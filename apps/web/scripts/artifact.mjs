@@ -21,6 +21,9 @@ html = cutFirst(html, '<meta charset="UTF-8" />');
 html = html.replace(/<meta name="viewport"[^>]*>/, '');
 for (const tag of ['</html>', '</body>', '<body>', '</head>']) html = cutLast(html, tag);
 
+// Bundled libraries contain literal U+FFFD inside JS strings/regexes; the escape is equivalent there.
+html = html.replaceAll('\uFFFD', '\\uFFFD');
+
 // Title first so the 8 KB title scan finds it.
 const title = html.match(/<title>[^<]*<\/title>/)[0];
 html = `${title}\n${cutFirst(html, title).trim()}\n`;
