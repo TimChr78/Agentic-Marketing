@@ -35,6 +35,12 @@ flowchart LR
   ingest --> vk
 ```
 
+### Homelab / local (owner's first install)
+
+- Same single-node compose file; Caddy can use local certificates (or skip TLS on a trusted LAN).
+- **Public reachability:** a live website's SDK, provider webhooks and remote MCP clients need to reach `ingest`, `decide` and `/mcp`. Expose only those paths through a tunnel (e.g. Cloudflare Tunnel or Tailscale Funnel) rather than opening ports; keep the admin UI LAN/VPN-only.
+- Outbound email via the configured SMTP relay; Mailpit for test sends.
+
 ## 2. Scaling path to 10M profiles
 
 | Concern | Single node | At 10M profiles / ~5k events/s peak |

@@ -103,4 +103,4 @@ The compiler marks which conditions are streamable; non-streamable ones fall bac
 
 - Export: scheduled export of events/profiles to Parquet on S3, or direct sync to warehouses (Snowflake/BigQuery/Postgres).
 - Import: "warehouse-native" sources — sync traits/audiences from a warehouse table into profiles.
-- This keeps the option open to make the platform composable on top of an existing warehouse (open question Q7 in the original brief).
+- Decided: the platform is the **system of record** for profiles; warehouse sync is added later and keeps the option open to run composably on top of an existing warehouse.

@@ -1,6 +1,6 @@
 # ADR-0009: Project license
 
-- Status: Proposed — needs owner decision
+- Status: Accepted (owner decision 2026-10-21)
 - Date: 2026-10-21
 
 ## Context
@@ -13,5 +13,5 @@ The core must be free and open source and self-hostable; a hosted multi-tenant o
 | Apache-2.0 / MIT core + separately licensed `ee/` directory (PostHog / Dittofeed style) | Maximum adoption & contributions | Anyone can host it as a competing service |
 | Fair-code (e.g. Sustainable Use, BSL) | Strong commercial protection | Not OSI open source — conflicts with the stated goal |
 
-## Recommendation
-AGPL-3.0 for the server, MIT for `sdk-js`, connector/adapter SDKs and schemas, with a lightweight CLA (or DCO if dual-licensing is ruled out).
+## Decision
+AGPL-3.0 for the server, MIT for `sdk-js`, connector/adapter SDKs and schemas, with a lightweight CLA so dual-licensing for a future hosted offering stays possible.

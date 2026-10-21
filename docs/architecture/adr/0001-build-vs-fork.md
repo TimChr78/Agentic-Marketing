@@ -1,6 +1,6 @@
 # ADR-0001: Build a new core, use Dittofeed as reference
 
-- Status: Proposed
+- Status: Accepted (owner decision 2026-10-21)
 - Date: 2026-10-21
 
 ## Context
@@ -15,4 +15,4 @@ Build a new core. Study Dittofeed's segmentation and ClickHouse modelling as pri
 - **Extend Mautic** — PHP, legacy architecture, GPL; not agent-native.
 
 ## Consequences
-More initial work; full control over foundations that are hardest to retrofit. Owner should confirm (open question #1).
+More initial work; full control over foundations that are hardest to retrofit. Confirmed by the owner.

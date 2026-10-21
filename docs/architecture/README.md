@@ -105,4 +105,4 @@ flowchart LR
 6. **MJML as canonical email format, GrapesJS as visual editor** — [ADR-0006](adr/0006-email-format-and-editor.md)
 7. **Single send gateway enforces consent/lawful basis for every outbound message** — [ADR-0007](adr/0007-send-gateway-consent.md)
 8. **Segment-spec compatible ingestion with own gateway** — [ADR-0008](adr/0008-segment-compatible-ingestion.md)
-9. **Project license: AGPL-3.0 core, MIT SDKs (proposed, needs owner decision)** — [ADR-0009](adr/0009-project-license.md)
+9. **Project license: AGPL-3.0 core, MIT SDKs (accepted)** — [ADR-0009](adr/0009-project-license.md)

@@ -37,12 +37,14 @@ interface ChannelAdapter<Config, Message> {
 
 | Channel | Phase | Adapters |
 |---|---|---|
-| Email | 1 | SMTP (Nodemailer, MIT — also covers Mailpit for dev, Postfix, any relay), Amazon SES, Postmark, SendGrid, Mailgun, Brevo; EU-hosted providers documented |
+| Email | 2 | **SMTP first** (Nodemailer, MIT — also covers Mailpit for dev, Postfix, any relay), Amazon SES, Postmark, SendGrid, Mailgun, Brevo; EU-hosted providers documented |
 | Webhooks | 2 | Generic HTTPS with HMAC signatures, retries with backoff, dead letter; SSRF-protected egress |
 | SMS | 3 | Twilio, Vonage, MessageBird/Bird, 46elks (EU) |
 | Push | 3 | FCM, APNs, Web Push (VAPID) |
 
-Email-specific features: dedicated sending domains with SPF/DKIM/DMARC setup guidance, one-click unsubscribe (RFC 8058) on every marketing email, bounce & complaint processing into suppression, open/click tracking **configurable per workspace** (open-pixel tracking can be disabled for privacy), warm-up throttles.
+SMTP relays give no delivery webhooks, so the SMTP adapter handles bounces via VERP return-paths and a bounce mailbox (IMAP polling, DSN parsing per RFC 3464) and synchronous SMTP rejections.
+
+Email-specific features: dedicated sending domains with SPF/DKIM/DMARC setup guidance, one-click unsubscribe (RFC 8058) on every marketing email, bounce & complaint processing into suppression, open/click tracking **configurable per workspace** — default: **click tracking on, open-pixel tracking off** (pixel tracking may require consent in the EU), warm-up throttles.
 
 ## 3. Web personalization
 
@@ -83,7 +85,7 @@ POST /v1/decide
 ## 4. Integrations
 
 - **Connector SDK** (TypeScript) with three kinds: *sources* (pull/receive data → events/profiles), *destinations* (push events/audiences out), *actions* (callable from journey nodes). Each connector declares config schema, auth type (API key / OAuth2), and rate limits — all auto-exposed in UI and MCP.
-- **First-party connectors (candidates):** Shopify, WooCommerce, Stripe, HubSpot, Salesforce, generic webhook in/out, CSV/SFTP, Postgres/warehouse.
+- **First-party connectors:** not a v1 priority. When built, **Shopify and Salesforce** first; other candidates: WooCommerce, Stripe, HubSpot, CSV/SFTP, Postgres/warehouse.
 - **Long tail without building everything:**
   - Outbound/inbound webhooks + our MCP server let **n8n, Activepieces, Zapier, Make** orchestrate us (as external systems — n8n is fair-code and is not embedded).
   - **Activepieces pieces** (MIT, TypeScript, published on npm) are worth evaluating as an embeddable action library behind our connector interface — to be validated in a spike (license of individual pieces, runtime isolation).
