@@ -49,7 +49,7 @@ Selection criteria, in priority order: **(1) maintainable by one person, (2) per
 
 | Area | Choice | License | Alternatives considered | Why |
 |---|---|---|---|---|
-| MCP | **Official MCP TypeScript SDK** (Streamable HTTP) | MIT | FastMCP | Reference implementation |
+| MCP | **Official MCP TypeScript SDK v2** (`@modelcontextprotocol/server` + `client`, spec 2026-07-28, stateless `createMcpHandler`) | Apache-2.0 | FastMCP, SDK v1 | Reference implementation; stateless per-request serving needs no session store (validated in spike 1) |
 | LLM abstraction | **Vercel AI SDK** (`ai`, `@ai-sdk/anthropic`, `@ai-sdk/openai-compatible`) | Apache-2.0 | LangChain.js, direct SDKs | Thin, typed structured output with zod, both endpoint styles with custom base URLs |
 | PII redaction | Schema-driven masking + rule detectors; **Presidio** optional sidecar later | MIT | — | Avoid a Python service in v1 |
 
@@ -57,7 +57,7 @@ Selection criteria, in priority order: **(1) maintainable by one person, (2) per
 
 | Area | Choice | License | Alternatives considered | Why |
 |---|---|---|---|---|
-| Authentication | **Better Auth** (organizations, passkeys, 2FA, OAuth 2.1 provider plugin for MCP, SSO plugin later) | MIT | Keycloak, Ory, Zitadel, Auth.js | Library, not another server to run; covers MCP OAuth needs. Keycloak/Zitadel remain options as external IdPs via OIDC |
+| Authentication | **Better Auth** (organizations, passkeys, 2FA, `@better-auth/mcp` OAuth 2.1 authorization server for MCP, SSO plugin later; all packages pinned to one version) | MIT | Keycloak, Ory, Zitadel, Auth.js | Library, not another server to run; covers MCP OAuth needs. Keycloak/Zitadel remain options as external IdPs via OIDC |
 | Authorization | Own RBAC in command layer → OpenFGA if needed | — / Apache-2.0 | Casbin, Cerbos | Start simple |
 | Key management | Pluggable: env/file KEK, AWS/GCP KMS, **OpenBao** transit | MPL-2.0 | Vault (BSL) | OpenBao is the open fork of Vault |
 | HTML sanitizing | **DOMPurify** | Apache-2.0 / MPL-2.0 | — | Experience content |

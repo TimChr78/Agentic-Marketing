@@ -30,8 +30,9 @@ The command layer is the only place that does authorization, validation, idempot
 
 ## 2. MCP server design
 
-- **Transport:** Streamable HTTP at `/mcp` (remote agents: Claude, ChatGPT, IDEs, n8n), plus stdio via the CLI for local development.
-- **Auth:** OAuth 2.1 with PKCE + dynamic client registration, served by our auth layer (Better Auth OAuth Provider plugin — see [tech-stack.md](tech-stack.md)); personal access tokens for scripts. Every MCP session acts as a **principal** (`user` or `agent`) with scopes.
+- **Transport:** Streamable HTTP at `/mcp` (remote agents: Claude, ChatGPT, IDEs, n8n), plus stdio via the CLI for local development. MCP spec 2026-07-28 with SDK v2: a fresh, stateless server per request, so no MCP session store is needed; 2025-era clients are served statelessly too.
+- **Auth:** OAuth 2.1 with PKCE, served by our auth layer (`@better-auth/mcp` — see [tech-stack.md](tech-stack.md)): RFC 9728/8414 discovery, Client ID Metadata Documents and dynamic client registration, JWT access tokens bound to the `/mcp` resource. Personal access tokens for scripts. Every request acts as a **principal** (`user` or `agent`); an agent's permissions are the user's role permissions ∩ the scopes the user granted.
+- **Least privilege:** MCP clients request every scope the server advertises, so the **consent screen** is where the person chooses what the agent may do (read-only by default). Later, scope step-up: advertise read scopes up front and answer writes with an `insufficient_scope` challenge. Validated in [spike 1](../../spikes/command-registry/FINDINGS.md).
 - **Tools** (grouped, ~60–100 at maturity; MCP clients can filter by group):
   - `profiles.*`, `events.query`, `segments.*` (create/preview/estimate size)
   - `journeys.*` (createDraft, updateDraft, validate, simulate, requestPublish, pause, stats)

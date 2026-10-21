@@ -1,6 +1,6 @@
 # ADR-0005: One command registry for REST, MCP and UI
 
-- Status: Proposed
+- Status: Accepted (validated by spike 1)
 - Date: 2026-10-21
 
 ## Context
@@ -15,3 +15,10 @@ Every capability is a `defineCommand({ name, description, input, output, permiss
 
 ## Consequences
 Command design becomes the main API design activity: names, descriptions and error messages must be good for humans *and* LLMs. Large tool counts need grouping/filtering in MCP.
+
+## Validation (spike 1, 2026-10-21)
+Built and tested end to end in [`spikes/command-registry`](../../../spikes/command-registry/FINDINGS.md): one `defineCommand` drives an RPC-style REST route with OpenAPI 3.1, an MCP tool (input/output schemas, annotations) behind OAuth 2.1, and a typed UI client with no code generation. Adjustments:
+- Input validation runs inside the registry's `execute`, not in the web framework, so every surface returns the same error and failures are audited; the OpenAPI document is generated from the same schemas.
+- MCP uses SDK v2 / spec 2026-07-28 with a stateless per-request server.
+- Agent least privilege is decided on the consent screen (clients request all advertised scopes); scope step-up is planned.
+- Tenant isolation is enforced by Postgres RLS through a dedicated non-bypass database role.
