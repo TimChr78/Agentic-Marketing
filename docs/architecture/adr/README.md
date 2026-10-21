@@ -14,3 +14,4 @@ New decisions get the next number; superseded ADRs are kept and linked.
 | [0007](0007-send-gateway-consent.md) | Single send gateway enforcing lawful basis | Proposed |
 | [0008](0008-segment-compatible-ingestion.md) | Segment-spec compatible ingestion with own gateway | Proposed |
 | [0009](0009-project-license.md) | Project license | Accepted |
+| [0010](0010-analytics-layers.md) | Three-layer analytics | Accepted |

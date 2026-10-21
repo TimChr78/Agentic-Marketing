@@ -1,0 +1,16 @@
+{
+  "name": "agentic-marketing",
+  "private": true,
+  "packageManager": "pnpm@10.28.0",
+  "scripts": {
+    "dev": "pnpm --filter @agentic-marketing/web dev",
+    "build": "pnpm --filter @agentic-marketing/web build",
+    "build:demo": "pnpm --filter @agentic-marketing/web build:single",
+    "typecheck": "pnpm -r typecheck"
+  },
+  "pnpm": {
+    "overrides": {
+      "@types/mjml-core": "5.1.0"
+    }
+  }
+}

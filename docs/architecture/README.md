@@ -35,6 +35,7 @@ An open-source, self-hostable, **event-driven marketing platform built agent-fir
 | [channels-and-personalization.md](channels-and-personalization.md) | Send gateway, channel adapters, web personalization / decision API, integrations |
 | [agents-and-mcp.md](agents-and-mcp.md) | Command registry, MCP server, LLM gateway (BYOK), AI journey steps, guardrails |
 | [security-and-privacy.md](security-and-privacy.md) | GDPR, consent & legitimate interest, encryption, erasure, authz, threat model |
+| [analytics-and-reporting.md](analytics-and-reporting.md) | Built-in marketing analytics, BI access, forwarding to Umami / Matomo / PostHog |
 | [tech-stack.md](tech-stack.md) | Technology selection matrix with alternatives and licenses |
 | [deployment-and-scaling.md](deployment-and-scaling.md) | Self-host topology, scaling path to 10M profiles and multi-tenant SaaS |
 | [roadmap.md](roadmap.md) | Phased delivery plan for a team of one |
@@ -106,3 +107,6 @@ flowchart LR
 7. **Single send gateway enforces consent/lawful basis for every outbound message** — [ADR-0007](adr/0007-send-gateway-consent.md)
 8. **Segment-spec compatible ingestion with own gateway** — [ADR-0008](adr/0008-segment-compatible-ingestion.md)
 9. **Project license: AGPL-3.0 core, MIT SDKs (accepted)** — [ADR-0009](adr/0009-project-license.md)
+10. **Three-layer analytics: built-in on ClickHouse, BYO BI, forward to Umami & co. (accepted)** — [ADR-0010](adr/0010-analytics-layers.md)
+
+A Phase −1 interactive demo with a mocked backend lives in [`apps/web`](../../apps/web/README.md).
