@@ -1,0 +1,201 @@
+@import "tailwindcss";
+
+/* Layout: operator console — fixed nav rail, working canvas, optional copilot drawer.
+   Cobalt = human actions & primary UI; amber = anything authored or done by an agent. */
+:root {
+  --bg: #f4f6f9;
+  --surface: #ffffff;
+  --surface-2: #edf0f5;
+  --line: #dce1e9;
+  --fg: #141a24;
+  --muted: #5d6779;
+  --accent: #2f5bea;
+  --accent-fg: #ffffff;
+  --accent-soft: #e3e9fd;
+  --agent: #a8650f;
+  --agent-soft: #fbefd9;
+  --good: #23824f;
+  --good-soft: #def3e7;
+  --warn: #c2410c;
+  --warn-soft: #fde8dc;
+  --bad: #c42b2b;
+  --bad-soft: #fbe1e1;
+  --shop-bg: #f3efe6;
+  --shop-fg: #1f2a22;
+  --shop-accent: #2f5d43;
+  --font-display: "Bricolage Grotesque", "IBM Plex Sans", system-ui, sans-serif;
+  --font-sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e1117;
+    --surface: #151a23;
+    --surface-2: #1c2230;
+    --line: #29303f;
+    --fg: #e5e9f0;
+    --muted: #98a2b3;
+    --accent: #7091f8;
+    --accent-fg: #0e1117;
+    --accent-soft: #1d2747;
+    --agent: #e3a64e;
+    --agent-soft: #33270f;
+    --good: #57c482;
+    --good-soft: #15301f;
+    --warn: #f0904f;
+    --warn-soft: #3a1f10;
+    --bad: #f26a6a;
+    --bad-soft: #3a1616;
+    --shop-bg: #1d1f1a;
+    --shop-fg: #ece8dc;
+    --shop-accent: #7fbf98;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0e1117;
+  --surface: #151a23;
+  --surface-2: #1c2230;
+  --line: #29303f;
+  --fg: #e5e9f0;
+  --muted: #98a2b3;
+  --accent: #7091f8;
+  --accent-fg: #0e1117;
+  --accent-soft: #1d2747;
+  --agent: #e3a64e;
+  --agent-soft: #33270f;
+  --good: #57c482;
+  --good-soft: #15301f;
+  --warn: #f0904f;
+  --warn-soft: #3a1f10;
+  --bad: #f26a6a;
+  --bad-soft: #3a1616;
+  --shop-bg: #1d1f1a;
+  --shop-fg: #ece8dc;
+  --shop-accent: #7fbf98;
+  color-scheme: dark;
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-line: var(--line);
+  --color-fg: var(--fg);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent);
+  --color-accent-fg: var(--accent-fg);
+  --color-accent-soft: var(--accent-soft);
+  --color-agent: var(--agent);
+  --color-agent-soft: var(--agent-soft);
+  --color-good: var(--good);
+  --color-good-soft: var(--good-soft);
+  --color-warn: var(--warn);
+  --color-warn-soft: var(--warn-soft);
+  --color-bad: var(--bad);
+  --color-bad-soft: var(--bad-soft);
+  --color-shop-bg: var(--shop-bg);
+  --color-shop-fg: var(--shop-fg);
+  --color-shop-accent: var(--shop-accent);
+  --font-display: var(--font-display);
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+h1,
+h2,
+h3 {
+  font-family: var(--font-display);
+  text-wrap: balance;
+  letter-spacing: -0.01em;
+}
+.num {
+  font-variant-numeric: tabular-nums;
+}
+.eyebrow {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  font-weight: 600;
+}
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+@keyframes flash-in {
+  from {
+    background: var(--accent-soft);
+  }
+}
+.flash-in {
+  animation: flash-in 1.2s ease-out;
+}
+@keyframes pulse-ring {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 55%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 10px transparent;
+  }
+}
+.sim-active {
+  animation: pulse-ring 1s ease-out infinite;
+}
+
+/* React Flow theming through tokens */
+.react-flow {
+  --xy-background-color: var(--bg);
+  --xy-edge-stroke: var(--muted);
+  --xy-edge-stroke-selected: var(--accent);
+  --xy-controls-button-background-color: var(--surface);
+  --xy-controls-button-background-color-hover: var(--surface-2);
+  --xy-controls-button-color: var(--fg);
+  --xy-controls-button-border-color: var(--line);
+  --xy-minimap-background-color: var(--surface);
+  --xy-background-pattern-dots-color: var(--line);
+  --xy-attribution-background-color: transparent;
+}
+.react-flow__edge-textbg {
+  fill: var(--surface);
+}
+.react-flow__edge-text {
+  fill: var(--muted);
+  font-size: 11px;
+}
+
+/* GrapesJS panel tweaks so the editor sits inside our console */
+.gjs-one-bg {
+  background-color: var(--surface-2);
+}
+.gjs-two-color {
+  color: var(--fg);
+}
+.gjs-three-bg {
+  background-color: var(--accent);
+  color: var(--accent-fg);
+}
+.gjs-four-color,
+.gjs-four-color-h:hover {
+  color: var(--accent);
+}

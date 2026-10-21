@@ -39,6 +39,7 @@ Selection criteria, in priority order: **(1) maintainable by one person, (2) per
 | Email format | **MJML** | MIT | React Email, raw HTML | Responsive & client-safe, declarative, LLM-friendly. See [ADR-0006](adr/0006-email-format-and-editor.md) |
 | Email visual editor | **GrapesJS + grapesjs-mjml** | BSD-3 | Easy Email (MIT), Unlayer (proprietary), Beefree (proprietary) | Mature, imports/exports MJML round-trip |
 | Templating | **LiquidJS** | MIT | Handlebars | Sandboxed, marketer-familiar (Shopify, Braze use Liquid) |
+| Charts | **Apache ECharts** | Apache-2.0 | Recharts, Chart.js | Rich chart types (funnels, dual axes), SVG renderer, themeable from tokens |
 | Code editor | **Monaco** | MIT | CodeMirror 6 | MJML/Liquid/JSON editing with schema-aware completion |
 | Data mapping expressions | **JSONata** | MIT | JMESPath | For automation transform nodes |
 | Email sending (SMTP) | **Nodemailer** | MIT | — | Universal SMTP adapter |
