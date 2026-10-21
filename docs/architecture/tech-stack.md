@@ -25,7 +25,8 @@ Selection criteria, in priority order: **(1) maintainable by one person, (2) per
 | Events / analytics | **ClickHouse** | Apache-2.0 | TimescaleDB, Druid, DuckDB | Best-in-class for event analytics at this scale; JSON type; TTL; single node goes very far |
 | Event bus | **NATS JetStream** | Apache-2.0 | Kafka, Redpanda (BSL), Redis Streams, Postgres only | Single small binary, durable streams, consumer groups, replay, clusterable; much lighter to self-host than Kafka. See [ADR-0003](adr/0003-storage-and-event-bus.md) |
 | Hot state / cache | **Valkey 8** | BSD-3 | Redis (license changed), Dragonfly (BSL) | Sub-ms session state, counters, rate limits; Redis-protocol compatible |
-| Job queue / durable steps | **Graphile Worker** | MIT | pg-boss, Temporal, Hatchet, DBOS | Jobs in the same Postgres txn as state changes, high throughput, cron. See [ADR-0004](adr/0004-journey-runtime.md) |
+| Journey steps | **Own batched sweeper** over the participants table (`FOR UPDATE SKIP LOCKED`) | — | Graphile Worker job per step, Temporal, DBOS | ~50× the throughput of job-per-step in spike 3, immediate crash recovery. See [ADR-0004](adr/0004-journey-runtime.md) |
+| Background jobs | **Graphile Worker** | MIT | pg-boss | Cron, maintenance, exports; jobs enqueued in the same transaction as state changes |
 | Object storage | **Any S3-compatible API** (+ local filesystem driver) | — | MinIO (AGPL; community edition reduced) | Users pick AWS S3, Cloudflare R2, Garage, SeaweedFS… |
 
 ## Product features

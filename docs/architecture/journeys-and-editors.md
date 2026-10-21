@@ -32,7 +32,7 @@ Journey settings: re-entry rule, frequency caps, quiet hours, exit criteria, goa
 
 ## 2. Journey runtime
 
-See [ADR-0004](adr/0004-journey-runtime.md) for why this is built on Postgres + Graphile Worker instead of Temporal.
+See [ADR-0004](adr/0004-journey-runtime.md) for why this is built on Postgres, with the participants table as a batched queue, instead of Temporal or one job per step.
 
 ```
 journey_participants(
@@ -55,7 +55,7 @@ stateDiagram-v2
 
 Principles:
 - **Interpreter, not code generation.** The interpreter loads the pinned `journey_version_id` and executes one node per job. Every node handler is idempotent and side effects go through the send gateway with an idempotency key, so retries are safe.
-- **State change + next job in one Postgres transaction** (Graphile Worker jobs live in the same database) → no lost or duplicated steps.
+- **Batched claims, one transaction:** sweepers claim due participants with `FOR UPDATE SKIP LOCKED`, advance them in memory and write states plus outbox rows in one transaction → no lost or duplicated steps (crash-tested in spike 3).
 - **Timers:** `wake_at` is indexed; the scheduler moves due participants to the queue in batches. Long waits (30 days) cost one row, not a running process.
 - **Event waits:** `(workspace_id, waiting_for_event, profile_id)` index; the trigger matcher checks incoming events against it.
 - **Version pinning:** participants stay on the version they entered with. Publishing a new version affects new entrants; a later "migrate participants" tool maps old node ids to new ones.

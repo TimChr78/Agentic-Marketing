@@ -17,5 +17,5 @@ Ordering principle: build the **foundations that are expensive to retrofit** fir
 Suggested spikes before Phase 0 code freeze on the design (1–3 days each):
 1. ✅ Command registry prototype: one command exposed via Hono/OpenAPI, MCP (Streamable HTTP + OAuth via Better Auth) and a typed UI call. Done, see [`spikes/command-registry/FINDINGS.md`](../../spikes/command-registry/FINDINGS.md).
 2. GrapesJS + grapesjs-mjml round-trip of an LLM-written MJML template (vs. Easy Email).
-3. Graphile Worker journey interpreter: 1M waiting participants, timer throughput, crash/retry semantics.
+3. ✅ Journey runtime: 1M waiting participants, timer throughput, crash/retry semantics. Done, see [`spikes/journey-runtime/FINDINGS.md`](../../spikes/journey-runtime/FINDINGS.md); ADR-0004 revised (batched table-as-queue instead of job per step).
 4. NATS JetStream → ClickHouse sink throughput and per-profile ordering on a single node.
