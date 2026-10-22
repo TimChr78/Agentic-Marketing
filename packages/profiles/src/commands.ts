@@ -396,7 +396,9 @@ export const eraseProfile = defineCommand({
     await ctx.services.events.deleteEventsOf(ws, {
       anonymousIds: ids.filter((i) => i.type === 'anonymous_id').map((i) => i.value),
       userIds: ids.filter((i) => i.type === 'user_id').map((i) => i.value),
+      profileIds: family,
     });
+    await ctx.tx.delete(schema.messages).where(inArray(schema.messages.profileId, family));
 
     const suppress = ids.filter((i) => i.type === 'email' || i.type === 'phone');
     if (suppress.length)

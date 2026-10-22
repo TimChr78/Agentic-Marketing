@@ -25,6 +25,10 @@ const Env = z.object({
     .regex(/^[a-z_][a-z0-9_]*$/)
     .default('events')
     .describe('Stream and subject prefix on the NATS server'),
+  EMAIL_TRACK_CLICKS: z
+    .enum(['true', 'false'])
+    .default('true')
+    .describe('Rewrite links in e-mails to count clicks (open pixels are never added)'),
   TRUSTED_ORIGINS: z.string().optional().describe('Comma-separated extra origins allowed to call auth endpoints'),
 });
 
@@ -55,6 +59,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
         .filter(Boolean) ?? [],
     clickhouse: { url: e.CLICKHOUSE_URL, database: e.CLICKHOUSE_DATABASE },
     nats: { url: e.NATS_URL, namespace: e.NATS_NAMESPACE },
+    trackClicks: e.EMAIL_TRACK_CLICKS === 'true',
     trustedOrigins: e.TRUSTED_ORIGINS?.split(',').map((o) => o.trim()) ?? [],
   };
 }

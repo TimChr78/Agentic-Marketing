@@ -7,6 +7,7 @@ const scopeText: Record<string, string> = {
   'artifacts:write': 'Create and edit drafts',
   'artifacts:publish': 'Publish, or send changes for approval (your approval policy still applies)',
   'artifacts:approve': 'Approve changes (agents can never use this)',
+  'messages:send': 'Send e-mails to people (consent, unsubscribes and suppressions are always enforced)',
   'audit:read': 'Read the audit log',
   'profiles:read': 'Read customer profiles and events (personal data stays hidden)',
   'profiles:pii': 'See personal data in profiles, such as e-mail addresses',

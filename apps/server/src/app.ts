@@ -2,6 +2,7 @@ import { type AuthConfig, acceptInvitation, authDirectory, createAuth, invitatio
 import { createExecutor, userPrincipal } from '@agentic-marketing/commands';
 import { AppError, newUuid } from '@agentic-marketing/core';
 import { createDb } from '@agentic-marketing/db';
+import { emailRoutes, linkSigner } from '@agentic-marketing/email';
 import { clickHouseStore, lazyNatsBus } from '@agentic-marketing/events';
 import { ingestApi } from '@agentic-marketing/ingest';
 import { localKeyProvider } from '@agentic-marketing/secrets';
@@ -26,7 +27,13 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
   const keyProvider = localKeyProvider(config.masterKey, config.previousMasterKeys);
   const bus = lazyNatsBus(config.nats);
   const events = clickHouseStore(config.clickhouse);
-  const executor = createExecutor(db, { keyProvider, directory: authDirectory(db), events });
+  const email = {
+    publicUrl: config.publicUrl,
+    links: linkSigner(config.authSecret),
+    adapterDeps: { fetch: globalThis.fetch },
+    trackClicks: config.trackClicks,
+  };
+  const executor = createExecutor(db, { keyProvider, directory: authDirectory(db), events, email });
 
   const app = new Hono();
 
@@ -80,10 +87,11 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
   });
 
   if (config.roles.has('ingest')) app.route('/', ingestApi({ db, bus }));
+  if (config.roles.has('api')) app.route('/', emailRoutes({ db, kp: keyProvider, events, email }));
 
   const mcp = mcpEndpoint({ auth, db, executor, resource: `${config.publicUrl}/mcp` });
   app.all('/mcp', (c) => mcp(c.req.raw));
   app.route('/', restApi({ auth, db, executor }));
 
-  return { app, db, auth, executor, keyProvider, bus, events };
+  return { app, db, auth, executor, keyProvider, bus, events, email };
 }

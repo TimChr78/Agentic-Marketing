@@ -6,6 +6,7 @@ export const PERMISSIONS = [
   'artifacts:write',
   'artifacts:publish',
   'artifacts:approve',
+  'messages:send',
   'audit:read',
   'profiles:read',
   'profiles:pii',
@@ -20,7 +21,7 @@ export type Permission = (typeof PERMISSIONS)[number];
 export const ROLE_PERMISSIONS: Record<Role, readonly Permission[]> = {
   owner: PERMISSIONS,
   admin: PERMISSIONS,
-  marketer: ['artifacts:read', 'artifacts:write', 'artifacts:publish', 'audit:read', 'profiles:read', 'profiles:write'],
+  marketer: ['artifacts:read', 'artifacts:write', 'artifacts:publish', 'messages:send', 'audit:read', 'profiles:read', 'profiles:write'],
   approver: ['artifacts:read', 'artifacts:approve', 'audit:read', 'profiles:read'],
   viewer: ['artifacts:read'],
 };

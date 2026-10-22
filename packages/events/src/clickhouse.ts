@@ -18,10 +18,41 @@ export interface EventStore {
     opts?: { limit?: number; before?: string },
   ): Promise<StoredEvent[]>;
   /** Deletes a person's events (erasure). */
-  deleteEventsOf(workspaceId: string, ids: { anonymousIds: string[]; userIds: string[] }): Promise<void>;
+  deleteEventsOf(workspaceId: string, ids: { anonymousIds: string[]; userIds: string[]; profileIds?: string[] }): Promise<void>;
+  insertMessageEvents(events: MessageEvent[]): Promise<void>;
+  messageEventsOf(workspaceId: string, filter: { messageIds?: string[]; profileId?: string }, limit?: number): Promise<MessageEvent[]>;
   ping(): Promise<boolean>;
   close(): Promise<void>;
   readonly client: ClickHouseClient;
+}
+
+export interface MessageEvent {
+  workspaceId: string;
+  messageId: string;
+  /** Unique per event of a message (provider event id, or the decision). */
+  eventId: string;
+  type:
+    | 'queued'
+    | 'sent'
+    | 'suppressed'
+    | 'failed'
+    | 'delivered'
+    | 'bounced'
+    | 'deferred'
+    | 'complained'
+    | 'opened'
+    | 'clicked'
+    | 'unsubscribed';
+  at: string;
+  profileId: string;
+  channel: string;
+  purpose: string;
+  provider: string;
+  templateId: string;
+  templateVersion: number;
+  journeyId: string;
+  reason: string;
+  url: string;
 }
 
 export interface StoredEvent {
@@ -129,9 +160,63 @@ export function clickHouseStore(opts: { url: string; database: string }): EventS
       }));
     },
     async deleteEventsOf(workspaceId, ids) {
+      if (ids.profileIds?.length)
+        await client.command({
+          query: 'DELETE FROM message_events WHERE workspace_id = {ws:UUID} AND profile_id IN {profiles:Array(String)}',
+          query_params: { ws: workspaceId, profiles: ids.profileIds },
+        });
       if (!ids.anonymousIds.length && !ids.userIds.length) return;
       // Lightweight delete: rows disappear from queries at once and from disk on the next merge.
       await client.command({ query: `DELETE FROM events WHERE ${idFilter}`, query_params: params(workspaceId, ids) });
+    },
+    async insertMessageEvents(events) {
+      if (!events.length) return;
+      await client.insert({
+        table: 'message_events',
+        format: 'JSONEachRow',
+        values: events.map((e) => ({
+          workspace_id: e.workspaceId,
+          message_id: e.messageId,
+          event_id: e.eventId,
+          type: e.type,
+          at: e.at.replace('Z', ''),
+          profile_id: e.profileId,
+          channel: e.channel,
+          purpose: e.purpose,
+          provider: e.provider,
+          template_id: e.templateId,
+          template_version: e.templateVersion,
+          journey_id: e.journeyId,
+          reason: e.reason,
+          url: e.url,
+        })),
+      });
+    },
+    async messageEventsOf(workspaceId, filter, limit = 200) {
+      const rs = await client.query({
+        query: `SELECT * FROM message_events FINAL WHERE workspace_id = {ws:UUID}
+                ${filter.messageIds ? 'AND message_id IN {ids:Array(String)}' : ''}
+                ${filter.profileId ? 'AND profile_id = {profile:String}' : ''}
+                ORDER BY at DESC LIMIT {limit:UInt32}`,
+        query_params: { ws: workspaceId, ids: filter.messageIds ?? [], profile: filter.profileId ?? '', limit },
+        format: 'JSONEachRow',
+      });
+      return (await rs.json<Record<string, never>>()).map((r) => ({
+        workspaceId: r.workspace_id,
+        messageId: r.message_id,
+        eventId: r.event_id,
+        type: r.type,
+        at: `${String(r.at).replace(' ', 'T')}Z`,
+        profileId: r.profile_id,
+        channel: r.channel,
+        purpose: r.purpose,
+        provider: r.provider,
+        templateId: r.template_id,
+        templateVersion: r.template_version,
+        journeyId: r.journey_id,
+        reason: r.reason,
+        url: r.url,
+      }));
     },
     async ping() {
       return (await client.ping()).success;

@@ -290,6 +290,54 @@ export const erasures = pgTable(
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
 );
 
+export const emailProviders = pgTable(
+  'email_providers',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    name: text('name').notNull(),
+    adapter: text('adapter').$type<'smtp' | 'ses' | 'postmark' | 'brevo' | 'log'>().notNull(),
+    config: jsonb('config').$type<Record<string, unknown>>().notNull().default({}),
+    secrets: bytea('secrets'),
+    secretsKeyId: text('secrets_key_id'),
+    fromEmail: text('from_email').notNull(),
+    fromName: text('from_name').notNull().default(''),
+    replyTo: text('reply_to'),
+    useFor: text('use_for').array().$type<('transactional' | 'marketing')[]>().notNull().default([]),
+    webhookTokenHash: text('webhook_token_hash').notNull(),
+    enabled: boolean('enabled').notNull().default(true),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
+export type MessageStatus = 'queued' | 'sending' | 'sent' | 'suppressed' | 'failed' | 'delivered' | 'bounced' | 'complained';
+export const messages = pgTable(
+  'messages',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    idempotencyKey: text('idempotency_key').notNull(),
+    channel: text('channel').notNull().default('email'),
+    profileId: text('profile_id'),
+    purpose: text('purpose').notNull(),
+    templateId: text('template_id'),
+    templateVersion: integer('template_version'),
+    journeyId: text('journey_id'),
+    providerId: text('provider_id'),
+    providerMessageId: text('provider_message_id'),
+    status: text('status').$type<MessageStatus>().notNull(),
+    reason: text('reason'),
+    recipientHash: text('recipient_hash'),
+    data: jsonb('data').$type<Record<string, unknown>>().notNull().default({}),
+    attempts: integer('attempts').notNull().default(0),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
 export type ApprovalPolicy = 'none' | 'agent_changes' | 'all_publishes';
 export type Role = 'owner' | 'admin' | 'marketer' | 'approver' | 'viewer';
 export type VersionState = 'draft' | 'in_review' | 'published' | 'superseded' | 'rejected';

@@ -117,10 +117,10 @@ describe('profiles, identity and consent', () => {
     const started = Date.now();
     await send(key, {
       batch: [
-        { type: 'page', name: 'Tents', anonymousId: 'dev-a', timestamp: '2026-10-22T08:00:00Z', context: yes },
+        { type: 'page', name: 'Tents', anonymousId: 'dev-a', timestamp: '2026-10-21T08:00:00Z', context: yes },
         {
           type: 'identify',
-          timestamp: '2026-10-22T08:00:01Z',
+          timestamp: '2026-10-21T08:00:01Z',
           anonymousId: 'dev-a',
           userId: 'u-42',
           traits: { email: 'Ada@Example.com', firstName: 'Ada', plan: 'pro' },

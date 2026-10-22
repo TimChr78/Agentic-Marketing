@@ -1,7 +1,7 @@
 import { artifactCommands, workspaceCommands } from '@agentic-marketing/artifacts';
 import { memberCommands } from '@agentic-marketing/auth';
 import type { AnyCommand } from '@agentic-marketing/commands';
-import { templateCommands } from '@agentic-marketing/email';
+import { messageCommands, providerCommands, templateCommands } from '@agentic-marketing/email';
 import { sourceCommands } from '@agentic-marketing/ingest';
 import { profileCommands } from '@agentic-marketing/profiles';
 import { secretCommands } from '@agentic-marketing/secrets';
@@ -10,6 +10,8 @@ import { secretCommands } from '@agentic-marketing/secrets';
 export const commands = [
   ...artifactCommands,
   ...templateCommands,
+  ...messageCommands,
+  ...providerCommands,
   ...workspaceCommands,
   ...memberCommands,
   ...sourceCommands,
