@@ -46,6 +46,16 @@ Goal: MartechSignal runs on the platform, and everything it needs that is still 
 - **Broadcast quality of life:** a test send to yourself; an A/B subject test on a sample, with the winner sent to the rest; a send-time window.
 - **Screens for forms and broadcasts** (they are artifacts today, with the generic editor only); a **members screen**.
 - **E-mail delivery events in webhook subscriptions** (Phase 5 limit).
+
+**Done before the pilot run (code only):**
+- e-mail events on profiles: `Email Sent`, `Email Delivered`, `Email Bounced`, `Email Complained`, `Email Link Clicked`, `Email Unsubscribed`, usable by segments, journeys and webhooks;
+- retention job: never-confirmed signups after `RETENTION_UNCONFIRMED_DAYS` (30), finished deliveries and AI calls after `RETENTION_LOG_DAYS` (180);
+- UTM tagging per template (`utm` in the template content), skipping the platform's own links and links already tagged;
+- `templates.sendTest` (to workspace members only);
+- a Newsletter screen (broadcast status, audience preview, cancel, test send, form HTML);
+- the Docker image is built and smoke-tested in CI (`scripts/smoke.sh`), which found and fixed a start-up crash on empty compose variables.
+
+Still open: the pilot run itself, A/B subject and send-time window, the members screen, stored tracking-plan warnings.
 - **Tracking-plan warnings stored for a report** (Phase 1 limit).
 - **The Docker image built and smoke-tested in CI** (never run so far: a real risk for a production pilot).
 
@@ -122,7 +132,7 @@ Design: [performance-marketing.md](performance-marketing.md). Built in this orde
 
 | Limitation (where it was recorded) | Phase |
 |---|---|
-| Docker image never run (Phase 0) | 6 |
+| Docker image never run (Phase 0) | 6 (done) |
 | No members screen (Phase 0) | 6 |
 | KMS/OpenBao key providers deferred (Phase 0) | 10 |
 | MCP scope step-up deferred (Phase 0) | 11 |
@@ -143,13 +153,13 @@ Design: [performance-marketing.md](performance-marketing.md). Built in this orde
 | No OAuth for LLM providers (Phase 4) | 11 |
 | Copilot streams steps, not tokens; history in the browser (Phase 4) | 11 |
 | No OAuth2 connectors / token store (Phase 5) | 8 |
-| E-mail delivery events not in webhook subscriptions (Phase 5) | 6 |
+| E-mail delivery events not in webhook subscriptions (Phase 5) | 6 (done) |
 | Rate limits per process; egress guard not on e-mail adapters (Phase 5) | 8 and 10 |
-| Unconfirmed double opt-in profiles are never cleaned up (pilot) | 6 |
+| Unconfirmed double opt-in profiles are never cleaned up (pilot) | 6 (done) |
 | No A/B subject or send-time option for broadcasts (pilot) | 6 |
-| No screens for forms and broadcasts (pilot) | 6 |
+| No screens for forms and broadcasts (pilot) | 6 (done) |
 | No consent banner (pilot) | 8 |
-| E-mail clicks are not profile events (pilot) | 6 |
+| E-mail clicks are not profile events (pilot) | 6 (done) |
 | SMTP gives no delivery events (pilot, ADR-0011) | 6 (switch to SES or Postmark) and 7 |
 | Activepieces pieces not embeddable safely (spike 5) | Later (pieces runner) |
 | Legal review of legitimate-interest templates and retention defaults (open question 10) | 6 (needed before the pilot goes live) |

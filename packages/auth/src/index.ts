@@ -14,6 +14,8 @@ export interface AuthConfig {
   secret: string;
   db: Db;
   trustedOrigins?: string[];
+  /** Header with the client IP set by the proxy in front (sign-in rate limits are per IP). */
+  clientIpHeader?: string;
   /** Overrides for Client ID Metadata Document discovery (tests use a stub transport). */
   cimd?: Partial<CimdOptions>;
 }
@@ -28,6 +30,7 @@ export function authOptions(config: AuthConfig) {
     database: config.db.admin,
     trustedOrigins: config.trustedOrigins,
     emailAndPassword: { enabled: true, minPasswordLength: 10 },
+    advanced: { ipAddress: { ipAddressHeaders: [config.clientIpHeader ?? 'x-forwarded-for'] } },
     plugins: [
       jwt(),
       // OAuth 2.1 authorization server for MCP clients (validated in spike 1).

@@ -286,6 +286,9 @@ importers:
       '@agentic-marketing/events':
         specifier: workspace:*
         version: link:../events
+      '@agentic-marketing/hotstate':
+        specifier: workspace:*
+        version: link:../hotstate
       '@agentic-marketing/ingest':
         specifier: workspace:*
         version: link:../ingest

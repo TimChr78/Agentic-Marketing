@@ -1,8 +1,10 @@
 # One image for every role (ADR-0002). Select roles with ROLE=api,worker,scheduler (default: all).
 FROM node:22-slim AS base
-ENV PNPM_HOME=/pnpm PATH=/pnpm:$PATH NODE_ENV=production
-RUN corepack enable
+ENV PNPM_HOME=/pnpm PATH=/pnpm:$PATH NODE_ENV=production COREPACK_HOME=/corepack
 WORKDIR /app
+# pnpm (the version pinned in package.json) is part of the image, so a container never downloads it.
+COPY package.json ./
+RUN corepack enable && corepack install && chmod -R a+rX /corepack
 
 FROM base AS deps
 COPY pnpm-lock.yaml pnpm-workspace.yaml package.json .npmrc ./

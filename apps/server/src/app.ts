@@ -1,4 +1,4 @@
-import { formsApi } from '@agentic-marketing/audience';
+import { formsApi, withEmailProfileEvents } from '@agentic-marketing/audience';
 import { type AuthConfig, acceptInvitation, authDirectory, createAuth, invitationWorkspace } from '@agentic-marketing/auth';
 import { createExecutor, userPrincipal } from '@agentic-marketing/commands';
 import { AppError, newUuid } from '@agentic-marketing/core';
@@ -27,11 +27,13 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
     secret: config.authSecret,
     db,
     trustedOrigins: config.trustedOrigins,
+    clientIpHeader: config.clientIpHeader,
     ...overrides,
   });
   const keyProvider = localKeyProvider(config.masterKey, config.previousMasterKeys);
   const bus = lazyNatsBus(config.nats);
-  const events = clickHouseStore(config.clickhouse);
+  // E-mail delivery events also become customer events (segments, journeys, webhooks).
+  const events = withEmailProfileEvents(clickHouseStore(config.clickhouse), { db, bus });
   const hot = valkeyHotState(config.valkey);
   const email = {
     publicUrl: config.linksUrl,
@@ -109,5 +111,18 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
   if (config.roles.has('api')) app.route('/', copilotApi({ auth, db, executor, kp: keyProvider }));
   app.route('/', restApi({ auth, db, executor }));
 
-  return { app, db, auth, executor, keyProvider, bus, events, email, hot, egress: config.egress, linksUrl: config.linksUrl };
+  return {
+    app,
+    db,
+    auth,
+    executor,
+    keyProvider,
+    bus,
+    events,
+    email,
+    hot,
+    egress: config.egress,
+    linksUrl: config.linksUrl,
+    retention: config.retention,
+  };
 }

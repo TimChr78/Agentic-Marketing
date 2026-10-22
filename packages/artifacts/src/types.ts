@@ -253,6 +253,15 @@ const emailTemplate = z.object({
   mjml: z.string().min(1).max(300_000).describe('MJML with Liquid. Variables: profile.*, event.*, unsubscribe_url, preferences_url'),
   text: z.string().max(100_000).optional().describe('Plain-text part (Liquid). Generated from the HTML when omitted'),
   sampleData: z.record(z.string(), z.unknown()).optional().describe('Example variables for previews, e.g. {"profile":{"firstName":"Ada"}}'),
+  utm: z
+    .object({
+      source: z.string().min(1).max(100).default('newsletter'),
+      medium: z.string().min(1).max(100).default('email'),
+      campaign: z.string().max(200).optional().describe('e.g. "signal-43"'),
+      domains: z.array(z.string().max(253)).max(20).optional().describe('Only tag links to these sites, e.g. ["martechsignal.com"]'),
+    })
+    .optional()
+    .describe("Add UTM parameters to links, so the site's analytics attributes visits from this e-mail"),
 });
 
 // Segment DSL (data-platform.md §6): a JSON condition tree that agents read and write and the

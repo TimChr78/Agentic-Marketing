@@ -1,7 +1,7 @@
 import { DEFAULT_PURPOSES, publishedSingleton, type TrackingPlan } from '@agentic-marketing/artifacts';
 import { type CommandContext, defineCommand } from '@agentic-marketing/commands';
 import { AppError, newId } from '@agentic-marketing/core';
-import { type IdentifierType, schema } from '@agentic-marketing/db';
+import { type IdentifierType, schema, type Tx } from '@agentic-marketing/db';
 import type {} from '@agentic-marketing/hotstate';
 import { and, desc, eq, inArray, isNull, lt } from 'drizzle-orm';
 import { z } from 'zod';
@@ -396,6 +396,51 @@ export const exportProfile = defineCommand({
   },
 });
 
+/**
+ * Removes people for good: events (ClickHouse), hot state, messages, consent ledger, merges and
+ * the profiles themselves (identifiers and keys cascade, so sealed data is crypto-shredded).
+ * `suppress` keeps hashes of their e-mail and phone so they are never contacted again: right for
+ * an erasure request, wrong for a retention cleanup (they may sign up again).
+ */
+export async function removeProfiles(
+  tx: Tx,
+  ws: string,
+  family: string[],
+  services: { events: CommandContext['services']['events']; hot?: CommandContext['services']['hot'] },
+  opts: { suppress: boolean },
+) {
+  const ids = await tx.select().from(schema.identifiers).where(inArray(schema.identifiers.profileId, family));
+  // Events first: if this fails nothing else has changed, and the removal can simply be retried.
+  await services.events.deleteEventsOf(ws, {
+    anonymousIds: ids.filter((i) => i.type === 'anonymous_id').map((i) => i.value),
+    userIds: ids.filter((i) => i.type === 'user_id').map((i) => i.value),
+    profileIds: family,
+  });
+  // And from the decision API's hot state.
+  await services.hot?.deleteSnapshot(ws, {
+    anonymousIds: ids.filter((i) => i.type === 'anonymous_id').map((i) => i.value),
+    userIds: ids.filter((i) => i.type === 'user_id').map((i) => i.value),
+  });
+  await tx.delete(schema.messages).where(inArray(schema.messages.profileId, family));
+  const suppress = opts.suppress ? ids.filter((i) => i.type === 'email' || i.type === 'phone') : [];
+  if (suppress.length)
+    await tx
+      .insert(schema.suppressions)
+      .values(
+        suppress.map((i) => ({ workspaceId: ws, channel: i.type === 'email' ? 'email' : 'sms', valueHash: i.value, reason: 'erased' })),
+      )
+      .onConflictDoNothing();
+  const consent = await tx
+    .delete(schema.consentRecords)
+    .where(inArray(schema.consentRecords.profileId, family))
+    .returning({ id: schema.consentRecords.id });
+  await tx.delete(schema.profileMerges).where(inArray(schema.profileMerges.fromId, family));
+  await tx.delete(schema.profileMerges).where(inArray(schema.profileMerges.intoId, family));
+  // Cascades to identifiers, profile keys (crypto-shredding) and consent state.
+  await tx.delete(schema.profiles).where(inArray(schema.profiles.id, family));
+  return { profiles: family.length, identifiers: ids.length, consentRecords: consent.length };
+}
+
 export const eraseProfile = defineCommand({
   name: 'profiles.erase',
   title: 'Erase a person (erasure request)',
@@ -411,40 +456,8 @@ export const eraseProfile = defineCommand({
     const ws = ctx.principal.workspaceId;
     const p = await canonical(ctx, input.profileId);
     const family = await mergedFamily(ctx.tx, ws, p.id);
-    const ids = await ctx.tx.select().from(schema.identifiers).where(inArray(schema.identifiers.profileId, family));
-
-    // Events first: if this fails nothing else has changed, and the erasure can simply be retried.
-    await ctx.services.events.deleteEventsOf(ws, {
-      anonymousIds: ids.filter((i) => i.type === 'anonymous_id').map((i) => i.value),
-      userIds: ids.filter((i) => i.type === 'user_id').map((i) => i.value),
-      profileIds: family,
-    });
-    // And from the decision API's hot state.
-    await ctx.services.hot?.deleteSnapshot(ws, {
-      anonymousIds: ids.filter((i) => i.type === 'anonymous_id').map((i) => i.value),
-      userIds: ids.filter((i) => i.type === 'user_id').map((i) => i.value),
-    });
-    await ctx.tx.delete(schema.messages).where(inArray(schema.messages.profileId, family));
-
-    const suppress = ids.filter((i) => i.type === 'email' || i.type === 'phone');
-    if (suppress.length)
-      await ctx.tx
-        .insert(schema.suppressions)
-        .values(
-          suppress.map((i) => ({ workspaceId: ws, channel: i.type === 'email' ? 'email' : 'sms', valueHash: i.value, reason: 'erased' })),
-        )
-        .onConflictDoNothing();
-    const consent = await ctx.tx
-      .delete(schema.consentRecords)
-      .where(inArray(schema.consentRecords.profileId, family))
-      .returning({ id: schema.consentRecords.id });
-    await ctx.tx.delete(schema.profileMerges).where(inArray(schema.profileMerges.fromId, family));
-    await ctx.tx.delete(schema.profileMerges).where(inArray(schema.profileMerges.intoId, family));
-    // Cascades to identifiers, profile keys (crypto-shredding) and consent state.
-    await ctx.tx.delete(schema.profiles).where(inArray(schema.profiles.id, family));
-
+    const counts = await removeProfiles(ctx.tx, ws, family, ctx.services, { suppress: true });
     const erasureId = newId('era');
-    const counts = { profiles: family.length, identifiers: ids.length, consentRecords: consent.length };
     await ctx.tx
       .insert(schema.erasures)
       .values({ workspaceId: ws, id: erasureId, profileIds: family, requestedBy: ctx.principal.userId, reason: input.reason, counts });

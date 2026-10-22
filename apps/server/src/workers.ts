@@ -1,5 +1,5 @@
 import { runAiWorker } from '@agentic-marketing/ai';
-import { consentHook, runBroadcasts } from '@agentic-marketing/audience';
+import { consentHook, runBroadcasts, runRetention } from '@agentic-marketing/audience';
 import { runDeliveryWorker } from '@agentic-marketing/email';
 import { runSink } from '@agentic-marketing/events';
 import { type DeliveryDeps, runDeliveries, webhookHook } from '@agentic-marketing/integrations';
@@ -16,10 +16,11 @@ export function startScheduler(
   signal: AbortSignal,
   opts: { segmentTickMs?: number; broadcastTickMs?: number } = {},
 ): Promise<void>[] {
-  logger.info('scheduler role: segment recomputation, broadcasts');
+  logger.info('scheduler role: segment recomputation, broadcasts, retention');
   return [
     runSegmentScheduler({ db: srv.db, events: srv.events, bus: srv.bus, tickMs: opts.segmentTickMs }, signal),
     runBroadcasts({ db: srv.db, kp: srv.keyProvider, events: srv.events }, signal, opts.broadcastTickMs),
+    runRetention({ db: srv.db, events: srv.events, hot: srv.hot, ...srv.retention }, signal),
   ];
 }
 
