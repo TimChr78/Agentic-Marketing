@@ -1,9 +1,10 @@
 import { aiCommands } from '@agentic-marketing/ai';
 import { artifactCommands, workspaceCommands } from '@agentic-marketing/artifacts';
-import { memberCommands } from '@agentic-marketing/auth';
+import { memberCommands, tokenCommands } from '@agentic-marketing/auth';
 import type { AnyCommand } from '@agentic-marketing/commands';
 import { messageCommands, providerCommands, templateCommands } from '@agentic-marketing/email';
 import { sourceCommands } from '@agentic-marketing/ingest';
+import { connectionCommands, webhookCommands } from '@agentic-marketing/integrations';
 import { journeyCommands } from '@agentic-marketing/journeys';
 import { experienceCommands } from '@agentic-marketing/personalize';
 import { profileCommands } from '@agentic-marketing/profiles';
@@ -18,12 +19,15 @@ export const commands = [
   ...providerCommands,
   ...workspaceCommands,
   ...memberCommands,
+  ...tokenCommands,
   ...sourceCommands,
   ...profileCommands,
   ...segmentCommands,
   ...journeyCommands,
   ...experienceCommands,
   ...aiCommands,
+  ...connectionCommands,
+  ...webhookCommands,
   ...secretCommands,
 ] as const;
 export type Commands = typeof commands;

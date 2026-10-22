@@ -447,6 +447,89 @@ export const aiCalls = pgTable(
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
 );
 
+export const apiTokens = pgTable(
+  'api_tokens',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    userId: text('user_id').notNull(),
+    name: text('name').notNull(),
+    tokenHash: text('token_hash').notNull(),
+    tokenHint: text('token_hint').notNull(),
+    scopes: text('scopes').array().notNull(),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    expiresAt: ts('expires_at'),
+    lastUsedAt: ts('last_used_at'),
+    revokedAt: ts('revoked_at'),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
+export const webhookEndpoints = pgTable(
+  'webhook_endpoints',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    name: text('name').notNull(),
+    url: text('url').notNull(),
+    events: text('events').array().notNull().default([]),
+    purpose: text('purpose'),
+    secrets: bytea('secrets').notNull(),
+    secretsKeyId: text('secrets_key_id').notNull(),
+    enabled: boolean('enabled').notNull().default(true),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
+export const connections = pgTable(
+  'connections',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    connector: text('connector').notNull(),
+    name: text('name').notNull(),
+    settings: jsonb('settings').$type<Record<string, unknown>>().notNull().default({}),
+    secrets: bytea('secrets'),
+    secretsKeyId: text('secrets_key_id'),
+    tokenHash: text('token_hash'),
+    enabled: boolean('enabled').notNull().default(true),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
+export type DeliveryStatus = 'pending' | 'running' | 'done' | 'failed' | 'dead';
+export const deliveries = pgTable(
+  'deliveries',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    kind: text('kind').$type<'webhook' | 'action'>().notNull(),
+    targetId: text('target_id').notNull(),
+    action: text('action'),
+    payload: jsonb('payload').$type<unknown>().notNull(),
+    status: text('status').$type<DeliveryStatus>().notNull(),
+    attempts: integer('attempts').notNull().default(0),
+    nextAttemptAt: ts('next_attempt_at').notNull().defaultNow(),
+    leaseUntil: ts('lease_until'),
+    idempotencyKey: text('idempotency_key').notNull(),
+    statusCode: integer('status_code'),
+    response: jsonb('response').$type<unknown>(),
+    error: text('error'),
+    durationMs: integer('duration_ms'),
+    participantId: bigint('participant_id', { mode: 'number' }),
+    node: text('node'),
+    seq: integer('seq'),
+    profileId: text('profile_id'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    finishedAt: ts('finished_at'),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
 export type ApprovalPolicy = 'none' | 'agent_changes' | 'all_publishes';
 export type Role = 'owner' | 'admin' | 'marketer' | 'approver' | 'viewer';
 export type VersionState = 'draft' | 'in_review' | 'published' | 'superseded' | 'rejected';

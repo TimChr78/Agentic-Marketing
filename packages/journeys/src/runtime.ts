@@ -1,13 +1,14 @@
-import { artifactTypes, type JourneyDefinition, publishedSingleton } from '@agentic-marketing/artifacts';
+import { artifactTypes, DEFAULT_PURPOSES, type JourneyDefinition, publishedSingleton } from '@agentic-marketing/artifacts';
 import { newId } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import { requestEmail } from '@agentic-marketing/email';
 import type { EventStore, JourneyEvent } from '@agentic-marketing/events';
-import type { ResolvedEvent } from '@agentic-marketing/profiles';
+import { consentStateOf, purposeAllowed, type ResolvedEvent } from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { contextFor, ENTERED, evaluate, publishedSegments } from '@agentic-marketing/segments';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, inArray, isNotNull, sql } from 'drizzle-orm';
+import jsonata from 'jsonata';
 import { compile, type Graph } from './graph';
 import { type AiOutcome, advance, type Effect, type ParticipantState, type Step } from './interpreter';
 
@@ -134,13 +135,126 @@ async function fallbackContent(tx: Tx, promptId: string): Promise<Record<string,
   return Object.fromEntries(slots.map((s) => [s.name, s.fallback]));
 }
 
+type Participant = typeof schema.journeyParticipants.$inferSelect;
+
+/** What JSONata expressions in automation steps see: the person (non-personal traits) and the participant's context. */
+async function scopeOf(tx: Tx, p: Participant) {
+  const [prof] = await tx.select({ traits: schema.profiles.traits }).from(schema.profiles).where(eq(schema.profiles.id, p.profileId));
+  const c = p.context as Record<string, unknown>;
+  return {
+    profile: { id: p.profileId, traits: prof?.traits ?? {} },
+    event: c.event,
+    vars: c.vars ?? {},
+    content: c.content ?? {},
+    results: c.results ?? {},
+  };
+}
+
+/** JSONata returns objects without a prototype; plain JSON is what the database and receivers get. */
+const evalJsonata = async (expression: string, scope: unknown): Promise<unknown> => {
+  const v = await jsonata(expression).evaluate(scope);
+  return v === undefined ? undefined : JSON.parse(JSON.stringify(v));
+};
+
+async function saveContext(tx: Tx, workspaceId: string, p: Participant) {
+  await tx
+    .update(schema.journeyParticipants)
+    .set({ context: p.context })
+    .where(and(eq(schema.journeyParticipants.workspaceId, workspaceId), eq(schema.journeyParticipants.id, p.id)));
+}
+
+async function webhookAllowed(tx: Tx, workspaceId: string, profileId: string, purpose: string) {
+  const purposes = (await publishedSingleton(tx, 'purposes'))?.purposes ?? DEFAULT_PURPOSES;
+  const basis = purposes.find((x) => x.key === purpose)?.basis ?? 'consent';
+  const state = (await consentStateOf(tx, workspaceId, profileId)).find(
+    (s) => s.purpose === purpose && (s.channel === '' || s.channel === 'webhook'),
+  );
+  return purposeAllowed(basis, state?.status);
+}
+
 async function applyEffect(
   tx: Tx,
   workspaceId: string,
-  p: typeof schema.journeyParticipants.$inferSelect,
+  p: Participant,
   eff: Effect,
   deps: JourneyDeps,
+  graph: Graph,
+  flags: { wakeNow: boolean },
 ): Promise<string | null> {
+  if (eff.kind === 'transform') {
+    try {
+      const value = await evalJsonata(eff.expression, await scopeOf(tx, p));
+      p.context = { ...p.context, vars: { ...((p.context.vars as Record<string, unknown>) ?? {}), [eff.set]: value ?? null } };
+      await saveContext(tx, workspaceId, p);
+      return `vars.${eff.set} = ${JSON.stringify(value ?? null).slice(0, 200)}`;
+    } catch (err) {
+      return `transform failed: ${(err as Error).message}`;
+    }
+  }
+  if (eff.kind === 'webhook') {
+    if (!(await webhookAllowed(tx, workspaceId, p.profileId, graph.purpose)))
+      return `not sent: no lawful basis for purpose "${graph.purpose}"`;
+    const scope = await scopeOf(tx, p);
+    let data: unknown = { profile: scope.profile, event: scope.event };
+    if (eff.data)
+      try {
+        data = await evalJsonata(eff.data, scope);
+      } catch (err) {
+        return `not sent: the data expression failed: ${(err as Error).message}`;
+      }
+    await tx
+      .insert(schema.deliveries)
+      .values({
+        workspaceId,
+        id: newId('dlv'),
+        kind: 'webhook',
+        targetId: eff.endpoint,
+        payload: {
+          type: 'journey.webhook',
+          timestamp: new Date().toISOString(),
+          data: { journey: { id: p.journeyId, version: p.version, node: eff.node }, ...(data as object) },
+        },
+        status: 'pending',
+        idempotencyKey: `jrn:${p.id}:${eff.node}:${eff.seq}`,
+        profileId: p.profileId,
+      })
+      .onConflictDoNothing();
+    return 'webhook queued';
+  }
+  if (eff.kind === 'action') {
+    let input: unknown = eff.input;
+    try {
+      if (typeof eff.input === 'string') input = await evalJsonata(eff.input, await scopeOf(tx, p));
+    } catch (err) {
+      // No point waiting for the timeout: take the error edge on the next sweep.
+      const results = (p.context.results as Record<string, unknown>) ?? {};
+      p.context = {
+        ...p.context,
+        results: { ...results, [eff.node]: { seq: eff.seq, ok: false, error: `input: ${(err as Error).message}` } },
+      };
+      await saveContext(tx, workspaceId, p);
+      flags.wakeNow = true;
+      return null;
+    }
+    await tx
+      .insert(schema.deliveries)
+      .values({
+        workspaceId,
+        id: newId('dlv'),
+        kind: 'action',
+        targetId: eff.connection,
+        action: eff.action,
+        payload: (input ?? {}) as object,
+        status: 'pending',
+        idempotencyKey: `jrn:${p.id}:${eff.node}:${eff.seq}`,
+        participantId: p.id,
+        node: eff.node,
+        seq: eff.seq,
+        profileId: p.profileId,
+      })
+      .onConflictDoNothing();
+    return null;
+  }
   if (eff.kind === 'ai') {
     // The AI worker answers outside this transaction and wakes the participant.
     await tx
@@ -236,6 +350,10 @@ export async function sweep(db: Db, deps: JourneyDeps, opts: { batch?: number; n
           const graph = await graphOf(tx, p.journeyId, p.version);
           result = await advance(graph, state, t, {
             key: String(p.id),
+            result: (node) => {
+              const r = (p.context.results as Record<string, { seq: number; ok: boolean; error?: string }> | undefined)?.[node];
+              return r && r.seq === p.seq ? r : undefined;
+            },
             ai: (node) => {
               const r = (p.context.ai as Record<string, AiOutcome & { seq: number }> | undefined)?.[node];
               return r && r.seq === p.seq ? r : undefined;
@@ -273,13 +391,15 @@ export async function sweep(db: Db, deps: JourneyDeps, opts: { batch?: number; n
           continue;
         }
         const details = new Map<string, string>();
+        const flags = { wakeNow: false };
+        const graph = await graphOf(tx, p.journeyId, p.version);
         for (const eff of result.effects) {
-          const d = await applyEffect(tx, ws, p, eff, deps);
+          const d = await applyEffect(tx, ws, p, eff, deps, graph, flags);
           if (d !== null) details.set(`${eff.node}:${eff.seq}`, d);
         }
         await tx
           .update(schema.journeyParticipants)
-          .set({ ...result.state, updatedAt: t })
+          .set({ ...result.state, ...(flags.wakeNow ? { dueAt: t } : {}), updatedAt: t })
           .where(eq(schema.journeyParticipants.id, p.id));
         if (p.seq === 0)
           journeyEvents.push({

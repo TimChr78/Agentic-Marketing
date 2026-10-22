@@ -18,6 +18,8 @@ const nodeKinds = [
   'split',
   'email',
   'webhook',
+  'action',
+  'transform',
   'updateProfile',
   'aiDecide',
   'aiGenerate',
@@ -72,6 +74,36 @@ export const journeyNodeConfigs = {
     trait: z.string().regex(/^[A-Za-z0-9_]{1,64}$/),
     value: z.union([z.string().max(500), z.number(), z.boolean(), z.null()]),
   }),
+  webhook: z.object({
+    endpoint: z.string().regex(/^whk_[0-9a-f]{32}$/, 'A webhook endpoint id (whk_…)'),
+    data: z
+      .string()
+      .max(5000)
+      .optional()
+      .describe(
+        "JSONata over {profile, event, vars, content, results} for the payload's data; default: the profile (id, non-personal traits) and the trigger event",
+      ),
+  }),
+  action: z.object({
+    connection: z.string().regex(/^con_[0-9a-f]{32}$/, 'A connection id (con_…)'),
+    action: z.string().min(1).max(64).describe('e.g. "postMessage" (Slack) or "request" (HTTP API)'),
+    input: z
+      .union([z.record(z.string(), z.unknown()), z.string().max(5000)])
+      .default({})
+      .describe('The action input: a JSON object, or a JSONata expression over {profile, event, vars, content, results} that returns one'),
+    timeout: Iso.default('PT10M').describe('How long the step waits for the action before taking the error edge'),
+  }),
+  transform: z.object({
+    set: z
+      .string()
+      .regex(/^[a-z][A-Za-z0-9_]{0,31}$/)
+      .describe('Stores the result as vars.<set>'),
+    expression: z
+      .string()
+      .min(1)
+      .max(5000)
+      .describe('JSONata over {profile, event, vars, content, results}, e.g. $sum(event.properties.products.price)'),
+  }),
   aiDecide: z.object({
     prompt: PromptRef.describe('A decide prompt (prm_…); its published version is used'),
     options: z
@@ -117,6 +149,8 @@ const journey = z.object({
         }
         const edges = n.next?.length ?? 0;
         if (n.kind === 'branch' && edges !== 2) ctx.addIssue({ code: 'custom', message: `Branch "${n.id}" needs two edges: [yes, no]` });
+        if (n.kind === 'action' && edges > 2)
+          ctx.addIssue({ code: 'custom', message: `Action "${n.id}" has at most two edges: [ok, error]` });
         if ((n.kind === 'waitEvent' || n.kind === 'goal') && edges > 2)
           ctx.addIssue({ code: 'custom', message: `"${n.id}" has at most two edges: [matched, timeout]` });
         const weights = (n.config as { weights?: unknown[] }).weights;

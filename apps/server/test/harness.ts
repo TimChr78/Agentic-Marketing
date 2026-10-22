@@ -161,6 +161,8 @@ export async function startTestServer(name: string, port: number) {
     NATS_NAMESPACE: dbName,
     VALKEY_URL: process.env.VALKEY_URL ?? 'redis://localhost:6379',
     VALKEY_PREFIX: dbName,
+    // Test receivers for webhooks and connector actions listen on loopback.
+    EGRESS_ALLOWED_HOSTS: '127.0.0.1',
   });
   const srv = createServer(config);
   await resetClickHouse(config.clickhouse.url, dbName);
@@ -172,7 +174,10 @@ export async function startTestServer(name: string, port: number) {
     http = serve({ fetch: srv.app.fetch, port }, (_i: AddressInfo) => resolve());
   });
   const stop = new AbortController();
-  const workers = [...startWorkers(srv, stop.signal), ...startScheduler(srv, stop.signal, { segmentTickMs: 500 })];
+  const workers = [
+    ...startWorkers(srv, stop.signal, { deliveries: { webhookBackoffMs: [200, 200], actionBackoffMs: [100] } }),
+    ...startScheduler(srv, stop.signal, { segmentTickMs: 500 }),
+  ];
 
   async function signUp(email: string): Promise<User> {
     const res = await fetch(`${base}/api/auth/sign-up/email`, {

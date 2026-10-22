@@ -18,10 +18,25 @@ export type Node =
   | { id: string; label: string; kind: 'updateProfile'; trait: string; value: string | number | boolean | null; next: string | null }
   | { id: string; label: string; kind: 'aiDecide'; prompt: string; options: string[]; fallback: string; ms: number; edges: string[] }
   | { id: string; label: string; kind: 'aiGenerate'; prompt: string; ms: number; next: string | null }
+  | { id: string; label: string; kind: 'webhook'; endpoint: string; data?: string; next: string | null }
+  | {
+      id: string;
+      label: string;
+      kind: 'action';
+      connection: string;
+      action: string;
+      input: Record<string, unknown> | string;
+      ms: number;
+      ok: string | null;
+      error: string | null;
+    }
+  | { id: string; label: string; kind: 'transform'; set: string; expression: string; next: string | null }
   | { id: string; label: string; kind: 'exit' };
 
 export interface Graph {
   start: string;
+  /** The journey's purpose; webhook steps need a lawful basis for it. */
+  purpose: string;
   trigger: Cfg<'trigger'>;
   nodes: Map<string, Node>;
 }
@@ -104,6 +119,31 @@ export function compile(def: JourneyDefinition): Graph {
         nodes.set(n.id, { ...base, kind: 'aiGenerate', prompt: c.prompt, ms: durationSeconds(c.timeout) * 1000, next: edge(0) });
         break;
       }
+      case 'webhook': {
+        const c = journeyNodeConfigs.webhook.parse(n.config);
+        nodes.set(n.id, { ...base, kind: 'webhook', endpoint: c.endpoint, data: c.data, next: edge(0) });
+        break;
+      }
+      case 'action': {
+        const c = journeyNodeConfigs.action.parse(n.config);
+        nodes.set(n.id, {
+          ...base,
+          kind: 'action',
+          connection: c.connection,
+          action: c.action,
+          input: c.input,
+          ms: durationSeconds(c.timeout) * 1000,
+          // With one edge, both outcomes continue there.
+          ok: edge(0),
+          error: n.next?.[1]?.to ?? edge(0),
+        });
+        break;
+      }
+      case 'transform': {
+        const c = journeyNodeConfigs.transform.parse(n.config);
+        nodes.set(n.id, { ...base, kind: 'transform', set: c.set, expression: c.expression, next: edge(0) });
+        break;
+      }
       case 'exit':
         nodes.set(n.id, { ...base, kind: 'exit' });
         break;
@@ -112,7 +152,7 @@ export function compile(def: JourneyDefinition): Graph {
     }
   });
   if (!trigger) throw new Error('journey without trigger');
-  return { start, trigger, nodes };
+  return { start, purpose: def.purpose, trigger, nodes };
 }
 
 /** Problems that block publishing a journey: kinds that cannot run yet, and missing e-mail templates or segments. */

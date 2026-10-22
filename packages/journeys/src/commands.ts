@@ -1,8 +1,15 @@
-import { artifactTypes, type JourneyDefinition, publishValidators } from '@agentic-marketing/artifacts';
+import {
+  artifactTypes,
+  DEFAULT_PURPOSES,
+  type JourneyDefinition,
+  publishedSingleton,
+  publishValidators,
+} from '@agentic-marketing/artifacts';
 import { defineCommand } from '@agentic-marketing/commands';
 import { AppError, newUuid } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
 import { checkRecipient } from '@agentic-marketing/email';
+import { consentStateOf, purposeAllowed } from '@agentic-marketing/profiles';
 import { contextFor, durationSeconds, evaluate, publishedSegments } from '@agentic-marketing/segments';
 import { and, desc, eq, inArray, isNotNull, sql } from 'drizzle-orm';
 import { z } from 'zod';
@@ -11,10 +18,14 @@ import { advance, type ParticipantState } from './interpreter';
 
 const JourneyId = z.string().regex(/^jrn_[0-9a-f]{32}$/);
 
+/** Extra publish checks other packages add (e.g. that connections and their actions exist). */
+export const journeyChecks: ((def: JourneyDefinition, tx: Tx) => Promise<string[]>)[] = [];
+
 /** Journeys can be published only with runnable nodes and published templates and segments. */
 publishValidators.set('journey', async (content, tx: Tx) => {
   const def = content as JourneyDefinition;
   const problems = unsupported(def);
+  for (const check of journeyChecks) problems.push(...(await check(def, tx)));
   const templates = def.nodes.filter((n) => n.kind === 'email').map((n) => String(n.config.template));
   const segments = def.nodes.flatMap((n) =>
     (n.kind === 'trigger' || n.kind === 'branch') && n.config.segment ? [String(n.config.segment)] : [],
@@ -189,6 +200,10 @@ export const simulateJourney = defineCommand({
       .record(z.string(), z.enum(['yes', 'no']))
       .default({})
       .describe('Answers for branch nodes when there is no profile (default no)'),
+    actions: z
+      .record(z.string(), z.enum(['ok', 'error']))
+      .default({})
+      .describe('Outcomes of action nodes, by node id (default ok). The simulation never calls them.'),
     ai: z
       .record(z.string(), z.string())
       .default({})
@@ -241,6 +256,7 @@ export const simulateJourney = defineCommand({
     while (state.status === 'ready' || state.status === 'waiting') {
       const out = await advance(graph, state, new Date(clock), {
         key: `simulation:${input.profileId ?? 'anyone'}`,
+        result: (node) => (input.actions[node] === 'error' ? { ok: false, error: 'given in the simulation' } : { ok: true }),
         ai: (node) =>
           input.ai[node] ? { option: input.ai[node], rationale: 'given in the simulation' } : { fallback: 'not called in a simulation' },
         branch: async (n) => {
@@ -282,19 +298,32 @@ export const simulateJourney = defineCommand({
             detail = v.ok ? `would send ${eff.template}` : `would not send: ${v.reason}`;
           } else detail = `would send ${eff.template}`;
         } else if (eff?.kind === 'updateProfile') detail = `would set ${eff.trait} = ${JSON.stringify(eff.value)}`;
-        else if (eff?.kind === 'ai') continue; // the outcome follows when the step resumes
+        else if (eff?.kind === 'webhook') {
+          const allowed =
+            !input.profileId ||
+            (await (async () => {
+              const purposes = (await publishedSingleton(ctx.tx, 'purposes'))?.purposes ?? DEFAULT_PURPOSES;
+              const basis = purposes.find((x) => x.key === graph.purpose)?.basis ?? 'consent';
+              const state = (await consentStateOf(ctx.tx, ws, input.profileId!)).find(
+                (x) => x.purpose === graph.purpose && (x.channel === '' || x.channel === 'webhook'),
+              );
+              return purposeAllowed(basis, state?.status);
+            })());
+          detail = allowed ? `would send a webhook to ${eff.endpoint}` : `would not send: no lawful basis for purpose "${graph.purpose}"`;
+        } else if (eff?.kind === 'transform') detail = `would set vars.${eff.set}`;
+        else if (eff?.kind === 'ai' || eff?.kind === 'action') continue; // the outcome follows when the step resumes
         if (
           s.type === 'step' ||
           s.type === 'converted' ||
-          (s.type === 'resumed' && (node.kind === 'aiDecide' || node.kind === 'aiGenerate'))
+          (s.type === 'resumed' && (node.kind === 'aiDecide' || node.kind === 'aiGenerate' || node.kind === 'action'))
         )
           steps.push({ after: fmt(clock), node: s.node, label: node.label, kind: node.kind, detail });
       }
       state = out.state;
       if (state.status !== 'waiting') break;
-      // AI steps answer right away in a simulation.
+      // AI and action steps answer right away in a simulation.
       const at = graph.nodes.get(state.node)!;
-      if (at.kind === 'aiDecide' || at.kind === 'aiGenerate') {
+      if (at.kind === 'aiDecide' || at.kind === 'aiGenerate' || at.kind === 'action') {
         state = { ...state, waitingEvent: null };
         continue;
       }

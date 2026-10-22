@@ -1,4 +1,4 @@
-import { type Auth, principalFromSession } from '@agentic-marketing/auth';
+import { type Auth, principalFromApiToken, principalFromSession } from '@agentic-marketing/auth';
 import type { Executor } from '@agentic-marketing/commands';
 import { AppError } from '@agentic-marketing/core';
 import type { Db } from '@agentic-marketing/db';
@@ -69,8 +69,17 @@ export function restApi(deps: { auth: Auth; db: Db; executor: Executor }) {
     });
     api.openAPIRegistry.registerPath(route);
     api.post(route.path, async (c) => {
-      const principal = await principalFromSession(deps.auth, deps.db, c.req.raw.headers);
-      if (!principal) throw new AppError('unauthorized', 'Sign in first, or pick a workspace you are a member of with X-Workspace-Id.');
+      const bearer = c.req.header('authorization')?.match(/^Bearer (amk_\S+)$/)?.[1];
+      const principal = bearer
+        ? await principalFromApiToken(deps.db, bearer)
+        : await principalFromSession(deps.auth, deps.db, c.req.raw.headers);
+      if (!principal)
+        throw new AppError(
+          'unauthorized',
+          bearer
+            ? 'This API token is unknown, revoked or expired.'
+            : 'Sign in first, or pick a workspace you are a member of with X-Workspace-Id.',
+        );
       const body = await c.req.json().catch(() => ({}));
       const out = await deps.executor.execute(cmd, body, principal, { surface: 'rest', idempotencyKey: c.req.header('idempotency-key') });
       return c.json(out as object, 200);

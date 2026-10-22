@@ -1,0 +1,139 @@
+import { lookup } from 'node:dns';
+import { request as httpRequest } from 'node:http';
+import { request as httpsRequest } from 'node:https';
+import { BlockList, isIP, type LookupFunction } from 'node:net';
+
+// Outbound HTTP for webhooks and connector actions, guarded against SSRF
+// (security-and-privacy.md §5): only http(s), no redirects, bounded time and response size, and
+// the address is checked when the socket connects, after DNS resolution, so a name cannot point
+// at an internal service. Private networks are blocked unless the install allows a host or range
+// (a homelab's n8n on the LAN, say) with EGRESS_ALLOWED_HOSTS.
+
+const blocked = new BlockList();
+for (const [net, prefix] of [
+  ['0.0.0.0', 8],
+  ['10.0.0.0', 8],
+  ['100.64.0.0', 10],
+  ['127.0.0.0', 8],
+  ['169.254.0.0', 16],
+  ['172.16.0.0', 12],
+  ['192.0.0.0', 24],
+  ['192.168.0.0', 16],
+  ['198.18.0.0', 15],
+  ['224.0.0.0', 4],
+  ['240.0.0.0', 4],
+] as const)
+  blocked.addSubnet(net, prefix, 'ipv4');
+for (const [net, prefix] of [
+  ['::', 128],
+  ['::1', 128],
+  ['fc00::', 7],
+  ['fe80::', 10],
+  ['ff00::', 8],
+] as const)
+  blocked.addSubnet(net, prefix, 'ipv6');
+
+export interface EgressPolicy {
+  /** Host names, IP addresses or CIDR ranges that may be reached even though they are private. */
+  allowedHosts: string[];
+}
+
+export class EgressError extends Error {}
+
+function allowList(policy: EgressPolicy) {
+  const names = new Set<string>();
+  const nets = new BlockList();
+  for (const h of policy.allowedHosts.map((x) => x.trim().toLowerCase()).filter(Boolean)) {
+    const [addr, bits] = h.split('/');
+    const v = isIP(addr);
+    if (v && bits) nets.addSubnet(addr, Number(bits), v === 6 ? 'ipv6' : 'ipv4');
+    else if (v) nets.addAddress(addr, v === 6 ? 'ipv6' : 'ipv4');
+    else names.add(h);
+  }
+  return { names, nets };
+}
+
+const family = (a: string) => (isIP(a) === 6 ? 'ipv6' : 'ipv4');
+
+/** Whether an address is private (and not explicitly allowed). */
+export function isBlockedAddress(address: string, policy: EgressPolicy): boolean {
+  const a = address.replace(/^::ffff:/, '');
+  const { nets } = allowList(policy);
+  if (nets.check(a, family(a))) return false;
+  return blocked.check(a, family(a));
+}
+
+/** A URL check without network access, for settings: scheme, credentials and literal private addresses. */
+export function checkUrl(raw: string, policy: EgressPolicy): string | null {
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    return 'not a valid URL';
+  }
+  if (u.protocol !== 'https:' && u.protocol !== 'http:') return 'only http and https URLs are allowed';
+  if (u.username || u.password) return 'credentials in the URL are not allowed; use a secret header';
+  const host = u.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  if (allowList(policy).names.has(host)) return null;
+  if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.internal')) return `${host} is an internal address`;
+  if (isIP(host) && isBlockedAddress(host, policy)) return `${host} is a private address; allow it with EGRESS_ALLOWED_HOSTS`;
+  return null;
+}
+
+export interface SafeResponse {
+  status: number;
+  headers: Record<string, string>;
+  body: string;
+}
+
+/** One HTTP request under the egress policy. Throws EgressError when the target is not allowed. */
+export function safeRequest(
+  url: string,
+  init: { method?: string; headers?: Record<string, string>; body?: string; timeoutMs?: number; maxBytes?: number },
+  policy: EgressPolicy,
+): Promise<SafeResponse> {
+  const problem = checkUrl(url, policy);
+  if (problem) return Promise.reject(new EgressError(problem));
+  const u = new URL(url);
+  const named = allowList(policy).names.has(u.hostname.toLowerCase());
+  // Resolve, then refuse private addresses unless the name itself is on the allow list.
+  const guardedLookup: LookupFunction = (hostname, options, cb) =>
+    lookup(hostname, { ...options, all: false }, (err, address, fam) => {
+      if (err) return cb(err, '', 0);
+      const a = address as string;
+      if (!named && isBlockedAddress(a, policy)) return cb(new EgressError(`${hostname} resolves to private address ${a}`), '', 0);
+      cb(null, a, fam as number);
+    });
+  const maxBytes = init.maxBytes ?? 256 * 1024;
+  return new Promise((resolve, reject) => {
+    const req = (u.protocol === 'https:' ? httpsRequest : httpRequest)(
+      u,
+      {
+        method: init.method ?? 'POST',
+        headers: { 'user-agent': 'agentic-marketing-webhooks/1', ...init.headers },
+        lookup: guardedLookup,
+        timeout: init.timeoutMs ?? 10_000,
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        let size = 0;
+        res.on('data', (c: Buffer) => {
+          size += c.length;
+          if (size <= maxBytes) chunks.push(c);
+        });
+        res.on('end', () =>
+          resolve({
+            status: res.statusCode ?? 0,
+            headers: Object.fromEntries(Object.entries(res.headers).map(([k, v]) => [k, Array.isArray(v) ? v.join(', ') : (v ?? '')])),
+            body: Buffer.concat(chunks).toString('utf8'),
+          }),
+        );
+        res.on('error', reject);
+      },
+    );
+    req.on('timeout', () => req.destroy(new Error(`timed out after ${init.timeoutMs ?? 10_000} ms`)));
+    req.on('error', reject);
+    if (init.body !== undefined) req.write(init.body);
+    req.end();
+  });
+}
