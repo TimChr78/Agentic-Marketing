@@ -1,4 +1,4 @@
-import { clickIdHook, conversionHook } from '@agentic-marketing/ads';
+import { clickIdHook, conversionHook, runAudienceSyncs, runSpendImport } from '@agentic-marketing/ads';
 import { runAiWorker } from '@agentic-marketing/ai';
 import { consentHook, runBroadcasts, runRetention } from '@agentic-marketing/audience';
 import { runDeliveryWorker } from '@agentic-marketing/email';
@@ -17,12 +17,14 @@ export function startScheduler(
   signal: AbortSignal,
   opts: { segmentTickMs?: number; broadcastTickMs?: number } = {},
 ): Promise<void>[] {
-  logger.info('scheduler role: segment recomputation, broadcasts, retention, OAuth token refresh');
+  logger.info('scheduler role: segment recomputation, broadcasts, retention, OAuth token refresh, audience sync, ad spend import');
   return [
     runSegmentScheduler({ db: srv.db, events: srv.events, bus: srv.bus, tickMs: opts.segmentTickMs }, signal),
     runBroadcasts({ db: srv.db, kp: srv.keyProvider, events: srv.events }, signal, opts.broadcastTickMs),
     runRetention({ db: srv.db, events: srv.events, hot: srv.hot, ...srv.retention }, signal),
     runTokenRefresher({ db: srv.db, kp: srv.keyProvider, egress: srv.egress }, signal),
+    runAudienceSyncs({ db: srv.db, kp: srv.keyProvider, egress: srv.egress }, signal),
+    runSpendImport({ db: srv.db, events: srv.events, kp: srv.keyProvider, egress: srv.egress }, signal),
   ];
 }
 

@@ -110,7 +110,12 @@ export function safeRequest(
       u,
       {
         method: init.method ?? 'POST',
-        headers: { 'user-agent': 'agentic-marketing-webhooks/1', ...init.headers },
+        // An explicit length: Node does not chunk DELETE bodies, so without it they arrive malformed.
+        headers: {
+          'user-agent': 'agentic-marketing-webhooks/1',
+          ...(init.body !== undefined ? { 'content-length': String(Buffer.byteLength(init.body)) } : {}),
+          ...init.headers,
+        },
         lookup: guardedLookup,
         timeout: init.timeoutMs ?? 10_000,
       },

@@ -87,6 +87,10 @@ Generated from the command registry (`apps/server/src/registry.ts`). **Effect**:
 | `connections.authorize` | write | workspace:admin | people only | Connect an OAuth 2.0 connection |
 | `ads.test` | write | workspace:admin | people and agents | Test an ad platform connection |
 | `ads.conversions` | read | artifacts:read | people and agents | Conversions sent to ad platforms |
+| `ads.performance` | read | artifacts:read | people and agents | Ad spend, conversions and ROAS per campaign |
+| `ads.importSpend` | write | artifacts:write | people and agents | Import ad spend now |
+| `ads.audiences` | read | artifacts:read | people and agents | Audience syncs and their state |
+| `ads.syncAudience` | write | messages:send | people and agents | Sync an audience now |
 | `webhooks.list` | read | artifacts:read | people and agents | List webhook endpoints |
 | `webhooks.create` | write | workspace:admin | people only | Add a webhook endpoint |
 | `webhooks.update` | write | workspace:admin | people only | Change a webhook endpoint |

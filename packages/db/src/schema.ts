@@ -364,6 +364,36 @@ export const smsProviders = pgTable(
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
 );
 
+export const audienceMembers = pgTable(
+  'audience_members',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    syncId: text('sync_id').notNull(),
+    platform: text('platform').$type<'meta' | 'google'>().notNull(),
+    profileId: text('profile_id').notNull(),
+    /** What was sent: the platform's hashes of e-mail and phone (needed to remove the person again). */
+    hashes: jsonb('hashes').$type<{ email?: string; phone?: string }>().notNull(),
+    addedAt: ts('added_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.syncId, t.platform, t.profileId] })],
+);
+
+export const audienceSyncState = pgTable(
+  'audience_sync_state',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    syncId: text('sync_id').notNull(),
+    platform: text('platform').$type<'meta' | 'google'>().notNull(),
+    status: text('status').$type<'ok' | 'error'>().notNull(),
+    error: text('error'),
+    members: integer('members').notNull().default(0),
+    added: integer('added').notNull().default(0),
+    removed: integer('removed').notNull().default(0),
+    lastRunAt: ts('last_run_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.syncId, t.platform] })],
+);
+
 export const segmentMemberships = pgTable(
   'segment_memberships',
   {

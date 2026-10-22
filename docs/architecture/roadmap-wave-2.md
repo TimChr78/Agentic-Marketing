@@ -145,7 +145,25 @@ Design: [performance-marketing.md](performance-marketing.md). Built in this orde
 - **`ads.test`** (Meta `test_event_code`, Google `validateOnly`), **`ads.conversions`**, and `adUploads` in `profiles.export`.
 - Request shapes are checked against the official SDKs (`facebook-nodejs-business-sdk` 24, `@google-ads/datamanager` 1.3); a live account is still to be tried.
 
-Part 2 (next): audience sync, spend import and ROAS, Microsoft, `ads.performance` and `ads.audiences`.
+**Built (part 2):**
+- **Audience sync** (`audience_sync` artifact: segment → Meta custom audience and/or Google Customer Match list, which identifiers may leave, removals on or off):
+  - each run (every 15 minutes, or `ads.syncAudience`) reconciles members who allowed `ad_targeting`;
+  - adds and removes through Meta `/{audience}/users` and Data Manager `audienceMembers:ingest`/`:remove`, with consent fields and Customer Match terms;
+  - the hashes that were sent are kept (`audience_members`), so leavers, withdrawals and **erased people** are removed;
+  - a Meta "flagged audience" refusal shows as an actionable error in `ads.audiences`.
+- **Spend import** into ClickHouse `ad_spend`:
+  - every 6 hours for the last 3 days, or `ads.importSpend` for up to 90;
+  - from Meta Insights (`act_…/insights`, campaign × day) and the Google Ads API v25 (GAQL `googleAds:search`; needs the `developerToken` secret and the `adwords` scope).
+- **`ads.performance`:**
+  - cost, impressions, clicks and the platform's own conversions per campaign;
+  - next to our conversions and revenue from the conversion map, attributed by last `utm_campaign` touch (campaign id or name, platform from `utm_source`) within a window;
+  - CPA, ROAS and unattributed totals.
+- **Microsoft Advertising offline conversions** (`microsoft_ads`, OAuth via Microsoft Entra plus a developer token):
+  - `ApplyOfflineConversions` over SOAP, as defined in Microsoft's SDK (`bingads` 13.0.30), with `msclkid` and hashed e-mail and phone;
+  - no test mode: point `apiBase` at the sandbox.
+
+Not built (later): Microsoft reporting and Customer Match (asynchronous bulk and report downloads); Meta Insights' own attribution windows; currency conversion in ROAS; LinkedIn and TikTok. Every platform call follows the official SDKs' contracts; live accounts are still to be tried.
+
 
 ## Phase 10: scale and operations (the original Phase 6)
 
