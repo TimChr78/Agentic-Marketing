@@ -23,12 +23,13 @@ jobs:
     env:
       TEST_DATABASE_URL: postgres://am:am@localhost:5432/am_test
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
-          cache: pnpm
+          package-manager-cache: false
+      # pnpm comes from corepack, pinned by `packageManager` in package.json.
+      - run: corepack enable
       # Spikes (with large benchmark dependencies) are not part of CI.
       - run: pnpm install --frozen-lockfile --filter "./packages/**" --filter "./apps/**" --filter "agentic-marketing"
       - run: pnpm lint

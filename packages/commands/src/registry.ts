@@ -28,12 +28,15 @@ export interface CommandDef<I extends z.ZodType = z.ZodType, O extends z.ZodType
   description: string;
   input: I;
   output: O;
-  permission: Permission;
+  /** null only for internal commands that are not in the public registry (e.g. accepting an invitation). */
+  permission: Permission | null;
   effect: Effect;
   /** Agents may never run it, whatever their scopes (approving, managing members…). */
   humansOnly?: boolean;
   /** Top-level input fields that must never be hashed into the audit log or idempotency store (secret values). */
   sensitive?: readonly string[];
+  /** Top-level output fields shown once (e.g. an invitation token): an idempotent replay returns them redacted. */
+  sensitiveOutput?: readonly string[];
   /** Audit successful calls of a read command too (e.g. reads of personal data). Writes and all failures are always audited. */
   auditReads?: boolean;
   /** What the command acts on, for the audit log (e.g. an artifact id). */
@@ -127,7 +130,7 @@ export function createExecutor(db: Db, services: Services) {
       target = cmd.target?.(parsed.data);
       if (cmd.humansOnly && principal.type !== 'user')
         return fail(new AppError('forbidden', `${cmd.name} can only be run by a person, not by an agent.`));
-      if (!principal.permissions.has(cmd.permission))
+      if (cmd.permission && !principal.permissions.has(cmd.permission))
         return fail(
           new AppError(
             'forbidden',
@@ -159,7 +162,7 @@ export function createExecutor(db: Db, services: Services) {
               key: opts.idempotencyKey,
               command: cmd.name,
               inputHash,
-              response: out as object,
+              response: redact(out, cmd.sensitiveOutput) as object,
             });
           if (cmd.effect !== 'read' || cmd.auditReads) await appendAudit(tx, principal, opts.surface, cmd, inputHash, target);
           return out;

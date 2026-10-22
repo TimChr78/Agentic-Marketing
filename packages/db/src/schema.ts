@@ -21,6 +21,24 @@ export const workspaceMembers = pgTable(
   (t) => [primaryKey({ columns: [t.workspaceId, t.userId] })],
 );
 
+export const invitations = pgTable(
+  'invitations',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    email: text('email').notNull(),
+    role: text('role').$type<Role>().notNull(),
+    tokenHash: text('token_hash').notNull(),
+    invitedBy: text('invited_by').notNull(),
+    status: text('status').$type<'pending' | 'accepted' | 'revoked'>().notNull().default('pending'),
+    acceptedBy: text('accepted_by'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    expiresAt: ts('expires_at').notNull(),
+    decidedAt: ts('decided_at'),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
 export const artifacts = pgTable(
   'artifacts',
   {

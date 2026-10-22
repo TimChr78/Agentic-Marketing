@@ -1,14 +1,16 @@
-import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
 
 /**
  * Wraps and unwraps data keys with a key-encryption key (KEK) that never touches the database.
  * Implementations: a local key from the environment (self-hosting), later AWS/GCP KMS or OpenBao.
  */
 export interface KeyProvider {
-  /** Identifies the KEK, stored next to each wrapped key so rotation can find what to re-wrap. */
+  /** Identifies the current KEK, stored next to each wrapped key so rotation can find what to re-wrap. */
   readonly id: string;
+  /** Wraps with the current KEK. */
   wrap(dataKey: Buffer): Promise<Buffer>;
-  unwrap(wrapped: Buffer): Promise<Buffer>;
+  /** Unwraps with the KEK `kekId` names, which may be a previous one during a rotation. */
+  unwrap(wrapped: Buffer, kekId: string): Promise<Buffer>;
 }
 
 const IV = 12;
@@ -27,18 +29,40 @@ export function open(key: Buffer, sealed: { iv: Buffer; ciphertext: Buffer; auth
   return Buffer.concat([d.update(sealed.ciphertext), d.final()]);
 }
 
-/** KEK from a base64-encoded 32-byte value, e.g. MASTER_KEY in the environment. */
-export function localKeyProvider(masterKeyBase64: string, id = 'local-1'): KeyProvider {
-  const kek = Buffer.from(masterKeyBase64, 'base64');
+function parseKek(base64: string) {
+  const kek = Buffer.from(base64, 'base64');
   if (kek.length !== 32) throw new Error('MASTER_KEY must be 32 random bytes, base64-encoded (e.g. `openssl rand -base64 32`).');
+  return kek;
+}
+
+/** A local KEK's id is a fingerprint of the key, so it changes exactly when the key does. */
+const fingerprint = (kek: Buffer) => `local-${createHash('sha256').update(kek).digest('hex').slice(0, 12)}`;
+
+/**
+ * KEKs from base64-encoded 32-byte values, e.g. MASTER_KEY (current) and MASTER_KEY_PREVIOUS in the
+ * environment. Rotation: set the new key as current and the old one as previous, run
+ * `cli rotate-keys` to re-wrap every data key, then drop the previous key.
+ */
+export function localKeyProvider(current: string, previous: readonly string[] = []): KeyProvider {
+  const keys = [current, ...previous].map(parseKek);
+  const ids = keys.map(fingerprint);
   return {
-    id,
+    id: ids[0],
     async wrap(dataKey) {
-      const s = seal(kek, dataKey);
+      const s = seal(keys[0], dataKey);
       return Buffer.concat([s.iv, s.authTag, s.ciphertext]);
     },
-    async unwrap(wrapped) {
-      return open(kek, { iv: wrapped.subarray(0, IV), authTag: wrapped.subarray(IV, IV + TAG), ciphertext: wrapped.subarray(IV + TAG) });
+    async unwrap(wrapped, kekId) {
+      const sealed = { iv: wrapped.subarray(0, IV), authTag: wrapped.subarray(IV, IV + TAG), ciphertext: wrapped.subarray(IV + TAG) };
+      // Try the named key first; GCM authentication rejects a wrong key, so trying the others is safe
+      // and covers ids from before fingerprints were used.
+      const order = [...keys.keys()].sort((a, b) => Number(ids[b] === kekId) - Number(ids[a] === kekId));
+      for (const k of order) {
+        try {
+          return open(keys[k], sealed);
+        } catch {}
+      }
+      throw new Error(`No configured master key unwraps this data key (kek ${kekId}). Is MASTER_KEY_PREVIOUS missing?`);
     },
   };
 }

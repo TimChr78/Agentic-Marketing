@@ -13,7 +13,7 @@ export function mcpEndpoint(deps: { auth: Auth; db: Db; executor: Executor; reso
   const build = (principal: Principal) => {
     const server = new McpServer({ name: 'agentic-marketing', version: '0.1.0' });
     for (const cmd of commands) {
-      if (cmd.humansOnly || !principal.permissions.has(cmd.permission)) continue;
+      if (cmd.humansOnly || !cmd.permission || !principal.permissions.has(cmd.permission)) continue;
       server.registerTool(
         cmd.name,
         {

@@ -10,6 +10,10 @@ const Env = z.object({
   APP_DB_PASSWORD: z.string().min(8).describe('Password for the am_app role the command layer uses (row-level security applies)'),
   AUTH_SECRET: z.string().min(32, 'AUTH_SECRET must be at least 32 characters (e.g. `openssl rand -base64 32`)'),
   MASTER_KEY: z.string().describe('Base64 32-byte key-encryption key for secrets (`openssl rand -base64 32`)'),
+  MASTER_KEY_PREVIOUS: z
+    .string()
+    .optional()
+    .describe('Comma-separated previous master keys, kept only while `cli rotate-keys` re-wraps data keys'),
   TRUSTED_ORIGINS: z.string().optional().describe('Comma-separated extra origins allowed to call auth endpoints'),
 });
 
@@ -34,6 +38,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     appDbPassword: e.APP_DB_PASSWORD,
     authSecret: e.AUTH_SECRET,
     masterKey: e.MASTER_KEY,
+    previousMasterKeys:
+      e.MASTER_KEY_PREVIOUS?.split(',')
+        .map((k) => k.trim())
+        .filter(Boolean) ?? [],
     trustedOrigins: e.TRUSTED_ORIGINS?.split(',').map((o) => o.trim()) ?? [],
   };
 }

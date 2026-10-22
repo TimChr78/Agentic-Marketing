@@ -1,5 +1,5 @@
-import { createAuth } from '@agentic-marketing/auth';
-import { createExecutor } from '@agentic-marketing/commands';
+import { acceptInvitation, authDirectory, createAuth, invitationWorkspace } from '@agentic-marketing/auth';
+import { createExecutor, userPrincipal } from '@agentic-marketing/commands';
 import { AppError, newUuid } from '@agentic-marketing/core';
 import { createDb } from '@agentic-marketing/db';
 import { localKeyProvider } from '@agentic-marketing/secrets';
@@ -8,13 +8,14 @@ import { oauthProviderAuthServerMetadata, oauthProviderOpenIdConfigMetadata } fr
 import { Hono } from 'hono';
 import type { Config } from './config';
 import { mcpEndpoint } from './http/mcp';
-import { consentPage, loginPage } from './http/pages';
+import { consentPage, invitePage, loginPage } from './http/pages';
 import { restApi } from './http/rest';
 
 export function createServer(config: Config) {
   const db = createDb({ adminUrl: config.adminDatabaseUrl, appUrl: config.appDatabaseUrl });
   const auth = createAuth({ baseUrl: config.publicUrl, secret: config.authSecret, db, trustedOrigins: config.trustedOrigins });
-  const executor = createExecutor(db, { keyProvider: localKeyProvider(config.masterKey) });
+  const keyProvider = localKeyProvider(config.masterKey, config.previousMasterKeys);
+  const executor = createExecutor(db, { keyProvider, directory: authDirectory(db) });
 
   const app = new Hono();
 
@@ -50,10 +51,25 @@ export function createServer(config: Config) {
 
   app.get('/login', (c) => c.html(loginPage));
   app.get('/consent', (c) => c.html(consentPage));
+  app.get('/invite', (c) => c.html(invitePage));
+
+  // Accepting an invitation: the person is signed in but not yet a member, so the workspace comes
+  // from the token rather than from their memberships.
+  app.post('/api/invitations/accept', async (c) => {
+    const session = await auth.api.getSession({ headers: c.req.raw.headers });
+    if (!session) throw new AppError('unauthorized', 'Sign in (or create an account) with the invited e-mail address first.');
+    const { token } = (await c.req.json().catch(() => ({}))) as { token?: unknown };
+    const inv = typeof token === 'string' ? await invitationWorkspace(db, token) : null;
+    if (!inv) throw new AppError('not_found', 'This invitation link is not valid any more. Ask for a new one.');
+    // Accepting needs no permission; the principal carries none until the membership exists.
+    const invitee = { ...userPrincipal(session.user.id, inv.workspaceId, inv.role), permissions: new Set<never>() };
+    const out = await executor.execute(acceptInvitation, { token, email: session.user.email }, invitee, { surface: 'rest' });
+    return c.json(out);
+  });
 
   const mcp = mcpEndpoint({ auth, db, executor, resource: `${config.publicUrl}/mcp` });
   app.all('/mcp', (c) => mcp(c.req.raw));
   app.route('/', restApi({ auth, db, executor }));
 
-  return { app, db, auth, executor };
+  return { app, db, auth, executor, keyProvider };
 }

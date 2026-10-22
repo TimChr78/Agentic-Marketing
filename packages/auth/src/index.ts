@@ -77,3 +77,4 @@ export async function principalFromAccessToken(db: Db, claims: JWTPayload): Prom
     .filter(Boolean);
   return agentPrincipal(claims.sub, String(claims.azp ?? claims.client_id ?? 'unknown-client'), m.workspace_id, m.role, scopes);
 }
+export * from './members';

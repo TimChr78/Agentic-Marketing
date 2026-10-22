@@ -44,6 +44,18 @@ docker compose up --build
 docker compose exec app pnpm --filter @agentic-marketing/server cli bootstrap --email … --password … --workspace …
 ```
 
+### Members
+
+Owners and admins invite people with `members.invite` (UI, REST or the typed client; agents cannot). The response holds a one-time link, `<PUBLIC_URL>/invite#<token>`, valid for 7 days. Send it to the person; they sign in or create an account with the invited e-mail address and join with the invited role. Only owners can make or change owners, and the last owner can be neither demoted nor removed.
+
+### Rotating the master key
+
+Secrets are encrypted with per-workspace data keys, which are wrapped by `MASTER_KEY`. To rotate it:
+
+1. Generate a new key (`openssl rand -base64 32`), set it as `MASTER_KEY`, and put the old one in `MASTER_KEY_PREVIOUS`. Restart; everything keeps working, and new data keys use the new master key.
+2. Run `pnpm --filter @agentic-marketing/server cli rotate-keys` to re-wrap every existing data key with the new master key.
+3. Remove `MASTER_KEY_PREVIOUS` and restart.
+
 ## Checks
 
 ```bash
