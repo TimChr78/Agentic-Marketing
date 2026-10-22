@@ -32,6 +32,8 @@ export interface EventStore {
   ): Promise<{ anonymousId: string; userId: string; count: number }[]>;
   insertMessageEvents(events: MessageEvent[]): Promise<void>;
   insertJourneyEvents(events: JourneyEvent[]): Promise<void>;
+  /** Unique messages per event type since a time, optionally for one template or journey. */
+  messageStats(workspaceId: string, q: { since: Date; templateId?: string; journeyId?: string }): Promise<Record<string, number>>;
   /** Per node and event type counts for a journey (analytics, canvas overlays). */
   journeyCounts(workspaceId: string, journeyId: string): Promise<{ node: string; type: string; count: number }[]>;
   messageEventsOf(workspaceId: string, filter: { messageIds?: string[]; profileId?: string }, limit?: number): Promise<MessageEvent[]>;
@@ -265,6 +267,17 @@ export function clickHouseStore(opts: { url: string; database: string }): EventS
           detail: e.detail,
         })),
       });
+    },
+    async messageStats(workspaceId, q) {
+      const rs = await client.query({
+        query: `SELECT type, uniqExact(message_id) AS c FROM message_events FINAL
+                WHERE workspace_id = {ws:UUID} AND at >= {since:DateTime64(3)}
+                ${q.templateId ? 'AND template_id = {t:String}' : ''} ${q.journeyId ? 'AND journey_id = {j:String}' : ''}
+                GROUP BY type`,
+        query_params: { ws: workspaceId, since: q.since.toISOString().replace('Z', ''), t: q.templateId ?? '', j: q.journeyId ?? '' },
+        format: 'JSONEachRow',
+      });
+      return Object.fromEntries((await rs.json<{ type: string; c: number }>()).map((r) => [r.type, Number(r.c)]));
     },
     async journeyCounts(workspaceId, journeyId) {
       const rs = await client.query({

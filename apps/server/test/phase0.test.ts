@@ -103,12 +103,13 @@ beforeAll(async () => {
   const config = loadConfig({
     PORT: String(PORT),
     DATABASE_URL: TEST_DB,
+    APP_DB_ROLE: 'am_app_test',
     APP_DB_PASSWORD: 'am_app_test_password',
     AUTH_SECRET: 'test-secret-test-secret-test-secret-123',
     MASTER_KEY,
   });
   srv = createServer(config, { cimd: { fetchClientMetadataResource: fetchCimd } });
-  await migrate(srv.db.admin, { appRolePassword: config.appDbPassword });
+  await migrate(srv.db.admin, { appRolePassword: config.appDbPassword, appRole: config.appDbRole });
   await migrateAuth({ baseUrl: config.publicUrl, secret: config.authSecret, db: srv.db });
   await new Promise<void>((resolve) => {
     http = serve({ fetch: srv.app.fetch, port: PORT }, (_i: AddressInfo) => resolve());

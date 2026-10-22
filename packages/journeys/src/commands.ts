@@ -229,7 +229,7 @@ export const simulateJourney = defineCommand({
       const effects = new Map(out.effects.map((e) => [`${e.node}:${e.seq}`, e]));
       for (const s of out.steps) {
         const node = graph.nodes.get(s.node)!;
-        let detail = s.detail || s.type;
+        let detail = s.detail || (s.type === 'converted' ? 'converted' : '');
         const eff = effects.get(`${s.node}:${s.seq}`);
         if (eff?.kind === 'email') {
           if (input.profileId) {

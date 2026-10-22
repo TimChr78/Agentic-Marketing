@@ -151,6 +151,7 @@ export async function startTestServer(name: string, port: number) {
   const config = loadConfig({
     PORT: String(port),
     DATABASE_URL: pgUrl.toString(),
+    APP_DB_ROLE: 'am_app_test',
     APP_DB_PASSWORD: 'am_app_test_password',
     AUTH_SECRET: 'test-secret-test-secret-test-secret-123',
     MASTER_KEY: Buffer.alloc(32, 7).toString('base64'),
@@ -161,7 +162,7 @@ export async function startTestServer(name: string, port: number) {
   });
   const srv = createServer(config);
   await resetClickHouse(config.clickhouse.url, dbName);
-  await migrate(srv.db.admin, { appRolePassword: config.appDbPassword });
+  await migrate(srv.db.admin, { appRolePassword: config.appDbPassword, appRole: config.appDbRole });
   await migrateAuth({ baseUrl: config.publicUrl, secret: config.authSecret, db: srv.db });
   await migrateClickHouse(config.clickhouse.url, config.clickhouse.database);
   let http: { close: () => void } | undefined;

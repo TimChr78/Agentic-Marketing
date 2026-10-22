@@ -7,6 +7,11 @@ const Env = z.object({
   PORT: z.coerce.number().int().default(3000),
   PUBLIC_URL: z.url().optional(),
   DATABASE_URL: z.string().describe('Owner/admin connection, used for migrations and auth tables'),
+  APP_DB_ROLE: z
+    .string()
+    .regex(/^[a-z_][a-z0-9_]{0,62}$/)
+    .default('am_app')
+    .describe('Name of the row-level-security role; separate installs on one Postgres server need different names'),
   APP_DB_PASSWORD: z.string().min(8).describe('Password for the am_app role the command layer uses (row-level security applies)'),
   AUTH_SECRET: z.string().min(32, 'AUTH_SECRET must be at least 32 characters (e.g. `openssl rand -base64 32`)'),
   MASTER_KEY: z.string().describe('Base64 32-byte key-encryption key for secrets (`openssl rand -base64 32`)'),
@@ -42,7 +47,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   }
   const e = parsed.data;
   const appUrl = new URL(e.DATABASE_URL);
-  appUrl.username = 'am_app';
+  appUrl.username = e.APP_DB_ROLE;
   appUrl.password = e.APP_DB_PASSWORD;
   return {
     roles: new Set(e.ROLE === 'all' ? ['api', 'ingest', 'worker', 'scheduler'] : e.ROLE.split(',').map((r) => r.trim())),
@@ -51,6 +56,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     adminDatabaseUrl: e.DATABASE_URL,
     appDatabaseUrl: appUrl.toString(),
     appDbPassword: e.APP_DB_PASSWORD,
+    appDbRole: e.APP_DB_ROLE,
     authSecret: e.AUTH_SECRET,
     masterKey: e.MASTER_KEY,
     previousMasterKeys:

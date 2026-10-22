@@ -3,6 +3,8 @@ import { CheckCircle2, FilePlus2, History, LogIn, RefreshCw, Send, ShieldCheck, 
 import { ApiError } from '@agentic-marketing/client';
 import { AuthorBadge, Button, Card, PageHeader, Pill, cx, inputCls, timeAgo } from '../components/ui';
 import { LiveProfiles } from './LiveProfiles';
+import { LiveEmails } from './live/LiveEmails';
+import { LiveJourneys } from './live/LiveJourneys';
 import { api, errText, type Out } from './liveApi';
 
 // Phase 0: this screen talks to the real API (apps/server) through the typed client. Every
@@ -18,7 +20,7 @@ export function LiveWorkspace() {
   const [ws, setWs] = useState<Workspace | null>(null);
   const [status, setStatus] = useState<'loading' | 'signed-out' | 'offline' | 'ready'>('loading');
   const [error, setError] = useState('');
-  const [tab, setTab] = useState<'artifacts' | 'people'>('artifacts');
+  const [tab, setTab] = useState<'artifacts' | 'journeys' | 'emails' | 'people'>('artifacts');
 
   const load = useCallback(async () => {
     try {
@@ -57,10 +59,12 @@ export function LiveWorkspace() {
           {error}
         </div>
       )}
-      <div className="mb-4 flex gap-1" role="tablist">
+      <div className="mb-4 flex gap-1 overflow-x-auto" role="tablist">
         {(
           [
             ['artifacts', 'Artifacts & approvals'],
+            ['journeys', 'Journeys'],
+            ['emails', 'E-mails'],
             ['people', 'People & data'],
           ] as const
         ).map(([key, label]) => (
@@ -75,7 +79,10 @@ export function LiveWorkspace() {
           </button>
         ))}
       </div>
-      {tab === 'artifacts' ? <Artifacts onError={setError} /> : <LiveProfiles canAdmin={ws!.you.permissions.includes('workspace:admin')} onError={setError} />}
+      {tab === 'artifacts' && <Artifacts onError={setError} />}
+      {tab === 'journeys' && <LiveJourneys onError={setError} />}
+      {tab === 'emails' && <LiveEmails canAdmin={ws!.you.permissions.includes('workspace:admin')} onError={setError} />}
+      {tab === 'people' && <LiveProfiles canAdmin={ws!.you.permissions.includes('workspace:admin')} onError={setError} />}
     </div>
   );
 }

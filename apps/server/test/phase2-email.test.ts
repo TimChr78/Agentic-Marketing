@@ -206,6 +206,12 @@ describe('e-mail end to end', () => {
       status: 'suppressed',
       reason: expect.stringContaining('suppression list (hard_bounce)'),
     });
+    const stats = await eventually(
+      () => api.call('messages.stats', { templateId }),
+      (s) => (s.counts.suppressed ?? 0) >= 2,
+    );
+    expect(stats.counts).toMatchObject({ sent: 1, bounced: 1, clicked: 1 });
+    expect(stats.rates).toMatchObject({ bounced: 100, clicked: 100 });
   });
 
   it('records a one-click unsubscribe as a withdrawal of consent', async () => {

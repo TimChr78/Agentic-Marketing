@@ -82,4 +82,53 @@ export const listMessages = defineCommand({
   },
 });
 
-export const messageCommands = [sendEmail, listMessages] as const;
+export const messageStats = defineCommand({
+  name: 'messages.stats',
+  title: 'E-mail performance',
+  description:
+    'Messages and what became of them over the last `days`, for the workspace, one template or one journey: decided, sent, delivered, bounced, complained, clicked, unsubscribed, with rates relative to sent. Opens are not tracked (no pixels).',
+  input: z.object({
+    days: z.number().int().min(1).max(400).default(30),
+    templateId: z
+      .string()
+      .regex(/^eml_[0-9a-f]{32}$/)
+      .optional(),
+    journeyId: z
+      .string()
+      .regex(/^jrn_[0-9a-f]{32}$/)
+      .optional(),
+  }),
+  output: z.object({
+    counts: z.record(z.string(), z.number()),
+    rates: z.object({
+      delivered: z.number().nullable(),
+      bounced: z.number().nullable(),
+      complained: z.number().nullable(),
+      clicked: z.number().nullable(),
+      unsubscribed: z.number().nullable(),
+    }),
+  }),
+  permission: 'artifacts:read',
+  effect: 'read',
+  handler: async (input, ctx) => {
+    const counts = await ctx.services.events.messageStats(ctx.principal.workspaceId, {
+      since: new Date(Date.now() - input.days * 86_400_000),
+      templateId: input.templateId,
+      journeyId: input.journeyId,
+    });
+    const sent = counts.sent ?? 0;
+    const rate = (k: string) => (sent ? Math.round(((counts[k] ?? 0) / sent) * 10_000) / 100 : null);
+    return {
+      counts,
+      rates: {
+        delivered: rate('delivered'),
+        bounced: rate('bounced'),
+        complained: rate('complained'),
+        clicked: rate('clicked'),
+        unsubscribed: rate('unsubscribed'),
+      },
+    };
+  },
+});
+
+export const messageCommands = [sendEmail, listMessages, messageStats] as const;

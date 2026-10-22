@@ -7,7 +7,7 @@ Ordering principle: build the **foundations that are expensive to retrofit** fir
 | **−1. Interactive demo** (done) | Feel the product, show it off | Clickable UI in the target stack with an in-browser mocked command registry: live shop with in-session personalization, journey builder + simulation, MJML editor, profiles & consent, analytics, approvals, scripted/live copilot. See `apps/web/README.md` | Every core flow can be shown end-to-end without a backend |
 | **0. Foundations** (core done) | A skeleton that every later feature plugs into | Monorepo, CI, Docker Compose; `core`, `commands` (registry → REST + MCP + UI client), auth (Better Auth), workspaces + RLS, artifacts/versions/approval policies, audit log, OpenTelemetry, key provider & secret store | An MCP client and the UI can create/version/approve a dummy artifact with identical rules |
 | **1. Data platform** (core done) | Collect and understand customers | Ingest gateway (Segment spec), `sdk-js` with consent, tracking plan, attribute schema with PII tags, identity resolution, profiles, ClickHouse sink, consent ledger & purposes, profile viewer UI, DSR export/erase | Site events appear on a resolved profile within seconds; erasure verifiably removes a person |
-| **2. Email + journeys (first vertical slice)** | First real value | Template system (MJML + Liquid, GrapesJS editor, code view, previews), send gateway, provider adapters with delivery events ([ADR-0011](adr/0011-email-delivery-providers.md): SMTP, Amazon SES, Postmark, Brevo; SMTP can use a provider's webhooks), bounces and complaints into suppression, unsubscribe, segments v1 (batch + streaming basics), journey engine + canvas (core nodes), simulation, journey & message analytics | A welcome + abandoned-browse journey runs end-to-end, built either in the UI or entirely via MCP |
+| **2. Email + journeys (first vertical slice)** (core done) | First real value | Template system (MJML + Liquid, GrapesJS editor, code view, previews), send gateway, provider adapters with delivery events ([ADR-0011](adr/0011-email-delivery-providers.md): SMTP, Amazon SES, Postmark, Brevo; SMTP can use a provider's webhooks), bounces and complaints into suppression, unsubscribe, segments v1 (batch + streaming basics), journey engine + canvas (core nodes), simulation, journey & message analytics | A welcome + abandoned-browse journey runs end-to-end, built either in the UI or entirely via MCP |
 | **3. Web personalization** | In-session experiences | Experience artifact & editor, decision API, session state & RT counters, SDK rendering + anti-flicker + client rules, A/B allocation & results | Next-page-view and same-page personalization with measured p95 < 50 ms server time |
 | **4. AI runtime & copilot** | Agents inside the product | LLM gateway (BYOK, OpenAI-/Anthropic-compatible), prompt artifacts with tests, `ai.decide` / `ai.generate`, context builder & redaction, budgets, in-app copilot over MCP | AI-chosen branches/content with full decision logs and fallbacks |
 | **5. Webhooks & integrations** | Connect the ecosystem | Webhook adapter (in/out), connector SDK, Activepieces-pieces spike, automation nodes (HTTP, transform). First-party connectors are **not a v1 priority**; when built, **Shopify and Salesforce** come first | Webhooks in/out work end-to-end; n8n can orchestrate via MCP/webhooks; connector SDK documented |
@@ -55,3 +55,20 @@ Known limits, to address later:
 - ClickHouse has no row policies yet; tenant scoping lives in the one module that queries it (`packages/events/src/clickhouse.ts`).
 - Tracking-plan warnings are returned to the sender and logged, not yet stored for a report.
 - Segments are in Phase 2 (segments v1), where journeys first need them. Bulk import and bot filtering are not built yet.
+
+## Phase 2 status (2026-10-22)
+
+Done; the suite has 81 tests, including end-to-end tests for e-mail, segments and journeys:
+- E-mail templates (MJML + Liquid, validated on save, sandboxed rendering, server previews), provider adapters with delivery events ([ADR-0011](adr/0011-email-delivery-providers.md): SMTP, Amazon SES, Postmark, Brevo, plus a development outbox), and the send gateway as an outbox (lawful basis, consent and objections, suppressions, retries, one-click unsubscribe, click tracking, "why not sent" in the message log).
+- Segments v1: JSON DSL over traits, events in time windows, consent and other segments; batch and streaming evaluation; entered/exited events.
+- Journey engine: interpreter and participants-as-queue runtime (spike 3 design), triggers on events or segment entry with re-entry rules, waits, wait-for-event, goals, branches, splits, e-mail and profile updates; simulation with per-person gateway decisions; journey and message statistics.
+- Live editors on the real API: journey canvas (React Flow) and e-mail editor (GrapesJS, code, server preview) in the live workspace screen, with e-mail providers and recent messages.
+
+Acceptance: a welcome journey (built over REST, as the UI does) and an abandoned-browse journey, segment and template built entirely by an MCP agent run end to end, with consent enforced (`apps/server/test/phase2-journeys.test.ts`).
+
+Known limits, to address later:
+- Frequency caps and quiet hours are not enforced yet; the gateway's decision log is ready for them.
+- No bounce mailbox for pure-SMTP setups; use a relay's webhooks (ADR-0011).
+- Segment evaluation holds ids in memory (fine for the homelab scale; the 10M-profile path moves set operations into SQL/ClickHouse).
+- A waiting participant whose profile is merged into another is not woken by events of the merged profile.
+- Webhook, AI and A/B result analysis nodes arrive in Phases 4–5; experiments' statistics with Phase 3.

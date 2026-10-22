@@ -9,17 +9,22 @@ const LOCK_KEY = 7_340_001; // arbitrary constant: one migrator at a time across
 /**
  * Apply pending SQL migrations in order, each in its own transaction. Safe to run from several
  * processes at once (advisory lock). Refuses to continue if an applied file was edited.
+ *
+ * The migrations grant privileges to `am_app`; `appRole` renames it, because roles are shared by
+ * every database on a Postgres server (e.g. tests next to a development database).
  */
-export async function migrate(admin: pg.Pool, opts: { appRolePassword: string; log?: (msg: string) => void }) {
+export async function migrate(admin: pg.Pool, opts: { appRolePassword: string; appRole?: string; log?: (msg: string) => void }) {
   const log = opts.log ?? (() => {});
+  const role = opts.appRole ?? 'am_app';
+  if (!/^[a-z_][a-z0-9_]{0,62}$/.test(role)) throw new Error(`Invalid app role name ${role}`);
   const client = await admin.connect();
   try {
     await client.query('SELECT pg_advisory_lock($1)', [LOCK_KEY]);
     // The app role is needed by the GRANTs in the migrations.
-    const { rowCount } = await client.query(`SELECT 1 FROM pg_roles WHERE rolname = 'am_app'`);
+    const { rowCount } = await client.query('SELECT 1 FROM pg_roles WHERE rolname = $1', [role]);
     const pwd = client.escapeLiteral(opts.appRolePassword);
     await client.query(
-      rowCount ? `ALTER ROLE am_app WITH LOGIN PASSWORD ${pwd}` : `CREATE ROLE am_app LOGIN PASSWORD ${pwd} NOSUPERUSER NOBYPASSRLS`,
+      rowCount ? `ALTER ROLE ${role} WITH LOGIN PASSWORD ${pwd}` : `CREATE ROLE ${role} LOGIN PASSWORD ${pwd} NOSUPERUSER NOBYPASSRLS`,
     );
     await client.query(
       `CREATE TABLE IF NOT EXISTS schema_migrations (version text PRIMARY KEY, checksum text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())`,
@@ -39,7 +44,7 @@ export async function migrate(admin: pg.Pool, opts: { appRolePassword: string; l
       }
       await client.query('BEGIN');
       try {
-        await client.query(sql);
+        await client.query(role === 'am_app' ? sql : sql.replace(/\bam_app\b/g, role));
         await client.query('INSERT INTO schema_migrations (version, checksum) VALUES ($1, $2)', [file, checksum]);
         await client.query('COMMIT');
         log(`applied ${file}`);
