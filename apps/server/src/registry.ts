@@ -2,7 +2,7 @@ import { adAudienceCommands, adCommands, spendCommands } from '@agentic-marketin
 import { aiCommands } from '@agentic-marketing/ai';
 import { artifactCommands, configCommands, workspaceCommands } from '@agentic-marketing/artifacts';
 import { audienceCommands } from '@agentic-marketing/audience';
-import { memberCommands, tokenCommands } from '@agentic-marketing/auth';
+import { listSsoProviders, memberCommands, scimCommands, tokenCommands } from '@agentic-marketing/auth';
 import type { AnyCommand } from '@agentic-marketing/commands';
 import {
   deliverabilityCommands,
@@ -34,6 +34,8 @@ export const commands = [
   ...smsProviderCommands,
   ...workspaceCommands,
   ...memberCommands,
+  ...scimCommands,
+  listSsoProviders,
   ...tokenCommands,
   ...sourceCommands,
   ...profileCommands,

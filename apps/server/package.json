@@ -46,6 +46,7 @@
     "@agentic-marketing/sdk-js": "workspace:*",
     "@types/pg": "8.23.1",
     "@types/smtp-server": "3.5.13",
+    "jose": "6.2.13",
     "pg": "8.23.1",
     "smtp-server": "3.19.17"
   }

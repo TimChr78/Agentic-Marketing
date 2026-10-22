@@ -17,6 +17,7 @@ import { copilotApi } from './http/copilot';
 import { mcpEndpoint } from './http/mcp';
 import { consentPage, invitePage, loginPage } from './http/pages';
 import { restApi } from './http/rest';
+import { scimApi } from './http/scim';
 import { keyProviderFor } from './keys';
 
 /** `overrides` exist for tests, e.g. a stub transport for Client ID Metadata Documents. */
@@ -28,6 +29,7 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
     db,
     trustedOrigins: config.trustedOrigins,
     clientIpHeader: config.clientIpHeader,
+    sso: config.sso,
     ...overrides,
   });
   const keyProvider = keyProviderFor(config);
@@ -121,6 +123,7 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
   const mcp = mcpEndpoint({ auth, db, executor, resource: `${config.publicUrl}/mcp` });
   app.all('/mcp', (c) => mcp(c.req.raw));
   if (config.roles.has('api')) app.route('/', copilotApi({ auth, db, executor, kp: keyProvider }));
+  if (config.roles.has('api')) app.route('/', scimApi({ auth, db, executor, publicUrl: config.publicUrl }));
   app.route('/', restApi({ auth, db, executor }));
 
   return {

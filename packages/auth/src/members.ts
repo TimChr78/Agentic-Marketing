@@ -12,6 +12,18 @@ import { z } from 'zod';
 /** Names and e-mail addresses of people, which live in the auth tables rather than in a workspace. */
 export interface Directory {
   users(ids: string[]): Promise<Map<string, { email: string; name: string }>>;
+  /** Single sign-on providers of a workspace (without secrets). */
+  ssoProviders(workspaceId: string): Promise<SsoProviderInfo[]>;
+}
+
+export interface SsoProviderInfo {
+  providerId: string;
+  type: 'oidc' | 'saml';
+  issuer: string;
+  domain: string;
+  domainVerified: boolean;
+  defaultRole: string;
+  enforced: boolean;
 }
 
 declare module '@agentic-marketing/commands' {
@@ -29,6 +41,22 @@ export function authDirectory(db: Db): Directory {
         [ids],
       );
       return new Map(rows.map((r) => [r.id, { email: r.email, name: r.name }]));
+    },
+    async ssoProviders(workspaceId) {
+      const { rows } = await db.admin.query<Record<string, unknown>>(
+        'SELECT * FROM "ssoProvider" WHERE "workspaceId" = $1 ORDER BY "providerId"',
+        [workspaceId],
+      );
+      return rows.map((r) => ({
+        providerId: String(r.providerId),
+        type: r.samlConfig ? 'saml' : 'oidc',
+        issuer: String(r.issuer),
+        domain: String(r.domain),
+        // Without domain verification (development) the column does not exist and domains count as verified.
+        domainVerified: r.domainVerified === undefined ? true : r.domainVerified === true,
+        defaultRole: String(r.defaultRole ?? 'viewer'),
+        enforced: r.enforced === true,
+      }));
     },
   };
 }

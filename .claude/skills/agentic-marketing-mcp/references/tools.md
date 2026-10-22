@@ -49,6 +49,10 @@ Generated from the command registry (`apps/server/src/registry.ts`). **Effect**:
 | `invitations.revoke` | write | workspace:admin | people only | Revoke an invitation |
 | `members.setRole` | write | workspace:admin | people only | Change a member’s role |
 | `members.remove` | destructive | workspace:admin | people only | Remove a member |
+| `sso.list` | read | workspace:admin | people and agents | Single sign-on providers |
+| `scim.status` | read | workspace:admin | people and agents | SCIM provisioning status |
+| `scim.configure` | write | workspace:admin | people only | Configure SCIM provisioning |
+| `scim.rotateToken` | write | workspace:admin | people only | Create the SCIM token |
 | `apiTokens.create` | write | – | people only | Create an API token |
 | `apiTokens.list` | read | – | people and agents | List API tokens (not an MCP tool) |
 | `apiTokens.revoke` | destructive | – | people only | Revoke an API token |
