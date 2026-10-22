@@ -131,10 +131,10 @@ export async function connectAgent(BASE: string, u: User, permissions: string[],
   await first.finishAuth(next.searchParams);
   const client = new Client({ name: 'phase0-test', version: '0' });
   await client.connect(new StreamableHTTPClientTransport(new URL(`${BASE}/mcp`), { authProvider: provider }));
-  return { client, clientId: provider.info.client_id as string };
+  return { client, clientId: provider.info.client_id as string, provider };
 }
 
-export async function startTestServer(name: string, port: number) {
+export async function startTestServer(name: string, port: number, env: Record<string, string> = {}) {
   const base = `http://localhost:${port}`;
   const pgUrl = new URL(process.env.TEST_DATABASE_URL ?? 'postgres://am:am@localhost:5432/am_test');
   const dbName = `am_${name}`;
@@ -164,6 +164,7 @@ export async function startTestServer(name: string, port: number) {
     VALKEY_PREFIX: dbName,
     // Test receivers for webhooks and connector actions listen on loopback.
     EGRESS_ALLOWED_HOSTS: '127.0.0.1',
+    ...env,
   });
   const srv = createServer(config);
   await resetClickHouse(config.clickhouse.url, dbName);

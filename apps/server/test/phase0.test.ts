@@ -232,8 +232,9 @@ describe('agents through MCP with OAuth', () => {
   }, 30_000);
   afterAll(() => agent?.client.close());
 
-  it('lists only the tools this agent may use, never humans-only ones', async () => {
-    const names = (await agent.client.listTools()).tools.map((t) => t.name);
+  it('lists only the tools this agent may use (or ask for), never humans-only ones', async () => {
+    const tools = (await agent.client.listTools()).tools;
+    const names = tools.map((t) => t.name);
     expect(names).toEqual(expect.arrayContaining(['artifacts.create', 'artifacts.requestPublish', 'artifacts.types', 'workspace.get']));
     for (const forbidden of [
       'approvals.approve',
@@ -241,12 +242,13 @@ describe('agents through MCP with OAuth', () => {
       'secrets.set',
       'secrets.delete',
       'workspace.setApprovalPolicy',
-      'audit.list',
       'members.invite',
       'members.setRole',
       'members.remove',
     ])
       expect(names).not.toContain(forbidden);
+    // Allowed by the role but not granted: listed, and calling it asks the person for the scope.
+    expect(tools.find((t) => t.name === 'audit.list')?.description).toContain('Needs the "audit:read" permission');
   });
 
   it('drafts a journey, and a person approves it under the same rules as the UI', async () => {
@@ -295,8 +297,10 @@ describe('agents through MCP with OAuth', () => {
     const ro = await connectAgent(users.owner, ['artifacts:read']);
     try {
       const names = (await ro.client.listTools()).tools.map((t) => t.name);
+      const tools = (await ro.client.listTools()).tools;
       expect(names).toContain('artifacts.list');
-      expect(names).not.toContain('artifacts.create');
+      expect(tools.find((t) => t.name === 'artifacts.list')?.description).not.toContain('Needs the');
+      expect(tools.find((t) => t.name === 'artifacts.create')?.description).toContain('Needs the "artifacts:write" permission');
     } finally {
       await ro.client.close();
     }

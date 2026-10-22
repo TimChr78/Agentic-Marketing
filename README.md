@@ -43,6 +43,7 @@ It runs as one Docker image (a TypeScript modular monolith) next to Postgres, Cl
 - **Governance:**
   - everything an agent builds is a versioned artifact (journey, segment, template, form…) with drafts, diffs and approval policies;
   - config as code: artifacts in git, promoted from staging to production through the same approvals;
+  - single sign-on (OIDC, SAML) and SCIM provisioning;
   - audit log;
   - encrypted secrets with key rotation, the key in the environment, OpenBao/Vault or AWS KMS;
   - Postgres row-level security and ClickHouse row policies per workspace;
@@ -67,6 +68,7 @@ On Kubernetes: the Helm chart in [`deploy/helm`](deploy/helm/agentic-marketing) 
 
 - [Development](docs/development.md): layout, running locally, tests, key rotation.
 - [Kubernetes reference deployment](docs/deployment/kubernetes.md): Helm, OpenBao or AWS KMS keys, sizing.
+- [Single sign-on, SCIM and agent permissions](docs/identity.md).
 - [Architecture](docs/architecture/README.md) and its [ADRs](docs/architecture/adr/).
 - [Integrations](docs/integrations.md): webhooks, connectors, n8n, config as code, warehouse export.
 - [Pilot: MartechSignal](docs/pilots/martechsignal.md): replacing Kit on a static Cloudflare Pages site.
@@ -87,7 +89,7 @@ Wave 1 (Phases −1 to 5) is complete: foundations, data platform, e-mail, segme
 | 8 | Consent everywhere | Done: consent banner with Consent Mode v2, ad purposes, click-id capture, OAuth 2.0 connections, shared rate limits, bot filtering |
 | 9 | Performance marketing | Done: conversions (Meta, Google, Microsoft), audience sync (Meta, Google), spend and ROAS. Later: Microsoft reporting and audiences, more platforms |
 | 10 | Scale and operations | Done: correctness (AI budget reservations, prompt test jobs, merge-safe journeys, journey version migration, instant experience updates), scale (segments evaluated in SQL, ClickHouse row policies, a load test to 1M profiles), operations (Helm chart, OpenBao and AWS KMS keys, warehouse export, config as code) |
-| 11 | Enterprise and ecosystem | Planned |
+| 11 | Enterprise and ecosystem | Part a done (single sign-on with OIDC and SAML, SCIM provisioning, MCP scope step-up). Next: AI improvements, experiment statistics and edge decide, push, more connectors |
 
 ## Development
 

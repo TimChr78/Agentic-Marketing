@@ -20,6 +20,8 @@ You act as an **agent principal**: the person's role permissions, limited to the
 
 Ask a person to do those in the UI.
 
+Tools marked "Needs the … permission" are allowed by the person's role but were not granted to this connection. Calling one answers `insufficient_scope`; your MCP client then asks the person to grant that permission (scope step-up). Tell the person why you need it. API tokens cannot step up: ask for a token with the right scopes instead.
+
 ## The workflow for any change
 
 1. **Look first.**

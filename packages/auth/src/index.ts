@@ -7,6 +7,7 @@ import { type BetterAuthOptions, betterAuth } from 'better-auth';
 import { getMigrations } from 'better-auth/db/migration';
 import { jwt } from 'better-auth/plugins';
 import type { JWTPayload } from 'jose';
+import { type SsoConfig, ssoGuard, ssoPlugin } from './sso';
 
 export interface AuthConfig {
   /** Public URL of the server, e.g. https://marketing.example.com */
@@ -18,6 +19,8 @@ export interface AuthConfig {
   clientIpHeader?: string;
   /** Overrides for Client ID Metadata Document discovery (tests use a stub transport). */
   cimd?: Partial<CimdOptions>;
+  /** Single sign-on settings (domain verification). */
+  sso?: SsoConfig;
 }
 
 /** Scopes an MCP client can be granted; permissions double as scopes. Agents get read-only unless the person grants more. */
@@ -31,6 +34,7 @@ export function authOptions(config: AuthConfig) {
     trustedOrigins: config.trustedOrigins,
     emailAndPassword: { enabled: true, minPasswordLength: 10 },
     advanced: { ipAddress: { ipAddressHeaders: [config.clientIpHeader ?? 'x-forwarded-for'] } },
+    hooks: { before: ssoGuard(config.db, config.sso ?? {}) },
     plugins: [
       jwt(),
       // OAuth 2.1 authorization server for MCP clients (validated in spike 1).
@@ -47,6 +51,8 @@ export function authOptions(config: AuthConfig) {
       // Client ID Metadata Documents: clients that identify themselves with an HTTPS URL instead of
       // registering (the MCP 2026-07-28 preference). The Node transport pins DNS to public addresses.
       cimd({ fetchClientMetadataResource, metadataProfile: 'mcp-2026-07-28', ...config.cimd }),
+      // Single sign-on with OIDC or SAML identity providers, per workspace.
+      ssoPlugin(config.db, config.sso ?? {}),
     ],
   } satisfies BetterAuthOptions;
 }
@@ -88,4 +94,6 @@ export async function principalFromAccessToken(db: Db, claims: JWTPayload): Prom
   return agentPrincipal(claims.sub, String(claims.azp ?? claims.client_id ?? 'unknown-client'), m.workspace_id, m.role, scopes);
 }
 export * from './members';
+export * from './scim';
+export * from './sso';
 export * from './tokens';

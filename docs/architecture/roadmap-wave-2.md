@@ -243,6 +243,13 @@ Not built yet: native BigQuery and Snowflake writers (they load the files); dele
   - stream copilot tokens and keep conversations server-side;
   - OpenAI OAuth if it becomes available (Phase 4 limits, open question 4).
 
+**Built (part a, identity):**
+- **Single sign-on** with OIDC and SAML (`@better-auth/sso`): a provider belongs to a workspace and gives new people its default role; only owners and admins of that workspace may set it up; domains are verified by DNS; `enforced` turns off passwords for the domain.
+- **SCIM 2.0** at `/scim/v2` (Users, Groups) with a per-workspace token; groups map to roles; owners are never changed; every change runs as an internal command, so it is audited (surface `scim`).
+- **MCP scope step-up:** tools the role allows but the connection was not granted are listed, and calling one answers `insufficient_scope` with the scopes to ask for.
+
+See [docs/identity.md](../identity.md). Not built yet: an SSO settings screen (endpoints only), SAML tested end to end against a real IdP.
+
 ## Every known limitation, and where it lands
 
 | Limitation (where it was recorded) | Phase |
@@ -250,7 +257,7 @@ Not built yet: native BigQuery and Snowflake writers (they load the files); dele
 | Docker image never run (Phase 0) | 6 (done) |
 | No members screen (Phase 0) | 6 |
 | KMS/OpenBao key providers deferred (Phase 0) | 10 (done: OpenBao/Vault Transit, AWS KMS) |
-| MCP scope step-up deferred (Phase 0) | 11 |
+| MCP scope step-up deferred (Phase 0) | 11 (done) |
 | JetStream keeps personal traits for its retention window (Phase 1) | 10 (window now 24 h by default, `NATS_RETENTION_HOURS`; encrypted volume in the deployment guide) |
 | No ClickHouse row policies (Phase 1) | 10 (done) |
 | Tracking-plan warnings not stored for a report (Phase 1) | 6 |

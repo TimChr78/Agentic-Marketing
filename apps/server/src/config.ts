@@ -104,7 +104,14 @@ const Env = z.object({
     .min(1)
     .default(180)
     .describe('Days finished webhook and action deliveries and AI call logs are kept'),
-  TRUSTED_ORIGINS: z.string().optional().describe('Comma-separated extra origins allowed to call auth endpoints'),
+  TRUSTED_ORIGINS: z
+    .string()
+    .optional()
+    .describe('Comma-separated extra origins allowed to call auth endpoints, and identity providers on private addresses'),
+  SSO_DOMAIN_VERIFICATION: z
+    .enum(['true', 'false'])
+    .default('true')
+    .describe('Require a DNS TXT record proving an SSO provider owns its e-mail domain'),
 });
 
 export type Config = ReturnType<typeof loadConfig>;
@@ -175,5 +182,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     },
     retention: { unconfirmedDays: e.RETENTION_UNCONFIRMED_DAYS, logDays: e.RETENTION_LOG_DAYS },
     trustedOrigins: e.TRUSTED_ORIGINS?.split(',').map((o) => o.trim()) ?? [],
+    sso: { domainVerification: e.SSO_DOMAIN_VERIFICATION === 'true' },
   };
 }

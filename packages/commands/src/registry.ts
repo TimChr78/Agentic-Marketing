@@ -10,7 +10,7 @@ import type { Permission, Principal } from './principal';
 // validation, authorization, idempotency and audit cannot be skipped by any surface.
 
 export type Effect = 'read' | 'write' | 'publish' | 'destructive';
-export type Surface = 'rest' | 'mcp' | 'internal';
+export type Surface = 'rest' | 'mcp' | 'scim' | 'internal';
 
 /** Extension point for dependencies commands need (key providers, clocks…). Packages augment it. */
 // biome-ignore lint/suspicious/noEmptyInterface: augmented by other packages via declaration merging
