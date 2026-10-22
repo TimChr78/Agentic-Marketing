@@ -530,6 +530,28 @@ export const deliveries = pgTable(
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
 );
 
+export type BroadcastStatus = 'scheduled' | 'running' | 'done' | 'cancelled' | 'failed';
+export const broadcastRuns = pgTable(
+  'broadcast_runs',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    broadcastId: text('broadcast_id').notNull(),
+    version: integer('version').notNull(),
+    status: text('status').$type<BroadcastStatus>().notNull(),
+    sendAt: ts('send_at').notNull(),
+    leaseUntil: ts('lease_until'),
+    cursor: text('cursor').notNull().default(''),
+    recipients: integer('recipients').notNull().default(0),
+    queued: integer('queued').notNull().default(0),
+    skipped: integer('skipped').notNull().default(0),
+    error: text('error'),
+    startedAt: ts('started_at'),
+    finishedAt: ts('finished_at'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.broadcastId] })],
+);
+
 export type ApprovalPolicy = 'none' | 'agent_changes' | 'all_publishes';
 export type Role = 'owner' | 'admin' | 'marketer' | 'approver' | 'viewer';
 export type VersionState = 'draft' | 'in_review' | 'published' | 'superseded' | 'rejected';

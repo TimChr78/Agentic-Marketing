@@ -489,6 +489,48 @@ const prompt = z
         if (!keys.has(o)) ctx.addIssue({ code: 'custom', message: `Test "${t.name}" expects unknown option "${o}"` });
   });
 
+// Audience building (pilot for content sites): signup forms with double opt-in, and broadcasts
+// (one-off sends such as a weekly newsletter) to a segment.
+const UrlOrPath = z
+  .string()
+  .max(2000)
+  .regex(/^(https?:\/\/|\/)/, 'An absolute URL or a path starting with /');
+const form = z
+  .object({
+    purposes: z.array(Key).min(1).max(10).describe('Purposes the person agrees to, e.g. ["marketing_email"]'),
+    doubleOptIn: z.boolean().default(true).describe('Consent counts only after the person clicks the confirmation link'),
+    confirmationTemplate: z
+      .string()
+      .regex(/^eml_[0-9a-f]{32}$/)
+      .optional()
+      .describe('Confirmation e-mail (with {{ confirm_url }}); its purpose must not need consent, e.g. "onboarding"'),
+    consentText: z.string().min(1).max(2000).describe('The text shown next to the form; stored with the consent as proof'),
+    traits: z
+      .array(z.string().regex(/^[A-Za-z][A-Za-z0-9_]{0,63}$/))
+      .max(20)
+      .default(['firstName'])
+      .describe('Form fields kept as traits besides email'),
+    successUrl: UrlOrPath.describe('Where the browser goes after submitting'),
+    confirmedUrl: UrlOrPath.describe('Where the browser goes after confirming'),
+    errorUrl: UrlOrPath.optional().describe('Where the browser goes when the submission is refused (?error=… is added)'),
+    allowedOrigins: z
+      .array(z.string().regex(/^https?:\/\/[a-z0-9.-]+(:\d+)?$/i))
+      .max(20)
+      .default([])
+      .describe('Sites the form may be posted from; empty: any'),
+    turnstile: z.boolean().default(false).describe('Require a Cloudflare Turnstile token (secret in secrets as "turnstile.secret_key")'),
+  })
+  .refine((f) => !f.doubleOptIn || !!f.confirmationTemplate, 'Double opt-in needs a confirmationTemplate');
+
+const broadcast = z.object({
+  template: z.string().regex(/^eml_[0-9a-f]{32}$/, 'An e-mail template id (eml_…)'),
+  segment: z.string().regex(/^seg_[0-9a-f]{32}$/, 'A segment id (seg_…)'),
+  sendAt: z.iso.datetime().optional().describe('When to start sending (UTC); default: as soon as it is published'),
+  description: z.string().max(500).optional(),
+});
+
+export type FormDefinition = z.output<typeof form>;
+export type BroadcastDefinition = z.output<typeof broadcast>;
 export type TrackingPlan = z.output<typeof trackingPlan>;
 export type PromptDefinition = z.output<typeof prompt>;
 export type ExperienceDefinition = z.output<typeof experience>;
@@ -525,6 +567,20 @@ export const artifactTypes = {
     description:
       'Instructions for an AI journey step (decide between options, or write text for content slots), with test cases. Run them with prompts.test.',
     content: prompt,
+  },
+  form: {
+    prefix: 'frm',
+    label: 'Signup form',
+    description:
+      'A public signup form (e.g. a newsletter): which purposes the person agrees to, double opt-in with a confirmation e-mail, redirects. Post to <links URL>/f/<id>.',
+    content: form,
+  },
+  broadcast: {
+    prefix: 'bct',
+    label: 'Broadcast',
+    description:
+      'A one-off send of an e-mail template to a segment at a set time, e.g. a weekly newsletter. Check it with broadcasts.preview.',
+    content: broadcast,
   },
   tracking_plan: {
     prefix: 'tpl',

@@ -1,5 +1,6 @@
 import { aiCommands } from '@agentic-marketing/ai';
 import { artifactCommands, workspaceCommands } from '@agentic-marketing/artifacts';
+import { audienceCommands } from '@agentic-marketing/audience';
 import { memberCommands, tokenCommands } from '@agentic-marketing/auth';
 import type { AnyCommand } from '@agentic-marketing/commands';
 import { messageCommands, providerCommands, templateCommands } from '@agentic-marketing/email';
@@ -26,6 +27,7 @@ export const commands = [
   ...journeyCommands,
   ...experienceCommands,
   ...aiCommands,
+  ...audienceCommands,
   ...connectionCommands,
   ...webhookCommands,
   ...secretCommands,
