@@ -2,7 +2,7 @@ import { artifactTypes, type BroadcastDefinition, publishValidators } from '@age
 import { defineCommand } from '@agentic-marketing/commands';
 import { AppError } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
-import { checkRecipient, requestEmail } from '@agentic-marketing/email';
+import { checkRecipient, checkSmsRecipient, requestEmail, requestSms } from '@agentic-marketing/email';
 import type { EventStore } from '@agentic-marketing/events';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
@@ -19,7 +19,7 @@ const BroadcastId = z.string().regex(/^bct_[0-9a-f]{32}$/);
 const BATCH = 200;
 const LEASE_MS = 120_000;
 
-async function published(tx: Tx, id: string, type: 'email_template' | 'segment') {
+async function published(tx: Tx, id: string, type: 'email_template' | 'sms_template' | 'segment') {
   const [a] = await tx
     .select({ id: schema.artifacts.id })
     .from(schema.artifacts)
@@ -30,7 +30,9 @@ async function published(tx: Tx, id: string, type: 'email_template' | 'segment')
 publishValidators.set('broadcast', async (content, tx: Tx) => {
   const b = content as BroadcastDefinition;
   const problems: string[] = [];
-  if (!(await published(tx, b.template, 'email_template'))) problems.push(`${b.template} is not a published e-mail template`);
+  const sms = b.template.startsWith('sms_');
+  if (!(await published(tx, b.template, sms ? 'sms_template' : 'email_template')))
+    problems.push(`${b.template} is not a published ${sms ? 'SMS' : 'e-mail'} template`);
   if (!(await published(tx, b.segment, 'segment'))) problems.push(`${b.segment} is not a published segment`);
   return problems;
 });
@@ -97,7 +99,13 @@ export const previewBroadcast = defineCommand({
     let wouldSend = 0;
     const wouldSkip: Record<string, number> = {};
     for (const m of members) {
-      const v = await checkRecipient(ctx.tx, ctx.principal.workspaceId, ctx.services.keyProvider, m.profileId, purpose);
+      const v = await (def.template.startsWith('sms_') ? checkSmsRecipient : checkRecipient)(
+        ctx.tx,
+        ctx.principal.workspaceId,
+        ctx.services.keyProvider,
+        m.profileId,
+        purpose,
+      );
       if (v.ok) wouldSend++;
       else {
         const reason = v.reason.split(':')[0];
@@ -237,7 +245,7 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
       .limit(BATCH);
     let queued = 0;
     for (const m of members) {
-      const d = await requestEmail(tx, ws, deps.kp, deps.events, {
+      const d = await (def.template.startsWith('sms_') ? requestSms : requestEmail)(tx, ws, deps.kp, deps.events, {
         profileId: m.profileId,
         templateId: def.template,
         idempotencyKey: `bct:${broadcastId}:${m.profileId}`,

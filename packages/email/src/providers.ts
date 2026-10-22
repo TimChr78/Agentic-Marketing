@@ -17,13 +17,17 @@ export const webhookTokenHash = (token: string) => sha256(`email-webhook:${token
 
 type ProviderRow = typeof schema.emailProviders.$inferSelect;
 
-async function sealSecrets(tx: Tx, workspaceId: string, kp: KeyProvider, secrets: Record<string, unknown>) {
+export async function sealSecrets(tx: Tx, workspaceId: string, kp: KeyProvider, secrets: Record<string, unknown>) {
   const dk = await activeDataKey(tx, workspaceId, kp);
   const s = seal(dk.key, Buffer.from(JSON.stringify(secrets), 'utf8'));
   return { secrets: Buffer.concat([s.iv, s.authTag, s.ciphertext]), secretsKeyId: dk.id };
 }
 
-export async function openSecrets(tx: Tx, row: ProviderRow, kp: KeyProvider): Promise<Record<string, unknown>> {
+export async function openSecrets(
+  tx: Tx,
+  row: Pick<ProviderRow, 'workspaceId' | 'secrets' | 'secretsKeyId'>,
+  kp: KeyProvider,
+): Promise<Record<string, unknown>> {
   if (!row.secrets || !row.secretsKeyId) return {};
   const key = await dataKeyById(tx, row.workspaceId, row.secretsKeyId, kp);
   const b = row.secrets;
@@ -42,7 +46,7 @@ const Use = z.enum(['transactional', 'marketing']);
 const Provider = z.object({
   id: z.string(),
   name: z.string(),
-  adapter: z.enum(['smtp', 'ses', 'postmark', 'brevo', 'log']),
+  adapter: z.enum(['smtp', 'ses', 'postmark', 'brevo', 'cloudflare', 'log']),
   config: z.record(z.string(), z.unknown()),
   fromEmail: z.string(),
   fromName: z.string(),
@@ -117,7 +121,7 @@ export const createProvider = defineCommand({
     'Add a delivery provider. `useFor` decides which messages go through it: transactional (contract/legal purposes) and/or marketing. Returns the webhook URL path for delivery events once; register it with the provider.',
   input: z.object({
     name: z.string().min(1).max(120),
-    adapter: z.enum(['smtp', 'ses', 'postmark', 'brevo', 'log']),
+    adapter: z.enum(['smtp', 'ses', 'postmark', 'brevo', 'cloudflare', 'log']),
     config: z.record(z.string(), z.unknown()).default({}),
     secrets: z.record(z.string(), z.unknown()).default({}),
     fromEmail: Email,

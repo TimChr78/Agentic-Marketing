@@ -3,7 +3,14 @@ import { artifactCommands, workspaceCommands } from '@agentic-marketing/artifact
 import { audienceCommands } from '@agentic-marketing/audience';
 import { memberCommands, tokenCommands } from '@agentic-marketing/auth';
 import type { AnyCommand } from '@agentic-marketing/commands';
-import { messageCommands, providerCommands, templateCommands } from '@agentic-marketing/email';
+import {
+  deliverabilityCommands,
+  messageCommands,
+  providerCommands,
+  smsCommands,
+  smsProviderCommands,
+  templateCommands,
+} from '@agentic-marketing/email';
 import { sourceCommands } from '@agentic-marketing/ingest';
 import { connectionCommands, webhookCommands } from '@agentic-marketing/integrations';
 import { journeyCommands } from '@agentic-marketing/journeys';
@@ -18,6 +25,9 @@ export const commands = [
   ...templateCommands,
   ...messageCommands,
   ...providerCommands,
+  ...deliverabilityCommands,
+  ...smsCommands,
+  ...smsProviderCommands,
   ...workspaceCommands,
   ...memberCommands,
   ...tokenCommands,

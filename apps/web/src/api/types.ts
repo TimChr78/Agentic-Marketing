@@ -50,6 +50,7 @@ export type NodeKind =
   | 'branch'
   | 'split'
   | 'email'
+  | 'sms'
   | 'webhook'
   | 'action'
   | 'transform'

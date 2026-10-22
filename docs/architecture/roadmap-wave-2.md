@@ -75,6 +75,23 @@ Design: [email-and-sms-delivery.md](email-and-sms-delivery.md).
   - budgets.
 - **Bounce mailbox (VERP)** for SMTP-only installs: optional, last.
 
+**Built:**
+- the `cloudflare` e-mail adapter (REST API, checked against Cloudflare's official SDK): permanent bounces and suppressed recipients in the send response become delivery events at once;
+- the `delivery_policy` artifact (one per workspace) for marketing messages only:
+  - frequency caps per channel and purposes;
+  - quiet hours in the person's `timezone` trait (default for SMS: 21:00–08:00), which hold messages until the window ends instead of dropping them;
+  - auto-pause of a stream above the complaint or bounce threshold;
+- `deliverability.health` (rates per channel and stream) and `emailProviders.checkDomain` (SPF, DKIM, DMARC with advice);
+- SMS through Twilio:
+  - `smsProviders.*`, with signed status callbacks and inbound messages;
+  - STOP, START and HELP keywords, including Danish, Swedish and Norwegian ones;
+  - `marketing_sms` and `service_sms` purposes;
+  - the `sms_template` artifact with a GSM-7/UCS-2 segment counter, `smsTemplates.preview` with the cost, and `messages.sendSms`;
+  - a journey `sms` node and SMS broadcasts;
+  - a monthly budget per provider.
+
+Not built (later): GatewayAPI, SMS double opt-in by code, per-provider rate limits and warm-up, link shortening in texts, and VERP.
+
 ## Phase 8: consent everywhere
 
 The prerequisite for paid media and for on-site tracking (MartechSignal phase B):
@@ -140,7 +157,7 @@ Design: [performance-marketing.md](performance-marketing.md). Built in this orde
 | No ClickHouse row policies (Phase 1) | 10 |
 | Tracking-plan warnings not stored for a report (Phase 1) | 6 |
 | No bot filtering on ingest (Phase 1) | 8 (with the consent banner and the SDK) |
-| Frequency caps and quiet hours not enforced (Phase 2) | 7 |
+| Frequency caps and quiet hours not enforced (Phase 2) | 7 (done) |
 | No bounce mailbox for pure SMTP (Phase 2) | 7 (optional; HTTP adapters preferred) |
 | Segment evaluation holds ids in memory (Phase 2) | 10 |
 | Merged profile does not wake waiting participants (Phase 2) | 10 |
@@ -160,7 +177,7 @@ Design: [performance-marketing.md](performance-marketing.md). Built in this orde
 | No screens for forms and broadcasts (pilot) | 6 (done) |
 | No consent banner (pilot) | 8 |
 | E-mail clicks are not profile events (pilot) | 6 (done) |
-| SMTP gives no delivery events (pilot, ADR-0011) | 6 (switch to SES or Postmark) and 7 |
+| SMTP gives no delivery events (pilot, ADR-0011) | 6 (switch to SES or Postmark) and 7 (Cloudflare adapter done) |
 | Activepieces pieces not embeddable safely (spike 5) | Later (pieces runner) |
 | Legal review of legitimate-interest templates and retention defaults (open question 10) | 6 (needed before the pilot goes live) |
 

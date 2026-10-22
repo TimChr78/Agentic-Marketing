@@ -8,7 +8,7 @@ import {
 import { defineCommand } from '@agentic-marketing/commands';
 import { AppError, newUuid } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
-import { checkRecipient } from '@agentic-marketing/email';
+import { checkRecipient, checkSmsRecipient } from '@agentic-marketing/email';
 import { consentStateOf, purposeAllowed } from '@agentic-marketing/profiles';
 import { contextFor, durationSeconds, evaluate, publishedSegments } from '@agentic-marketing/segments';
 import { and, desc, eq, inArray, isNotNull, sql } from 'drizzle-orm';
@@ -26,7 +26,7 @@ publishValidators.set('journey', async (content, tx: Tx) => {
   const def = content as JourneyDefinition;
   const problems = unsupported(def);
   for (const check of journeyChecks) problems.push(...(await check(def, tx)));
-  const templates = def.nodes.filter((n) => n.kind === 'email').map((n) => String(n.config.template));
+  const templates = def.nodes.filter((n) => n.kind === 'email' || n.kind === 'sms').map((n) => String(n.config.template));
   const segments = def.nodes.flatMap((n) =>
     (n.kind === 'trigger' || n.kind === 'branch') && n.config.segment ? [String(n.config.segment)] : [],
   );
@@ -63,7 +63,10 @@ publishValidators.set('journey', async (content, tx: Tx) => {
       .where(and(inArray(schema.artifacts.id, refs), isNotNull(schema.artifacts.publishedVersion)));
     const ok = new Set(found.map((f) => f.id));
     for (const r of new Set(refs))
-      if (!ok.has(r)) problems.push(`${r} is not a published ${r.startsWith('eml_') ? 'e-mail template' : 'segment'}`);
+      if (!ok.has(r))
+        problems.push(
+          `${r} is not a published ${r.startsWith('eml_') ? 'e-mail template' : r.startsWith('sms_') ? 'SMS template' : 'segment'}`,
+        );
   }
   return problems;
 });
@@ -297,6 +300,25 @@ export const simulateJourney = defineCommand({
               : { ok: false as const, reason: 'not_published: the template has no published version' };
             detail = v.ok ? `would send ${eff.template}` : `would not send: ${v.reason}`;
           } else detail = `would send ${eff.template}`;
+        } else if (eff?.kind === 'sms') {
+          if (input.profileId) {
+            const [tpl] = await ctx.tx
+              .select({ purpose: sql<string>`${schema.artifactVersions.content} ->> 'purpose'` })
+              .from(schema.artifacts)
+              .innerJoin(
+                schema.artifactVersions,
+                and(
+                  eq(schema.artifactVersions.workspaceId, schema.artifacts.workspaceId),
+                  eq(schema.artifactVersions.artifactId, schema.artifacts.id),
+                  eq(schema.artifactVersions.number, schema.artifacts.publishedVersion),
+                ),
+              )
+              .where(eq(schema.artifacts.id, eff.template));
+            const v = tpl
+              ? await checkSmsRecipient(ctx.tx, ws, ctx.services.keyProvider, input.profileId, tpl.purpose)
+              : { ok: false as const, reason: 'not_published: the template has no published version' };
+            detail = v.ok ? `would text ${eff.template}` : `would not text: ${v.reason}`;
+          } else detail = `would text ${eff.template}`;
         } else if (eff?.kind === 'updateProfile') detail = `would set ${eff.trait} = ${JSON.stringify(eff.value)}`;
         else if (eff?.kind === 'webhook') {
           const allowed =

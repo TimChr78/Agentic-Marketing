@@ -16,7 +16,16 @@ Generated from the command registry (`apps/server/src/registry.ts`). **Effect**:
 | `approvals.approve` | publish | artifacts:approve | people only | Approve and publish |
 | `approvals.reject` | write | artifacts:approve | people only | Reject a change |
 | `templates.preview` | read | artifacts:read | people and agents | Preview an e-mail template |
+| `templates.sendTest` | write | messages:send | people and agents | Send a test e-mail to a workspace member |
 | `messages.sendEmail` | write | messages:send | people and agents | Send an e-mail to a person |
+| `messages.sendSms` | write | messages:send | people and agents | Send a text message to a person |
+| `smsTemplates.preview` | read | artifacts:read | people and agents | Preview an SMS template (segments, cost) |
+| `deliverability.health` | read | artifacts:read | people and agents | Bounce and complaint rates |
+| `emailProviders.checkDomain` | read | artifacts:read | people and agents | Check a provider's sending domain (SPF, DKIM, DMARC) |
+| `smsProviders.list` | read | workspace:admin | people and agents | List SMS providers |
+| `smsProviders.create` | write | workspace:admin | people only | Add an SMS provider |
+| `smsProviders.update` | write | workspace:admin | people only | Change an SMS provider |
+| `smsProviders.delete` | destructive | workspace:admin | people only | Delete an SMS provider |
 | `messages.list` | read | profiles:read | people and agents | Messages and what happened to them |
 | `messages.stats` | read | artifacts:read | people and agents | E-mail performance |
 | `emailProviders.list` | read | workspace:admin | people and agents | List e-mail providers |

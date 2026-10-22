@@ -7,9 +7,13 @@ import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, lt, sql } from 'drizzle-orm';
 import { type AdapterDeps, MESSAGE_ID_HEADER } from './adapters';
+import { applyDeliveryEvents } from './deliveryEvents';
 import { type ClickLink, type LinkSigner, tagLinks, trackLinks, type UnsubscribeLink } from './links';
+import { decisionEvent, defer, MAX_ATTEMPTS } from './outbox';
+import { checkPolicy } from './policy';
 import { transportFor } from './providers';
 import { renderTemplate } from './render';
+import { deliverSms } from './sms/gateway';
 
 // The send gateway (ADR-0007). Every e-mail is requested here and goes out through an outbox:
 // `requestEmail` decides (lawful basis, suppression, address) and records the message; the
@@ -95,25 +99,6 @@ export async function checkRecipient(tx: Tx, workspaceId: string, kp: KeyProvide
   return { ok: true, email: person.email, emailHash: person.emailHash, vars: person.vars, basis: p.basis, profileId: person.id };
 }
 
-function decisionEvent(m: typeof schema.messages.$inferSelect, type: MessageEvent['type'], reason = '', provider = ''): MessageEvent {
-  return {
-    workspaceId: m.workspaceId,
-    messageId: m.id,
-    eventId: `decision:${type}:${m.attempts}`,
-    type,
-    at: new Date().toISOString(),
-    profileId: m.profileId ?? '',
-    channel: m.channel,
-    purpose: m.purpose,
-    provider,
-    templateId: m.templateId ?? '',
-    templateVersion: m.templateVersion ?? 0,
-    journeyId: m.journeyId ?? '',
-    reason,
-    url: '',
-  };
-}
-
 /**
  * Records a send request and decides it. Returns the earlier decision for a repeated
  * idempotency key. Queued messages are sent by the delivery worker.
@@ -157,7 +142,6 @@ export async function requestEmail(tx: Tx, workspaceId: string, kp: KeyProvider,
   return { messageId: m.id, status, reason, duplicate: false };
 }
 
-const MAX_ATTEMPTS = 4;
 const STALE_SENDING_MS = 10 * 60_000;
 
 /**
@@ -186,17 +170,19 @@ export async function deliverRound(
         .where(and(eq(schema.messages.status, 'sending'), lt(schema.messages.updatedAt, new Date(Date.now() - STALE_SENDING_MS)))),
     );
     const claimed = await db.withWorkspace(ws, async (tx) => {
-      const res = await tx.execute<{ id: string }>(sql`
+      const res = await tx.execute<{ id: string; channel: string }>(sql`
         UPDATE messages SET status = 'sending', attempts = attempts + 1, updated_at = now()
         WHERE (workspace_id, id) IN (
           SELECT workspace_id, id FROM messages
           WHERE status = 'queued' AND updated_at <= now() - make_interval(secs => 30 * attempts * attempts)
+            AND (not_before IS NULL OR not_before <= now())
           ORDER BY created_at LIMIT ${deps.batch ?? 50} FOR UPDATE SKIP LOCKED)
-        RETURNING id`);
-      return res.rows.map((r) => r.id);
+        RETURNING id, channel`);
+      return res.rows;
     });
-    for (const id of claimed) {
-      await deliverOne(db, ws, id, deps);
+    for (const { id, channel } of claimed) {
+      if (channel === 'sms') await deliverSms(db, ws, id, deps);
+      else await deliverOne(db, ws, id, deps);
       handled++;
     }
   }
@@ -224,6 +210,14 @@ async function deliverOne(db: Db, ws: string, id: string, deps: { kp: KeyProvide
     if (!tpl) return finish('failed', 'no_template: the template version is gone');
     const v = await checkRecipient(tx, ws, deps.kp, m.profileId ?? '', m.purpose);
     if (!v.ok) return finish('suppressed', v.reason);
+    const hold = await checkPolicy(
+      tx,
+      ws,
+      { ...m, profileId: v.profileId, channel: 'email', basis: v.basis, timezone: v.vars.timezone },
+      await purposesOf(tx),
+    );
+    if (hold.ok === false) return finish('suppressed', hold.reason);
+    if (hold.ok === 'later') return defer(tx, m, hold.until, hold.reason);
     const stream = streamOf(v.basis);
     const providers = await tx.select().from(schema.emailProviders).where(eq(schema.emailProviders.enabled, true));
     const provider = providers.find((p) => p.useFor.includes(stream));
@@ -272,8 +266,9 @@ async function deliverOne(db: Db, ws: string, id: string, deps: { kp: KeyProvide
   }
   const { m, provider, transport, out } = prepared;
   let event: MessageEvent;
+  let reported: MessageEvent[] = [];
   try {
-    const { providerMessageId } = await transport.send(out);
+    const { providerMessageId, events: known } = await transport.send(out);
     await db.withWorkspace(ws, (tx) =>
       tx
         .update(schema.messages)
@@ -281,6 +276,7 @@ async function deliverOne(db: Db, ws: string, id: string, deps: { kp: KeyProvide
         .where(eq(schema.messages.id, id)),
     );
     event = decisionEvent(m, 'sent', '', provider.adapter);
+    if (known?.length) reported = await db.withWorkspace(ws, (tx) => applyDeliveryEvents(tx, known, provider.adapter, deps.kp));
   } catch (e) {
     const reason = `provider_error: ${(e as Error).message.split('\n')[0]}`;
     const retry = m.attempts < MAX_ATTEMPTS;
@@ -295,7 +291,7 @@ async function deliverOne(db: Db, ws: string, id: string, deps: { kp: KeyProvide
   } finally {
     await transport.close?.();
   }
-  await deps.events.insertMessageEvents([event]);
+  await deps.events.insertMessageEvents([event, ...reported]);
 }
 
 async function publishedTemplateVersion(tx: Tx, templateId: string, version: number | null) {

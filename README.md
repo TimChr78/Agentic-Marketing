@@ -12,10 +12,16 @@ It runs as one Docker image (a TypeScript modular monolith) next to Postgres, Cl
 - **E-mail:**
   - MJML and Liquid templates with preview, test sends and UTM tagging;
   - a send gateway that checks lawful basis, consent, objections and suppressions;
-  - providers SES, Postmark, Brevo or SMTP, with delivery, bounce, complaint and click events;
+  - providers SES, Postmark, Brevo, Cloudflare Email Service or SMTP, with delivery, bounce, complaint and click events;
+  - a domain check for SPF, DKIM and DMARC;
   - one-click unsubscribe (RFC 8058).
 
   What happens to an e-mail becomes a customer event (`Email Link Clicked`…), so segments, journeys and webhooks can use it.
+- **SMS:** Twilio, with consent per purpose, STOP/START/HELP replies, delivery reports, a segment and cost preview, and a monthly budget. SMS works in journeys and broadcasts.
+- **Delivery policy:** for marketing messages on every channel:
+  - frequency caps;
+  - quiet hours in each person's time zone;
+  - an automatic pause when bounce or complaint rates pass the limits.
 - **Newsletter:** signup forms with double opt-in (works without JavaScript, optional Cloudflare Turnstile), subscriber import with consent proof (from Kit, Mailchimp…), broadcasts to a segment.
 - **Journeys:** a visual builder and an engine with waits, branches, e-mail, webhooks, connector actions and AI steps (decide, generate) with fallbacks.
 - **Web personalization:** experiences and A/B tests served by a decision API, with an anti-flicker snippet and consent-aware targeting.
@@ -59,8 +65,8 @@ Wave 1 (Phases −1 to 5) is complete: foundations, data platform, e-mail, segme
 | Phase | Theme | State |
 |---|---|---|
 | 6 | Pilot live and hardening | The code items are done: e-mail events on profiles, retention, UTM tagging, test sends, Newsletter screen, Docker smoke test. The MartechSignal run is next. |
-| 7 | Delivery beyond SMTP, and SMS | Next: Cloudflare Email Service for transactional mail, deliverability guardrails, frequency caps and quiet hours, Twilio SMS |
-| 8 | Consent everywhere | Planned: consent banner, Consent Mode v2, ad purposes, click ids |
+| 7 | Delivery beyond SMTP, and SMS | Done: Cloudflare Email Service adapter, delivery policy (caps, quiet hours, auto-pause), deliverability health and domain check, Twilio SMS. Later: GatewayAPI, SMS double opt-in, provider warm-up |
+| 8 | Consent everywhere | Next: consent banner, Consent Mode v2, ad purposes, click ids |
 | 9 | Performance marketing | Planned: Meta Conversions API and audiences, Google Data Manager API, spend and ROAS, Microsoft |
 | 10 | Scale and operations | Planned |
 | 11 | Enterprise and ecosystem | Planned |

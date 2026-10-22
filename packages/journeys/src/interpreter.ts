@@ -18,6 +18,7 @@ export interface ParticipantState {
 
 export type Effect =
   | { kind: 'email'; node: string; seq: number; template: string }
+  | { kind: 'sms'; node: string; seq: number; template: string }
   | { kind: 'updateProfile'; node: string; seq: number; trait: string; value: string | number | boolean | null }
   /** Ask the AI worker for a decision or text; the participant waits until it answers or the step times out. */
   | { kind: 'ai'; node: string; seq: number; task: 'decide' | 'generate'; prompt: string }
@@ -97,6 +98,10 @@ export async function advance(
         break;
       case 'email':
         effects.push({ kind: 'email', node: n.id, seq, template: n.template });
+        if (!goTo(n.next)) return end('completed', n.id);
+        break;
+      case 'sms':
+        effects.push({ kind: 'sms', node: n.id, seq, template: n.template });
         if (!goTo(n.next)) return end('completed', n.id);
         break;
       case 'updateProfile':

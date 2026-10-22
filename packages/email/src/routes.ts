@@ -1,15 +1,15 @@
-import { DEFAULT_PURPOSES, publishedSingleton } from '@agentic-marketing/artifacts';
-import { type Db, schema, type Tx } from '@agentic-marketing/db';
-import type { EventStore, MessageEvent } from '@agentic-marketing/events';
-import { profileForMessage, recordConsent } from '@agentic-marketing/profiles';
+import { type Db, schema } from '@agentic-marketing/db';
+import type { EventStore } from '@agentic-marketing/events';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { eq } from 'drizzle-orm';
 import { Hono } from 'hono';
 import type { DeliveryEvent } from './adapters';
+import { applyDeliveryEvents, type Msg, messageEvent, withdraw } from './deliveryEvents';
 import type { EmailServices } from './gateway';
 import type { ClickLink, UnsubscribeLink } from './links';
 import { transportFor, webhookTokenHash } from './providers';
+import { smsRoutes } from './sms/routes';
 
 // Public endpoints that e-mails and providers reach: delivery webhooks, one-click unsubscribe
 // (RFC 8058) and click redirects. None of them needs a session; each is authenticated by a
@@ -22,89 +22,6 @@ export interface EmailRouteDeps {
   email: EmailServices;
 }
 
-type Msg = typeof schema.messages.$inferSelect;
-const STATUS_ORDER = ['queued', 'sending', 'sent', 'delivered', 'bounced', 'complained'];
-
-function messageEvent(m: Msg, e: Pick<MessageEvent, 'eventId' | 'type' | 'at'> & Partial<MessageEvent>, provider: string): MessageEvent {
-  return {
-    workspaceId: m.workspaceId,
-    messageId: m.id,
-    profileId: m.profileId ?? '',
-    channel: m.channel,
-    purpose: m.purpose,
-    provider,
-    templateId: m.templateId ?? '',
-    templateVersion: m.templateVersion ?? 0,
-    journeyId: m.journeyId ?? '',
-    reason: '',
-    url: '',
-    ...e,
-  };
-}
-
-async function withdraw(tx: Tx, m: Msg, source: 'unsubscribe', proof: Record<string, unknown>, kp: KeyProvider) {
-  if (!m.profileId) return;
-  const person = await profileForMessage(tx, m.workspaceId, m.profileId, kp);
-  if (!person) return;
-  const purposes = (await publishedSingleton(tx, 'purposes'))?.purposes ?? DEFAULT_PURPOSES;
-  const basis = purposes.find((p) => p.key === m.purpose)?.basis ?? 'consent';
-  // Under legitimate interest an unsubscribe is an objection; under consent, a withdrawal.
-  await recordConsent(tx, m.workspaceId, person.id, purposes, [
-    { purpose: m.purpose, channel: 'email', status: basis === 'legitimate_interest' ? 'objected' : 'withdrawn', source, proof },
-  ]);
-}
-
-/** Applies a provider's delivery events to the message log, suppressions and consent. */
-async function applyDeliveryEvents(tx: Tx, events: DeliveryEvent[], provider: string, kp: KeyProvider): Promise<MessageEvent[]> {
-  const out: MessageEvent[] = [];
-  for (const e of events) {
-    const [m] = e.messageId
-      ? await tx.select().from(schema.messages).where(eq(schema.messages.id, e.messageId))
-      : e.providerMessageId
-        ? await tx.select().from(schema.messages).where(eq(schema.messages.providerMessageId, e.providerMessageId))
-        : [];
-    if (!m) {
-      logger.warn({ provider, event: e.type, providerMessageId: e.providerMessageId }, 'delivery event for an unknown message');
-      continue;
-    }
-    const at = e.at && !Number.isNaN(Date.parse(e.at)) ? new Date(e.at).toISOString() : new Date().toISOString();
-    out.push(
-      messageEvent(
-        m,
-        { eventId: e.eventId, type: e.type, at, reason: e.reason ?? (e.bounce ? `${e.bounce} bounce` : ''), url: e.url ?? '' },
-        provider,
-      ),
-    );
-
-    const next =
-      e.type === 'delivered'
-        ? 'delivered'
-        : e.type === 'bounced' && e.bounce === 'hard'
-          ? 'bounced'
-          : e.type === 'complained'
-            ? 'complained'
-            : null;
-    if (next && STATUS_ORDER.indexOf(next) > STATUS_ORDER.indexOf(m.status))
-      await tx
-        .update(schema.messages)
-        .set({ status: next, reason: e.reason ?? m.reason, updatedAt: new Date() })
-        .where(eq(schema.messages.id, m.id));
-    if (m.recipientHash && ((e.type === 'bounced' && e.bounce === 'hard') || e.type === 'complained'))
-      await tx
-        .insert(schema.suppressions)
-        .values({
-          workspaceId: m.workspaceId,
-          channel: 'email',
-          valueHash: m.recipientHash,
-          reason: e.type === 'complained' ? 'complaint' : 'hard_bounce',
-        })
-        .onConflictDoNothing();
-    if (e.type === 'complained' || e.type === 'unsubscribed')
-      await withdraw(tx, m, 'unsubscribe', { messageId: m.id, via: `${provider} ${e.type}` }, kp);
-  }
-  return out;
-}
-
 const page = (
   title: string,
   body: string,
@@ -114,6 +31,7 @@ const page = (
 
 export function emailRoutes(deps: EmailRouteDeps) {
   const app = new Hono();
+  app.route('/', smsRoutes(deps));
 
   app.post('/hooks/email/:id/:token', async (c) => {
     const { id, token } = c.req.param();
