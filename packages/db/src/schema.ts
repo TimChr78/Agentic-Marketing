@@ -628,3 +628,29 @@ export const broadcastRuns = pgTable(
 export type ApprovalPolicy = 'none' | 'agent_changes' | 'all_publishes';
 export type Role = 'owner' | 'admin' | 'marketer' | 'approver' | 'viewer';
 export type VersionState = 'draft' | 'in_review' | 'published' | 'superseded' | 'rejected';
+
+export type WarehouseDataset = 'profiles' | 'identifiers' | 'consent' | 'segment_memberships' | 'events' | 'message_events';
+export const warehouseExports = pgTable(
+  'warehouse_exports',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    name: text('name').notNull(),
+    kind: text('kind').$type<'postgres' | 's3'>().notNull(),
+    config: jsonb('config').$type<Record<string, unknown>>().notNull().default({}),
+    secrets: bytea('secrets'),
+    secretsKeyId: text('secrets_key_id'),
+    datasets: text('datasets').array().$type<WarehouseDataset[]>().notNull(),
+    everyMinutes: integer('every_minutes').notNull().default(60),
+    enabled: boolean('enabled').notNull().default(true),
+    cursors: jsonb('cursors').$type<Record<string, string>>().notNull().default({}),
+    runRequested: boolean('run_requested').notNull().default(false),
+    lastRunAt: ts('last_run_at'),
+    lastStatus: text('last_status').$type<'ok' | 'failed'>(),
+    lastError: text('last_error'),
+    lastCounts: jsonb('last_counts').$type<Record<string, number>>().notNull().default({}),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);

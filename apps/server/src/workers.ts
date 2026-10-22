@@ -9,15 +9,18 @@ import { refreshSnapshots, snapshotHook } from '@agentic-marketing/personalize';
 import { runProfileWorkers } from '@agentic-marketing/profiles';
 import { runSegmentScheduler, segmentHook } from '@agentic-marketing/segments';
 import { logger } from '@agentic-marketing/telemetry';
+import { runWarehouseExports } from '@agentic-marketing/warehouse';
 import type { createServer } from './app';
 
 /** Periodic jobs of the scheduler role. */
 export function startScheduler(
   srv: ReturnType<typeof createServer>,
   signal: AbortSignal,
-  opts: { segmentTickMs?: number; broadcastTickMs?: number } = {},
+  opts: { segmentTickMs?: number; broadcastTickMs?: number; warehouseTickMs?: number; warehouseLagMs?: number } = {},
 ): Promise<void>[] {
-  logger.info('scheduler role: segment recomputation, broadcasts, retention, OAuth token refresh, audience sync, ad spend import');
+  logger.info(
+    'scheduler role: segment recomputation, broadcasts, retention, OAuth token refresh, audience sync, ad spend import, warehouse exports',
+  );
   return [
     runSegmentScheduler(
       {
@@ -35,6 +38,17 @@ export function startScheduler(
     runTokenRefresher({ db: srv.db, kp: srv.keyProvider, egress: srv.egress }, signal),
     runAudienceSyncs({ db: srv.db, kp: srv.keyProvider, egress: srv.egress }, signal),
     runSpendImport({ db: srv.db, events: srv.events, kp: srv.keyProvider, egress: srv.egress }, signal),
+    runWarehouseExports(
+      {
+        db: srv.db,
+        events: srv.events,
+        kp: srv.keyProvider,
+        egress: srv.egress,
+        tickMs: opts.warehouseTickMs,
+        lagMs: opts.warehouseLagMs,
+      },
+      signal,
+    ),
   ];
 }
 

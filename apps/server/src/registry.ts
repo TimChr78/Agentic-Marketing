@@ -19,11 +19,13 @@ import { experienceCommands } from '@agentic-marketing/personalize';
 import { profileCommands } from '@agentic-marketing/profiles';
 import { secretCommands } from '@agentic-marketing/secrets';
 import { segmentCommands } from '@agentic-marketing/segments';
+import { warehouseCommands } from '@agentic-marketing/warehouse';
 
 /** Every command the server exposes. REST routes, OpenAPI, MCP tools and the UI client derive from this list. */
 export const commands = [
   ...artifactCommands,
   ...configCommands,
+  ...warehouseCommands,
   ...templateCommands,
   ...messageCommands,
   ...providerCommands,

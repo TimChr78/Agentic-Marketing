@@ -14,5 +14,6 @@ export type {
   ParticipantStatus,
   Role,
   VersionState,
+  WarehouseDataset,
 } from './schema';
 export * as schema from './schema';

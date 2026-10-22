@@ -8,6 +8,7 @@ Each step is one tool call: `tool {input}`. Replace `…` ids with real ones fro
 - Welcome journey after double opt-in
 - Signup form with double opt-in
 - AI-chosen branch with a tested prompt
+- Promoting changes from staging
 - Reporting the week
 
 ## Weekly newsletter
@@ -82,6 +83,14 @@ After publishing, the site posts to `<links URL>/f/frm_…`. Signups show as `Fo
 2. `prompts.test {"artifactId":"prm_…"}`, then `prompts.testRun {"runId":"run_…"}` until `status` is `done` and every case passes; then request publishing.
 3. In the journey, add a node `{"id":"pick","kind":"aiDecide","label":"Pick","config":{"prompt":"prm_…","options":["seo","automation"],"fallback":"automation"},"next":[{"to":"seo_mail"},{"to":"auto_mail"}]}`.
 4. Decisions, with their rationale and fallback reasons, are in `ai.calls {"journeyId":"jrn_…"}`.
+
+## Promoting changes from staging
+
+1. In the staging workspace: `config.export` (published versions; `includeDrafts: true` for work in progress).
+2. In production: `config.import` with the bundle. The default is a dry run: report the creates and updates to the person.
+3. With their go-ahead: `config.import` with `dryRun: false, publish: true`. Ids are kept, so a journey still points at its template and segments. Under the production approval policy, agent changes land in review (`publish: "in_review"`); tell the person which approvals wait.
+
+Nothing is deleted by an import. In git, `scripts/am-config.mjs pull|push` does the same with one file per artifact.
 
 ## Reporting the week
 

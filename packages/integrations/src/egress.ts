@@ -89,7 +89,7 @@ export interface SafeResponse {
 /** One HTTP request under the egress policy. Throws EgressError when the target is not allowed. */
 export function safeRequest(
   url: string,
-  init: { method?: string; headers?: Record<string, string>; body?: string; timeoutMs?: number; maxBytes?: number },
+  init: { method?: string; headers?: Record<string, string>; body?: string | Buffer; timeoutMs?: number; maxBytes?: number },
   policy: EgressPolicy,
 ): Promise<SafeResponse> {
   const problem = checkUrl(url, policy);
@@ -153,11 +153,15 @@ export function egressFetch(policy: EgressPolicy): typeof fetch {
     const url = req ? req.url : String(input);
     const headers = Object.fromEntries(new Headers(req ? req.headers : init?.headers).entries());
     const method = init?.method ?? req?.method ?? 'GET';
+    // Binary bodies (gzipped uploads) pass through as bytes; anything else as text.
+    const raw = init?.body;
     const body =
-      init?.body !== undefined && init.body !== null
-        ? String(init.body)
+      raw !== undefined && raw !== null
+        ? raw instanceof Uint8Array || raw instanceof ArrayBuffer
+          ? Buffer.from(raw as Uint8Array)
+          : String(raw)
         : req && method !== 'GET' && method !== 'HEAD'
-          ? await req.text()
+          ? Buffer.from(await req.arrayBuffer())
           : undefined;
     const res = await safeRequest(url, { method, headers, body, timeoutMs: 30_000, maxBytes: 1024 * 1024 }, policy);
     return new Response(res.status === 204 || res.status === 304 ? null : res.body, { status: res.status, headers: res.headers });

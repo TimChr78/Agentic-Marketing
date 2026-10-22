@@ -15,6 +15,8 @@ Generated from the command registry (`apps/server/src/registry.ts`). **Effect**:
 | `approvals.list` | read | artifacts:read | people and agents | List approval requests |
 | `approvals.approve` | publish | artifacts:approve | people only | Approve and publish |
 | `approvals.reject` | write | artifacts:approve | people only | Reject a change |
+| `config.export` | read | artifacts:read | people and agents | Export artifacts as a bundle |
+| `config.import` | write | artifacts:write | people and agents | Import a bundle of artifacts (dry run first; publishing needs artifacts:publish) |
 | `templates.preview` | read | artifacts:read | people and agents | Preview an e-mail template |
 | `templates.sendTest` | write | messages:send | people and agents | Send a test e-mail to a workspace member |
 | `messages.sendEmail` | write | messages:send | people and agents | Send an e-mail to a person |
@@ -26,6 +28,11 @@ Generated from the command registry (`apps/server/src/registry.ts`). **Effect**:
 | `smsProviders.create` | write | workspace:admin | people only | Add an SMS provider |
 | `smsProviders.update` | write | workspace:admin | people only | Change an SMS provider |
 | `smsProviders.delete` | destructive | workspace:admin | people only | Delete an SMS provider |
+| `warehouse.list` | read | workspace:admin | people and agents | List warehouse exports |
+| `warehouse.create` | write | workspace:admin | people only | Add a warehouse export |
+| `warehouse.update` | write | workspace:admin | people only | Change a warehouse export |
+| `warehouse.run` | write | workspace:admin | people and agents | Run a warehouse export now |
+| `warehouse.delete` | write | workspace:admin | people only | Remove a warehouse export |
 | `messages.list` | read | profiles:read | people and agents | Messages and what happened to them |
 | `messages.stats` | read | artifacts:read | people and agents | E-mail performance |
 | `emailProviders.list` | read | workspace:admin | people and agents | List e-mail providers |
