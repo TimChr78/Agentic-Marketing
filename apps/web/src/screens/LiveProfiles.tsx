@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Download, KeyRound, Plus, RefreshCw, Trash2, User, UserX } from 'lucide-react';
 import { Button, Card, Mono, Pill, cx, inputCls, timeAgo } from '../components/ui';
+import { LiveImport } from './live/LiveImport';
 import { api, errText, type Out } from './liveApi';
 
 // Phase 1: the data platform through the real API. Sources and their snippet, people as the
@@ -31,6 +32,7 @@ export function LiveProfiles({ canAdmin, onError }: { canAdmin: boolean; onError
     <div className="grid gap-5 lg:grid-cols-[360px_minmax(0,1fr)]">
       <div className="flex min-w-0 flex-col gap-5">
         {canAdmin && <Sources onError={onError} />}
+        {canAdmin && <LiveImport onError={onError} onDone={() => setTimeout(() => void refresh(), 2000)} />}
         <Card title="People" action={<Button variant="ghost" onClick={refresh} aria-label="Refresh"><RefreshCw size={14} /></Button>}>
           <ul className="max-h-[520px] divide-y divide-line overflow-y-auto">
             {profiles.map((p) => (

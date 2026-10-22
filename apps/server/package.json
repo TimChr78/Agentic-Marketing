@@ -12,6 +12,7 @@
   "dependencies": {
     "@agentic-marketing/ai": "workspace:*",
     "@agentic-marketing/artifacts": "workspace:*",
+    "@agentic-marketing/audience": "workspace:*",
     "@agentic-marketing/auth": "workspace:*",
     "@agentic-marketing/client": "workspace:*",
     "@agentic-marketing/commands": "workspace:*",

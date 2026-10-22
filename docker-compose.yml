@@ -53,6 +53,11 @@ services:
       ROLE: all
       PORT: 3000
       PUBLIC_URL: ${PUBLIC_URL:-http://localhost:3000}
+      PUBLIC_LINKS_URL: ${PUBLIC_LINKS_URL:-}
+      CLIENT_IP_HEADER: ${CLIENT_IP_HEADER:-x-forwarded-for}
+      EGRESS_ALLOWED_HOSTS: ${EGRESS_ALLOWED_HOSTS:-}
+      EMAIL_TRACK_CLICKS: ${EMAIL_TRACK_CLICKS:-true}
+      TRUSTED_ORIGINS: ${TRUSTED_ORIGINS:-}
       DATABASE_URL: postgres://am:${POSTGRES_PASSWORD}@postgres:5432/am
       APP_DB_PASSWORD: ${APP_DB_PASSWORD:?set APP_DB_PASSWORD in .env}
       AUTH_SECRET: ${AUTH_SECRET:?set AUTH_SECRET in .env}

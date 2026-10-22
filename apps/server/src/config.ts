@@ -6,6 +6,16 @@ const Env = z.object({
   ROLE: z.string().default('all').describe('Comma-separated roles: api, ingest, worker, scheduler, or all'),
   PORT: z.coerce.number().int().default(3000),
   PUBLIC_URL: z.url().optional(),
+  PUBLIC_LINKS_URL: z
+    .url()
+    .optional()
+    .describe(
+      'Base URL for links people follow from e-mails and websites (unsubscribe, clicks, forms, confirmations), e.g. https://martechsignal.com/am when the site proxies /am/* to the platform. Default: PUBLIC_URL',
+    ),
+  CLIENT_IP_HEADER: z
+    .string()
+    .default('x-forwarded-for')
+    .describe('Header carrying the client IP set by your proxy, e.g. cf-connecting-ip behind Cloudflare; the first address is used'),
   DATABASE_URL: z.string().describe('Owner/admin connection, used for migrations and auth tables'),
   APP_DB_ROLE: z
     .string()
@@ -65,6 +75,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     roles: new Set(e.ROLE === 'all' ? ['api', 'ingest', 'worker', 'scheduler'] : e.ROLE.split(',').map((r) => r.trim())),
     port: e.PORT,
     publicUrl: (e.PUBLIC_URL ?? `http://localhost:${e.PORT}`).replace(/\/$/, ''),
+    linksUrl: (e.PUBLIC_LINKS_URL ?? e.PUBLIC_URL ?? `http://localhost:${e.PORT}`).replace(/\/$/, ''),
+    clientIpHeader: e.CLIENT_IP_HEADER.toLowerCase(),
     adminDatabaseUrl: e.DATABASE_URL,
     appDatabaseUrl: appUrl.toString(),
     appDbPassword: e.APP_DB_PASSWORD,

@@ -116,6 +116,8 @@ export interface IngestDeps {
   bus: EventBus;
   /** Session state for the decision API, written before the request is answered. */
   hot?: HotState;
+  /** Header with the client IP set by the proxy in front (e.g. cf-connecting-ip); default x-forwarded-for. */
+  clientIpHeader?: string;
   /** Events per second per source; bursts up to 5×. */
   ratePerSource?: number;
 }
@@ -211,7 +213,13 @@ export function ingestApi(deps: IngestDeps) {
     if (!allow(source.id, items.length)) return fail(429, 'rate_limited', 'Too many events for this source; retry with backoff.');
 
     const policy = await loadPolicy(source.workspaceId);
-    const ip = source.kind === 'browser' ? (c.req.header('x-forwarded-for')?.split(',')[0].trim() ?? undefined) : undefined;
+    const ip =
+      source.kind === 'browser'
+        ? (c.req
+            .header(deps.clientIpHeader ?? 'x-forwarded-for')
+            ?.split(',')[0]
+            .trim() ?? undefined)
+        : undefined;
     const { accepted, rejected, warnings, dropped } = acceptItems(items, source, policy, {
       ip,
       context: (body.context as Record<string, unknown> | undefined) ?? {},

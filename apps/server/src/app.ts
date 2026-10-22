@@ -1,3 +1,4 @@
+import { formsApi } from '@agentic-marketing/audience';
 import { type AuthConfig, acceptInvitation, authDirectory, createAuth, invitationWorkspace } from '@agentic-marketing/auth';
 import { createExecutor, userPrincipal } from '@agentic-marketing/commands';
 import { AppError, newUuid } from '@agentic-marketing/core';
@@ -33,7 +34,7 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
   const events = clickHouseStore(config.clickhouse);
   const hot = valkeyHotState(config.valkey);
   const email = {
-    publicUrl: config.publicUrl,
+    publicUrl: config.linksUrl,
     links: linkSigner(config.authSecret),
     adapterDeps: { fetch: globalThis.fetch },
     trackClicks: config.trackClicks,
@@ -94,14 +95,19 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
 
   // The decision API goes first: the ingest routes claim every other /v1/<word> path.
   if (config.roles.has('ingest')) app.route('/', decideApi({ db, hot }));
-  if (config.roles.has('ingest')) app.route('/', ingestApi({ db, bus, hot }));
+  if (config.roles.has('ingest')) app.route('/', ingestApi({ db, bus, hot, clientIpHeader: config.clientIpHeader }));
   if (config.roles.has('api')) app.route('/', emailRoutes({ db, kp: keyProvider, events, email }));
   if (config.roles.has('ingest')) app.route('/', inboundApi({ db, bus, kp: keyProvider }));
+  if (config.roles.has('ingest'))
+    app.route(
+      '/',
+      formsApi({ db, bus, kp: keyProvider, links: email.links, egress: config.egress, clientIpHeader: config.clientIpHeader }),
+    );
 
   const mcp = mcpEndpoint({ auth, db, executor, resource: `${config.publicUrl}/mcp` });
   app.all('/mcp', (c) => mcp(c.req.raw));
   if (config.roles.has('api')) app.route('/', copilotApi({ auth, db, executor, kp: keyProvider }));
   app.route('/', restApi({ auth, db, executor }));
 
-  return { app, db, auth, executor, keyProvider, bus, events, email, hot, egress: config.egress };
+  return { app, db, auth, executor, keyProvider, bus, events, email, hot, egress: config.egress, linksUrl: config.linksUrl };
 }

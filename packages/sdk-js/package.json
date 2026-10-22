@@ -8,9 +8,11 @@
     ".": "./src/index.ts"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit -p ."
+    "typecheck": "tsc --noEmit -p .",
+    "build": "esbuild src/browser.ts --bundle --minify --format=iife --global-name=AgenticMarketing --target=es2019 --outfile=dist/am.min.js"
   },
   "devDependencies": {
+    "esbuild": "0.28.2",
     "happy-dom": "20.14.5"
   }
 }
