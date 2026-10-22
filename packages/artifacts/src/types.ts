@@ -138,12 +138,30 @@ const purposes = z.object({
       }
     }),
 });
+const emailTemplate = z.object({
+  purpose: Key.describe(
+    'Purpose key, e.g. "marketing_email" or "onboarding"; decides the lawful basis and whether an unsubscribe link is required',
+  ),
+  subject: z.string().min(1).max(300).describe('Liquid, e.g. "Welcome, {{ profile.firstName | default: \'friend\' }}"'),
+  preheader: z.string().max(300).optional().describe('Preview text shown after the subject in inboxes'),
+  mjml: z.string().min(1).max(300_000).describe('MJML with Liquid. Variables: profile.*, event.*, unsubscribe_url, preferences_url'),
+  text: z.string().max(100_000).optional().describe('Plain-text part (Liquid). Generated from the HTML when omitted'),
+  sampleData: z.record(z.string(), z.unknown()).optional().describe('Example variables for previews, e.g. {"profile":{"firstName":"Ada"}}'),
+});
+
 export type TrackingPlan = z.output<typeof trackingPlan>;
+export type EmailTemplate = z.output<typeof emailTemplate>;
 export type Purposes = z.output<typeof purposes>['purposes'];
 
 export const artifactTypes = {
   note: { prefix: 'not', label: 'Note', description: 'Free-form note, used to exercise the artifact system.', content: note },
   journey: { prefix: 'jrn', label: 'Journey', description: 'A customer journey graph: trigger, steps and branches.', content: journey },
+  email_template: {
+    prefix: 'eml',
+    label: 'E-mail template',
+    description: 'An e-mail as MJML with Liquid placeholders, with subject, preheader and purpose. Preview it with templates.preview.',
+    content: emailTemplate,
+  },
   tracking_plan: {
     prefix: 'tpl',
     label: 'Tracking plan',
@@ -217,3 +235,10 @@ export const DEFAULT_PURPOSES: Purposes = [
 export type ArtifactType = keyof typeof artifactTypes;
 export const ARTIFACT_TYPES = Object.keys(artifactTypes) as [ArtifactType, ...ArtifactType[]];
 export const artifactTypeEnum = z.enum(ARTIFACT_TYPES);
+
+/**
+ * Checks beyond the schema that need heavy libraries (e.g. compiling MJML). Packages register
+ * them; artifact commands run them on every save so agents get the errors right away.
+ */
+export type ContentValidator = (content: unknown) => string[];
+export const contentValidators = new Map<ArtifactType, ContentValidator>();

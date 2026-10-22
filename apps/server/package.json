@@ -16,6 +16,7 @@
     "@agentic-marketing/commands": "workspace:*",
     "@agentic-marketing/core": "workspace:*",
     "@agentic-marketing/db": "workspace:*",
+    "@agentic-marketing/email": "workspace:*",
     "@agentic-marketing/events": "workspace:*",
     "@agentic-marketing/ingest": "workspace:*",
     "@agentic-marketing/profiles": "workspace:*",

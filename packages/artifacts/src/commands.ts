@@ -4,7 +4,7 @@ import { schema, type VersionState } from '@agentic-marketing/db';
 import { and, desc, eq } from 'drizzle-orm';
 import { z } from 'zod';
 import { diffJson } from './diff';
-import { type ArtifactType, artifactTypeEnum, artifactTypes } from './types';
+import { type ArtifactType, artifactTypeEnum, artifactTypes, contentValidators } from './types';
 
 // Generic, versioned artifacts with a configurable approval pipeline (journeys-and-editors.md §5).
 // Published versions are immutable; edits always produce or update a draft.
@@ -49,6 +49,8 @@ function validateContent(type: ArtifactType, content: unknown) {
       `The content is not a valid ${type}. Call artifacts.types for the schema.`,
       z.treeifyError(parsed.error),
     );
+  const problems = contentValidators.get(type)?.(parsed.data) ?? [];
+  if (problems.length) throw new AppError('invalid_input', `The content is not a valid ${type}: ${problems.join('; ')}`, { problems });
   return parsed.data as Record<string, unknown>;
 }
 

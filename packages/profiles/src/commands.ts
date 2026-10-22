@@ -435,3 +435,43 @@ export const profileCommands = [
   exportProfile,
   eraseProfile,
 ] as const;
+
+/**
+ * A person as message templates see them: traits and personal data merged, plus their e-mail
+ * address, for the profile or the profile it was merged into. Null when there is no such person.
+ */
+export async function profileForMessage(
+  tx: CommandContext['tx'],
+  workspaceId: string,
+  profileId: string,
+  kp: CommandContext['services']['keyProvider'],
+) {
+  let id = profileId;
+  for (let i = 0; i < 20; i++) {
+    const [p] = await tx
+      .select()
+      .from(schema.profiles)
+      .where(and(eq(schema.profiles.workspaceId, workspaceId), eq(schema.profiles.id, id)));
+    if (!p) return null;
+    if (p.mergedInto) {
+      id = p.mergedInto;
+      continue;
+    }
+    const crypto = personCrypto(tx, workspaceId, kp);
+    const pii = (await crypto.open<Record<string, unknown>>(p.id, p.pii)) ?? {};
+    const ids = await tx
+      .select()
+      .from(schema.identifiers)
+      .where(and(eq(schema.identifiers.workspaceId, workspaceId), eq(schema.identifiers.profileId, p.id)));
+    const sealedEmail = ids.find((i) => i.type === 'email');
+    const email = sealedEmail ? await crypto.open<string>(p.id, sealedEmail.valueEnc) : undefined;
+    return {
+      id: p.id,
+      email: email ?? null,
+      emailHash: sealedEmail?.value ?? null,
+      userId: ids.find((i) => i.type === 'user_id')?.value ?? null,
+      vars: { ...p.traits, ...pii, ...(email ? { email } : {}), id: p.id },
+    };
+  }
+  return null;
+}
