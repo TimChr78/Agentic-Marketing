@@ -1,0 +1,21 @@
+{
+  "name": "@agentic-marketing/events",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "dependencies": {
+    "@agentic-marketing/commands": "workspace:*",
+    "@agentic-marketing/core": "workspace:*",
+    "@agentic-marketing/telemetry": "workspace:*",
+    "@clickhouse/client": "1.24.0",
+    "@nats-io/jetstream": "3.4.0",
+    "@nats-io/transport-node": "3.4.0",
+    "zod": "4.6.7"
+  }
+}

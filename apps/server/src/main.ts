@@ -1,31 +1,40 @@
 import { migrateAuth } from '@agentic-marketing/auth';
 import { migrate } from '@agentic-marketing/db';
+import { migrateClickHouse } from '@agentic-marketing/events';
 import { initTelemetry, logger, shutdownTelemetry } from '@agentic-marketing/telemetry';
 import { serve } from '@hono/node-server';
 import { createServer } from './app';
 import { loadConfig } from './config';
+import { startWorkers } from './workers';
 
-// One image, several roles (ADR-0002). Phase 0 implements `api`; `worker` and `scheduler` arrive
-// with the data platform and journey runtime.
+// One image, several roles (ADR-0002): `api` (UI, REST, MCP), `ingest` (event collection),
+// `worker` (event consumers) and `scheduler` (arrives with the journey runtime).
 const config = loadConfig();
 initTelemetry('agentic-marketing');
 
-const { app, db, auth } = createServer(config);
+const srv = createServer(config);
+const { app, db } = srv;
 await migrate(db.admin, { appRolePassword: config.appDbPassword, log: (m) => logger.info(m) });
 await migrateAuth({ baseUrl: config.publicUrl, secret: config.authSecret, db });
-void auth;
+await migrateClickHouse(config.clickhouse.url, config.clickhouse.database, (m) => logger.info(m));
 
 const servers: { close: () => void }[] = [];
-if (config.roles.has('api')) {
+if (config.roles.has('api') || config.roles.has('ingest')) {
   servers.push(
     serve({ fetch: app.fetch, port: config.port }, () => logger.info({ url: config.publicUrl, roles: [...config.roles] }, 'api listening')),
   );
 }
-for (const role of ['worker', 'scheduler']) if (config.roles.has(role)) logger.info(`${role} role has nothing to run yet (Phase 1+)`);
+const stopWorkers = new AbortController();
+const workers = config.roles.has('worker') ? startWorkers(srv, stopWorkers.signal) : [];
+if (config.roles.has('scheduler')) logger.info('scheduler role has nothing to run yet (Phase 2)');
 
 const shutdown = async () => {
   logger.info('shutting down');
   for (const s of servers) s.close();
+  stopWorkers.abort();
+  await Promise.allSettled(workers);
+  await srv.bus.close();
+  await srv.events.close();
   await db.close();
   await shutdownTelemetry();
   process.exit(0);

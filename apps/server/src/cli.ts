@@ -2,6 +2,7 @@ import { parseArgs } from 'node:util';
 import { migrateAuth } from '@agentic-marketing/auth';
 import { newUuid } from '@agentic-marketing/core';
 import { migrate } from '@agentic-marketing/db';
+import { migrateClickHouse } from '@agentic-marketing/events';
 import { rewrapDataKeys } from '@agentic-marketing/secrets';
 import { createServer } from './app';
 import { loadConfig } from './config';
@@ -17,6 +18,7 @@ const { db, auth, keyProvider } = createServer(config);
 try {
   await migrate(db.admin, { appRolePassword: config.appDbPassword, log: console.log });
   await migrateAuth({ baseUrl: config.publicUrl, secret: config.authSecret, db });
+  await migrateClickHouse(config.clickhouse.url, config.clickhouse.database, console.log);
 
   if (command === 'migrate') {
     console.log('database is up to date');

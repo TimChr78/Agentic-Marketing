@@ -16,6 +16,8 @@
     "@agentic-marketing/commands": "workspace:*",
     "@agentic-marketing/core": "workspace:*",
     "@agentic-marketing/db": "workspace:*",
+    "@agentic-marketing/events": "workspace:*",
+    "@agentic-marketing/ingest": "workspace:*",
     "@agentic-marketing/secrets": "workspace:*",
     "@agentic-marketing/telemetry": "workspace:*",
     "@better-auth/mcp": "1.7.7",

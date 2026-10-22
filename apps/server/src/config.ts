@@ -3,7 +3,7 @@ import { z } from 'zod';
 // All configuration comes from the environment and is validated at start-up, so a missing or
 // malformed setting fails fast with a clear message instead of at the first request.
 const Env = z.object({
-  ROLE: z.string().default('all').describe('Comma-separated roles: api, worker, scheduler, or all'),
+  ROLE: z.string().default('all').describe('Comma-separated roles: api, ingest, worker, scheduler, or all'),
   PORT: z.coerce.number().int().default(3000),
   PUBLIC_URL: z.url().optional(),
   DATABASE_URL: z.string().describe('Owner/admin connection, used for migrations and auth tables'),
@@ -14,6 +14,17 @@ const Env = z.object({
     .string()
     .optional()
     .describe('Comma-separated previous master keys, kept only while `cli rotate-keys` re-wraps data keys'),
+  CLICKHOUSE_URL: z.url().default('http://localhost:8123').describe('ClickHouse HTTP endpoint, credentials in the URL if needed'),
+  CLICKHOUSE_DATABASE: z
+    .string()
+    .regex(/^[a-z_][a-z0-9_]*$/)
+    .default('am'),
+  NATS_URL: z.string().default('nats://localhost:4222'),
+  NATS_NAMESPACE: z
+    .string()
+    .regex(/^[a-z_][a-z0-9_]*$/)
+    .default('events')
+    .describe('Stream and subject prefix on the NATS server'),
   TRUSTED_ORIGINS: z.string().optional().describe('Comma-separated extra origins allowed to call auth endpoints'),
 });
 
@@ -30,7 +41,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   appUrl.username = 'am_app';
   appUrl.password = e.APP_DB_PASSWORD;
   return {
-    roles: new Set(e.ROLE === 'all' ? ['api', 'worker', 'scheduler'] : e.ROLE.split(',').map((r) => r.trim())),
+    roles: new Set(e.ROLE === 'all' ? ['api', 'ingest', 'worker', 'scheduler'] : e.ROLE.split(',').map((r) => r.trim())),
     port: e.PORT,
     publicUrl: (e.PUBLIC_URL ?? `http://localhost:${e.PORT}`).replace(/\/$/, ''),
     adminDatabaseUrl: e.DATABASE_URL,
@@ -42,6 +53,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
       e.MASTER_KEY_PREVIOUS?.split(',')
         .map((k) => k.trim())
         .filter(Boolean) ?? [],
+    clickhouse: { url: e.CLICKHOUSE_URL, database: e.CLICKHOUSE_DATABASE },
+    nats: { url: e.NATS_URL, namespace: e.NATS_NAMESPACE },
     trustedOrigins: e.TRUSTED_ORIGINS?.split(',').map((o) => o.trim()) ?? [],
   };
 }

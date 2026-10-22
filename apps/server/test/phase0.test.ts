@@ -222,6 +222,8 @@ beforeAll(async () => {
 
 afterAll(async () => {
   http?.close();
+  await srv?.bus.close();
+  await srv?.events.close();
   await srv?.db.close();
 });
 

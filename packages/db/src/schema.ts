@@ -154,6 +154,25 @@ export const secrets = pgTable(
   (t) => [primaryKey({ columns: [t.workspaceId, t.name] })],
 );
 
+export const sources = pgTable(
+  'sources',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    name: text('name').notNull(),
+    kind: text('kind').$type<'browser' | 'server'>().notNull(),
+    keyHash: text('key_hash').notNull(),
+    publicKey: text('public_key'),
+    keyHint: text('key_hint').notNull(),
+    allowedOrigins: text('allowed_origins').array().notNull().default([]),
+    requiredPurpose: text('required_purpose'),
+    enabled: boolean('enabled').notNull().default(true),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
 export type ApprovalPolicy = 'none' | 'agent_changes' | 'all_publishes';
 export type Role = 'owner' | 'admin' | 'marketer' | 'approver' | 'viewer';
 export type VersionState = 'draft' | 'in_review' | 'published' | 'superseded' | 'rejected';

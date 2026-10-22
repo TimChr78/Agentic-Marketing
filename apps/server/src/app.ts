@@ -2,6 +2,8 @@ import { type AuthConfig, acceptInvitation, authDirectory, createAuth, invitatio
 import { createExecutor, userPrincipal } from '@agentic-marketing/commands';
 import { AppError, newUuid } from '@agentic-marketing/core';
 import { createDb } from '@agentic-marketing/db';
+import { clickHouseStore, lazyNatsBus } from '@agentic-marketing/events';
+import { ingestApi } from '@agentic-marketing/ingest';
 import { localKeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { oauthProviderAuthServerMetadata, oauthProviderOpenIdConfigMetadata } from '@better-auth/oauth-provider';
@@ -22,7 +24,9 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
     ...overrides,
   });
   const keyProvider = localKeyProvider(config.masterKey, config.previousMasterKeys);
-  const executor = createExecutor(db, { keyProvider, directory: authDirectory(db) });
+  const bus = lazyNatsBus(config.nats);
+  const events = clickHouseStore(config.clickhouse);
+  const executor = createExecutor(db, { keyProvider, directory: authDirectory(db), events });
 
   const app = new Hono();
 
@@ -37,6 +41,7 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
   app.get('/readyz', async (c) => {
     try {
       await db.ping();
+      if (!(await events.ping())) throw new Error('ClickHouse is not reachable');
       return c.json({ ok: true });
     } catch {
       return c.json({ ok: false }, 503);
@@ -74,9 +79,11 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
     return c.json(out);
   });
 
+  if (config.roles.has('ingest')) app.route('/', ingestApi({ db, bus }));
+
   const mcp = mcpEndpoint({ auth, db, executor, resource: `${config.publicUrl}/mcp` });
   app.all('/mcp', (c) => mcp(c.req.raw));
   app.route('/', restApi({ auth, db, executor }));
 
-  return { app, db, auth, executor, keyProvider };
+  return { app, db, auth, executor, keyProvider, bus, events };
 }
