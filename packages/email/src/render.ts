@@ -23,6 +23,7 @@ const engine = new Liquid({
     exists: async () => false,
     resolve: (_root: string, file: string) => file,
   },
+  relativeReference: false,
   parseLimit: 300_000,
   renderLimit: 1_000,
   memoryLimit: 20_000_000,

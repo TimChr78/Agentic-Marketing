@@ -5,6 +5,7 @@ import { messageCommands, providerCommands, templateCommands } from '@agentic-ma
 import { sourceCommands } from '@agentic-marketing/ingest';
 import { profileCommands } from '@agentic-marketing/profiles';
 import { secretCommands } from '@agentic-marketing/secrets';
+import { segmentCommands } from '@agentic-marketing/segments';
 
 /** Every command the server exposes. REST routes, OpenAPI, MCP tools and the UI client derive from this list. */
 export const commands = [
@@ -16,6 +17,7 @@ export const commands = [
   ...memberCommands,
   ...sourceCommands,
   ...profileCommands,
+  ...segmentCommands,
   ...secretCommands,
 ] as const;
 export type Commands = typeof commands;

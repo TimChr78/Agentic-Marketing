@@ -149,7 +149,74 @@ const emailTemplate = z.object({
   sampleData: z.record(z.string(), z.unknown()).optional().describe('Example variables for previews, e.g. {"profile":{"firstName":"Ada"}}'),
 });
 
+// Segment DSL (data-platform.md §6): a JSON condition tree that agents read and write and the
+// UI edits. The same definition is evaluated in batch and per person as events arrive.
+const Duration = z
+  .string()
+  .regex(/^P(\d+W|\d+D|T\d+H|T\d+M|\d+DT\d+H)$/, 'ISO 8601 duration such as P7D, P2W, PT6H or PT30M')
+  .describe('Look-back window, e.g. "P7D"');
+const PropKey = z.string().regex(/^[A-Za-z0-9_]{1,64}$/, 'Letters, digits and _');
+const Scalar = z.union([z.string().max(500), z.number(), z.boolean()]);
+export type SegmentCondition =
+  | { all: SegmentCondition[] }
+  | { any: SegmentCondition[] }
+  | { not: SegmentCondition }
+  | {
+      trait: string;
+      op: 'eq' | 'neq' | 'in' | 'gt' | 'gte' | 'lt' | 'lte' | 'exists' | 'not_exists' | 'contains';
+      value?: string | number | boolean | (string | number)[];
+    }
+  | { event: string; where?: Record<string, string | number | boolean>; count?: { gte?: number; lte?: number }; within?: string }
+  | { consent: string }
+  | { segment: string };
+export const segmentCondition: z.ZodType<SegmentCondition> = z.lazy(() =>
+  z.union([
+    z.object({ all: z.array(segmentCondition).min(1).max(50) }).strict(),
+    z.object({ any: z.array(segmentCondition).min(1).max(50) }).strict(),
+    z.object({ not: segmentCondition }).strict(),
+    z
+      .object({
+        trait: PropKey.describe('A non-personal trait, e.g. "city" or "loyaltyTier"'),
+        op: z.enum(['eq', 'neq', 'in', 'gt', 'gte', 'lt', 'lte', 'exists', 'not_exists', 'contains']),
+        value: z.union([Scalar, z.array(z.union([z.string().max(500), z.number()])).max(500)]).optional(),
+      })
+      .strict(),
+    z
+      .object({
+        event: z.string().min(1).max(200).describe('Event name, e.g. "Product Viewed"'),
+        where: z.record(PropKey, Scalar).optional().describe('Property equals value, e.g. {"category":"tents"}'),
+        count: z
+          .object({ gte: z.number().int().min(0).optional(), lte: z.number().int().min(0).optional() })
+          .optional()
+          .describe('How many times; default at least once'),
+        within: Duration.optional(),
+      })
+      .strict(),
+    z
+      .object({
+        consent: z
+          .string()
+          .regex(/^[a-z][a-z0-9_]{0,63}$/)
+          .describe('Purpose the person allows (by its lawful basis)'),
+      })
+      .strict(),
+    z
+      .object({
+        segment: z
+          .string()
+          .regex(/^seg_[0-9a-f]{32}$/)
+          .describe('Members of another (published) segment'),
+      })
+      .strict(),
+  ]),
+);
+const segment = z.object({
+  description: z.string().max(1000).default(''),
+  condition: segmentCondition,
+});
+
 export type TrackingPlan = z.output<typeof trackingPlan>;
+export type SegmentDefinition = z.output<typeof segment>;
 export type EmailTemplate = z.output<typeof emailTemplate>;
 export type Purposes = z.output<typeof purposes>['purposes'];
 
@@ -161,6 +228,13 @@ export const artifactTypes = {
     label: 'E-mail template',
     description: 'An e-mail as MJML with Liquid placeholders, with subject, preheader and purpose. Preview it with templates.preview.',
     content: emailTemplate,
+  },
+  segment: {
+    prefix: 'seg',
+    label: 'Segment',
+    description:
+      'A group of people defined by traits, events in a time window, consent and other segments. Preview it with segments.preview.',
+    content: segment,
   },
   tracking_plan: {
     prefix: 'tpl',

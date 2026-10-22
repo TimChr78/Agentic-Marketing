@@ -338,6 +338,32 @@ export const messages = pgTable(
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
 );
 
+export const segmentMemberships = pgTable(
+  'segment_memberships',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    segmentId: text('segment_id').notNull(),
+    profileId: text('profile_id').notNull(),
+    since: ts('since').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.segmentId, t.profileId] })],
+);
+
+export const segmentRuns = pgTable(
+  'segment_runs',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    segmentId: text('segment_id').notNull(),
+    version: integer('version').notNull(),
+    members: integer('members').notNull(),
+    entered: integer('entered').notNull(),
+    exited: integer('exited').notNull(),
+    tookMs: integer('took_ms').notNull(),
+    at: ts('at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.segmentId] })],
+);
+
 export type ApprovalPolicy = 'none' | 'agent_changes' | 'all_publishes';
 export type Role = 'owner' | 'admin' | 'marketer' | 'approver' | 'viewer';
 export type VersionState = 'draft' | 'in_review' | 'published' | 'superseded' | 'rejected';

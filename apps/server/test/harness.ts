@@ -9,7 +9,7 @@ import pg from 'pg';
 import { createServer } from '../src/app';
 import { loadConfig } from '../src/config';
 import type { Commands } from '../src/registry';
-import { startWorkers } from '../src/workers';
+import { startScheduler, startWorkers } from '../src/workers';
 
 // A complete server (Postgres, ClickHouse, NATS, api + ingest + worker roles) on fresh databases.
 
@@ -75,7 +75,7 @@ export async function startTestServer(name: string, port: number) {
     http = serve({ fetch: srv.app.fetch, port }, (_i: AddressInfo) => resolve());
   });
   const stop = new AbortController();
-  const workers = startWorkers(srv, stop.signal);
+  const workers = [...startWorkers(srv, stop.signal), ...startScheduler(srv, stop.signal, { segmentTickMs: 500 })];
 
   async function signUp(email: string): Promise<User> {
     const res = await fetch(`${base}/api/auth/sign-up/email`, {

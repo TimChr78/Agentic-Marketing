@@ -17,6 +17,34 @@ const errors = Object.fromEntries(
   ].map(([code, description]) => [code, { description, content: { 'application/json': { schema: ErrorBody } } }]),
 );
 
+type Json = Record<string, unknown>;
+
+/**
+ * A command schema as OpenAPI 3.1 JSON Schema, from Zod's own converter (it handles recursive
+ * schemas such as segment conditions). Shared definitions move to components.schemas.
+ */
+function jsonSchema(api: OpenAPIHono, schema: unknown, name: string, io: 'input' | 'output'): Json {
+  const {
+    $defs,
+    $schema: _,
+    ...root
+  } = z.toJSONSchema(schema as z.ZodType, { io, unrepresentable: 'any' }) as Json & { $defs?: Record<string, Json> };
+  const rename = (k: string) => `${name}.${io}.${k}`.replace(/[^A-Za-z0-9._-]/g, '_');
+  const rewrite = (v: unknown): unknown =>
+    Array.isArray(v)
+      ? v.map(rewrite)
+      : v && typeof v === 'object'
+        ? Object.fromEntries(
+            Object.entries(v).map(([k, x]) => [
+              k,
+              k === '$ref' && typeof x === 'string' && x.startsWith('#/$defs/') ? `#/components/schemas/${rename(x.slice(8))}` : rewrite(x),
+            ]),
+          )
+        : v;
+  for (const [k, def] of Object.entries($defs ?? {})) api.openAPIRegistry.registerComponent('schemas', rename(k), rewrite(def) as never);
+  return rewrite(root) as Json;
+}
+
 /** One RPC-style POST route per command, documented as OpenAPI 3.1. Validation happens in the executor. */
 export function restApi(deps: { auth: Auth; db: Db; executor: Executor }) {
   const api = new OpenAPIHono();
@@ -31,8 +59,13 @@ export function restApi(deps: { auth: Auth; db: Db; executor: Executor }) {
       'x-effect': cmd.effect,
       'x-permission': cmd.permission,
       'x-humans-only': cmd.humansOnly ?? false,
-      request: { body: { required: true, content: { 'application/json': { schema: cmd.input } } } },
-      responses: { 200: { description: 'OK', content: { 'application/json': { schema: cmd.output } } }, ...errors },
+      request: {
+        body: { required: true, content: { 'application/json': { schema: jsonSchema(api, cmd.input, cmd.name, 'input') as never } } },
+      },
+      responses: {
+        200: { description: 'OK', content: { 'application/json': { schema: jsonSchema(api, cmd.output, cmd.name, 'output') as never } } },
+        ...errors,
+      },
     });
     api.openAPIRegistry.registerPath(route);
     api.post(route.path, async (c) => {

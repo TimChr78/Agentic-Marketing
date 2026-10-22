@@ -33,7 +33,7 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
     adapterDeps: { fetch: globalThis.fetch },
     trackClicks: config.trackClicks,
   };
-  const executor = createExecutor(db, { keyProvider, directory: authDirectory(db), events, email });
+  const executor = createExecutor(db, { keyProvider, directory: authDirectory(db), events, bus, email });
 
   const app = new Hono();
 

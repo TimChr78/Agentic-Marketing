@@ -19,6 +19,17 @@ export interface EventStore {
   ): Promise<StoredEvent[]>;
   /** Deletes a person's events (erasure). */
   deleteEventsOf(workspaceId: string, ids: { anonymousIds: string[]; userIds: string[]; profileIds?: string[] }): Promise<void>;
+  /** Matching events per identifier (segments): name, property equality, time window, optional id scope. */
+  countEvents(
+    workspaceId: string,
+    q: {
+      name: string;
+      where?: Record<string, string | number | boolean>;
+      sinceSeconds?: number;
+      ids?: { anonymousIds: string[]; userIds: string[] };
+      excludeEventIds?: string[];
+    },
+  ): Promise<{ anonymousId: string; userId: string; count: number }[]>;
   insertMessageEvents(events: MessageEvent[]): Promise<void>;
   messageEventsOf(workspaceId: string, filter: { messageIds?: string[]; profileId?: string }, limit?: number): Promise<MessageEvent[]>;
   ping(): Promise<boolean>;
@@ -169,6 +180,33 @@ export function clickHouseStore(opts: { url: string; database: string }): EventS
       // Lightweight delete: rows disappear from queries at once and from disk on the next merge.
       await client.command({ query: `DELETE FROM events WHERE ${idFilter}`, query_params: params(workspaceId, ids) });
     },
+    async countEvents(workspaceId, q) {
+      const params: Record<string, unknown> = { ws: workspaceId, name: q.name, exclude: q.excludeEventIds ?? [] };
+      const where = Object.entries(q.where ?? {}).map(([k, v], i) => {
+        // Keys are validated as [A-Za-z0-9_]; values travel as parameters.
+        if (!/^[A-Za-z0-9_]{1,64}$/.test(k)) throw new Error(`invalid property name ${k}`);
+        params[`v${i}`] = String(v);
+        return `toString(properties.\`${k}\`) = {v${i}:String}`;
+      });
+      if (q.sinceSeconds) params.since = q.sinceSeconds;
+      if (q.ids) Object.assign(params, { anon: q.ids.anonymousIds, users: q.ids.userIds });
+      const rs = await client.query({
+        query: `SELECT anonymous_id, user_id, count() AS c FROM events FINAL
+                WHERE workspace_id = {ws:UUID} AND name = {name:String}
+                ${q.sinceSeconds ? 'AND timestamp >= now64(3) - toIntervalSecond({since:UInt32})' : ''}
+                ${q.ids ? 'AND (anonymous_id IN {anon:Array(String)} OR user_id IN {users:Array(String)})' : ''}
+                ${q.excludeEventIds?.length ? 'AND event_id NOT IN {exclude:Array(String)}' : ''}
+                ${where.map((w) => `AND ${w}`).join(' ')}
+                GROUP BY anonymous_id, user_id`,
+        query_params: params,
+        format: 'JSONEachRow',
+      });
+      return (await rs.json<{ anonymous_id: string; user_id: string; c: number }>()).map((r) => ({
+        anonymousId: r.anonymous_id,
+        userId: r.user_id,
+        count: Number(r.c),
+      }));
+    },
     async insertMessageEvents(events) {
       if (!events.length) return;
       await client.insert({
@@ -230,6 +268,7 @@ export function clickHouseStore(opts: { url: string; database: string }): EventS
 declare module '@agentic-marketing/commands' {
   interface Services {
     events: EventStore;
+    bus: import('./bus').EventBus;
   }
 }
 

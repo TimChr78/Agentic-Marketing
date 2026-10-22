@@ -5,7 +5,7 @@ import { initTelemetry, logger, shutdownTelemetry } from '@agentic-marketing/tel
 import { serve } from '@hono/node-server';
 import { createServer } from './app';
 import { loadConfig } from './config';
-import { startWorkers } from './workers';
+import { startScheduler, startWorkers } from './workers';
 
 // One image, several roles (ADR-0002): `api` (UI, REST, MCP), `ingest` (event collection),
 // `worker` (event consumers) and `scheduler` (arrives with the journey runtime).
@@ -25,8 +25,10 @@ if (config.roles.has('api') || config.roles.has('ingest')) {
   );
 }
 const stopWorkers = new AbortController();
-const workers = config.roles.has('worker') ? startWorkers(srv, stopWorkers.signal) : [];
-if (config.roles.has('scheduler')) logger.info('scheduler role has nothing to run yet (Phase 2)');
+const workers = [
+  ...(config.roles.has('worker') ? startWorkers(srv, stopWorkers.signal) : []),
+  ...(config.roles.has('scheduler') ? startScheduler(srv, stopWorkers.signal) : []),
+];
 
 const shutdown = async () => {
   logger.info('shutting down');
