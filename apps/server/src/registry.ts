@@ -3,6 +3,7 @@ import { memberCommands } from '@agentic-marketing/auth';
 import type { AnyCommand } from '@agentic-marketing/commands';
 import { messageCommands, providerCommands, templateCommands } from '@agentic-marketing/email';
 import { sourceCommands } from '@agentic-marketing/ingest';
+import { journeyCommands } from '@agentic-marketing/journeys';
 import { profileCommands } from '@agentic-marketing/profiles';
 import { secretCommands } from '@agentic-marketing/secrets';
 import { segmentCommands } from '@agentic-marketing/segments';
@@ -18,6 +19,7 @@ export const commands = [
   ...sourceCommands,
   ...profileCommands,
   ...segmentCommands,
+  ...journeyCommands,
   ...secretCommands,
 ] as const;
 export type Commands = typeof commands;

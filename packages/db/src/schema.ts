@@ -364,6 +364,31 @@ export const segmentRuns = pgTable(
   (t) => [primaryKey({ columns: [t.workspaceId, t.segmentId] })],
 );
 
+export type ParticipantStatus = 'ready' | 'waiting' | 'completed' | 'exited' | 'failed';
+export const journeyParticipants = pgTable(
+  'journey_participants',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: bigserial('id', { mode: 'number' }).notNull(),
+    journeyId: text('journey_id').notNull(),
+    version: integer('version').notNull(),
+    profileId: text('profile_id').notNull(),
+    entryKey: text('entry_key').notNull(),
+    node: text('node').notNull(),
+    status: text('status').$type<ParticipantStatus>().notNull(),
+    seq: integer('seq').notNull().default(0),
+    dueAt: ts('due_at'),
+    waitingEvent: text('waiting_event'),
+    matched: boolean('matched').notNull().default(false),
+    converted: boolean('converted').notNull().default(false),
+    context: jsonb('context').$type<Record<string, unknown>>().notNull().default({}),
+    error: text('error'),
+    enteredAt: ts('entered_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
 export type ApprovalPolicy = 'none' | 'agent_changes' | 'all_publishes';
 export type Role = 'owner' | 'admin' | 'marketer' | 'approver' | 'viewer';
 export type VersionState = 'draft' | 'in_review' | 'published' | 'superseded' | 'rejected';

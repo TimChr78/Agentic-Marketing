@@ -31,6 +31,9 @@ export interface EventStore {
     },
   ): Promise<{ anonymousId: string; userId: string; count: number }[]>;
   insertMessageEvents(events: MessageEvent[]): Promise<void>;
+  insertJourneyEvents(events: JourneyEvent[]): Promise<void>;
+  /** Per node and event type counts for a journey (analytics, canvas overlays). */
+  journeyCounts(workspaceId: string, journeyId: string): Promise<{ node: string; type: string; count: number }[]>;
   messageEventsOf(workspaceId: string, filter: { messageIds?: string[]; profileId?: string }, limit?: number): Promise<MessageEvent[]>;
   ping(): Promise<boolean>;
   close(): Promise<void>;
@@ -64,6 +67,19 @@ export interface MessageEvent {
   journeyId: string;
   reason: string;
   url: string;
+}
+
+export interface JourneyEvent {
+  workspaceId: string;
+  journeyId: string;
+  version: number;
+  participantId: number;
+  profileId: string;
+  node: string;
+  type: 'entered' | 'step' | 'waiting' | 'resumed' | 'converted' | 'completed' | 'exited' | 'failed';
+  seq: number;
+  at: string;
+  detail: string;
 }
 
 export interface StoredEvent {
@@ -172,10 +188,11 @@ export function clickHouseStore(opts: { url: string; database: string }): EventS
     },
     async deleteEventsOf(workspaceId, ids) {
       if (ids.profileIds?.length)
-        await client.command({
-          query: 'DELETE FROM message_events WHERE workspace_id = {ws:UUID} AND profile_id IN {profiles:Array(String)}',
-          query_params: { ws: workspaceId, profiles: ids.profileIds },
-        });
+        for (const table of ['message_events', 'journey_events'])
+          await client.command({
+            query: `DELETE FROM ${table} WHERE workspace_id = {ws:UUID} AND profile_id IN {profiles:Array(String)}`,
+            query_params: { ws: workspaceId, profiles: ids.profileIds },
+          });
       if (!ids.anonymousIds.length && !ids.userIds.length) return;
       // Lightweight delete: rows disappear from queries at once and from disk on the next merge.
       await client.command({ query: `DELETE FROM events WHERE ${idFilter}`, query_params: params(workspaceId, ids) });
@@ -229,6 +246,34 @@ export function clickHouseStore(opts: { url: string; database: string }): EventS
           url: e.url,
         })),
       });
+    },
+    async insertJourneyEvents(events) {
+      if (!events.length) return;
+      await client.insert({
+        table: 'journey_events',
+        format: 'JSONEachRow',
+        values: events.map((e) => ({
+          workspace_id: e.workspaceId,
+          journey_id: e.journeyId,
+          version: e.version,
+          participant_id: e.participantId,
+          profile_id: e.profileId,
+          node: e.node,
+          type: e.type,
+          seq: e.seq,
+          at: e.at.replace('Z', ''),
+          detail: e.detail,
+        })),
+      });
+    },
+    async journeyCounts(workspaceId, journeyId) {
+      const rs = await client.query({
+        query: `SELECT node, type, uniqExact(participant_id) AS c FROM journey_events FINAL
+                WHERE workspace_id = {ws:UUID} AND journey_id = {j:String} GROUP BY node, type`,
+        query_params: { ws: workspaceId, j: journeyId },
+        format: 'JSONEachRow',
+      });
+      return (await rs.json<{ node: string; type: string; c: number }>()).map((r) => ({ node: r.node, type: r.type, count: Number(r.c) }));
     },
     async messageEventsOf(workspaceId, filter, limit = 200) {
       const rs = await client.query({

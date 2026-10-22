@@ -32,14 +32,48 @@ const journeyNode = z.object({
   kind: z.enum(nodeKinds),
   label: z.string().min(1).max(120),
   config: z
-    .record(z.string(), z.union([z.string(), z.number(), z.boolean()]))
+    .record(z.string(), z.unknown())
     .default({})
-    .describe('Step settings, e.g. {"duration":"P2D"}'),
+    .describe('Settings for the kind; see journeyNodeConfigs, e.g. wait: {"duration":"P2D"}'),
   next: z
     .array(z.object({ to: z.string(), label: z.string().max(40).optional() }))
     .optional()
-    .describe('Steps this one continues to. Omit to continue with the following node.'),
+    .describe(
+      'Steps this one continues to, in order (waitEvent/goal: [matched, timeout]; branch: [yes, no]; split: one per weight). Omit to continue with the following node.',
+    ),
+  position: z.object({ x: z.number(), y: z.number() }).optional().describe('Canvas position; no effect on behaviour'),
 });
+
+const Iso = z.string().regex(/^P(\d+W|\d+D|T\d+H|T\d+M|\d+DT\d+H)$/, 'ISO 8601 duration such as P2D, PT6H, P1W');
+const SegmentRef = z.string().regex(/^seg_[0-9a-f]{32}$/);
+
+/** Settings per node kind (validated on save). Kinds without one cannot be published yet. */
+export const journeyNodeConfigs = {
+  trigger: z
+    .object({
+      event: z.string().min(1).max(200).optional().describe('Enter when this event happens, e.g. "Signed Up"'),
+      segment: SegmentRef.optional().describe('Enter when the person enters this segment'),
+      reentry: z
+        .enum(['once', 'after_exit', 'always'])
+        .default('once')
+        .describe('once: never again; after_exit: when not in the journey; always: every time'),
+    })
+    .refine((c) => !!c.event !== !!c.segment, 'Set exactly one of event or segment'),
+  wait: z.object({ duration: Iso }),
+  waitEvent: z.object({ event: z.string().min(1).max(200), timeout: Iso }),
+  goal: z.object({ event: z.string().min(1).max(200), within: Iso }),
+  branch: z
+    .object({ segment: SegmentRef.optional(), condition: z.unknown().optional().describe('A segment condition, evaluated for the person') })
+    .refine((c) => !!c.segment !== (c.condition !== undefined), 'Set exactly one of segment or condition'),
+  split: z.object({ weights: z.array(z.number().int().min(0).max(100)).min(2).max(5).describe('Relative weights, one per outgoing edge') }),
+  email: z.object({ template: z.string().regex(/^eml_[0-9a-f]{32}$/, 'An e-mail template id (eml_…)') }),
+  updateProfile: z.object({
+    trait: z.string().regex(/^[A-Za-z0-9_]{1,64}$/),
+    value: z.union([z.string().max(500), z.number(), z.boolean(), z.null()]),
+  }),
+  exit: z.object({}),
+} as const;
+
 const journey = z.object({
   purpose: Key.describe('Purpose key of the messages, e.g. "marketing_email"; the send gateway derives the lawful basis from it'),
   goal: z.string().max(200).optional(),
@@ -58,6 +92,22 @@ const journey = z.object({
           if (!ids.has(e.to)) ctx.addIssue({ code: 'custom', message: `Node "${n.id}" continues to unknown node "${e.to}"` });
       const triggers = nodes.filter((n) => n.kind === 'trigger').length;
       if (triggers !== 1) ctx.addIssue({ code: 'custom', message: `A journey needs exactly one trigger node, found ${triggers}` });
+      for (const n of nodes) {
+        const schema = journeyNodeConfigs[n.kind as keyof typeof journeyNodeConfigs] as z.ZodType | undefined;
+        if (schema) {
+          const r = schema.safeParse(n.config);
+          if (!r.success)
+            for (const i of r.error.issues)
+              ctx.addIssue({ code: 'custom', message: `Node "${n.id}" (${n.kind}): ${[...i.path, ''].join('.')}${i.message}` });
+        }
+        const edges = n.next?.length ?? 0;
+        if (n.kind === 'branch' && edges !== 2) ctx.addIssue({ code: 'custom', message: `Branch "${n.id}" needs two edges: [yes, no]` });
+        if ((n.kind === 'waitEvent' || n.kind === 'goal') && edges > 2)
+          ctx.addIssue({ code: 'custom', message: `"${n.id}" has at most two edges: [matched, timeout]` });
+        const weights = (n.config as { weights?: unknown[] }).weights;
+        if (n.kind === 'split' && Array.isArray(weights) && weights.length !== edges)
+          ctx.addIssue({ code: 'custom', message: `Split "${n.id}" needs one edge per weight (${weights.length})` });
+      }
     }),
 });
 
@@ -316,3 +366,7 @@ export const artifactTypeEnum = z.enum(ARTIFACT_TYPES);
  */
 export type ContentValidator = (content: unknown) => string[];
 export const contentValidators = new Map<ArtifactType, ContentValidator>();
+/** Checks that only apply to publishing (a draft may be unfinished), e.g. referenced templates exist. */
+export type PublishValidator = (content: unknown, tx: import('@agentic-marketing/db').Tx) => Promise<string[]>;
+export const publishValidators = new Map<ArtifactType, PublishValidator>();
+export type JourneyDefinition = z.output<typeof journey>;

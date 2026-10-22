@@ -1,5 +1,6 @@
 import { runDeliveryWorker } from '@agentic-marketing/email';
 import { runSink } from '@agentic-marketing/events';
+import { journeyHook, runSweeper } from '@agentic-marketing/journeys';
 import { runProfileWorkers } from '@agentic-marketing/profiles';
 import { runSegmentScheduler, segmentHook } from '@agentic-marketing/segments';
 import { logger } from '@agentic-marketing/telemetry';
@@ -22,12 +23,18 @@ export function startWorkers(srv: ReturnType<typeof createServer>, signal: Abort
       logger.error({ err, worker: name }, 'worker stopped');
       throw err;
     });
-  logger.info('worker role: ClickHouse sink, profile workers, e-mail delivery');
+  logger.info('worker role: ClickHouse sink, profile workers, journeys, e-mail delivery');
   return [
     run('clickhouse-sink', runSink(srv.bus, srv.events, signal)),
+    run('journey-sweeper', runSweeper(srv.db, { kp: srv.keyProvider, events: srv.events }, signal)),
     run('email-delivery', runDeliveryWorker(srv.db, { kp: srv.keyProvider, events: srv.events, email: srv.email }, signal)),
     ...runProfileWorkers(
-      { bus: srv.bus, db: srv.db, kp: srv.keyProvider, after: [segmentHook({ db: srv.db, events: srv.events, bus: srv.bus })] },
+      {
+        bus: srv.bus,
+        db: srv.db,
+        kp: srv.keyProvider,
+        after: [segmentHook({ db: srv.db, events: srv.events, bus: srv.bus }), journeyHook(srv.db)],
+      },
       signal,
     ).map((p, i) => run(`profiles-${i}`, p)),
   ];

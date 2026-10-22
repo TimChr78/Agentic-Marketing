@@ -19,6 +19,7 @@
     "@agentic-marketing/email": "workspace:*",
     "@agentic-marketing/events": "workspace:*",
     "@agentic-marketing/ingest": "workspace:*",
+    "@agentic-marketing/journeys": "workspace:*",
     "@agentic-marketing/profiles": "workspace:*",
     "@agentic-marketing/secrets": "workspace:*",
     "@agentic-marketing/segments": "workspace:*",

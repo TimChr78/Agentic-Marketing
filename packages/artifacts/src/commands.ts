@@ -4,7 +4,7 @@ import { schema, type VersionState } from '@agentic-marketing/db';
 import { and, desc, eq } from 'drizzle-orm';
 import { z } from 'zod';
 import { diffJson } from './diff';
-import { type ArtifactType, artifactTypeEnum, artifactTypes, contentValidators } from './types';
+import { type ArtifactType, artifactTypeEnum, artifactTypes, contentValidators, publishValidators } from './types';
 
 // Generic, versioned artifacts with a configurable approval pipeline (journeys-and-editors.md §5).
 // Published versions are immutable; edits always produce or update a draft.
@@ -91,8 +91,14 @@ async function setVersionState(ctx: CommandContext, artifactId: string, number: 
     );
 }
 
+async function checkPublishable(ctx: CommandContext, type: string, content: unknown) {
+  const problems = (await publishValidators.get(type as ArtifactType)?.(content, ctx.tx)) ?? [];
+  if (problems.length) throw new AppError('invalid_input', `This ${type} cannot be published yet: ${problems.join('; ')}`, { problems });
+}
+
 async function publishVersion(ctx: CommandContext, artifactId: string, number: number) {
   const a = await loadArtifact(ctx, artifactId);
+  await checkPublishable(ctx, a.type, (await loadVersion(ctx, artifactId, number)).content);
   if (a.publishedVersion && a.publishedVersion !== number) await setVersionState(ctx, artifactId, a.publishedVersion, 'superseded');
   await setVersionState(ctx, artifactId, number, 'published');
   await ctx.tx
@@ -389,6 +395,7 @@ export const requestPublish = defineCommand({
         'conflict',
         `The latest version (v${v.number}) is ${v.state.replace('_', ' ')}, not a draft. Edit it first to create a new draft.`,
       );
+    await checkPublishable(ctx, a.type, v.content);
     const [w] = await ctx.tx
       .select({ policy: schema.workspaces.approvalPolicy })
       .from(schema.workspaces)
