@@ -31,6 +31,7 @@
     "zod": "4.6.7"
   },
   "devDependencies": {
+    "@agentic-marketing/sdk-js": "workspace:*",
     "@modelcontextprotocol/client": "2.3.1",
     "@types/pg": "8.23.1",
     "pg": "8.23.1"

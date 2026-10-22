@@ -331,3 +331,42 @@ describe('tracking plan at ingest', () => {
     expect(stored[0].properties).toEqual({ total: 99 });
   });
 });
+
+describe('sdk-js against the gateway', () => {
+  it('collects nothing before consent, then builds a profile with the consent on record', async () => {
+    const { createAnalytics } = await import('@agentic-marketing/sdk-js');
+    const owner3 = await t.signUp(`owner3-${Date.now()}@example.com`);
+    const ws3 = await t.workspaceWith([[owner3, 'owner']]);
+    const api = t.api(owner3);
+    const { key } = await api.call('sources.create', { name: 'Site', kind: 'browser', allowedOrigins: ['*'] });
+    const a = createAnalytics({
+      writeKey: key,
+      host: t.base,
+      storage: null,
+      page: () => ({ path: '/', url: 'https://x.example/', title: 'Home', referrer: '' }),
+    });
+
+    a.page('Home');
+    await a.flush();
+    a.setConsent({ analytics: true, marketing_email: true });
+    a.identify('sdk-user', { email: 'sdk@example.com', plan: 'free' });
+    await a.flush();
+
+    const { profileId } = await eventually(
+      () => api.call('profiles.find', { type: 'user_id', value: 'sdk-user' }),
+      (r) => !!r.profileId,
+    );
+    const p = await eventually(
+      () => api.call('profiles.get', { profileId: profileId! }),
+      (x) => x.consent.length === 2,
+    );
+    expect(p).toMatchObject({ traits: { plan: 'free' }, personal: { email: 'sdk@example.com' } });
+    expect(p.consent.map((c) => `${c.purpose}:${c.status}`).sort()).toEqual(['analytics:granted', 'marketing_email:granted']);
+    const { events } = await eventually(
+      () => api.call('profiles.events', { profileId: profileId! }),
+      (r) => r.events.length === 3,
+    );
+    expect(events.map((e) => e.name).sort()).toEqual(['Home', 'Segment Consent Preference Updated', 'identify']);
+    expect(ws3).toBeTruthy();
+  });
+});
