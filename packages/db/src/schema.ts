@@ -134,6 +134,7 @@ export const dataKeys = pgTable(
     kekId: text('kek_id').notNull(),
     wrappedKey: bytea('wrapped_key').notNull(),
     active: boolean('active').notNull().default(true),
+    purpose: text('purpose').$type<'secrets' | 'identity' | 'matching'>().notNull().default('secrets'),
     createdAt: ts('created_at').notNull().defaultNow(),
   },
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
@@ -169,6 +170,122 @@ export const sources = pgTable(
     enabled: boolean('enabled').notNull().default(true),
     createdAt: ts('created_at').notNull().defaultNow(),
     updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
+export const profiles = pgTable(
+  'profiles',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    mergedInto: text('merged_into'),
+    traits: jsonb('traits').$type<Record<string, unknown>>().notNull().default({}),
+    pii: bytea('pii'),
+    firstSeen: ts('first_seen').notNull().defaultNow(),
+    lastSeen: ts('last_seen').notNull().defaultNow(),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
+export const profileKeys = pgTable(
+  'profile_keys',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    profileId: text('profile_id').notNull(),
+    dataKeyId: text('data_key_id').notNull(),
+    wrappedKey: bytea('wrapped_key').notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.profileId] })],
+);
+
+export type IdentifierType = 'anonymous_id' | 'user_id' | 'email' | 'phone';
+export const identifiers = pgTable(
+  'identifiers',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    type: text('type').$type<IdentifierType>().notNull(),
+    value: text('value').notNull(),
+    profileId: text('profile_id').notNull(),
+    valueEnc: bytea('value_enc'),
+    firstSeen: ts('first_seen').notNull().defaultNow(),
+    lastSeen: ts('last_seen').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.type, t.value] })],
+);
+
+export const profileMerges = pgTable(
+  'profile_merges',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    fromId: text('from_id').notNull(),
+    intoId: text('into_id').notNull(),
+    reason: text('reason').notNull(),
+    at: ts('at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.fromId] })],
+);
+
+export type ConsentStatus = 'granted' | 'denied' | 'withdrawn' | 'objected';
+export type ConsentSource = 'sdk' | 'form' | 'import' | 'api' | 'unsubscribe' | 'agent';
+export const consentRecords = pgTable(
+  'consent_records',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: bigserial('id', { mode: 'number' }).notNull(),
+    profileId: text('profile_id').notNull(),
+    purpose: text('purpose').notNull(),
+    channel: text('channel').notNull().default(''),
+    status: text('status').$type<ConsentStatus>().notNull(),
+    basis: text('basis').notNull(),
+    source: text('source').$type<ConsentSource>().notNull(),
+    proof: jsonb('proof').$type<Record<string, unknown>>().notNull().default({}),
+    messageId: text('message_id'),
+    recordedAt: ts('recorded_at').notNull().defaultNow(),
+    recordedBy: text('recorded_by'),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
+export const consentState = pgTable(
+  'consent_state',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    profileId: text('profile_id').notNull(),
+    purpose: text('purpose').notNull(),
+    channel: text('channel').notNull().default(''),
+    status: text('status').$type<ConsentStatus>().notNull(),
+    basis: text('basis').notNull(),
+    source: text('source').$type<ConsentSource>().notNull(),
+    updatedAt: ts('updated_at').notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.profileId, t.purpose, t.channel] })],
+);
+
+export const suppressions = pgTable(
+  'suppressions',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    channel: text('channel').notNull(),
+    valueHash: text('value_hash').notNull(),
+    reason: text('reason').notNull(),
+    at: ts('at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.channel, t.valueHash] })],
+);
+
+export const erasures = pgTable(
+  'erasures',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    profileIds: text('profile_ids').array().notNull(),
+    requestedBy: text('requested_by').notNull(),
+    reason: text('reason').notNull(),
+    counts: jsonb('counts').$type<Record<string, number>>().notNull(),
+    at: ts('at').notNull().defaultNow(),
   },
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
 );

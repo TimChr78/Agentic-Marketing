@@ -91,11 +91,12 @@ export async function natsBus(opts: { url: string; namespace?: string; retention
       while (!signal.aborted) {
         const msgs: JsMsg[] = [];
         const started = Date.now();
-        while (msgs.length < (o.maxBatch ?? 1000) && Date.now() - started < (o.maxWaitMs ?? 1000) && !signal.aborted) {
+        // Always fetch at least once (the fetch itself waits up to a second for messages), then keep
+        // filling the batch while there is time left.
+        do {
           const batch = await consumer.fetch({ max_messages: (o.maxBatch ?? 1000) - msgs.length, expires: 1000 });
           for await (const m of batch) msgs.push(m);
-          if (msgs.length && o.maxWaitMs === 0) break;
-        }
+        } while (msgs.length < (o.maxBatch ?? 1000) && Date.now() - started < (o.maxWaitMs ?? 1000) && !signal.aborted);
         if (!msgs.length) continue;
         try {
           await handler(msgs.map((m) => JSON.parse(dec.decode(m.data)) as BusEvent));

@@ -1,0 +1,437 @@
+import { DEFAULT_PURPOSES, publishedSingleton, type TrackingPlan } from '@agentic-marketing/artifacts';
+import { type CommandContext, defineCommand } from '@agentic-marketing/commands';
+import { AppError, newId } from '@agentic-marketing/core';
+import { type IdentifierType, schema } from '@agentic-marketing/db';
+import { and, desc, eq, inArray, isNull, lt } from 'drizzle-orm';
+import { z } from 'zod';
+import { consentStateOf, mergedFamily, purposeAllowed, recordConsent } from './consent';
+import { personCrypto } from './crypto';
+
+// Profile, consent and data-subject-request commands. Personal data is decrypted only for
+// principals with profiles:pii; agents additionally see only traits the attribute schema marks
+// agent-visible. Reads of personal data are audited.
+
+const ProfileId = z.string().regex(/^prf_[0-9a-f]{32}$/);
+const HIDDEN = '[hidden]';
+
+async function canonical(ctx: CommandContext, profileId: string) {
+  let id = profileId;
+  for (let i = 0; i < 20; i++) {
+    const [p] = await ctx.tx
+      .select()
+      .from(schema.profiles)
+      .where(and(eq(schema.profiles.workspaceId, ctx.principal.workspaceId), eq(schema.profiles.id, id)));
+    if (!p) throw new AppError('not_found', `No profile ${profileId}. Find people with profiles.find or profiles.list.`);
+    if (!p.mergedInto) return p;
+    id = p.mergedInto;
+  }
+  throw new Error('merge chain too long');
+}
+
+async function purposesOf(ctx: CommandContext) {
+  return (await publishedSingleton(ctx.tx, 'purposes'))?.purposes ?? DEFAULT_PURPOSES;
+}
+
+/** Which personal values this principal may see in clear. */
+function piiFilter(ctx: CommandContext, plan: TrackingPlan | null) {
+  if (!ctx.principal.permissions.has('profiles:pii')) return () => false;
+  if (ctx.principal.type === 'user') return () => true;
+  const visible = new Set(plan?.traits.filter((t) => t.agentVisible).map((t) => t.name));
+  return (name: string) => visible.has(name);
+}
+
+async function identifiersOf(ctx: CommandContext, profileId: string) {
+  return ctx.tx
+    .select()
+    .from(schema.identifiers)
+    .where(and(eq(schema.identifiers.workspaceId, ctx.principal.workspaceId), eq(schema.identifiers.profileId, profileId)))
+    .orderBy(schema.identifiers.firstSeen);
+}
+
+const Identifier = z.object({ type: z.string(), value: z.string(), firstSeen: z.string(), lastSeen: z.string() });
+const ConsentEntry = z.object({
+  purpose: z.string(),
+  channel: z.string(),
+  status: z.string(),
+  basis: z.string(),
+  source: z.string(),
+  updatedAt: z.string(),
+});
+const ProfileOut = z.object({
+  id: z.string(),
+  traits: z.record(z.string(), z.unknown()).describe('Traits that are not personal data'),
+  personal: z.record(z.string(), z.unknown()).describe(`Personal traits; values are "${HIDDEN}" without profiles:pii`),
+  identifiers: z.array(Identifier),
+  consent: z.array(ConsentEntry),
+  mergedFrom: z.array(z.string()),
+  firstSeen: z.string(),
+  lastSeen: z.string(),
+});
+
+async function profileOut(ctx: CommandContext, p: typeof schema.profiles.$inferSelect) {
+  const ws = ctx.principal.workspaceId;
+  const crypto = personCrypto(ctx.tx, ws, ctx.services.keyProvider);
+  const show = piiFilter(ctx, await publishedSingleton(ctx.tx, 'tracking_plan'));
+  const pii = (await crypto.open<Record<string, unknown>>(p.id, p.pii)) ?? {};
+  const ids = await identifiersOf(ctx, p.id);
+  const personal: Record<string, unknown> = {};
+  const identifiers = [];
+  for (const i of ids) {
+    let value = i.value;
+    if (i.type === 'email' || i.type === 'phone') {
+      const plain = await crypto.open<string>(p.id, i.valueEnc);
+      value = show(i.type) && plain ? plain : HIDDEN;
+      personal[i.type] = value;
+    }
+    identifiers.push({ type: i.type, value, firstSeen: i.firstSeen.toISOString(), lastSeen: i.lastSeen.toISOString() });
+  }
+  for (const [k, v] of Object.entries(pii)) personal[k] = show(k) ? v : HIDDEN;
+  const family = await mergedFamily(ctx.tx, ws, p.id);
+  return {
+    id: p.id,
+    traits: p.traits,
+    personal,
+    identifiers,
+    consent: (await consentStateOf(ctx.tx, ws, p.id)).map((c) => ({ ...c, updatedAt: c.updatedAt.toISOString() })),
+    mergedFrom: family.filter((id) => id !== p.id),
+    firstSeen: p.firstSeen.toISOString(),
+    lastSeen: p.lastSeen.toISOString(),
+  };
+}
+
+export const listProfiles = defineCommand({
+  name: 'profiles.list',
+  title: 'Recently active profiles',
+  description: 'People (known and anonymous) by most recent activity, without personal data. Page with `before` (a lastSeen value).',
+  input: z.object({ limit: z.number().int().min(1).max(200).default(50), before: z.iso.datetime().optional() }),
+  output: z.object({
+    profiles: z.array(
+      z.object({
+        id: z.string(),
+        traits: z.record(z.string(), z.unknown()),
+        known: z.boolean(),
+        lastSeen: z.string(),
+        firstSeen: z.string(),
+      }),
+    ),
+  }),
+  permission: 'profiles:read',
+  effect: 'read',
+  handler: async (input, ctx) => {
+    const rows = await ctx.tx
+      .select()
+      .from(schema.profiles)
+      .where(and(isNull(schema.profiles.mergedInto), input.before ? lt(schema.profiles.lastSeen, new Date(input.before)) : undefined))
+      .orderBy(desc(schema.profiles.lastSeen))
+      .limit(input.limit);
+    const knownIds = rows.length
+      ? new Set(
+          (
+            await ctx.tx
+              .select({ profileId: schema.identifiers.profileId })
+              .from(schema.identifiers)
+              .where(
+                and(
+                  inArray(
+                    schema.identifiers.profileId,
+                    rows.map((r) => r.id),
+                  ),
+                  inArray(schema.identifiers.type, ['user_id', 'email', 'phone']),
+                ),
+              )
+          ).map((r) => r.profileId),
+        )
+      : new Set<string>();
+    return {
+      profiles: rows.map((r) => ({
+        id: r.id,
+        traits: r.traits,
+        known: knownIds.has(r.id),
+        lastSeen: r.lastSeen.toISOString(),
+        firstSeen: r.firstSeen.toISOString(),
+      })),
+    };
+  },
+});
+
+export const findProfile = defineCommand({
+  name: 'profiles.find',
+  title: 'Find a person',
+  description:
+    'Look a person up by e-mail, phone, user id or anonymous id. E-mail and phone are matched by hash, so this works without seeing personal data.',
+  input: z.object({ type: z.enum(['email', 'phone', 'user_id', 'anonymous_id']), value: z.string().min(1).max(320) }),
+  output: z.object({ profileId: z.string().nullable() }),
+  permission: 'profiles:read',
+  effect: 'read',
+  sensitive: ['value'],
+  handler: async (input, ctx) => {
+    const crypto = personCrypto(ctx.tx, ctx.principal.workspaceId, ctx.services.keyProvider);
+    const value = input.type === 'email' || input.type === 'phone' ? await crypto.matchHash(input.type, input.value) : input.value;
+    const [i] = await ctx.tx
+      .select({ profileId: schema.identifiers.profileId })
+      .from(schema.identifiers)
+      .where(and(eq(schema.identifiers.type, input.type as IdentifierType), eq(schema.identifiers.value, value)));
+    return { profileId: i?.profileId ?? null };
+  },
+});
+
+export const getProfile = defineCommand({
+  name: 'profiles.get',
+  title: 'Read a profile',
+  description:
+    'A person’s traits, identifiers and consent. Personal values are shown only with profiles:pii (agents: only traits the tracking plan marks agentVisible). A merged profile id returns the profile it was merged into.',
+  input: z.object({ profileId: ProfileId }),
+  output: ProfileOut,
+  permission: 'profiles:read',
+  effect: 'read',
+  auditReads: true,
+  target: (i) => i.profileId,
+  handler: async (input, ctx) => profileOut(ctx, await canonical(ctx, input.profileId)),
+});
+
+export const profileEvents = defineCommand({
+  name: 'profiles.events',
+  title: 'A person’s events',
+  description: 'Events of a person across all their anonymous and user ids, newest first. Page with `before` (a timestamp).',
+  input: z.object({ profileId: ProfileId, limit: z.number().int().min(1).max(500).default(100), before: z.iso.datetime().optional() }),
+  output: z.object({
+    events: z.array(
+      z.object({
+        eventId: z.string(),
+        type: z.string(),
+        name: z.string(),
+        timestamp: z.string(),
+        properties: z.record(z.string(), z.unknown()),
+        context: z.record(z.string(), z.unknown()),
+      }),
+    ),
+  }),
+  permission: 'profiles:read',
+  effect: 'read',
+  target: (i) => i.profileId,
+  handler: async (input, ctx) => {
+    const p = await canonical(ctx, input.profileId);
+    const ids = await identifiersOf(ctx, p.id);
+    const events = await ctx.services.events.eventsOf(
+      ctx.principal.workspaceId,
+      {
+        anonymousIds: ids.filter((i) => i.type === 'anonymous_id').map((i) => i.value),
+        userIds: ids.filter((i) => i.type === 'user_id').map((i) => i.value),
+      },
+      { limit: input.limit, before: input.before },
+    );
+    return {
+      events: events.map(({ eventId, type, name, timestamp, properties, context }) => ({
+        eventId,
+        type,
+        name,
+        timestamp,
+        properties,
+        context,
+      })),
+    };
+  },
+});
+
+export const listPurposes = defineCommand({
+  name: 'purposes.list',
+  title: 'Processing purposes',
+  description: 'The purposes in force (the published purposes artifact, or the defaults) with their lawful basis.',
+  input: z.object({}),
+  output: z.object({
+    source: z.enum(['published', 'default']),
+    purposes: z.array(
+      z.object({ key: z.string(), name: z.string(), basis: z.string(), channels: z.array(z.string()), description: z.string() }),
+    ),
+  }),
+  permission: 'artifacts:read',
+  effect: 'read',
+  handler: async (_i, ctx) => {
+    const published = await publishedSingleton(ctx.tx, 'purposes');
+    return { source: published ? ('published' as const) : ('default' as const), purposes: published?.purposes ?? DEFAULT_PURPOSES };
+  },
+});
+
+export const recordConsentCommand = defineCommand({
+  name: 'consent.record',
+  title: 'Record consent or an objection',
+  description:
+    'Add an entry to a person’s consent ledger, e.g. a consent given on a form or an objection by phone. Agents may only record restrictions (denied, withdrawn, objected), never a consent.',
+  input: z.object({
+    profileId: ProfileId,
+    purpose: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/),
+    channel: z.enum(['', 'email', 'web', 'sms', 'push', 'webhook']).default(''),
+    status: z.enum(['granted', 'denied', 'withdrawn', 'objected']),
+    source: z.enum(['form', 'import', 'api', 'unsubscribe']).default('api'),
+    proof: z.record(z.string(), z.unknown()).default({}).describe('Evidence: form id and text version, double opt-in token, call notes …'),
+  }),
+  output: z.object({ recorded: z.boolean(), allowed: z.boolean().describe('Whether the purpose is now allowed for this person') }),
+  permission: 'profiles:write',
+  effect: 'write',
+  target: (i) => i.profileId,
+  handler: async (input, ctx) => {
+    if (ctx.principal.type === 'agent' && input.status === 'granted')
+      throw new AppError('forbidden', 'Agents cannot record a consent; only a person (or the person’s own action) can.');
+    const p = await canonical(ctx, input.profileId);
+    const purposes = await purposesOf(ctx);
+    if (!purposes.some((x) => x.key === input.purpose))
+      throw new AppError('invalid_input', `Unknown purpose "${input.purpose}". See purposes.list.`);
+    const n = await recordConsent(ctx.tx, ctx.principal.workspaceId, p.id, purposes, [
+      {
+        purpose: input.purpose,
+        channel: input.channel,
+        status: input.status,
+        source: ctx.principal.type === 'agent' ? 'agent' : input.source,
+        proof: input.proof,
+        recordedBy: ctx.principal.userId,
+      },
+    ]);
+    const state = (await consentStateOf(ctx.tx, ctx.principal.workspaceId, p.id)).find(
+      (s) => s.purpose === input.purpose && s.channel === input.channel,
+    );
+    const basis = purposes.find((x) => x.key === input.purpose)?.basis ?? 'consent';
+    return { recorded: n > 0, allowed: purposeAllowed(basis, state?.status) };
+  },
+});
+
+export const consentHistory = defineCommand({
+  name: 'consent.history',
+  title: 'Consent ledger of a person',
+  description: 'Every consent, refusal, withdrawal and objection recorded for a person (including merged profiles), oldest first.',
+  input: z.object({ profileId: ProfileId }),
+  output: z.object({
+    records: z.array(
+      z.object({
+        purpose: z.string(),
+        channel: z.string(),
+        status: z.string(),
+        basis: z.string(),
+        source: z.string(),
+        proof: z.record(z.string(), z.unknown()),
+        recordedAt: z.string(),
+        recordedBy: z.string().nullable(),
+      }),
+    ),
+  }),
+  permission: 'profiles:read',
+  effect: 'read',
+  target: (i) => i.profileId,
+  handler: async (input, ctx) => {
+    const p = await canonical(ctx, input.profileId);
+    const family = await mergedFamily(ctx.tx, ctx.principal.workspaceId, p.id);
+    const rows = await ctx.tx
+      .select()
+      .from(schema.consentRecords)
+      .where(inArray(schema.consentRecords.profileId, family))
+      .orderBy(schema.consentRecords.recordedAt, schema.consentRecords.id);
+    return {
+      records: rows.map((r) => ({
+        purpose: r.purpose,
+        channel: r.channel,
+        status: r.status,
+        basis: r.basis,
+        source: r.source,
+        proof: r.proof,
+        recordedAt: r.recordedAt.toISOString(),
+        recordedBy: r.recordedBy,
+      })),
+    };
+  },
+});
+
+export const exportProfile = defineCommand({
+  name: 'profiles.export',
+  title: 'Export a person’s data (access request)',
+  description:
+    'Everything held about a person, for a data subject access or portability request: profile, personal data, identifiers, consent ledger and events.',
+  input: z.object({ profileId: ProfileId, maxEvents: z.number().int().min(0).max(100_000).default(10_000) }),
+  output: z.object({
+    exportedAt: z.string(),
+    profile: ProfileOut,
+    consentRecords: z.array(z.record(z.string(), z.unknown())),
+    events: z.array(z.record(z.string(), z.unknown())),
+  }),
+  permission: 'profiles:pii',
+  effect: 'read',
+  humansOnly: true,
+  auditReads: true,
+  target: (i) => i.profileId,
+  handler: async (input, ctx) => {
+    const profile = await getProfile.handler({ profileId: input.profileId }, ctx);
+    const { records } = await consentHistory.handler({ profileId: profile.id }, ctx);
+    const { events } = input.maxEvents
+      ? await profileEvents.handler({ profileId: profile.id, limit: Math.min(input.maxEvents, 500) }, ctx)
+      : { events: [] };
+    // Page through the rest.
+    while (events.length < input.maxEvents && events.length % 500 === 0 && events.length) {
+      const more = await profileEvents.handler(
+        { profileId: profile.id, limit: Math.min(500, input.maxEvents - events.length), before: events[events.length - 1].timestamp },
+        ctx,
+      );
+      if (!more.events.length) break;
+      events.push(...more.events);
+    }
+    return { exportedAt: new Date().toISOString(), profile, consentRecords: records, events };
+  },
+});
+
+export const eraseProfile = defineCommand({
+  name: 'profiles.erase',
+  title: 'Erase a person (erasure request)',
+  description:
+    'Permanently remove a person: profile and merged profiles, identifiers, consent ledger and events. Their encryption key is destroyed, so copies in backups become unreadable. Hashes of their e-mail and phone are kept on a suppression list so they are never contacted again.',
+  input: z.object({ profileId: ProfileId, reason: z.string().min(1).max(500).describe('E.g. "Erasure request by e-mail on 2026-10-22"') }),
+  output: z.object({ erasureId: z.string(), profiles: z.number(), identifiers: z.number(), consentRecords: z.number() }),
+  permission: 'profiles:erase',
+  effect: 'destructive',
+  humansOnly: true,
+  target: (i) => i.profileId,
+  handler: async (input, ctx) => {
+    const ws = ctx.principal.workspaceId;
+    const p = await canonical(ctx, input.profileId);
+    const family = await mergedFamily(ctx.tx, ws, p.id);
+    const ids = await ctx.tx.select().from(schema.identifiers).where(inArray(schema.identifiers.profileId, family));
+
+    // Events first: if this fails nothing else has changed, and the erasure can simply be retried.
+    await ctx.services.events.deleteEventsOf(ws, {
+      anonymousIds: ids.filter((i) => i.type === 'anonymous_id').map((i) => i.value),
+      userIds: ids.filter((i) => i.type === 'user_id').map((i) => i.value),
+    });
+
+    const suppress = ids.filter((i) => i.type === 'email' || i.type === 'phone');
+    if (suppress.length)
+      await ctx.tx
+        .insert(schema.suppressions)
+        .values(
+          suppress.map((i) => ({ workspaceId: ws, channel: i.type === 'email' ? 'email' : 'sms', valueHash: i.value, reason: 'erased' })),
+        )
+        .onConflictDoNothing();
+    const consent = await ctx.tx
+      .delete(schema.consentRecords)
+      .where(inArray(schema.consentRecords.profileId, family))
+      .returning({ id: schema.consentRecords.id });
+    await ctx.tx.delete(schema.profileMerges).where(inArray(schema.profileMerges.fromId, family));
+    await ctx.tx.delete(schema.profileMerges).where(inArray(schema.profileMerges.intoId, family));
+    // Cascades to identifiers, profile keys (crypto-shredding) and consent state.
+    await ctx.tx.delete(schema.profiles).where(inArray(schema.profiles.id, family));
+
+    const erasureId = newId('era');
+    const counts = { profiles: family.length, identifiers: ids.length, consentRecords: consent.length };
+    await ctx.tx
+      .insert(schema.erasures)
+      .values({ workspaceId: ws, id: erasureId, profileIds: family, requestedBy: ctx.principal.userId, reason: input.reason, counts });
+    return { erasureId, ...counts };
+  },
+});
+
+export const profileCommands = [
+  listProfiles,
+  findProfile,
+  getProfile,
+  profileEvents,
+  listPurposes,
+  recordConsentCommand,
+  consentHistory,
+  exportProfile,
+  eraseProfile,
+] as const;

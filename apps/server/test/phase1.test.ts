@@ -97,3 +97,237 @@ describe('sources and ingest', () => {
     expect(res.headers.get('access-control-allow-methods')).toBe('POST');
   });
 });
+
+describe('profiles, identity and consent', () => {
+  let key: string;
+  let marketer: User;
+  let profileId: string;
+  const yes = consent({ analytics: true });
+
+  beforeAll(async () => {
+    marketer = await t.signUp(`marketer-${Date.now()}@example.com`);
+    await t.srv.db.admin.query(`INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'marketer')`, [
+      ws,
+      marketer.id,
+    ]);
+    key = (await t.api(owner).call('sources.create', { name: 'Shop 2', kind: 'browser', allowedOrigins: [SHOP] })).key;
+  });
+
+  it('resolves an anonymous visitor to a known person within seconds', async () => {
+    const started = Date.now();
+    await send(key, {
+      batch: [
+        { type: 'page', name: 'Tents', anonymousId: 'dev-a', timestamp: '2026-10-22T08:00:00Z', context: yes },
+        {
+          type: 'identify',
+          timestamp: '2026-10-22T08:00:01Z',
+          anonymousId: 'dev-a',
+          userId: 'u-42',
+          traits: { email: 'Ada@Example.com', firstName: 'Ada', plan: 'pro' },
+          context: yes,
+        },
+      ],
+    });
+    const owners = t.api(owner);
+    const found = await eventually(
+      () => owners.call('profiles.find', { type: 'email', value: 'ada@example.com ' }),
+      (r) => !!r.profileId,
+    );
+    profileId = found.profileId!;
+    const events = await eventually(
+      () => owners.call('profiles.events', { profileId }),
+      (r) => r.events.length === 2,
+    );
+    expect(events.events.map((e) => e.name)).toEqual(['identify', 'Tents']);
+    expect(Date.now() - started).toBeLessThan(5_000);
+
+    const p = await owners.call('profiles.get', { profileId });
+    expect(p.traits).toEqual({ plan: 'pro' });
+    expect(p.personal).toEqual({ email: 'Ada@Example.com', firstName: 'Ada' });
+    expect(p.identifiers.map((i) => i.type).sort()).toEqual(['anonymous_id', 'email', 'user_id']);
+
+    // Personal data is encrypted at rest and only a hash is used for matching.
+    const { rows } = await t.srv.db.admin.query(`SELECT value, value_enc FROM identifiers WHERE type = 'email'`);
+    expect(JSON.stringify(rows)).not.toMatch(/ada@example\.com/i);
+    const ch = await t.srv.events.eventsOf(ws, { anonymousIds: ['dev-a'], userIds: [] });
+    expect(JSON.stringify(ch)).not.toContain('Ada@');
+  });
+
+  it('hides personal data from roles without profiles:pii', async () => {
+    const p = await t.api(marketer).call('profiles.get', { profileId });
+    expect(p.personal).toEqual({ email: '[hidden]', firstName: '[hidden]' });
+    expect(p.identifiers.find((i) => i.type === 'email')?.value).toBe('[hidden]');
+    expect((await rejects(t.api(marketer).call('profiles.export', { profileId }))).status).toBe(403);
+  });
+
+  it('merges a second device when it identifies with the same e-mail', async () => {
+    await send(key, {
+      batch: [
+        { type: 'track', event: 'Product Viewed', anonymousId: 'dev-b', properties: { sku: 'TENT-2' }, context: yes },
+        { type: 'identify', anonymousId: 'dev-b', traits: { email: 'ada@example.com', city: 'Aarhus' }, context: yes },
+      ],
+    });
+    const api = t.api(owner);
+    const merged = await eventually(
+      () => api.call('profiles.get', { profileId }),
+      (p) => p.identifiers.some((i) => i.value === 'dev-b'),
+    );
+    expect(merged.id).toBe(profileId);
+    expect(merged.traits).toEqual({ plan: 'pro', city: 'Aarhus' });
+    expect((await api.call('profiles.find', { type: 'anonymous_id', value: 'dev-b' })).profileId).toBe(profileId);
+    const events = await eventually(
+      () => api.call('profiles.events', { profileId }),
+      (r) => r.events.length === 4,
+    );
+    expect(events.events.map((e) => e.name)).toContain('Product Viewed');
+  });
+
+  it('never joins two different user ids', async () => {
+    await send(key, {
+      batch: [{ type: 'identify', anonymousId: 'dev-c', userId: 'u-99', traits: { email: 'ada@example.com' }, context: yes }],
+    });
+    const api = t.api(owner);
+    await eventually(
+      () => api.call('profiles.find', { type: 'anonymous_id', value: 'dev-c' }),
+      (r) => !!r.profileId,
+    );
+    expect((await api.call('profiles.find', { type: 'user_id', value: 'u-99' })).profileId).toBeNull();
+    const p = await api.call('profiles.get', { profileId });
+    expect(p.identifiers.filter((i) => i.type === 'user_id').map((i) => i.value)).toEqual(['u-42']);
+  });
+
+  it('records consent changes from the SDK in the ledger, and refuses agents granting consent', async () => {
+    const change = (prefs: Record<string, boolean>, id: string) => ({
+      type: 'track',
+      event: 'Segment Consent Preference Updated',
+      anonymousId: 'dev-a',
+      messageId: id,
+      context: { ...consent(prefs), userAgent: 'test' },
+    });
+    await send(key, { batch: [change({ analytics: true, marketing_email: true }, 'c1')] });
+    await send(key, {
+      batch: [change({ analytics: true, marketing_email: false }, 'c2'), change({ analytics: true, marketing_email: false }, 'c2')],
+    });
+    const api = t.api(owner);
+    const history = await eventually(
+      () => api.call('consent.history', { profileId }),
+      (h) => h.records.length === 3,
+    );
+    expect(history.records.map((r) => `${r.purpose}:${r.status}:${r.source}`)).toEqual([
+      'analytics:granted:sdk',
+      'marketing_email:granted:sdk',
+      'marketing_email:withdrawn:sdk',
+    ]);
+    expect(history.records[0].proof).toMatchObject({ messageId: 'c1', userAgent: 'test' });
+    const p = await api.call('profiles.get', { profileId });
+    expect(p.consent.find((c) => c.purpose === 'marketing_email')).toMatchObject({ status: 'withdrawn', basis: 'consent' });
+
+    expect(
+      await api.call('consent.record', {
+        profileId,
+        purpose: 'marketing_email',
+        status: 'granted',
+        source: 'form',
+        proof: { form: 'newsletter-v3' },
+      }),
+    ).toEqual({
+      recorded: true,
+      allowed: true,
+    });
+    const { agentPrincipal } = await import('@agentic-marketing/commands');
+    const { recordConsentCommand } = await import('@agentic-marketing/profiles');
+    const agent = agentPrincipal(owner.id, 'test-agent', ws, 'owner', ['profiles:write']);
+    await expect(
+      t.srv.executor.execute(recordConsentCommand, { profileId, purpose: 'marketing_email', status: 'granted' }, agent, { surface: 'mcp' }),
+    ).rejects.toMatchObject({ code: 'forbidden' });
+    expect(
+      await t.srv.executor.execute(recordConsentCommand, { profileId, purpose: 'marketing_email', status: 'objected' }, agent, {
+        surface: 'mcp',
+      }),
+    ).toEqual({ recorded: true, allowed: false });
+    expect((await rejects(api.call('consent.record', { profileId, purpose: 'telepathy', status: 'denied' }))).status).toBe(400);
+  });
+
+  it('exports everything about a person', async () => {
+    const out = await t.api(owner).call('profiles.export', { profileId });
+    expect(out.profile.personal).toMatchObject({ email: 'Ada@Example.com', firstName: 'Ada' });
+    expect(out.events.length).toBeGreaterThanOrEqual(4);
+    expect(out.consentRecords.length).toBe(5);
+    const { entries } = await t.api(owner).call('audit.list', { limit: 50 });
+    expect(entries.some((e) => e.command === 'profiles.export' && e.target === profileId)).toBe(true);
+  });
+
+  it('erases a person verifiably: events, identifiers, keys and ledger gone, e-mail suppressed', async () => {
+    const api = t.api(owner);
+    expect((await rejects(t.api(marketer).call('profiles.erase', { profileId, reason: 'x' }))).status).toBe(403);
+    const before = await api.call('profiles.get', { profileId });
+    const family = [profileId, ...before.mergedFrom];
+
+    const res = await api.call('profiles.erase', { profileId, reason: 'Erasure request by e-mail' });
+    expect(res).toMatchObject({ profiles: 2, consentRecords: 5 });
+
+    expect((await api.call('profiles.find', { type: 'email', value: 'ada@example.com' })).profileId).toBeNull();
+    expect((await rejects(api.call('profiles.get', { profileId }))).status).toBe(404);
+    expect(await t.srv.events.eventsOf(ws, { anonymousIds: ['dev-a', 'dev-b'], userIds: ['u-42'] })).toEqual([]);
+    for (const table of ['profiles', 'profile_keys', 'identifiers', 'consent_state'])
+      expect(
+        (
+          await t.srv.db.admin.query(
+            `SELECT count(*)::int AS n FROM ${table} WHERE ${table === 'profiles' ? 'id' : 'profile_id'} = ANY($1)`,
+            [family],
+          )
+        ).rows[0].n,
+      ).toBe(0);
+    expect(
+      (await t.srv.db.admin.query('SELECT count(*)::int AS n FROM consent_records WHERE profile_id = ANY($1)', [family])).rows[0].n,
+    ).toBe(0);
+    expect(
+      (await t.srv.db.admin.query(`SELECT reason FROM suppressions WHERE workspace_id = $1 AND channel = 'email'`, [ws])).rows,
+    ).toEqual([{ reason: 'erased' }]);
+    const { rows } = await t.srv.db.admin.query('SELECT counts, reason FROM erasures WHERE workspace_id = $1', [ws]);
+    expect(rows).toEqual([{ counts: { profiles: 2, identifiers: 5, consentRecords: 5 }, reason: 'Erasure request by e-mail' }]);
+  });
+});
+
+describe('tracking plan at ingest', () => {
+  it('removes personal properties and blocks events the published plan forbids', async () => {
+    const owner2 = await t.signUp(`owner2-${Date.now()}@example.com`);
+    const ws2 = await t.workspaceWith([[owner2, 'owner']], 'none');
+    const api = t.api(owner2);
+    const { artifactId } = await api.call('artifacts.create', {
+      type: 'tracking_plan',
+      name: 'Tracking plan',
+      content: {
+        unknownEvents: 'block',
+        events: [
+          {
+            name: 'Order Completed',
+            properties: [
+              { name: 'total', type: 'number', required: true },
+              { name: 'address', pii: true },
+            ],
+          },
+        ],
+      },
+    });
+    expect((await rejects(api.call('artifacts.create', { type: 'tracking_plan', name: 'Second', content: {} }))).status).toBe(409);
+    await api.call('artifacts.requestPublish', { artifactId, note: 'First plan' });
+    const { key } = await api.call('sources.create', { name: 'Shop', kind: 'browser', allowedOrigins: ['*'], requiredPurpose: null });
+
+    const res = await send(key, {
+      batch: [
+        { type: 'track', event: 'Order Completed', anonymousId: 'x1', properties: { total: 99, address: 'Main St 1' } },
+        { type: 'track', event: 'Mystery', anonymousId: 'x1' },
+      ],
+    });
+    expect(await res.json()).toMatchObject({
+      accepted: 1,
+      rejected: [{ index: 1, error: 'Event "Mystery" is not in the tracking plan.' }],
+    });
+    const stored = await eventually(
+      () => t.srv.events.eventsOf(ws2, { anonymousIds: ['x1'], userIds: [] }),
+      (e) => e.length === 1,
+    );
+    expect(stored[0].properties).toEqual({ total: 99 });
+  });
+});

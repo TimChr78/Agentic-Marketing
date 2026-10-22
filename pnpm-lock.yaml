@@ -56,6 +56,9 @@ importers:
       '@agentic-marketing/ingest':
         specifier: workspace:*
         version: link:../../packages/ingest
+      '@agentic-marketing/profiles':
+        specifier: workspace:*
+        version: link:../../packages/profiles
       '@agentic-marketing/secrets':
         specifier: workspace:*
         version: link:../../packages/secrets
@@ -329,6 +332,36 @@ importers:
       hono:
         specifier: 4.13.13
         version: 4.13.13
+      zod:
+        specifier: 4.6.7
+        version: 4.6.7
+
+  packages/profiles:
+    dependencies:
+      '@agentic-marketing/artifacts':
+        specifier: workspace:*
+        version: link:../artifacts
+      '@agentic-marketing/commands':
+        specifier: workspace:*
+        version: link:../commands
+      '@agentic-marketing/core':
+        specifier: workspace:*
+        version: link:../core
+      '@agentic-marketing/db':
+        specifier: workspace:*
+        version: link:../db
+      '@agentic-marketing/events':
+        specifier: workspace:*
+        version: link:../events
+      '@agentic-marketing/secrets':
+        specifier: workspace:*
+        version: link:../secrets
+      '@agentic-marketing/telemetry':
+        specifier: workspace:*
+        version: link:../telemetry
+      drizzle-orm:
+        specifier: 0.45.4
+        version: 0.45.4(@opentelemetry/api@1.10.0)(@types/pg@8.23.1)(kysely@0.29.7)(pg@8.23.1)
       zod:
         specifier: 4.6.7
         version: 4.6.7
