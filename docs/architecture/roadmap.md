@@ -54,7 +54,7 @@ Acceptance: an identified visitor's events are on their profile in about one to 
 
 Known limits, to address later:
 - Events wait in the JetStream stream (with personal traits, for the profile worker) for its retention window, 7 days by default; erasure cannot remove them from there. Keep the NATS volume on encrypted disk, or shorten `retentionDays`.
-- ClickHouse has no row policies yet; tenant scoping lives in the one module that queries it (`packages/events/src/clickhouse.ts`).
+- ClickHouse has no row policies yet; tenant scoping lives in the one module that queries it (`packages/events/src/clickhouse.ts`). Done in wave 2, Phase 10.
 - Tracking-plan warnings are returned to the sender and logged, not yet stored for a report.
 - Segments are in Phase 2 (segments v1), where journeys first need them. Bulk import and bot filtering are not built yet.
 
@@ -71,7 +71,7 @@ Acceptance: a welcome journey (built over REST, as the UI does) and an abandoned
 Known limits, to address later:
 - Frequency caps and quiet hours are not enforced yet; the gateway's decision log is ready for them.
 - No bounce mailbox for pure-SMTP setups; use a relay's webhooks (ADR-0011).
-- Segment evaluation holds ids in memory (fine for the homelab scale; the 10M-profile path moves set operations into SQL/ClickHouse).
+- Segment evaluation holds ids in memory (fine for the homelab scale; the 10M-profile path moves set operations into SQL/ClickHouse). Done in wave 2, Phase 10.
 - A waiting participant whose profile is merged into another is not woken by events of the merged profile.
 - Webhook, AI and A/B result analysis nodes arrive in Phases 4–5; experiments' statistics with Phase 3.
 

@@ -300,6 +300,7 @@ export const adPerformance = defineCommand({
     const until = input.until ?? day(new Date());
     const since = input.since ?? day(new Date(Date.now() - 29 * 86_400_000));
     const ch = ctx.services.events.client;
+    const clickhouse_settings = await ctx.services.events.settingsFor(ws);
     const spend = await (
       await ch.query({
         query: `SELECT platform, campaign_id, argMax(campaign_name, date) AS campaign_name, sum(cost) AS cost, any(currency) AS currency,
@@ -309,6 +310,7 @@ export const adPerformance = defineCommand({
                 GROUP BY platform, campaign_id ORDER BY cost DESC`,
         query_params: { ws, since, until, platform: input.platform ?? '' },
         format: 'JSONEachRow',
+        clickhouse_settings,
       })
     ).json<Record<string, string | number>>();
 
@@ -325,6 +327,7 @@ export const adPerformance = defineCommand({
                     LIMIT 100000`,
             query_params: { ws, names, since: `${since} 00:00:00`, untilEnd: `${day(new Date(Date.parse(until) + 86_400_000))} 00:00:00` },
             format: 'JSONEachRow',
+            clickhouse_settings,
           })
         ).json<{ anonymous_id: string; timestamp: string; name: string; properties: string }>()
       : [];
@@ -341,6 +344,7 @@ export const adPerformance = defineCommand({
                     ORDER BY timestamp`,
             query_params: { ws, visitors, from: `${day(new Date(Date.parse(since) - input.windowDays * 86_400_000))} 00:00:00` },
             format: 'JSONEachRow',
+            clickhouse_settings,
           })
         ).json<{ anonymous_id: string; timestamp: string; campaign: string; source: string }>()
       : [];

@@ -1,8 +1,8 @@
 import type { Db } from '@agentic-marketing/db';
 import { schema } from '@agentic-marketing/db';
-import type { EventBus, EventStore } from '@agentic-marketing/events';
+import type { BusEvent, EventBus, EventStore } from '@agentic-marketing/events';
 import { logger } from '@agentic-marketing/telemetry';
-import { publishedSegments, refreshSegment } from './membership';
+import { publishedSegments, publishInSlices, refreshSegment } from './membership';
 
 /**
  * Scheduler role: recomputes segments whose published version changed right away, and every
@@ -31,7 +31,7 @@ export async function runSegmentScheduler(
           .withWorkspace(ws, async (tx) => {
             const all = await publishedSegments(tx);
             const runs = new Map((await tx.select().from(schema.segmentRuns)).map((r) => [r.segmentId, r]));
-            const out = [];
+            const out: BusEvent[] = [];
             const changed = new Set<string>();
             for (const seg of all) {
               const last = runs.get(seg.id);
@@ -41,10 +41,10 @@ export async function runSegmentScheduler(
                 { workspace: ws, segment: seg.id, members: r.members, entered: r.entered, exited: r.exited },
                 'segment recomputed',
               );
-              out.push(...r.changes);
+              for (const e of r.changes) out.push(e);
               for (const p of r.changedProfiles) changed.add(p);
             }
-            if (out.length) await deps.bus.publish(out);
+            await publishInSlices(deps.bus, out);
             return [...changed];
           })
           .then((changed) => (changed.length && deps.afterRefresh ? deps.afterRefresh(ws, changed) : undefined));

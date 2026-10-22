@@ -5,7 +5,8 @@ import { type ClickHouseClient, createClient } from '@clickhouse/client';
 import type { BusEvent } from './schema';
 
 // ClickHouse is the event store. This module is the only place that talks to it, and every
-// query it offers is scoped to one workspace (ClickHouse has no row-level security here).
+// query it offers is scoped to one workspace. Row policies (see applyRowPolicies) enforce that
+// too: a query sees only the rows of the workspace in its SQL_workspace setting, and none without.
 
 const MIGRATIONS = new URL('../clickhouse/', import.meta.url);
 
@@ -30,6 +31,12 @@ export interface EventStore {
       excludeEventIds?: string[];
     },
   ): Promise<{ anonymousId: string; userId: string; count: number }[]>;
+  /** The same counts for a whole workspace, streamed in batches (segment refreshes over millions of people). */
+  countEventsBatches(
+    workspaceId: string,
+    q: { name: string; where?: Record<string, string | number | boolean>; sinceSeconds?: number },
+    batchSize?: number,
+  ): AsyncIterable<{ anonymousId: string; userId: string; count: number }[]>;
   /** Per variant: visitors exposed to an experience, and how many did the goal event after their first exposure. */
   experimentCounts(
     workspaceId: string,
@@ -44,7 +51,54 @@ export interface EventStore {
   messageEventsOf(workspaceId: string, filter: { messageIds?: string[]; profileId?: string }, limit?: number): Promise<MessageEvent[]>;
   ping(): Promise<boolean>;
   close(): Promise<void>;
+  /** Settings to pass with a query of one workspace through `client` (the row policies need them). */
+  settingsFor(workspaceId: string): Promise<Record<string, string>>;
   readonly client: ClickHouseClient;
+}
+
+export const ROW_POLICY = 'am_workspace';
+const SCOPED_TABLES = ['events', 'message_events', 'journey_events', 'ad_spend'];
+
+/**
+ * Row policies: every table with a workspace_id returns only the rows of the workspace named in
+ * the query's SQL_workspace setting, so a query that forgets its workspace filter sees nothing
+ * rather than every workspace. Needs a user with access management and the SQL_ prefix for custom
+ * settings (the reference compose file and Helm chart set both). `auto` applies them when it can.
+ */
+export async function applyRowPolicies(
+  client: ClickHouseClient,
+  database: string,
+  mode: 'required' | 'auto' | 'off',
+  log: (m: string) => void = () => {},
+) {
+  if (mode === 'off') {
+    for (const t of SCOPED_TABLES) await client.command({ query: `DROP ROW POLICY IF EXISTS ${ROW_POLICY} ON ${database}.${t}` });
+    return false;
+  }
+  try {
+    if (!(await acceptsWorkspaceSetting(client)))
+      throw new Error('the server does not accept SQL_ custom settings (custom_settings_prefixes)');
+    for (const t of SCOPED_TABLES)
+      await client.command({
+        query: `CREATE ROW POLICY OR REPLACE ${ROW_POLICY} ON ${database}.${t} FOR SELECT
+                USING workspace_id = toUUIDOrZero(getSettingOrDefault('SQL_workspace', '')) TO ALL`,
+      });
+    return true;
+  } catch (err) {
+    const why = `ClickHouse row policies could not be applied: ${(err as Error).message.split('\n')[0]}`;
+    if (mode === 'required') throw new Error(`${why}. Grant the user access management, or set CLICKHOUSE_ROW_POLICIES=auto.`);
+    log(`${why}; queries are still filtered by workspace in code`);
+    return false;
+  }
+}
+
+async function acceptsWorkspaceSetting(client: ClickHouseClient) {
+  try {
+    await client.command({ query: 'SELECT 1', clickhouse_settings: { SQL_workspace: '' } as never });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export interface MessageEvent {
@@ -118,7 +172,12 @@ const toRow = (e: BusEvent) => ({
 });
 
 /** Applies the SQL files in packages/events/clickhouse once each, in order. */
-export async function migrateClickHouse(url: string, database: string, log: (m: string) => void = () => {}) {
+export async function migrateClickHouse(
+  url: string,
+  database: string,
+  log: (m: string) => void = () => {},
+  opts: { rowPolicies?: 'required' | 'auto' | 'off' } = {},
+) {
   const root = createClient({ url });
   await root.command({ query: `CREATE DATABASE IF NOT EXISTS ${database}` });
   await root.close();
@@ -150,6 +209,7 @@ export async function migrateClickHouse(url: string, database: string, log: (m: 
     await ch.insert({ table: 'schema_migrations', values: [{ name: file, checksum }], format: 'JSONEachRow' });
     log(`applied ClickHouse migration ${file}`);
   }
+  await applyRowPolicies(ch, database, opts.rowPolicies ?? 'auto', log);
   await ch.close();
 }
 
@@ -165,14 +225,62 @@ export function clickHouseStore(opts: { url: string; database: string }): EventS
     anon: ids.anonymousIds,
     users: ids.userIds,
   });
+  // Whether the server takes the SQL_workspace setting; when it does, every query names its workspace.
+  let accepts: Promise<boolean> | undefined;
+  const settingsFor = async (workspaceId: string): Promise<Record<string, string>> => {
+    accepts ??= acceptsWorkspaceSetting(client);
+    return (await accepts) ? { SQL_workspace: workspaceId } : {};
+  };
+  type QueryArgs = Parameters<ClickHouseClient['query']>[0];
+  const query = async (workspaceId: string, args: QueryArgs & { format: 'JSONEachRow' }) =>
+    client.query({ ...args, clickhouse_settings: { ...args.clickhouse_settings, ...((await settingsFor(workspaceId)) as object) } });
+  const command = async (workspaceId: string, args: Parameters<ClickHouseClient['command']>[0]) =>
+    client.command({ ...args, clickhouse_settings: { ...args.clickhouse_settings, ...((await settingsFor(workspaceId)) as object) } });
+  const countQuery = (
+    workspaceId: string,
+    q: {
+      name: string;
+      where?: Record<string, string | number | boolean>;
+      sinceSeconds?: number;
+      ids?: { anonymousIds: string[]; userIds: string[] };
+      excludeEventIds?: string[];
+    },
+  ) => {
+    const params: Record<string, unknown> = { ws: workspaceId, name: q.name, exclude: q.excludeEventIds ?? [] };
+    const where = Object.entries(q.where ?? {}).map(([k, v], i) => {
+      // Keys are validated as [A-Za-z0-9_]; values travel as parameters.
+      if (!/^[A-Za-z0-9_]{1,64}$/.test(k)) throw new Error(`invalid property name ${k}`);
+      params[`v${i}`] = String(v);
+      return `toString(properties.\`${k}\`) = {v${i}:String}`;
+    });
+    if (q.sinceSeconds) params.since = q.sinceSeconds;
+    if (q.ids) Object.assign(params, { anon: q.ids.anonymousIds, users: q.ids.userIds });
+    return {
+      query: `SELECT anonymous_id, user_id, count() AS c FROM events FINAL
+              WHERE workspace_id = {ws:UUID} AND name = {name:String}
+              ${q.sinceSeconds ? 'AND timestamp >= now64(3) - toIntervalSecond({since:UInt32})' : ''}
+              ${q.ids ? 'AND (anonymous_id IN {anon:Array(String)} OR user_id IN {users:Array(String)})' : ''}
+              ${q.excludeEventIds?.length ? 'AND event_id NOT IN {exclude:Array(String)}' : ''}
+              ${where.map((w) => `AND ${w}`).join(' ')}
+              GROUP BY anonymous_id, user_id`,
+      query_params: params,
+      format: 'JSONEachRow' as const,
+    };
+  };
+  const countRow = (r: { anonymous_id: string; user_id: string; c: number }) => ({
+    anonymousId: r.anonymous_id,
+    userId: r.user_id,
+    count: Number(r.c),
+  });
   return {
     client,
+    settingsFor,
     async insert(events) {
       if (events.length) await client.insert({ table: 'events', values: events.map(toRow), format: 'JSONEachRow' });
     },
     async eventsOf(workspaceId, ids, o = {}) {
       if (!ids.anonymousIds.length && !ids.userIds.length) return [];
-      const rs = await client.query({
+      const rs = await query(workspaceId, {
         query: `SELECT event_id, type, name, timestamp, received_at, anonymous_id, user_id, properties, context
                 FROM events FINAL
                 WHERE ${idFilter} ${o.before ? 'AND timestamp < {before:DateTime64(3)}' : ''}
@@ -196,43 +304,34 @@ export function clickHouseStore(opts: { url: string; database: string }): EventS
     async deleteEventsOf(workspaceId, ids) {
       if (ids.profileIds?.length)
         for (const table of ['message_events', 'journey_events'])
-          await client.command({
+          await command(workspaceId, {
             query: `DELETE FROM ${table} WHERE workspace_id = {ws:UUID} AND profile_id IN {profiles:Array(String)}`,
             query_params: { ws: workspaceId, profiles: ids.profileIds },
           });
       if (!ids.anonymousIds.length && !ids.userIds.length) return;
       // Lightweight delete: rows disappear from queries at once and from disk on the next merge.
-      await client.command({ query: `DELETE FROM events WHERE ${idFilter}`, query_params: params(workspaceId, ids) });
+      await command(workspaceId, { query: `DELETE FROM events WHERE ${idFilter}`, query_params: params(workspaceId, ids) });
     },
     async countEvents(workspaceId, q) {
-      const params: Record<string, unknown> = { ws: workspaceId, name: q.name, exclude: q.excludeEventIds ?? [] };
-      const where = Object.entries(q.where ?? {}).map(([k, v], i) => {
-        // Keys are validated as [A-Za-z0-9_]; values travel as parameters.
-        if (!/^[A-Za-z0-9_]{1,64}$/.test(k)) throw new Error(`invalid property name ${k}`);
-        params[`v${i}`] = String(v);
-        return `toString(properties.\`${k}\`) = {v${i}:String}`;
-      });
-      if (q.sinceSeconds) params.since = q.sinceSeconds;
-      if (q.ids) Object.assign(params, { anon: q.ids.anonymousIds, users: q.ids.userIds });
-      const rs = await client.query({
-        query: `SELECT anonymous_id, user_id, count() AS c FROM events FINAL
-                WHERE workspace_id = {ws:UUID} AND name = {name:String}
-                ${q.sinceSeconds ? 'AND timestamp >= now64(3) - toIntervalSecond({since:UInt32})' : ''}
-                ${q.ids ? 'AND (anonymous_id IN {anon:Array(String)} OR user_id IN {users:Array(String)})' : ''}
-                ${q.excludeEventIds?.length ? 'AND event_id NOT IN {exclude:Array(String)}' : ''}
-                ${where.map((w) => `AND ${w}`).join(' ')}
-                GROUP BY anonymous_id, user_id`,
-        query_params: params,
-        format: 'JSONEachRow',
-      });
-      return (await rs.json<{ anonymous_id: string; user_id: string; c: number }>()).map((r) => ({
-        anonymousId: r.anonymous_id,
-        userId: r.user_id,
-        count: Number(r.c),
-      }));
+      const rs = await query(workspaceId, countQuery(workspaceId, q));
+      return (await rs.json<{ anonymous_id: string; user_id: string; c: number }>()).map(countRow);
+    },
+    async *countEventsBatches(workspaceId, q, batchSize = 10_000) {
+      const rs = await query(workspaceId, countQuery(workspaceId, q));
+      let batch: { anonymousId: string; userId: string; count: number }[] = [];
+      for await (const rows of rs.stream<{ anonymous_id: string; user_id: string; c: number }>()) {
+        for (const row of rows) {
+          batch.push(countRow(row.json()));
+          if (batch.length >= batchSize) {
+            yield batch;
+            batch = [];
+          }
+        }
+      }
+      if (batch.length) yield batch;
     },
     async experimentCounts(workspaceId, q) {
-      const rs = await client.query({
+      const rs = await query(workspaceId, {
         query: `WITH
             exposures AS (
               SELECT anonymous_id AS visitor, argMin(toString(properties.variant_id), timestamp) AS variant, min(timestamp) AS first
@@ -306,7 +405,7 @@ export function clickHouseStore(opts: { url: string; database: string }): EventS
       });
     },
     async messageStats(workspaceId, q) {
-      const rs = await client.query({
+      const rs = await query(workspaceId, {
         query: `SELECT type, uniqExact(message_id) AS c FROM message_events FINAL
                 WHERE workspace_id = {ws:UUID} AND at >= {since:DateTime64(3)}
                 ${q.templateId ? 'AND template_id = {t:String}' : ''} ${q.journeyId ? 'AND journey_id = {j:String}' : ''}
@@ -317,7 +416,7 @@ export function clickHouseStore(opts: { url: string; database: string }): EventS
       return Object.fromEntries((await rs.json<{ type: string; c: number }>()).map((r) => [r.type, Number(r.c)]));
     },
     async journeyCounts(workspaceId, journeyId) {
-      const rs = await client.query({
+      const rs = await query(workspaceId, {
         query: `SELECT node, type, uniqExact(participant_id) AS c FROM journey_events FINAL
                 WHERE workspace_id = {ws:UUID} AND journey_id = {j:String} GROUP BY node, type`,
         query_params: { ws: workspaceId, j: journeyId },
@@ -326,7 +425,7 @@ export function clickHouseStore(opts: { url: string; database: string }): EventS
       return (await rs.json<{ node: string; type: string; c: number }>()).map((r) => ({ node: r.node, type: r.type, count: Number(r.c) }));
     },
     async messageEventsOf(workspaceId, filter, limit = 200) {
-      const rs = await client.query({
+      const rs = await query(workspaceId, {
         query: `SELECT * FROM message_events FINAL WHERE workspace_id = {ws:UUID}
                 ${filter.messageIds ? 'AND message_id IN {ids:Array(String)}' : ''}
                 ${filter.profileId ? 'AND profile_id = {profile:String}' : ''}

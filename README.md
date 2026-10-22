@@ -9,7 +9,7 @@ It runs as one Docker image (a TypeScript modular monolith) next to Postgres, Cl
 - **Collect events:** Segment-compatible ingest (`/v1/batch`), a browser SDK, per-source consent rules, a tracking plan, bot filtering.
 - **Consent banner:** in the SDK, CSP-safe, with texts from your purposes and Google Consent Mode v2 signals. Ad click ids (`gclid`, `fbclid`, `msclkid`…) are kept only with `ad_measurement` consent.
 - **Know people:** identity resolution and merges, profiles with traits and events, a consent ledger per purpose, export and erasure (DSR).
-- **Segments:** conditions on traits, events, consent and other segments, recomputed continuously, with enter and exit events.
+- **Segments:** conditions on traits, events, consent and other segments, recomputed continuously, with enter and exit events. Whole-segment refreshes run as SQL in Postgres and ClickHouse, load-tested to a million profiles.
 - **E-mail:**
   - MJML and Liquid templates with preview, test sends and UTM tagging;
   - a send gateway that checks lawful basis, consent, objections and suppressions;
@@ -43,6 +43,7 @@ It runs as one Docker image (a TypeScript modular monolith) next to Postgres, Cl
   - everything an agent builds is a versioned artifact (journey, segment, template, form…) with drafts, diffs and approval policies;
   - audit log;
   - encrypted secrets with key rotation;
+  - Postgres row-level security and ClickHouse row policies per workspace;
   - retention jobs.
 
 ## Quick start (Docker)
@@ -80,7 +81,7 @@ Wave 1 (Phases −1 to 5) is complete: foundations, data platform, e-mail, segme
 | 7 | Delivery beyond SMTP, and SMS | Done: Cloudflare Email Service adapter, delivery policy (caps, quiet hours, auto-pause), deliverability health and domain check, Twilio SMS. Later: GatewayAPI, SMS double opt-in, provider warm-up |
 | 8 | Consent everywhere | Done: consent banner with Consent Mode v2, ad purposes, click-id capture, OAuth 2.0 connections, shared rate limits, bot filtering |
 | 9 | Performance marketing | Done: conversions (Meta, Google, Microsoft), audience sync (Meta, Google), spend and ROAS. Later: Microsoft reporting and audiences, more platforms |
-| 10 | Scale and operations | Part a done (correctness: AI budget reservations, prompt test jobs, egress on provider adapters, merge-safe journeys, journey version migration, instant experience updates). Next: SQL/ClickHouse segment evaluation and load tests, then Helm, KMS, warehouse export, config-as-code |
+| 10 | Scale and operations | Part a done (correctness: AI budget reservations, prompt test jobs, egress on provider adapters, merge-safe journeys, journey version migration, instant experience updates). Part b done (scale: segments evaluated in SQL, ClickHouse row policies, a load test). Next: Helm, KMS, warehouse export, config-as-code |
 | 11 | Enterprise and ecosystem | Planned |
 
 ## Development
@@ -89,6 +90,7 @@ Wave 1 (Phases −1 to 5) is complete: foundations, data platform, e-mail, segme
 pnpm install
 pnpm lint && pnpm typecheck && pnpm test   # tests need Postgres, ClickHouse, NATS and Valkey
 scripts/smoke.sh                           # the Docker image end to end
+pnpm --filter @agentic-marketing/server cli loadtest --profiles 1000000   # segment refreshes at scale
 pnpm dev:web                               # the UI (a mocked demo without the API)
 ```
 

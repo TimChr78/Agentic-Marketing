@@ -84,6 +84,24 @@ export async function evaluate(cond: SegmentCondition, ctx: EvalContext): Promis
 }
 
 async function traitSet(c: Extract<SegmentCondition, { trait: string }>, ctx: EvalContext): Promise<Set<string>> {
+  const rows = await ctx.tx
+    .select({ id: schema.profiles.id })
+    .from(schema.profiles)
+    .where(
+      and(
+        isNull(schema.profiles.mergedInto),
+        ctx.scope ? inArray(schema.profiles.id, ctx.scope.length ? ctx.scope : ['-']) : undefined,
+        await traitPredicate(c, ctx),
+      ),
+    );
+  return new Set(rows.map((r) => r.id));
+}
+
+/** A trait condition as a predicate on the profiles table (never NULL). Personal traits are refused. */
+export async function traitPredicate(
+  c: Extract<SegmentCondition, { trait: string }>,
+  ctx: Pick<EvalContext, 'tx' | '_plan'>,
+): Promise<SQL> {
   ctx._plan ??= publishedSingleton(ctx.tx, 'tracking_plan');
   const plan = await ctx._plan;
   const def = plan?.traits.find((t) => t.name === c.trait);
@@ -115,17 +133,7 @@ async function traitSet(c: Extract<SegmentCondition, { trait: string }>, ctx: Ev
   };
   if (v === undefined && !['exists', 'not_exists'].includes(c.op))
     throw new AppError('invalid_input', `Trait condition "${c.trait} ${c.op}" needs a value.`);
-  const rows = await ctx.tx
-    .select({ id: schema.profiles.id })
-    .from(schema.profiles)
-    .where(
-      and(
-        isNull(schema.profiles.mergedInto),
-        ctx.scope ? inArray(schema.profiles.id, ctx.scope.length ? ctx.scope : ['-']) : undefined,
-        conditions[c.op](),
-      ),
-    );
-  return new Set(rows.map((r) => r.id));
+  return sql`COALESCE((${conditions[c.op]()}), false)`;
 }
 
 async function identifiersByProfile(ctx: EvalContext, profileIds?: string[]) {

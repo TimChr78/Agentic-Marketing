@@ -34,6 +34,10 @@ const Env = z.object({
     .string()
     .regex(/^[a-z_][a-z0-9_]*$/)
     .default('am'),
+  CLICKHOUSE_ROW_POLICIES: z
+    .enum(['required', 'auto', 'off'])
+    .default('auto')
+    .describe('Row policies that limit every ClickHouse query to its workspace: required fails at startup if they cannot be applied'),
   NATS_URL: z.string().default('nats://localhost:4222'),
   NATS_NAMESPACE: z
     .string()
@@ -107,7 +111,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
       e.MASTER_KEY_PREVIOUS?.split(',')
         .map((k) => k.trim())
         .filter(Boolean) ?? [],
-    clickhouse: { url: e.CLICKHOUSE_URL, database: e.CLICKHOUSE_DATABASE },
+    clickhouse: { url: e.CLICKHOUSE_URL, database: e.CLICKHOUSE_DATABASE, rowPolicies: e.CLICKHOUSE_ROW_POLICIES },
     nats: { url: e.NATS_URL, namespace: e.NATS_NAMESPACE, retentionHours: e.NATS_RETENTION_HOURS },
     valkey: { url: e.VALKEY_URL, prefix: e.VALKEY_PREFIX },
     trackClicks: e.EMAIL_TRACK_CLICKS === 'true',

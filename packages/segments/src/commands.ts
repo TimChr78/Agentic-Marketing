@@ -2,10 +2,10 @@ import { artifactTypes, segmentCondition } from '@agentic-marketing/artifacts';
 import { defineCommand } from '@agentic-marketing/commands';
 import { AppError } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
-import { and, desc, eq, gt } from 'drizzle-orm';
+import { and, desc, eq, gt, sql } from 'drizzle-orm';
 import { z } from 'zod';
-import { evaluate } from './evaluate';
-import { contextFor, publishedSegments, refreshSegment } from './membership';
+import { contextFor, publishedSegments, publishInSlices, refreshSegment } from './membership';
+import { materialize } from './sql';
 
 const SegmentId = z.string().regex(/^seg_[0-9a-f]{32}$/);
 
@@ -55,8 +55,9 @@ export const previewSegment = defineCommand({
       segments,
       input.artifactId ? { _stack: [input.artifactId] } : {},
     );
-    const members = await evaluate(condition, evalCtx);
-    return { count: members.size, sample: [...members].slice(0, 20), tookMs: Date.now() - started };
+    const members = await materialize(condition, evalCtx);
+    const sample = await ctx.tx.execute<{ profile_id: string }>(sql.raw(`SELECT profile_id FROM ${members.table} LIMIT 20`));
+    return { count: members.size, sample: sample.rows.map((r) => r.profile_id), tookMs: Date.now() - started };
   },
 });
 
@@ -100,7 +101,7 @@ export const refreshSegmentCommand = defineCommand({
     const seg = all.find((s) => s.id === input.artifactId);
     if (!seg) throw new AppError('not_found', `Segment ${input.artifactId} has no published version. Publish it first.`);
     const r = await refreshSegment(ctx.tx, ctx.principal.workspaceId, seg, ctx.services.events, all);
-    if (r.changes.length) await ctx.services.bus.publish(r.changes);
+    await publishInSlices(ctx.services.bus, r.changes);
     return { members: r.members, entered: r.entered, exited: r.exited };
   },
 });

@@ -195,6 +195,23 @@ Not built (later): Microsoft reporting and Customer Match (asynchronous bulk and
   - unmatched participants stay or exit;
   - it has a dry run.
 
+**Built (part b, scale):**
+- **Segments are evaluated in SQL.** A refresh or preview compiles the condition into one predicate over `profiles` (traits as JSONB, consent as `EXISTS` on `consent_state`, referenced segments inlined). Event conditions are counted in ClickHouse, streamed into a temporary table in batches and summed per person in Postgres. Membership changes are a set difference in SQL, staged in a temporary table. Only the people who entered or left reach the application, to become change events (published in slices) and snapshot updates (written in slices). The in-memory evaluator remains for streaming updates, which look at a handful of people; a test checks both give the same members.
+- **ClickHouse row policies:** each table with a `workspace_id` shows a query only the rows of the workspace in its `SQL_workspace` setting, and none without one. The event store sets it on every query. `CLICKHOUSE_ROW_POLICIES` (`required`, `auto`, `off`); compose and CI give the ClickHouse user access management.
+- **Load test** (`cli loadtest --profiles N`): synthetic people and events in a throwaway workspace, five segments refreshed twice, sizes checked against the data.
+
+Measured on a 4-vCPU, 16 GB development VM (Postgres 16, ClickHouse 26.8, everything on one machine, default settings), 1,000,000 profiles and 1,600,000 events:
+
+| Segment | Members | First refresh | Refresh, nothing changed |
+|---|---|---|---|
+| Trait (`plan = pro`) | 250,000 | 13.2 s | 1.8 s |
+| 2+ product views in 7 days | 500,000 | 34.0 s | 17.0 s |
+| Never viewed a product | 250,000 | 22.7 s | 14.7 s |
+| Consent to marketing e-mail | 500,000 | 20.3 s | 4.7 s |
+| Viewed 2+, no order, consented | 200,000 | 19.8 s | 14.5 s |
+
+Seeding took 52 s. The process peaked at about 1.1 GB, mostly the 500,000 change events of a first refresh. With refreshes every 15 minutes, this is well within budget at 1M. At 10M, expect about ten times these numbers: a few minutes per event segment. The next steps there are counting per profile inside ClickHouse (a dictionary of identifiers instead of streaming identifier counts to Postgres) and publishing the change events of very large first refreshes in a stream. A run at 10M on production-sized hardware is still to be done.
+
 ## Phase 11: enterprise and ecosystem
 
 - **SSO (OIDC, SAML) and SCIM** (the original Phase 6); **MCP scope step-up** (Phase 0 deferral).
@@ -223,12 +240,12 @@ Not built (later): Microsoft reporting and Customer Match (asynchronous bulk and
 | KMS/OpenBao key providers deferred (Phase 0) | 10 |
 | MCP scope step-up deferred (Phase 0) | 11 |
 | JetStream keeps personal traits for its retention window (Phase 1) | 10 (window now 24 h by default, `NATS_RETENTION_HOURS`; encrypted volume in the deployment guide) |
-| No ClickHouse row policies (Phase 1) | 10 |
+| No ClickHouse row policies (Phase 1) | 10 (done) |
 | Tracking-plan warnings not stored for a report (Phase 1) | 6 |
 | No bot filtering on ingest (Phase 1) | 8 (done) |
 | Frequency caps and quiet hours not enforced (Phase 2) | 7 (done) |
 | No bounce mailbox for pure SMTP (Phase 2) | 7 (optional; HTTP adapters preferred) |
-| Segment evaluation holds ids in memory (Phase 2) | 10 |
+| Segment evaluation holds ids in memory (Phase 2) | 10 (done: SQL, load-tested to 1M profiles) |
 | Merged profile does not wake waiting participants (Phase 2) | 10 (done) |
 | Experience definitions cached 30 s (Phase 3) | 10 (done: invalidated on publish) |
 | Fixed-horizon experiment statistics only (Phase 3) | 11 |

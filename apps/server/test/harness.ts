@@ -157,6 +157,7 @@ export async function startTestServer(name: string, port: number) {
     MASTER_KEY: Buffer.alloc(32, 7).toString('base64'),
     CLICKHOUSE_URL: process.env.CLICKHOUSE_URL ?? 'http://localhost:8123',
     CLICKHOUSE_DATABASE: dbName,
+    CLICKHOUSE_ROW_POLICIES: process.env.CLICKHOUSE_ROW_POLICIES ?? 'auto',
     NATS_URL: natsUrl,
     NATS_NAMESPACE: dbName,
     VALKEY_URL: process.env.VALKEY_URL ?? 'redis://localhost:6379',
@@ -168,7 +169,7 @@ export async function startTestServer(name: string, port: number) {
   await resetClickHouse(config.clickhouse.url, dbName);
   await migrate(srv.db.admin, { appRolePassword: config.appDbPassword, appRole: config.appDbRole });
   await migrateAuth({ baseUrl: config.publicUrl, secret: config.authSecret, db: srv.db });
-  await migrateClickHouse(config.clickhouse.url, config.clickhouse.database);
+  await migrateClickHouse(config.clickhouse.url, config.clickhouse.database, undefined, config.clickhouse);
   let http: { close: () => void } | undefined;
   await new Promise<void>((resolve) => {
     http = serve({ fetch: srv.app.fetch, port }, (_i: AddressInfo) => resolve());
