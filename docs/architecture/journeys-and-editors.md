@@ -74,8 +74,9 @@ Principles:
 See [ADR-0006](adr/0006-email-format-and-editor.md).
 
 - **Canonical format: MJML + Liquid.** MJML (MIT) gives responsive, client-safe HTML; Liquid (LiquidJS, MIT — sandboxed, no code execution) gives personalization (`{{ profile.first_name | default: "there" }}`, loops over cart items).
-- **Visual editor: GrapesJS (BSD-3) with the `grapesjs-mjml` preset**, wrapped in a React component. It imports and exports MJML directly, so an agent-written MJML template opens in the visual editor and vice-versa.
-- Fallback / alternative evaluated in a spike: Easy Email (MIT, React + MJML) — nicer React integration, less certain maintenance.
+- **Visual editor: GrapesJS (BSD-3) with the `grapesjs-mjml` preset**, wrapped in a React component. It imports and exports MJML directly, so an agent-written MJML template opens in the visual editor and vice-versa. [Spike 2](../../spikes/email-editor/FINDINGS.md) showed this needs a thin adapter: expand self-closing `mj-*` tags before import, unescape entities inside Liquid tags on export, and treat `mj-table` as a code-only block. With that, agent-written templates round-trip pixel-identical.
+- **Save-time guards:** every save from the visual editor is checked against the previous version: Liquid tokens must be unchanged unless the person edited them, and the MJML must validate. A save that would silently drop or corrupt Liquid is blocked.
+- Easy Email (MIT) was evaluated and rejected: it drops `mj-preview`/`mj-title` and overrides the template's styles with its own defaults on import.
 - **Code view** (Monaco) with MJML + Liquid, for power users and diff review.
 - Content building blocks: reusable **snippets/blocks** (header, footer, product grid), **brand kit** (colors, fonts, logo), **content slots** that `ai.generate` may fill.
 - Rendering pipeline: Liquid → MJML → HTML (+ plain-text alternative), link wrapping for click tracking, List-Unsubscribe headers. Rendered output cached per (template version, locale).

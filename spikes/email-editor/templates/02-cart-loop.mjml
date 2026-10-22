@@ -1,0 +1,32 @@
+<mjml>
+  <mj-head>
+    <mj-preview>Your {{ cart.items | size }} items are waiting</mj-preview>
+    <mj-attributes>
+      <mj-all font-family="Helvetica, Arial, sans-serif" />
+    </mj-attributes>
+  </mj-head>
+  <mj-body background-color="#f3efe6">
+    <mj-section background-color="#ffffff" padding="28px 24px 8px">
+      <mj-column>
+        <mj-text font-size="22px" color="#1f2a22">Still thinking it over, {{ profile.first_name }}?</mj-text>
+        <mj-text font-size="15px" color="#374151">{% if variant == "A" %}Use code <strong>TRAIL10</strong> for 10% off today.{% else %}Shipping is on us for the next 48 hours.{% endif %}</mj-text>
+      </mj-column>
+    </mj-section>
+    <mj-raw>{% for item in cart.items limit: 3 %}</mj-raw>
+    <mj-section background-color="#ffffff" padding="8px 24px">
+      <mj-column width="35%">
+        <mj-image src="{{ item.image_url }}" alt="{{ item.name }}" width="160px" />
+      </mj-column>
+      <mj-column width="65%">
+        <mj-text font-size="16px" font-weight="700">{{ item.name }}</mj-text>
+        <mj-text font-size="14px" color="#6b7280">{{ item.price | money: "DKK" }} · size {{ item.size }}</mj-text>
+      </mj-column>
+    </mj-section>
+    <mj-raw>{% endfor %}</mj-raw>
+    <mj-section background-color="#ffffff" padding="8px 24px 28px">
+      <mj-column>
+        <mj-button background-color="#2f5d43" color="#ffffff" href="https://fjeldvej.example/cart">Back to my cart</mj-button>
+      </mj-column>
+    </mj-section>
+  </mj-body>
+</mjml>

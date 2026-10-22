@@ -1,6 +1,6 @@
 # ADR-0003: PostgreSQL, ClickHouse, NATS JetStream and Valkey
 
-- Status: Proposed
+- Status: Accepted (event path validated by spike 4)
 - Date: 2026-10-21
 
 ## Context
@@ -25,3 +25,7 @@ Postgres and ClickHouse are sources of truth; NATS retains a replay window; Valk
 
 ## Consequences
 Four stateful services to run (plus object storage). Each is a single container in the default compose file, and each has a well-trodden clustering path.
+
+## Validation (spike 4, 2026-10-22)
+[`spikes/event-pipeline/FINDINGS.md`](../../../spikes/event-pipeline/FINDINGS.md): ingest gateway → JetStream → batched ClickHouse sink on one 4-vCPU machine. ~18k events/s per Node ingest process; 1M events with 0 per-visitor ordering violations across 16 shards; no loss or visible duplicates after a sink SIGKILL and a crash between INSERT and ack (at-least-once + `ReplacingMergeTree` on `event_id`); 7× compression; segment and funnel queries over 1M events in 13–47 ms. ClickHouse ran embedded (chDB, same engine) because the server download was blocked; server-mode numbers are re-checked in Phase 1. Consumers need an explicit `ack_wait` (5 s) shorter than the 30 s default.
+

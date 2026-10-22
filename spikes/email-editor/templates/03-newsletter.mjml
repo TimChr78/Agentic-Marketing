@@ -1,0 +1,52 @@
+<mjml>
+  <mj-head>
+    <mj-attributes>
+      <mj-class name="eyebrow" font-size="11px" letter-spacing="2px" text-transform="uppercase" color="#2f5d43" />
+      <mj-class name="card-title" font-size="17px" font-weight="700" color="#1f2a22" />
+      <mj-all font-family="Helvetica, Arial, sans-serif" />
+    </mj-attributes>
+  </mj-head>
+  <mj-body background-color="#eef0f2">
+    <mj-section padding="12px 0">
+      <mj-column>
+        <mj-navbar base-url="https://fjeldvej.example" hamburger="hamburger" ico-color="#1f2a22">
+          <mj-navbar-link href="/shoes" color="#1f2a22">Shoes</mj-navbar-link>
+          <mj-navbar-link href="/jackets" color="#1f2a22">Jackets</mj-navbar-link>
+          <mj-navbar-link href="/tents" color="#1f2a22">Tents</mj-navbar-link>
+        </mj-navbar>
+      </mj-column>
+    </mj-section>
+    <mj-hero mode="fixed-height" height="320px" background-width="600px" background-height="320px" background-url="https://images.example.com/hero-fjord.jpg" background-color="#2a3c33" padding="80px 24px">
+      <mj-text mj-class="eyebrow" color="#f3efe6" align="center">November field notes</mj-text>
+      <mj-text font-size="30px" color="#ffffff" align="center" font-family="Georgia, serif">Layering for wet, windy weeks</mj-text>
+      <mj-button href="https://fjeldvej.example/journal/layering" background-color="#f3efe6" color="#1f2a22">Read the guide</mj-button>
+    </mj-hero>
+    <mj-section background-color="#ffffff" padding="24px 12px">
+      <mj-column>
+        <mj-image src="https://images.example.com/shell.jpg" alt="Storm Shell" />
+        <mj-text mj-class="card-title">Storm Shell</mj-text>
+        <mj-text>3-layer, 20k waterproof.</mj-text>
+      </mj-column>
+      <mj-column>
+        <mj-image src="https://images.example.com/fleece.jpg" alt="Fleece Mid" />
+        <mj-text mj-class="card-title">Fleece Mid</mj-text>
+        <mj-text>Recycled, 300 g/m².</mj-text>
+      </mj-column>
+      <mj-column>
+        <mj-image src="https://images.example.com/base.jpg" alt="Merino Base" />
+        <mj-text mj-class="card-title">Merino Base</mj-text>
+        <mj-text>Odour-resistant for multi-day trips.</mj-text>
+      </mj-column>
+    </mj-section>
+    <mj-section background-color="#ffffff" padding="0 24px 24px">
+      <mj-column>
+        <mj-divider border-color="#dce1e9" border-width="1px" />
+        <mj-spacer height="12px" />
+        <mj-social font-size="13px" icon-size="22px" mode="horizontal">
+          <mj-social-element name="instagram" href="https://instagram.com/fjeldvej">Instagram</mj-social-element>
+          <mj-social-element name="facebook" href="https://facebook.com/fjeldvej">Facebook</mj-social-element>
+        </mj-social>
+      </mj-column>
+    </mj-section>
+  </mj-body>
+</mjml>

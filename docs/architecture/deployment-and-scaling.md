@@ -45,7 +45,7 @@ flowchart LR
 
 | Concern | Single node | At 10M profiles / ~5k events/s peak |
 |---|---|---|
-| Ingest | in `all` process | dedicated `ingest` pods, stateless; ~1–2k events/s per pod in Node → 4–6 pods |
+| Ingest | in `all` process | dedicated `ingest` pods, stateless; spike 4 measured ~18k events/s per Node process (JetStream-acked), so 5k events/s peak needs 1–2 pods plus headroom |
 | Bus | single NATS | 3-node JetStream cluster, subjects partitioned by `workspace` + hash(profile) for ordered per-profile processing |
 | Events | single ClickHouse | single large node still feasible (~500M rows/month compressed); then 2 shards × 2 replicas with ClickHouse Keeper |
 | Profiles (Postgres) | single | ~10M rows × few KB → tens of GB: fine on one primary; read replicas for analytics/UI; hash-partition `journey_participants` & `identifiers` |

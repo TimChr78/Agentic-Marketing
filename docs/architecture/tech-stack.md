@@ -38,7 +38,7 @@ Selection criteria, in priority order: **(1) maintainable by one person, (2) per
 | Flow canvas | **React Flow (xyflow)** | MIT | Rete.js, JointJS (commercial) | De-facto standard for node editors |
 | Graph layout | **ELK.js** (or dagre) | EPL-2.0 / MIT | — | Auto-layout of journeys |
 | Email format | **MJML** | MIT | React Email, raw HTML | Responsive & client-safe, declarative, LLM-friendly. See [ADR-0006](adr/0006-email-format-and-editor.md) |
-| Email visual editor | **GrapesJS + grapesjs-mjml** | BSD-3 | Easy Email (MIT), Unlayer (proprietary), Beefree (proprietary) | Mature, imports/exports MJML round-trip |
+| Email visual editor | **GrapesJS + grapesjs-mjml** (with a small normalisation adapter) | BSD-3 | Easy Email (MIT), Unlayer (proprietary), Beefree (proprietary) | Round-trips agent-written MJML + Liquid pixel-identical once self-closing tags are expanded and Liquid is unescaped (spike 2); Easy Email drops preview text and restyles templates |
 | Templating | **LiquidJS** | MIT | Handlebars | Sandboxed, marketer-familiar (Shopify, Braze use Liquid) |
 | Charts | **Apache ECharts** | Apache-2.0 | Recharts, Chart.js | Rich chart types (funnels, dual axes), SVG renderer, themeable from tokens |
 | Code editor | **Monaco** | MIT | CodeMirror 6 | MJML/Liquid/JSON editing with schema-aware completion |
