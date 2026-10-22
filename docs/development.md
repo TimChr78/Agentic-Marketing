@@ -85,6 +85,14 @@ Secrets are encrypted with per-workspace data keys, which are wrapped by `MASTER
 2. Run `pnpm --filter @agentic-marketing/server cli rotate-keys` to re-wrap every existing data key with the new master key.
 3. Remove `MASTER_KEY_PREVIOUS` and restart.
 
+### ClickHouse row policies
+
+Every ClickHouse table with a `workspace_id` has a row policy (`am_workspace`): a query sees only the rows of the workspace in its `SQL_workspace` setting, and none without it. The event store sets it on every query, so the policy backs up the workspace filters in code. Creating the policies needs a ClickHouse user with access management (`CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1` in the official image, as in `docker-compose.yml`) and the `SQL_` custom-settings prefix (in the image's default config). `CLICKHOUSE_ROW_POLICIES=required` (compose, CI) refuses to start without them, `auto` (default) applies them when it can, `off` removes them. To look at data by hand: `SELECT … SETTINGS SQL_workspace = '<workspace id>'`.
+
+### Load test
+
+`pnpm --filter @agentic-marketing/server cli loadtest --profiles 1000000` seeds a throwaway workspace with synthetic people (traits, a user id, consent) and their events straight into Postgres and ClickHouse, refreshes five segments (trait, event count in a window, "never did", consent, and a combination with `not`) twice, checks every size against what the data implies, prints the timings and removes the workspace (`--keep` leaves it). Results are in [the reference deployment notes](architecture/roadmap-wave-2.md#phase-10-scale-and-operations-the-original-phase-6).
+
 ## Checks
 
 ```bash

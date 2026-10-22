@@ -15,6 +15,11 @@ export function snapshotHook(deps: { db: Db; hot: HotState }) {
 
 /** Writes fresh snapshots for these people (e.g. right after a scheduled segment refresh changed them). */
 export async function refreshSnapshots(deps: { db: Db; hot: HotState }, workspaceId: string, people: string[]) {
+  // In slices: a refresh can move a million people, more than one query can take as parameters.
+  for (let i = 0; i < people.length; i += 2000) await refreshSlice(deps, workspaceId, people.slice(i, i + 2000));
+}
+
+async function refreshSlice(deps: { db: Db; hot: HotState }, workspaceId: string, people: string[]) {
   if (!people.length) return;
   const data = await deps.db.withWorkspace(
     workspaceId,

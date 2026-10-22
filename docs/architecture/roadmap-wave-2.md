@@ -223,12 +223,12 @@ Not built (later): Microsoft reporting and Customer Match (asynchronous bulk and
 | KMS/OpenBao key providers deferred (Phase 0) | 10 |
 | MCP scope step-up deferred (Phase 0) | 11 |
 | JetStream keeps personal traits for its retention window (Phase 1) | 10 (window now 24 h by default, `NATS_RETENTION_HOURS`; encrypted volume in the deployment guide) |
-| No ClickHouse row policies (Phase 1) | 10 |
+| No ClickHouse row policies (Phase 1) | 10 (done) |
 | Tracking-plan warnings not stored for a report (Phase 1) | 6 |
 | No bot filtering on ingest (Phase 1) | 8 (done) |
 | Frequency caps and quiet hours not enforced (Phase 2) | 7 (done) |
 | No bounce mailbox for pure SMTP (Phase 2) | 7 (optional; HTTP adapters preferred) |
-| Segment evaluation holds ids in memory (Phase 2) | 10 |
+| Segment evaluation holds ids in memory (Phase 2) | 10 (done: SQL, load-tested to 1M profiles) |
 | Merged profile does not wake waiting participants (Phase 2) | 10 (done) |
 | Experience definitions cached 30 s (Phase 3) | 10 (done: invalidated on publish) |
 | Fixed-horizon experiment statistics only (Phase 3) | 11 |

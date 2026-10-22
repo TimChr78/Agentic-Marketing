@@ -6,19 +6,21 @@ import { migrateClickHouse } from '@agentic-marketing/events';
 import { rewrapDataKeys } from '@agentic-marketing/secrets';
 import { createServer } from './app';
 import { loadConfig } from './config';
+import { runLoadTest } from './loadtest';
 
 // Admin CLI.
 //   pnpm cli migrate
 //   pnpm cli bootstrap --email you@example.com --password '…' --name 'You' --workspace 'My shop'
 //   pnpm cli rotate-keys    (after setting a new MASTER_KEY and the old one in MASTER_KEY_PREVIOUS)
+//   pnpm cli loadtest --profiles 1000000 [--keep]   (synthetic data in a throwaway workspace)
 const [command, ...rest] = process.argv.slice(2);
 const config = loadConfig();
-const { db, auth, keyProvider } = createServer(config);
+const { db, auth, keyProvider, events } = createServer(config);
 
 try {
   await migrate(db.admin, { appRolePassword: config.appDbPassword, appRole: config.appDbRole, log: console.log });
   await migrateAuth({ baseUrl: config.publicUrl, secret: config.authSecret, db });
-  await migrateClickHouse(config.clickhouse.url, config.clickhouse.database, console.log);
+  await migrateClickHouse(config.clickhouse.url, config.clickhouse.database, console.log, config.clickhouse);
 
   if (command === 'migrate') {
     console.log('database is up to date');
@@ -39,8 +41,14 @@ try {
     const { rewrapped } = await rewrapDataKeys(db.admin, keyProvider);
     console.log(`re-wrapped ${rewrapped} data key(s) with master key ${keyProvider.id}`);
     if (config.previousMasterKeys.length) console.log('every data key now uses the current master key; you can remove MASTER_KEY_PREVIOUS');
+  } else if (command === 'loadtest') {
+    const { values } = parseArgs({ args: rest, options: { profiles: { type: 'string', default: '100000' }, keep: { type: 'boolean' } } });
+    const report = await runLoadTest({ db, events }, { profiles: Number(values.profiles), keep: values.keep, log: console.log });
+    console.log(JSON.stringify(report, null, 2));
   } else {
-    console.log('usage: cli migrate | cli bootstrap --email … --password … --workspace … [--name …] | cli rotate-keys');
+    console.log(
+      'usage: cli migrate | cli bootstrap --email … --password … --workspace … [--name …] | cli rotate-keys | cli loadtest --profiles N [--keep]',
+    );
     process.exitCode = 1;
   }
 } finally {

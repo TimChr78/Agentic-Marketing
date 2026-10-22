@@ -99,3 +99,30 @@ describe('bus → ClickHouse sink', () => {
     expect(await store.eventsOf(ws, { anonymousIds: ['anon-2'], userIds: [] })).toHaveLength(10);
   }, 20_000);
 });
+
+describe('row policies', () => {
+  it('shows a query only the rows of the workspace it names, and none without one', async () => {
+    const other = newUuid();
+    await store.insert([ev(100, { workspaceId: other, messageId: 'other-1', anonymousId: 'anon-x' })]);
+    const count = async (settings: Record<string, string>) =>
+      Number(
+        (
+          await (
+            await store.client.query({
+              query: 'SELECT count() AS c FROM events',
+              format: 'JSONEachRow',
+              clickhouse_settings: settings as never,
+            })
+          ).json<{ c: number }>()
+        )[0].c,
+      );
+    // Deliberately unfiltered SQL: the policy alone decides what it returns.
+    expect(await count({})).toBe(0);
+    expect(await count(await store.settingsFor(other))).toBe(1);
+    expect(await count(await store.settingsFor(ws))).toBeGreaterThan(1);
+    expect(await store.countEvents(other, { name: 'product_viewed' })).toEqual([{ anonymousId: 'anon-x', userId: '', count: 1 }]);
+    const batches = [];
+    for await (const b of store.countEventsBatches(ws, { name: 'product_viewed' }, 1)) batches.push(b);
+    expect(batches.length).toBe(2); // anon-0 and anon-2 (anon-1 was erased above)
+  });
+});
