@@ -765,6 +765,9 @@ importers:
       '@agentic-marketing/db':
         specifier: workspace:*
         version: link:../db
+      aws4fetch:
+        specifier: 1.0.20
+        version: 1.0.20
       drizzle-orm:
         specifier: 0.45.4
         version: 0.45.4(@opentelemetry/api@1.10.0)(@types/pg@8.23.1)(kysely@0.29.7)(pg@8.23.1)

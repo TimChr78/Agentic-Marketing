@@ -1,0 +1,8 @@
+Agentic Marketing {{ .Chart.AppVersion }} is deploying as {{ include "am.fullname" . }}:
+  api ({{ .Values.roles.api.replicas }}), ingest ({{ .Values.roles.ingest.replicas }}), worker ({{ .Values.roles.worker.replicas }}), scheduler (1).
+
+Create the first workspace and owner:
+  kubectl exec deploy/{{ include "am.fullname" . }}-api -- pnpm --filter @agentic-marketing/server cli bootstrap \
+    --email you@example.com --password '…' --workspace 'My site'
+
+Then open {{ .Values.config.PUBLIC_URL }} and connect MCP clients to {{ .Values.config.PUBLIC_URL }}/mcp.

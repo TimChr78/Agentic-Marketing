@@ -212,6 +212,12 @@ Measured on a 4-vCPU, 16 GB development VM (Postgres 16, ClickHouse 26.8, everyt
 
 Seeding took 52 s. The process peaked at about 1.1 GB, mostly the 500,000 change events of a first refresh. With refreshes every 15 minutes, this is well within budget at 1M. At 10M, expect about ten times these numbers: a few minutes per event segment. The next steps there are counting per profile inside ClickHouse (a dictionary of identifiers instead of streaming identifier counts to Postgres) and publishing the change events of very large first refreshes in a stream. A run at 10M on production-sized hardware is still to be done.
 
+**Built (part c1, deployment):**
+- **Helm chart** (`deploy/helm/agentic-marketing`): one Deployment per role, an Ingress that splits the public collection paths to `ingest`, a migration Job (Helm hook), PodDisruptionBudgets, optional ingest autoscaling; checked with `helm lint` and Kubernetes schemas in CI. The [reference deployment](../deployment/kubernetes.md) covers installation, keys and sizing.
+- **Key providers:** `KEY_PROVIDER=openbao` (OpenBao or Vault Transit, token or token file) and `aws-kms` (SigV4), next to `local`. Unwrapped data keys are cached for ten minutes. Moving from `MASTER_KEY`: keep it while the new provider is configured, run `cli rotate-keys`, then remove it.
+
+Not built yet: GCP KMS and Azure Key Vault; AWS pod identity without a credentials helper; a published container image.
+
 ## Phase 11: enterprise and ecosystem
 
 - **SSO (OIDC, SAML) and SCIM** (the original Phase 6); **MCP scope step-up** (Phase 0 deferral).
@@ -237,7 +243,7 @@ Seeding took 52 s. The process peaked at about 1.1 GB, mostly the 500,000 change
 |---|---|
 | Docker image never run (Phase 0) | 6 (done) |
 | No members screen (Phase 0) | 6 |
-| KMS/OpenBao key providers deferred (Phase 0) | 10 |
+| KMS/OpenBao key providers deferred (Phase 0) | 10 (done: OpenBao/Vault Transit, AWS KMS) |
 | MCP scope step-up deferred (Phase 0) | 11 |
 | JetStream keeps personal traits for its retention window (Phase 1) | 10 (window now 24 h by default, `NATS_RETENTION_HOURS`; encrypted volume in the deployment guide) |
 | No ClickHouse row policies (Phase 1) | 10 (done) |

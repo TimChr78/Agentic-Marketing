@@ -79,6 +79,8 @@ Owners and admins invite people with `members.invite` (UI, REST or the typed cli
 
 ### Rotating the master key
 
+To keep the key-encryption key in OpenBao/Vault Transit or AWS KMS instead of `MASTER_KEY`, see [the Kubernetes guide](deployment/kubernetes.md#keys-master_key-openbao-or-aws-kms); `cli rotate-keys` moves existing data keys over.
+
 Secrets are encrypted with per-workspace data keys, which are wrapped by `MASTER_KEY`. To rotate it:
 
 1. Generate a new key (`openssl rand -base64 32`), set it as `MASTER_KEY`, and put the old one in `MASTER_KEY_PREVIOUS`. Restart; everything keeps working, and new data keys use the new master key.

@@ -1,0 +1,32 @@
+{{- if .Values.ingress.enabled }}
+{{- $api := printf "%s-api" (include "am.fullname" .) }}
+{{- $ingest := printf "%s-ingest" (include "am.fullname" .) }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "am.fullname" . }}
+  labels: {{- include "am.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations: {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- with .Values.ingress.tls }}
+  tls: {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          # Public collection paths go to the ingest role; everything else to the api role.
+          {{- range $path := list "/v1/" "/f/" "/hooks/in/" }}
+          - path: {{ $path }}
+            pathType: Prefix
+            backend: { service: { name: {{ $ingest }}, port: { name: http } } }
+          {{- end }}
+          - path: /
+            pathType: Prefix
+            backend: { service: { name: {{ $api }}, port: { name: http } } }
+{{- end }}

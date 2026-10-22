@@ -14,9 +14,11 @@ initTelemetry('agentic-marketing');
 
 const srv = createServer(config);
 const { app, db } = srv;
-await migrate(db.admin, { appRolePassword: config.appDbPassword, appRole: config.appDbRole, log: (m) => logger.info(m) });
-await migrateAuth({ baseUrl: config.publicUrl, secret: config.authSecret, db });
-await migrateClickHouse(config.clickhouse.url, config.clickhouse.database, (m) => logger.info(m), config.clickhouse);
+if (!config.skipMigrations) {
+  await migrate(db.admin, { appRolePassword: config.appDbPassword, appRole: config.appDbRole, log: (m) => logger.info(m) });
+  await migrateAuth({ baseUrl: config.publicUrl, secret: config.authSecret, db });
+  await migrateClickHouse(config.clickhouse.url, config.clickhouse.database, (m) => logger.info(m), config.clickhouse);
+}
 
 const servers: { close: () => void }[] = [];
 if (config.roles.has('api') || config.roles.has('ingest')) {

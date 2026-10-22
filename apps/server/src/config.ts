@@ -3,6 +3,10 @@ import { z } from 'zod';
 // All configuration comes from the environment and is validated at start-up, so a missing or
 // malformed setting fails fast with a clear message instead of at the first request.
 const Env = z.object({
+  SKIP_MIGRATIONS: z
+    .enum(['true', 'false'])
+    .default('false')
+    .describe('Start without migrating (Kubernetes: a migration job runs before each upgrade)'),
   ROLE: z.string().default('all').describe('Comma-separated roles: api, ingest, worker, scheduler, or all'),
   PORT: z.coerce.number().int().default(3000),
   PUBLIC_URL: z.url().optional(),
@@ -24,11 +28,32 @@ const Env = z.object({
     .describe('Name of the row-level-security role; separate installs on one Postgres server need different names'),
   APP_DB_PASSWORD: z.string().min(8).describe('Password for the am_app role the command layer uses (row-level security applies)'),
   AUTH_SECRET: z.string().min(32, 'AUTH_SECRET must be at least 32 characters (e.g. `openssl rand -base64 32`)'),
-  MASTER_KEY: z.string().describe('Base64 32-byte key-encryption key for secrets (`openssl rand -base64 32`)'),
+  KEY_PROVIDER: z
+    .enum(['local', 'openbao', 'aws-kms'])
+    .default('local')
+    .describe('Where the key-encryption key lives: MASTER_KEY (local), OpenBao/Vault Transit, or AWS KMS'),
+  MASTER_KEY: z
+    .string()
+    .optional()
+    .describe(
+      'Base64 32-byte key-encryption key for secrets (`openssl rand -base64 32`); with another KEY_PROVIDER, the key to migrate from',
+    ),
   MASTER_KEY_PREVIOUS: z
     .string()
     .optional()
     .describe('Comma-separated previous master keys, kept only while `cli rotate-keys` re-wraps data keys'),
+  OPENBAO_ADDR: z.url().optional().describe('OpenBao or Vault address, e.g. https://bao.internal:8200'),
+  OPENBAO_TOKEN: z.string().optional(),
+  OPENBAO_TOKEN_FILE: z.string().optional().describe('File with the token (agent sidecar, Kubernetes secret); re-read when rejected'),
+  OPENBAO_TRANSIT_MOUNT: z.string().default('transit'),
+  OPENBAO_TRANSIT_KEY: z.string().default('agentic-marketing'),
+  OPENBAO_NAMESPACE: z.string().optional(),
+  AWS_KMS_KEY_ID: z.string().optional().describe('Key id, ARN or alias of a symmetric KMS key'),
+  AWS_REGION: z.string().optional(),
+  AWS_ACCESS_KEY_ID: z.string().optional(),
+  AWS_SECRET_ACCESS_KEY: z.string().optional(),
+  AWS_SESSION_TOKEN: z.string().optional(),
+  AWS_KMS_ENDPOINT: z.url().optional().describe('A VPC endpoint or a test server instead of kms.<region>.amazonaws.com'),
   CLICKHOUSE_URL: z.url().default('http://localhost:8123').describe('ClickHouse HTTP endpoint, credentials in the URL if needed'),
   CLICKHOUSE_DATABASE: z
     .string()
@@ -92,12 +117,21 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     throw new Error(`Invalid configuration:\n${issues}`);
   }
   const e = parsed.data;
+  const missing = (names: string[]) => names.filter((n) => !e[n as keyof typeof e]);
+  const needed =
+    e.KEY_PROVIDER === 'local'
+      ? missing(['MASTER_KEY'])
+      : e.KEY_PROVIDER === 'openbao'
+        ? [...missing(['OPENBAO_ADDR']), ...(e.OPENBAO_TOKEN || e.OPENBAO_TOKEN_FILE ? [] : ['OPENBAO_TOKEN or OPENBAO_TOKEN_FILE'])]
+        : missing(['AWS_KMS_KEY_ID', 'AWS_REGION', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY']);
+  if (needed.length) throw new Error(`Invalid configuration:\n  KEY_PROVIDER=${e.KEY_PROVIDER} needs ${needed.join(', ')}`);
   const appUrl = new URL(e.DATABASE_URL);
   appUrl.username = e.APP_DB_ROLE;
   appUrl.password = e.APP_DB_PASSWORD;
   return {
     roles: new Set(e.ROLE === 'all' ? ['api', 'ingest', 'worker', 'scheduler'] : e.ROLE.split(',').map((r) => r.trim())),
     port: e.PORT,
+    skipMigrations: e.SKIP_MIGRATIONS === 'true',
     publicUrl: (e.PUBLIC_URL ?? `http://localhost:${e.PORT}`).replace(/\/$/, ''),
     linksUrl: (e.PUBLIC_LINKS_URL ?? e.PUBLIC_URL ?? `http://localhost:${e.PORT}`).replace(/\/$/, ''),
     clientIpHeader: e.CLIENT_IP_HEADER.toLowerCase(),
@@ -107,6 +141,25 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     appDbRole: e.APP_DB_ROLE,
     authSecret: e.AUTH_SECRET,
     masterKey: e.MASTER_KEY,
+    keys: {
+      provider: e.KEY_PROVIDER,
+      openbao: {
+        addr: e.OPENBAO_ADDR ?? '',
+        token: e.OPENBAO_TOKEN,
+        tokenFile: e.OPENBAO_TOKEN_FILE,
+        mount: e.OPENBAO_TRANSIT_MOUNT,
+        key: e.OPENBAO_TRANSIT_KEY,
+        namespace: e.OPENBAO_NAMESPACE,
+      },
+      awsKms: {
+        keyId: e.AWS_KMS_KEY_ID ?? '',
+        region: e.AWS_REGION ?? '',
+        accessKeyId: e.AWS_ACCESS_KEY_ID ?? '',
+        secretAccessKey: e.AWS_SECRET_ACCESS_KEY ?? '',
+        sessionToken: e.AWS_SESSION_TOKEN,
+        endpoint: e.AWS_KMS_ENDPOINT,
+      },
+    },
     previousMasterKeys:
       e.MASTER_KEY_PREVIOUS?.split(',')
         .map((k) => k.trim())

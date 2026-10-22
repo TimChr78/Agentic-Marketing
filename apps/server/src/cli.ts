@@ -11,7 +11,7 @@ import { runLoadTest } from './loadtest';
 // Admin CLI.
 //   pnpm cli migrate
 //   pnpm cli bootstrap --email you@example.com --password '…' --name 'You' --workspace 'My shop'
-//   pnpm cli rotate-keys    (after setting a new MASTER_KEY and the old one in MASTER_KEY_PREVIOUS)
+//   pnpm cli rotate-keys    (after setting a new MASTER_KEY and the old one in MASTER_KEY_PREVIOUS, or a new KEY_PROVIDER)
 //   pnpm cli loadtest --profiles 1000000 [--keep]   (synthetic data in a throwaway workspace)
 const [command, ...rest] = process.argv.slice(2);
 const config = loadConfig();
@@ -39,8 +39,11 @@ try {
     console.log(`created workspace "${values.workspace}" (${workspaceId}) with owner ${values.email}`);
   } else if (command === 'rotate-keys') {
     const { rewrapped } = await rewrapDataKeys(db.admin, keyProvider);
-    console.log(`re-wrapped ${rewrapped} data key(s) with master key ${keyProvider.id}`);
-    if (config.previousMasterKeys.length) console.log('every data key now uses the current master key; you can remove MASTER_KEY_PREVIOUS');
+    console.log(`re-wrapped ${rewrapped} data key(s) with ${keyProvider.id}`);
+    if (config.keys.provider !== 'local' && config.masterKey)
+      console.log(`every data key now uses ${config.keys.provider}; you can remove MASTER_KEY and MASTER_KEY_PREVIOUS`);
+    else if (config.previousMasterKeys.length)
+      console.log('every data key now uses the current master key; you can remove MASTER_KEY_PREVIOUS');
   } else if (command === 'loadtest') {
     const { values } = parseArgs({ args: rest, options: { profiles: { type: 'string', default: '100000' }, keep: { type: 'boolean' } } });
     const report = await runLoadTest({ db, events }, { profiles: Number(values.profiles), keep: values.keep, log: console.log });

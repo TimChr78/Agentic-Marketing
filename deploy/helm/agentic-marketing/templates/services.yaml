@@ -1,0 +1,17 @@
+{{- range $role := list "api" "ingest" }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "am.fullname" $ }}-{{ $role }}
+  labels:
+    {{- include "am.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $role }}
+spec:
+  type: {{ $.Values.service.type }}
+  selector: {{- include "am.selector" (dict "root" $ "role" $role) | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ $.Values.service.port }}
+      targetPort: http
+{{- end }}

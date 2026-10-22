@@ -1,0 +1,102 @@
+# Agentic Marketing on Kubernetes. Postgres, ClickHouse, NATS (JetStream) and Valkey are not part
+# of this chart: point it at managed services or operators you already run (see
+# docs/deployment/kubernetes.md for a reference deployment).
+
+# No image is published yet: build it from the repository's Dockerfile and push it to your
+# registry (`docker build -t registry.example.com/agentic-marketing:0.1.0 .`).
+image:
+  repository: registry.example.com/agentic-marketing
+  tag: ""            # defaults to the chart's appVersion
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# One image, four roles (ADR-0002). Each role is its own Deployment so it scales on its own.
+roles:
+  api:          # UI, REST, MCP, copilot, e-mail links and webhooks
+    replicas: 2
+    resources: { requests: { cpu: 250m, memory: 512Mi }, limits: { memory: 1Gi } }
+  ingest:       # /v1 events and decide, signup forms, inbound hooks
+    replicas: 2
+    resources: { requests: { cpu: 250m, memory: 384Mi }, limits: { memory: 768Mi } }
+    autoscaling: { enabled: false, minReplicas: 2, maxReplicas: 10, targetCPUUtilizationPercentage: 70 }
+  worker:       # ClickHouse sink, profile workers, journeys, AI steps, deliveries
+    replicas: 2
+    resources: { requests: { cpu: 500m, memory: 768Mi }, limits: { memory: 2Gi } }
+  scheduler:    # segment refreshes, broadcasts, retention, token refresh, audience sync, spend import
+    replicas: 1   # keep at 1: its loops are not coordinated across replicas
+    resources: { requests: { cpu: 250m, memory: 1Gi }, limits: { memory: 2Gi } }
+
+# Plain settings (become a ConfigMap). See .env.example for every variable.
+config:
+  PUBLIC_URL: https://marketing.example.com
+  PUBLIC_LINKS_URL: ""
+  CLIENT_IP_HEADER: x-forwarded-for
+  CLICKHOUSE_URL: http://clickhouse:8123
+  CLICKHOUSE_DATABASE: am
+  CLICKHOUSE_ROW_POLICIES: required
+  NATS_URL: nats://nats:4222
+  NATS_RETENTION_HOURS: "24"
+  VALKEY_URL: redis://valkey:6379
+  KEY_PROVIDER: local   # local (MASTER_KEY), openbao or aws-kms
+  EMAIL_TRACK_CLICKS: "true"
+  RETENTION_UNCONFIRMED_DAYS: "30"
+  RETENTION_LOG_DAYS: "180"
+  EGRESS_ALLOWED_HOSTS: ""
+  OTEL_EXPORTER_OTLP_ENDPOINT: ""
+
+# Secret settings: DATABASE_URL, APP_DB_PASSWORD, AUTH_SECRET, and MASTER_KEY or the OpenBao /
+# AWS KMS credentials. Prefer an existing Secret (sealed-secrets, External Secrets, Vault agent…);
+# `values` creates one from here, for trying things out.
+secrets:
+  existingSecret: ""
+  values: {}
+  #   DATABASE_URL: postgres://am:…@postgres:5432/am
+  #   APP_DB_PASSWORD: …
+  #   AUTH_SECRET: …
+  #   MASTER_KEY: …
+
+# Extra environment for every role, e.g. a token file mounted by an OpenBao agent.
+extraEnv: []
+extraVolumes: []
+extraVolumeMounts: []
+
+# Database, ClickHouse and Valkey migrations run as a Helm hook before each install and upgrade.
+migrations:
+  enabled: true
+  backoffLimit: 3
+
+service:
+  type: ClusterIP
+  port: 80
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  host: marketing.example.com
+  tls: []
+  #  - secretName: marketing-tls
+  #    hosts: [marketing.example.com]
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}   # e.g. eks.amazonaws.com/role-arn for AWS KMS through IRSA (with an agent)
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false
+  capabilities: { drop: [ALL] }
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+podAnnotations: {}
