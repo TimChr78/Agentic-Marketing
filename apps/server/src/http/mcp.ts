@@ -1,4 +1,4 @@
-import { type Auth, principalFromAccessToken } from '@agentic-marketing/auth';
+import { type Auth, principalFromAccessToken, principalFromApiToken } from '@agentic-marketing/auth';
 import type { Executor, Principal } from '@agentic-marketing/commands';
 import { AppError } from '@agentic-marketing/core';
 import type { Db } from '@agentic-marketing/db';
@@ -44,7 +44,7 @@ export function mcpServerFor(principal: Principal, executor: Executor) {
 export function mcpEndpoint(deps: { auth: Auth; db: Db; executor: Executor; resource: string }) {
   const handler = createMcpHandler(({ authInfo }) => mcpServerFor(authInfo!.extra!.principal as Principal, deps.executor));
 
-  return requireMcpAuth(
+  const oauth = requireMcpAuth(
     deps.auth,
     async (request, claims) => {
       const principal = await principalFromAccessToken(deps.db, claims);
@@ -62,4 +62,14 @@ export function mcpEndpoint(deps: { auth: Auth; db: Db; executor: Executor; reso
     },
     { resource: deps.resource },
   );
+  // API tokens (scripts, n8n) skip OAuth; everything else goes through it.
+  return async (request: Request) => {
+    const bearer = request.headers.get('authorization')?.match(/^Bearer (amk_\S+)$/)?.[1];
+    if (!bearer) return oauth(request);
+    const principal = await principalFromApiToken(deps.db, bearer);
+    if (!principal)
+      return Response.json({ error: 'invalid_token', message: 'This API token is unknown, revoked or expired.' }, { status: 401 });
+    const authInfo: AuthInfo = { token: '', clientId: principal.clientId!, scopes: [...principal.permissions], extra: { principal } };
+    return handler.fetch(request, { authInfo });
+  };
 }

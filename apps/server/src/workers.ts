@@ -1,6 +1,7 @@
 import { runAiWorker } from '@agentic-marketing/ai';
 import { runDeliveryWorker } from '@agentic-marketing/email';
 import { runSink } from '@agentic-marketing/events';
+import { type DeliveryDeps, runDeliveries, webhookHook } from '@agentic-marketing/integrations';
 import { journeyHook, runSweeper } from '@agentic-marketing/journeys';
 import { snapshotHook } from '@agentic-marketing/personalize';
 import { runProfileWorkers } from '@agentic-marketing/profiles';
@@ -19,17 +20,22 @@ export function startScheduler(
 }
 
 /** Event consumers of the worker role. Each runs until `signal` aborts. */
-export function startWorkers(srv: ReturnType<typeof createServer>, signal: AbortSignal): Promise<void>[] {
+export function startWorkers(
+  srv: ReturnType<typeof createServer>,
+  signal: AbortSignal,
+  opts: { deliveries?: Pick<DeliveryDeps, 'webhookBackoffMs' | 'actionBackoffMs'> } = {},
+): Promise<void>[] {
   const run = (name: string, p: Promise<void>) =>
     p.catch((err) => {
       logger.error({ err, worker: name }, 'worker stopped');
       throw err;
     });
-  logger.info('worker role: ClickHouse sink, profile workers, journeys, AI steps, e-mail delivery');
+  logger.info('worker role: ClickHouse sink, profile workers, journeys, AI steps, e-mail, webhooks and actions');
   return [
     run('clickhouse-sink', runSink(srv.bus, srv.events, signal)),
     run('journey-sweeper', runSweeper(srv.db, { kp: srv.keyProvider, events: srv.events }, signal)),
     run('ai-steps', runAiWorker(srv.db, { kp: srv.keyProvider, events: srv.events }, signal)),
+    run('deliveries', runDeliveries(srv.db, { kp: srv.keyProvider, egress: srv.egress, ...opts.deliveries }, signal)),
     run('email-delivery', runDeliveryWorker(srv.db, { kp: srv.keyProvider, events: srv.events, email: srv.email }, signal)),
     ...runProfileWorkers(
       {
@@ -40,6 +46,7 @@ export function startWorkers(srv: ReturnType<typeof createServer>, signal: Abort
           segmentHook({ db: srv.db, events: srv.events, bus: srv.bus }),
           snapshotHook({ db: srv.db, hot: srv.hot }),
           journeyHook(srv.db),
+          webhookHook(srv.db),
         ],
       },
       signal,

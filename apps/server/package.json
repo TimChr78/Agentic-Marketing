@@ -21,6 +21,7 @@
     "@agentic-marketing/events": "workspace:*",
     "@agentic-marketing/hotstate": "workspace:*",
     "@agentic-marketing/ingest": "workspace:*",
+    "@agentic-marketing/integrations": "workspace:*",
     "@agentic-marketing/journeys": "workspace:*",
     "@agentic-marketing/personalize": "workspace:*",
     "@agentic-marketing/profiles": "workspace:*",

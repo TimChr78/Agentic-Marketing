@@ -1,7 +1,7 @@
 import { publishedSingleton } from '@agentic-marketing/artifacts';
 import { newUuid } from '@agentic-marketing/core';
 import type { Db } from '@agentic-marketing/db';
-import { type EventBus, InboundEvent } from '@agentic-marketing/events';
+import { type BusEvent, type EventBus, InboundEvent } from '@agentic-marketing/events';
 import type { HotState } from '@agentic-marketing/hotstate';
 import { logger } from '@agentic-marketing/telemetry';
 import { type Context, Hono } from 'hono';
@@ -73,6 +73,42 @@ export function writeKeyOf(c: Context, body: Record<string, unknown>): string | 
   if (auth?.startsWith('Bearer ')) return auth.slice(7);
   const first = Array.isArray(body.batch) ? (body.batch[0] as Record<string, unknown> | undefined) : undefined;
   return (body.writeKey as string | undefined) ?? (first?.writeKey as string | undefined) ?? c.req.header('x-write-key');
+}
+
+/** Validates and applies the workspace policy to raw Segment-spec events (shared by the gateway and inbound webhooks). */
+export function acceptItems(
+  items: unknown[],
+  source: SourceInfo,
+  policy: WorkspacePolicy,
+  opts: { ip?: string; context?: Record<string, unknown>; receivedAt?: Date } = {},
+) {
+  const receivedAt = opts.receivedAt ?? new Date();
+  const accepted: BusEvent[] = [];
+  const rejected: { index: number; error: string }[] = [];
+  const warnings: { index: number; warning: string }[] = [];
+  let dropped = 0;
+  for (const [index, item] of items.entries()) {
+    if (JSON.stringify(item).length > MAX_EVENT) {
+      rejected.push({ index, error: `Events are limited to ${MAX_EVENT / 1024} KB.` });
+      continue;
+    }
+    const withContext =
+      item && typeof item === 'object'
+        ? { ...item, context: { ...opts.context, ...((item as { context?: Record<string, unknown> }).context ?? {}) } }
+        : item;
+    const parsed = InboundEvent.safeParse(withContext);
+    if (!parsed.success) {
+      rejected.push({ index, error: z.prettifyError(parsed.error) });
+      continue;
+    }
+    const out = processEvent(parsed.data, source, policy, receivedAt, { ip: opts.ip, messageId: newUuid });
+    if (out.kind === 'accepted') {
+      accepted.push(out.event);
+      for (const w of out.warnings) warnings.push({ index, warning: w });
+    } else if (out.kind === 'dropped') dropped++;
+    else rejected.push({ index, error: out.error });
+  }
+  return { accepted, rejected, warnings, dropped };
 }
 
 export interface IngestDeps {
@@ -174,32 +210,12 @@ export function ingestApi(deps: IngestDeps) {
     if (!items?.length) return fail(400, 'invalid_batch', 'A batch needs a non-empty "batch" array.');
     if (!allow(source.id, items.length)) return fail(429, 'rate_limited', 'Too many events for this source; retry with backoff.');
 
-    const receivedAt = new Date();
     const policy = await loadPolicy(source.workspaceId);
-    const batchContext = (body.context as Record<string, unknown> | undefined) ?? {};
     const ip = source.kind === 'browser' ? (c.req.header('x-forwarded-for')?.split(',')[0].trim() ?? undefined) : undefined;
-    const accepted = [];
-    const rejected: { index: number; error: string }[] = [];
-    const warnings: { index: number; warning: string }[] = [];
-    let dropped = 0;
-    for (const [index, item] of items.entries()) {
-      if (JSON.stringify(item).length > MAX_EVENT) {
-        rejected.push({ index, error: `Events are limited to ${MAX_EVENT / 1024} KB.` });
-        continue;
-      }
-      const withContext = item && typeof item === 'object' ? { ...item, context: { ...batchContext, ...(item.context ?? {}) } } : item;
-      const parsed = InboundEvent.safeParse(withContext);
-      if (!parsed.success) {
-        rejected.push({ index, error: z.prettifyError(parsed.error) });
-        continue;
-      }
-      const out = processEvent(parsed.data, source, policy, receivedAt, { ip, messageId: newUuid });
-      if (out.kind === 'accepted') {
-        accepted.push(out.event);
-        for (const w of out.warnings) warnings.push({ index, warning: w });
-      } else if (out.kind === 'dropped') dropped++;
-      else rejected.push({ index, error: out.error });
-    }
+    const { accepted, rejected, warnings, dropped } = acceptItems(items, source, policy, {
+      ip,
+      context: (body.context as Record<string, unknown> | undefined) ?? {},
+    });
 
     if (!accepted.length && rejected.length) return c.json({ success: false, error: 'invalid_events', rejected }, 400, cors);
     const { duplicates } = accepted.length ? await deps.bus.publish(accepted) : { duplicates: 0 };

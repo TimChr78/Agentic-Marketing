@@ -10,7 +10,7 @@ Ordering principle: build the **foundations that are expensive to retrofit** fir
 | **2. Email + journeys (first vertical slice)** (core done) | First real value | Template system (MJML + Liquid, GrapesJS editor, code view, previews), send gateway, provider adapters with delivery events ([ADR-0011](adr/0011-email-delivery-providers.md): SMTP, Amazon SES, Postmark, Brevo; SMTP can use a provider's webhooks), bounces and complaints into suppression, unsubscribe, segments v1 (batch + streaming basics), journey engine + canvas (core nodes), simulation, journey & message analytics | A welcome + abandoned-browse journey runs end-to-end, built either in the UI or entirely via MCP |
 | **3. Web personalization** (core done) | In-session experiences | Experience artifact & editor, decision API, session state & RT counters, SDK rendering + anti-flicker + client rules, A/B allocation & results | Next-page-view and same-page personalization with measured p95 < 50 ms server time |
 | **4. AI runtime & copilot** (core done) | Agents inside the product | LLM gateway (BYOK, OpenAI-/Anthropic-compatible), prompt artifacts with tests, `ai.decide` / `ai.generate`, context builder & redaction, budgets, in-app copilot over MCP | AI-chosen branches/content with full decision logs and fallbacks |
-| **5. Webhooks & integrations** | Connect the ecosystem | Webhook adapter (in/out), connector SDK, Activepieces-pieces spike, automation nodes (HTTP, transform). First-party connectors are **not a v1 priority**; when built, **Shopify and Salesforce** come first | Webhooks in/out work end-to-end; n8n can orchestrate via MCP/webhooks; connector SDK documented |
+| **5. Webhooks & integrations** (core done) | Connect the ecosystem | Webhook adapter (in/out), connector SDK, Activepieces-pieces spike, automation nodes (HTTP, transform). First-party connectors are **not a v1 priority**; when built, **Shopify and Salesforce** come first | Webhooks in/out work end-to-end; n8n can orchestrate via MCP/webhooks; connector SDK documented |
 | **6. Breadth & scale** | Production-grade for larger orgs | SMS & push adapters, warehouse export/sync, SSO (OIDC/SAML) & SCIM, Helm chart, load testing to 10M profiles, config-as-code export, participant migration between journey versions | Documented reference deployment at 10M profiles |
 | **Later** | | Probabilistic identity, recommendations engine, edge decide, autonomous goal-driven agents (scope C), SaaS multi-tenancy & billing | |
 
@@ -115,3 +115,34 @@ Known limits, to address later:
 - Budgets can be overshot by a few concurrent calls; prompt tests run in the command's transaction.
 - OAuth credentials for providers (open question 4) are not supported; API keys only.
 - The copilot does not stream tokens, only steps; the conversation lives in the browser.
+
+## Phase 5 status (2026-10-22)
+
+Done ([ADR-0013](adr/0013-integrations.md), guide: [integrations.md](../integrations.md)):
+- API tokens for scripts and automation tools: an agent principal with chosen scopes, accepted as Bearer on REST and `/mcp`, revocable, audited as `token:<id>`.
+- Outbound webhooks:
+  - Standard Webhooks signatures; subscriptions to customer events after identity resolution, with an optional purpose gate; payloads without personal traits;
+  - retries with backoff, a dead letter and manual retry (`webhooks.*`, `deliveries.*`).
+- Egress guard for every outbound call: public addresses only, checked at connect time; no redirects; bounded time and size; `EGRESS_ALLOWED_HOSTS` for LAN targets.
+- Connector SDK (`defineConnector`): settings, sealed secrets, inbound verify and map, actions, rate limits.
+  - Connectors: generic webhook (JSONata mapping, HMAC or Standard Webhooks), Shopify (signed orders, checkouts, customers), Slack, HTTP API.
+  - Commands: `connectors.list`, `connections.*`.
+  - Inbound URLs: `/hooks/in/<connection>/<token>`, through the same ingest policy.
+- Journey steps:
+  - `transform` (JSONata into `vars`);
+  - `action` (asynchronous, ok/error edges);
+  - `webhook` (consent-checked).
+  - Simulation and publish checks cover all three.
+- "Integrations" tab in the live workspace; the new steps in the journey builder.
+- Activepieces spike ([findings](../../spikes/activepieces/FINDINGS.md)): pieces are not embedded for now.
+
+Acceptance: n8n-style orchestration end to end (`apps/server/test/phase5.test.ts`):
+- an API token over REST and MCP;
+- signed outbound webhooks with retry and a dead letter;
+- signed Shopify and generic inbound webhooks becoming profiles and events;
+- a journey that transforms, calls Slack, then sends a webhook, and takes the error edge when Slack fails.
+
+Known limits, to address later:
+- No OAuth2 connectors yet (token store and refresh worker come with Salesforce); first-party connectors beyond the references are not built.
+- E-mail delivery events (sent, bounced, clicked) are not offered to webhook subscriptions yet; only customer events and journey steps are.
+- Rate limits are per worker process; the egress guard does not cover the e-mail provider adapters, which call fixed provider hosts.

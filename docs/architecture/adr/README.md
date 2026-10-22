@@ -17,3 +17,4 @@ New decisions get the next number; superseded ADRs are kept and linked.
 | [0010](0010-analytics-layers.md) | Three-layer analytics | Accepted |
 | [0011](0011-email-delivery-providers.md) | Email delivery through provider adapters, not SMTP alone | Accepted |
 | [0012](0012-ai-runtime.md) | AI steps run asynchronously with fallbacks; the copilot is an in-process MCP client | Accepted |
+| [0013](0013-integrations.md) | Integrations through signed webhooks, API tokens and an own connector SDK | Accepted |

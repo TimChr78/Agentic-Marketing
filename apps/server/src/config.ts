@@ -36,6 +36,12 @@ const Env = z.object({
     .regex(/^[a-z_][a-z0-9_]*$/)
     .default('am')
     .describe('Key prefix, so several installs can share one Valkey'),
+  EGRESS_ALLOWED_HOSTS: z
+    .string()
+    .default('')
+    .describe(
+      'Comma-separated hosts, IPs or CIDR ranges that webhooks and connector actions may reach although private, e.g. "n8n.lan,192.168.1.0/24"',
+    ),
   EMAIL_TRACK_CLICKS: z
     .enum(['true', 'false'])
     .default('true')
@@ -73,6 +79,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     nats: { url: e.NATS_URL, namespace: e.NATS_NAMESPACE },
     valkey: { url: e.VALKEY_URL, prefix: e.VALKEY_PREFIX },
     trackClicks: e.EMAIL_TRACK_CLICKS === 'true',
+    egress: {
+      allowedHosts: e.EGRESS_ALLOWED_HOSTS.split(',')
+        .map((h) => h.trim())
+        .filter(Boolean),
+    },
     trustedOrigins: e.TRUSTED_ORIGINS?.split(',').map((o) => o.trim()) ?? [],
   };
 }

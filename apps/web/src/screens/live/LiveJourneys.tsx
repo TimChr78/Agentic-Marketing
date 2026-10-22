@@ -27,8 +27,8 @@ interface Content {
   nodes: LiveNode[];
 }
 
-/** What can run today; webhook steps arrive in a later phase. */
-const PALETTE: NodeKind[] = ['trigger', 'wait', 'waitEvent', 'branch', 'split', 'aiDecide', 'aiGenerate', 'email', 'updateProfile', 'goal', 'exit'];
+/** Every step kind the runtime can run. */
+const PALETTE: NodeKind[] = ['trigger', 'wait', 'waitEvent', 'branch', 'split', 'aiDecide', 'aiGenerate', 'email', 'updateProfile', 'webhook', 'action', 'transform', 'goal', 'exit'];
 const DEFAULTS: Partial<Record<NodeKind, Record<string, unknown>>> = {
   trigger: { event: 'Signed Up', reentry: 'once' },
   wait: { duration: 'P1D' },
@@ -40,9 +40,17 @@ const DEFAULTS: Partial<Record<NodeKind, Record<string, unknown>>> = {
   updateProfile: { trait: 'lifecycle', value: 'engaged' },
   aiDecide: { prompt: '', options: ['vip', 'standard'], fallback: 'standard', timeout: 'PT5M' },
   aiGenerate: { prompt: '', timeout: 'PT5M' },
+  webhook: { endpoint: '' },
+  action: { connection: '', action: 'postMessage', input: '{"text": "New lead: " & profile.id}', timeout: 'PT10M' },
+  transform: { set: 'total', expression: '$sum(event.properties.products.price)' },
   exit: {},
 };
-const EDGE_LABELS: Partial<Record<NodeKind, string[]>> = { branch: ['yes', 'no'], waitEvent: ['matched', 'timeout'], goal: ['converted', 'timeout'] };
+const EDGE_LABELS: Partial<Record<NodeKind, string[]>> = {
+  branch: ['yes', 'no'],
+  waitEvent: ['matched', 'timeout'],
+  goal: ['converted', 'timeout'],
+  action: ['ok', 'error'],
+};
 
 function summary(n: LiveNode): string {
   const c = n.config as Record<string, any>;
@@ -63,6 +71,12 @@ function summary(n: LiveNode): string {
       return c.template ? String(c.template).slice(0, 16) + '…' : 'choose a template';
     case 'updateProfile':
       return `${c.trait} = ${JSON.stringify(c.value)}`;
+    case 'webhook':
+      return c.endpoint ? `to ${String(c.endpoint).slice(0, 12)}…` : 'choose an endpoint';
+    case 'action':
+      return c.connection ? `${c.action} via ${String(c.connection).slice(0, 12)}…` : 'choose a connection';
+    case 'transform':
+      return `vars.${c.set} = ${String(c.expression).slice(0, 40)}`;
     case 'aiDecide':
       return c.prompt ? `${(c.options ?? []).join(' | ')} · fallback ${c.fallback}` : 'choose a decide prompt';
     case 'aiGenerate':

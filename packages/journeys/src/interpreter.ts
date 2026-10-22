@@ -21,6 +21,10 @@ export type Effect =
   | { kind: 'updateProfile'; node: string; seq: number; trait: string; value: string | number | boolean | null }
   /** Ask the AI worker for a decision or text; the participant waits until it answers or the step times out. */
   | { kind: 'ai'; node: string; seq: number; task: 'decide' | 'generate'; prompt: string }
+  | { kind: 'webhook'; node: string; seq: number; endpoint: string; data?: string }
+  | { kind: 'transform'; node: string; seq: number; set: string; expression: string }
+  /** Run a connector action; the participant waits for its result or the timeout. */
+  | { kind: 'action'; node: string; seq: number; connection: string; action: string; input: Record<string, unknown> | string }
   /** A text step that got no answer: its slots take their fallback texts. */
   | { kind: 'aiFallback'; node: string; seq: number; prompt: string };
 
@@ -46,6 +50,8 @@ export interface Env {
   key: string;
   /** The AI worker's answer for a step the participant waited at, if it came in time. */
   ai?(node: string): AiOutcome | undefined;
+  /** The outcome of an action step the participant waited at, if it came in time. */
+  result?(node: string): { ok: boolean; error?: string } | undefined;
 }
 
 /** Deterministic weighted choice: the same participant and node always take the same edge. */
@@ -172,6 +178,30 @@ export async function advance(
           ? `fallback ${chosen} (${why})`
           : `AI chose ${chosen}${r?.rationale ? `: ${r.rationale}` : ''}`;
         if (!goTo(n.edges[n.options.indexOf(chosen)] ?? null)) return end('completed', n.id);
+        break;
+      }
+      case 'webhook':
+        effects.push({ kind: 'webhook', node: n.id, seq, endpoint: n.endpoint, data: n.data });
+        if (!goTo(n.next)) return end('completed', n.id);
+        break;
+      case 'transform':
+        effects.push({ kind: 'transform', node: n.id, seq, set: n.set, expression: n.expression });
+        if (!goTo(n.next)) return end('completed', n.id);
+        break;
+      case 'action': {
+        if (!resuming) {
+          effects.push({ kind: 'action', node: n.id, seq, connection: n.connection, action: n.action, input: n.input });
+          steps.push({ node: n.id, seq, type: 'waiting', detail: `for ${n.action}` });
+          return {
+            state: { node, status: 'waiting', seq, dueAt: new Date(now.getTime() + n.ms), waitingEvent: null, matched: false, converted },
+            effects,
+            steps,
+          };
+        }
+        resuming = false;
+        const r = env.result?.(n.id);
+        steps[steps.length - 1].detail = r?.ok ? 'ok' : `error: ${r ? r.error : 'timed out'}`;
+        if (!goTo(r?.ok ? n.ok : n.error)) return end('completed', n.id);
         break;
       }
       case 'exit':

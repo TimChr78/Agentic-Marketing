@@ -7,6 +7,7 @@ export type {
   ApprovalPolicy,
   ConsentSource,
   ConsentStatus,
+  DeliveryStatus,
   IdentifierType,
   MessageStatus,
   ParticipantStatus,
