@@ -1,5 +1,7 @@
 # Roadmap (team of one, no deadline)
 
+> **Wave 2 (from 2026-10-22):** the phases after the MartechSignal pilot are replanned in [roadmap-wave-2.md](roadmap-wave-2.md): pilot hardening, delivery beyond SMTP and SMS, consent everywhere, performance marketing with Google, Meta and Microsoft, scale, and enterprise. The table below is wave 1.
+
 Ordering principle: build the **foundations that are expensive to retrofit** first (command registry, tenancy, artifacts/versioning, consent, audit), then deliver one end-to-end vertical slice, then widen.
 
 | Phase | Goal | Contents | "Done" means |
@@ -11,7 +13,7 @@ Ordering principle: build the **foundations that are expensive to retrofit** fir
 | **3. Web personalization** (core done) | In-session experiences | Experience artifact & editor, decision API, session state & RT counters, SDK rendering + anti-flicker + client rules, A/B allocation & results | Next-page-view and same-page personalization with measured p95 < 50 ms server time |
 | **4. AI runtime & copilot** (core done) | Agents inside the product | LLM gateway (BYOK, OpenAI-/Anthropic-compatible), prompt artifacts with tests, `ai.decide` / `ai.generate`, context builder & redaction, budgets, in-app copilot over MCP | AI-chosen branches/content with full decision logs and fallbacks |
 | **5. Webhooks & integrations** (core done) | Connect the ecosystem | Webhook adapter (in/out), connector SDK, Activepieces-pieces spike, automation nodes (HTTP, transform). First-party connectors are **not a v1 priority**; when built, **Shopify and Salesforce** come first | Webhooks in/out work end-to-end; n8n can orchestrate via MCP/webhooks; connector SDK documented |
-| **6. Breadth & scale** | Production-grade for larger orgs | SMS & push adapters, warehouse export/sync, SSO (OIDC/SAML) & SCIM, Helm chart, load testing to 10M profiles, config-as-code export, participant migration between journey versions | Documented reference deployment at 10M profiles |
+| **6. Breadth & scale** (superseded by [wave 2](roadmap-wave-2.md)) | Production-grade for larger orgs | SMS & push adapters, warehouse export/sync, SSO (OIDC/SAML) & SCIM, Helm chart, load testing to 10M profiles, config-as-code export, participant migration between journey versions | Documented reference deployment at 10M profiles |
 | **Later** | | Probabilistic identity, recommendations engine, edge decide, autonomous goal-driven agents (scope C), SaaS multi-tenancy & billing | |
 
 Suggested spikes before Phase 0 code freeze on the design (1–3 days each):
