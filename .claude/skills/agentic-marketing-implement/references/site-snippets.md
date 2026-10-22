@@ -2,8 +2,10 @@
 
 ## Signup form (no JavaScript, CSP-safe)
 
+The `action` is the links URL plus `/f/<form id>`: `https://am.<site>/f/frm_…` with option A (the tunnel hostname, listed in the CSP's `form-action`), or `/am/f/frm_…` with option B (the worker proxy).
+
 ```html
-<form class="sub-form" action="/am/f/frm_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX" method="post">
+<form class="sub-form" action="https://am.example.com/f/frm_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX" method="post">
   <label class="visually-hidden" for="sub-email">Work email</label>
   <input id="sub-email" type="email" name="email" placeholder="you@company.com" autocomplete="email" required>
   <input type="text" name="firstName" placeholder="First name (optional)" autocomplete="given-name">

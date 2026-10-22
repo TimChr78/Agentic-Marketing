@@ -2,44 +2,64 @@
 
 ## Contents
 - Topology
-- Tunnel and Access
-- Pages worker proxy
+- Option A: hostname on the existing tunnel
+- Option B: worker proxy and Access
+- Pages worker proxy (option B)
 - Turnstile
 - DNS for e-mail
 - Checks
 
 ## Topology
 
+Two ways to publish the platform's public paths. Choose A when a tunnel already serves something like Umami.
+
 ```
-visitor ─► https://site/…        Cloudflare Pages (_worker.js)
-              └─ /am/*  ─────────► https://am-edge.<domain>  (Cloudflare Tunnel, Access: service token)
-                                        └─► cloudflared ─► app:3000 (homelab)
-admin, MCP ─► http://am.lan:3000  (LAN / Tailscale only)
+Option A (existing tunnel)
+visitor ─► https://site/…            Cloudflare Pages (unchanged)
+form post, e-mail links ─► https://am.site/(f|u|c)/…  ─► tunnel ─► app:3000   (other paths: 404 at the edge)
+
+Option B (worker proxy)
+visitor ─► https://site/am/(f|u|c|v1/batch|v1/decide)… ─► _worker.js ─► https://am-edge.site (Access: service token) ─► tunnel ─► app:3000
+
+admin, MCP ─► http://am.lan:3000  (LAN / Tailscale only, both options)
 ```
 
-Only the paths in the proxy's allow-list are reachable from the internet:
-- `f/…` (forms and confirmations), `u/…` (unsubscribe), `c/…` (e-mail clicks);
-- later `v1/batch` and `v1/decide` (SDK).
+Provider webhooks (`/hooks/email/…`) and inbound connector webhooks (`/hooks/in/…`) need a public route only if they are used. Add `hooks` to the tunnel's path rule.
 
-Provider webhooks (`/hooks/email/…`) and inbound connector webhooks (`/hooks/in/…`) need their own public route only if they are used. Add them to the tunnel's public ingress, not to the site proxy.
+## Option A: hostname on the existing tunnel
 
-## Tunnel and Access
+Tunnel config (locally managed `config.yml`), next to the existing rules:
+```yaml
+ingress:
+  - hostname: analytics.example.com      # e.g. existing Umami
+    service: http://umami:3000
+  - hostname: am.example.com
+    path: ^/(f|u|c)/                     # add |hooks if a provider posts webhooks
+    service: http://app:3000
+  - hostname: am.example.com
+    service: http_status:404
+  - service: http_status:404
+```
+- **Dashboard-managed tunnel:** Zero Trust → Networks → Tunnels → the tunnel → Public hostnames. Add `am.example.com` with Path `^/(f|u|c)/` → `http://app:3000`, and a second entry for `am.example.com` with no path → `http_status:404`. The more specific rule must come first.
+- **cloudflared in Compose** (if not running already):
+  ```yaml
+  cloudflared:
+    image: cloudflare/cloudflared:2026.9.3
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+  ```
+- **Platform:** `PUBLIC_LINKS_URL=https://am.example.com`, `CLIENT_IP_HEADER=cf-connecting-ip`.
+- **Site CSP:** `form-action 'self' https://am.example.com`, and remove the old newsletter tool's domain. Add `connect-src https://am.example.com` only if forms post JSON with JavaScript.
 
-1. Create a tunnel: Zero Trust → Networks → Tunnels → Create (`cloudflared`). Run the connector next to the app, e.g. as a Compose service:
-   ```yaml
-   cloudflared:
-     image: cloudflare/cloudflared:2026.9.3
-     command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
-   ```
-2. Add a public hostname `am-edge.<domain>` → `http://app:3000`.
-3. Protect it with Zero Trust → Access → Applications → Self-hosted for `am-edge.<domain>`:
+## Option B: worker proxy and Access
+
+1. Create a tunnel hostname `am-edge.<domain>` → `http://app:3000`.
+2. Protect it with Zero Trust → Access → Applications → Self-hosted for `am-edge.<domain>`:
    - add a policy with action **Service Auth**, including a new service token;
    - keep the client id and secret for the worker.
 
    Requests without the token never reach the app.
-4. If provider webhooks must reach the app, add a second hostname with an Access bypass policy for the exact path `/hooks/email/*` only.
 
-## Pages worker proxy
+## Pages worker proxy (option B)
 
 - Copy [cloudflare-worker-proxy.js](cloudflare-worker-proxy.js) to the site root as `am-proxy.js`. Make sure the deploy step uploads it, e.g. `stage_deploy.py` for a staged deploy dir.
 - In `_worker.js`:
@@ -77,8 +97,10 @@ Cloudflare Email Routing receives mail only; it does not send newsletters.
 ## Checks
 
 ```sh
-curl -s -o /dev/null -w '%{http_code}\n' https://<site>/am/v1/artifacts.list   # 404: commands are not exposed
-curl -s -o /dev/null -w '%{http_code}\n' https://am-edge.<domain>/readyz        # 403 from Access without the token
+# Option A
+curl -s -o /dev/null -w '%{http_code}\n' https://am.<domain>/                     # 404: nothing but f/u/c is public
+curl -s -o /dev/null -w '%{http_code}\n' -X POST https://am.<domain>/v1/workspace.get  # 404: commands are not public
 curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' -X POST \
-  -d 'email=you@example.com' -H 'origin: https://<site>' https://<site>/am/f/<form id>   # 303 to successUrl
+  -d 'email=you@example.com' -H 'origin: https://<site>' https://am.<domain>/f/<form id>   # 303 to successUrl
+# Option B: the same through https://<site>/am/…, and https://am-edge.<domain>/readyz gives 403 without the token
 ```

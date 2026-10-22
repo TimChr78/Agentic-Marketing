@@ -10,14 +10,14 @@ A light pilot before Phase 6: run the platform for a real site, the owner's [mar
 | Build | A Python generator builds static HTML (no bundler). `deploy.sh` uploads `deploy-out/` with wrangler; an agent (Hermes) runs builds and deploys on cron. |
 | Content | Tool directory (`catalog-tools.json`, about 170 tools), reviews, comparisons, "best of", glossary, blog, checklist, `llms.txt`. No accounts, no ads. |
 | Newsletter | Weekly ("one email, every Friday") on **Kit**. A plain HTML form posts to `app.kit.com` in a new tab, once per page, on about 200 pages. |
-| Measurement | Self-hosted **Umami** (`analytics.martechsignal.com`, cookieless; `data-umami-event` on the subscribe button) and Cloudflare Web Analytics. |
+| Measurement | Self-hosted **Umami** in the homelab behind a Cloudflare Tunnel (`analytics.martechsignal.com`, cookieless; `data-umami-event` on the subscribe button) and Cloudflare Web Analytics. |
 | Privacy promise | "No tracking cookies, no analytics that build profiles … vendor links have no redirect trackers." The newsletter address is used "for exactly one purpose". |
 | CSP | Strict: `script-src 'self' analytics.martechsignal.com static.cloudflareinsights.com`, `connect-src 'self' …`, `form-action 'self' https://app.kit.com`, no `unsafe-inline` scripts. |
 
 ## What the pilot should do
 
 1. **Own the newsletter.** Signups through the platform with double opt-in, existing Kit subscribers imported with their consent, and the Friday issue sent as a broadcast to a consent-based segment through the owner's SMTP relay (or SES or Postmark).
-2. **Welcome journey.** A welcome e-mail after confirmation, plus a nudge after a week if they have not clicked anything.
+2. **Welcome journey.** A welcome e-mail after confirmation, then a "start here" e-mail a few days later.
 3. **Agent-run operations.** The Hermes agent drafts each issue and broadcast through MCP with an API token; Tim approves in the UI (workspace policy "agent changes need a person").
 4. **Keep the privacy promise.** Do not track anonymous visitors in phase A. People who subscribe are known by their e-mail; what they click in e-mails is first-party.
 5. **Later (phase B, optional).** Consent-gated on-site tracking and personalization, e.g. a newsletter CTA tailored to the category being read, and segments by interest.
@@ -29,10 +29,10 @@ A light pilot before Phase 6: run the platform for a real site, the owner's [mar
 | Signup form that works without JavaScript and under the CSP | Missing: ingest takes JSON with a write key | **Built**: `form` artifact; `POST /f/<form>` takes urlencoded or JSON, answers 303 to the site's own pages, checks allowed origins, has a honeypot and a per-IP rate limit |
 | Double opt-in (EU practice, and the purposes already had the flag) | Flag only | **Built**: confirmation e-mail (template with `{{ confirm_url }}`, contract purpose); the link opens a page with a button, so mail scanners cannot confirm; consent is recorded with proof (form, version, consent-text hash, submitted and confirmed at) |
 | Bot protection | – | **Built**: honeypot and rate limit by default; **Cloudflare Turnstile** per form (`turnstile: true`, secret `turnstile.secret_key`) |
-| Move subscribers from Kit with consent | Missing (Phase 1 limit: no bulk import) | **Built**: `profiles.import`, up to 5,000 rows per call, keeping consent history and proof; idempotent; people only |
+| Move subscribers from Kit with consent | Missing (Phase 1 limit: no bulk import) | **Built**: `profiles.import`, up to 5,000 rows per call, keeping consent history and proof; idempotent; people only. In the UI: a CSV import that recognises Kit's columns |
 | Weekly newsletter | Missing: journeys are triggered; `journeys.enroll` caps at 1,000 and is not a campaign | **Built**: `broadcast` artifact (template + segment + optional `sendAt`); it runs once, in batches, through the send gateway; `broadcasts.preview`, `broadcasts.status`, `broadcasts.cancel` |
-| E-mail links on the site's own domain (unsubscribe, clicks, confirm) | Links used `PUBLIC_URL`, which is also the admin and OAuth URL | **Built**: `PUBLIC_LINKS_URL` (e.g. `https://martechsignal.com/am`) |
-| Visitor IP behind Cloudflare | Hard-wired `x-forwarded-for` | **Built**: `CLIENT_IP_HEADER` (the proxy sets `x-am-client-ip`) |
+| E-mail links on the site's domain (unsubscribe, clicks, confirm) | Links used `PUBLIC_URL`, which is also the admin and OAuth URL | **Built**: `PUBLIC_LINKS_URL` (e.g. `https://am.martechsignal.com`) |
+| Visitor IP behind Cloudflare | Hard-wired `x-forwarded-for` | **Built**: `CLIENT_IP_HEADER` (`cf-connecting-ip` through the tunnel) |
 | SDK on a site without a bundler, under `script-src 'self'` | Source only | **Built**: `pnpm --filter @agentic-marketing/sdk-js build` makes `dist/am.min.js` (7 KB IIFE, global `AgenticMarketing`) to host on the site |
 | Welcome journey, unsubscribe (RFC 8058), suppressions, bounces | Existing | Existing |
 | Agent drafting, approval, audit | Existing (MCP, API tokens, approval policy) | Existing |
@@ -42,17 +42,47 @@ A light pilot before Phase 6: run the platform for a real site, the owner's [mar
 
 ## Cloudflare specifics
 
-- **First-party proxy in `_worker.js`** ([reference](../../.claude/skills/agentic-marketing-implement/references/cloudflare-worker-proxy.js)). `/am/*` on the site forwards only the public paths (forms, confirmation, unsubscribe, clicks, and later `v1/batch` and `v1/decide`) to the platform.
-  - The CSP keeps `form-action 'self'` and `connect-src 'self'`; no third-party domain is added.
-  - Ad blockers do not block it.
-  - The admin UI, REST commands and MCP are not reachable through the site.
-  - The proxy must run before the worker's HTML edge cache. Its responses are `no-store`.
-- **Reaching the homelab: Cloudflare Tunnel** (`cloudflared`).
-  - One tunnel hostname (e.g. `am-edge.<domain>`) maps to the app's port. Protect it with **Cloudflare Access** using a service-token policy; the worker sends the token, so only the site can call the platform.
-  - The admin UI and MCP stay on the LAN or a VPN (Tailscale). Hermes runs on the same server, so it uses the LAN URL with an API token.
+Umami already runs in the homelab behind a **Cloudflare Tunnel** (`analytics.martechsignal.com`), so the platform reuses that tunnel.
+
+- **Option A, recommended: a hostname on the existing tunnel**, with path rules, the same way Umami is set up.
+  - Add a public hostname `am.martechsignal.com` → `http://<app>:3000` that lets **only** the public paths through. In the tunnel config:
+    ```yaml
+    ingress:
+      - hostname: analytics.martechsignal.com     # existing Umami rule
+        service: http://umami:3000
+      - hostname: am.martechsignal.com
+        path: ^/(f|u|c)/                          # forms + confirmation, unsubscribe, e-mail clicks
+        service: http://app:3000
+      - hostname: am.martechsignal.com
+        service: http_status:404                  # admin UI, REST commands, MCP: not public
+      - service: http_status:404
+    ```
+    For a tunnel managed in the dashboard, add two public hostnames: one with Path `^/(f|u|c)/` to the app, and a catch-all for the hostname to `http_status:404`.
+  - Platform settings: `PUBLIC_LINKS_URL=https://am.martechsignal.com`, `CLIENT_IP_HEADER=cf-connecting-ip` (the tunnel passes the visitor's IP).
+  - Site: the form posts to `https://am.martechsignal.com/f/<form id>`. The CSP's `form-action` swaps `https://app.kit.com` for `https://am.martechsignal.com`. Nothing else changes; the site worker stays as it is.
+  - If the relay offers bounce and complaint webhooks, add `hooks` to the path rule: `^/(f|u|c|hooks)/`.
+- **Option B: first-party proxy in `_worker.js`** ([reference](../../.claude/skills/agentic-marketing-implement/references/cloudflare-worker-proxy.js)). `/am/*` on martechsignal.com is forwarded to a tunnel hostname locked with a Cloudflare Access service token.
+  - Pick it if the links should live on the main domain, or for phase B tracking, where a same-origin `/am/v1/batch` is safest against ad blockers.
+  - It needs worker code and must run before the worker's HTML edge cache.
+- **Admin and MCP** stay on the LAN or a VPN (Tailscale). Hermes runs on the same server, so it uses the LAN URL with an API token.
 - **Turnstile** (free) is better than a CAPTCHA if bots find the form; it needs `challenges.cloudflare.com` in `script-src` and `frame-src`.
-- **E-mail sending:** Cloudflare does not send bulk mail. Keep the SMTP relay (with the relay's bounce webhooks if it has them, ADR-0011), or use SES or Postmark. Add SPF, DKIM and DMARC for the sending domain in Cloudflare DNS.
+- **E-mail sending:** Cloudflare does not send bulk mail. Keep the SMTP relay (with the relay's bounce webhooks if it has them, ADR-0011), or use SES or Postmark. Add SPF, DKIM and DMARC for the sending domain in Cloudflare DNS, and remove Kit's sending-domain records after the switch.
 - **Edge cache:** the worker caches HTML for 5 minutes, so personalization must stay client-side (the SDK), which it already is.
+
+## Replacing Kit: cutover without losing signups
+
+1. Build and test everything with your own address: the form, the confirmation, the welcome e-mail, a test broadcast to a one-person segment.
+2. **Switch the forms first.** Change the generator's subscribe partial (about 200 pages) to post to the platform, and deploy. From now on, new signups land in the platform.
+3. **Then export from Kit** (Subscribers → export, active only) and import in the UI: People & data → Import subscribers. The import maps Kit's columns (`email_address`, `first_name`, `created_at`, `state`), keeps the subscription date and "Kit" as proof, skips inactive rows and duplicates, and uploads in batches of 5,000. Because the export happens after the switch, nobody who signed up in between is lost.
+4. **Rebuild Kit's automations** (a welcome sequence, if any) as a journey triggered by `Subscription Confirmed`. People imported from Kit do not trigger it; they already had their welcome.
+5. **The first Friday issue from the platform.** Mention the change in one line ("same newsletter, new sending address") to limit spam complaints, and watch bounces and complaints in `broadcasts.status`.
+6. **Close Kit** after one quiet issue: cancel scheduled broadcasts there, export a final archive, delete the subscriber data (GDPR: no copies without a purpose), cancel the plan, and remove Kit's DNS records.
+
+## Umami alongside the platform
+
+- Umami stays the on-site analytics, cookieless and without profiles. The platform does not replace it in phase A.
+- **Newsletter traffic in Umami:** add UTM parameters to links in each issue, e.g. `?utm_source=newsletter&utm_medium=email&utm_campaign=signal-43`. Umami then shows which issues bring readers to which pages. The platform's click counting (if on) and UTM tags work together.
+- **Signup conversions in Umami:** keep `data-umami-event="Newsletter subscribe"` on the button. The platform counts confirmations (`Subscription Confirmed`); Umami counts form submissions per page.
 
 ## Privacy and legal changes on the site
 
@@ -66,16 +96,16 @@ A light pilot before Phase 6: run the platform for a real site, the owner's [mar
 ## Plan for the implementation session
 
 1. **Platform up.**
-   - Docker Compose on the homelab with `PUBLIC_URL` (LAN), `PUBLIC_LINKS_URL=https://martechsignal.com/am` and `CLIENT_IP_HEADER=x-am-client-ip`.
+   - Docker Compose on the homelab with `PUBLIC_URL` (LAN), `PUBLIC_LINKS_URL=https://am.martechsignal.com` and `CLIENT_IP_HEADER=cf-connecting-ip` (option A).
    - Bootstrap the owner (`cli bootstrap`); set the approval policy to `agent_changes`.
    - Add the e-mail provider (SMTP relay) with `useFor: [transactional, marketing]`.
    - Purposes: the defaults fit (`marketing_email` is consent-based; `onboarding` covers the confirmation e-mail). Double opt-in is set on the form (`doubleOptIn: true`); the purposes' `requiresDoubleOptIn` flag is informational only.
-2. **Edge.** Create the tunnel and the Access service token; add `am-proxy.js` and the `/am/` branch to `_worker.js`; set `AM_ORIGIN`, `AM_ACCESS_ID` and `AM_ACCESS_SECRET` on the Pages project.
+2. **Edge.** Add the `am.martechsignal.com` hostname with the path rules to the existing Umami tunnel (option A). Check that `/f/…` reaches the app and `/` and `/v1/workspace.get` answer 404.
 3. **Signup.**
    - Create the confirmation template (purpose `onboarding`), the form (DOI, `successUrl` and `confirmedUrl` pages on the site, `allowedOrigins: ["https://martechsignal.com"]`) and the two small pages (`/subscribe/check-your-inbox/`, `/subscribe/welcome/`).
-   - Change the generator's subscribe partial to post to `/am/f/<form id>` with the honeypot field.
-   - Update the CSP: drop `app.kit.com` from `form-action` and `connect-src` once Kit is gone.
-4. **Import.** Export active Kit subscribers as CSV and import them in batches of up to 5,000 with `profiles.import` (people only; use the UI's REST client or a script with the owner's session).
+   - Change the generator's subscribe partial to post to `https://am.martechsignal.com/f/<form id>` with the honeypot field (see "Replacing Kit" for the order).
+   - Update the CSP: `form-action 'self' https://am.martechsignal.com`, and drop `app.kit.com` from `form-action` and `connect-src`.
+4. **Import.** After the forms are switched, export active Kit subscribers and import them in the UI (People & data → Import subscribers).
 5. **Newsletter.**
    - Segment `{"consent": "marketing_email"}` ("Newsletter subscribers").
    - Each week: Hermes drafts the issue template and a `broadcast` with `sendAt` Friday 07:00 UTC over MCP, runs `broadcasts.preview` and requests publishing; Tim approves; check with `broadcasts.status`.

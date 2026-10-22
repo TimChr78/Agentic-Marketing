@@ -48,8 +48,8 @@ Write the fit down as a table (need / exists / gap), as in `docs/pilots/martechs
 ### 2. Deploy the platform
 Docker Compose on the host (homelab or VM): copy `.env.example` to `.env` and generate secrets with `openssl rand -base64 32`. Set:
 - `PUBLIC_URL`: the admin URL (LAN or VPN), e.g. `http://am.lan:3000`.
-- `PUBLIC_LINKS_URL=https://<site>/am`: the links in e-mails and forms.
-- `CLIENT_IP_HEADER=x-am-client-ip` (set by the proxy).
+- `PUBLIC_LINKS_URL`: the public base for links in e-mails and forms. Option A: `https://am.<site>`; option B: `https://<site>/am`.
+- `CLIENT_IP_HEADER`: `cf-connecting-ip` behind a Cloudflare Tunnel (option A), or `x-am-client-ip` with the worker proxy (option B).
 - `EGRESS_ALLOWED_HOSTS` only if webhooks must reach the LAN.
 
 Then:
@@ -60,11 +60,11 @@ docker compose exec app pnpm --filter @agentic-marketing/server cli bootstrap --
 Sign in to the UI and set the approval policy to "Agent changes need a person". **Check:** `GET /readyz` returns `{"ok":true}`.
 
 ### 3. Expose the public paths
-Read [references/cloudflare.md](references/cloudflare.md). In short:
-- a Cloudflare Tunnel hostname, locked with a Cloudflare Access service token;
-- the site's worker proxies `/am/*`, public paths only, using [references/cloudflare-worker-proxy.js](references/cloudflare-worker-proxy.js).
+Only these are public: `f/` (forms and confirmations), `u/` (unsubscribe), `c/` (e-mail clicks), plus `hooks/` if a provider posts bounce webhooks. Read [references/cloudflare.md](references/cloudflare.md):
+- **Option A (default when a Cloudflare Tunnel already exists, e.g. for Umami):** add a hostname `am.<site>` to that tunnel with a path rule `^/(f|u|c)/` and a 404 catch-all. Add `am.<site>` to the CSP's `form-action`.
+- **Option B:** the site's own worker proxies `/am/*` with [references/cloudflare-worker-proxy.js](references/cloudflare-worker-proxy.js) to a tunnel hostname locked with a Cloudflare Access service token. No CSP change; best for phase B tracking.
 
-For other hosts (Netlify, Vercel, nginx), proxy the same allow-list and set the same header. **Check:** `curl -sI https://<site>/am/v1/artifacts.list` returns 404 (not exposed), and a form post returns 303.
+For other hosts (Netlify, Vercel, nginx), expose the same paths the same way. **Check:** `/` and `/v1/workspace.get` on the public hostname return 404, and a form post returns 303.
 
 ### 4. E-mail sending
 Add a provider in the UI (E-mails → providers) or with `emailProviders.create` (humans only):
@@ -90,15 +90,17 @@ Add a provider in the UI (E-mails → providers) or with `emailProviders.create`
 **Check:** submit with your own address. You are redirected to the inbox page, the confirmation mail arrives, and the button lands on the welcome page. `consent.history` then shows `granted`, source `form`, with `double_opt_in: true` in the proof. Before the click there is no consent.
 
 ### 6. Import existing subscribers
-Export **active** subscribers from the old tool (Kit: Subscribers → export CSV). Map each row to:
+Switch the site's forms to the platform **first**, then export, so nobody who signs up in between is lost.
+
+Export **active** subscribers from the old tool (Kit: Subscribers → export CSV). The person importing uses the UI: People & data → Import subscribers. It recognises Kit's columns (`email_address`, `first_name`, `created_at`, `state`), skips inactive rows and duplicates, and uploads in batches. For scripts, each row maps to:
 ```json
 {"email":"…","traits":{"firstName":"…"},
  "consent":[{"purpose":"marketing_email","status":"granted","recordedAt":"<subscribed at, ISO>",
              "proof":{"system":"Kit","form":"<form or source>","state":"active"}}]}
 ```
-Call `profiles.import` with up to 5,000 rows per call and a `label` such as "Kit export 2026-10-22". It is humans only: use the UI's REST session or the owner's script, never an agent token. Re-running the same rows is harmless.
+`profiles.import` takes up to 5,000 rows per call and a `label` such as "Kit export 2026-10-22". It is humans only, never an agent token. Re-running the same rows is harmless. Imported people do not trigger journeys on `Subscription Confirmed`.
 
-**Check:** the returned `rejected` is empty; a sample's `consent.history` shows the old date and the proof. Then stop sending from the old tool.
+**Check:** nothing is rejected; a sample's `consent.history` shows the old date and the proof. Then rebuild the old tool's automations as journeys, send the first issue from the platform, and close the old account (delete its subscriber data and its DNS records).
 
 ### 7. Newsletter broadcast
 - **Once:** a segment `{"consent":"marketing_email"}` named "Newsletter subscribers".
@@ -138,7 +140,8 @@ See [references/site-snippets.md](references/site-snippets.md). Without consent,
 
 ## Gotchas
 - Cloudflare Pages advanced mode: put the proxy branch first in `_worker.js`, **before** the edge-cache lookup.
-- `PUBLIC_LINKS_URL` must match the proxied prefix exactly, or unsubscribe and confirm links break.
+- `PUBLIC_LINKS_URL` must match the public hostname or prefix exactly, or unsubscribe and confirm links break.
+- Add UTM parameters to links in issues (`utm_source=newsletter&utm_medium=email&utm_campaign=<issue>`) so the site's analytics (e.g. Umami) attributes newsletter traffic.
 - Form submissions and confirmations arrive as events; consent appears a moment later, after identity resolution.
 - If the workspace's tracking plan blocks unknown events, add `Form Submitted`, `Subscription Confirmed` and `Subscription Imported`.
 - People who never confirm keep a profile without consent; erase stale ones periodically (`profiles.erase`).
