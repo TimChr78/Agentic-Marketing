@@ -157,3 +157,39 @@ describe('sdk-js decide', () => {
     expect(decisions[0]).toMatchObject({ experienceId: ids.overlay, trigger: { type: 'exit_intent' } });
   });
 });
+
+describe('experiment results', () => {
+  it('counts exposures and conversions after exposure per variant', async () => {
+    const api = t.api(owner);
+    const viewed = (v: string, variant: string) => ({
+      type: 'track',
+      event: 'Experience Viewed',
+      anonymousId: v,
+      properties: { experience_id: ids.hero, variant_id: variant, version: 1, placement: 'home_hero' },
+      context: yes,
+      timestamp: '2026-10-21T10:00:00Z',
+    });
+    const order = (v: string, at: string) => ({ type: 'track', event: 'Order Completed', anonymousId: v, context: yes, timestamp: at });
+    const batch = [
+      ...Array.from({ length: 10 }, (_, i) => viewed(`x-a${i}`, 'a')),
+      ...Array.from({ length: 10 }, (_, i) => viewed(`x-b${i}`, 'b')),
+      // Two "a" visitors and five "b" visitors buy after seeing it; one "a" visitor bought only before.
+      order('x-a0', '2026-10-21T11:00:00Z'),
+      order('x-a1', '2026-10-21T11:00:00Z'),
+      order('x-a2', '2026-10-21T09:00:00Z'),
+      ...Array.from({ length: 5 }, (_, i) => order(`x-b${i}`, '2026-10-21T12:00:00Z')),
+    ];
+    expect((await post('/v1/batch', { batch })).status).toBe(200);
+    const r = await eventually(
+      () => api.call('experiences.results', { artifactId: ids.hero }),
+      (x) => x.variants.reduce((n, v) => n + v.exposed, 0) >= 20 && x.variants.reduce((n, v) => n + v.converted, 0) >= 7,
+    );
+    expect(r.goal).toBe('Order Completed');
+    expect(r.control).toBe('a');
+    const a = r.variants.find((v) => v.variant === 'a')!;
+    const b = r.variants.find((v) => v.variant === 'b')!;
+    expect(a).toMatchObject({ exposed: 10, converted: 2, rate: 0.2, lift: null });
+    expect(b).toMatchObject({ exposed: 10, converted: 5, rate: 0.5 });
+    expect(b.lift).toBeCloseTo(1.5, 5);
+  });
+});

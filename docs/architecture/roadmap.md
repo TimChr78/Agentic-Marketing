@@ -8,7 +8,7 @@ Ordering principle: build the **foundations that are expensive to retrofit** fir
 | **0. Foundations** (core done) | A skeleton that every later feature plugs into | Monorepo, CI, Docker Compose; `core`, `commands` (registry → REST + MCP + UI client), auth (Better Auth), workspaces + RLS, artifacts/versions/approval policies, audit log, OpenTelemetry, key provider & secret store | An MCP client and the UI can create/version/approve a dummy artifact with identical rules |
 | **1. Data platform** (core done) | Collect and understand customers | Ingest gateway (Segment spec), `sdk-js` with consent, tracking plan, attribute schema with PII tags, identity resolution, profiles, ClickHouse sink, consent ledger & purposes, profile viewer UI, DSR export/erase | Site events appear on a resolved profile within seconds; erasure verifiably removes a person |
 | **2. Email + journeys (first vertical slice)** (core done) | First real value | Template system (MJML + Liquid, GrapesJS editor, code view, previews), send gateway, provider adapters with delivery events ([ADR-0011](adr/0011-email-delivery-providers.md): SMTP, Amazon SES, Postmark, Brevo; SMTP can use a provider's webhooks), bounces and complaints into suppression, unsubscribe, segments v1 (batch + streaming basics), journey engine + canvas (core nodes), simulation, journey & message analytics | A welcome + abandoned-browse journey runs end-to-end, built either in the UI or entirely via MCP |
-| **3. Web personalization** | In-session experiences | Experience artifact & editor, decision API, session state & RT counters, SDK rendering + anti-flicker + client rules, A/B allocation & results | Next-page-view and same-page personalization with measured p95 < 50 ms server time |
+| **3. Web personalization** (core done) | In-session experiences | Experience artifact & editor, decision API, session state & RT counters, SDK rendering + anti-flicker + client rules, A/B allocation & results | Next-page-view and same-page personalization with measured p95 < 50 ms server time |
 | **4. AI runtime & copilot** | Agents inside the product | LLM gateway (BYOK, OpenAI-/Anthropic-compatible), prompt artifacts with tests, `ai.decide` / `ai.generate`, context builder & redaction, budgets, in-app copilot over MCP | AI-chosen branches/content with full decision logs and fallbacks |
 | **5. Webhooks & integrations** | Connect the ecosystem | Webhook adapter (in/out), connector SDK, Activepieces-pieces spike, automation nodes (HTTP, transform). First-party connectors are **not a v1 priority**; when built, **Shopify and Salesforce** come first | Webhooks in/out work end-to-end; n8n can orchestrate via MCP/webhooks; connector SDK documented |
 | **6. Breadth & scale** | Production-grade for larger orgs | SMS & push adapters, warehouse export/sync, SSO (OIDC/SAML) & SCIM, Helm chart, load testing to 10M profiles, config-as-code export, participant migration between journey versions | Documented reference deployment at 10M profiles |
@@ -72,3 +72,21 @@ Known limits, to address later:
 - Segment evaluation holds ids in memory (fine for the homelab scale; the 10M-profile path moves set operations into SQL/ClickHouse).
 - A waiting participant whose profile is merged into another is not woken by events of the merged profile.
 - Webhook, AI and A/B result analysis nodes arrive in Phases 4–5; experiments' statistics with Phase 3.
+
+## Phase 3 status (2026-10-22)
+
+Done; the suite has 95 tests, including end-to-end personalization:
+- Hot state in Valkey: per-visitor sessions (page views, path, referrer, UTM, event counts) written by ingest before it answers, and profile snapshots (non-personal traits, segment memberships) kept current after identity resolution and segments.
+- `experience` artifacts: placement, priority, decide-time targeting (traits, segments, session counts, new visitor, page, referrer, UTM, device), A/B/n variants (HTML or JSON), holdout, goal, triggers (immediate, exit intent, scroll, time on page).
+- `POST /v1/decide`: hot state and cached definitions only; page-only targeting without the web_personalization purpose; sticky allocation by profile; Server-Timing.
+- sdk-js: `decide()`, `personalize()` with sanitising, anti-flicker snippet, client-side triggers and exposure events.
+- `experiences.results`: exposures, conversions after first exposure, lift, p-value and interval per variant against the control.
+- "Web experiences" tab in the live workspace.
+
+Acceptance: next-page-view personalization from session state and segments, consent-limited decisions, and p95 server time under 50 ms over 200 decisions (`apps/server/test/phase3.test.ts`).
+
+Known limits, to address later:
+- New or changed experiences reach the decision API within 30 s (definition cache).
+- Results use a fixed-horizon test; sequential testing and Bayesian summaries later. Visitors are counted by anonymous id (per device).
+- No visual editor for experience content yet (HTML/JSON); no edge deployment of `decide`.
+- Segment memberships changed by the scheduled refresh reach snapshots with the person's next event.
