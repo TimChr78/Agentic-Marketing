@@ -40,12 +40,15 @@ export const listMessages = defineCommand({
     messages: z.array(
       z.object({
         id: z.string(),
+        channel: z.string(),
         profileId: z.string().nullable(),
         templateId: z.string().nullable(),
         templateVersion: z.number().nullable(),
         purpose: z.string(),
         status: Status,
         reason: z.string().nullable(),
+        notBefore: z.string().nullable().describe('Held back until then (quiet hours, a paused stream)'),
+        segments: z.number().nullable().describe('SMS segments used'),
         createdAt: z.string(),
         events: z.array(z.object({ type: z.string(), at: z.string(), reason: z.string(), url: z.string() })),
       }),
@@ -66,12 +69,15 @@ export const listMessages = defineCommand({
     return {
       messages: rows.map((r) => ({
         id: r.id,
+        channel: r.channel,
         profileId: r.profileId,
         templateId: r.templateId,
         templateVersion: r.templateVersion,
         purpose: r.purpose,
         status: r.status,
         reason: r.reason,
+        notBefore: r.notBefore?.toISOString() ?? null,
+        segments: r.segments,
         createdAt: r.createdAt.toISOString(),
         events: events
           .filter((e) => e.messageId === r.id)

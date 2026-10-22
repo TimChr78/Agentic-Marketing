@@ -17,6 +17,7 @@ const nodeKinds = [
   'branch',
   'split',
   'email',
+  'sms',
   'webhook',
   'action',
   'transform',
@@ -70,6 +71,7 @@ export const journeyNodeConfigs = {
     .refine((c) => !!c.segment !== (c.condition !== undefined), 'Set exactly one of segment or condition'),
   split: z.object({ weights: z.array(z.number().int().min(0).max(100)).min(2).max(5).describe('Relative weights, one per outgoing edge') }),
   email: z.object({ template: z.string().regex(/^eml_[0-9a-f]{32}$/, 'An e-mail template id (eml_…)') }),
+  sms: z.object({ template: z.string().regex(/^sms_[0-9a-f]{32}$/, 'An SMS template id (sms_…)') }),
   updateProfile: z.object({
     trait: z.string().regex(/^[A-Za-z0-9_]{1,64}$/),
     value: z.union([z.string().max(500), z.number(), z.boolean(), z.null()]),
@@ -262,6 +264,59 @@ const emailTemplate = z.object({
     })
     .optional()
     .describe("Add UTM parameters to links, so the site's analytics attributes visits from this e-mail"),
+});
+
+const smsTemplate = z.object({
+  purpose: Key.describe('Purpose key, e.g. "marketing_sms" or "service_sms"; decides the lawful basis'),
+  body: z
+    .string()
+    .min(1)
+    .max(1600)
+    .describe(
+      'Liquid, e.g. "Hi {{ profile.firstName }}, your order shipped." Marketing texts get " Reply STOP to opt out." added unless the body mentions STOP',
+    ),
+  sampleData: z.record(z.string(), z.unknown()).optional().describe('Example variables for previews, e.g. {"profile":{"firstName":"Ada"}}'),
+});
+
+// Delivery policy (Phase 7): limits that apply to every message, whoever sends it.
+const Clock = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'HH:MM, 24-hour');
+const Zone = z.string().refine((tz) => {
+  try {
+    new Intl.DateTimeFormat('en', { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}, 'An IANA time zone such as Europe/Copenhagen');
+const deliveryPolicy = z.object({
+  timezone: Zone.default('UTC').describe('Used for quiet hours when a person has no "timezone" trait'),
+  frequencyCaps: z
+    .array(
+      z.object({
+        channel: z.enum(['email', 'sms']),
+        purposes: z.array(Key).max(20).default([]).describe('Empty: every purpose not based on contract or legal obligation'),
+        max: z.number().int().min(1).max(1000),
+        days: z.number().int().min(1).max(90),
+      }),
+    )
+    .max(20)
+    .default([])
+    .describe('e.g. at most 2 marketing e-mails in 7 days per person; messages over the cap are not sent'),
+  quietHours: z
+    .array(z.object({ channel: z.enum(['email', 'sms']), start: Clock, end: Clock }))
+    .max(4)
+    .default([{ channel: 'sms', start: '21:00', end: '08:00' }])
+    .describe("Marketing messages wait until the quiet hours end, in the person's local time"),
+  health: z
+    .object({
+      autoPause: z.boolean().default(true).describe('Hold marketing messages while a stop threshold is exceeded'),
+      windowDays: z.number().int().min(1).max(30).default(7),
+      minVolume: z.number().int().min(1).default(200).describe('Rates count only after this many messages in the window'),
+      complaintWarn: z.number().min(0).max(1).default(0.001),
+      complaintStop: z.number().min(0).max(1).default(0.003),
+      bounceStop: z.number().min(0).max(1).default(0.05),
+    })
+    .prefault({}),
 });
 
 // Segment DSL (data-platform.md §6): a JSON condition tree that agents read and write and the
@@ -532,13 +587,16 @@ const form = z
   .refine((f) => !f.doubleOptIn || !!f.confirmationTemplate, 'Double opt-in needs a confirmationTemplate');
 
 const broadcast = z.object({
-  template: z.string().regex(/^eml_[0-9a-f]{32}$/, 'An e-mail template id (eml_…)'),
+  template: z.string().regex(/^(eml|sms)_[0-9a-f]{32}$/, 'An e-mail or SMS template id (eml_… or sms_…)'),
   segment: z.string().regex(/^seg_[0-9a-f]{32}$/, 'A segment id (seg_…)'),
   sendAt: z.iso.datetime().optional().describe('When to start sending (UTC); default: as soon as it is published'),
   description: z.string().max(500).optional(),
 });
 
 export type FormDefinition = z.output<typeof form>;
+export type SmsTemplate = z.output<typeof smsTemplate>;
+export type DeliveryPolicy = z.output<typeof deliveryPolicy>;
+export const DEFAULT_DELIVERY_POLICY: DeliveryPolicy = deliveryPolicy.parse({});
 export type BroadcastDefinition = z.output<typeof broadcast>;
 export type TrackingPlan = z.output<typeof trackingPlan>;
 export type PromptDefinition = z.output<typeof prompt>;
@@ -555,6 +613,12 @@ export const artifactTypes = {
     label: 'E-mail template',
     description: 'An e-mail as MJML with Liquid placeholders, with subject, preheader and purpose. Preview it with templates.preview.',
     content: emailTemplate,
+  },
+  sms_template: {
+    prefix: 'sms',
+    label: 'SMS template',
+    description: 'A text message with Liquid placeholders and a purpose. Preview it (segments, cost) with smsTemplates.preview.',
+    content: smsTemplate,
   },
   segment: {
     prefix: 'seg',
@@ -607,6 +671,14 @@ export const artifactTypes = {
     content: purposes,
     singleton: true,
   },
+  delivery_policy: {
+    prefix: 'dlp',
+    label: 'Delivery policy',
+    description:
+      'Frequency caps, quiet hours and the bounce and complaint thresholds that pause marketing messages. One per workspace; defaults apply until one is published.',
+    content: deliveryPolicy,
+    singleton: true,
+  },
 } as const;
 
 /** Purposes that apply until the workspace publishes its own `purposes` artifact. */
@@ -649,6 +721,22 @@ export const DEFAULT_PURPOSES: Purposes = [
     description: 'News and offers by e-mail.',
     basis: 'consent',
     channels: ['email'],
+    requiresDoubleOptIn: false,
+  },
+  {
+    key: 'marketing_sms',
+    name: 'Marketing SMS',
+    description: 'News and offers by text message.',
+    basis: 'consent',
+    channels: ['sms'],
+    requiresDoubleOptIn: false,
+  },
+  {
+    key: 'service_sms',
+    name: 'Service texts',
+    description: 'Texts about your account and orders, e.g. delivery updates.',
+    basis: 'contract',
+    channels: ['sms'],
     requiresDoubleOptIn: false,
   },
   {

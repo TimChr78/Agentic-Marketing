@@ -43,7 +43,8 @@ export interface AdapterDeps {
 }
 
 export interface EmailTransport {
-  send(msg: OutgoingEmail): Promise<{ providerMessageId: string | null }>;
+  /** `events`: what the provider already knows from the send itself (e.g. a suppressed address). */
+  send(msg: OutgoingEmail): Promise<{ providerMessageId: string | null; events?: DeliveryEvent[] }>;
   /** Called after the URL token matched; for providers that also sign their webhooks (SNS). */
   verifyWebhook?(req: WebhookRequest): Promise<boolean>;
   parseWebhook?(req: WebhookRequest): Promise<DeliveryEvent[]>;
@@ -51,7 +52,7 @@ export interface EmailTransport {
 }
 
 export interface EmailAdapter<C extends z.ZodType = z.ZodType, S extends z.ZodType = z.ZodType> {
-  id: 'smtp' | 'ses' | 'postmark' | 'brevo' | 'log';
+  id: 'smtp' | 'ses' | 'postmark' | 'brevo' | 'cloudflare' | 'log';
   label: string;
   /** Settings that are not secret; returned by the API. */
   config: C;

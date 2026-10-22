@@ -506,10 +506,14 @@ export async function profileForMessage(
       .where(and(eq(schema.identifiers.workspaceId, workspaceId), eq(schema.identifiers.profileId, p.id)));
     const sealedEmail = ids.find((i) => i.type === 'email');
     const email = sealedEmail ? await crypto.open<string>(p.id, sealedEmail.valueEnc) : undefined;
+    const sealedPhone = ids.find((i) => i.type === 'phone');
+    const phone = sealedPhone ? await crypto.open<string>(p.id, sealedPhone.valueEnc) : undefined;
     return {
       id: p.id,
       email: email ?? null,
       emailHash: sealedEmail?.value ?? null,
+      phone: phone ?? null,
+      phoneHash: sealedPhone?.value ?? null,
       userId: ids.find((i) => i.type === 'user_id')?.value ?? null,
       vars: { ...p.traits, ...pii, ...(email ? { email } : {}), id: p.id },
     };

@@ -7,6 +7,7 @@ import {
   Hourglass,
   LogOut,
   Mail,
+  MessageSquare,
   Shuffle,
   Sparkles,
   UserCog,
@@ -26,6 +27,7 @@ export const kindMeta: Record<NodeKind, { label: string; icon: LucideIcon; group
   goal: { label: 'Goal', icon: Flag, group: 'Flow', defaults: { event: 'order_completed', within: 'P14D' } },
   exit: { label: 'Exit', icon: LogOut, group: 'Flow', defaults: {} },
   email: { label: 'Send e-mail', icon: Mail, group: 'Action', defaults: { template: 'tpl_welcome', purpose: 'marketing_email' } },
+  sms: { label: 'Send SMS', icon: MessageSquare, group: 'Action', defaults: { template: 'sms_reminder' } },
   webhook: { label: 'Webhook', icon: Webhook, group: 'Action', defaults: { url: 'https://hooks.example.com/crm', method: 'POST' } },
   action: { label: 'Connector action', icon: Cable, group: 'Action', defaults: { connection: 'con_slack', action: 'postMessage' } },
   transform: { label: 'Transform', icon: Braces, group: 'Flow', defaults: { set: 'total', expression: '$sum(event.properties.products.price)' } },
@@ -49,6 +51,8 @@ export function configSummary(n: JourneyNode) {
       return `A ${c.a}% · B ${c.b}%${c.holdout ? ` · holdout ${c.holdout}%` : ''}`;
     case 'email':
       return `${c.template}${c.variant ? ` · variant ${c.variant}` : ''}`;
+    case 'sms':
+      return String(c.template);
     case 'aiDecide':
       return `${c.options} · fallback ${c.fallback}`;
     case 'aiGenerate':

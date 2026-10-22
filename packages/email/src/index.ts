@@ -1,8 +1,15 @@
 export * from './adapters';
+export * from './deliverability';
 export * from './gateway';
 export * from './links';
 export * from './messages';
+export * from './policy';
 export * from './providers';
 export * from './render';
 export * from './routes';
+export { smsOutbox, smsSegments, twilioSignature } from './sms/adapters';
+export * from './sms/commands';
+export { checkSmsRecipient, requestSms } from './sms/gateway';
+export * from './sms/providers';
+export * from './sms/routes';
 export * from './templates';

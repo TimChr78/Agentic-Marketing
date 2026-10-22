@@ -1,4 +1,5 @@
 import { brevoAdapter } from './brevo';
+import { cloudflareAdapter } from './cloudflare';
 import { logAdapter } from './log';
 import { postmarkAdapter } from './postmark';
 import { sesAdapter } from './ses';
@@ -16,5 +17,6 @@ export const adapters: Record<EmailAdapter['id'], EmailAdapter> = {
   ses: sesAdapter as unknown as EmailAdapter,
   postmark: postmarkAdapter as unknown as EmailAdapter,
   brevo: brevoAdapter as unknown as EmailAdapter,
+  cloudflare: cloudflareAdapter as unknown as EmailAdapter,
   log: logAdapter as unknown as EmailAdapter,
 };

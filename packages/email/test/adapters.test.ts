@@ -194,3 +194,41 @@ describe('SMTP', () => {
     }
   });
 });
+
+describe('Cloudflare Email Service', () => {
+  const config = adapters.cloudflare.config.parse({ accountId: 'a'.repeat(32) });
+  const secrets = { apiToken: 'cf-token-0123456789abcdef' };
+
+  it('sends through the REST API and reports delivery from the response', async () => {
+    const s = stubFetch({
+      success: true,
+      errors: [],
+      result: { message_id: 'cf-1', delivered: ['ada@example.com'], queued: [], permanent_bounces: [], suppressed_recipients: [] },
+    });
+    const r = await adapters.cloudflare.create(config, secrets, s).send(msg);
+    expect(r).toMatchObject({ providerMessageId: 'cf-1', events: [{ type: 'delivered', messageId: 'msg_0192abc' }] });
+    expect(s.calls[0].url).toBe(`https://api.cloudflare.com/client/v4/accounts/${'a'.repeat(32)}/email/sending/send`);
+    expect((s.calls[0].init.headers as Record<string, string>).authorization).toBe('Bearer cf-token-0123456789abcdef');
+    expect(JSON.parse(String(s.calls[0].init.body))).toMatchObject({
+      from: { address: 'news@shop.example.com', name: 'Fjeldvej' },
+      to: 'ada@example.com',
+      headers: { 'List-Unsubscribe': '<https://m.example.com/u/t>' },
+    });
+  });
+
+  it('turns permanent bounces and suppressed recipients into hard bounces', async () => {
+    const bounced = stubFetch({ success: true, result: { message_id: 'cf-2', permanent_bounces: ['ADA@example.com'] } });
+    expect((await adapters.cloudflare.create(config, secrets, bounced).send(msg)).events).toMatchObject([
+      { type: 'bounced', bounce: 'hard' },
+    ]);
+    const suppressed = stubFetch({ success: true, result: { message_id: 'cf-3', suppressed_recipients: ['ada@example.com'] } });
+    expect((await adapters.cloudflare.create(config, secrets, suppressed).send(msg)).events).toMatchObject([
+      { type: 'bounced', reason: "on Cloudflare's suppression list" },
+    ]);
+  });
+
+  it('reports refusals as errors', async () => {
+    const s = stubFetch({ success: false, errors: [{ code: 10001, message: 'sender domain not verified' }] }, 400);
+    await expect(adapters.cloudflare.create(config, secrets, s).send(msg)).rejects.toThrow('sender domain not verified');
+  });
+});

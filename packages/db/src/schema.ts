@@ -296,7 +296,7 @@ export const emailProviders = pgTable(
     workspaceId: uuid('workspace_id').notNull(),
     id: text('id').notNull(),
     name: text('name').notNull(),
-    adapter: text('adapter').$type<'smtp' | 'ses' | 'postmark' | 'brevo' | 'log'>().notNull(),
+    adapter: text('adapter').$type<'smtp' | 'ses' | 'postmark' | 'brevo' | 'cloudflare' | 'log'>().notNull(),
     config: jsonb('config').$type<Record<string, unknown>>().notNull().default({}),
     secrets: bytea('secrets'),
     secretsKeyId: text('secrets_key_id'),
@@ -332,6 +332,31 @@ export const messages = pgTable(
     recipientHash: text('recipient_hash'),
     data: jsonb('data').$type<Record<string, unknown>>().notNull().default({}),
     attempts: integer('attempts').notNull().default(0),
+    /** Held back until then (quiet hours, a paused stream). */
+    notBefore: ts('not_before'),
+    /** SMS segments used. */
+    segments: integer('segments'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
+export const smsProviders = pgTable(
+  'sms_providers',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    name: text('name').notNull(),
+    adapter: text('adapter').$type<'twilio' | 'log'>().notNull(),
+    config: jsonb('config').$type<Record<string, unknown>>().notNull().default({}),
+    secrets: bytea('secrets'),
+    secretsKeyId: text('secrets_key_id'),
+    /** Phone number (E.164), alphanumeric sender id, or messaging service id. */
+    sender: text('sender').notNull(),
+    useFor: text('use_for').array().$type<('transactional' | 'marketing')[]>().notNull().default([]),
+    webhookTokenHash: text('webhook_token_hash').notNull(),
+    enabled: boolean('enabled').notNull().default(true),
     createdAt: ts('created_at').notNull().defaultNow(),
     updatedAt: ts('updated_at').notNull().defaultNow(),
   },

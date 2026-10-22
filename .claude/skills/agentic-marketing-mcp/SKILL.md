@@ -52,7 +52,9 @@ Read [references/tools.md](references/tools.md) for the full list with effects a
 | Artifacts | `artifacts.types`, `.list`, `.get`, `.create`, `.updateDraft`, `.history`, `.diff`, `.requestPublish`; `approvals.list` |
 | People | `profiles.find {type:"email", value}`, `profiles.get`, `profiles.events`, `profiles.list`, `consent.history`, `segments.ofProfile` |
 | Segments | `segments.preview`, `segments.members`, `segments.refresh` |
-| E-mail | `templates.preview`, `messages.list`, `messages.stats`; `messages.sendEmail` (needs `messages:send`) |
+| E-mail | `templates.preview`, `templates.sendTest`, `messages.list`, `messages.stats`; `messages.sendEmail` (needs `messages:send`) |
+| SMS | `smsTemplates.preview` (segments, cost); `messages.sendSms` (needs `messages:send`) |
+| Deliverability | `deliverability.health`, `emailProviders.checkDomain` |
 | Newsletter | `broadcasts.preview`, `broadcasts.status`, `broadcasts.cancel` |
 | Journeys | `journeys.simulate`, `journeys.stats`, `journeys.enroll` (needs `messages:send`) |
 | Web | `experiences.results` |
@@ -72,12 +74,14 @@ Worked examples with full payloads are in [references/recipes.md](references/rec
 
 ## Content rules that save round trips
 
-- **Ids** look like `eml_` (template), `seg_` (segment), `jrn_` (journey), `bct_` (broadcast), `frm_` (form), `prm_` (prompt), `exp_` (experience), each followed by 32 hex characters.
+- **Ids** look like `eml_` (template), `sms_` (SMS template), `dlp_` (delivery policy), `seg_` (segment), `jrn_` (journey), `bct_` (broadcast), `frm_` (form), `prm_` (prompt), `exp_` (experience), each followed by 32 hex characters.
 - **Durations** are ISO 8601: `PT6H`, `P2D`, `P1W`. **Timestamps** are ISO in UTC: `2026-10-30T07:00:00Z`.
 - **E-mail templates:** MJML with Liquid.
   - Variables: `{{ profile.firstName | default: "there" }}`, `{{ content.<slot> }}` (AI-generated text), and journey context.
   - Use `{{ unsubscribe_url | raw }}` in marketing footers and `{{ confirm_url | raw }}` in double opt-in confirmations.
   - Template purposes: `marketing_email` for newsletters, `onboarding` for transactional or confirmation mail.
+- **SMS templates:** plain text with Liquid; purposes `marketing_sms` (needs consent) or `service_sms`. Check `smsTemplates.preview` for segments and cost before publishing.
+- **Delivery policy:** frequency caps, quiet hours and the auto-pause live in the workspace's `delivery_policy` artifact. A `queued` message with a `quiet_hours:` or `paused:` reason is held, not lost; a `frequency_cap:` reason means it was not sent.
 - **Segment conditions:** `{"trait":"plan","op":"eq","value":"pro"}`, `{"event":"Product Viewed","where":{"category":"tents"},"count":{"gte":2},"within":"P7D"}`, `{"consent":"marketing_email"}`, `{"segment":"seg_…"}`. Combine them with `{"all":[…]}`, `{"any":[…]}` and `{"not":…}`.
 - **Journey nodes:**
   - kinds: `trigger`, `wait`, `waitEvent`, `goal`, `branch`, `split`, `email`, `updateProfile`, `webhook`, `action`, `transform`, `aiDecide`, `aiGenerate`, `exit`;
