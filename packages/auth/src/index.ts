@@ -1,5 +1,7 @@
 import { agentPrincipal, PERMISSIONS, type Principal, userPrincipal } from '@agentic-marketing/commands';
 import type { Db, Role } from '@agentic-marketing/db';
+import { type CimdOptions, cimd } from '@better-auth/cimd';
+import { fetchClientMetadataResource } from '@better-auth/cimd/node';
 import { mcp } from '@better-auth/mcp';
 import { type BetterAuthOptions, betterAuth } from 'better-auth';
 import { getMigrations } from 'better-auth/db/migration';
@@ -12,6 +14,8 @@ export interface AuthConfig {
   secret: string;
   db: Db;
   trustedOrigins?: string[];
+  /** Overrides for Client ID Metadata Document discovery (tests use a stub transport). */
+  cimd?: Partial<CimdOptions>;
 }
 
 /** Scopes an MCP client can be granted; permissions double as scopes. Agents get read-only unless the person grants more. */
@@ -37,6 +41,9 @@ export function authOptions(config: AuthConfig) {
         clientRegistrationDefaultScopes: AGENT_DEFAULT_SCOPES,
         clientRegistrationAllowedScopes: ['openid', 'profile', 'email', 'offline_access', ...PERMISSIONS],
       }),
+      // Client ID Metadata Documents: clients that identify themselves with an HTTPS URL instead of
+      // registering (the MCP 2026-07-28 preference). The Node transport pins DNS to public addresses.
+      cimd({ fetchClientMetadataResource, metadataProfile: 'mcp-2026-07-28', ...config.cimd }),
     ],
   } satisfies BetterAuthOptions;
 }

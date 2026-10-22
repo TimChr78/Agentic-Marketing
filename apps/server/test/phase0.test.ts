@@ -68,7 +68,26 @@ const journey = {
   },
 };
 
+// A Client ID Metadata Document, served by a stub transport instead of the internet.
+const CIMD_URL = 'https://agent.example.com/oauth/client.json';
+const cimdDocument = {
+  client_id: CIMD_URL,
+  client_name: 'Metadata-document agent',
+  redirect_uris: ['http://localhost/callback'],
+  grant_types: ['authorization_code', 'refresh_token'],
+  response_types: ['code'],
+  token_endpoint_auth_method: 'none',
+};
+const cimdFetches: string[] = [];
+const fetchCimd = async (input: RequestInfo | URL) => {
+  const url = String(input instanceof Request ? input.url : input);
+  cimdFetches.push(url);
+  if (url !== CIMD_URL) return new Response('not found', { status: 404 });
+  return Response.json(cimdDocument, { headers: { 'cache-control': 'max-age=300' } });
+};
+
 class TestOAuthProvider implements OAuthClientProvider {
+  constructor(readonly clientMetadataUrl?: string) {}
   info: any;
   tokenSet: any;
   verifier = '';
@@ -122,8 +141,8 @@ const grantFrom = (requested: string, permissions: string[]) =>
     .join(' ');
 
 /** Plays the person in the browser: authorize → sign in → consent with the chosen permissions. */
-async function connectAgent(u: User, permissions: string[]) {
-  const provider = new TestOAuthProvider();
+async function connectAgent(u: User, permissions: string[], clientMetadataUrl?: string) {
+  const provider = new TestOAuthProvider(clientMetadataUrl);
   const first = new StreamableHTTPClientTransport(new URL(`${BASE}/mcp`), { authProvider: provider });
   await expect(new Client({ name: 't', version: '0' }).connect(first)).rejects.toBeInstanceOf(UnauthorizedError);
 
@@ -174,7 +193,7 @@ beforeAll(async () => {
     AUTH_SECRET: 'test-secret-test-secret-test-secret-123',
     MASTER_KEY,
   });
-  srv = createServer(config);
+  srv = createServer(config, { cimd: { fetchClientMetadataResource: fetchCimd } });
   await migrate(srv.db.admin, { appRolePassword: config.appDbPassword });
   await migrateAuth({ baseUrl: config.publicUrl, secret: config.authSecret, db: srv.db });
   await new Promise<void>((resolve) => {
@@ -330,6 +349,22 @@ describe('agents through MCP with OAuth', () => {
 
     expect(await owner.call('approvals.approve', { approvalId: pub.approvalId })).toMatchObject({ status: 'approved', version: 1 });
     expect((await owner.call('artifacts.get', { artifactId: created.artifactId })).publishedVersion).toBe(1);
+  });
+
+  it('accepts clients identified by a Client ID Metadata Document instead of registration', async () => {
+    const meta = await (await fetch(`${BASE}/.well-known/oauth-authorization-server`)).json();
+    expect(meta.client_id_metadata_document_supported).toBe(true);
+    const cimdAgent = await connectAgent(users.owner, ['artifacts:read'], CIMD_URL);
+    try {
+      expect(cimdAgent.clientId).toBe(CIMD_URL);
+      expect(cimdFetches).toContain(CIMD_URL);
+      const ws = structured(await cimdAgent.client.callTool({ name: 'workspace.get', arguments: {} }));
+      expect(ws.you).toMatchObject({ type: 'agent', permissions: ['artifacts:read'] });
+      const { rows } = await srv.db.admin.query(`SELECT count(*)::int AS n FROM "oauthClient" WHERE "clientId" = $1`, [CIMD_URL]);
+      expect(rows[0].n).toBe(1);
+    } finally {
+      await cimdAgent.client.close();
+    }
   });
 
   it('returns structured, actionable tool errors', async () => {

@@ -1,4 +1,4 @@
-import { acceptInvitation, authDirectory, createAuth, invitationWorkspace } from '@agentic-marketing/auth';
+import { type AuthConfig, acceptInvitation, authDirectory, createAuth, invitationWorkspace } from '@agentic-marketing/auth';
 import { createExecutor, userPrincipal } from '@agentic-marketing/commands';
 import { AppError, newUuid } from '@agentic-marketing/core';
 import { createDb } from '@agentic-marketing/db';
@@ -11,9 +11,16 @@ import { mcpEndpoint } from './http/mcp';
 import { consentPage, invitePage, loginPage } from './http/pages';
 import { restApi } from './http/rest';
 
-export function createServer(config: Config) {
+/** `overrides` exist for tests, e.g. a stub transport for Client ID Metadata Documents. */
+export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'> = {}) {
   const db = createDb({ adminUrl: config.adminDatabaseUrl, appUrl: config.appDatabaseUrl });
-  const auth = createAuth({ baseUrl: config.publicUrl, secret: config.authSecret, db, trustedOrigins: config.trustedOrigins });
+  const auth = createAuth({
+    baseUrl: config.publicUrl,
+    secret: config.authSecret,
+    db,
+    trustedOrigins: config.trustedOrigins,
+    ...overrides,
+  });
   const keyProvider = localKeyProvider(config.masterKey, config.previousMasterKeys);
   const executor = createExecutor(db, { keyProvider, directory: authDirectory(db) });
 

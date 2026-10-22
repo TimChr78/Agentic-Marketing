@@ -24,7 +24,7 @@ All four spikes are done; Phase 0 can start.
 
 ## Phase 0 status (2026-10-22)
 
-Done, with 23 tests (16 end-to-end against Postgres):
+Done, with 29 tests (21 end-to-end against Postgres):
 - Monorepo packages `core`, `db`, `commands`, `artifacts`, `secrets`, `auth`, `telemetry`, `client`; `apps/server` with roles; CLI (`migrate`, `bootstrap`).
 - Command registry → REST + OpenAPI 3.1, MCP (OAuth 2.1, consent with per-permission choice), typed UI client.
 - Workspaces, roles (owner, admin, marketer, approver, viewer), Postgres RLS via a dedicated app role.
@@ -33,6 +33,7 @@ Done, with 23 tests (16 end-to-end against Postgres):
 - OpenTelemetry spans per command (exported when `OTEL_EXPORTER_OTLP_ENDPOINT` is set), pino logs.
 - Dockerfile, Docker Compose, GitHub Actions CI, Biome.
 - "Live workspace (API)" screen in the web app.
+- Follow-ups: member and invitation commands (one-time links, owner rules, last-owner protection), master key rotation (`MASTER_KEY_PREVIOUS` + `cli rotate-keys`), Client ID Metadata Document clients (`@better-auth/cimd`, MCP 2026-07-28 profile), CI on Node 24 actions. CI has run green on GitHub.
 
-Left for Phase 0 follow-up: inviting members and managing roles as commands, KMS/OpenBao key providers and key rotation, CIMD client registration, MCP scope step-up, and running the Docker image and CI workflow for the first time (no Docker daemon or GitHub runner was available while building).
+Deferred: KMS/OpenBao key providers (the `KeyProvider` interface is ready; local keys are enough for the homelab install), MCP scope step-up (agents see only the tools they were granted and get an actionable error; re-consent covers the rest until a client needs `insufficient_scope` challenges), a members screen in the web app, and running the Docker image (no Docker daemon was available while building).
 
