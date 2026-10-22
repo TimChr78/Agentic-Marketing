@@ -35,13 +35,13 @@ const toSummary = (v: VersionRow) => ({
   basedOn: v.basedOn,
   createdAt: v.createdAt.toISOString(),
 });
-const author = (ctx: CommandContext) => ({
+export const author = (ctx: CommandContext) => ({
   authorType: ctx.principal.type,
   authorId: ctx.principal.userId,
   authorClient: ctx.principal.clientId ?? null,
 });
 
-function validateContent(type: ArtifactType, content: unknown) {
+export function validateContent(type: ArtifactType, content: unknown) {
   const parsed = (artifactTypes[type].content as z.ZodType).safeParse(content);
   if (!parsed.success)
     throw new AppError(

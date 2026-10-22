@@ -218,6 +218,12 @@ Seeding took 52 s. The process peaked at about 1.1 GB, mostly the 500,000 change
 
 Not built yet: GCP KMS and Azure Key Vault; AWS pod identity without a credentials helper; a published container image.
 
+**Built (part c2, data):**
+- **Config as code:** `config.export` and `config.import` (bundles keep artifact ids, so references hold across workspaces; dry run by default; publishing in dependency order through the approval policy), and `scripts/am-config.mjs` for one file per artifact in git.
+- **Warehouse export** to Postgres (upserts, snapshot replacement, erasures applied) and S3-compatible storage (gzipped NDJSON for BigQuery, Snowflake, Redshift, DuckDB): profiles without personal data, user and anonymous ids, consent, segment memberships, events, message events and erasures, on a schedule per destination. The egress guard now passes binary bodies through.
+
+Not built yet: native BigQuery and Snowflake writers (they load the files); deleting artifacts through an import; a UI for exports (REST and MCP only).
+
 ## Phase 11: enterprise and ecosystem
 
 - **SSO (OIDC, SAML) and SCIM** (the original Phase 6); **MCP scope step-up** (Phase 0 deferral).

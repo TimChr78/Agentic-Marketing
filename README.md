@@ -38,9 +38,11 @@ It runs as one Docker image (a TypeScript modular monolith) next to Postgres, Cl
   - a connector SDK (Shopify, Slack, HTTP, and OAuth 2.0 APIs with automatic token refresh);
   - inbound hooks;
   - API tokens (for n8n and scripts);
+  - warehouse export to Postgres or S3-compatible storage (for BigQuery, Snowflake…), without personal data, with erasures;
   - rate limits shared across workers.
 - **Governance:**
   - everything an agent builds is a versioned artifact (journey, segment, template, form…) with drafts, diffs and approval policies;
+  - config as code: artifacts in git, promoted from staging to production through the same approvals;
   - audit log;
   - encrypted secrets with key rotation, the key in the environment, OpenBao/Vault or AWS KMS;
   - Postgres row-level security and ClickHouse row policies per workspace;
@@ -66,7 +68,7 @@ On Kubernetes: the Helm chart in [`deploy/helm`](deploy/helm/agentic-marketing) 
 - [Development](docs/development.md): layout, running locally, tests, key rotation.
 - [Kubernetes reference deployment](docs/deployment/kubernetes.md): Helm, OpenBao or AWS KMS keys, sizing.
 - [Architecture](docs/architecture/README.md) and its [ADRs](docs/architecture/adr/).
-- [Integrations](docs/integrations.md): webhooks, connectors, n8n.
+- [Integrations](docs/integrations.md): webhooks, connectors, n8n, config as code, warehouse export.
 - [Pilot: MartechSignal](docs/pilots/martechsignal.md): replacing Kit on a static Cloudflare Pages site.
 - Agent skills in [`.claude/skills/`](.claude/skills/):
   - `agentic-marketing-implement`: rolling the stack out on a website;
@@ -84,7 +86,7 @@ Wave 1 (Phases −1 to 5) is complete: foundations, data platform, e-mail, segme
 | 7 | Delivery beyond SMTP, and SMS | Done: Cloudflare Email Service adapter, delivery policy (caps, quiet hours, auto-pause), deliverability health and domain check, Twilio SMS. Later: GatewayAPI, SMS double opt-in, provider warm-up |
 | 8 | Consent everywhere | Done: consent banner with Consent Mode v2, ad purposes, click-id capture, OAuth 2.0 connections, shared rate limits, bot filtering |
 | 9 | Performance marketing | Done: conversions (Meta, Google, Microsoft), audience sync (Meta, Google), spend and ROAS. Later: Microsoft reporting and audiences, more platforms |
-| 10 | Scale and operations | Part a done (correctness: AI budget reservations, prompt test jobs, egress on provider adapters, merge-safe journeys, journey version migration, instant experience updates). Part b done (scale: segments evaluated in SQL, ClickHouse row policies, a load test). Part c1 done (Helm chart, OpenBao and AWS KMS key providers). Next: warehouse export, config-as-code |
+| 10 | Scale and operations | Done: correctness (AI budget reservations, prompt test jobs, merge-safe journeys, journey version migration, instant experience updates), scale (segments evaluated in SQL, ClickHouse row policies, a load test to 1M profiles), operations (Helm chart, OpenBao and AWS KMS keys, warehouse export, config as code) |
 | 11 | Enterprise and ecosystem | Planned |
 
 ## Development

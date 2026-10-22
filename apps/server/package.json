@@ -30,6 +30,7 @@
     "@agentic-marketing/secrets": "workspace:*",
     "@agentic-marketing/segments": "workspace:*",
     "@agentic-marketing/telemetry": "workspace:*",
+    "@agentic-marketing/warehouse": "workspace:*",
     "@better-auth/mcp": "1.7.7",
     "@better-auth/oauth-provider": "1.7.7",
     "@hono/node-server": "2.1.5",

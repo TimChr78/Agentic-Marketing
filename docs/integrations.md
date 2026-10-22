@@ -125,3 +125,37 @@ export const pipedriveConnector = defineConnector({
 - For inbound connectors, implement `verify` (return why a request is not authentic, or `null`) and `map` (payload → Segment events). Give each event a stable `messageId` from the sender's delivery id, so redelivered webhooks are de-duplicated.
 
 The settings, secrets and input schemas show up in `connectors.list` (UI and MCP) automatically.
+
+## Config as code
+
+`config.export` returns every artifact of a workspace (published versions, or the latest drafts with `includeDrafts`) as one JSON bundle; `config.import` applies a bundle to a workspace. Artifact ids travel with the bundle (they are unique per workspace), so references between artifacts hold, e.g. from staging to production. An import creates missing artifacts, puts changed content in a new draft and leaves equal ones alone. It starts as a dry run; `publish: true` publishes in dependency order through the approval policy (an API token counts as an agent). Nothing is ever deleted.
+
+For git, `scripts/am-config.mjs` keeps one file per artifact:
+
+```bash
+export AM_URL=https://marketing.example.com AM_TOKEN=amk_…   # token scopes: artifacts:read, artifacts:write (+ artifacts:publish)
+scripts/am-config.mjs pull config/                    # config/<type>/<name>.<id>.json
+scripts/am-config.mjs push config/                    # dry run: what would change
+scripts/am-config.mjs push config/ --apply --publish  # e.g. from CI after a merge
+```
+
+## Warehouse export
+
+`warehouse.create` (owners and admins, in the UI or over REST) adds a destination that receives the workspace's data on a schedule (`everyMinutes`, default 60; `warehouse.run` runs it now):
+
+| Dataset | Rows | How |
+|---|---|---|
+| `profiles` | profile id, merged-into, non-personal traits, first/last seen | incremental (changed since the last run) |
+| `identifiers` | user ids and anonymous ids (never e-mail or phone) | incremental (new ones) |
+| `consent` | consent state per person, purpose and channel | incremental |
+| `segment_memberships` | who is in which segment | full snapshot each run |
+| `events` | events with properties and context | incremental, from ClickHouse |
+| `message_events` | sends, deliveries, opens, clicks, bounces… | incremental, from ClickHouse |
+
+Personal traits stay behind: they are sealed per person and never exported. Erasures are exported too, so the warehouse can forget the same people.
+
+- **Postgres** (`kind: "postgres"`, `secrets: { url }`, `config: { schema }`): upserts into `am_*` tables with the workspace id in every key; snapshots are replaced in one transaction; erasures delete the person's rows (events through the exported ids) and are recorded in `am_erasures`.
+- **S3-compatible storage** (`kind: "s3"`, `config: { bucket, region, endpoint?, prefix }`, `secrets: { accessKeyId, secretAccessKey }`): gzipped NDJSON under `<prefix>/workspace=<id>/<dataset>/dt=<day>/` (snapshots under `snapshot=<run>/`, complete when `_complete.ndjson.gz` exists; erasures under `erasures/`). Load it with BigQuery (`bq load --source_format=NEWLINE_DELIMITED_JSON`, or an external table), Snowflake (an external stage and `COPY INTO … FILE_FORMAT = (TYPE = JSON)`), Redshift `COPY … FORMAT JSON 'auto'`, DuckDB or Spark. Endpoints for R2, GCS (interoperability) or MinIO take path-style requests. Apply the erasure files downstream.
+
+Runs read up to two minutes before now, so late writes land in the next run; a failed run is repeated in full (harmless for Postgres; files may repeat rows). Destinations on private addresses need `EGRESS_ALLOWED_HOSTS`.
+
