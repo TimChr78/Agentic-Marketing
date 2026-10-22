@@ -56,13 +56,26 @@ const Env = z.object({
     .enum(['true', 'false'])
     .default('true')
     .describe('Rewrite links in e-mails to count clicks (open pixels are never added)'),
+  RETENTION_UNCONFIRMED_DAYS: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .default(30)
+    .describe('Days before signups that were never confirmed (no consent recorded) are removed'),
+  RETENTION_LOG_DAYS: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .default(180)
+    .describe('Days finished webhook and action deliveries and AI call logs are kept'),
   TRUSTED_ORIGINS: z.string().optional().describe('Comma-separated extra origins allowed to call auth endpoints'),
 });
 
 export type Config = ReturnType<typeof loadConfig>;
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
-  const parsed = Env.safeParse(env);
+  // docker compose passes unset variables as empty strings: treat them as not set.
+  const parsed = Env.safeParse(Object.fromEntries(Object.entries(env).filter(([, v]) => v !== '')));
   if (!parsed.success) {
     const issues = parsed.error.issues.map((i) => `  ${i.path.join('.')}: ${i.message}`).join('\n');
     throw new Error(`Invalid configuration:\n${issues}`);
@@ -96,6 +109,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
         .map((h) => h.trim())
         .filter(Boolean),
     },
+    retention: { unconfirmedDays: e.RETENTION_UNCONFIRMED_DAYS, logDays: e.RETENTION_LOG_DAYS },
     trustedOrigins: e.TRUSTED_ORIGINS?.split(',').map((o) => o.trim()) ?? [],
   };
 }

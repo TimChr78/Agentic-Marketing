@@ -57,3 +57,11 @@ jobs:
       - run: pnpm lint
       - run: pnpm typecheck
       - run: pnpm test
+
+  # The Docker image as a self-hoster runs it: docker compose up, bootstrap, sign in, a signup form
+  # that sends its confirmation e-mail.
+  docker-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: scripts/smoke.sh

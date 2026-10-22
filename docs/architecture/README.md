@@ -38,7 +38,10 @@ An open-source, self-hostable, **event-driven marketing platform built agent-fir
 | [analytics-and-reporting.md](analytics-and-reporting.md) | Built-in marketing analytics, BI access, forwarding to Umami / Matomo / PostHog |
 | [tech-stack.md](tech-stack.md) | Technology selection matrix with alternatives and licenses |
 | [deployment-and-scaling.md](deployment-and-scaling.md) | Self-host topology, scaling path to 10M profiles and multi-tenant SaaS |
-| [roadmap.md](roadmap.md) | Phased delivery plan for a team of one |
+| [roadmap.md](roadmap.md) | Phased delivery plan for a team of one (wave 1) |
+| [roadmap-wave-2.md](roadmap-wave-2.md) | Wave 2: prioritised phases after the pilot, with every known limitation placed |
+| [performance-marketing.md](performance-marketing.md) | Google, Meta and Microsoft ads: conversions, audiences, spend and ROAS |
+| [email-and-sms-delivery.md](email-and-sms-delivery.md) | Sending beyond SMTP (SES, Postmark, Cloudflare Email Service) and the SMS channel |
 | [open-questions.md](open-questions.md) | Decisions still needed from the product owner |
 | [adr/](adr/) | Architecture Decision Records |
 

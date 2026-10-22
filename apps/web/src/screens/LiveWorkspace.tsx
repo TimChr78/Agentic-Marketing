@@ -9,6 +9,7 @@ import { LiveEmails } from './live/LiveEmails';
 import { LiveIntegrations } from './live/LiveIntegrations';
 import { LiveExperiences } from './live/LiveExperiences';
 import { LiveJourneys } from './live/LiveJourneys';
+import { LiveNewsletter } from './live/LiveNewsletter';
 import { api, errText, type Out } from './liveApi';
 
 // Phase 0: this screen talks to the real API (apps/server) through the typed client. Every
@@ -24,7 +25,7 @@ export function LiveWorkspace() {
   const [ws, setWs] = useState<Workspace | null>(null);
   const [status, setStatus] = useState<'loading' | 'signed-out' | 'offline' | 'ready'>('loading');
   const [error, setError] = useState('');
-  const [tab, setTab] = useState<'artifacts' | 'journeys' | 'emails' | 'experiences' | 'ai' | 'integrations' | 'copilot' | 'people'>('artifacts');
+  const [tab, setTab] = useState<'artifacts' | 'journeys' | 'emails' | 'newsletter' | 'experiences' | 'ai' | 'integrations' | 'copilot' | 'people'>('artifacts');
 
   const load = useCallback(async () => {
     try {
@@ -69,6 +70,7 @@ export function LiveWorkspace() {
             ['artifacts', 'Artifacts & approvals'],
             ['journeys', 'Journeys'],
             ['emails', 'E-mails'],
+            ['newsletter', 'Newsletter'],
             ['experiences', 'Web experiences'],
             ['ai', 'AI'],
             ['integrations', 'Integrations'],
@@ -90,6 +92,7 @@ export function LiveWorkspace() {
       {tab === 'artifacts' && <Artifacts onError={setError} />}
       {tab === 'journeys' && <LiveJourneys onError={setError} />}
       {tab === 'emails' && <LiveEmails canAdmin={ws!.you.permissions.includes('workspace:admin')} onError={setError} />}
+      {tab === 'newsletter' && <LiveNewsletter onError={setError} />}
       {tab === 'experiences' && <LiveExperiences onError={setError} />}
       {tab === 'ai' && <LiveAi canAdmin={ws!.you.permissions.includes('workspace:admin')} onError={setError} />}
       {tab === 'integrations' && (

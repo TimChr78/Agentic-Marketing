@@ -7,7 +7,7 @@ import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, lt, sql } from 'drizzle-orm';
 import { type AdapterDeps, MESSAGE_ID_HEADER } from './adapters';
-import { type ClickLink, type LinkSigner, trackLinks, type UnsubscribeLink } from './links';
+import { type ClickLink, type LinkSigner, tagLinks, trackLinks, type UnsubscribeLink } from './links';
 import { transportFor } from './providers';
 import { renderTemplate } from './render';
 
@@ -236,13 +236,12 @@ async function deliverOne(db: Db, ws: string, id: string, deps: { kp: KeyProvide
     } catch (e) {
       return finish('failed', `render_error: ${(e as Error).message.split('\n')[0]}`);
     }
+    const tagged = tpl.utm ? tagLinks(rendered.html, tpl.utm, [deps.email.publicUrl]) : rendered.html;
     const html = deps.email.trackClicks
-      ? trackLinks(
-          rendered.html,
-          (url) => `${deps.email.publicUrl}/c/${deps.email.links.sign({ w: ws, m: m.id, url } satisfies ClickLink)}`,
-          [unsubscribe],
-        )
-      : rendered.html;
+      ? trackLinks(tagged, (url) => `${deps.email.publicUrl}/c/${deps.email.links.sign({ w: ws, m: m.id, url } satisfies ClickLink)}`, [
+          unsubscribe,
+        ])
+      : tagged;
     const headers: Record<string, string> = { [MESSAGE_ID_HEADER]: m.id };
     if (stream === 'marketing') {
       headers['List-Unsubscribe'] = `<${unsubscribe}>`;

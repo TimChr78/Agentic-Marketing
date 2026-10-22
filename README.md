@@ -1,9 +1,77 @@
-# Agentic-Marketing
+# Agentic Marketing
 
-An open-source, self-hostable, event-driven marketing platform built agent-first: every capability is available through MCP as well as a human-friendly UI (visual journey builder, MJML email editor, web personalization), backed by a real-time customer data platform with GDPR-grade consent handling.
+An open-source, self-hostable marketing platform built **agent-first**: every capability is a command that works the same over REST, MCP (for AI agents) and the web UI, under the same permissions, approvals and audit log. Underneath is an event-based customer data platform with GDPR-grade consent handling. You bring your own LLM keys.
 
-**Status:** Phase 0 (foundations) in progress: command layer with REST + MCP + typed client, auth with MCP OAuth, versioned artifacts with approvals, audit log, secrets. Architecture, spikes and a Phase −1 demo are in place.
+It runs as one Docker image (a TypeScript modular monolith) next to Postgres, ClickHouse, NATS and Valkey, and is sized for a team of one up to a few million profiles.
 
-- Architecture: [`docs/architecture/`](docs/architecture/README.md)
-- Demo: [`apps/web/`](apps/web/README.md) — `pnpm install && pnpm dev:web`
-- Development (Phase 0 foundations, server, tests): [`docs/development.md`](docs/development.md)
+## What it does
+
+- **Collect events:** Segment-compatible ingest (`/v1/batch`), a browser SDK, per-source consent rules, a tracking plan.
+- **Know people:** identity resolution and merges, profiles with traits and events, a consent ledger per purpose, export and erasure (DSR).
+- **Segments:** conditions on traits, events, consent and other segments, recomputed continuously, with enter and exit events.
+- **E-mail:**
+  - MJML and Liquid templates with preview, test sends and UTM tagging;
+  - a send gateway that checks lawful basis, consent, objections and suppressions;
+  - providers SES, Postmark, Brevo or SMTP, with delivery, bounce, complaint and click events;
+  - one-click unsubscribe (RFC 8058).
+
+  What happens to an e-mail becomes a customer event (`Email Link Clicked`…), so segments, journeys and webhooks can use it.
+- **Newsletter:** signup forms with double opt-in (works without JavaScript, optional Cloudflare Turnstile), subscriber import with consent proof (from Kit, Mailchimp…), broadcasts to a segment.
+- **Journeys:** a visual builder and an engine with waits, branches, e-mail, webhooks, connector actions and AI steps (decide, generate) with fallbacks.
+- **Web personalization:** experiences and A/B tests served by a decision API, with an anti-flicker snippet and consent-aware targeting.
+- **AI:** your own providers (Anthropic, OpenAI, Ollama…), metering and budgets, prompt artifacts, redaction, a decision log, and an in-app copilot over MCP.
+- **Integrations:** signed outbound webhooks, a connector SDK (Shopify, Slack, HTTP), inbound hooks and API tokens (for n8n and scripts).
+- **Governance:**
+  - everything an agent builds is a versioned artifact (journey, segment, template, form…) with drafts, diffs and approval policies;
+  - audit log;
+  - encrypted secrets with key rotation;
+  - retention jobs.
+
+## Quick start (Docker)
+
+```bash
+cp .env.example .env        # fill in the secrets: openssl rand -base64 32
+docker compose up -d --build
+docker compose exec app pnpm --filter @agentic-marketing/server cli bootstrap \
+  --email you@example.com --password '…' --workspace 'My site'
+```
+
+Open http://localhost:3000, sign in, and add an e-mail provider. To let an AI agent work in the workspace, connect an MCP client (Claude, an IDE…) to `http://localhost:3000/mcp`: it registers itself, and you choose its permissions on the consent page.
+
+Running it behind a proxy or a Cloudflare Tunnel: set `PUBLIC_URL`, `PUBLIC_LINKS_URL` and `CLIENT_IP_HEADER` (see [`.env.example`](.env.example)).
+
+## Documentation
+
+- [Development](docs/development.md): layout, running locally, tests, key rotation.
+- [Architecture](docs/architecture/README.md) and its [ADRs](docs/architecture/adr/).
+- [Integrations](docs/integrations.md): webhooks, connectors, n8n.
+- [Pilot: MartechSignal](docs/pilots/martechsignal.md): replacing Kit on a static Cloudflare Pages site.
+- Agent skills in [`.claude/skills/`](.claude/skills/):
+  - `agentic-marketing-implement`: rolling the stack out on a website;
+  - `agentic-marketing-mcp`: operating a workspace over MCP.
+
+## Status and roadmap
+
+Wave 1 (Phases −1 to 5) is complete: foundations, data platform, e-mail, segments, journeys, personalization, AI and integrations.
+
+[Wave 2](docs/architecture/roadmap-wave-2.md):
+
+| Phase | Theme | State |
+|---|---|---|
+| 6 | Pilot live and hardening | The code items are done: e-mail events on profiles, retention, UTM tagging, test sends, Newsletter screen, Docker smoke test. The MartechSignal run is next. |
+| 7 | Delivery beyond SMTP, and SMS | Next: Cloudflare Email Service for transactional mail, deliverability guardrails, frequency caps and quiet hours, Twilio SMS |
+| 8 | Consent everywhere | Planned: consent banner, Consent Mode v2, ad purposes, click ids |
+| 9 | Performance marketing | Planned: Meta Conversions API and audiences, Google Data Manager API, spend and ROAS, Microsoft |
+| 10 | Scale and operations | Planned |
+| 11 | Enterprise and ecosystem | Planned |
+
+## Development
+
+```bash
+pnpm install
+pnpm lint && pnpm typecheck && pnpm test   # tests need Postgres, ClickHouse, NATS and Valkey
+scripts/smoke.sh                           # the Docker image end to end
+pnpm dev:web                               # the UI (a mocked demo without the API)
+```
+
+See [docs/development.md](docs/development.md) for details.
