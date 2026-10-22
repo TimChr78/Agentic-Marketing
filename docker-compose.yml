@@ -1,5 +1,6 @@
-# Self-hosted single node. Phase 0 needs only Postgres; ClickHouse, NATS and Valkey are added with
-# the data platform (Phase 1). Copy .env.example to .env and fill in the secrets first.
+# Self-hosted single node: Postgres (configuration, profiles), ClickHouse (events), NATS JetStream
+# (event bus) and the app. Valkey arrives with web personalization (Phase 3).
+# Copy .env.example to .env and fill in the secrets first.
 services:
   postgres:
     image: postgres:16-alpine
@@ -14,11 +15,34 @@ services:
       interval: 5s
       retries: 10
 
+  clickhouse:
+    image: clickhouse/clickhouse-server:26.8
+    environment:
+      CLICKHOUSE_SKIP_USER_SETUP: 1
+    volumes:
+      - chdata:/var/lib/clickhouse
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8123/ping"]
+      interval: 5s
+      retries: 20
+
+  nats:
+    image: nats:2.15.0
+    command: ["-js", "-sd", "/data"]
+    volumes:
+      - natsdata:/data
+
   app:
     build: .
     depends_on:
       postgres:
         condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      nats:
+        condition: service_started
     environment:
       ROLE: all
       PORT: 3000
@@ -27,9 +51,14 @@ services:
       APP_DB_PASSWORD: ${APP_DB_PASSWORD:?set APP_DB_PASSWORD in .env}
       AUTH_SECRET: ${AUTH_SECRET:?set AUTH_SECRET in .env}
       MASTER_KEY: ${MASTER_KEY:?set MASTER_KEY in .env}
+      MASTER_KEY_PREVIOUS: ${MASTER_KEY_PREVIOUS:-}
+      CLICKHOUSE_URL: http://clickhouse:8123
+      NATS_URL: nats://nats:4222
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
     ports:
       - "3000:3000"
 
 volumes:
   pgdata:
+  chdata:
+  natsdata:

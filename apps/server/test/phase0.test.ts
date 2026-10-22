@@ -3,7 +3,7 @@ import { migrateAuth } from '@agentic-marketing/auth';
 import { type ApiError, type CommandInput, createClient } from '@agentic-marketing/client';
 import { hashValue, newUuid } from '@agentic-marketing/core';
 import { migrate } from '@agentic-marketing/db';
-import { localKeyProvider, readSecret } from '@agentic-marketing/secrets';
+import { localKeyProvider, readSecret, rewrapDataKeys } from '@agentic-marketing/secrets';
 import { serve } from '@hono/node-server';
 import { Client, type OAuthClientProvider, StreamableHTTPClientTransport, UnauthorizedError } from '@modelcontextprotocol/client';
 import pg from 'pg';
@@ -68,7 +68,26 @@ const journey = {
   },
 };
 
+// A Client ID Metadata Document, served by a stub transport instead of the internet.
+const CIMD_URL = 'https://agent.example.com/oauth/client.json';
+const cimdDocument = {
+  client_id: CIMD_URL,
+  client_name: 'Metadata-document agent',
+  redirect_uris: ['http://localhost/callback'],
+  grant_types: ['authorization_code', 'refresh_token'],
+  response_types: ['code'],
+  token_endpoint_auth_method: 'none',
+};
+const cimdFetches: string[] = [];
+const fetchCimd = async (input: RequestInfo | URL) => {
+  const url = String(input instanceof Request ? input.url : input);
+  cimdFetches.push(url);
+  if (url !== CIMD_URL) return new Response('not found', { status: 404 });
+  return Response.json(cimdDocument, { headers: { 'cache-control': 'max-age=300' } });
+};
+
 class TestOAuthProvider implements OAuthClientProvider {
+  constructor(readonly clientMetadataUrl?: string) {}
   info: any;
   tokenSet: any;
   verifier = '';
@@ -122,8 +141,8 @@ const grantFrom = (requested: string, permissions: string[]) =>
     .join(' ');
 
 /** Plays the person in the browser: authorize → sign in → consent with the chosen permissions. */
-async function connectAgent(u: User, permissions: string[]) {
-  const provider = new TestOAuthProvider();
+async function connectAgent(u: User, permissions: string[], clientMetadataUrl?: string) {
+  const provider = new TestOAuthProvider(clientMetadataUrl);
   const first = new StreamableHTTPClientTransport(new URL(`${BASE}/mcp`), { authProvider: provider });
   await expect(new Client({ name: 't', version: '0' }).connect(first)).rejects.toBeInstanceOf(UnauthorizedError);
 
@@ -174,7 +193,7 @@ beforeAll(async () => {
     AUTH_SECRET: 'test-secret-test-secret-test-secret-123',
     MASTER_KEY,
   });
-  srv = createServer(config);
+  srv = createServer(config, { cimd: { fetchClientMetadataResource: fetchCimd } });
   await migrate(srv.db.admin, { appRolePassword: config.appDbPassword });
   await migrateAuth({ baseUrl: config.publicUrl, secret: config.authSecret, db: srv.db });
   await new Promise<void>((resolve) => {
@@ -203,6 +222,8 @@ beforeAll(async () => {
 
 afterAll(async () => {
   http?.close();
+  await srv?.bus.close();
+  await srv?.events.close();
   await srv?.db.close();
 });
 
@@ -305,6 +326,9 @@ describe('agents through MCP with OAuth', () => {
       'secrets.delete',
       'workspace.setApprovalPolicy',
       'audit.list',
+      'members.invite',
+      'members.setRole',
+      'members.remove',
     ])
       expect(names).not.toContain(forbidden);
   });
@@ -327,6 +351,22 @@ describe('agents through MCP with OAuth', () => {
 
     expect(await owner.call('approvals.approve', { approvalId: pub.approvalId })).toMatchObject({ status: 'approved', version: 1 });
     expect((await owner.call('artifacts.get', { artifactId: created.artifactId })).publishedVersion).toBe(1);
+  });
+
+  it('accepts clients identified by a Client ID Metadata Document instead of registration', async () => {
+    const meta = await (await fetch(`${BASE}/.well-known/oauth-authorization-server`)).json();
+    expect(meta.client_id_metadata_document_supported).toBe(true);
+    const cimdAgent = await connectAgent(users.owner, ['artifacts:read'], CIMD_URL);
+    try {
+      expect(cimdAgent.clientId).toBe(CIMD_URL);
+      expect(cimdFetches).toContain(CIMD_URL);
+      const ws = structured(await cimdAgent.client.callTool({ name: 'workspace.get', arguments: {} }));
+      expect(ws.you).toMatchObject({ type: 'agent', permissions: ['artifacts:read'] });
+      const { rows } = await srv.db.admin.query(`SELECT count(*)::int AS n FROM "oauthClient" WHERE "clientId" = $1`, [CIMD_URL]);
+      expect(rows[0].n).toBe(1);
+    } finally {
+      await cimdAgent.client.close();
+    }
   });
 
   it('returns structured, actionable tool errors', async () => {
@@ -396,6 +436,108 @@ describe('secrets', () => {
 
     const { rows: audit } = await srv.db.admin.query(`SELECT input_hash FROM audit_log WHERE command = 'secrets.set'`);
     expect(audit[0].input_hash).toBe(hashValue({ name: 'llm.anthropic.api_key', value: '[redacted]' }));
+  });
+
+  it('rotates the master key: re-wraps data keys, and old-only configs stop working', async () => {
+    const NEW_KEY = Buffer.alloc(32, 8).toString('base64');
+    const rotating = localKeyProvider(NEW_KEY, [MASTER_KEY]);
+    expect(await rewrapDataKeys(srv.db.admin, rotating)).toEqual({ rewrapped: 1 });
+    expect(await rewrapDataKeys(srv.db.admin, rotating)).toEqual({ rewrapped: 0 });
+    const { rows } = await srv.db.admin.query(`SELECT DISTINCT kek_id FROM data_keys`);
+    expect(rows).toEqual([{ kek_id: rotating.id }]);
+
+    const read = (kp: ReturnType<typeof localKeyProvider>) =>
+      srv.db.withWorkspace(wsA, (tx) => readSecret(tx, wsA, 'llm.anthropic.api_key', kp));
+    expect(await read(localKeyProvider(NEW_KEY))).toBe('sk-test-123');
+    await expect(read(localKeyProvider(MASTER_KEY))).rejects.toThrow(/MASTER_KEY_PREVIOUS/);
+
+    // Rotate back so the running server's key works again.
+    await rewrapDataKeys(srv.db.admin, localKeyProvider(MASTER_KEY, [NEW_KEY]));
+    expect(await read(localKeyProvider(MASTER_KEY))).toBe('sk-test-123');
+  });
+});
+
+describe('members and invitations', () => {
+  const invitee: User = { email: `invitee-${Date.now()}@Example.com`, cookie: '', id: '' };
+  const signUp = async (u: User) => {
+    const res = await fetch(`${BASE}/api/auth/sign-up/email`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: BASE },
+      body: JSON.stringify({ email: u.email, password: PASSWORD, name: 'Invitee' }),
+    });
+    u.cookie = cookieOf(res);
+    u.id = (await res.json()).user.id;
+  };
+  const accept = (u: User, token: string) =>
+    fetch(`${BASE}/api/invitations/accept`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: u.cookie },
+      body: JSON.stringify({ token }),
+    });
+
+  it('invites by e-mail with a one-time link that only the invited address can accept', async () => {
+    const owner = api(users.owner);
+    const inv = await owner.call('members.invite', { email: invitee.email, role: 'marketer' }, { idempotencyKey: 'invite-1' });
+    expect(inv).toMatchObject({ email: invitee.email.toLowerCase(), role: 'marketer', status: 'pending' });
+    expect(inv.acceptPath).toBe(`/invite#${inv.token}`);
+    // The token is shown once: a replay returns it redacted, and only its hash is stored.
+    expect(await owner.call('members.invite', { email: invitee.email, role: 'marketer' }, { idempotencyKey: 'invite-1' })).toMatchObject({
+      id: inv.id,
+      token: '[redacted]',
+    });
+    const { rows } = await srv.db.admin.query(`SELECT response::text FROM idempotency_keys`);
+    expect(JSON.stringify(rows)).not.toContain(inv.token);
+    expect((await rejects(owner.call('members.invite', { email: invitee.email, role: 'viewer' }))).status).toBe(409);
+    expect((await rejects(owner.call('members.invite', { email: users.viewer.email, role: 'viewer' }))).status).toBe(409);
+
+    expect((await accept({ ...invitee, cookie: '' }, inv.token)).status).toBe(401);
+    expect((await accept(users.outsider, inv.token)).status).toBe(403);
+    expect((await accept(users.outsider, 'not-a-token')).status).toBe(404);
+
+    await signUp(invitee);
+    const res = await accept(invitee, inv.token);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ workspaceId: wsA, role: 'marketer' });
+    expect((await accept(invitee, inv.token)).status).toBe(404); // used up
+
+    expect(await api(invitee).call('artifacts.create', note('From the new marketer'))).toMatchObject({ state: 'draft' });
+    const { members } = await owner.call('members.list', {});
+    expect(members.find((m) => m.userId === invitee.id)).toMatchObject({ email: invitee.email.toLowerCase(), role: 'marketer' });
+    expect((await owner.call('invitations.list', {})).invitations[0]).toMatchObject({ id: inv.id, status: 'accepted' });
+    const { entries } = await owner.call('audit.list', { limit: 5 });
+    expect(entries.some((e) => e.command === 'invitations.accept' && e.principalId === invitee.id && e.ok)).toBe(true);
+  });
+
+  it('revokes invitations', async () => {
+    const owner = api(users.owner);
+    const inv = await owner.call('members.invite', { email: `later-${Date.now()}@example.com`, role: 'viewer' });
+    await owner.call('invitations.revoke', { id: inv.id });
+    expect((await accept(users.outsider, inv.token)).status).toBe(404);
+    expect((await rejects(owner.call('invitations.revoke', { id: inv.id }))).status).toBe(404);
+  });
+
+  it('keeps owners in charge of owners, and never leaves a workspace without one', async () => {
+    const owner = api(users.owner);
+    await owner.call('members.setRole', { userId: invitee.id, role: 'admin' });
+    const admin = api(invitee);
+    expect((await rejects(admin.call('members.invite', { email: 'boss@example.com', role: 'owner' }))).status).toBe(403);
+    expect((await rejects(admin.call('members.setRole', { userId: users.viewer.id, role: 'owner' }))).status).toBe(403);
+    expect((await rejects(admin.call('members.remove', { userId: users.owner.id }))).status).toBe(403);
+    expect((await rejects(api(users.viewer).call('members.list', {}))).status).toBe(403);
+
+    expect((await rejects(owner.call('members.setRole', { userId: users.owner.id, role: 'admin' }))).status).toBe(409);
+    expect((await rejects(owner.call('members.remove', { userId: users.owner.id }))).status).toBe(409);
+
+    // With a second owner, the first can step down, and be reinstated.
+    await owner.call('members.setRole', { userId: users.reviewer.id, role: 'owner' });
+    await owner.call('members.setRole', { userId: users.owner.id, role: 'admin' });
+    await api(users.reviewer).call('members.setRole', { userId: users.owner.id, role: 'owner' });
+    await owner.call('members.setRole', { userId: users.reviewer.id, role: 'approver' });
+
+    // A removed member loses access at once.
+    await admin.call('members.remove', { userId: users.viewer.id });
+    expect((await rejects(api(users.viewer).call('artifacts.list', {}))).status).toBe(401);
+    expect((await rejects(admin.call('members.remove', { userId: users.viewer.id }))).status).toBe(404);
   });
 });
 

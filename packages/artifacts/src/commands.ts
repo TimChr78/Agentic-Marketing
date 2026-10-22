@@ -138,6 +138,14 @@ export const createArtifact = defineCommand({
     const content = validateContent(input.type, input.content);
     const id = newId(artifactTypes[input.type].prefix);
     const ws = ctx.principal.workspaceId;
+    if ('singleton' in artifactTypes[input.type]) {
+      const [existing] = await ctx.tx
+        .select({ id: schema.artifacts.id })
+        .from(schema.artifacts)
+        .where(and(eq(schema.artifacts.workspaceId, ws), eq(schema.artifacts.type, input.type)));
+      if (existing)
+        throw new AppError('conflict', `A workspace has one ${input.type}; it is ${existing.id}. Edit it with artifacts.updateDraft.`);
+    }
     await ctx.tx.insert(schema.artifacts).values({ workspaceId: ws, id, type: input.type, name: input.name, latestVersion: 1 });
     await ctx.tx.insert(schema.artifactVersions).values({
       workspaceId: ws,
@@ -539,3 +547,23 @@ export const artifactCommands = [
   approve,
   reject,
 ] as const;
+
+/** Content of the published version of a workspace's singleton artifact (tracking plan, purposes), if any. */
+export async function publishedSingleton<T extends 'tracking_plan' | 'purposes'>(
+  tx: CommandContext['tx'],
+  type: T,
+): Promise<z.output<(typeof artifactTypes)[T]['content']> | null> {
+  const [row] = await tx
+    .select({ content: schema.artifactVersions.content })
+    .from(schema.artifacts)
+    .innerJoin(
+      schema.artifactVersions,
+      and(
+        eq(schema.artifactVersions.workspaceId, schema.artifacts.workspaceId),
+        eq(schema.artifactVersions.artifactId, schema.artifacts.id),
+        eq(schema.artifactVersions.number, schema.artifacts.publishedVersion),
+      ),
+    )
+    .where(eq(schema.artifacts.type, type));
+  return row ? (artifactTypes[type].content.parse(row.content) as never) : null;
+}
