@@ -1,25 +1,24 @@
 import { useCallback, useEffect, useState } from 'react';
 import { CheckCircle2, FilePlus2, History, LogIn, RefreshCw, Send, ShieldCheck, XCircle } from 'lucide-react';
-import { ApiError, createClient, type CommandOutput } from '@agentic-marketing/client';
-import type { Commands } from '@agentic-marketing/server/src/registry';
+import { ApiError } from '@agentic-marketing/client';
 import { AuthorBadge, Button, Card, PageHeader, Pill, cx, inputCls, timeAgo } from '../components/ui';
+import { LiveProfiles } from './LiveProfiles';
+import { api, errText, type Out } from './liveApi';
 
 // Phase 0: this screen talks to the real API (apps/server) through the typed client. Every
 // action is the same command an MCP agent would call, under the same rules.
 
-const api = createClient<Commands>({ credentials: 'include' });
-type Out<N extends Commands[number]['name']> = CommandOutput<Commands, N>;
 type Workspace = Out<'workspace.get'>;
 type ArtifactList = Out<'artifacts.list'>['artifacts'];
 type Artifact = Out<'artifacts.get'>;
 
 const stateTone = { draft: 'neutral', in_review: 'agent', published: 'good', superseded: 'neutral', rejected: 'bad' } as const;
-const errText = (e: unknown) => (e instanceof ApiError ? e.message : (e as Error).message);
 
 export function LiveWorkspace() {
   const [ws, setWs] = useState<Workspace | null>(null);
   const [status, setStatus] = useState<'loading' | 'signed-out' | 'offline' | 'ready'>('loading');
   const [error, setError] = useState('');
+  const [tab, setTab] = useState<'artifacts' | 'people'>('artifacts');
 
   const load = useCallback(async () => {
     try {
@@ -50,7 +49,7 @@ export function LiveWorkspace() {
 
   return (
     <div className="mx-auto max-w-[1200px]">
-      <PageHeader eyebrow={`Phase 0 · real API · ${ws!.you.role}`} title={ws!.name}>
+      <PageHeader eyebrow={`Real API · ${ws!.you.role}`} title={ws!.name}>
         <PolicyPicker ws={ws!} onChange={load} onError={setError} />
       </PageHeader>
       {error && (
@@ -58,7 +57,25 @@ export function LiveWorkspace() {
           {error}
         </div>
       )}
-      <Artifacts onError={setError} />
+      <div className="mb-4 flex gap-1" role="tablist">
+        {(
+          [
+            ['artifacts', 'Artifacts & approvals'],
+            ['people', 'People & data'],
+          ] as const
+        ).map(([key, label]) => (
+          <button
+            key={key}
+            role="tab"
+            aria-selected={tab === key}
+            onClick={() => setTab(key)}
+            className={cx('rounded-md px-3 py-1.5 text-[13px] font-medium', tab === key ? 'bg-accent-soft text-accent' : 'text-muted hover:bg-surface-2')}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      {tab === 'artifacts' ? <Artifacts onError={setError} /> : <LiveProfiles canAdmin={ws!.you.permissions.includes('workspace:admin')} onError={setError} />}
     </div>
   );
 }
