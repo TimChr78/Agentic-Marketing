@@ -156,7 +156,7 @@ export function ingestApi(deps: IngestDeps) {
       return fail(403, 'origin_not_allowed', `Origin ${origin ?? '(none)'} is not allowed for this source.`);
 
     const items = kind === 'batch' ? (Array.isArray(body.batch) ? body.batch : null) : [{ ...body, type: kind }];
-    if (!items || !items.length) return fail(400, 'invalid_batch', 'A batch needs a non-empty "batch" array.');
+    if (!items?.length) return fail(400, 'invalid_batch', 'A batch needs a non-empty "batch" array.');
     if (!allow(source.id, items.length)) return fail(429, 'rate_limited', 'Too many events for this source; retry with backoff.');
 
     const receivedAt = new Date();
