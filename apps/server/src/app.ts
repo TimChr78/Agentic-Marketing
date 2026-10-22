@@ -9,7 +9,6 @@ import { valkeyHotState } from '@agentic-marketing/hotstate';
 import { ingestApi } from '@agentic-marketing/ingest';
 import { egressFetch, inboundApi, oauthRoutes } from '@agentic-marketing/integrations';
 import { decideApi } from '@agentic-marketing/personalize';
-import { localKeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { oauthProviderAuthServerMetadata, oauthProviderOpenIdConfigMetadata } from '@better-auth/oauth-provider';
 import { Hono } from 'hono';
@@ -18,6 +17,7 @@ import { copilotApi } from './http/copilot';
 import { mcpEndpoint } from './http/mcp';
 import { consentPage, invitePage, loginPage } from './http/pages';
 import { restApi } from './http/rest';
+import { keyProviderFor } from './keys';
 
 /** `overrides` exist for tests, e.g. a stub transport for Client ID Metadata Documents. */
 export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'> = {}) {
@@ -30,7 +30,7 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
     clientIpHeader: config.clientIpHeader,
     ...overrides,
   });
-  const keyProvider = localKeyProvider(config.masterKey, config.previousMasterKeys);
+  const keyProvider = keyProviderFor(config);
   const bus = lazyNatsBus(config.nats);
   // E-mail delivery events also become customer events (segments, journeys, webhooks).
   const events = withEmailProfileEvents(clickHouseStore(config.clickhouse), { db, bus });

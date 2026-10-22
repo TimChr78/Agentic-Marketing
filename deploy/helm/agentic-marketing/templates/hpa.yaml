@@ -1,0 +1,16 @@
+{{- with .Values.roles.ingest.autoscaling }}
+{{- if .enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "am.fullname" $ }}-ingest
+  labels: {{- include "am.labels" $ | nindent 4 }}
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: {{ include "am.fullname" $ }}-ingest }
+  minReplicas: {{ .minReplicas }}
+  maxReplicas: {{ .maxReplicas }}
+  metrics:
+    - type: Resource
+      resource: { name: cpu, target: { type: Utilization, averageUtilization: {{ .targetCPUUtilizationPercentage }} } }
+{{- end }}
+{{- end }}

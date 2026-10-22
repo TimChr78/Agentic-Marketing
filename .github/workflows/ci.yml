@@ -43,10 +43,14 @@ jobs:
       CLICKHOUSE_URL: http://localhost:8123
       CLICKHOUSE_ROW_POLICIES: required
       NATS_URL: nats://localhost:4222
+      OPENBAO_TEST_ADDR: http://localhost:8200
+      OPENBAO_TEST_TOKEN: root
     steps:
       - uses: actions/checkout@v5
       # Service containers cannot take arguments, and NATS needs `-js` for JetStream.
       - run: docker run -d --name nats -p 4222:4222 nats:2.15.0 -js
+      # OpenBao in dev mode, for the Transit key-provider test (packages/secrets).
+      - run: docker run -d --name openbao -p 8200:8200 openbao/openbao:2.6.4 server -dev -dev-root-token-id=root -dev-listen-address=0.0.0.0:8200
       - uses: actions/setup-node@v5
         with:
           node-version: 22
@@ -66,3 +70,17 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - run: scripts/smoke.sh
+
+  # The Helm chart renders and every manifest matches the Kubernetes schemas.
+  helm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.19.0
+      - run: helm lint deploy/helm/agentic-marketing --set secrets.existingSecret=am
+      - run: |
+          helm template am deploy/helm/agentic-marketing --set secrets.existingSecret=am \
+            --set ingress.enabled=true --set roles.ingest.autoscaling.enabled=true > rendered.yaml
+          go run github.com/yannh/kubeconform/cmd/kubeconform@v0.7.0 -strict -summary -kubernetes-version 1.33.0 rendered.yaml

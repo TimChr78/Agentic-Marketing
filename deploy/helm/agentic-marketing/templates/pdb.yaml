@@ -1,0 +1,14 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+{{- range $role := list "api" "ingest" "worker" }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "am.fullname" $ }}-{{ $role }}
+  labels: {{- include "am.labels" $ | nindent 4 }}
+spec:
+  minAvailable: {{ $.Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels: {{- include "am.selector" (dict "root" $ "role" $role) | nindent 6 }}
+{{- end }}
+{{- end }}

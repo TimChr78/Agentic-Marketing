@@ -2,11 +2,14 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:
 
 /**
  * Wraps and unwraps data keys with a key-encryption key (KEK) that never touches the database.
- * Implementations: a local key from the environment (self-hosting), later AWS/GCP KMS or OpenBao.
+ * Implementations: a local key from the environment (self-hosting), OpenBao/Vault Transit and AWS
+ * KMS (providers.ts).
  */
 export interface KeyProvider {
   /** Identifies the current KEK, stored next to each wrapped key so rotation can find what to re-wrap. */
   readonly id: string;
+  /** Whether a stored KEK id is one this provider can unwrap (default: equal to `id`). */
+  owns?(kekId: string): boolean;
   /** Wraps with the current KEK. */
   wrap(dataKey: Buffer): Promise<Buffer>;
   /** Unwraps with the KEK `kekId` names, which may be a previous one during a rotation. */
@@ -48,6 +51,7 @@ export function localKeyProvider(current: string, previous: readonly string[] = 
   const ids = keys.map(fingerprint);
   return {
     id: ids[0],
+    owns: (kekId) => ids.includes(kekId),
     async wrap(dataKey) {
       const s = seal(keys[0], dataKey);
       return Buffer.concat([s.iv, s.authTag, s.ciphertext]);
