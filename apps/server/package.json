@@ -16,10 +16,13 @@
     "@agentic-marketing/commands": "workspace:*",
     "@agentic-marketing/core": "workspace:*",
     "@agentic-marketing/db": "workspace:*",
+    "@agentic-marketing/email": "workspace:*",
     "@agentic-marketing/events": "workspace:*",
     "@agentic-marketing/ingest": "workspace:*",
+    "@agentic-marketing/journeys": "workspace:*",
     "@agentic-marketing/profiles": "workspace:*",
     "@agentic-marketing/secrets": "workspace:*",
+    "@agentic-marketing/segments": "workspace:*",
     "@agentic-marketing/telemetry": "workspace:*",
     "@better-auth/mcp": "1.7.7",
     "@better-auth/oauth-provider": "1.7.7",
@@ -34,6 +37,8 @@
     "@agentic-marketing/sdk-js": "workspace:*",
     "@modelcontextprotocol/client": "2.3.1",
     "@types/pg": "8.23.1",
-    "pg": "8.23.1"
+    "@types/smtp-server": "3.5.13",
+    "pg": "8.23.1",
+    "smtp-server": "3.19.17"
   }
 }

@@ -45,9 +45,18 @@ export interface ResolveDeps {
   purposes: (tx: Tx) => Promise<Purposes>;
 }
 
-/** Applies one workspace's events, in order, in the given transaction. Safe to re-run (at-least-once delivery). */
-export async function applyEvents(tx: Tx, workspaceId: string, events: BusEvent[], deps: ResolveDeps) {
+export interface ResolvedEvent {
+  event: BusEvent;
+  profileId: string;
+}
+
+/**
+ * Applies one workspace's events, in order, in the given transaction, and returns which profile
+ * each event belongs to. Safe to re-run (at-least-once delivery).
+ */
+export async function applyEvents(tx: Tx, workspaceId: string, events: BusEvent[], deps: ResolveDeps): Promise<ResolvedEvent[]> {
   const crypto = personCrypto(tx, workspaceId, deps.kp);
+  const resolved: ResolvedEvent[] = [];
   let purposes: Purposes | undefined;
   for (const e of events) {
     const ids = await identsOf(e, crypto);
@@ -59,6 +68,7 @@ export async function applyEvents(tx: Tx, workspaceId: string, events: BusEvent[
     const profilesKnown = new Set(known.map((k) => k.profileId));
     if (!hasProfileData(e) && known.length === ids.length && profilesKnown.size === 1) {
       await touch(tx, workspaceId, [...profilesKnown][0], ids, e.timestamp);
+      resolved.push({ event: e, profileId: [...profilesKnown][0] });
       continue;
     }
 
@@ -71,7 +81,9 @@ export async function applyEvents(tx: Tx, workspaceId: string, events: BusEvent[
       purposes ??= await deps.purposes(tx);
       await recordSdkConsent(tx, workspaceId, profileId, e, purposes);
     }
+    resolved.push({ event: e, profileId });
   }
+  return resolved;
 }
 
 async function previousIdents(tx: Tx, workspaceId: string, previousId: string): Promise<Ident[]> {

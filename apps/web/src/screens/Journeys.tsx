@@ -91,14 +91,16 @@ export function Journeys() {
   );
 }
 
-type StepData = {
+export type StepData = {
   node: JourneyNode;
   showStats: boolean;
   sim: 'none' | 'visited' | 'current';
+  /** Overrides the derived config summary (the live builder's settings differ from the demo's). */
+  summary?: string;
 };
 
-const StepNode = memo(({ data, selected }: NodeProps<Node<StepData>>) => {
-  const { node, showStats, sim } = data;
+export const StepNode = memo(({ data, selected }: NodeProps<Node<StepData>>) => {
+  const { node, showStats, sim, summary } = data;
   const meta = kindMeta[node.kind];
   const Icon = meta.icon;
   return (
@@ -118,7 +120,7 @@ const StepNode = memo(({ data, selected }: NodeProps<Node<StepData>>) => {
         <span className="text-[10px] font-semibold uppercase tracking-wider text-muted">{meta.label}</span>
       </div>
       <div className="mt-1.5 text-[13px] font-semibold leading-snug text-fg">{node.label}</div>
-      <div className="mt-0.5 truncate font-mono text-[11px] text-muted">{configSummary(node)}</div>
+      <div className="mt-0.5 truncate font-mono text-[11px] text-muted">{summary ?? configSummary(node)}</div>
       {showStats && node.stats && (
         <div className="num mt-2 flex gap-3 border-t border-line pt-1.5 text-[11px] text-muted">
           <span>
@@ -136,7 +138,7 @@ const StepNode = memo(({ data, selected }: NodeProps<Node<StepData>>) => {
   );
 });
 
-const nodeTypes = { step: StepNode };
+export const nodeTypes = { step: StepNode };
 const palette: NodeKind[] = ['trigger', 'wait', 'waitEvent', 'branch', 'split', 'email', 'webhook', 'updateProfile', 'aiDecide', 'aiGenerate', 'goal', 'exit'];
 
 function Builder({ journey, onBack }: { journey: Journey; onBack: () => void }) {

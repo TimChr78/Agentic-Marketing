@@ -5,11 +5,12 @@ import { newUuid } from '@agentic-marketing/core';
 import { migrate } from '@agentic-marketing/db';
 import { migrateClickHouse, resetClickHouse, resetNatsNamespace } from '@agentic-marketing/events';
 import { serve } from '@hono/node-server';
+import { Client, type OAuthClientProvider, StreamableHTTPClientTransport, UnauthorizedError } from '@modelcontextprotocol/client';
 import pg from 'pg';
 import { createServer } from '../src/app';
 import { loadConfig } from '../src/config';
 import type { Commands } from '../src/registry';
-import { startWorkers } from '../src/workers';
+import { startScheduler, startWorkers } from '../src/workers';
 
 // A complete server (Postgres, ClickHouse, NATS, api + ingest + worker roles) on fresh databases.
 
@@ -40,6 +41,99 @@ export async function eventually<T>(fn: () => Promise<T>, ok: (v: T) => boolean,
   }
 }
 
+export class TestOAuthProvider implements OAuthClientProvider {
+  constructor(readonly clientMetadataUrl?: string) {}
+  info: any;
+  tokenSet: any;
+  verifier = '';
+  discovery: any;
+  authorizationUrl?: URL;
+  get redirectUrl() {
+    return 'http://localhost/callback';
+  }
+  get clientMetadata() {
+    return {
+      client_name: 'Phase 0 test agent',
+      redirect_uris: ['http://localhost/callback'],
+      grant_types: ['authorization_code', 'refresh_token'],
+      response_types: ['code'],
+      token_endpoint_auth_method: 'none',
+    };
+  }
+  clientInformation() {
+    return this.info;
+  }
+  saveClientInformation(i: unknown) {
+    this.info = i;
+  }
+  tokens() {
+    return this.tokenSet;
+  }
+  saveTokens(t: unknown) {
+    this.tokenSet = t;
+  }
+  redirectToAuthorization(url: URL) {
+    this.authorizationUrl = url;
+  }
+  saveCodeVerifier(v: string) {
+    this.verifier = v;
+  }
+  codeVerifier() {
+    return this.verifier;
+  }
+  saveDiscoveryState(s: unknown) {
+    this.discovery = s;
+  }
+  discoveryState() {
+    return this.discovery;
+  }
+}
+
+export const grantFrom = (requested: string, permissions: string[]) =>
+  requested
+    .split(' ')
+    .filter((s) => !s.includes(':') || permissions.includes(s))
+    .join(' ');
+
+/** Plays the person in the browser: authorize → sign in → consent with the chosen permissions. */
+export async function connectAgent(BASE: string, u: User, permissions: string[], clientMetadataUrl?: string) {
+  const provider = new TestOAuthProvider(clientMetadataUrl);
+  const first = new StreamableHTTPClientTransport(new URL(`${BASE}/mcp`), { authProvider: provider });
+  const unauthorized = await new Client({ name: 't', version: '0' }).connect(first).then(
+    () => null,
+    (e) => e,
+  );
+  if (!(unauthorized instanceof UnauthorizedError)) throw new Error('expected the first MCP connection to need authorization');
+
+  const authz = await fetch(provider.authorizationUrl!, { redirect: 'manual', headers: { accept: 'application/json' } });
+  const login = new URL(authz.headers.get('location') ?? (await authz.json()).url, BASE);
+  const signIn = await fetch(`${BASE}/api/auth/sign-in/email`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', origin: BASE },
+    body: JSON.stringify({ email: u.email, password: PASSWORD, oauth_query: login.search.slice(1) }),
+  });
+  let next = new URL((await signIn.json()).url, BASE);
+  if (next.pathname === '/consent') {
+    const consent = await fetch(`${BASE}/api/auth/oauth2/consent`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: BASE, cookie: cookieOf(signIn) },
+      // Like the consent page: identity scopes as requested, permissions as chosen (never more than requested).
+      body: JSON.stringify({
+        accept: true,
+        scope: grantFrom(next.searchParams.get('scope') ?? '', permissions),
+        oauth_query: next.search.slice(1),
+      }),
+    });
+    const body = await consent.json();
+    if (!body.url) throw new Error(`consent failed: ${JSON.stringify(body)}`);
+    next = new URL(body.url);
+  }
+  await first.finishAuth(next.searchParams);
+  const client = new Client({ name: 'phase0-test', version: '0' });
+  await client.connect(new StreamableHTTPClientTransport(new URL(`${BASE}/mcp`), { authProvider: provider }));
+  return { client, clientId: provider.info.client_id as string };
+}
+
 export async function startTestServer(name: string, port: number) {
   const base = `http://localhost:${port}`;
   const pgUrl = new URL(process.env.TEST_DATABASE_URL ?? 'postgres://am:am@localhost:5432/am_test');
@@ -57,6 +151,7 @@ export async function startTestServer(name: string, port: number) {
   const config = loadConfig({
     PORT: String(port),
     DATABASE_URL: pgUrl.toString(),
+    APP_DB_ROLE: 'am_app_test',
     APP_DB_PASSWORD: 'am_app_test_password',
     AUTH_SECRET: 'test-secret-test-secret-test-secret-123',
     MASTER_KEY: Buffer.alloc(32, 7).toString('base64'),
@@ -67,7 +162,7 @@ export async function startTestServer(name: string, port: number) {
   });
   const srv = createServer(config);
   await resetClickHouse(config.clickhouse.url, dbName);
-  await migrate(srv.db.admin, { appRolePassword: config.appDbPassword });
+  await migrate(srv.db.admin, { appRolePassword: config.appDbPassword, appRole: config.appDbRole });
   await migrateAuth({ baseUrl: config.publicUrl, secret: config.authSecret, db: srv.db });
   await migrateClickHouse(config.clickhouse.url, config.clickhouse.database);
   let http: { close: () => void } | undefined;
@@ -75,7 +170,7 @@ export async function startTestServer(name: string, port: number) {
     http = serve({ fetch: srv.app.fetch, port }, (_i: AddressInfo) => resolve());
   });
   const stop = new AbortController();
-  const workers = startWorkers(srv, stop.signal);
+  const workers = [...startWorkers(srv, stop.signal), ...startScheduler(srv, stop.signal, { segmentTickMs: 500 })];
 
   async function signUp(email: string): Promise<User> {
     const res = await fetch(`${base}/api/auth/sign-up/email`, {

@@ -15,8 +15,12 @@ export interface DbConfig {
 export interface Db {
   admin: pg.Pool;
   app: pg.Pool;
-  /** Run `fn` in one transaction scoped to a workspace; RLS reads `app.workspace_id`. */
-  withWorkspace<T>(workspaceId: string, fn: (tx: Tx) => Promise<T>): Promise<T>;
+  /**
+   * Run `fn` in one transaction scoped to a workspace; RLS reads `app.workspace_id`.
+   * `snapshot: true` (repeatable read) makes every statement see the same data, for reads that
+   * combine several queries and must not see a concurrent change half-applied.
+   */
+  withWorkspace<T>(workspaceId: string, fn: (tx: Tx) => Promise<T>, opts?: { snapshot?: boolean }): Promise<T>;
   ping(): Promise<void>;
   close(): Promise<void>;
 }
@@ -27,10 +31,10 @@ export function createDb(config: DbConfig): Db {
   return {
     admin,
     app,
-    async withWorkspace(workspaceId, fn) {
+    async withWorkspace(workspaceId, fn, opts) {
       const client = await app.connect();
       try {
-        await client.query('BEGIN');
+        await client.query(opts?.snapshot ? 'BEGIN ISOLATION LEVEL REPEATABLE READ' : 'BEGIN');
         await client.query("SELECT set_config('app.workspace_id', $1, true)", [workspaceId]);
         const result = await fn(drizzle(client, { schema }));
         await client.query('COMMIT');

@@ -5,12 +5,12 @@ import { hashValue, newUuid } from '@agentic-marketing/core';
 import { migrate } from '@agentic-marketing/db';
 import { localKeyProvider, readSecret, rewrapDataKeys } from '@agentic-marketing/secrets';
 import { serve } from '@hono/node-server';
-import { Client, type OAuthClientProvider, StreamableHTTPClientTransport, UnauthorizedError } from '@modelcontextprotocol/client';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createServer } from '../src/app';
 import { loadConfig } from '../src/config';
 import type { Commands } from '../src/registry';
+import { connectAgent as harnessConnectAgent } from './harness';
 
 // Phase 0 acceptance: "an MCP client and the UI can create, version and approve an artifact with
 // identical rules". Runs against a fresh database (TEST_DATABASE_URL, default am_test on localhost).
@@ -62,7 +62,7 @@ const journey = {
     goal: 'Order within 14 days',
     nodes: [
       { id: 'n1', kind: 'trigger', label: 'Entered lapsed segment', config: { event: 'segment.entered' } },
-      { id: 'n2', kind: 'email', label: 'We miss you', config: { template: 'tpl_win_back' } },
+      { id: 'n2', kind: 'updateProfile', label: 'Mark as lapsed', config: { trait: 'lifecycle', value: 'lapsed' } },
       { id: 'n3', kind: 'goal', label: 'Ordered', config: { event: 'order_completed', within: 'P14D' } },
     ],
   },
@@ -86,94 +86,8 @@ const fetchCimd = async (input: RequestInfo | URL) => {
   return Response.json(cimdDocument, { headers: { 'cache-control': 'max-age=300' } });
 };
 
-class TestOAuthProvider implements OAuthClientProvider {
-  constructor(readonly clientMetadataUrl?: string) {}
-  info: any;
-  tokenSet: any;
-  verifier = '';
-  discovery: any;
-  authorizationUrl?: URL;
-  get redirectUrl() {
-    return 'http://localhost/callback';
-  }
-  get clientMetadata() {
-    return {
-      client_name: 'Phase 0 test agent',
-      redirect_uris: ['http://localhost/callback'],
-      grant_types: ['authorization_code', 'refresh_token'],
-      response_types: ['code'],
-      token_endpoint_auth_method: 'none',
-    };
-  }
-  clientInformation() {
-    return this.info;
-  }
-  saveClientInformation(i: unknown) {
-    this.info = i;
-  }
-  tokens() {
-    return this.tokenSet;
-  }
-  saveTokens(t: unknown) {
-    this.tokenSet = t;
-  }
-  redirectToAuthorization(url: URL) {
-    this.authorizationUrl = url;
-  }
-  saveCodeVerifier(v: string) {
-    this.verifier = v;
-  }
-  codeVerifier() {
-    return this.verifier;
-  }
-  saveDiscoveryState(s: unknown) {
-    this.discovery = s;
-  }
-  discoveryState() {
-    return this.discovery;
-  }
-}
-
-const grantFrom = (requested: string, permissions: string[]) =>
-  requested
-    .split(' ')
-    .filter((s) => !s.includes(':') || permissions.includes(s))
-    .join(' ');
-
-/** Plays the person in the browser: authorize → sign in → consent with the chosen permissions. */
-async function connectAgent(u: User, permissions: string[], clientMetadataUrl?: string) {
-  const provider = new TestOAuthProvider(clientMetadataUrl);
-  const first = new StreamableHTTPClientTransport(new URL(`${BASE}/mcp`), { authProvider: provider });
-  await expect(new Client({ name: 't', version: '0' }).connect(first)).rejects.toBeInstanceOf(UnauthorizedError);
-
-  const authz = await fetch(provider.authorizationUrl!, { redirect: 'manual', headers: { accept: 'application/json' } });
-  const login = new URL(authz.headers.get('location') ?? (await authz.json()).url, BASE);
-  const signIn = await fetch(`${BASE}/api/auth/sign-in/email`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', origin: BASE },
-    body: JSON.stringify({ email: u.email, password: PASSWORD, oauth_query: login.search.slice(1) }),
-  });
-  let next = new URL((await signIn.json()).url, BASE);
-  if (next.pathname === '/consent') {
-    const consent = await fetch(`${BASE}/api/auth/oauth2/consent`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', origin: BASE, cookie: cookieOf(signIn) },
-      // Like the consent page: identity scopes as requested, permissions as chosen (never more than requested).
-      body: JSON.stringify({
-        accept: true,
-        scope: grantFrom(next.searchParams.get('scope') ?? '', permissions),
-        oauth_query: next.search.slice(1),
-      }),
-    });
-    const body = await consent.json();
-    if (!body.url) throw new Error(`consent failed: ${JSON.stringify(body)}`);
-    next = new URL(body.url);
-  }
-  await first.finishAuth(next.searchParams);
-  const client = new Client({ name: 'phase0-test', version: '0' });
-  await client.connect(new StreamableHTTPClientTransport(new URL(`${BASE}/mcp`), { authProvider: provider }));
-  return { client, clientId: provider.info.client_id as string };
-}
+const connectAgent = (u: User, permissions: string[], clientMetadataUrl?: string) =>
+  harnessConnectAgent(BASE, u, permissions, clientMetadataUrl);
 const structured = (r: any) => r.structuredContent as any;
 const toolError = (r: any) => JSON.parse(r.content[0].text);
 
@@ -189,12 +103,13 @@ beforeAll(async () => {
   const config = loadConfig({
     PORT: String(PORT),
     DATABASE_URL: TEST_DB,
+    APP_DB_ROLE: 'am_app_test',
     APP_DB_PASSWORD: 'am_app_test_password',
     AUTH_SECRET: 'test-secret-test-secret-test-secret-123',
     MASTER_KEY,
   });
   srv = createServer(config, { cimd: { fetchClientMetadataResource: fetchCimd } });
-  await migrate(srv.db.admin, { appRolePassword: config.appDbPassword });
+  await migrate(srv.db.admin, { appRolePassword: config.appDbPassword, appRole: config.appDbRole });
   await migrateAuth({ baseUrl: config.publicUrl, secret: config.authSecret, db: srv.db });
   await new Promise<void>((resolve) => {
     http = serve({ fetch: srv.app.fetch, port: PORT }, (_i: AddressInfo) => resolve());

@@ -71,6 +71,8 @@ describe('Segment event schema', () => {
       sentAt: '2030-01-01T00:00:04Z',
     });
     expect(correctedTimestamp(e, received).toISOString()).toBe('2026-10-01T12:00:06.000Z');
+    const future = InboundEvent.parse({ type: 'track', event: 'x', anonymousId: 'a', timestamp: '2030-01-01T00:00:00Z' });
+    expect(correctedTimestamp(future, received)).toEqual(received);
   });
 });
 

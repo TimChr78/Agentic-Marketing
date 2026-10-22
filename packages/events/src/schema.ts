@@ -86,8 +86,10 @@ export function correctedTimestamp(e: InboundEvent, receivedAt: Date): Date {
   const ts = e.timestamp ?? e.originalTimestamp;
   if (!ts) return receivedAt;
   const t = Date.parse(ts);
-  if (e.sentAt) return new Date(receivedAt.getTime() - (Date.parse(e.sentAt) - t));
-  return new Date(t);
+  const corrected = e.sentAt ? receivedAt.getTime() - (Date.parse(e.sentAt) - t) : t;
+  // Nothing happened after we received it: a clock in the future would otherwise let an old
+  // event (e.g. a consent) outrank later ones.
+  return new Date(Math.min(corrected, receivedAt.getTime()));
 }
 
 export function consentOf(context: Record<string, unknown> | undefined): Record<string, boolean> | undefined {

@@ -32,14 +32,48 @@ const journeyNode = z.object({
   kind: z.enum(nodeKinds),
   label: z.string().min(1).max(120),
   config: z
-    .record(z.string(), z.union([z.string(), z.number(), z.boolean()]))
+    .record(z.string(), z.unknown())
     .default({})
-    .describe('Step settings, e.g. {"duration":"P2D"}'),
+    .describe('Settings for the kind; see journeyNodeConfigs, e.g. wait: {"duration":"P2D"}'),
   next: z
     .array(z.object({ to: z.string(), label: z.string().max(40).optional() }))
     .optional()
-    .describe('Steps this one continues to. Omit to continue with the following node.'),
+    .describe(
+      'Steps this one continues to, in order (waitEvent/goal: [matched, timeout]; branch: [yes, no]; split: one per weight). Omit to continue with the following node.',
+    ),
+  position: z.object({ x: z.number(), y: z.number() }).optional().describe('Canvas position; no effect on behaviour'),
 });
+
+const Iso = z.string().regex(/^P(\d+W|\d+D|T\d+H|T\d+M|\d+DT\d+H)$/, 'ISO 8601 duration such as P2D, PT6H, P1W');
+const SegmentRef = z.string().regex(/^seg_[0-9a-f]{32}$/);
+
+/** Settings per node kind (validated on save). Kinds without one cannot be published yet. */
+export const journeyNodeConfigs = {
+  trigger: z
+    .object({
+      event: z.string().min(1).max(200).optional().describe('Enter when this event happens, e.g. "Signed Up"'),
+      segment: SegmentRef.optional().describe('Enter when the person enters this segment'),
+      reentry: z
+        .enum(['once', 'after_exit', 'always'])
+        .default('once')
+        .describe('once: never again; after_exit: when not in the journey; always: every time'),
+    })
+    .refine((c) => !!c.event !== !!c.segment, 'Set exactly one of event or segment'),
+  wait: z.object({ duration: Iso }),
+  waitEvent: z.object({ event: z.string().min(1).max(200), timeout: Iso }),
+  goal: z.object({ event: z.string().min(1).max(200), within: Iso }),
+  branch: z
+    .object({ segment: SegmentRef.optional(), condition: z.unknown().optional().describe('A segment condition, evaluated for the person') })
+    .refine((c) => !!c.segment !== (c.condition !== undefined), 'Set exactly one of segment or condition'),
+  split: z.object({ weights: z.array(z.number().int().min(0).max(100)).min(2).max(5).describe('Relative weights, one per outgoing edge') }),
+  email: z.object({ template: z.string().regex(/^eml_[0-9a-f]{32}$/, 'An e-mail template id (eml_…)') }),
+  updateProfile: z.object({
+    trait: z.string().regex(/^[A-Za-z0-9_]{1,64}$/),
+    value: z.union([z.string().max(500), z.number(), z.boolean(), z.null()]),
+  }),
+  exit: z.object({}),
+} as const;
+
 const journey = z.object({
   purpose: Key.describe('Purpose key of the messages, e.g. "marketing_email"; the send gateway derives the lawful basis from it'),
   goal: z.string().max(200).optional(),
@@ -58,6 +92,22 @@ const journey = z.object({
           if (!ids.has(e.to)) ctx.addIssue({ code: 'custom', message: `Node "${n.id}" continues to unknown node "${e.to}"` });
       const triggers = nodes.filter((n) => n.kind === 'trigger').length;
       if (triggers !== 1) ctx.addIssue({ code: 'custom', message: `A journey needs exactly one trigger node, found ${triggers}` });
+      for (const n of nodes) {
+        const schema = journeyNodeConfigs[n.kind as keyof typeof journeyNodeConfigs] as z.ZodType | undefined;
+        if (schema) {
+          const r = schema.safeParse(n.config);
+          if (!r.success)
+            for (const i of r.error.issues)
+              ctx.addIssue({ code: 'custom', message: `Node "${n.id}" (${n.kind}): ${[...i.path, ''].join('.')}${i.message}` });
+        }
+        const edges = n.next?.length ?? 0;
+        if (n.kind === 'branch' && edges !== 2) ctx.addIssue({ code: 'custom', message: `Branch "${n.id}" needs two edges: [yes, no]` });
+        if ((n.kind === 'waitEvent' || n.kind === 'goal') && edges > 2)
+          ctx.addIssue({ code: 'custom', message: `"${n.id}" has at most two edges: [matched, timeout]` });
+        const weights = (n.config as { weights?: unknown[] }).weights;
+        if (n.kind === 'split' && Array.isArray(weights) && weights.length !== edges)
+          ctx.addIssue({ code: 'custom', message: `Split "${n.id}" needs one edge per weight (${weights.length})` });
+      }
     }),
 });
 
@@ -138,12 +188,104 @@ const purposes = z.object({
       }
     }),
 });
+const emailTemplate = z.object({
+  purpose: Key.describe(
+    'Purpose key, e.g. "marketing_email" or "onboarding"; decides the lawful basis and whether an unsubscribe link is required',
+  ),
+  subject: z.string().min(1).max(300).describe('Liquid, e.g. "Welcome, {{ profile.firstName | default: \'friend\' }}"'),
+  preheader: z.string().max(300).optional().describe('Preview text shown after the subject in inboxes'),
+  mjml: z.string().min(1).max(300_000).describe('MJML with Liquid. Variables: profile.*, event.*, unsubscribe_url, preferences_url'),
+  text: z.string().max(100_000).optional().describe('Plain-text part (Liquid). Generated from the HTML when omitted'),
+  sampleData: z.record(z.string(), z.unknown()).optional().describe('Example variables for previews, e.g. {"profile":{"firstName":"Ada"}}'),
+});
+
+// Segment DSL (data-platform.md §6): a JSON condition tree that agents read and write and the
+// UI edits. The same definition is evaluated in batch and per person as events arrive.
+const Duration = z
+  .string()
+  .regex(/^P(\d+W|\d+D|T\d+H|T\d+M|\d+DT\d+H)$/, 'ISO 8601 duration such as P7D, P2W, PT6H or PT30M')
+  .describe('Look-back window, e.g. "P7D"');
+const PropKey = z.string().regex(/^[A-Za-z0-9_]{1,64}$/, 'Letters, digits and _');
+const Scalar = z.union([z.string().max(500), z.number(), z.boolean()]);
+export type SegmentCondition =
+  | { all: SegmentCondition[] }
+  | { any: SegmentCondition[] }
+  | { not: SegmentCondition }
+  | {
+      trait: string;
+      op: 'eq' | 'neq' | 'in' | 'gt' | 'gte' | 'lt' | 'lte' | 'exists' | 'not_exists' | 'contains';
+      value?: string | number | boolean | (string | number)[];
+    }
+  | { event: string; where?: Record<string, string | number | boolean>; count?: { gte?: number; lte?: number }; within?: string }
+  | { consent: string }
+  | { segment: string };
+export const segmentCondition: z.ZodType<SegmentCondition> = z.lazy(() =>
+  z.union([
+    z.object({ all: z.array(segmentCondition).min(1).max(50) }).strict(),
+    z.object({ any: z.array(segmentCondition).min(1).max(50) }).strict(),
+    z.object({ not: segmentCondition }).strict(),
+    z
+      .object({
+        trait: PropKey.describe('A non-personal trait, e.g. "city" or "loyaltyTier"'),
+        op: z.enum(['eq', 'neq', 'in', 'gt', 'gte', 'lt', 'lte', 'exists', 'not_exists', 'contains']),
+        value: z.union([Scalar, z.array(z.union([z.string().max(500), z.number()])).max(500)]).optional(),
+      })
+      .strict(),
+    z
+      .object({
+        event: z.string().min(1).max(200).describe('Event name, e.g. "Product Viewed"'),
+        where: z.record(PropKey, Scalar).optional().describe('Property equals value, e.g. {"category":"tents"}'),
+        count: z
+          .object({ gte: z.number().int().min(0).optional(), lte: z.number().int().min(0).optional() })
+          .optional()
+          .describe('How many times; default at least once'),
+        within: Duration.optional(),
+      })
+      .strict(),
+    z
+      .object({
+        consent: z
+          .string()
+          .regex(/^[a-z][a-z0-9_]{0,63}$/)
+          .describe('Purpose the person allows (by its lawful basis)'),
+      })
+      .strict(),
+    z
+      .object({
+        segment: z
+          .string()
+          .regex(/^seg_[0-9a-f]{32}$/)
+          .describe('Members of another (published) segment'),
+      })
+      .strict(),
+  ]),
+);
+const segment = z.object({
+  description: z.string().max(1000).default(''),
+  condition: segmentCondition,
+});
+
 export type TrackingPlan = z.output<typeof trackingPlan>;
+export type SegmentDefinition = z.output<typeof segment>;
+export type EmailTemplate = z.output<typeof emailTemplate>;
 export type Purposes = z.output<typeof purposes>['purposes'];
 
 export const artifactTypes = {
   note: { prefix: 'not', label: 'Note', description: 'Free-form note, used to exercise the artifact system.', content: note },
   journey: { prefix: 'jrn', label: 'Journey', description: 'A customer journey graph: trigger, steps and branches.', content: journey },
+  email_template: {
+    prefix: 'eml',
+    label: 'E-mail template',
+    description: 'An e-mail as MJML with Liquid placeholders, with subject, preheader and purpose. Preview it with templates.preview.',
+    content: emailTemplate,
+  },
+  segment: {
+    prefix: 'seg',
+    label: 'Segment',
+    description:
+      'A group of people defined by traits, events in a time window, consent and other segments. Preview it with segments.preview.',
+    content: segment,
+  },
   tracking_plan: {
     prefix: 'tpl',
     label: 'Tracking plan',
@@ -217,3 +359,14 @@ export const DEFAULT_PURPOSES: Purposes = [
 export type ArtifactType = keyof typeof artifactTypes;
 export const ARTIFACT_TYPES = Object.keys(artifactTypes) as [ArtifactType, ...ArtifactType[]];
 export const artifactTypeEnum = z.enum(ARTIFACT_TYPES);
+
+/**
+ * Checks beyond the schema that need heavy libraries (e.g. compiling MJML). Packages register
+ * them; artifact commands run them on every save so agents get the errors right away.
+ */
+export type ContentValidator = (content: unknown) => string[];
+export const contentValidators = new Map<ArtifactType, ContentValidator>();
+/** Checks that only apply to publishing (a draft may be unfinished), e.g. referenced templates exist. */
+export type PublishValidator = (content: unknown, tx: import('@agentic-marketing/db').Tx) => Promise<string[]>;
+export const publishValidators = new Map<ArtifactType, PublishValidator>();
+export type JourneyDefinition = z.output<typeof journey>;

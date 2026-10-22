@@ -5,7 +5,7 @@ import { initTelemetry, logger, shutdownTelemetry } from '@agentic-marketing/tel
 import { serve } from '@hono/node-server';
 import { createServer } from './app';
 import { loadConfig } from './config';
-import { startWorkers } from './workers';
+import { startScheduler, startWorkers } from './workers';
 
 // One image, several roles (ADR-0002): `api` (UI, REST, MCP), `ingest` (event collection),
 // `worker` (event consumers) and `scheduler` (arrives with the journey runtime).
@@ -14,7 +14,7 @@ initTelemetry('agentic-marketing');
 
 const srv = createServer(config);
 const { app, db } = srv;
-await migrate(db.admin, { appRolePassword: config.appDbPassword, log: (m) => logger.info(m) });
+await migrate(db.admin, { appRolePassword: config.appDbPassword, appRole: config.appDbRole, log: (m) => logger.info(m) });
 await migrateAuth({ baseUrl: config.publicUrl, secret: config.authSecret, db });
 await migrateClickHouse(config.clickhouse.url, config.clickhouse.database, (m) => logger.info(m));
 
@@ -25,8 +25,10 @@ if (config.roles.has('api') || config.roles.has('ingest')) {
   );
 }
 const stopWorkers = new AbortController();
-const workers = config.roles.has('worker') ? startWorkers(srv, stopWorkers.signal) : [];
-if (config.roles.has('scheduler')) logger.info('scheduler role has nothing to run yet (Phase 2)');
+const workers = [
+  ...(config.roles.has('worker') ? startWorkers(srv, stopWorkers.signal) : []),
+  ...(config.roles.has('scheduler') ? startScheduler(srv, stopWorkers.signal) : []),
+];
 
 const shutdown = async () => {
   logger.info('shutting down');

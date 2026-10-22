@@ -16,7 +16,7 @@ const config = loadConfig();
 const { db, auth, keyProvider } = createServer(config);
 
 try {
-  await migrate(db.admin, { appRolePassword: config.appDbPassword, log: console.log });
+  await migrate(db.admin, { appRolePassword: config.appDbPassword, appRole: config.appDbRole, log: console.log });
   await migrateAuth({ baseUrl: config.publicUrl, secret: config.authSecret, db });
   await migrateClickHouse(config.clickhouse.url, config.clickhouse.database, console.log);
 
