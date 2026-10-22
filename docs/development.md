@@ -67,6 +67,10 @@ People must allow the `ai_processing` purpose for AI steps to use their data. Te
 
 See [integrations.md](integrations.md) for API tokens, webhooks, connectors and n8n. Outbound calls only reach public addresses; allow LAN targets such as a homelab n8n with `EGRESS_ALLOWED_HOSTS=n8n.lan,192.168.1.0/24`.
 
+### Agent skills
+
+`.claude/skills/agentic-marketing-implement` (rolling the stack out on a website, with Cloudflare specifics) and `.claude/skills/agentic-marketing-mcp` (operating a workspace over MCP) load automatically in Claude Code sessions in this repo. To use them from a website's repo, copy both folders into that repo's `.claude/skills/`. The worked example is [pilots/martechsignal.md](pilots/martechsignal.md).
+
 ### Members
 
 Owners and admins invite people with `members.invite` (UI, REST or the typed client; agents cannot). The response holds a one-time link, `<PUBLIC_URL>/invite#<token>`, valid for 7 days. Send it to the person; they sign in or create an account with the invited e-mail address and join with the invited role. Only owners can make or change owners, and the last owner can be neither demoted nor removed.

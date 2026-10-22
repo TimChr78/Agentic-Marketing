@@ -699,6 +699,9 @@ importers:
 
   packages/sdk-js:
     devDependencies:
+      esbuild:
+        specifier: 0.28.2
+        version: 0.28.2
       happy-dom:
         specifier: 20.14.5
         version: 20.14.5

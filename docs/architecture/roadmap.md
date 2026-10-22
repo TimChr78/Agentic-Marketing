@@ -146,3 +146,14 @@ Known limits, to address later:
 - No OAuth2 connectors yet (token store and refresh worker come with Salesforce); first-party connectors beyond the references are not built.
 - E-mail delivery events (sent, bounced, clicked) are not offered to webhook subscriptions yet; only customer events and journey steps are.
 - Rate limits are per worker process; the egress guard does not cover the e-mail provider adapters, which call fixed provider hosts.
+
+## Pilot: MartechSignal.com (2026-10-22)
+
+Before Phase 6, a light pilot on the owner's site: [assessment and plan](../pilots/martechsignal.md). Built for it:
+- signup forms with double opt-in, honeypot, rate limit and optional Turnstile;
+- subscriber import with consent history;
+- broadcasts for the weekly newsletter;
+- `PUBLIC_LINKS_URL` and `CLIENT_IP_HEADER` for a first-party proxy behind Cloudflare;
+- a browser build of the SDK.
+
+Agent skills for rolling the stack out and for operating it over MCP are in `.claude/skills/` (`agentic-marketing-implement`, `agentic-marketing-mcp`). The pilot's findings decide whether Phase 6 comes next.
