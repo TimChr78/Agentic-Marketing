@@ -346,11 +346,34 @@ const conversionMap = z.object({
             conversionAction: z.string().regex(/^\d{1,20}$/, 'The numeric conversion action id'),
           })
           .optional(),
+        microsoft: z
+          .object({
+            connection: ConnectionRef,
+            conversionName: z.string().min(1).max(100).describe('The offline conversion goal name in Microsoft Advertising'),
+          })
+          .optional(),
       }),
     )
     .min(1)
     .max(50),
 });
+
+// Audience sync (Phase 9): a segment kept in sync with ad platform audiences.
+const audienceSync = z
+  .object({
+    segment: z.string().regex(/^seg_[0-9a-f]{32}$/, 'A segment id (seg_…)'),
+    meta: z.object({ connection: ConnectionRef, audienceId: z.string().regex(/^\d{5,25}$/, 'The custom audience id') }).optional(),
+    google: z
+      .object({ connection: ConnectionRef, userListId: z.string().regex(/^\d{1,20}$/, 'The Customer Match user list id') })
+      .optional(),
+    identifiers: z
+      .array(z.enum(['email', 'phone']))
+      .min(1)
+      .default(['email', 'phone'])
+      .describe('Which identifiers may leave (hashed)'),
+    removals: z.boolean().default(true).describe('Remove people who leave the segment or withdraw ad_targeting'),
+  })
+  .refine((a) => !!a.meta || !!a.google, 'Sync to meta and/or google');
 
 // Segment DSL (data-platform.md §6): a JSON condition tree that agents read and write and the
 // UI edits. The same definition is evaluated in batch and per person as events arrive.
@@ -628,6 +651,7 @@ const broadcast = z.object({
 
 export type FormDefinition = z.output<typeof form>;
 export type ConversionMap = z.output<typeof conversionMap>;
+export type AudienceSync = z.output<typeof audienceSync>;
 export type SmsTemplate = z.output<typeof smsTemplate>;
 export type DeliveryPolicy = z.output<typeof deliveryPolicy>;
 export const DEFAULT_DELIVERY_POLICY: DeliveryPolicy = deliveryPolicy.parse({});
@@ -712,6 +736,13 @@ export const artifactTypes = {
       'Which events are conversions on which ad platform (Meta Conversions API, Google Data Manager), with value and currency. Sent only for people who allowed ad_measurement. One per workspace.',
     content: conversionMap,
     singleton: true,
+  },
+  audience_sync: {
+    prefix: 'aud',
+    label: 'Audience sync',
+    description:
+      'A segment kept in sync with a Meta custom audience and/or a Google Customer Match list: hashed e-mail and phone of members who allowed ad_targeting, added and removed as the segment changes. Check it with ads.audiences.',
+    content: audienceSync,
   },
   delivery_policy: {
     prefix: 'dlp',

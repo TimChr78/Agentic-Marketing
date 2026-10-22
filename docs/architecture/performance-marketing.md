@@ -1,6 +1,6 @@
 # Performance marketing: Google, Meta and Microsoft ads
 
-Status: design for wave 2, Phase 9 ([roadmap-wave-2.md](roadmap-wave-2.md)). The groundwork is built in Phase 8: ad purposes, click-id capture, the consent banner with Google Consent Mode v2, and OAuth 2.0 connections. Phase 9 part 1 adds conversions to Meta (Conversions API) and Google (Data Manager API) from a `conversion_map`; audiences, spend and Microsoft follow.
+Status: design for wave 2, Phase 9 ([roadmap-wave-2.md](roadmap-wave-2.md)). The groundwork is built in Phase 8: ad purposes, click-id capture, the consent banner with Google Consent Mode v2, and OAuth 2.0 connections. Phase 9 builds conversions to Meta, Google and Microsoft from a `conversion_map`, audience sync to Meta and Google, and spend import with ROAS (see the roadmap for what is left).
 
 The platform already knows who converted, why, and whether they consented. Performance marketing uses that **first-party, consented data** in three ways:
 - **Conversion feedback:** tell ad platforms which clicks became signups, leads and orders (server-side), so their bidding optimises for real outcomes.

@@ -9,14 +9,28 @@ import type { KeyProvider } from '@agentic-marketing/secrets';
 import { and, desc, eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
 import { CLICK_ID_TYPES, type ClickIds, purposeHolds } from './clickIds';
-import { type Conversion, googleAdsConnector, metaAdsConnector, type Person, type SendResult, sendToGoogle, sendToMeta } from './platforms';
+import {
+  type Conversion,
+  googleAdsConnector,
+  metaAdsConnector,
+  microsoftAdsConnector,
+  type Person,
+  type SendResult,
+  sendToGoogle,
+  sendToMeta,
+  sendToMicrosoft,
+} from './platforms';
 
 // Conversion feedback (performance-marketing.md, flow 1): mapped events of people who allowed
 // ad_measurement are queued per platform in the deliveries outbox and sent by the delivery worker,
 // with retries and the connection's rate limit. Identifiers are read and hashed only at send time.
 
-type Platform = 'meta' | 'google';
-const CONNECTOR: Record<Platform, string> = { meta: metaAdsConnector.id, google: googleAdsConnector.id };
+type Platform = 'meta' | 'google' | 'microsoft';
+const CONNECTOR: Record<Platform, string> = {
+  meta: metaAdsConnector.id,
+  google: googleAdsConnector.id,
+  microsoft: microsoftAdsConnector.id,
+};
 
 publishValidators.set('conversion_map', async (content, tx: Tx) => {
   const map = content as ConversionMap;
@@ -29,7 +43,7 @@ publishValidators.set('conversion_map', async (content, tx: Tx) => {
         .where(inArray(schema.connections.id, [...new Set(refs.map((r) => r.id))]))
     : [];
   map.rules.forEach((r, i) => {
-    if (!r.meta && !r.google) problems.push(`rule ${i + 1} ("${r.event}") sends nowhere: add meta or google`);
+    if (!r.meta && !r.google && !r.microsoft) problems.push(`rule ${i + 1} ("${r.event}") sends nowhere: add meta, google or microsoft`);
     if (r.value && !r.currency && !r.currencyProperty) problems.push(`rule ${i + 1} ("${r.event}") has a value but no currency`);
   });
   for (const ref of refs) {
@@ -80,7 +94,7 @@ export function conversionHook(deps: { db: Db }) {
             profileId,
             adTargeting: signal?.ad_targeting,
           };
-          for (const platform of ['meta', 'google'] as const) {
+          for (const platform of ['meta', 'google', 'microsoft'] as const) {
             const dest = r[platform];
             if (!dest) continue;
             await tx
@@ -157,6 +171,23 @@ function send(
       egress,
       { test },
     );
+  if (row.connector === microsoftAdsConnector.id) {
+    if (test)
+      return Promise.resolve<SendResult>({
+        ok: false,
+        error: 'Microsoft has no test mode: point apiBase at the sandbox and use a sandbox account',
+        permanent: true,
+      });
+    return sendToMicrosoft(
+      c,
+      p,
+      dest as { conversionName: string },
+      microsoftAdsConnector.settings.parse(row.settings),
+      microsoftAdsConnector.secrets.parse(secrets),
+      row.oauthStatus === 'connected' ? accessTokenOf(secrets) : undefined,
+      egress,
+    );
+  }
   return Promise.resolve<SendResult>({
     ok: false,
     error: `${connectorOf(row.connector).label} does not take conversions`,

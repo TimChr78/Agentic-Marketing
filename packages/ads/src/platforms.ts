@@ -20,6 +20,11 @@ export const metaAdsConnector = defineConnector({
       .regex(/^v\d+\.\d$/)
       .default('v24.0'),
     testEventCode: z.string().max(50).optional().describe('From Events Manager → Test events; ads.test uses it'),
+    adAccountId: z
+      .string()
+      .regex(/^(act_)?\d{5,25}$/)
+      .optional()
+      .describe('The ad account (act_…), for spend import'),
     apiBase: z.url().default('https://graph.facebook.com'),
   }),
   secrets: z.object({ accessToken: z.string().min(20).describe('A system-user access token with ads_management') }),
@@ -40,21 +45,93 @@ export const googleAdsConnector = defineConnector({
       .optional()
       .describe('The manager account, when access goes through one'),
     apiBase: z.url().default('https://datamanager.googleapis.com'),
+    reportingBase: z.url().default('https://googleads.googleapis.com').describe('Google Ads API, for spend reports (v25)'),
     authorizeUrl: z.url().default('https://accounts.google.com/o/oauth2/v2/auth'),
     tokenUrl: z.url().default('https://oauth2.googleapis.com/token'),
   }),
-  secrets: z.object({ clientId: z.string().min(1).max(500), clientSecret: z.string().min(1).max(500) }),
+  secrets: z.object({
+    clientId: z.string().min(1).max(500),
+    clientSecret: z.string().min(1).max(500),
+    developerToken: z.string().min(10).max(100).optional().describe('Google Ads API developer token, for spend import'),
+  }),
   oauth: (s) => ({
     authorizeUrl: s.authorizeUrl,
     tokenUrl: s.tokenUrl,
-    scopes: ['https://www.googleapis.com/auth/datamanager'],
+    scopes: ['https://www.googleapis.com/auth/datamanager', 'https://www.googleapis.com/auth/adwords'],
     params: { access_type: 'offline', prompt: 'consent' },
   }),
   rateLimit: 600,
 });
 
+export const microsoftAdsConnector = defineConnector({
+  id: 'microsoft_ads',
+  label: 'Microsoft Advertising (offline conversions)',
+  description:
+    'Sends offline conversions with msclkid and hashed e-mail and phone to Microsoft Advertising (Campaign Management API v13, ApplyOfflineConversions). Connect with OAuth (your Microsoft Entra app) and add your developer token.',
+  auth: 'oauth2',
+  settings: z.object({
+    customerId: z.string().regex(/^\d{1,20}$/, 'The manager customer id'),
+    accountId: z.string().regex(/^\d{1,20}$/, 'The ad account id'),
+    apiBase: z
+      .url()
+      .default('https://campaign.api.bingads.microsoft.com/Api/Advertiser/CampaignManagement/v13/CampaignManagementService.svc')
+      .describe('Use https://campaign.api.sandbox.bingads.microsoft.com/… for the sandbox'),
+    authorizeUrl: z.url().default('https://login.microsoftonline.com/common/oauth2/v2.0/authorize'),
+    tokenUrl: z.url().default('https://login.microsoftonline.com/common/oauth2/v2.0/token'),
+  }),
+  secrets: z.object({
+    clientId: z.string().min(1).max(500),
+    clientSecret: z.string().min(1).max(500),
+    developerToken: z.string().min(5).max(100),
+  }),
+  oauth: (s) => ({
+    authorizeUrl: s.authorizeUrl,
+    tokenUrl: s.tokenUrl,
+    scopes: ['https://ads.microsoft.com/msads.manage', 'offline_access'],
+  }),
+  rateLimit: 300,
+});
+
 registerConnector(metaAdsConnector);
 registerConnector(googleAdsConnector);
+registerConnector(microsoftAdsConnector);
+
+const xml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+/**
+ * Microsoft: one OfflineConversion through SOAP (the contract in Microsoft's SDK, bingads 13.0.30,
+ * CampaignManagementService.svc). Elements follow the schema's sequence order.
+ */
+export async function sendToMicrosoft(
+  c: Conversion,
+  p: Person,
+  dest: { conversionName: string },
+  settings: z.output<typeof microsoftAdsConnector.settings>,
+  secrets: { developerToken: string },
+  accessToken: string | undefined,
+  egress: DeliveryDeps['egress'],
+): Promise<SendResult> {
+  if (!accessToken) return { ok: false, error: 'not connected: authorize the Microsoft Advertising connection', permanent: true };
+  if (!p.clickIds.msclkid && !p.email && !p.phone)
+    return { ok: false, error: 'nothing to match on: no msclkid, e-mail or phone for this person', permanent: true };
+  const el = (name: string, v: string | number | undefined) => (v === undefined || v === '' ? '' : `<${name}>${xml(String(v))}</${name}>`);
+  const ns = 'https://bingads.microsoft.com/CampaignManagement/v13';
+  const body = `<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Header xmlns="${ns}">${el('AuthenticationToken', accessToken)}${el('CustomerAccountId', settings.accountId)}${el('CustomerId', settings.customerId)}${el('DeveloperToken', secrets.developerToken)}</s:Header><s:Body><ApplyOfflineConversionsRequest xmlns="${ns}"><OfflineConversions><OfflineConversion>${el('ConversionCurrencyCode', c.currency)}${el('ConversionName', dest.conversionName)}${el('ConversionTime', new Date(c.at).toISOString())}${el('ConversionValue', c.value)}${el('HashedEmailAddress', p.email ? googleEmail(p.email) : undefined)}${el('HashedPhoneNumber', p.phone ? googlePhone(p.phone) : undefined)}${el('MicrosoftClickId', p.clickIds.msclkid)}</OfflineConversion></OfflineConversions></ApplyOfflineConversionsRequest></s:Body></s:Envelope>`;
+  const res = await safeRequest(
+    settings.apiBase,
+    { method: 'POST', headers: { 'content-type': 'text/xml; charset=utf-8', soapaction: 'ApplyOfflineConversions' }, body },
+    egress,
+  );
+  const messages = [...res.body.matchAll(/<(?:\w+:)?Message>([^<]*)<\/(?:\w+:)?Message>/g)].map((m) => m[1]);
+  const faulty = /<(?:\w+:)?Fault>|<(?:\w+:)?BatchError>/.test(res.body);
+  if (res.status >= 200 && res.status < 300 && !faulty) return { ok: true, statusCode: res.status, response: { applied: 1 } };
+  return {
+    ok: false,
+    statusCode: res.status,
+    error: `HTTP ${res.status}: ${messages.join('; ') || res.body.slice(0, 300)}`,
+    permanent: res.status !== 429 && res.status < 500,
+  };
+}
 
 /** A conversion as queued, plus what is known about the person at send time. */
 export interface Conversion {

@@ -55,7 +55,7 @@ Read [references/tools.md](references/tools.md) for the full list with effects a
 | E-mail | `templates.preview`, `templates.sendTest`, `messages.list`, `messages.stats`; `messages.sendEmail` (needs `messages:send`) |
 | SMS | `smsTemplates.preview` (segments, cost); `messages.sendSms` (needs `messages:send`) |
 | Deliverability | `deliverability.health`, `emailProviders.checkDomain` |
-| Ads | `ads.conversions` (what was sent to Meta and Google, and errors), `ads.test` (test mode); conversion rules are the `conversion_map` artifact (draft it, a person publishes) |
+| Ads | `ads.performance` (cost, conversions, CPA, ROAS per campaign), `ads.audiences`, `ads.conversions`, `ads.importSpend`, `ads.syncAudience`, `ads.test`; rules are the `conversion_map` and `audience_sync` artifacts (draft them, a person publishes) |
 | Newsletter | `broadcasts.preview`, `broadcasts.status`, `broadcasts.cancel` |
 | Journeys | `journeys.simulate`, `journeys.stats`, `journeys.enroll` (needs `messages:send`) |
 | Web | `experiences.results` |
@@ -82,6 +82,7 @@ Worked examples with full payloads are in [references/recipes.md](references/rec
   - Use `{{ unsubscribe_url | raw }}` in marketing footers and `{{ confirm_url | raw }}` in double opt-in confirmations.
   - Template purposes: `marketing_email` for newsletters, `onboarding` for transactional or confirmation mail.
 - **SMS templates:** plain text with Liquid; purposes `marketing_sms` (needs consent) or `service_sms`. Check `smsTemplates.preview` for segments and cost before publishing.
+- **Ads reporting:** campaigns are matched by `utm_campaign` = the platform's campaign id or name; tell the site owner to tag ad URLs that way. Report ROAS from `ads.performance`, and say when conversions are unattributed. Never propose changes as done: budgets and bids are for people.
 - **Conversion map:** rules `{event, value?, currency?, meta?: {connection, eventName}, google?: {connection, conversionAction}}`. Use the confirmed event (e.g. `Subscription Confirmed` → Meta `Lead`), not the form submission. Only people who allowed `ad_measurement` are sent. Agents never change budgets or bids.
 - **Delivery policy:** frequency caps, quiet hours and the auto-pause live in the workspace's `delivery_policy` artifact. A `queued` message with a `quiet_hours:` or `paused:` reason is held, not lost; a `frequency_cap:` reason means it was not sent.
 - **Segment conditions:** `{"trait":"plan","op":"eq","value":"pro"}`, `{"event":"Product Viewed","where":{"category":"tents"},"count":{"gte":2},"within":"P7D"}`, `{"consent":"marketing_email"}`, `{"segment":"seg_…"}`. Combine them with `{"all":[…]}`, `{"any":[…]}` and `{"not":…}`.

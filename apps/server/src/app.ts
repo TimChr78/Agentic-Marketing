@@ -50,6 +50,7 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
     hot,
     egress: config.egress,
     publicUrl: config.publicUrl,
+    db,
   });
 
   const app = new Hono();
