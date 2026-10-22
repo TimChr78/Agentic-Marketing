@@ -33,7 +33,11 @@ export function sanitize(html: string, doc: Document = document): DocumentFragme
       }
       for (const a of Array.from(el.attributes)) {
         const name = a.name.toLowerCase();
-        const value = a.value.replace(/[\s\u0000-\u001f]/g, '').toLowerCase();
+        // Browsers ignore whitespace and control characters inside a scheme ("java\tscript:").
+        const value = [...a.value]
+          .filter((ch) => ch.charCodeAt(0) > 0x20)
+          .join('')
+          .toLowerCase();
         const handler = name.startsWith('on');
         const badStyle = name === 'style' && /expression|url\(\s*['"]?javascript:/i.test(a.value);
         const badUrl = URL_ATTRS.has(name) && /^(javascript|vbscript|data):(?!image\/(png|gif|jpe?g|webp);)/.test(value);

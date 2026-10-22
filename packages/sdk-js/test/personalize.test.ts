@@ -1,12 +1,12 @@
-import { Window } from 'happy-dom';
+import { Window as HappyWindow } from 'happy-dom';
 import { describe, expect, it } from 'vitest';
 import { type Decision, personalize, sanitize } from '../src/personalize';
 
 function page(html: string) {
-  const win = new Window({ url: 'https://shop.example.com/' });
+  const win = new HappyWindow({ url: 'https://shop.example.com/' });
   win.document.body.innerHTML = html;
   win.document.documentElement.classList.add('am-loading');
-  return { win: win as unknown as Window & typeof globalThis, doc: win.document as unknown as Document };
+  return { win: win as unknown as Window, doc: win.document as unknown as Document };
 }
 const decision = (over: Partial<Decision>): Decision => ({
   placement: 'home_hero',
