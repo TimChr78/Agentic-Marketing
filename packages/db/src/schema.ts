@@ -201,7 +201,8 @@ export const profileKeys = pgTable(
   (t) => [primaryKey({ columns: [t.workspaceId, t.profileId] })],
 );
 
-export type IdentifierType = 'anonymous_id' | 'user_id' | 'email' | 'phone';
+export type IdentifierType = 'anonymous_id' | 'user_id' | 'email' | 'phone' | ClickIdType;
+export type ClickIdType = 'gclid' | 'gbraid' | 'wbraid' | 'fbc' | 'fbp' | 'msclkid';
 export const identifiers = pgTable(
   'identifiers',
   {
@@ -519,6 +520,11 @@ export const connections = pgTable(
     secrets: bytea('secrets'),
     secretsKeyId: text('secrets_key_id'),
     tokenHash: text('token_hash'),
+    oauthStatus: text('oauth_status').$type<'pending' | 'connected' | 'error'>(),
+    oauthError: text('oauth_error'),
+    /** The authorization in progress: hash of the state, PKCE verifier, redirect URI. */
+    oauthPending: jsonb('oauth_pending').$type<{ stateHash: string; verifier: string; redirectUri: string; at: string }>(),
+    tokenExpiresAt: ts('token_expires_at'),
     enabled: boolean('enabled').notNull().default(true),
     createdAt: ts('created_at').notNull().defaultNow(),
     updatedAt: ts('updated_at').notNull().defaultNow(),

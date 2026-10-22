@@ -21,6 +21,8 @@ export interface InboundContext<S, K> {
 export interface ActionContext<S, K> {
   settings: S;
   secrets: K;
+  /** For OAuth 2.0 connectors: a current access token (the refresh worker keeps it fresh). */
+  accessToken?: string;
   request: (
     url: string,
     init: { method?: string; headers?: Record<string, string>; body?: string; timeoutMs?: number },
@@ -52,6 +54,12 @@ export interface Connector<S = any, K = any> {
     map(payload: unknown, ctx: InboundContext<S, K>): Promise<InboundItem[]> | InboundItem[];
   };
   actions?: Record<string, ConnectorAction<S, K>>;
+  /**
+   * For `auth: 'oauth2'`: where to send the person to authorize, and where to get tokens. The
+   * connector's secrets must include `clientId` and `clientSecret` (the app registered with the
+   * provider; its redirect URI is <public URL>/oauth/callback).
+   */
+  oauth?: (settings: S) => { authorizeUrl: string; tokenUrl: string; scopes: string[]; params?: Record<string, string> };
   /** Calls per minute per connection that actions stay under. */
   rateLimit?: number;
 }

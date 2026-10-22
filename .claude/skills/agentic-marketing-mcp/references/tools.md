@@ -84,6 +84,7 @@ Generated from the command registry (`apps/server/src/registry.ts`). **Effect**:
 | `connections.update` | write | workspace:admin | people only | Change a connection |
 | `connections.delete` | destructive | workspace:admin | people only | Delete a connection |
 | `connections.runAction` | write | messages:send | people and agents | Run a connector action |
+| `connections.authorize` | write | workspace:admin | people only | Connect an OAuth 2.0 connection |
 | `webhooks.list` | read | artifacts:read | people and agents | List webhook endpoints |
 | `webhooks.create` | write | workspace:admin | people only | Add a webhook endpoint |
 | `webhooks.update` | write | workspace:admin | people only | Change a webhook endpoint |

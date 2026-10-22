@@ -4,6 +4,7 @@ export * from './connectors';
 export * from './deliveries';
 export * from './egress';
 export * from './inbound';
+export * from './oauth';
 export * from './sdk';
 export * from './signing';
 export * from './webhooks';

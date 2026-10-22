@@ -34,6 +34,12 @@ const paths: Record<string, InboundEvent['type'] | 'batch'> = {
   a: 'alias',
 };
 
+// Crawlers, link previewers, headless browsers and HTTP tools. Their "visits" are not people, so
+// browser sources drop them (answering success, so they learn nothing).
+export const BOT_UA =
+  /bot\b|bot\/|crawl|spider|slurp|headless|lighthouse|pagespeed|facebookexternalhit|bingpreview|embedly|python-requests|python-urllib|curl\/|wget\/|go-http-client|okhttp|java\/|axios\/|node-fetch|phantomjs|puppeteer|playwright/i;
+export const isBot = (ua: string | undefined) => !ua || BOT_UA.test(ua);
+
 export interface CachedSource extends SourceInfo {
   enabled: boolean;
   allowedOrigins: string[];
@@ -167,6 +173,25 @@ export function ingestApi(deps: IngestDeps) {
 
   const app = new Hono();
 
+  // The consent banner's texts: the workspace's purposes for the web, by write key.
+  app.get('/v1/consent/purposes', async (c) => {
+    const origin = c.req.header('origin');
+    const key = c.req.query('writeKey') ?? writeKeyOf(c, {});
+    const source = key ? await loadSource(key) : null;
+    if (!source?.enabled) return c.json({ error: 'invalid_write_key' }, 401);
+    if (!originAllowed(source, origin)) return c.json({ error: 'origin_not_allowed' }, 403);
+    const { purposes } = await loadPolicy(source.workspaceId);
+    return c.json(
+      {
+        purposes: purposes
+          .filter((p) => p.channels.includes('web'))
+          .map((p) => ({ key: p.key, name: p.name, description: p.description, basis: p.basis })),
+      },
+      200,
+      { ...(origin ? { 'access-control-allow-origin': origin, vary: 'origin' } : {}), 'cache-control': 'public, max-age=300' },
+    );
+  });
+
   // Browsers preflight cross-origin JSON posts. The origin is checked on the real request, once
   // the write key says which origins are allowed.
   app.options('/v1/:kind{[a-z]+}', (c) => {
@@ -210,8 +235,14 @@ export function ingestApi(deps: IngestDeps) {
 
     const items = kind === 'batch' ? (Array.isArray(body.batch) ? body.batch : null) : [{ ...body, type: kind }];
     if (!items?.length) return fail(400, 'invalid_batch', 'A batch needs a non-empty "batch" array.');
-    if (!allow(source.id, items.length)) return fail(429, 'rate_limited', 'Too many events for this source; retry with backoff.');
+    const rate = deps.ratePerSource ?? 1000;
+    const ok = deps.hot
+      ? await deps.hot.take(`src:${source.id}`, items.length, rate, rate * 5).catch(() => allow(source.id, items.length))
+      : allow(source.id, items.length);
+    if (!ok) return fail(429, 'rate_limited', 'Too many events for this source; retry with backoff.');
 
+    if (source.kind === 'browser' && isBot(c.req.header('user-agent')))
+      return c.json({ success: true, accepted: 0, duplicates: 0, dropped: items.length }, 200, cors);
     const policy = await loadPolicy(source.workspaceId);
     const ip =
       source.kind === 'browser'

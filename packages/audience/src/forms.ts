@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { clickIdsFrom } from '@agentic-marketing/ads';
 import { artifactTypes, DEFAULT_PURPOSES, type FormDefinition, publishedSingleton, publishValidators } from '@agentic-marketing/artifacts';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import type { LinkSigner } from '@agentic-marketing/email';
@@ -191,6 +192,18 @@ export function formsApi(deps: FormsDeps) {
     for (const t of form.def.traits) if (str(t)) traits[t] = str(t).slice(0, 200);
     const anon = /^[A-Za-z0-9:_-]{8,100}$/.test(str('anonymousId')) ? str('anonymousId') : `form:${randomUUID()}`;
     const submittedAt = new Date().toISOString();
+    // Ad click ids from hidden fields (sites without the SDK), and the visitor's choices from the
+    // site's consent banner (am_consent="analytics,ad_measurement"); the click ids are kept only
+    // when ad_measurement is among them.
+    const clickIds = clickIdsFrom(raw);
+    const allowedPurposes = str('am_consent')
+      .split(',')
+      .map((p) => p.trim())
+      .filter((p) => /^[a-z][a-z0-9_]{0,63}$/.test(p));
+    const context = {
+      ...(Object.keys(clickIds).length ? { clickIds } : {}),
+      ...(allowedPurposes.length ? { consent: { categoryPreferences: Object.fromEntries(allowedPurposes.map((p) => [p, true])) } } : {}),
+    };
     const items = [
       { type: 'identify', anonymousId: anon, traits, timestamp: submittedAt },
       {
@@ -198,6 +211,7 @@ export function formsApi(deps: FormsDeps) {
         event: SUBMITTED,
         anonymousId: anon,
         timestamp: submittedAt,
+        context,
         properties: {
           form_id: c.req.param('id'),
           form_version: form.version,

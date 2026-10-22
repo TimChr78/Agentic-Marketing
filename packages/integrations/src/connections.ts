@@ -7,6 +7,7 @@ import { eq } from 'drizzle-orm';
 import { z } from 'zod';
 import { connectors } from './connectors';
 import { type EgressPolicy, safeRequest } from './egress';
+import { accessTokenOf } from './oauth';
 import type { Connector } from './sdk';
 
 // Connections: a connector with this workspace's settings and sealed secrets. Inbound
@@ -42,6 +43,7 @@ export async function runAction(row: Row, secrets: Record<string, unknown>, acti
   return a.run(parsed.data, {
     settings: c.settings.parse(row.settings),
     secrets: c.secrets.parse(secrets),
+    accessToken: c.auth === 'oauth2' && row.oauthStatus === 'connected' ? accessTokenOf(secrets) : undefined,
     request: (url, init) => safeRequest(url, init, egress),
   });
 }
@@ -96,6 +98,10 @@ const Connection = z.object({
   settings: z.record(z.string(), z.unknown()),
   hasSecrets: z.boolean(),
   inbound: z.boolean(),
+  oauth: z
+    .object({ status: z.enum(['pending', 'connected', 'error']), error: z.string().nullable(), expiresAt: z.string().nullable() })
+    .nullable()
+    .describe('OAuth 2.0 connections: whether they are connected (connections.authorize)'),
   enabled: z.boolean(),
   createdAt: z.string(),
 });
@@ -106,6 +112,7 @@ const connectionOut = (r: Row) => ({
   settings: r.settings,
   hasSecrets: !!r.secrets,
   inbound: !!r.tokenHash,
+  oauth: r.oauthStatus ? { status: r.oauthStatus, error: r.oauthError, expiresAt: r.tokenExpiresAt?.toISOString() ?? null } : null,
   enabled: r.enabled,
   createdAt: r.createdAt.toISOString(),
 });
@@ -196,6 +203,9 @@ export const updateConnection = defineCommand({
     const [cur] = await ctx.tx.select().from(schema.connections).where(eq(schema.connections.id, id));
     if (!cur) throw new AppError('not_found', `No connection ${id}.`);
     const c = checked(connectorOf(cur.connector), settings ?? cur.settings, secrets);
+    // New app credentials keep the tokens they already got (connect again to replace them).
+    const tokens = c.secrets && cur.secrets ? (await connectionSecrets(ctx.tx, cur, ctx.services.keyProvider)).__oauth : undefined;
+    if (c.secrets && tokens) c.secrets.__oauth = tokens;
     const [row] = await ctx.tx
       .update(schema.connections)
       .set({

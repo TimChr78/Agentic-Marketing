@@ -12,7 +12,7 @@ import {
   templateCommands,
 } from '@agentic-marketing/email';
 import { sourceCommands } from '@agentic-marketing/ingest';
-import { connectionCommands, webhookCommands } from '@agentic-marketing/integrations';
+import { connectionCommands, oauthCommands, webhookCommands } from '@agentic-marketing/integrations';
 import { journeyCommands } from '@agentic-marketing/journeys';
 import { experienceCommands } from '@agentic-marketing/personalize';
 import { profileCommands } from '@agentic-marketing/profiles';
@@ -39,6 +39,7 @@ export const commands = [
   ...aiCommands,
   ...audienceCommands,
   ...connectionCommands,
+  ...oauthCommands,
   ...webhookCommands,
   ...secretCommands,
 ] as const;

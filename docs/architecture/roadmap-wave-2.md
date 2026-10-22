@@ -102,6 +102,25 @@ The prerequisite for paid media and for on-site tracking (MartechSignal phase B)
 - **Shared rate limits in Valkey**, across workers (Phase 5 limit), before many workers call ad APIs.
 - **MartechSignal phase B (optional):** the banner, the SDK from `dist/am.min.js`, and interest segments from reading behaviour.
 
+**Built:**
+- **Consent banner** in the SDK (`createConsentBanner`):
+  - CSP-safe (DOM and CSSOM only);
+  - texts from `GET /v1/consent/purposes`;
+  - "Accept all" and "Reject all" equally prominent, with per-purpose choices;
+  - a `data-am-consent-open` re-open link;
+  - Google Consent Mode v2 defaults and updates (`analytics_storage`, `ad_storage`, `ad_user_data`, `ad_personalization`).
+- **Ad purposes** `ad_measurement` and `ad_targeting` in the defaults.
+- **Click ids** (`gclid`, `gbraid`, `wbraid`, `fbc` from `fbclid`, `fbp`, `msclkid`):
+  - captured by the SDK (stored in the browser only with `ad_measurement`), from landing URLs and from form hidden fields (with `am_consent`);
+  - stored as identifiers only when `ad_measurement` holds, so they follow merges and erasure.
+- **OAuth 2.0 for connectors:**
+  - authorization code with PKCE (`connections.authorize`, `/oauth/callback`);
+  - tokens sealed with the connection's secrets;
+  - a refresh worker in the scheduler, which marks a connection to reconnect when the refresh token is refused;
+  - a generic `oauth_http` connector.
+- **Shared rate limits** in Valkey (an atomic token bucket) for ingest per source and connector actions per connection.
+- **Bot filtering:** crawlers, previewers, headless browsers and HTTP tools are dropped on browser sources.
+
 ## Phase 9: performance marketing
 
 Design: [performance-marketing.md](performance-marketing.md). Built in this order:
@@ -156,7 +175,7 @@ Design: [performance-marketing.md](performance-marketing.md). Built in this orde
 | JetStream keeps personal traits for its retention window (Phase 1) | 10 |
 | No ClickHouse row policies (Phase 1) | 10 |
 | Tracking-plan warnings not stored for a report (Phase 1) | 6 |
-| No bot filtering on ingest (Phase 1) | 8 (with the consent banner and the SDK) |
+| No bot filtering on ingest (Phase 1) | 8 (done) |
 | Frequency caps and quiet hours not enforced (Phase 2) | 7 (done) |
 | No bounce mailbox for pure SMTP (Phase 2) | 7 (optional; HTTP adapters preferred) |
 | Segment evaluation holds ids in memory (Phase 2) | 10 |
@@ -169,13 +188,13 @@ Design: [performance-marketing.md](performance-marketing.md). Built in this orde
 | AI budgets can be overshot; prompt tests in the command transaction (Phase 4) | 10 |
 | No OAuth for LLM providers (Phase 4) | 11 |
 | Copilot streams steps, not tokens; history in the browser (Phase 4) | 11 |
-| No OAuth2 connectors / token store (Phase 5) | 8 |
+| No OAuth2 connectors / token store (Phase 5) | 8 (done) |
 | E-mail delivery events not in webhook subscriptions (Phase 5) | 6 (done) |
-| Rate limits per process; egress guard not on e-mail adapters (Phase 5) | 8 and 10 |
+| Rate limits per process; egress guard not on e-mail adapters (Phase 5) | 8 (rate limits shared: done) and 10 |
 | Unconfirmed double opt-in profiles are never cleaned up (pilot) | 6 (done) |
 | No A/B subject or send-time option for broadcasts (pilot) | 6 |
 | No screens for forms and broadcasts (pilot) | 6 (done) |
-| No consent banner (pilot) | 8 |
+| No consent banner (pilot) | 8 (done) |
 | E-mail clicks are not profile events (pilot) | 6 (done) |
 | SMTP gives no delivery events (pilot, ADR-0011) | 6 (switch to SES or Postmark) and 7 (Cloudflare adapter done) |
 | Activepieces pieces not embeddable safely (spike 5) | Later (pieces runner) |

@@ -740,6 +740,22 @@ export const DEFAULT_PURPOSES: Purposes = [
     requiresDoubleOptIn: false,
   },
   {
+    key: 'ad_measurement',
+    name: 'Ad measurement',
+    description: 'Telling ad platforms which ad clicks led to a signup or purchase.',
+    basis: 'consent',
+    channels: ['web'],
+    requiresDoubleOptIn: false,
+  },
+  {
+    key: 'ad_targeting',
+    name: 'Ad personalization',
+    description: 'Showing you, or leaving you out of, ads on other sites based on what you did here.',
+    basis: 'consent',
+    channels: ['web'],
+    requiresDoubleOptIn: false,
+  },
+  {
     key: 'ai_processing',
     name: 'AI personalization',
     description: 'Using AI to choose content and timing for you.',
