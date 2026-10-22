@@ -109,7 +109,12 @@ describe('segments', () => {
       () => api.call('profiles.events', { profileId: ids.ada }),
       (r) => r.events.some((e) => e.name === 'Segment Exited'),
     );
-    expect((await api.call('segments.members', { artifactId })).members.map((m) => m.profileId)).toEqual([ids.bo]);
+    // The change event is published just before the membership commits, so wait for the members too.
+    const after = await eventually(
+      () => api.call('segments.members', { artifactId }),
+      (r) => r.members.length === 1 && r.members[0].profileId === ids.bo,
+    );
+    expect(after.members.map((m) => m.profileId)).toEqual([ids.bo]);
 
     // Segments can build on each other; loops are refused.
     expect(
