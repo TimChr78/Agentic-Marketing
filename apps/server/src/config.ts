@@ -40,6 +40,13 @@ const Env = z.object({
     .regex(/^[a-z_][a-z0-9_]*$/)
     .default('events')
     .describe('Stream and subject prefix on the NATS server'),
+  NATS_RETENTION_HOURS: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(24 * 30)
+    .default(24)
+    .describe('How long JetStream keeps events (they hold personal traits until processed): long enough to ride out a worker outage'),
   VALKEY_URL: z.string().default('redis://localhost:6379').describe('Valkey (or Redis) for session state and profile snapshots'),
   VALKEY_PREFIX: z
     .string()
@@ -101,7 +108,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
         .map((k) => k.trim())
         .filter(Boolean) ?? [],
     clickhouse: { url: e.CLICKHOUSE_URL, database: e.CLICKHOUSE_DATABASE },
-    nats: { url: e.NATS_URL, namespace: e.NATS_NAMESPACE },
+    nats: { url: e.NATS_URL, namespace: e.NATS_NAMESPACE, retentionHours: e.NATS_RETENTION_HOURS },
     valkey: { url: e.VALKEY_URL, prefix: e.VALKEY_PREFIX },
     trackClicks: e.EMAIL_TRACK_CLICKS === 'true',
     egress: {

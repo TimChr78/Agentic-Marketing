@@ -1,4 +1,4 @@
-import { artifactTypes, type ExperienceDefinition } from '@agentic-marketing/artifacts';
+import { artifactTypes, type ExperienceDefinition, publishListeners } from '@agentic-marketing/artifacts';
 import { type Db, schema } from '@agentic-marketing/db';
 import { consentOf } from '@agentic-marketing/events';
 import type { HotState } from '@agentic-marketing/hotstate';
@@ -45,10 +45,21 @@ export interface Decision {
 
 export function decideApi(deps: { db: Db; hot: HotState }) {
   const { loadSource, loadPolicy } = sourceLookups(deps.db);
-  const cache = new Map<string, { at: number; list: Promise<PublishedExperience[]> }>();
-  const experiences = (ws: string) => {
+  const cache = new Map<string, { at: number; stamp: string; list: Promise<PublishedExperience[]> }>();
+  // Publishing an experience bumps the workspace's stamp in Valkey; it is checked at most once a
+  // second per workspace, so a change shows within about a second (CACHE_MS stays as a backstop).
+  const stamps = new Map<string, { at: number; stamp: Promise<string> }>();
+  const stampOf = (ws: string) => {
+    const s = stamps.get(ws);
+    if (s && Date.now() - s.at < 1000) return s.stamp;
+    const stamp = deps.hot.stamp(`experiences:${ws}`).catch(() => '?');
+    stamps.set(ws, { at: Date.now(), stamp });
+    return stamp;
+  };
+  const experiences = async (ws: string) => {
+    const stamp = await stampOf(ws);
     const hit = cache.get(ws);
-    if (hit && Date.now() - hit.at < CACHE_MS) return hit.list;
+    if (hit && hit.stamp === stamp && Date.now() - hit.at < CACHE_MS) return hit.list;
     const list = deps.db.withWorkspace(ws, async (tx) => {
       const rows = await tx
         .select({ id: schema.artifacts.id, version: schema.artifacts.publishedVersion, content: schema.artifactVersions.content })
@@ -68,7 +79,7 @@ export function decideApi(deps: { db: Db; hot: HotState }) {
         .map((r) => ({ id: r.id, version: r.version ?? 0, def: artifactTypes.experience.content.parse(r.content) }))
         .sort((a, b) => b.def.priority - a.def.priority);
     });
-    cache.set(ws, { at: Date.now(), list });
+    cache.set(ws, { at: Date.now(), stamp, list });
     list.catch(() => cache.delete(ws));
     return list;
   };
@@ -156,3 +167,7 @@ export function decideApi(deps: { db: Db; hot: HotState }) {
 
   return app;
 }
+
+publishListeners.push(async (ctx, a) => {
+  if (a.type === 'experience') await ctx.services.hot.bump(`experiences:${a.workspaceId}`);
+});

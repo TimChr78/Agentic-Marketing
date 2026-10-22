@@ -362,4 +362,98 @@ export const simulateJourney = defineCommand({
   },
 });
 
-export const journeyCommands = [journeyStats, enrollProfiles, simulateJourney] as const;
+export const migrateJourney = defineCommand({
+  name: 'journeys.migrate',
+  title: 'Move participants to the published version',
+  description:
+    'Moves people who are still in an older version of a journey onto the published one. A participant whose node exists in the new version (same id and kind) keeps its place and any wait; `mapping` moves others (old node id → new node id) and they restart that step; the rest stay on their version, or exit with unmatched="exit". Try it with dryRun first.',
+  input: z.object({
+    artifactId: JourneyId,
+    mapping: z.record(z.string(), z.string()).default({}).describe('Old node id → node id in the published version'),
+    unmatched: z.enum(['stay', 'exit']).default('stay'),
+    dryRun: z.boolean().default(true),
+  }),
+  output: z.object({
+    toVersion: z.number().int(),
+    moved: z.number().int(),
+    restarted: z.number().int().describe('Moved to a node of another kind: they run that step again'),
+    stayed: z.number().int(),
+    exited: z.number().int(),
+    byNode: z.array(z.object({ fromVersion: z.number(), from: z.string(), to: z.string().nullable(), count: z.number() })),
+  }),
+  permission: 'artifacts:publish',
+  effect: 'publish',
+  target: (i) => i.artifactId,
+  handler: async (input, ctx) => {
+    const [a] = await ctx.tx.select().from(schema.artifacts).where(eq(schema.artifacts.id, input.artifactId));
+    if (a?.type !== 'journey' || !a.publishedVersion)
+      throw new AppError('not_found', `Journey ${input.artifactId} has no published version.`);
+    const target = compile((await loadDefinition(ctx.tx, a.id, a.publishedVersion)).def);
+    for (const [from, to] of Object.entries(input.mapping))
+      if (!target.nodes.has(to))
+        throw new AppError('invalid_input', `mapping ${from} → ${to}: version ${a.publishedVersion} has no node "${to}".`);
+    const active = await ctx.tx
+      .select()
+      .from(schema.journeyParticipants)
+      .where(
+        and(
+          eq(schema.journeyParticipants.journeyId, a.id),
+          inArray(schema.journeyParticipants.status, ['ready', 'waiting']),
+          sql`${schema.journeyParticipants.version} <> ${a.publishedVersion}`,
+        ),
+      );
+    const olds = new Map<number, ReturnType<typeof compile>>();
+    const out = { toVersion: a.publishedVersion, moved: 0, restarted: 0, stayed: 0, exited: 0 };
+    const byNode = new Map<string, { fromVersion: number; from: string; to: string | null; count: number }>();
+    for (const p of active) {
+      if (!olds.has(p.version)) olds.set(p.version, compile((await loadDefinition(ctx.tx, a.id, p.version)).def));
+      const oldNode = olds.get(p.version)!.nodes.get(p.node);
+      const to = input.mapping[p.node] ?? (target.nodes.has(p.node) ? p.node : null);
+      const key = `${p.version}:${p.node}`;
+      const b = byNode.get(key) ?? { fromVersion: p.version, from: p.node, to, count: 0 };
+      b.count++;
+      byNode.set(key, b);
+      if (!to) {
+        if (input.unmatched === 'exit') {
+          out.exited++;
+          if (!input.dryRun)
+            await ctx.tx
+              .update(schema.journeyParticipants)
+              .set({
+                status: 'exited',
+                dueAt: null,
+                waitingEvent: null,
+                error: `left in a migration to v${a.publishedVersion}`,
+                updatedAt: new Date(),
+              })
+              .where(eq(schema.journeyParticipants.id, p.id));
+        } else out.stayed++;
+        continue;
+      }
+      // Same kind at the same place: the wait (due time, awaited event) carries over as it is.
+      const same = to === p.node && oldNode?.kind === target.nodes.get(to)?.kind;
+      if (same) out.moved++;
+      else out.restarted++;
+      if (!input.dryRun)
+        await ctx.tx
+          .update(schema.journeyParticipants)
+          .set(
+            same
+              ? { version: a.publishedVersion, updatedAt: new Date() }
+              : {
+                  version: a.publishedVersion,
+                  node: to,
+                  status: 'ready',
+                  dueAt: new Date(),
+                  waitingEvent: null,
+                  matched: false,
+                  updatedAt: new Date(),
+                },
+          )
+          .where(eq(schema.journeyParticipants.id, p.id));
+    }
+    return { ...out, moved: out.moved + out.restarted, byNode: [...byNode.values()] };
+  },
+});
+
+export const journeyCommands = [journeyStats, enrollProfiles, simulateJourney, migrateJourney] as const;

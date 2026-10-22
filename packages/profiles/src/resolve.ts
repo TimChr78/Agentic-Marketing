@@ -217,6 +217,12 @@ async function merge(tx: Tx, workspaceId: string, from: string, into: string, cr
       );
   }
 
+  // Journeys follow the person: a participant waiting for an event of the merged-away profile is
+  // now found by the survivor's events (including the one that caused this merge).
+  await tx.execute(
+    sql`UPDATE journey_participants SET profile_id = ${into}, updated_at = now() WHERE workspace_id = ${workspaceId} AND profile_id = ${from}`,
+  );
+
   const srcPii = (await crypto.open<Record<string, unknown>>(from, src.pii)) ?? {};
   const dstPii = (await crypto.open<Record<string, unknown>>(into, dst.pii)) ?? {};
   const pii = { ...srcPii, ...dstPii };

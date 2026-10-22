@@ -258,7 +258,7 @@ function PromptEditor({ id, onBack, onError }: { id: string; onBack: () => void;
   const [a, setA] = useState<Out<'artifacts.get'> | null>(null);
   const [json, setJson] = useState('');
   const [status, setStatus] = useState('');
-  const [tests, setTests] = useState<Out<'prompts.test'> | null>(null);
+  const [tests, setTests] = useState<Out<'prompts.testRun'> | null>(null);
   const [running, setRunning] = useState(false);
   const load = useCallback(async () => {
     try {
@@ -333,7 +333,14 @@ function PromptEditor({ id, onBack, onError }: { id: string; onBack: () => void;
             onClick={async () => {
               setRunning(true);
               try {
-                setTests(await api.call('prompts.test', { artifactId: id, version: a.version.number }));
+                // Test runs are jobs: queue, then poll until every case has an answer.
+                const { runId } = await api.call('prompts.test', { artifactId: id, version: a.version.number });
+                for (let i = 0; i < 120; i++) {
+                  const r = await api.call('prompts.testRun', { runId });
+                  setTests(r);
+                  if (r.status === 'done') break;
+                  await new Promise((res) => setTimeout(res, 1000));
+                }
                 onError('');
               } catch (e) {
                 onError(errText(e));

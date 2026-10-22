@@ -79,7 +79,7 @@ After publishing, the site posts to `<links URL>/f/frm_…`. Signups show as `Fo
      "options":[{"key":"seo","description":"Reads SEO and GEO content"},{"key":"automation","description":"Reads marketing automation content"}],
      "tests":[{"name":"SEO reader","events":[{"name":"page","properties":{"path":"/categories/seo/"}}],"expect":{"options":["seo"]}}]}}
    ```
-2. `prompts.test {"artifactId":"prm_…"}` until it passes, then request publishing.
+2. `prompts.test {"artifactId":"prm_…"}`, then `prompts.testRun {"runId":"run_…"}` until `status` is `done` and every case passes; then request publishing.
 3. In the journey, add a node `{"id":"pick","kind":"aiDecide","label":"Pick","config":{"prompt":"prm_…","options":["seo","automation"],"fallback":"automation"},"next":[{"to":"seo_mail"},{"to":"auto_mail"}]}`.
 4. Decisions, with their rationale and fallback reasons, are in `ai.calls {"journeyId":"jrn_…"}`.
 

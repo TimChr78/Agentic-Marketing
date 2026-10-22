@@ -179,6 +179,22 @@ Not built (later): Microsoft reporting and Customer Match (asynchronous bulk and
 - **Correctness:** atomic AI budget reservation (Phase 4 limit); prompt tests as jobs, not in the command transaction (Phase 4 limit); the egress guard also on e-mail provider adapters (Phase 5 limit).
 - **Segment snapshots** updated right after scheduled refreshes, not at the person's next event (Phase 3 limit); a shorter experience-definition cache via invalidation (Phase 3 limit).
 
+**Built (part a, correctness):**
+- **AI budgets hold under concurrency:**
+  - before each model call (journey steps, prompt tests, copilot turns) its estimated tokens are reserved, under a per-provider advisory lock;
+  - the month's usage counts reservations, which end with the call or expire after 5 minutes.
+- **Prompt tests are jobs:** `prompts.test` queues the cases and the AI worker runs them outside any transaction; `prompts.testRun` returns the results.
+- **The egress guard covers e-mail and SMS provider adapters** (an egress-guarded fetch).
+- **A profile merge moves journey participants to the survivor**, so a wait for an event wakes on the survivor's events.
+- **Scheduled segment refreshes write snapshots** for everyone they move at once.
+- **Publishing an experience bumps a stamp in Valkey:** the decision API checks it about once a second and reloads, instead of waiting for the 30-second cache. Commands get an after-commit hook for this.
+- **NATS retention** defaults to 24 hours (`NATS_RETENTION_HOURS`).
+- **`journeys.migrate`** moves active participants of older versions onto the published one:
+  - same node and kind keeps the place and the wait;
+  - a `mapping` restarts the mapped step;
+  - unmatched participants stay or exit;
+  - it has a dry run.
+
 ## Phase 11: enterprise and ecosystem
 
 - **SSO (OIDC, SAML) and SCIM** (the original Phase 6); **MCP scope step-up** (Phase 0 deferral).
@@ -206,25 +222,25 @@ Not built (later): Microsoft reporting and Customer Match (asynchronous bulk and
 | No members screen (Phase 0) | 6 |
 | KMS/OpenBao key providers deferred (Phase 0) | 10 |
 | MCP scope step-up deferred (Phase 0) | 11 |
-| JetStream keeps personal traits for its retention window (Phase 1) | 10 |
+| JetStream keeps personal traits for its retention window (Phase 1) | 10 (window now 24 h by default, `NATS_RETENTION_HOURS`; encrypted volume in the deployment guide) |
 | No ClickHouse row policies (Phase 1) | 10 |
 | Tracking-plan warnings not stored for a report (Phase 1) | 6 |
 | No bot filtering on ingest (Phase 1) | 8 (done) |
 | Frequency caps and quiet hours not enforced (Phase 2) | 7 (done) |
 | No bounce mailbox for pure SMTP (Phase 2) | 7 (optional; HTTP adapters preferred) |
 | Segment evaluation holds ids in memory (Phase 2) | 10 |
-| Merged profile does not wake waiting participants (Phase 2) | 10 |
-| Experience definitions cached 30 s (Phase 3) | 10 |
+| Merged profile does not wake waiting participants (Phase 2) | 10 (done) |
+| Experience definitions cached 30 s (Phase 3) | 10 (done: invalidated on publish) |
 | Fixed-horizon experiment statistics only (Phase 3) | 11 |
 | No visual experience editor; no edge decide (Phase 3) | 11 |
-| Snapshot lag after scheduled segment refresh (Phase 3) | 10 |
+| Snapshot lag after scheduled segment refresh (Phase 3) | 10 (done) |
 | No generated-text caching, decision sampling or `ai.classify` (Phase 4) | 11 |
-| AI budgets can be overshot; prompt tests in the command transaction (Phase 4) | 10 |
+| AI budgets can be overshot; prompt tests in the command transaction (Phase 4) | 10 (done) |
 | No OAuth for LLM providers (Phase 4) | 11 |
 | Copilot streams steps, not tokens; history in the browser (Phase 4) | 11 |
 | No OAuth2 connectors / token store (Phase 5) | 8 (done) |
 | E-mail delivery events not in webhook subscriptions (Phase 5) | 6 (done) |
-| Rate limits per process; egress guard not on e-mail adapters (Phase 5) | 8 (rate limits shared: done) and 10 |
+| Rate limits per process; egress guard not on e-mail adapters (Phase 5) | 8 (rate limits shared: done) and 10 (HTTP e-mail and SMS adapters: done; SMTP connects directly) |
 | Unconfirmed double opt-in profiles are never cleaned up (pilot) | 6 (done) |
 | No A/B subject or send-time option for broadcasts (pilot) | 6 |
 | No screens for forms and broadcasts (pilot) | 6 (done) |

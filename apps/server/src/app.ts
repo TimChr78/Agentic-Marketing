@@ -7,7 +7,7 @@ import { emailRoutes, linkSigner } from '@agentic-marketing/email';
 import { clickHouseStore, lazyNatsBus } from '@agentic-marketing/events';
 import { valkeyHotState } from '@agentic-marketing/hotstate';
 import { ingestApi } from '@agentic-marketing/ingest';
-import { inboundApi, oauthRoutes } from '@agentic-marketing/integrations';
+import { egressFetch, inboundApi, oauthRoutes } from '@agentic-marketing/integrations';
 import { decideApi } from '@agentic-marketing/personalize';
 import { localKeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
@@ -38,7 +38,8 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
   const email = {
     publicUrl: config.linksUrl,
     links: linkSigner(config.authSecret),
-    adapterDeps: { fetch: globalThis.fetch },
+    // Provider adapters reach the outside world through the egress guard too.
+    adapterDeps: { fetch: egressFetch(config.egress) },
     trackClicks: config.trackClicks,
   };
   const executor = createExecutor(db, {

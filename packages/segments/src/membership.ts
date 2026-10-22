@@ -160,7 +160,7 @@ export async function refreshSegment(tx: Tx, workspaceId: string, seg: Published
     .insert(schema.segmentRuns)
     .values(run)
     .onConflictDoUpdate({ target: [schema.segmentRuns.workspaceId, schema.segmentRuns.segmentId], set: run });
-  return { members: members.size, entered: entered.length, exited: exited.length, changes };
+  return { members: members.size, entered: entered.length, exited: exited.length, changes, changedProfiles: [...entered, ...exited] };
 }
 
 /**

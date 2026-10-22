@@ -20,6 +20,8 @@ export interface CommandContext {
   principal: Principal;
   tx: Tx;
   services: Services;
+  /** Runs `fn` once the command's transaction has committed (e.g. to invalidate caches); errors are logged, not thrown. */
+  afterCommit?: (fn: () => Promise<void>) => void;
 }
 
 export interface CommandDef<I extends z.ZodType = z.ZodType, O extends z.ZodType = z.ZodType, N extends string = string> {
@@ -140,6 +142,7 @@ export function createExecutor(db: Db, services: Services) {
           ),
         );
 
+      const committed: (() => Promise<void>)[] = [];
       try {
         const result = await db.withWorkspace(
           principal.workspaceId,
@@ -157,7 +160,9 @@ export function createExecutor(db: Db, services: Services) {
                 return hit.response as z.output<C['output']>;
               }
             }
-            const out = cmd.output.parse(await cmd.handler(parsed.data, { principal, tx, services })) as z.output<C['output']>;
+            const out = cmd.output.parse(
+              await cmd.handler(parsed.data, { principal, tx, services, afterCommit: (fn) => committed.push(fn) }),
+            ) as z.output<C['output']>;
             if (opts.idempotencyKey)
               await tx.insert(schema.idempotencyKeys).values({
                 workspaceId: principal.workspaceId,
@@ -176,6 +181,7 @@ export function createExecutor(db: Db, services: Services) {
         // its lock with the latest entries visible, which a snapshot taken earlier would not show.
         if (cmd.effect === 'read' && cmd.auditReads)
           await db.withWorkspace(principal.workspaceId, (tx) => appendAudit(tx, principal, opts.surface, cmd, inputHash, target));
+        for (const fn of committed) await fn().catch((err) => span.recordException(err as Error));
         span.end();
         return result;
       } catch (err) {

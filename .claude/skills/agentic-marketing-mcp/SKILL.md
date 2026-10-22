@@ -32,7 +32,7 @@ Ask a person to do those in the UI.
    - segments: `segments.preview {condition}` or `{artifactId}` gives a count and sample;
    - journeys: `journeys.simulate {artifactId, profileId?, events?, ai?, actions?}`;
    - broadcasts: `broadcasts.preview {artifactId}` gives the audience, would-send count and skip reasons;
-   - prompts: `prompts.test {artifactId}`.
+   - prompts: `prompts.test {artifactId}` queues the test cases; read the results with `prompts.testRun {runId}` until `status` is `done`.
 4. **Request publishing.** `artifacts.requestPublish {artifactId, note}`. Under the usual policy ("agent changes need a person") this creates an approval request: tell the person what to approve and why (the note shows in Approvals). Publishing also runs publish checks, e.g. that referenced templates and segments are published.
 5. **Report.** Give the ids you created and the results of your checks (counts, simulation outcome). Do not claim something was sent or published until `artifacts.get` shows `publishedVersion` or `broadcasts.status` says so.
 
@@ -57,9 +57,9 @@ Read [references/tools.md](references/tools.md) for the full list with effects a
 | Deliverability | `deliverability.health`, `emailProviders.checkDomain` |
 | Ads | `ads.performance` (cost, conversions, CPA, ROAS per campaign), `ads.audiences`, `ads.conversions`, `ads.importSpend`, `ads.syncAudience`, `ads.test`; rules are the `conversion_map` and `audience_sync` artifacts (draft them, a person publishes) |
 | Newsletter | `broadcasts.preview`, `broadcasts.status`, `broadcasts.cancel` |
-| Journeys | `journeys.simulate`, `journeys.stats`, `journeys.enroll` (needs `messages:send`) |
+| Journeys | `journeys.simulate`, `journeys.stats`, `journeys.enroll` (needs `messages:send`), `journeys.migrate` (move people to the published version; dry run first) |
 | Web | `experiences.results` |
-| AI | `prompts.test`, `ai.calls`, `ai.usage`, `aiProviders.list` |
+| AI | `prompts.test` + `prompts.testRun`, `ai.calls`, `ai.usage`, `aiProviders.list` |
 | Integrations | `connectors.list`, `connections.list` (shows OAuth status), `connections.runAction`, `webhooks.list`, `deliveries.list`; `connections.authorize` is for people only |
 | Workspace | `workspace.get`, `purposes.list`, `audit.list` |
 

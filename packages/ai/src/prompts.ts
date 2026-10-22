@@ -3,7 +3,7 @@ import { defineCommand } from '@agentic-marketing/commands';
 import { AppError, newId } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
 import { generateText, Output } from 'ai';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import type { PersonContext } from './context';
 import { AiUnavailable, modelFor, type ReadyModel } from './providers';
@@ -125,16 +125,46 @@ const TestResult = z.object({
   problems: z.array(z.string()),
 });
 
+type TestCase = PromptDefinition['tests'][number];
+
+/** Runs one test case and checks its expectations. */
+export async function runTestCase(m: ReadyModel, def: PromptDefinition, t: TestCase) {
+  const person = { id: 'prf_sample', traits: t.traits, recentEvents: t.events.map((e) => ({ ...e, at: '' })) };
+  const problems: string[] = [];
+  let answer: unknown = null;
+  let usage: Usage = { inputTokens: 0, outputTokens: 0 };
+  try {
+    const r = await runPrompt(m, def, person as unknown as PersonContext);
+    usage = r.usage;
+    if (r.kind === 'decide') {
+      answer = { option: r.option, rationale: r.rationale };
+      if (t.expect.options && !t.expect.options.includes(r.option))
+        problems.push(`chose "${r.option}", expected one of ${t.expect.options.join(', ')}`);
+    } else {
+      answer = { slots: r.slots, rejected: r.rejected };
+      for (const [slot, why] of Object.entries(r.rejected)) problems.push(`slot ${slot} ${why}`);
+      const all = Object.values(r.slots).join('\n').toLowerCase();
+      for (const c of t.expect.contains ?? []) if (!all.includes(c.toLowerCase())) problems.push(`does not contain "${c}"`);
+      for (const c of t.expect.notContains ?? []) if (all.includes(c.toLowerCase())) problems.push(`contains "${c}"`);
+    }
+  } catch (err) {
+    problems.push(`model call failed: ${(err as Error).message}`);
+  }
+  return { person, answer, problems, usage };
+}
+
+// Test runs are jobs: model calls take seconds each and must not hold a database transaction open.
+// prompts.test queues one ai_calls row per case (kind "test"); the AI worker runs them.
 export const testPrompt = defineCommand({
   name: 'prompts.test',
   title: 'Run a prompt’s test cases',
   description:
-    'Runs every test case of a prompt version (default: the latest) against the journeys AI provider and checks the expectations. Uses tokens; each call is logged.',
+    'Queues every test case of a prompt version (default: the latest) to run against the journeys AI provider; the AI worker runs them within seconds. Read the results with prompts.testRun. Uses tokens; each call is logged.',
   input: z.object({
     artifactId: z.string().regex(/^prm_[0-9a-f]{32}$/),
     version: z.number().int().min(1).optional().describe('Default: the latest version, draft included'),
   }),
-  output: z.object({ version: z.number(), passed: z.number(), failed: z.number(), results: z.array(TestResult) }),
+  output: z.object({ runId: z.string(), version: z.number(), queued: z.number() }),
   permission: 'artifacts:write',
   effect: 'write',
   target: (i) => i.artifactId,
@@ -144,57 +174,66 @@ export const testPrompt = defineCommand({
     const p = await promptVersion(ctx.tx, a.id, input.version ?? a.latestVersion);
     if (!p) throw new AppError('not_found', `Prompt ${a.id} has no version ${input.version}.`);
     if (!p.def.tests.length) throw new AppError('invalid_input', 'This prompt has no test cases yet. Add some to its `tests`.');
-    let m: ReadyModel;
     try {
-      m = await modelFor(ctx.tx, ctx.services.keyProvider, 'journeys', p.def.model);
+      await modelFor(ctx.tx, ctx.services.keyProvider, 'journeys', p.def.model);
     } catch (err) {
       if (err instanceof AiUnavailable) throw new AppError('conflict', `Cannot run the tests: ${err.message}.`);
       throw err;
     }
-    const results: z.input<typeof TestResult>[] = [];
-    for (const t of p.def.tests) {
-      const person = { id: 'prf_sample', traits: t.traits, recentEvents: t.events.map((e) => ({ ...e, at: '' })) };
-      const started = Date.now();
-      const problems: string[] = [];
-      let answer: unknown = null;
-      let usage: Usage = { inputTokens: 0, outputTokens: 0 };
-      try {
-        const r = await runPrompt(m, p.def, person);
-        usage = r.usage;
-        if (r.kind === 'decide') {
-          answer = { option: r.option, rationale: r.rationale };
-          if (t.expect.options && !t.expect.options.includes(r.option))
-            problems.push(`chose "${r.option}", expected one of ${t.expect.options.join(', ')}`);
-        } else {
-          answer = { slots: r.slots, rejected: r.rejected };
-          for (const [slot, why] of Object.entries(r.rejected)) problems.push(`slot ${slot} ${why}`);
-          const all = Object.values(r.slots).join('\n').toLowerCase();
-          for (const c of t.expect.contains ?? []) if (!all.includes(c.toLowerCase())) problems.push(`does not contain "${c}"`);
-          for (const c of t.expect.notContains ?? []) if (all.includes(c.toLowerCase())) problems.push(`contains "${c}"`);
-        }
-      } catch (err) {
-        problems.push(`model call failed: ${(err as Error).message}`);
-      }
-      await ctx.tx.insert(schema.aiCalls).values({
+    const runId = newId('run');
+    await ctx.tx.insert(schema.aiCalls).values(
+      p.def.tests.map((t, index) => ({
         workspaceId: ctx.principal.workspaceId,
         id: newId('aic'),
-        kind: 'test',
-        status: problems.length ? 'failed' : 'done',
-        providerId: m.providerId,
-        model: m.modelId,
+        kind: 'test' as const,
+        status: 'pending' as const,
         promptId: a.id,
         promptVersion: p.version,
-        input: { test: t.name, person },
-        output: answer,
-        error: problems.join('; ') || null,
-        ...usage,
-        latencyMs: Date.now() - started,
+        input: { runId, index, test: t.name },
         principalId: ctx.principal.userId,
-        finishedAt: new Date(),
-      });
-      results.push({ name: t.name, passed: !problems.length, answer, problems });
-    }
+      })),
+    );
+    return { runId, version: p.version, queued: p.def.tests.length };
+  },
+});
+
+export const testRunResults = defineCommand({
+  name: 'prompts.testRun',
+  title: 'Results of a prompt test run',
+  description: 'The results of prompts.test: "running" until every case has an answer, then which passed and why the others failed.',
+  input: z.object({ runId: z.string().regex(/^run_[0-9a-f]{32}$/) }),
+  output: z.object({
+    status: z.enum(['running', 'done']),
+    version: z.number().nullable(),
+    passed: z.number(),
+    failed: z.number(),
+    results: z.array(TestResult),
+  }),
+  permission: 'artifacts:read',
+  effect: 'read',
+  handler: async (input, ctx) => {
+    const rows = await ctx.tx
+      .select()
+      .from(schema.aiCalls)
+      .where(and(eq(schema.aiCalls.kind, 'test'), sql`${schema.aiCalls.input} ->> 'runId' = ${input.runId}`));
+    if (!rows.length) throw new AppError('not_found', `No test run ${input.runId}.`);
+    rows.sort((x, y) => Number((x.input as { index?: number }).index) - Number((y.input as { index?: number }).index));
+    const running = rows.some((r) => r.status === 'pending' || r.status === 'running');
+    const results = rows
+      .filter((r) => r.status === 'done' || r.status === 'failed')
+      .map((r) => ({
+        name: String((r.input as { test?: string }).test ?? ''),
+        passed: r.status === 'done',
+        answer: r.output ?? null,
+        problems: r.error ? r.error.split('; ') : [],
+      }));
     const passed = results.filter((r) => r.passed).length;
-    return { version: p.version, passed, failed: results.length - passed, results };
+    return {
+      status: running ? ('running' as const) : ('done' as const),
+      version: rows[0].promptVersion,
+      passed,
+      failed: results.length - passed,
+      results,
+    };
   },
 });

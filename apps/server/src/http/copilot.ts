@@ -1,4 +1,4 @@
-import { AiUnavailable, modelFor } from '@agentic-marketing/ai';
+import { AiUnavailable, modelFor, releaseTokens, reserveTokens } from '@agentic-marketing/ai';
 import { type Auth, principalFromSession } from '@agentic-marketing/auth';
 import { agentPrincipal, type Executor, type Permission, ROLE_PERMISSIONS } from '@agentic-marketing/commands';
 import { AppError, newId } from '@agentic-marketing/core';
@@ -48,6 +48,7 @@ export type CopilotEvent =
 
 /** MCP tool names may contain dots; model APIs allow letters, digits, _ and - only. */
 const toolName = (name: string) => name.replaceAll('.', '__');
+const COPILOT_TURN_TOKENS = 20_000;
 
 export function copilotApi(deps: { auth: Auth; db: Db; executor: Executor; kp: KeyProvider }) {
   const app = new Hono();
@@ -72,6 +73,12 @@ export function copilotApi(deps: { auth: Auth; db: Db; executor: Executor; kp: K
       user.role,
       COPILOT_SCOPES.filter((p) => ROLE_PERMISSIONS[user.role].includes(p)),
     );
+
+    // A turn may take several model steps; hold enough of the budget for one before starting.
+    const reservation = await reserveTokens(deps.db, ws, model.providerId, COPILOT_TURN_TOKENS).catch((err) => {
+      if (err instanceof AiUnavailable) throw new AppError('conflict', `The copilot cannot answer: ${err.message}.`);
+      throw err;
+    });
 
     const encoder = new TextEncoder();
     const body = new ReadableStream<Uint8Array>({
@@ -155,6 +162,7 @@ export function copilotApi(deps: { auth: Auth; db: Db; executor: Executor; kp: K
               }),
             )
             .catch((err) => logger.error({ err }, 'copilot call not logged'));
+          await releaseTokens(deps.db, ws, reservation).catch(() => {});
           controller.close();
         }
       },
