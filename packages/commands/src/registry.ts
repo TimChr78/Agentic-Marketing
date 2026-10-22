@@ -141,32 +141,41 @@ export function createExecutor(db: Db, services: Services) {
         );
 
       try {
-        const result = await db.withWorkspace(principal.workspaceId, async (tx) => {
-          if (opts.idempotencyKey) {
-            const [hit] = await tx
-              .select()
-              .from(schema.idempotencyKeys)
-              .where(
-                and(eq(schema.idempotencyKeys.workspaceId, principal.workspaceId), eq(schema.idempotencyKeys.key, opts.idempotencyKey)),
-              );
-            if (hit) {
-              if (hit.command !== cmd.name || hit.inputHash !== inputHash)
-                throw new AppError('conflict', 'This idempotency key was already used for a different request. Use a new key.');
-              return hit.response as z.output<C['output']>;
+        const result = await db.withWorkspace(
+          principal.workspaceId,
+          async (tx) => {
+            if (opts.idempotencyKey) {
+              const [hit] = await tx
+                .select()
+                .from(schema.idempotencyKeys)
+                .where(
+                  and(eq(schema.idempotencyKeys.workspaceId, principal.workspaceId), eq(schema.idempotencyKeys.key, opts.idempotencyKey)),
+                );
+              if (hit) {
+                if (hit.command !== cmd.name || hit.inputHash !== inputHash)
+                  throw new AppError('conflict', 'This idempotency key was already used for a different request. Use a new key.');
+                return hit.response as z.output<C['output']>;
+              }
             }
-          }
-          const out = cmd.output.parse(await cmd.handler(parsed.data, { principal, tx, services })) as z.output<C['output']>;
-          if (opts.idempotencyKey)
-            await tx.insert(schema.idempotencyKeys).values({
-              workspaceId: principal.workspaceId,
-              key: opts.idempotencyKey,
-              command: cmd.name,
-              inputHash,
-              response: redact(out, cmd.sensitiveOutput) as object,
-            });
-          if (cmd.effect !== 'read' || cmd.auditReads) await appendAudit(tx, principal, opts.surface, cmd, inputHash, target);
-          return out;
-        });
+            const out = cmd.output.parse(await cmd.handler(parsed.data, { principal, tx, services })) as z.output<C['output']>;
+            if (opts.idempotencyKey)
+              await tx.insert(schema.idempotencyKeys).values({
+                workspaceId: principal.workspaceId,
+                key: opts.idempotencyKey,
+                command: cmd.name,
+                inputHash,
+                response: redact(out, cmd.sensitiveOutput) as object,
+              });
+            if (cmd.effect !== 'read') await appendAudit(tx, principal, opts.surface, cmd, inputHash, target);
+            return out;
+          },
+          // Reads see one consistent snapshot; writes keep read-committed so their locks see the latest rows.
+          { snapshot: cmd.effect === 'read' },
+        );
+        // An audited read is recorded in its own transaction: the hash chain must be appended under
+        // its lock with the latest entries visible, which a snapshot taken earlier would not show.
+        if (cmd.effect === 'read' && cmd.auditReads)
+          await db.withWorkspace(principal.workspaceId, (tx) => appendAudit(tx, principal, opts.surface, cmd, inputHash, target));
         span.end();
         return result;
       } catch (err) {
