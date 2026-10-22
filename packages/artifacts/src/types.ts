@@ -46,6 +46,7 @@ const journeyNode = z.object({
 
 const Iso = z.string().regex(/^P(\d+W|\d+D|T\d+H|T\d+M|\d+DT\d+H)$/, 'ISO 8601 duration such as P2D, PT6H, P1W');
 const SegmentRef = z.string().regex(/^seg_[0-9a-f]{32}$/);
+const PromptRef = z.string().regex(/^prm_[0-9a-f]{32}$/, 'A prompt id (prm_…)');
 
 /** Settings per node kind (validated on save). Kinds without one cannot be published yet. */
 export const journeyNodeConfigs = {
@@ -70,6 +71,20 @@ export const journeyNodeConfigs = {
   updateProfile: z.object({
     trait: z.string().regex(/^[A-Za-z0-9_]{1,64}$/),
     value: z.union([z.string().max(500), z.number(), z.boolean(), z.null()]),
+  }),
+  aiDecide: z.object({
+    prompt: PromptRef.describe('A decide prompt (prm_…); its published version is used'),
+    options: z
+      .array(z.string().regex(/^[a-z][a-z0-9_]{0,31}$/))
+      .min(2)
+      .max(6)
+      .describe("The prompt's option keys in the order of this node's edges"),
+    fallback: z.string().describe('Option taken when the AI cannot decide (no consent, budget, timeout, error, invalid answer)'),
+    timeout: Iso.default('PT5M').describe('How long the step may wait for the model before taking the fallback'),
+  }),
+  aiGenerate: z.object({
+    prompt: PromptRef.describe("A generate prompt (prm_…); its slots fill `content.<slot>` for later e-mails, or the slot's fallback text"),
+    timeout: Iso.default('PT5M'),
   }),
   exit: z.object({}),
 } as const;
@@ -105,6 +120,13 @@ const journey = z.object({
         if ((n.kind === 'waitEvent' || n.kind === 'goal') && edges > 2)
           ctx.addIssue({ code: 'custom', message: `"${n.id}" has at most two edges: [matched, timeout]` });
         const weights = (n.config as { weights?: unknown[] }).weights;
+        const options = (n.config as { options?: unknown[]; fallback?: unknown }).options;
+        if (n.kind === 'aiDecide' && Array.isArray(options)) {
+          if (options.length !== edges)
+            ctx.addIssue({ code: 'custom', message: `AI decision "${n.id}" needs one edge per option (${options.length})` });
+          if (!options.includes((n.config as { fallback?: unknown }).fallback))
+            ctx.addIssue({ code: 'custom', message: `AI decision "${n.id}": fallback must be one of its options` });
+        }
         if (n.kind === 'split' && Array.isArray(weights) && weights.length !== edges)
           ctx.addIssue({ code: 'custom', message: `Split "${n.id}" needs one edge per weight (${weights.length})` });
       }
@@ -368,7 +390,73 @@ const experience = z
     if (e.variants.every((v) => v.weight === 0)) ctx.addIssue({ code: 'custom', message: 'At least one variant needs a weight above 0' });
   });
 
+// Prompts for AI steps (agents-and-mcp.md §5): versioned like everything else, with test cases
+// that run against the configured model before a change is approved.
+const OptionKey = z.string().regex(/^[a-z][a-z0-9_]{0,31}$/);
+const promptTest = z.object({
+  name: z.string().min(1).max(120),
+  traits: z.record(z.string(), z.unknown()).default({}).describe('Profile traits of the sample person (as the model sees them)'),
+  events: z
+    .array(z.object({ name: z.string().min(1).max(200), properties: z.record(z.string(), z.unknown()).default({}) }))
+    .max(50)
+    .default([])
+    .describe('Recent events of the sample person, newest last'),
+  expect: z
+    .object({
+      options: z.array(OptionKey).optional().describe('decide: the answer must be one of these'),
+      contains: z.array(z.string().max(200)).optional().describe('generate: every slot together must contain these (case-insensitive)'),
+      notContains: z.array(z.string().max(200)).optional(),
+    })
+    .default({}),
+});
+const prompt = z
+  .object({
+    kind: z.enum(['decide', 'generate']).describe('decide: choose one option; generate: write text for content slots'),
+    instructions: z
+      .string()
+      .min(1)
+      .max(8000)
+      .describe('What the model should do. The person (traits, recent events, trigger) is appended as delimited data.'),
+    model: z.enum(['default', 'fast']).default('default').describe("Which of the provider's models to use"),
+    temperature: z.number().min(0).max(1).default(0.2),
+    maxOutputTokens: z.number().int().min(16).max(4000).default(400),
+    options: z
+      .array(z.object({ key: OptionKey, description: z.string().min(1).max(500) }))
+      .max(6)
+      .default([])
+      .describe('decide: the choices, e.g. {"key":"discount","description":"Price-sensitive: offer 10% off"}'),
+    slots: z
+      .array(
+        z.object({
+          name: z.string().regex(/^[a-z][a-z0-9_]{0,31}$/),
+          description: z.string().min(1).max(500),
+          maxLength: z.number().int().min(1).max(2000).default(200),
+          fallback: z.string().max(2000).describe('Used when generation fails or the text does not pass the checks'),
+        }),
+      )
+      .max(10)
+      .default([])
+      .describe('generate: the content slots; templates use them as {{ content.<name> }}'),
+    forbidden: z
+      .array(z.string().min(1).max(200))
+      .max(100)
+      .default([])
+      .describe('generate: phrases the text must never contain (claims, words)'),
+    tests: z.array(promptTest).max(50).default([]),
+  })
+  .superRefine((p, ctx) => {
+    if (p.kind === 'decide' && p.options.length < 2)
+      ctx.addIssue({ code: 'custom', message: 'A decide prompt needs at least two options' });
+    if (p.kind === 'generate' && !p.slots.length) ctx.addIssue({ code: 'custom', message: 'A generate prompt needs at least one slot' });
+    const keys = new Set(p.options.map((o) => o.key));
+    if (keys.size !== p.options.length) ctx.addIssue({ code: 'custom', message: 'Option keys must be unique' });
+    for (const t of p.tests)
+      for (const o of t.expect.options ?? [])
+        if (!keys.has(o)) ctx.addIssue({ code: 'custom', message: `Test "${t.name}" expects unknown option "${o}"` });
+  });
+
 export type TrackingPlan = z.output<typeof trackingPlan>;
+export type PromptDefinition = z.output<typeof prompt>;
 export type ExperienceDefinition = z.output<typeof experience>;
 export type SegmentDefinition = z.output<typeof segment>;
 export type EmailTemplate = z.output<typeof emailTemplate>;
@@ -396,6 +484,13 @@ export const artifactTypes = {
     description:
       'Personalized content for a placement on the website, with targeting, variants (A/B/n), a holdout and a goal. Served by the decision API.',
     content: experience,
+  },
+  prompt: {
+    prefix: 'prm',
+    label: 'AI prompt',
+    description:
+      'Instructions for an AI journey step (decide between options, or write text for content slots), with test cases. Run them with prompts.test.',
+    content: prompt,
   },
   tracking_plan: {
     prefix: 'tpl',

@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit -p ."
   },
   "dependencies": {
+    "@agentic-marketing/ai": "workspace:*",
     "@agentic-marketing/artifacts": "workspace:*",
     "@agentic-marketing/auth": "workspace:*",
     "@agentic-marketing/client": "workspace:*",
@@ -30,14 +31,15 @@
     "@better-auth/oauth-provider": "1.7.7",
     "@hono/node-server": "2.1.5",
     "@hono/zod-openapi": "1.6.3",
+    "@modelcontextprotocol/client": "2.3.1",
     "@modelcontextprotocol/server": "2.3.1",
+    "ai": "7.0.132",
     "hono": "4.13.13",
     "tsx": "4.23.15",
     "zod": "4.6.7"
   },
   "devDependencies": {
     "@agentic-marketing/sdk-js": "workspace:*",
-    "@modelcontextprotocol/client": "2.3.1",
     "@types/pg": "8.23.1",
     "@types/smtp-server": "3.5.13",
     "pg": "8.23.1",

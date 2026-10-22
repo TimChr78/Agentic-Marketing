@@ -1,3 +1,4 @@
+import { aiCommands } from '@agentic-marketing/ai';
 import { artifactCommands, workspaceCommands } from '@agentic-marketing/artifacts';
 import { memberCommands } from '@agentic-marketing/auth';
 import type { AnyCommand } from '@agentic-marketing/commands';
@@ -22,6 +23,7 @@ export const commands = [
   ...segmentCommands,
   ...journeyCommands,
   ...experienceCommands,
+  ...aiCommands,
   ...secretCommands,
 ] as const;
 export type Commands = typeof commands;

@@ -8,41 +8,41 @@ import { commands } from '../registry';
 
 // MCP surface (spec 2026-07-28, SDK v2): a stateless server per request for the authenticated
 // principal. Each command the principal may run becomes a tool; humans-only commands and tools
-// outside the granted permissions are not listed.
-export function mcpEndpoint(deps: { auth: Auth; db: Db; executor: Executor; resource: string }) {
-  const build = (principal: Principal) => {
-    const server = new McpServer({ name: 'agentic-marketing', version: '0.1.0' });
-    for (const cmd of commands) {
-      if (cmd.humansOnly || !cmd.permission || !principal.permissions.has(cmd.permission)) continue;
-      server.registerTool(
-        cmd.name,
-        {
-          title: cmd.title,
-          description: cmd.description,
-          inputSchema: cmd.input,
-          outputSchema: cmd.output,
-          annotations: {
-            readOnlyHint: cmd.effect === 'read',
-            destructiveHint: cmd.effect === 'destructive',
-            idempotentHint: cmd.effect === 'read',
-            openWorldHint: false,
-          },
+// outside the granted permissions are not listed. The in-app copilot uses the same server.
+export function mcpServerFor(principal: Principal, executor: Executor) {
+  const server = new McpServer({ name: 'agentic-marketing', version: '0.1.0' });
+  for (const cmd of commands) {
+    if (cmd.humansOnly || !cmd.permission || !principal.permissions.has(cmd.permission)) continue;
+    server.registerTool(
+      cmd.name,
+      {
+        title: cmd.title,
+        description: cmd.description,
+        inputSchema: cmd.input,
+        outputSchema: cmd.output,
+        annotations: {
+          readOnlyHint: cmd.effect === 'read',
+          destructiveHint: cmd.effect === 'destructive',
+          idempotentHint: cmd.effect === 'read',
+          openWorldHint: false,
         },
-        async (input: unknown) => {
-          try {
-            const out = await deps.executor.execute(cmd, input, principal, { surface: 'mcp' });
-            return { content: [{ type: 'text' as const, text: JSON.stringify(out) }], structuredContent: out as Record<string, unknown> };
-          } catch (err) {
-            if (err instanceof AppError) return { isError: true, content: [{ type: 'text' as const, text: JSON.stringify(err.toJSON()) }] };
-            throw err;
-          }
-        },
-      );
-    }
-    return server;
-  };
+      },
+      async (input: unknown) => {
+        try {
+          const out = await executor.execute(cmd, input, principal, { surface: 'mcp' });
+          return { content: [{ type: 'text' as const, text: JSON.stringify(out) }], structuredContent: out as Record<string, unknown> };
+        } catch (err) {
+          if (err instanceof AppError) return { isError: true, content: [{ type: 'text' as const, text: JSON.stringify(err.toJSON()) }] };
+          throw err;
+        }
+      },
+    );
+  }
+  return server;
+}
 
-  const handler = createMcpHandler(({ authInfo }) => build(authInfo!.extra!.principal as Principal));
+export function mcpEndpoint(deps: { auth: Auth; db: Db; executor: Executor; resource: string }) {
+  const handler = createMcpHandler(({ authInfo }) => mcpServerFor(authInfo!.extra!.principal as Principal, deps.executor));
 
   return requireMcpAuth(
     deps.auth,

@@ -1,4 +1,4 @@
-import { bigserial, boolean, customType, integer, jsonb, pgTable, primaryKey, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import { bigint, bigserial, boolean, customType, integer, jsonb, pgTable, primaryKey, text, timestamp, uuid } from 'drizzle-orm/pg-core';
 
 const bytea = customType<{ data: Buffer }>({ dataType: () => 'bytea' });
 const ts = (name: string) => timestamp(name, { withTimezone: true });
@@ -385,6 +385,64 @@ export const journeyParticipants = pgTable(
     error: text('error'),
     enteredAt: ts('entered_at').notNull().defaultNow(),
     updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
+export type AiUse = 'journeys' | 'copilot';
+export const aiProviders = pgTable(
+  'ai_providers',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    name: text('name').notNull(),
+    kind: text('kind').$type<'openai-compatible' | 'anthropic-compatible'>().notNull(),
+    baseUrl: text('base_url').notNull(),
+    models: jsonb('models').$type<{ default: string; fast?: string }>().notNull(),
+    structuredOutputs: boolean('structured_outputs').notNull().default(true),
+    useFor: text('use_for').array().$type<AiUse[]>().notNull().default([]),
+    monthlyTokenBudget: bigint('monthly_token_budget', { mode: 'number' }),
+    region: text('region').notNull().default(''),
+    secrets: bytea('secrets'),
+    secretsKeyId: text('secrets_key_id'),
+    enabled: boolean('enabled').notNull().default(true),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
+export type AiCallKind = 'decide' | 'generate' | 'copilot' | 'test';
+export type AiCallStatus = 'pending' | 'running' | 'done' | 'fallback' | 'failed';
+export const aiCalls = pgTable(
+  'ai_calls',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    kind: text('kind').$type<AiCallKind>().notNull(),
+    status: text('status').$type<AiCallStatus>().notNull(),
+    leaseUntil: ts('lease_until'),
+    attempts: integer('attempts').notNull().default(0),
+    idempotencyKey: text('idempotency_key'),
+    providerId: text('provider_id'),
+    model: text('model'),
+    promptId: text('prompt_id'),
+    promptVersion: integer('prompt_version'),
+    journeyId: text('journey_id'),
+    participantId: bigint('participant_id', { mode: 'number' }),
+    node: text('node'),
+    seq: integer('seq'),
+    profileId: text('profile_id'),
+    input: jsonb('input').$type<Record<string, unknown>>().notNull().default({}),
+    output: jsonb('output').$type<unknown>(),
+    rationale: text('rationale'),
+    error: text('error'),
+    inputTokens: integer('input_tokens').notNull().default(0),
+    outputTokens: integer('output_tokens').notNull().default(0),
+    latencyMs: integer('latency_ms'),
+    principalId: text('principal_id'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    finishedAt: ts('finished_at'),
   },
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
 );

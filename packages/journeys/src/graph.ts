@@ -16,6 +16,8 @@ export type Node =
   | { id: string; label: string; kind: 'split'; weights: number[]; edges: string[] }
   | { id: string; label: string; kind: 'email'; template: string; next: string | null }
   | { id: string; label: string; kind: 'updateProfile'; trait: string; value: string | number | boolean | null; next: string | null }
+  | { id: string; label: string; kind: 'aiDecide'; prompt: string; options: string[]; fallback: string; ms: number; edges: string[] }
+  | { id: string; label: string; kind: 'aiGenerate'; prompt: string; ms: number; next: string | null }
   | { id: string; label: string; kind: 'exit' };
 
 export interface Graph {
@@ -82,6 +84,24 @@ export function compile(def: JourneyDefinition): Graph {
       case 'updateProfile': {
         const c = journeyNodeConfigs.updateProfile.parse(n.config);
         nodes.set(n.id, { ...base, kind: 'updateProfile', trait: c.trait, value: c.value, next: edge(0) });
+        break;
+      }
+      case 'aiDecide': {
+        const c = journeyNodeConfigs.aiDecide.parse(n.config);
+        nodes.set(n.id, {
+          ...base,
+          kind: 'aiDecide',
+          prompt: c.prompt,
+          options: c.options,
+          fallback: c.fallback,
+          ms: durationSeconds(c.timeout) * 1000,
+          edges: (n.next ?? []).map((e) => e.to),
+        });
+        break;
+      }
+      case 'aiGenerate': {
+        const c = journeyNodeConfigs.aiGenerate.parse(n.config);
+        nodes.set(n.id, { ...base, kind: 'aiGenerate', prompt: c.prompt, ms: durationSeconds(c.timeout) * 1000, next: edge(0) });
         break;
       }
       case 'exit':

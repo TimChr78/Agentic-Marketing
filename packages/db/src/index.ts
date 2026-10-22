@@ -1,6 +1,9 @@
 export * from './migrate';
 export * from './pool';
 export type {
+  AiCallKind,
+  AiCallStatus,
+  AiUse,
   ApprovalPolicy,
   ConsentSource,
   ConsentStatus,

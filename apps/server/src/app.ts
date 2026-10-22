@@ -12,6 +12,7 @@ import { logger } from '@agentic-marketing/telemetry';
 import { oauthProviderAuthServerMetadata, oauthProviderOpenIdConfigMetadata } from '@better-auth/oauth-provider';
 import { Hono } from 'hono';
 import type { Config } from './config';
+import { copilotApi } from './http/copilot';
 import { mcpEndpoint } from './http/mcp';
 import { consentPage, invitePage, loginPage } from './http/pages';
 import { restApi } from './http/rest';
@@ -97,6 +98,7 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
 
   const mcp = mcpEndpoint({ auth, db, executor, resource: `${config.publicUrl}/mcp` });
   app.all('/mcp', (c) => mcp(c.req.raw));
+  if (config.roles.has('api')) app.route('/', copilotApi({ auth, db, executor, kp: keyProvider }));
   app.route('/', restApi({ auth, db, executor }));
 
   return { app, db, auth, executor, keyProvider, bus, events, email, hot };

@@ -150,3 +150,20 @@ export async function rewrapDataKeys(admin: pg.Pool, kp: KeyProvider): Promise<{
 }
 
 export const secretCommands = [setSecret, listSecrets, deleteSecret] as const;
+
+const IV = 12;
+const TAG = 16;
+
+/** Seals a JSON value with the workspace's secrets key, as one blob (iv, tag, ciphertext) plus the key id. */
+export async function sealJson(tx: Tx, workspaceId: string, kp: KeyProvider, value: unknown) {
+  const dk = await activeDataKey(tx, workspaceId, kp);
+  const s = seal(dk.key, Buffer.from(JSON.stringify(value), 'utf8'));
+  return { blob: Buffer.concat([s.iv, s.authTag, s.ciphertext]), keyId: dk.id };
+}
+
+export async function openJson<T>(tx: Tx, workspaceId: string, kp: KeyProvider, blob: Buffer, keyId: string): Promise<T> {
+  const key = await dataKeyById(tx, workspaceId, keyId, kp);
+  return JSON.parse(
+    open(key, { iv: blob.subarray(0, IV), authTag: blob.subarray(IV, IV + TAG), ciphertext: blob.subarray(IV + TAG) }).toString('utf8'),
+  );
+}
