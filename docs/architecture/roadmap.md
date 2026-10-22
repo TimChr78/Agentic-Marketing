@@ -91,7 +91,7 @@ Known limits, to address later:
 - New or changed experiences reach the decision API within 30 s (definition cache).
 - Results use a fixed-horizon test; sequential testing and Bayesian summaries later. Visitors are counted by anonymous id (per device).
 - No visual editor for experience content yet (HTML/JSON); no edge deployment of `decide`.
-- Segment memberships changed by the scheduled refresh reach snapshots with the person's next event.
+- Segment memberships changed by the scheduled refresh reach snapshots with the person's next event (fixed in wave 2, Phase 10).
 
 ## Phase 4 status (2026-10-22)
 

@@ -142,3 +142,24 @@ export function safeRequest(
     req.end();
   });
 }
+
+/**
+ * A fetch that goes through the egress guard, for code that takes a fetch (e-mail and SMS
+ * provider adapters): a provider URL pointing at a private address is refused like a webhook's.
+ */
+export function egressFetch(policy: EgressPolicy): typeof fetch {
+  return (async (input: string | URL | Request, init?: RequestInit) => {
+    const req = input instanceof Request ? input : null;
+    const url = req ? req.url : String(input);
+    const headers = Object.fromEntries(new Headers(req ? req.headers : init?.headers).entries());
+    const method = init?.method ?? req?.method ?? 'GET';
+    const body =
+      init?.body !== undefined && init.body !== null
+        ? String(init.body)
+        : req && method !== 'GET' && method !== 'HEAD'
+          ? await req.text()
+          : undefined;
+    const res = await safeRequest(url, { method, headers, body, timeoutMs: 30_000, maxBytes: 1024 * 1024 }, policy);
+    return new Response(res.status === 204 || res.status === 304 ? null : res.body, { status: res.status, headers: res.headers });
+  }) as typeof fetch;
+}

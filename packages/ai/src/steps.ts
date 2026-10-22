@@ -5,8 +5,8 @@ import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { aiAllowed, personContext } from './context';
-import { promptVersion, runPrompt } from './prompts';
-import { AiUnavailable, modelFor, type ReadyModel } from './providers';
+import { promptVersion, runPrompt, runTestCase } from './prompts';
+import { AiUnavailable, estimateTokens, modelFor, type ReadyModel, releaseTokens, reserveTokens } from './providers';
 
 // The AI worker: answers the AI steps of journeys. A step is a pending row in ai_calls; the
 // worker claims it with a lease, builds the context and checks consent in one transaction,
@@ -113,6 +113,18 @@ async function handle(db: Db, c: CallRow, deps: AiStepDeps) {
   const prep = await db.withWorkspace(c.workspaceId, (tx) => prepare(tx, c, deps));
   if (!prep) return finish(db, c, null, { status: 'failed', error: 'no_prompt: the prompt has no published version' });
   if (prep.fallback || !prep.model || !prep.person) return finish(db, c, prep, { status: 'fallback', error: prep.fallback });
+  let reservation: string;
+  try {
+    reservation = await reserveTokens(
+      db,
+      c.workspaceId,
+      prep.model.providerId,
+      estimateTokens({ def: prep.def, person: prep.person }, prep.def.maxOutputTokens),
+    );
+  } catch (err) {
+    if (err instanceof AiUnavailable) return finish(db, c, prep, { status: 'fallback', error: `${err.reason}: ${err.message}` });
+    throw err;
+  }
   const started = Date.now();
   try {
     const r = await runPrompt(prep.model, prep.def, prep.person, { timeoutMs: 60_000 });
@@ -129,6 +141,62 @@ async function handle(db: Db, c: CallRow, deps: AiStepDeps) {
     });
   } catch (err) {
     return finish(db, c, prep, { status: 'fallback', error: `model_error: ${(err as Error).message}`, latencyMs: Date.now() - started });
+  } finally {
+    // The call's real usage is in ai_calls now (finish ran first), so the hold can go.
+    await releaseTokens(db, c.workspaceId, reservation);
+  }
+}
+
+/** One queued prompt test case (prompts.test): run outside any transaction, then recorded. */
+async function handleTest(db: Db, c: CallRow, deps: AiStepDeps) {
+  const record = (values: Partial<CallRow>) =>
+    db.withWorkspace(c.workspaceId, (tx) =>
+      tx
+        .update(schema.aiCalls)
+        .set({ leaseUntil: null, finishedAt: new Date(), ...values })
+        .where(and(eq(schema.aiCalls.workspaceId, c.workspaceId), eq(schema.aiCalls.id, c.id))),
+    );
+  const index = Number((c.input as { index?: number }).index);
+  const ready = await db.withWorkspace(c.workspaceId, async (tx) => {
+    const p = await promptVersion(tx, c.promptId ?? '', c.promptVersion ?? undefined);
+    const test = p?.def.tests[index];
+    if (!p || !test) return null;
+    try {
+      return { def: p.def, test, model: await modelFor(tx, deps.kp, 'journeys', p.def.model) };
+    } catch (err) {
+      if (err instanceof AiUnavailable) return { error: `${err.reason}: ${err.message}` };
+      throw err;
+    }
+  });
+  if (!ready) return record({ status: 'failed', error: 'the prompt version or test case is gone' });
+  if ('error' in ready) return record({ status: 'failed', error: ready.error ?? null });
+  let reservation: string;
+  try {
+    reservation = await reserveTokens(
+      db,
+      c.workspaceId,
+      ready.model.providerId,
+      estimateTokens({ def: ready.def, test: ready.test }, ready.def.maxOutputTokens),
+    );
+  } catch (err) {
+    if (err instanceof AiUnavailable) return record({ status: 'failed', error: `${err.reason}: ${err.message}` });
+    throw err;
+  }
+  const started = Date.now();
+  try {
+    const r = await runTestCase(ready.model, ready.def, ready.test);
+    await record({
+      status: r.problems.length ? 'failed' : 'done',
+      providerId: ready.model.providerId,
+      model: ready.model.modelId,
+      input: { ...c.input, person: r.person },
+      output: r.answer,
+      error: r.problems.join('; ') || null,
+      ...r.usage,
+      latencyMs: Date.now() - started,
+    });
+  } finally {
+    await releaseTokens(db, c.workspaceId, reservation);
   }
 }
 
@@ -136,7 +204,7 @@ async function handle(db: Db, c: CallRow, deps: AiStepDeps) {
 export async function answerSteps(db: Db, deps: AiStepDeps, opts: { batch?: number } = {}): Promise<number> {
   const { rows } = await db.admin.query<{ workspace_id: string }>(
     `SELECT DISTINCT workspace_id FROM ai_calls
-     WHERE (status = 'pending' OR (status = 'running' AND lease_until < now())) AND participant_id IS NOT NULL LIMIT 100`,
+     WHERE (status = 'pending' OR (status = 'running' AND lease_until < now())) AND (participant_id IS NOT NULL OR kind = 'test') LIMIT 100`,
   );
   let handled = 0;
   for (const { workspace_id: ws } of rows) {
@@ -145,7 +213,7 @@ export async function answerSteps(db: Db, deps: AiStepDeps, opts: { batch?: numb
         UPDATE ai_calls SET status = 'running', lease_until = now() + ${`${LEASE_MS} milliseconds`}::interval, attempts = attempts + 1
         WHERE workspace_id = ${ws} AND id IN (
           SELECT id FROM ai_calls
-          WHERE (status = 'pending' OR (status = 'running' AND lease_until < now())) AND participant_id IS NOT NULL
+          WHERE (status = 'pending' OR (status = 'running' AND lease_until < now())) AND (participant_id IS NOT NULL OR kind = 'test')
           ORDER BY created_at LIMIT ${opts.batch ?? 8} FOR UPDATE SKIP LOCKED)
         RETURNING id`);
       if (!res.rows.length) return [];
@@ -161,9 +229,12 @@ export async function answerSteps(db: Db, deps: AiStepDeps, opts: { batch?: numb
     });
     await Promise.all(
       claimed.map((c) =>
-        (c.attempts > 3 ? finish(db, c, null, { status: 'failed', error: 'gave up after 3 attempts' }) : handle(db, c, deps)).catch((err) =>
-          logger.error({ err, call: c.id }, 'AI step failed'),
-        ),
+        (c.attempts > 3
+          ? finish(db, c, null, { status: 'failed', error: 'gave up after 3 attempts' })
+          : c.kind === 'test'
+            ? handleTest(db, c, deps)
+            : handle(db, c, deps)
+        ).catch((err) => logger.error({ err, call: c.id }, 'AI step failed')),
       ),
     );
     handled += claimed.length;

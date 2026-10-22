@@ -5,7 +5,7 @@ import { runDeliveryWorker } from '@agentic-marketing/email';
 import { runSink } from '@agentic-marketing/events';
 import { type DeliveryDeps, runDeliveries, runTokenRefresher, webhookHook } from '@agentic-marketing/integrations';
 import { journeyHook, runSweeper } from '@agentic-marketing/journeys';
-import { snapshotHook } from '@agentic-marketing/personalize';
+import { refreshSnapshots, snapshotHook } from '@agentic-marketing/personalize';
 import { runProfileWorkers } from '@agentic-marketing/profiles';
 import { runSegmentScheduler, segmentHook } from '@agentic-marketing/segments';
 import { logger } from '@agentic-marketing/telemetry';
@@ -19,7 +19,17 @@ export function startScheduler(
 ): Promise<void>[] {
   logger.info('scheduler role: segment recomputation, broadcasts, retention, OAuth token refresh, audience sync, ad spend import');
   return [
-    runSegmentScheduler({ db: srv.db, events: srv.events, bus: srv.bus, tickMs: opts.segmentTickMs }, signal),
+    runSegmentScheduler(
+      {
+        db: srv.db,
+        events: srv.events,
+        bus: srv.bus,
+        tickMs: opts.segmentTickMs,
+        // Snapshots (what the decision API sees) follow a scheduled refresh at once.
+        afterRefresh: (ws, people) => refreshSnapshots({ db: srv.db, hot: srv.hot }, ws, people),
+      },
+      signal,
+    ),
     runBroadcasts({ db: srv.db, kp: srv.keyProvider, events: srv.events }, signal, opts.broadcastTickMs),
     runRetention({ db: srv.db, events: srv.events, hot: srv.hot, ...srv.retention }, signal),
     runTokenRefresher({ db: srv.db, kp: srv.keyProvider, egress: srv.egress }, signal),

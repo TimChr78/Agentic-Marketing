@@ -1,6 +1,6 @@
 import { defineCommand } from '@agentic-marketing/commands';
 import { AppError, newId } from '@agentic-marketing/core';
-import { type AiUse, schema, type Tx } from '@agentic-marketing/db';
+import { type AiUse, type Db, schema, type Tx } from '@agentic-marketing/db';
 import { type KeyProvider, openJson, sealJson } from '@agentic-marketing/secrets';
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
@@ -51,7 +51,39 @@ export async function usedThisMonth(tx: Tx, providerId: string): Promise<number>
         gte(schema.aiCalls.createdAt, sql`date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'`),
       ),
     );
-  return Number(r.n);
+  const [held] = await tx
+    .select({ n: sql<string>`coalesce(sum(${schema.aiTokenReservations.tokens}), 0)` })
+    .from(schema.aiTokenReservations)
+    .where(and(eq(schema.aiTokenReservations.providerId, providerId), gte(schema.aiTokenReservations.expiresAt, sql`now()`)));
+  return Number(r.n) + Number(held.n);
+}
+
+/** A rough token count for a request: ~4 characters per token, plus the most the answer may use. */
+export const estimateTokens = (input: unknown, maxOutput: number) => Math.ceil(JSON.stringify(input ?? '').length / 4) + maxOutput;
+
+/**
+ * Reserves tokens for one call before it is made, in its own committed transaction and under a
+ * per-provider lock, so concurrent calls see each other. Throws AiUnavailable('budget') when the
+ * month's usage plus reservations would pass the budget. Release it when the call has finished.
+ */
+export async function reserveTokens(db: Db, workspaceId: string, providerId: string, tokens: number, ttlMs = 5 * 60_000): Promise<string> {
+  return db.withWorkspace(workspaceId, async (tx) => {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`ai-budget:${providerId}`}))`);
+    const [row] = await tx.select().from(schema.aiProviders).where(eq(schema.aiProviders.id, providerId));
+    if (
+      row?.monthlyTokenBudget !== null &&
+      row?.monthlyTokenBudget !== undefined &&
+      (await usedThisMonth(tx, providerId)) + tokens > row.monthlyTokenBudget
+    )
+      throw new AiUnavailable('budget');
+    const id = newId('rsv');
+    await tx.insert(schema.aiTokenReservations).values({ workspaceId, id, providerId, tokens, expiresAt: new Date(Date.now() + ttlMs) });
+    return id;
+  });
+}
+
+export async function releaseTokens(db: Db, workspaceId: string, id: string) {
+  await db.withWorkspace(workspaceId, (tx) => tx.delete(schema.aiTokenReservations).where(eq(schema.aiTokenReservations.id, id)));
 }
 
 const providerOut = async (tx: Tx, r: ProviderRow) => ({

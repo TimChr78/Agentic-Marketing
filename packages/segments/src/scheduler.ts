@@ -9,7 +9,15 @@ import { publishedSegments, refreshSegment } from './membership';
  * segment periodically, so time windows ("in the last 7 days") also make people leave.
  */
 export async function runSegmentScheduler(
-  deps: { db: Db; events: EventStore; bus: EventBus; everyMs?: number; tickMs?: number },
+  deps: {
+    db: Db;
+    events: EventStore;
+    bus: EventBus;
+    everyMs?: number;
+    tickMs?: number;
+    /** Called with the people a run moved in or out (e.g. to refresh their snapshots right away). */
+    afterRefresh?: (workspaceId: string, profileIds: string[]) => Promise<void>;
+  },
   signal: AbortSignal,
 ) {
   const every = deps.everyMs ?? 15 * 60_000;
@@ -19,19 +27,27 @@ export async function runSegmentScheduler(
         `SELECT DISTINCT workspace_id FROM artifacts WHERE type = 'segment' AND published_version IS NOT NULL AND NOT archived`,
       );
       for (const { workspace_id: ws } of rows) {
-        await deps.db.withWorkspace(ws, async (tx) => {
-          const all = await publishedSegments(tx);
-          const runs = new Map((await tx.select().from(schema.segmentRuns)).map((r) => [r.segmentId, r]));
-          const out = [];
-          for (const seg of all) {
-            const last = runs.get(seg.id);
-            if (last && last.version === seg.version && Date.now() - last.at.getTime() < every) continue;
-            const r = await refreshSegment(tx, ws, seg, deps.events, all);
-            logger.info({ workspace: ws, segment: seg.id, members: r.members, entered: r.entered, exited: r.exited }, 'segment recomputed');
-            out.push(...r.changes);
-          }
-          if (out.length) await deps.bus.publish(out);
-        });
+        await deps.db
+          .withWorkspace(ws, async (tx) => {
+            const all = await publishedSegments(tx);
+            const runs = new Map((await tx.select().from(schema.segmentRuns)).map((r) => [r.segmentId, r]));
+            const out = [];
+            const changed = new Set<string>();
+            for (const seg of all) {
+              const last = runs.get(seg.id);
+              if (last && last.version === seg.version && Date.now() - last.at.getTime() < every) continue;
+              const r = await refreshSegment(tx, ws, seg, deps.events, all);
+              logger.info(
+                { workspace: ws, segment: seg.id, members: r.members, entered: r.entered, exited: r.exited },
+                'segment recomputed',
+              );
+              out.push(...r.changes);
+              for (const p of r.changedProfiles) changed.add(p);
+            }
+            if (out.length) await deps.bus.publish(out);
+            return [...changed];
+          })
+          .then((changed) => (changed.length && deps.afterRefresh ? deps.afterRefresh(ws, changed) : undefined));
       }
     } catch (err) {
       logger.error({ err }, 'segment scheduler round failed');

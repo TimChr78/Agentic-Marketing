@@ -67,6 +67,7 @@ services:
       MASTER_KEY_PREVIOUS: ${MASTER_KEY_PREVIOUS:-}
       CLICKHOUSE_URL: http://clickhouse:8123
       NATS_URL: nats://nats:4222
+      NATS_RETENTION_HOURS: ${NATS_RETENTION_HOURS:-24}
       VALKEY_URL: redis://valkey:6379
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
     ports:

@@ -131,7 +131,13 @@ describe('LLM gateway', () => {
 
   it('runs a prompt’s test cases against the model, with the person as delimited data', async () => {
     const api = t.api(owner);
-    const r = await api.call('prompts.test', { artifactId: ids.decide });
+    // A test run is a job: queued now, answered by the AI worker.
+    const { runId, queued } = await api.call('prompts.test', { artifactId: ids.decide });
+    expect(queued).toBe(2);
+    const r = await eventually(
+      () => api.call('prompts.testRun', { runId }),
+      (x) => x.status === 'done',
+    );
     expect(r).toMatchObject({ version: 1, passed: 2, failed: 0 });
     expect(r.results[0].answer).toMatchObject({ option: 'vip', rationale: 'High lifetime value.' });
     const req = llm.requests.at(-1)!;
@@ -140,9 +146,9 @@ describe('LLM gateway', () => {
     expect(req.system).toContain('- vip: A loyal, high-value customer');
     const used = await eventually(
       () => api.call('aiProviders.list', {}),
-      (l) => l.providers[0].usedThisMonth > 0,
+      (l) => l.providers[0].usedThisMonth === 240,
     );
-    expect(used.providers[0].usedThisMonth).toBe(240);
+    expect(used.providers[0].usedThisMonth).toBe(240); // reservations released, real usage only
     expect((await api.call('ai.calls', { kind: 'test' })).calls).toHaveLength(2);
   });
 });

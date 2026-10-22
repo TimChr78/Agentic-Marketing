@@ -24,9 +24,9 @@ It runs as one Docker image (a TypeScript modular monolith) next to Postgres, Cl
   - quiet hours in each person's time zone;
   - an automatic pause when bounce or complaint rates pass the limits.
 - **Newsletter:** signup forms with double opt-in (works without JavaScript, optional Cloudflare Turnstile), subscriber import with consent proof (from Kit, Mailchimp…), broadcasts to a segment.
-- **Journeys:** a visual builder and an engine with waits, branches, e-mail, webhooks, connector actions and AI steps (decide, generate) with fallbacks.
+- **Journeys:** a visual builder and an engine with waits, branches, e-mail, SMS, webhooks, connector actions and AI steps (decide, generate) with fallbacks; people can be moved onto a new version.
 - **Web personalization:** experiences and A/B tests served by a decision API, with an anti-flicker snippet and consent-aware targeting.
-- **AI:** your own providers (Anthropic, OpenAI, Ollama…), metering and budgets, prompt artifacts, redaction, a decision log, and an in-app copilot over MCP.
+- **AI:** your own providers (Anthropic, OpenAI, Ollama…), metering and budgets that hold under concurrency, prompt artifacts with test runs, redaction, a decision log, and an in-app copilot over MCP.
 - **Performance marketing:**
   - conversions to Meta (Conversions API), Google Ads (Data Manager API) and Microsoft Advertising, from a conversion map, for people who allowed `ad_measurement`;
   - segments synced to Meta custom audiences and Google Customer Match, with `ad_targeting` consent and removals when people leave, withdraw or are erased;
@@ -80,7 +80,7 @@ Wave 1 (Phases −1 to 5) is complete: foundations, data platform, e-mail, segme
 | 7 | Delivery beyond SMTP, and SMS | Done: Cloudflare Email Service adapter, delivery policy (caps, quiet hours, auto-pause), deliverability health and domain check, Twilio SMS. Later: GatewayAPI, SMS double opt-in, provider warm-up |
 | 8 | Consent everywhere | Done: consent banner with Consent Mode v2, ad purposes, click-id capture, OAuth 2.0 connections, shared rate limits, bot filtering |
 | 9 | Performance marketing | Done: conversions (Meta, Google, Microsoft), audience sync (Meta, Google), spend and ROAS. Later: Microsoft reporting and audiences, more platforms |
-| 10 | Scale and operations | Next |
+| 10 | Scale and operations | Part a done (correctness: AI budget reservations, prompt test jobs, egress on provider adapters, merge-safe journeys, journey version migration, instant experience updates). Next: SQL/ClickHouse segment evaluation and load tests, then Helm, KMS, warehouse export, config-as-code |
 | 11 | Enterprise and ecosystem | Planned |
 
 ## Development

@@ -469,6 +469,18 @@ export const aiProviders = pgTable(
 );
 
 export type AiCallKind = 'decide' | 'generate' | 'copilot' | 'test';
+
+export const aiTokenReservations = pgTable(
+  'ai_token_reservations',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    providerId: text('provider_id').notNull(),
+    tokens: integer('tokens').notNull(),
+    expiresAt: ts('expires_at').notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
 export type AiCallStatus = 'pending' | 'running' | 'done' | 'fallback' | 'failed';
 export const aiCalls = pgTable(
   'ai_calls',

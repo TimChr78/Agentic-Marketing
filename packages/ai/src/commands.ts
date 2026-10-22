@@ -2,7 +2,7 @@ import { defineCommand } from '@agentic-marketing/commands';
 import { schema } from '@agentic-marketing/db';
 import { and, desc, eq, gte, lt, sql } from 'drizzle-orm';
 import { z } from 'zod';
-import { testPrompt } from './prompts';
+import { testPrompt, testRunResults } from './prompts';
 import { createAiProvider, deleteAiProvider, listAiProviders, updateAiProvider } from './providers';
 
 // The decision log and usage: every AI call (journey steps, prompt tests, copilot turns) with
@@ -129,6 +129,7 @@ export const aiCommands = [
   updateAiProvider,
   deleteAiProvider,
   testPrompt,
+  testRunResults,
   listAiCalls,
   aiUsage,
 ] as const;

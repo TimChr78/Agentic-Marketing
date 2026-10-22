@@ -67,6 +67,7 @@ Generated from the command registry (`apps/server/src/registry.ts`). **Effect**:
 | `journeys.stats` | read | artifacts:read | people and agents | Journey statistics |
 | `journeys.enroll` | write | messages:send | people and agents | Put people into a journey |
 | `journeys.simulate` | read | artifacts:read | people and agents | Simulate a journey |
+| `journeys.migrate` | publish | artifacts:publish | people and agents | Move participants to the published version |
 | `broadcasts.preview` | read | artifacts:read | people and agents | Preview a broadcast’s audience |
 | `broadcasts.status` | read | artifacts:read | people and agents | Broadcast status and results |
 | `broadcasts.cancel` | write | messages:send | people and agents | Cancel a broadcast |
@@ -75,7 +76,8 @@ Generated from the command registry (`apps/server/src/registry.ts`). **Effect**:
 | `aiProviders.create` | write | workspace:admin | people only | Add an AI provider |
 | `aiProviders.update` | write | workspace:admin | people only | Change an AI provider |
 | `aiProviders.delete` | destructive | workspace:admin | people only | Delete an AI provider |
-| `prompts.test` | write | artifacts:write | people and agents | Run a prompt’s test cases (uses tokens) |
+| `prompts.test` | write | artifacts:write | people and agents | Queue a prompt’s test cases (uses tokens) |
+| `prompts.testRun` | read | artifacts:read | people and agents | Results of a prompt test run |
 | `ai.calls` | read | artifacts:read | people and agents | AI decision log |
 | `ai.usage` | read | artifacts:read | people and agents | AI usage |
 | `connectors.list` | read | artifacts:read | people and agents | List connectors |

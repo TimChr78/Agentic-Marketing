@@ -39,7 +39,12 @@ export interface EventBus {
 }
 
 /** `namespace` names the stream and its subjects, so several installs (or test runs) can share a NATS server. */
-export async function natsBus(opts: { url: string; namespace?: string; retentionDays?: number }): Promise<EventBus> {
+/**
+ * The event bus on NATS JetStream. Events carry personal traits until the profile workers seal
+ * them, so the stream keeps them only as long as a worker outage could last (`retentionHours`,
+ * default 24); put the JetStream store on an encrypted volume.
+ */
+export async function natsBus(opts: { url: string; namespace?: string; retentionHours?: number }): Promise<EventBus> {
   const ns = opts.namespace ?? 'events';
   const STREAM = ns.toUpperCase();
   const nc: NatsConnection = await connect({ servers: opts.url, name: 'agentic-marketing' });
@@ -49,7 +54,7 @@ export async function natsBus(opts: { url: string; namespace?: string; retention
     subjects: [`${ns}.>`],
     storage: StorageType.File,
     retention: RetentionPolicy.Limits,
-    max_age: nanos((opts.retentionDays ?? 7) * 86_400_000),
+    max_age: nanos((opts.retentionHours ?? 24) * 3_600_000),
     // SDK retries within this window are dropped by JetStream (msgID = messageId).
     duplicate_window: nanos(120_000),
   };

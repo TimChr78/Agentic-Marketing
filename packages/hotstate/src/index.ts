@@ -41,6 +41,9 @@ export interface HotState {
    * to `burst`). False when there are not enough; then nothing is taken.
    */
   take(key: string, n: number, rate: number, burst: number): Promise<boolean>;
+  /** A version stamp shared by all processes: `bump` changes it, `stamp` reads it (cache invalidation). */
+  bump(key: string): Promise<void>;
+  stamp(key: string): Promise<string>;
   ping(): Promise<boolean>;
   close(): Promise<void>;
 }
@@ -131,6 +134,13 @@ export function valkeyHotState(opts: { url: string; prefix?: string }): HotState
       const values = await client.mget(...keys);
       const hit = values.find((v) => v);
       return hit ? (JSON.parse(hit) as ProfileSnapshot) : null;
+    },
+
+    async bump(key) {
+      await client.incr(`${p}:v:${key}`);
+    },
+    async stamp(key) {
+      return (await client.get(`${p}:v:${key}`)) ?? '0';
     },
 
     async take(key, n, rate, burst) {

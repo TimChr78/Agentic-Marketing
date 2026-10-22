@@ -96,6 +96,9 @@ async function checkPublishable(ctx: CommandContext, type: string, content: unkn
   if (problems.length) throw new AppError('invalid_input', `This ${type} cannot be published yet: ${problems.join('; ')}`, { problems });
 }
 
+/** Called after an artifact version is published (once committed), e.g. to drop caches of its type. */
+export const publishListeners: ((ctx: CommandContext, artifact: { id: string; type: string; workspaceId: string }) => Promise<void>)[] = [];
+
 async function publishVersion(ctx: CommandContext, artifactId: string, number: number) {
   const a = await loadArtifact(ctx, artifactId);
   await checkPublishable(ctx, a.type, (await loadVersion(ctx, artifactId, number)).content);
@@ -105,6 +108,8 @@ async function publishVersion(ctx: CommandContext, artifactId: string, number: n
     .update(schema.artifacts)
     .set({ publishedVersion: number, updatedAt: new Date() })
     .where(and(eq(schema.artifacts.workspaceId, ctx.principal.workspaceId), eq(schema.artifacts.id, artifactId)));
+  const artifact = { id: artifactId, type: a.type, workspaceId: ctx.principal.workspaceId };
+  for (const l of publishListeners) ctx.afterCommit ? ctx.afterCommit(() => l(ctx, artifact)) : await l(ctx, artifact);
 }
 
 export const listTypes = defineCommand({
