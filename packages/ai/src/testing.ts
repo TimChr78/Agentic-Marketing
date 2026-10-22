@@ -2,8 +2,8 @@ import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
 // A scripted LLM server for tests: speaks the OpenAI chat-completions and Anthropic messages
-// wire formats (non-streaming), so tests exercise the real provider adapters. The base URL for
-// either kind is `${url}/v1`.
+// wire formats, plain and streamed (server-sent events, text in several chunks), so tests
+// exercise the real provider adapters. The base URL for either kind is `${url}/v1`.
 
 export interface FakeRequest {
   api: 'openai' | 'anthropic';
@@ -44,6 +44,7 @@ interface WireRequest {
   tools?: { name?: string; function?: { name: string } }[];
   response_format?: unknown;
   output_config?: unknown;
+  stream?: boolean;
 }
 
 function normalise(api: FakeRequest['api'], body: WireRequest, apiKey: string): FakeRequest {
@@ -139,6 +140,72 @@ function encode(api: FakeRequest['api'], model: string, reply: FakeReply) {
   };
 }
 
+/** Splits text into a few pieces, as a model streams it. */
+const pieces = (text: string) => {
+  const size = Math.max(1, Math.ceil(text.length / 3));
+  const out: string[] = [];
+  for (let i = 0; i < text.length; i += size) out.push(text.slice(i, i + size));
+  return out;
+};
+
+/** The same reply as server-sent events, in the provider's streaming format. */
+function encodeStream(api: FakeRequest['api'], model: string, reply: Exclude<FakeReply, { status: number }>): string {
+  const id = `fake_${++seq}`;
+  const usage = 'text' in reply ? { input: reply.inputTokens ?? 100, output: reply.outputTokens ?? 20 } : { input: 100, output: 20 };
+  if (api === 'openai') {
+    const chunk = (delta: unknown, finish: string | null = null, extra: object = {}) =>
+      `data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model, choices: [{ index: 0, delta, finish_reason: finish }], ...extra })}\n\n`;
+    const body =
+      'text' in reply
+        ? [chunk({ role: 'assistant', content: '' }), ...pieces(reply.text).map((t) => chunk({ content: t })), chunk({}, 'stop')]
+        : [
+            chunk({ role: 'assistant', content: null }),
+            ...reply.toolCalls.map((t, i) =>
+              chunk({
+                tool_calls: [
+                  { index: i, id: `${id}_${i}`, type: 'function', function: { name: t.name, arguments: JSON.stringify(t.input) } },
+                ],
+              }),
+            ),
+            chunk({}, 'tool_calls'),
+          ];
+    const usageChunk = `data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model, choices: [], usage: { prompt_tokens: usage.input, completion_tokens: usage.output, total_tokens: usage.input + usage.output } })}\n\n`;
+    return `${body.join('')}${usageChunk}data: [DONE]\n\n`;
+  }
+  const ev = (type: string, data: object) => `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
+  const blocks =
+    'text' in reply
+      ? [
+          ev('content_block_start', { index: 0, content_block: { type: 'text', text: '' } }),
+          ...pieces(reply.text).map((t) => ev('content_block_delta', { index: 0, delta: { type: 'text_delta', text: t } })),
+          ev('content_block_stop', { index: 0 }),
+        ]
+      : reply.toolCalls.flatMap((t, i) => [
+          ev('content_block_start', { index: i, content_block: { type: 'tool_use', id: `${id}_${i}`, name: t.name, input: {} } }),
+          ev('content_block_delta', { index: i, delta: { type: 'input_json_delta', partial_json: JSON.stringify(t.input) } }),
+          ev('content_block_stop', { index: i }),
+        ]);
+  return [
+    ev('message_start', {
+      message: {
+        id,
+        type: 'message',
+        role: 'assistant',
+        model,
+        content: [],
+        stop_reason: null,
+        usage: { input_tokens: usage.input, output_tokens: 1 },
+      },
+    }),
+    ...blocks,
+    ev('message_delta', {
+      delta: { stop_reason: 'text' in reply ? 'end_turn' : 'tool_use', stop_sequence: null },
+      usage: { output_tokens: usage.output },
+    }),
+    ev('message_stop', {}),
+  ].join('');
+}
+
 export async function fakeLlm(handler: (r: FakeRequest) => FakeReply | Promise<FakeReply>) {
   const requests: FakeRequest[] = [];
   const server = createServer((req, res) => {
@@ -153,10 +220,17 @@ export async function fakeLlm(handler: (r: FakeRequest) => FakeReply | Promise<F
         return;
       }
       const apiKey = String(req.headers.authorization ?? '').replace(/^Bearer /, '') || String(req.headers['x-api-key'] ?? '');
-      const r = normalise(api, JSON.parse(raw), apiKey);
+      const body = JSON.parse(raw) as WireRequest;
+      const r = normalise(api, body, apiKey);
       requests.push(r);
       try {
-        const out = encode(api, r.model, await handler(r));
+        const reply = await handler(r);
+        if (body.stream && !('status' in reply)) {
+          res.setHeader('content-type', 'text/event-stream');
+          res.end(encodeStream(api, r.model, reply));
+          return;
+        }
+        const out = encode(api, r.model, reply);
         res.statusCode = out.status;
         res.end(JSON.stringify(out.body));
       } catch (err) {

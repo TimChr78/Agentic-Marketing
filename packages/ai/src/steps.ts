@@ -1,11 +1,11 @@
-import type { PromptDefinition } from '@agentic-marketing/artifacts';
+import { type PromptDefinition, publishedSingleton } from '@agentic-marketing/artifacts';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { aiAllowed, personContext } from './context';
-import { promptVersion, runPrompt, runTestCase } from './prompts';
+import { promptVersion, runClassify, runPrompt, runTestCase } from './prompts';
 import { AiUnavailable, estimateTokens, modelFor, type ReadyModel, releaseTokens, reserveTokens } from './providers';
 
 // The AI worker: answers the AI steps of journeys. A step is a pending row in ai_calls; the
@@ -27,6 +27,32 @@ interface Prepared {
   model?: ReadyModel;
   person?: Record<string, unknown>;
   fallback?: string;
+  /** Per-segment text cache (generate prompts with `cache`): the key, and the slots when cached. */
+  cache?: { key: string; slots?: Record<string, string> };
+}
+
+/** Whether an answered call is set aside for human review (prompts with review.sampleRate). */
+const sampled = (def: PromptDefinition | undefined) => !!def?.review && Math.random() < def.review.sampleRate;
+
+/**
+ * The cache key of a person for a prompt with `cache`: which of its segments they are in. The
+ * model then sees only those segments' names, so the text holds nothing personal and can serve
+ * everyone with the same key.
+ */
+async function segmentKey(tx: Tx, profileId: string, segments: string[]) {
+  const rows = await tx
+    .select({ id: schema.segmentMemberships.segmentId, name: schema.artifacts.name })
+    .from(schema.segmentMemberships)
+    .innerJoin(
+      schema.artifacts,
+      and(
+        eq(schema.artifacts.workspaceId, schema.segmentMemberships.workspaceId),
+        eq(schema.artifacts.id, schema.segmentMemberships.segmentId),
+      ),
+    )
+    .where(and(eq(schema.segmentMemberships.profileId, profileId), inArray(schema.segmentMemberships.segmentId, segments)));
+  const inside = rows.sort((a, b) => a.id.localeCompare(b.id));
+  return { key: inside.map((r) => r.id).join('+') || 'none', names: inside.map((r) => r.name) };
 }
 
 async function prepare(tx: Tx, c: CallRow, deps: AiStepDeps): Promise<Prepared | null> {
@@ -44,6 +70,21 @@ async function prepare(tx: Tx, c: CallRow, deps: AiStepDeps): Promise<Prepared |
   if (!consent.ok) return { ...base, fallback: consent.reason };
   try {
     const model = await modelFor(tx, deps.kp, 'journeys', p.def.model);
+    if (p.def.kind === 'generate' && p.def.cache) {
+      const { key, names } = await segmentKey(tx, c.profileId ?? '', p.def.cache.segments);
+      const [hit] = await tx
+        .select({ slots: schema.aiTextCache.slots })
+        .from(schema.aiTextCache)
+        .where(
+          and(
+            eq(schema.aiTextCache.promptId, c.promptId ?? ''),
+            eq(schema.aiTextCache.promptVersion, p.version),
+            eq(schema.aiTextCache.cacheKey, key),
+            sql`${schema.aiTextCache.expiresAt} > now()`,
+          ),
+        );
+      return { ...base, model, person: { segments: names }, cache: { key, slots: hit?.slots } };
+    }
     const trigger = (c.input as { trigger?: { name: string; properties: Record<string, unknown> } | null }).trigger ?? undefined;
     const person = await personContext(tx, c.workspaceId, deps.kp, deps.events, c.profileId ?? '', trigger);
     if (!person) return { ...base, fallback: 'no_profile: the person does not exist (or was erased)' };
@@ -68,6 +109,7 @@ async function finish(
     inputTokens?: number;
     outputTokens?: number;
     latencyMs?: number;
+    cached?: boolean;
   },
 ) {
   await db.withWorkspace(c.workspaceId, async (tx) => {
@@ -103,6 +145,8 @@ async function finish(
         inputTokens: out.inputTokens ?? 0,
         outputTokens: out.outputTokens ?? 0,
         latencyMs: out.latencyMs ?? null,
+        cached: out.cached ?? false,
+        reviewStatus: !late && out.status === 'done' && sampled(prep?.def) ? 'pending' : null,
         finishedAt: new Date(),
       })
       .where(and(eq(schema.aiCalls.workspaceId, c.workspaceId), eq(schema.aiCalls.id, c.id)));
@@ -113,6 +157,13 @@ async function handle(db: Db, c: CallRow, deps: AiStepDeps) {
   const prep = await db.withWorkspace(c.workspaceId, (tx) => prepare(tx, c, deps));
   if (!prep) return finish(db, c, null, { status: 'failed', error: 'no_prompt: the prompt has no published version' });
   if (prep.fallback || !prep.model || !prep.person) return finish(db, c, prep, { status: 'fallback', error: prep.fallback });
+  if (prep.cache?.slots)
+    return finish(db, c, prep, {
+      status: 'done',
+      slots: prep.cache.slots,
+      output: { slots: prep.cache.slots, cached: true },
+      cached: true,
+    });
   let reservation: string;
   try {
     reservation = await reserveTokens(
@@ -132,6 +183,29 @@ async function handle(db: Db, c: CallRow, deps: AiStepDeps) {
     if (r.kind === 'decide')
       return finish(db, c, prep, { status: 'done', option: r.option, rationale: r.rationale, output: { option: r.option }, ...usage });
     const rejected = Object.entries(r.rejected).map(([k, v]) => `${k}: ${v}`);
+    // Only text that passed every check is worth reusing.
+    if (prep.cache && prep.def.cache && !rejected.length)
+      await db.withWorkspace(c.workspaceId, (tx) =>
+        tx
+          .insert(schema.aiTextCache)
+          .values({
+            workspaceId: c.workspaceId,
+            promptId: c.promptId ?? '',
+            promptVersion: prep.version,
+            cacheKey: prep.cache!.key,
+            slots: r.slots,
+            expiresAt: new Date(Date.now() + prep.def.cache!.ttlHours * 3_600_000),
+          })
+          .onConflictDoUpdate({
+            target: [
+              schema.aiTextCache.workspaceId,
+              schema.aiTextCache.promptId,
+              schema.aiTextCache.promptVersion,
+              schema.aiTextCache.cacheKey,
+            ],
+            set: { slots: r.slots, createdAt: new Date(), expiresAt: new Date(Date.now() + prep.def.cache!.ttlHours * 3_600_000) },
+          }),
+      );
     return finish(db, c, prep, {
       status: 'done',
       slots: r.slots,
@@ -200,11 +274,80 @@ async function handleTest(db: Db, c: CallRow, deps: AiStepDeps) {
   }
 }
 
+/** One ai.classify call: label the text, store the label on the person if the prompt says so. */
+async function handleClassify(db: Db, c: CallRow, deps: AiStepDeps) {
+  const record = (values: Partial<CallRow>) =>
+    db.withWorkspace(c.workspaceId, (tx) =>
+      tx
+        .update(schema.aiCalls)
+        .set({ leaseUntil: null, finishedAt: new Date(), ...values })
+        .where(and(eq(schema.aiCalls.workspaceId, c.workspaceId), eq(schema.aiCalls.id, c.id))),
+    );
+  const ready = await db.withWorkspace(c.workspaceId, async (tx) => {
+    const p = await promptVersion(tx, c.promptId ?? '', c.promptVersion ?? undefined);
+    if (p?.def.kind !== 'classify') return { error: 'no_prompt: the classify prompt version is gone' };
+    if (c.profileId) {
+      const consent = await aiAllowed(tx, c.workspaceId, c.profileId);
+      if (!consent.ok) return { error: consent.reason ?? 'no_lawful_basis' };
+    }
+    try {
+      return { def: p.def, model: await modelFor(tx, deps.kp, 'journeys', p.def.model) };
+    } catch (err) {
+      if (err instanceof AiUnavailable) return { error: `${err.reason}: ${err.message}` };
+      throw err;
+    }
+  });
+  if ('error' in ready) return record({ status: 'failed', error: ready.error ?? null });
+  const text = String((c.input as { text?: string }).text ?? '');
+  let reservation: string;
+  try {
+    reservation = await reserveTokens(
+      db,
+      c.workspaceId,
+      ready.model.providerId,
+      estimateTokens({ def: ready.def, text }, ready.def.maxOutputTokens),
+    );
+  } catch (err) {
+    if (err instanceof AiUnavailable) return record({ status: 'failed', error: `${err.reason}: ${err.message}` });
+    throw err;
+  }
+  const started = Date.now();
+  try {
+    const r = await runClassify(ready.model, ready.def, text, { timeoutMs: 60_000 });
+    let trait: string | null = null;
+    if (ready.def.trait && c.profileId)
+      trait = await db.withWorkspace(c.workspaceId, async (tx) => {
+        // Like a journey's updateProfile step: never into a trait the tracking plan marks personal.
+        const plan = await publishedSingleton(tx, 'tracking_plan');
+        const def = plan?.traits.find((x) => x.name === ready.def.trait);
+        if (def && def.pii !== 'none') return null;
+        await tx.execute(sql`
+          UPDATE profiles SET traits = jsonb_set(traits, ARRAY[${ready.def.trait}], ${JSON.stringify(r.label)}::jsonb), updated_at = now()
+          WHERE workspace_id = ${c.workspaceId} AND id = ${c.profileId} AND merged_into IS NULL`);
+        return ready.def.trait ?? null;
+      });
+    await record({
+      status: 'done',
+      providerId: ready.model.providerId,
+      model: ready.model.modelId,
+      output: { label: r.label, ...(trait ? { trait } : {}) },
+      rationale: r.rationale,
+      ...r.usage,
+      latencyMs: Date.now() - started,
+      reviewStatus: sampled(ready.def) ? 'pending' : null,
+    });
+  } catch (err) {
+    await record({ status: 'failed', error: `model_error: ${(err as Error).message}`, latencyMs: Date.now() - started });
+  } finally {
+    await releaseTokens(db, c.workspaceId, reservation);
+  }
+}
+
 /** Claims due AI steps across workspaces and answers them, a few at a time. Returns how many it handled. */
 export async function answerSteps(db: Db, deps: AiStepDeps, opts: { batch?: number } = {}): Promise<number> {
   const { rows } = await db.admin.query<{ workspace_id: string }>(
     `SELECT DISTINCT workspace_id FROM ai_calls
-     WHERE (status = 'pending' OR (status = 'running' AND lease_until < now())) AND (participant_id IS NOT NULL OR kind = 'test') LIMIT 100`,
+     WHERE (status = 'pending' OR (status = 'running' AND lease_until < now())) AND (participant_id IS NOT NULL OR kind IN ('test', 'classify')) LIMIT 100`,
   );
   let handled = 0;
   for (const { workspace_id: ws } of rows) {
@@ -213,7 +356,7 @@ export async function answerSteps(db: Db, deps: AiStepDeps, opts: { batch?: numb
         UPDATE ai_calls SET status = 'running', lease_until = now() + ${`${LEASE_MS} milliseconds`}::interval, attempts = attempts + 1
         WHERE workspace_id = ${ws} AND id IN (
           SELECT id FROM ai_calls
-          WHERE (status = 'pending' OR (status = 'running' AND lease_until < now())) AND (participant_id IS NOT NULL OR kind = 'test')
+          WHERE (status = 'pending' OR (status = 'running' AND lease_until < now())) AND (participant_id IS NOT NULL OR kind IN ('test', 'classify'))
           ORDER BY created_at LIMIT ${opts.batch ?? 8} FOR UPDATE SKIP LOCKED)
         RETURNING id`);
       if (!res.rows.length) return [];
@@ -233,7 +376,9 @@ export async function answerSteps(db: Db, deps: AiStepDeps, opts: { batch?: numb
           ? finish(db, c, null, { status: 'failed', error: 'gave up after 3 attempts' })
           : c.kind === 'test'
             ? handleTest(db, c, deps)
-            : handle(db, c, deps)
+            : c.kind === 'classify'
+              ? handleClassify(db, c, deps)
+              : handle(db, c, deps)
         ).catch((err) => logger.error({ err, call: c.id }, 'AI step failed')),
       ),
     );

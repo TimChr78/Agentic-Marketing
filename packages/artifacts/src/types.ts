@@ -549,6 +549,7 @@ const experience = z
 const OptionKey = z.string().regex(/^[a-z][a-z0-9_]{0,31}$/);
 const promptTest = z.object({
   name: z.string().min(1).max(120),
+  text: z.string().max(8000).optional().describe('classify: the text to classify'),
   traits: z.record(z.string(), z.unknown()).default({}).describe('Profile traits of the sample person (as the model sees them)'),
   events: z
     .array(z.object({ name: z.string().min(1).max(200), properties: z.record(z.string(), z.unknown()).default({}) }))
@@ -557,7 +558,7 @@ const promptTest = z.object({
     .describe('Recent events of the sample person, newest last'),
   expect: z
     .object({
-      options: z.array(OptionKey).optional().describe('decide: the answer must be one of these'),
+      options: z.array(OptionKey).optional().describe('decide, classify: the answer must be one of these'),
       contains: z.array(z.string().max(200)).optional().describe('generate: every slot together must contain these (case-insensitive)'),
       notContains: z.array(z.string().max(200)).optional(),
     })
@@ -565,7 +566,9 @@ const promptTest = z.object({
 });
 const prompt = z
   .object({
-    kind: z.enum(['decide', 'generate']).describe('decide: choose one option; generate: write text for content slots'),
+    kind: z
+      .enum(['decide', 'generate', 'classify'])
+      .describe('decide: choose one option for a person; generate: write text for content slots; classify: label a text (ai.classify)'),
     instructions: z
       .string()
       .min(1)
@@ -576,9 +579,11 @@ const prompt = z
     maxOutputTokens: z.number().int().min(16).max(4000).default(400),
     options: z
       .array(z.object({ key: OptionKey, description: z.string().min(1).max(500) }))
-      .max(6)
+      .max(20)
       .default([])
-      .describe('decide: the choices, e.g. {"key":"discount","description":"Price-sensitive: offer 10% off"}'),
+      .describe(
+        'decide: the choices, e.g. {"key":"discount","description":"Price-sensitive: offer 10% off"}; classify: the labels, e.g. {"key":"complaint","description":"Unhappy about an order"}',
+      ),
     slots: z
       .array(
         z.object({
@@ -597,10 +602,35 @@ const prompt = z
       .default([])
       .describe('generate: phrases the text must never contain (claims, words)'),
     tests: z.array(promptTest).max(50).default([]),
+    trait: z
+      .string()
+      .regex(/^[A-Za-z][A-Za-z0-9_]{0,63}$/)
+      .optional()
+      .describe('classify: store the label in this profile trait when ai.classify is given a person'),
+    cache: z
+      .object({
+        segments: z
+          .array(z.string().regex(/^seg_[0-9a-f]{32}$/))
+          .min(1)
+          .max(10)
+          .describe('Text is written once per combination of these segments, from the segment names alone (no personal data)'),
+        ttlHours: z.number().int().min(1).max(720).default(24),
+      })
+      .optional()
+      .describe('generate: reuse generated text for everyone in the same segments instead of writing it per person'),
+    review: z
+      .object({ sampleRate: z.number().min(0).max(1).describe('Share of answered calls set aside for a person to review, e.g. 0.05') })
+      .optional()
+      .describe('Sample answers for human review (ai.reviews)'),
   })
   .superRefine((p, ctx) => {
-    if (p.kind === 'decide' && p.options.length < 2)
-      ctx.addIssue({ code: 'custom', message: 'A decide prompt needs at least two options' });
+    if ((p.kind === 'decide' || p.kind === 'classify') && p.options.length < 2)
+      ctx.addIssue({ code: 'custom', message: `A ${p.kind} prompt needs at least two options` });
+    if (p.kind === 'decide' && p.options.length > 6) ctx.addIssue({ code: 'custom', message: 'A decide prompt has at most six options' });
+    if (p.cache && p.kind !== 'generate') ctx.addIssue({ code: 'custom', message: 'Only generate prompts can cache text' });
+    if (p.trait && p.kind !== 'classify') ctx.addIssue({ code: 'custom', message: 'Only classify prompts store a trait' });
+    if (p.kind === 'classify')
+      for (const t of p.tests) if (!t.text) ctx.addIssue({ code: 'custom', message: `Test "${t.name}" of a classify prompt needs a text` });
     if (p.kind === 'generate' && !p.slots.length) ctx.addIssue({ code: 'custom', message: 'A generate prompt needs at least one slot' });
     const keys = new Set(p.options.map((o) => o.key));
     if (keys.size !== p.options.length) ctx.addIssue({ code: 'custom', message: 'Option keys must be unique' });

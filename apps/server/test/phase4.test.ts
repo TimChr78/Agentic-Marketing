@@ -65,11 +65,11 @@ const consent = (userId: string, ai: boolean) => ({
   context: { consent: { categoryPreferences: { marketing_email: true, ai_processing: ai } } },
 });
 
-async function copilot(u: User, message: string, history: unknown[] = []) {
+async function copilot(u: User, message: string, conversationId?: string) {
   const res = await fetch(`${t.base}/api/copilot`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', cookie: u.cookie },
-    body: JSON.stringify({ message, history }),
+    body: JSON.stringify({ message, conversationId }),
   });
   if (!res.ok) return { status: res.status, body: await res.json(), events: [] as Record<string, any>[] };
   const events = (await res.text())
@@ -337,10 +337,20 @@ describe('copilot', () => {
     });
     const r = await copilot(owner, 'Which prompts do I have?');
     expect(r.status).toBe(200);
-    expect(r.events.map((e) => e.type)).toEqual(['tool', 'toolResult', 'text', 'done']);
-    expect(r.events[0]).toMatchObject({ name: 'artifacts.list', input: { type: 'prompt' } });
-    expect(r.events[1]).toMatchObject({ ok: true });
-    expect(r.events[2].text).toBe('You have 2 prompts.');
+    // The answer streams in token by token, after the tool call.
+    const kinds = r.events.map((e) => e.type).filter((k, i, all) => k !== 'delta' || all[i - 1] !== 'delta');
+    expect(kinds).toEqual(['conversation', 'tool', 'toolResult', 'delta', 'done']);
+    expect(r.events.filter((e) => e.type === 'delta').length).toBeGreaterThan(1);
+    const said = (events: Record<string, any>[]) =>
+      events
+        .filter((e) => e.type === 'delta')
+        .map((e) => e.text)
+        .join('');
+    expect(r.events[1]).toMatchObject({ name: 'artifacts.list', input: { type: 'prompt' } });
+    expect(r.events[2]).toMatchObject({ ok: true });
+    expect(said(r.events)).toBe('You have 2 prompts.');
+    const conversationId = r.events.at(-1)!.conversationId;
+    expect(r.events[0]).toMatchObject({ id: conversationId, title: 'Which prompts do I have?' });
 
     const req = llm.requests.at(-1)!;
     expect(req).toMatchObject({ api: 'openai', model: 'local-test', apiKey: 'local-key' });
@@ -349,11 +359,27 @@ describe('copilot', () => {
     for (const hidden of ['approvals__approve', 'journeys__enroll', 'profiles__erase', 'aiProviders__create', 'secrets__set'])
       expect(req.tools).not.toContain(hidden);
 
-    // The conversation continues from the returned history; changes are drafts, audited as the copilot's.
-    const again = await copilot(owner, 'Make a note about the tent sale', r.events[3].history);
-    expect(again.events.map((e) => e.type)).toEqual(['tool', 'toolResult', 'text', 'done']);
+    // The conversation continues on the server; changes are drafts, audited as the copilot's.
+    const again = await copilot(owner, 'Make a note about the tent sale', conversationId);
+    expect(again.events.filter((e) => e.type !== 'delta').map((e) => e.type)).toEqual(['conversation', 'tool', 'toolResult', 'done']);
     expect(llm.requests.at(-1)!.messages.length).toBeGreaterThan(4);
-    const noteId = again.events[1].output.artifactId;
+    const noteId = again.events[2].output.artifactId;
+    expect(said(again.events)).toBe(`Drafted ${noteId}.`);
+
+    // Kept for the person, on any device: their conversations and what was said.
+    expect((await api.call('copilot.conversations', {})).conversations).toMatchObject([{ id: conversationId, turns: 2 }]);
+    const kept = await api.call('copilot.conversation', { id: conversationId });
+    expect(kept.events.map((e) => e.type)).toEqual(['user', 'tool', 'toolResult', 'text', 'user', 'tool', 'toolResult', 'text']);
+    expect(kept.events[3]).toEqual({ type: 'text', text: 'You have 2 prompts.' });
+    // A colleague in the same workspace cannot read or continue it.
+    const colleague = await t.signUp(`colleague-${Date.now()}@example.com`);
+    const { rows } = await t.srv.db.admin.query('SELECT workspace_id FROM workspace_members WHERE user_id = $1', [owner.id]);
+    await t.srv.db.admin.query(`INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'marketer')`, [
+      rows[0].workspace_id,
+      colleague.id,
+    ]);
+    expect((await copilot(colleague, 'hi', conversationId)).status).toBe(404);
+    expect((await rejects(t.api(colleague).call('copilot.conversation', { id: conversationId }))).status).toBe(404);
     expect(await api.call('artifacts.get', { artifactId: noteId })).toMatchObject({ publishedVersion: null });
 
     const audit = await api.call('audit.list', { limit: 20 });

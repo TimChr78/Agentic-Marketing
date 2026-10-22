@@ -91,6 +91,13 @@ Generated from the command registry (`apps/server/src/registry.ts`). **Effect**:
 | `prompts.testRun` | read | artifacts:read | people and agents | Results of a prompt test run |
 | `ai.calls` | read | artifacts:read | people and agents | AI decision log |
 | `ai.usage` | read | artifacts:read | people and agents | AI usage |
+| `ai.classify` | write | profiles:write | people and agents | Classify a text (queued; uses tokens) |
+| `ai.classification` | read | artifacts:read | people and agents | Result of a classification |
+| `ai.reviews` | read | artifacts:read | people and agents | AI answers to review, and quality per prompt |
+| `ai.review` | write | artifacts:read | people only | Review an AI answer |
+| `copilot.conversations` | read | artifacts:read | people only | My copilot conversations |
+| `copilot.conversation` | read | artifacts:read | people only | A copilot conversation |
+| `copilot.deleteConversation` | write | artifacts:read | people only | Delete a copilot conversation |
 | `connectors.list` | read | artifacts:read | people and agents | List connectors |
 | `connections.list` | read | artifacts:read | people and agents | List connections |
 | `connections.create` | write | workspace:admin | people only | Add a connection |
