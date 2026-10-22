@@ -1,0 +1,23 @@
+<mjml>
+  <mj-body background-color="#f3efe6">
+    <mj-section background-color="#ffffff" padding="28px 24px">
+      <mj-column>
+        <mj-text font-size="22px" color="#1f2a22">It has been a while, {{ profile.first_name | capitalize }}</mj-text>
+        <mj-text font-size="15px" color="#374151">
+          {% if profile.orders_count > 3 %}
+            As one of our regulars, here is <strong>15% off</strong> anything in {{ profile.preferred_category }}.
+          {% elsif profile.orders_count > 0 %}
+            We saved your favourites. Take <strong>10% off</strong> your next order.
+          {% else %}
+            Our autumn range just landed.
+          {% endif %}
+        </mj-text>
+        <mj-table font-size="14px" cellpadding="6px">
+          <tr style="border-bottom:1px solid #dce1e9;text-align:left;"><th>Your last order</th><th>Date</th></tr>
+          <tr><td>{{ profile.last_order.name | default: "—" }}</td><td>{{ profile.last_order.date | date: "%d %b %Y" }}</td></tr>
+        </mj-table>
+        <mj-button background-color="#2f5d43" color="#ffffff" href="https://fjeldvej.example/?code={{ offer.code | url_encode }}">See what is new</mj-button>
+      </mj-column>
+    </mj-section>
+  </mj-body>
+</mjml>

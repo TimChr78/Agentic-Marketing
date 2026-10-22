@@ -130,7 +130,7 @@ sequenceDiagram
 
 ```mermaid
 sequenceDiagram
-  participant Q as Graphile Worker queue (Postgres)
+  participant Q as Due participants (Postgres sweeper)
   participant J as Journey interpreter
   participant SG as Send gateway
   participant C as Consent ledger

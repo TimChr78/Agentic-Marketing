@@ -25,7 +25,8 @@ Selection criteria, in priority order: **(1) maintainable by one person, (2) per
 | Events / analytics | **ClickHouse** | Apache-2.0 | TimescaleDB, Druid, DuckDB | Best-in-class for event analytics at this scale; JSON type; TTL; single node goes very far |
 | Event bus | **NATS JetStream** | Apache-2.0 | Kafka, Redpanda (BSL), Redis Streams, Postgres only | Single small binary, durable streams, consumer groups, replay, clusterable; much lighter to self-host than Kafka. See [ADR-0003](adr/0003-storage-and-event-bus.md) |
 | Hot state / cache | **Valkey 8** | BSD-3 | Redis (license changed), Dragonfly (BSL) | Sub-ms session state, counters, rate limits; Redis-protocol compatible |
-| Job queue / durable steps | **Graphile Worker** | MIT | pg-boss, Temporal, Hatchet, DBOS | Jobs in the same Postgres txn as state changes, high throughput, cron. See [ADR-0004](adr/0004-journey-runtime.md) |
+| Journey steps | **Own batched sweeper** over the participants table (`FOR UPDATE SKIP LOCKED`) | — | Graphile Worker job per step, Temporal, DBOS | ~50× the throughput of job-per-step in spike 3, immediate crash recovery. See [ADR-0004](adr/0004-journey-runtime.md) |
+| Background jobs | **Graphile Worker** | MIT | pg-boss | Cron, maintenance, exports; jobs enqueued in the same transaction as state changes |
 | Object storage | **Any S3-compatible API** (+ local filesystem driver) | — | MinIO (AGPL; community edition reduced) | Users pick AWS S3, Cloudflare R2, Garage, SeaweedFS… |
 
 ## Product features
@@ -37,7 +38,7 @@ Selection criteria, in priority order: **(1) maintainable by one person, (2) per
 | Flow canvas | **React Flow (xyflow)** | MIT | Rete.js, JointJS (commercial) | De-facto standard for node editors |
 | Graph layout | **ELK.js** (or dagre) | EPL-2.0 / MIT | — | Auto-layout of journeys |
 | Email format | **MJML** | MIT | React Email, raw HTML | Responsive & client-safe, declarative, LLM-friendly. See [ADR-0006](adr/0006-email-format-and-editor.md) |
-| Email visual editor | **GrapesJS + grapesjs-mjml** | BSD-3 | Easy Email (MIT), Unlayer (proprietary), Beefree (proprietary) | Mature, imports/exports MJML round-trip |
+| Email visual editor | **GrapesJS + grapesjs-mjml** (with a small normalisation adapter) | BSD-3 | Easy Email (MIT), Unlayer (proprietary), Beefree (proprietary) | Round-trips agent-written MJML + Liquid pixel-identical once self-closing tags are expanded and Liquid is unescaped (spike 2); Easy Email drops preview text and restyles templates |
 | Templating | **LiquidJS** | MIT | Handlebars | Sandboxed, marketer-familiar (Shopify, Braze use Liquid) |
 | Charts | **Apache ECharts** | Apache-2.0 | Recharts, Chart.js | Rich chart types (funnels, dual axes), SVG renderer, themeable from tokens |
 | Code editor | **Monaco** | MIT | CodeMirror 6 | MJML/Liquid/JSON editing with schema-aware completion |
@@ -49,7 +50,7 @@ Selection criteria, in priority order: **(1) maintainable by one person, (2) per
 
 | Area | Choice | License | Alternatives considered | Why |
 |---|---|---|---|---|
-| MCP | **Official MCP TypeScript SDK** (Streamable HTTP) | MIT | FastMCP | Reference implementation |
+| MCP | **Official MCP TypeScript SDK v2** (`@modelcontextprotocol/server` + `client`, spec 2026-07-28, stateless `createMcpHandler`) | Apache-2.0 | FastMCP, SDK v1 | Reference implementation; stateless per-request serving needs no session store (validated in spike 1) |
 | LLM abstraction | **Vercel AI SDK** (`ai`, `@ai-sdk/anthropic`, `@ai-sdk/openai-compatible`) | Apache-2.0 | LangChain.js, direct SDKs | Thin, typed structured output with zod, both endpoint styles with custom base URLs |
 | PII redaction | Schema-driven masking + rule detectors; **Presidio** optional sidecar later | MIT | — | Avoid a Python service in v1 |
 
@@ -57,7 +58,7 @@ Selection criteria, in priority order: **(1) maintainable by one person, (2) per
 
 | Area | Choice | License | Alternatives considered | Why |
 |---|---|---|---|---|
-| Authentication | **Better Auth** (organizations, passkeys, 2FA, OAuth 2.1 provider plugin for MCP, SSO plugin later) | MIT | Keycloak, Ory, Zitadel, Auth.js | Library, not another server to run; covers MCP OAuth needs. Keycloak/Zitadel remain options as external IdPs via OIDC |
+| Authentication | **Better Auth** (organizations, passkeys, 2FA, `@better-auth/mcp` OAuth 2.1 authorization server for MCP, SSO plugin later; all packages pinned to one version) | MIT | Keycloak, Ory, Zitadel, Auth.js | Library, not another server to run; covers MCP OAuth needs. Keycloak/Zitadel remain options as external IdPs via OIDC |
 | Authorization | Own RBAC in command layer → OpenFGA if needed | — / Apache-2.0 | Casbin, Cerbos | Start simple |
 | Key management | Pluggable: env/file KEK, AWS/GCP KMS, **OpenBao** transit | MPL-2.0 | Vault (BSL) | OpenBao is the open fork of Vault |
 | HTML sanitizing | **DOMPurify** | Apache-2.0 / MPL-2.0 | — | Experience content |

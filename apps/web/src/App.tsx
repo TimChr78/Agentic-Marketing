@@ -2,6 +2,7 @@ import { lazy, Suspense, useEffect } from 'react';
 import {
   BarChart3,
   Bot,
+  Database,
   CheckCircle2,
   Globe,
   LayoutDashboard,
@@ -22,6 +23,7 @@ import { Analytics } from './screens/Analytics';
 import { Approvals } from './screens/Approvals';
 import { Setup } from './screens/Setup';
 import { Copilot } from './copilot/Copilot';
+import { LiveWorkspace } from './screens/LiveWorkspace';
 
 // GrapesJS is large; load it only when the e-mail editor opens.
 const EmailEditor = lazy(() => import('./screens/EmailEditor'));
@@ -35,6 +37,7 @@ const nav: { route: Route; label: string; icon: typeof Workflow }[] = [
   { route: 'analytics', label: 'Analytics', icon: BarChart3 },
   { route: 'approvals', label: 'Approvals', icon: CheckCircle2 },
   { route: 'setup', label: 'Channels & MCP', icon: PlugZap },
+  { route: 'workspace', label: 'Live workspace (API)', icon: Database },
 ];
 
 const fullBleed: Route[] = ['email'];
@@ -115,6 +118,7 @@ export default function App() {
           {route === 'analytics' && <Analytics />}
           {route === 'approvals' && <Approvals />}
           {route === 'setup' && <Setup />}
+          {route === 'workspace' && <LiveWorkspace />}
         </Suspense>
       </main>
 

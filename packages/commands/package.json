@@ -1,0 +1,19 @@
+{
+  "name": "@agentic-marketing/commands",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "dependencies": {
+    "@agentic-marketing/core": "workspace:*",
+    "@agentic-marketing/db": "workspace:*",
+    "@opentelemetry/api": "1.10.0",
+    "drizzle-orm": "0.45.4",
+    "zod": "4.6.7"
+  }
+}

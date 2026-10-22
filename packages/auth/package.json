@@ -1,0 +1,24 @@
+{
+  "name": "@agentic-marketing/auth",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "dependencies": {
+    "@agentic-marketing/commands": "workspace:*",
+    "@agentic-marketing/db": "workspace:*",
+    "@better-auth/core": "1.7.7",
+    "@better-auth/mcp": "1.7.7",
+    "@better-auth/oauth-provider": "1.7.7",
+    "@better-auth/utils": "0.4.2",
+    "@better-fetch/fetch": "1.3.2",
+    "better-auth": "1.7.7",
+    "better-call": "1.4.0",
+    "jose": "6.2.13"
+  }
+}

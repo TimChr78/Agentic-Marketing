@@ -45,11 +45,11 @@ flowchart LR
 
 | Concern | Single node | At 10M profiles / ~5k events/s peak |
 |---|---|---|
-| Ingest | in `all` process | dedicated `ingest` pods, stateless; ~1–2k events/s per pod in Node → 4–6 pods |
+| Ingest | in `all` process | dedicated `ingest` pods, stateless; spike 4 measured ~18k events/s per Node process (JetStream-acked), so 5k events/s peak needs 1–2 pods plus headroom |
 | Bus | single NATS | 3-node JetStream cluster, subjects partitioned by `workspace` + hash(profile) for ordered per-profile processing |
 | Events | single ClickHouse | single large node still feasible (~500M rows/month compressed); then 2 shards × 2 replicas with ClickHouse Keeper |
 | Profiles (Postgres) | single | ~10M rows × few KB → tens of GB: fine on one primary; read replicas for analytics/UI; hash-partition `journey_participants` & `identifiers` |
-| Journey steps | Graphile Worker in process | dedicated worker pods; tuned concurrency; Postgres is the bottleneck at very high rates → upgrade path is swapping the `DurableRuntime` port to Temporal |
+| Journey steps | batched sweeper in process | more sweeper processes, then hash-partition `participants`; spike 3 measured ~45k participant transitions/s on one 4-vCPU box, far above the 10M-profile need |
 | Decide | in process | dedicated pods + Valkey replicas; optional edge deployment (Hono runs on edge runtimes) with a regional Valkey |
 | Email | provider-bound | 50M/month ≈ 20/s average, bursts of thousands/s → adapter rate limits + queue smoothing |
 

@@ -1,0 +1,15 @@
+{
+  "name": "@agentic-marketing/core",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "dependencies": {
+    "uuidv7": "1.2.1"
+  }
+}

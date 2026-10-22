@@ -1,0 +1,35 @@
+{
+  "name": "@agentic-marketing/server",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch --env-file-if-exists=../../.env src/main.ts",
+    "start": "tsx src/main.ts",
+    "cli": "tsx --env-file-if-exists=../../.env src/cli.ts",
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "dependencies": {
+    "@agentic-marketing/artifacts": "workspace:*",
+    "@agentic-marketing/auth": "workspace:*",
+    "@agentic-marketing/client": "workspace:*",
+    "@agentic-marketing/commands": "workspace:*",
+    "@agentic-marketing/core": "workspace:*",
+    "@agentic-marketing/db": "workspace:*",
+    "@agentic-marketing/secrets": "workspace:*",
+    "@agentic-marketing/telemetry": "workspace:*",
+    "@better-auth/mcp": "1.7.7",
+    "@better-auth/oauth-provider": "1.7.7",
+    "@hono/node-server": "2.1.5",
+    "@hono/zod-openapi": "1.6.3",
+    "@modelcontextprotocol/server": "2.3.1",
+    "hono": "4.13.13",
+    "tsx": "4.23.15",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "2.3.1",
+    "@types/pg": "8.23.1",
+    "pg": "8.23.1"
+  }
+}

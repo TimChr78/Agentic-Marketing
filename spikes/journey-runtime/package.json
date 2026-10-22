@@ -1,0 +1,21 @@
+{
+  "name": "@agentic-marketing/spike-journey-runtime",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "bench": "tsx src/bench.ts",
+    "crash": "tsx src/crash-test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "graphile-worker": "0.17.3",
+    "pg": "8.23.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "@types/pg": "^8.23.1",
+    "tsx": "4.23.15",
+    "typescript": "^7.0.2"
+  }
+}

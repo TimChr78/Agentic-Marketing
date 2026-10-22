@@ -1,0 +1,42 @@
+<mjml>
+  <mj-head>
+    <mj-font name="Inter" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600" />
+    <mj-attributes>
+      <mj-all font-family="Inter, Helvetica, Arial, sans-serif" />
+    </mj-attributes>
+  </mj-head>
+  <mj-body background-color="#eef0f2">
+    <mj-wrapper background-color="#ffffff" border-radius="8px" padding="24px">
+      <mj-section padding="0">
+        <mj-group>
+          <mj-column>
+            <mj-text font-weight="600">Order {{ order.number }}</mj-text>
+          </mj-column>
+          <mj-column>
+            <mj-text align="right" color="#6b7280">{{ order.created_at | date: "%d.%m.%Y" }}</mj-text>
+          </mj-column>
+        </mj-group>
+      </mj-section>
+      <mj-section padding="8px 0">
+        <mj-column>
+          <mj-divider border-color="#dce1e9" border-width="1px" />
+          <mj-raw><!-- htmlmin:ignore -->{% for line in order.lines %}<!-- htmlmin:ignore --></mj-raw>
+          <mj-text padding="4px 25px">{{ line.quantity }} × {{ line.name }} — {{ line.total | money: "DKK" }}</mj-text>
+          <mj-raw><!-- htmlmin:ignore -->{% endfor %}<!-- htmlmin:ignore --></mj-raw>
+          <mj-divider border-color="#dce1e9" border-width="1px" />
+          <mj-text font-weight="600" align="right">Total {{ order.total | money: "DKK" }}</mj-text>
+        </mj-column>
+      </mj-section>
+      <mj-section padding="0">
+        <mj-column>
+          <mj-accordion>
+            <mj-accordion-element>
+              <mj-accordion-title>Returns</mj-accordion-title>
+              <mj-accordion-text>60-day free returns at any Fjeldvej store or by post.</mj-accordion-text>
+            </mj-accordion-element>
+          </mj-accordion>
+        </mj-column>
+      </mj-section>
+    </mj-wrapper>
+  </mj-body>
+</mjml>

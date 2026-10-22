@@ -101,7 +101,7 @@ flowchart LR
 1. **Build a new core, using Dittofeed as a reference rather than forking it** — [ADR-0001](adr/0001-build-vs-fork.md)
 2. **TypeScript modular monolith, one image, role-based processes** — [ADR-0002](adr/0002-modular-monolith-typescript.md)
 3. **PostgreSQL + ClickHouse + NATS JetStream + Valkey** as the only stateful components — [ADR-0003](adr/0003-storage-and-event-bus.md)
-4. **Own journey runtime on Postgres (Graphile Worker) instead of Temporal** — [ADR-0004](adr/0004-journey-runtime.md)
+4. **Own journey runtime on Postgres: participants table as a batched queue (validated: ~45k participants/s, crash-safe)** — [ADR-0004](adr/0004-journey-runtime.md)
 5. **One command registry generates REST, MCP and UI client** — [ADR-0005](adr/0005-command-registry-mcp.md)
 6. **MJML as canonical email format, GrapesJS as visual editor** — [ADR-0006](adr/0006-email-format-and-editor.md)
 7. **Single send gateway enforces consent/lawful basis for every outbound message** — [ADR-0007](adr/0007-send-gateway-consent.md)

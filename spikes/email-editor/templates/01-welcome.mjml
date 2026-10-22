@@ -1,0 +1,43 @@
+<mjml>
+  <mj-head>
+    <mj-title>Welcome to Fjeldvej Outdoor</mj-title>
+    <mj-preview>Your 10% welcome code is inside, {{ profile.first_name | default: "friend" }}</mj-preview>
+    <mj-attributes>
+      <mj-all font-family="Helvetica, Arial, sans-serif" />
+      <mj-text font-size="15px" line-height="1.6" color="#374151" />
+      <mj-button background-color="#2f5d43" color="#ffffff" border-radius="4px" font-weight="600" />
+    </mj-attributes>
+    <mj-style inline="inline">
+      .muted a { color: #6b7280; }
+    </mj-style>
+  </mj-head>
+  <mj-body background-color="#f3efe6" width="600px">
+    <mj-section background-color="#2f5d43" padding="20px 24px">
+      <mj-column>
+        <mj-text font-size="22px" font-weight="700" color="#f3efe6" font-family="Georgia, serif">Fjeldvej Outdoor</mj-text>
+      </mj-column>
+    </mj-section>
+    <mj-section background-color="#ffffff" padding="32px 24px">
+      <mj-column>
+        <mj-text font-size="26px" color="#1f2a22" font-family="Georgia, serif">Hej {{ profile.first_name | default: "there" }}, welcome aboard</mj-text>
+        <mj-text>We pick gear the way you pick routes: for the weather you will actually meet. Here is what people in {{ profile.city | default: "Denmark" }} are buying this week.</mj-text>
+        <mj-button href="https://fjeldvej.example/{{ profile.preferred_category | default: 'new' }}?utm_source=welcome">Explore {{ profile.preferred_category | default: "the autumn range" }}</mj-button>
+      </mj-column>
+    </mj-section>
+    <mj-section background-color="#ffffff" padding="0 24px 24px">
+      <mj-column>
+        <mj-text font-weight="700">Free returns</mj-text>
+        <mj-text>60 days, no questions.</mj-text>
+      </mj-column>
+      <mj-column>
+        <mj-text font-weight="700">Repair service</mj-text>
+        <mj-text>We fix zips, seams and soles.</mj-text>
+      </mj-column>
+    </mj-section>
+    <mj-section padding="16px 24px">
+      <mj-column>
+        <mj-text css-class="muted" font-size="11px" color="#6b7280">You get this e-mail because you created an account. <a href="{{ unsubscribe_url }}">Unsubscribe</a> · Fjeldvej Outdoor ApS, Vesterbrogade 1, 1620 København V</mj-text>
+      </mj-column>
+    </mj-section>
+  </mj-body>
+</mjml>
