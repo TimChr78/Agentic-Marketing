@@ -3,6 +3,8 @@ import { CheckCircle2, FilePlus2, History, LogIn, RefreshCw, Send, ShieldCheck, 
 import { ApiError } from '@agentic-marketing/client';
 import { AuthorBadge, Button, Card, PageHeader, Pill, cx, inputCls, timeAgo } from '../components/ui';
 import { LiveProfiles } from './LiveProfiles';
+import { LiveAi } from './live/LiveAi';
+import { LiveCopilot } from './live/LiveCopilot';
 import { LiveEmails } from './live/LiveEmails';
 import { LiveExperiences } from './live/LiveExperiences';
 import { LiveJourneys } from './live/LiveJourneys';
@@ -21,7 +23,7 @@ export function LiveWorkspace() {
   const [ws, setWs] = useState<Workspace | null>(null);
   const [status, setStatus] = useState<'loading' | 'signed-out' | 'offline' | 'ready'>('loading');
   const [error, setError] = useState('');
-  const [tab, setTab] = useState<'artifacts' | 'journeys' | 'emails' | 'experiences' | 'people'>('artifacts');
+  const [tab, setTab] = useState<'artifacts' | 'journeys' | 'emails' | 'experiences' | 'ai' | 'copilot' | 'people'>('artifacts');
 
   const load = useCallback(async () => {
     try {
@@ -67,6 +69,8 @@ export function LiveWorkspace() {
             ['journeys', 'Journeys'],
             ['emails', 'E-mails'],
             ['experiences', 'Web experiences'],
+            ['ai', 'AI'],
+            ['copilot', 'Copilot'],
             ['people', 'People & data'],
           ] as const
         ).map(([key, label]) => (
@@ -85,6 +89,8 @@ export function LiveWorkspace() {
       {tab === 'journeys' && <LiveJourneys onError={setError} />}
       {tab === 'emails' && <LiveEmails canAdmin={ws!.you.permissions.includes('workspace:admin')} onError={setError} />}
       {tab === 'experiences' && <LiveExperiences onError={setError} />}
+      {tab === 'ai' && <LiveAi canAdmin={ws!.you.permissions.includes('workspace:admin')} onError={setError} />}
+      {tab === 'copilot' && <LiveCopilot />}
       {tab === 'people' && <LiveProfiles canAdmin={ws!.you.permissions.includes('workspace:admin')} onError={setError} />}
     </div>
   );

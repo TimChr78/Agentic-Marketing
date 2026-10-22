@@ -17,6 +17,7 @@ import { mcpServerFor } from './mcp';
 // gets, and every call goes through the executor (validation, permissions, approvals, audit).
 // Sending, approving, erasing, personal data and settings are not granted to it.
 
+const MAX_STEPS = 12;
 const COPILOT_SCOPES: Permission[] = [
   'artifacts:read',
   'artifacts:write',
@@ -110,7 +111,7 @@ export function copilotApi(deps: { auth: Auth; db: Db; executor: Executor; kp: K
             system: SYSTEM,
             messages: [...(history as ModelMessage[]), { role: 'user', content: message }],
             tools: toolset,
-            stopWhen: isStepCount(12),
+            stopWhen: isStepCount(MAX_STEPS),
             maxOutputTokens: 2000,
             maxRetries: 1,
             timeout: 120_000,
@@ -120,6 +121,11 @@ export function copilotApi(deps: { auth: Auth; db: Db; executor: Executor; kp: K
           });
           usage = { inputTokens: r.totalUsage.inputTokens ?? 0, outputTokens: r.totalUsage.outputTokens ?? 0 };
           if (r.text) emit({ type: 'text', text: r.text });
+          else if (r.finishReason === 'tool-calls')
+            emit({
+              type: 'text',
+              text: `I stopped after ${MAX_STEPS} steps without finishing. Tell me how to continue, or narrow the task.`,
+            });
           emit({
             type: 'done',
             history: [...(history as ModelMessage[]), { role: 'user', content: message }, ...r.response.messages],
