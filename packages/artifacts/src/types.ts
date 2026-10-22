@@ -319,6 +319,39 @@ const deliveryPolicy = z.object({
     .prefault({}),
 });
 
+// Conversion map (Phase 9): which of our events are conversions on which ad platform.
+const ConnectionRef = z.string().regex(/^con_[0-9a-f]{32}$/, 'A connection id (con_…)');
+const PropPath = z
+  .string()
+  .regex(/^[A-Za-z0-9_]{1,64}(\.[A-Za-z0-9_]{1,64}){0,3}$/)
+  .describe('A property of the event, e.g. "total" or "order.total"');
+const conversionMap = z.object({
+  rules: z
+    .array(
+      z.object({
+        event: z.string().min(1).max(200).describe('Our event name, e.g. "Order Completed" or "Subscription Confirmed"'),
+        value: PropPath.optional().describe('Where the conversion value is'),
+        currency: z
+          .string()
+          .regex(/^[A-Z]{3}$/)
+          .optional()
+          .describe('Fixed currency, e.g. "DKK"; or set currencyProperty'),
+        currencyProperty: PropPath.optional(),
+        meta: z
+          .object({ connection: ConnectionRef, eventName: z.string().min(1).max(100).describe('e.g. "Purchase" or "Lead"') })
+          .optional(),
+        google: z
+          .object({
+            connection: ConnectionRef,
+            conversionAction: z.string().regex(/^\d{1,20}$/, 'The numeric conversion action id'),
+          })
+          .optional(),
+      }),
+    )
+    .min(1)
+    .max(50),
+});
+
 // Segment DSL (data-platform.md §6): a JSON condition tree that agents read and write and the
 // UI edits. The same definition is evaluated in batch and per person as events arrive.
 const Duration = z
@@ -594,6 +627,7 @@ const broadcast = z.object({
 });
 
 export type FormDefinition = z.output<typeof form>;
+export type ConversionMap = z.output<typeof conversionMap>;
 export type SmsTemplate = z.output<typeof smsTemplate>;
 export type DeliveryPolicy = z.output<typeof deliveryPolicy>;
 export const DEFAULT_DELIVERY_POLICY: DeliveryPolicy = deliveryPolicy.parse({});
@@ -669,6 +703,14 @@ export const artifactTypes = {
     description:
       'Processing purposes with their lawful basis (consent, legitimate interest with LIA, contract, legal obligation). One per workspace.',
     content: purposes,
+    singleton: true,
+  },
+  conversion_map: {
+    prefix: 'cvm',
+    label: 'Conversion map',
+    description:
+      'Which events are conversions on which ad platform (Meta Conversions API, Google Data Manager), with value and currency. Sent only for people who allowed ad_measurement. One per workspace.',
+    content: conversionMap,
     singleton: true,
   },
   delivery_policy: {

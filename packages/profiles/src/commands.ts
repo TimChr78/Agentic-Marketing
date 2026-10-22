@@ -354,6 +354,9 @@ export const exportProfile = defineCommand({
     aiDecisions: z
       .array(z.record(z.string(), z.unknown()))
       .describe('Automated decisions and texts made for the person by AI steps, with the rationale (GDPR Art. 15 and 22)'),
+    adUploads: z
+      .array(z.record(z.string(), z.unknown()))
+      .describe('Conversions sent about the person to ad platforms (recipients under GDPR Art. 15), with what was sent'),
   }),
   permission: 'profiles:pii',
   effect: 'read',
@@ -392,7 +395,27 @@ export const exportProfile = defineCommand({
       rationale: c.rationale,
       fallbackReason: c.error,
     }));
-    return { exportedAt: new Date().toISOString(), profile, consentRecords: records, events, aiDecisions };
+    const adUploads = (
+      await ctx.tx
+        .select()
+        .from(schema.deliveries)
+        .where(and(eq(schema.deliveries.kind, 'ad_conversion'), inArray(schema.deliveries.profileId, family)))
+        .orderBy(schema.deliveries.createdAt)
+    ).map((d) => {
+      const p = d.payload as { name?: string; at?: string; value?: number; currency?: string };
+      return {
+        at: d.createdAt.toISOString(),
+        platform: d.action,
+        connection: d.targetId,
+        event: p.name,
+        eventAt: p.at,
+        value: p.value,
+        currency: p.currency,
+        status: d.status,
+        sent: 'hashed e-mail and phone, ad click ids, the event time and value',
+      };
+    });
+    return { exportedAt: new Date().toISOString(), profile, consentRecords: records, events, aiDecisions, adUploads };
   },
 });
 

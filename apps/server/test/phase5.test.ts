@@ -150,7 +150,7 @@ describe('outbound webhooks', () => {
 describe('inbound webhooks and connectors', () => {
   it('lists the connectors with their schemas', async () => {
     const { connectors } = await t.api(owner).call('connectors.list', {});
-    expect(connectors.map((c) => c.id)).toEqual(['webhook', 'shopify', 'slack', 'http', 'oauth_http']);
+    expect(connectors.map((c) => c.id)).toEqual(['webhook', 'shopify', 'slack', 'http', 'oauth_http', 'meta_ads', 'google_ads']);
     expect(connectors.find((c) => c.id === 'slack')!.actions.map((a) => a.name)).toEqual(['postMessage']);
   });
 

@@ -27,6 +27,7 @@ It runs as one Docker image (a TypeScript modular monolith) next to Postgres, Cl
 - **Journeys:** a visual builder and an engine with waits, branches, e-mail, webhooks, connector actions and AI steps (decide, generate) with fallbacks.
 - **Web personalization:** experiences and A/B tests served by a decision API, with an anti-flicker snippet and consent-aware targeting.
 - **AI:** your own providers (Anthropic, OpenAI, Ollama…), metering and budgets, prompt artifacts, redaction, a decision log, and an in-app copilot over MCP.
+- **Performance marketing:** conversions to Meta (Conversions API) and Google Ads (Data Manager API) from a conversion map, for people who allowed `ad_measurement`. Identifiers are hashed, click ids and consent fields are included, test modes are built in, and each upload is listed in the person's data export.
 - **Integrations:**
   - signed outbound webhooks;
   - a connector SDK (Shopify, Slack, HTTP, and OAuth 2.0 APIs with automatic token refresh);
@@ -73,7 +74,7 @@ Wave 1 (Phases −1 to 5) is complete: foundations, data platform, e-mail, segme
 | 6 | Pilot live and hardening | The code items are done: e-mail events on profiles, retention, UTM tagging, test sends, Newsletter screen, Docker smoke test. The MartechSignal run is next. |
 | 7 | Delivery beyond SMTP, and SMS | Done: Cloudflare Email Service adapter, delivery policy (caps, quiet hours, auto-pause), deliverability health and domain check, Twilio SMS. Later: GatewayAPI, SMS double opt-in, provider warm-up |
 | 8 | Consent everywhere | Done: consent banner with Consent Mode v2, ad purposes, click-id capture, OAuth 2.0 connections, shared rate limits, bot filtering |
-| 9 | Performance marketing | Next: Meta Conversions API and audiences, Google Data Manager API, spend and ROAS, Microsoft |
+| 9 | Performance marketing | Part 1 done: conversions to Meta and Google with test modes. Next: audience sync, spend import and ROAS, Microsoft |
 | 10 | Scale and operations | Planned |
 | 11 | Enterprise and ecosystem | Planned |
 

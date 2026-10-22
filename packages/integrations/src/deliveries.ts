@@ -46,7 +46,17 @@ type Outcome =
   | { ok: true; statusCode?: number; response: unknown }
   | { ok: false; statusCode?: number; error: string; permanent?: boolean };
 
+/**
+ * Handlers for delivery kinds other packages add (e.g. ad conversions). They return the outcome
+ * like webhooks do; `permanent` failures are not retried.
+ */
+export const deliveryHandlers = new Map<string, (db: Db, d: Row, deps: DeliveryDeps) => Promise<Outcome | 'later'>>();
+export type DeliveryOutcome = Outcome;
+export type DeliveryRow = Row;
+
 async function attempt(db: Db, d: Row, deps: DeliveryDeps): Promise<Outcome | 'later'> {
+  const handler = deliveryHandlers.get(d.kind);
+  if (handler) return handler(db, d, deps);
   if (d.kind === 'webhook') {
     const target = await db.withWorkspace(d.workspaceId, async (tx) => {
       const [e] = await tx.select().from(schema.webhookEndpoints).where(eq(schema.webhookEndpoints.id, d.targetId));
@@ -104,7 +114,7 @@ async function handle(db: Db, d: Row, deps: DeliveryDeps) {
     await set({ status: 'done', statusCode: out.statusCode ?? null, response: out.response, error: null, finishedAt: new Date() });
     return wake(db, d, { ok: true, result: out.response });
   }
-  const backoff = d.kind === 'webhook' ? (deps.webhookBackoffMs ?? WEBHOOK_BACKOFF) : (deps.actionBackoffMs ?? ACTION_BACKOFF);
+  const backoff = d.kind === 'action' ? (deps.actionBackoffMs ?? ACTION_BACKOFF) : (deps.webhookBackoffMs ?? WEBHOOK_BACKOFF);
   const last = out.permanent || d.attempts > backoff.length;
   if (!last)
     return set({
@@ -114,7 +124,7 @@ async function handle(db: Db, d: Row, deps: DeliveryDeps) {
       nextAttemptAt: new Date(Date.now() + backoff[d.attempts - 1]),
     });
   await set({
-    status: d.kind === 'webhook' ? 'dead' : 'failed',
+    status: d.kind === 'action' ? 'failed' : 'dead',
     statusCode: out.statusCode ?? null,
     error: out.error,
     finishedAt: new Date(),

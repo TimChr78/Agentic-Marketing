@@ -1,3 +1,4 @@
+import { adCommands } from '@agentic-marketing/ads';
 import { aiCommands } from '@agentic-marketing/ai';
 import { artifactCommands, workspaceCommands } from '@agentic-marketing/artifacts';
 import { audienceCommands } from '@agentic-marketing/audience';
@@ -39,6 +40,7 @@ export const commands = [
   ...aiCommands,
   ...audienceCommands,
   ...connectionCommands,
+  ...adCommands,
   ...oauthCommands,
   ...webhookCommands,
   ...secretCommands,

@@ -538,7 +538,7 @@ export const deliveries = pgTable(
   {
     workspaceId: uuid('workspace_id').notNull(),
     id: text('id').notNull(),
-    kind: text('kind').$type<'webhook' | 'action'>().notNull(),
+    kind: text('kind').$type<'webhook' | 'action' | 'ad_conversion'>().notNull(),
     targetId: text('target_id').notNull(),
     action: text('action'),
     payload: jsonb('payload').$type<unknown>().notNull(),

@@ -253,3 +253,8 @@ export const oauthHttpConnector = defineConnector({
 export const connectors = Object.fromEntries(
   [webhookConnector, shopifyConnector, slackConnector, httpConnector, oauthHttpConnector].map((c) => [c.id, c]),
 ) as Record<string, import('../sdk').Connector>;
+
+/** Adds a connector from another package (e.g. the ad platforms), at import time. */
+export function registerConnector(c: import('../sdk').Connector) {
+  connectors[c.id] = c;
+}
