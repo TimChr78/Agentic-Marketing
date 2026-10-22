@@ -6,6 +6,7 @@ import { LiveProfiles } from './LiveProfiles';
 import { LiveAi } from './live/LiveAi';
 import { LiveCopilot } from './live/LiveCopilot';
 import { LiveEmails } from './live/LiveEmails';
+import { LiveIntegrations } from './live/LiveIntegrations';
 import { LiveExperiences } from './live/LiveExperiences';
 import { LiveJourneys } from './live/LiveJourneys';
 import { api, errText, type Out } from './liveApi';
@@ -23,7 +24,7 @@ export function LiveWorkspace() {
   const [ws, setWs] = useState<Workspace | null>(null);
   const [status, setStatus] = useState<'loading' | 'signed-out' | 'offline' | 'ready'>('loading');
   const [error, setError] = useState('');
-  const [tab, setTab] = useState<'artifacts' | 'journeys' | 'emails' | 'experiences' | 'ai' | 'copilot' | 'people'>('artifacts');
+  const [tab, setTab] = useState<'artifacts' | 'journeys' | 'emails' | 'experiences' | 'ai' | 'integrations' | 'copilot' | 'people'>('artifacts');
 
   const load = useCallback(async () => {
     try {
@@ -70,6 +71,7 @@ export function LiveWorkspace() {
             ['emails', 'E-mails'],
             ['experiences', 'Web experiences'],
             ['ai', 'AI'],
+            ['integrations', 'Integrations'],
             ['copilot', 'Copilot'],
             ['people', 'People & data'],
           ] as const
@@ -90,6 +92,9 @@ export function LiveWorkspace() {
       {tab === 'emails' && <LiveEmails canAdmin={ws!.you.permissions.includes('workspace:admin')} onError={setError} />}
       {tab === 'experiences' && <LiveExperiences onError={setError} />}
       {tab === 'ai' && <LiveAi canAdmin={ws!.you.permissions.includes('workspace:admin')} onError={setError} />}
+      {tab === 'integrations' && (
+        <LiveIntegrations canAdmin={ws!.you.permissions.includes('workspace:admin')} permissions={ws!.you.permissions} onError={setError} />
+      )}
       {tab === 'copilot' && <LiveCopilot />}
       {tab === 'people' && <LiveProfiles canAdmin={ws!.you.permissions.includes('workspace:admin')} onError={setError} />}
     </div>

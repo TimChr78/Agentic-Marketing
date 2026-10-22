@@ -51,6 +51,8 @@ export type NodeKind =
   | 'split'
   | 'email'
   | 'webhook'
+  | 'action'
+  | 'transform'
   | 'updateProfile'
   | 'aiDecide'
   | 'aiGenerate'

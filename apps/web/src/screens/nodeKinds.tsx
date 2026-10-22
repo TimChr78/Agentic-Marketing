@@ -1,4 +1,6 @@
 import {
+  Braces,
+  Cable,
   Clock,
   Flag,
   GitBranch,
@@ -25,6 +27,8 @@ export const kindMeta: Record<NodeKind, { label: string; icon: LucideIcon; group
   exit: { label: 'Exit', icon: LogOut, group: 'Flow', defaults: {} },
   email: { label: 'Send e-mail', icon: Mail, group: 'Action', defaults: { template: 'tpl_welcome', purpose: 'marketing_email' } },
   webhook: { label: 'Webhook', icon: Webhook, group: 'Action', defaults: { url: 'https://hooks.example.com/crm', method: 'POST' } },
+  action: { label: 'Connector action', icon: Cable, group: 'Action', defaults: { connection: 'con_slack', action: 'postMessage' } },
+  transform: { label: 'Transform', icon: Braces, group: 'Flow', defaults: { set: 'total', expression: '$sum(event.properties.products.price)' } },
   updateProfile: { label: 'Update profile', icon: UserCog, group: 'Action', defaults: { trait: 'lifecycle_stage', value: 'engaged' } },
   aiDecide: { label: 'AI decide', icon: Sparkles, group: 'AI', ai: true, defaults: { prompt: 'prm_nba@1', options: 'continue | exit', fallback: 'exit' } },
   aiGenerate: { label: 'AI generate', icon: Wand2, group: 'AI', ai: true, defaults: { slot: 'intro', prompt: 'prm_copy@1', maxChars: 200 } },
@@ -55,6 +59,10 @@ export function configSummary(n: JourneyNode) {
       return `${c.method} ${c.url}`;
     case 'updateProfile':
       return `${c.trait} = ${c.value}`;
+    case 'action':
+      return `${c.action} via ${c.connection}`;
+    case 'transform':
+      return `vars.${c.set} = ${c.expression}`;
     default:
       return '';
   }
