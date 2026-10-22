@@ -37,12 +37,12 @@ interface ChannelAdapter<Config, Message> {
 
 | Channel | Phase | Adapters |
 |---|---|---|
-| Email | 2 | **SMTP first** (Nodemailer, MIT — also covers Mailpit for dev, Postfix, any relay), Amazon SES, Postmark, SendGrid, Mailgun, Brevo; EU-hosted providers documented |
+| Email | 2 | SMTP (Nodemailer, MIT — also covers Mailpit for dev, Postfix, any relay), Amazon SES, Postmark, Brevo ([ADR-0011](adr/0011-email-delivery-providers.md)); Mailgun, SendGrid, Resend later |
 | Webhooks | 2 | Generic HTTPS with HMAC signatures, retries with backoff, dead letter; SSRF-protected egress |
 | SMS | 3 | Twilio, Vonage, MessageBird/Bird, 46elks (EU) |
 | Push | 3 | FCM, APNs, Web Push (VAPID) |
 
-SMTP relays give no delivery webhooks, so the SMTP adapter handles bounces via VERP return-paths and a bounce mailbox (IMAP polling, DSN parsing per RFC 3464) and synchronous SMTP rejections.
+SMTP itself reports no delivery events, so the SMTP adapter can be paired with the relay provider's webhooks (SES, Postmark, Brevo …); a bounce mailbox (VERP, DSN parsing per RFC 3464) is a later option for pure-SMTP setups.
 
 Email-specific features: dedicated sending domains with SPF/DKIM/DMARC setup guidance, one-click unsubscribe (RFC 8058) on every marketing email, bounce & complaint processing into suppression, open/click tracking **configurable per workspace** — default: **click tracking on, open-pixel tracking off** (pixel tracking may require consent in the EU), warm-up throttles.
 
