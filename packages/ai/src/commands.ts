@@ -2,6 +2,8 @@ import { defineCommand } from '@agentic-marketing/commands';
 import { schema } from '@agentic-marketing/db';
 import { and, desc, eq, gte, lt, sql } from 'drizzle-orm';
 import { z } from 'zod';
+import { classifyCommands } from './classify';
+import { copilotCommands } from './copilot';
 import { testPrompt, testRunResults } from './prompts';
 import { createAiProvider, deleteAiProvider, listAiProviders, updateAiProvider } from './providers';
 
@@ -10,7 +12,7 @@ import { createAiProvider, deleteAiProvider, listAiProviders, updateAiProvider }
 
 const Call = z.object({
   id: z.string(),
-  kind: z.enum(['decide', 'generate', 'copilot', 'test']),
+  kind: z.enum(['decide', 'generate', 'copilot', 'test', 'classify']),
   status: z.enum(['pending', 'running', 'done', 'fallback', 'failed']),
   model: z.string().nullable(),
   promptId: z.string().nullable(),
@@ -25,6 +27,10 @@ const Call = z.object({
   inputTokens: z.number(),
   outputTokens: z.number(),
   latencyMs: z.number().nullable(),
+  cached: z.boolean().describe('Text served from the per-segment cache, without a model call'),
+  review: z
+    .object({ status: z.enum(['pending', 'reviewed']), verdict: z.enum(['good', 'bad']).nullable(), note: z.string().nullable() })
+    .nullable(),
   createdAt: z.string(),
 });
 
@@ -37,7 +43,7 @@ export const listAiCalls = defineCommand({
     journeyId: z.string().optional(),
     promptId: z.string().optional(),
     profileId: z.string().optional(),
-    kind: z.enum(['decide', 'generate', 'copilot', 'test']).optional(),
+    kind: z.enum(['decide', 'generate', 'copilot', 'test', 'classify']).optional(),
     limit: z.number().int().min(1).max(200).default(50),
     before: z.iso.datetime().optional(),
   }),
@@ -78,6 +84,8 @@ export const listAiCalls = defineCommand({
         inputTokens: r.inputTokens,
         outputTokens: r.outputTokens,
         latencyMs: r.latencyMs,
+        cached: r.cached,
+        review: r.reviewStatus ? { status: r.reviewStatus, verdict: r.reviewVerdict ?? null, note: r.reviewNote ?? null } : null,
         createdAt: r.createdAt.toISOString(),
       })),
     };
@@ -132,4 +140,6 @@ export const aiCommands = [
   testRunResults,
   listAiCalls,
   aiUsage,
+  ...classifyCommands,
+  ...copilotCommands,
 ] as const;

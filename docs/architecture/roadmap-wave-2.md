@@ -250,6 +250,13 @@ Not built yet: native BigQuery and Snowflake writers (they load the files); dele
 
 See [docs/identity.md](../identity.md). Not built yet: an SSO settings screen (endpoints only), SAML tested end to end against a real IdP.
 
+**Built (part b, AI):**
+- **`ai.classify`:** classify prompts label a text (a reply, a form message) as a job for the AI worker; `ai.classification` returns the label; with a person, consent is checked and the label can be stored in a trait.
+- **Generated text per segment:** generate prompts with `cache` write text once per combination of segments, from the segment names alone, and reuse it until it expires.
+- **Review samples:** `review.sampleRate` sets answers aside for people to judge (`ai.reviews`, `ai.review`), with a quality rate per prompt.
+- **Copilot:** token streaming, conversations stored on the server per person (the last 20 turns go to the model), past conversations in the UI.
+- **OpenAI OAuth:** not built. OpenAI opened "Sign in with ChatGPT" to third-party apps at DevDay 2026, for launch partners only; it lands when any app can register.
+
 ## Every known limitation, and where it lands
 
 | Limitation (where it was recorded) | Phase |
@@ -270,10 +277,10 @@ See [docs/identity.md](../identity.md). Not built yet: an SSO settings screen (e
 | Fixed-horizon experiment statistics only (Phase 3) | 11 |
 | No visual experience editor; no edge decide (Phase 3) | 11 |
 | Snapshot lag after scheduled segment refresh (Phase 3) | 10 (done) |
-| No generated-text caching, decision sampling or `ai.classify` (Phase 4) | 11 |
+| No generated-text caching, decision sampling or `ai.classify` (Phase 4) | 11 (done) |
 | AI budgets can be overshot; prompt tests in the command transaction (Phase 4) | 10 (done) |
-| No OAuth for LLM providers (Phase 4) | 11 |
-| Copilot streams steps, not tokens; history in the browser (Phase 4) | 11 |
+| No OAuth for LLM providers (Phase 4) | Later: OpenAI's "Sign in with ChatGPT" for third-party apps is open to launch partners only (DevDay 2026); revisit when it is open to all |
+| Copilot streams steps, not tokens; history in the browser (Phase 4) | 11 (done) |
 | No OAuth2 connectors / token store (Phase 5) | 8 (done) |
 | E-mail delivery events not in webhook subscriptions (Phase 5) | 6 (done) |
 | Rate limits per process; egress guard not on e-mail adapters (Phase 5) | 8 (rate limits shared: done) and 10 (HTTP e-mail and SMS adapters: done; SMTP connects directly) |

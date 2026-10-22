@@ -65,6 +65,12 @@ Give it the uses `journeys` (AI steps and prompt tests) and/or `copilot`. Withou
 
 People must allow the `ai_processing` purpose for AI steps to use their data. Templates use generated text as `{{ content.<slot> }}`. Tests use a scripted LLM server (`@agentic-marketing/ai/testing`) instead of a real provider.
 
+More from prompts:
+- **Classify** (`kind: "classify"`, the `options` are the labels): `ai.classify {artifactId, text, profileId?}` queues the call and returns a `callId`; `ai.classification {callId}` gives the label within seconds. The text reaches the model as delimited data. With a person, their `ai_processing` consent is checked and, if the prompt names a `trait`, the label is stored on their profile (never into a trait the tracking plan marks personal). Useful from n8n, e.g. to sort e-mail replies.
+- **Text per segment** (`cache: {segments, ttlHours}` on a generate prompt): the text is written once per combination of those segments, from the segment names alone, and reused for everyone in the same combination until it expires; the decision log marks reused answers `cached`.
+- **Review samples** (`review: {sampleRate}`): that share of answered calls waits in `ai.reviews` for a person's verdict (`ai.review`, good or bad, with a note); `ai.reviews` also gives each prompt's share of good answers.
+- **Copilot:** text streams in as the model writes it, and conversations are kept on the server per person (`copilot.conversations`, `copilot.conversation`, `copilot.deleteConversation`); only the last 20 turns go back to the model.
+
 ### Integrations
 
 See [integrations.md](integrations.md) for API tokens, webhooks, connectors and n8n. Outbound calls only reach public addresses; allow LAN targets such as a homelab n8n with `EGRESS_ALLOWED_HOSTS=n8n.lan,192.168.1.0/24`.

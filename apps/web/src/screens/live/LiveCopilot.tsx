@@ -1,20 +1,43 @@
 import { useEffect, useRef, useState } from 'react';
 import { Bot, ChevronRight, Loader2, Send, Wrench } from 'lucide-react';
 import { Button, Card, Pill, cx, inputCls } from '../../components/ui';
+import { api } from '../liveApi';
 
 // The copilot on the real API: the server runs the conversation with the workspace's copilot
-// provider, as an MCP client with an agent principal. Tool calls stream in as they happen.
+// provider, as an MCP client with an agent principal. Text streams in as the model writes it,
+// tool calls as they happen; conversations are kept on the server, so earlier ones can be opened.
 
 type Item =
   | { id: string; role: 'user' | 'assistant' | 'error'; text: string }
   | { id: string; role: 'tool'; name: string; input: unknown; output?: unknown; ok?: boolean };
 
 type Event =
+  | { type: 'conversation'; id: string; title: string }
+  | { type: 'user'; text: string }
+  | { type: 'delta'; text: string }
+  | { type: 'text'; text: string }
   | { type: 'tool'; id: string; name: string; input: unknown }
   | { type: 'toolResult'; id: string; name: string; ok: boolean; output: unknown }
-  | { type: 'text'; text: string }
   | { type: 'error'; message: string }
-  | { type: 'done'; history: unknown[]; usage: { inputTokens: number; outputTokens: number } };
+  | { type: 'done'; conversationId: string; usage: { inputTokens: number; outputTokens: number } };
+
+/** Folds one event into the conversation as shown: deltas grow the answer being written. */
+function apply(xs: Item[], e: Event, streaming: { id: string | null }): Item[] {
+  if (e.type === 'user') return [...xs, { id: nid(), role: 'user', text: e.text }];
+  if (e.type === 'tool') {
+    streaming.id = null;
+    return [...xs, { id: e.id, role: 'tool', name: e.name, input: e.input }];
+  }
+  if (e.type === 'toolResult') return xs.map((x) => (x.id === e.id && x.role === 'tool' ? { ...x, output: e.output, ok: e.ok } : x));
+  if (e.type === 'delta') {
+    if (streaming.id) return xs.map((x) => (x.id === streaming.id && x.role === 'assistant' ? { ...x, text: x.text + e.text } : x));
+    streaming.id = nid();
+    return [...xs, { id: streaming.id, role: 'assistant', text: e.text }];
+  }
+  if (e.type === 'text') return [...xs, { id: nid(), role: 'assistant', text: e.text }];
+  if (e.type === 'error') return [...xs, { id: nid(), role: 'error', text: e.message }];
+  return xs;
+}
 
 let seq = 0;
 const nid = () => `m${++seq}`;
@@ -23,34 +46,49 @@ const SUGGESTIONS = ['What is in this workspace?', 'Draft a win-back segment for
 
 export function LiveCopilot() {
   const [items, setItems] = useState<Item[]>([]);
-  const [history, setHistory] = useState<unknown[]>([]);
+  const [conversationId, setConversationId] = useState<string | undefined>();
+  const [past, setPast] = useState<{ id: string; title: string; updatedAt: string }[]>([]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [tokens, setTokens] = useState(0);
   const end = useRef<HTMLDivElement>(null);
   useEffect(() => end.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }), [items]);
+  const loadPast = () =>
+    api
+      .call('copilot.conversations', {})
+      .then((r) => setPast(r.conversations))
+      .catch(() => {});
+  useEffect(() => {
+    void loadPast();
+  }, []);
+
+  async function open(id: string) {
+    if (busy) return;
+    const c = await api.call('copilot.conversation', { id });
+    const streaming = { id: null as string | null };
+    setItems((c.events as Event[]).reduce<Item[]>((xs, e) => apply(xs, e, streaming), []));
+    setConversationId(c.id);
+  }
 
   async function ask(text: string) {
     if (!text.trim() || busy) return;
     setInput('');
     setBusy(true);
     setItems((xs) => [...xs, { id: nid(), role: 'user', text }]);
+    const streaming = { id: null as string | null };
     const on = (e: Event) => {
-      if (e.type === 'tool') setItems((xs) => [...xs, { id: e.id, role: 'tool', name: e.name, input: e.input }]);
-      else if (e.type === 'toolResult') setItems((xs) => xs.map((x) => (x.id === e.id && x.role === 'tool' ? { ...x, output: e.output, ok: e.ok } : x)));
-      else if (e.type === 'text') setItems((xs) => [...xs, { id: nid(), role: 'assistant', text: e.text }]);
-      else if (e.type === 'error') setItems((xs) => [...xs, { id: nid(), role: 'error', text: e.message }]);
-      else {
-        setHistory(e.history);
+      if (e.type === 'conversation') setConversationId(e.id);
+      else if (e.type === 'done') {
         setTokens((t) => t + e.usage.inputTokens + e.usage.outputTokens);
-      }
+        void loadPast();
+      } else setItems((xs) => apply(xs, e, streaming));
     };
     try {
       const res = await fetch('/api/copilot', {
         method: 'POST',
         credentials: 'include',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ message: text, history }),
+        body: JSON.stringify({ message: text, conversationId }),
       });
       if (!res.ok || !res.body) {
         const body = await res.json().catch(() => ({}));
@@ -85,12 +123,27 @@ export function LiveCopilot() {
         <span className="flex items-center gap-2 text-[11px] text-muted">
           {tokens > 0 && `${tokens} tokens`}
           <Pill tone="agent">agent · drafts only</Pill>
+          {past.length > 0 && (
+            <select
+              className={cx(inputCls, 'h-7 max-w-[180px] py-0 text-[11px]')}
+              aria-label="Earlier conversations"
+              value={conversationId ?? ''}
+              onChange={(e) => e.target.value && void open(e.target.value)}
+            >
+              <option value="">Past…</option>
+              {past.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.title}
+                </option>
+              ))}
+            </select>
+          )}
           {items.length > 0 && (
             <Button
               variant="ghost"
               onClick={() => {
                 setItems([]);
-                setHistory([]);
+                setConversationId(undefined);
               }}
             >
               New chat

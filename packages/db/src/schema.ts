@@ -468,7 +468,7 @@ export const aiProviders = pgTable(
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
 );
 
-export type AiCallKind = 'decide' | 'generate' | 'copilot' | 'test';
+export type AiCallKind = 'decide' | 'generate' | 'copilot' | 'test' | 'classify';
 
 export const aiTokenReservations = pgTable(
   'ai_token_reservations',
@@ -511,8 +511,56 @@ export const aiCalls = pgTable(
     principalId: text('principal_id'),
     createdAt: ts('created_at').notNull().defaultNow(),
     finishedAt: ts('finished_at'),
+    cached: boolean('cached').notNull().default(false),
+    reviewStatus: text('review_status').$type<'pending' | 'reviewed'>(),
+    reviewVerdict: text('review_verdict').$type<'good' | 'bad'>(),
+    reviewNote: text('review_note'),
+    reviewedBy: text('reviewed_by'),
+    reviewedAt: ts('reviewed_at'),
   },
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
+export const aiTextCache = pgTable(
+  'ai_text_cache',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    promptId: text('prompt_id').notNull(),
+    promptVersion: integer('prompt_version').notNull(),
+    cacheKey: text('cache_key').notNull(),
+    slots: jsonb('slots').$type<Record<string, string>>().notNull(),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    expiresAt: ts('expires_at').notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.promptId, t.promptVersion, t.cacheKey] })],
+);
+
+export const copilotConversations = pgTable(
+  'copilot_conversations',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    userId: text('user_id').notNull(),
+    title: text('title').notNull(),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
+export const copilotTurns = pgTable(
+  'copilot_turns',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    conversationId: text('conversation_id').notNull(),
+    n: integer('n').notNull(),
+    messages: jsonb('messages').$type<unknown[]>().notNull(),
+    events: jsonb('events').$type<unknown[]>().notNull(),
+    inputTokens: integer('input_tokens').notNull().default(0),
+    outputTokens: integer('output_tokens').notNull().default(0),
+    createdAt: ts('created_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.conversationId, t.n] })],
 );
 
 export const apiTokens = pgTable(
