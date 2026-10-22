@@ -159,6 +159,8 @@ export async function startTestServer(name: string, port: number) {
     CLICKHOUSE_DATABASE: dbName,
     NATS_URL: natsUrl,
     NATS_NAMESPACE: dbName,
+    VALKEY_URL: process.env.VALKEY_URL ?? 'redis://localhost:6379',
+    VALKEY_PREFIX: dbName,
   });
   const srv = createServer(config);
   await resetClickHouse(config.clickhouse.url, dbName);
@@ -203,6 +205,7 @@ export async function startTestServer(name: string, port: number) {
       await Promise.allSettled(workers);
       await srv.bus.close();
       await srv.events.close();
+      await srv.hot.close();
       await srv.db.close();
     },
   };

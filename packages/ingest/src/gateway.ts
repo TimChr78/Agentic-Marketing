@@ -2,6 +2,7 @@ import { publishedSingleton } from '@agentic-marketing/artifacts';
 import { newUuid } from '@agentic-marketing/core';
 import type { Db } from '@agentic-marketing/db';
 import { type EventBus, InboundEvent } from '@agentic-marketing/events';
+import type { HotState } from '@agentic-marketing/hotstate';
 import { logger } from '@agentic-marketing/telemetry';
 import { type Context, Hono } from 'hono';
 import { z } from 'zod';
@@ -33,7 +34,7 @@ const paths: Record<string, InboundEvent['type'] | 'batch'> = {
   a: 'alias',
 };
 
-interface CachedSource extends SourceInfo {
+export interface CachedSource extends SourceInfo {
   enabled: boolean;
   allowedOrigins: string[];
 }
@@ -66,7 +67,7 @@ function rateLimiter(rate: number, burst: number) {
   };
 }
 
-function writeKeyOf(c: Context, body: Record<string, unknown>): string | undefined {
+export function writeKeyOf(c: Context, body: Record<string, unknown>): string | undefined {
   const auth = c.req.header('authorization');
   if (auth?.startsWith('Basic ')) return Buffer.from(auth.slice(6), 'base64').toString('utf8').split(':')[0];
   if (auth?.startsWith('Bearer ')) return auth.slice(7);
@@ -77,18 +78,19 @@ function writeKeyOf(c: Context, body: Record<string, unknown>): string | undefin
 export interface IngestDeps {
   db: Db;
   bus: EventBus;
+  /** Session state for the decision API, written before the request is answered. */
+  hot?: HotState;
   /** Events per second per source; bursts up to 5×. */
   ratePerSource?: number;
 }
 
-export function ingestApi(deps: IngestDeps) {
+/** Write key → source, and workspace → policy, each cached for 30 s (shared with the decision API). */
+export function sourceLookups(db: Db) {
   const sources = ttlCache<CachedSource | null>(CACHE_MS);
   const policies = ttlCache<WorkspacePolicy>(CACHE_MS);
-  const allow = rateLimiter(deps.ratePerSource ?? 1000, (deps.ratePerSource ?? 1000) * 5);
-
   const loadSource = (key: string) =>
     sources(keyHash(key), async () => {
-      const { rows } = await deps.db.admin.query(
+      const { rows } = await db.admin.query(
         'SELECT id, workspace_id, kind, required_purpose, enabled, allowed_origins FROM sources WHERE key_hash = $1',
         [keyHash(key)],
       );
@@ -106,11 +108,24 @@ export function ingestApi(deps: IngestDeps) {
     });
   const loadPolicy = (workspaceId: string) =>
     policies(workspaceId, () =>
-      deps.db.withWorkspace(workspaceId, async (tx) => ({
+      db.withWorkspace(workspaceId, async (tx) => ({
         plan: await publishedSingleton(tx, 'tracking_plan'),
         purposes: (await publishedSingleton(tx, 'purposes'))?.purposes ?? defaultPolicy.purposes,
       })),
     );
+  return { loadSource, loadPolicy };
+}
+
+/** Whether a browser request may use this source (allowed origins); server sources have no origin rule. */
+export function originAllowed(source: CachedSource, origin: string | undefined) {
+  return (
+    source.kind !== 'browser' || source.allowedOrigins.includes('*') || (!!origin && source.allowedOrigins.includes(origin.toLowerCase()))
+  );
+}
+
+export function ingestApi(deps: IngestDeps) {
+  const { loadSource, loadPolicy } = sourceLookups(deps.db);
+  const allow = rateLimiter(deps.ratePerSource ?? 1000, (deps.ratePerSource ?? 1000) * 5);
 
   const app = new Hono();
 
@@ -188,6 +203,9 @@ export function ingestApi(deps: IngestDeps) {
 
     if (!accepted.length && rejected.length) return c.json({ success: false, error: 'invalid_events', rejected }, 400, cors);
     const { duplicates } = accepted.length ? await deps.bus.publish(accepted) : { duplicates: 0 };
+    // Session state is best effort: the events are safely on the bus already.
+    if (accepted.length && deps.hot)
+      await deps.hot.recordSessions(accepted).catch((err) => logger.warn({ err }, 'session state not updated'));
     if (rejected.length) logger.warn({ source: source.id, rejected: rejected.length }, 'ingest rejected events');
     return c.json(
       {

@@ -30,6 +30,12 @@ const Env = z.object({
     .regex(/^[a-z_][a-z0-9_]*$/)
     .default('events')
     .describe('Stream and subject prefix on the NATS server'),
+  VALKEY_URL: z.string().default('redis://localhost:6379').describe('Valkey (or Redis) for session state and profile snapshots'),
+  VALKEY_PREFIX: z
+    .string()
+    .regex(/^[a-z_][a-z0-9_]*$/)
+    .default('am')
+    .describe('Key prefix, so several installs can share one Valkey'),
   EMAIL_TRACK_CLICKS: z
     .enum(['true', 'false'])
     .default('true')
@@ -65,6 +71,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
         .filter(Boolean) ?? [],
     clickhouse: { url: e.CLICKHOUSE_URL, database: e.CLICKHOUSE_DATABASE },
     nats: { url: e.NATS_URL, namespace: e.NATS_NAMESPACE },
+    valkey: { url: e.VALKEY_URL, prefix: e.VALKEY_PREFIX },
     trackClicks: e.EMAIL_TRACK_CLICKS === 'true',
     trustedOrigins: e.TRUSTED_ORIGINS?.split(',').map((o) => o.trim()) ?? [],
   };

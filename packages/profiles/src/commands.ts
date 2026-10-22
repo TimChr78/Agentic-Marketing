@@ -2,6 +2,7 @@ import { DEFAULT_PURPOSES, publishedSingleton, type TrackingPlan } from '@agenti
 import { type CommandContext, defineCommand } from '@agentic-marketing/commands';
 import { AppError, newId } from '@agentic-marketing/core';
 import { type IdentifierType, schema } from '@agentic-marketing/db';
+import type {} from '@agentic-marketing/hotstate';
 import { and, desc, eq, inArray, isNull, lt } from 'drizzle-orm';
 import { z } from 'zod';
 import { consentStateOf, mergedFamily, purposeAllowed, recordConsent } from './consent';
@@ -397,6 +398,11 @@ export const eraseProfile = defineCommand({
       anonymousIds: ids.filter((i) => i.type === 'anonymous_id').map((i) => i.value),
       userIds: ids.filter((i) => i.type === 'user_id').map((i) => i.value),
       profileIds: family,
+    });
+    // And from the decision API's hot state.
+    await ctx.services.hot?.deleteSnapshot(ws, {
+      anonymousIds: ids.filter((i) => i.type === 'anonymous_id').map((i) => i.value),
+      userIds: ids.filter((i) => i.type === 'user_id').map((i) => i.value),
     });
     await ctx.tx.delete(schema.messages).where(inArray(schema.messages.profileId, family));
 

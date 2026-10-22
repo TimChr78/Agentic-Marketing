@@ -15,6 +15,7 @@
     "@agentic-marketing/core": "workspace:*",
     "@agentic-marketing/db": "workspace:*",
     "@agentic-marketing/events": "workspace:*",
+    "@agentic-marketing/hotstate": "workspace:*",
     "@agentic-marketing/secrets": "workspace:*",
     "@agentic-marketing/telemetry": "workspace:*",
     "drizzle-orm": "0.45.4",

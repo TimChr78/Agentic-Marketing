@@ -37,6 +37,7 @@ const shutdown = async () => {
   await Promise.allSettled(workers);
   await srv.bus.close();
   await srv.events.close();
+  await srv.hot.close();
   await db.close();
   await shutdownTelemetry();
   process.exit(0);
