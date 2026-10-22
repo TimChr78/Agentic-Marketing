@@ -27,8 +27,8 @@ interface Content {
   nodes: LiveNode[];
 }
 
-/** What can run today; AI and webhook steps arrive in later phases. */
-const PALETTE: NodeKind[] = ['trigger', 'wait', 'waitEvent', 'branch', 'split', 'email', 'updateProfile', 'goal', 'exit'];
+/** What can run today; webhook steps arrive in a later phase. */
+const PALETTE: NodeKind[] = ['trigger', 'wait', 'waitEvent', 'branch', 'split', 'aiDecide', 'aiGenerate', 'email', 'updateProfile', 'goal', 'exit'];
 const DEFAULTS: Partial<Record<NodeKind, Record<string, unknown>>> = {
   trigger: { event: 'Signed Up', reentry: 'once' },
   wait: { duration: 'P1D' },
@@ -38,6 +38,8 @@ const DEFAULTS: Partial<Record<NodeKind, Record<string, unknown>>> = {
   split: { weights: [50, 50] },
   email: { template: '' },
   updateProfile: { trait: 'lifecycle', value: 'engaged' },
+  aiDecide: { prompt: '', options: ['vip', 'standard'], fallback: 'standard', timeout: 'PT5M' },
+  aiGenerate: { prompt: '', timeout: 'PT5M' },
   exit: {},
 };
 const EDGE_LABELS: Partial<Record<NodeKind, string[]>> = { branch: ['yes', 'no'], waitEvent: ['matched', 'timeout'], goal: ['converted', 'timeout'] };
@@ -61,6 +63,10 @@ function summary(n: LiveNode): string {
       return c.template ? String(c.template).slice(0, 16) + '…' : 'choose a template';
     case 'updateProfile':
       return `${c.trait} = ${JSON.stringify(c.value)}`;
+    case 'aiDecide':
+      return c.prompt ? `${(c.options ?? []).join(' | ')} · fallback ${c.fallback}` : 'choose a decide prompt';
+    case 'aiGenerate':
+      return c.prompt ? `fills content.* from ${String(c.prompt).slice(0, 12)}…` : 'choose a generate prompt';
     default:
       return '';
   }
@@ -70,7 +76,7 @@ function summary(n: LiveNode): string {
 type FlowEdge = { source: string; target: string; label?: string; implicit: boolean };
 function edgesOf(nodes: LiveNode[]): FlowEdge[] {
   return nodes.flatMap((n, i): FlowEdge[] => {
-    if (n.next) return n.next.map((e, k) => ({ source: n.id, target: e.to, label: e.label ?? EDGE_LABELS[n.kind]?.[k] ?? (n.kind === 'split' ? `variant ${String.fromCharCode(65 + k)}` : undefined), implicit: false }));
+    if (n.next) return n.next.map((e, k) => ({ source: n.id, target: e.to, label: e.label ?? EDGE_LABELS[n.kind]?.[k] ?? (n.kind === 'split' ? `variant ${String.fromCharCode(65 + k)}` : n.kind === 'aiDecide' ? (n.config.options as string[] | undefined)?.[k] : undefined), implicit: false }));
     const following = nodes[i + 1];
     return n.kind !== 'exit' && following ? [{ source: n.id, target: following.id, implicit: true }] : [];
   });
@@ -270,7 +276,7 @@ function Builder({ id, onBack, onError }: { id: string; onBack: () => void; onEr
     const nid = `n${Date.now().toString(36).slice(-4)}`;
     // Insert after the anchor: it continues to the new step, which takes over where it went.
     // Steps with several outcomes (branch, split, waits) get the new step as an extra edge.
-    const single = anchor && anchor.kind !== 'exit' && (anchor.next?.length ?? 0) <= 1 && !EDGE_LABELS[anchor.kind] && anchor.kind !== 'split';
+    const single = anchor && anchor.kind !== 'exit' && (anchor.next?.length ?? 0) <= 1 && !EDGE_LABELS[anchor.kind] && anchor.kind !== 'split' && anchor.kind !== 'aiDecide';
     const node: LiveNode = {
       id: nid,
       kind,

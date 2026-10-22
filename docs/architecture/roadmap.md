@@ -9,7 +9,7 @@ Ordering principle: build the **foundations that are expensive to retrofit** fir
 | **1. Data platform** (core done) | Collect and understand customers | Ingest gateway (Segment spec), `sdk-js` with consent, tracking plan, attribute schema with PII tags, identity resolution, profiles, ClickHouse sink, consent ledger & purposes, profile viewer UI, DSR export/erase | Site events appear on a resolved profile within seconds; erasure verifiably removes a person |
 | **2. Email + journeys (first vertical slice)** (core done) | First real value | Template system (MJML + Liquid, GrapesJS editor, code view, previews), send gateway, provider adapters with delivery events ([ADR-0011](adr/0011-email-delivery-providers.md): SMTP, Amazon SES, Postmark, Brevo; SMTP can use a provider's webhooks), bounces and complaints into suppression, unsubscribe, segments v1 (batch + streaming basics), journey engine + canvas (core nodes), simulation, journey & message analytics | A welcome + abandoned-browse journey runs end-to-end, built either in the UI or entirely via MCP |
 | **3. Web personalization** (core done) | In-session experiences | Experience artifact & editor, decision API, session state & RT counters, SDK rendering + anti-flicker + client rules, A/B allocation & results | Next-page-view and same-page personalization with measured p95 < 50 ms server time |
-| **4. AI runtime & copilot** | Agents inside the product | LLM gateway (BYOK, OpenAI-/Anthropic-compatible), prompt artifacts with tests, `ai.decide` / `ai.generate`, context builder & redaction, budgets, in-app copilot over MCP | AI-chosen branches/content with full decision logs and fallbacks |
+| **4. AI runtime & copilot** (core done) | Agents inside the product | LLM gateway (BYOK, OpenAI-/Anthropic-compatible), prompt artifacts with tests, `ai.decide` / `ai.generate`, context builder & redaction, budgets, in-app copilot over MCP | AI-chosen branches/content with full decision logs and fallbacks |
 | **5. Webhooks & integrations** | Connect the ecosystem | Webhook adapter (in/out), connector SDK, Activepieces-pieces spike, automation nodes (HTTP, transform). First-party connectors are **not a v1 priority**; when built, **Shopify and Salesforce** come first | Webhooks in/out work end-to-end; n8n can orchestrate via MCP/webhooks; connector SDK documented |
 | **6. Breadth & scale** | Production-grade for larger orgs | SMS & push adapters, warehouse export/sync, SSO (OIDC/SAML) & SCIM, Helm chart, load testing to 10M profiles, config-as-code export, participant migration between journey versions | Documented reference deployment at 10M profiles |
 | **Later** | | Probabilistic identity, recommendations engine, edge decide, autonomous goal-driven agents (scope C), SaaS multi-tenancy & billing | |
@@ -90,3 +90,28 @@ Known limits, to address later:
 - Results use a fixed-horizon test; sequential testing and Bayesian summaries later. Visitors are counted by anonymous id (per device).
 - No visual editor for experience content yet (HTML/JSON); no edge deployment of `decide`.
 - Segment memberships changed by the scheduled refresh reach snapshots with the person's next event.
+
+## Phase 4 status (2026-10-22)
+
+Done ([ADR-0012](adr/0012-ai-runtime.md)):
+- LLM gateway with the workspace's own keys:
+  - OpenAI-compatible and Anthropic-compatible providers (AI SDK), with keys sealed and write-only;
+  - one provider per use (journeys, copilot);
+  - monthly token budgets and usage per day (`ai.usage`).
+- `prompt` artifacts (decide or generate) with test cases; `prompts.test` runs them against the model.
+- `aiDecide` and `aiGenerate` journey nodes:
+  - asynchronous steps answered by the AI worker, with fallbacks and logged reasons for each failure (no consent, no provider, budget, model error, invalid answer, timeout);
+  - generated texts go into `content.<slot>` for later e-mails, after length, phrase, link and markup checks;
+  - simulation support, and publish checks against the prompt.
+- Context builder: profile id instead of identifiers, agent-visible traits only, redacted recent events, gated on the `ai_processing` purpose. The person is sent as delimited data.
+- Decision log (`ai.calls`) with context, answer, rationale, tokens and latency; included in the access export and erased with the person.
+- In-app copilot (`/api/copilot`): an in-process MCP client on the same MCP server, acting as an agent principal that drafts but cannot send, approve, erase or change settings. It streams its tool calls.
+- "AI" and "Copilot" tabs in the live workspace (providers, prompts with a test runner, decision log); AI steps in the journey builder.
+
+Acceptance: AI-chosen branches and generated content with full decision logs and fallbacks (no consent, model error, budget, rejected text), prompt tests, the access export and the copilot working through MCP and audited as an agent, against a scripted LLM server that speaks both wire formats (`apps/server/test/phase4.test.ts`).
+
+Known limits, to address later:
+- No caching of generated text per segment, no sampling of decisions for human review, no `ai.classify`.
+- Budgets can be overshot by a few concurrent calls; prompt tests run in the command's transaction.
+- OAuth credentials for providers (open question 4) are not supported; API keys only.
+- The copilot does not stream tokens, only steps; the conversation lives in the browser.

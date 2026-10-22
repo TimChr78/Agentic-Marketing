@@ -52,6 +52,17 @@ Add a source in the UI ("People & data") or with `sources.create`. Browser sourc
 
 Mark elements with `data-am-placement="home_hero"`, put `antiFlickerSnippet()` from `@agentic-marketing/sdk-js` in the page head, and call `analytics.personalize()` after loading the SDK. Create a web experience for the placement (UI "Web experiences" or `artifacts.create` with type `experience`); published experiences are served by `POST /v1/decide` within 30 seconds. Visitors who have not allowed `web_personalization` only get page-based targeting (page, referrer, UTM, device).
 
+### AI providers and the copilot
+
+Add a provider under Live workspace → AI with your own key. Base URLs:
+- Anthropic: `https://api.anthropic.com/v1`
+- OpenAI: `https://api.openai.com/v1`
+- Ollama: `http://<host>:11434/v1` (turn off structured outputs if the server does not support JSON-schema responses)
+
+Give it the uses `journeys` (AI steps and prompt tests) and/or `copilot`. Without a provider, AI steps take their fallback.
+
+People must allow the `ai_processing` purpose for AI steps to use their data. Templates use generated text as `{{ content.<slot> }}`. Tests use a scripted LLM server (`@agentic-marketing/ai/testing`) instead of a real provider.
+
 ### Members
 
 Owners and admins invite people with `members.invite` (UI, REST or the typed client; agents cannot). The response holds a one-time link, `<PUBLIC_URL>/invite#<token>`, valid for 7 days. Send it to the person; they sign in or create an account with the invited e-mail address and join with the invited role. Only owners can make or change owners, and the last owner can be neither demoted nor removed.

@@ -19,6 +19,31 @@ publishValidators.set('journey', async (content, tx: Tx) => {
   const segments = def.nodes.flatMap((n) =>
     (n.kind === 'trigger' || n.kind === 'branch') && n.config.segment ? [String(n.config.segment)] : [],
   );
+  const prompts = def.nodes.filter((n) => n.kind === 'aiDecide' || n.kind === 'aiGenerate');
+  for (const n of prompts) {
+    const [row] = await tx
+      .select({ content: schema.artifactVersions.content })
+      .from(schema.artifacts)
+      .innerJoin(
+        schema.artifactVersions,
+        and(
+          eq(schema.artifactVersions.workspaceId, schema.artifacts.workspaceId),
+          eq(schema.artifactVersions.artifactId, schema.artifacts.id),
+          eq(schema.artifactVersions.number, schema.artifacts.publishedVersion),
+        ),
+      )
+      .where(and(eq(schema.artifacts.id, String(n.config.prompt)), eq(schema.artifacts.type, 'prompt')));
+    const prompt = row?.content as { kind: string; options: { key: string }[] } | undefined;
+    const want = n.kind === 'aiDecide' ? 'decide' : 'generate';
+    if (!prompt) problems.push(`node "${n.id}": ${n.config.prompt} is not a published prompt`);
+    else if (prompt.kind !== want) problems.push(`node "${n.id}" needs a ${want} prompt, ${n.config.prompt} is a ${prompt.kind} prompt`);
+    else if (n.kind === 'aiDecide') {
+      const keys = prompt.options.map((o) => o.key).sort();
+      const options = [...((n.config.options as string[] | undefined) ?? [])].sort();
+      if (keys.join() !== options.join())
+        problems.push(`node "${n.id}": options (${options.join(', ')}) must be the prompt's options (${keys.join(', ')})`);
+    }
+  }
   const refs = [...templates, ...segments];
   if (refs.length) {
     const found = await tx
@@ -164,6 +189,10 @@ export const simulateJourney = defineCommand({
       .record(z.string(), z.enum(['yes', 'no']))
       .default({})
       .describe('Answers for branch nodes when there is no profile (default no)'),
+    ai: z
+      .record(z.string(), z.string())
+      .default({})
+      .describe('Options AI decision nodes take, by node id (default: their fallback). The simulation never calls a model.'),
     maxDays: z.number().int().min(1).max(365).default(90),
   }),
   output: z.object({
@@ -212,6 +241,8 @@ export const simulateJourney = defineCommand({
     while (state.status === 'ready' || state.status === 'waiting') {
       const out = await advance(graph, state, new Date(clock), {
         key: `simulation:${input.profileId ?? 'anyone'}`,
+        ai: (node) =>
+          input.ai[node] ? { option: input.ai[node], rationale: 'given in the simulation' } : { fallback: 'not called in a simulation' },
         branch: async (n) => {
           if (!input.profileId) return input.branches[n.id] === 'yes';
           if (n.segment) {
@@ -251,11 +282,22 @@ export const simulateJourney = defineCommand({
             detail = v.ok ? `would send ${eff.template}` : `would not send: ${v.reason}`;
           } else detail = `would send ${eff.template}`;
         } else if (eff?.kind === 'updateProfile') detail = `would set ${eff.trait} = ${JSON.stringify(eff.value)}`;
-        if (s.type === 'step' || s.type === 'converted')
+        else if (eff?.kind === 'ai') continue; // the outcome follows when the step resumes
+        if (
+          s.type === 'step' ||
+          s.type === 'converted' ||
+          (s.type === 'resumed' && (node.kind === 'aiDecide' || node.kind === 'aiGenerate'))
+        )
           steps.push({ after: fmt(clock), node: s.node, label: node.label, kind: node.kind, detail });
       }
       state = out.state;
       if (state.status !== 'waiting') break;
+      // AI steps answer right away in a simulation.
+      const at = graph.nodes.get(state.node)!;
+      if (at.kind === 'aiDecide' || at.kind === 'aiGenerate') {
+        state = { ...state, waitingEvent: null };
+        continue;
+      }
       // Jump the clock to the next scripted event the person waits for, or the timer.
       const next = scripted.find((e) => e.at >= clock && e.event === state.waitingEvent && e.at <= (state.dueAt?.getTime() ?? Infinity));
       clock = next ? next.at : (state.dueAt?.getTime() ?? limit);

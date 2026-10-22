@@ -1,3 +1,4 @@
+import { runAiWorker } from '@agentic-marketing/ai';
 import { runDeliveryWorker } from '@agentic-marketing/email';
 import { runSink } from '@agentic-marketing/events';
 import { journeyHook, runSweeper } from '@agentic-marketing/journeys';
@@ -24,10 +25,11 @@ export function startWorkers(srv: ReturnType<typeof createServer>, signal: Abort
       logger.error({ err, worker: name }, 'worker stopped');
       throw err;
     });
-  logger.info('worker role: ClickHouse sink, profile workers, journeys, e-mail delivery');
+  logger.info('worker role: ClickHouse sink, profile workers, journeys, AI steps, e-mail delivery');
   return [
     run('clickhouse-sink', runSink(srv.bus, srv.events, signal)),
     run('journey-sweeper', runSweeper(srv.db, { kp: srv.keyProvider, events: srv.events }, signal)),
+    run('ai-steps', runAiWorker(srv.db, { kp: srv.keyProvider, events: srv.events }, signal)),
     run('email-delivery', runDeliveryWorker(srv.db, { kp: srv.keyProvider, events: srv.events, email: srv.email }, signal)),
     ...runProfileWorkers(
       {

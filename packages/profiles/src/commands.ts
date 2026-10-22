@@ -351,6 +351,9 @@ export const exportProfile = defineCommand({
     profile: ProfileOut,
     consentRecords: z.array(z.record(z.string(), z.unknown())),
     events: z.array(z.record(z.string(), z.unknown())),
+    aiDecisions: z
+      .array(z.record(z.string(), z.unknown()))
+      .describe('Automated decisions and texts made for the person by AI steps, with the rationale (GDPR Art. 15 and 22)'),
   }),
   permission: 'profiles:pii',
   effect: 'read',
@@ -372,7 +375,24 @@ export const exportProfile = defineCommand({
       if (!more.events.length) break;
       events.push(...more.events);
     }
-    return { exportedAt: new Date().toISOString(), profile, consentRecords: records, events };
+    const family = [profile.id, ...profile.mergedFrom];
+    const aiDecisions = (
+      await ctx.tx.select().from(schema.aiCalls).where(inArray(schema.aiCalls.profileId, family)).orderBy(schema.aiCalls.createdAt)
+    ).map((c) => ({
+      at: c.createdAt.toISOString(),
+      kind: c.kind,
+      status: c.status,
+      journeyId: c.journeyId,
+      node: c.node,
+      promptId: c.promptId,
+      promptVersion: c.promptVersion,
+      model: c.model,
+      input: c.input,
+      output: c.output,
+      rationale: c.rationale,
+      fallbackReason: c.error,
+    }));
+    return { exportedAt: new Date().toISOString(), profile, consentRecords: records, events, aiDecisions };
   },
 });
 

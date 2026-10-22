@@ -18,7 +18,19 @@ export interface ParticipantState {
 
 export type Effect =
   | { kind: 'email'; node: string; seq: number; template: string }
-  | { kind: 'updateProfile'; node: string; seq: number; trait: string; value: string | number | boolean | null };
+  | { kind: 'updateProfile'; node: string; seq: number; trait: string; value: string | number | boolean | null }
+  /** Ask the AI worker for a decision or text; the participant waits until it answers or the step times out. */
+  | { kind: 'ai'; node: string; seq: number; task: 'decide' | 'generate'; prompt: string }
+  /** A text step that got no answer: its slots take their fallback texts. */
+  | { kind: 'aiFallback'; node: string; seq: number; prompt: string };
+
+/** What the AI worker answered for a step (stored on the participant). */
+export interface AiOutcome {
+  option?: string;
+  rationale?: string;
+  /** Set when no model answered: no consent, no provider, budget, error or invalid answer. */
+  fallback?: string;
+}
 
 export interface Step {
   node: string;
@@ -32,6 +44,8 @@ export interface Env {
   branch(node: Extract<Graph['nodes'] extends Map<string, infer N> ? N : never, { kind: 'branch' }>): Promise<boolean>;
   /** A stable key for deterministic random choices (A/B split). */
   key: string;
+  /** The AI worker's answer for a step the participant waited at, if it came in time. */
+  ai?(node: string): AiOutcome | undefined;
 }
 
 /** Deterministic weighted choice: the same participant and node always take the same edge. */
@@ -131,6 +145,33 @@ export async function advance(
         const i = pick(n.weights, `${env.key}:${n.id}`);
         steps[steps.length - 1].detail = `variant ${i + 1}`;
         if (!goTo(n.edges[i] ?? null)) return end('completed', n.id);
+        break;
+      }
+      case 'aiDecide':
+      case 'aiGenerate': {
+        if (!resuming) {
+          effects.push({ kind: 'ai', node: n.id, seq, task: n.kind === 'aiDecide' ? 'decide' : 'generate', prompt: n.prompt });
+          steps.push({ node: n.id, seq, type: 'waiting', detail: 'for the AI' });
+          return {
+            state: { node, status: 'waiting', seq, dueAt: new Date(now.getTime() + n.ms), waitingEvent: null, matched: false, converted },
+            effects,
+            steps,
+          };
+        }
+        resuming = false;
+        const r = env.ai?.(n.id);
+        const why = r ? r.fallback : 'timed out';
+        if (n.kind === 'aiGenerate') {
+          if (why) effects.push({ kind: 'aiFallback', node: n.id, seq, prompt: n.prompt });
+          steps[steps.length - 1].detail = why ? `fallback texts (${why})` : 'AI wrote the content';
+          if (!goTo(n.next)) return end('completed', n.id);
+          break;
+        }
+        const chosen = !why && r?.option && n.options.includes(r.option) ? r.option : n.fallback;
+        steps[steps.length - 1].detail = why
+          ? `fallback ${chosen} (${why})`
+          : `AI chose ${chosen}${r?.rationale ? `: ${r.rationale}` : ''}`;
+        if (!goTo(n.edges[n.options.indexOf(chosen)] ?? null)) return end('completed', n.id);
         break;
       }
       case 'exit':

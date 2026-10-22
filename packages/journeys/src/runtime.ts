@@ -1,4 +1,5 @@
 import { artifactTypes, type JourneyDefinition, publishedSingleton } from '@agentic-marketing/artifacts';
+import { newId } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import { requestEmail } from '@agentic-marketing/email';
 import type { EventStore, JourneyEvent } from '@agentic-marketing/events';
@@ -8,7 +9,7 @@ import { contextFor, ENTERED, evaluate, publishedSegments } from '@agentic-marke
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, inArray, isNotNull, sql } from 'drizzle-orm';
 import { compile, type Graph } from './graph';
-import { advance, type Effect, type ParticipantState, type Step } from './interpreter';
+import { type AiOutcome, advance, type Effect, type ParticipantState, type Step } from './interpreter';
 
 // The journey runtime (ADR-0004): trigger matching and wake-ups run as a post-commit hook of the
 // profile workers; the sweeper (worker role) advances due participants in batches.
@@ -115,7 +116,61 @@ export function journeyHook(db: Db) {
   };
 }
 
-async function applyEffect(tx: Tx, workspaceId: string, p: typeof schema.journeyParticipants.$inferSelect, eff: Effect, deps: JourneyDeps) {
+/** Fallback texts of a generate prompt's slots (its published version). */
+async function fallbackContent(tx: Tx, promptId: string): Promise<Record<string, string>> {
+  const [row] = await tx
+    .select({ content: schema.artifactVersions.content })
+    .from(schema.artifacts)
+    .innerJoin(
+      schema.artifactVersions,
+      and(
+        eq(schema.artifactVersions.workspaceId, schema.artifacts.workspaceId),
+        eq(schema.artifactVersions.artifactId, schema.artifacts.id),
+        eq(schema.artifactVersions.number, schema.artifacts.publishedVersion),
+      ),
+    )
+    .where(eq(schema.artifacts.id, promptId));
+  const slots = (row?.content as { slots?: { name: string; fallback: string }[] } | undefined)?.slots ?? [];
+  return Object.fromEntries(slots.map((s) => [s.name, s.fallback]));
+}
+
+async function applyEffect(
+  tx: Tx,
+  workspaceId: string,
+  p: typeof schema.journeyParticipants.$inferSelect,
+  eff: Effect,
+  deps: JourneyDeps,
+): Promise<string | null> {
+  if (eff.kind === 'ai') {
+    // The AI worker answers outside this transaction and wakes the participant.
+    await tx
+      .insert(schema.aiCalls)
+      .values({
+        workspaceId,
+        id: newId('aic'),
+        kind: eff.task,
+        status: 'pending',
+        idempotencyKey: `jrn:${p.id}:${eff.node}:${eff.seq}`,
+        promptId: eff.prompt,
+        journeyId: p.journeyId,
+        participantId: p.id,
+        node: eff.node,
+        seq: eff.seq,
+        profileId: p.profileId,
+        input: { trigger: (p.context as { event?: unknown }).event ?? null },
+      })
+      .onConflictDoNothing();
+    return null;
+  }
+  if (eff.kind === 'aiFallback') {
+    const content = { ...((p.context.content as Record<string, string> | undefined) ?? {}), ...(await fallbackContent(tx, eff.prompt)) };
+    p.context = { ...p.context, content };
+    await tx
+      .update(schema.journeyParticipants)
+      .set({ context: p.context })
+      .where(and(eq(schema.journeyParticipants.workspaceId, workspaceId), eq(schema.journeyParticipants.id, p.id)));
+    return null;
+  }
   if (eff.kind === 'email') {
     const d = await requestEmail(tx, workspaceId, deps.kp, deps.events, {
       profileId: p.profileId,
@@ -181,6 +236,10 @@ export async function sweep(db: Db, deps: JourneyDeps, opts: { batch?: number; n
           const graph = await graphOf(tx, p.journeyId, p.version);
           result = await advance(graph, state, t, {
             key: String(p.id),
+            ai: (node) => {
+              const r = (p.context.ai as Record<string, AiOutcome & { seq: number }> | undefined)?.[node];
+              return r && r.seq === p.seq ? r : undefined;
+            },
             branch: async (n) => {
               if (n.segment) {
                 const [m] = await tx
@@ -214,7 +273,10 @@ export async function sweep(db: Db, deps: JourneyDeps, opts: { batch?: number; n
           continue;
         }
         const details = new Map<string, string>();
-        for (const eff of result.effects) details.set(`${eff.node}:${eff.seq}`, await applyEffect(tx, ws, p, eff, deps));
+        for (const eff of result.effects) {
+          const d = await applyEffect(tx, ws, p, eff, deps);
+          if (d !== null) details.set(`${eff.node}:${eff.seq}`, d);
+        }
         await tx
           .update(schema.journeyParticipants)
           .set({ ...result.state, updatedAt: t })
