@@ -341,8 +341,23 @@ function Connections({ canAdmin, onError }: { canAdmin: boolean; onError: (m: st
               <span className="block text-[11px] text-muted">
                 {x.connector} · <span className="font-mono">{x.id}</span>
                 {x.inbound ? ' · receives webhooks' : ''}
+                {x.oauth ? ` · OAuth ${x.oauth.status}${x.oauth.error ? `: ${x.oauth.error}` : ''}` : ''}
               </span>
             </span>
+            {canAdmin && catalog.find((k) => k.id === x.connector)?.auth === 'oauth2' && (
+              <Button
+                onClick={async () => {
+                  try {
+                    const { url } = await api.call('connections.authorize', { id: x.id });
+                    window.open(url, '_blank', 'noopener');
+                  } catch (e) {
+                    onError(errText(e));
+                  }
+                }}
+              >
+                {x.oauth?.status === 'connected' ? 'Reconnect' : 'Authorize'}
+              </Button>
+            )}
             {canAdmin && (
               <Button
                 variant="ghost"

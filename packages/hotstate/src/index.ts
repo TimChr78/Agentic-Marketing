@@ -36,9 +36,29 @@ export interface HotState {
   deleteSnapshot(workspaceId: string, ids: { anonymousIds: string[]; userIds: string[] }): Promise<void>;
   /** The snapshot for whichever id is known, user id first. */
   snapshot(workspaceId: string, ids: { anonymousId?: string; userId?: string }): Promise<ProfileSnapshot | null>;
+  /**
+   * Takes `n` tokens from a bucket shared by every process (sustained `rate` per second, bursts up
+   * to `burst`). False when there are not enough; then nothing is taken.
+   */
+  take(key: string, n: number, rate: number, burst: number): Promise<boolean>;
   ping(): Promise<boolean>;
   close(): Promise<void>;
 }
+
+// Token bucket in one atomic step, timed by the server's clock so processes need not agree.
+const TAKE = `
+local t = redis.call('TIME')
+local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+local rate, burst, n = tonumber(ARGV[1]), tonumber(ARGV[2]), tonumber(ARGV[3])
+local b = redis.call('HMGET', KEYS[1], 't', 'a')
+local tokens = tonumber(b[1]) or burst
+local at = tonumber(b[2]) or now
+tokens = math.min(burst, tokens + (now - at) / 1000 * rate)
+local ok = 0
+if tokens >= n then tokens = tokens - n; ok = 1 end
+redis.call('HSET', KEYS[1], 't', tostring(tokens), 'a', tostring(now))
+redis.call('PEXPIRE', KEYS[1], math.ceil(burst / rate * 1000) + 1000)
+return ok`;
 
 export function valkeyHotState(opts: { url: string; prefix?: string }): HotState {
   const client = new Valkey(opts.url, { lazyConnect: true, maxRetriesPerRequest: 2, enableAutoPipelining: true });
@@ -111,6 +131,10 @@ export function valkeyHotState(opts: { url: string; prefix?: string }): HotState
       const values = await client.mget(...keys);
       const hit = values.find((v) => v);
       return hit ? (JSON.parse(hit) as ProfileSnapshot) : null;
+    },
+
+    async take(key, n, rate, burst) {
+      return (await client.eval(TAKE, 1, `${p}:rl:${key}`, rate, burst, n)) === 1;
     },
 
     async ping() {

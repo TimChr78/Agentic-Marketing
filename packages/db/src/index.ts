@@ -5,6 +5,7 @@ export type {
   AiCallStatus,
   AiUse,
   ApprovalPolicy,
+  ClickIdType,
   ConsentSource,
   ConsentStatus,
   DeliveryStatus,

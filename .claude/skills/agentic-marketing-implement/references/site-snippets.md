@@ -64,8 +64,19 @@ The platform also adds `List-Unsubscribe` and `List-Unsubscribe-Post` headers (R
    `am-init.js`:
    ```js
    window.am = AgenticMarketing.createAnalytics({ writeKey: 'pk_…', host: location.origin + '/am' });
-   // The banner calls: am.setConsent({ analytics: true, web_personalization: false });
+   // The built-in banner: texts from the workspace's purposes, equal "Accept all" and "Reject all",
+   // per-purpose choices, and Google Consent Mode v2 signals if the site runs Google tags.
+   AgenticMarketing.createConsentBanner(am, { privacyUrl: '/privacy/' });
    am.page();
    ```
-   Before consent the SDK sends nothing and stores nothing.
+   Before consent the SDK sends nothing and stores nothing. A footer link with `data-am-consent-open` reopens the banner:
+   ```html
+   <a href="#" data-am-consent-open>Cookie settings</a>
+   ```
+   With Google tags on the page, load `am.min.js` and `am-init.js` **before** the Google tag, so the "denied" defaults are set first.
+5. Ad click ids (`gclid`, `fbclid`, `msclkid`…) on landing URLs are kept only after the visitor allows `ad_measurement`. On a no-JS signup form, pass them as hidden fields together with the banner choice:
+   ```html
+   <input type="hidden" name="gclid"> <input type="hidden" name="fbclid"> <input type="hidden" name="am_consent">
+   ```
+   (fill them from the URL and `am.consent` in `am-init.js`; `am_consent` is a comma list such as `analytics,ad_measurement`).
 4. Extend the proxy allow-list with `v1/batch` and `v1/decide` (already in the reference). Phase A needs no `connect-src` change (same origin).

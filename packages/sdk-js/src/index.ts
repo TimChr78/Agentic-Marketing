@@ -9,6 +9,7 @@
 
 import { type Decision, type PersonalizeOptions, personalize } from './personalize';
 
+export { type BannerOptions, createConsentBanner, googleConsentDefaults } from './banner';
 export { antiFlickerSnippet, type Decision, sanitize } from './personalize';
 
 export type Consent = Record<string, boolean>;
@@ -28,6 +29,8 @@ export interface AnalyticsOptions {
   fetch?: typeof fetch;
   storage?: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'> | null;
   page?: () => { path: string; url: string; title: string; referrer: string };
+  /** Landing-page query string and cookies to read ad click ids from; default: this page's. */
+  landing?: () => { search: string; cookies: string };
   sendBeacon?: (url: string, body: string) => boolean;
 }
 
@@ -41,7 +44,28 @@ interface QueuedEvent extends Props {
 }
 
 const LIB = { name: '@agentic-marketing/sdk-js', version: '0.1.0' };
-const KEYS = { consent: 'am.consent', anonymousId: 'am.aid', userId: 'am.uid' };
+const KEYS = { consent: 'am.consent', anonymousId: 'am.aid', userId: 'am.uid', clickIds: 'am.clk' };
+const AD_PURPOSE = 'ad_measurement';
+const CLICK_VALUE = /^[A-Za-z0-9._~-]{4,500}$/;
+
+export type ClickIds = Partial<Record<'gclid' | 'gbraid' | 'wbraid' | 'fbc' | 'fbp' | 'msclkid', string>>;
+
+/** Ad click ids on the landing page, plus Meta's _fbc/_fbp cookies when a Meta tag set them. */
+export function captureClickIds(search: string, cookies: string, now = Date.now()): ClickIds {
+  const q = new URLSearchParams(search);
+  const out: ClickIds = {};
+  for (const k of ['gclid', 'gbraid', 'wbraid', 'msclkid'] as const) {
+    const v = q.get(k);
+    if (v && CLICK_VALUE.test(v)) out[k] = v;
+  }
+  const fbclid = q.get('fbclid');
+  if (fbclid && CLICK_VALUE.test(fbclid)) out.fbc = `fb.1.${now}.${fbclid}`;
+  for (const part of cookies.split(';')) {
+    const [k, v] = part.trim().split('=');
+    if ((k === '_fbc' && !out.fbc) || k === '_fbp') if (v && CLICK_VALUE.test(v)) out[k.slice(1) as 'fbc' | 'fbp'] = v;
+  }
+  return out;
+}
 const CONSENT_EVENT = 'Segment Consent Preference Updated';
 const MAX_QUEUE = 1000;
 
@@ -100,12 +124,27 @@ export function createAnalytics(opts: AnalyticsOptions) {
   const allowed = () => consent?.[purpose] === true;
   let anonymousId = (allowed() && store.get(KEYS.anonymousId)) || uuid();
   let userId = (allowed() && store.get(KEYS.userId)) || undefined;
+  // Click ids live in memory until ad_measurement is allowed, then (and only then) in storage.
+  let clickIds: ClickIds = (() => {
+    const stored = consent?.[AD_PURPOSE] === true ? store.get(KEYS.clickIds) : null;
+    let saved: ClickIds = {};
+    try {
+      saved = stored ? (JSON.parse(stored) as ClickIds) : {};
+    } catch {}
+    const l = opts.landing?.() ?? {
+      search: typeof location === 'undefined' ? '' : location.search,
+      cookies: typeof document === 'undefined' ? '' : document.cookie,
+    };
+    return { ...saved, ...captureClickIds(l.search, l.cookies) };
+  })();
   let pending: QueuedEvent[] = [];
   const outbox: QueuedEvent[] = [];
   let timer: ReturnType<typeof setTimeout> | undefined;
   let backoff = 0;
 
   const persistIds = () => {
+    if (consent?.[AD_PURPOSE] === true && Object.keys(clickIds).length) store.set(KEYS.clickIds, JSON.stringify(clickIds));
+    else store.remove(KEYS.clickIds);
     if (allowed()) {
       store.set(KEYS.anonymousId, anonymousId);
       if (userId) store.set(KEYS.userId, userId);
@@ -122,6 +161,7 @@ export function createAnalytics(opts: AnalyticsOptions) {
       ...(page ? { page } : {}),
       ...(typeof navigator !== 'undefined' ? { userAgent: navigator.userAgent, locale: navigator.language } : {}),
       consent: { categoryPreferences: { ...(consent ?? {}) } },
+      ...(consent?.[AD_PURPOSE] === true && Object.keys(clickIds).length ? { clickIds: { ...clickIds } } : {}),
     };
   }
 
@@ -191,6 +231,13 @@ export function createAnalytics(opts: AnalyticsOptions) {
     get anonymousId() {
       return anonymousId;
     },
+    /** Collector origin and write key, for the consent banner. */
+    get host() {
+      return opts.host.replace(/\/$/, '');
+    },
+    get writeKey() {
+      return opts.writeKey;
+    },
 
     /** Record the visitor's choice (from your consent banner or CMP). Merges with earlier choices. */
     setConsent(choice: Consent) {
@@ -246,6 +293,7 @@ export function createAnalytics(opts: AnalyticsOptions) {
     reset() {
       anonymousId = uuid();
       userId = undefined;
+      clickIds = {};
       persistIds();
     },
     flush,

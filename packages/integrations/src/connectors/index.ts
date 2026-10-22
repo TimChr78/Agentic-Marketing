@@ -198,6 +198,58 @@ export const httpConnector = defineConnector({
   },
 });
 
+export const oauthHttpConnector = defineConnector({
+  id: 'oauth_http',
+  label: 'HTTP API (OAuth 2.0)',
+  description:
+    'Calls a JSON API that uses OAuth 2.0 (authorization code with PKCE): connect once in the browser, then tokens are refreshed automatically. Register <public URL>/oauth/callback as the redirect URI.',
+  auth: 'oauth2',
+  settings: z.object({
+    baseUrl: z.url().describe('e.g. https://api.example.com/v2'),
+    authorizeUrl: z.url(),
+    tokenUrl: z.url(),
+    scopes: z.array(z.string().max(300)).max(30).default([]),
+    authorizeParams: z
+      .record(z.string(), z.string().max(300))
+      .default({})
+      .describe('e.g. {"access_type":"offline","prompt":"consent"} for Google'),
+  }),
+  secrets: z.object({ clientId: z.string().min(1).max(500), clientSecret: z.string().min(1).max(500) }),
+  oauth: (s) => ({ authorizeUrl: s.authorizeUrl, tokenUrl: s.tokenUrl, scopes: s.scopes, params: s.authorizeParams }),
+  rateLimit: 120,
+  actions: {
+    request: {
+      label: 'HTTP request',
+      description:
+        'A request to the base URL plus a path, with the access token. JSON responses are parsed. Non-2xx answers take the error edge.',
+      input: z.object({
+        method: z.enum(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']).default('GET'),
+        path: z.string().max(1000).default(''),
+        body: z.unknown().optional(),
+      }),
+      async run(input: { method: string; path: string; body?: unknown }, { settings, accessToken, request }) {
+        if (!accessToken) throw new Error('not connected: authorize the connection first');
+        const url = `${settings.baseUrl.replace(/\/+$/, '')}/${input.path.replace(/^\/+/, '')}`;
+        const res = await request(url, {
+          method: input.method,
+          headers: {
+            accept: 'application/json',
+            authorization: `Bearer ${accessToken}`,
+            ...(input.body !== undefined ? { 'content-type': 'application/json' } : {}),
+          },
+          body: input.body !== undefined && input.method !== 'GET' ? JSON.stringify(input.body) : undefined,
+        });
+        let body: unknown = res.body;
+        try {
+          body = JSON.parse(res.body);
+        } catch {}
+        if (res.status < 200 || res.status >= 300) throw new Error(`HTTP ${res.status}: ${res.body.slice(0, 200)}`);
+        return { status: res.status, body };
+      },
+    },
+  },
+});
+
 export const connectors = Object.fromEntries(
-  [webhookConnector, shopifyConnector, slackConnector, httpConnector].map((c) => [c.id, c]),
+  [webhookConnector, shopifyConnector, slackConnector, httpConnector, oauthHttpConnector].map((c) => [c.id, c]),
 ) as Record<string, import('../sdk').Connector>;

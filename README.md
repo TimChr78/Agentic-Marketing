@@ -6,7 +6,8 @@ It runs as one Docker image (a TypeScript modular monolith) next to Postgres, Cl
 
 ## What it does
 
-- **Collect events:** Segment-compatible ingest (`/v1/batch`), a browser SDK, per-source consent rules, a tracking plan.
+- **Collect events:** Segment-compatible ingest (`/v1/batch`), a browser SDK, per-source consent rules, a tracking plan, bot filtering.
+- **Consent banner:** in the SDK, CSP-safe, with texts from your purposes and Google Consent Mode v2 signals. Ad click ids (`gclid`, `fbclid`, `msclkid`…) are kept only with `ad_measurement` consent.
 - **Know people:** identity resolution and merges, profiles with traits and events, a consent ledger per purpose, export and erasure (DSR).
 - **Segments:** conditions on traits, events, consent and other segments, recomputed continuously, with enter and exit events.
 - **E-mail:**
@@ -26,7 +27,12 @@ It runs as one Docker image (a TypeScript modular monolith) next to Postgres, Cl
 - **Journeys:** a visual builder and an engine with waits, branches, e-mail, webhooks, connector actions and AI steps (decide, generate) with fallbacks.
 - **Web personalization:** experiences and A/B tests served by a decision API, with an anti-flicker snippet and consent-aware targeting.
 - **AI:** your own providers (Anthropic, OpenAI, Ollama…), metering and budgets, prompt artifacts, redaction, a decision log, and an in-app copilot over MCP.
-- **Integrations:** signed outbound webhooks, a connector SDK (Shopify, Slack, HTTP), inbound hooks and API tokens (for n8n and scripts).
+- **Integrations:**
+  - signed outbound webhooks;
+  - a connector SDK (Shopify, Slack, HTTP, and OAuth 2.0 APIs with automatic token refresh);
+  - inbound hooks;
+  - API tokens (for n8n and scripts);
+  - rate limits shared across workers.
 - **Governance:**
   - everything an agent builds is a versioned artifact (journey, segment, template, form…) with drafts, diffs and approval policies;
   - audit log;
@@ -66,8 +72,8 @@ Wave 1 (Phases −1 to 5) is complete: foundations, data platform, e-mail, segme
 |---|---|---|
 | 6 | Pilot live and hardening | The code items are done: e-mail events on profiles, retention, UTM tagging, test sends, Newsletter screen, Docker smoke test. The MartechSignal run is next. |
 | 7 | Delivery beyond SMTP, and SMS | Done: Cloudflare Email Service adapter, delivery policy (caps, quiet hours, auto-pause), deliverability health and domain check, Twilio SMS. Later: GatewayAPI, SMS double opt-in, provider warm-up |
-| 8 | Consent everywhere | Next: consent banner, Consent Mode v2, ad purposes, click ids |
-| 9 | Performance marketing | Planned: Meta Conversions API and audiences, Google Data Manager API, spend and ROAS, Microsoft |
+| 8 | Consent everywhere | Done: consent banner with Consent Mode v2, ad purposes, click-id capture, OAuth 2.0 connections, shared rate limits, bot filtering |
+| 9 | Performance marketing | Next: Meta Conversions API and audiences, Google Data Manager API, spend and ROAS, Microsoft |
 | 10 | Scale and operations | Planned |
 | 11 | Enterprise and ecosystem | Planned |
 

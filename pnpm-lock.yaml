@@ -32,6 +32,9 @@ importers:
 
   apps/server:
     dependencies:
+      '@agentic-marketing/ads':
+        specifier: workspace:*
+        version: link:../../packages/ads
       '@agentic-marketing/ai':
         specifier: workspace:*
         version: link:../../packages/ai
@@ -206,6 +209,27 @@ importers:
         specifier: 2.3.4
         version: 2.3.4(vite@8.3.5(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.51.2)(tsx@4.23.15)(yaml@2.9.1))
 
+  packages/ads:
+    dependencies:
+      '@agentic-marketing/artifacts':
+        specifier: workspace:*
+        version: link:../artifacts
+      '@agentic-marketing/db':
+        specifier: workspace:*
+        version: link:../db
+      '@agentic-marketing/events':
+        specifier: workspace:*
+        version: link:../events
+      '@agentic-marketing/profiles':
+        specifier: workspace:*
+        version: link:../profiles
+      '@agentic-marketing/telemetry':
+        specifier: workspace:*
+        version: link:../telemetry
+      drizzle-orm:
+        specifier: 0.45.4
+        version: 0.45.4(@opentelemetry/api@1.10.0)(@types/pg@8.23.1)(kysely@0.29.7)(pg@8.23.1)
+
   packages/ai:
     dependencies:
       '@agentic-marketing/artifacts':
@@ -268,6 +292,9 @@ importers:
 
   packages/audience:
     dependencies:
+      '@agentic-marketing/ads':
+        specifier: workspace:*
+        version: link:../ads
       '@agentic-marketing/artifacts':
         specifier: workspace:*
         version: link:../artifacts
@@ -558,6 +585,9 @@ importers:
       '@agentic-marketing/events':
         specifier: workspace:*
         version: link:../events
+      '@agentic-marketing/hotstate':
+        specifier: workspace:*
+        version: link:../hotstate
       '@agentic-marketing/ingest':
         specifier: workspace:*
         version: link:../ingest

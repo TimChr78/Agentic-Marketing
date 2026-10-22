@@ -133,7 +133,7 @@ Simulate it with `journeys.simulate`, then publish. E-mail clicks are not profil
 Consent-gated tracking and personalization:
 - build the SDK (`pnpm --filter @agentic-marketing/sdk-js build`) and host `dist/am.min.js` on the site;
 - add a browser source with the site's origin;
-- add a consent banner that calls `am.setConsent({...})`;
+- add the SDK's consent banner (`AgenticMarketing.createConsentBanner(am)`), which records choices as consent proof and sends Google Consent Mode v2 signals;
 - create `experience` artifacts for placements.
 
 See [references/site-snippets.md](references/site-snippets.md). Without consent, only page, referrer and UTM targeting applies.

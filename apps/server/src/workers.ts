@@ -1,8 +1,9 @@
+import { clickIdHook } from '@agentic-marketing/ads';
 import { runAiWorker } from '@agentic-marketing/ai';
 import { consentHook, runBroadcasts, runRetention } from '@agentic-marketing/audience';
 import { runDeliveryWorker } from '@agentic-marketing/email';
 import { runSink } from '@agentic-marketing/events';
-import { type DeliveryDeps, runDeliveries, webhookHook } from '@agentic-marketing/integrations';
+import { type DeliveryDeps, runDeliveries, runTokenRefresher, webhookHook } from '@agentic-marketing/integrations';
 import { journeyHook, runSweeper } from '@agentic-marketing/journeys';
 import { snapshotHook } from '@agentic-marketing/personalize';
 import { runProfileWorkers } from '@agentic-marketing/profiles';
@@ -16,11 +17,12 @@ export function startScheduler(
   signal: AbortSignal,
   opts: { segmentTickMs?: number; broadcastTickMs?: number } = {},
 ): Promise<void>[] {
-  logger.info('scheduler role: segment recomputation, broadcasts, retention');
+  logger.info('scheduler role: segment recomputation, broadcasts, retention, OAuth token refresh');
   return [
     runSegmentScheduler({ db: srv.db, events: srv.events, bus: srv.bus, tickMs: opts.segmentTickMs }, signal),
     runBroadcasts({ db: srv.db, kp: srv.keyProvider, events: srv.events }, signal, opts.broadcastTickMs),
     runRetention({ db: srv.db, events: srv.events, hot: srv.hot, ...srv.retention }, signal),
+    runTokenRefresher({ db: srv.db, kp: srv.keyProvider, egress: srv.egress }, signal),
   ];
 }
 
@@ -40,7 +42,7 @@ export function startWorkers(
     run('clickhouse-sink', runSink(srv.bus, srv.events, signal)),
     run('journey-sweeper', runSweeper(srv.db, { kp: srv.keyProvider, events: srv.events }, signal)),
     run('ai-steps', runAiWorker(srv.db, { kp: srv.keyProvider, events: srv.events }, signal)),
-    run('deliveries', runDeliveries(srv.db, { kp: srv.keyProvider, egress: srv.egress, ...opts.deliveries }, signal)),
+    run('deliveries', runDeliveries(srv.db, { kp: srv.keyProvider, egress: srv.egress, hot: srv.hot, ...opts.deliveries }, signal)),
     run('email-delivery', runDeliveryWorker(srv.db, { kp: srv.keyProvider, events: srv.events, email: srv.email }, signal)),
     ...runProfileWorkers(
       {
@@ -50,6 +52,7 @@ export function startWorkers(
         after: [
           // Consent first: segments and journeys that react to a signup need it recorded.
           consentHook({ db: srv.db, kp: srv.keyProvider, events: srv.events, links: srv.email.links, linksUrl: srv.linksUrl }),
+          clickIdHook({ db: srv.db }),
           segmentHook({ db: srv.db, events: srv.events, bus: srv.bus }),
           snapshotHook({ db: srv.db, hot: srv.hot }),
           journeyHook(srv.db),

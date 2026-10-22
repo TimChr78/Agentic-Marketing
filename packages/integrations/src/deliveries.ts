@@ -1,5 +1,6 @@
 import { AppError } from '@agentic-marketing/core';
 import { type Db, schema } from '@agentic-marketing/db';
+import type { HotState } from '@agentic-marketing/hotstate';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, inArray, sql } from 'drizzle-orm';
@@ -15,6 +16,8 @@ import { endpointSecret } from './webhooks';
 export interface DeliveryDeps {
   kp: KeyProvider;
   egress: EgressPolicy;
+  /** Shared rate limits across workers; without it each process counts on its own. */
+  hot?: Pick<HotState, 'take'>;
   /** Delay before each retry; the delivery is dead (webhooks) or failed (actions) after the last. */
   webhookBackoffMs?: number[];
   actionBackoffMs?: number[];
@@ -61,7 +64,8 @@ async function attempt(db: Db, d: Row, deps: DeliveryDeps): Promise<Outcome | 'l
   });
   if (!conn) return { ok: false, error: 'the connection was deleted or disabled', permanent: true };
   const limit = connectorOf(conn.row.connector).rateLimit;
-  if (limit && !takeToken(conn.row.id, limit)) return 'later';
+  if (limit && !(deps.hot ? await deps.hot.take(`con:${conn.row.id}`, 1, limit / 60, limit) : takeToken(conn.row.id, limit)))
+    return 'later';
   const result = await runAction(conn.row, conn.secrets, d.action ?? '', d.payload, deps.egress);
   return { ok: true, response: result ?? null };
 }

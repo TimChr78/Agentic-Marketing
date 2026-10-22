@@ -59,7 +59,7 @@ Read [references/tools.md](references/tools.md) for the full list with effects a
 | Journeys | `journeys.simulate`, `journeys.stats`, `journeys.enroll` (needs `messages:send`) |
 | Web | `experiences.results` |
 | AI | `prompts.test`, `ai.calls`, `ai.usage`, `aiProviders.list` |
-| Integrations | `connectors.list`, `connections.list`, `connections.runAction`, `webhooks.list`, `deliveries.list` |
+| Integrations | `connectors.list`, `connections.list` (shows OAuth status), `connections.runAction`, `webhooks.list`, `deliveries.list`; `connections.authorize` is for people only |
 | Workspace | `workspace.get`, `purposes.list`, `audit.list` |
 
 ## Recipes
