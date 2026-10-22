@@ -135,3 +135,25 @@ describe('decision API', () => {
     expect((await fetch(`${t.base}/v1/decide`, { method: 'OPTIONS', headers: { origin: 'https://shop.example.com' } })).status).toBe(204);
   });
 });
+
+describe('sdk-js decide', () => {
+  it('asks the decision API with the visitor’s ids and consent', async () => {
+    const { createAnalytics } = await import('@agentic-marketing/sdk-js');
+    const a = createAnalytics({
+      writeKey: key,
+      host: t.base,
+      storage: null,
+      page: () => ({ path: '/', url: 'https://shop.example.com/?utm_source=newsletter', title: 'Home', referrer: '' }),
+    });
+    expect((await a.decide(['top_banner'])).map((d) => d.placement)).toEqual(['top_banner']);
+    a.setConsent({ analytics: true, web_personalization: true });
+    a.track('Product Viewed', { category: 'tents' });
+    a.track('Product Viewed', { category: 'tents' });
+    await a.flush();
+    const decisions = await eventually(
+      () => a.decide(['overlay']),
+      (d) => d.length === 1,
+    );
+    expect(decisions[0]).toMatchObject({ experienceId: ids.overlay, trigger: { type: 'exit_intent' } });
+  });
+});

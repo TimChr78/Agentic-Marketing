@@ -9,5 +9,8 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p ."
+  },
+  "devDependencies": {
+    "happy-dom": "20.14.5"
   }
 }

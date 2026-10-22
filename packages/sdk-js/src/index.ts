@@ -7,6 +7,10 @@
 //   "Segment Consent Preference Updated" event, which lands in the consent ledger.
 // - The anonymous id is kept in localStorage only while the tracking purpose is allowed.
 
+import { type Decision, type PersonalizeOptions, personalize } from './personalize';
+
+export { antiFlickerSnippet, type Decision, sanitize } from './personalize';
+
 export type Consent = Record<string, boolean>;
 type Props = Record<string, unknown>;
 
@@ -179,7 +183,7 @@ export function createAnalytics(opts: AnalyticsOptions) {
   if (typeof addEventListener === 'function')
     addEventListener('visibilitychange', () => typeof document !== 'undefined' && document.visibilityState === 'hidden' && flushOnHide());
 
-  return {
+  const api = {
     /** The visitor's current choice, or null if they have not chosen yet. */
     get consent(): Consent | null {
       return consent ? { ...consent } : null;
@@ -214,6 +218,30 @@ export function createAnalytics(opts: AnalyticsOptions) {
       persistIds();
       enqueue({ type: 'identify', traits, ...(id ? { userId: id } : {}) });
     },
+    /** Ask the decision API what the given placements show. Works before consent too (page-only targeting). */
+    async decide(placements: string[]): Promise<Decision[]> {
+      const page = (opts.page ?? browserPage)();
+      const res = await doFetch(`${opts.host.replace(/\/$/, '')}/v1/decide`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: auth },
+        body: JSON.stringify({
+          anonymousId,
+          ...(userId ? { userId } : {}),
+          placements,
+          page: page ? { url: page.url, path: page.path, referrer: page.referrer } : undefined,
+          context: {
+            consent: { categoryPreferences: { ...(consent ?? {}) } },
+            ...(typeof navigator !== 'undefined' ? { userAgent: navigator.userAgent } : {}),
+          },
+        }),
+      });
+      if (!res.ok) throw new Error(`decide answered ${res.status}`);
+      return ((await res.json()) as { decisions: Decision[] }).decisions;
+    },
+    /** Decide, render the placements on this page, and report what was shown. */
+    personalize(o: PersonalizeOptions = {}) {
+      return personalize({ decide: (p) => api.decide(p), track: (e, props) => api.track(e, props) }, o);
+    },
     /** Forget the visitor on this device (e.g. on logout): new anonymous id, no user id. */
     reset() {
       anonymousId = uuid();
@@ -222,5 +250,6 @@ export function createAnalytics(opts: AnalyticsOptions) {
     },
     flush,
   };
+  return api;
 }
 export type Analytics = ReturnType<typeof createAnalytics>;
