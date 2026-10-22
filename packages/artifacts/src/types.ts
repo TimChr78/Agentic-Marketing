@@ -265,7 +265,111 @@ const segment = z.object({
   condition: segmentCondition,
 });
 
+// Web experiences (channels-and-personalization.md §3). Targeting is evaluated on every page
+// request from hot state only, so it is a smaller language than segments: profile traits and
+// segment memberships (from the snapshot), session counters, and the page itself.
+export type DecideCondition =
+  | { all: DecideCondition[] }
+  | { any: DecideCondition[] }
+  | { not: DecideCondition }
+  | {
+      trait: string;
+      op: 'eq' | 'neq' | 'in' | 'gt' | 'gte' | 'lt' | 'lte' | 'exists';
+      value?: string | number | boolean | (string | number)[];
+    }
+  | { segment: string }
+  | { session: string; count?: { gte?: number; lte?: number } }
+  | { newVisitor: boolean }
+  | { page: { path?: string; pathPrefix?: string; urlContains?: string } }
+  | { referrer: { contains: string } }
+  | { utmSource: string }
+  | { device: 'mobile' | 'desktop' };
+export const decideCondition: z.ZodType<DecideCondition> = z.lazy(() =>
+  z.union([
+    z.object({ all: z.array(decideCondition).min(1).max(20) }).strict(),
+    z.object({ any: z.array(decideCondition).min(1).max(20) }).strict(),
+    z.object({ not: decideCondition }).strict(),
+    z
+      .object({
+        trait: PropKey,
+        op: z.enum(['eq', 'neq', 'in', 'gt', 'gte', 'lt', 'lte', 'exists']),
+        value: z.union([Scalar, z.array(z.union([z.string().max(500), z.number()])).max(200)]).optional(),
+      })
+      .strict(),
+    z.object({ segment: z.string().regex(/^seg_[0-9a-f]{32}$/) }).strict(),
+    z
+      .object({
+        session: z.string().min(1).max(200).describe('Event name counted in the current session, e.g. "Product Viewed" or "page"'),
+        count: z.object({ gte: z.number().int().min(0).optional(), lte: z.number().int().min(0).optional() }).optional(),
+      })
+      .strict(),
+    z.object({ newVisitor: z.boolean() }).strict(),
+    z
+      .object({
+        page: z
+          .object({
+            path: z.string().max(500).optional(),
+            pathPrefix: z.string().max(500).optional(),
+            urlContains: z.string().max(500).optional(),
+          })
+          .strict(),
+      })
+      .strict(),
+    z.object({ referrer: z.object({ contains: z.string().min(1).max(200) }).strict() }).strict(),
+    z.object({ utmSource: z.string().min(1).max(200) }).strict(),
+    z.object({ device: z.enum(['mobile', 'desktop']) }).strict(),
+  ]),
+);
+const experience = z
+  .object({
+    placement: z
+      .string()
+      .regex(/^[a-z][a-z0-9_-]{0,63}$/)
+      .describe('Where it shows: the page element with data-am-placement="<placement>"'),
+    description: z.string().max(1000).default(''),
+    priority: z.number().int().min(0).max(1000).default(100).describe('Higher wins when several experiences target the same placement'),
+    targeting: decideCondition
+      .optional()
+      .describe(
+        'Who sees it. Traits, segments and session conditions need the visitor to allow web_personalization; page, referrer, UTM and device do not',
+      ),
+    variants: z
+      .array(
+        z.object({
+          id: z.string().regex(/^[a-z0-9_]{1,32}$/),
+          name: z.string().min(1).max(120),
+          weight: z.number().int().min(0).max(100).default(50),
+          content: z
+            .object({
+              html: z.string().max(50_000).optional().describe('HTML for the placement; scripts and event handlers are removed by the SDK'),
+              json: z.record(z.string(), z.unknown()).optional().describe('Data for a site that renders the placement itself'),
+            })
+            .refine((c) => c.html !== undefined || c.json !== undefined, 'A variant needs html or json content'),
+        }),
+      )
+      .min(1)
+      .max(5),
+    holdoutPercent: z.number().int().min(0).max(50).default(0).describe('Share of eligible visitors who see nothing (control group)'),
+    goal: z
+      .object({ event: z.string().min(1).max(200) })
+      .optional()
+      .describe('Conversion event for results'),
+    trigger: z
+      .object({ type: z.enum(['immediate', 'exit_intent', 'scroll', 'time_on_page']), value: z.number().min(0).max(3600).optional() })
+      .default({ type: 'immediate' })
+      .describe('When the SDK shows it: at once, on exit intent, after scrolling value % or after value seconds'),
+  })
+  .superRefine((e, ctx) => {
+    const ids = new Set<string>();
+    for (const v of e.variants) {
+      if (ids.has(v.id)) ctx.addIssue({ code: 'custom', message: `Duplicate variant id "${v.id}"` });
+      ids.add(v.id);
+    }
+    if (e.variants.every((v) => v.weight === 0)) ctx.addIssue({ code: 'custom', message: 'At least one variant needs a weight above 0' });
+  });
+
 export type TrackingPlan = z.output<typeof trackingPlan>;
+export type ExperienceDefinition = z.output<typeof experience>;
 export type SegmentDefinition = z.output<typeof segment>;
 export type EmailTemplate = z.output<typeof emailTemplate>;
 export type Purposes = z.output<typeof purposes>['purposes'];
@@ -285,6 +389,13 @@ export const artifactTypes = {
     description:
       'A group of people defined by traits, events in a time window, consent and other segments. Preview it with segments.preview.',
     content: segment,
+  },
+  experience: {
+    prefix: 'exp',
+    label: 'Web experience',
+    description:
+      'Personalized content for a placement on the website, with targeting, variants (A/B/n), a holdout and a goal. Served by the decision API.',
+    content: experience,
   },
   tracking_plan: {
     prefix: 'tpl',

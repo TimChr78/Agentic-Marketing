@@ -22,7 +22,7 @@ Adding a capability = one `defineCommand(...)` in a package + adding it to `apps
 
 ## Run locally
 
-Requirements: Node 22+, pnpm 10, PostgreSQL 16, ClickHouse (26.8 LTS) and NATS with JetStream (`nats-server -js`), local or Docker. `CLICKHOUSE_URL` and `NATS_URL` default to localhost.
+Requirements: Node 22+, pnpm 10, PostgreSQL 16, ClickHouse (26.8 LTS), NATS with JetStream (`nats-server -js`) and Valkey (or Redis), local or Docker. `CLICKHOUSE_URL`, `NATS_URL` and `VALKEY_URL` default to localhost.
 
 ```bash
 pnpm install
@@ -47,6 +47,10 @@ docker compose exec app pnpm --filter @agentic-marketing/server cli bootstrap --
 ### Collecting events
 
 Add a source in the UI ("People & data") or with `sources.create`. Browser sources get a public write key and only accept their allowed origins; by default they keep an event only when the visitor allowed the `analytics` purpose. On a site, use `@agentic-marketing/sdk-js` (`packages/sdk-js`), or any Segment-compatible library pointed at this server (`/v1/batch`, write key as the Basic auth user name). Events show up on the person's profile within a couple of seconds; `ROLE` decides which processes run the `api`, `ingest` and `worker` parts (all by default).
+
+### Personalizing the website
+
+Mark elements with `data-am-placement="home_hero"`, put `antiFlickerSnippet()` from `@agentic-marketing/sdk-js` in the page head, and call `analytics.personalize()` after loading the SDK. Create a web experience for the placement (UI "Web experiences" or `artifacts.create` with type `experience`); published experiences are served by `POST /v1/decide` within 30 seconds. Visitors who have not allowed `web_personalization` only get page-based targeting (page, referrer, UTM, device).
 
 ### Members
 

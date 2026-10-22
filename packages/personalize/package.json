@@ -1,0 +1,26 @@
+{
+  "name": "@agentic-marketing/personalize",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "dependencies": {
+    "@agentic-marketing/artifacts": "workspace:*",
+    "@agentic-marketing/commands": "workspace:*",
+    "@agentic-marketing/core": "workspace:*",
+    "@agentic-marketing/db": "workspace:*",
+    "@agentic-marketing/events": "workspace:*",
+    "@agentic-marketing/hotstate": "workspace:*",
+    "@agentic-marketing/ingest": "workspace:*",
+    "@agentic-marketing/profiles": "workspace:*",
+    "@agentic-marketing/telemetry": "workspace:*",
+    "drizzle-orm": "0.45.4",
+    "hono": "4.13.13",
+    "zod": "4.6.7"
+  }
+}

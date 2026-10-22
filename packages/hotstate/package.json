@@ -1,0 +1,17 @@
+{
+  "name": "@agentic-marketing/hotstate",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "dependencies": {
+    "@agentic-marketing/commands": "workspace:*",
+    "@agentic-marketing/events": "workspace:*",
+    "iovalkey": "0.4.0"
+  }
+}

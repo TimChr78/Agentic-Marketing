@@ -1,5 +1,5 @@
 # Self-hosted single node: Postgres (configuration, profiles), ClickHouse (events), NATS JetStream
-# (event bus) and the app. Valkey arrives with web personalization (Phase 3).
+# (event bus), Valkey (session state for personalization) and the app.
 # Copy .env.example to .env and fill in the secrets first.
 services:
   postgres:
@@ -34,6 +34,10 @@ services:
     volumes:
       - natsdata:/data
 
+  valkey:
+    image: valkey/valkey:8.1.9
+    command: ["valkey-server", "--save", "", "--appendonly", "no"]
+
   app:
     build: .
     depends_on:
@@ -42,6 +46,8 @@ services:
       clickhouse:
         condition: service_healthy
       nats:
+        condition: service_started
+      valkey:
         condition: service_started
     environment:
       ROLE: all
@@ -54,6 +60,7 @@ services:
       MASTER_KEY_PREVIOUS: ${MASTER_KEY_PREVIOUS:-}
       CLICKHOUSE_URL: http://clickhouse:8123
       NATS_URL: nats://nats:4222
+      VALKEY_URL: redis://valkey:6379
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
     ports:
       - "3000:3000"

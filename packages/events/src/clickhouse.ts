@@ -30,6 +30,11 @@ export interface EventStore {
       excludeEventIds?: string[];
     },
   ): Promise<{ anonymousId: string; userId: string; count: number }[]>;
+  /** Per variant: visitors exposed to an experience, and how many did the goal event after their first exposure. */
+  experimentCounts(
+    workspaceId: string,
+    q: { experienceId: string; goal?: string; since?: Date },
+  ): Promise<{ variant: string; exposed: number; converted: number }[]>;
   insertMessageEvents(events: MessageEvent[]): Promise<void>;
   insertJourneyEvents(events: JourneyEvent[]): Promise<void>;
   /** Unique messages per event type since a time, optionally for one template or journey. */
@@ -224,6 +229,38 @@ export function clickHouseStore(opts: { url: string; database: string }): EventS
         anonymousId: r.anonymous_id,
         userId: r.user_id,
         count: Number(r.c),
+      }));
+    },
+    async experimentCounts(workspaceId, q) {
+      const rs = await client.query({
+        query: `WITH
+            exposures AS (
+              SELECT anonymous_id AS visitor, argMin(toString(properties.variant_id), timestamp) AS variant, min(timestamp) AS first
+              FROM events FINAL
+              WHERE workspace_id = {ws:UUID} AND name = 'Experience Viewed' AND toString(properties.experience_id) = {exp:String}
+                AND anonymous_id != '' AND timestamp >= {since:DateTime64(3)}
+              GROUP BY anonymous_id),
+            goals AS (
+              SELECT anonymous_id AS visitor, max(timestamp) AS last
+              FROM events FINAL
+              WHERE workspace_id = {ws:UUID} AND name = {goal:String} AND anonymous_id != '' AND timestamp >= {since:DateTime64(3)}
+              GROUP BY anonymous_id)
+          SELECT e.variant AS variant, count() AS exposed, countIf(g.visitor != '' AND g.last >= e.first) AS converted
+          FROM exposures e LEFT JOIN goals g ON g.visitor = e.visitor
+          GROUP BY e.variant ORDER BY e.variant`,
+        query_params: {
+          ws: workspaceId,
+          exp: q.experienceId,
+          goal: q.goal ?? '',
+          since: (q.since ?? new Date(0)).toISOString().replace('Z', ''),
+        },
+        format: 'JSONEachRow',
+        clickhouse_settings: { join_use_nulls: 0 },
+      });
+      return (await rs.json<{ variant: string; exposed: number; converted: number }>()).map((r) => ({
+        variant: r.variant,
+        exposed: Number(r.exposed),
+        converted: Number(r.converted),
       }));
     },
     async insertMessageEvents(events) {

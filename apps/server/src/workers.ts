@@ -1,6 +1,7 @@
 import { runDeliveryWorker } from '@agentic-marketing/email';
 import { runSink } from '@agentic-marketing/events';
 import { journeyHook, runSweeper } from '@agentic-marketing/journeys';
+import { snapshotHook } from '@agentic-marketing/personalize';
 import { runProfileWorkers } from '@agentic-marketing/profiles';
 import { runSegmentScheduler, segmentHook } from '@agentic-marketing/segments';
 import { logger } from '@agentic-marketing/telemetry';
@@ -33,7 +34,11 @@ export function startWorkers(srv: ReturnType<typeof createServer>, signal: Abort
         bus: srv.bus,
         db: srv.db,
         kp: srv.keyProvider,
-        after: [segmentHook({ db: srv.db, events: srv.events, bus: srv.bus }), journeyHook(srv.db)],
+        after: [
+          segmentHook({ db: srv.db, events: srv.events, bus: srv.bus }),
+          snapshotHook({ db: srv.db, hot: srv.hot }),
+          journeyHook(srv.db),
+        ],
       },
       signal,
     ).map((p, i) => run(`profiles-${i}`, p)),

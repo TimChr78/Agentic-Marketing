@@ -1,0 +1,134 @@
+import type {} from '@agentic-marketing/commands';
+import type { BusEvent } from '@agentic-marketing/events';
+import Valkey from 'iovalkey';
+
+// Hot state for the decision API (channels-and-personalization.md §3): the visitor's session and
+// a snapshot of their profile, in Valkey, so `decide` never touches Postgres or ClickHouse.
+// Everything here can be rebuilt: sessions expire, snapshots are rewritten on the next event.
+
+const SESSION_TTL_S = 30 * 60;
+const SNAPSHOT_TTL_S = 30 * 86_400;
+
+export interface Session {
+  pageViews: number;
+  firstSeen: string | null;
+  lastPath: string | null;
+  referrer: string | null;
+  utmSource: string | null;
+  /** Events of this session by name. */
+  counts: Record<string, number>;
+  isNew: boolean;
+}
+
+export interface ProfileSnapshot {
+  profileId: string;
+  /** Non-personal traits only. */
+  traits: Record<string, unknown>;
+  segments: string[];
+  at: string;
+}
+
+export interface HotState {
+  /** Counts accepted events into each visitor's session (ingest, before it answers). */
+  recordSessions(events: BusEvent[]): Promise<void>;
+  session(workspaceId: string, anonymousId: string): Promise<Session>;
+  writeSnapshot(workspaceId: string, ids: { anonymousIds: string[]; userIds: string[] }, snapshot: ProfileSnapshot): Promise<void>;
+  deleteSnapshot(workspaceId: string, ids: { anonymousIds: string[]; userIds: string[] }): Promise<void>;
+  /** The snapshot for whichever id is known, user id first. */
+  snapshot(workspaceId: string, ids: { anonymousId?: string; userId?: string }): Promise<ProfileSnapshot | null>;
+  ping(): Promise<boolean>;
+  close(): Promise<void>;
+}
+
+export function valkeyHotState(opts: { url: string; prefix?: string }): HotState {
+  const client = new Valkey(opts.url, { lazyConnect: true, maxRetriesPerRequest: 2, enableAutoPipelining: true });
+  const p = opts.prefix ?? 'am';
+  const sessionKey = (ws: string, anon: string) => `${p}:${ws}:s:${anon}`;
+  const snapKey = (ws: string, kind: 'a' | 'u', id: string) => `${p}:${ws}:p:${kind}:${id}`;
+
+  return {
+    async recordSessions(events) {
+      const multi = client.multi();
+      let n = 0;
+      for (const e of events) {
+        if (!e.anonymousId) continue;
+        const k = sessionKey(e.workspaceId, e.anonymousId);
+        multi.hsetnx(k, 'first', e.timestamp);
+        multi.hincrby(k, `e:${e.name}`, 1);
+        if (e.type === 'page') {
+          multi.hincrby(k, 'pv', 1);
+          const page = (e.context.page ?? {}) as { path?: string; referrer?: string; search?: string };
+          if (page.path) multi.hset(k, 'path', page.path);
+          if (page.referrer) multi.hsetnx(k, 'ref', page.referrer);
+          const utm =
+            new URLSearchParams(page.search ?? '').get('utm_source') ??
+            (e.context.campaign as { source?: string } | undefined)?.source ??
+            null;
+          if (utm) multi.hsetnx(k, 'utm', utm);
+        }
+        multi.expire(k, SESSION_TTL_S);
+        n++;
+      }
+      if (n) await multi.exec();
+    },
+
+    async session(ws, anon) {
+      const h = await client.hgetall(sessionKey(ws, anon));
+      const counts: Record<string, number> = {};
+      for (const [k, v] of Object.entries(h)) if (k.startsWith('e:')) counts[k.slice(2)] = Number(v);
+      return {
+        pageViews: Number(h.pv ?? 0),
+        firstSeen: h.first ?? null,
+        lastPath: h.path ?? null,
+        referrer: h.ref ?? null,
+        utmSource: h.utm ?? null,
+        counts,
+        isNew: !h.first,
+      };
+    },
+
+    async writeSnapshot(ws, ids, snap) {
+      const value = JSON.stringify(snap);
+      const multi = client.multi();
+      for (const a of ids.anonymousIds) multi.set(snapKey(ws, 'a', a), value, 'EX', SNAPSHOT_TTL_S);
+      for (const u of ids.userIds) multi.set(snapKey(ws, 'u', u), value, 'EX', SNAPSHOT_TTL_S);
+      await multi.exec();
+    },
+
+    async deleteSnapshot(ws, ids) {
+      const keys = [
+        ...ids.anonymousIds.flatMap((a) => [snapKey(ws, 'a', a), sessionKey(ws, a)]),
+        ...ids.userIds.map((u) => snapKey(ws, 'u', u)),
+      ];
+      if (keys.length) await client.del(...keys);
+    },
+
+    async snapshot(ws, ids) {
+      const keys = [ids.userId && snapKey(ws, 'u', ids.userId), ids.anonymousId && snapKey(ws, 'a', ids.anonymousId)].filter(
+        (k): k is string => !!k,
+      );
+      if (!keys.length) return null;
+      const values = await client.mget(...keys);
+      const hit = values.find((v) => v);
+      return hit ? (JSON.parse(hit) as ProfileSnapshot) : null;
+    },
+
+    async ping() {
+      try {
+        return (await client.ping()) === 'PONG';
+      } catch {
+        return false;
+      }
+    },
+
+    async close() {
+      client.disconnect();
+    },
+  };
+}
+
+declare module '@agentic-marketing/commands' {
+  interface Services {
+    hot: HotState;
+  }
+}

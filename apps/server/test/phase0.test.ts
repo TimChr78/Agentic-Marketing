@@ -139,6 +139,7 @@ afterAll(async () => {
   http?.close();
   await srv?.bus.close();
   await srv?.events.close();
+  await srv?.hot.close();
   await srv?.db.close();
 });
 

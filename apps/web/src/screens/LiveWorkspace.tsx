@@ -4,6 +4,7 @@ import { ApiError } from '@agentic-marketing/client';
 import { AuthorBadge, Button, Card, PageHeader, Pill, cx, inputCls, timeAgo } from '../components/ui';
 import { LiveProfiles } from './LiveProfiles';
 import { LiveEmails } from './live/LiveEmails';
+import { LiveExperiences } from './live/LiveExperiences';
 import { LiveJourneys } from './live/LiveJourneys';
 import { api, errText, type Out } from './liveApi';
 
@@ -20,7 +21,7 @@ export function LiveWorkspace() {
   const [ws, setWs] = useState<Workspace | null>(null);
   const [status, setStatus] = useState<'loading' | 'signed-out' | 'offline' | 'ready'>('loading');
   const [error, setError] = useState('');
-  const [tab, setTab] = useState<'artifacts' | 'journeys' | 'emails' | 'people'>('artifacts');
+  const [tab, setTab] = useState<'artifacts' | 'journeys' | 'emails' | 'experiences' | 'people'>('artifacts');
 
   const load = useCallback(async () => {
     try {
@@ -65,6 +66,7 @@ export function LiveWorkspace() {
             ['artifacts', 'Artifacts & approvals'],
             ['journeys', 'Journeys'],
             ['emails', 'E-mails'],
+            ['experiences', 'Web experiences'],
             ['people', 'People & data'],
           ] as const
         ).map(([key, label]) => (
@@ -82,6 +84,7 @@ export function LiveWorkspace() {
       {tab === 'artifacts' && <Artifacts onError={setError} />}
       {tab === 'journeys' && <LiveJourneys onError={setError} />}
       {tab === 'emails' && <LiveEmails canAdmin={ws!.you.permissions.includes('workspace:admin')} onError={setError} />}
+      {tab === 'experiences' && <LiveExperiences onError={setError} />}
       {tab === 'people' && <LiveProfiles canAdmin={ws!.you.permissions.includes('workspace:admin')} onError={setError} />}
     </div>
   );

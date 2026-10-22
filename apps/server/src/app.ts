@@ -4,7 +4,9 @@ import { AppError, newUuid } from '@agentic-marketing/core';
 import { createDb } from '@agentic-marketing/db';
 import { emailRoutes, linkSigner } from '@agentic-marketing/email';
 import { clickHouseStore, lazyNatsBus } from '@agentic-marketing/events';
+import { valkeyHotState } from '@agentic-marketing/hotstate';
 import { ingestApi } from '@agentic-marketing/ingest';
+import { decideApi } from '@agentic-marketing/personalize';
 import { localKeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { oauthProviderAuthServerMetadata, oauthProviderOpenIdConfigMetadata } from '@better-auth/oauth-provider';
@@ -27,13 +29,14 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
   const keyProvider = localKeyProvider(config.masterKey, config.previousMasterKeys);
   const bus = lazyNatsBus(config.nats);
   const events = clickHouseStore(config.clickhouse);
+  const hot = valkeyHotState(config.valkey);
   const email = {
     publicUrl: config.publicUrl,
     links: linkSigner(config.authSecret),
     adapterDeps: { fetch: globalThis.fetch },
     trackClicks: config.trackClicks,
   };
-  const executor = createExecutor(db, { keyProvider, directory: authDirectory(db), events, bus, email });
+  const executor = createExecutor(db, { keyProvider, directory: authDirectory(db), events, bus, email, hot });
 
   const app = new Hono();
 
@@ -49,6 +52,7 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
     try {
       await db.ping();
       if (!(await events.ping())) throw new Error('ClickHouse is not reachable');
+      if (!(await hot.ping())) throw new Error('Valkey is not reachable');
       return c.json({ ok: true });
     } catch {
       return c.json({ ok: false }, 503);
@@ -86,12 +90,14 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
     return c.json(out);
   });
 
-  if (config.roles.has('ingest')) app.route('/', ingestApi({ db, bus }));
+  // The decision API goes first: the ingest routes claim every other /v1/<word> path.
+  if (config.roles.has('ingest')) app.route('/', decideApi({ db, hot }));
+  if (config.roles.has('ingest')) app.route('/', ingestApi({ db, bus, hot }));
   if (config.roles.has('api')) app.route('/', emailRoutes({ db, kp: keyProvider, events, email }));
 
   const mcp = mcpEndpoint({ auth, db, executor, resource: `${config.publicUrl}/mcp` });
   app.all('/mcp', (c) => mcp(c.req.raw));
   app.route('/', restApi({ auth, db, executor }));
 
-  return { app, db, auth, executor, keyProvider, bus, events, email };
+  return { app, db, auth, executor, keyProvider, bus, events, email, hot };
 }
