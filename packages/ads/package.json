@@ -11,10 +11,15 @@
   },
   "dependencies": {
     "@agentic-marketing/artifacts": "workspace:*",
+    "@agentic-marketing/commands": "workspace:*",
+    "@agentic-marketing/core": "workspace:*",
     "@agentic-marketing/db": "workspace:*",
     "@agentic-marketing/events": "workspace:*",
+    "@agentic-marketing/integrations": "workspace:*",
     "@agentic-marketing/profiles": "workspace:*",
+    "@agentic-marketing/secrets": "workspace:*",
     "@agentic-marketing/telemetry": "workspace:*",
-    "drizzle-orm": "0.45.4"
+    "drizzle-orm": "0.45.4",
+    "zod": "4.6.7"
   }
 }

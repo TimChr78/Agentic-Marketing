@@ -184,7 +184,7 @@ export const testWebhook = defineCommand({
 
 const Delivery = z.object({
   id: z.string(),
-  kind: z.enum(['webhook', 'action']),
+  kind: z.enum(['webhook', 'action', 'ad_conversion']),
   targetId: z.string(),
   action: z.string().nullable(),
   status: z.enum(['pending', 'running', 'done', 'failed', 'dead']),

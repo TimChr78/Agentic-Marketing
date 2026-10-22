@@ -1,4 +1,4 @@
-import { clickIdHook } from '@agentic-marketing/ads';
+import { clickIdHook, conversionHook } from '@agentic-marketing/ads';
 import { runAiWorker } from '@agentic-marketing/ai';
 import { consentHook, runBroadcasts, runRetention } from '@agentic-marketing/audience';
 import { runDeliveryWorker } from '@agentic-marketing/email';
@@ -52,7 +52,9 @@ export function startWorkers(
         after: [
           // Consent first: segments and journeys that react to a signup need it recorded.
           consentHook({ db: srv.db, kp: srv.keyProvider, events: srv.events, links: srv.email.links, linksUrl: srv.linksUrl }),
+          // Click ids before conversions, so a landing and its conversion in one batch match.
           clickIdHook({ db: srv.db }),
+          conversionHook({ db: srv.db }),
           segmentHook({ db: srv.db, events: srv.events, bus: srv.bus }),
           snapshotHook({ db: srv.db, hot: srv.hot }),
           journeyHook(srv.db),

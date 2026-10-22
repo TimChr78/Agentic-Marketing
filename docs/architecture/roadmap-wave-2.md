@@ -131,6 +131,22 @@ Design: [performance-marketing.md](performance-marketing.md). Built in this orde
 5. **Microsoft Advertising:** offline conversions with `msclkid` (Bulk API), Customer Match where eligible, reporting. The new server-side Conversions API is per-account pilot only.
 6. **Guardrails:** test modes (`validateOnly`, `test_event_code`); uploads per person in `profiles.export`; erasure removes people from synced audiences; no agent write access to budgets or bids in this wave.
 
+**Built (part 1, conversions):**
+- **Ad accounts as connections:**
+  - `meta_ads`: a system-user token, plus pixel id, Graph API version (default v24.0) and test event code;
+  - `google_ads`: OAuth with your Google Cloud client (scope `datamanager`), plus customer and login customer ids.
+- **The `conversion_map` artifact** (one per workspace; publishing checks the connections). It maps events to Meta event names and Google conversion actions, with value and currency.
+- **A post-resolve hook** queues conversions in the deliveries outbox, only for people for whom `ad_measurement` holds. The delivery worker then:
+  - reads and hashes e-mail and phone at send time;
+  - adds click ids (`fbc`/`fbp`, `gclid`/`gbraid`/`wbraid`), the user agent, and an external id (hashed profile id);
+  - sends Google's consent fields (`ad_user_data` granted, `ad_personalization` from `ad_targeting`);
+  - uses `event_id`/`transactionId` = our message id for de-duplication;
+  - retries 429 and 5xx, and stops on other errors and on a withdrawal after the event.
+- **`ads.test`** (Meta `test_event_code`, Google `validateOnly`), **`ads.conversions`**, and `adUploads` in `profiles.export`.
+- Request shapes are checked against the official SDKs (`facebook-nodejs-business-sdk` 24, `@google-ads/datamanager` 1.3); a live account is still to be tried.
+
+Part 2 (next): audience sync, spend import and ROAS, Microsoft, `ads.performance` and `ads.audiences`.
+
 ## Phase 10: scale and operations (the original Phase 6)
 
 - **Helm chart** and a documented reference deployment; KMS or OpenBao key providers (Phase 0 deferral).
