@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: am
+          POSTGRES_PASSWORD: am
+          POSTGRES_DB: am
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U am"
+          --health-interval 5s
+          --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgres://am:am@localhost:5432/am_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      # Spikes (with large benchmark dependencies) are not part of CI.
+      - run: pnpm install --frozen-lockfile --filter "./packages/**" --filter "./apps/**" --filter "agentic-marketing"
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test

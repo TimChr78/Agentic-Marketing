@@ -2,11 +2,18 @@
   "name": "agentic-marketing",
   "private": true,
   "packageManager": "pnpm@10.28.0",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
-    "dev": "pnpm --filter @agentic-marketing/web dev",
-    "build": "pnpm --filter @agentic-marketing/web build",
+    "dev": "pnpm --filter @agentic-marketing/server dev",
+    "dev:web": "pnpm --filter @agentic-marketing/web dev",
     "build:demo": "pnpm --filter @agentic-marketing/web build:single",
-    "typecheck": "pnpm -r typecheck"
+    "migrate": "pnpm --filter @agentic-marketing/server cli migrate",
+    "lint": "biome check .",
+    "format": "biome format --write .",
+    "typecheck": "pnpm -r --filter './packages/*' --filter './apps/*' typecheck",
+    "test": "vitest run"
   },
   "pnpm": {
     "overrides": {
@@ -15,5 +22,12 @@
       "@better-auth/core": "1.7.7",
       "better-auth": "1.7.7"
     }
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.15",
+    "@types/node": "^26.6.5",
+    "tsx": "4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "5.0.5"
   }
 }

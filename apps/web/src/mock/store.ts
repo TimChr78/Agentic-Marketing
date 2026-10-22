@@ -23,7 +23,7 @@ import {
 // The mock "backend database". Only api/commands.ts writes to the domain slices;
 // screens read from here and call commands, just as they would against the real API.
 
-export type Route = 'overview' | 'journeys' | 'email' | 'live' | 'profiles' | 'analytics' | 'approvals' | 'setup';
+export type Route = 'overview' | 'journeys' | 'email' | 'live' | 'profiles' | 'analytics' | 'approvals' | 'setup' | 'workspace';
 
 export interface Toast {
   id: number;
@@ -96,4 +96,4 @@ export const useStore = create<State>((set) => ({
   dismissToast: (id) => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
 }));
 
-export const routes: Route[] = ['overview', 'journeys', 'email', 'live', 'profiles', 'analytics', 'approvals', 'setup'];
+export const routes: Route[] = ['overview', 'journeys', 'email', 'live', 'profiles', 'analytics', 'approvals', 'setup', 'workspace'];

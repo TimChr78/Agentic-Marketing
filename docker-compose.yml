@@ -1,0 +1,35 @@
+# Self-hosted single node. Phase 0 needs only Postgres; ClickHouse, NATS and Valkey are added with
+# the data platform (Phase 1). Copy .env.example to .env and fill in the secrets first.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: am
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: am
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U am"]
+      interval: 5s
+      retries: 10
+
+  app:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ROLE: all
+      PORT: 3000
+      PUBLIC_URL: ${PUBLIC_URL:-http://localhost:3000}
+      DATABASE_URL: postgres://am:${POSTGRES_PASSWORD}@postgres:5432/am
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?set APP_DB_PASSWORD in .env}
+      AUTH_SECRET: ${AUTH_SECRET:?set AUTH_SECRET in .env}
+      MASTER_KEY: ${MASTER_KEY:?set MASTER_KEY in .env}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+    ports:
+      - "3000:3000"
+
+volumes:
+  pgdata:

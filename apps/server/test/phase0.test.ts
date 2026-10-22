@@ -1,0 +1,422 @@
+import type { AddressInfo } from 'node:net';
+import { migrateAuth } from '@agentic-marketing/auth';
+import { type ApiError, type CommandInput, createClient } from '@agentic-marketing/client';
+import { hashValue, newUuid } from '@agentic-marketing/core';
+import { migrate } from '@agentic-marketing/db';
+import { localKeyProvider, readSecret } from '@agentic-marketing/secrets';
+import { serve } from '@hono/node-server';
+import { Client, type OAuthClientProvider, StreamableHTTPClientTransport, UnauthorizedError } from '@modelcontextprotocol/client';
+import pg from 'pg';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { createServer } from '../src/app';
+import { loadConfig } from '../src/config';
+import type { Commands } from '../src/registry';
+
+// Phase 0 acceptance: "an MCP client and the UI can create, version and approve an artifact with
+// identical rules". Runs against a fresh database (TEST_DATABASE_URL, default am_test on localhost).
+
+const PORT = 3299;
+const BASE = `http://localhost:${PORT}`;
+const TEST_DB = process.env.TEST_DATABASE_URL ?? 'postgres://am:am@localhost:5432/am_test';
+const MASTER_KEY = Buffer.alloc(32, 7).toString('base64');
+
+let srv: ReturnType<typeof createServer>;
+let http: { close: () => void };
+const wsA = newUuid();
+const wsB = newUuid();
+
+type User = { email: string; cookie: string; id: string };
+const users: Record<'owner' | 'reviewer' | 'viewer' | 'outsider', User> = {
+  owner: { email: `owner-${Date.now()}@example.com`, cookie: '', id: '' },
+  reviewer: { email: `reviewer-${Date.now()}@example.com`, cookie: '', id: '' },
+  viewer: { email: `viewer-${Date.now()}@example.com`, cookie: '', id: '' },
+  outsider: { email: `outsider-${Date.now()}@example.com`, cookie: '', id: '' },
+};
+const PASSWORD = 'correct-horse-battery-staple';
+
+const cookieOf = (res: Response) =>
+  res.headers
+    .getSetCookie()
+    .map((c) => c.split(';')[0])
+    .join('; ');
+const api = (u: User) => createClient<Commands>({ baseUrl: BASE, headers: { cookie: u.cookie } });
+const rejects = async (p: Promise<unknown>) => {
+  try {
+    await p;
+  } catch (e) {
+    return e as ApiError;
+  }
+  throw new Error('expected the call to fail');
+};
+
+const note = (title: string): CommandInput<Commands, 'artifacts.create'> => ({
+  type: 'note',
+  name: title,
+  content: { title, body: 'Hello' },
+});
+const journey = {
+  type: 'journey' as const,
+  name: 'Win-back 60 days',
+  content: {
+    purpose: 'marketing_email',
+    goal: 'Order within 14 days',
+    nodes: [
+      { id: 'n1', kind: 'trigger', label: 'Entered lapsed segment', config: { event: 'segment.entered' } },
+      { id: 'n2', kind: 'email', label: 'We miss you', config: { template: 'tpl_win_back' } },
+      { id: 'n3', kind: 'goal', label: 'Ordered', config: { event: 'order_completed', within: 'P14D' } },
+    ],
+  },
+};
+
+class TestOAuthProvider implements OAuthClientProvider {
+  info: any;
+  tokenSet: any;
+  verifier = '';
+  discovery: any;
+  authorizationUrl?: URL;
+  get redirectUrl() {
+    return 'http://localhost/callback';
+  }
+  get clientMetadata() {
+    return {
+      client_name: 'Phase 0 test agent',
+      redirect_uris: ['http://localhost/callback'],
+      grant_types: ['authorization_code', 'refresh_token'],
+      response_types: ['code'],
+      token_endpoint_auth_method: 'none',
+    };
+  }
+  clientInformation() {
+    return this.info;
+  }
+  saveClientInformation(i: unknown) {
+    this.info = i;
+  }
+  tokens() {
+    return this.tokenSet;
+  }
+  saveTokens(t: unknown) {
+    this.tokenSet = t;
+  }
+  redirectToAuthorization(url: URL) {
+    this.authorizationUrl = url;
+  }
+  saveCodeVerifier(v: string) {
+    this.verifier = v;
+  }
+  codeVerifier() {
+    return this.verifier;
+  }
+  saveDiscoveryState(s: unknown) {
+    this.discovery = s;
+  }
+  discoveryState() {
+    return this.discovery;
+  }
+}
+
+const grantFrom = (requested: string, permissions: string[]) =>
+  requested
+    .split(' ')
+    .filter((s) => !s.includes(':') || permissions.includes(s))
+    .join(' ');
+
+/** Plays the person in the browser: authorize → sign in → consent with the chosen permissions. */
+async function connectAgent(u: User, permissions: string[]) {
+  const provider = new TestOAuthProvider();
+  const first = new StreamableHTTPClientTransport(new URL(`${BASE}/mcp`), { authProvider: provider });
+  await expect(new Client({ name: 't', version: '0' }).connect(first)).rejects.toBeInstanceOf(UnauthorizedError);
+
+  const authz = await fetch(provider.authorizationUrl!, { redirect: 'manual', headers: { accept: 'application/json' } });
+  const login = new URL(authz.headers.get('location') ?? (await authz.json()).url, BASE);
+  const signIn = await fetch(`${BASE}/api/auth/sign-in/email`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', origin: BASE },
+    body: JSON.stringify({ email: u.email, password: PASSWORD, oauth_query: login.search.slice(1) }),
+  });
+  let next = new URL((await signIn.json()).url, BASE);
+  if (next.pathname === '/consent') {
+    const consent = await fetch(`${BASE}/api/auth/oauth2/consent`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: BASE, cookie: cookieOf(signIn) },
+      // Like the consent page: identity scopes as requested, permissions as chosen (never more than requested).
+      body: JSON.stringify({
+        accept: true,
+        scope: grantFrom(next.searchParams.get('scope') ?? '', permissions),
+        oauth_query: next.search.slice(1),
+      }),
+    });
+    const body = await consent.json();
+    if (!body.url) throw new Error(`consent failed: ${JSON.stringify(body)}`);
+    next = new URL(body.url);
+  }
+  await first.finishAuth(next.searchParams);
+  const client = new Client({ name: 'phase0-test', version: '0' });
+  await client.connect(new StreamableHTTPClientTransport(new URL(`${BASE}/mcp`), { authProvider: provider }));
+  return { client, clientId: provider.info.client_id as string };
+}
+const structured = (r: any) => r.structuredContent as any;
+const toolError = (r: any) => JSON.parse(r.content[0].text);
+
+beforeAll(async () => {
+  const url = new URL(TEST_DB);
+  const dbName = url.pathname.slice(1);
+  const maint = new pg.Client({ connectionString: Object.assign(new URL(TEST_DB), { pathname: '/postgres' }).toString() });
+  await maint.connect();
+  await maint.query(`DROP DATABASE IF EXISTS ${dbName} WITH (FORCE)`);
+  await maint.query(`CREATE DATABASE ${dbName}`);
+  await maint.end();
+
+  const config = loadConfig({
+    PORT: String(PORT),
+    DATABASE_URL: TEST_DB,
+    APP_DB_PASSWORD: 'am_app_test_password',
+    AUTH_SECRET: 'test-secret-test-secret-test-secret-123',
+    MASTER_KEY,
+  });
+  srv = createServer(config);
+  await migrate(srv.db.admin, { appRolePassword: config.appDbPassword });
+  await migrateAuth({ baseUrl: config.publicUrl, secret: config.authSecret, db: srv.db });
+  await new Promise<void>((resolve) => {
+    http = serve({ fetch: srv.app.fetch, port: PORT }, (_i: AddressInfo) => resolve());
+  });
+
+  for (const u of Object.values(users)) {
+    const res = await fetch(`${BASE}/api/auth/sign-up/email`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: BASE },
+      body: JSON.stringify({ email: u.email, password: PASSWORD, name: u.email.split('@')[0] }),
+    });
+    expect(res.status).toBe(200);
+    u.cookie = cookieOf(res);
+    u.id = (await res.json()).user.id;
+  }
+  await srv.db.admin.query(
+    `INSERT INTO workspaces (id, name, approval_policy) VALUES ($1, 'Fjeldvej', 'agent_changes'), ($2, 'Other shop', 'none')`,
+    [wsA, wsB],
+  );
+  await srv.db.admin.query(
+    `INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'owner'), ($1, $3, 'approver'), ($1, $4, 'viewer'), ($5, $6, 'owner')`,
+    [wsA, users.owner.id, users.reviewer.id, users.viewer.id, wsB, users.outsider.id],
+  );
+}, 60_000);
+
+afterAll(async () => {
+  http?.close();
+  await srv?.db.close();
+});
+
+describe('people through REST and the typed client', () => {
+  it('creates a draft, edits it in place, and protects against lost updates', async () => {
+    const owner = api(users.owner);
+    const created = await owner.call('artifacts.create', note('Launch plan'));
+    expect(created).toMatchObject({ version: 1, state: 'draft' });
+    expect(created.artifactId).toMatch(/^not_[0-9a-f]{32}$/);
+
+    const v1 = await owner.call('artifacts.get', { artifactId: created.artifactId });
+    const edited = await owner.call('artifacts.updateDraft', {
+      artifactId: created.artifactId,
+      content: { title: 'Launch plan', body: 'Hello, edited' },
+      expectedContentHash: v1.version.contentHash,
+    });
+    expect(edited.version).toBe(1); // still the same draft
+
+    const stale = await rejects(
+      owner.call('artifacts.updateDraft', {
+        artifactId: created.artifactId,
+        content: { title: 'x', body: 'y' },
+        expectedContentHash: v1.version.contentHash,
+      }),
+    );
+    expect(stale.status).toBe(412);
+  });
+
+  it('rejects invalid content with details an agent can act on', async () => {
+    const err = await rejects(
+      api(users.owner).call('artifacts.create', {
+        ...journey,
+        content: { ...journey.content, nodes: [{ id: 'n1', kind: 'email', label: 'x', next: [{ to: 'zz' }] }] },
+      }),
+    );
+    expect(err.status).toBe(400);
+    expect(err.message).toContain('artifacts.types');
+    expect(JSON.stringify(err.details)).toContain('exactly one trigger');
+    expect(JSON.stringify(err.details)).toContain('unknown node');
+  });
+
+  it('publishes a person’s draft directly under "agent_changes", then versions further edits', async () => {
+    const owner = api(users.owner);
+    const { artifactId } = await owner.call('artifacts.create', note('Brand voice'));
+    expect(await owner.call('artifacts.requestPublish', { artifactId, note: 'First version' })).toMatchObject({
+      status: 'published',
+      version: 1,
+    });
+    const v2 = await owner.call('artifacts.updateDraft', { artifactId, content: { title: 'Brand voice', body: 'Warm, direct, Nordic.' } });
+    expect(v2.version).toBe(2);
+    const d = await owner.call('artifacts.diff', { artifactId });
+    expect(d).toMatchObject({ from: 1, to: 2 });
+    expect(d.changes).toEqual([{ path: 'body', kind: 'changed', before: 'Hello', after: 'Warm, direct, Nordic.' }]);
+    const h = await owner.call('artifacts.history', { artifactId });
+    expect(h.versions.map((v) => [v.number, v.state, v.basedOn])).toEqual([
+      [2, 'draft', 1],
+      [1, 'published', null],
+    ]);
+  });
+
+  it('enforces roles: a viewer can read but not write', async () => {
+    const err = await rejects(api(users.viewer).call('artifacts.create', note('Nope')));
+    expect(err.status).toBe(403);
+    expect(err.message).toContain('Your role (viewer)');
+    const list = await api(users.viewer).call('artifacts.list', {});
+    expect(list.artifacts.length).toBeGreaterThan(0);
+  });
+
+  it('isolates workspaces with row-level security', async () => {
+    const outsider = api(users.outsider);
+    expect((await outsider.call('artifacts.list', {})).artifacts).toEqual([]);
+    const { artifacts } = await api(users.owner).call('artifacts.list', {});
+    const err = await rejects(outsider.call('artifacts.get', { artifactId: artifacts[0].id }));
+    expect(err.status).toBe(404);
+  });
+
+  it('replays idempotent requests and refuses key reuse for a different request', async () => {
+    const owner = api(users.owner);
+    const a = await owner.call('artifacts.create', note('Idempotent'), { idempotencyKey: 'key-1' });
+    const b = await owner.call('artifacts.create', note('Idempotent'), { idempotencyKey: 'key-1' });
+    expect(b).toEqual(a);
+    expect((await rejects(owner.call('artifacts.create', note('Other'), { idempotencyKey: 'key-1' }))).status).toBe(409);
+  });
+});
+
+describe('agents through MCP with OAuth', () => {
+  let agent: Awaited<ReturnType<typeof connectAgent>>;
+  beforeAll(async () => {
+    agent = await connectAgent(users.owner, ['artifacts:read', 'artifacts:write', 'artifacts:publish']);
+  }, 30_000);
+  afterAll(() => agent?.client.close());
+
+  it('lists only the tools this agent may use, never humans-only ones', async () => {
+    const names = (await agent.client.listTools()).tools.map((t) => t.name);
+    expect(names).toEqual(expect.arrayContaining(['artifacts.create', 'artifacts.requestPublish', 'artifacts.types', 'workspace.get']));
+    for (const forbidden of [
+      'approvals.approve',
+      'approvals.reject',
+      'secrets.set',
+      'secrets.delete',
+      'workspace.setApprovalPolicy',
+      'audit.list',
+    ])
+      expect(names).not.toContain(forbidden);
+  });
+
+  it('drafts a journey, and a person approves it under the same rules as the UI', async () => {
+    const created = structured(await agent.client.callTool({ name: 'artifacts.create', arguments: journey }));
+    const pub = structured(
+      await agent.client.callTool({
+        name: 'artifacts.requestPublish',
+        arguments: { artifactId: created.artifactId, note: 'Proposed by agent' },
+      }),
+    );
+    expect(pub).toMatchObject({ status: 'in_review', policy: 'agent_changes' });
+
+    const owner = api(users.owner);
+    const got = await owner.call('artifacts.get', { artifactId: created.artifactId });
+    expect(got.version.author).toEqual({ type: 'agent', id: users.owner.id, client: agent.clientId });
+    const pending = await owner.call('approvals.list', {});
+    expect(pending.approvals.map((a) => a.id)).toContain(pub.approvalId);
+
+    expect(await owner.call('approvals.approve', { approvalId: pub.approvalId })).toMatchObject({ status: 'approved', version: 1 });
+    expect((await owner.call('artifacts.get', { artifactId: created.artifactId })).publishedVersion).toBe(1);
+  });
+
+  it('returns structured, actionable tool errors', async () => {
+    const res = await agent.client.callTool({ name: 'artifacts.get', arguments: { artifactId: `not_${'0'.repeat(32)}` } });
+    expect(res.isError).toBe(true);
+    expect(toolError(res)).toMatchObject({ error: 'not_found' });
+  });
+
+  it('gives a read-only grant read-only tools', async () => {
+    const ro = await connectAgent(users.owner, ['artifacts:read']);
+    try {
+      const names = (await ro.client.listTools()).tools.map((t) => t.name);
+      expect(names).toContain('artifacts.list');
+      expect(names).not.toContain('artifacts.create');
+    } finally {
+      await ro.client.close();
+    }
+  }, 30_000);
+});
+
+describe('approval policies', () => {
+  it('"all_publishes" requires someone other than the requester to approve', async () => {
+    const owner = api(users.owner);
+    await owner.call('workspace.setApprovalPolicy', { policy: 'all_publishes' });
+    try {
+      const { artifactId } = await owner.call('artifacts.create', note('Four eyes'));
+      const pub = await owner.call('artifacts.requestPublish', { artifactId, note: 'Please review' });
+      expect(pub.status).toBe('in_review');
+      const self = await rejects(owner.call('approvals.approve', { approvalId: pub.approvalId! }));
+      expect(self.status).toBe(403);
+      expect(self.message).toContain('someone else');
+      expect(await api(users.reviewer).call('approvals.approve', { approvalId: pub.approvalId!, note: 'Looks good' })).toMatchObject({
+        status: 'approved',
+      });
+    } finally {
+      await owner.call('workspace.setApprovalPolicy', { policy: 'agent_changes' });
+    }
+  });
+
+  it('a rejected version stays in history and the next edit starts a new draft', async () => {
+    const owner = api(users.owner);
+    await owner.call('workspace.setApprovalPolicy', { policy: 'all_publishes' });
+    try {
+      const { artifactId } = await owner.call('artifacts.create', note('Rejected'));
+      const pub = await owner.call('artifacts.requestPublish', { artifactId, note: 'v1' });
+      await api(users.reviewer).call('approvals.reject', { approvalId: pub.approvalId!, note: 'Tone is off' });
+      const next = await owner.call('artifacts.updateDraft', { artifactId, content: { title: 'Rejected', body: 'Better tone' } });
+      expect(next).toMatchObject({ version: 2, state: 'draft' });
+    } finally {
+      await owner.call('workspace.setApprovalPolicy', { policy: 'agent_changes' });
+    }
+  });
+});
+
+describe('secrets', () => {
+  it('stores encrypted, never returns values, and keeps values out of the audit log', async () => {
+    const owner = api(users.owner);
+    await owner.call('secrets.set', { name: 'llm.anthropic.api_key', value: 'sk-test-123' });
+    const { secrets } = await owner.call('secrets.list', {});
+    expect(secrets).toEqual([expect.objectContaining({ name: 'llm.anthropic.api_key' })]);
+    expect(JSON.stringify(secrets)).not.toContain('sk-test');
+
+    const { rows } = await srv.db.admin.query(`SELECT ciphertext FROM secrets WHERE workspace_id = $1`, [wsA]);
+    expect(rows[0].ciphertext.toString('utf8')).not.toContain('sk-test');
+    const value = await srv.db.withWorkspace(wsA, (tx) => readSecret(tx, wsA, 'llm.anthropic.api_key', localKeyProvider(MASTER_KEY)));
+    expect(value).toBe('sk-test-123');
+
+    const { rows: audit } = await srv.db.admin.query(`SELECT input_hash FROM audit_log WHERE command = 'secrets.set'`);
+    expect(audit[0].input_hash).toBe(hashValue({ name: 'llm.anthropic.api_key', value: '[redacted]' }));
+  });
+});
+
+describe('audit log and API description', () => {
+  it('records both surfaces in a verifiable, append-only chain', async () => {
+    const owner = api(users.owner);
+    const { entries } = await owner.call('audit.list', { limit: 500 });
+    expect(new Set(entries.map((e) => `${e.surface}:${e.principalType}`))).toEqual(new Set(['rest:user', 'mcp:agent']));
+    expect(entries.some((e) => !e.ok && e.error?.startsWith('forbidden'))).toBe(true);
+    expect(await owner.call('audit.verify', {})).toMatchObject({ ok: true, firstBrokenSeq: null });
+    await expect(srv.db.app.query('UPDATE audit_log SET ok = true')).rejects.toThrow(/permission denied/);
+  });
+
+  it('documents every command in OpenAPI 3.1', async () => {
+    const doc = await (await fetch(`${BASE}/openapi.json`)).json();
+    const { commands } = await import('../src/registry');
+    expect(Object.keys(doc.paths).sort()).toEqual(commands.map((c) => `/v1/${c.name}`).sort());
+  });
+
+  it('answers health checks', async () => {
+    expect((await fetch(`${BASE}/healthz`)).status).toBe(200);
+    expect((await fetch(`${BASE}/readyz`)).status).toBe(200);
+  });
+});
