@@ -16,8 +16,6 @@ Postgres, ClickHouse, NATS JetStream and Valkey are not in the chart. Use manage
 ## Install
 
 ```bash
-docker build -t registry.example.com/agentic-marketing:0.1.0 . && docker push registry.example.com/agentic-marketing:0.1.0
-
 kubectl create secret generic am-secrets \
   --from-literal=DATABASE_URL='postgres://am:…@postgres:5432/am' \
   --from-literal=APP_DB_PASSWORD="$(openssl rand -base64 24)" \
@@ -25,12 +23,13 @@ kubectl create secret generic am-secrets \
   --from-literal=MASTER_KEY="$(openssl rand -base64 32)"
 
 helm install am deploy/helm/agentic-marketing \
-  --set image.repository=registry.example.com/agentic-marketing \
   --set secrets.existingSecret=am-secrets \
   --set config.PUBLIC_URL=https://marketing.example.com \
   --set config.CLICKHOUSE_URL=http://am:…@clickhouse:8123 \
   --set ingress.enabled=true --set ingress.host=marketing.example.com
 ```
+
+The chart uses the released image, `ghcr.io/timchr78/agentic-marketing:<appVersion>`; the packaged chart is also attached to each [GitHub release](https://github.com/TimChr78/Agentic-Marketing/releases). For your own build, push it to your registry and set `image.repository` and `image.tag`.
 
 Then create the first workspace with `cli bootstrap` (the chart's notes print the command). `DATABASE_URL` is an owner of the database: migrations create the `am_app` role that the application itself uses under row-level security.
 

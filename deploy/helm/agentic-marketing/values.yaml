@@ -2,10 +2,10 @@
 # of this chart: point it at managed services or operators you already run (see
 # docs/deployment/kubernetes.md for a reference deployment).
 
-# No image is published yet: build it from the repository's Dockerfile and push it to your
-# registry (`docker build -t registry.example.com/agentic-marketing:0.1.0 .`).
+# Released images (linux/amd64 and linux/arm64) are published to GitHub's registry for every
+# version tag. To run your own build, push it to your registry and set repository and tag.
 image:
-  repository: registry.example.com/agentic-marketing
+  repository: ghcr.io/timchr78/agentic-marketing
   tag: ""            # defaults to the chart's appVersion
   pullPolicy: IfNotPresent
 imagePullSecrets: []
