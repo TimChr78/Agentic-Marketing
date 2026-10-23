@@ -90,6 +90,7 @@ describe('Docker build context', () => {
 
   it('builds the live admin UI and copies it into the runtime image', () => {
     expect(dockerfile).toContain('FROM base AS web');
+    expect(dockerfile).toContain('tsconfig.base.json');
     expect(dockerfile).toContain('COPY apps/web ./apps/web');
     expect(dockerfile).toContain('build:live');
     expect(dockerfile).toContain('COPY --from=web /app/apps/web/dist /app/apps/web/dist');

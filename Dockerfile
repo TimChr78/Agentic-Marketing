@@ -15,7 +15,7 @@ RUN pnpm install --frozen-lockfile --filter "@agentic-marketing/server..."
 
 # The live admin UI: a production build of `apps/web` in `live` mode (no demo screens).
 FROM base AS web
-COPY pnpm-lock.yaml pnpm-workspace.yaml package.json .npmrc ./
+COPY pnpm-lock.yaml pnpm-workspace.yaml package.json .npmrc tsconfig.base.json ./
 COPY packages ./packages
 COPY apps/server ./apps/server
 COPY apps/web ./apps/web
