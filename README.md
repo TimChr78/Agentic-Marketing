@@ -58,7 +58,7 @@ docker compose up -d        # pulls the released image
 docker compose exec app am bootstrap --email you@example.com --workspace 'My site'
 ```
 
-`AM_VERSION` (default `0.1.0`) selects the released image `ghcr.io/timchr78/agentic-marketing`. Pin a version instead of `latest` so restarts and `docker compose pull` do not silently change what runs. `AM_PORT` (default `3000`) is the published host port: the app still listens on 3000 inside the container, so keep `PUBLIC_URL` and `PUBLIC_LINKS_URL` in step with it. ClickHouse is capped at `CLICKHOUSE_MEM_LIMIT` (default `2g`), which covers the whole container (server, caches and query memory); ClickHouse's own limits such as `max_server_memory_usage` still apply inside it, and 2g is a starting point for the single-node pilot.
+`AM_VERSION` (default `0.1.1`) selects the released image `ghcr.io/timchr78/agentic-marketing`. Pin a version instead of `latest` so restarts and `docker compose pull` do not silently change what runs. `AM_PORT` (default `3000`) is the published host port: the app still listens on 3000 inside the container, so keep `PUBLIC_URL` and `PUBLIC_LINKS_URL` in step with it. ClickHouse is capped at `CLICKHOUSE_MEM_LIMIT` (default `2g`), which covers the whole container (server, caches and query memory); ClickHouse's own limits such as `max_server_memory_usage` still apply inside it, and 2g is a starting point for the single-node pilot.
 
 To build from source (development, CI or a local patch) use the overlay:
 
@@ -96,7 +96,7 @@ On Kubernetes: the Helm chart in [`deploy/helm`](deploy/helm/agentic-marketing) 
 
 ## Releases and upgrading
 
-Releases are on [GitHub](https://github.com/TimChr78/Agentic-Marketing/releases), with the image `ghcr.io/timchr78/agentic-marketing:<version>` (linux/amd64 and linux/arm64) and the packaged Helm chart; what changed is in the [changelog](CHANGELOG.md). The current release is **0.1.0**, a pre-release. A release is made by pushing a version tag, or by running the Release workflow (Actions → Release → Run workflow) with the version, which tags the current `main`.
+Releases are on [GitHub](https://github.com/TimChr78/Agentic-Marketing/releases), with the image `ghcr.io/timchr78/agentic-marketing:<version>` (linux/amd64 and linux/arm64) and the packaged Helm chart; what changed is in the [changelog](CHANGELOG.md). The current release is **0.1.1**, a pre-release. A release is made by pushing a version tag, or by running the Release workflow (Actions → Release → Run workflow) with the version, which tags the current `main`.
 
 Upgrading: database migrations run when the server starts. With `SKIP_MIGRATIONS=true` (several replicas, Kubernetes) run `cli migrate` first; the Helm chart does this in a Job before each upgrade. Migrations only move forward, so back up Postgres before upgrading. While the version is 0.x, read the changelog before each upgrade: commands and artifact formats may still change.
 

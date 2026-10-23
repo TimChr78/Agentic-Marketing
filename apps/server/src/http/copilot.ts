@@ -137,7 +137,7 @@ export function copilotApi(deps: { auth: Auth; db: Db; executor: Executor; kp: K
         };
         let messages: ModelMessage[] = [];
         const server = mcpServerFor(principal, deps.executor);
-        const client = new Client({ name: 'copilot', version: '0.1.0' });
+        const client = new Client({ name: 'copilot', version: '0.1.1' });
         const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
         const started = Date.now();
         let usage = { inputTokens: 0, outputTokens: 0 };
