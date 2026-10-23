@@ -153,12 +153,17 @@ describe('inbound webhooks and connectors', () => {
     expect(connectors.map((c) => c.id)).toEqual([
       'webhook',
       'shopify',
+      'shopify_app',
+      'salesforce',
       'slack',
       'http',
       'oauth_http',
       'meta_ads',
       'google_ads',
       'microsoft_ads',
+      'linkedin_ads',
+      'tiktok_ads',
+      'pinterest_ads',
     ]);
     expect(connectors.find((c) => c.id === 'slack')!.actions.map((a) => a.name)).toEqual(['postMessage']);
   });

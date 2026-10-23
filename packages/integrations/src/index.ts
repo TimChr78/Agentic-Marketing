@@ -6,5 +6,6 @@ export * from './egress';
 export * from './inbound';
 export * from './oauth';
 export * from './sdk';
+export * from './shopifyImport';
 export * from './signing';
 export * from './webhooks';

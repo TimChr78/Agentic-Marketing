@@ -60,7 +60,9 @@ const ok = sig.split(' ').includes(expected) && Math.abs(Date.now() / 1000 - ts)
 | Connector | Receives | Actions |
 |---|---|---|
 | `webhook` | Any JSON. A JSONata `mapping` over `{body, headers}` returns Segment events. Optional `signature`: `hmac-sha256` (header, hex/base64, prefix, e.g. GitHub's `sha256=`) or `standard-webhooks` | – |
-| `shopify` | `orders/create`, `orders/paid`, `checkouts/create`, `customers/*`. Becomes identify (customer id as `shopify:<id>`, e-mail), Order Completed / Order Paid and Checkout Started. Verified with `X-Shopify-Hmac-Sha256` | – |
+| `shopify` | `orders/create`, `orders/paid`, `orders/fulfilled`, `orders/cancelled`, `refunds/create`, `checkouts/create`, `customers/*`. Becomes identify (customer id as `shopify:<id>`, e-mail), Order Completed / Paid / Shipped / Cancelled / Refunded and Checkout Started; with `syncEmailConsent`, Shopify's e-mail marketing consent becomes `marketing_email` consent. Verified with `X-Shopify-Hmac-Sha256` | – |
+| `shopify_app` | The same webhooks, signed with your app's secret. Installed with OAuth (`read_customers`, `read_orders`); `shopify.importCustomers` imports existing customers, 250 per call | `registerWebhooks {inboundUrl}` |
+| `salesforce` | Records posted by a Flow or Apex callout, signed with HMAC-SHA256 (hex, `x-am-signature`): `{recordId, sobject, email, traits, event, properties}` become identify (`salesforce:<id>`) and track | `upsertContact {email, lastName, firstName, fields}`, `createLead`, `createTask {subject, whoId, whatId, dueDate}`, `query {soql}` (SELECT only); OAuth with your connected app |
 | `slack` | – | `postMessage {text}` through an incoming-webhook URL |
 | `http` | – | `request {method, path, body}` against a base URL with secret headers |
 

@@ -38,6 +38,17 @@ describe('ad click ids', () => {
     expect(captureClickIds('?msclkid=<script>', '')).toEqual({});
   });
 
+  it('reads LinkedIn, TikTok and Pinterest click ids and cookies', () => {
+    expect(captureClickIds('?li_fat_id=li-123&ttclid=E.C.P.abc', '_ttp=ttp-cookie-1; _epik=epik-cookie-1')).toEqual({
+      li_fat_id: 'li-123',
+      ttclid: 'E.C.P.abc',
+      ttp: 'ttp-cookie-1',
+      epik: 'epik-cookie-1',
+    });
+    // The landing parameter wins over an older cookie.
+    expect(captureClickIds('?epik=epik-new', '_epik=epik-old')).toEqual({ epik: 'epik-new' });
+  });
+
   it('sends and keeps them only with ad_measurement allowed', async () => {
     const h = harness({ search: '?gclid=Cj0KCQabc', cookies: '' });
     const a = h.make();
