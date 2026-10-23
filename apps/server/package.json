@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "tsx watch --env-file-if-exists=../../.env src/main.ts",
     "start": "tsx src/main.ts",
-    "cli": "tsx --env-file-if-exists=../../.env src/cli.ts",
+    "cli": "tsx src/cli.ts",
     "typecheck": "tsc --noEmit -p ."
   },
   "dependencies": {

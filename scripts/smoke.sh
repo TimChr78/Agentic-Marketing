@@ -22,7 +22,7 @@ dc up -d $([ -n "${SMOKE_NO_BUILD:-}" ] || echo --build) --wait --wait-timeout 3
 curl -fsS http://localhost:3000/readyz >/dev/null && echo "ready"
 
 EMAIL=owner@example.com PASSWORD='smoke-test-password-123'
-dc exec -T app pnpm --silent --filter @agentic-marketing/server cli bootstrap --email "$EMAIL" --password "$PASSWORD" --workspace Smoke
+dc exec -T -e AM_BOOTSTRAP_PASSWORD="$PASSWORD" app am bootstrap --email "$EMAIL" --workspace Smoke
 curl -fsS -c /tmp/am_smoke_cookies -H 'content-type: application/json' -H 'origin: http://localhost:3000' \
   -d "{\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\"}" http://localhost:3000/api/auth/sign-in/email >/dev/null
 call() { curl -fsS -b /tmp/am_smoke_cookies -H 'content-type: application/json' -d "$2" "http://localhost:3000/v1/$1"; }

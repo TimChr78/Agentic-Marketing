@@ -55,8 +55,9 @@ Docker Compose on the host (homelab or VM): copy `.env.example` to `.env` and ge
 Then:
 ```sh
 docker compose up -d
-docker compose exec app pnpm --filter @agentic-marketing/server cli bootstrap --email you@site.com --password '…' --workspace 'Site name'
+docker compose exec app am bootstrap --email you@site.com --workspace 'Site name'
 ```
+This prompts for the password without echo. When running non-interactively, pass it as `AM_BOOTSTRAP_PASSWORD` to `docker compose exec -e AM_BOOTSTRAP_PASSWORD` or pipe one line on stdin with `docker compose exec -T`; never put the password in argv. Change it later with `am reset-password --email you@site.com` and `AM_RESET_PASSWORD`.
 Sign in to the UI and set the approval policy to "Agent changes need a person". **Check:** `GET /readyz` returns `{"ok":true}`.
 
 ### 3. Expose the public paths

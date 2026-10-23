@@ -15,6 +15,8 @@ RUN pnpm install --frozen-lockfile --filter "@agentic-marketing/server..."
 
 FROM base
 COPY --from=deps /app /app
+# `am` is the admin CLI without pnpm's script banner (which would echo arguments such as secrets).
+RUN printf '#!/bin/sh\nexec pnpm --silent --filter @agentic-marketing/server cli "$@"\n' > /usr/local/bin/am && chmod +x /usr/local/bin/am
 USER node
 EXPOSE 3000
 HEALTHCHECK --interval=15s --timeout=3s CMD node -e "fetch('http://localhost:3000/readyz').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"

@@ -28,10 +28,12 @@ Requirements: Node 22+, pnpm 10, PostgreSQL 16, ClickHouse (26.8 LTS), NATS with
 ```bash
 pnpm install
 cp .env.example .env          # fill AUTH_SECRET and MASTER_KEY (openssl rand -base64 32), point DATABASE_URL at Postgres
-pnpm --filter @agentic-marketing/server cli bootstrap --email you@example.com --password '…' --workspace 'My shop'
+pnpm --silent --filter @agentic-marketing/server cli bootstrap --email you@example.com --workspace 'My shop'
 pnpm dev                       # API on http://localhost:3000 (migrates on start)
 pnpm dev:web                   # UI on http://localhost:5173 → "Live workspace (API)"
 ```
+
+`bootstrap` prompts for the password without echoing it. Non-interactively, set `AM_BOOTSTRAP_PASSWORD` for the command or pipe one line on stdin; `--password` still works but is deprecated because arguments are visible in process listings and shell history. `pnpm --silent --filter @agentic-marketing/server cli reset-password --email you@example.com` changes a password later, reading `AM_RESET_PASSWORD`, a hidden prompt or stdin.
 
 `DATABASE_URL` must be a role that can create roles (the migration creates `am_app`, the row-level-security role the app uses, with `APP_DB_PASSWORD`).
 
@@ -55,8 +57,10 @@ TRUSTED_PROXY_CIDRS=127.0.0.1/32,::1/128,10.0.0.0/8
 ```bash
 cp .env.example .env   # fill in the secrets
 docker compose up --build
-docker compose exec app pnpm --filter @agentic-marketing/server cli bootstrap --email … --password … --workspace …
+docker compose exec app am bootstrap --email … --workspace …
 ```
+
+`am` runs the server CLI without pnpm's banner. The command prompts for the password without echo; for scripts use `docker compose exec -e AM_BOOTSTRAP_PASSWORD app am bootstrap …` (or pipe one line with `docker compose exec -T`). `am reset-password --email …` (with `AM_RESET_PASSWORD`) sets a new password. `--password` is deprecated.
 
 `scripts/smoke.sh` (also run in CI) does this end to end with a throw-away compose project: start, bootstrap, sign in, publish a signup form, and check its confirmation e-mail is sent.
 
