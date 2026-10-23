@@ -61,6 +61,8 @@ docker compose exec app pnpm --filter @agentic-marketing/server cli bootstrap \
 
 Open http://localhost:3000, sign in, and add an e-mail provider. To let an AI agent work in the workspace, connect an MCP client (Claude, an IDE…) to `http://localhost:3000/mcp`: it registers itself, and you choose its permissions on the consent page.
 
+MCP requires `PUBLIC_URL` to be HTTPS. With a plain-HTTP address on a LAN the admin UI and REST API still work, but MCP/OAuth client endpoints are disabled; expose the server over HTTPS (e.g. with Tailscale or a Cloudflare Tunnel) to enable MCP.
+
 Running it behind a proxy or a Cloudflare Tunnel: set `PUBLIC_URL`, `PUBLIC_LINKS_URL` and `CLIENT_IP_HEADER` (see [`.env.example`](.env.example)).
 
 On Kubernetes: the Helm chart in [`deploy/helm`](deploy/helm/agentic-marketing) runs each role as its own Deployment; see the [reference deployment](docs/deployment/kubernetes.md).

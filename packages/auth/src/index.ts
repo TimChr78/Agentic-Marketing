@@ -26,7 +26,28 @@ export interface AuthConfig {
 /** Scopes an MCP client can be granted; permissions double as scopes. Agents get read-only unless the person grants more. */
 export const AGENT_DEFAULT_SCOPES = ['openid', 'offline_access', 'artifacts:read'];
 
+/**
+ * MCP OAuth requires an HTTPS resource URL; only loopback hosts may use plain HTTP for local
+ * development. Anything else (e.g. a LAN address such as http://192.168.1.20:3210) is rejected by
+ * the MCP plugin, so callers disable the MCP/OAuth client endpoints instead of weakening the check.
+ */
+export function isMcpResourceUrlAllowed(baseUrl: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(baseUrl);
+  } catch {
+    return false;
+  }
+  if (url.protocol === 'https:') return true;
+  if (url.protocol !== 'http:') return false;
+  const hostname = url.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  if (hostname === 'localhost' || hostname.endsWith('.localhost') || hostname === '::1') return true;
+  const octets = hostname.split('.');
+  return octets.length === 4 && octets[0] === '127' && octets.every((octet) => /^\d{1,3}$/.test(octet) && Number(octet) <= 255);
+}
+
 export function authOptions(config: AuthConfig) {
+  const mcpEnabled = isMcpResourceUrlAllowed(config.baseUrl);
   return {
     baseURL: config.baseUrl,
     secret: config.secret,
@@ -37,20 +58,25 @@ export function authOptions(config: AuthConfig) {
     hooks: { before: ssoGuard(config.db, config.sso ?? {}) },
     plugins: [
       jwt(),
-      // OAuth 2.1 authorization server for MCP clients (validated in spike 1).
-      mcp({
-        loginPage: '/login',
-        consentPage: '/consent',
-        resource: `${config.baseUrl}/mcp`,
-        scopes: ['openid', 'profile', 'email', 'offline_access', ...PERMISSIONS],
-        allowDynamicClientRegistration: true,
-        allowUnauthenticatedClientRegistration: true,
-        clientRegistrationDefaultScopes: AGENT_DEFAULT_SCOPES,
-        clientRegistrationAllowedScopes: ['openid', 'profile', 'email', 'offline_access', ...PERMISSIONS],
-      }),
-      // Client ID Metadata Documents: clients that identify themselves with an HTTPS URL instead of
-      // registering (the MCP 2026-07-28 preference). The Node transport pins DNS to public addresses.
-      cimd({ fetchClientMetadataResource, metadataProfile: 'mcp-2026-07-28', ...config.cimd }),
+      // OAuth 2.1 authorization server for MCP clients (validated in spike 1). The plugin rejects
+      // plain-HTTP resource URLs outside loopback, so it is only registered when that is allowed.
+      ...(mcpEnabled
+        ? [
+            mcp({
+              loginPage: '/login',
+              consentPage: '/consent',
+              resource: `${config.baseUrl}/mcp`,
+              scopes: ['openid', 'profile', 'email', 'offline_access', ...PERMISSIONS],
+              allowDynamicClientRegistration: true,
+              allowUnauthenticatedClientRegistration: true,
+              clientRegistrationDefaultScopes: AGENT_DEFAULT_SCOPES,
+              clientRegistrationAllowedScopes: ['openid', 'profile', 'email', 'offline_access', ...PERMISSIONS],
+            }),
+            // Client ID Metadata Documents: clients that identify themselves with an HTTPS URL instead of
+            // registering (the MCP 2026-07-28 preference). The Node transport pins DNS to public addresses.
+            cimd({ fetchClientMetadataResource, metadataProfile: 'mcp-2026-07-28', ...config.cimd }),
+          ]
+        : []),
       // Single sign-on with OIDC or SAML identity providers, per workspace.
       ssoPlugin(config.db, config.sso ?? {}),
     ],

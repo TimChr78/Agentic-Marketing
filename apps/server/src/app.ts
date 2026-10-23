@@ -1,5 +1,12 @@
 import { formsApi, withEmailProfileEvents } from '@agentic-marketing/audience';
-import { type AuthConfig, acceptInvitation, authDirectory, createAuth, invitationWorkspace } from '@agentic-marketing/auth';
+import {
+  type AuthConfig,
+  acceptInvitation,
+  authDirectory,
+  createAuth,
+  invitationWorkspace,
+  isMcpResourceUrlAllowed,
+} from '@agentic-marketing/auth';
 import { createExecutor, userPrincipal } from '@agentic-marketing/commands';
 import { AppError, newUuid } from '@agentic-marketing/core';
 import { createDb } from '@agentic-marketing/db';
@@ -23,6 +30,13 @@ import { keyProviderFor } from './keys';
 /** `overrides` exist for tests, e.g. a stub transport for Client ID Metadata Documents. */
 export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'> = {}) {
   const db = createDb({ adminUrl: config.adminDatabaseUrl, appUrl: config.appDatabaseUrl });
+  const mcpEnabled = isMcpResourceUrlAllowed(config.publicUrl);
+  if (!mcpEnabled) {
+    logger.warn(
+      { publicUrl: config.publicUrl },
+      'MCP/OAuth client endpoints are disabled because PUBLIC_URL is plain HTTP on a non-loopback host; the admin UI and REST API still work. Use HTTPS (e.g. Tailscale or a Cloudflare Tunnel) to enable MCP.',
+    );
+  }
   const auth = createAuth({
     baseUrl: config.publicUrl,
     secret: config.authSecret,
@@ -88,8 +102,10 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
   app.get('/.well-known/oauth-authorization-server/*', (c) => asMeta(c.req.raw));
   app.get('/.well-known/openid-configuration', (c) => oidcMeta(c.req.raw));
   app.get('/.well-known/openid-configuration/*', (c) => oidcMeta(c.req.raw));
-  app.get('/.well-known/oauth-protected-resource', (c) => auth.handler(c.req.raw));
-  app.get('/.well-known/oauth-protected-resource/*', (c) => auth.handler(c.req.raw));
+  if (mcpEnabled) {
+    app.get('/.well-known/oauth-protected-resource', (c) => auth.handler(c.req.raw));
+    app.get('/.well-known/oauth-protected-resource/*', (c) => auth.handler(c.req.raw));
+  }
 
   app.get('/login', (c) => c.html(loginPage));
   app.get('/consent', (c) => c.html(consentPage));
@@ -122,8 +138,10 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
       formsApi({ db, bus, kp: keyProvider, links: email.links, egress: config.egress, clientIpHeader: config.clientIpHeader }),
     );
 
-  const mcp = mcpEndpoint({ auth, db, executor, resource: `${config.publicUrl}/mcp` });
-  app.all('/mcp', (c) => mcp(c.req.raw));
+  if (mcpEnabled) {
+    const mcp = mcpEndpoint({ auth, db, executor, resource: `${config.publicUrl}/mcp` });
+    app.all('/mcp', (c) => mcp(c.req.raw));
+  }
   if (config.roles.has('api')) app.route('/', copilotApi({ auth, db, executor, kp: keyProvider }));
   if (config.roles.has('api')) app.route('/', scimApi({ auth, db, executor, publicUrl: config.publicUrl }));
   app.route('/', restApi({ auth, db, executor }));

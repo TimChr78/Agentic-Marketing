@@ -37,6 +37,8 @@ pnpm dev:web                   # UI on http://localhost:5173 → "Live workspace
 
 Connect an MCP client (Claude, an IDE, …) to `http://localhost:3000/mcp`. It registers itself, you sign in and choose its permissions on the consent page.
 
+MCP requires an HTTPS `PUBLIC_URL` (loopback HTTP is fine for local development). If the server starts with a plain-HTTP LAN address such as `http://192.168.1.20:3210`, it logs a warning and starts without the MCP/OAuth client endpoints; the admin UI and REST API keep working. Use an HTTPS URL (e.g. a Tailscale or Cloudflare Tunnel hostname) to enable MCP.
+
 ### Docker Compose
 
 ```bash
