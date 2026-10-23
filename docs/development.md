@@ -39,6 +39,17 @@ Connect an MCP client (Claude, an IDE, …) to `http://localhost:3000/mcp`. It r
 
 MCP requires an HTTPS `PUBLIC_URL` (loopback HTTP is fine for local development). If the server starts with a plain-HTTP LAN address such as `http://192.168.1.20:3210`, it logs a warning and starts without the MCP/OAuth client endpoints; the admin UI and REST API keep working. Use an HTTPS URL (e.g. a Tailscale or Cloudflare Tunnel hostname) to enable MCP.
 
+### Client IP behind two ingress paths
+
+Public traffic and admin traffic often take different paths: visitors arrive through a Cloudflare Tunnel (which sets `cf-connecting-ip`), while admins sign in over the LAN or VPN (where that header is absent). List both headers in trust order, and name the proxies whose forwarding headers may be believed:
+
+```bash
+CLIENT_IP_HEADER=cf-connecting-ip,x-forwarded-for
+TRUSTED_PROXY_CIDRS=127.0.0.1/32,::1/128,10.0.0.0/8
+```
+
+`CLIENT_IP_HEADER` is an ordered, comma-separated list; the first valid address of the first header present is used. With `TRUSTED_PROXY_CIDRS` set, headers are ignored unless the socket address is in one of those ranges (bare IPs and CIDR ranges, IPv4 or IPv6), so a client cannot spoof its rate-limit bucket. Admin LAN traffic has no forwarding header and falls back to the socket address. Empty `TRUSTED_PROXY_CIDRS` trusts the headers from any source, which preserves the previous behavior; set it to your tunnel/proxy and loopback ranges in production.
+
 ### Docker Compose
 
 ```bash

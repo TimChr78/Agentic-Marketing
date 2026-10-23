@@ -25,4 +25,25 @@ describe('configuration', () => {
   it('fails fast with the setting that is wrong', () => {
     expect(() => loadConfig({ ...base, PUBLIC_LINKS_URL: 'not a url' })).toThrow('PUBLIC_LINKS_URL');
   });
+
+  it('parses client IP headers as an ordered, lowercased, de-duplicated list', () => {
+    const c = loadConfig({ ...base, CLIENT_IP_HEADER: ' CF-Connecting-IP, X-Forwarded-For,cf-connecting-ip ,, ' });
+    expect(c.clientIpHeaders).toEqual(['cf-connecting-ip', 'x-forwarded-for']);
+    expect(c.clientIpHeader).toBe('cf-connecting-ip');
+  });
+
+  it('defaults to x-forwarded-for and keeps it as the first client IP header', () => {
+    const c = loadConfig(base);
+    expect(c.clientIpHeaders).toEqual(['x-forwarded-for']);
+    expect(c.clientIpHeader).toBe('x-forwarded-for');
+  });
+
+  it('parses trusted proxy CIDRs, trimming entries and dropping empties', () => {
+    const c = loadConfig({ ...base, TRUSTED_PROXY_CIDRS: '127.0.0.1/32, ::1/128 , 10.0.0.0/8,' });
+    expect(c.trustedProxyCidrs).toEqual(['127.0.0.1/32', '::1/128', '10.0.0.0/8']);
+  });
+
+  it('rejects an invalid TRUSTED_PROXY_CIDRS entry', () => {
+    expect(() => loadConfig({ ...base, TRUSTED_PROXY_CIDRS: '127.0.0.1/32,not-a-cidr' })).toThrow('TRUSTED_PROXY_CIDRS');
+  });
 });

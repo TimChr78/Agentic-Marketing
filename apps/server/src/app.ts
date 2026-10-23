@@ -8,7 +8,7 @@ import {
   isMcpResourceUrlAllowed,
 } from '@agentic-marketing/auth';
 import { createExecutor, userPrincipal } from '@agentic-marketing/commands';
-import { AppError, newUuid } from '@agentic-marketing/core';
+import { AppError, newUuid, RESOLVED_CLIENT_IP_HEADER, remoteAddressFromEnv, resolveClientIp } from '@agentic-marketing/core';
 import { createDb } from '@agentic-marketing/db';
 import { emailRoutes, linkSigner, pushRoutes } from '@agentic-marketing/email';
 import { clickHouseStore, lazyNatsBus } from '@agentic-marketing/events';
@@ -42,7 +42,7 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
     secret: config.authSecret,
     db,
     trustedOrigins: config.trustedOrigins,
-    clientIpHeader: config.clientIpHeader,
+    clientIpHeaders: [RESOLVED_CLIENT_IP_HEADER],
     sso: config.sso,
     ...overrides,
   });
@@ -73,6 +73,24 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
 
   const app = new Hono();
 
+  /**
+   * Resolves the client IP once, then replaces any caller-supplied value of the resolved header.
+   * Better Auth reads only that header, so admin sign-ins cannot share (or pick) a rate-limit
+   * bucket through a spoofed forwarding header.
+   */
+  const withClientIp = (c: { req: { raw: Request }; env: unknown }) => {
+    const headers = new Headers(c.req.raw.headers);
+    headers.delete(RESOLVED_CLIENT_IP_HEADER);
+    const ip = resolveClientIp({
+      header: (name) => headers.get(name) ?? undefined,
+      remoteAddress: remoteAddressFromEnv(c.env),
+      headerNames: config.clientIpHeaders,
+      trustedProxyCidrs: config.trustedProxyCidrs,
+    });
+    if (ip) headers.set(RESOLVED_CLIENT_IP_HEADER, ip);
+    return new Request(c.req.raw, { headers });
+  };
+
   app.onError((err, c) => {
     if (err instanceof AppError) return c.json(err.toJSON(), err.status as 400);
     const requestId = newUuid();
@@ -92,7 +110,7 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
     }
   });
 
-  app.on(['GET', 'POST'], '/api/auth/*', (c) => auth.handler(c.req.raw));
+  app.on(['GET', 'POST'], '/api/auth/*', (c) => auth.handler(withClientIp(c)));
 
   // OAuth discovery at the root, where MCP clients look (RFC 8414 path insertion included). The MCP
   // plugin answers RFC 9728 protected-resource metadata itself when the root path reaches it.
@@ -103,8 +121,8 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
   app.get('/.well-known/openid-configuration', (c) => oidcMeta(c.req.raw));
   app.get('/.well-known/openid-configuration/*', (c) => oidcMeta(c.req.raw));
   if (mcpEnabled) {
-    app.get('/.well-known/oauth-protected-resource', (c) => auth.handler(c.req.raw));
-    app.get('/.well-known/oauth-protected-resource/*', (c) => auth.handler(c.req.raw));
+    app.get('/.well-known/oauth-protected-resource', (c) => auth.handler(withClientIp(c)));
+    app.get('/.well-known/oauth-protected-resource/*', (c) => auth.handler(withClientIp(c)));
   }
 
   app.get('/login', (c) => c.html(loginPage));
@@ -128,14 +146,23 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
   // The decision API goes first: the ingest routes claim every other /v1/<word> path.
   if (config.roles.has('ingest')) app.route('/', decideApi({ db, hot }));
   if (config.roles.has('ingest')) app.route('/', pushRoutes({ db, kp: keyProvider }));
-  if (config.roles.has('ingest')) app.route('/', ingestApi({ db, bus, hot, clientIpHeader: config.clientIpHeader }));
+  if (config.roles.has('ingest'))
+    app.route('/', ingestApi({ db, bus, hot, clientIpHeaders: config.clientIpHeaders, trustedProxyCidrs: config.trustedProxyCidrs }));
   if (config.roles.has('api')) app.route('/', emailRoutes({ db, kp: keyProvider, events, email }));
   if (config.roles.has('ingest')) app.route('/', inboundApi({ db, bus, kp: keyProvider }));
   if (config.roles.has('api')) app.route('/', oauthRoutes({ db, kp: keyProvider, egress: config.egress }));
   if (config.roles.has('ingest'))
     app.route(
       '/',
-      formsApi({ db, bus, kp: keyProvider, links: email.links, egress: config.egress, clientIpHeader: config.clientIpHeader }),
+      formsApi({
+        db,
+        bus,
+        kp: keyProvider,
+        links: email.links,
+        egress: config.egress,
+        clientIpHeaders: config.clientIpHeaders,
+        trustedProxyCidrs: config.trustedProxyCidrs,
+      }),
     );
 
   if (mcpEnabled) {

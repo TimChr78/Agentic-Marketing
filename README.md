@@ -63,7 +63,7 @@ Open http://localhost:3000, sign in, and add an e-mail provider. To let an AI ag
 
 MCP requires `PUBLIC_URL` to be HTTPS. With a plain-HTTP address on a LAN the admin UI and REST API still work, but MCP/OAuth client endpoints are disabled; expose the server over HTTPS (e.g. with Tailscale or a Cloudflare Tunnel) to enable MCP.
 
-Running it behind a proxy or a Cloudflare Tunnel: set `PUBLIC_URL`, `PUBLIC_LINKS_URL` and `CLIENT_IP_HEADER` (see [`.env.example`](.env.example)).
+Running it behind a proxy or a Cloudflare Tunnel: set `PUBLIC_URL`, `PUBLIC_LINKS_URL`, `CLIENT_IP_HEADER` (an ordered list, e.g. `cf-connecting-ip,x-forwarded-for`) and `TRUSTED_PROXY_CIDRS` for the tunnel/proxy ranges (see [`.env.example`](.env.example)). Admin LAN traffic without a forwarding header uses the socket address.
 
 On Kubernetes: the Helm chart in [`deploy/helm`](deploy/helm/agentic-marketing) runs each role as its own Deployment; see the [reference deployment](docs/deployment/kubernetes.md).
 

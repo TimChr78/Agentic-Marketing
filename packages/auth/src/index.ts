@@ -15,7 +15,9 @@ export interface AuthConfig {
   secret: string;
   db: Db;
   trustedOrigins?: string[];
-  /** Header with the client IP set by the proxy in front (sign-in rate limits are per IP). */
+  /** Headers with the client IP, in trust order (sign-in rate limits are per IP). */
+  clientIpHeaders?: string[];
+  /** @deprecated Use `clientIpHeaders`; kept for backwards compatibility. */
   clientIpHeader?: string;
   /** Overrides for Client ID Metadata Document discovery (tests use a stub transport). */
   cimd?: Partial<CimdOptions>;
@@ -54,7 +56,9 @@ export function authOptions(config: AuthConfig) {
     database: config.db.admin,
     trustedOrigins: config.trustedOrigins,
     emailAndPassword: { enabled: true, minPasswordLength: 10 },
-    advanced: { ipAddress: { ipAddressHeaders: [config.clientIpHeader ?? 'x-forwarded-for'] } },
+    advanced: {
+      ipAddress: { ipAddressHeaders: config.clientIpHeaders ?? [config.clientIpHeader ?? 'x-forwarded-for'] },
+    },
     hooks: { before: ssoGuard(config.db, config.sso ?? {}) },
     plugins: [
       jwt(),

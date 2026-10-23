@@ -1,3 +1,4 @@
+import { isIpOrCidr } from '@agentic-marketing/core';
 import { z } from 'zod';
 
 // All configuration comes from the environment and is validated at start-up, so a missing or
@@ -19,7 +20,23 @@ const Env = z.object({
   CLIENT_IP_HEADER: z
     .string()
     .default('x-forwarded-for')
-    .describe('Header carrying the client IP set by your proxy, e.g. cf-connecting-ip behind Cloudflare; the first address is used'),
+    .describe(
+      'Headers carrying the client IP, in trust order and comma-separated, e.g. cf-connecting-ip,x-forwarded-for for public traffic through a Cloudflare Tunnel plus LAN/VPN sign-ins; the first address of the first valid header is used',
+    ),
+  TRUSTED_PROXY_CIDRS: z
+    .string()
+    .default('')
+    .refine(
+      (value) =>
+        value
+          .split(',')
+          .map((entry) => entry.trim())
+          .every((entry) => !entry || isIpOrCidr(entry)),
+      'TRUSTED_PROXY_CIDRS must be a comma-separated list of IP addresses or CIDR ranges',
+    )
+    .describe(
+      'Comma-separated proxy/loopback ranges whose forwarding headers are trusted, e.g. 127.0.0.1/32,::1/128,10.0.0.0/8; empty trusts the forwarded headers from any source (backward compatible)',
+    ),
   DATABASE_URL: z.string().describe('Owner/admin connection, used for migrations and auth tables'),
   APP_DB_ROLE: z
     .string()
@@ -135,13 +152,24 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   const appUrl = new URL(e.DATABASE_URL);
   appUrl.username = e.APP_DB_ROLE;
   appUrl.password = e.APP_DB_PASSWORD;
+  const clientIpHeaders = [
+    ...new Set(
+      e.CLIENT_IP_HEADER.split(',')
+        .map((header) => header.trim().toLowerCase())
+        .filter(Boolean),
+    ),
+  ];
   return {
     roles: new Set(e.ROLE === 'all' ? ['api', 'ingest', 'worker', 'scheduler'] : e.ROLE.split(',').map((r) => r.trim())),
     port: e.PORT,
     skipMigrations: e.SKIP_MIGRATIONS === 'true',
     publicUrl: (e.PUBLIC_URL ?? `http://localhost:${e.PORT}`).replace(/\/$/, ''),
     linksUrl: (e.PUBLIC_LINKS_URL ?? e.PUBLIC_URL ?? `http://localhost:${e.PORT}`).replace(/\/$/, ''),
-    clientIpHeader: e.CLIENT_IP_HEADER.toLowerCase(),
+    clientIpHeaders: clientIpHeaders.length ? clientIpHeaders : ['x-forwarded-for'],
+    clientIpHeader: clientIpHeaders[0] ?? 'x-forwarded-for',
+    trustedProxyCidrs: e.TRUSTED_PROXY_CIDRS.split(',')
+      .map((entry) => entry.trim())
+      .filter(Boolean),
     adminDatabaseUrl: e.DATABASE_URL,
     appDatabaseUrl: appUrl.toString(),
     appDbPassword: e.APP_DB_PASSWORD,
