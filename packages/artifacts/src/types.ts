@@ -530,6 +530,18 @@ const experience = z
       .object({ event: z.string().min(1).max(200) })
       .optional()
       .describe('Conversion event for results'),
+    analysis: z
+      .object({
+        method: z
+          .enum(['sequential', 'bayesian', 'fixed'])
+          .default('sequential')
+          .describe(
+            'sequential: always-valid p-values, check any time; bayesian: probability to beat the control; fixed: z-test at a planned sample size',
+          ),
+        alpha: z.number().min(0.001).max(0.2).default(0.05),
+        threshold: z.number().min(0.5).max(0.999).default(0.95).describe('bayesian: probability needed to call a winner'),
+      })
+      .default({ method: 'sequential', alpha: 0.05, threshold: 0.95 }),
     trigger: z
       .object({ type: z.enum(['immediate', 'exit_intent', 'scroll', 'time_on_page']), value: z.number().min(0).max(3600).optional() })
       .default({ type: 'immediate' })

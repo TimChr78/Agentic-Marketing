@@ -178,7 +178,13 @@ export async function startTestServer(name: string, port: number, env: Record<st
   const stop = new AbortController();
   const workers = [
     ...startWorkers(srv, stop.signal, { deliveries: { webhookBackoffMs: [200, 200], actionBackoffMs: [100] } }),
-    ...startScheduler(srv, stop.signal, { segmentTickMs: 500, broadcastTickMs: 300, warehouseTickMs: 300, warehouseLagMs: 0 }),
+    ...startScheduler(srv, stop.signal, {
+      segmentTickMs: 500,
+      broadcastTickMs: 300,
+      warehouseTickMs: 300,
+      warehouseLagMs: 0,
+      edgeTickMs: 200,
+    }),
   ];
 
   async function signUp(email: string): Promise<User> {

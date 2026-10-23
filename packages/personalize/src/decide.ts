@@ -1,13 +1,14 @@
-import { artifactTypes, type ExperienceDefinition, publishListeners } from '@agentic-marketing/artifacts';
-import { type Db, schema } from '@agentic-marketing/db';
+import { publishListeners } from '@agentic-marketing/artifacts';
+import type { Db } from '@agentic-marketing/db';
 import { consentOf } from '@agentic-marketing/events';
 import type { HotState } from '@agentic-marketing/hotstate';
 import { consentAllows, originAllowed, sourceLookups, writeKeyOf } from '@agentic-marketing/ingest';
 import { logger } from '@agentic-marketing/telemetry';
-import { and, eq, isNotNull } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { z } from 'zod';
-import { allocate, type DecideContext, deviceOf, matches } from './targeting';
+import { decideAll, type PublishedExperience } from './core';
+import { loadPublishedExperiences } from './edge';
+import { type DecideContext, deviceOf } from './targeting';
 
 // The decision API (channels-and-personalization.md §3.3): POST /v1/decide with a write key.
 // Reads only hot state (Valkey) and cached experience definitions, never Postgres or ClickHouse
@@ -15,12 +16,6 @@ import { allocate, type DecideContext, deviceOf, matches } from './targeting';
 
 export const PERSONALIZATION_PURPOSE = 'web_personalization';
 const CACHE_MS = 30_000;
-
-export interface PublishedExperience {
-  id: string;
-  version: number;
-  def: ExperienceDefinition;
-}
 
 const DecideRequest = z.object({
   writeKey: z.string().optional(),
@@ -31,17 +26,11 @@ const DecideRequest = z.object({
     .object({ url: z.string().max(2000).default(''), path: z.string().max(1000).default('/'), referrer: z.string().max(2000).default('') })
     .default({ url: '', path: '/', referrer: '' }),
   context: z.record(z.string(), z.unknown()).optional(),
+  preview: z
+    .object({ experienceId: z.string().max(64), variantId: z.string().max(32) })
+    .optional()
+    .describe('Show this variant of this experience (the editor’s preview link), ignoring targeting'),
 });
-
-export interface Decision {
-  placement: string;
-  experienceId: string;
-  version: number;
-  /** "holdout" when the person is in the control group and sees the default content. */
-  variantId: string;
-  content: { html?: string; json?: Record<string, unknown> } | null;
-  trigger: ExperienceDefinition['trigger'];
-}
 
 export function decideApi(deps: { db: Db; hot: HotState }) {
   const { loadSource, loadPolicy } = sourceLookups(deps.db);
@@ -60,25 +49,7 @@ export function decideApi(deps: { db: Db; hot: HotState }) {
     const stamp = await stampOf(ws);
     const hit = cache.get(ws);
     if (hit && hit.stamp === stamp && Date.now() - hit.at < CACHE_MS) return hit.list;
-    const list = deps.db.withWorkspace(ws, async (tx) => {
-      const rows = await tx
-        .select({ id: schema.artifacts.id, version: schema.artifacts.publishedVersion, content: schema.artifactVersions.content })
-        .from(schema.artifacts)
-        .innerJoin(
-          schema.artifactVersions,
-          and(
-            eq(schema.artifactVersions.workspaceId, schema.artifacts.workspaceId),
-            eq(schema.artifactVersions.artifactId, schema.artifacts.id),
-            eq(schema.artifactVersions.number, schema.artifacts.publishedVersion),
-          ),
-        )
-        .where(
-          and(eq(schema.artifacts.type, 'experience'), isNotNull(schema.artifacts.publishedVersion), eq(schema.artifacts.archived, false)),
-        );
-      return rows
-        .map((r) => ({ id: r.id, version: r.version ?? 0, def: artifactTypes.experience.content.parse(r.content) }))
-        .sort((a, b) => b.def.priority - a.def.priority);
-    });
+    const list = deps.db.withWorkspace(ws, loadPublishedExperiences);
     cache.set(ws, { at: Date.now(), stamp, list });
     list.catch(() => cache.delete(ws));
     return list;
@@ -142,20 +113,7 @@ export function decideApi(deps: { db: Db; hot: HotState }) {
     };
     const stableId = snapshot?.profileId ?? req.userId ?? req.anonymousId ?? '';
 
-    const decisions: Decision[] = [];
-    for (const placement of req.placements) {
-      const e = wanted.find((x) => x.def.placement === placement && (!x.def.targeting || matches(x.def.targeting, ctx)));
-      if (!e) continue;
-      const v = stableId ? allocate(e.id, stableId, e.def) : e.def.variants[0];
-      decisions.push({
-        placement,
-        experienceId: e.id,
-        version: e.version,
-        variantId: v?.id ?? 'holdout',
-        content: v?.content ?? null,
-        trigger: e.def.trigger,
-      });
-    }
+    const decisions = decideAll(wanted, req.placements, ctx, stableId, req.preview);
     const ms = performance.now() - started;
     if (ms > 50) logger.warn({ ms: Math.round(ms), workspace: ws }, 'slow decision');
     return c.json({ decisions, personalized }, 200, {

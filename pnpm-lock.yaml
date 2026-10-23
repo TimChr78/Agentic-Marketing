@@ -129,6 +129,9 @@ importers:
         specifier: 4.6.7
         version: 4.6.7
     devDependencies:
+      '@agentic-marketing/edge-worker':
+        specifier: workspace:*
+        version: link:../../packages/edge-worker
       '@agentic-marketing/sdk-js':
         specifier: workspace:*
         version: link:../../packages/sdk-js
@@ -465,6 +468,12 @@ importers:
         specifier: ^8.23.1
         version: 8.23.1
 
+  packages/edge-worker:
+    dependencies:
+      '@agentic-marketing/personalize':
+        specifier: workspace:*
+        version: link:../personalize
+
   packages/email:
     dependencies:
       '@agentic-marketing/artifacts':
@@ -708,9 +717,15 @@ importers:
       '@agentic-marketing/ingest':
         specifier: workspace:*
         version: link:../ingest
+      '@agentic-marketing/integrations':
+        specifier: workspace:*
+        version: link:../integrations
       '@agentic-marketing/profiles':
         specifier: workspace:*
         version: link:../profiles
+      '@agentic-marketing/secrets':
+        specifier: workspace:*
+        version: link:../secrets
       '@agentic-marketing/telemetry':
         specifier: workspace:*
         version: link:../telemetry

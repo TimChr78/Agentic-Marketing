@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useState } from 'react';
-import { ArrowLeft, FlaskConical, Plus, Save, Send } from 'lucide-react';
+import { ArrowLeft, ExternalLink, FlaskConical, Plus, Save, Send } from 'lucide-react';
 import { Button, Card, Pill, cx, inputCls, timeAgo } from '../../components/ui';
 import { api, errText, type Out } from '../liveApi';
+import { Composer } from './Composer';
 
-// Web experiences on the real API: the definition as JSON (what agents edit too), a preview of
-// each variant, and experiment results.
+// Web experiences on the real API: the definition as JSON (what agents edit too), a visual
+// composer and a preview of each variant, preview links for the live site, and experiment results.
 
 const STARTER = {
   placement: 'home_hero',
@@ -94,6 +95,8 @@ function Editor({ id, onBack, onError }: { id: string; onBack: () => void; onErr
   const [json, setJson] = useState('');
   const [results, setResults] = useState<Out<'experiences.results'> | null>(null);
   const [status, setStatus] = useState('');
+  const [composing, setComposing] = useState<string | null>(null);
+  const [site, setSite] = useState('');
   const load = useCallback(async () => {
     try {
       const got = await api.call('artifacts.get', { artifactId: id });
@@ -111,6 +114,25 @@ function Editor({ id, onBack, onError }: { id: string; onBack: () => void; onErr
   try {
     variants = JSON.parse(json).variants ?? [];
   } catch {}
+  const setHtml = (variantId: string, html: string) => {
+    try {
+      const def = JSON.parse(json);
+      def.variants = def.variants.map((v: { id: string; content: object }) => (v.id === variantId ? { ...v, content: { ...v.content, html } } : v));
+      setJson(JSON.stringify(def, null, 2));
+    } catch {
+      onError('Fix the JSON first: the definition is not valid JSON.');
+    }
+  };
+  const previewUrl = (variantId: string) => {
+    try {
+      const u = new URL(site);
+      u.searchParams.set('am_preview', `${id}:${variantId}`);
+      return u.toString();
+    } catch {
+      return null;
+    }
+  };
+  const decided = results?.method === 'bayesian' ? 'P(beat control)' : results?.method === 'sequential' ? 'p (any time)' : 'p';
 
   return (
     <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
@@ -176,7 +198,7 @@ function Editor({ id, onBack, onError }: { id: string; onBack: () => void; onErr
                     <th className="px-4 py-2 text-right">Converted</th>
                     <th className="px-4 py-2 text-right">Rate</th>
                     <th className="px-4 py-2 text-right">Lift</th>
-                    <th className="px-4 py-2 text-right">p</th>
+                    <th className="px-4 py-2 text-right">{decided}</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-line">
@@ -189,7 +211,11 @@ function Editor({ id, onBack, onError }: { id: string; onBack: () => void; onErr
                       <td className="px-4 py-2 text-right">{v.converted}</td>
                       <td className="px-4 py-2 text-right">{pct(v.rate)}</td>
                       <td className={cx('px-4 py-2 text-right', (v.lift ?? 0) > 0 ? 'text-good' : (v.lift ?? 0) < 0 ? 'text-bad' : '')}>{pct(v.lift)}</td>
-                      <td className="px-4 py-2 text-right">{v.pValue === null ? '–' : v.pValue.toFixed(3)}</td>
+                      <td className="px-4 py-2 text-right">
+                        {results.method === 'bayesian'
+                          ? pct(v.probBeatControl)
+                          : (results.method === 'sequential' ? v.sequentialP : v.pValue)?.toFixed(3) ?? '–'}
+                      </td>
                     </tr>
                   ))}
                   {!results.variants.length && (
@@ -202,15 +228,37 @@ function Editor({ id, onBack, onError }: { id: string; onBack: () => void; onErr
                 </tbody>
               </table>
               <p className="px-4 py-2 text-[11px] text-muted">
-                Goal: {results.goal ?? 'none'}. {results.note}
+                Goal: {results.goal ?? 'none'}. {results.recommendation} {results.note}
               </p>
             </div>
           ) : (
             <p className="px-4 py-3 text-[13px] text-muted">Publish the experience to start collecting results.</p>
           )}
         </Card>
+        <Card title="Preview on your site">
+          <div className="grid gap-1.5 p-3 text-[12px]">
+            <input className={inputCls} placeholder="https://www.example.com/page-with-the-placement" value={site} onChange={(e) => setSite(e.target.value)} aria-label="Page to preview on" />
+            <p className="text-muted">Opens the page with the published version of a variant, whoever you are; previews are not counted in results.</p>
+          </div>
+        </Card>
         {variants.map((v) => (
-          <Card key={v.id} title={`Variant ${v.id} · ${v.name}`}>
+          <Card
+            key={v.id}
+            title={`Variant ${v.id} · ${v.name}`}
+            action={
+              <div className="flex gap-2">
+                {previewUrl(v.id) && (
+                  <a className="inline-flex items-center gap-1 text-[12px] underline" href={previewUrl(v.id) ?? '#'} target="_blank" rel="noreferrer">
+                    <ExternalLink size={12} /> Preview
+                  </a>
+                )}
+                <Button variant="ghost" onClick={() => setComposing(composing === v.id ? null : v.id)}>
+                  {composing === v.id ? 'Done' : 'Edit visually'}
+                </Button>
+              </div>
+            }
+          >
+            {composing === v.id && <Composer html={v.content?.html} onChange={(html) => setHtml(v.id, html)} />}
             {v.content?.html !== undefined ? (
               <iframe title={`Variant ${v.id}`} sandbox="" className="h-[160px] w-full bg-white" srcDoc={`<body style="font-family:system-ui;margin:16px">${v.content.html}</body>`} />
             ) : (

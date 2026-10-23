@@ -44,6 +44,7 @@
     "zod": "4.6.7"
   },
   "devDependencies": {
+    "@agentic-marketing/edge-worker": "workspace:*",
     "@agentic-marketing/sdk-js": "workspace:*",
     "@types/pg": "8.23.1",
     "@types/smtp-server": "3.5.13",

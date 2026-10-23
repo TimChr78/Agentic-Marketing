@@ -1,5 +1,6 @@
 import { Window as HappyWindow } from 'happy-dom';
 import { describe, expect, it } from 'vitest';
+import { previewOf } from '../src/index';
 import { type Decision, personalize, sanitize } from '../src/personalize';
 
 function page(html: string) {
@@ -58,6 +59,20 @@ describe('personalize', () => {
       ['Experience Viewed', { experience_id: 'exp_2', variant_id: 'holdout', version: 1, placement: 'top_banner' }],
     ]);
     expect(doc.documentElement.classList.contains('am-loading')).toBe(false);
+  });
+
+  it('shows preview links without reporting them as views', async () => {
+    const id = `exp_${'a'.repeat(32)}`;
+    expect(previewOf(`https://shop.example.com/?am_preview=${id}:b`)).toEqual({ experienceId: id, variantId: 'b' });
+    expect(previewOf('https://shop.example.com/?am_preview=nope')).toBeUndefined();
+    const { win, doc } = page('<div data-am-placement="home_hero">Default</div>');
+    const tracked: string[] = [];
+    await personalize(
+      { decide: async () => [decision({ preview: true, content: { html: '<p>Draft B</p>' } })], track: (e) => tracked.push(e) },
+      { doc, win },
+    );
+    expect(doc.querySelector('[data-am-placement="home_hero"]')?.innerHTML).toBe('<p>Draft B</p>');
+    expect(tracked).toEqual([]);
   });
 
   it('keeps the default content when the decision API is slow', async () => {

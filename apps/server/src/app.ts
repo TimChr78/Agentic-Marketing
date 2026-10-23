@@ -8,7 +8,7 @@ import { clickHouseStore, lazyNatsBus } from '@agentic-marketing/events';
 import { valkeyHotState } from '@agentic-marketing/hotstate';
 import { ingestApi } from '@agentic-marketing/ingest';
 import { egressFetch, inboundApi, oauthRoutes } from '@agentic-marketing/integrations';
-import { decideApi } from '@agentic-marketing/personalize';
+import { decideApi, edgeMirror } from '@agentic-marketing/personalize';
 import { logger } from '@agentic-marketing/telemetry';
 import { oauthProviderAuthServerMetadata, oauthProviderOpenIdConfigMetadata } from '@better-auth/oauth-provider';
 import { Hono } from 'hono';
@@ -36,7 +36,8 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
   const bus = lazyNatsBus(config.nats);
   // E-mail delivery events also become customer events (segments, journeys, webhooks).
   const events = withEmailProfileEvents(clickHouseStore(config.clickhouse), { db, bus });
-  const hot = valkeyHotState(config.valkey);
+  // Snapshot writes also queue for the edge (Workers KV) where a workspace turned it on.
+  const hot = edgeMirror(valkeyHotState(config.valkey), db);
   const email = {
     publicUrl: config.linksUrl,
     links: linkSigner(config.authSecret),

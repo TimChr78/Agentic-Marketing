@@ -15,7 +15,7 @@ import {
 import { sourceCommands } from '@agentic-marketing/ingest';
 import { connectionCommands, oauthCommands, webhookCommands } from '@agentic-marketing/integrations';
 import { journeyCommands } from '@agentic-marketing/journeys';
-import { experienceCommands } from '@agentic-marketing/personalize';
+import { edgeCommands, experienceCommands } from '@agentic-marketing/personalize';
 import { profileCommands } from '@agentic-marketing/profiles';
 import { secretCommands } from '@agentic-marketing/secrets';
 import { segmentCommands } from '@agentic-marketing/segments';
@@ -42,6 +42,7 @@ export const commands = [
   ...segmentCommands,
   ...journeyCommands,
   ...experienceCommands,
+  ...edgeCommands,
   ...aiCommands,
   ...audienceCommands,
   ...connectionCommands,

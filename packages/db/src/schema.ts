@@ -702,3 +702,22 @@ export const warehouseExports = pgTable(
   },
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
 );
+
+export const edgeTargets = pgTable('edge_targets', {
+  workspaceId: uuid('workspace_id').primaryKey(),
+  provider: text('provider').$type<'cloudflare'>().notNull().default('cloudflare'),
+  accountId: text('account_id').notNull(),
+  namespaceId: text('namespace_id').notNull(),
+  apiBase: text('api_base'),
+  secrets: bytea('secrets'),
+  secretsKeyId: text('secrets_key_id'),
+  snapshots: boolean('snapshots').notNull().default(true),
+  enabled: boolean('enabled').notNull().default(true),
+  bundleHash: text('bundle_hash'),
+  pushedKeys: text('pushed_keys').array().$type<string[]>().notNull().default([]),
+  backfillCursor: text('backfill_cursor'),
+  lastSyncAt: ts('last_sync_at'),
+  lastError: text('last_error'),
+  createdAt: ts('created_at').notNull().defaultNow(),
+  updatedAt: ts('updated_at').notNull().defaultNow(),
+});

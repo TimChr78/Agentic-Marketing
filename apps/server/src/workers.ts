@@ -5,7 +5,7 @@ import { runDeliveryWorker } from '@agentic-marketing/email';
 import { runSink } from '@agentic-marketing/events';
 import { type DeliveryDeps, runDeliveries, runTokenRefresher, webhookHook } from '@agentic-marketing/integrations';
 import { journeyHook, runSweeper } from '@agentic-marketing/journeys';
-import { refreshSnapshots, snapshotHook } from '@agentic-marketing/personalize';
+import { refreshSnapshots, runEdgeSync, snapshotHook } from '@agentic-marketing/personalize';
 import { runProfileWorkers } from '@agentic-marketing/profiles';
 import { runSegmentScheduler, segmentHook } from '@agentic-marketing/segments';
 import { logger } from '@agentic-marketing/telemetry';
@@ -16,10 +16,10 @@ import type { createServer } from './app';
 export function startScheduler(
   srv: ReturnType<typeof createServer>,
   signal: AbortSignal,
-  opts: { segmentTickMs?: number; broadcastTickMs?: number; warehouseTickMs?: number; warehouseLagMs?: number } = {},
+  opts: { segmentTickMs?: number; broadcastTickMs?: number; warehouseTickMs?: number; warehouseLagMs?: number; edgeTickMs?: number } = {},
 ): Promise<void>[] {
   logger.info(
-    'scheduler role: segment recomputation, broadcasts, retention, OAuth token refresh, audience sync, ad spend import, warehouse exports',
+    'scheduler role: segment recomputation, broadcasts, retention, OAuth token refresh, audience sync, ad spend import, warehouse exports, edge sync',
   );
   return [
     runSegmentScheduler(
@@ -49,6 +49,7 @@ export function startScheduler(
       },
       signal,
     ),
+    runEdgeSync({ db: srv.db, hot: srv.hot, kp: srv.keyProvider, egress: srv.egress, tickMs: opts.edgeTickMs }, signal),
   ];
 }
 
