@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import { isIpOrCidr } from '@agentic-marketing/core';
 import { z } from 'zod';
 
@@ -10,6 +11,10 @@ const Env = z.object({
     .describe('Start without migrating (Kubernetes: a migration job runs before each upgrade)'),
   ROLE: z.string().default('all').describe('Comma-separated roles: api, ingest, worker, scheduler, or all'),
   PORT: z.coerce.number().int().default(3000),
+  WEB_DIST: z
+    .string()
+    .optional()
+    .describe('Directory with the built admin UI; default: apps/web/dist in the repo, which is also where the image puts it'),
   PUBLIC_URL: z.url().optional(),
   PUBLIC_LINKS_URL: z
     .url()
@@ -162,6 +167,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   return {
     roles: new Set(e.ROLE === 'all' ? ['api', 'ingest', 'worker', 'scheduler'] : e.ROLE.split(',').map((r) => r.trim())),
     port: e.PORT,
+    // Resolved from this file, never from the working directory: `pnpm start` and the image both
+    // run from /app, where the built UI sits next to the server.
+    webDist: e.WEB_DIST ?? fileURLToPath(new URL('../../../apps/web/dist', import.meta.url)),
     skipMigrations: e.SKIP_MIGRATIONS === 'true',
     publicUrl: (e.PUBLIC_URL ?? `http://localhost:${e.PORT}`).replace(/\/$/, ''),
     linksUrl: (e.PUBLIC_LINKS_URL ?? e.PUBLIC_URL ?? `http://localhost:${e.PORT}`).replace(/\/$/, ''),

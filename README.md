@@ -60,7 +60,7 @@ docker compose exec app am bootstrap --email you@example.com --workspace 'My sit
 
 The bootstrap command prompts for the password without echoing it. In a script, set `AM_BOOTSTRAP_PASSWORD` and pass it through (`docker compose exec -e AM_BOOTSTRAP_PASSWORD app am bootstrap …`) or pipe one line on stdin (`… | docker compose exec -T app am bootstrap …`). `--password` still works but is deprecated: arguments are visible in process listings and shell history. Change the password later with `am reset-password --email you@example.com` (again via `AM_RESET_PASSWORD`, a hidden prompt, or stdin).
 
-Open http://localhost:3000, sign in, and add an e-mail provider. To let an AI agent work in the workspace, connect an MCP client (Claude, an IDE…) to `http://localhost:3000/mcp`: it registers itself, and you choose its permissions on the consent page.
+Open http://localhost:3000 for the admin UI (it is built into the image and served at `/`), sign in, and add an e-mail provider. To let an AI agent work in the workspace, connect an MCP client (Claude, an IDE…) to `http://localhost:3000/mcp`: it registers itself, and you choose its permissions on the consent page.
 
 MCP requires `PUBLIC_URL` to be HTTPS. With a plain-HTTP address on a LAN the admin UI and REST API still work, but MCP/OAuth client endpoints are disabled; expose the server over HTTPS (e.g. with Tailscale or a Cloudflare Tunnel) to enable MCP.
 

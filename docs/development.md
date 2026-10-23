@@ -15,7 +15,7 @@ packages/
   edge-worker/ the decision API as a Cloudflare Worker, reading Workers KV (docs/deployment/edge.md)
 apps/
   server/      Hono app: REST (/v1/<command>, /openapi.json), MCP (/mcp), sign-in/consent, health; CLI
-  web/         React UI: Phase −1 demo (mocked) + "Live workspace (API)" screen against the real server
+  web/         React UI: live workspace against the real API (production build in the image at /) + Phase −1 demo (mocked, dev)
 spikes/        throw-away prototypes with their FINDINGS.md (not part of CI or the image)
 ```
 
@@ -30,8 +30,20 @@ pnpm install
 cp .env.example .env          # fill AUTH_SECRET and MASTER_KEY (openssl rand -base64 32), point DATABASE_URL at Postgres
 pnpm --silent --filter @agentic-marketing/server cli bootstrap --email you@example.com --workspace 'My shop'
 pnpm dev                       # API on http://localhost:3000 (migrates on start)
-pnpm dev:web                   # UI on http://localhost:5173 → "Live workspace (API)"
+pnpm dev:web                   # UI on http://localhost:5173 → "Live workspace (API)", demo screens included
 ```
+
+For development the demo still starts; the production build is the live workspace only:
+
+```bash
+pnpm --filter @agentic-marketing/web build:live   # writes apps/web/dist
+pnpm dev                                          # serves that build at http://localhost:3000/
+```
+
+The Docker image runs `build:live` and copies `apps/web/dist` into place, so `/` is the admin UI. When the
+directory exists the server serves real assets and falls back to `index.html` for extension-less paths; API
+paths are never answered with the page. Set `WEB_DIST` to serve a different build (for example a mounted
+volume); when the directory is absent the server runs API-only, as before.
 
 `bootstrap` prompts for the password without echoing it. Non-interactively, set `AM_BOOTSTRAP_PASSWORD` for the command or pipe one line on stdin; `--password` still works but is deprecated because arguments are visible in process listings and shell history. `pnpm --silent --filter @agentic-marketing/server cli reset-password --email you@example.com` changes a password later, reading `AM_RESET_PASSWORD`, a hidden prompt or stdin.
 

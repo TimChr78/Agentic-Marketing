@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import { formsApi, withEmailProfileEvents } from '@agentic-marketing/audience';
 import {
   type AuthConfig,
@@ -25,6 +26,7 @@ import { mcpEndpoint } from './http/mcp';
 import { consentPage, invitePage, loginPage } from './http/pages';
 import { restApi } from './http/rest';
 import { scimApi } from './http/scim';
+import { staticSite } from './http/static';
 import { keyProviderFor } from './keys';
 
 /** `overrides` exist for tests, e.g. a stub transport for Client ID Metadata Documents. */
@@ -172,6 +174,13 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
   if (config.roles.has('api')) app.route('/', copilotApi({ auth, db, executor, kp: keyProvider }));
   if (config.roles.has('api')) app.route('/', scimApi({ auth, db, executor, publicUrl: config.publicUrl }));
   app.route('/', restApi({ auth, db, executor }));
+
+  // Last, so every API route above wins. Without a build (packages/tests, server-only install) the
+  // middleware is a no-op and the server behaves exactly as before.
+  if (existsSync(config.webDist)) {
+    app.use('*', staticSite({ root: config.webDist }));
+    logger.info({ webDist: config.webDist }, 'serving the admin UI at /');
+  }
 
   return {
     app,

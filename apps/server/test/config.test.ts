@@ -46,4 +46,14 @@ describe('configuration', () => {
   it('rejects an invalid TRUSTED_PROXY_CIDRS entry', () => {
     expect(() => loadConfig({ ...base, TRUSTED_PROXY_CIDRS: '127.0.0.1/32,not-a-cidr' })).toThrow('TRUSTED_PROXY_CIDRS');
   });
+
+  it('defaults webDist to apps/web/dist in the repo', () => {
+    const c = loadConfig(base);
+    expect(c.webDist.endsWith('/apps/web/dist')).toBe(true);
+  });
+
+  it('respects an explicit WEB_DIST', () => {
+    const c = loadConfig({ ...base, WEB_DIST: '/srv/agentic-marketing/ui' });
+    expect(c.webDist).toBe('/srv/agentic-marketing/ui');
+  });
 });

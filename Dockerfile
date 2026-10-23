@@ -10,11 +10,22 @@ FROM base AS deps
 COPY pnpm-lock.yaml pnpm-workspace.yaml package.json .npmrc ./
 COPY packages ./packages
 COPY apps/server ./apps/server
-# Only the server and the packages it uses (spikes and the web demo stay out of the image).
+# Only the server and the packages it uses (spikes and the Phase −1 demo stay out of the image).
 RUN pnpm install --frozen-lockfile --filter "@agentic-marketing/server..."
+
+# The live admin UI: a production build of `apps/web` in `live` mode (no demo screens).
+FROM base AS web
+COPY pnpm-lock.yaml pnpm-workspace.yaml package.json .npmrc ./
+COPY packages ./packages
+COPY apps/server ./apps/server
+COPY apps/web ./apps/web
+# The build tooling (Vite, TypeScript) is a dev dependency, and base sets NODE_ENV=production.
+RUN pnpm install --frozen-lockfile --prod=false --filter "@agentic-marketing/web..."
+RUN pnpm --filter @agentic-marketing/web build:live
 
 FROM base
 COPY --from=deps /app /app
+COPY --from=web /app/apps/web/dist /app/apps/web/dist
 # `am` is the admin CLI without pnpm's script banner (which would echo arguments such as secrets).
 RUN printf '#!/bin/sh\nexec pnpm --silent --filter @agentic-marketing/server cli "$@"\n' > /usr/local/bin/am && chmod +x /usr/local/bin/am
 USER node

@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "build:single": "tsc --noEmit && vite build --mode single && node scripts/artifact.mjs",
+    "build:live": "tsc --noEmit && vite build --mode live",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit"
   },
