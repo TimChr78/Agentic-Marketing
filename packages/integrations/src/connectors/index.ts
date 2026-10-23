@@ -2,8 +2,13 @@ import jsonata from 'jsonata';
 import { z } from 'zod';
 import { defineConnector, type InboundItem } from '../sdk';
 import { verifyHmac, verifyWebhook } from '../signing';
+import { salesforceConnector } from './salesforce';
+import { shopifyAppConnector, shopifyConnector } from './shopify';
 
-// Built-in connectors. Shopify and Slack are references for the SDK; the generic webhook and
+export { salesforceConnector } from './salesforce';
+export * from './shopify';
+
+// Built-in connectors. Shopify (shopify.ts), Salesforce (salesforce.ts) and Slack are references for the SDK; the generic webhook and
 // HTTP connectors cover everything else (and n8n, Zapier or Make in front of it).
 
 const asItems = (v: unknown): InboundItem[] =>
@@ -48,88 +53,6 @@ export const webhookConnector = defineConnector({
     async map(payload, { settings, headers }) {
       const v = await jsonata(settings.mapping).evaluate({ body: payload, headers });
       return asItems(v === undefined ? undefined : JSON.parse(JSON.stringify(v)));
-    },
-  },
-});
-
-const money = (v: unknown) => (v === undefined || v === null ? undefined : Number(v));
-
-export const shopifyConnector = defineConnector({
-  id: 'shopify',
-  label: 'Shopify',
-  description:
-    'Receives Shopify webhooks (orders/create, orders/paid, checkouts/create, customers/create, customers/update) as Order Completed, Checkout Started and identify events. Register the inbound URL in Shopify with the JSON format.',
-  auth: 'signing_secret',
-  settings: z.object({ shop: z.string().max(200).default('').describe('e.g. my-shop.myshopify.com (informational)') }),
-  secrets: z.object({ webhookSecret: z.string().min(1).max(500).describe("The app's client secret, which signs its webhooks") }),
-  inbound: {
-    verify({ secrets, headers, body }) {
-      return verifyHmac(secrets.webhookSecret, body, headers['x-shopify-hmac-sha256'], 'base64')
-        ? null
-        : 'the Shopify signature does not match';
-    },
-    map(payload, { headers }) {
-      // biome-ignore lint/suspicious/noExplicitAny: Shopify's payloads, read defensively field by field
-      const p = payload as Record<string, any>;
-      const topic = headers['x-shopify-topic'] ?? '';
-      const id = headers['x-shopify-webhook-id'] ?? headers['x-shopify-event-id'] ?? String(p.id ?? '');
-      const at = p.updated_at ?? p.created_at;
-      const customer = topic.startsWith('customers/') ? p : p.customer;
-      const userId = customer?.id ? `shopify:${customer.id}` : undefined;
-      const anonymousId = !userId && p.token ? `shopify-checkout:${p.token}` : undefined;
-      const who = { ...(userId ? { userId } : { anonymousId }) };
-      const items: InboundItem[] = [];
-      if (customer?.id || p.email)
-        items.push({
-          type: 'identify',
-          ...who,
-          messageId: `${id}:identify`,
-          timestamp: at,
-          traits: {
-            email: customer?.email ?? p.email,
-            firstName: customer?.first_name,
-            lastName: customer?.last_name,
-            phone: customer?.phone ?? undefined,
-            shopify_customer_id: customer?.id ? String(customer.id) : undefined,
-            orders_count: customer?.orders_count,
-          },
-        });
-      // biome-ignore lint/suspicious/noExplicitAny: as above
-      const products = (p.line_items ?? []).map((l: Record<string, any>) => ({
-        product_id: l.product_id ? String(l.product_id) : undefined,
-        sku: l.sku ?? undefined,
-        name: l.title,
-        price: money(l.price),
-        quantity: l.quantity,
-      }));
-      if (topic === 'orders/create' || topic === 'orders/paid')
-        items.push({
-          type: 'track',
-          ...who,
-          event: topic === 'orders/paid' ? 'Order Paid' : 'Order Completed',
-          messageId: `${id}:order`,
-          timestamp: at,
-          properties: {
-            order_id: String(p.id),
-            order_number: p.order_number,
-            total: money(p.total_price),
-            subtotal: money(p.subtotal_price),
-            tax: money(p.total_tax),
-            discount: money(p.total_discounts),
-            currency: p.currency,
-            products,
-          },
-        });
-      if (topic === 'checkouts/create')
-        items.push({
-          type: 'track',
-          ...who,
-          event: 'Checkout Started',
-          messageId: `${id}:checkout`,
-          timestamp: at,
-          properties: { checkout_id: p.token, value: money(p.total_price), currency: p.currency, products },
-        });
-      return items;
     },
   },
 });
@@ -251,7 +174,9 @@ export const oauthHttpConnector = defineConnector({
 });
 
 export const connectors = Object.fromEntries(
-  [webhookConnector, shopifyConnector, slackConnector, httpConnector, oauthHttpConnector].map((c) => [c.id, c]),
+  [webhookConnector, shopifyConnector, shopifyAppConnector, salesforceConnector, slackConnector, httpConnector, oauthHttpConnector].map(
+    (c) => [c.id, c],
+  ),
 ) as Record<string, import('../sdk').Connector>;
 
 /** Adds a connector from another package (e.g. the ad platforms), at import time. */

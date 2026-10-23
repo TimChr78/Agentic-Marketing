@@ -15,7 +15,7 @@ import {
   templateCommands,
 } from '@agentic-marketing/email';
 import { sourceCommands } from '@agentic-marketing/ingest';
-import { connectionCommands, oauthCommands, webhookCommands } from '@agentic-marketing/integrations';
+import { connectionCommands, importShopifyCustomers, oauthCommands, webhookCommands } from '@agentic-marketing/integrations';
 import { journeyCommands } from '@agentic-marketing/journeys';
 import { edgeCommands, experienceCommands } from '@agentic-marketing/personalize';
 import { profileCommands } from '@agentic-marketing/profiles';
@@ -50,6 +50,7 @@ export const commands = [
   ...aiCommands,
   ...audienceCommands,
   ...connectionCommands,
+  importShopifyCustomers,
   ...adCommands,
   ...adAudienceCommands,
   ...spendCommands,

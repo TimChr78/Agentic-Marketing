@@ -202,7 +202,7 @@ export const profileKeys = pgTable(
 );
 
 export type IdentifierType = 'anonymous_id' | 'user_id' | 'email' | 'phone' | ClickIdType;
-export type ClickIdType = 'gclid' | 'gbraid' | 'wbraid' | 'fbc' | 'fbp' | 'msclkid';
+export type ClickIdType = 'gclid' | 'gbraid' | 'wbraid' | 'fbc' | 'fbp' | 'msclkid' | 'li_fat_id' | 'ttclid' | 'ttp' | 'epik';
 export const identifiers = pgTable(
   'identifiers',
   {

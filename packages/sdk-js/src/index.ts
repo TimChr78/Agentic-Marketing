@@ -54,13 +54,15 @@ const KEYS = { consent: 'am.consent', anonymousId: 'am.aid', userId: 'am.uid', c
 const AD_PURPOSE = 'ad_measurement';
 const CLICK_VALUE = /^[A-Za-z0-9._~-]{4,500}$/;
 
-export type ClickIds = Partial<Record<'gclid' | 'gbraid' | 'wbraid' | 'fbc' | 'fbp' | 'msclkid', string>>;
+export type ClickIds = Partial<
+  Record<'gclid' | 'gbraid' | 'wbraid' | 'fbc' | 'fbp' | 'msclkid' | 'li_fat_id' | 'ttclid' | 'ttp' | 'epik', string>
+>;
 
-/** Ad click ids on the landing page, plus Meta's _fbc/_fbp cookies when a Meta tag set them. */
+/** Ad click ids on the landing page, plus the platforms' cookies (_fbc, _fbp, _ttp, _epik) when their tags set them. */
 export function captureClickIds(search: string, cookies: string, now = Date.now()): ClickIds {
   const q = new URLSearchParams(search);
   const out: ClickIds = {};
-  for (const k of ['gclid', 'gbraid', 'wbraid', 'msclkid'] as const) {
+  for (const k of ['gclid', 'gbraid', 'wbraid', 'msclkid', 'li_fat_id', 'ttclid', 'epik'] as const) {
     const v = q.get(k);
     if (v && CLICK_VALUE.test(v)) out[k] = v;
   }
@@ -68,7 +70,9 @@ export function captureClickIds(search: string, cookies: string, now = Date.now(
   if (fbclid && CLICK_VALUE.test(fbclid)) out.fbc = `fb.1.${now}.${fbclid}`;
   for (const part of cookies.split(';')) {
     const [k, v] = part.trim().split('=');
-    if ((k === '_fbc' && !out.fbc) || k === '_fbp') if (v && CLICK_VALUE.test(v)) out[k.slice(1) as 'fbc' | 'fbp'] = v;
+    if (!v || !CLICK_VALUE.test(v)) continue;
+    if ((k === '_fbc' && !out.fbc) || k === '_fbp' || k === '_ttp') out[k.slice(1) as 'fbc' | 'fbp' | 'ttp'] = v;
+    else if (k === '_epik' && !out.epik) out.epik = v;
   }
   return out;
 }

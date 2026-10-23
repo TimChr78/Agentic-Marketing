@@ -272,6 +272,13 @@ Not built yet: session conditions at the edge (they read as "no session" there),
 
 Not built yet: notification actions (buttons), automatic re-subscription on `pushsubscriptionchange`, a push providers screen (commands only).
 
+**Built (part e, connectors):**
+- **Ad platforms beyond the big three:** conversions to LinkedIn (Conversions API, OAuth), TikTok (Events API 2.0) and Pinterest (Conversions API v5) from the conversion map, with their click ids (`li_fat_id`; `ttclid` and the `_ttp` cookie; `epik` and `_epik`) captured by the SDK and kept only with `ad_measurement`; TikTok and Pinterest test modes in `ads.test`. The conversion map now checks Microsoft connections too.
+- **Salesforce:** OAuth with your connected app; journey actions to upsert contacts by e-mail (SOQL-escaped), create leads and tasks, and run read-only SOQL; signed callouts from Flows or Apex become people and events.
+- **Shopify app:** OAuth install, webhook registration through the Admin GraphQL API, `shopify.importCustomers` (pages of 250) with e-mail marketing consent as `marketing_email` when `syncEmailConsent` is on, and fulfilment, cancellation and refund events.
+
+Not built yet: audiences and spend for LinkedIn, TikTok and Pinterest; Salesforce bulk sync and Change Data Capture; a Shopify product catalogue.
+
 ## Every known limitation, and where it lands
 
 | Limitation (where it was recorded) | Phase |

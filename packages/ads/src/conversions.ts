@@ -20,22 +20,27 @@ import {
   sendToMeta,
   sendToMicrosoft,
 } from './platforms';
+import { linkedinAdsConnector, pinterestAdsConnector, sendToLinkedin, sendToPinterest, sendToTiktok, tiktokAdsConnector } from './social';
 
 // Conversion feedback (performance-marketing.md, flow 1): mapped events of people who allowed
 // ad_measurement are queued per platform in the deliveries outbox and sent by the delivery worker,
 // with retries and the connection's rate limit. Identifiers are read and hashed only at send time.
 
-type Platform = 'meta' | 'google' | 'microsoft';
+const PLATFORMS = ['meta', 'google', 'microsoft', 'linkedin', 'tiktok', 'pinterest'] as const;
+type Platform = (typeof PLATFORMS)[number];
 const CONNECTOR: Record<Platform, string> = {
   meta: metaAdsConnector.id,
   google: googleAdsConnector.id,
   microsoft: microsoftAdsConnector.id,
+  linkedin: linkedinAdsConnector.id,
+  tiktok: tiktokAdsConnector.id,
+  pinterest: pinterestAdsConnector.id,
 };
 
 publishValidators.set('conversion_map', async (content, tx: Tx) => {
   const map = content as ConversionMap;
   const problems: string[] = [];
-  const refs = map.rules.flatMap((r, i) => (['meta', 'google'] as const).flatMap((p) => (r[p] ? [{ i, p, id: r[p]!.connection }] : [])));
+  const refs = map.rules.flatMap((r, i) => PLATFORMS.flatMap((p) => (r[p] ? [{ i, p, id: r[p]!.connection }] : [])));
   const rows = refs.length
     ? await tx
         .select()
@@ -43,7 +48,7 @@ publishValidators.set('conversion_map', async (content, tx: Tx) => {
         .where(inArray(schema.connections.id, [...new Set(refs.map((r) => r.id))]))
     : [];
   map.rules.forEach((r, i) => {
-    if (!r.meta && !r.google && !r.microsoft) problems.push(`rule ${i + 1} ("${r.event}") sends nowhere: add meta, google or microsoft`);
+    if (!PLATFORMS.some((p) => r[p])) problems.push(`rule ${i + 1} ("${r.event}") sends nowhere: add one of ${PLATFORMS.join(', ')}`);
     if (r.value && !r.currency && !r.currencyProperty) problems.push(`rule ${i + 1} ("${r.event}") has a value but no currency`);
   });
   for (const ref of refs) {
@@ -94,7 +99,7 @@ export function conversionHook(deps: { db: Db }) {
             profileId,
             adTargeting: signal?.ad_targeting,
           };
-          for (const platform of ['meta', 'google', 'microsoft'] as const) {
+          for (const platform of PLATFORMS) {
             const dest = r[platform];
             if (!dest) continue;
             await tx
@@ -188,6 +193,42 @@ function send(
       egress,
     );
   }
+  if (row.connector === linkedinAdsConnector.id) {
+    if (test)
+      return Promise.resolve<SendResult>({
+        ok: false,
+        error: 'LinkedIn has no test mode: send to a test conversion rule',
+        permanent: true,
+      });
+    return sendToLinkedin(
+      c,
+      p,
+      dest as { conversionId: string },
+      linkedinAdsConnector.settings.parse(row.settings),
+      row.oauthStatus === 'connected' ? accessTokenOf(secrets) : undefined,
+      egress,
+    );
+  }
+  if (row.connector === tiktokAdsConnector.id)
+    return sendToTiktok(
+      c,
+      p,
+      dest as { event: string },
+      tiktokAdsConnector.settings.parse(row.settings),
+      tiktokAdsConnector.secrets.parse(secrets),
+      egress,
+      { test },
+    );
+  if (row.connector === pinterestAdsConnector.id)
+    return sendToPinterest(
+      c,
+      p,
+      dest as { eventName: string },
+      pinterestAdsConnector.settings.parse(row.settings),
+      pinterestAdsConnector.secrets.parse(secrets),
+      egress,
+      { test },
+    );
   return Promise.resolve<SendResult>({
     ok: false,
     error: `${connectorOf(row.connector).label} does not take conversions`,
@@ -226,10 +267,10 @@ export const testAdConnection = defineCommand({
   name: 'ads.test',
   title: 'Test an ad platform connection',
   description:
-    "Sends a sample conversion in the platform's test mode: Meta with the connection's testEventCode (it shows under Test events), Google with validateOnly (checked, not recorded). The identifiers are made up.",
+    "Sends a sample conversion in the platform's test mode: Meta and TikTok with the connection's testEventCode (it shows under Test events), Google with validateOnly (checked, not recorded), Pinterest with test=true. The identifiers are made up.",
   input: z.object({
     connection: ConnectionId,
-    eventName: z.string().max(100).default('Lead').describe('Meta event name'),
+    eventName: z.string().max(100).default('Lead').describe('Meta event name (TikTok: its event, Pinterest: its event name)'),
     conversionAction: z
       .string()
       .regex(/^\d{1,20}$/)
@@ -254,7 +295,14 @@ export const testAdConnection = defineCommand({
       profileId: 'test',
     };
     const person: Person = { email: 'test@example.com', phone: null, clickIds: {}, personalization: false };
-    const dest = row.connector === googleAdsConnector.id ? { conversionAction: input.conversionAction } : { eventName: input.eventName };
+    const dest =
+      row.connector === googleAdsConnector.id
+        ? { conversionAction: input.conversionAction }
+        : row.connector === tiktokAdsConnector.id
+          ? { event: input.eventName }
+          : row.connector === pinterestAdsConnector.id
+            ? { eventName: input.eventName === 'Lead' ? 'lead' : input.eventName }
+            : { eventName: input.eventName };
     const secrets = await connectionSecrets(ctx.tx, row, ctx.services.keyProvider);
     const r = await send(row, secrets, sample, person, dest, ctx.services.egress ?? { allowedHosts: [] }, true);
     return r.ok
@@ -267,7 +315,7 @@ export const listConversions = defineCommand({
   name: 'ads.conversions',
   title: 'Conversions sent to ad platforms',
   description:
-    'Recent conversions queued for Meta and Google, newest first: event, platform, status (pending, done, dead) and the platform error. Only people who allowed ad_measurement are ever queued.',
+    'Recent conversions queued for the ad platforms, newest first: event, platform, status (pending, done, dead) and the platform error. Only people who allowed ad_measurement are ever queued.',
   input: z.object({
     status: z.enum(['pending', 'running', 'done', 'dead']).optional(),
     connection: ConnectionId.optional(),

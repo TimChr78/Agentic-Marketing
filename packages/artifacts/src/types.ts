@@ -370,6 +370,23 @@ const conversionMap = z.object({
             conversionName: z.string().min(1).max(100).describe('The offline conversion goal name in Microsoft Advertising'),
           })
           .optional(),
+        linkedin: z
+          .object({ connection: ConnectionRef, conversionId: z.string().regex(/^\d{1,20}$/, 'The numeric conversion rule id') })
+          .optional(),
+        tiktok: z
+          .object({
+            connection: ConnectionRef,
+            event: z.string().min(1).max(100).describe('A TikTok standard event, e.g. "CompletePayment" or "SubmitForm"'),
+          })
+          .optional(),
+        pinterest: z
+          .object({
+            connection: ConnectionRef,
+            eventName: z
+              .enum(['checkout', 'add_to_cart', 'page_visit', 'signup', 'lead', 'search', 'view_category', 'watch_video', 'custom'])
+              .describe('A Pinterest event name'),
+          })
+          .optional(),
       }),
     )
     .min(1)

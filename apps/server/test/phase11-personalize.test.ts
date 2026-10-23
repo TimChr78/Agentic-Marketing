@@ -126,7 +126,11 @@ describe('edge decisions', () => {
     expect(calls.every((c) => c.auth === 'Bearer cf-token-0123456789abcdef')).toBe(true);
     // Not in the segment (no snapshot at the edge): nothing for the hero.
     expect((await edgeDecide({ userId: 'nobody', context: yes })).decisions).toEqual([]);
-    const status = await t.api(owner).call('edge.status', {});
+    // The sync records its time after the writes it made.
+    const status = await eventually(
+      () => t.api(owner).call('edge.status', {}),
+      (s) => s.lastSyncAt !== null,
+    );
     expect(status.lastError).toBeNull();
     expect(status.lastSyncAt).not.toBeNull();
   });

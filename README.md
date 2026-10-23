@@ -29,7 +29,7 @@ It runs as one Docker image (a TypeScript modular monolith) next to Postgres, Cl
 - **Web personalization:** experiences and A/B tests served by a decision API (or at the edge, by a Cloudflare Worker), with an anti-flicker snippet, consent-aware targeting, a visual composer, preview links and sequential or Bayesian results.
 - **AI:** your own providers (Anthropic, OpenAI, Ollama…), metering and budgets that hold under concurrency, prompt artifacts with test runs, redaction, a decision log with sampled human reviews, text classification, generated text cached per segment, and an in-app copilot over MCP that streams its answers and keeps conversations.
 - **Performance marketing:**
-  - conversions to Meta (Conversions API), Google Ads (Data Manager API) and Microsoft Advertising, from a conversion map, for people who allowed `ad_measurement`;
+  - conversions to Meta (Conversions API), Google Ads (Data Manager API), Microsoft Advertising, LinkedIn, TikTok and Pinterest, from a conversion map, for people who allowed `ad_measurement`;
   - segments synced to Meta custom audiences and Google Customer Match, with `ad_targeting` consent and removals when people leave, withdraw or are erased;
   - spend import with CPA and ROAS per campaign from first-party attribution.
 
@@ -92,7 +92,7 @@ Wave 1 (Phases −1 to 5) is complete: foundations, data platform, e-mail, segme
 | 8 | Consent everywhere | Done: consent banner with Consent Mode v2, ad purposes, click-id capture, OAuth 2.0 connections, shared rate limits, bot filtering |
 | 9 | Performance marketing | Done: conversions (Meta, Google, Microsoft), audience sync (Meta, Google), spend and ROAS. Later: Microsoft reporting and audiences, more platforms |
 | 10 | Scale and operations | Done: correctness (AI budget reservations, prompt test jobs, merge-safe journeys, journey version migration, instant experience updates), scale (segments evaluated in SQL, ClickHouse row policies, a load test to 1M profiles), operations (Helm chart, OpenBao and AWS KMS keys, warehouse export, config as code) |
-| 11 | Enterprise and ecosystem | Part a done (single sign-on with OIDC and SAML, SCIM provisioning, MCP scope step-up). Part b done (AI: classify, text per segment, review samples, a streaming copilot with stored conversations). Part c done (sequential and Bayesian experiment statistics, edge decide on Cloudflare Workers, a visual composer and preview links). Part d done (push: web push, FCM, APNs). Next: more connectors |
+| 11 | Enterprise and ecosystem | Part a done (single sign-on with OIDC and SAML, SCIM provisioning, MCP scope step-up). Part b done (AI: classify, text per segment, review samples, a streaming copilot with stored conversations). Part c done (sequential and Bayesian experiment statistics, edge decide on Cloudflare Workers, a visual composer and preview links). Part d done (push: web push, FCM, APNs). Part e done (Salesforce, the Shopify app with customer import, conversions to LinkedIn, TikTok and Pinterest) |
 
 ## Development
 

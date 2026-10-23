@@ -5,20 +5,21 @@ import type { ClickIdType } from '@agentic-marketing/db';
 // links a visit to an ad platform's knowledge of the person, so it is kept only with the
 // `ad_measurement` purpose allowed.
 
-export const CLICK_ID_TYPES: ClickIdType[] = ['gclid', 'gbraid', 'wbraid', 'fbc', 'fbp', 'msclkid'];
+export const CLICK_ID_TYPES: ClickIdType[] = ['gclid', 'gbraid', 'wbraid', 'fbc', 'fbp', 'msclkid', 'li_fat_id', 'ttclid', 'ttp', 'epik'];
 export type ClickIds = Partial<Record<ClickIdType, string>>;
 
 const VALUE = /^[A-Za-z0-9._~-]{4,500}$/;
 
 /**
- * Click ids from landing-page parameters (gclid, gbraid, wbraid, fbclid, msclkid) or already
- * named ones (fbc, fbp, as Meta's cookies hold them). `fbclid` becomes an `fbc` in Meta's format,
+ * Click ids from landing-page parameters (gclid, gbraid, wbraid, fbclid, msclkid, li_fat_id, ttclid,
+ * epik) or already named ones (fbc, fbp, ttp, as the platforms' cookies hold them). `fbclid` becomes an `fbc` in Meta's format,
  * fb.1.<first seen, ms>.<fbclid>.
  */
 export function clickIdsFrom(params: Record<string, unknown>, seenAt = Date.now()): ClickIds {
   const out: ClickIds = {};
   const str = (k: string) => (typeof params[k] === 'string' ? (params[k] as string).trim() : '');
-  for (const t of ['gclid', 'gbraid', 'wbraid', 'msclkid', 'fbc', 'fbp'] as const) if (VALUE.test(str(t))) out[t] = str(t);
+  for (const t of ['gclid', 'gbraid', 'wbraid', 'msclkid', 'fbc', 'fbp', 'li_fat_id', 'ttclid', 'ttp', 'epik'] as const)
+    if (VALUE.test(str(t))) out[t] = str(t);
   if (!out.fbc && VALUE.test(str('fbclid'))) out.fbc = `fb.1.${seenAt}.${str('fbclid')}`;
   return out;
 }
