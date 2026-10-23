@@ -16,7 +16,7 @@ import {
   type NodeProps,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { ArrowLeft, BarChart3, Play, Plus, Send, Trash2, Workflow } from 'lucide-react';
+import { AlertTriangle, ArrowLeft, BarChart3, Play, Plus, Send, Trash2, Workflow } from 'lucide-react';
 import { useStore } from '../mock/store';
 import { exec } from '../api/commands';
 import type { Journey, JourneyEdge, JourneyNode, NodeKind } from '../api/types';
@@ -97,18 +97,21 @@ export type StepData = {
   sim: 'none' | 'visited' | 'current';
   /** Overrides the derived config summary (the live builder's settings differ from the demo's). */
   summary?: string;
+  /** What still needs attention before publishing; drafts may be saved with it. */
+  warning?: string;
 };
 
 export const StepNode = memo(({ data, selected }: NodeProps<Node<StepData>>) => {
-  const { node, showStats, sim, summary } = data;
+  const { node, showStats, sim, summary, warning } = data;
   const meta = kindMeta[node.kind];
   const Icon = meta.icon;
   return (
     <div
+      title={warning}
       className={cx(
         'w-[230px] rounded-lg border px-3 py-2.5 shadow-sm',
         sim === 'none' ? 'bg-surface' : 'bg-accent-soft',
-        sim === 'current' ? 'sim-active border-accent' : meta.ai ? 'border-agent/50' : 'border-line',
+        sim === 'current' ? 'sim-active border-accent' : warning ? 'border-warn' : meta.ai ? 'border-agent/50' : 'border-line',
         selected && 'ring-2 ring-accent',
       )}
     >
@@ -118,6 +121,7 @@ export const StepNode = memo(({ data, selected }: NodeProps<Node<StepData>>) => 
           <Icon size={14} />
         </span>
         <span className="text-[10px] font-semibold uppercase tracking-wider text-muted">{meta.label}</span>
+        {warning && <AlertTriangle size={13} className="ml-auto shrink-0 text-warn" aria-label="Needs attention before publishing" />}
       </div>
       <div className="mt-1.5 text-[13px] font-semibold leading-snug text-fg">{node.label}</div>
       <div className="mt-0.5 truncate font-mono text-[11px] text-muted">{summary ?? configSummary(node)}</div>
