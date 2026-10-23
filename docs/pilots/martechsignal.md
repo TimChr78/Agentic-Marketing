@@ -31,7 +31,7 @@ A light pilot before Phase 6: run the platform for a real site, the owner's [mar
 | Bot protection | – | **Built**: honeypot and rate limit by default; **Cloudflare Turnstile** per form (`turnstile: true`, secret `turnstile.secret_key`) |
 | Move subscribers from Kit with consent | Missing (Phase 1 limit: no bulk import) | **Built**: `profiles.import`, up to 5,000 rows per call, keeping consent history and proof; idempotent; people only. In the UI: a CSV import that recognises Kit's columns |
 | Weekly newsletter | Missing: journeys are triggered; `journeys.enroll` caps at 1,000 and is not a campaign | **Built**: `broadcast` artifact (template + segment + optional `sendAt`); it runs once, in batches, through the send gateway; `broadcasts.preview`, `broadcasts.status`, `broadcasts.cancel` |
-| E-mail links on the site's domain (unsubscribe, clicks, confirm) | Links used `PUBLIC_URL`, which is also the admin and OAuth URL | **Built**: `PUBLIC_LINKS_URL` (e.g. `https://am.martechsignal.com`) |
+| E-mail links on the site's domain (unsubscribe, clicks, confirm) | Links used `PUBLIC_URL`, which is also the admin and OAuth URL | **Built**: `PUBLIC_LINKS_URL` (option A: e.g. `https://am.martechsignal.com`; option B: `https://martechsignal.com/am`) |
 | Visitor IP behind Cloudflare | Hard-wired `x-forwarded-for` | **Built**: `CLIENT_IP_HEADER` (`cf-connecting-ip` through the tunnel) |
 | SDK on a site without a bundler, under `script-src 'self'` | Source only | **Built**: `pnpm --filter @agentic-marketing/sdk-js build` makes `dist/am.min.js` (7 KB IIFE, global `AgenticMarketing`) to host on the site |
 | Welcome journey, unsubscribe (RFC 8058), suppressions, bounces | Existing | Existing |
@@ -42,9 +42,9 @@ A light pilot before Phase 6: run the platform for a real site, the owner's [mar
 
 ## Cloudflare specifics
 
-Umami already runs in the homelab behind a **Cloudflare Tunnel** (`analytics.martechsignal.com`), so the platform reuses that tunnel.
+Umami already runs in the homelab behind a **Cloudflare Tunnel** (`analytics.martechsignal.com`), so the platform reuses that tunnel and **option A is the default here**.
 
-- **Option A, recommended: a hostname on the existing tunnel**, with path rules, the same way Umami is set up.
+- **Option A, default here (recommended): a hostname on the existing tunnel**, with path rules, the same way Umami is set up.
   - Add a public hostname `am.martechsignal.com` → `http://<app>:3000` that lets **only** the public paths through. In the tunnel config:
     ```yaml
     ingress:
@@ -61,10 +61,10 @@ Umami already runs in the homelab behind a **Cloudflare Tunnel** (`analytics.mar
   - Platform settings: `PUBLIC_LINKS_URL=https://am.martechsignal.com`, `CLIENT_IP_HEADER=cf-connecting-ip` (the tunnel passes the visitor's IP).
   - Site: the form posts to `https://am.martechsignal.com/f/<form id>`. The CSP's `form-action` swaps `https://app.kit.com` for `https://am.martechsignal.com`. Nothing else changes; the site worker stays as it is.
   - If the relay offers bounce and complaint webhooks, add `hooks` to the path rule: `^/(f|u|c|hooks)/`.
-- **Option B: first-party proxy in `_worker.js`** ([reference](../../.claude/skills/agentic-marketing-implement/references/cloudflare-worker-proxy.js)). `/am/*` on martechsignal.com is forwarded to a tunnel hostname locked with a Cloudflare Access service token.
+- **Option B: first-party proxy in `_worker.js`** ([reference](../../.claude/skills/agentic-marketing-implement/references/cloudflare-worker-proxy.js)). `/am/*` on martechsignal.com is forwarded to a tunnel hostname locked with a Cloudflare Access service token. The form then posts to `/am/f/<form id>`.
   - Pick it if the links should live on the main domain, or for phase B tracking, where a same-origin `/am/v1/batch` is safest against ad blockers.
   - It needs worker code and must run before the worker's HTML edge cache.
-- **Admin and MCP** stay on the LAN or a VPN (Tailscale). Hermes runs on the same server, so it uses the LAN URL with an API token.
+- **Admin and MCP.** The admin UI and REST work over a plain-HTTP LAN URL (`http://am.lan:3000`); with a plain-HTTP non-loopback `PUBLIC_URL` the server starts normally, but MCP/OAuth is disabled. For MCP, expose the same server over HTTPS — Tailscale Serve/Funnel on the homelab, the Cloudflare Tunnel, or a TLS reverse proxy. Hermes runs on the same server, so it can use REST on the LAN, or MCP over the HTTPS URL with an API token.
 - **Turnstile** (free) is better than a CAPTCHA if bots find the form; it needs `challenges.cloudflare.com` in `script-src` and `frame-src`.
 - **E-mail sending:** Cloudflare does not send bulk mail. Keep the SMTP relay (with the relay's bounce webhooks if it has them, ADR-0011), or use SES or Postmark. Add SPF, DKIM and DMARC for the sending domain in Cloudflare DNS, and remove Kit's sending-domain records after the switch.
 - **Edge cache:** the worker caches HTML for 5 minutes, so personalization must stay client-side (the SDK), which it already is.
@@ -96,7 +96,7 @@ Umami already runs in the homelab behind a **Cloudflare Tunnel** (`analytics.mar
 ## Plan for the implementation session
 
 1. **Platform up.**
-   - Docker Compose on the homelab with `PUBLIC_URL` (LAN), `PUBLIC_LINKS_URL=https://am.martechsignal.com` and `CLIENT_IP_HEADER=cf-connecting-ip` (option A).
+   - Docker Compose on the homelab with `PUBLIC_URL` (LAN for admin/REST; use an HTTPS URL for MCP), `PUBLIC_LINKS_URL=https://am.martechsignal.com` and `CLIENT_IP_HEADER=cf-connecting-ip` (option A).
    - Bootstrap the owner (`cli bootstrap`); set the approval policy to `agent_changes`.
    - Add the e-mail provider (SMTP relay) with `useFor: [transactional, marketing]`.
    - Purposes: the defaults fit (`marketing_email` is consent-based; `onboarding` covers the confirmation e-mail). Double opt-in is set on the form (`doubleOptIn: true`); the purposes' `requiresDoubleOptIn` flag is informational only.
@@ -116,7 +116,7 @@ Umami already runs in the homelab behind a **Cloudflare Tunnel** (`analytics.mar
 
 ## Known limits found while assessing
 
-- People who never confirm keep a profile without consent. There is no automatic cleanup yet; delete them with `profiles.erase`, or wait for a retention job (to do).
+- People who never confirm keep a profile without consent until retention removes it. The scheduler runs hourly: form-only profiles with no consent record, no other identity and no merge are removed after `RETENTION_UNCONFIRMED_DAYS` (default 30), without suppression so they can sign up again. Finished deliveries and AI calls are removed after `RETENTION_LOG_DAYS` (default 180). `profiles.erase` remains available for an immediate erasure request; it is not needed for routine cleanup.
 - Broadcasts have no A/B subject test or send-time optimisation; a broadcast goes to the segment as it is at send time.
 - No dedicated UI for forms and broadcasts yet. They are artifacts, so the generic artifact editor, MCP and REST work.
 - No consent banner component; phase B needs one.

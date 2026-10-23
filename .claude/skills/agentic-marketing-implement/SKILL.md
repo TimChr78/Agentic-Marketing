@@ -13,7 +13,7 @@ Read first, from the platform repo: `docs/pilots/martechsignal.md` (a worked ass
 
 - **Consent first.** Marketing e-mail needs the `marketing_email` purpose allowed for the person. The send gateway enforces it per person and per message; never work around it (no sending through another tool, no "legitimate interest" without a documented LIA).
 - **Double opt-in** for newsletter signups in the EU. Consent is recorded only after the confirmation click, with proof.
-- **First-party and minimal.** Public paths go through the site's own domain (`/am/*`); the admin UI, REST commands and MCP never do. Do not add third-party script domains to the CSP for the platform.
+- **First-party and minimal.** Only `f/`, `u/`, `c/` and optionally `hooks/` are public. Option A serves them from a dedicated `am.<site>` hostname on an existing tunnel (the default when one is already there); Option B proxies `/am/*` through the site's own domain for first-party links and phase B. The admin UI, REST commands and MCP are never public. Do not add third-party script domains to the CSP for the platform.
 - **Keep the site's privacy promise.** If the site says "no tracking", do not add the tracking SDK without a consent banner and an updated privacy policy (phase B).
 - **Agents draft, people approve.** Set the workspace approval policy to `agent_changes`. Importing consent, approving, sending and settings are humans-only.
 
@@ -47,8 +47,8 @@ Write the fit down as a table (need / exists / gap), as in `docs/pilots/martechs
 
 ### 2. Deploy the platform
 Docker Compose on the host (homelab or VM): copy `.env.example` to `.env` and generate secrets with `openssl rand -base64 32`. Set:
-- `PUBLIC_URL`: the admin URL (LAN or VPN), e.g. `http://am.lan:3000`.
-- `PUBLIC_LINKS_URL`: the public base for links in e-mails and forms. Option A: `https://am.<site>`; option B: `https://<site>/am`.
+- `PUBLIC_URL`: the admin URL, e.g. `https://am.<site>` or a VPN hostname. Plain HTTP on a LAN or loopback is supported for the admin UI and REST (`http://am.lan:3000`); with a plain-HTTP non-loopback URL the server still starts, but the MCP/OAuth endpoints are disabled. Use HTTPS (Tailscale Serve/Funnel, a Cloudflare Tunnel or a TLS reverse proxy) where MCP is needed.
+- `PUBLIC_LINKS_URL`: the public base for links in e-mails and forms. Option A (default when a tunnel already exists): `https://am.<site>`; Option B: `https://<site>/am`.
 - `CLIENT_IP_HEADER`: `cf-connecting-ip` behind a Cloudflare Tunnel (option A), or `x-am-client-ip` with the worker proxy (option B).
 - `EGRESS_ALLOWED_HOSTS` only if webhooks must reach the LAN.
 
@@ -64,7 +64,7 @@ Sign in to the UI and set the approval policy to "Agent changes need a person". 
 ### 3. Expose the public paths
 Only these are public: `f/` (forms and confirmations), `u/` (unsubscribe), `c/` (e-mail clicks), plus `hooks/` if a provider posts bounce webhooks. Read [references/cloudflare.md](references/cloudflare.md):
 - **Option A (default when a Cloudflare Tunnel already exists, e.g. for Umami):** add a hostname `am.<site>` to that tunnel with a path rule `^/(f|u|c)/` and a 404 catch-all. Add `am.<site>` to the CSP's `form-action`.
-- **Option B:** the site's own worker proxies `/am/*` with [references/cloudflare-worker-proxy.js](references/cloudflare-worker-proxy.js) to a tunnel hostname locked with a Cloudflare Access service token. No CSP change; best for phase B tracking.
+- **Option B (first-party links, and the natural fit for phase B):** the site's own worker proxies `/am/*` with [references/cloudflare-worker-proxy.js](references/cloudflare-worker-proxy.js) to a tunnel hostname locked with a Cloudflare Access service token. No CSP change; choose it when links must stay on the main domain or for phase B tracking.
 
 For other hosts (Netlify, Vercel, nginx), expose the same paths the same way. **Check:** `/` and `/v1/workspace.get` on the public hostname return 404, and a form post returns 303.
 
@@ -86,7 +86,7 @@ Add a provider in the UI (E-mails → providers) or with `emailProviders.create`
     "errorUrl":"https://<site>/subscribe/oops/","allowedOrigins":["https://<site>"],"turnstile":false}
    ```
    Publishing refuses a confirmation template whose purpose needs consent, or one without `confirm_url`.
-3. Site: replace the old form with the HTML in [references/site-snippets.md](references/site-snippets.md). It is a plain POST to `/am/f/<form id>`: no JavaScript, works under `form-action 'self'`. Add the three small pages.
+3. Site: replace the old form with the HTML in [references/site-snippets.md](references/site-snippets.md). It is a plain POST, no JavaScript either way: with option A to `https://am.<site>/f/<form id>`, adding `https://am.<site>` to the CSP's `form-action`; with option B to `/am/f/<form id>`, which works under `form-action 'self'`. Add the three small pages.
 4. Bots: the honeypot and per-IP rate limit are always on. If spam arrives, set `turnstile: true`, store the secret with `secrets.set` as `turnstile.secret_key`, and add the widget (see the snippets; it needs a CSP change).
 
 **Check:** submit with your own address. You are redirected to the inbox page, the confirmation mail arrives, and the button lands on the welcome page. `consent.history` then shows `granted`, source `form`, with `double_opt_in: true` in the proof. Before the click there is no consent.
@@ -129,7 +129,7 @@ Simulate it with `journeys.simulate`, then publish. E-mail clicks are not profil
 ### 9. Privacy policy and CSP
 - **Privacy policy:** name the platform (self-hosted) as the newsletter processor, and list the data (e-mail, name, consent proof, delivery and click events). Set `EMAIL_TRACK_CLICKS=false` if clicks should not be counted.
 - **Form text:** keep `consentText` identical to the text shown next to the form.
-- **CSP:** remove the old tool's domains from `form-action` and `connect-src`. Nothing needs adding for phase A.
+- **CSP:** remove the old tool's domains from `form-action` and `connect-src`. Option A: add `https://am.<site>` to `form-action` (and to `connect-src` only if forms post JSON with JavaScript). Option B: no change; the form posts to `/am/f/<form id>` on the site's origin under `form-action 'self'`.
 
 ### 10. Phase B (optional)
 Consent-gated tracking and personalization:
@@ -146,4 +146,4 @@ See [references/site-snippets.md](references/site-snippets.md). Without consent,
 - Add UTM parameters to links in issues (`utm_source=newsletter&utm_medium=email&utm_campaign=<issue>`) so the site's analytics (e.g. Umami) attributes newsletter traffic.
 - Form submissions and confirmations arrive as events; consent appears a moment later, after identity resolution.
 - If the workspace's tracking plan blocks unknown events, add `Form Submitted`, `Subscription Confirmed` and `Subscription Imported`.
-- People who never confirm keep a profile without consent; erase stale ones periodically (`profiles.erase`).
+- People who never confirm keep a profile without consent. The scheduler runs retention hourly: form-only profiles with no consent record, no other identity and no merge are removed after `RETENTION_UNCONFIRMED_DAYS` (default 30), without suppression so they can sign up again. Finished deliveries and AI calls are removed after `RETENTION_LOG_DAYS` (default 180). `profiles.erase` is for an immediate erasure request, not routine cleanup.
