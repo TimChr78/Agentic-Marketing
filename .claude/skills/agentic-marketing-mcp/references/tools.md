@@ -22,12 +22,19 @@ Generated from the command registry (`apps/server/src/registry.ts`). **Effect**:
 | `messages.sendEmail` | write | messages:send | people and agents | Send an e-mail to a person |
 | `messages.sendSms` | write | messages:send | people and agents | Send a text message to a person |
 | `smsTemplates.preview` | read | artifacts:read | people and agents | Preview an SMS template (segments, cost) |
+| `messages.sendPush` | write | messages:send | people and agents | Send a push notification to a person (all their devices) |
+| `pushTemplates.preview` | read | artifacts:read | people and agents | Preview a push template |
+| `push.devices` | read | profiles:read | people and agents | Devices a person gets notifications on |
 | `deliverability.health` | read | artifacts:read | people and agents | Bounce and complaint rates |
 | `emailProviders.checkDomain` | read | artifacts:read | people and agents | Check a provider's sending domain (SPF, DKIM, DMARC) |
 | `smsProviders.list` | read | workspace:admin | people and agents | List SMS providers |
 | `smsProviders.create` | write | workspace:admin | people only | Add an SMS provider |
 | `smsProviders.update` | write | workspace:admin | people only | Change an SMS provider |
 | `smsProviders.delete` | destructive | workspace:admin | people only | Delete an SMS provider |
+| `pushProviders.list` | read | workspace:admin | people and agents | List push providers (web push, FCM, APNs) |
+| `pushProviders.create` | write | workspace:admin | people only | Add a push provider |
+| `pushProviders.update` | write | workspace:admin | people only | Change a push provider |
+| `pushProviders.delete` | destructive | workspace:admin | people only | Delete a push provider |
 | `warehouse.list` | read | workspace:admin | people and agents | List warehouse exports |
 | `warehouse.create` | write | workspace:admin | people only | Add a warehouse export |
 | `warehouse.update` | write | workspace:admin | people only | Change a warehouse export |

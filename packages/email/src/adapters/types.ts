@@ -40,6 +40,11 @@ export interface WebhookRequest {
 
 export interface AdapterDeps {
   fetch: typeof fetch;
+  /** HTTP/2 requests (Apple's push service only speaks HTTP/2), under the same egress guard. */
+  http2?: (
+    url: string,
+    init: { method?: string; headers?: Record<string, string>; body?: string | Buffer; timeoutMs?: number },
+  ) => Promise<{ status: number; headers: Record<string, string>; body: string }>;
 }
 
 export interface EmailTransport {

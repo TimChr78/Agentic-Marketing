@@ -364,6 +364,43 @@ export const smsProviders = pgTable(
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
 );
 
+export const pushProviders = pgTable(
+  'push_providers',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    name: text('name').notNull(),
+    adapter: text('adapter').$type<'webpush' | 'fcm' | 'apns' | 'log'>().notNull(),
+    config: jsonb('config').$type<Record<string, unknown>>().notNull().default({}),
+    secrets: bytea('secrets'),
+    secretsKeyId: text('secrets_key_id'),
+    useFor: text('use_for').array().$type<('transactional' | 'marketing')[]>().notNull().default([]),
+    enabled: boolean('enabled').notNull().default(true),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
+export const pushSubscriptions = pgTable(
+  'push_subscriptions',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    kind: text('kind').$type<'web' | 'fcm' | 'apns'>().notNull(),
+    anonymousId: text('anonymous_id'),
+    userId: text('user_id'),
+    tokenHash: text('token_hash').notNull(),
+    secrets: bytea('secrets').notNull(),
+    secretsKeyId: text('secrets_key_id').notNull(),
+    sourceId: text('source_id'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+    lastSentAt: ts('last_sent_at'),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
 export const audienceMembers = pgTable(
   'audience_members',
   {

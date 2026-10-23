@@ -51,6 +51,7 @@ export type NodeKind =
   | 'split'
   | 'email'
   | 'sms'
+  | 'push'
   | 'webhook'
   | 'action'
   | 'transform'

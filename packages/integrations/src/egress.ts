@@ -1,5 +1,6 @@
 import { lookup } from 'node:dns';
 import { request as httpRequest } from 'node:http';
+import { connect as http2Connect } from 'node:http2';
 import { request as httpsRequest } from 'node:https';
 import { BlockList, isIP, type LookupFunction } from 'node:net';
 
@@ -80,6 +81,18 @@ export function checkUrl(raw: string, policy: EgressPolicy): string | null {
   return null;
 }
 
+/** Resolve, then refuse private addresses unless the name itself is on the allow list. */
+function lookupFor(u: URL, policy: EgressPolicy): LookupFunction {
+  const named = allowList(policy).names.has(u.hostname.toLowerCase());
+  return (hostname, options, cb) =>
+    lookup(hostname, { ...options, all: false }, (err, address, fam) => {
+      if (err) return cb(err, '', 0);
+      const a = address as string;
+      if (!named && isBlockedAddress(a, policy)) return cb(new EgressError(`${hostname} resolves to private address ${a}`), '', 0);
+      cb(null, a, fam as number);
+    });
+}
+
 export interface SafeResponse {
   status: number;
   headers: Record<string, string>;
@@ -95,15 +108,7 @@ export function safeRequest(
   const problem = checkUrl(url, policy);
   if (problem) return Promise.reject(new EgressError(problem));
   const u = new URL(url);
-  const named = allowList(policy).names.has(u.hostname.toLowerCase());
-  // Resolve, then refuse private addresses unless the name itself is on the allow list.
-  const guardedLookup: LookupFunction = (hostname, options, cb) =>
-    lookup(hostname, { ...options, all: false }, (err, address, fam) => {
-      if (err) return cb(err, '', 0);
-      const a = address as string;
-      if (!named && isBlockedAddress(a, policy)) return cb(new EgressError(`${hostname} resolves to private address ${a}`), '', 0);
-      cb(null, a, fam as number);
-    });
+  const guardedLookup = lookupFor(u, policy);
   const maxBytes = init.maxBytes ?? 256 * 1024;
   return new Promise((resolve, reject) => {
     const req = (u.protocol === 'https:' ? httpsRequest : httpRequest)(
@@ -166,4 +171,52 @@ export function egressFetch(policy: EgressPolicy): typeof fetch {
     const res = await safeRequest(url, { method, headers, body, timeoutMs: 30_000, maxBytes: 1024 * 1024 }, policy);
     return new Response(res.status === 204 || res.status === 304 ? null : res.body, { status: res.status, headers: res.headers });
   }) as typeof fetch;
+}
+
+export type Http2Request = (
+  url: string,
+  init: { method?: string; headers?: Record<string, string>; body?: string | Buffer; timeoutMs?: number },
+) => Promise<SafeResponse>;
+
+/**
+ * One HTTP/2 request under the egress policy, for providers that only speak HTTP/2 (Apple's push
+ * service). http:// targets use HTTP/2 without TLS (prior knowledge), for test servers.
+ */
+export function egressHttp2(policy: EgressPolicy): Http2Request {
+  return (url, init) => {
+    const problem = checkUrl(url, policy);
+    if (problem) return Promise.reject(new EgressError(problem));
+    const u = new URL(url);
+    const timeout = init.timeoutMs ?? 30_000;
+    return new Promise((resolve, reject) => {
+      const session = http2Connect(u.origin, { lookup: lookupFor(u, policy) });
+      const fail = (err: Error) => {
+        session.destroy();
+        reject(err);
+      };
+      session.on('error', fail);
+      const req = session.request({ ':method': init.method ?? 'POST', ':path': `${u.pathname}${u.search}`, ...init.headers });
+      req.setTimeout(timeout, () => req.close());
+      let status = 0;
+      let headers: Record<string, string> = {};
+      req.on('response', (h) => {
+        status = Number(h[':status']);
+        headers = Object.fromEntries(
+          Object.entries(h)
+            .filter(([k]) => !k.startsWith(':'))
+            .map(([k, v]) => [k, Array.isArray(v) ? v.join(', ') : String(v ?? '')]),
+        );
+      });
+      const chunks: Buffer[] = [];
+      req.on('data', (c: Buffer) => chunks.push(c));
+      req.on('end', () => {
+        session.close();
+        if (!status) return reject(new Error(`no response within ${timeout} ms`));
+        resolve({ status, headers, body: Buffer.concat(chunks).toString('utf8') });
+      });
+      req.on('error', fail);
+      if (init.body !== undefined) req.end(init.body);
+      else req.end();
+    });
+  };
 }

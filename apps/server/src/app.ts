@@ -3,11 +3,11 @@ import { type AuthConfig, acceptInvitation, authDirectory, createAuth, invitatio
 import { createExecutor, userPrincipal } from '@agentic-marketing/commands';
 import { AppError, newUuid } from '@agentic-marketing/core';
 import { createDb } from '@agentic-marketing/db';
-import { emailRoutes, linkSigner } from '@agentic-marketing/email';
+import { emailRoutes, linkSigner, pushRoutes } from '@agentic-marketing/email';
 import { clickHouseStore, lazyNatsBus } from '@agentic-marketing/events';
 import { valkeyHotState } from '@agentic-marketing/hotstate';
 import { ingestApi } from '@agentic-marketing/ingest';
-import { egressFetch, inboundApi, oauthRoutes } from '@agentic-marketing/integrations';
+import { egressFetch, egressHttp2, inboundApi, oauthRoutes } from '@agentic-marketing/integrations';
 import { decideApi, edgeMirror } from '@agentic-marketing/personalize';
 import { logger } from '@agentic-marketing/telemetry';
 import { oauthProviderAuthServerMetadata, oauthProviderOpenIdConfigMetadata } from '@better-auth/oauth-provider';
@@ -42,7 +42,7 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
     publicUrl: config.linksUrl,
     links: linkSigner(config.authSecret),
     // Provider adapters reach the outside world through the egress guard too.
-    adapterDeps: { fetch: egressFetch(config.egress) },
+    adapterDeps: { fetch: egressFetch(config.egress), http2: egressHttp2(config.egress) },
     trackClicks: config.trackClicks,
   };
   const executor = createExecutor(db, {
@@ -111,6 +111,7 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
 
   // The decision API goes first: the ingest routes claim every other /v1/<word> path.
   if (config.roles.has('ingest')) app.route('/', decideApi({ db, hot }));
+  if (config.roles.has('ingest')) app.route('/', pushRoutes({ db, kp: keyProvider }));
   if (config.roles.has('ingest')) app.route('/', ingestApi({ db, bus, hot, clientIpHeader: config.clientIpHeader }));
   if (config.roles.has('api')) app.route('/', emailRoutes({ db, kp: keyProvider, events, email }));
   if (config.roles.has('ingest')) app.route('/', inboundApi({ db, bus, kp: keyProvider }));

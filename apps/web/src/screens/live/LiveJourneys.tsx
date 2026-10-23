@@ -28,7 +28,7 @@ interface Content {
 }
 
 /** Every step kind the runtime can run. */
-const PALETTE: NodeKind[] = ['trigger', 'wait', 'waitEvent', 'branch', 'split', 'aiDecide', 'aiGenerate', 'email', 'sms', 'updateProfile', 'webhook', 'action', 'transform', 'goal', 'exit'];
+const PALETTE: NodeKind[] = ['trigger', 'wait', 'waitEvent', 'branch', 'split', 'aiDecide', 'aiGenerate', 'email', 'sms', 'push', 'updateProfile', 'webhook', 'action', 'transform', 'goal', 'exit'];
 const DEFAULTS: Partial<Record<NodeKind, Record<string, unknown>>> = {
   trigger: { event: 'Signed Up', reentry: 'once' },
   wait: { duration: 'P1D' },
@@ -38,6 +38,7 @@ const DEFAULTS: Partial<Record<NodeKind, Record<string, unknown>>> = {
   split: { weights: [50, 50] },
   email: { template: '' },
   sms: { template: '' },
+  push: { template: '' },
   updateProfile: { trait: 'lifecycle', value: 'engaged' },
   aiDecide: { prompt: '', options: ['vip', 'standard'], fallback: 'standard', timeout: 'PT5M' },
   aiGenerate: { prompt: '', timeout: 'PT5M' },
@@ -70,6 +71,7 @@ function summary(n: LiveNode): string {
       return (c.weights ?? []).map((w: number, i: number) => `${String.fromCharCode(65 + i)} ${w}`).join(' · ');
     case 'email':
     case 'sms':
+    case 'push':
       return c.template ? String(c.template).slice(0, 16) + '…' : 'choose a template';
     case 'updateProfile':
       return `${c.trait} = ${JSON.stringify(c.value)}`;
@@ -493,7 +495,7 @@ function Inspector({ node, onChange, onDelete }: { node: LiveNode; onChange: (p:
         />
       </label>
       {EDGE_LABELS[node.kind] && <p className="text-[12px] text-muted">Outgoing edges, in order: {EDGE_LABELS[node.kind]!.join(', ')}.</p>}
-      {(node.kind === 'email' || node.kind === 'sms') && <p className="rounded-md bg-surface-2 p-2.5 text-[12px] text-muted">The send gateway checks the template's purpose, consent, objections and suppressions before every send.</p>}
+      {(node.kind === 'email' || node.kind === 'sms' || node.kind === 'push') && <p className="rounded-md bg-surface-2 p-2.5 text-[12px] text-muted">The send gateway checks the template's purpose, consent, objections and suppressions before every send.</p>}
     </div>
   );
 }

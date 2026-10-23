@@ -14,7 +14,7 @@ export type Node =
   | { id: string; label: string; kind: 'waitEvent' | 'goal'; event: string; ms: number; matched: string | null; timeout: string | null }
   | { id: string; label: string; kind: 'branch'; segment?: string; condition?: SegmentCondition; yes: string | null; no: string | null }
   | { id: string; label: string; kind: 'split'; weights: number[]; edges: string[] }
-  | { id: string; label: string; kind: 'email' | 'sms'; template: string; next: string | null }
+  | { id: string; label: string; kind: 'email' | 'sms' | 'push'; template: string; next: string | null }
   | { id: string; label: string; kind: 'updateProfile'; trait: string; value: string | number | boolean | null; next: string | null }
   | { id: string; label: string; kind: 'aiDecide'; prompt: string; options: string[]; fallback: string; ms: number; edges: string[] }
   | { id: string; label: string; kind: 'aiGenerate'; prompt: string; ms: number; next: string | null }
@@ -98,6 +98,9 @@ export function compile(def: JourneyDefinition): Graph {
         break;
       case 'sms':
         nodes.set(n.id, { ...base, kind: 'sms', template: journeyNodeConfigs.sms.parse(n.config).template, next: edge(0) });
+        break;
+      case 'push':
+        nodes.set(n.id, { ...base, kind: 'push', template: journeyNodeConfigs.push.parse(n.config).template, next: edge(0) });
         break;
       case 'updateProfile': {
         const c = journeyNodeConfigs.updateProfile.parse(n.config);
