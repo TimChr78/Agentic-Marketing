@@ -4,7 +4,7 @@ import { schema, type VersionState } from '@agentic-marketing/db';
 import { and, desc, eq } from 'drizzle-orm';
 import { z } from 'zod';
 import { diffJson } from './diff';
-import { type ArtifactType, artifactTypeEnum, artifactTypes, contentValidators, publishValidators } from './types';
+import { type ArtifactType, artifactTypeEnum, artifactTypes, contentValidators, draftContentSchemas, publishValidators } from './types';
 
 // Generic, versioned artifacts with a configurable approval pipeline (journeys-and-editors.md §5).
 // Published versions are immutable; edits always produce or update a draft.
@@ -41,14 +41,60 @@ export const author = (ctx: CommandContext) => ({
   authorClient: ctx.principal.clientId ?? null,
 });
 
-export function validateContent(type: ArtifactType, content: unknown) {
+export type DraftWarning = { nodeId: string | null; path: string; message: string };
+const DraftWarningSchema = z.object({ nodeId: z.string().nullable(), path: z.string(), message: z.string() });
+
+function pathText(path: PropertyKey[]): string {
+  return path.reduce<string>((text, part) => {
+    if (typeof part === 'number') return `${text}[${part}]`;
+    return text ? `${text}.${String(part)}` : String(part);
+  }, '');
+}
+
+function pathParts(path: PropertyKey[]): (string | number)[] {
+  return path.filter((part): part is string | number => typeof part === 'string' || typeof part === 'number');
+}
+
+/** Turns a schema issue into a message that names the step and field it belongs to. */
+function describeIssue(issue: z.core.$ZodIssue, content: unknown): DraftWarning {
+  const path = pathParts(issue.path);
+  let nodeId: string | null = null;
+  let nodeKind: string | null = null;
+  const nodes = (content as { nodes?: unknown } | null)?.nodes;
+  if (path[0] === 'nodes' && typeof path[1] === 'number' && Array.isArray(nodes)) {
+    const node = nodes[path[1]] as { id?: unknown; kind?: unknown } | undefined;
+    nodeId = typeof node?.id === 'string' ? node.id : null;
+    nodeKind = typeof node?.kind === 'string' ? node.kind : null;
+  }
+  const text = pathText(path);
+  const message = issue.message.startsWith('Node "')
+    ? issue.message
+    : nodeId
+      ? `Node "${nodeId}"${nodeKind ? ` (${nodeKind})` : ''}: ${text ? `${text}: ` : ''}${issue.message}`
+      : text
+        ? `${text}: ${issue.message}`
+        : issue.message;
+  return { nodeId, path: text, message };
+}
+
+/** Advice for an incomplete draft: the full schema's issues, without stopping the save. */
+export function contentWarnings(type: ArtifactType, content: unknown): DraftWarning[] {
   const parsed = (artifactTypes[type].content as z.ZodType).safeParse(content);
-  if (!parsed.success)
+  if (parsed.success) return [];
+  return parsed.error.issues.map((issue) => describeIssue(issue, content));
+}
+
+export function validateContent(type: ArtifactType, content: unknown, mode: 'draft' | 'publish' = 'publish') {
+  const schema = (mode === 'draft' ? draftContentSchemas.get(type) : undefined) ?? artifactTypes[type].content;
+  const parsed = (schema as z.ZodType).safeParse(content);
+  if (!parsed.success) {
+    const problems = parsed.error.issues.map((issue) => describeIssue(issue, content).message);
     throw new AppError(
       'invalid_input',
-      `The content is not a valid ${type}. Call artifacts.types for the schema.`,
+      `The content is not a valid ${type}: ${problems.join('; ')}. Call artifacts.types for the schema.`,
       z.treeifyError(parsed.error),
     );
+  }
   const problems = contentValidators.get(type)?.(parsed.data) ?? [];
   if (problems.length) throw new AppError('invalid_input', `The content is not a valid ${type}: ${problems.join('; ')}`, { problems });
   return parsed.data as Record<string, unknown>;
@@ -92,6 +138,17 @@ async function setVersionState(ctx: CommandContext, artifactId: string, number: 
 }
 
 async function checkPublishable(ctx: CommandContext, type: string, content: unknown) {
+  const schema = artifactTypes[type as ArtifactType]?.content as z.ZodType | undefined;
+  if (schema) {
+    const parsed = schema.safeParse(content);
+    if (!parsed.success) {
+      const problems = parsed.error.issues.map((issue) => describeIssue(issue, content).message);
+      throw new AppError('invalid_input', `This ${type} cannot be published yet: ${problems.join('; ')}`, {
+        problems,
+        errors: z.treeifyError(parsed.error),
+      });
+    }
+  }
   const problems = (await publishValidators.get(type as ArtifactType)?.(content, ctx.tx)) ?? [];
   if (problems.length) throw new AppError('invalid_input', `This ${type} cannot be published yet: ${problems.join('; ')}`, { problems });
 }
@@ -144,11 +201,17 @@ export const createArtifact = defineCommand({
     content: z.unknown().describe('Content matching the type schema from artifacts.types'),
     note: z.string().max(500).optional().describe('Why this change was made, shown to reviewers'),
   }),
-  output: z.object({ artifactId: z.string(), version: z.number().int(), state: VersionStateSchema }),
+  output: z.object({
+    artifactId: z.string(),
+    version: z.number().int(),
+    state: VersionStateSchema,
+    warnings: z.array(DraftWarningSchema).describe('Settings that must be filled in before this artifact can be published'),
+  }),
   permission: 'artifacts:write',
   effect: 'write',
   handler: async (input, ctx) => {
-    const content = validateContent(input.type, input.content);
+    const content = validateContent(input.type, input.content, 'draft');
+    const warnings = contentWarnings(input.type, content);
     const id = newId(artifactTypes[input.type].prefix);
     const ws = ctx.principal.workspaceId;
     if ('singleton' in artifactTypes[input.type]) {
@@ -170,7 +233,7 @@ export const createArtifact = defineCommand({
       note: input.note ?? null,
       ...author(ctx),
     });
-    return { artifactId: id, version: 1, state: 'draft' as const };
+    return { artifactId: id, version: 1, state: 'draft' as const, warnings };
   },
 });
 
@@ -189,13 +252,20 @@ export const updateDraft = defineCommand({
       .optional()
       .describe('Content hash of the version you edited; the update fails with 412 if the draft changed since'),
   }),
-  output: z.object({ artifactId: z.string(), version: z.number().int(), state: VersionStateSchema, contentHash: z.string() }),
+  output: z.object({
+    artifactId: z.string(),
+    version: z.number().int(),
+    state: VersionStateSchema,
+    contentHash: z.string(),
+    warnings: z.array(DraftWarningSchema).describe('Settings that must be filled in before this artifact can be published'),
+  }),
   permission: 'artifacts:write',
   effect: 'write',
   target: (i) => i.artifactId,
   handler: async (input, ctx) => {
     const a = await loadArtifact(ctx, input.artifactId);
-    const content = validateContent(a.type as ArtifactType, input.content);
+    const content = validateContent(a.type as ArtifactType, input.content, 'draft');
+    const warnings = contentWarnings(a.type as ArtifactType, content);
     const latest = await loadVersion(ctx, a.id, a.latestVersion);
     if (input.expectedContentHash && input.expectedContentHash !== latest.contentHash)
       throw new AppError(
@@ -225,7 +295,7 @@ export const updateDraft = defineCommand({
         .update(schema.artifacts)
         .set({ updatedAt: new Date() })
         .where(and(eq(schema.artifacts.workspaceId, ws), eq(schema.artifacts.id, a.id)));
-      return { artifactId: a.id, version: latest.number, state: 'draft' as const, contentHash };
+      return { artifactId: a.id, version: latest.number, state: 'draft' as const, contentHash, warnings };
     }
     const number = latest.number + 1;
     await ctx.tx.insert(schema.artifactVersions).values({
@@ -243,7 +313,7 @@ export const updateDraft = defineCommand({
       .update(schema.artifacts)
       .set({ latestVersion: number, updatedAt: new Date() })
       .where(and(eq(schema.artifacts.workspaceId, ws), eq(schema.artifacts.id, a.id)));
-    return { artifactId: a.id, version: number, state: 'draft' as const, contentHash };
+    return { artifactId: a.id, version: number, state: 'draft' as const, contentHash, warnings };
   },
 });
 

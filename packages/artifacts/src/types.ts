@@ -125,50 +125,87 @@ export const journeyNodeConfigs = {
   exit: z.object({}),
 } as const;
 
-const journey = z.object({
+const journeyBase = {
   purpose: Key.describe('Purpose key of the messages, e.g. "marketing_email"; the send gateway derives the lawful basis from it'),
   goal: z.string().max(200).optional(),
-  nodes: z
-    .array(journeyNode)
-    .min(1)
-    .max(200)
-    .superRefine((nodes, ctx) => {
-      const ids = new Set<string>();
-      for (const n of nodes) {
-        if (ids.has(n.id)) ctx.addIssue({ code: 'custom', message: `Duplicate node id "${n.id}"` });
-        ids.add(n.id);
-      }
-      for (const n of nodes)
-        for (const e of n.next ?? [])
-          if (!ids.has(e.to)) ctx.addIssue({ code: 'custom', message: `Node "${n.id}" continues to unknown node "${e.to}"` });
-      const triggers = nodes.filter((n) => n.kind === 'trigger').length;
-      if (triggers !== 1) ctx.addIssue({ code: 'custom', message: `A journey needs exactly one trigger node, found ${triggers}` });
-      for (const n of nodes) {
-        const schema = journeyNodeConfigs[n.kind as keyof typeof journeyNodeConfigs] as z.ZodType | undefined;
-        if (schema) {
-          const r = schema.safeParse(n.config);
-          if (!r.success)
-            for (const i of r.error.issues)
-              ctx.addIssue({ code: 'custom', message: `Node "${n.id}" (${n.kind}): ${[...i.path, ''].join('.')}${i.message}` });
+  nodes: z.array(journeyNode).min(1).max(200),
+};
+
+/** Path-aware messages keep validation issues attached to the node they came from. */
+function pathText(path: PropertyKey[]): string {
+  return path.reduce<string>((text, part) => {
+    if (typeof part === 'number') return `${text}[${part}]`;
+    return text ? `${text}.${String(part)}` : String(part);
+  }, '');
+}
+
+/** Graph shape shared by drafts and publishing: ids, edges and the one trigger. */
+function checkJourneyStructure(nodes: z.output<typeof journeyNode>[], ctx: z.RefinementCtx) {
+  const ids = new Set<string>();
+  nodes.forEach((n, index) => {
+    if (ids.has(n.id)) ctx.addIssue({ code: 'custom', path: ['nodes', index], message: `Duplicate node id "${n.id}"` });
+    ids.add(n.id);
+  });
+  nodes.forEach((n, index) => {
+    for (const e of n.next ?? [])
+      if (!ids.has(e.to))
+        ctx.addIssue({ code: 'custom', path: ['nodes', index, 'next'], message: `Node "${n.id}" continues to unknown node "${e.to}"` });
+    const edges = n.next?.length ?? 0;
+    if (n.kind === 'branch' && edges !== 2)
+      ctx.addIssue({ code: 'custom', path: ['nodes', index, 'next'], message: `Branch "${n.id}" needs two edges: [yes, no]` });
+    if (n.kind === 'action' && edges > 2)
+      ctx.addIssue({ code: 'custom', path: ['nodes', index, 'next'], message: `Action "${n.id}" has at most two edges: [ok, error]` });
+    if ((n.kind === 'waitEvent' || n.kind === 'goal') && edges > 2)
+      ctx.addIssue({ code: 'custom', path: ['nodes', index, 'next'], message: `"${n.id}" has at most two edges: [matched, timeout]` });
+  });
+  const triggers = nodes.filter((n) => n.kind === 'trigger').length;
+  if (triggers !== 1) ctx.addIssue({ code: 'custom', message: `A journey needs exactly one trigger node, found ${triggers}` });
+}
+
+/** A draft may be unfinished: only the graph shape must be right, so steps can be filled in later. */
+export const journeyDraft = z.object(journeyBase).superRefine((d, ctx) => checkJourneyStructure(d.nodes, ctx));
+
+/** A published journey must be runnable: every step's settings are checked too. */
+export const journey = z.object(journeyBase).superRefine((d, ctx) => {
+  checkJourneyStructure(d.nodes, ctx);
+  d.nodes.forEach((n, index) => {
+    const schema = journeyNodeConfigs[n.kind as keyof typeof journeyNodeConfigs] as z.ZodType | undefined;
+    if (schema) {
+      const r = schema.safeParse(n.config);
+      if (!r.success)
+        for (const issue of r.error.issues) {
+          const field = pathText(['config', ...issue.path]);
+          ctx.addIssue({
+            code: 'custom',
+            path: ['nodes', index, 'config', ...issue.path],
+            message: `Node "${n.id}" (${n.kind}): ${field}: ${issue.message}`,
+          });
         }
-        const edges = n.next?.length ?? 0;
-        if (n.kind === 'branch' && edges !== 2) ctx.addIssue({ code: 'custom', message: `Branch "${n.id}" needs two edges: [yes, no]` });
-        if (n.kind === 'action' && edges > 2)
-          ctx.addIssue({ code: 'custom', message: `Action "${n.id}" has at most two edges: [ok, error]` });
-        if ((n.kind === 'waitEvent' || n.kind === 'goal') && edges > 2)
-          ctx.addIssue({ code: 'custom', message: `"${n.id}" has at most two edges: [matched, timeout]` });
-        const weights = (n.config as { weights?: unknown[] }).weights;
-        const options = (n.config as { options?: unknown[]; fallback?: unknown }).options;
-        if (n.kind === 'aiDecide' && Array.isArray(options)) {
-          if (options.length !== edges)
-            ctx.addIssue({ code: 'custom', message: `AI decision "${n.id}" needs one edge per option (${options.length})` });
-          if (!options.includes((n.config as { fallback?: unknown }).fallback))
-            ctx.addIssue({ code: 'custom', message: `AI decision "${n.id}": fallback must be one of its options` });
-        }
-        if (n.kind === 'split' && Array.isArray(weights) && weights.length !== edges)
-          ctx.addIssue({ code: 'custom', message: `Split "${n.id}" needs one edge per weight (${weights.length})` });
-      }
-    }),
+    }
+    const edges = n.next?.length ?? 0;
+    const weights = (n.config as { weights?: unknown[] }).weights;
+    const options = (n.config as { options?: unknown[]; fallback?: unknown }).options;
+    if (n.kind === 'aiDecide' && Array.isArray(options)) {
+      if (options.length !== edges)
+        ctx.addIssue({
+          code: 'custom',
+          path: ['nodes', index, 'config', 'options'],
+          message: `AI decision "${n.id}" needs one edge per option (${options.length})`,
+        });
+      if (!options.includes((n.config as { fallback?: unknown }).fallback))
+        ctx.addIssue({
+          code: 'custom',
+          path: ['nodes', index, 'config', 'fallback'],
+          message: `AI decision "${n.id}": fallback must be one of its options`,
+        });
+    }
+    if (n.kind === 'split' && Array.isArray(weights) && weights.length !== edges)
+      ctx.addIssue({
+        code: 'custom',
+        path: ['nodes', index, 'config', 'weights'],
+        message: `Split "${n.id}" needs one edge per weight (${weights.length})`,
+      });
+  });
 });
 
 // Data governance (data-platform.md §2, §4; security-and-privacy.md §2). One of each per
@@ -942,6 +979,14 @@ export const DEFAULT_PURPOSES: Purposes = [
 export type ArtifactType = keyof typeof artifactTypes;
 export const ARTIFACT_TYPES = Object.keys(artifactTypes) as [ArtifactType, ...ArtifactType[]];
 export const artifactTypeEnum = z.enum(ARTIFACT_TYPES);
+
+/**
+ * Looser schemas for saving drafts: a draft may be unfinished (e.g. a journey step with no
+ * template yet). Types without an entry use their normal content schema. Publishing always
+ * validates the full schema in artifactTypes.
+ */
+export const draftContentSchemas = new Map<ArtifactType, z.ZodType>();
+draftContentSchemas.set('journey', journeyDraft);
 
 /**
  * Checks beyond the schema that need heavy libraries (e.g. compiling MJML). Packages register

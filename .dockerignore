@@ -2,7 +2,6 @@
 **/dist
 **/dist-single
 spikes
-apps/web
 .git
 *.log
 .env

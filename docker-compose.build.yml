@@ -1,0 +1,6 @@
+# Source-build overlay: build the app from this checkout instead of pulling the release image.
+# docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+services:
+  app:
+    image: ${AM_BUILD_IMAGE:-agentic-marketing:local}
+    build: .

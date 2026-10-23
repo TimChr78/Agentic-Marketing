@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { clickIdsFrom } from '@agentic-marketing/ads';
 import { artifactTypes, DEFAULT_PURPOSES, type FormDefinition, publishedSingleton, publishValidators } from '@agentic-marketing/artifacts';
+import { remoteAddressFromEnv, resolveClientIp } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import type { LinkSigner } from '@agentic-marketing/email';
 import type { EventBus } from '@agentic-marketing/events';
@@ -103,7 +104,11 @@ export interface FormsDeps {
   kp: KeyProvider;
   links: LinkSigner;
   egress: EgressPolicy;
-  /** Header with the client IP set by the proxy in front (e.g. cf-connecting-ip). */
+  /** Headers with the client IP, in trust order (e.g. cf-connecting-ip, x-forwarded-for). */
+  clientIpHeaders?: string[];
+  /** When set, forwarding headers are trusted only from these proxy/loopback ranges. */
+  trustedProxyCidrs?: string[];
+  /** @deprecated Use `clientIpHeaders`; kept for backwards compatibility. */
   clientIpHeader?: string;
   /** Submissions per minute per IP and form; bursts up to 3×. */
   ratePerMinute?: number;
@@ -143,11 +148,14 @@ export function formsApi(deps: FormsDeps) {
     const f = await deps.db.withWorkspace(ws, (tx) => publishedForm(tx, formId));
     return f ? { ws, ...f } : null;
   };
+  const headerNames = deps.clientIpHeaders ?? (deps.clientIpHeader ? [deps.clientIpHeader] : ['x-forwarded-for']);
   const ipOf = (c: Context) =>
-    c.req
-      .header(deps.clientIpHeader ?? 'x-forwarded-for')
-      ?.split(',')[0]
-      .trim() || undefined;
+    resolveClientIp({
+      header: (name) => c.req.header(name),
+      remoteAddress: remoteAddressFromEnv(c.env),
+      headerNames,
+      trustedProxyCidrs: deps.trustedProxyCidrs,
+    });
 
   app.options('/f/:id', (c) =>
     c.body(null, 204, {

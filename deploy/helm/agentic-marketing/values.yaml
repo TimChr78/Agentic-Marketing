@@ -30,7 +30,8 @@ roles:
 config:
   PUBLIC_URL: https://marketing.example.com
   PUBLIC_LINKS_URL: ""
-  CLIENT_IP_HEADER: x-forwarded-for
+  CLIENT_IP_HEADER: x-forwarded-for   # ordered list for public + LAN ingress, e.g. cf-connecting-ip,x-forwarded-for
+  TRUSTED_PROXY_CIDRS: ""             # proxy/loopback ranges allowed to set forwarding headers; empty = trust all
   CLICKHOUSE_URL: http://clickhouse:8123
   CLICKHOUSE_DATABASE: am
   CLICKHOUSE_ROW_POLICIES: required

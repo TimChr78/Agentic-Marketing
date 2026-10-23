@@ -123,7 +123,7 @@ export const importConfig = defineCommand({
     const changes: z.infer<typeof Change>[] = [];
     const toPublish: { id: string; type: ArtifactType; change: z.infer<typeof Change> }[] = [];
     for (const item of input.bundle.artifacts) {
-      const content = validateContent(item.type, item.content);
+      const content = validateContent(item.type, item.content, 'draft');
       // A workspace has one of each singleton type, whatever its id.
       const current = byId.get(item.id) ?? ('singleton' in artifactTypes[item.type] ? singletons.get(item.type) : undefined);
       if (current && current.a.type !== item.type)

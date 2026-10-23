@@ -1,5 +1,5 @@
 import { publishedSingleton } from '@agentic-marketing/artifacts';
-import { newUuid } from '@agentic-marketing/core';
+import { newUuid, remoteAddressFromEnv, resolveClientIp } from '@agentic-marketing/core';
 import type { Db } from '@agentic-marketing/db';
 import { type BusEvent, type EventBus, InboundEvent } from '@agentic-marketing/events';
 import type { HotState } from '@agentic-marketing/hotstate';
@@ -122,7 +122,11 @@ export interface IngestDeps {
   bus: EventBus;
   /** Session state for the decision API, written before the request is answered. */
   hot?: HotState;
-  /** Header with the client IP set by the proxy in front (e.g. cf-connecting-ip); default x-forwarded-for. */
+  /** Headers with the client IP, in trust order (e.g. cf-connecting-ip, x-forwarded-for). */
+  clientIpHeaders?: string[];
+  /** When set, forwarding headers are trusted only from these proxy/loopback ranges. */
+  trustedProxyCidrs?: string[];
+  /** @deprecated Use `clientIpHeaders`; kept for backwards compatibility. */
   clientIpHeader?: string;
   /** Events per second per source; bursts up to 5×. */
   ratePerSource?: number;
@@ -170,6 +174,7 @@ export function originAllowed(source: CachedSource, origin: string | undefined) 
 export function ingestApi(deps: IngestDeps) {
   const { loadSource, loadPolicy } = sourceLookups(deps.db);
   const allow = rateLimiter(deps.ratePerSource ?? 1000, (deps.ratePerSource ?? 1000) * 5);
+  const headerNames = deps.clientIpHeaders ?? (deps.clientIpHeader ? [deps.clientIpHeader] : ['x-forwarded-for']);
 
   const app = new Hono();
 
@@ -246,10 +251,12 @@ export function ingestApi(deps: IngestDeps) {
     const policy = await loadPolicy(source.workspaceId);
     const ip =
       source.kind === 'browser'
-        ? (c.req
-            .header(deps.clientIpHeader ?? 'x-forwarded-for')
-            ?.split(',')[0]
-            .trim() ?? undefined)
+        ? resolveClientIp({
+            header: (name) => c.req.header(name),
+            remoteAddress: remoteAddressFromEnv(c.env),
+            headerNames,
+            trustedProxyCidrs: deps.trustedProxyCidrs,
+          })
         : undefined;
     const { accepted, rejected, warnings, dropped } = acceptItems(items, source, policy, {
       ip,

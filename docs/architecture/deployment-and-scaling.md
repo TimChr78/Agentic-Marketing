@@ -15,6 +15,8 @@ flowchart LR
 ```
 
 - 6 containers, one VM with 4 vCPU / 16 GB RAM handles ~100k–1M profiles and hundreds of events/s.
+- The app runs the published image (`ghcr.io/timchr78/agentic-marketing:${AM_VERSION}`); use `docker-compose.build.yml` only to build this checkout.
+- ClickHouse is capped at `CLICKHOUSE_MEM_LIMIT` (default 2g) for the whole container. That is a starting point for the pilot: raise it (and ClickHouse's `max_server_memory_usage`) with event volume.
 - `app` image runs migrations on start (guarded by advisory lock), serves UI, API, MCP, ingest, decide, workers, scheduler.
 - Config via env file; `cli` for admin tasks (create owner, rotate keys, backup hooks).
 

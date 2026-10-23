@@ -20,7 +20,7 @@ export function missingScope(principal: Principal, toolName: string) {
 }
 
 export function mcpServerFor(principal: Principal, executor: Executor, opts: { stepUp?: boolean } = {}) {
-  const server = new McpServer({ name: 'agentic-marketing', version: '0.1.0' });
+  const server = new McpServer({ name: 'agentic-marketing', version: '0.1.1' });
   for (const cmd of commands) {
     if (cmd.humansOnly || !cmd.permission) continue;
     const granted = principal.permissions.has(cmd.permission);

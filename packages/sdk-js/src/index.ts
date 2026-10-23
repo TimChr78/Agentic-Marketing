@@ -49,7 +49,7 @@ interface QueuedEvent extends Props {
   context?: Props;
 }
 
-const LIB = { name: '@agentic-marketing/sdk-js', version: '0.1.0' };
+const LIB = { name: '@agentic-marketing/sdk-js', version: '0.1.1' };
 const KEYS = { consent: 'am.consent', anonymousId: 'am.aid', userId: 'am.uid', clickIds: 'am.clk' };
 const AD_PURPOSE = 'ad_measurement';
 const CLICK_VALUE = /^[A-Za-z0-9._~-]{4,500}$/;

@@ -15,7 +15,7 @@ packages/
   edge-worker/ the decision API as a Cloudflare Worker, reading Workers KV (docs/deployment/edge.md)
 apps/
   server/      Hono app: REST (/v1/<command>, /openapi.json), MCP (/mcp), sign-in/consent, health; CLI
-  web/         React UI: Phase −1 demo (mocked) + "Live workspace (API)" screen against the real server
+  web/         React UI: live workspace against the real API (production build in the image at /) + Phase −1 demo (mocked, dev)
 spikes/        throw-away prototypes with their FINDINGS.md (not part of CI or the image)
 ```
 
@@ -28,22 +28,55 @@ Requirements: Node 22+, pnpm 10, PostgreSQL 16, ClickHouse (26.8 LTS), NATS with
 ```bash
 pnpm install
 cp .env.example .env          # fill AUTH_SECRET and MASTER_KEY (openssl rand -base64 32), point DATABASE_URL at Postgres
-pnpm --filter @agentic-marketing/server cli bootstrap --email you@example.com --password '…' --workspace 'My shop'
+pnpm --silent --filter @agentic-marketing/server cli bootstrap --email you@example.com --workspace 'My shop'
 pnpm dev                       # API on http://localhost:3000 (migrates on start)
-pnpm dev:web                   # UI on http://localhost:5173 → "Live workspace (API)"
+pnpm dev:web                   # UI on http://localhost:5173 → "Live workspace (API)", demo screens included
 ```
+
+For development the demo still starts; the production build is the live workspace only:
+
+```bash
+pnpm --filter @agentic-marketing/web build:live   # writes apps/web/dist
+pnpm dev                                          # serves that build at http://localhost:3000/
+```
+
+The Docker image runs `build:live` and copies `apps/web/dist` into place, so `/` is the admin UI. When the
+directory exists the server serves real assets and falls back to `index.html` for extension-less paths; API
+paths are never answered with the page. Set `WEB_DIST` to serve a different build (for example a mounted
+volume); when the directory is absent the server runs API-only, as before.
+
+`bootstrap` prompts for the password without echoing it. Non-interactively, set `AM_BOOTSTRAP_PASSWORD` for the command or pipe one line on stdin; `--password` still works but is deprecated because arguments are visible in process listings and shell history. `pnpm --silent --filter @agentic-marketing/server cli reset-password --email you@example.com` changes a password later, reading `AM_RESET_PASSWORD`, a hidden prompt or stdin.
 
 `DATABASE_URL` must be a role that can create roles (the migration creates `am_app`, the row-level-security role the app uses, with `APP_DB_PASSWORD`).
 
 Connect an MCP client (Claude, an IDE, …) to `http://localhost:3000/mcp`. It registers itself, you sign in and choose its permissions on the consent page.
 
+MCP requires an HTTPS `PUBLIC_URL` (loopback HTTP is fine for local development). If the server starts with a plain-HTTP LAN address such as `http://192.168.1.20:3210`, it logs a warning and starts without the MCP/OAuth client endpoints; the admin UI and REST API keep working. Use an HTTPS URL (e.g. a Tailscale or Cloudflare Tunnel hostname) to enable MCP.
+
+### Client IP behind two ingress paths
+
+Public traffic and admin traffic often take different paths: visitors arrive through a Cloudflare Tunnel (which sets `cf-connecting-ip`), while admins sign in over the LAN or VPN (where that header is absent). List both headers in trust order, and name the proxies whose forwarding headers may be believed:
+
+```bash
+CLIENT_IP_HEADER=cf-connecting-ip,x-forwarded-for
+TRUSTED_PROXY_CIDRS=127.0.0.1/32,::1/128,10.0.0.0/8
+```
+
+`CLIENT_IP_HEADER` is an ordered, comma-separated list; the first valid address of the first header present is used. With `TRUSTED_PROXY_CIDRS` set, headers are ignored unless the socket address is in one of those ranges (bare IPs and CIDR ranges, IPv4 or IPv6), so a client cannot spoof its rate-limit bucket. Admin LAN traffic has no forwarding header and falls back to the socket address. Empty `TRUSTED_PROXY_CIDRS` trusts the headers from any source, which preserves the previous behavior; set it to your tunnel/proxy and loopback ranges in production.
+
 ### Docker Compose
 
 ```bash
 cp .env.example .env   # fill in the secrets
-docker compose up --build
-docker compose exec app pnpm --filter @agentic-marketing/server cli bootstrap --email … --password … --workspace …
+docker compose up -d   # the released image, as a self-hoster runs it
+# or build the working tree (development, CI):
+docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+docker compose exec app am bootstrap --email … --workspace …
 ```
+
+The default file pulls `ghcr.io/timchr78/agentic-marketing:${AM_VERSION}` (pin the version in `.env`; `AM_PORT` changes the published port). The overlay builds this checkout and tags it `AM_BUILD_IMAGE` (default `agentic-marketing:local`); `scripts/smoke.sh` uses the same overlay. ClickHouse is capped at `CLICKHOUSE_MEM_LIMIT` (default 2g), which covers the whole container; ClickHouse's own `max_server_memory_usage` still applies inside it. To keep data in host directories instead of named volumes, see the README: the services run as their own users, so the directories need matching ownership and permissions.
+
+`am` runs the server CLI without pnpm's banner. The command prompts for the password without echo; for scripts use `docker compose exec -e AM_BOOTSTRAP_PASSWORD app am bootstrap …` (or pipe one line with `docker compose exec -T`). `am reset-password --email …` (with `AM_RESET_PASSWORD`) sets a new password. `--password` is deprecated.
 
 `scripts/smoke.sh` (also run in CI) does this end to end with a throw-away compose project: start, bootstrap, sign in, publish a signup form, and check its confirmation e-mail is sent.
 

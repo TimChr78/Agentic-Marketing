@@ -1,3 +1,5 @@
+import { fileURLToPath } from 'node:url';
+import { isIpOrCidr } from '@agentic-marketing/core';
 import { z } from 'zod';
 
 // All configuration comes from the environment and is validated at start-up, so a missing or
@@ -9,6 +11,10 @@ const Env = z.object({
     .describe('Start without migrating (Kubernetes: a migration job runs before each upgrade)'),
   ROLE: z.string().default('all').describe('Comma-separated roles: api, ingest, worker, scheduler, or all'),
   PORT: z.coerce.number().int().default(3000),
+  WEB_DIST: z
+    .string()
+    .optional()
+    .describe('Directory with the built admin UI; default: apps/web/dist in the repo, which is also where the image puts it'),
   PUBLIC_URL: z.url().optional(),
   PUBLIC_LINKS_URL: z
     .url()
@@ -19,7 +25,23 @@ const Env = z.object({
   CLIENT_IP_HEADER: z
     .string()
     .default('x-forwarded-for')
-    .describe('Header carrying the client IP set by your proxy, e.g. cf-connecting-ip behind Cloudflare; the first address is used'),
+    .describe(
+      'Headers carrying the client IP, in trust order and comma-separated, e.g. cf-connecting-ip,x-forwarded-for for public traffic through a Cloudflare Tunnel plus LAN/VPN sign-ins; the first address of the first valid header is used',
+    ),
+  TRUSTED_PROXY_CIDRS: z
+    .string()
+    .default('')
+    .refine(
+      (value) =>
+        value
+          .split(',')
+          .map((entry) => entry.trim())
+          .every((entry) => !entry || isIpOrCidr(entry)),
+      'TRUSTED_PROXY_CIDRS must be a comma-separated list of IP addresses or CIDR ranges',
+    )
+    .describe(
+      'Comma-separated proxy/loopback ranges whose forwarding headers are trusted, e.g. 127.0.0.1/32,::1/128,10.0.0.0/8; empty trusts the forwarded headers from any source (backward compatible)',
+    ),
   DATABASE_URL: z.string().describe('Owner/admin connection, used for migrations and auth tables'),
   APP_DB_ROLE: z
     .string()
@@ -135,13 +157,27 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   const appUrl = new URL(e.DATABASE_URL);
   appUrl.username = e.APP_DB_ROLE;
   appUrl.password = e.APP_DB_PASSWORD;
+  const clientIpHeaders = [
+    ...new Set(
+      e.CLIENT_IP_HEADER.split(',')
+        .map((header) => header.trim().toLowerCase())
+        .filter(Boolean),
+    ),
+  ];
   return {
     roles: new Set(e.ROLE === 'all' ? ['api', 'ingest', 'worker', 'scheduler'] : e.ROLE.split(',').map((r) => r.trim())),
     port: e.PORT,
+    // Resolved from this file, never from the working directory: `pnpm start` and the image both
+    // run from /app, where the built UI sits next to the server.
+    webDist: e.WEB_DIST ?? fileURLToPath(new URL('../../../apps/web/dist', import.meta.url)),
     skipMigrations: e.SKIP_MIGRATIONS === 'true',
     publicUrl: (e.PUBLIC_URL ?? `http://localhost:${e.PORT}`).replace(/\/$/, ''),
     linksUrl: (e.PUBLIC_LINKS_URL ?? e.PUBLIC_URL ?? `http://localhost:${e.PORT}`).replace(/\/$/, ''),
-    clientIpHeader: e.CLIENT_IP_HEADER.toLowerCase(),
+    clientIpHeaders: clientIpHeaders.length ? clientIpHeaders : ['x-forwarded-for'],
+    clientIpHeader: clientIpHeaders[0] ?? 'x-forwarded-for',
+    trustedProxyCidrs: e.TRUSTED_PROXY_CIDRS.split(',')
+      .map((entry) => entry.trim())
+      .filter(Boolean),
     adminDatabaseUrl: e.DATABASE_URL,
     appDatabaseUrl: appUrl.toString(),
     appDbPassword: e.APP_DB_PASSWORD,

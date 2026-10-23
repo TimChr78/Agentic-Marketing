@@ -11,7 +11,7 @@
 
 ## Topology
 
-Two ways to publish the platform's public paths. Choose A when a tunnel already serves something like Umami.
+Two ways to publish the platform's public paths. Option A is the default and recommended choice when a tunnel already serves something like Umami; Option B keeps the links first-party under `/am/*` and is the natural fit for phase B.
 
 ```
 Option A (existing tunnel)
@@ -21,8 +21,11 @@ form post, e-mail links ─► https://am.site/(f|u|c)/…  ─► tunnel ─►
 Option B (worker proxy)
 visitor ─► https://site/am/(f|u|c|v1/batch|v1/decide)… ─► _worker.js ─► https://am-edge.site (Access: service token) ─► tunnel ─► app:3000
 
-admin, MCP ─► http://am.lan:3000  (LAN / Tailscale only, both options)
+admin UI, REST ─► http://am.lan:3000 or https://…  (LAN / VPN; plain HTTP is fine for admin and REST)
+MCP, OAuth ─► https://…                             (HTTPS only: Tailscale, tunnel or TLS proxy)
 ```
+
+The admin UI, REST and MCP are never public paths. With a plain-HTTP non-loopback `PUBLIC_URL` such as `http://am.lan:3000`, the server starts normally and the admin UI and REST work, but the MCP/OAuth endpoints are disabled; MCP needs HTTPS (Tailscale Serve/Funnel, a Cloudflare Tunnel or a TLS reverse proxy).
 
 Provider webhooks (`/hooks/email/…`) and inbound connector webhooks (`/hooks/in/…`) need a public route only if they are used. Add `hooks` to the tunnel's path rule.
 

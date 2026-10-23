@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Background, Controls, MarkerType, ReactFlow, ReactFlowProvider, applyNodeChanges, type Connection, type Edge, type Node, type NodeChange } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { ArrowLeft, BarChart3, Play, Plus, Send, Trash2, Workflow } from 'lucide-react';
+import { AlertTriangle, ArrowLeft, BarChart3, Play, Plus, Send, Trash2, Workflow } from 'lucide-react';
 import type { JourneyNode, NodeKind } from '../../api/types';
 import { Button, Card, Pill, cx, inputBase, inputCls, timeAgo } from '../../components/ui';
 import { useTheme } from '../../lib/theme';
@@ -13,6 +13,7 @@ import { kindMeta } from '../nodeKinds';
 // edges); saving is artifacts.updateDraft, so drafts, versions and approvals apply as usual.
 
 type Artifact = Out<'artifacts.get'>;
+type Warning = { nodeId: string | null; path: string; message: string };
 interface LiveNode {
   id: string;
   kind: NodeKind;
@@ -110,6 +111,7 @@ export function LiveJourneys({ onError }: { onError: (m: string) => void }) {
   const [list, setList] = useState<Out<'artifacts.list'>['artifacts']>([]);
   const [open, setOpen] = useState<string | null>(null);
   const [name, setName] = useState('');
+  const [createdWarnings, setCreatedWarnings] = useState<Warning[]>([]);
   const load = useCallback(async () => {
     try {
       setList((await api.call('artifacts.list', {})).artifacts.filter((a) => a.type === 'journey'));
@@ -124,9 +126,11 @@ export function LiveJourneys({ onError }: { onError: (m: string) => void }) {
       <ReactFlowProvider>
         <Builder
           id={open}
+          initialWarnings={createdWarnings}
           onError={onError}
           onBack={() => {
             setOpen(null);
+            setCreatedWarnings([]);
             void load();
           }}
         />
@@ -152,6 +156,7 @@ export function LiveJourneys({ onError }: { onError: (m: string) => void }) {
               },
             });
             setName('');
+            setCreatedWarnings(r.warnings);
             setOpen(r.artifactId);
           } catch (err) {
             onError(errText(err));
@@ -166,7 +171,13 @@ export function LiveJourneys({ onError }: { onError: (m: string) => void }) {
       <ul className="divide-y divide-line">
         {list.map((j) => (
           <li key={j.id}>
-            <button className="flex w-full items-center gap-2.5 px-4 py-2.5 text-left hover:bg-surface-2" onClick={() => setOpen(j.id)}>
+            <button
+              className="flex w-full items-center gap-2.5 px-4 py-2.5 text-left hover:bg-surface-2"
+              onClick={() => {
+                setCreatedWarnings([]);
+                setOpen(j.id);
+              }}
+            >
               <Workflow size={15} className="text-muted" />
               <span className="min-w-0 flex-1">
                 <span className="block truncate font-medium">{j.name}</span>
@@ -185,7 +196,17 @@ export function LiveJourneys({ onError }: { onError: (m: string) => void }) {
   );
 }
 
-function Builder({ id, onBack, onError }: { id: string; onBack: () => void; onError: (m: string) => void }) {
+function Builder({
+  id,
+  initialWarnings = [],
+  onBack,
+  onError,
+}: {
+  id: string;
+  initialWarnings?: Warning[];
+  onBack: () => void;
+  onError: (m: string) => void;
+}) {
   const theme = useTheme();
   const [artifact, setArtifact] = useState<Artifact | null>(null);
   const [content, setContent] = useState<Content | null>(null);
@@ -198,6 +219,7 @@ function Builder({ id, onBack, onError }: { id: string; onBack: () => void; onEr
   const [people, setPeople] = useState<Out<'profiles.list'>['profiles']>([]);
   const [simProfile, setSimProfile] = useState('');
   const [status, setStatus] = useState('');
+  const [warnings, setWarnings] = useState<Warning[]>(initialWarnings);
   const saveTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   const reload = useCallback(async () => {
@@ -224,6 +246,7 @@ function Builder({ id, onBack, onError }: { id: string; onBack: () => void; onEr
         try {
           const r = await api.call('artifacts.updateDraft', { artifactId: id, content: next, expectedContentHash: hash });
           setHash(r.contentHash);
+          setWarnings(r.warnings);
           setStatus(`Saved draft v${r.version}`);
           onError('');
           if (artifact && r.version !== artifact.version.number) await reload();
@@ -249,12 +272,17 @@ function Builder({ id, onBack, onError }: { id: string; onBack: () => void; onEr
           showStats: showStats && !!stats,
           sim: sim ? (simVisited.has(n.id) ? 'visited' : 'none') : 'none',
           summary: summary(n),
+          warning:
+            warnings
+              .filter((w) => w.nodeId === n.id)
+              .map((w) => w.message)
+              .join('; ') || undefined,
         },
         selected: n.id === selected,
         measured: measured[n.id],
       })),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [nodes, stats, showStats, sim, selected, measured],
+    [nodes, stats, showStats, sim, selected, measured, warnings],
   );
   const rfEdges: Edge[] = useMemo(
     () =>
@@ -376,6 +404,24 @@ function Builder({ id, onBack, onError }: { id: string; onBack: () => void; onEr
           </Button>
         </div>
       </div>
+
+      {warnings.length > 0 && (
+        <div className="border-b border-warn/40 bg-warn-soft px-3 py-2 text-[12px] text-warn">
+          <div className="flex items-center gap-1.5 font-semibold">
+            <AlertTriangle size={13} /> {warnings.length} step{warnings.length === 1 ? '' : 's'} need{warnings.length === 1 ? 's' : ''} attention before publishing
+          </div>
+          <ul className="mt-1 space-y-0.5">
+            {warnings.slice(0, 6).map((w, i) => (
+              <li key={`${w.nodeId ?? 'journey'}-${w.path}-${i}`} className="flex flex-wrap gap-x-1.5">
+                <span className="font-medium">{nodes.find((n) => n.id === w.nodeId)?.label ?? 'Journey'}</span>
+                <span className="min-w-0 break-words opacity-90">{w.message}</span>
+              </li>
+            ))}
+            {warnings.length > 6 && <li className="opacity-90">…and {warnings.length - 6} more</li>}
+          </ul>
+          <p className="mt-1 opacity-90">Saving still works: publishing waits until these are filled in.</p>
+        </div>
+      )}
 
       <div className="flex min-h-0 flex-1 flex-col md:flex-row">
         <div className="flex shrink-0 gap-1 overflow-x-auto border-b border-line bg-surface p-2 md:w-[160px] md:flex-col md:border-b-0 md:border-r">
