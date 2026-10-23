@@ -5,8 +5,14 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export COMPOSE_PROJECT_NAME=am_smoke
+export AM_PORT=3000
+# Build the local image, or reuse it with SMOKE_NO_BUILD=1 (SMOKE_IMAGE names the image).
+export AM_BUILD_IMAGE="${SMOKE_IMAGE:-am_smoke-app}"
 ENV_FILE=$(mktemp)
-trap 'docker compose --env-file "$ENV_FILE" logs app | tail -50; docker compose --env-file "$ENV_FILE" down -v >/dev/null 2>&1; rm -f "$ENV_FILE" /tmp/am_smoke_cookies' EXIT
+dc() {
+  docker compose --env-file "$ENV_FILE" -f docker-compose.yml -f docker-compose.build.yml "$@"
+}
+trap 'dc logs app | tail -50; dc down -v >/dev/null 2>&1; rm -f "$ENV_FILE" /tmp/am_smoke_cookies' EXIT
 
 cat >"$ENV_FILE" <<ENV
 POSTGRES_PASSWORD=$(openssl rand -hex 16)
@@ -14,10 +20,11 @@ APP_DB_PASSWORD=$(openssl rand -hex 16)
 AUTH_SECRET=$(openssl rand -base64 32)
 MASTER_KEY=$(openssl rand -base64 32)
 PUBLIC_URL=http://localhost:3000
+AM_PORT=3000
 ENV
-dc() { docker compose --env-file "$ENV_FILE" "$@"; }
 
-# SMOKE_NO_BUILD=1 reuses an image built beforehand as am_smoke-app.
+# Always build through the overlay: the default compose file pulls the release image.
+# SMOKE_NO_BUILD=1 reuses an image built beforehand as $AM_BUILD_IMAGE (am_smoke-app by default).
 dc up -d $([ -n "${SMOKE_NO_BUILD:-}" ] || echo --build) --wait --wait-timeout 300
 curl -fsS http://localhost:3000/readyz >/dev/null && echo "ready"
 
