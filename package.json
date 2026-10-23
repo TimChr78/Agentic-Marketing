@@ -1,6 +1,8 @@
 {
   "name": "agentic-marketing",
   "private": true,
+  "version": "0.1.0",
+  "license": "MIT",
   "packageManager": "pnpm@10.28.0",
   "engines": {
     "node": ">=22"

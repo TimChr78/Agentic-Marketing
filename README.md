@@ -79,6 +79,14 @@ On Kubernetes: the Helm chart in [`deploy/helm`](deploy/helm/agentic-marketing) 
   - `agentic-marketing-implement`: rolling the stack out on a website;
   - `agentic-marketing-mcp`: operating a workspace over MCP.
 
+## Releases and upgrading
+
+Releases are on [GitHub](https://github.com/TimChr78/Agentic-Marketing/releases), with the image `ghcr.io/timchr78/agentic-marketing:<version>` (linux/amd64 and linux/arm64) and the packaged Helm chart; what changed is in the [changelog](CHANGELOG.md). The current release is **0.1.0**, a pre-release.
+
+Upgrading: database migrations run when the server starts. With `SKIP_MIGRATIONS=true` (several replicas, Kubernetes) run `cli migrate` first; the Helm chart does this in a Job before each upgrade. Migrations only move forward, so back up Postgres before upgrading. While the version is 0.x, read the changelog before each upgrade: commands and artifact formats may still change.
+
+Security problems: see [SECURITY.md](SECURITY.md).
+
 ## Status and roadmap
 
 Wave 1 (Phases −1 to 5) is complete: foundations, data platform, e-mail, segments, journeys, personalization, AI and integrations.
@@ -105,3 +113,8 @@ pnpm dev:web                               # the UI (a mocked demo without the A
 ```
 
 See [docs/development.md](docs/development.md) for details.
+
+## License
+
+[MIT](LICENSE).
+
