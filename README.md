@@ -81,7 +81,7 @@ On Kubernetes: the Helm chart in [`deploy/helm`](deploy/helm/agentic-marketing) 
 
 ## Releases and upgrading
 
-Releases are on [GitHub](https://github.com/TimChr78/Agentic-Marketing/releases), with the image `ghcr.io/timchr78/agentic-marketing:<version>` (linux/amd64 and linux/arm64) and the packaged Helm chart; what changed is in the [changelog](CHANGELOG.md). The current release is **0.1.0**, a pre-release.
+Releases are on [GitHub](https://github.com/TimChr78/Agentic-Marketing/releases), with the image `ghcr.io/timchr78/agentic-marketing:<version>` (linux/amd64 and linux/arm64) and the packaged Helm chart; what changed is in the [changelog](CHANGELOG.md). The current release is **0.1.0**, a pre-release. A release is made by pushing a version tag, or by running the Release workflow (Actions → Release → Run workflow) with the version, which tags the current `main`.
 
 Upgrading: database migrations run when the server starts. With `SKIP_MIGRATIONS=true` (several replicas, Kubernetes) run `cli migrate` first; the Helm chart does this in a Job before each upgrade. Migrations only move forward, so back up Postgres before upgrading. While the version is 0.x, read the changelog before each upgrade: commands and artifact formats may still change.
 

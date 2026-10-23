@@ -1,35 +1,65 @@
 name: Release
 
-# Pushing a version tag (v0.1.0) publishes a release: the container image for linux/amd64 and
-# linux/arm64 to GitHub's registry, the packaged Helm chart, and a GitHub release with the
-# CHANGELOG section of that version. 0.x versions are marked as pre-releases.
+# Publishes a release: the container image for linux/amd64 and linux/arm64 to GitHub's registry,
+# the packaged Helm chart, and a GitHub release with the CHANGELOG section of that version. 0.x
+# versions are marked as pre-releases. Two ways to start it:
+#   - push a version tag (v0.1.0);
+#   - run it by hand (Actions → Release → Run workflow) with the version: it releases the
+#     current main and creates the tag itself with the release.
 
 on:
   push:
     tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release, e.g. 0.1.0 (must match package.json, the chart and CHANGELOG.md)'
+        required: true
+        type: string
 
 permissions:
   contents: write
   packages: write
+
+# One release at a time per version.
+concurrency:
+  group: release-${{ inputs.version || github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
   release:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          # A manual run releases main as it is now.
+          ref: ${{ github.event_name == 'workflow_dispatch' && 'main' || github.ref }}
 
-      - name: Check the tag matches the versions
+      - name: Check the version
         id: version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
-          v="${GITHUB_REF_NAME#v}"
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            v="${INPUT_VERSION#v}"
+          else
+            v="${GITHUB_REF_NAME#v}"
+          fi
+          echo "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' || { echo "::error::$v is not a version (x.y.z)"; exit 1; }
           for f in package.json apps/server/package.json; do
             got=$(node -p "require('./$f').version")
-            [ "$got" = "$v" ] || { echo "::error::$f has version $got, the tag is $GITHUB_REF_NAME"; exit 1; }
+            [ "$got" = "$v" ] || { echo "::error::$f has version $got, not $v"; exit 1; }
           done
           chart=$(grep '^appVersion:' deploy/helm/agentic-marketing/Chart.yaml | tr -d '"' | awk '{print $2}')
-          [ "$chart" = "$v" ] || { echo "::error::Chart appVersion is $chart, the tag is $GITHUB_REF_NAME"; exit 1; }
+          [ "$chart" = "$v" ] || { echo "::error::Chart appVersion is $chart, not $v"; exit 1; }
           grep -q "^## \[$v\]" CHANGELOG.md || { echo "::error::CHANGELOG.md has no section for $v"; exit 1; }
+          if gh release view "v$v" >/dev/null 2>&1; then echo "::error::Release v$v exists already"; exit 1; fi
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] && git ls-remote --exit-code --tags origin "refs/tags/v$v" >/dev/null; then
+            echo "::error::Tag v$v exists already: push it again to release it, or delete it first"; exit 1
+          fi
           echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           case "$v" in 0.*|*-*) echo "prerelease=true" >> "$GITHUB_OUTPUT" ;; *) echo "prerelease=false" >> "$GITHUB_OUTPUT" ;; esac
 
       - uses: docker/setup-qemu-action@v3
@@ -44,11 +74,13 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository_owner }}/agentic-marketing
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{version}},value=${{ steps.version.outputs.version }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ steps.version.outputs.version }}
           labels: |
             org.opencontainers.image.title=Agentic Marketing
             org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+            org.opencontainers.image.revision=${{ steps.version.outputs.sha }}
       - uses: docker/build-push-action@v6
         with:
           context: .
@@ -75,4 +107,6 @@ jobs:
           printf '\n**Image:** `ghcr.io/%s/agentic-marketing:%s`\n' "${GITHUB_REPOSITORY_OWNER,,}" "$v" >> notes.md
           flags=""
           [ "${{ steps.version.outputs.prerelease }}" = "true" ] && flags="--prerelease"
-          gh release create "$GITHUB_REF_NAME" dist/*.tgz --title "Agentic Marketing $GITHUB_REF_NAME" --notes-file notes.md $flags
+          # On a manual run the tag does not exist yet: the release creates it on the commit built above.
+          gh release create "v$v" dist/*.tgz --target "${{ steps.version.outputs.sha }}" \
+            --title "Agentic Marketing v$v" --notes-file notes.md $flags
