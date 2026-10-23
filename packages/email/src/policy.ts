@@ -7,7 +7,7 @@ import { and, eq, gte, inArray, lt, ne, or, sql } from 'drizzle-orm';
 // pause while the stream's bounce or complaint rate is too high. Transactional messages (contract,
 // legal obligation) are never held back.
 
-export type Channel = 'email' | 'sms';
+export type Channel = 'email' | 'sms' | 'push';
 export type Hold = { ok: true } | { ok: false; reason: string } | { ok: 'later'; until: Date; reason: string };
 
 const SENT = ['sending', 'sent', 'delivered', 'bounced', 'complained'] as const;
@@ -146,7 +146,7 @@ export async function checkPolicy(
     if (n >= cap.max)
       return {
         ok: false,
-        reason: `frequency_cap: ${n} ${message.channel === 'sms' ? 'texts' : 'e-mails'} in ${cap.days} days (at most ${cap.max})`,
+        reason: `frequency_cap: ${n} ${{ email: 'e-mails', sms: 'texts', push: 'notifications' }[message.channel]} in ${cap.days} days (at most ${cap.max})`,
       };
   }
 

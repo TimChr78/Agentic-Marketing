@@ -1,4 +1,5 @@
 import {
+  Bell,
   Braces,
   Cable,
   Clock,
@@ -28,6 +29,7 @@ export const kindMeta: Record<NodeKind, { label: string; icon: LucideIcon; group
   exit: { label: 'Exit', icon: LogOut, group: 'Flow', defaults: {} },
   email: { label: 'Send e-mail', icon: Mail, group: 'Action', defaults: { template: 'tpl_welcome', purpose: 'marketing_email' } },
   sms: { label: 'Send SMS', icon: MessageSquare, group: 'Action', defaults: { template: 'sms_reminder' } },
+  push: { label: 'Send push', icon: Bell, group: 'Action', defaults: { template: 'psh_sale' } },
   webhook: { label: 'Webhook', icon: Webhook, group: 'Action', defaults: { url: 'https://hooks.example.com/crm', method: 'POST' } },
   action: { label: 'Connector action', icon: Cable, group: 'Action', defaults: { connection: 'con_slack', action: 'postMessage' } },
   transform: { label: 'Transform', icon: Braces, group: 'Flow', defaults: { set: 'total', expression: '$sum(event.properties.products.price)' } },
@@ -52,6 +54,7 @@ export function configSummary(n: JourneyNode) {
     case 'email':
       return `${c.template}${c.variant ? ` · variant ${c.variant}` : ''}`;
     case 'sms':
+    case 'push':
       return String(c.template);
     case 'aiDecide':
       return `${c.options} · fallback ${c.fallback}`;

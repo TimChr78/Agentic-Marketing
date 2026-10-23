@@ -18,6 +18,7 @@ const nodeKinds = [
   'split',
   'email',
   'sms',
+  'push',
   'webhook',
   'action',
   'transform',
@@ -72,6 +73,7 @@ export const journeyNodeConfigs = {
   split: z.object({ weights: z.array(z.number().int().min(0).max(100)).min(2).max(5).describe('Relative weights, one per outgoing edge') }),
   email: z.object({ template: z.string().regex(/^eml_[0-9a-f]{32}$/, 'An e-mail template id (eml_…)') }),
   sms: z.object({ template: z.string().regex(/^sms_[0-9a-f]{32}$/, 'An SMS template id (sms_…)') }),
+  push: z.object({ template: z.string().regex(/^psh_[0-9a-f]{32}$/, 'A push template id (psh_…)') }),
   updateProfile: z.object({
     trait: z.string().regex(/^[A-Za-z0-9_]{1,64}$/),
     value: z.union([z.string().max(500), z.number(), z.boolean(), z.null()]),
@@ -278,6 +280,22 @@ const smsTemplate = z.object({
   sampleData: z.record(z.string(), z.unknown()).optional().describe('Example variables for previews, e.g. {"profile":{"firstName":"Ada"}}'),
 });
 
+const pushTemplate = z.object({
+  purpose: Key.describe('Purpose key, e.g. "marketing_push" or "service_push"; decides the lawful basis'),
+  title: z
+    .string()
+    .min(1)
+    .max(200)
+    .describe('Liquid, e.g. "{{ profile.firstName }}, your order shipped"; keep it under about 50 characters'),
+  body: z.string().min(1).max(1000).describe('Liquid; shown under the title, cut by most devices after about 150 characters'),
+  url: z.string().max(2000).optional().describe('Opened on click (Liquid allowed); clicks are counted'),
+  icon: z.url().optional().describe('Web push: a square image, e.g. your logo'),
+  image: z.url().optional().describe('A larger picture, where the device shows one'),
+  ttlHours: z.number().int().min(0).max(672).default(24).describe('How long push services keep it for an offline device'),
+  urgency: z.enum(['normal', 'high']).default('normal').describe('high wakes the device; for time-critical service messages'),
+  sampleData: z.record(z.string(), z.unknown()).optional().describe('Example variables for previews'),
+});
+
 // Delivery policy (Phase 7): limits that apply to every message, whoever sends it.
 const Clock = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'HH:MM, 24-hour');
 const Zone = z.string().refine((tz) => {
@@ -293,7 +311,7 @@ const deliveryPolicy = z.object({
   frequencyCaps: z
     .array(
       z.object({
-        channel: z.enum(['email', 'sms']),
+        channel: z.enum(['email', 'sms', 'push']),
         purposes: z.array(Key).max(20).default([]).describe('Empty: every purpose not based on contract or legal obligation'),
         max: z.number().int().min(1).max(1000),
         days: z.number().int().min(1).max(90),
@@ -303,7 +321,7 @@ const deliveryPolicy = z.object({
     .default([])
     .describe('e.g. at most 2 marketing e-mails in 7 days per person; messages over the cap are not sent'),
   quietHours: z
-    .array(z.object({ channel: z.enum(['email', 'sms']), start: Clock, end: Clock }))
+    .array(z.object({ channel: z.enum(['email', 'sms', 'push']), start: Clock, end: Clock }))
     .max(4)
     .default([{ channel: 'sms', start: '21:00', end: '08:00' }])
     .describe("Marketing messages wait until the quiet hours end, in the person's local time"),
@@ -685,7 +703,7 @@ const form = z
   .refine((f) => !f.doubleOptIn || !!f.confirmationTemplate, 'Double opt-in needs a confirmationTemplate');
 
 const broadcast = z.object({
-  template: z.string().regex(/^(eml|sms)_[0-9a-f]{32}$/, 'An e-mail or SMS template id (eml_… or sms_…)'),
+  template: z.string().regex(/^(eml|sms|psh)_[0-9a-f]{32}$/, 'An e-mail, SMS or push template id (eml_…, sms_… or psh_…)'),
   segment: z.string().regex(/^seg_[0-9a-f]{32}$/, 'A segment id (seg_…)'),
   sendAt: z.iso.datetime().optional().describe('When to start sending (UTC); default: as soon as it is published'),
   description: z.string().max(500).optional(),
@@ -695,6 +713,7 @@ export type FormDefinition = z.output<typeof form>;
 export type ConversionMap = z.output<typeof conversionMap>;
 export type AudienceSync = z.output<typeof audienceSync>;
 export type SmsTemplate = z.output<typeof smsTemplate>;
+export type PushTemplate = z.output<typeof pushTemplate>;
 export type DeliveryPolicy = z.output<typeof deliveryPolicy>;
 export const DEFAULT_DELIVERY_POLICY: DeliveryPolicy = deliveryPolicy.parse({});
 export type BroadcastDefinition = z.output<typeof broadcast>;
@@ -719,6 +738,13 @@ export const artifactTypes = {
     label: 'SMS template',
     description: 'A text message with Liquid placeholders and a purpose. Preview it (segments, cost) with smsTemplates.preview.',
     content: smsTemplate,
+  },
+  push_template: {
+    prefix: 'psh',
+    label: 'Push template',
+    description:
+      'A push notification (title, body, link, image) with Liquid placeholders and a purpose, for browsers (web push) and apps (FCM, APNs). Preview it with pushTemplates.preview.',
+    content: pushTemplate,
   },
   segment: {
     prefix: 'seg',
@@ -852,6 +878,22 @@ export const DEFAULT_PURPOSES: Purposes = [
     description: 'Texts about your account and orders, e.g. delivery updates.',
     basis: 'contract',
     channels: ['sms'],
+    requiresDoubleOptIn: false,
+  },
+  {
+    key: 'marketing_push',
+    name: 'Marketing notifications',
+    description: 'News and offers as notifications in your browser or our app.',
+    basis: 'consent',
+    channels: ['push'],
+    requiresDoubleOptIn: false,
+  },
+  {
+    key: 'service_push',
+    name: 'Service notifications',
+    description: 'Notifications about your account and orders, e.g. delivery updates.',
+    basis: 'contract',
+    channels: ['push'],
     requiresDoubleOptIn: false,
   },
   {

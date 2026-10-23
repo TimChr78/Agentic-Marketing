@@ -1,7 +1,7 @@
 import { artifactTypes, DEFAULT_PURPOSES, type JourneyDefinition, publishedSingleton } from '@agentic-marketing/artifacts';
 import { newId } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
-import { requestEmail, requestSms } from '@agentic-marketing/email';
+import { requestEmail, requestPush, requestSms } from '@agentic-marketing/email';
 import type { EventStore, JourneyEvent } from '@agentic-marketing/events';
 import { consentStateOf, purposeAllowed, type ResolvedEvent } from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
@@ -304,6 +304,16 @@ async function applyEffect(
       data: p.context,
     });
     return `SMS ${d.status}${d.reason ? `: ${d.reason}` : ''}`;
+  }
+  if (eff.kind === 'push') {
+    const d = await requestPush(tx, workspaceId, deps.kp, deps.events, {
+      profileId: p.profileId,
+      templateId: eff.template,
+      idempotencyKey: `jrn:${p.id}:${eff.node}:${eff.seq}`,
+      journeyId: p.journeyId,
+      data: p.context,
+    });
+    return `push ${d.status}${d.reason ? `: ${d.reason}` : ''}`;
   }
   // Only non-personal traits; personal data never comes from a journey definition.
   const plan = await publishedSingleton(tx, 'tracking_plan');

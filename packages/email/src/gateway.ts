@@ -12,6 +12,7 @@ import { type ClickLink, type LinkSigner, tagLinks, trackLinks, type Unsubscribe
 import { decisionEvent, defer, MAX_ATTEMPTS } from './outbox';
 import { checkPolicy } from './policy';
 import { transportFor } from './providers';
+import { deliverPush } from './push/gateway';
 import { renderTemplate } from './render';
 import { deliverSms } from './sms/gateway';
 
@@ -182,6 +183,7 @@ export async function deliverRound(
     });
     for (const { id, channel } of claimed) {
       if (channel === 'sms') await deliverSms(db, ws, id, deps);
+      else if (channel === 'push') await deliverPush(db, ws, id, deps);
       else await deliverOne(db, ws, id, deps);
       handled++;
     }

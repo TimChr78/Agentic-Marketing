@@ -19,12 +19,13 @@ It runs as one Docker image (a TypeScript modular monolith) next to Postgres, Cl
 
   What happens to an e-mail becomes a customer event (`Email Link Clicked`…), so segments, journeys and webhooks can use it.
 - **SMS:** Twilio, with consent per purpose, STOP/START/HELP replies, delivery reports, a segment and cost preview, and a monthly budget. SMS works in journeys and broadcasts.
+- **Push:** web push (VAPID, encrypted payloads) for browsers, FCM for Android and APNs for Apple apps, with the same consent and delivery policy; in journeys and broadcasts.
 - **Delivery policy:** for marketing messages on every channel:
   - frequency caps;
   - quiet hours in each person's time zone;
   - an automatic pause when bounce or complaint rates pass the limits.
 - **Newsletter:** signup forms with double opt-in (works without JavaScript, optional Cloudflare Turnstile), subscriber import with consent proof (from Kit, Mailchimp…), broadcasts to a segment.
-- **Journeys:** a visual builder and an engine with waits, branches, e-mail, SMS, webhooks, connector actions and AI steps (decide, generate) with fallbacks; people can be moved onto a new version.
+- **Journeys:** a visual builder and an engine with waits, branches, e-mail, SMS, push, webhooks, connector actions and AI steps (decide, generate) with fallbacks; people can be moved onto a new version.
 - **Web personalization:** experiences and A/B tests served by a decision API (or at the edge, by a Cloudflare Worker), with an anti-flicker snippet, consent-aware targeting, a visual composer, preview links and sequential or Bayesian results.
 - **AI:** your own providers (Anthropic, OpenAI, Ollama…), metering and budgets that hold under concurrency, prompt artifacts with test runs, redaction, a decision log with sampled human reviews, text classification, generated text cached per segment, and an in-app copilot over MCP that streams its answers and keeps conversations.
 - **Performance marketing:**
@@ -69,6 +70,7 @@ On Kubernetes: the Helm chart in [`deploy/helm`](deploy/helm/agentic-marketing) 
 - [Development](docs/development.md): layout, running locally, tests, key rotation.
 - [Kubernetes reference deployment](docs/deployment/kubernetes.md): Helm, OpenBao or AWS KMS keys, sizing.
 - [Edge decisions](docs/deployment/edge.md): the decision API on Cloudflare Workers.
+- [Push notifications](docs/push.md): browsers, Android and Apple apps.
 - [Single sign-on, SCIM and agent permissions](docs/identity.md).
 - [Architecture](docs/architecture/README.md) and its [ADRs](docs/architecture/adr/).
 - [Integrations](docs/integrations.md): webhooks, connectors, n8n, config as code, warehouse export.
@@ -90,7 +92,7 @@ Wave 1 (Phases −1 to 5) is complete: foundations, data platform, e-mail, segme
 | 8 | Consent everywhere | Done: consent banner with Consent Mode v2, ad purposes, click-id capture, OAuth 2.0 connections, shared rate limits, bot filtering |
 | 9 | Performance marketing | Done: conversions (Meta, Google, Microsoft), audience sync (Meta, Google), spend and ROAS. Later: Microsoft reporting and audiences, more platforms |
 | 10 | Scale and operations | Done: correctness (AI budget reservations, prompt test jobs, merge-safe journeys, journey version migration, instant experience updates), scale (segments evaluated in SQL, ClickHouse row policies, a load test to 1M profiles), operations (Helm chart, OpenBao and AWS KMS keys, warehouse export, config as code) |
-| 11 | Enterprise and ecosystem | Part a done (single sign-on with OIDC and SAML, SCIM provisioning, MCP scope step-up). Part b done (AI: classify, text per segment, review samples, a streaming copilot with stored conversations). Part c done (sequential and Bayesian experiment statistics, edge decide on Cloudflare Workers, a visual composer and preview links). Next: push, more connectors |
+| 11 | Enterprise and ecosystem | Part a done (single sign-on with OIDC and SAML, SCIM provisioning, MCP scope step-up). Part b done (AI: classify, text per segment, review samples, a streaming copilot with stored conversations). Part c done (sequential and Bayesian experiment statistics, edge decide on Cloudflare Workers, a visual composer and preview links). Part d done (push: web push, FCM, APNs). Next: more connectors |
 
 ## Development
 

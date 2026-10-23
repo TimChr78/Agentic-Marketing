@@ -3,7 +3,7 @@ import { type CommandContext, defineCommand } from '@agentic-marketing/commands'
 import { AppError, newId } from '@agentic-marketing/core';
 import { type IdentifierType, schema, type Tx } from '@agentic-marketing/db';
 import type {} from '@agentic-marketing/hotstate';
-import { and, desc, eq, inArray, isNull, lt } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, lt, or } from 'drizzle-orm';
 import { z } from 'zod';
 import { consentStateOf, mergedFamily, purposeAllowed, recordConsent } from './consent';
 import { personCrypto } from './crypto';
@@ -357,6 +357,9 @@ export const exportProfile = defineCommand({
     adUploads: z
       .array(z.record(z.string(), z.unknown()))
       .describe('Conversions sent about the person to ad platforms (recipients under GDPR Art. 15), with what was sent'),
+    pushDevices: z
+      .array(z.record(z.string(), z.unknown()))
+      .describe('Browsers and apps registered for notifications (kind and dates; the endpoint or token is sealed)'),
   }),
   permission: 'profiles:pii',
   effect: 'read',
@@ -415,7 +418,27 @@ export const exportProfile = defineCommand({
         sent: 'hashed e-mail and phone, ad click ids, the event time and value',
       };
     });
-    return { exportedAt: new Date().toISOString(), profile, consentRecords: records, events, aiDecisions, adUploads };
+    const ids = await ctx.tx
+      .select({ type: schema.identifiers.type, value: schema.identifiers.value })
+      .from(schema.identifiers)
+      .where(and(inArray(schema.identifiers.profileId, family), inArray(schema.identifiers.type, ['anonymous_id', 'user_id'])));
+    const ps = schema.pushSubscriptions;
+    const anon = ids.filter((i) => i.type === 'anonymous_id').map((i) => i.value);
+    const users = ids.filter((i) => i.type === 'user_id').map((i) => i.value);
+    const pushDevices =
+      anon.length || users.length
+        ? (
+            await ctx.tx
+              .select()
+              .from(ps)
+              .where(or(anon.length ? inArray(ps.anonymousId, anon) : undefined, users.length ? inArray(ps.userId, users) : undefined))
+          ).map((d) => ({
+            kind: d.kind,
+            registeredAt: d.createdAt.toISOString(),
+            lastNotifiedAt: d.lastSentAt?.toISOString() ?? null,
+          }))
+        : [];
+    return { exportedAt: new Date().toISOString(), profile, consentRecords: records, events, aiDecisions, adUploads, pushDevices };
   },
 });
 
@@ -444,6 +467,11 @@ export async function removeProfiles(
     anonymousIds: ids.filter((i) => i.type === 'anonymous_id').map((i) => i.value),
     userIds: ids.filter((i) => i.type === 'user_id').map((i) => i.value),
   });
+  // Their browsers and apps stop getting notifications.
+  const anon = ids.filter((i) => i.type === 'anonymous_id').map((i) => i.value);
+  const users = ids.filter((i) => i.type === 'user_id').map((i) => i.value);
+  if (anon.length) await tx.delete(schema.pushSubscriptions).where(inArray(schema.pushSubscriptions.anonymousId, anon));
+  if (users.length) await tx.delete(schema.pushSubscriptions).where(inArray(schema.pushSubscriptions.userId, users));
   await tx.delete(schema.messages).where(inArray(schema.messages.profileId, family));
   const suppress = opts.suppress ? ids.filter((i) => i.type === 'email' || i.type === 'phone') : [];
   if (suppress.length)

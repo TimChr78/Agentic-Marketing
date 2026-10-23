@@ -141,6 +141,9 @@ importers:
       '@types/smtp-server':
         specifier: 3.5.13
         version: 3.5.13
+      http_ece:
+        specifier: 1.2.1
+        version: 1.2.1
       jose:
         specifier: 6.2.13
         version: 6.2.13
@@ -491,6 +494,9 @@ importers:
       '@agentic-marketing/events':
         specifier: workspace:*
         version: link:../events
+      '@agentic-marketing/ingest':
+        specifier: workspace:*
+        version: link:../ingest
       '@agentic-marketing/profiles':
         specifier: workspace:*
         version: link:../profiles
@@ -531,6 +537,9 @@ importers:
       '@types/smtp-server':
         specifier: 3.5.13
         version: 3.5.13
+      http_ece:
+        specifier: 1.2.1
+        version: 1.2.1
       smtp-server:
         specifier: 3.19.17
         version: 3.19.17
@@ -3022,6 +3031,10 @@ packages:
 
   htmlparser2@9.1.0:
     resolution: {integrity: sha512-5zfg6mHUoaer/97TxnGpxmbR7zJtPwIYFMZ/H5ucTlPZhKvtum05yiPK3Mgai3a0DyVxv7qYqoweaEd2nrYQzQ==}
+
+  http_ece@1.2.1:
+    resolution: {integrity: sha512-+tzLoMYgXvicu60sVFoswTiu6BiQ6EX3DORRJQ3W2dNpNWCyZ3tcmRFZZ3jgVyw8ziWUCeUARKCkYDY6JgFx+w==}
+    engines: {node: '>=16'}
 
   hyphenate-style-name@1.1.0:
     resolution: {integrity: sha512-WDC/ui2VVRrz3jOVi+XtjqkDjiVjTtFaAGiW37k6b+ohyQ5wYDOGkvCZa8+H0nx3gyvv0+BST9xuOgIyGQ00gw==}
@@ -6084,6 +6097,8 @@ snapshots:
       domhandler: 5.0.3
       domutils: 3.2.2
       entities: 4.5.0
+
+  http_ece@1.2.1: {}
 
   hyphenate-style-name@1.1.0: {}
 

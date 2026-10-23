@@ -264,6 +264,14 @@ See [docs/identity.md](../identity.md). Not built yet: an SSO settings screen (e
 
 Not built yet: session conditions at the edge (they read as "no session" there), Durable Objects, a point-and-click editor that picks elements on the live page.
 
+**Built (part d, push):**
+- **Push as a channel:** push templates (`push_template`, title, body, link, image, TTL, urgency) with a purpose, `marketing_push` and `service_push` purposes by default, push nodes in journeys and broadcasts, frequency caps and quiet hours for push.
+- **Web push** with VAPID keys generated per provider and payloads encrypted per RFC 8291 (checked against an independent implementation); the SDK's `subscribePush()` and a service worker (`am-sw.js`).
+- **FCM** (HTTP v1 API, service-account JWT) and **APNs** (HTTP/2, ES256 provider tokens) adapters; app backends register tokens at `/v1/push/subscribe`.
+- Registrations are sealed, follow identity resolution through anonymous and user ids, are deleted when the service reports them gone, are listed in the data export and removed on erasure. See [push notifications](../push.md).
+
+Not built yet: notification actions (buttons), automatic re-subscription on `pushsubscriptionchange`, a push providers screen (commands only).
+
 ## Every known limitation, and where it lands
 
 | Limitation (where it was recorded) | Phase |

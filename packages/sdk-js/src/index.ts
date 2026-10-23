@@ -8,9 +8,11 @@
 // - The anonymous id is kept in localStorage only while the tracking purpose is allowed.
 
 import { type Decision, type PersonalizeOptions, personalize } from './personalize';
+import { type PushHost, type PushOptions, subscribePush, unsubscribePush } from './push';
 
 export { type BannerOptions, createConsentBanner, googleConsentDefaults } from './banner';
 export { antiFlickerSnippet, type Decision, sanitize } from './personalize';
+export { keyBytes, type PushOptions, type PushState } from './push';
 
 export type Consent = Record<string, boolean>;
 type Props = Record<string, unknown>;
@@ -34,6 +36,8 @@ export interface AnalyticsOptions {
   /** Landing-page query string and cookies to read ad click ids from; default: this page's. */
   landing?: () => { search: string; cookies: string };
   sendBeacon?: (url: string, body: string) => boolean;
+  /** Service worker and Notification, for tests; default: the browser's. */
+  push?: PushHost['env'];
 }
 
 interface QueuedEvent extends Props {
@@ -306,6 +310,14 @@ export function createAnalytics(opts: AnalyticsOptions) {
     personalize(o: PersonalizeOptions = {}) {
       return personalize({ decide: (p) => api.decide(p), track: (e, props) => api.track(e, props) }, o);
     },
+    /** Ask for notifications and subscribe this browser (web push). Records consent for the purpose on a yes. */
+    subscribePush(o: PushOptions = {}) {
+      return subscribePush(pushHost(), o);
+    },
+    /** Stop notifications in this browser and withdraw the purpose's consent. */
+    unsubscribePush(o: PushOptions = {}) {
+      return unsubscribePush(pushHost(), o);
+    },
     /** Forget the visitor on this device (e.g. on logout): new anonymous id, no user id. */
     reset() {
       anonymousId = uuid();
@@ -315,6 +327,16 @@ export function createAnalytics(opts: AnalyticsOptions) {
     },
     flush,
   };
+  function pushHost(): PushHost {
+    return {
+      host: opts.host.replace(/\/$/, ''),
+      auth,
+      fetch: doFetch,
+      anonymousId: () => anonymousId,
+      setConsent: (c) => api.setConsent(c),
+      env: opts.push,
+    };
+  }
   return api;
 }
 export type Analytics = ReturnType<typeof createAnalytics>;
