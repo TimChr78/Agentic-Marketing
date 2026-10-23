@@ -12,6 +12,7 @@ packages/
   auth/        Better Auth (people) + OAuth 2.1 for MCP clients, principal resolution
   telemetry/   pino logger, optional OpenTelemetry tracing (OTLP)
   client/      typed REST client inferred from the command registry
+  edge-worker/ the decision API as a Cloudflare Worker, reading Workers KV (docs/deployment/edge.md)
 apps/
   server/      Hono app: REST (/v1/<command>, /openapi.json), MCP (/mcp), sign-in/consent, health; CLI
   web/         React UI: Phase −1 demo (mocked) + "Live workspace (API)" screen against the real server

@@ -9,6 +9,8 @@ export interface Decision {
   variantId: string;
   content: { html?: string; json?: Record<string, unknown> } | null;
   trigger: { type: 'immediate' | 'exit_intent' | 'scroll' | 'time_on_page'; value?: number };
+  /** Shown because of a preview link (?am_preview=…); not reported as a view. */
+  preview?: boolean;
 }
 
 /**
@@ -92,7 +94,13 @@ export async function personalize(host: PersonalizeHost, opts: PersonalizeOption
     const el = doc.querySelector(`[data-am-placement="${d.placement.replace(/"/g, '')}"]`);
     if (d.content?.html !== undefined && el) el.replaceChildren(sanitize(d.content.html, doc));
     opts.onDecision?.(d, el);
-    host.track('Experience Viewed', { experience_id: d.experienceId, variant_id: d.variantId, version: d.version, placement: d.placement });
+    if (!d.preview)
+      host.track('Experience Viewed', {
+        experience_id: d.experienceId,
+        variant_id: d.variantId,
+        version: d.version,
+        placement: d.placement,
+      });
   };
 
   for (const d of decisions) {

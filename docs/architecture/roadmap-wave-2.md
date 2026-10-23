@@ -257,6 +257,13 @@ See [docs/identity.md](../identity.md). Not built yet: an SSO settings screen (e
 - **Copilot:** token streaming, conversations stored on the server per person (the last 20 turns go to the model), past conversations in the UI.
 - **OpenAI OAuth:** not built. OpenAI opened "Sign in with ChatGPT" to third-party apps at DevDay 2026, for launch partners only; it lands when any app can register.
 
+**Built (part c, personalization):**
+- **Experiment statistics:** besides the fixed-horizon z-test, every result has an always-valid sequential p-value (mSPRT, safe to check any time) and Bayesian probabilities to beat the control and to be best, with expected loss (Beta posteriors, Monte Carlo). An experience's `analysis` (`sequential` by default, `bayesian` or `fixed`, with `alpha` and `threshold`) picks which one the recommendation follows.
+- **Edge decide on Cloudflare Workers:** `edge.configure` mirrors published experiences, purposes, write keys and profile snapshots (non-personal traits, segments) to Workers KV; the worker in `packages/edge-worker` answers `/v1/decide` with the same contract and the same decision code as the server. Snapshot writes and erasures queue in an outbox and go up in bulk every second; a new target starts with a backfill. See [edge decisions](../deployment/edge.md).
+- **Visual editor:** a block composer per variant (heading, text, button, image, colours, alignment) with live preview, writing the variant's HTML; preview links (`?am_preview=<experience>:<variant>`) show a variant on the real site without counting it in results.
+
+Not built yet: session conditions at the edge (they read as "no session" there), Durable Objects, a point-and-click editor that picks elements on the live page.
+
 ## Every known limitation, and where it lands
 
 | Limitation (where it was recorded) | Phase |
@@ -274,8 +281,8 @@ See [docs/identity.md](../identity.md). Not built yet: an SSO settings screen (e
 | Segment evaluation holds ids in memory (Phase 2) | 10 (done: SQL, load-tested to 1M profiles) |
 | Merged profile does not wake waiting participants (Phase 2) | 10 (done) |
 | Experience definitions cached 30 s (Phase 3) | 10 (done: invalidated on publish) |
-| Fixed-horizon experiment statistics only (Phase 3) | 11 |
-| No visual experience editor; no edge decide (Phase 3) | 11 |
+| Fixed-horizon experiment statistics only (Phase 3) | 11 (done: sequential and Bayesian) |
+| No visual experience editor; no edge decide (Phase 3) | 11 (done: block composer and preview links; Workers KV edge decide without session conditions) |
 | Snapshot lag after scheduled segment refresh (Phase 3) | 10 (done) |
 | No generated-text caching, decision sampling or `ai.classify` (Phase 4) | 11 (done) |
 | AI budgets can be overshot; prompt tests in the command transaction (Phase 4) | 10 (done) |

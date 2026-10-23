@@ -4,7 +4,9 @@
   "version": "0.0.0",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./core": "./src/core.ts",
+    "./targeting": "./src/targeting.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p ."
@@ -17,7 +19,9 @@
     "@agentic-marketing/events": "workspace:*",
     "@agentic-marketing/hotstate": "workspace:*",
     "@agentic-marketing/ingest": "workspace:*",
+    "@agentic-marketing/integrations": "workspace:*",
     "@agentic-marketing/profiles": "workspace:*",
+    "@agentic-marketing/secrets": "workspace:*",
     "@agentic-marketing/telemetry": "workspace:*",
     "drizzle-orm": "0.45.4",
     "hono": "4.13.13",

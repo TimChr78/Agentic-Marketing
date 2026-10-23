@@ -82,7 +82,10 @@ Generated from the command registry (`apps/server/src/registry.ts`). **Effect**:
 | `broadcasts.preview` | read | artifacts:read | people and agents | Preview a broadcast’s audience |
 | `broadcasts.status` | read | artifacts:read | people and agents | Broadcast status and results |
 | `broadcasts.cancel` | write | messages:send | people and agents | Cancel a broadcast |
-| `experiences.results` | read | artifacts:read | people and agents | Experiment results |
+| `experiences.results` | read | artifacts:read | people and agents | Experiment results (fixed, sequential and Bayesian; `recommendation` follows the experience’s `analysis.method`) |
+| `edge.status` | read | workspace:admin | people and agents | Edge decisions status (Cloudflare Workers KV) |
+| `edge.configure` | write | workspace:admin | people only | Mirror decisions to Cloudflare Workers KV |
+| `edge.sync` | write | workspace:admin | people and agents | Sync the edge now, optionally backfilling snapshots |
 | `aiProviders.list` | read | artifacts:read | people and agents | List AI providers |
 | `aiProviders.create` | write | workspace:admin | people only | Add an AI provider |
 | `aiProviders.update` | write | workspace:admin | people only | Change an AI provider |

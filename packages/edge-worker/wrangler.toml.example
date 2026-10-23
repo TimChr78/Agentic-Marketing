@@ -1,0 +1,18 @@
+# Copy to wrangler.toml, fill in the KV namespace id and your route, then `npx wrangler deploy`.
+# The KV namespace is the one given to edge.configure; the platform keeps it in sync.
+name = "agentic-marketing-decide"
+main = "src/worker.ts"
+compatibility_date = "2026-09-01"
+# node:crypto (write key hashes, sticky variant allocation).
+compatibility_flags = ["nodejs_compat"]
+
+# Answer decisions on your own domain, next to the page, e.g. https://example.com/am/v1/decide.
+routes = [{ pattern = "example.com/am/v1/decide", zone_name = "example.com" }]
+
+[[kv_namespaces]]
+binding = "AM_KV"
+id = "0123456789abcdef0123456789abcdef"
+
+[vars]
+# Seconds each isolate keeps experiences and write keys before reading KV again.
+AM_CACHE_SECONDS = "10"

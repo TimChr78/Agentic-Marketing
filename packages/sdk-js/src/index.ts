@@ -19,6 +19,8 @@ export interface AnalyticsOptions {
   writeKey: string;
   /** Collector origin, e.g. https://marketing.example.com */
   host: string;
+  /** Where to ask for decisions, e.g. the edge worker on your own domain (https://example.com/am/v1/decide). Default: host's /v1/decide. */
+  decideUrl?: string;
   /** Purpose that must be allowed before events are sent (the source's required purpose). Default "analytics". */
   trackingPurpose?: string;
   /** Flush when this many events are queued. Default 20. */
@@ -94,6 +96,17 @@ function safeStorage(s: AnalyticsOptions['storage']) {
       } catch {}
     },
   };
+}
+
+/** The editor's preview link: ?am_preview=<experience id>:<variant id> shows that variant here. */
+export function previewOf(url: string | undefined): { experienceId: string; variantId: string } | undefined {
+  if (!url) return undefined;
+  try {
+    const m = new URL(url).searchParams.get('am_preview')?.match(/^(exp_[0-9a-f]{32}):([a-z0-9_]{1,32})$/);
+    return m ? { experienceId: m[1], variantId: m[2] } : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function browserPage() {
@@ -268,7 +281,8 @@ export function createAnalytics(opts: AnalyticsOptions) {
     /** Ask the decision API what the given placements show. Works before consent too (page-only targeting). */
     async decide(placements: string[]): Promise<Decision[]> {
       const page = (opts.page ?? browserPage)();
-      const res = await doFetch(`${opts.host.replace(/\/$/, '')}/v1/decide`, {
+      const preview = previewOf(page?.url);
+      const res = await doFetch(opts.decideUrl ?? `${opts.host.replace(/\/$/, '')}/v1/decide`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: auth },
         body: JSON.stringify({
@@ -276,6 +290,7 @@ export function createAnalytics(opts: AnalyticsOptions) {
           ...(userId ? { userId } : {}),
           placements,
           page: page ? { url: page.url, path: page.path, referrer: page.referrer } : undefined,
+          ...(preview ? { preview } : {}),
           context: {
             consent: { categoryPreferences: { ...(consent ?? {}) } },
             ...(typeof navigator !== 'undefined' ? { userAgent: navigator.userAgent } : {}),
@@ -283,7 +298,9 @@ export function createAnalytics(opts: AnalyticsOptions) {
         }),
       });
       if (!res.ok) throw new Error(`decide answered ${res.status}`);
-      return ((await res.json()) as { decisions: Decision[] }).decisions;
+      const { decisions } = (await res.json()) as { decisions: Decision[] };
+      // A preview is not an exposure: it is marked, and personalize() does not report it.
+      return preview ? decisions.map((d) => (d.experienceId === preview.experienceId ? { ...d, preview: true } : d)) : decisions;
     },
     /** Decide, render the placements on this page, and report what was shown. */
     personalize(o: PersonalizeOptions = {}) {

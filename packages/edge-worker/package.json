@@ -1,0 +1,15 @@
+{
+  "name": "@agentic-marketing/edge-worker",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/worker.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "dependencies": {
+    "@agentic-marketing/personalize": "workspace:*"
+  }
+}
