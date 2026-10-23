@@ -7,12 +7,14 @@ import { describe, expect, it } from 'vitest';
 const root = fileURLToPath(new URL('../../../', import.meta.url));
 const read = (name: string) => readFile(join(root, name), 'utf8');
 
-const [compose, buildOverlay, envExample, smoke, readme] = await Promise.all([
+const [compose, buildOverlay, envExample, smoke, readme, dockerfile, dockerignore] = await Promise.all([
   read('docker-compose.yml'),
   read('docker-compose.build.yml'),
   read('.env.example'),
   read('scripts/smoke.sh'),
   read('README.md'),
+  read('Dockerfile'),
+  read('.dockerignore'),
 ]);
 
 /** The lines of one service, up to the next two-space service key. */
@@ -72,6 +74,25 @@ describe('smoke test', () => {
     expect(smoke).toContain('-f docker-compose.yml -f docker-compose.build.yml');
     expect(smoke).toMatch(/trap 'dc logs app[\s\S]*dc down -v/);
     expect(smoke).toContain('SMOKE_NO_BUILD');
+  });
+});
+
+describe('Docker build context', () => {
+  it('keeps apps/web available to the image build', () => {
+    const ignored = dockerignore
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line && !line.startsWith('#'));
+    expect(ignored).not.toContain('apps/web');
+    expect(ignored).toContain('**/node_modules');
+    expect(ignored).toContain('**/dist');
+  });
+
+  it('builds the live admin UI and copies it into the runtime image', () => {
+    expect(dockerfile).toContain('FROM base AS web');
+    expect(dockerfile).toContain('COPY apps/web ./apps/web');
+    expect(dockerfile).toContain('build:live');
+    expect(dockerfile).toContain('COPY --from=web /app/apps/web/dist /app/apps/web/dist');
   });
 });
 
