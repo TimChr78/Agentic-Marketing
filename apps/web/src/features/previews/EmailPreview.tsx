@@ -14,7 +14,7 @@ export function emailDoc(html: string) {
  * data, at desktop and mobile width, with subject, preheader and the plain-text part.
  */
 export function EmailPreview({ artifactId, version, compact }: { artifactId: string; version?: number; compact?: boolean }) {
-  const [width, setWidth] = useState<'desktop' | 'mobile'>('desktop');
+  const [width, setWidth] = useState<'desktop' | 'mobile'>(() => (window.innerWidth < 640 ? 'mobile' : 'desktop'));
   const [tab, setTab] = useState<'html' | 'text'>('html');
   const { data, error, loading, reload } = useApi(() => api.call('templates.preview', { artifactId, version }), [artifactId, version]);
   if (loading) return <LoadingBlock lines={6} label="Rendering the e-mail" />;

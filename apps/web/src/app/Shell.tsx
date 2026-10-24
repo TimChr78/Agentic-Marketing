@@ -47,14 +47,10 @@ export function Shell({ children }: { children: ReactNode }) {
           <IconButton className="lg:hidden" label="Open navigation" icon={<MenuIcon size={18} />} onClick={() => setNavOpen(true)} />
           <nav aria-label="Breadcrumb" className="min-w-0 flex-1">
             <ol className="flex min-w-0 items-center gap-1 text-[13px]">
-              {group && (
-                <li className="hidden shrink-0 text-muted sm:block">
-                  {group.path ? <Link to={group.path} className="hover:text-fg">{group.label}</Link> : group.label}
-                </li>
-              )}
+              {group && !group.path && <li className="hidden shrink-0 text-muted sm:block">{group.label}</li>}
               {crumbs.map((c, i) => (
                 <li key={i} className={cx('flex min-w-0 items-center gap-1', i < crumbs.length - 1 && 'hidden sm:flex')}>
-                  {(group || i > 0) && <ChevronRight size={14} className={cx('shrink-0 text-muted', i === 0 && 'hidden sm:block')} aria-hidden />}
+                  {((group && !group.path) || i > 0) && <ChevronRight size={14} className={cx('shrink-0 text-muted', i === 0 && 'hidden sm:block')} aria-hidden />}
                   {c.to && i < crumbs.length - 1 ? (
                     <Link to={c.to} className="truncate text-muted hover:text-fg">
                       {c.label}

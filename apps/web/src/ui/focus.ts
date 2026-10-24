@@ -11,13 +11,13 @@ export function focusables(root: HTMLElement) {
  * Dialog focus handling (WAI-ARIA dialog pattern): moves focus into `ref` when `active`, keeps Tab
  * inside it, closes on Escape, and returns focus to whatever had it before when it closes.
  */
-export function useFocusTrap(ref: RefObject<HTMLElement | null>, active: boolean, onEscape?: () => void) {
+export function useFocusTrap(ref: RefObject<HTMLElement | null>, active: boolean, onEscape?: () => void, initialFocus: 'first' | 'container' = 'first') {
   useEffect(() => {
     if (!active) return;
     const root = ref.current;
     if (!root) return;
     const previous = document.activeElement as HTMLElement | null;
-    const initial = root.querySelector<HTMLElement>('[data-autofocus]') ?? focusables(root)[0] ?? root;
+    const initial = root.querySelector<HTMLElement>('[data-autofocus]') ?? (initialFocus === 'container' ? root : focusables(root)[0]) ?? root;
     initial.focus({ preventScroll: true });
 
     const onKey = (e: KeyboardEvent) => {

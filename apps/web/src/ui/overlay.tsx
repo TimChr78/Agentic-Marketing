@@ -36,7 +36,8 @@ export interface DrawerProps {
 export function Drawer({ open, onClose, title, meta, children, footer, width = 'md', actions }: DrawerProps) {
   const ref = useRef<HTMLDivElement>(null);
   const titleId = useId();
-  useFocusTrap(ref, open, onClose);
+  // A drawer opens on its content (screen readers read the title); Tab then reaches the controls.
+  useFocusTrap(ref, open, onClose, 'container');
   useBodyScrollLock(open);
   if (!open) return null;
   return createPortal(
