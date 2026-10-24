@@ -328,3 +328,12 @@
 .gjs-four-color-h:hover {
   color: var(--accent);
 }
+
+/* GrapesJS: use the app's accent instead of its pink highlight. */
+.gjs-four-color,
+.gjs-four-color-h:hover {
+  color: #88a9f7 !important;
+}
+.gjs-selected {
+  outline-color: #2457d6 !important;
+}
