@@ -142,7 +142,7 @@ export function ArtifactDetailPage({
         meta={
           <>
             <span>{typeLabel(a.type)}</span>
-            <StatePill state={latest.state} />
+            {latest.state !== 'published' && <StatePill state={latest.state} />}
             {a.publishedVersion ? <StatusPill tone="good">Live v{a.publishedVersion}</StatusPill> : <StatusPill>Not live</StatusPill>}
             <span>
               v{latest.number} by {latest.by?.displayName ?? (latest.author.type === 'agent' ? 'an agent' : 'a person')} · {timeAgo(latest.createdAt)}

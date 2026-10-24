@@ -194,7 +194,7 @@ p{margin:0 0 1.25rem;color:var(--muted);white-space:pre-line;overflow-wrap:anywh
 button{font:inherit;font-weight:600;min-height:44px;padding:.65rem 1.25rem;border:1px solid var(--accent);border-radius:var(--radius);background:var(--accent);color:var(--accentText);cursor:pointer}
 button:hover{filter:brightness(.94)}
 button:focus-visible{outline:3px solid var(--text);outline-offset:3px}
-button[disabled]{cursor:not-allowed;opacity:.7}
+button[disabled]{cursor:not-allowed}
 .back{margin:1.5rem 0 0;font-size:.95rem}
 a{color:var(--accent);text-underline-offset:.15em}
 a:focus-visible{outline:3px solid var(--text);outline-offset:3px;border-radius:2px}
