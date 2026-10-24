@@ -757,7 +757,12 @@ const form = z
   .refine((f) => !f.doubleOptIn || !!f.confirmationTemplate, 'Double opt-in needs a confirmationTemplate');
 
 const broadcast = z.object({
-  template: z.string().regex(/^(eml|sms|psh)_[0-9a-f]{32}$/, 'An e-mail, SMS or push template id (eml_…, sms_… or psh_…)'),
+  template: z
+    .string()
+    .regex(/^(eml|sms|psh)_[0-9a-f]{32}$/, 'An e-mail, SMS or push template id (eml_…, sms_… or psh_…)')
+    .describe(
+      'An e-mail, SMS or push template id (eml_…, sms_… or psh_…). For a newsletter, use one template per issue (copy the previous issue as a starting point): broadcasts carry no per-send data, so a shared layout cannot be filled per issue. The template must be published before the broadcast can be.',
+    ),
   segment: z.string().regex(/^seg_[0-9a-f]{32}$/, 'A segment id (seg_…)'),
   sendAt: z.iso.datetime().optional().describe('When to start sending (UTC); default: as soon as it is published'),
   description: z.string().max(500).optional(),
@@ -832,7 +837,7 @@ export const artifactTypes = {
     prefix: 'bct',
     label: 'Broadcast',
     description:
-      'A one-off send of an e-mail template to a segment at a set time, e.g. a weekly newsletter. Check it with broadcasts.preview.',
+      'A one-off send of an e-mail template to a segment at a set time, e.g. a weekly newsletter. Use the template-per-issue pattern: each issue is its own e-mail template (copy the previous issue as a starting point), and the broadcast references it. Broadcasts carry no per-send data. The template must be published before the broadcast can be, so an issue takes two approvals: template, then broadcast. Check it with broadcasts.preview.',
     content: broadcast,
   },
   tracking_plan: {

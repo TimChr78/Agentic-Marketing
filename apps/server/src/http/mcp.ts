@@ -5,6 +5,7 @@ import type { Db } from '@agentic-marketing/db';
 import { requireMcpAuth } from '@better-auth/mcp';
 import { type AuthInfo, createMcpHandler, McpServer } from '@modelcontextprotocol/server';
 import { commands } from '../registry';
+import { MCP_GUIDE_URI, MCP_INSTRUCTIONS } from './mcpInstructions';
 
 // MCP surface (spec 2026-07-28, SDK v2): a stateless server per request for the authenticated
 // principal. Each command the principal may run becomes a tool; humans-only commands are not
@@ -20,7 +21,17 @@ export function missingScope(principal: Principal, toolName: string) {
 }
 
 export function mcpServerFor(principal: Principal, executor: Executor, opts: { stepUp?: boolean } = {}) {
-  const server = new McpServer({ name: 'agentic-marketing', version: '0.1.1' });
+  const server = new McpServer({ name: 'agentic-marketing', version: '0.1.1' }, { instructions: MCP_INSTRUCTIONS });
+  server.registerResource(
+    'guide',
+    MCP_GUIDE_URI,
+    {
+      title: 'Agent guide',
+      description: 'How to draft, validate, request publishing, handle dependencies and protect privacy.',
+      mimeType: 'text/markdown',
+    },
+    async (uri) => ({ contents: [{ uri: uri.href, text: MCP_INSTRUCTIONS, mimeType: 'text/markdown' }] }),
+  );
   for (const cmd of commands) {
     if (cmd.humansOnly || !cmd.permission) continue;
     const granted = principal.permissions.has(cmd.permission);
