@@ -62,17 +62,25 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
     adapterDeps: { fetch: egressFetch(config.egress), http2: egressHttp2(config.egress) },
     trackClicks: config.trackClicks,
   };
-  const executor = createExecutor(db, {
-    keyProvider,
-    directory: authDirectory(db),
-    events,
-    bus,
-    email,
-    hot,
-    egress: config.egress,
-    publicUrl: config.publicUrl,
+  const executor = createExecutor(
     db,
-  });
+    {
+      keyProvider,
+      directory: authDirectory(db),
+      events,
+      bus,
+      email,
+      hot,
+      egress: config.egress,
+      publicUrl: config.publicUrl,
+      db,
+    },
+    {
+      strictInputs: config.strictInputs,
+      onUnknownKeys: (command, unknown) =>
+        logger.warn({ command, unknownKeys: unknown.map((u) => u.path) }, 'command input has unknown keys'),
+    },
+  );
 
   const app = new Hono();
   // Defence in depth for a proxy that forwards raw paths: never route a traversal target.
@@ -171,7 +179,14 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
     );
 
   if (mcpEnabled) {
-    const mcp = mcpEndpoint({ auth, db, executor, resource: `${config.publicUrl}/mcp` });
+    const mcp = mcpEndpoint({
+      auth,
+      db,
+      executor,
+      resource: `${config.publicUrl}/mcp`,
+      textContent: config.mcpTextContent,
+      toolNameStyle: config.mcpToolNameStyle,
+    });
     app.all('/mcp', (c) => mcp(c.req.raw));
   }
   if (config.roles.has('api')) app.route('/', copilotApi({ auth, db, executor, kp: keyProvider }));

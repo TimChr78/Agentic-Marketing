@@ -9,6 +9,18 @@ const Env = z.object({
     .enum(['true', 'false'])
     .default('false')
     .describe('Start without migrating (Kubernetes: a migration job runs before each upgrade)'),
+  STRICT_INPUTS: z
+    .enum(['true', 'false'])
+    .default('false')
+    .describe('Reject unknown command input keys instead of accepting them with a warning (roll it out before flipping this)'),
+  MCP_TEXT_CONTENT: z
+    .enum(['json', 'summary'])
+    .default('json')
+    .describe('Text block of an MCP tool result: the full result as JSON, or a one-line summary (structuredContent is always complete)'),
+  MCP_TOOL_NAME_STYLE: z
+    .enum(['dotted', 'underscore'])
+    .default('dotted')
+    .describe('MCP tool names: command names such as artifacts.list, or underscore names such as artifacts_list'),
   ROLE: z.string().default('all').describe('Comma-separated roles: api, ingest, worker, scheduler, or all'),
   PORT: z.coerce.number().int().default(3000),
   PUBLIC_PORT: z.coerce
@@ -179,6 +191,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     // run from /app, where the built UI sits next to the server.
     webDist: e.WEB_DIST ?? fileURLToPath(new URL('../../../apps/web/dist', import.meta.url)),
     skipMigrations: e.SKIP_MIGRATIONS === 'true',
+    strictInputs: e.STRICT_INPUTS === 'true',
+    mcpTextContent: e.MCP_TEXT_CONTENT,
+    mcpToolNameStyle: e.MCP_TOOL_NAME_STYLE,
     publicUrl: (e.PUBLIC_URL ?? `http://localhost:${e.PORT}`).replace(/\/$/, ''),
     linksUrl: (e.PUBLIC_LINKS_URL ?? e.PUBLIC_URL ?? `http://localhost:${e.PORT}`).replace(/\/$/, ''),
     clientIpHeaders: clientIpHeaders.length ? clientIpHeaders : ['x-forwarded-for'],
