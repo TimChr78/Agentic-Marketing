@@ -61,4 +61,19 @@ describe('pilot documentation', () => {
     expect(pilot).toMatch(/admin UI and REST work over a plain-HTTP LAN URL/i);
     expect(cloudflare).not.toMatch(/admin, MCP[^\n]*http:\/\//i);
   });
+
+  it('documents the public-only listener and a traversal-safe tunnel rule', async () => {
+    const [skill, cloudflare, pilot] = await Promise.all([read(paths.skill), read(paths.cloudflare), read(paths.pilot)]);
+    for (const doc of [skill, cloudflare, pilot]) {
+      expect(doc).toContain('PUBLIC_PORT');
+      // A path rule is still supported, but only in the strict form where a segment may not start
+      // with a dot or percent (link tokens are base64url, so real links keep matching).
+      expect(doc).toContain('^/(f|u|c|hooks)(/[^/.%][^/%]*)+/?$');
+      expect(doc).toContain('curl --path-as-is');
+      // The old loose prefix rule must be gone: cloudflared matches it against the raw path.
+      expect(doc).not.toMatch(/\^\/\(f\|u\|c(?:\|hooks)?\)\//);
+      expect(doc).not.toMatch(/path:\s*\^\/\(f\|u\|c/);
+    }
+    for (const doc of [skill, pilot]) expect(doc).toMatch(/400 or 404/);
+  });
 });

@@ -49,6 +49,7 @@ Write the fit down as a table (need / exists / gap), as in `docs/pilots/martechs
 Docker Compose on the host (homelab or VM): copy `.env.example` to `.env` and generate secrets with `openssl rand -base64 32`. Set:
 - `PUBLIC_URL`: the admin URL, e.g. `https://am.<site>` or a VPN hostname. Plain HTTP on a LAN or loopback is supported for the admin UI and REST (`http://am.lan:3000`); with a plain-HTTP non-loopback URL the server still starts, but the MCP/OAuth endpoints are disabled. Use HTTPS (Tailscale Serve/Funnel, a Cloudflare Tunnel or a TLS reverse proxy) where MCP is needed.
 - `PUBLIC_LINKS_URL`: the public base for links in e-mails and forms. Option A (default when a tunnel already exists): `https://am.<site>`; Option B: `https://<site>/am`.
+- `PUBLIC_PORT`: optional public-only listener for option A, e.g. `3001`; point the tunnel there instead of using a path rule.
 - `CLIENT_IP_HEADER`: `cf-connecting-ip` behind a Cloudflare Tunnel (option A), or `x-am-client-ip` with the worker proxy (option B).
 - `EGRESS_ALLOWED_HOSTS` only if webhooks must reach the LAN.
 
@@ -63,10 +64,10 @@ Sign in to the UI and set the approval policy to "Agent changes need a person". 
 
 ### 3. Expose the public paths
 Only these are public: `f/` (forms and confirmations), `u/` (unsubscribe), `c/` (e-mail clicks), plus `hooks/` if a provider posts bounce webhooks. Read [references/cloudflare.md](references/cloudflare.md):
-- **Option A (default when a Cloudflare Tunnel already exists, e.g. for Umami):** add a hostname `am.<site>` to that tunnel with a path rule `^/(f|u|c)/` and a 404 catch-all. Add `am.<site>` to the CSP's `form-action`.
+- **Option A (default when a Cloudflare Tunnel already exists, e.g. for Umami):** set `PUBLIC_PORT=3001` and add a hostname `am.<site>` to that tunnel pointing at `http://app:3001` — no path rule is needed, and only `/f`, `/u`, `/c`, `/hooks` (plus the probes) exist there. If a path rule is unavoidable, use the strict `^/(f|u|c|hooks)(/[^/.%][^/%]*)+/?$` with a 404 catch-all: a loose prefix rule can be bypassed with a raw `..` path. Add `am.<site>` to the CSP's `form-action`.
 - **Option B (first-party links, and the natural fit for phase B):** the site's own worker proxies `/am/*` with [references/cloudflare-worker-proxy.js](references/cloudflare-worker-proxy.js) to a tunnel hostname locked with a Cloudflare Access service token. No CSP change; choose it when links must stay on the main domain or for phase B tracking.
 
-For other hosts (Netlify, Vercel, nginx), expose the same paths the same way. **Check:** `/` and `/v1/workspace.get` on the public hostname return 404, and a form post returns 303.
+For other hosts (Netlify, Vercel, nginx), expose the same paths the same way. **Check:** `/` and `/v1/workspace.get` on the public hostname return 404, a form post returns 303, and `curl --path-as-is -X POST https://am.<site>/f/../v1/workspace.get` returns 400 or 404, never 401 (repeat with `/f/%2e%2e/v1/workspace.get`).
 
 ### 4. E-mail sending
 Add a provider in the UI (E-mails → providers) or with `emailProviders.create` (humans only):

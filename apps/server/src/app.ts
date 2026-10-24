@@ -24,6 +24,7 @@ import type { Config } from './config';
 import { copilotApi } from './http/copilot';
 import { mcpEndpoint } from './http/mcp';
 import { consentPage, invitePage, loginPage } from './http/pages';
+import { rejectUnsafeRawPath } from './http/raw-path';
 import { restApi } from './http/rest';
 import { scimApi } from './http/scim';
 import { staticSite } from './http/static';
@@ -74,6 +75,8 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
   });
 
   const app = new Hono();
+  // Defence in depth for a proxy that forwards raw paths: never route a traversal target.
+  app.use('*', rejectUnsafeRawPath);
 
   /**
    * Resolves the client IP once, then replaces any caller-supplied value of the resolved header.

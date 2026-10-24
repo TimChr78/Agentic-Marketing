@@ -56,4 +56,9 @@ describe('configuration', () => {
     const c = loadConfig({ ...base, WEB_DIST: '/srv/agentic-marketing/ui' });
     expect(c.webDist).toBe('/srv/agentic-marketing/ui');
   });
+
+  it('keeps PUBLIC_PORT optional and parses it when set', () => {
+    expect(loadConfig(base).publicPort).toBeUndefined();
+    expect(loadConfig({ ...base, PUBLIC_PORT: '3001' }).publicPort).toBe(3001);
+  });
 });

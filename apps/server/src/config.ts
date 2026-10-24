@@ -11,6 +11,13 @@ const Env = z.object({
     .describe('Start without migrating (Kubernetes: a migration job runs before each upgrade)'),
   ROLE: z.string().default('all').describe('Comma-separated roles: api, ingest, worker, scheduler, or all'),
   PORT: z.coerce.number().int().default(3000),
+  PUBLIC_PORT: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(65535)
+    .optional()
+    .describe('Optional second listener that serves only /f, /u, /c, /hooks, /healthz and /readyz; point the public tunnel or proxy here'),
   WEB_DIST: z
     .string()
     .optional()
@@ -167,6 +174,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   return {
     roles: new Set(e.ROLE === 'all' ? ['api', 'ingest', 'worker', 'scheduler'] : e.ROLE.split(',').map((r) => r.trim())),
     port: e.PORT,
+    publicPort: e.PUBLIC_PORT,
     // Resolved from this file, never from the working directory: `pnpm start` and the image both
     // run from /app, where the built UI sits next to the server.
     webDist: e.WEB_DIST ?? fileURLToPath(new URL('../../../apps/web/dist', import.meta.url)),

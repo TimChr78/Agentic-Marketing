@@ -16,7 +16,7 @@ Two ways to publish the platform's public paths. Option A is the default and rec
 ```
 Option A (existing tunnel)
 visitor ─► https://site/…            Cloudflare Pages (unchanged)
-form post, e-mail links ─► https://am.site/(f|u|c)/…  ─► tunnel ─► app:3000   (other paths: 404 at the edge)
+form post, e-mail links ─► https://am.site/{f,u,c,hooks}/…  ─► tunnel ─► app:3001   (public-only listener; other paths 404 there)
 
 Option B (worker proxy)
 visitor ─► https://site/am/(f|u|c|v1/batch|v1/decide)… ─► _worker.js ─► https://am-edge.site (Access: service token) ─► tunnel ─► app:3000
@@ -27,9 +27,11 @@ MCP, OAuth ─► https://…                             (HTTPS only: Tailscale
 
 The admin UI, REST and MCP are never public paths. With a plain-HTTP non-loopback `PUBLIC_URL` such as `http://am.lan:3000`, the server starts normally and the admin UI and REST work, but the MCP/OAuth endpoints are disabled; MCP needs HTTPS (Tailscale Serve/Funnel, a Cloudflare Tunnel or a TLS reverse proxy).
 
-Provider webhooks (`/hooks/email/…`) and inbound connector webhooks (`/hooks/in/…`) need a public route only if they are used. Add `hooks` to the tunnel's path rule.
+Provider webhooks (`/hooks/email/…`) and inbound connector webhooks (`/hooks/in/…`) need a public route only if they are used. They are part of the public listener, so enable `hooks` there (or in the strict path rule) when needed.
 
 ## Option A: hostname on the existing tunnel
+
+Set `PUBLIC_PORT=3001` on the platform: it then serves the admin UI, REST and MCP on `3000` (LAN/VPN only) and **only** `/f`, `/u`, `/c`, `/hooks`, `/healthz` and `/readyz` on `3001`. Point the tunnel at `3001`, so no path rule is needed and nothing else can be reached whatever the proxy forwards. Option A is the default and recommended choice when a tunnel already serves something like Umami.
 
 Tunnel config (locally managed `config.yml`), next to the existing rules:
 ```yaml
@@ -37,20 +39,18 @@ ingress:
   - hostname: analytics.example.com      # e.g. existing Umami
     service: http://umami:3000
   - hostname: am.example.com
-    path: ^/(f|u|c)/                     # add |hooks if a provider posts webhooks
-    service: http://app:3000
-  - hostname: am.example.com
-    service: http_status:404
+    service: http://app:3001             # public-only listener; no path rule
   - service: http_status:404
 ```
-- **Dashboard-managed tunnel:** Zero Trust → Networks → Tunnels → the tunnel → Public hostnames. Add `am.example.com` with Path `^/(f|u|c)/` → `http://app:3000`, and a second entry for `am.example.com` with no path → `http_status:404`. The more specific rule must come first.
+- **Dashboard-managed tunnel:** Zero Trust → Networks → Tunnels → the tunnel → Public hostnames. Add one entry: `am.example.com` → `http://app:3001`. No catch-all entry and no path regex are needed.
+- **Strict path rule, only if the tunnel cannot use the second port:** a loose prefix rule is unsafe because cloudflared matches the **raw** path and forwards it raw; `/f/../v1/workspace.get` passes a rule that only checks the prefix and the app then resolves it to the admin API. Use `^/(f|u|c|hooks)(/[^/.%][^/%]*)+/?$` with a `http_status:404` catch-all, and keep the platform's own guard (it rejects dot-segments and encoded dots/slashes with 400 on both listeners).
 - **cloudflared in Compose** (if not running already):
   ```yaml
   cloudflared:
     image: cloudflare/cloudflared:2026.9.3
     command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
   ```
-- **Platform:** `PUBLIC_LINKS_URL=https://am.example.com`, `CLIENT_IP_HEADER=cf-connecting-ip`.
+- **Platform:** `PUBLIC_PORT=3001`, `PUBLIC_LINKS_URL=https://am.example.com`, `CLIENT_IP_HEADER=cf-connecting-ip`.
 - **Site CSP:** `form-action 'self' https://am.example.com`, and remove the old newsletter tool's domain. Add `connect-src https://am.example.com` only if forms post JSON with JavaScript.
 
 ## Option B: worker proxy and Access
@@ -101,9 +101,15 @@ Cloudflare Email Routing receives mail only; it does not send newsletters.
 
 ```sh
 # Option A
-curl -s -o /dev/null -w '%{http_code}\n' https://am.<domain>/                     # 404: nothing but f/u/c is public
+curl -s -o /dev/null -w '%{http_code}\n' https://am.<domain>/                     # 404: nothing but f/u/c/hooks is public
 curl -s -o /dev/null -w '%{http_code}\n' -X POST https://am.<domain>/v1/workspace.get  # 404: commands are not public
+curl --path-as-is -s -o /dev/null -w '%{http_code}\n' \
+  -X POST https://am.<domain>/f/../v1/workspace.get                              # 400 or 404, never 401
+curl --path-as-is -s -o /dev/null -w '%{http_code}\n' \
+  -X POST https://am.<domain>/f/%2e%2e/v1/workspace.get                          # 400 or 404, never 401
 curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' -X POST \
   -d 'email=you@example.com' -H 'origin: https://<site>' https://am.<domain>/f/<form id>   # 303 to successUrl
 # Option B: the same through https://<site>/am/…, and https://am-edge.<domain>/readyz gives 403 without the token
 ```
+
+`curl --path-as-is` is required: without it curl removes the dot-segment before sending, which hides the bypass. A 401 means the raw path reached the admin API and the edge rule or public listener is not in place.

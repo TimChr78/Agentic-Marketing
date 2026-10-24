@@ -55,6 +55,7 @@ services:
     environment:
       ROLE: all
       PORT: 3000
+      PUBLIC_PORT: ${PUBLIC_PORT:-}
       PUBLIC_URL: ${PUBLIC_URL:-http://localhost:3000}
       PUBLIC_LINKS_URL: ${PUBLIC_LINKS_URL:-}
       CLIENT_IP_HEADER: ${CLIENT_IP_HEADER:-x-forwarded-for}
@@ -77,6 +78,8 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
     ports:
       - "${AM_PORT:-3000}:3000"
+      # To expose the public-only listener, set PUBLIC_PORT (e.g. 3001) above and uncomment:
+      # - "${PUBLIC_PORT:-3001}:${PUBLIC_PORT:-3001}"
 
 volumes:
   pgdata:
