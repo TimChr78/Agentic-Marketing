@@ -21,7 +21,7 @@ export function missingScope(principal: Principal, toolName: string) {
 }
 
 export function mcpServerFor(principal: Principal, executor: Executor, opts: { stepUp?: boolean } = {}) {
-  const server = new McpServer({ name: 'agentic-marketing', version: '0.1.1' }, { instructions: MCP_INSTRUCTIONS });
+  const server = new McpServer({ name: 'agentic-marketing', version: '0.1.2' }, { instructions: MCP_INSTRUCTIONS });
   server.registerResource(
     'guide',
     MCP_GUIDE_URI,
