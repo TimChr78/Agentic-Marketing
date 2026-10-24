@@ -98,6 +98,42 @@ export function mcpEndpoint(deps: { auth: Auth; db: Db; executor: Executor; reso
     );
   }
 
+  /**
+   * API tokens have no scope step-up of their own: their owner edits them. A tool the token no
+   * longer has a scope for (after narrowing) gets 403 on the very next call, before the MCP server
+   * is built from the freshly read principal.
+   */
+  async function apiTokenChallenge(request: Request, principal: Principal) {
+    if (request.method !== 'POST') return null;
+    const body = await request
+      .clone()
+      .json()
+      .catch(() => null);
+    const calls = (Array.isArray(body) ? body : [body]).filter((m) => m?.method === 'tools/call');
+    const humanOnly = calls.find((m) => commands.find((c) => c.name === m.params?.name)?.humansOnly);
+    if (humanOnly)
+      return Response.json(
+        { error: 'forbidden', message: 'This command can only be run by a person, not by an API token.' },
+        { status: 403 },
+      );
+    const missing = [
+      ...new Set(
+        calls
+          .map((m) => commands.find((c) => c.name === m.params?.name))
+          .filter((c) => c?.permission && !principal.permissions.has(c.permission))
+          .map((c) => c!.permission!),
+      ),
+    ];
+    if (!missing.length) return null;
+    return Response.json(
+      {
+        error: 'insufficient_scope',
+        message: `This API token does not have the ${missing.join(', ')} permission. Its owner can add it with apiTokens.update.`,
+      },
+      { status: 403 },
+    );
+  }
+
   const oauth = requireMcpAuth(
     deps.auth,
     async (request, claims) => {
@@ -123,6 +159,10 @@ export function mcpEndpoint(deps: { auth: Auth; db: Db; executor: Executor; reso
     const principal = await principalFromApiToken(deps.db, bearer);
     if (!principal)
       return Response.json({ error: 'invalid_token', message: 'This API token is unknown, revoked or expired.' }, { status: 401 });
+    // The server (and its tool list) is built per request from this principal, so a narrowed token
+    // loses tools at once rather than keeping a cached server from an earlier request.
+    const denial = await apiTokenChallenge(request, principal);
+    if (denial) return denial;
     const authInfo: AuthInfo = { token: '', clientId: principal.clientId!, scopes: [...principal.permissions], extra: { principal } };
     return handler.fetch(request, { authInfo });
   };

@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { type CommandContext, defineCommand } from '@agentic-marketing/commands';
 import { AppError, newId, sha256 } from '@agentic-marketing/core';
 import { type Db, type Role, schema } from '@agentic-marketing/db';
+import { verifyPassword as verifyBetterAuthPassword } from 'better-auth/crypto';
 import { and, desc, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
 
@@ -12,6 +13,13 @@ import { z } from 'zod';
 /** Names and e-mail addresses of people, which live in the auth tables rather than in a workspace. */
 export interface Directory {
   users(ids: string[]): Promise<Map<string, { email: string; name: string }>>;
+  /** Display names of registered OAuth clients, by client id. */
+  oauthClients(clientIds: string[]): Promise<Map<string, string>>;
+  /**
+   * Checks a person's current password against their Better Auth credential account. People who
+   * sign in with single sign-on have no password and return 'no_password'.
+   */
+  verifyPassword(userId: string, password: string): Promise<'ok' | 'wrong' | 'no_password'>;
   /** Single sign-on providers of a workspace (without secrets). */
   ssoProviders(workspaceId: string): Promise<SsoProviderInfo[]>;
 }
@@ -41,6 +49,23 @@ export function authDirectory(db: Db): Directory {
         [ids],
       );
       return new Map(rows.map((r) => [r.id, { email: r.email, name: r.name }]));
+    },
+    async oauthClients(clientIds) {
+      if (!clientIds.length) return new Map();
+      const { rows } = await db.admin.query<{ clientId: string; name: string | null }>(
+        'SELECT "clientId", name FROM "oauthClient" WHERE "clientId" = ANY($1)',
+        [clientIds],
+      );
+      return new Map(rows.map((r) => [r.clientId, r.name ?? '']));
+    },
+    async verifyPassword(userId, password) {
+      const { rows } = await db.admin.query<{ password: string | null }>(
+        `SELECT password FROM "account" WHERE "userId" = $1 AND "providerId" = 'credential' LIMIT 1`,
+        [userId],
+      );
+      const hash = rows[0]?.password;
+      if (!hash) return 'no_password';
+      return (await verifyBetterAuthPassword({ hash, password })) ? 'ok' : 'wrong';
     },
     async ssoProviders(workspaceId) {
       const { rows } = await db.admin.query<Record<string, unknown>>(
