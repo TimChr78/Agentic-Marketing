@@ -31,7 +31,7 @@ Provider webhooks (`/hooks/email/…`) and inbound connector webhooks (`/hooks/i
 
 ## Option A: hostname on the existing tunnel
 
-Set `PUBLIC_PORT=3001` on the platform: it then serves the admin UI, REST and MCP on `3000` (LAN/VPN only) and **only** `/f`, `/u`, `/c`, `/hooks`, `/healthz` and `/readyz` on `3001`. Point the tunnel at `3001`, so no path rule is needed and nothing else can be reached whatever the proxy forwards. Option A is the default and recommended choice when a tunnel already serves something like Umami.
+Set `PUBLIC_PORT=3001` on the platform: it then serves the admin UI, REST and MCP on `3000` (LAN/VPN only) and **only** `/f`, `/u`, `/c`, `/a`, `/hooks`, `/healthz` and `/readyz` on `3001`. Point the tunnel at `3001`, so no path rule is needed and nothing else can be reached whatever the proxy forwards. Option A is the default and recommended choice when a tunnel already serves something like Umami.
 
 Tunnel config (locally managed `config.yml`), next to the existing rules:
 ```yaml
@@ -43,7 +43,7 @@ ingress:
   - service: http_status:404
 ```
 - **Dashboard-managed tunnel:** Zero Trust → Networks → Tunnels → the tunnel → Public hostnames. Add one entry: `am.example.com` → `http://app:3001`. No catch-all entry and no path regex are needed.
-- **Strict path rule, only if the tunnel cannot use the second port:** a loose prefix rule is unsafe because cloudflared matches the **raw** path and forwards it raw; `/f/../v1/workspace.get` passes a rule that only checks the prefix and the app then resolves it to the admin API. Use `^/(f|u|c|hooks)(/[^/.%][^/%]*)+/?$` with a `http_status:404` catch-all, and keep the platform's own guard (it rejects dot-segments and encoded dots/slashes with 400 on both listeners).
+- **Strict path rule, only if the tunnel cannot use the second port:** a loose prefix rule is unsafe because cloudflared matches the **raw** path and forwards it raw; `/f/../v1/workspace.get` passes a rule that only checks the prefix and the app then resolves it to the admin API. Use `^/(f|u|c|a|hooks)(/[^/.%][^/%]*)+/?$` with a `http_status:404` catch-all, and keep the platform's own guard (it rejects dot-segments and encoded dots/slashes with 400 on both listeners).
 - **cloudflared in Compose** (if not running already):
   ```yaml
   cloudflared:
@@ -101,7 +101,7 @@ Cloudflare Email Routing receives mail only; it does not send newsletters.
 
 ```sh
 # Option A
-curl -s -o /dev/null -w '%{http_code}\n' https://am.<domain>/                     # 404: nothing but f/u/c/hooks is public
+curl -s -o /dev/null -w '%{http_code}\n' https://am.<domain>/                     # 404: nothing but f/u/c/a/hooks is public
 curl -s -o /dev/null -w '%{http_code}\n' -X POST https://am.<domain>/v1/workspace.get  # 404: commands are not public
 curl --path-as-is -s -o /dev/null -w '%{http_code}\n' \
   -X POST https://am.<domain>/f/../v1/workspace.get                              # 400 or 404, never 401

@@ -68,7 +68,7 @@ describe('pilot documentation', () => {
       expect(doc).toContain('PUBLIC_PORT');
       // A path rule is still supported, but only in the strict form where a segment may not start
       // with a dot or percent (link tokens are base64url, so real links keep matching).
-      expect(doc).toContain('^/(f|u|c|hooks)(/[^/.%][^/%]*)+/?$');
+      expect(doc).toContain('^/(f|u|c|a|hooks)(/[^/.%][^/%]*)+/?$');
       expect(doc).toContain('curl --path-as-is');
       // The old loose prefix rule must be gone: cloudflared matches it against the raw path.
       expect(doc).not.toMatch(/\^\/\(f\|u\|c(?:\|hooks)?\)\//);

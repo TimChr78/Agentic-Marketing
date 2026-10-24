@@ -1,4 +1,5 @@
 import { existsSync } from 'node:fs';
+import { assetRoutes } from '@agentic-marketing/assets';
 import { formsApi, withEmailProfileEvents } from '@agentic-marketing/audience';
 import {
   type AuthConfig,
@@ -70,6 +71,7 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
       events,
       bus,
       email,
+      assets: { publicUrl: config.linksUrl, maxBytes: config.assetMaxBytes },
       hot,
       egress: config.egress,
       publicUrl: config.publicUrl,
@@ -164,6 +166,8 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
   if (config.roles.has('api')) app.route('/', emailRoutes({ db, kp: keyProvider, events, email }));
   if (config.roles.has('ingest')) app.route('/', inboundApi({ db, bus, kp: keyProvider }));
   if (config.roles.has('api')) app.route('/', oauthRoutes({ db, kp: keyProvider, egress: config.egress }));
+  // Public asset links, on both roles that front the public edge (like /f and /u).
+  if (config.roles.has('api') || config.roles.has('ingest')) app.route('/', assetRoutes({ db }));
   if (config.roles.has('ingest'))
     app.route(
       '/',
@@ -191,7 +195,7 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
   }
   if (config.roles.has('api')) app.route('/', copilotApi({ auth, db, executor, kp: keyProvider }));
   if (config.roles.has('api')) app.route('/', scimApi({ auth, db, executor, publicUrl: config.publicUrl }));
-  app.route('/', restApi({ auth, db, executor }));
+  app.route('/', restApi({ auth, db, executor, assetMaxBytes: config.assetMaxBytes }));
 
   // Last, so every API route above wins. Without a build (packages/tests, server-only install) the
   // middleware is a no-op and the server behaves exactly as before.

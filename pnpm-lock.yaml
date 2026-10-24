@@ -41,6 +41,9 @@ importers:
       '@agentic-marketing/artifacts':
         specifier: workspace:*
         version: link:../../packages/artifacts
+      '@agentic-marketing/assets':
+        specifier: workspace:*
+        version: link:../../packages/assets
       '@agentic-marketing/audience':
         specifier: workspace:*
         version: link:../../packages/audience
@@ -316,6 +319,27 @@ importers:
       drizzle-orm:
         specifier: 0.45.4
         version: 0.45.4(@opentelemetry/api@1.10.0)(@types/pg@8.23.1)(kysely@0.29.7)(pg@8.23.1)
+      zod:
+        specifier: 4.6.7
+        version: 4.6.7
+
+  packages/assets:
+    dependencies:
+      '@agentic-marketing/commands':
+        specifier: workspace:*
+        version: link:../commands
+      '@agentic-marketing/core':
+        specifier: workspace:*
+        version: link:../core
+      '@agentic-marketing/db':
+        specifier: workspace:*
+        version: link:../db
+      drizzle-orm:
+        specifier: 0.45.4
+        version: 0.45.4(@opentelemetry/api@1.10.0)(@types/pg@8.23.1)(kysely@0.29.7)(pg@8.23.1)
+      hono:
+        specifier: 4.13.13
+        version: 4.13.13
       zod:
         specifier: 4.6.7
         version: 4.6.7

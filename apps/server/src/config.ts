@@ -29,7 +29,9 @@ const Env = z.object({
     .min(1)
     .max(65535)
     .optional()
-    .describe('Optional second listener that serves only /f, /u, /c, /hooks, /healthz and /readyz; point the public tunnel or proxy here'),
+    .describe(
+      'Optional second listener that serves only /f, /u, /c, /a, /hooks, /healthz and /readyz; point the public tunnel or proxy here',
+    ),
   WEB_DIST: z
     .string()
     .optional()
@@ -133,6 +135,12 @@ const Env = z.object({
     .enum(['true', 'false'])
     .default('true')
     .describe('Rewrite links in e-mails to count clicks (open pixels are never added)'),
+  ASSET_MAX_BYTES: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .default(5_242_880)
+    .describe('Largest asset (image or PDF) the library accepts, in bytes; default 5 MB'),
   RETENTION_UNCONFIRMED_DAYS: z.coerce
     .number()
     .int()
@@ -234,6 +242,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     nats: { url: e.NATS_URL, namespace: e.NATS_NAMESPACE, retentionHours: e.NATS_RETENTION_HOURS },
     valkey: { url: e.VALKEY_URL, prefix: e.VALKEY_PREFIX },
     trackClicks: e.EMAIL_TRACK_CLICKS === 'true',
+    assetMaxBytes: e.ASSET_MAX_BYTES,
     egress: {
       allowedHosts: e.EGRESS_ALLOWED_HOSTS.split(',')
         .map((h) => h.trim())

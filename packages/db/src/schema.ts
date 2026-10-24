@@ -760,6 +760,38 @@ export const warehouseExports = pgTable(
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
 );
 
+export const assets = pgTable(
+  'assets',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    name: text('name').notNull(),
+    fileName: text('file_name').notNull(),
+    contentType: text('content_type').notNull(),
+    byteSize: integer('byte_size').notNull(),
+    sha256: text('sha256').notNull(),
+    width: integer('width'),
+    height: integer('height'),
+    altText: text('alt_text').notNull().default(''),
+    createdBy: text('created_by').notNull(),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+    deletedAt: ts('deleted_at'),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
+/** The file bytes, apart from the metadata so assets.list never reads them. */
+export const assetBlobs = pgTable(
+  'asset_blobs',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    assetId: text('asset_id').notNull(),
+    data: bytea('data').notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.assetId] })],
+);
+
 export const edgeTargets = pgTable('edge_targets', {
   workspaceId: uuid('workspace_id').primaryKey(),
   provider: text('provider').$type<'cloudflare'>().notNull().default('cloudflare'),

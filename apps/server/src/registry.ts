@@ -1,6 +1,7 @@
 import { adAudienceCommands, adCommands, spendCommands } from '@agentic-marketing/ads';
 import { aiCommands } from '@agentic-marketing/ai';
 import { artifactCommands, configCommands, workspaceCommands } from '@agentic-marketing/artifacts';
+import { assetCommands } from '@agentic-marketing/assets';
 import { audienceCommands } from '@agentic-marketing/audience';
 import { listSsoProviders, memberCommands, scimCommands, tokenCommands } from '@agentic-marketing/auth';
 import type { AnyCommand } from '@agentic-marketing/commands';
@@ -26,6 +27,7 @@ import { warehouseCommands } from '@agentic-marketing/warehouse';
 /** Every command the server exposes. REST routes, OpenAPI, MCP tools and the UI client derive from this list. */
 export const commands = [
   ...artifactCommands,
+  ...assetCommands,
   ...configCommands,
   ...warehouseCommands,
   ...templateCommands,

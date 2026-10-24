@@ -45,18 +45,18 @@ A light pilot before Phase 6: run the platform for a real site, the owner's [mar
 Umami already runs in the homelab behind a **Cloudflare Tunnel** (`analytics.martechsignal.com`), so the platform reuses that tunnel and **option A is the default here**.
 
 - **Option A, default here (recommended): a hostname on the existing tunnel**, pointed at the public-only listener.
-  - Set `PUBLIC_PORT=3001` on the platform. It keeps serving the admin UI, REST and MCP on `3000` (LAN/VPN only) and additionally serves **only** `/f`, `/u`, `/c` and `/hooks` (plus `/healthz` and `/readyz`) on `3001`; everything else is 404 there.
+  - Set `PUBLIC_PORT=3001` on the platform. It keeps serving the admin UI, REST and MCP on `3000` (LAN/VPN only) and additionally serves **only** `/f`, `/u`, `/c`, `/a` and `/hooks` (plus `/healthz` and `/readyz`) on `3001`; everything else is 404 there.
   - In the tunnel config, point the new hostname at that port with **no path rule**:
     ```yaml
     ingress:
       - hostname: analytics.martechsignal.com     # existing Umami rule
         service: http://umami:3000
       - hostname: am.martechsignal.com
-        service: http://app:3001                  # public listener: only f/u/c/hooks exist here
+        service: http://app:3001                  # public listener: only f/u/c/a/hooks exist here
       - service: http_status:404
     ```
     For a tunnel managed in the dashboard, add one public hostname: `am.martechsignal.com` → `http://app:3001`. No second entry and no path regex are needed.
-  - If a path rule is unavoidable, use the strict form `^/(f|u|c|hooks)(/[^/.%][^/%]*)+/?$` with a catch-all to `http_status:404`. A loose rule is unsafe because cloudflared matches the **raw** path and forwards it raw: `/f/../v1/workspace.get` passes any rule that only checks the prefix, then the app resolves it to the admin API. The server now also rejects dot-segments, encoded dots/slashes and backslashes with 400 on both listeners, but the separate listener is the structural fix.
+  - If a path rule is unavoidable, use the strict form `^/(f|u|c|a|hooks)(/[^/.%][^/%]*)+/?$` with a catch-all to `http_status:404`. A loose rule is unsafe because cloudflared matches the **raw** path and forwards it raw: `/f/../v1/workspace.get` passes any rule that only checks the prefix, then the app resolves it to the admin API. The server now also rejects dot-segments, encoded dots/slashes and backslashes with 400 on both listeners, but the separate listener is the structural fix.
   - Platform settings: `PUBLIC_LINKS_URL=https://am.martechsignal.com`, `CLIENT_IP_HEADER=cf-connecting-ip` (the tunnel passes the visitor's IP).
   - Site: the form posts to `https://am.martechsignal.com/f/<form id>`. The CSP's `form-action` swaps `https://app.kit.com` for `https://am.martechsignal.com`. Nothing else changes; the site worker stays as it is.
   - Bounce and complaint webhooks (`/hooks/...`) are served by the same public listener; with a path rule, the strict regex above already includes them.
@@ -67,6 +67,10 @@ Umami already runs in the homelab behind a **Cloudflare Tunnel** (`analytics.mar
 - **Turnstile** (free) is better than a CAPTCHA if bots find the form; it needs `challenges.cloudflare.com` in `script-src` and `frame-src`.
 - **E-mail sending:** Cloudflare does not send bulk mail. Keep the SMTP relay (with the relay's bounce webhooks if it has them, ADR-0011), or use SES or Postmark. Add SPF, DKIM and DMARC for the sending domain in Cloudflare DNS, and remove Kit's sending-domain records after the switch.
 - **Edge cache:** the worker caches HTML for 5 minutes, so personalization must stay client-side (the SDK), which it already is.
+
+## Assets
+
+Images and PDFs for e-mails and hosted pages live in the asset library (`assets.upload`, `assets.list`, `assets.get`, `assets.update`, `assets.delete` over MCP or REST). Uploads are checked against their declared type (PNG, JPEG, GIF, WebP or PDF; SVG is refused), images record their pixel size, and each asset gets a stable public URL `${PUBLIC_LINKS_URL}/a/<id>/<file name>`. Anyone with that URL can fetch the file, so treat asset ids as unlisted rather than secret and never upload confidential documents; this is also why `/a` is served by the public-only listener. The size limit defaults to 5 MB and is set with `ASSET_MAX_BYTES` (bytes). Deleting an asset that a latest or published artifact still references is refused unless the caller forces it, and agents may never force; a deleted asset's URL answers 410 Gone.
 
 ## Replacing Kit: cutover without losing signups
 
@@ -104,7 +108,7 @@ Umami already runs in the homelab behind a **Cloudflare Tunnel** (`analytics.mar
    curl --path-as-is -s -o /dev/null -w '%{http_code}\n' -X POST https://am.martechsignal.com/f/../v1/workspace.get   # 400 or 404
    curl --path-as-is -s -o /dev/null -w '%{http_code}\n' -X POST https://am.martechsignal.com/f/%2e%2e/v1/workspace.get # 400 or 404
    ```
-   Neither may answer 401 from the admin API. If the tunnel still uses a path rule, use `^/(f|u|c|hooks)(/[^/.%][^/%]*)+/?$`.
+   Neither may answer 401 from the admin API. If the tunnel still uses a path rule, use `^/(f|u|c|a|hooks)(/[^/.%][^/%]*)+/?$`.
 3. **Signup.**
    - Create the confirmation template (purpose `onboarding`), the form (DOI, `successUrl` and `confirmedUrl` pages on the site, `allowedOrigins: ["https://martechsignal.com"]`) and the two small pages (`/subscribe/check-your-inbox/`, `/subscribe/welcome/`).
    - Change the generator's subscribe partial to post to `https://am.martechsignal.com/f/<form id>` with the honeypot field (see "Replacing Kit" for the order).
