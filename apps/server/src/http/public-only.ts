@@ -3,7 +3,7 @@ import { rejectUnsafeRawPath } from './raw-path';
 
 // A listener for the public edge: a tunnel can point here without any path rule, so the admin UI,
 // REST commands and MCP are unreachable whatever the proxy forwards.
-const PUBLIC_ROOTS = new Set(['f', 'u', 'c', 'hooks']);
+const PUBLIC_ROOTS = new Set(['f', 'u', 'c', 'a', 'hooks']);
 const PUBLIC_EXACT = new Set(['/healthz', '/readyz']);
 
 export function publicOnly(app: Hono) {

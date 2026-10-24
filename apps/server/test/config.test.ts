@@ -61,4 +61,9 @@ describe('configuration', () => {
     expect(loadConfig(base).publicPort).toBeUndefined();
     expect(loadConfig({ ...base, PUBLIC_PORT: '3001' }).publicPort).toBe(3001);
   });
+
+  it('defaults the asset size limit to 5 MB and parses an override', () => {
+    expect(loadConfig(base).assetMaxBytes).toBe(5_242_880);
+    expect(loadConfig({ ...base, ASSET_MAX_BYTES: '1048576' }).assetMaxBytes).toBe(1_048_576);
+  });
 });
