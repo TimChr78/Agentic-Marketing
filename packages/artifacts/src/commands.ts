@@ -52,6 +52,9 @@ export const author = (ctx: CommandContext) => ({
 export type DraftWarning = { nodeId: string | null; path: string; message: string };
 const DraftWarningSchema = z.object({ nodeId: z.string().nullable(), path: z.string(), message: z.string() });
 
+/** The admin UI page for an approval request (only SERVICES with a public URL can build absolute links). */
+const approvalUrl = (publicUrl: string | undefined, approvalId: string) => (publicUrl ? `${publicUrl}/approvals/${approvalId}` : null);
+
 function pathText(path: PropertyKey[]): string {
   return path.reduce<string>((text, part) => {
     if (typeof part === 'number') return `${text}[${part}]`;
@@ -464,15 +467,17 @@ export const diff = defineCommand({
 
 export const requestPublish = defineCommand({
   name: 'artifacts.requestPublish',
-  title: 'Publish (or request approval)',
+  title: 'Submit for review (or publish)',
   description:
-    'Publish the latest draft. Under the workspace approval policy this either publishes immediately or puts the version in review and creates an approval request for a person.',
+    "Submits the latest draft for review under the workspace approval policy; publishes directly only when the policy allows it (policy `none`, or `agent_changes` for a person's own edits). A person then approves or rejects it in the admin UI. Check the result with approvals.list or artifacts.get.",
   input: z.object({ artifactId: ArtifactId, note: z.string().min(1).max(1000).describe('What changed and why, for the reviewer') }),
   output: z.object({
     status: z.enum(['published', 'in_review']),
     version: z.number().int(),
     approvalId: z.string().nullable(),
     policy: z.string(),
+    reviewUrl: z.string().nullable().describe('Admin UI page where a person approves this; null when it was published directly'),
+    next: z.string().describe('What happens next, and how to check the result'),
   }),
   permission: 'artifacts:publish',
   effect: 'publish',
@@ -494,7 +499,14 @@ export const requestPublish = defineCommand({
       w.policy === 'all_publishes' || (w.policy === 'agent_changes' && (ctx.principal.type === 'agent' || v.authorType === 'agent'));
     if (!needsApproval) {
       await publishVersion(ctx, a.id, v.number);
-      return { status: 'published' as const, version: v.number, approvalId: null, policy: w.policy };
+      return {
+        status: 'published' as const,
+        version: v.number,
+        approvalId: null,
+        policy: w.policy,
+        reviewUrl: null,
+        next: `Published as v${v.number}; it is live now.`,
+      };
     }
     const approvalId = newId('apr');
     await setVersionState(ctx, a.id, v.number, 'in_review');
@@ -509,7 +521,17 @@ export const requestPublish = defineCommand({
       requestedByClient: ctx.principal.clientId ?? null,
       note: input.note,
     });
-    return { status: 'in_review' as const, version: v.number, approvalId, policy: w.policy };
+    const reviewUrl = approvalUrl(ctx.services.publicUrl, approvalId);
+    return {
+      status: 'in_review' as const,
+      version: v.number,
+      approvalId,
+      policy: w.policy,
+      reviewUrl,
+      next: reviewUrl
+        ? `A person must approve this in the admin UI: ${reviewUrl}. Check the result with approvals.list or artifacts.get.`
+        : 'A person must approve this in the admin UI. Check the result with approvals.list or artifacts.get.',
+    };
   },
 });
 
@@ -525,6 +547,7 @@ const Approval = z.object({
   decidedBy: z.string().nullable(),
   decisionNote: z.string().nullable(),
   createdAt: z.string(),
+  reviewUrl: z.string().nullable().describe('Admin UI page for this approval request'),
 });
 
 export const listApprovals = defineCommand({
@@ -565,6 +588,7 @@ export const listApprovals = defineCommand({
         decidedBy: r.decidedBy,
         decisionNote: r.decisionNote,
         createdAt: r.createdAt.toISOString(),
+        reviewUrl: approvalUrl(ctx.services.publicUrl, r.id),
       })),
     };
   },
