@@ -23,10 +23,20 @@ const ArtifactId = z
   .describe('Artifact id, e.g. "jrn_0192…"');
 const VersionStateSchema = z.enum(['draft', 'in_review', 'published', 'superseded', 'rejected']);
 const Author = z.object({ type: z.enum(['user', 'agent']), id: z.string(), client: z.string().nullable() });
+const Requester = z.object({
+  kind: z.enum(['person', 'token', 'oauth_client']),
+  displayName: z.string(),
+  personName: z.string().nullable(),
+  tokenName: z.string().nullable(),
+  tokenId: z.string().nullable(),
+  clientName: z.string().nullable(),
+});
+
 const VersionSummary = z.object({
   number: z.number().int(),
   state: VersionStateSchema,
   author: Author,
+  by: Requester.optional().describe('Who wrote this version: person, API token (with owner) or OAuth client'),
   note: z.string().nullable(),
   contentHash: z.string(),
   basedOn: z.number().int().nullable(),
@@ -359,7 +369,7 @@ export const getArtifact = defineCommand({
       name: a.name,
       latestVersion: a.latestVersion,
       publishedVersion: a.publishedVersion,
-      version: { ...toSummary(v), content: v.content },
+      version: { ...(await withAuthorNames(ctx, [toSummary(v)]))[0]!, content: v.content },
     };
   },
 });
@@ -431,7 +441,7 @@ export const history = defineCommand({
         and(eq(schema.artifactVersions.workspaceId, ctx.principal.workspaceId), eq(schema.artifactVersions.artifactId, input.artifactId)),
       )
       .orderBy(desc(schema.artifactVersions.number));
-    return { versions: rows.map(toSummary) };
+    return { versions: await withAuthorNames(ctx, rows.map(toSummary)) };
   },
 });
 
@@ -535,14 +545,6 @@ export const requestPublish = defineCommand({
   },
 });
 
-const Requester = z.object({
-  kind: z.enum(['person', 'token', 'oauth_client']),
-  displayName: z.string(),
-  personName: z.string().nullable(),
-  tokenName: z.string().nullable(),
-  tokenId: z.string().nullable(),
-  clientName: z.string().nullable(),
-});
 
 const Approval = z.object({
   id: z.string(),
@@ -577,45 +579,42 @@ const directoryOf = (ctx: CommandContext) => (ctx.services as { directory?: Appr
 const nameOf = (p: { email: string; name: string } | undefined, fallback: string) => p?.name || p?.email || fallback;
 
 /** Resolves raw requester ids to names: people, API tokens (with their owner) and OAuth clients. */
-async function resolveRequesters(ctx: CommandContext, rows: ApprovalRow[]): Promise<Map<string, RequesterOut>> {
-  const tokenIds = rows
-    .filter((r) => r.requestedByType === 'agent' && r.requestedByClient?.startsWith('token:'))
-    .map((r) => r.requestedByClient!.slice('token:'.length));
-  const clientIds = rows
-    .filter((r) => r.requestedByType === 'agent' && r.requestedByClient && !r.requestedByClient.startsWith('token:'))
-    .map((r) => r.requestedByClient!);
+interface ActorRef {
+  key: string;
+  type: 'user' | 'agent';
+  id: string;
+  client: string | null;
+}
+
+/** Resolves raw actor ids to names: people, API tokens (with their owner) and OAuth clients. */
+async function resolveActors(ctx: CommandContext, actors: ActorRef[]): Promise<Map<string, RequesterOut>> {
+  const tokenIds = actors.filter((r) => r.type === 'agent' && r.client?.startsWith('token:')).map((r) => r.client!.slice('token:'.length));
+  const clientIds = actors.filter((r) => r.type === 'agent' && r.client && !r.client.startsWith('token:')).map((r) => r.client!);
   const tokens = tokenIds.length
     ? await ctx.tx
         .select({ id: schema.apiTokens.id, name: schema.apiTokens.name, userId: schema.apiTokens.userId })
         .from(schema.apiTokens)
-        .where(inArray(schema.apiTokens.id, tokenIds))
+        .where(inArray(schema.apiTokens.id, [...new Set(tokenIds)]))
     : [];
   const tokenById = new Map(tokens.map((t) => [t.id, t]));
   const directory = directoryOf(ctx);
   const people = directory
-    ? await directory.users([...new Set([...rows.map((r) => r.requestedById), ...tokens.map((t) => t.userId)])])
+    ? await directory.users([...new Set([...actors.map((r) => r.id), ...tokens.map((t) => t.userId)])])
     : new Map<string, { email: string; name: string }>();
   const clients = directory && clientIds.length ? await directory.oauthClients([...new Set(clientIds)]) : new Map<string, string>();
 
-  const requesters = new Map<string, RequesterOut>();
-  for (const r of rows) {
-    const personName = nameOf(people.get(r.requestedById), r.requestedById);
-    if (r.requestedByType === 'user') {
-      requesters.set(r.id, {
-        kind: 'person',
-        displayName: personName,
-        personName,
-        tokenName: null,
-        tokenId: null,
-        clientName: null,
-      });
+  const out = new Map<string, RequesterOut>();
+  for (const r of actors) {
+    const personName = nameOf(people.get(r.id), r.id);
+    if (r.type === 'user') {
+      out.set(r.key, { kind: 'person', displayName: personName, personName, tokenName: null, tokenId: null, clientName: null });
       continue;
     }
-    const tokenId = r.requestedByClient?.startsWith('token:') ? r.requestedByClient.slice('token:'.length) : null;
+    const tokenId = r.client?.startsWith('token:') ? r.client.slice('token:'.length) : null;
     if (tokenId) {
       const token = tokenById.get(tokenId);
-      const ownerName = nameOf(people.get(token?.userId ?? r.requestedById), r.requestedById);
-      requesters.set(r.id, {
+      const ownerName = nameOf(people.get(token?.userId ?? r.id), r.id);
+      out.set(r.key, {
         kind: 'token',
         displayName: token?.name ? `${token.name} (${ownerName})` : ownerName,
         personName: ownerName,
@@ -625,17 +624,28 @@ async function resolveRequesters(ctx: CommandContext, rows: ApprovalRow[]): Prom
       });
       continue;
     }
-    const clientName = (r.requestedByClient && clients.get(r.requestedByClient)) || null;
-    requesters.set(r.id, {
-      kind: 'oauth_client',
-      displayName: clientName || personName,
-      personName,
-      tokenName: null,
-      tokenId: null,
-      clientName,
-    });
+    const clientName = (r.client && clients.get(r.client)) || null;
+    out.set(r.key, { kind: 'oauth_client', displayName: clientName || personName, personName, tokenName: null, tokenId: null, clientName });
   }
-  return requesters;
+  return out;
+}
+
+const resolveRequesters = (ctx: CommandContext, rows: ApprovalRow[]) =>
+  resolveActors(
+    ctx,
+    rows.map((r) => ({ key: r.id, type: r.requestedByType, id: r.requestedById, client: r.requestedByClient })),
+  );
+
+/** Version summaries with the author's display name (`by`), for history and detail views. */
+export async function withAuthorNames<V extends { number: number; author: { type: 'user' | 'agent'; id: string; client: string | null } }>(
+  ctx: CommandContext,
+  versions: V[],
+): Promise<(V & { by: RequesterOut })[]> {
+  const names = await resolveActors(
+    ctx,
+    versions.map((v) => ({ key: String(v.number), ...v.author })),
+  );
+  return versions.map((v) => ({ ...v, by: names.get(String(v.number))! }));
 }
 
 const approvalOut = (ctx: CommandContext, r: ApprovalRow, a: ArtifactRow, requester: RequesterOut) => ({

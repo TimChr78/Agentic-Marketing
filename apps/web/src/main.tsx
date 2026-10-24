@@ -6,11 +6,12 @@ function render(node: ReactNode) {
   createRoot(document.getElementById('root')!).render(<StrictMode>{node}</StrictMode>);
 }
 
-// `--mode live` is the production admin UI served by the image. Every other mode (development and the
-// regular/single-file demo builds) keeps the Phase −1 demo. The two literal dynamic imports let
-// Rollup drop the branch that is not built, so the live bundle never pulls in the demo.
-if (import.meta.env.MODE === 'live') {
-  void import('./LiveApp').then(({ default: LiveApp }) => render(<LiveApp />));
-} else {
+// The demo (sample data, mocked backend) is a separate bundle at /demo, linked only from the
+// sign-in page; the single-file build is the demo alone. Everything else is the real workspace.
+const isDemo = import.meta.env.MODE === 'single' || location.pathname === '/demo' || location.pathname.startsWith('/demo/');
+if (isDemo) {
+  document.title = 'Agentic Marketing demo';
   void import('./App').then(({ default: App }) => render(<App />));
+} else {
+  void import('./app/Root').then(({ Root }) => render(<Root />));
 }

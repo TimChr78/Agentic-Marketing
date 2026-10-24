@@ -1,7 +1,7 @@
 import { defineCommand, type Permission } from '@agentic-marketing/commands';
 import { AppError, canonicalJson, sha256 } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
-import { desc, eq, lt } from 'drizzle-orm';
+import { and, desc, eq, lt } from 'drizzle-orm';
 import { z } from 'zod';
 
 const Policy = z.enum(['none', 'agent_changes', 'all_publishes']);
@@ -166,7 +166,11 @@ export const listAudit = defineCommand({
   name: 'audit.list',
   title: 'Read audit log',
   description: 'Who ran which command, through which surface, on what, and whether it succeeded. Newest first; page with `beforeSeq`.',
-  input: z.object({ limit: z.number().int().min(1).max(500).default(100), beforeSeq: z.number().int().optional() }),
+  input: z.object({
+    limit: z.number().int().min(1).max(500).default(100),
+    beforeSeq: z.number().int().optional(),
+    target: z.string().optional().describe('Only entries about this object, e.g. an artifact id'),
+  }),
   output: z.object({ entries: z.array(AuditEntry) }),
   permission: 'audit:read',
   effect: 'read',
@@ -174,7 +178,12 @@ export const listAudit = defineCommand({
     const rows = await ctx.tx
       .select()
       .from(schema.auditLog)
-      .where(input.beforeSeq ? lt(schema.auditLog.seq, input.beforeSeq) : undefined)
+      .where(
+        and(
+          input.beforeSeq ? lt(schema.auditLog.seq, input.beforeSeq) : undefined,
+          input.target ? eq(schema.auditLog.target, input.target) : undefined,
+        ),
+      )
       .orderBy(desc(schema.auditLog.seq))
       .limit(input.limit);
     return {

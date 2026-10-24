@@ -782,11 +782,13 @@ const BrandLogoUrl = z
   .max(2000)
   .refine((value) => {
     try {
-      return new URL(value).protocol === 'https:';
+      const url = new URL(value);
+      if (url.protocol === 'https:') return true;
+      return url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]', '::1'].includes(url.hostname);
     } catch {
       return false;
     }
-  }, 'Use an https URL for the logo');
+  }, 'Use an https URL for the logo (http only on localhost, for development)');
 const CopyText = z.string().max(500);
 const brandCopy = z.object({
   confirmTitle: CopyText.optional().describe('Default "Confirm your subscription"'),
