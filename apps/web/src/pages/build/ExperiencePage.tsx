@@ -1,8 +1,5 @@
-import { useCrumbs } from '../../app/page';
-import { EmptyState } from '../../ui';
+import { ArtifactDetailPage } from '../../features/artifacts/ArtifactDetailPage';
 
-// TODO(v0.2): placeholder while the page is built.
-export default function ExperiencePage() {
-  useCrumbs([{ label: 'ExperiencePage' }]);
-  return <EmptyState title="ExperiencePage">Not built yet.</EmptyState>;
+export default function ExperiencePage({ params }: { params: Record<string, string> }) {
+  return <ArtifactDetailPage id={params.id} crumbs={[{ label: 'Experiences', to: '/build/experiences' }]} />;
 }

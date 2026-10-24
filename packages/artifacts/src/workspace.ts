@@ -3,6 +3,7 @@ import { AppError, canonicalJson, sha256 } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
 import { and, desc, eq, lt } from 'drizzle-orm';
 import { z } from 'zod';
+import { resolveActors } from './commands';
 
 const Policy = z.enum(['none', 'agent_changes', 'all_publishes']);
 
@@ -160,6 +161,7 @@ const AuditEntry = z.object({
   target: z.string().nullable(),
   ok: z.boolean(),
   error: z.string().nullable(),
+  actorName: z.string().optional().describe('Who ran it: a person, an API token (with owner) or an OAuth client'),
 });
 
 export const listAudit = defineCommand({
@@ -186,8 +188,13 @@ export const listAudit = defineCommand({
       )
       .orderBy(desc(schema.auditLog.seq))
       .limit(input.limit);
+    const names = await resolveActors(
+      ctx,
+      rows.map((r) => ({ key: String(r.seq), type: r.principalType === 'agent' ? 'agent' : 'user', id: r.principalId, client: r.clientId })),
+    );
     return {
       entries: rows.map((r) => ({
+        actorName: names.get(String(r.seq))?.displayName,
         seq: r.seq,
         at: r.at.toISOString(),
         principalType: r.principalType,

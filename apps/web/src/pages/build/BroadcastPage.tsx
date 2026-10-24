@@ -1,8 +1,6 @@
-import { useCrumbs } from '../../app/page';
-import { EmptyState } from '../../ui';
+import { ArtifactDetailPage } from '../../features/artifacts/ArtifactDetailPage';
+import { BroadcastEditor } from '../../features/artifacts/BroadcastEditor';
 
-// TODO(v0.2): placeholder while the page is built.
-export default function BroadcastPage() {
-  useCrumbs([{ label: 'BroadcastPage' }]);
-  return <EmptyState title="BroadcastPage">Not built yet.</EmptyState>;
+export default function BroadcastPage({ params }: { params: Record<string, string> }) {
+  return <ArtifactDetailPage id={params.id} crumbs={[{ label: 'Broadcasts', to: '/build/broadcasts' }]} editor={(p) => <BroadcastEditor {...p} />} />;
 }

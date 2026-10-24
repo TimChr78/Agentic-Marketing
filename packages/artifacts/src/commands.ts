@@ -579,7 +579,7 @@ const directoryOf = (ctx: CommandContext) => (ctx.services as { directory?: Appr
 const nameOf = (p: { email: string; name: string } | undefined, fallback: string) => p?.name || p?.email || fallback;
 
 /** Resolves raw requester ids to names: people, API tokens (with their owner) and OAuth clients. */
-interface ActorRef {
+export interface ActorRef {
   key: string;
   type: 'user' | 'agent';
   id: string;
@@ -587,7 +587,7 @@ interface ActorRef {
 }
 
 /** Resolves raw actor ids to names: people, API tokens (with their owner) and OAuth clients. */
-async function resolveActors(ctx: CommandContext, actors: ActorRef[]): Promise<Map<string, RequesterOut>> {
+export async function resolveActors(ctx: CommandContext, actors: ActorRef[]): Promise<Map<string, RequesterOut>> {
   const tokenIds = actors.filter((r) => r.type === 'agent' && r.client?.startsWith('token:')).map((r) => r.client!.slice('token:'.length));
   const clientIds = actors.filter((r) => r.type === 'agent' && r.client && !r.client.startsWith('token:')).map((r) => r.client!);
   const tokens = tokenIds.length

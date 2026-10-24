@@ -1,8 +1,25 @@
-import { useCrumbs } from '../../app/page';
-import { EmptyState } from '../../ui';
+import { ArtifactListPage } from '../../features/artifacts/ArtifactListPage';
 
-// TODO(v0.2): placeholder while the page is built.
 export default function PromptsPage() {
-  useCrumbs([{ label: 'PromptsPage' }]);
-  return <EmptyState title="PromptsPage">Not built yet.</EmptyState>;
+  return (
+    <ArtifactListPage
+      type="prompt"
+      title="AI prompts"
+      description="Instructions for AI steps in journeys: choose a path, write content slots or label a text. Each one has test cases."
+      emptyTitle="No prompts yet"
+      emptyText="Create a prompt to use in an AI decision or AI content step. AI providers are set up under Settings → Providers."
+      create={{
+        label: 'New prompt',
+        content: () => ({
+          kind: 'decide',
+          instructions: 'Choose the option that fits this person best, based on their traits and recent events.',
+          model: 'default',
+          options: [
+            { key: 'engaged', description: 'Reads most issues' },
+            { key: 'casual', description: 'Everyone else' },
+          ],
+        }),
+      }}
+    />
+  );
 }

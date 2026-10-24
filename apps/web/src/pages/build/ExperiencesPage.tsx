@@ -1,8 +1,17 @@
-import { useCrumbs } from '../../app/page';
-import { EmptyState } from '../../ui';
+import { ArtifactListPage } from '../../features/artifacts/ArtifactListPage';
 
-// TODO(v0.2): placeholder while the page is built.
 export default function ExperiencesPage() {
-  useCrumbs([{ label: 'ExperiencesPage' }]);
-  return <EmptyState title="ExperiencesPage">Not built yet.</EmptyState>;
+  return (
+    <ArtifactListPage
+      type="experience"
+      title="Experiences"
+      description="Personalised content for a placement on your site, with variants, targeting and a holdout group."
+      emptyTitle="No experiences yet"
+      emptyText="Create one for an element on your site marked with data-am-placement, such as a newsletter banner under articles."
+      create={{
+        label: 'New experience',
+        content: () => ({ placement: 'article-footer', description: '', variants: [{ id: 'a', name: 'Variant A', weight: 50, content: { html: '<p>Get the newsletter.</p>' } }], holdoutPercent: 0 }),
+      }}
+    />
+  );
 }
