@@ -1,11 +1,33 @@
 import { createHmac } from 'node:crypto';
+import type { LookupAddress, LookupOptions } from 'node:dns';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { getDefaultAutoSelectFamily, setDefaultAutoSelectFamily } from 'node:net';
 import { describe, expect, it } from 'vitest';
-import { checkUrl, isBlockedAddress, safeRequest } from '../src/egress';
+import { checkUrl, type DnsResolve, type EgressPolicy, egressFetch, isBlockedAddress, lookupFor, safeRequest } from '../src/egress';
 import { newWebhookSecret, signWebhook, verifyHmac, verifyWebhook, webhookHeaders } from '../src/signing';
 
 const none = { allowedHosts: [] };
+
+const publicAddresses: LookupAddress[] = [
+  { address: '93.184.216.34', family: 4 },
+  { address: '2606:2800:220:1:248:1893:25c8:1946', family: 6 },
+];
+
+const resolving =
+  (addresses: LookupAddress[]): DnsResolve =>
+  (_hostname, _options, cb) =>
+    cb(null, addresses);
+
+/** Call a guarded lookup as `net` does, turning the callback into a promise. */
+function lookupOf(
+  resolve: DnsResolve,
+  options: LookupOptions,
+  policy: EgressPolicy = none,
+): Promise<{ address: string | LookupAddress[]; family?: number }> {
+  const fn = lookupFor(new URL('https://example.com/hook'), policy, resolve);
+  return new Promise((ok, fail) => fn('example.com', options, (err, address, family) => (err ? fail(err) : ok({ address, family }))));
+}
 
 describe('egress guard', () => {
   it('blocks private, loopback, link-local and metadata addresses unless allowed', () => {
@@ -46,6 +68,47 @@ describe('egress guard', () => {
     const res = await safeRequest(`http://127.0.0.1:${port}/`, {}, { allowedHosts: ['127.0.0.1'] });
     expect(res.status).toBe(302);
     srv.close();
+  });
+
+  it('honours all:true, the way autoSelectFamily calls the lookup', async () => {
+    await expect(lookupOf(resolving(publicAddresses), { all: true })).resolves.toEqual({ address: publicAddresses });
+    await expect(lookupOf(resolving(publicAddresses), { all: false })).resolves.toEqual({ address: '93.184.216.34', family: 4 });
+  });
+
+  it('refuses a mixed public/private answer instead of using its public address', async () => {
+    const mixed: LookupAddress[] = [
+      { address: '93.184.216.34', family: 4 },
+      { address: '10.0.0.1', family: 4 },
+    ];
+    await expect(lookupOf(resolving(mixed), { all: true })).rejects.toThrow(/private address 10\.0\.0\.1/);
+    await expect(lookupOf(resolving(mixed), { all: false })).rejects.toThrow(/private address 10\.0\.0\.1/);
+    await expect(lookupOf(resolving([]), { all: true })).rejects.toMatchObject({ code: 'ENOTFOUND' });
+  });
+
+  it('reaches a local server by name through safeRequest and egressFetch with Happy Eyeballs on', async () => {
+    // Node 20+ defaults autoSelectFamily to true, which asks the custom lookup for every address.
+    const previous = getDefaultAutoSelectFamily();
+    setDefaultAutoSelectFamily(true);
+    expect(getDefaultAutoSelectFamily()).toBe(true);
+    const srv = createServer((req, res) => {
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      res.end(`ok ${req.method}`);
+    });
+    await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+    const port = (srv.address() as AddressInfo).port;
+    // `localhost` itself must be named, since checkUrl rejects internal names; the loops are allowed too.
+    const policy = { allowedHosts: ['localhost', '127.0.0.1', '::1'] };
+    try {
+      const res = await safeRequest(`http://localhost:${port}/hook`, { body: '{}' }, policy);
+      expect(res.status).toBe(200);
+      expect(res.body).toBe('ok POST');
+      const fetched = await egressFetch(policy)(`http://localhost:${port}/fetch`);
+      expect(fetched.status).toBe(200);
+      expect(await fetched.text()).toBe('ok GET');
+    } finally {
+      setDefaultAutoSelectFamily(previous);
+      srv.close();
+    }
   });
 });
 
