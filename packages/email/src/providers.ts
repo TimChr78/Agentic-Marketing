@@ -127,6 +127,7 @@ export const listProviders = defineCommand({
         secrets: z.unknown(),
         tracking: Tracking,
         trackingNote: z.string(),
+        docsUrl: z.string().nullable().describe("The provider's documentation for these settings"),
       }),
     ),
     warnings: z.array(z.string()).describe('Provider settings that contradict the workspace privacy settings'),
@@ -144,6 +145,7 @@ export const listProviders = defineCommand({
         secrets: z.toJSONSchema(a.secrets, { io: 'input' }),
         tracking: a.tracking,
         trackingNote: a.trackingNote,
+        docsUrl: a.docsUrl ?? null,
       })),
       warnings: trackingWarnings(rows, ctx.services.email.trackClicks),
     };

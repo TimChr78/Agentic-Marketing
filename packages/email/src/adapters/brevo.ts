@@ -22,11 +22,12 @@ const types: Record<string, { type: DeliveryEventType; bounce?: 'hard' | 'soft' 
 export const brevoAdapter = defineAdapter({
   id: 'brevo',
   label: 'Brevo',
+  docsUrl: 'https://developers.brevo.com/docs/send-a-transactional-email',
   tracking: 'forced',
   trackingNote:
     "Brevo adds open and click tracking to every message, including the unsubscribe link; it cannot be turned off from here (only Brevo support can disable it for some accounts), and 'anonymised tracking' still rewrites links.",
   config: z.object({}),
-  secrets: z.object({ apiKey: z.string().min(10) }),
+  secrets: z.object({ apiKey: z.string().min(10).describe('API key (v3) from Brevo → SMTP & API') }),
   create: (_config, secrets, { fetch }) => ({
     async send(m) {
       const res = await fetch('https://api.brevo.com/v3/smtp/email', {

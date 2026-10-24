@@ -11,20 +11,21 @@ import { defineAdapter } from './types';
 export const smtpAdapter = defineAdapter({
   id: 'smtp',
   label: 'SMTP relay',
+  docsUrl: 'https://nodemailer.com/smtp/',
   tracking: 'none',
   trackingNote: 'SMTP adds no tracking itself; whether the relay rewrites links or adds pixels depends entirely on the relay.',
   config: z.object({
-    host: z.string().min(1),
-    port: z.number().int().min(1).max(65535).default(587),
+    host: z.string().min(1).describe('Relay host name, e.g. smtp.example.com'),
+    port: z.number().int().min(1).max(65535).default(587).describe('Usually 587 (STARTTLS) or 465 (TLS)'),
     secure: z.boolean().default(false).describe('TLS from the start (port 465); otherwise STARTTLS when offered'),
     requireTls: z.boolean().default(true).describe('Refuse to send without STARTTLS'),
-    user: z.string().optional(),
+    user: z.string().optional().describe('User name for the relay, if it needs one'),
     events: z
       .enum(['none', 'ses', 'postmark', 'brevo'])
       .default('none')
       .describe('Whose webhooks report deliveries and bounces for this relay'),
   }),
-  secrets: z.object({ password: z.string().optional() }),
+  secrets: z.object({ password: z.string().optional().describe('Password for the relay user') }),
   create: (config, secrets, deps) => {
     const transport = createTransport({
       host: config.host,

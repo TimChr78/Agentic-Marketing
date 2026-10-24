@@ -17,6 +17,10 @@ if (email !== '-') {
 await page.addInitScript((t) => localStorage.setItem('am.theme', t), theme);
 await page.goto(base + path);
 await page.waitForTimeout(Number(process.env.WAIT ?? 1500));
+for (const sel of (process.env.CLICK ?? '').split('||').filter(Boolean)) {
+  await page.locator(sel).first().click();
+  await page.waitForTimeout(800);
+}
 const file = `/tmp/shots/${out ?? path.replace(/\W+/g, '_')}-${width}-${theme}.png`;
 await page.screenshot({ path: file, fullPage: process.env.FULL === '1' });
 console.log(file);

@@ -7,15 +7,16 @@ import { type DeliveryEvent, defineAdapter, type WebhookRequest } from './types'
 export const postmarkAdapter = defineAdapter({
   id: 'postmark',
   label: 'Postmark',
+  docsUrl: 'https://postmarkapp.com/developer/api/email-api',
   tracking: 'configurable',
   trackingNote:
     'Postmark tracks opens and clicks only when a message enables them; the platform sends link tracking off on every message and open tracking off unless the provider setting trackOpens is on.',
   config: z.object({
-    transactionalStream: z.string().default('outbound'),
-    marketingStream: z.string().default('broadcast'),
-    trackOpens: z.boolean().default(false),
+    transactionalStream: z.string().default('outbound').describe('Message stream for transactional e-mail'),
+    marketingStream: z.string().default('broadcast').describe('Broadcast message stream for marketing e-mail'),
+    trackOpens: z.boolean().default(false).describe('Let Postmark count opens with a tracking pixel'),
   }),
-  secrets: z.object({ serverToken: z.string().min(10) }),
+  secrets: z.object({ serverToken: z.string().min(10).describe('Server API token from the Postmark server settings') }),
   create: (config, secrets, { fetch }) => ({
     async send(m) {
       const res = await fetch('https://api.postmarkapp.com/email', {

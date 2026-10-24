@@ -82,7 +82,7 @@ export async function seed(t: T) {
 
   const owner = t.api(users.owner, ws);
   await owner.call('workspace.setSeedList', { seedList: ['inbox-check@example.com'] }).catch(() => {});
-  await owner.call('emailProviders.create', { name: 'Development log', adapter: 'log', fromEmail: 'news@martechsignal.example', fromName: 'MartechSignal' });
+  await owner.call('emailProviders.create', { name: 'Development log', adapter: 'log', fromEmail: 'news@martechsignal.example', fromName: 'MartechSignal', useFor: ['transactional', 'marketing'] });
   await owner.call('secrets.set', { name: 'turnstile.secret_key', value: 'dev-secret-not-real' });
 
   const logo = await owner.call('assets.upload', { fileName: 'martechsignal-logo.png', contentType: 'image/png', dataBase64: png(160, 40, [29, 78, 216]).toString('base64'), altText: 'MartechSignal' });
