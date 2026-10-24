@@ -1,6 +1,18 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { clickIdsFrom } from '@agentic-marketing/ads';
-import { artifactTypes, DEFAULT_PURPOSES, type FormDefinition, publishedSingleton, publishValidators } from '@agentic-marketing/artifacts';
+import {
+  artifactTypes,
+  type BrandCopy,
+  DEFAULT_PURPOSES,
+  type FormDefinition,
+  HOSTED_PAGE_HEADERS,
+  type HostedPageKind,
+  originOfUrl,
+  publishedSingleton,
+  publishValidators,
+  renderHostedPage,
+  resolveBrand,
+} from '@agentic-marketing/artifacts';
 import { remoteAddressFromEnv, resolveClientIp } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import type { LinkSigner } from '@agentic-marketing/email';
@@ -129,8 +141,10 @@ async function verifyTurnstile(token: string | undefined, secret: string | null,
   }
 }
 
-const page = (title: string, body: string) =>
-  `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>${title}</title><style>body{font-family:system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1rem;line-height:1.5}button{font:inherit;padding:.6rem 1.2rem;border-radius:6px;border:0;background:#111;color:#fff;cursor:pointer}</style></head><body>${body}</body></html>`;
+/** The form's own site: first allowed origin, else the success URL's origin (#37). */
+export function formOrigin(def: Pick<FormDefinition, 'allowedOrigins' | 'successUrl'>): string | null {
+  return def.allowedOrigins[0] ?? originOfUrl(def.successUrl);
+}
 
 export function formsApi(deps: FormsDeps) {
   const { loadPolicy } = sourceLookups(deps.db);
@@ -148,6 +162,20 @@ export function formsApi(deps: FormsDeps) {
     const f = await deps.db.withWorkspace(ws, (tx) => publishedForm(tx, formId));
     return f ? { ws, ...f } : null;
   };
+
+  /** The published brand for the token's workspace plus the form's override; drafts never render. */
+  const hostedPage = async (kind: HostedPageKind, t: DoiToken | null, ctx: { copy?: Partial<BrandCopy> } = {}) => {
+    if (!t) return renderHostedPage(kind, resolveBrand(), ctx);
+    const { form, brand } = await deps.db.withWorkspace(t.w, async (tx) => ({
+      form: await publishedForm(tx, t.f, t.v),
+      brand: await publishedSingleton(tx, 'brand'),
+    }));
+    return renderHostedPage(kind, resolveBrand(brand, form?.def.hostedPages), {
+      fallbackSiteUrl: form ? formOrigin(form.def) : null,
+      ...ctx,
+    });
+  };
+  const hosted = (c: Context, html: string, status: 200 | 404 | 410) => c.html(html, status, HOSTED_PAGE_HEADERS);
   const headerNames = deps.clientIpHeaders ?? (deps.clientIpHeader ? [deps.clientIpHeader] : ['x-forwarded-for']);
   const ipOf = (c: Context) =>
     resolveClientIp({
@@ -243,25 +271,34 @@ export function formsApi(deps: FormsDeps) {
 
   // Confirmation: the link opens a page with a button, so mail scanners that follow links do not
   // confirm on the person's behalf. The POST records the confirmation as an event.
-  const verified = (token: string) => {
+  const tokenOf = (token: string) => {
     const t = deps.links.verify<DoiToken>(token);
-    return t?.k === 'doi' && t.x > Date.now() ? t : null;
+    return t?.k === 'doi' ? t : null;
   };
-  app.get('/f/confirm/:token', (c) => {
-    if (!verified(c.req.param('token')))
-      return c.html(page('Link expired', '<h1>This link has expired</h1><p>Please sign up again; we will send you a new link.</p>'), 410);
-    return c.html(
-      page(
-        'Confirm your subscription',
-        `<h1>Confirm your subscription</h1><p>One click and you are in.</p><form method="post"><button type="submit">Yes, subscribe me</button></form>`,
-      ),
-    );
+  const verified = (token: string) => {
+    const t = tokenOf(token);
+    return t && t.x > Date.now() ? t : null;
+  };
+  app.get('/f/confirm/:token', async (c) => {
+    const t = tokenOf(c.req.param('token'));
+    if (!verified(c.req.param('token'))) return hosted(c, await hostedPage('expired', t), 410);
+    return hosted(c, await hostedPage('confirm', t), 200);
   });
   app.post('/f/confirm/:token', async (c) => {
     const t = verified(c.req.param('token'));
-    if (!t) return c.html(page('Link expired', '<h1>This link has expired</h1><p>Please sign up again.</p>'), 410);
+    if (!t) return hosted(c, await hostedPage('expired', tokenOf(c.req.param('token'))), 410);
     const form = await deps.db.withWorkspace(t.w, (tx) => publishedForm(tx, t.f, t.v));
-    if (!form) return c.html(page('Not available', '<h1>This signup is no longer available</h1>'), 404);
+    if (!form)
+      return hosted(
+        c,
+        await hostedPage('expired', t, {
+          copy: {
+            expiredTitle: 'This signup is no longer available',
+            expiredBody: 'The form behind this link is no longer available. Please sign up again from the site.',
+          },
+        }),
+        404,
+      );
     const item = {
       type: 'track',
       event: CONFIRMED,
