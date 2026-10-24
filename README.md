@@ -58,7 +58,7 @@ docker compose up -d        # pulls the released image
 docker compose exec app am bootstrap --email you@example.com --workspace 'My site'
 ```
 
-`AM_VERSION` (default `0.1.1`) selects the released image `ghcr.io/timchr78/agentic-marketing`. Pin a version instead of `latest` so restarts and `docker compose pull` do not silently change what runs. `AM_PORT` (default `3000`) is the published host port: the app still listens on 3000 inside the container, so keep `PUBLIC_URL` and `PUBLIC_LINKS_URL` in step with it. ClickHouse is capped at `CLICKHOUSE_MEM_LIMIT` (default `2g`), which covers the whole container (server, caches and query memory); ClickHouse's own limits such as `max_server_memory_usage` still apply inside it, and 2g is a starting point for the single-node pilot.
+`AM_VERSION` (default `0.1.2`) selects the released image `ghcr.io/timchr78/agentic-marketing`. Pin a version instead of `latest` so restarts and `docker compose pull` do not silently change what runs. `AM_PORT` (default `3000`) is the published host port: the app still listens on 3000 inside the container, so keep `PUBLIC_URL` and `PUBLIC_LINKS_URL` in step with it. ClickHouse is capped at `CLICKHOUSE_MEM_LIMIT` (default `2g`), which covers the whole container (server, caches and query memory); ClickHouse's own limits such as `max_server_memory_usage` still apply inside it, and 2g is a starting point for the single-node pilot.
 
 To build from source (development, CI or a local patch) use the overlay:
 
@@ -74,7 +74,7 @@ Open http://localhost:3000 for the admin UI (it is built into the image and serv
 
 MCP requires `PUBLIC_URL` to be HTTPS. With a plain-HTTP address on a LAN the admin UI and REST API still work, but MCP/OAuth client endpoints are disabled; expose the server over HTTPS (e.g. with Tailscale or a Cloudflare Tunnel) to enable MCP.
 
-Running it behind a proxy or a Cloudflare Tunnel: set `PUBLIC_URL`, `PUBLIC_LINKS_URL`, `CLIENT_IP_HEADER` (an ordered list, e.g. `cf-connecting-ip,x-forwarded-for`) and `TRUSTED_PROXY_CIDRS` for the tunnel/proxy ranges (see [`.env.example`](.env.example)). Admin LAN traffic without a forwarding header uses the socket address.
+Running it behind a proxy or a Cloudflare Tunnel: set `PUBLIC_URL`, `PUBLIC_LINKS_URL`, `CLIENT_IP_HEADER` (an ordered list, e.g. `cf-connecting-ip,x-forwarded-for`) and `TRUSTED_PROXY_CIDRS` for the tunnel/proxy ranges (see [`.env.example`](.env.example)). Set `PUBLIC_PORT` to add a public-only listener (`/f`, `/u`, `/c`, `/hooks`, `/healthz`, `/readyz`) and point the tunnel there, so no path rule is needed. Admin LAN traffic without a forwarding header uses the socket address.
 
 The compose file keeps Postgres, ClickHouse and NATS data in named volumes. To use host directories instead, replace those volume entries, e.g. `- /srv/am/pgdata:/var/lib/postgresql/data`, `- /srv/am/clickhouse:/var/lib/clickhouse` and `- /srv/am/nats:/data`. The containers run as their own users (Postgres uid 70 in the Alpine image, ClickHouse uid 101, NATS uid 1000), so `chown` the host directories to match the image you use or the services will fail to write; named volumes avoid that.
 
@@ -96,7 +96,7 @@ On Kubernetes: the Helm chart in [`deploy/helm`](deploy/helm/agentic-marketing) 
 
 ## Releases and upgrading
 
-Releases are on [GitHub](https://github.com/TimChr78/Agentic-Marketing/releases), with the image `ghcr.io/timchr78/agentic-marketing:<version>` (linux/amd64 and linux/arm64) and the packaged Helm chart; what changed is in the [changelog](CHANGELOG.md). The current release is **0.1.1**, a pre-release. A release is made by pushing a version tag, or by running the Release workflow (Actions → Release → Run workflow) with the version, which tags the current `main`.
+Releases are on [GitHub](https://github.com/TimChr78/Agentic-Marketing/releases), with the image `ghcr.io/timchr78/agentic-marketing:<version>` (linux/amd64 and linux/arm64) and the packaged Helm chart; what changed is in the [changelog](CHANGELOG.md). The current release is **0.1.2**, a pre-release. A release is made by pushing a version tag, or by running the Release workflow (Actions → Release → Run workflow) with the version, which tags the current `main`.
 
 Upgrading: database migrations run when the server starts. With `SKIP_MIGRATIONS=true` (several replicas, Kubernetes) run `cli migrate` first; the Helm chart does this in a Job before each upgrade. Migrations only move forward, so back up Postgres before upgrading. While the version is 0.x, read the changelog before each upgrade: commands and artifact formats may still change.
 

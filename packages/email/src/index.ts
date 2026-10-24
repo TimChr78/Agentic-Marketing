@@ -19,3 +19,4 @@ export { checkSmsRecipient, requestSms } from './sms/gateway';
 export * from './sms/providers';
 export * from './sms/routes';
 export * from './templates';
+export * from './testSend';

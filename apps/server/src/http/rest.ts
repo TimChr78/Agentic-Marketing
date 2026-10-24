@@ -85,6 +85,6 @@ export function restApi(deps: { auth: Auth; db: Db; executor: Executor }) {
       return c.json(out as object, 200);
     });
   }
-  api.doc31('/openapi.json', { openapi: '3.1.0', info: { title: 'Agentic Marketing API', version: '0.1.1' } });
+  api.doc31('/openapi.json', { openapi: '3.1.0', info: { title: 'Agentic Marketing API', version: '0.1.2' } });
   return api;
 }

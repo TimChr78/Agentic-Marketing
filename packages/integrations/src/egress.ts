@@ -1,4 +1,4 @@
-import { lookup } from 'node:dns';
+import { type LookupAddress, type LookupOptions, lookup } from 'node:dns';
 import { request as httpRequest } from 'node:http';
 import { connect as http2Connect } from 'node:http2';
 import { request as httpsRequest } from 'node:https';
@@ -81,16 +81,37 @@ export function checkUrl(raw: string, policy: EgressPolicy): string | null {
   return null;
 }
 
-/** Resolve, then refuse private addresses unless the name itself is on the allow list. */
-function lookupFor(u: URL, policy: EgressPolicy): LookupFunction {
+export type DnsResolve = (
+  hostname: string,
+  options: LookupOptions,
+  cb: (err: NodeJS.ErrnoException | null, addresses: LookupAddress[]) => void,
+) => void;
+
+const dnsLookup = lookup as unknown as DnsResolve;
+
+/**
+ * Resolve, then refuse private addresses unless the name itself is on the allow list. Every
+ * address is checked, so a mixed public/private answer cannot slip through. `autoSelectFamily`
+ * (the default since Node 20) calls this with `all: true` and expects an array.
+ */
+export function lookupFor(u: URL, policy: EgressPolicy, resolve: DnsResolve = dnsLookup): LookupFunction {
   const named = allowList(policy).names.has(u.hostname.toLowerCase());
-  return (hostname, options, cb) =>
-    lookup(hostname, { ...options, all: false }, (err, address, fam) => {
+  return (hostname, options, cb) => {
+    resolve(hostname, { ...options, all: true }, (err, addresses) => {
       if (err) return cb(err, '', 0);
-      const a = address as string;
-      if (!named && isBlockedAddress(a, policy)) return cb(new EgressError(`${hostname} resolves to private address ${a}`), '', 0);
-      cb(null, a, fam as number);
+      if (!addresses.length) {
+        const notFound: NodeJS.ErrnoException = new Error(`getaddrinfo ENOTFOUND ${hostname}`);
+        notFound.code = 'ENOTFOUND';
+        return cb(notFound, '', 0);
+      }
+      if (!named) {
+        for (const { address } of addresses)
+          if (isBlockedAddress(address, policy)) return cb(new EgressError(`${hostname} resolves to private address ${address}`), '', 0);
+      }
+      if (options.all) return cb(null, addresses);
+      cb(null, addresses[0].address, addresses[0].family);
     });
+  };
 }
 
 export interface SafeResponse {

@@ -44,23 +44,22 @@ A light pilot before Phase 6: run the platform for a real site, the owner's [mar
 
 Umami already runs in the homelab behind a **Cloudflare Tunnel** (`analytics.martechsignal.com`), so the platform reuses that tunnel and **option A is the default here**.
 
-- **Option A, default here (recommended): a hostname on the existing tunnel**, with path rules, the same way Umami is set up.
-  - Add a public hostname `am.martechsignal.com` → `http://<app>:3000` that lets **only** the public paths through. In the tunnel config:
+- **Option A, default here (recommended): a hostname on the existing tunnel**, pointed at the public-only listener.
+  - Set `PUBLIC_PORT=3001` on the platform. It keeps serving the admin UI, REST and MCP on `3000` (LAN/VPN only) and additionally serves **only** `/f`, `/u`, `/c` and `/hooks` (plus `/healthz` and `/readyz`) on `3001`; everything else is 404 there.
+  - In the tunnel config, point the new hostname at that port with **no path rule**:
     ```yaml
     ingress:
       - hostname: analytics.martechsignal.com     # existing Umami rule
         service: http://umami:3000
       - hostname: am.martechsignal.com
-        path: ^/(f|u|c)/                          # forms + confirmation, unsubscribe, e-mail clicks
-        service: http://app:3000
-      - hostname: am.martechsignal.com
-        service: http_status:404                  # admin UI, REST commands, MCP: not public
+        service: http://app:3001                  # public listener: only f/u/c/hooks exist here
       - service: http_status:404
     ```
-    For a tunnel managed in the dashboard, add two public hostnames: one with Path `^/(f|u|c)/` to the app, and a catch-all for the hostname to `http_status:404`.
+    For a tunnel managed in the dashboard, add one public hostname: `am.martechsignal.com` → `http://app:3001`. No second entry and no path regex are needed.
+  - If a path rule is unavoidable, use the strict form `^/(f|u|c|hooks)(/[^/.%][^/%]*)+/?$` with a catch-all to `http_status:404`. A loose rule is unsafe because cloudflared matches the **raw** path and forwards it raw: `/f/../v1/workspace.get` passes any rule that only checks the prefix, then the app resolves it to the admin API. The server now also rejects dot-segments, encoded dots/slashes and backslashes with 400 on both listeners, but the separate listener is the structural fix.
   - Platform settings: `PUBLIC_LINKS_URL=https://am.martechsignal.com`, `CLIENT_IP_HEADER=cf-connecting-ip` (the tunnel passes the visitor's IP).
   - Site: the form posts to `https://am.martechsignal.com/f/<form id>`. The CSP's `form-action` swaps `https://app.kit.com` for `https://am.martechsignal.com`. Nothing else changes; the site worker stays as it is.
-  - If the relay offers bounce and complaint webhooks, add `hooks` to the path rule: `^/(f|u|c|hooks)/`.
+  - Bounce and complaint webhooks (`/hooks/...`) are served by the same public listener; with a path rule, the strict regex above already includes them.
 - **Option B: first-party proxy in `_worker.js`** ([reference](../../.claude/skills/agentic-marketing-implement/references/cloudflare-worker-proxy.js)). `/am/*` on martechsignal.com is forwarded to a tunnel hostname locked with a Cloudflare Access service token. The form then posts to `/am/f/<form id>`.
   - Pick it if the links should live on the main domain, or for phase B tracking, where a same-origin `/am/v1/batch` is safest against ad blockers.
   - It needs worker code and must run before the worker's HTML edge cache.
@@ -96,11 +95,16 @@ Umami already runs in the homelab behind a **Cloudflare Tunnel** (`analytics.mar
 ## Plan for the implementation session
 
 1. **Platform up.**
-   - Docker Compose on the homelab with `PUBLIC_URL` (LAN for admin/REST; use an HTTPS URL for MCP), `PUBLIC_LINKS_URL=https://am.martechsignal.com` and `CLIENT_IP_HEADER=cf-connecting-ip` (option A).
+   - Docker Compose on the homelab with `PUBLIC_URL` (LAN for admin/REST; use an HTTPS URL for MCP), `PUBLIC_PORT=3001` (public-only listener), `PUBLIC_LINKS_URL=https://am.martechsignal.com` and `CLIENT_IP_HEADER=cf-connecting-ip` (option A).
    - Bootstrap the owner (`cli bootstrap`); set the approval policy to `agent_changes`.
    - Add the e-mail provider (SMTP relay) with `useFor: [transactional, marketing]`.
    - Purposes: the defaults fit (`marketing_email` is consent-based; `onboarding` covers the confirmation e-mail). Double opt-in is set on the form (`doubleOptIn: true`); the purposes' `requiresDoubleOptIn` flag is informational only.
-2. **Edge.** Add the `am.martechsignal.com` hostname with the path rules to the existing Umami tunnel (option A). Check that `/f/…` reaches the app and `/` and `/v1/workspace.get` answer 404.
+2. **Edge.** Set `PUBLIC_PORT=3001` and add the `am.martechsignal.com` hostname to the existing Umami tunnel pointing at `http://app:3001` (option A, no path rule). Check that `/f/…` reaches the app, `/` and `/v1/workspace.get` answer 404, and a raw traversal is refused:
+   ```sh
+   curl --path-as-is -s -o /dev/null -w '%{http_code}\n' -X POST https://am.martechsignal.com/f/../v1/workspace.get   # 400 or 404
+   curl --path-as-is -s -o /dev/null -w '%{http_code}\n' -X POST https://am.martechsignal.com/f/%2e%2e/v1/workspace.get # 400 or 404
+   ```
+   Neither may answer 401 from the admin API. If the tunnel still uses a path rule, use `^/(f|u|c|hooks)(/[^/.%][^/%]*)+/?$`.
 3. **Signup.**
    - Create the confirmation template (purpose `onboarding`), the form (DOI, `successUrl` and `confirmedUrl` pages on the site, `allowedOrigins: ["https://martechsignal.com"]`) and the two small pages (`/subscribe/check-your-inbox/`, `/subscribe/welcome/`).
    - Change the generator's subscribe partial to post to `https://am.martechsignal.com/f/<form id>` with the honeypot field (see "Replacing Kit" for the order).

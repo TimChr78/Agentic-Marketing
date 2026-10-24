@@ -135,6 +135,9 @@ export function sesWebhook(deps: AdapterDeps) {
 export const sesAdapter = defineAdapter({
   id: 'ses',
   label: 'Amazon SES',
+  tracking: 'configurable',
+  trackingNote:
+    'SES tracks opens and clicks only when the AWS configuration set used for the message enables open or click tracking; the platform does not add tracking options.',
   config: z.object({
     region: z.string().regex(/^[a-z]{2}(-[a-z]+)+-\d$/, 'An AWS region such as eu-west-1'),
     accessKeyId: z.string().min(16),

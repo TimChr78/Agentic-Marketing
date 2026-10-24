@@ -43,6 +43,7 @@ export async function transportFor(tx: Tx, row: ProviderRow, kp: KeyProvider, de
 }
 
 const Use = z.enum(['transactional', 'marketing']);
+const Tracking = z.enum(['forced', 'configurable', 'none']);
 const Provider = z.object({
   id: z.string(),
   name: z.string(),
@@ -54,19 +55,40 @@ const Provider = z.object({
   useFor: z.array(Use),
   enabled: z.boolean(),
   hasCredentials: z.boolean(),
+  tracking: Tracking.describe('Whether the provider tracks opens/clicks itself, and whether the platform can stop it'),
+  trackingNote: z.string().describe('A short explanation of provider-side tracking'),
 });
-const providerOut = (r: ProviderRow) => ({
-  id: r.id,
-  name: r.name,
-  adapter: r.adapter,
-  config: r.config,
-  fromEmail: r.fromEmail,
-  fromName: r.fromName,
-  replyTo: r.replyTo,
-  useFor: r.useFor,
-  enabled: r.enabled,
-  hasCredentials: !!r.secrets,
-});
+const providerOut = (r: ProviderRow) => {
+  const a = adapters[r.adapter];
+  return {
+    id: r.id,
+    name: r.name,
+    adapter: r.adapter,
+    config: r.config,
+    fromEmail: r.fromEmail,
+    fromName: r.fromName,
+    replyTo: r.replyTo,
+    useFor: r.useFor,
+    enabled: r.enabled,
+    hasCredentials: !!r.secrets,
+    tracking: a.tracking,
+    trackingNote: a.trackingNote,
+  };
+};
+
+/**
+ * Provider-side tracking can contradict the workspace's own promise. Warn when click tracking
+ * is off here but an enabled marketing provider tracks every message anyway.
+ */
+function trackingWarnings(rows: ProviderRow[], trackClicks: boolean): string[] {
+  if (trackClicks) return [];
+  return rows
+    .filter((r) => r.enabled && r.useFor.includes('marketing') && adapters[r.adapter].tracking === 'forced')
+    .map(
+      (r) =>
+        `${adapters[r.adapter].label} provider "${r.name}" adds open and click tracking to every marketing e-mail although EMAIL_TRACK_CLICKS=false.`,
+    );
+}
 
 function checkSettings(adapter: keyof typeof adapters, config: unknown, secrets: unknown) {
   const a = adapters[adapter];
@@ -97,19 +119,35 @@ export const listProviders = defineCommand({
   input: z.object({}),
   output: z.object({
     providers: z.array(Provider),
-    adapters: z.array(z.object({ id: z.string(), label: z.string(), config: z.unknown(), secrets: z.unknown() })),
+    adapters: z.array(
+      z.object({
+        id: z.string(),
+        label: z.string(),
+        config: z.unknown(),
+        secrets: z.unknown(),
+        tracking: Tracking,
+        trackingNote: z.string(),
+      }),
+    ),
+    warnings: z.array(z.string()).describe('Provider settings that contradict the workspace privacy settings'),
   }),
   permission: 'workspace:admin',
   effect: 'read',
-  handler: async (_i, ctx) => ({
-    providers: (await ctx.tx.select().from(schema.emailProviders).orderBy(schema.emailProviders.createdAt)).map(providerOut),
-    adapters: Object.values(adapters).map((a) => ({
-      id: a.id,
-      label: a.label,
-      config: z.toJSONSchema(a.config, { io: 'input' }),
-      secrets: z.toJSONSchema(a.secrets, { io: 'input' }),
-    })),
-  }),
+  handler: async (_i, ctx) => {
+    const rows = await ctx.tx.select().from(schema.emailProviders).orderBy(schema.emailProviders.createdAt);
+    return {
+      providers: rows.map(providerOut),
+      adapters: Object.values(adapters).map((a) => ({
+        id: a.id,
+        label: a.label,
+        config: z.toJSONSchema(a.config, { io: 'input' }),
+        secrets: z.toJSONSchema(a.secrets, { io: 'input' }),
+        tracking: a.tracking,
+        trackingNote: a.trackingNote,
+      })),
+      warnings: trackingWarnings(rows, ctx.services.email.trackClicks),
+    };
+  },
 });
 
 const Email = z.email().max(320);
@@ -118,7 +156,7 @@ export const createProvider = defineCommand({
   name: 'emailProviders.create',
   title: 'Add an e-mail provider',
   description:
-    'Add a delivery provider. `useFor` decides which messages go through it: transactional (contract/legal purposes) and/or marketing. Returns the webhook URL path for delivery events once; register it with the provider.',
+    'Add a delivery provider. `useFor` decides which messages go through it: transactional (contract/legal purposes) and/or marketing. Returns the full webhook URL for delivery events once; register it with the provider.',
   input: z.object({
     name: z.string().min(1).max(120),
     adapter: z.enum(['smtp', 'ses', 'postmark', 'brevo', 'cloudflare', 'log']),
@@ -129,12 +167,16 @@ export const createProvider = defineCommand({
     replyTo: Email.optional(),
     useFor: z.array(Use).max(2).default([]),
   }),
-  output: Provider.extend({ webhookPath: z.string().describe('POST delivery events here (prefix with your public URL)') }),
+  output: Provider.extend({
+    webhookPath: z.string().describe('POST delivery events here (prefix with your public links URL)'),
+    webhookUrl: z.string().describe('Full URL for provider delivery events, built from PUBLIC_LINKS_URL'),
+    warnings: z.array(z.string()).describe('Provider settings that contradict the workspace privacy settings'),
+  }),
   permission: 'workspace:admin',
   effect: 'write',
   humansOnly: true,
   sensitive: ['secrets'],
-  sensitiveOutput: ['webhookPath'],
+  sensitiveOutput: ['webhookPath', 'webhookUrl'],
   handler: async (input, ctx) => {
     const { config, secrets } = checkSettings(input.adapter, input.config, input.secrets);
     const id = newId('epr');
@@ -158,7 +200,13 @@ export const createProvider = defineCommand({
         webhookTokenHash: webhookTokenHash(token),
       })
       .returning();
-    return { ...providerOut(row), webhookPath: `/hooks/email/${id}/${token}` };
+    const webhookPath = `/hooks/email/${id}/${token}`;
+    return {
+      ...providerOut(row),
+      webhookPath,
+      webhookUrl: `${ctx.services.email.publicUrl}${webhookPath}`,
+      warnings: trackingWarnings([row], ctx.services.email.trackClicks),
+    };
   },
 });
 
@@ -177,7 +225,9 @@ export const updateProvider = defineCommand({
     useFor: z.array(Use).max(2).optional(),
     enabled: z.boolean().optional(),
   }),
-  output: Provider,
+  output: Provider.extend({
+    warnings: z.array(z.string()).describe('Provider settings that contradict the workspace privacy settings'),
+  }),
   permission: 'workspace:admin',
   effect: 'write',
   humansOnly: true,
@@ -198,7 +248,34 @@ export const updateProvider = defineCommand({
       })
       .where(eq(schema.emailProviders.id, id))
       .returning();
-    return providerOut(row);
+    return { ...providerOut(row), warnings: trackingWarnings([row], ctx.services.email.trackClicks) };
+  },
+});
+
+export const rotateProviderWebhook = defineCommand({
+  name: 'emailProviders.rotateWebhook',
+  title: 'Replace an e-mail provider webhook URL',
+  description: 'Issue a new webhook URL for delivery events. The old URL stops working immediately; replace it with the provider.',
+  input: z.object({ id: z.string().regex(/^epr_[0-9a-f]{32}$/) }),
+  output: z.object({
+    webhookPath: z.string().describe('POST delivery events here (prefix with your public links URL)'),
+    webhookUrl: z.string().describe('Full URL for provider delivery events, built from PUBLIC_LINKS_URL'),
+  }),
+  permission: 'workspace:admin',
+  effect: 'write',
+  humansOnly: true,
+  sensitiveOutput: ['webhookPath', 'webhookUrl'],
+  target: (i) => i.id,
+  handler: async ({ id }, ctx) => {
+    const token = randomBytes(24).toString('base64url');
+    const [row] = await ctx.tx
+      .update(schema.emailProviders)
+      .set({ webhookTokenHash: webhookTokenHash(token), updatedAt: new Date() })
+      .where(eq(schema.emailProviders.id, id))
+      .returning({ id: schema.emailProviders.id });
+    if (!row) throw new AppError('not_found', `No e-mail provider ${id}. List them with emailProviders.list.`);
+    const webhookPath = `/hooks/email/${id}/${token}`;
+    return { webhookPath, webhookUrl: `${ctx.services.email.publicUrl}${webhookPath}` };
   },
 });
 
@@ -222,4 +299,4 @@ export const deleteProvider = defineCommand({
   },
 });
 
-export const providerCommands = [listProviders, createProvider, updateProvider, deleteProvider] as const;
+export const providerCommands = [listProviders, createProvider, updateProvider, rotateProviderWebhook, deleteProvider] as const;

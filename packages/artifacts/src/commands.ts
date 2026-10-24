@@ -4,7 +4,15 @@ import { schema, type VersionState } from '@agentic-marketing/db';
 import { and, desc, eq } from 'drizzle-orm';
 import { z } from 'zod';
 import { diffJson } from './diff';
-import { type ArtifactType, artifactTypeEnum, artifactTypes, contentValidators, draftContentSchemas, publishValidators } from './types';
+import {
+  ARTIFACT_TYPES,
+  type ArtifactType,
+  artifactTypeEnum,
+  artifactTypes,
+  contentValidators,
+  draftContentSchemas,
+  publishValidators,
+} from './types';
 
 // Generic, versioned artifacts with a configurable approval pipeline (journeys-and-editors.md §5).
 // Published versions are immutable; edits always produce or update a draft.
@@ -173,20 +181,27 @@ export const listTypes = defineCommand({
   name: 'artifacts.types',
   title: 'List artifact types',
   description:
-    'The artifact types this workspace supports, each with the JSON Schema its content must match. Read this before creating content.',
-  input: z.object({}),
+    'The artifact types this workspace supports, each with the JSON Schema its content must match. Pass type to get one type (the full list is large, about 66 KB); omit it for all. Read this before creating content.',
+  input: z.object({
+    type: z
+      .enum(ARTIFACT_TYPES, `Unknown artifact type. Use one of: ${ARTIFACT_TYPES.join(', ')}.`)
+      .optional()
+      .describe('Return only this type; omit to return all types'),
+  }),
   output: z.object({
     types: z.array(z.object({ type: z.string(), label: z.string(), description: z.string(), contentSchema: z.unknown() })),
   }),
   permission: 'artifacts:read',
   effect: 'read',
-  handler: async () => ({
-    types: Object.entries(artifactTypes).map(([type, t]) => ({
-      type,
-      label: t.label,
-      description: t.description,
-      contentSchema: z.toJSONSchema(t.content, { io: 'input' }),
-    })),
+  handler: async (input) => ({
+    types: Object.entries(artifactTypes)
+      .filter(([type]) => !input.type || type === input.type)
+      .map(([type, t]) => ({
+        type,
+        label: t.label,
+        description: t.description,
+        contentSchema: z.toJSONSchema(t.content, { io: 'input' }),
+      })),
   }),
 });
 

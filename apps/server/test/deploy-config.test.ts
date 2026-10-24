@@ -7,7 +7,7 @@ import { describe, expect, it } from 'vitest';
 const root = fileURLToPath(new URL('../../../', import.meta.url));
 const read = (name: string) => readFile(join(root, name), 'utf8');
 
-const [compose, buildOverlay, envExample, smoke, readme, dockerfile, dockerignore] = await Promise.all([
+const [compose, buildOverlay, envExample, smoke, readme, dockerfile, dockerignore, ci] = await Promise.all([
   read('docker-compose.yml'),
   read('docker-compose.build.yml'),
   read('.env.example'),
@@ -15,6 +15,7 @@ const [compose, buildOverlay, envExample, smoke, readme, dockerfile, dockerignor
   read('README.md'),
   read('Dockerfile'),
   read('.dockerignore'),
+  read('.github/workflows/ci.yml'),
 ]);
 
 /** The lines of one service, up to the next two-space service key. */
@@ -94,6 +95,16 @@ describe('Docker build context', () => {
     expect(dockerfile).toContain('COPY apps/web ./apps/web');
     expect(dockerfile).toContain('build:live');
     expect(dockerfile).toContain('COPY --from=web /app/apps/web/dist /app/apps/web/dist');
+  });
+});
+
+describe('CI Node version', () => {
+  it('matches the Docker image major, so the egress lookup test runs on the shipped Node', () => {
+    // Node 20+ defaults autoSelectFamily to true; the egress lookup test asserts that behaviour.
+    const image = /^FROM\s+node:(\d+)-/m.exec(dockerfile)?.[1];
+    const workflow = /node-version:\s*["']?(\d+)/.exec(ci)?.[1];
+    expect(image).toBeTruthy();
+    expect(workflow).toBe(image);
   });
 });
 

@@ -9,6 +9,7 @@ import { Client, type OAuthClientProvider, StreamableHTTPClientTransport, Unauth
 import pg from 'pg';
 import { createServer } from '../src/app';
 import { loadConfig } from '../src/config';
+import { publicOnly } from '../src/http/public-only';
 import type { Commands } from '../src/registry';
 import { startScheduler, startWorkers } from '../src/workers';
 
@@ -175,6 +176,12 @@ export async function startTestServer(name: string, port: number, env: Record<st
   await new Promise<void>((resolve) => {
     http = serve({ fetch: srv.app.fetch, port }, (_i: AddressInfo) => resolve());
   });
+  let publicHttp: { close: () => void } | undefined;
+  if (config.publicPort) {
+    await new Promise<void>((resolve) => {
+      publicHttp = serve({ fetch: publicOnly(srv.app).fetch, port: config.publicPort! }, (_i: AddressInfo) => resolve());
+    });
+  }
   const stop = new AbortController();
   const workers = [
     ...startWorkers(srv, stop.signal, { deliveries: { webhookBackoffMs: [200, 200], actionBackoffMs: [100] } }),
@@ -208,12 +215,14 @@ export async function startTestServer(name: string, port: number, env: Record<st
   return {
     srv,
     base,
+    publicBase: config.publicPort ? `http://localhost:${config.publicPort}` : undefined,
     signUp,
     workspaceWith,
     api: (u: User, workspaceId?: string) =>
       createClient<Commands>({ baseUrl: base, headers: { cookie: u.cookie, ...(workspaceId ? { 'x-workspace-id': workspaceId } : {}) } }),
     async close() {
       stop.abort();
+      publicHttp?.close();
       http?.close();
       await Promise.allSettled(workers);
       await srv.bus.close();

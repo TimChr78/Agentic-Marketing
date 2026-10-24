@@ -1,12 +1,22 @@
-import { artifactTypes, type BroadcastDefinition, publishValidators } from '@agentic-marketing/artifacts';
+import { artifactTypes, type BroadcastDefinition, type EmailTemplate, publishValidators } from '@agentic-marketing/artifacts';
 import { defineCommand } from '@agentic-marketing/commands';
 import { AppError } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
-import { checkPushRecipient, checkRecipient, checkSmsRecipient, requestEmail, requestPush, requestSms } from '@agentic-marketing/email';
+import {
+  checkPushRecipient,
+  checkRecipient,
+  checkSmsRecipient,
+  requestEmail,
+  requestPush,
+  requestSms,
+  sendTestMessages,
+  testRecipientsInput,
+  testSendOutput,
+} from '@agentic-marketing/email';
 import type { EventStore } from '@agentic-marketing/events';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
-import { and, asc, eq, gt, inArray, isNotNull, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, isNotNull, sql } from 'drizzle-orm';
 import { z } from 'zod';
 
 // Broadcasts: a one-off send of a template to a segment, e.g. the weekly newsletter. Publishing
@@ -120,6 +130,72 @@ export const previewBroadcast = defineCommand({
   },
 });
 
+export const sendTestBroadcast = defineCommand({
+  name: 'broadcasts.sendTest',
+  title: 'Send a test broadcast',
+  description:
+    'Send a broadcast’s e-mail to members of this workspace or the admin-configured seed list (workspace.setSeedList), at most 10 per call, with "[Test]" in the subject. Uses the broadcast version you name (default: its latest draft), and the template version the broadcast would send (the template’s published version, or its latest draft while it has none) through the marketing provider. Purpose/consent checks are skipped, suppressions still apply, and each copy is recorded as a test message (never counted in reporting) and an audit entry. No profile or consent is written; agents drafting newsletters can run it with the artifacts:write scope.',
+  input: z.object({
+    artifactId: BroadcastId,
+    version: z.number().int().min(1).optional().describe('Default: the latest draft, else the latest version'),
+    to: testRecipientsInput,
+  }),
+  output: testSendOutput,
+  permission: 'artifacts:write',
+  effect: 'write',
+  target: (i) => i.artifactId,
+  handler: async (input, ctx) => {
+    const [artifact] = await ctx.tx
+      .select()
+      .from(schema.artifacts)
+      .where(and(eq(schema.artifacts.id, input.artifactId), eq(schema.artifacts.type, 'broadcast')));
+    if (!artifact) throw new AppError('not_found', `No broadcast ${input.artifactId}.`);
+    let version: number;
+    if (input.version) version = input.version;
+    else {
+      const [draft] = await ctx.tx
+        .select({ number: schema.artifactVersions.number })
+        .from(schema.artifactVersions)
+        .where(and(eq(schema.artifactVersions.artifactId, input.artifactId), eq(schema.artifactVersions.state, 'draft')))
+        .orderBy(desc(schema.artifactVersions.number))
+        .limit(1);
+      version = draft?.number ?? artifact.latestVersion;
+    }
+    const [bv] = await ctx.tx
+      .select({ content: schema.artifactVersions.content })
+      .from(schema.artifactVersions)
+      .where(and(eq(schema.artifactVersions.artifactId, input.artifactId), eq(schema.artifactVersions.number, version)));
+    if (!bv) throw new AppError('not_found', `No broadcast ${input.artifactId} version ${version}.`);
+    const def = artifactTypes.broadcast.content.parse(bv.content) as BroadcastDefinition;
+    if (!def.template.startsWith('eml_'))
+      throw new AppError('invalid_input', 'broadcasts.sendTest sends e-mail only; this broadcast uses an SMS or push template.');
+
+    // A real broadcast sends the template's published version. Before the first approval round
+    // there is none yet, so a test uses the template's latest version (its draft).
+    const [template] = await ctx.tx
+      .select()
+      .from(schema.artifacts)
+      .where(and(eq(schema.artifacts.id, def.template), eq(schema.artifacts.type, 'email_template')));
+    if (!template) throw new AppError('not_found', `No e-mail template ${def.template}.`);
+    const templateVersion = template.publishedVersion ?? template.latestVersion;
+    const [tv] = await ctx.tx
+      .select({ content: schema.artifactVersions.content })
+      .from(schema.artifactVersions)
+      .where(and(eq(schema.artifactVersions.artifactId, def.template), eq(schema.artifactVersions.number, templateVersion)));
+    if (!tv) throw new AppError('conflict', `Version ${templateVersion} of ${def.template} is missing.`);
+    const t = tv.content as EmailTemplate;
+    return sendTestMessages(ctx, {
+      templateId: def.template,
+      templateVersion,
+      template: t,
+      purpose: t.purpose,
+      stream: 'marketing',
+      journeyId: input.artifactId,
+      to: input.to,
+    });
+  },
+});
+
 const Run = z.object({
   status: z.enum(['not_scheduled', 'scheduled', 'running', 'done', 'cancelled', 'failed']),
   version: z.number().nullable(),
@@ -200,7 +276,7 @@ export const cancelBroadcast = defineCommand({
   },
 });
 
-export const broadcastCommands = [previewBroadcast, broadcastStatus, cancelBroadcast] as const;
+export const broadcastCommands = [previewBroadcast, sendTestBroadcast, broadcastStatus, cancelBroadcast] as const;
 
 export interface BroadcastDeps {
   db: Db;

@@ -7,6 +7,8 @@ export const outbox: OutgoingEmail[] = [];
 export const logAdapter = defineAdapter({
   id: 'log',
   label: 'Development outbox (sends nothing)',
+  tracking: 'none',
+  trackingNote: 'The development outbox only keeps messages in memory and sends nothing.',
   config: z.object({}),
   secrets: z.object({}),
   create: () => ({

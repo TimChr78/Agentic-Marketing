@@ -60,13 +60,15 @@ export async function applyDeliveryEvents(tx: Tx, events: DeliveryEvent[], provi
       continue;
     }
     const at = e.at && !Number.isNaN(Date.parse(e.at)) ? new Date(e.at).toISOString() : new Date().toISOString();
-    out.push(
-      messageEvent(
-        m,
-        { eventId: e.eventId, type: e.type, at, reason: e.reason ?? (e.bounce ? `${e.bounce} bounce` : ''), url: e.url ?? '' },
-        provider,
-      ),
-    );
+    // Test sends never enter reporting or change consent. Their status and suppressions still count.
+    if (!m.test)
+      out.push(
+        messageEvent(
+          m,
+          { eventId: e.eventId, type: e.type, at, reason: e.reason ?? (e.bounce ? `${e.bounce} bounce` : ''), url: e.url ?? '' },
+          provider,
+        ),
+      );
 
     const next =
       e.type === 'delivered'
@@ -91,7 +93,7 @@ export async function applyDeliveryEvents(tx: Tx, events: DeliveryEvent[], provi
           reason: e.type === 'complained' ? 'complaint' : 'hard_bounce',
         })
         .onConflictDoNothing();
-    if (e.type === 'complained' || e.type === 'unsubscribed')
+    if (!m.test && (e.type === 'complained' || e.type === 'unsubscribed'))
       await withdraw(tx, m, 'unsubscribe', { messageId: m.id, via: `${provider} ${e.type}` }, kp);
   }
   return out;

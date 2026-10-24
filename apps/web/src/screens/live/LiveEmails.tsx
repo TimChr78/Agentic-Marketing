@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
-import { Gauge, Mail, MessageSquare, Plus, Server } from 'lucide-react';
+import { Copy, Gauge, Mail, MessageSquare, Plus, RefreshCw, Server } from 'lucide-react';
 import { Button, Card, Pill, cx, inputBase, inputCls, timeAgo } from '../../components/ui';
 import { api, errText, type Out } from '../liveApi';
 
@@ -19,6 +19,7 @@ const STARTER = `<mjml>
 </mjml>`;
 
 const statusTone = { queued: 'neutral', sending: 'neutral', sent: 'accent', delivered: 'good', suppressed: 'warn', failed: 'bad', bounced: 'bad', complained: 'bad' } as const;
+const trackingTone = { forced: 'bad', configurable: 'warn', none: 'good' } as const;
 
 export function LiveEmails({ canAdmin, onError }: { canAdmin: boolean; onError: (m: string) => void }) {
   const [list, setList] = useState<Out<'artifacts.list'>['artifacts']>([]);
@@ -136,10 +137,19 @@ export function LiveEmails({ canAdmin, onError }: { canAdmin: boolean; onError: 
 }
 
 const SMTP_EXAMPLE = '{ "host": "smtp.example.com", "port": 587, "user": "apikey", "events": "none" }';
+const INITIAL_PROVIDER_FORM = {
+  name: 'SMTP relay',
+  adapter: 'smtp',
+  config: SMTP_EXAMPLE,
+  secrets: '{ "password": "" }',
+  fromEmail: '',
+  fromName: '',
+  replyTo: '',
+};
 
 function Providers({ onError }: { onError: (m: string) => void }) {
   const [data, setData] = useState<Out<'emailProviders.list'> | null>(null);
-  const [form, setForm] = useState({ name: 'SMTP relay', adapter: 'smtp', config: SMTP_EXAMPLE, secrets: '{ "password": "" }', fromEmail: '', fromName: '' });
+  const [form, setForm] = useState(INITIAL_PROVIDER_FORM);
   const [webhook, setWebhook] = useState('');
   const load = useCallback(async () => {
     try {
@@ -149,19 +159,48 @@ function Providers({ onError }: { onError: (m: string) => void }) {
     }
   }, [onError]);
   useEffect(() => void load(), [load]);
+  const selected = data?.adapters.find((a) => a.id === form.adapter);
 
   return (
     <Card title="E-mail providers" action={<Server size={14} className="text-muted" />}>
+      {!!data?.warnings.length && (
+        <div className="border-b border-warn/40 bg-warn-soft px-4 py-2.5 text-[12px] text-warn">
+          {data.warnings.map((w) => (
+            <p key={w}>{w}</p>
+          ))}
+        </div>
+      )}
       <ul className="divide-y divide-line text-[13px]">
         {data?.providers.map((p) => (
-          <li key={p.id} className="flex items-center gap-2 px-4 py-2.5">
-            <span className="min-w-0 flex-1">
-              <span className="block font-medium">{p.name}</span>
-              <span className="text-[11px] text-muted">
-                {p.adapter} · {p.fromEmail} · {p.useFor.join(', ') || 'not used'}
+          <li key={p.id} className="px-4 py-2.5">
+            <div className="flex items-center gap-2">
+              <span className="min-w-0 flex-1">
+                <span className="block font-medium">{p.name}</span>
+                <span className="text-[11px] text-muted">
+                  {p.adapter} · {p.fromEmail} · {p.useFor.join(', ') || 'not used'}
+                  {p.replyTo ? ` · reply-to ${p.replyTo}` : ''}
+                </span>
               </span>
-            </span>
-            <Pill tone={p.enabled ? 'good' : 'neutral'}>{p.enabled ? 'enabled' : 'off'}</Pill>
+              <span title={p.trackingNote}>
+                <Pill tone={trackingTone[p.tracking]}>Provider tracking: {p.tracking}</Pill>
+              </span>
+              <Button
+                variant="ghost"
+                onClick={async () => {
+                  if (!confirm(`Create a new webhook URL for ${p.name}? The old URL stops working immediately.`)) return;
+                  try {
+                    const r = await api.call('emailProviders.rotateWebhook', { id: p.id });
+                    setWebhook(r.webhookUrl);
+                  } catch (e) {
+                    onError(errText(e));
+                  }
+                }}
+              >
+                <RefreshCw size={14} /> New webhook URL
+              </Button>
+              <Pill tone={p.enabled ? 'good' : 'neutral'}>{p.enabled ? 'enabled' : 'off'}</Pill>
+            </div>
+            <p className="mt-1 text-[11px] text-muted">{p.trackingNote}</p>
           </li>
         ))}
       </ul>
@@ -177,9 +216,11 @@ function Providers({ onError }: { onError: (m: string) => void }) {
               secrets: JSON.parse(form.secrets || '{}'),
               fromEmail: form.fromEmail,
               fromName: form.fromName,
+              ...(form.replyTo.trim() ? { replyTo: form.replyTo.trim() } : {}),
               useFor: ['transactional', 'marketing'],
             });
-            setWebhook(`${location.origin}${r.webhookPath}`);
+            setWebhook(r.webhookUrl);
+            setForm(INITIAL_PROVIDER_FORM);
             await load();
           } catch (err) {
             onError(err instanceof SyntaxError ? 'Settings and credentials must be JSON.' : errText(err));
@@ -197,7 +238,19 @@ function Providers({ onError }: { onError: (m: string) => void }) {
           </select>
           <input className={inputCls} placeholder="From address" value={form.fromEmail} onChange={(e) => setForm({ ...form, fromEmail: e.target.value })} aria-label="From address" />
           <input className={inputCls} placeholder="From name" value={form.fromName} onChange={(e) => setForm({ ...form, fromName: e.target.value })} aria-label="From name" />
+          <input
+            className={inputCls}
+            placeholder="Reply-to address (optional)"
+            value={form.replyTo}
+            onChange={(e) => setForm({ ...form, replyTo: e.target.value })}
+            aria-label="Reply-to address"
+          />
         </div>
+        {selected && (
+          <p className="text-[11px] text-muted">
+            Provider tracking: <span className="font-semibold">{selected.tracking}</span> — {selected.trackingNote}
+          </p>
+        )}
         <textarea className={cx(inputCls, 'h-16 font-mono text-[12px]')} value={form.config} onChange={(e) => setForm({ ...form, config: e.target.value })} aria-label="Settings (JSON)" />
         <textarea className={cx(inputCls, 'h-12 font-mono text-[12px]')} value={form.secrets} onChange={(e) => setForm({ ...form, secrets: e.target.value })} aria-label="Credentials (JSON, write-only)" />
         <div className="flex items-center gap-2">
@@ -208,9 +261,18 @@ function Providers({ onError }: { onError: (m: string) => void }) {
         </div>
       </form>
       {webhook && (
-        <p className="border-t border-line px-4 py-2.5 text-[12px]">
-          Delivery events webhook (shown once): <span className="break-all font-mono">{webhook}</span>
-        </p>
+        <div className="flex flex-wrap items-center gap-2 border-t border-line px-4 py-2.5 text-[12px]">
+          <span>Delivery events webhook (shown once):</span>
+          <span className="break-all font-mono">{webhook}</span>
+          <Button
+            variant="ghost"
+            onClick={() =>
+              navigator.clipboard?.writeText(webhook).catch(() => onError('Copy failed, select the text instead.'))
+            }
+          >
+            <Copy size={13} /> Copy
+          </Button>
+        </div>
       )}
     </Card>
   );

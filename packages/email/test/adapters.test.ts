@@ -35,6 +35,8 @@ describe('Postmark', () => {
       MessageStream: 'broadcast',
       Metadata: { am_message_id: 'msg_0192abc' },
       From: '"Fjeldvej" <news@shop.example.com>',
+      TrackOpens: false,
+      TrackLinks: 'None',
     });
     expect(body.Headers).toEqual([{ Name: 'List-Unsubscribe', Value: '<https://m.example.com/u/t>' }]);
   });
@@ -74,6 +76,17 @@ describe('Postmark', () => {
       type: 'clicked',
       url: 'https://shop/x',
     });
+  });
+});
+
+describe('Adapter tracking metadata', () => {
+  it('declares a tracking capability and a note for every adapter', () => {
+    for (const a of Object.values(adapters)) {
+      expect(['forced', 'configurable', 'none']).toContain(a.tracking);
+      expect(a.trackingNote.length).toBeGreaterThan(10);
+    }
+    expect(adapters.brevo.tracking).toBe('forced');
+    expect(adapters.postmark.tracking).toBe('configurable');
   });
 });
 
