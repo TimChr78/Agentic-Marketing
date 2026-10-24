@@ -73,6 +73,7 @@ export async function streamRates(
         .where(
           and(
             eq(schema.messages.channel, channel),
+            eq(schema.messages.test, false),
             inArray(schema.messages.purpose, keys),
             inArray(schema.messages.status, ['sent', 'delivered', 'bounced', 'complained']),
             gte(schema.messages.createdAt, since),
@@ -133,6 +134,7 @@ export async function checkPolicy(
         and(
           eq(schema.messages.profileId, message.profileId),
           eq(schema.messages.channel, message.channel),
+          eq(schema.messages.test, false),
           inArray(schema.messages.purpose, keys),
           ne(schema.messages.id, message.id),
           gte(schema.messages.createdAt, new Date(now.getTime() - cap.days * 86_400_000)),

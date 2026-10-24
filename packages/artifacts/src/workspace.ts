@@ -9,12 +9,13 @@ const Policy = z.enum(['none', 'agent_changes', 'all_publishes']);
 export const getWorkspace = defineCommand({
   name: 'workspace.get',
   title: 'Current workspace',
-  description: 'The workspace you are acting in, its approval policy, and your role and permissions.',
+  description: 'The workspace you are acting in, its approval policy, its test-send seed list, and your role and permissions.',
   input: z.object({}),
   output: z.object({
     id: z.string(),
     name: z.string(),
     approvalPolicy: Policy,
+    seedList: z.array(z.string()).describe('Addresses (besides members) that test sends may go to'),
     you: z.object({ type: z.enum(['user', 'agent']), userId: z.string(), role: z.string(), permissions: z.array(z.string()) }),
   }),
   permission: 'artifacts:read',
@@ -26,8 +27,28 @@ export const getWorkspace = defineCommand({
       id: w.id,
       name: w.name,
       approvalPolicy: w.approvalPolicy,
+      seedList: w.seedList,
       you: { type: p.type, userId: p.userId, role: p.role, permissions: [...p.permissions].sort() },
     };
+  },
+});
+
+export const setSeedList = defineCommand({
+  name: 'workspace.setSeedList',
+  title: 'Set the test-send seed list',
+  description:
+    'Admins: replace the list of e-mail addresses (besides workspace members) that templates.sendTest and broadcasts.sendTest may send to. Use it for monitoring inboxes. At most 50 addresses; does not affect real broadcasts. Only people can change it.',
+  input: z.object({
+    seedList: z.array(z.email().max(320)).max(50).describe('E-mail addresses allowed to receive test sends'),
+  }),
+  output: z.object({ seedList: z.array(z.string()) }),
+  permission: 'workspace:admin',
+  effect: 'write',
+  humansOnly: true,
+  handler: async (input, ctx) => {
+    const seedList = [...new Set(input.seedList.map((e) => e.trim().toLowerCase()))];
+    await ctx.tx.update(schema.workspaces).set({ seedList }).where(eq(schema.workspaces.id, ctx.principal.workspaceId));
+    return { seedList };
   },
 });
 
@@ -127,4 +148,4 @@ export const verifyAudit = defineCommand({
   },
 });
 
-export const workspaceCommands = [getWorkspace, setApprovalPolicy, listAudit, verifyAudit] as const;
+export const workspaceCommands = [getWorkspace, setSeedList, setApprovalPolicy, listAudit, verifyAudit] as const;

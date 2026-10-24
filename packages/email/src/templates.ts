@@ -1,13 +1,12 @@
 import { contentValidators, DEFAULT_PURPOSES, type EmailTemplate, publishedSingleton } from '@agentic-marketing/artifacts';
 import { defineCommand } from '@agentic-marketing/commands';
-import { AppError, newUuid } from '@agentic-marketing/core';
+import { AppError } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
 import { profileForMessage } from '@agentic-marketing/profiles';
 import { and, desc, eq } from 'drizzle-orm';
 import { z } from 'zod';
-import { tagLinks } from './links';
-import { transportFor } from './providers';
 import { renderTemplate, validateTemplate } from './render';
+import { sendTestMessages, testRecipientsInput, testSendOutput } from './testSend';
 
 contentValidators.set('email_template', (c) => validateTemplate(c as EmailTemplate));
 
@@ -69,85 +68,56 @@ export const previewTemplate = defineCommand({
   },
 });
 
-/** People's names and e-mail addresses (provided by the auth package). */
-interface MemberDirectory {
-  users(ids: string[]): Promise<Map<string, { email: string; name: string }>>;
-}
-
 export const sendTestEmail = defineCommand({
   name: 'templates.sendTest',
   title: 'Send a test e-mail',
   description:
-    'Send a template version (default: the latest, drafts included) to a member of this workspace (default: you), rendered with its sample data and "[Test]" in the subject, through the provider the real send would use. Not recorded as a message; links are not tracked.',
+    'Send a template version through the provider the real send would use: by default the latest draft (or the latest version when there is no draft). Recipients are limited to workspace members and the admin-configured seed list (workspace.setSeedList), at most 10 per call; `to` defaults to you. Rendered with each recipient’s profile when the workspace knows their address, otherwise with sample data, and with "[Test]" in the subject. Purpose/consent checks are skipped, suppressions still apply, and each copy is recorded as a test message (never counted in reporting) and an audit entry. No profile or consent is written; agents drafting newsletters can run it with the artifacts:write scope.',
   input: z.object({
     artifactId: z.string().regex(/^eml_[0-9a-f]{32}$/),
-    version: z.number().int().min(1).optional(),
-    to: z.email().optional().describe("A workspace member's e-mail address; default: the caller's"),
+    version: z.number().int().min(1).optional().describe('Default: the latest draft, else the latest version'),
+    to: testRecipientsInput,
   }),
-  output: z.object({ to: z.string(), subject: z.string(), provider: z.string() }),
-  permission: 'messages:send',
+  output: testSendOutput,
+  permission: 'artifacts:write',
   effect: 'write',
   target: (i) => i.artifactId,
   handler: async (input, ctx) => {
+    const [artifact] = await ctx.tx
+      .select({ latestVersion: schema.artifacts.latestVersion })
+      .from(schema.artifacts)
+      .where(and(eq(schema.artifacts.id, input.artifactId), eq(schema.artifacts.type, 'email_template')));
+    if (!artifact) throw new AppError('not_found', `No e-mail template ${input.artifactId}.`);
+    let version: number;
+    if (input.version) version = input.version;
+    else {
+      const [draft] = await ctx.tx
+        .select({ number: schema.artifactVersions.number })
+        .from(schema.artifactVersions)
+        .where(and(eq(schema.artifactVersions.artifactId, input.artifactId), eq(schema.artifactVersions.state, 'draft')))
+        .orderBy(desc(schema.artifactVersions.number))
+        .limit(1);
+      version = draft?.number ?? artifact.latestVersion;
+    }
     const [v] = await ctx.tx
       .select()
       .from(schema.artifactVersions)
-      .where(
-        and(
-          eq(schema.artifactVersions.artifactId, input.artifactId),
-          input.version ? eq(schema.artifactVersions.number, input.version) : undefined,
-        ),
-      )
-      .orderBy(desc(schema.artifactVersions.number))
-      .limit(1);
-    if (!v) throw new AppError('not_found', `No template ${input.artifactId}.`);
+      .where(and(eq(schema.artifactVersions.artifactId, input.artifactId), eq(schema.artifactVersions.number, version)));
+    if (!v) throw new AppError('not_found', `No template ${input.artifactId} version ${version}.`);
     const t = v.content as EmailTemplate;
-    // Only to members: a test send must never become a way to mail arbitrary people.
-    const directory = (ctx.services as { directory?: MemberDirectory }).directory;
-    const memberIds = (await ctx.tx.select({ userId: schema.workspaceMembers.userId }).from(schema.workspaceMembers)).map((m) => m.userId);
-    const members = directory ? await directory.users(memberIds) : new Map();
-    const emails = new Map([...members].map(([id, u]) => [u.email.toLowerCase(), id]));
-    const own = members.get(ctx.principal.userId)?.email;
-    const to = (input.to ?? own ?? '').toLowerCase();
-    if (!emails.has(to)) throw new AppError('forbidden', 'Test e-mails go to members of this workspace only.');
 
+    // The provider is the one the real send would use for this purpose's stream.
     const purposes = (await publishedSingleton(ctx.tx, 'purposes'))?.purposes ?? DEFAULT_PURPOSES;
     const basis = purposes.find((p) => p.key === t.purpose)?.basis ?? 'consent';
     const stream = basis === 'contract' || basis === 'legal_obligation' ? 'transactional' : 'marketing';
-    const provider = (await ctx.tx.select().from(schema.emailProviders).where(eq(schema.emailProviders.enabled, true))).find((p) =>
-      p.useFor.includes(stream),
-    );
-    if (!provider) throw new AppError('conflict', `No enabled e-mail provider is set up for ${stream} messages.`);
-    let rendered: Awaited<ReturnType<typeof renderTemplate>>;
-    try {
-      rendered = await renderTemplate(t, {
-        ...(t.sampleData ?? {}),
-        unsubscribe_url: `${ctx.services.email.publicUrl}/u/test`,
-        preferences_url: `${ctx.services.email.publicUrl}/u/test`,
-        confirm_url: `${ctx.services.email.publicUrl}/f/confirm/test`,
-      });
-    } catch (e) {
-      throw new AppError('invalid_input', `The template could not be rendered: ${(e as Error).message.split('\n')[0]}`);
-    }
-    const html = t.utm ? tagLinks(rendered.html, t.utm, [ctx.services.email.publicUrl]) : rendered.html;
-    const transport = await transportFor(ctx.tx, provider, ctx.services.keyProvider, ctx.services.email.adapterDeps);
-    const subject = `[Test] ${rendered.subject}`;
-    try {
-      await transport.send({
-        messageId: `test_${newUuid()}`,
-        from: { email: provider.fromEmail, name: provider.fromName || undefined },
-        replyTo: provider.replyTo ?? undefined,
-        to,
-        subject,
-        html,
-        text: rendered.text,
-        headers: {},
-        stream,
-      });
-    } catch (e) {
-      throw new AppError('conflict', `${provider.name} refused the test e-mail: ${(e as Error).message}`);
-    }
-    return { to, subject, provider: provider.name };
+    return sendTestMessages(ctx, {
+      templateId: input.artifactId,
+      templateVersion: version,
+      template: t,
+      purpose: t.purpose,
+      stream,
+      to: input.to,
+    });
   },
 });
 

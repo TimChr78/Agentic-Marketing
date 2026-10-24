@@ -49,6 +49,7 @@ export const listMessages = defineCommand({
         reason: z.string().nullable(),
         notBefore: z.string().nullable().describe('Held back until then (quiet hours, a paused stream)'),
         segments: z.number().nullable().describe('SMS segments used'),
+        test: z.boolean().describe('A test send, not counted in reporting'),
         createdAt: z.string(),
         events: z.array(z.object({ type: z.string(), at: z.string(), reason: z.string(), url: z.string() })),
       }),
@@ -78,6 +79,7 @@ export const listMessages = defineCommand({
         reason: r.reason,
         notBefore: r.notBefore?.toISOString() ?? null,
         segments: r.segments,
+        test: r.test,
         createdAt: r.createdAt.toISOString(),
         events: events
           .filter((e) => e.messageId === r.id)

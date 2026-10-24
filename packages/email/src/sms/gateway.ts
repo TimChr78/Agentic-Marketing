@@ -130,6 +130,7 @@ async function segmentsThisMonth(tx: Tx, providerId: string) {
     .where(
       and(
         eq(schema.messages.channel, 'sms'),
+        eq(schema.messages.test, false),
         eq(schema.messages.providerId, providerId),
         inArray(schema.messages.status, ['sent', 'delivered', 'bounced']),
         gte(schema.messages.createdAt, new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1))),

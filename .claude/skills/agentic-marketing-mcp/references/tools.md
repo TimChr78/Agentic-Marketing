@@ -18,7 +18,7 @@ Generated from the command registry (`apps/server/src/registry.ts`). **Effect**:
 | `config.export` | read | artifacts:read | people and agents | Export artifacts as a bundle |
 | `config.import` | write | artifacts:write | people and agents | Import a bundle of artifacts (dry run first; publishing needs artifacts:publish) |
 | `templates.preview` | read | artifacts:read | people and agents | Preview an e-mail template |
-| `templates.sendTest` | write | messages:send | people and agents | Send a test e-mail to a workspace member |
+| `templates.sendTest` | write | artifacts:write | people and agents | Send a test e-mail to members or the admin seed list (marked as a test) |
 | `messages.sendEmail` | write | messages:send | people and agents | Send an e-mail to a person |
 | `messages.sendSms` | write | messages:send | people and agents | Send a text message to a person |
 | `smsTemplates.preview` | read | artifacts:read | people and agents | Preview an SMS template (segments, cost) |
@@ -48,6 +48,7 @@ Generated from the command registry (`apps/server/src/registry.ts`). **Effect**:
 | `emailProviders.rotateWebhook` | write | workspace:admin | people only | Replace an e-mail provider webhook URL |
 | `emailProviders.delete` | destructive | workspace:admin | people only | Delete an e-mail provider |
 | `workspace.get` | read | artifacts:read | people and agents | Current workspace |
+| `workspace.setSeedList` | write | workspace:admin | people only | Set the test-send seed list |
 | `workspace.setApprovalPolicy` | write | workspace:admin | people only | Set approval policy |
 | `audit.list` | read | audit:read | people and agents | Read audit log |
 | `audit.verify` | read | audit:read | people and agents | Verify audit log integrity |
@@ -88,6 +89,7 @@ Generated from the command registry (`apps/server/src/registry.ts`). **Effect**:
 | `journeys.simulate` | read | artifacts:read | people and agents | Simulate a journey |
 | `journeys.migrate` | publish | artifacts:publish | people and agents | Move participants to the published version |
 | `broadcasts.preview` | read | artifacts:read | people and agents | Preview a broadcast’s audience |
+| `broadcasts.sendTest` | write | artifacts:write | people and agents | Send a broadcast test e-mail (marked as a test) |
 | `broadcasts.status` | read | artifacts:read | people and agents | Broadcast status and results |
 | `broadcasts.cancel` | write | messages:send | people and agents | Cancel a broadcast |
 | `experiences.results` | read | artifacts:read | people and agents | Experiment results (fixed, sequential and Bayesian; `recommendation` follows the experience’s `analysis.method`) |

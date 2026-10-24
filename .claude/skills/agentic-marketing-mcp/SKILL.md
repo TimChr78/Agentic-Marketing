@@ -58,7 +58,7 @@ Read [references/tools.md](references/tools.md) for the full list with effects a
 | SMS | `smsTemplates.preview` (segments, cost); `messages.sendSms` (needs `messages:send`) |
 | Deliverability | `deliverability.health`, `emailProviders.checkDomain` |
 | Ads | `ads.performance` (cost, conversions, CPA, ROAS per campaign), `ads.audiences`, `ads.conversions`, `ads.importSpend`, `ads.syncAudience`, `ads.test`; rules are the `conversion_map` and `audience_sync` artifacts (draft them, a person publishes) |
-| Newsletter | `broadcasts.preview`, `broadcasts.status`, `broadcasts.cancel` |
+| Newsletter | `broadcasts.preview`, `broadcasts.sendTest`, `broadcasts.status`, `broadcasts.cancel`; `workspace.setSeedList` (admin) |
 | Journeys | `journeys.simulate`, `journeys.stats`, `journeys.enroll` (needs `messages:send`), `journeys.migrate` (move people to the published version; dry run first) |
 | Web | `experiences.results` |
 | AI | `prompts.test` + `prompts.testRun`, `ai.calls`, `ai.usage`, `aiProviders.list` |
