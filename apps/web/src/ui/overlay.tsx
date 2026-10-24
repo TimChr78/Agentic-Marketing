@@ -81,9 +81,11 @@ export interface ModalProps {
   children: ReactNode;
   footer?: ReactNode;
   role?: 'dialog' | 'alertdialog';
+  /** md: 480 px (confirmations, short forms); lg: 760 px (pickers). */
+  size?: 'md' | 'lg';
 }
 
-export function Modal({ open, onClose, title, children, footer, role = 'dialog' }: ModalProps) {
+export function Modal({ open, onClose, title, children, footer, role = 'dialog', size = 'md' }: ModalProps) {
   const ref = useRef<HTMLDivElement>(null);
   const titleId = useId();
   useFocusTrap(ref, open, onClose);
@@ -98,12 +100,12 @@ export function Modal({ open, onClose, title, children, footer, role = 'dialog' 
         aria-modal="true"
         aria-labelledby={titleId}
         tabIndex={-1}
-        className="am-rise relative w-full max-w-[480px] rounded-t-xl border border-line bg-surface shadow-2 outline-none sm:rounded-xl"
+        className={cx('am-rise relative flex max-h-[92vh] w-full flex-col rounded-t-xl border border-line bg-surface shadow-2 outline-none sm:rounded-xl', size === 'lg' ? 'max-w-[760px]' : 'max-w-[480px]')}
       >
         <h2 id={titleId} className="px-5 pt-4 text-[15px] leading-[22px] font-semibold">
           {title}
         </h2>
-        <div className="px-5 pt-2 pb-4 text-[14px] leading-[22px] text-fg-2">{children}</div>
+        <div className="min-h-0 overflow-y-auto px-5 pt-2 pb-4 text-[14px] leading-[22px] text-fg-2">{children}</div>
         {footer && <div className="flex flex-wrap justify-end gap-2 border-t border-line px-5 py-3">{footer}</div>}
       </div>
     </div>,
