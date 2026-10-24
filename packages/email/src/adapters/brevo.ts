@@ -22,6 +22,9 @@ const types: Record<string, { type: DeliveryEventType; bounce?: 'hard' | 'soft' 
 export const brevoAdapter = defineAdapter({
   id: 'brevo',
   label: 'Brevo',
+  tracking: 'forced',
+  trackingNote:
+    "Brevo adds open and click tracking to every message, including the unsubscribe link; it cannot be turned off from here (only Brevo support can disable it for some accounts), and 'anonymised tracking' still rewrites links.",
   config: z.object({}),
   secrets: z.object({ apiKey: z.string().min(10) }),
   create: (_config, secrets, { fetch }) => ({

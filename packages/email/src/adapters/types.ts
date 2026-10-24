@@ -47,6 +47,14 @@ export interface AdapterDeps {
   ) => Promise<{ status: number; headers: Record<string, string>; body: string }>;
 }
 
+/**
+ * Who adds open/click tracking to the message, independently of the workspace's own
+ * click tracking (`EMAIL_TRACK_CLICKS`): `forced` means every message is tracked by the
+ * provider and the platform cannot turn it off; `configurable` means tracking is opt-in per
+ * message or configuration set; `none` means the adapter adds no tracking of its own.
+ */
+export type TrackingCapability = 'forced' | 'configurable' | 'none';
+
 export interface EmailTransport {
   /** `events`: what the provider already knows from the send itself (e.g. a suppressed address). */
   send(msg: OutgoingEmail): Promise<{ providerMessageId: string | null; events?: DeliveryEvent[] }>;
@@ -63,6 +71,10 @@ export interface EmailAdapter<C extends z.ZodType = z.ZodType, S extends z.ZodTy
   config: C;
   /** Credentials; write-only, stored sealed. */
   secrets: S;
+  /** Whether the provider tracks opens/clicks itself, and whether the platform can stop it. */
+  tracking: TrackingCapability;
+  /** A short operator-facing explanation of `tracking`. */
+  trackingNote: string;
   create(config: z.output<C>, secrets: z.output<S>, deps: AdapterDeps): EmailTransport;
 }
 

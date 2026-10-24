@@ -74,6 +74,7 @@ Add a provider in the UI (E-mails → providers) or with `emailProviders.create`
 - SMTP relay, SES, Postmark or Brevo; `useFor: ["transactional", "marketing"]`.
 - Register the provider's webhook URL for bounces and complaints.
 - Set up SPF, DKIM and DMARC for the sending domain.
+- Check provider-side tracking. Brevo adds open and click tracking to every message (including the unsubscribe link) and cannot turn it off from here; use Cloudflare Email Service, Postmark or SES for marketing if the site promises no tracking. `emailProviders.list` shows `tracking`, `trackingNote` and a warning when `EMAIL_TRACK_CLICKS=false` but a marketing provider tracks anyway.
 
 **Check:** `messages.sendEmail` to yourself (with consent) arrives, and a test bounce shows in `messages.list`.
 
@@ -128,7 +129,7 @@ A `journey` (purpose `marketing_email`):
 Simulate it with `journeys.simulate`, then publish. E-mail clicks are not profile events yet, so do not branch on "clicked".
 
 ### 9. Privacy policy and CSP
-- **Privacy policy:** name the platform (self-hosted) as the newsletter processor, and list the data (e-mail, name, consent proof, delivery and click events). Set `EMAIL_TRACK_CLICKS=false` if clicks should not be counted.
+- **Privacy policy:** name the platform (self-hosted) as the newsletter processor, and list the data (e-mail, name, consent proof, delivery and click events). Set `EMAIL_TRACK_CLICKS=false` if clicks should not be counted, and remember that it does not stop provider-side tracking: Brevo always tracks and rewrites links (see step 4).
 - **Form text:** keep `consentText` identical to the text shown next to the form.
 - **CSP:** remove the old tool's domains from `form-action` and `connect-src`. Option A: add `https://am.<site>` to `form-action` (and to `connect-src` only if forms post JSON with JavaScript). Option B: no change; the form posts to `/am/f/<form id>` on the site's origin under `form-action 'self'`.
 

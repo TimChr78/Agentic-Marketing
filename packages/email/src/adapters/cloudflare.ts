@@ -17,6 +17,8 @@ interface SendResult {
 export const cloudflareAdapter = defineAdapter({
   id: 'cloudflare',
   label: 'Cloudflare Email Service',
+  tracking: 'none',
+  trackingNote: 'Cloudflare Email Service does not add tracking (per its documentation; verify for your account).',
   config: z.object({
     accountId: z.string().regex(/^[0-9a-f]{32}$/, 'The 32-character Cloudflare account id'),
     apiBase: z.url().default('https://api.cloudflare.com/client/v4'),

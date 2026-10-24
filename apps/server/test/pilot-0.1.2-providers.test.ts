@@ -65,3 +65,44 @@ describe('e-mail provider credentials and webhook URLs', () => {
     expect(await fresh.json()).toEqual({ ok: true, events: 0 });
   });
 });
+
+describe('provider-side tracking warnings', () => {
+  let off: Awaited<ReturnType<typeof startTestServer>>;
+  let admin: User;
+
+  beforeAll(async () => {
+    off = await startTestServer('test_pilot_providers_tracking', 3300, {
+      PUBLIC_URL: 'http://localhost:3300',
+      PUBLIC_LINKS_URL: LINKS,
+      EMAIL_TRACK_CLICKS: 'false',
+    });
+    admin = await off.signUp(`tracking-${Date.now()}@example.com`);
+    await off.workspaceWith([[admin, 'owner']]);
+  }, 60_000);
+  afterAll(() => off?.close());
+
+  it('warns when Brevo carries marketing mail although EMAIL_TRACK_CLICKS=false', async () => {
+    const api = off.api(admin);
+    const created = await api.call('emailProviders.create', {
+      name: 'Brevo marketing',
+      adapter: 'brevo',
+      config: {},
+      secrets: { apiKey: 'xkeysib-0123456789abcdef' },
+      fromEmail: 'news@example.com',
+      useFor: ['marketing'],
+    });
+    expect(created.tracking).toBe('forced');
+    expect(created.warnings).toEqual([
+      'Brevo provider "Brevo marketing" adds open and click tracking to every marketing e-mail although EMAIL_TRACK_CLICKS=false.',
+    ]);
+
+    const listed = await api.call('emailProviders.list', {});
+    expect(listed.warnings).toEqual(created.warnings);
+    for (const p of listed.providers) expect(['forced', 'configurable', 'none']).toContain(p.tracking);
+
+    const moved = await api.call('emailProviders.update', { id: created.id, useFor: ['transactional'] });
+    expect(moved.tracking).toBe('forced');
+    expect(moved.warnings).toEqual([]);
+    expect((await api.call('emailProviders.list', {})).warnings).toEqual([]);
+  });
+});

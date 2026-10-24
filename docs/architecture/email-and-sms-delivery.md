@@ -20,12 +20,27 @@ That last one needs complaint events to be measured at all.
 
 The provider adapters have shipped since Phase 2. They are HTTP APIs with signed delivery-event webhooks:
 
-| Adapter | Events | Fit |
-|---|---|---|
-| **Amazon SES** (v2 API, SigV4) | SNS → webhook (signature verified): delivery, bounce, complaint | **Recommended for the newsletter**: cheapest at volume, EU regions (eu-north-1, eu-central-1), mature reputation tooling |
-| **Postmark** | Webhooks; a separate broadcast stream | Best deliverability for small senders; costs more per message |
-| **Brevo** | Webhooks | EU-based (France), free tier |
-| SMTP | Only with a provider's webhooks | Last resort |
+| Adapter | Events | Fit | Provider-side tracking |
+|---|---|---|---|
+| **Amazon SES** (v2 API, SigV4) | SNS → webhook (signature verified): delivery, bounce, complaint | **Recommended for the newsletter**: cheapest at volume, EU regions (eu-north-1, eu-central-1), mature reputation tooling | Configurable: only if the configuration set enables it |
+| **Postmark** | Webhooks; a separate broadcast stream | Best deliverability for small senders; costs more per message | Configurable: per message; the adapter turns links off |
+| **Brevo** | Webhooks | EU-based (France), free tier | **Forced: open and click tracking on every message** |
+| **Cloudflare Email Service** | From the send response only; no webhooks yet (see below) | Transactional; see below | None (per its documentation; verify for your account) |
+| SMTP | Only with a provider's webhooks | Last resort | Depends entirely on the relay |
+| Development outbox | None | Development and tests | None (sends nothing) |
+
+### Provider-side tracking
+
+The workspace setting `EMAIL_TRACK_CLICKS` only controls the platform's own link rewriting. A provider can still rewrite links or add an open pixel, and then the admin UI would understate what the recipient sees:
+
+- **Brevo: forced.** Brevo adds open and click tracking to every message. Every HTML link — including the platform's unsubscribe link — is rewritten through Brevo's tracker, and a hidden pixel is added. It cannot be turned off per message or in the Brevo UI; only Brevo support can disable it for some accounts, and Brevo's "anonymised tracking" still rewrites links. If the site promises no tracking, use Cloudflare Email Service, Postmark or SES for marketing, or ask Brevo support before sending.
+- **Postmark: configurable.** The adapter sends `TrackLinks: 'None'` on every message and `TrackOpens: false` unless the provider's `trackOpens` setting is on, so provider tracking is off by default.
+- **Amazon SES: configurable.** Tracking happens only when the AWS configuration set named on the message has open or click tracking enabled. The adapter adds no tracking options of its own.
+- **Cloudflare Email Service: none.** It documents no open or click tracking; verify this for the account before promising it.
+- **SMTP: depends on the relay.** The adapter adds nothing, but an SMTP relay (for example Brevo's SMTP endpoint) can still rewrite links and add pixels.
+- **Development outbox: none.** It keeps messages in memory and sends nothing.
+
+`emailProviders.list` returns `tracking` (`forced`, `configurable` or `none`) and `trackingNote` for each provider, and a `warnings` list when the workspace has click tracking off but an enabled marketing provider tracks every message anyway. The same warning appears in the admin UI above the provider list.
 
 The workspace already routes **transactional** and **marketing** messages to different providers, by purpose. **The MarTechSignal pilot can use SES or Postmark from day one instead of the SMTP relay**; nothing new is needed for that.
 

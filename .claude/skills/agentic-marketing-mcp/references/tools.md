@@ -42,7 +42,7 @@ Generated from the command registry (`apps/server/src/registry.ts`). **Effect**:
 | `warehouse.delete` | write | workspace:admin | people only | Remove a warehouse export |
 | `messages.list` | read | profiles:read | people and agents | Messages and what happened to them |
 | `messages.stats` | read | artifacts:read | people and agents | E-mail performance |
-| `emailProviders.list` | read | workspace:admin | people and agents | List e-mail providers |
+| `emailProviders.list` | read | workspace:admin | people and agents | List e-mail providers, including `tracking`, `trackingNote` and privacy warnings |
 | `emailProviders.create` | write | workspace:admin | people only | Add an e-mail provider |
 | `emailProviders.update` | write | workspace:admin | people only | Change an e-mail provider |
 | `emailProviders.rotateWebhook` | write | workspace:admin | people only | Replace an e-mail provider webhook URL |

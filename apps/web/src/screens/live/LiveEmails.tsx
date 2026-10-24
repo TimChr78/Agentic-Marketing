@@ -19,6 +19,7 @@ const STARTER = `<mjml>
 </mjml>`;
 
 const statusTone = { queued: 'neutral', sending: 'neutral', sent: 'accent', delivered: 'good', suppressed: 'warn', failed: 'bad', bounced: 'bad', complained: 'bad' } as const;
+const trackingTone = { forced: 'bad', configurable: 'warn', none: 'good' } as const;
 
 export function LiveEmails({ canAdmin, onError }: { canAdmin: boolean; onError: (m: string) => void }) {
   const [list, setList] = useState<Out<'artifacts.list'>['artifacts']>([]);
@@ -158,34 +159,48 @@ function Providers({ onError }: { onError: (m: string) => void }) {
     }
   }, [onError]);
   useEffect(() => void load(), [load]);
+  const selected = data?.adapters.find((a) => a.id === form.adapter);
 
   return (
     <Card title="E-mail providers" action={<Server size={14} className="text-muted" />}>
+      {!!data?.warnings.length && (
+        <div className="border-b border-warn/40 bg-warn-soft px-4 py-2.5 text-[12px] text-warn">
+          {data.warnings.map((w) => (
+            <p key={w}>{w}</p>
+          ))}
+        </div>
+      )}
       <ul className="divide-y divide-line text-[13px]">
         {data?.providers.map((p) => (
-          <li key={p.id} className="flex items-center gap-2 px-4 py-2.5">
-            <span className="min-w-0 flex-1">
-              <span className="block font-medium">{p.name}</span>
-              <span className="text-[11px] text-muted">
-                {p.adapter} · {p.fromEmail} · {p.useFor.join(', ') || 'not used'}
-                {p.replyTo ? ` · reply-to ${p.replyTo}` : ''}
+          <li key={p.id} className="px-4 py-2.5">
+            <div className="flex items-center gap-2">
+              <span className="min-w-0 flex-1">
+                <span className="block font-medium">{p.name}</span>
+                <span className="text-[11px] text-muted">
+                  {p.adapter} · {p.fromEmail} · {p.useFor.join(', ') || 'not used'}
+                  {p.replyTo ? ` · reply-to ${p.replyTo}` : ''}
+                </span>
               </span>
-            </span>
-            <Button
-              variant="ghost"
-              onClick={async () => {
-                if (!confirm(`Create a new webhook URL for ${p.name}? The old URL stops working immediately.`)) return;
-                try {
-                  const r = await api.call('emailProviders.rotateWebhook', { id: p.id });
-                  setWebhook(r.webhookUrl);
-                } catch (e) {
-                  onError(errText(e));
-                }
-              }}
-            >
-              <RefreshCw size={14} /> New webhook URL
-            </Button>
-            <Pill tone={p.enabled ? 'good' : 'neutral'}>{p.enabled ? 'enabled' : 'off'}</Pill>
+              <span title={p.trackingNote}>
+                <Pill tone={trackingTone[p.tracking]}>Provider tracking: {p.tracking}</Pill>
+              </span>
+              <Button
+                variant="ghost"
+                onClick={async () => {
+                  if (!confirm(`Create a new webhook URL for ${p.name}? The old URL stops working immediately.`)) return;
+                  try {
+                    const r = await api.call('emailProviders.rotateWebhook', { id: p.id });
+                    setWebhook(r.webhookUrl);
+                  } catch (e) {
+                    onError(errText(e));
+                  }
+                }}
+              >
+                <RefreshCw size={14} /> New webhook URL
+              </Button>
+              <Pill tone={p.enabled ? 'good' : 'neutral'}>{p.enabled ? 'enabled' : 'off'}</Pill>
+            </div>
+            <p className="mt-1 text-[11px] text-muted">{p.trackingNote}</p>
           </li>
         ))}
       </ul>
@@ -231,6 +246,11 @@ function Providers({ onError }: { onError: (m: string) => void }) {
             aria-label="Reply-to address"
           />
         </div>
+        {selected && (
+          <p className="text-[11px] text-muted">
+            Provider tracking: <span className="font-semibold">{selected.tracking}</span> — {selected.trackingNote}
+          </p>
+        )}
         <textarea className={cx(inputCls, 'h-16 font-mono text-[12px]')} value={form.config} onChange={(e) => setForm({ ...form, config: e.target.value })} aria-label="Settings (JSON)" />
         <textarea className={cx(inputCls, 'h-12 font-mono text-[12px]')} value={form.secrets} onChange={(e) => setForm({ ...form, secrets: e.target.value })} aria-label="Credentials (JSON, write-only)" />
         <div className="flex items-center gap-2">

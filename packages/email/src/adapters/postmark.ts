@@ -7,6 +7,9 @@ import { type DeliveryEvent, defineAdapter, type WebhookRequest } from './types'
 export const postmarkAdapter = defineAdapter({
   id: 'postmark',
   label: 'Postmark',
+  tracking: 'configurable',
+  trackingNote:
+    'Postmark tracks opens and clicks only when a message enables them; the platform sends link tracking off on every message and open tracking off unless the provider setting trackOpens is on.',
   config: z.object({
     transactionalStream: z.string().default('outbound'),
     marketingStream: z.string().default('broadcast'),
@@ -29,6 +32,7 @@ export const postmarkAdapter = defineAdapter({
           Metadata: { am_message_id: m.messageId },
           MessageStream: m.stream === 'marketing' ? config.marketingStream : config.transactionalStream,
           TrackOpens: config.trackOpens,
+          TrackLinks: 'None',
         }),
       });
       const body = (await res.json().catch(() => ({}))) as { ErrorCode?: number; Message?: string; MessageID?: string };

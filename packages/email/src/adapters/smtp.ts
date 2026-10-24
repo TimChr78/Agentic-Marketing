@@ -11,6 +11,8 @@ import { defineAdapter } from './types';
 export const smtpAdapter = defineAdapter({
   id: 'smtp',
   label: 'SMTP relay',
+  tracking: 'none',
+  trackingNote: 'SMTP adds no tracking itself; whether the relay rewrites links or adds pixels depends entirely on the relay.',
   config: z.object({
     host: z.string().min(1),
     port: z.number().int().min(1).max(65535).default(587),
