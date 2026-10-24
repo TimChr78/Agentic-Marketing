@@ -729,6 +729,100 @@ const UrlOrPath = z
   .string()
   .max(2000)
   .regex(/^(https?:\/\/|\/)/, 'An absolute URL or a path starting with /');
+
+// Hosted pages (#37): the workspace's brand for the pages a subscriber sees on the links host
+// (double opt-in confirm and expired, unsubscribe and its result page). One brand per workspace;
+// each form may override parts of it. Every value here ends up in HTML or CSS, so it is validated
+// strictly and escaped when rendered.
+const HexColor = z.string().regex(/^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/, 'Use a #rgb or #rrggbb colour such as "#1d4ed8"');
+const brandColors = z.object({
+  background: HexColor.optional().describe('Page background, default #ffffff'),
+  surface: HexColor.optional().describe('Card behind the message, default #f6f7f9'),
+  text: HexColor.optional().describe('Headings and body text, default #111827 (WCAG AA on the defaults)'),
+  muted: HexColor.optional().describe('Secondary text, default #4b5563'),
+  accent: HexColor.optional().describe('Primary button and links, default #1d4ed8'),
+  accentText: HexColor.optional().describe('Text on the primary button, default #ffffff'),
+  border: HexColor.optional().describe('Card and button borders, default #d1d5db'),
+});
+const BrandLanguage = z
+  .string()
+  .max(35)
+  .refine((tag) => {
+    try {
+      Intl.getCanonicalLocales(tag);
+      return true;
+    } catch {
+      return false;
+    }
+  }, 'Use a BCP 47 language tag such as "en", "da" or "pt-BR"');
+const BrandFontStack = z
+  .string()
+  .min(1)
+  .max(200)
+  .regex(
+    /^[-A-Za-z0-9 ,'"]+$/,
+    'Use letters, digits, spaces, commas, quotes and hyphens only, e.g. "Georgia, serif" or system-ui, sans-serif',
+  )
+  .describe('CSS font-family value; only letters, digits, spaces, commas, quotes and hyphens');
+const BrandUrl = z
+  .string()
+  .max(2000)
+  .refine((value) => {
+    try {
+      const url = new URL(value);
+      if (url.protocol === 'https:') return true;
+      return url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]', '::1'].includes(url.hostname);
+    } catch {
+      return false;
+    }
+  }, 'Use an https URL, or http on localhost for development');
+const BrandLogoUrl = z
+  .string()
+  .max(2000)
+  .refine((value) => {
+    try {
+      return new URL(value).protocol === 'https:';
+    } catch {
+      return false;
+    }
+  }, 'Use an https URL for the logo');
+const CopyText = z.string().max(500);
+const brandCopy = z.object({
+  confirmTitle: CopyText.optional().describe('Default "Confirm your subscription"'),
+  confirmBody: CopyText.optional().describe('Default "One click and you are in."'),
+  confirmButton: CopyText.optional().describe('Default "Yes, subscribe me"'),
+  confirmedTitle: CopyText.optional().describe('Default "You are subscribed"'),
+  confirmedBody: CopyText.optional().describe('Default "Your subscription is confirmed."'),
+  expiredTitle: CopyText.optional().describe('Default "Link expired"'),
+  expiredBody: CopyText.optional().describe('Default "This link has expired. Please sign up again; we will send you a new link."'),
+  unsubscribeTitle: CopyText.optional().describe('Default "Unsubscribe"'),
+  unsubscribeBody: CopyText.optional().describe('Default "You will no longer receive these e-mails."'),
+  unsubscribeButton: CopyText.optional().describe('Default "Unsubscribe"'),
+  unsubscribedTitle: CopyText.optional().describe('Default "Unsubscribed"'),
+  unsubscribedBody: CopyText.optional().describe('Default "You are unsubscribed. It can take a moment before running campaigns notice."'),
+  backToSite: CopyText.optional().describe('Link text on the expired, confirmed and unsubscribe pages; default "Back to {site}"'),
+});
+/** All brand fields optional, with no defaults: the shape of a form's partial brand override. */
+const brandFields = {
+  siteName: z.string().max(120).optional().describe('Shown on every hosted page and in "Back to <site>"'),
+  siteUrl: BrandUrl.optional().describe('Where "Back to <site>" points; https, or http on localhost'),
+  logoUrl: BrandLogoUrl.optional().describe('Logo shown at the top; https URL, e.g. an asset public URL'),
+  logoAlt: z.string().max(200).optional().describe('Logo alt text; the site name when omitted'),
+  logoHeight: z.number().int().min(16).max(96).optional().describe('Logo height in px, default 32'),
+  colors: brandColors.optional(),
+  fontStack: BrandFontStack.optional().describe('Font stack for the page, default a system UI stack'),
+  radius: z.number().int().min(0).max(24).optional().describe('Corner radius in px, default 8'),
+  language: BrandLanguage.optional().describe('Page language (BCP 47), default "en"'),
+  copy: brandCopy.optional(),
+};
+const brandInput = z.object(brandFields);
+const brand = brandInput.extend({
+  logoHeight: z.number().int().min(16).max(96).default(32).describe('Logo height in px'),
+  colors: brandColors.default({}),
+  radius: z.number().int().min(0).max(24).default(8).describe('Corner radius in px'),
+  language: BrandLanguage.default('en'),
+});
+
 const form = z
   .object({
     purposes: z.array(Key).min(1).max(10).describe('Purposes the person agrees to, e.g. ["marketing_email"]'),
@@ -753,6 +847,11 @@ const form = z
       .default([])
       .describe('Sites the form may be posted from; empty: any'),
     turnstile: z.boolean().default(false).describe('Require a Cloudflare Turnstile token (secret in secrets as "turnstile.secret_key")'),
+    hostedPages: brandInput
+      .optional()
+      .describe(
+        'Overrides the workspace brand on this form’s hosted confirm and expired pages (site name, colours, logo, copy and language); keep it small so the firm-wide brand stays recognisable',
+      ),
   })
   .refine((f) => !f.doubleOptIn || !!f.confirmationTemplate, 'Double opt-in needs a confirmationTemplate');
 
@@ -769,6 +868,9 @@ const broadcast = z.object({
 });
 
 export type FormDefinition = z.output<typeof form>;
+export type Brand = z.output<typeof brand>;
+export type BrandOverride = z.output<typeof brandInput>;
+export type BrandCopy = z.output<typeof brandCopy>;
 export type ConversionMap = z.output<typeof conversionMap>;
 export type AudienceSync = z.output<typeof audienceSync>;
 export type SmsTemplate = z.output<typeof smsTemplate>;
@@ -830,8 +932,16 @@ export const artifactTypes = {
     prefix: 'frm',
     label: 'Signup form',
     description:
-      'A public signup form (e.g. a newsletter): which purposes the person agrees to, double opt-in with a confirmation e-mail, redirects. Post to <links URL>/f/<id>.',
+      'A public signup form (e.g. a newsletter): which purposes the person agrees to, double opt-in with a confirmation e-mail, redirects. Post to <links URL>/f/<id>. Add hostedPages to override the workspace brand on this form’s confirm and expired pages.',
     content: form,
+  },
+  brand: {
+    prefix: 'brd',
+    label: 'Brand',
+    description:
+      'The workspace’s brand for the pages subscribers see on the platform domain: double opt-in confirm and expired, unsubscribe and unsubscribed. Site name, URL for “Back to …”, logo, colours, font stack, radius, language and copy overrides. One per workspace; the published version is live. Preview it with hostedPages.preview.',
+    content: brand,
+    singleton: true,
   },
   broadcast: {
     prefix: 'bct',
