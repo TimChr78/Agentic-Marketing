@@ -7,6 +7,8 @@ export const workspaces = pgTable('workspaces', {
   id: uuid('id').primaryKey(),
   name: text('name').notNull(),
   approvalPolicy: text('approval_policy').$type<ApprovalPolicy>().notNull(),
+  /** IANA time zone used to display dates in the UI. */
+  timeZone: text('time_zone').notNull().default('UTC'),
   /** Addresses (besides members) that admins allow test e-mails to. */
   seedList: text('seed_list').array().notNull().default([]),
   createdAt: ts('created_at').notNull().defaultNow(),
