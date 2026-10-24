@@ -1,4 +1,5 @@
 import { defineCommand } from '@agentic-marketing/commands';
+import { isoDateTime } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
 import { and, desc, eq, gte, lt, sql } from 'drizzle-orm';
 import { z } from 'zod';
@@ -45,7 +46,7 @@ export const listAiCalls = defineCommand({
     profileId: z.string().optional(),
     kind: z.enum(['decide', 'generate', 'copilot', 'test', 'classify']).optional(),
     limit: z.number().int().min(1).max(200).default(50),
-    before: z.iso.datetime().optional(),
+    before: isoDateTime('before').optional(),
   }),
   output: z.object({ calls: z.array(Call) }),
   permission: 'artifacts:read',

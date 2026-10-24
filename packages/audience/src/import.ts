@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { DEFAULT_PURPOSES, publishedSingleton } from '@agentic-marketing/artifacts';
 import { defineCommand } from '@agentic-marketing/commands';
-import { newId } from '@agentic-marketing/core';
+import { isoDateTime, newId } from '@agentic-marketing/core';
 import { acceptItems } from '@agentic-marketing/ingest';
 import { z } from 'zod';
 
@@ -24,7 +24,7 @@ const Row = z.object({
       z.object({
         purpose: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/),
         status: z.enum(['granted', 'denied', 'withdrawn', 'objected']),
-        recordedAt: z.iso.datetime().optional().describe('When the person gave it, from the old system'),
+        recordedAt: isoDateTime('recordedAt').optional().describe('When the person gave it, from the old system'),
         proof: z
           .record(z.string(), z.unknown())
           .default({})

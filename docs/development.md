@@ -115,7 +115,7 @@ See [integrations.md](integrations.md) for API tokens, webhooks, connectors and 
 
 ### Members
 
-Owners and admins invite people with `members.invite` (UI, REST or the typed client; agents cannot). The response holds a one-time link, `<PUBLIC_URL>/invite#<token>`, valid for 7 days. Send it to the person; they sign in or create an account with the invited e-mail address and join with the invited role. Only owners can make or change owners, and the last owner can be neither demoted nor removed.
+Owners and admins invite people with `members.invite` (UI, REST or the typed client; agents cannot). The response holds a one-time link, `<PUBLIC_URL>/invite#<token>`, valid for 7 days. Send it to the person; they sign in or create an account with the invited e-mail address and join with the invited role. Only owners can make or change owners, and the last owner can be neither demoted nor removed. `workspace.memberships` lists the workspaces a signed-in person belongs to with their role; REST clients switch by sending `X-Workspace-Id: <workspace id>` on later calls (the admin UI keeps the choice).
 
 ### Rotating the master key
 
@@ -130,6 +130,16 @@ Secrets are encrypted with per-workspace data keys, which are wrapped by `MASTER
 ### ClickHouse row policies
 
 Every ClickHouse table with a `workspace_id` has a row policy (`am_workspace`): a query sees only the rows of the workspace in its `SQL_workspace` setting, and none without it. The event store sets it on every query, so the policy backs up the workspace filters in code. Creating the policies needs a ClickHouse user with access management (`CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1` in the official image, as in `docker-compose.yml`) and the `SQL_` custom-settings prefix (in the image's default config). `CLICKHOUSE_ROW_POLICIES=required` (compose, CI) refuses to start without them, `auto` (default) applies them when it can, `off` removes them. To look at data by hand: `SELECT … SETTINGS SQL_workspace = '<workspace id>'`.
+
+### API and MCP compatibility
+
+Command names, inputs and outputs stay backward compatible: new fields are optional, and existing commands keep their meaning. Three settings control stricter API surfaces:
+
+- `STRICT_INPUTS` (default `false`) is warn-first: unknown keys in a command's input are logged and returned as `warnings` in the result, so existing clients keep working. With `true`, they are rejected with `invalid_input` naming the offending key and the keys the command accepts. Roll it out by running with the default first, fixing clients that send typos, then turning it on.
+- `MCP_TEXT_CONTENT` (default `json`) puts the full command result in an MCP tool result's text block. `summary` puts a one-line summary there instead (e.g. `artifacts.list: 12 artifacts`); `structuredContent` always carries the full result.
+- `MCP_TOOL_NAME_STYLE` (default `dotted`) lists tools by command name (`artifacts.list`). `underscore` lists and accepts `artifacts_list` instead, for clients that reject dots; scope step-up works the same way. REST always uses the command name at `POST /v1/<command>`.
+
+Every MCP tool advertises an object `outputSchema` and returns matching `structuredContent`, so clients can validate results.
 
 ### Load test
 

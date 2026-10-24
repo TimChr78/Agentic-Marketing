@@ -5,7 +5,7 @@
 const scopeText: Record<string, string> = {
   'artifacts:read': 'Read journeys, templates and other artifacts',
   'artifacts:write': 'Create and edit drafts',
-  'artifacts:publish': 'Publish, or send changes for approval (your approval policy still applies)',
+  'artifacts:publish': 'Submit changes for review, or publish directly where the approval policy allows it',
   'artifacts:approve': 'Approve changes (agents can never use this)',
   'messages:send': 'Send e-mails to people (consent, unsubscribes and suppressions are always enforced)',
   'audit:read': 'Read the audit log',

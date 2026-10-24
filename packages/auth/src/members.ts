@@ -12,6 +12,8 @@ import { z } from 'zod';
 /** Names and e-mail addresses of people, which live in the auth tables rather than in a workspace. */
 export interface Directory {
   users(ids: string[]): Promise<Map<string, { email: string; name: string }>>;
+  /** Workspaces a person belongs to, for the workspace switcher. */
+  memberships(userId: string): Promise<{ id: string; name: string; role: Role }[]>;
   /** Single sign-on providers of a workspace (without secrets). */
   ssoProviders(workspaceId: string): Promise<SsoProviderInfo[]>;
 }
@@ -41,6 +43,18 @@ export function authDirectory(db: Db): Directory {
         [ids],
       );
       return new Map(rows.map((r) => [r.id, { email: r.email, name: r.name }]));
+    },
+    async memberships(userId) {
+      // Cross-workspace by nature: the command runs inside the current workspace's RLS scope.
+      const { rows } = await db.admin.query<{ id: string; name: string; role: Role }>(
+        `SELECT w.id, w.name, m.role
+           FROM workspace_members m
+           JOIN workspaces w ON w.id = m.workspace_id
+          WHERE m.user_id = $1
+          ORDER BY w.name, w.created_at`,
+        [userId],
+      );
+      return rows;
     },
     async ssoProviders(workspaceId) {
       const { rows } = await db.admin.query<Record<string, unknown>>(
@@ -91,6 +105,19 @@ async function memberOf(ctx: CommandContext, userId: string) {
 }
 
 const Member = z.object({ userId: z.string(), email: z.string(), name: z.string(), role: RoleSchema, since: z.string() });
+
+export const listMemberships = defineCommand({
+  name: 'workspace.memberships',
+  title: 'Your workspaces',
+  description:
+    'The workspaces you belong to and your role in each. Switch workspace by sending the chosen id in the X-Workspace-Id header on REST calls (the admin UI stores it after you pick one).',
+  input: z.object({}),
+  output: z.object({ workspaces: z.array(z.object({ id: z.string(), name: z.string(), role: RoleSchema })) }),
+  permission: null,
+  effect: 'read',
+  humansOnly: true,
+  handler: async (_input, ctx) => ({ workspaces: await ctx.services.directory.memberships(ctx.principal.userId) }),
+});
 
 export const listMembers = defineCommand({
   name: 'members.list',
@@ -259,7 +286,15 @@ export const removeMember = defineCommand({
   },
 });
 
-export const memberCommands = [listMembers, inviteMember, listInvitations, revokeInvitation, setMemberRole, removeMember] as const;
+export const memberCommands = [
+  listMembers,
+  listMemberships,
+  inviteMember,
+  listInvitations,
+  revokeInvitation,
+  setMemberRole,
+  removeMember,
+] as const;
 
 // Accepting an invitation. The invitee is not a member yet, so this command is not part of the
 // public registry: the server finds the workspace from the token and runs it for the signed-in

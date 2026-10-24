@@ -4,6 +4,7 @@ import { SpanStatusCode, trace } from '@opentelemetry/api';
 import { and, desc, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import type { Permission, Principal } from './principal';
+import { findUnknownInputKeys, type UnknownInputKey, unknownKeyMessages } from './unknownKeys';
 
 // The command registry (ADR-0005): every capability is a command. REST, MCP and the typed UI
 // client are generated from these definitions, and `execute` is the only way to run one, so
@@ -13,8 +14,10 @@ export type Effect = 'read' | 'write' | 'publish' | 'destructive';
 export type Surface = 'rest' | 'mcp' | 'scim' | 'internal';
 
 /** Extension point for dependencies commands need (key providers, clocks…). Packages augment it. */
-// biome-ignore lint/suspicious/noEmptyInterface: augmented by other packages via declaration merging
-export interface Services {}
+export interface Services {
+  /** Public URL of the server, e.g. for admin UI deep links in command output. */
+  publicUrl?: string;
+}
 
 export interface CommandContext {
   principal: Principal;
@@ -58,14 +61,38 @@ export interface ExecuteOptions {
   idempotencyKey?: string;
 }
 
+export interface ExecutorOptions {
+  /** Reject unknown input keys instead of ignoring them with a warning (STRICT_INPUTS). */
+  strictInputs?: boolean;
+  /** Called with the unknown keys a non-strict executor ignored, e.g. to log them. */
+  onUnknownKeys?: (command: string, unknown: UnknownInputKey[]) => void;
+}
+
 const tracer = trace.getTracer('@agentic-marketing/commands');
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+/** Adds the unknown-key warnings to a command result without overwriting a command's own warnings. */
+function withInputWarnings<T>(out: T, messages: string[]): T {
+  if (!messages.length || !isPlainObject(out)) return out;
+  const existing = out.warnings;
+  if (existing === undefined) return { ...out, warnings: messages };
+  // Some commands (artifacts.create/updateDraft) use warnings for structured draft findings; keep those.
+  if (Array.isArray(existing) && existing.every((warning) => typeof warning === 'string'))
+    return { ...out, warnings: [...existing, ...messages] };
+  return out;
+}
 
 function redact(input: unknown, fields?: readonly string[]) {
   if (!fields?.length || !input || typeof input !== 'object') return input;
   return Object.fromEntries(Object.entries(input).map(([k, v]) => [k, fields.includes(k) ? '[redacted]' : v]));
 }
 
-export function createExecutor(db: Db, services: Services) {
+export function createExecutor(db: Db, services: Services, options: ExecutorOptions = {}) {
   async function appendAudit(
     tx: Tx,
     p: Principal,
@@ -117,6 +144,8 @@ export function createExecutor(db: Db, services: Services) {
       const input = rawInput ?? {};
       const inputHash = hashValue(redact(input, cmd.sensitive));
       let target: string | undefined;
+      const unknown = findUnknownInputKeys(cmd.input, input);
+      const unknownMessages = unknownKeyMessages(cmd.name, unknown);
 
       const fail = async (err: AppError): Promise<never> => {
         // The main transaction rolled back; record the failed attempt in its own.
@@ -126,9 +155,13 @@ export function createExecutor(db: Db, services: Services) {
         throw err;
       };
 
+      if (unknown.length) {
+        if (options.strictInputs) return fail(new AppError('invalid_input', unknownMessages.join(' '), { unknownKeys: unknown }));
+      }
       const parsed = cmd.input.safeParse(input);
       if (!parsed.success)
         return fail(new AppError('invalid_input', 'The input does not match the command schema.', z.treeifyError(parsed.error)));
+      if (unknown.length) options.onUnknownKeys?.(cmd.name, unknown);
       target = cmd.target?.(parsed.data);
       if (cmd.humansOnly && principal.type !== 'user')
         return fail(new AppError('forbidden', `${cmd.name} can only be run by a person, not by an agent.`));
@@ -160,8 +193,9 @@ export function createExecutor(db: Db, services: Services) {
                 return hit.response as z.output<C['output']>;
               }
             }
-            const out = cmd.output.parse(
-              await cmd.handler(parsed.data, { principal, tx, services, afterCommit: (fn) => committed.push(fn) }),
+            const out = withInputWarnings(
+              cmd.output.parse(await cmd.handler(parsed.data, { principal, tx, services, afterCommit: (fn) => committed.push(fn) })),
+              unknownMessages,
             ) as z.output<C['output']>;
             if (opts.idempotencyKey)
               await tx.insert(schema.idempotencyKeys).values({
