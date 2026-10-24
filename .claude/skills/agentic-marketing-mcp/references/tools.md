@@ -45,6 +45,7 @@ Generated from the command registry (`apps/server/src/registry.ts`). **Effect**:
 | `emailProviders.list` | read | workspace:admin | people and agents | List e-mail providers |
 | `emailProviders.create` | write | workspace:admin | people only | Add an e-mail provider |
 | `emailProviders.update` | write | workspace:admin | people only | Change an e-mail provider |
+| `emailProviders.rotateWebhook` | write | workspace:admin | people only | Replace an e-mail provider webhook URL |
 | `emailProviders.delete` | destructive | workspace:admin | people only | Delete an e-mail provider |
 | `workspace.get` | read | artifacts:read | people and agents | Current workspace |
 | `workspace.setApprovalPolicy` | write | workspace:admin | people only | Set approval policy |

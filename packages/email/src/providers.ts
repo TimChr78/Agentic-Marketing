@@ -118,7 +118,7 @@ export const createProvider = defineCommand({
   name: 'emailProviders.create',
   title: 'Add an e-mail provider',
   description:
-    'Add a delivery provider. `useFor` decides which messages go through it: transactional (contract/legal purposes) and/or marketing. Returns the webhook URL path for delivery events once; register it with the provider.',
+    'Add a delivery provider. `useFor` decides which messages go through it: transactional (contract/legal purposes) and/or marketing. Returns the full webhook URL for delivery events once; register it with the provider.',
   input: z.object({
     name: z.string().min(1).max(120),
     adapter: z.enum(['smtp', 'ses', 'postmark', 'brevo', 'cloudflare', 'log']),
@@ -129,12 +129,15 @@ export const createProvider = defineCommand({
     replyTo: Email.optional(),
     useFor: z.array(Use).max(2).default([]),
   }),
-  output: Provider.extend({ webhookPath: z.string().describe('POST delivery events here (prefix with your public URL)') }),
+  output: Provider.extend({
+    webhookPath: z.string().describe('POST delivery events here (prefix with your public links URL)'),
+    webhookUrl: z.string().describe('Full URL for provider delivery events, built from PUBLIC_LINKS_URL'),
+  }),
   permission: 'workspace:admin',
   effect: 'write',
   humansOnly: true,
   sensitive: ['secrets'],
-  sensitiveOutput: ['webhookPath'],
+  sensitiveOutput: ['webhookPath', 'webhookUrl'],
   handler: async (input, ctx) => {
     const { config, secrets } = checkSettings(input.adapter, input.config, input.secrets);
     const id = newId('epr');
@@ -158,7 +161,8 @@ export const createProvider = defineCommand({
         webhookTokenHash: webhookTokenHash(token),
       })
       .returning();
-    return { ...providerOut(row), webhookPath: `/hooks/email/${id}/${token}` };
+    const webhookPath = `/hooks/email/${id}/${token}`;
+    return { ...providerOut(row), webhookPath, webhookUrl: `${ctx.services.email.publicUrl}${webhookPath}` };
   },
 });
 
@@ -202,6 +206,33 @@ export const updateProvider = defineCommand({
   },
 });
 
+export const rotateProviderWebhook = defineCommand({
+  name: 'emailProviders.rotateWebhook',
+  title: 'Replace an e-mail provider webhook URL',
+  description: 'Issue a new webhook URL for delivery events. The old URL stops working immediately; replace it with the provider.',
+  input: z.object({ id: z.string().regex(/^epr_[0-9a-f]{32}$/) }),
+  output: z.object({
+    webhookPath: z.string().describe('POST delivery events here (prefix with your public links URL)'),
+    webhookUrl: z.string().describe('Full URL for provider delivery events, built from PUBLIC_LINKS_URL'),
+  }),
+  permission: 'workspace:admin',
+  effect: 'write',
+  humansOnly: true,
+  sensitiveOutput: ['webhookPath', 'webhookUrl'],
+  target: (i) => i.id,
+  handler: async ({ id }, ctx) => {
+    const token = randomBytes(24).toString('base64url');
+    const [row] = await ctx.tx
+      .update(schema.emailProviders)
+      .set({ webhookTokenHash: webhookTokenHash(token), updatedAt: new Date() })
+      .where(eq(schema.emailProviders.id, id))
+      .returning({ id: schema.emailProviders.id });
+    if (!row) throw new AppError('not_found', `No e-mail provider ${id}. List them with emailProviders.list.`);
+    const webhookPath = `/hooks/email/${id}/${token}`;
+    return { webhookPath, webhookUrl: `${ctx.services.email.publicUrl}${webhookPath}` };
+  },
+});
+
 export const deleteProvider = defineCommand({
   name: 'emailProviders.delete',
   title: 'Delete an e-mail provider',
@@ -222,4 +253,4 @@ export const deleteProvider = defineCommand({
   },
 });
 
-export const providerCommands = [listProviders, createProvider, updateProvider, deleteProvider] as const;
+export const providerCommands = [listProviders, createProvider, updateProvider, rotateProviderWebhook, deleteProvider] as const;
