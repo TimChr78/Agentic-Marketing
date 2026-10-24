@@ -1,3 +1,4 @@
+import { isoDateTime } from '@agentic-marketing/core';
 import { z } from 'zod';
 
 // Artifact types and their content schemas. Every type gets versioning, diffs and approvals from
@@ -764,7 +765,7 @@ const broadcast = z.object({
       'An e-mail, SMS or push template id (eml_…, sms_… or psh_…). For a newsletter, use one template per issue (copy the previous issue as a starting point): broadcasts carry no per-send data, so a shared layout cannot be filled per issue. The template must be published before the broadcast can be.',
     ),
   segment: z.string().regex(/^seg_[0-9a-f]{32}$/, 'A segment id (seg_…)'),
-  sendAt: z.iso.datetime().optional().describe('When to start sending (UTC); default: as soon as it is published'),
+  sendAt: isoDateTime('sendAt').optional().describe('When to start sending; default: as soon as it is published'),
   description: z.string().max(500).optional(),
 });
 

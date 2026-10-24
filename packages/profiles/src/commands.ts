@@ -1,6 +1,6 @@
 import { DEFAULT_PURPOSES, publishedSingleton, type TrackingPlan } from '@agentic-marketing/artifacts';
 import { type CommandContext, defineCommand } from '@agentic-marketing/commands';
-import { AppError, newId } from '@agentic-marketing/core';
+import { AppError, isoDateTime, newId } from '@agentic-marketing/core';
 import { type IdentifierType, schema, type Tx } from '@agentic-marketing/db';
 import type {} from '@agentic-marketing/hotstate';
 import { and, desc, eq, inArray, isNull, lt, or } from 'drizzle-orm';
@@ -104,7 +104,7 @@ export const listProfiles = defineCommand({
   name: 'profiles.list',
   title: 'Recently active profiles',
   description: 'People (known and anonymous) by most recent activity, without personal data. Page with `before` (a lastSeen value).',
-  input: z.object({ limit: z.number().int().min(1).max(200).default(50), before: z.iso.datetime().optional() }),
+  input: z.object({ limit: z.number().int().min(1).max(200).default(50), before: isoDateTime('before').optional() }),
   output: z.object({
     profiles: z.array(
       z.object({
@@ -194,7 +194,7 @@ export const profileEvents = defineCommand({
   name: 'profiles.events',
   title: 'A person’s events',
   description: 'Events of a person across all their anonymous and user ids, newest first. Page with `before` (a timestamp).',
-  input: z.object({ profileId: ProfileId, limit: z.number().int().min(1).max(500).default(100), before: z.iso.datetime().optional() }),
+  input: z.object({ profileId: ProfileId, limit: z.number().int().min(1).max(500).default(100), before: isoDateTime('before').optional() }),
   output: z.object({
     events: z.array(
       z.object({
