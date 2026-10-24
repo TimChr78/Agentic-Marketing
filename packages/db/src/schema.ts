@@ -624,6 +624,20 @@ export const apiTokens = pgTable(
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
 );
 
+export const apiTokenChanges = pgTable(
+  'api_token_changes',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    tokenId: text('token_id').notNull(),
+    changedBy: text('changed_by').notNull(),
+    changedAt: ts('changed_at').notNull().defaultNow(),
+    changes: jsonb('changes').$type<Record<string, unknown>>().notNull(),
+    steppedUp: boolean('stepped_up').notNull().default(false),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
 export const webhookEndpoints = pgTable(
   'webhook_endpoints',
   {

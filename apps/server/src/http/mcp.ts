@@ -181,6 +181,34 @@ export function mcpEndpoint(deps: {
     );
   }
 
+  /**
+   * API tokens have no scope step-up of their own: their owner edits them. A tool the token no
+   * longer has a scope for (after narrowing) fails on the very next call with a tool error that
+   * says why. It is a JSON-RPC result, not an HTTP error, so clients keep their session.
+   */
+  async function apiTokenDenial(request: Request, principal: Principal) {
+    if (request.method !== 'POST') return null;
+    const body = await request
+      .clone()
+      .json()
+      .catch(() => null);
+    if (!body || Array.isArray(body) || body.method !== 'tools/call') return null;
+    const cmd = commandForMcpTool(String(body.params?.name ?? ''), style);
+    if (!cmd) return null;
+    const message = cmd.humansOnly
+      ? `${cmd.name} can only be run by a person, not by an API token.`
+      : cmd.permission && !principal.permissions.has(cmd.permission)
+        ? `This API token does not have the ${cmd.permission} permission. Its owner can add it with apiTokens.update.`
+        : null;
+    if (!message) return null;
+    const error = { code: cmd.humansOnly ? 'forbidden' : 'insufficient_scope', message };
+    return Response.json({
+      jsonrpc: '2.0',
+      id: body.id ?? null,
+      result: { isError: true, content: [{ type: 'text', text: JSON.stringify(error) }] },
+    });
+  }
+
   const oauth = requireMcpAuth(
     deps.auth,
     async (request, claims) => {
@@ -206,6 +234,10 @@ export function mcpEndpoint(deps: {
     const principal = await principalFromApiToken(deps.db, bearer);
     if (!principal)
       return Response.json({ error: 'invalid_token', message: 'This API token is unknown, revoked or expired.' }, { status: 401 });
+    // The server (and its tool list) is built per request from this principal, so a narrowed token
+    // loses tools at once rather than keeping a cached server from an earlier request.
+    const denial = await apiTokenDenial(request, principal);
+    if (denial) return denial;
     const authInfo: AuthInfo = { token: '', clientId: principal.clientId!, scopes: [...principal.permissions], extra: { principal } };
     return handler.fetch(request, { authInfo });
   };

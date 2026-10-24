@@ -1,7 +1,7 @@
 import { type CommandContext, defineCommand } from '@agentic-marketing/commands';
 import { AppError, hashValue, newId } from '@agentic-marketing/core';
 import { schema, type VersionState } from '@agentic-marketing/db';
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
 import { diffJson } from './diff';
 import {
@@ -535,6 +535,15 @@ export const requestPublish = defineCommand({
   },
 });
 
+const Requester = z.object({
+  kind: z.enum(['person', 'token', 'oauth_client']),
+  displayName: z.string(),
+  personName: z.string().nullable(),
+  tokenName: z.string().nullable(),
+  tokenId: z.string().nullable(),
+  clientName: z.string().nullable(),
+});
+
 const Approval = z.object({
   id: z.string(),
   artifactId: z.string(),
@@ -543,27 +552,125 @@ const Approval = z.object({
   version: z.number().int(),
   status: z.enum(['pending', 'approved', 'rejected', 'withdrawn']),
   requestedBy: Author,
+  requester: Requester,
   note: z.string(),
   decidedBy: z.string().nullable(),
   decisionNote: z.string().nullable(),
   createdAt: z.string(),
+  artifactLatestVersion: z.number().int(),
+  artifactPublishedVersion: z.number().int().nullable(),
   reviewUrl: z.string().nullable().describe('Admin UI page for this approval request'),
+});
+
+type ApprovalRow = typeof schema.approvalRequests.$inferSelect;
+type ArtifactRow = typeof schema.artifacts.$inferSelect;
+type RequesterOut = z.output<typeof Requester>;
+
+/** People and OAuth-client names live in the auth tables (provided by the auth package). */
+interface ApprovalDirectory {
+  users(ids: string[]): Promise<Map<string, { email: string; name: string }>>;
+  oauthClients(clientIds: string[]): Promise<Map<string, string>>;
+}
+
+const directoryOf = (ctx: CommandContext) => (ctx.services as { directory?: ApprovalDirectory }).directory;
+
+const nameOf = (p: { email: string; name: string } | undefined, fallback: string) => p?.name || p?.email || fallback;
+
+/** Resolves raw requester ids to names: people, API tokens (with their owner) and OAuth clients. */
+async function resolveRequesters(ctx: CommandContext, rows: ApprovalRow[]): Promise<Map<string, RequesterOut>> {
+  const tokenIds = rows
+    .filter((r) => r.requestedByType === 'agent' && r.requestedByClient?.startsWith('token:'))
+    .map((r) => r.requestedByClient!.slice('token:'.length));
+  const clientIds = rows
+    .filter((r) => r.requestedByType === 'agent' && r.requestedByClient && !r.requestedByClient.startsWith('token:'))
+    .map((r) => r.requestedByClient!);
+  const tokens = tokenIds.length
+    ? await ctx.tx
+        .select({ id: schema.apiTokens.id, name: schema.apiTokens.name, userId: schema.apiTokens.userId })
+        .from(schema.apiTokens)
+        .where(inArray(schema.apiTokens.id, tokenIds))
+    : [];
+  const tokenById = new Map(tokens.map((t) => [t.id, t]));
+  const directory = directoryOf(ctx);
+  const people = directory
+    ? await directory.users([...new Set([...rows.map((r) => r.requestedById), ...tokens.map((t) => t.userId)])])
+    : new Map<string, { email: string; name: string }>();
+  const clients = directory && clientIds.length ? await directory.oauthClients([...new Set(clientIds)]) : new Map<string, string>();
+
+  const requesters = new Map<string, RequesterOut>();
+  for (const r of rows) {
+    const personName = nameOf(people.get(r.requestedById), r.requestedById);
+    if (r.requestedByType === 'user') {
+      requesters.set(r.id, {
+        kind: 'person',
+        displayName: personName,
+        personName,
+        tokenName: null,
+        tokenId: null,
+        clientName: null,
+      });
+      continue;
+    }
+    const tokenId = r.requestedByClient?.startsWith('token:') ? r.requestedByClient.slice('token:'.length) : null;
+    if (tokenId) {
+      const token = tokenById.get(tokenId);
+      const ownerName = nameOf(people.get(token?.userId ?? r.requestedById), r.requestedById);
+      requesters.set(r.id, {
+        kind: 'token',
+        displayName: token?.name ? `${token.name} (${ownerName})` : ownerName,
+        personName: ownerName,
+        tokenName: token?.name ?? null,
+        tokenId,
+        clientName: null,
+      });
+      continue;
+    }
+    const clientName = (r.requestedByClient && clients.get(r.requestedByClient)) || null;
+    requesters.set(r.id, {
+      kind: 'oauth_client',
+      displayName: clientName || personName,
+      personName,
+      tokenName: null,
+      tokenId: null,
+      clientName,
+    });
+  }
+  return requesters;
+}
+
+const approvalOut = (ctx: CommandContext, r: ApprovalRow, a: ArtifactRow, requester: RequesterOut) => ({
+  id: r.id,
+  artifactId: r.artifactId,
+  artifactName: a.name,
+  artifactType: a.type,
+  version: r.version,
+  status: r.status,
+  requestedBy: { type: r.requestedByType, id: r.requestedById, client: r.requestedByClient },
+  requester,
+  note: r.note,
+  decidedBy: r.decidedBy,
+  decisionNote: r.decisionNote,
+  createdAt: r.createdAt.toISOString(),
+  artifactLatestVersion: a.latestVersion,
+  artifactPublishedVersion: a.publishedVersion,
+  reviewUrl: approvalUrl(ctx.services.publicUrl, r.id),
 });
 
 export const listApprovals = defineCommand({
   name: 'approvals.list',
   title: 'List approval requests',
-  description: 'Approval requests in this workspace (default: pending), oldest first.',
+  description: 'Approval requests in this workspace (default: pending), oldest first, optionally for one artifact.',
   input: z.object({
     status: z.enum(['pending', 'approved', 'rejected', 'withdrawn']).default('pending'),
     limit: z.number().int().min(1).max(200).default(50),
+    artifactId: ArtifactId.optional().describe('Only requests for this artifact'),
   }),
   output: z.object({ approvals: z.array(Approval) }),
   permission: 'artifacts:read',
   effect: 'read',
   handler: async (input, ctx) => {
     const rows = await ctx.tx
-      .select({ r: schema.approvalRequests, name: schema.artifacts.name, type: schema.artifacts.type })
+      .select({ r: schema.approvalRequests, a: schema.artifacts })
       .from(schema.approvalRequests)
       .innerJoin(
         schema.artifacts,
@@ -572,24 +679,95 @@ export const listApprovals = defineCommand({
           eq(schema.artifacts.id, schema.approvalRequests.artifactId),
         ),
       )
-      .where(eq(schema.approvalRequests.status, input.status))
+      .where(
+        and(
+          eq(schema.approvalRequests.status, input.status),
+          input.artifactId ? eq(schema.approvalRequests.artifactId, input.artifactId) : undefined,
+        ),
+      )
       .orderBy(schema.approvalRequests.createdAt)
       .limit(input.limit);
+    const requesters = await resolveRequesters(
+      ctx,
+      rows.map(({ r }) => r),
+    );
+    return { approvals: rows.map(({ r, a }) => approvalOut(ctx, r, a, requesters.get(r.id)!)) };
+  },
+});
+
+export const getApproval = defineCommand({
+  name: 'approvals.get',
+  title: 'Get an approval request',
+  description:
+    'An approval request with the version under review, the published version, a structural diff from the published version to the reviewed one, and the decision history.',
+  input: z.object({ approvalId: z.string() }),
+  output: Approval.extend({
+    content: z.unknown(),
+    publishedContent: z.unknown().nullable(),
+    publishedVersion: z.number().int().nullable(),
+    diff: z.object({
+      from: z.number().int().nullable(),
+      to: z.number().int(),
+      changes: z.array(
+        z.object({
+          path: z.string(),
+          kind: z.enum(['added', 'removed', 'changed']),
+          before: z.unknown().optional(),
+          after: z.unknown().optional(),
+        }),
+      ),
+    }),
+    history: z.array(
+      z.object({
+        at: z.string(),
+        by: z.object({ id: z.string(), name: z.string() }),
+        status: z.enum(['approved', 'rejected']),
+        note: z.string().nullable(),
+      }),
+    ),
+  }),
+  permission: 'artifacts:read',
+  effect: 'read',
+  handler: async (input, ctx) => {
+    const [row] = await ctx.tx
+      .select({ r: schema.approvalRequests, a: schema.artifacts })
+      .from(schema.approvalRequests)
+      .innerJoin(
+        schema.artifacts,
+        and(
+          eq(schema.artifacts.workspaceId, schema.approvalRequests.workspaceId),
+          eq(schema.artifacts.id, schema.approvalRequests.artifactId),
+        ),
+      )
+      .where(and(eq(schema.approvalRequests.workspaceId, ctx.principal.workspaceId), eq(schema.approvalRequests.id, input.approvalId)));
+    if (!row) throw new AppError('not_found', `Approval request ${input.approvalId} does not exist in this workspace.`);
+    const requester = (await resolveRequesters(ctx, [row.r])).get(row.r.id)!;
+    const version = await loadVersion(ctx, row.r.artifactId, row.r.version);
+    const published = row.a.publishedVersion ? await loadVersion(ctx, row.a.id, row.a.publishedVersion) : null;
+    const directory = directoryOf(ctx);
+    const decider = directory && row.r.decidedBy ? (await directory.users([row.r.decidedBy])).get(row.r.decidedBy) : undefined;
+    const history =
+      row.r.decidedBy && (row.r.status === 'approved' || row.r.status === 'rejected')
+        ? [
+            {
+              at: (row.r.decidedAt ?? row.r.createdAt).toISOString(),
+              by: { id: row.r.decidedBy, name: nameOf(decider, row.r.decidedBy) },
+              status: row.r.status,
+              note: row.r.decisionNote,
+            },
+          ]
+        : [];
     return {
-      approvals: rows.map(({ r, name, type }) => ({
-        id: r.id,
-        artifactId: r.artifactId,
-        artifactName: name,
-        artifactType: type,
-        version: r.version,
-        status: r.status,
-        requestedBy: { type: r.requestedByType, id: r.requestedById, client: r.requestedByClient },
-        note: r.note,
-        decidedBy: r.decidedBy,
-        decisionNote: r.decisionNote,
-        createdAt: r.createdAt.toISOString(),
-        reviewUrl: approvalUrl(ctx.services.publicUrl, r.id),
-      })),
+      ...approvalOut(ctx, row.r, row.a, requester),
+      content: version.content,
+      publishedContent: published?.content ?? null,
+      publishedVersion: row.a.publishedVersion,
+      diff: {
+        from: row.a.publishedVersion,
+        to: row.r.version,
+        changes: diffJson(published?.content ?? {}, version.content),
+      },
+      history,
     };
   },
 });
@@ -667,6 +845,7 @@ export const artifactCommands = [
   diff,
   requestPublish,
   listApprovals,
+  getApproval,
   approve,
   reject,
 ] as const;
