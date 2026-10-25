@@ -1,5 +1,6 @@
-import { Check, ChevronDown, ChevronRight, LogOut, Menu as MenuIcon, Monitor, Moon, Search, Settings2, Sun, X } from 'lucide-react';
+import { Bot, Check, ChevronDown, ChevronRight, LogOut, Menu as MenuIcon, Monitor, Moon, Search, Settings2, Sun, X } from 'lucide-react';
 import { type ReactNode, useEffect, useRef, useState } from 'react';
+import { CopilotDrawer } from '../features/copilot/CopilotDrawer';
 import { Badge, cx, IconButton, Kbd, Menu } from '../ui';
 import { useFocusTrap } from '../ui/focus';
 import { type Crumb, CrumbsProvider } from './page';
@@ -17,6 +18,8 @@ export function Shell({ children }: { children: ReactNode }) {
   const [crumbs, setCrumbs] = useState<Crumb[]>([]);
   const [navOpen, setNavOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
+  const [copilotOpen, setCopilotOpen] = useState(false);
+  const { can } = useSession();
 
   useEffect(() => setNavOpen(false), [path]);
   useEffect(() => {
@@ -74,6 +77,7 @@ export function Shell({ children }: { children: ReactNode }) {
             <Kbd>⌘K</Kbd>
           </button>
           <IconButton className="md:hidden" label="Search" icon={<Search size={16} />} onClick={() => setSearchOpen(true)} />
+          {can('artifacts:read') && <IconButton label="Copilot" icon={<Bot size={16} />} onClick={() => setCopilotOpen(true)} />}
           <ThemeMenu />
           <UserMenu />
         </header>
@@ -82,6 +86,7 @@ export function Shell({ children }: { children: ReactNode }) {
         </main>
       </div>
       {searchOpen && <SearchPalette onClose={() => setSearchOpen(false)} />}
+      <CopilotDrawer open={copilotOpen} onClose={() => setCopilotOpen(false)} />
     </div>
   );
 }
