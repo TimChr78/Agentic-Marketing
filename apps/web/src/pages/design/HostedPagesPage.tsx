@@ -45,6 +45,7 @@ export default function HostedPagesPage() {
             <ul className="mt-3 list-disc space-y-1.5 pl-4 text-[13px] text-fg-2">
               <li>Opening a link never confirms or unsubscribes by itself; the person presses the button, so link scanners can't act for them.</li>
               <li>Mail clients' one-click unsubscribe (RFC 8058) still works without a page.</li>
+              <li>The confirmed page shows after confirming when the form has no confirmed page of its own on your site.</li>
               <li>Expired, confirmed and unsubscribe pages link back to your site.</li>
             </ul>
           </Card>

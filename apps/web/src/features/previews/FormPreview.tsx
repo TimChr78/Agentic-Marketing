@@ -75,7 +75,7 @@ export function FormPreview({ content, stacked }: { content: FormContent; stacke
                 ['Double opt-in', content.doubleOptIn === false ? 'Off: consent counts at once' : 'On: consent counts after the person confirms'],
                 ['Confirmation e-mail', <RefName id={content.confirmationTemplate} />],
                 ['After submit', url(content.successUrl)],
-                ['After confirming', url(content.confirmedUrl)],
+                ['After confirming', content.confirmedUrl ? url(content.confirmedUrl) : 'The branded confirmation page'],
                 ['On error', url(content.errorUrl)],
                 ['Allowed sites', content.allowedOrigins?.length ? content.allowedOrigins.join(', ') : 'Any site'],
                 ['Bot check', content.turnstile ? 'Cloudflare Turnstile required' : 'None'],

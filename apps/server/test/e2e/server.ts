@@ -1,3 +1,5 @@
+import { serve } from '@hono/node-server';
+import { Hono } from 'hono';
 import { startTestServer } from '../harness';
 import { PEOPLE, seed } from './seed';
 
@@ -13,10 +15,40 @@ const t = await startTestServer('e2e', port, {
   TRUSTED_ORIGINS: 'http://localhost:5173',
 });
 const s = await seed(t);
+
+// Test-only fixtures on the next port (never part of the product): the links a subscriber would
+// get by e-mail, signed with this server's key, so the hosted-page specs can click them in a
+// real browser (#115).
+const fixtures = new Hono();
+fixtures.get('/forms', (c) => c.json(s.forms));
+fixtures.post('/confirm-link', async (c) => {
+  const { form, anonymousId } = await c.req.json<{ form: string; anonymousId: string }>();
+  const { rows } = await t.srv.db.admin.query<{ published_version: number }>('SELECT published_version FROM artifacts WHERE id = $1', [
+    form,
+  ]);
+  const token = t.srv.email.links.sign({
+    k: 'doi',
+    w: s.ws,
+    f: form,
+    v: rows[0].published_version,
+    a: anonymousId,
+    s: new Date().toISOString(),
+    x: Date.now() + 86_400_000,
+  });
+  return c.json({ url: `${t.base}/f/confirm/${token}` });
+});
+fixtures.post('/unsubscribe-link', async (c) => {
+  const { profileId } = await c.req.json<{ profileId: string }>();
+  const token = t.srv.email.links.sign({ w: s.ws, p: profileId, u: 'marketing_email', m: `e2e-${Date.now()}` });
+  return c.json({ url: `${t.base}/u/${token}` });
+});
+const fixturesHttp = serve({ fetch: fixtures.fetch, port: port + 1, hostname: '127.0.0.1' });
+
 console.log(`\nReady on ${t.base}`);
 for (const [role, p] of Object.entries(PEOPLE)) console.log(`  ${role.padEnd(8)} ${p.email}`);
 console.log(`  password correct-horse-battery-staple\n  agent token ${s.token}\n`);
 const stop = async () => {
+  fixturesHttp.close();
   await t.close();
   process.exit(0);
 };

@@ -190,8 +190,7 @@ export function FormEditor({ artifact, content, onChange, readOnly, errors }: Ed
           />
           <UrlField
             label="Confirmed page"
-            hint="Where the browser goes after the person confirms the double opt-in."
-            required
+            hint="Where the browser goes after the person confirms the double opt-in. Leave empty to show the branded confirmation page."
             value={content.confirmedUrl}
             onChange={(v) => set({ confirmedUrl: v || undefined })}
             readOnly={readOnly}

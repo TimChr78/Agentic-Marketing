@@ -88,10 +88,11 @@ Add a provider in the UI (Settings → Providers → Add provider) or with `emai
     "errorUrl":"https://<site>/subscribe/oops/","allowedOrigins":["https://<site>"],"turnstile":false}
    ```
    Publishing refuses a confirmation template whose purpose needs consent, or one without `confirm_url`.
+   `confirmedUrl` is optional (since 0.2.2). Leave it out and the confirm button shows the branded "confirmed" page (Design → Hosted pages) on the links host; set it to send people to a page on the site. The confirm page allows that page's origin in its `form-action`, so the redirect is not blocked by the browser.
 3. Site: replace the old form with the HTML in [references/site-snippets.md](references/site-snippets.md). It is a plain POST, no JavaScript either way: with option A to `https://am.<site>/f/<form id>`, adding `https://am.<site>` to the CSP's `form-action`; with option B to `/am/f/<form id>`, which works under `form-action 'self'`. Add the three small pages.
 4. Bots: the honeypot and per-IP rate limit are always on. If spam arrives, set `turnstile: true`, store the secret with `secrets.set` as `turnstile.secret_key`, and add the widget (see the snippets; it needs a CSP change).
 
-**Check:** submit with your own address. You are redirected to the inbox page, the confirmation mail arrives, and the button lands on the welcome page. `consent.history` then shows `granted`, source `form`, with `double_opt_in: true` in the proof. Before the click there is no consent.
+**Check:** submit with your own address. You are redirected to the inbox page, the confirmation mail arrives, and the button lands on the welcome page (or on the branded confirmed page when `confirmedUrl` is unset). Click it in a real browser, not with curl: a browser enforces the CSP on the redirect. `consent.history` then shows `granted`, source `form`, with `double_opt_in: true` in the proof. Before the click there is no consent.
 
 ### 6. Import existing subscribers
 Switch the site's forms to the platform **first**, then export, so nobody who signs up in between is lost.

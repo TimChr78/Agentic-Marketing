@@ -69,7 +69,7 @@ artifacts.create {"type":"form","name":"Newsletter","content":{
   "successUrl":"https://example.com/subscribe/check-your-inbox/","confirmedUrl":"https://example.com/subscribe/welcome/",
   "errorUrl":"https://example.com/subscribe/oops/","allowedOrigins":["https://example.com"]}}
 ```
-After publishing, the site posts to `<links URL>/f/frm_…`. Signups show as `Form Submitted` and `Subscription Confirmed` events (`profiles.events`), and as consent in `consent.history`.
+`confirmedUrl` is optional: without it, confirming shows the branded confirmed page (the `brand` artifact's copy) on the links host. After publishing, the site posts to `<links URL>/f/frm_…`. Signups show as `Form Submitted` and `Subscription Confirmed` events (`profiles.events`), and as consent in `consent.history`.
 
 ## AI-chosen branch with a tested prompt
 

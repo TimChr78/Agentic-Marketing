@@ -842,7 +842,9 @@ const form = z
       .default(['firstName'])
       .describe('Form fields kept as traits besides email'),
     successUrl: UrlOrPath.describe('Where the browser goes after submitting'),
-    confirmedUrl: UrlOrPath.describe('Where the browser goes after confirming'),
+    confirmedUrl: UrlOrPath.optional().describe(
+      'Where the browser goes after confirming the double opt-in; leave it out to show the branded confirmed page on the links host',
+    ),
     errorUrl: UrlOrPath.optional().describe('Where the browser goes when the submission is refused (?error=… is added)'),
     allowedOrigins: z
       .array(z.string().regex(/^https?:\/\/[a-z0-9.-]+(:\d+)?$/i))

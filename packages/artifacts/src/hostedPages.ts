@@ -124,14 +124,24 @@ function siteLabel(brand: ResolvedBrand, siteUrl: string | null): string {
   return 'the site';
 }
 
-/** Strict headers for every hosted page: no scripts, no framing, no caching, no referrer leak. */
-export const HOSTED_PAGE_HEADERS = {
-  'content-security-policy':
-    "default-src 'none'; img-src https: data:; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
-  'referrer-policy': 'no-referrer',
-  'x-content-type-options': 'nosniff',
-  'cache-control': 'no-store',
-} as const;
+/**
+ * Strict headers for every hosted page: no scripts, no framing, no caching, no referrer leak.
+ * `form-action` also governs the redirects that follow a form submission (CSP3, enforced by
+ * Chromium), so a page whose POST answers with a redirect to another site must list that site's
+ * origin (#115). Pass only origins from `originOfUrl`; anything else is dropped.
+ */
+export function hostedPageHeaders(redirectOrigins: (string | null | undefined)[] = []) {
+  const extra = [...new Set(redirectOrigins.filter((o): o is string => !!o && originOfUrl(o) === o))];
+  return {
+    'content-security-policy': `default-src 'none'; img-src https: data:; style-src 'unsafe-inline'; form-action ${["'self'", ...extra].join(' ')}; frame-ancestors 'none'; base-uri 'none'`,
+    'referrer-policy': 'no-referrer',
+    'x-content-type-options': 'nosniff',
+    'cache-control': 'no-store',
+  };
+}
+
+/** The headers for pages whose forms post back to the links host and are answered in place. */
+export const HOSTED_PAGE_HEADERS = hostedPageHeaders();
 
 const BUTTON_PAGES: ReadonlySet<HostedPageKind> = new Set(['confirm', 'unsubscribe']);
 const BACK_LINK_PAGES: ReadonlySet<HostedPageKind> = new Set(['expired', 'confirmed', 'unsubscribe', 'unsubscribed']);

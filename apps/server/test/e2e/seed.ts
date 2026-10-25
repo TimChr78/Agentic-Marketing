@@ -179,6 +179,21 @@ export async function seed(t: T) {
     },
   });
   await pub(form.artifactId, 'Signup form');
+  // No thank-you page on the site: confirming shows the branded confirmed page (#115).
+  const footerForm = await owner.call('artifacts.create', {
+    type: 'form',
+    name: 'Footer signup',
+    content: {
+      purposes: ['marketing_email'],
+      doubleOptIn: true,
+      confirmationTemplate: confirm.artifactId,
+      consentText: 'Send me the weekly MartechSignal newsletter. Unsubscribe at any time.',
+      traits: [],
+      successUrl: 'https://martechsignal.example/thanks',
+      allowedOrigins: ['https://martechsignal.example'],
+    },
+  });
+  await pub(footerForm.artifactId, 'Footer signup form');
 
   await owner.call('profiles.import', {
     label: 'Kit export 2026-10-20',
@@ -312,5 +327,5 @@ export async function seed(t: T) {
     },
   });
 
-  return { ws, sandbox, users, token: token.token };
+  return { ws, sandbox, users, token: token.token, forms: { signup: form.artifactId, footer: footerForm.artifactId } };
 }
