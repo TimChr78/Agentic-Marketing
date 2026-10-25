@@ -9,7 +9,7 @@ import {
 import { AppError } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
 import type { BusEvent, EventStore } from '@agentic-marketing/events';
-import { purposeAllowed } from '@agentic-marketing/profiles';
+import { currentConsent, purposeAllowed } from '@agentic-marketing/profiles';
 import { and, eq, inArray, isNull, type SQL, sql } from 'drizzle-orm';
 
 // Segment evaluation as set algebra over profile ids. The same code serves batch recomputation
@@ -200,11 +200,23 @@ async function consentSet(purpose: string, ctx: EvalContext): Promise<Set<string
   if (!p) throw new AppError('invalid_input', `Unknown purpose "${purpose}" in a consent condition. See purposes.list.`);
   const all = await universe(ctx);
   const states = await ctx.tx
-    .select({ profileId: schema.consentState.profileId, status: schema.consentState.status, channel: schema.consentState.channel })
+    .select({
+      profileId: schema.consentState.profileId,
+      purpose: schema.consentState.purpose,
+      status: schema.consentState.status,
+      channel: schema.consentState.channel,
+      updatedAt: schema.consentState.updatedAt,
+    })
     .from(schema.consentState)
-    .where(and(eq(schema.consentState.purpose, purpose), eq(schema.consentState.channel, '')));
-  const status = new Map(states.map((s) => [s.profileId, s.status]));
-  return new Set([...all].filter((id) => purposeAllowed(p.basis, status.get(id))));
+    .where(
+      and(
+        eq(schema.consentState.purpose, purpose),
+        ctx.scope ? inArray(schema.consentState.profileId, ctx.scope.length ? ctx.scope : ['-']) : undefined,
+      ),
+    );
+  const byProfile = new Map<string, typeof states>();
+  for (const s of states) byProfile.set(s.profileId, [...(byProfile.get(s.profileId) ?? []), s]);
+  return new Set([...all].filter((id) => purposeAllowed(p.basis, currentConsent(byProfile.get(id) ?? [], purpose)?.status)));
 }
 
 async function segmentSet(id: string, ctx: EvalContext): Promise<Set<string>> {
@@ -227,5 +239,7 @@ export function relevant(cond: SegmentCondition, e: BusEvent): boolean {
   if ('not' in cond) return relevant(cond.not, e);
   if ('event' in cond) return cond.event === e.name;
   if ('segment' in cond) return true;
+  // Form confirmations (frm_) and imports (imp_) carry no consent field; the consent hook records theirs.
+  if ('consent' in cond && /^(frm|imp)_/.test(e.sourceId)) return true;
   return Object.keys(e.traits).length > 0 || Object.keys(e.consent).length > 0 || e.type === 'identify';
 }

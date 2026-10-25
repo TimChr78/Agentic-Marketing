@@ -183,7 +183,9 @@ considered and why. Anything that needed the owner's decision is listed under **
 
 ## Parked (needs the owner)
 
-1. **"Send me a test" for approvers.** The approval drawer offers it to roles with `artifacts:write`
-   (owner, admin, builder). The built-in approver role lacks it, and giving approvers test sends would
-   change who can send (pause rule 2). Options: leave as is; let `templates.sendTest`/`broadcasts.sendTest`
-   accept `artifacts:approve` when sending only to the caller.
+1. **"Send me a test" for approvers — decided in 0.2.1 (#53): option 2.** The approval drawer offers it
+   to roles with `artifacts:write` (owner, admin, builder). The built-in approver role lacks it, and giving
+   approvers full test sends would change who can send (pause rule 2), so `templates.sendTest` and
+   `broadcasts.sendTest` also accept `artifacts:approve` when `to` is omitted: the caller is the only
+   recipient. Passing `to` (even the caller's own address) still needs `artifacts:write`, and agents never
+   get the alternative, so an approver's token cannot use it.

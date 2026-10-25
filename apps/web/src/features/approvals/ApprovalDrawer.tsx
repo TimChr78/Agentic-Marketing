@@ -46,7 +46,8 @@ export function ApprovalDrawer({ id, queue, onClose, onDecided }: { id: string; 
   const pending = a?.status === 'pending';
   const canApprove = can('artifacts:approve');
   const ownRequest = a?.requestedBy.type === 'user' && a.requestedBy.id === user.id;
-  const testable = a && can('artifacts:write') && (a.artifactType === 'email_template' || (a.artifactType === 'broadcast' && String((a.content as { template?: string }).template ?? '').startsWith('eml_')));
+  // Approvers can test to their own address (the commands accept artifacts:approve without `to`).
+  const testable = a && (can('artifacts:write') || can('artifacts:approve')) && (a.artifactType === 'email_template' || (a.artifactType === 'broadcast' && String((a.content as { template?: string }).template ?? '').startsWith('eml_')));
 
   const next = () => {
     const i = queue.indexOf(id);

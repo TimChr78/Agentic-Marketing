@@ -134,7 +134,7 @@ export const sendTestBroadcast = defineCommand({
   name: 'broadcasts.sendTest',
   title: 'Send a test broadcast',
   description:
-    'Send a broadcast’s e-mail to members of this workspace or the admin-configured seed list (workspace.setSeedList), at most 10 per call, with "[Test]" in the subject. Uses the broadcast version you name (default: its latest draft), and the template version the broadcast would send (the template’s published version, or its latest draft while it has none) through the marketing provider. Purpose/consent checks are skipped, suppressions still apply, and each copy is recorded as a test message (never counted in reporting) and an audit entry. No profile or consent is written; agents drafting newsletters can run it with the artifacts:write scope.',
+    'Send a broadcast’s e-mail to members of this workspace or the admin-configured seed list (workspace.setSeedList), at most 10 per call, with "[Test]" in the subject. Uses the broadcast version you name (default: its latest draft), and the template version the broadcast would send (the template’s published version, or its latest draft while it has none) through the marketing provider. Purpose/consent checks are skipped, suppressions still apply, and each copy is recorded as a test message (never counted in reporting) and an audit entry. No profile or consent is written; agents drafting newsletters can run it with the artifacts:write scope. Approvers may run it without `to`, sending to themselves only.',
   input: z.object({
     artifactId: BroadcastId,
     version: z.number().int().min(1).optional().describe('Default: the latest draft, else the latest version'),
@@ -142,6 +142,8 @@ export const sendTestBroadcast = defineCommand({
   }),
   output: testSendOutput,
   permission: 'artifacts:write',
+  // Same self-service rule as templates.sendTest: an approver may only test to their own address.
+  selfService: { permission: 'artifacts:approve', allows: (input) => input.to === undefined },
   effect: 'write',
   target: (i) => i.artifactId,
   handler: async (input, ctx) => {

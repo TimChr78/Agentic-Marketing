@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { DEFAULT_PURPOSES, publishedSingleton, type SegmentCondition } from '@agentic-marketing/artifacts';
 import { AppError } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
+import { consentStatusSql, purposeAllowedSql } from '@agentic-marketing/profiles';
 import { type SQL, sql } from 'drizzle-orm';
 import { durationSeconds, type EvalContext, traitPredicate } from './evaluate';
 
@@ -48,16 +49,8 @@ async function consentPredicate(purpose: string, ctx: SqlContext): Promise<SQL> 
   ctx._purposes ??= publishedSingleton(ctx.tx, 'purposes').then((p) => p?.purposes ?? DEFAULT_PURPOSES);
   const p = (await ctx._purposes).find((x) => x.key === purpose);
   if (!p) throw new AppError('invalid_input', `Unknown purpose "${purpose}" in a consent condition. See purposes.list.`);
-  // The same rules as purposeAllowed in @agentic-marketing/profiles.
-  const state = (statuses: string[]) =>
-    sql`EXISTS (SELECT 1 FROM consent_state c WHERE c.profile_id = ${schema.profiles.id} AND c.purpose = ${purpose}
-          AND c.channel = '' AND c.status IN (${sql.join(
-            statuses.map((s) => sql`${s}`),
-            sql`, `,
-          )}))`;
-  if (p.basis === 'consent') return state(['granted']);
-  if (p.basis === 'legitimate_interest') return sql`NOT ${state(['objected', 'withdrawn', 'denied'])}`;
-  return sql`true`;
+  // The same rule as consentSet in evaluate.ts (currentConsent and purposeAllowed).
+  return purposeAllowedSql(p.basis, consentStatusSql(sql`${schema.profiles.id}`, purpose));
 }
 
 async function eventPredicate(c: Extract<SegmentCondition, { event: string }>, ctx: SqlContext): Promise<SQL> {

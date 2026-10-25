@@ -2,7 +2,7 @@ import { DEFAULT_PURPOSES, publishedSingleton } from '@agentic-marketing/artifac
 import { defineCommand } from '@agentic-marketing/commands';
 import { AppError, newId } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
-import { consentStateOf, purposeAllowed, type ResolvedEvent } from '@agentic-marketing/profiles';
+import { consentStateOf, currentConsent, purposeAllowed, type ResolvedEvent } from '@agentic-marketing/profiles';
 import { type KeyProvider, openJson, sealJson } from '@agentic-marketing/secrets';
 import { and, desc, eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
@@ -296,7 +296,7 @@ export function webhookHook(db: Db) {
           if (ep.purpose) {
             if (!consent.has(profileId)) consent.set(profileId, await consentStateOf(tx, workspaceId, profileId));
             const basis = purposes.find((p) => p.key === ep.purpose)?.basis ?? 'consent';
-            const state = consent.get(profileId)!.find((s) => s.purpose === ep.purpose && s.channel === '');
+            const state = currentConsent(consent.get(profileId)!, ep.purpose);
             if (!purposeAllowed(basis, state?.status)) continue;
           }
           if (!traits.has(profileId)) {

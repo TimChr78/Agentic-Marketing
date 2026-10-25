@@ -2,7 +2,7 @@ import { DEFAULT_PURPOSES, type PushTemplate, publishedSingleton } from '@agenti
 import { newId, newUuid } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import type { EventStore, MessageEvent } from '@agentic-marketing/events';
-import { consentStateOf, profileForMessage, purposeAllowed } from '@agentic-marketing/profiles';
+import { consentStateOf, currentConsent, profileForMessage, purposeAllowed } from '@agentic-marketing/profiles';
 import { type KeyProvider, openJson } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, inArray, or } from 'drizzle-orm';
@@ -68,9 +68,7 @@ export async function checkPushRecipient(
   if (!devices) return { ok: false, reason: 'no_address: the person has no device registered for notifications' };
   const p = (await purposesOf(tx)).find((x) => x.key === purpose);
   if (!p) return { ok: false, reason: `unknown_purpose: "${purpose}" is not a configured purpose` };
-  const state = (await consentStateOf(tx, workspaceId, person.id))
-    .filter((s) => s.purpose === purpose && (s.channel === '' || s.channel === 'push'))
-    .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())[0];
+  const state = currentConsent(await consentStateOf(tx, workspaceId, person.id), purpose, 'push');
   if (!purposeAllowed(p.basis, state?.status))
     return {
       ok: false,

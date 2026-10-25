@@ -5,7 +5,7 @@ import { type BusEvent, CONSENT_EVENT } from '@agentic-marketing/events';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, inArray, sql } from 'drizzle-orm';
-import { consentStateOf, recomputeConsentState, recordConsent } from './consent';
+import { consentStateOf, currentConsent, recomputeConsentState, recordConsent } from './consent';
 import { type PersonCrypto, personCrypto } from './crypto';
 
 // Deterministic identity resolution (data-platform.md §3). Each event's identifiers are looked up;
@@ -273,9 +273,8 @@ async function updateProfile(tx: Tx, workspaceId: string, profileId: string, e: 
 }
 
 async function recordSdkConsent(tx: Tx, workspaceId: string, profileId: string, e: BusEvent, purposes: Purposes) {
-  const current = new Map(
-    (await consentStateOf(tx, workspaceId, profileId)).filter((s) => s.channel === '').map((s) => [s.purpose, s.status]),
-  );
+  const state = await consentStateOf(tx, workspaceId, profileId);
+  const current = new Map([...new Set(state.map((s) => s.purpose))].map((p) => [p, currentConsent(state, p)?.status]));
   const records = Object.entries(e.consent).map(([purpose, allowed]) => ({
     purpose,
     status: allowed ? ('granted' as const) : current.get(purpose) === 'granted' ? ('withdrawn' as const) : ('denied' as const),

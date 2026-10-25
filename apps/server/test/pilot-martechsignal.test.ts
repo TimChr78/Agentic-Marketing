@@ -237,3 +237,48 @@ describe('weekly newsletter as a broadcast', () => {
     expect((await rejects(api.call('broadcasts.cancel', { artifactId: later.artifactId }))).message).toContain('already cancelled');
   });
 });
+
+describe('unsubscribing (#103)', () => {
+  it('drops the person from consent segments and the next broadcast, and a new signup brings them back', async () => {
+    const api = t.api(owner);
+    const { profileId: ada } = await api.call('profiles.find', { type: 'email', value: 'ada@example.com' });
+    const members = () => api.call('segments.members', { artifactId: ids.segment });
+    expect((await members()).members.map((m) => m.profileId)).toContain(ada);
+
+    // RFC 8058 one-click unsubscribe from the newsletter: the ledger gets (marketing_email, 'email', withdrawn)
+    // next to the form's (marketing_email, '', granted).
+    const issue = mailTo('ada@example.com').find((m) => m.subject.startsWith('Signal #42'))!;
+    const unsubscribe = issue.html.match(/href="([^"]*\/u\/[^"]+)"/)![1].replace(/&amp;/g, '&');
+    const res = await fetch(unsubscribe, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: 'List-Unsubscribe=One-Click',
+    });
+    expect(res.status).toBe(200);
+    const { records } = await api.call('consent.history', { profileId: ada! });
+    expect(records.map((r) => [r.channel, r.status])).toEqual(
+      expect.arrayContaining([
+        ['', 'granted'],
+        ['email', 'withdrawn'],
+      ]),
+    );
+
+    // Membership drops right away, without waiting for the scheduler, and stays dropped after a full recompute.
+    expect((await members()).members.map((m) => m.profileId)).not.toContain(ada);
+    expect(await api.call('segments.refresh', { artifactId: ids.segment })).toMatchObject({ members: 1, exited: 0 });
+    expect((await api.call('segments.preview', { condition: { consent: 'marketing_email' } })).count).toBe(1);
+    expect(await api.call('broadcasts.preview', { artifactId: ids.newsletter })).toMatchObject({ audience: 1, wouldSend: 1 });
+
+    // Signing up again is a new consent (it used to be ignored as "unchanged"), and confirming it restores membership.
+    await post(ids.form, { email: 'ada@example.com' });
+    const confirm = await eventually(
+      async () => mailTo('ada@example.com').filter((m) => m.subject === 'Confirm your subscription'),
+      (m) => m.length === 2,
+    );
+    let link = confirm[1].html.match(/href="([^"]*\/(?:c|f\/confirm)\/[^"]+)"/)![1].replace(/&amp;/g, '&');
+    if (link.includes('/c/')) link = (await fetch(link, { redirect: 'manual' })).headers.get('location')!;
+    await fetch(link, { method: 'POST', redirect: 'manual' });
+    await eventually(members, (r) => r.members.some((m) => m.profileId === ada));
+    expect(await api.call('broadcasts.preview', { artifactId: ids.newsletter })).toMatchObject({ audience: 2, wouldSend: 2 });
+  });
+});

@@ -28,10 +28,19 @@ export interface EmailRouteDeps {
   kp: KeyProvider;
   events: EventStore;
   email: EmailServices;
+  /** Called after consent changed outside the event stream (unsubscribes), e.g. to update segments. */
+  consentChanged?: (workspaceId: string, profileIds: string[], cause: string) => Promise<void>;
 }
 
 export function emailRoutes(deps: EmailRouteDeps) {
   const app = new Hono();
+  // Best effort: the unsubscribe is recorded either way, and the segment scheduler catches up.
+  const consentChanged = async (ws: string, people: string[], cause: string) => {
+    if (!deps.consentChanged || !people.length) return;
+    await deps
+      .consentChanged(ws, people, cause)
+      .catch((err) => logger.warn({ err, workspace: ws }, 'segment update after unsubscribe failed'));
+  };
   app.route('/', smsRoutes(deps));
 
   app.post('/hooks/email/:id/:token', async (c) => {
@@ -61,6 +70,9 @@ export function emailRoutes(deps: EmailRouteDeps) {
       }
     });
     await deps.events.insertMessageEvents(result.events);
+    for (const e of result.events)
+      if ((e.type === 'unsubscribed' || e.type === 'complained') && e.profileId)
+        await consentChanged(ws, [e.profileId], `unsubscribe:${e.messageId}`);
     return c.json({ ok: result.status === 200, events: result.events.length }, result.status);
   });
 
@@ -96,6 +108,7 @@ export function emailRoutes(deps: EmailRouteDeps) {
       return messageEvent(msg, { eventId: 'unsubscribe-link', type: 'unsubscribed', at: new Date().toISOString() }, '');
     });
     await deps.events.insertMessageEvents([recorded]);
+    if (recorded.profileId) await consentChanged(link.w, [recorded.profileId], `unsubscribe:${link.m}`);
     return link;
   };
 

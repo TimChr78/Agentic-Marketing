@@ -35,6 +35,14 @@ export interface CommandDef<I extends z.ZodType = z.ZodType, O extends z.ZodType
   output: O;
   /** null only for internal commands that are not in the public registry (e.g. accepting an invitation). */
   permission: Permission | null;
+  /**
+   * A second permission (never for agents) that also runs the command when `allows` confirms the input
+   * only touches the caller, e.g. an approver test-sending to their own address.
+   */
+  selfService?: {
+    permission: Permission;
+    allows: (input: z.output<I>, principal: Principal) => boolean;
+  };
   effect: Effect;
   /** Agents may never run it, whatever their scopes (approving, managing members…). */
   humansOnly?: boolean;
@@ -165,15 +173,22 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
       target = cmd.target?.(parsed.data);
       if (cmd.humansOnly && principal.type !== 'user')
         return fail(new AppError('forbidden', `${cmd.name} can only be run by a person, not by an agent.`));
-      if (cmd.permission && !principal.permissions.has(cmd.permission))
-        return fail(
-          new AppError(
-            'forbidden',
-            principal.type === 'agent'
-              ? `This agent was not granted the "${cmd.permission}" permission. The person can grant it when connecting the agent.`
-              : `Your role (${principal.role}) does not include the "${cmd.permission}" permission.`,
-          ),
-        );
+      if (cmd.permission && !principal.permissions.has(cmd.permission)) {
+        const selfService =
+          principal.type === 'user' &&
+          cmd.selfService !== undefined &&
+          principal.permissions.has(cmd.selfService.permission) &&
+          cmd.selfService.allows(parsed.data, principal);
+        if (!selfService)
+          return fail(
+            new AppError(
+              'forbidden',
+              principal.type === 'agent'
+                ? `This agent was not granted the "${cmd.permission}" permission. The person can grant it when connecting the agent.`
+                : `Your role (${principal.role}) does not include the "${cmd.permission}" permission.`,
+            ),
+          );
+      }
 
       const committed: (() => Promise<void>)[] = [];
       try {

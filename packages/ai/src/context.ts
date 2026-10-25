@@ -1,7 +1,7 @@
 import { DEFAULT_PURPOSES, publishedSingleton } from '@agentic-marketing/artifacts';
 import { schema, type Tx } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
-import { consentStateOf, personCrypto, purposeAllowed } from '@agentic-marketing/profiles';
+import { consentStateOf, currentConsent, personCrypto, purposeAllowed } from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { and, eq } from 'drizzle-orm';
 
@@ -46,9 +46,7 @@ export async function aiAllowed(tx: Tx, workspaceId: string, profileId: string):
   const purposes = (await publishedSingleton(tx, 'purposes'))?.purposes ?? DEFAULT_PURPOSES;
   const p = purposes.find((x) => x.key === AI_PURPOSE);
   if (!p) return { ok: false, reason: `no_lawful_basis: the ${AI_PURPOSE} purpose is not configured` };
-  const state = (await consentStateOf(tx, workspaceId, profileId))
-    .filter((s) => s.purpose === AI_PURPOSE && s.channel === '')
-    .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())[0];
+  const state = currentConsent(await consentStateOf(tx, workspaceId, profileId), AI_PURPOSE);
   if (purposeAllowed(p.basis, state?.status)) return { ok: true };
   return {
     ok: false,

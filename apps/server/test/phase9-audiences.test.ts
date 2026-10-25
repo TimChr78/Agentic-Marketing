@@ -250,6 +250,28 @@ describe('audience sync', () => {
       expect.objectContaining({ platform: 'google', members: 0 }),
     ]);
   });
+
+  it('removes people whose newer withdrawal is on one channel only (0.2.1, #103)', async () => {
+    const api = t.api(owner);
+    const fay = await person('anon-fay', 'fay@example.com', '+4544444444', 'pro', true);
+    await eventually(
+      () => api.call('segments.members', { artifactId: ids.segment }),
+      (r) => r.members.some((m) => m.profileId === fay),
+      15_000,
+    );
+    const added = await api.call('ads.syncAudience', { artifactId: ids.sync });
+    expect(added.results.map((r) => [r.platform, r.added, r.members])).toEqual([
+      ['meta', 1, 1],
+      ['google', 1, 1],
+    ]);
+    // The all-channels grant stays; the newer web-only withdrawal decides.
+    await api.call('consent.record', { profileId: fay, purpose: 'ad_targeting', channel: 'web', status: 'withdrawn' });
+    const { results } = await api.call('ads.syncAudience', { artifactId: ids.sync });
+    expect(results.map((r) => [r.platform, r.removed, r.members])).toEqual([
+      ['meta', 1, 0],
+      ['google', 1, 0],
+    ]);
+  });
 });
 
 describe('spend and ROAS', () => {
