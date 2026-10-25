@@ -18,6 +18,7 @@ import { valkeyHotState } from '@agentic-marketing/hotstate';
 import { ingestApi } from '@agentic-marketing/ingest';
 import { egressFetch, egressHttp2, inboundApi, oauthRoutes } from '@agentic-marketing/integrations';
 import { decideApi, edgeMirror } from '@agentic-marketing/personalize';
+import { refreshPeople } from '@agentic-marketing/segments';
 import { logger } from '@agentic-marketing/telemetry';
 import { oauthProviderAuthServerMetadata, oauthProviderOpenIdConfigMetadata } from '@better-auth/oauth-provider';
 import { Hono } from 'hono';
@@ -163,7 +164,20 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
   if (config.roles.has('ingest')) app.route('/', pushRoutes({ db, kp: keyProvider }));
   if (config.roles.has('ingest'))
     app.route('/', ingestApi({ db, bus, hot, clientIpHeaders: config.clientIpHeaders, trustedProxyCidrs: config.trustedProxyCidrs }));
-  if (config.roles.has('api')) app.route('/', emailRoutes({ db, kp: keyProvider, events, email }));
+  if (config.roles.has('api'))
+    app.route(
+      '/',
+      emailRoutes({
+        db,
+        kp: keyProvider,
+        events,
+        email,
+        consentChanged: async (ws, people, cause) => {
+          const changes = await db.withWorkspace(ws, (tx) => refreshPeople(tx, ws, people, events, cause));
+          if (changes.length) await bus.publish(changes);
+        },
+      }),
+    );
   if (config.roles.has('ingest')) app.route('/', inboundApi({ db, bus, kp: keyProvider }));
   if (config.roles.has('api')) app.route('/', oauthRoutes({ db, kp: keyProvider, egress: config.egress }));
   // Public asset links, on both roles that front the public edge (like /f and /u).

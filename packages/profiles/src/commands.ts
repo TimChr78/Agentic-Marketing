@@ -5,7 +5,7 @@ import { type IdentifierType, schema, type Tx } from '@agentic-marketing/db';
 import type {} from '@agentic-marketing/hotstate';
 import { and, desc, eq, inArray, isNull, lt, or } from 'drizzle-orm';
 import { z } from 'zod';
-import { consentStateOf, mergedFamily, purposeAllowed, recordConsent } from './consent';
+import { consentStateOf, currentConsent, mergedFamily, purposeAllowed, recordConsent } from './consent';
 import { personCrypto } from './crypto';
 
 // Profile, consent and data-subject-request commands. Personal data is decrypted only for
@@ -287,9 +287,7 @@ export const recordConsentCommand = defineCommand({
         recordedBy: ctx.principal.userId,
       },
     ]);
-    const state = (await consentStateOf(ctx.tx, ctx.principal.workspaceId, p.id)).find(
-      (s) => s.purpose === input.purpose && s.channel === input.channel,
-    );
+    const state = currentConsent(await consentStateOf(ctx.tx, ctx.principal.workspaceId, p.id), input.purpose, input.channel || undefined);
     const basis = purposes.find((x) => x.key === input.purpose)?.basis ?? 'consent';
     return { recorded: n > 0, allowed: purposeAllowed(basis, state?.status) };
   },

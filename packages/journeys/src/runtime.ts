@@ -3,7 +3,7 @@ import { newId } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import { requestEmail, requestPush, requestSms } from '@agentic-marketing/email';
 import type { EventStore, JourneyEvent } from '@agentic-marketing/events';
-import { consentStateOf, purposeAllowed, type ResolvedEvent } from '@agentic-marketing/profiles';
+import { consentStateOf, currentConsent, purposeAllowed, type ResolvedEvent } from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { contextFor, ENTERED, evaluate, publishedSegments } from '@agentic-marketing/segments';
 import { logger } from '@agentic-marketing/telemetry';
@@ -166,9 +166,7 @@ async function saveContext(tx: Tx, workspaceId: string, p: Participant) {
 async function webhookAllowed(tx: Tx, workspaceId: string, profileId: string, purpose: string) {
   const purposes = (await publishedSingleton(tx, 'purposes'))?.purposes ?? DEFAULT_PURPOSES;
   const basis = purposes.find((x) => x.key === purpose)?.basis ?? 'consent';
-  const state = (await consentStateOf(tx, workspaceId, profileId)).find(
-    (s) => s.purpose === purpose && (s.channel === '' || s.channel === 'webhook'),
-  );
+  const state = currentConsent(await consentStateOf(tx, workspaceId, profileId), purpose, 'webhook');
   return purposeAllowed(basis, state?.status);
 }
 

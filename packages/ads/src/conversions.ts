@@ -4,7 +4,7 @@ import { AppError, newId } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import { consentOf } from '@agentic-marketing/events';
 import { accessTokenOf, connectionSecrets, connectorOf, type DeliveryDeps, deliveryHandlers } from '@agentic-marketing/integrations';
-import { consentStateOf, profileForMessage, type ResolvedEvent } from '@agentic-marketing/profiles';
+import { consentStateOf, currentConsent, profileForMessage, type ResolvedEvent } from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { and, desc, eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
@@ -64,9 +64,7 @@ const get = (o: unknown, path: string) =>
   path.split('.').reduce<unknown>((v, k) => (v && typeof v === 'object' ? (v as Record<string, unknown>)[k] : undefined), o);
 
 async function latestStatus(tx: Tx, ws: string, profileId: string, purpose: string) {
-  return (await consentStateOf(tx, ws, profileId))
-    .filter((s) => s.purpose === purpose)
-    .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())[0];
+  return currentConsent(await consentStateOf(tx, ws, profileId), purpose);
 }
 
 /** Post-resolve hook: queues the conversions an event triggers. */

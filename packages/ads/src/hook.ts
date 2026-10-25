@@ -1,7 +1,7 @@
 import { DEFAULT_PURPOSES, publishedSingleton } from '@agentic-marketing/artifacts';
 import { type Db, schema } from '@agentic-marketing/db';
 import { consentOf } from '@agentic-marketing/events';
-import { consentStateOf, type ResolvedEvent } from '@agentic-marketing/profiles';
+import { consentStateOf, currentConsent, type ResolvedEvent } from '@agentic-marketing/profiles';
 import { sql } from 'drizzle-orm';
 import { CLICK_ID_TYPES, clickIdsOfEvent, purposeHolds } from './clickIds';
 
@@ -21,12 +21,7 @@ export function clickIdHook(deps: { db: Db }) {
       const ledger = new Map<string, string | undefined>();
       for (const { r, ids } of withIds) {
         if (!ledger.has(r.profileId))
-          ledger.set(
-            r.profileId,
-            (await consentStateOf(tx, workspaceId, r.profileId))
-              .filter((s) => s.purpose === 'ad_measurement')
-              .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())[0]?.status,
-          );
+          ledger.set(r.profileId, currentConsent(await consentStateOf(tx, workspaceId, r.profileId), 'ad_measurement')?.status);
         if (!purposeHolds(purposes, 'ad_measurement', consentOf(r.event.context)?.ad_measurement, ledger.get(r.profileId))) continue;
         for (const type of CLICK_ID_TYPES) {
           const value = ids[type];

@@ -242,6 +242,23 @@ export async function streamUpdate(tx: Tx, workspaceId: string, resolved: Resolv
   return out;
 }
 
+/**
+ * Re-evaluates every segment for a few people after a change that reaches no event stream, such
+ * as an unsubscribe link writing consent. Returns the change events to publish.
+ */
+export async function refreshPeople(tx: Tx, workspaceId: string, profileIds: string[], events: EventStore, cause: string) {
+  const scope = [...new Set(profileIds)];
+  if (!scope.length) return [];
+  const segments = await publishedSegments(tx);
+  const out: BusEvent[] = [];
+  for (const seg of segments) {
+    const members = await evaluate(seg.definition.condition, contextFor(tx, workspaceId, events, segments, { scope }));
+    const { entered, exited } = await applyDiff(tx, workspaceId, seg.id, members, scope);
+    out.push(...(await membershipEvents(tx, workspaceId, seg, entered, exited, () => cause)));
+  }
+  return out;
+}
+
 /** The after-resolve hook for the profile workers. */
 export function segmentHook(deps: {
   db: { withWorkspace: <T>(ws: string, fn: (tx: Tx) => Promise<T>) => Promise<T> };

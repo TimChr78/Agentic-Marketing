@@ -31,6 +31,8 @@ consent_state(workspace_id, profile_id, purpose_key, channel, effective_status, 
 suppressions(workspace_id, channel, value_hash, reason, at)  -- survives erasure (hash only)
 ```
 
+The current status of a purpose combines the all-channels row (`''`) and the channel rows by one rule, [ADR-0014](adr/0014-consent-channel-precedence.md): for a channel, the newer of `''` and that channel; without a channel (segments, audience syncs), a newer refusal on any channel wins.
+
 Evaluation in the send gateway: `consent` basis → needs `granted`; `legitimate_interest` → allowed unless `objected/withdrawn`, and the LI policy conditions hold (e.g. `is_customer` trait for soft opt-in). Double opt-in flows are built-in journeys.
 
 ## 3. Encryption & keys

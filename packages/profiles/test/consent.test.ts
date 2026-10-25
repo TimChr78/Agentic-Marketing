@@ -1,0 +1,29 @@
+import { describe, expect, it } from 'vitest';
+import { type ConsentRow, currentConsent, purposeAllowed } from '../src/consent';
+import { CASES, P, row } from './consentCases';
+
+// The one rule for "current status of a purpose" (ADR 0014), as every reader applies it.
+
+const status = (rows: ConsentRow[], channel?: string) => currentConsent(rows, P, channel)?.status;
+
+describe('currentConsent', () => {
+  for (const c of CASES)
+    it(c.name, () => {
+      expect(status(c.rows)).toBe(c.any);
+      expect(status(c.rows, 'email')).toBe(c.email);
+    });
+
+  it('for a channel, is the newest of the all-channels and that channel’s row (the send gateway, unchanged)', () => {
+    const rows = [row('', 'granted', 1), row('email', 'withdrawn', 2), row('', 'granted', 3)];
+    expect(status(rows, 'email')).toBe('granted');
+    expect(status([row('', 'granted', 3), row('email', 'withdrawn', 2)], 'sms')).toBe('granted');
+  });
+
+  it('feeds purposeAllowed for each basis', () => {
+    const unsubscribed = currentConsent([row('', 'granted', 1), row('email', 'objected', 2)], P)?.status;
+    expect(purposeAllowed('consent', unsubscribed)).toBe(false);
+    expect(purposeAllowed('legitimate_interest', unsubscribed)).toBe(false);
+    expect(purposeAllowed('legitimate_interest', undefined)).toBe(true);
+    expect(purposeAllowed('contract', unsubscribed)).toBe(true);
+  });
+});

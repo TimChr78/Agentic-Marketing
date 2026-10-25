@@ -2,7 +2,7 @@ import { DEFAULT_PURPOSES, publishedSingleton } from '@agentic-marketing/artifac
 import type { Db, Tx } from '@agentic-marketing/db';
 import { type LinkSigner, requestEmail } from '@agentic-marketing/email';
 import type { EventStore } from '@agentic-marketing/events';
-import { type ConsentInput, consentStateOf, type ResolvedEvent, recordConsent } from '@agentic-marketing/profiles';
+import { type ConsentInput, consentStateOf, currentConsent, type ResolvedEvent, recordConsent } from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { CONFIRMED, DOI_DAYS, type DoiToken, publishedForm, SUBMITTED } from './forms';
@@ -25,8 +25,9 @@ const purposesOf = async (tx: Tx) => (await publishedSingleton(tx, 'purposes'))?
 
 /** Records only what changes the person's current state (a repeated signup is not a new consent). */
 async function recordChanges(tx: Tx, ws: string, profileId: string, records: ConsentInput[]) {
-  const current = new Map((await consentStateOf(tx, ws, profileId)).filter((s) => s.channel === '').map((s) => [s.purpose, s.status]));
-  const changed = records.filter((r) => current.get(r.purpose) !== r.status);
+  // Compared with the current status, so signing up again after an unsubscribe is a new consent.
+  const state = await consentStateOf(tx, ws, profileId);
+  const changed = records.filter((r) => currentConsent(state, r.purpose)?.status !== r.status);
   if (changed.length) await recordConsent(tx, ws, profileId, await purposesOf(tx), changed);
 }
 

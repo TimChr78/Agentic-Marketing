@@ -2,7 +2,7 @@ import { DEFAULT_PURPOSES, type EmailTemplate, publishedSingleton } from '@agent
 import { newId, newUuid } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import type { EventStore, MessageEvent } from '@agentic-marketing/events';
-import { consentStateOf, profileForMessage, purposeAllowed } from '@agentic-marketing/profiles';
+import { consentStateOf, currentConsent, profileForMessage, purposeAllowed } from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, lt, sql } from 'drizzle-orm';
@@ -84,9 +84,7 @@ export async function checkRecipient(tx: Tx, workspaceId: string, kp: KeyProvide
   if (!person.email || !person.emailHash) return { ok: false, reason: 'no_address: no e-mail address is known for this person' };
   const p = (await purposesOf(tx)).find((x) => x.key === purpose);
   if (!p) return { ok: false, reason: `unknown_purpose: "${purpose}" is not a configured purpose` };
-  const state = (await consentStateOf(tx, workspaceId, person.id))
-    .filter((s) => s.purpose === purpose && (s.channel === '' || s.channel === 'email'))
-    .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())[0];
+  const state = currentConsent(await consentStateOf(tx, workspaceId, person.id), purpose, 'email');
   if (!purposeAllowed(p.basis, state?.status))
     return {
       ok: false,

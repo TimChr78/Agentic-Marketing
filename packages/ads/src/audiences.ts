@@ -3,7 +3,7 @@ import { defineCommand } from '@agentic-marketing/commands';
 import { AppError } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import { accessTokenOf, connectionSecrets, type EgressPolicy, safeRequest } from '@agentic-marketing/integrations';
-import { profileForMessage } from '@agentic-marketing/profiles';
+import { consentStatusSql, profileForMessage } from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, inArray, isNotNull, sql } from 'drizzle-orm';
@@ -166,8 +166,7 @@ export async function syncAudience(
     const plan = await db.withWorkspace(ws, async (tx) => {
       const purposes = (await publishedSingleton(tx, 'purposes'))?.purposes ?? DEFAULT_PURPOSES;
       const rows = await tx.execute<{ profile_id: string; status: string | null }>(sql`
-        SELECT m.profile_id, cs.status FROM segment_memberships m
-        LEFT JOIN consent_state cs ON cs.workspace_id = m.workspace_id AND cs.profile_id = m.profile_id AND cs.purpose = 'ad_targeting' AND cs.channel = ''
+        SELECT m.profile_id, ${consentStatusSql(sql`m.profile_id`, 'ad_targeting')} AS status FROM segment_memberships m
         WHERE m.segment_id = ${def.segment}`);
       const desired = new Set(
         rows.rows.filter((r) => purposeHolds(purposes, 'ad_targeting', undefined, r.status ?? undefined)).map((r) => r.profile_id),
