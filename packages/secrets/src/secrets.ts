@@ -97,7 +97,12 @@ export const listSecrets = defineCommand({
   input: z.object({}),
   output: z.object({
     secrets: z.array(
-      z.object({ name: z.string(), updatedBy: z.string(), updatedByName: z.string().optional().describe('Name of the person who last set it'), updatedAt: z.string() }),
+      z.object({
+        name: z.string(),
+        updatedBy: z.string(),
+        updatedByName: z.string().optional().describe('Name of the person who last set it'),
+        updatedAt: z.string(),
+      }),
     ),
   }),
   permission: 'secrets:read',
@@ -108,8 +113,11 @@ export const listSecrets = defineCommand({
       .from(schema.secrets)
       .orderBy(schema.secrets.name);
     // People's names live in the auth tables; the auth package provides the directory.
-    const directory = (ctx.services as { directory?: { users(ids: string[]): Promise<Map<string, { name: string; email: string }>> } }).directory;
-    const people = directory ? await directory.users([...new Set(rows.map((r) => r.updatedBy))]) : new Map<string, { name: string; email: string }>();
+    const directory = (ctx.services as { directory?: { users(ids: string[]): Promise<Map<string, { name: string; email: string }>> } })
+      .directory;
+    const people = directory
+      ? await directory.users([...new Set(rows.map((r) => r.updatedBy))])
+      : new Map<string, { name: string; email: string }>();
     return {
       secrets: rows.map((r) => {
         const p = people.get(r.updatedBy);

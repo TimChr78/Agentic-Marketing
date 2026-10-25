@@ -56,7 +56,12 @@ function png(w: number, h: number, rgb: [number, number, number]) {
   ihdr[9] = 2;
   const row = Buffer.concat([Buffer.from([0]), Buffer.alloc(w * 3).fill(Buffer.from(rgb))]);
   const raw = Buffer.concat(Array.from({ length: h }, () => row));
-  return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', ihdr), chunk('IDAT', deflateSync(raw)), chunk('IEND', Buffer.alloc(0))]);
+  return Buffer.concat([
+    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+    chunk('IHDR', ihdr),
+    chunk('IDAT', deflateSync(raw)),
+    chunk('IEND', Buffer.alloc(0)),
+  ]);
 }
 
 export async function seed(t: T) {
@@ -66,7 +71,8 @@ export async function seed(t: T) {
     approver: await t.signUp(PEOPLE.approver.email),
     viewer: await t.signUp(PEOPLE.viewer.email),
   };
-  for (const [k, u] of Object.entries(users)) await t.srv.db.admin.query('UPDATE "user" SET name = $1 WHERE id = $2', [PEOPLE[k as keyof typeof PEOPLE].name, u.id]);
+  for (const [k, u] of Object.entries(users))
+    await t.srv.db.admin.query('UPDATE "user" SET name = $1 WHERE id = $2', [PEOPLE[k as keyof typeof PEOPLE].name, u.id]);
   const ws = await t.workspaceWith(
     [
       [users.owner, 'owner'],
@@ -82,30 +88,65 @@ export async function seed(t: T) {
 
   const owner = t.api(users.owner, ws);
   await owner.call('workspace.setSeedList', { seedList: ['inbox-check@example.com'] }).catch(() => {});
-  await owner.call('emailProviders.create', { name: 'Development log', adapter: 'log', fromEmail: 'news@martechsignal.example', fromName: 'MartechSignal', useFor: ['transactional', 'marketing'] });
+  await owner.call('emailProviders.create', {
+    name: 'Development log',
+    adapter: 'log',
+    fromEmail: 'news@martechsignal.example',
+    fromName: 'MartechSignal',
+    useFor: ['transactional', 'marketing'],
+  });
   await owner.call('secrets.set', { name: 'turnstile.secret_key', value: 'dev-secret-not-real' });
 
-  const logo = await owner.call('assets.upload', { fileName: 'martechsignal-logo.png', contentType: 'image/png', dataBase64: png(160, 40, [29, 78, 216]).toString('base64'), altText: 'MartechSignal' });
-  await owner.call('assets.upload', { fileName: 'issue-43-hero.png', contentType: 'image/png', dataBase64: png(600, 300, [15, 122, 131]).toString('base64'), altText: 'Chart of e-mail engagement by weekday' });
+  const logo = await owner.call('assets.upload', {
+    fileName: 'martechsignal-logo.png',
+    contentType: 'image/png',
+    dataBase64: png(160, 40, [29, 78, 216]).toString('base64'),
+    altText: 'MartechSignal',
+  });
+  await owner.call('assets.upload', {
+    fileName: 'issue-43-hero.png',
+    contentType: 'image/png',
+    dataBase64: png(600, 300, [15, 122, 131]).toString('base64'),
+    altText: 'Chart of e-mail engagement by weekday',
+  });
 
   const pub = async (id: string, note: string) => owner.call('artifacts.requestPublish', { artifactId: id, note });
   const brand = await owner.call('artifacts.create', {
     type: 'brand',
     name: 'Brand',
-    content: { siteName: 'MartechSignal', siteUrl: 'https://martechsignal.example', logoUrl: logo.url, logoAlt: 'MartechSignal', colors: { accent: '#1d4ed8' }, language: 'en' },
+    content: {
+      siteName: 'MartechSignal',
+      siteUrl: 'https://martechsignal.example',
+      logoUrl: logo.url,
+      logoAlt: 'MartechSignal',
+      colors: { accent: '#1d4ed8' },
+      language: 'en',
+    },
   });
   await pub(brand.artifactId, 'Initial brand');
 
   const confirm = await owner.call('artifacts.create', {
     type: 'email_template',
     name: 'Confirm your subscription',
-    content: { purpose: 'onboarding', subject: 'Confirm your MartechSignal subscription', preheader: 'One click and you are in', mjml: mjml('Confirm your subscription', 'Click below to confirm. <a href="{{ confirm_url }}">Confirm</a>'), sampleData: { profile: { firstName: 'Ada' }, confirm_url: 'https://links.example/f/confirm/sample' } },
+    content: {
+      purpose: 'onboarding',
+      subject: 'Confirm your MartechSignal subscription',
+      preheader: 'One click and you are in',
+      mjml: mjml('Confirm your subscription', 'Click below to confirm. <a href="{{ confirm_url }}">Confirm</a>'),
+      sampleData: { profile: { firstName: 'Ada' }, confirm_url: 'https://links.example/f/confirm/sample' },
+    },
   });
   await pub(confirm.artifactId, 'Confirmation e-mail');
   const issue42 = await owner.call('artifacts.create', {
     type: 'email_template',
     name: 'Weekly Signal #42',
-    content: { purpose: 'marketing_email', subject: 'Signal #42: attribution is a story you tell', preheader: 'Plus three tools worth a look', mjml: mjml('Signal #42', 'This week: why last-click attribution keeps winning arguments it should lose.'), sampleData: { profile: { firstName: 'Ada' } } },
+    content: {
+      purpose: 'marketing_email',
+      subject: 'Signal #42: attribution is a story you tell',
+      preheader: 'Plus three tools worth a look',
+      mjml: mjml('Signal #42', 'This week: why last-click attribution keeps winning arguments it should lose.'),
+      sampleData: { profile: { firstName: 'Ada' } },
+    },
   });
   await pub(issue42.artifactId, 'Issue 42');
   const subscribers = await owner.call('artifacts.create', {
@@ -117,7 +158,10 @@ export async function seed(t: T) {
   const engaged = await owner.call('artifacts.create', {
     type: 'segment',
     name: 'Engaged readers',
-    content: { description: 'Subscribers who opened recently.', condition: { all: [{ consent: 'marketing_email' }, { event: 'Email Opened', within: 'P30D' }] } },
+    content: {
+      description: 'Subscribers who opened recently.',
+      condition: { all: [{ consent: 'marketing_email' }, { event: 'Email Opened', within: 'P30D' }] },
+    },
   });
   await pub(engaged.artifactId, 'Engaged readers');
   const form = await owner.call('artifacts.create', {
@@ -141,13 +185,24 @@ export async function seed(t: T) {
     rows: Array.from({ length: 24 }, (_, i) => ({
       email: `reader${i + 1}@example.net`,
       traits: { firstName: ['Ada', 'Grace', 'Linus', 'Margaret', 'Ken', 'Barbara'][i % 6], city: i % 2 ? 'Copenhagen' : 'Aarhus' },
-      consent: [{ purpose: 'marketing_email', status: i % 7 === 6 ? ('withdrawn' as const) : ('granted' as const), recordedAt: '2026-09-01T08:00:00Z', proof: { system: 'Kit' } }],
+      consent: [
+        {
+          purpose: 'marketing_email',
+          status: i % 7 === 6 ? ('withdrawn' as const) : ('granted' as const),
+          recordedAt: '2026-09-01T08:00:00Z',
+          proof: { system: 'Kit' },
+        },
+      ],
     })),
   });
 
   // The agent: an API token owned by the builder, as Hermes uses on the pilot.
   const builder = t.api(users.builder, ws);
-  const token = await builder.call('apiTokens.create', { name: 'Hermes', scopes: ['artifacts:read', 'artifacts:write', 'artifacts:publish'], expiresInDays: 90 });
+  const token = await builder.call('apiTokens.create', {
+    name: 'Hermes',
+    scopes: ['artifacts:read', 'artifacts:write', 'artifacts:publish'],
+    expiresInDays: 90,
+  });
   await builder.call('apiTokens.create', { name: 'n8n reporting', scopes: ['artifacts:read'] });
   const agent = createClient<Commands>({ baseUrl: t.base, headers: { authorization: `Bearer ${token.token}` } });
   const ask = (id: string, note: string) => agent.call('artifacts.requestPublish', { artifactId: id, note });
@@ -155,20 +210,47 @@ export async function seed(t: T) {
   const issue43 = await agent.call('artifacts.create', {
     type: 'email_template',
     name: 'Weekly Signal #43',
-    content: { purpose: 'marketing_email', subject: 'Signal #43: the inbox is the new homepage', preheader: 'Why readers trust e-mail more than feeds', mjml: mjml('Signal #43', 'Feeds come and go; the inbox stays. This week we look at what 1,200 newsletters taught us about Tuesday sends.'), sampleData: { profile: { firstName: 'Ada' } } },
+    content: {
+      purpose: 'marketing_email',
+      subject: 'Signal #43: the inbox is the new homepage',
+      preheader: 'Why readers trust e-mail more than feeds',
+      mjml: mjml(
+        'Signal #43',
+        'Feeds come and go; the inbox stays. This week we look at what 1,200 newsletters taught us about Tuesday sends.',
+      ),
+      sampleData: { profile: { firstName: 'Ada' } },
+    },
   });
   await ask(issue43.artifactId, 'Draft of issue 43 from the editorial outline. Subject tested against #41 and #42.');
 
   const bc = await agent.call('artifacts.create', {
     type: 'broadcast',
     name: 'Signal #42 resend to engaged readers',
-    content: { template: issue42.artifactId, segment: engaged.artifactId, sendAt: '2026-10-30T09:00:00+01:00', description: 'Resend of #42 to readers who opened in the last 30 days.' },
+    content: {
+      template: issue42.artifactId,
+      segment: engaged.artifactId,
+      sendAt: '2026-10-30T09:00:00+01:00',
+      description: 'Resend of #42 to readers who opened in the last 30 days.',
+    },
   });
   await ask(bc.artifactId, 'Resend #42 on Friday morning, Copenhagen time.');
 
   await agent.call('artifacts.updateDraft', {
     artifactId: engaged.artifactId,
-    content: { description: 'Subscribers who opened or clicked recently.', condition: { all: [{ consent: 'marketing_email' }, { any: [{ event: 'Email Opened', within: 'P14D' }, { event: 'Email Clicked', within: 'P30D' }] }] } },
+    content: {
+      description: 'Subscribers who opened or clicked recently.',
+      condition: {
+        all: [
+          { consent: 'marketing_email' },
+          {
+            any: [
+              { event: 'Email Opened', within: 'P14D' },
+              { event: 'Email Clicked', within: 'P30D' },
+            ],
+          },
+        ],
+      },
+    },
   });
   await ask(engaged.artifactId, 'Tighten to 14 days of opens, or a click in 30 days.');
 
@@ -194,22 +276,40 @@ export async function seed(t: T) {
       purpose: 'marketing_email',
       goal: 'Reader opens two issues in the first two weeks',
       nodes: [
-        { id: 'n1', kind: 'trigger', label: 'Confirmed subscription', config: { event: 'Subscription Confirmed', reentry: 'once' }, next: [{ to: 'n2' }] },
+        {
+          id: 'n1',
+          kind: 'trigger',
+          label: 'Confirmed subscription',
+          config: { event: 'Subscription Confirmed', reentry: 'once' },
+          next: [{ to: 'n2' }],
+        },
         { id: 'n2', kind: 'email', label: 'Welcome e-mail', config: { template: issue42.artifactId }, next: [{ to: 'n3' }] },
         { id: 'n3', kind: 'wait', label: 'Wait two days', config: { duration: 'P2D' }, next: [{ to: 'n4' }] },
-        { id: 'n4', kind: 'branch', label: 'Opened the welcome?', config: { segment: engaged.artifactId }, next: [{ to: 'n5' }, { to: 'n6' }] },
+        {
+          id: 'n4',
+          kind: 'branch',
+          label: 'Opened the welcome?',
+          config: { segment: engaged.artifactId },
+          next: [{ to: 'n5' }, { to: 'n6' }],
+        },
         { id: 'n5', kind: 'exit', label: 'Done', config: {} },
         { id: 'n6', kind: 'email', label: 'Best of MartechSignal', config: { template: issue42.artifactId }, next: [{ to: 'n7' }] },
         { id: 'n7', kind: 'exit', label: 'Exit', config: {} },
       ],
     },
   });
-  await agent.call('artifacts.requestPublish', { artifactId: welcome.artifactId, note: 'Two-step welcome: issue 42 now, and again after two days for people who did not open it.' });
+  await agent.call('artifacts.requestPublish', {
+    artifactId: welcome.artifactId,
+    note: 'Two-step welcome: issue 42 now, and again after two days for people who did not open it.',
+  });
 
   await agent.call('artifacts.create', {
     type: 'experience',
     name: 'Newsletter banner on articles',
-    content: { placement: 'article-footer', variants: [{ id: 'a', name: 'Short pitch', weight: 50, content: { html: '<p>Get the Tuesday signal.</p>' } }] },
+    content: {
+      placement: 'article-footer',
+      variants: [{ id: 'a', name: 'Short pitch', weight: 50, content: { html: '<p>Get the Tuesday signal.</p>' } }],
+    },
   });
 
   return { ws, sandbox, users, token: token.token };

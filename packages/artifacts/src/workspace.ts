@@ -190,7 +190,12 @@ export const listAudit = defineCommand({
       .limit(input.limit);
     const names = await resolveActors(
       ctx,
-      rows.map((r) => ({ key: String(r.seq), type: r.principalType === 'agent' ? 'agent' : 'user', id: r.principalId, client: r.clientId })),
+      rows.map((r) => ({
+        key: String(r.seq),
+        type: r.principalType === 'agent' ? 'agent' : 'user',
+        id: r.principalId,
+        client: r.clientId,
+      })),
     );
     return {
       entries: rows.map((r) => ({

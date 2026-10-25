@@ -545,7 +545,6 @@ export const requestPublish = defineCommand({
   },
 });
 
-
 const Approval = z.object({
   id: z.string(),
   artifactId: z.string(),
