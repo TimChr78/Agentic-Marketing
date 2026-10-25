@@ -12,11 +12,13 @@ export interface NodeData extends Record<string, unknown> {
   /** People who passed it / are waiting there (journey stats). */
   stats?: { reached?: number; waiting?: number };
   readOnly?: boolean;
+  /** On the simulated path. */
+  highlight?: boolean;
 }
 
 /** One journey step on the canvas: category colour on the left edge and icon, text label, warnings. */
 export const NodeView = memo(function NodeView({ data, selected }: NodeProps) {
-  const { node, summary, warnings, stats, readOnly } = data as NodeData;
+  const { node, summary, warnings, stats, readOnly, highlight } = data as NodeData;
   const meta = KINDS[node.kind];
   const Icon = meta.icon;
   const color = `var(--cat-${meta.category})`;
@@ -25,7 +27,7 @@ export const NodeView = memo(function NodeView({ data, selected }: NodeProps) {
     <div
       className={cx(
         'relative rounded-lg border bg-surface text-left shadow-1 transition-shadow',
-        selected ? 'border-accent ring-2 ring-accent/30' : warnings.length ? 'border-warn/60' : 'border-line-strong',
+        selected ? 'border-accent ring-2 ring-accent/30' : highlight ? 'border-good ring-2 ring-good/30' : warnings.length ? 'border-warn/60' : 'border-line-strong',
       )}
       style={{ width: NODE_W }}
     >
@@ -58,7 +60,7 @@ export const NodeView = memo(function NodeView({ data, selected }: NodeProps) {
       )}
       {Array.from({ length: outs }, (_, i) => {
         const left = outs === 1 ? '50%' : `${((i + 1) / (outs + 1)) * 100}%`;
-        const label = outs > 1 ? edgeLabel(node, i) : undefined;
+        const label = outs > 1 && i >= (node.next?.length ?? 0) ? edgeLabel(node, i) : undefined;
         return (
           <Handle
             key={i}

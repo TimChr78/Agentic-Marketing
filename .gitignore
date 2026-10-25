@@ -5,3 +5,5 @@ dist-single/
 .DS_Store
 out/
 .env
+test-results/
+playwright-report/

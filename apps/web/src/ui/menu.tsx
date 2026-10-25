@@ -157,19 +157,21 @@ export function Menu({
 /** A context menu opened at the pointer (or at an element for keyboard users). */
 export function ContextMenu({ at, items, onClose, label }: { at: { x: number; y: number } | null; items: (MenuItem | 'separator')[]; onClose: () => void; label?: string }) {
   const list = useRef<HTMLDivElement>(null);
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
   useEffect(() => {
     if (!at) return;
     const prev = document.activeElement as HTMLElement | null;
     list.current?.querySelector<HTMLElement>('[role=menuitem]:not([aria-disabled=true])')?.focus();
     const onDoc = (e: MouseEvent) => {
-      if (!list.current?.contains(e.target as Node)) onClose();
+      if (!list.current?.contains(e.target as Node)) closeRef.current();
     };
     document.addEventListener('mousedown', onDoc);
     return () => {
       document.removeEventListener('mousedown', onDoc);
       prev?.focus?.();
     };
-  }, [at, onClose]);
+  }, [at]);
   if (!at) return null;
   const onKey = (e: React.KeyboardEvent) => {
     const els = Array.from(list.current?.querySelectorAll<HTMLElement>('[role=menuitem]:not([aria-disabled=true])') ?? []);
@@ -188,7 +190,7 @@ export function ContextMenu({ at, items, onClose, label }: { at: { x: number; y:
       role="menu"
       aria-label={label}
       onKeyDown={onKey}
-      style={{ position: 'fixed', top: Math.min(at.y, window.innerHeight - 220), left: Math.min(at.x, window.innerWidth - 200) }}
+      style={{ position: 'fixed', top: Math.min(Number.isFinite(at.y) ? at.y : window.innerHeight / 3, window.innerHeight - 220), left: Math.min(Number.isFinite(at.x) ? at.x : window.innerWidth / 3, window.innerWidth - 200) }}
       className="am-fade-in z-[70] min-w-[180px] rounded-lg border border-line bg-surface p-1 shadow-2"
     >
       {items.map((it, i) =>

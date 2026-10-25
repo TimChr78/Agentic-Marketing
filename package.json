@@ -15,7 +15,9 @@
     "lint": "biome check .",
     "format": "biome format --write .",
     "typecheck": "pnpm -r --filter './packages/*' --filter './apps/*' typecheck",
-    "test": "vitest run"
+    "test": "vitest run",
+    "e2e": "playwright test",
+    "e2e:dev": "playwright test"
   },
   "pnpm": {
     "overrides": {

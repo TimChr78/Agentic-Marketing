@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { api, type Out } from '../app/api';
 
 // Names (and published versions) of referenced artifacts, e.g. the template and segment of a
@@ -50,7 +50,7 @@ export function useArtifactNames(ids: string[]) {
       live = false;
     };
   }, [key]);
-  return (id: string) => names[id];
+  return useCallback((id: string) => names[id], [names]);
 }
 
 /** Artifact ids referenced anywhere in a JSON value (eml_…, seg_…, prm_… and so on). */

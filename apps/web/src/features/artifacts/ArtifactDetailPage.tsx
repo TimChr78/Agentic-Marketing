@@ -1,5 +1,5 @@
 import { Copy, MoreHorizontal, Pencil, Send } from 'lucide-react';
-import { type ReactNode, useCallback, useEffect, useMemo, useState } from 'react';
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError, api, errText, type Out } from '../../app/api';
 import { typeLabel } from '../../app/artifactRoutes';
 import { ButtonLink } from '../../app/links';
@@ -42,6 +42,7 @@ export function ArtifactDetailPage({
   description,
   wide,
   extraActions,
+  autosave,
 }: {
   id: string;
   /** Breadcrumbs before the artifact's name, e.g. [{label:'Journeys', to:'/build/journeys'}]. */
@@ -52,6 +53,8 @@ export function ArtifactDetailPage({
   /** The editor takes the full width (journey canvas). */
   wide?: boolean;
   extraActions?: (a: Artifact) => ReactNode;
+  /** Save drafts automatically a moment after each change (journey builder). */
+  autosave?: boolean;
 }) {
   const { can, workspace } = useWorkspace();
   const toast = useToast();
@@ -86,8 +89,11 @@ export function ArtifactDetailPage({
     };
   }, [dirty]);
 
+  const [savedAt, setSavedAt] = useState<number | null>(null);
+  const [conflict, setConflict] = useState(false);
+  const failedDraft = useRef<string | null>(null);
   const save = useCallback(
-    async (opts: { name?: string } = {}) => {
+    async (opts: { name?: string; quiet?: boolean } = {}) => {
       if (!a) return false;
       setSaving(true);
       setSaveError(null);
@@ -97,10 +103,13 @@ export function ArtifactDetailPage({
         setWarnings(r.warnings);
         invalidateArtifact(a.id);
         await art.reload();
-        toast.success(r.version === a.version.number ? 'Draft saved.' : `Saved as draft v${r.version}. The live version is unchanged until it is published.`);
+        setSavedAt(Date.now());
+        if (!opts.quiet || r.version !== a.version.number)
+          toast.success(r.version === a.version.number ? 'Draft saved.' : `Saved as draft v${r.version}. The live version is unchanged until it is published.`);
         return true;
       } catch (e) {
         if (e instanceof ApiError && e.code === 'invalid_input') setErrors(fieldErrors(e.details));
+        setConflict(e instanceof ApiError && e.status === 412);
         setSaveError(e instanceof ApiError && e.status === 412 ? `${e.message} Your changes are still here; copy them before reloading.` : errText(e));
         return false;
       } finally {
@@ -109,6 +118,19 @@ export function ArtifactDetailPage({
     },
     [a, draft, art, toast],
   );
+
+  // Autosave: a moment after the last change; retried on the next change after an error, but never
+  // over someone else's newer version (412), where the person decides.
+  useEffect(() => {
+    if (!autosave || !dirty || readOnly || saving || conflict) return;
+    const snapshot = JSON.stringify(draft);
+    if (failedDraft.current === snapshot) return;
+    const t = setTimeout(async () => {
+      if (!(await save({ quiet: true }))) failedDraft.current = snapshot;
+    }, 1200);
+    return () => clearTimeout(t);
+    // biome-ignore lint/correctness/useExhaustiveDependencies: keyed on the draft
+  }, [autosave, dirty, readOnly, saving, conflict, draft]);
 
   // Ctrl/Cmd+S saves.
   useEffect(() => {
@@ -153,7 +175,12 @@ export function ArtifactDetailPage({
         actions={
           <>
             {extraActions?.(a)}
-            {dirty && !readOnly && (
+            {autosave && !readOnly && (
+              <span className="text-[12px] text-muted" aria-live="polite">
+                {saving ? 'Saving…' : saveError ? 'Not saved, see below' : dirty ? 'Unsaved changes' : savedAt ? 'All changes saved' : 'Changes save automatically'}
+              </span>
+            )}
+            {dirty && !readOnly && (!autosave || conflict) && (
               <>
                 <Button variant="ghost" onClick={() => setDraft(a.version.content)}>
                   Discard changes
