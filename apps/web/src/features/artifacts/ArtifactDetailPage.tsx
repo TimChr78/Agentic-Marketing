@@ -28,7 +28,7 @@ export interface EditorProps<C = any> {
   warnings: DraftWarning[];
 }
 
-type Tab = 'content' | 'preview' | 'versions' | 'activity';
+type Tab = string;
 
 /**
  * The detail page every artifact gets (Part 4): content (editable for roles that may), preview,
@@ -43,6 +43,7 @@ export function ArtifactDetailPage({
   wide,
   extraActions,
   autosave,
+  extraTabs = [],
 }: {
   id: string;
   /** Breadcrumbs before the artifact's name, e.g. [{label:'Journeys', to:'/build/journeys'}]. */
@@ -55,6 +56,8 @@ export function ArtifactDetailPage({
   extraActions?: (a: Artifact) => ReactNode;
   /** Save drafts automatically a moment after each change (journey builder). */
   autosave?: boolean;
+  /** Type-specific tabs after Preview, e.g. a broadcast's sending status or a prompt's tests. */
+  extraTabs?: { key: string; label: string; render: (a: Artifact) => ReactNode }[];
 }) {
   const { can, workspace } = useWorkspace();
   const toast = useToast();
@@ -236,7 +239,8 @@ export function ArtifactDetailPage({
         onChange={(t) => setTab(t)}
         items={[
           { key: 'content', label: dirty ? 'Content •' : 'Content' },
-          ...(preview ? [{ key: 'preview' as const, label: 'Preview' }] : []),
+          ...(preview ? [{ key: 'preview', label: 'Preview' }] : []),
+          ...extraTabs.map((t) => ({ key: t.key, label: t.label })),
           { key: 'versions', label: 'Versions', count: a.latestVersion },
           { key: 'activity', label: 'Activity' },
         ]}
@@ -256,6 +260,7 @@ export function ArtifactDetailPage({
             <ArtifactPreview type={a.type} artifactId={a.id} version={latest.number} content={latest.content} />
           </div>
         )}
+        {extraTabs.map((t) => tab === t.key && <div key={t.key}>{t.render(a)}</div>)}
         {tab === 'versions' && <VersionsPanel artifact={a} />}
         {tab === 'activity' && <ActivityPanel artifactId={a.id} />}
       </Tabs>
