@@ -67,6 +67,8 @@ export interface EmailTransport {
 export interface EmailAdapter<C extends z.ZodType = z.ZodType, S extends z.ZodType = z.ZodType> {
   id: 'smtp' | 'ses' | 'postmark' | 'brevo' | 'cloudflare' | 'log';
   label: string;
+  /** The provider's own documentation for the settings and credentials asked for here. */
+  docsUrl?: string;
   /** Settings that are not secret; returned by the API. */
   config: C;
   /** Credentials; write-only, stored sealed. */

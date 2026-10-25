@@ -6,6 +6,10 @@ It runs as one Docker image (a TypeScript modular monolith) next to Postgres, Cl
 
 ## What it does
 
+![The approval drawer: the agent's e-mail rendered for review](docs/design/screenshots/approval-email-1440-light.png)
+
+- **An admin UI built for reviewing agents' work:** an approval drawer that shows the actual e-mail, form, journey, segment or broadcast with what changed and who asked; a journey builder with drag and drop; template, form, segment and brand editors; an asset library; light and dark themes; keyboard access throughout. Screens are in [docs/design/screenshots](docs/design/screenshots).
+
 - **Collect events:** Segment-compatible ingest (`/v1/batch`), a browser SDK, per-source consent rules, a tracking plan, bot filtering.
 - **Consent banner:** in the SDK, CSP-safe, with texts from your purposes and Google Consent Mode v2 signals. Ad click ids (`gclid`, `fbclid`, `msclkid`…) are kept only with `ad_measurement` consent.
 - **Know people:** identity resolution and merges, profiles with traits and events, a consent ledger per purpose, export and erasure (DSR).
@@ -58,7 +62,7 @@ docker compose up -d        # pulls the released image
 docker compose exec app am bootstrap --email you@example.com --workspace 'My site'
 ```
 
-`AM_VERSION` (default `0.1.2`) selects the released image `ghcr.io/timchr78/agentic-marketing`. Pin a version instead of `latest` so restarts and `docker compose pull` do not silently change what runs. `AM_PORT` (default `3000`) is the published host port: the app still listens on 3000 inside the container, so keep `PUBLIC_URL` and `PUBLIC_LINKS_URL` in step with it. ClickHouse is capped at `CLICKHOUSE_MEM_LIMIT` (default `2g`), which covers the whole container (server, caches and query memory); ClickHouse's own limits such as `max_server_memory_usage` still apply inside it, and 2g is a starting point for the single-node pilot.
+`AM_VERSION` (default `0.2.0`) selects the released image `ghcr.io/timchr78/agentic-marketing`. Pin a version instead of `latest` so restarts and `docker compose pull` do not silently change what runs. `AM_PORT` (default `3000`) is the published host port: the app still listens on 3000 inside the container, so keep `PUBLIC_URL` and `PUBLIC_LINKS_URL` in step with it. ClickHouse is capped at `CLICKHOUSE_MEM_LIMIT` (default `2g`), which covers the whole container (server, caches and query memory); ClickHouse's own limits such as `max_server_memory_usage` still apply inside it, and 2g is a starting point for the single-node pilot.
 
 To build from source (development, CI or a local patch) use the overlay:
 
@@ -74,7 +78,7 @@ Open http://localhost:3000 for the admin UI (it is built into the image and serv
 
 MCP requires `PUBLIC_URL` to be HTTPS. With a plain-HTTP address on a LAN the admin UI and REST API still work, but MCP/OAuth client endpoints are disabled; expose the server over HTTPS (e.g. with Tailscale or a Cloudflare Tunnel) to enable MCP.
 
-Running it behind a proxy or a Cloudflare Tunnel: set `PUBLIC_URL`, `PUBLIC_LINKS_URL`, `CLIENT_IP_HEADER` (an ordered list, e.g. `cf-connecting-ip,x-forwarded-for`) and `TRUSTED_PROXY_CIDRS` for the tunnel/proxy ranges (see [`.env.example`](.env.example)). Set `PUBLIC_PORT` to add a public-only listener (`/f`, `/u`, `/c`, `/hooks`, `/healthz`, `/readyz`) and point the tunnel there, so no path rule is needed. Admin LAN traffic without a forwarding header uses the socket address.
+Running it behind a proxy or a Cloudflare Tunnel: set `PUBLIC_URL`, `PUBLIC_LINKS_URL`, `CLIENT_IP_HEADER` (an ordered list, e.g. `cf-connecting-ip,x-forwarded-for`) and `TRUSTED_PROXY_CIDRS` for the tunnel/proxy ranges (see [`.env.example`](.env.example)). Set `PUBLIC_PORT` to add a public-only listener (`/f`, `/u`, `/c`, `/a`, `/hooks`, `/healthz`, `/readyz`) and point the tunnel there, so no path rule is needed. Admin LAN traffic without a forwarding header uses the socket address.
 
 The compose file keeps Postgres, ClickHouse and NATS data in named volumes. To use host directories instead, replace those volume entries, e.g. `- /srv/am/pgdata:/var/lib/postgresql/data`, `- /srv/am/clickhouse:/var/lib/clickhouse` and `- /srv/am/nats:/data`. The containers run as their own users (Postgres uid 70 in the Alpine image, ClickHouse uid 101, NATS uid 1000), so `chown` the host directories to match the image you use or the services will fail to write; named volumes avoid that.
 
@@ -96,7 +100,7 @@ On Kubernetes: the Helm chart in [`deploy/helm`](deploy/helm/agentic-marketing) 
 
 ## Releases and upgrading
 
-Releases are on [GitHub](https://github.com/TimChr78/Agentic-Marketing/releases), with the image `ghcr.io/timchr78/agentic-marketing:<version>` (linux/amd64 and linux/arm64) and the packaged Helm chart; what changed is in the [changelog](CHANGELOG.md). The current release is **0.1.2**, a pre-release. A release is made by pushing a version tag, or by running the Release workflow (Actions → Release → Run workflow) with the version, which tags the current `main`.
+Releases are on [GitHub](https://github.com/TimChr78/Agentic-Marketing/releases), with the image `ghcr.io/timchr78/agentic-marketing:<version>` (linux/amd64 and linux/arm64) and the packaged Helm chart; what changed is in the [changelog](CHANGELOG.md). The current release is **0.2.0**, a pre-release. A release is made by pushing a version tag, or by running the Release workflow (Actions → Release → Run workflow) with the version, which tags the current `main`.
 
 Upgrading: database migrations run when the server starts. With `SKIP_MIGRATIONS=true` (several replicas, Kubernetes) run `cli migrate` first; the Helm chart does this in a Job before each upgrade. Migrations only move forward, so back up Postgres before upgrading. While the version is 0.x, read the changelog before each upgrade: commands and artifact formats may still change.
 
@@ -110,7 +114,7 @@ Wave 1 (Phases −1 to 5) is complete: foundations, data platform, e-mail, segme
 
 | Phase | Theme | State |
 |---|---|---|
-| 6 | Pilot live and hardening | The code items are done: e-mail events on profiles, retention, UTM tagging, test sends, Newsletter screen, Docker smoke test. The MartechSignal run is next. |
+| 6 | Pilot live and hardening | The code items are done: e-mail events on profiles, retention, UTM tagging, test sends, Docker smoke test. 0.2.0 replaced the admin UI (navigation, approvals, journey builder, assets, brand). The MartechSignal run is next. |
 | 7 | Delivery beyond SMTP, and SMS | Done: Cloudflare Email Service adapter, delivery policy (caps, quiet hours, auto-pause), deliverability health and domain check, Twilio SMS. Later: GatewayAPI, SMS double opt-in, provider warm-up |
 | 8 | Consent everywhere | Done: consent banner with Consent Mode v2, ad purposes, click-id capture, OAuth 2.0 connections, shared rate limits, bot filtering |
 | 9 | Performance marketing | Done: conversions (Meta, Google, Microsoft), audience sync (Meta, Google), spend and ROAS. Later: Microsoft reporting and audiences, more platforms |
@@ -124,7 +128,9 @@ pnpm install
 pnpm lint && pnpm typecheck && pnpm test   # tests need Postgres, ClickHouse, NATS and Valkey
 scripts/smoke.sh                           # the Docker image end to end
 pnpm --filter @agentic-marketing/server cli loadtest --profiles 1000000   # segment refreshes at scale
-pnpm dev:web                               # the UI (a mocked demo without the API)
+pnpm dev:web                               # the admin UI on :5173 against the API (demo at /demo)
+npx tsx apps/server/test/e2e/server.ts     # a seeded workspace on :3100 for UI work
+pnpm e2e                                   # Playwright end-to-end tests of the UI
 ```
 
 See [docs/development.md](docs/development.md) for details.

@@ -3,6 +3,7 @@ import type { Executor } from '@agentic-marketing/commands';
 import { AppError } from '@agentic-marketing/core';
 import type { Db } from '@agentic-marketing/db';
 import { createRoute, OpenAPIHono, z } from '@hono/zod-openapi';
+import { bodyLimit } from 'hono/body-limit';
 import { commands } from '../registry';
 
 const ErrorBody = z.object({ error: z.string(), message: z.string(), details: z.unknown().optional() });
@@ -46,8 +47,9 @@ function jsonSchema(api: OpenAPIHono, schema: unknown, name: string, io: 'input'
 }
 
 /** One RPC-style POST route per command, documented as OpenAPI 3.1. Validation happens in the executor. */
-export function restApi(deps: { auth: Auth; db: Db; executor: Executor }) {
+export function restApi(deps: { auth: Auth; db: Db; executor: Executor; assetMaxBytes: number }) {
   const api = new OpenAPIHono();
+  const assetLimitMb = (deps.assetMaxBytes / (1024 * 1024)).toFixed(1).replace(/\.0$/, '');
   for (const cmd of commands) {
     const route = createRoute({
       method: 'post',
@@ -68,6 +70,24 @@ export function restApi(deps: { auth: Auth; db: Db; executor: Executor }) {
       },
     });
     api.openAPIRegistry.registerPath(route);
+    if (cmd.name === 'assets.upload') {
+      // Base64 inflates by 4/3; refuse an oversized body before it is buffered, with the same
+      // limit the command enforces on the decoded bytes (plus room for the JSON envelope).
+      api.use(
+        route.path,
+        bodyLimit({
+          maxSize: Math.ceil(deps.assetMaxBytes * (4 / 3)) + 16_384,
+          onError: (c) =>
+            c.json(
+              {
+                error: 'invalid_input',
+                message: `The upload body is larger than the ${assetLimitMb} MB asset limit allows. Upload a smaller file or raise ASSET_MAX_BYTES.`,
+              },
+              413,
+            ),
+        }),
+      );
+    }
     api.post(route.path, async (c) => {
       const bearer = c.req.header('authorization')?.match(/^Bearer (amk_\S+)$/)?.[1];
       const principal = bearer
@@ -85,6 +105,6 @@ export function restApi(deps: { auth: Auth; db: Db; executor: Executor }) {
       return c.json(out as object, 200);
     });
   }
-  api.doc31('/openapi.json', { openapi: '3.1.0', info: { title: 'Agentic Marketing API', version: '0.1.2' } });
+  api.doc31('/openapi.json', { openapi: '3.1.0', info: { title: 'Agentic Marketing API', version: '0.2.0' } });
   return api;
 }

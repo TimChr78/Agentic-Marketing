@@ -1,75 +1,94 @@
 @import "tailwindcss";
 
-/* Layout: operator console — fixed nav rail, working canvas, optional copilot drawer.
-   Cobalt = human actions & primary UI; amber = anything authored or done by an agent. */
+/* Design tokens (docs/design/DESIGN.md). Light is the default; `data-theme="dark"` on <html> switches,
+   and an inline script in index.html sets it before first paint (system / light / dark). */
 :root {
-  --bg: #f4f6f9;
+  --bg: #f7f8fa;
   --surface: #ffffff;
-  --surface-2: #edf0f5;
-  --line: #dce1e9;
-  --fg: #141a24;
-  --muted: #5d6779;
-  --accent: #2f5bea;
+  --surface-2: #f2f4f7;
+  --surface-3: #e9ecf1;
+  --line: #e2e5ea;
+  --line-strong: #c9ced6;
+  --control: #868d99;
+  --fg: #14171c;
+  --fg-2: #454c59;
+  --muted: #646c79;
+  --accent: #2457d6;
+  --accent-hover: #1e4bbb;
   --accent-fg: #ffffff;
-  --accent-soft: #e3e9fd;
-  --agent: #a8650f;
-  --agent-soft: #fbefd9;
-  --good: #23824f;
-  --good-soft: #def3e7;
-  --warn: #c2410c;
-  --warn-soft: #fde8dc;
-  --bad: #c42b2b;
-  --bad-soft: #fbe1e1;
+  --accent-soft: #eaf0fd;
+  --good: #18794a;
+  --good-soft: #e7f4ed;
+  --warn: #9a5400;
+  --warn-soft: #fcf0df;
+  --bad: #c0282d;
+  --bad-soft: #fcebeb;
+  --scrim: rgb(10 12 16 / 0.45);
+  --shadow-1: 0 1px 2px rgb(0 0 0 / 0.06), 0 4px 16px rgb(0 0 0 / 0.08);
+  --shadow-2: 0 12px 40px rgb(0 0 0 / 0.18);
+
+  /* Journey node categories: the only categorical palette (always with icon + label + legend). */
+  --cat-trigger: #0f7a83;
+  --cat-message: #3a5bd0;
+  --cat-wait: #626a77;
+  --cat-logic: #a35f00;
+  --cat-ai: #7449c2;
+  --cat-action: #b0377a;
+  --cat-exit: #3d434d;
+
+  /* Legacy names used by the Phase −1 demo (/demo). Agent work is marked with an icon in the real UI. */
+  --agent: #8a5300;
+  --agent-soft: #fbf1e2;
   --shop-bg: #f3efe6;
   --shop-fg: #1f2a22;
   --shop-accent: #2f5d43;
-  --font-display: "Bricolage Grotesque", "IBM Plex Sans", system-ui, sans-serif;
-  --font-sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
-  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  --font-display: var(--font-sans);
+  --radius-sm: 4px;
+  --radius: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  color-scheme: light;
 }
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    --bg: #0e1117;
-    --surface: #151a23;
-    --surface-2: #1c2230;
-    --line: #29303f;
-    --fg: #e5e9f0;
-    --muted: #98a2b3;
-    --accent: #7091f8;
-    --accent-fg: #0e1117;
-    --accent-soft: #1d2747;
-    --agent: #e3a64e;
-    --agent-soft: #33270f;
-    --good: #57c482;
-    --good-soft: #15301f;
-    --warn: #f0904f;
-    --warn-soft: #3a1f10;
-    --bad: #f26a6a;
-    --bad-soft: #3a1616;
-    --shop-bg: #1d1f1a;
-    --shop-fg: #ece8dc;
-    --shop-accent: #7fbf98;
-    color-scheme: dark;
-  }
-}
+
 :root[data-theme="dark"] {
-  --bg: #0e1117;
-  --surface: #151a23;
-  --surface-2: #1c2230;
-  --line: #29303f;
-  --fg: #e5e9f0;
-  --muted: #98a2b3;
-  --accent: #7091f8;
-  --accent-fg: #0e1117;
-  --accent-soft: #1d2747;
+  --bg: #0e1013;
+  --surface: #15181d;
+  --surface-2: #1b1f26;
+  --surface-3: #232831;
+  --line: #272b33;
+  --line-strong: #3a404b;
+  --control: #5f6775;
+  --fg: #e7e9ed;
+  --fg-2: #b4bac5;
+  --muted: #8d95a3;
+  --accent: #7097f5;
+  --accent-hover: #88a9f7;
+  --accent-fg: #0e1013;
+  --accent-soft: #1a2541;
+  --good: #4dbd7d;
+  --good-soft: #132a1d;
+  --warn: #e3a24c;
+  --warn-soft: #2d2211;
+  --bad: #f27474;
+  --bad-soft: #331718;
+  --scrim: rgb(0 0 0 / 0.6);
+  --shadow-1: 0 1px 2px rgb(0 0 0 / 0.4), 0 6px 20px rgb(0 0 0 / 0.35);
+  --shadow-2: 0 16px 48px rgb(0 0 0 / 0.55);
+
+  --cat-trigger: #41b8c3;
+  --cat-message: #8aa2f2;
+  --cat-wait: #9aa2b0;
+  --cat-logic: #e0a24a;
+  --cat-ai: #a98bef;
+  --cat-action: #e57ab2;
+  --cat-exit: #c3c8d1;
+
   --agent: #e3a64e;
   --agent-soft: #33270f;
-  --good: #57c482;
-  --good-soft: #15301f;
-  --warn: #f0904f;
-  --warn-soft: #3a1f10;
-  --bad: #f26a6a;
-  --bad-soft: #3a1616;
   --shop-bg: #1d1f1a;
   --shop-fg: #ece8dc;
   --shop-accent: #7fbf98;
@@ -80,69 +99,160 @@
   --color-bg: var(--bg);
   --color-surface: var(--surface);
   --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
   --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-control: var(--control);
   --color-fg: var(--fg);
+  --color-fg-2: var(--fg-2);
   --color-muted: var(--muted);
   --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
   --color-accent-fg: var(--accent-fg);
   --color-accent-soft: var(--accent-soft);
-  --color-agent: var(--agent);
-  --color-agent-soft: var(--agent-soft);
   --color-good: var(--good);
   --color-good-soft: var(--good-soft);
   --color-warn: var(--warn);
   --color-warn-soft: var(--warn-soft);
   --color-bad: var(--bad);
   --color-bad-soft: var(--bad-soft);
+  --color-agent: var(--agent);
+  --color-agent-soft: var(--agent-soft);
   --color-shop-bg: var(--shop-bg);
   --color-shop-fg: var(--shop-fg);
   --color-shop-accent: var(--shop-accent);
-  --font-display: var(--font-display);
+  --color-cat-trigger: var(--cat-trigger);
+  --color-cat-message: var(--cat-message);
+  --color-cat-wait: var(--cat-wait);
+  --color-cat-logic: var(--cat-logic);
+  --color-cat-ai: var(--cat-ai);
+  --color-cat-action: var(--cat-action);
+  --color-cat-exit: var(--cat-exit);
   --font-sans: var(--font-sans);
   --font-mono: var(--font-mono);
+  --font-display: var(--font-display);
+  --radius-sm: var(--radius-sm);
+  --radius-md: var(--radius);
+  --radius-lg: var(--radius-lg);
+  --radius-xl: var(--radius-xl);
+  --shadow-1: var(--shadow-1);
+  --shadow-2: var(--shadow-2);
+  --text-xs: 11px;
+  --text-xs--line-height: 16px;
+  --text-sm: 12px;
+  --text-sm--line-height: 16px;
+  --text-ui: 13px;
+  --text-ui--line-height: 20px;
+  --text-body: 14px;
+  --text-body--line-height: 22px;
+  --text-title: 15px;
+  --text-title--line-height: 22px;
+  --text-page: 20px;
+  --text-page--line-height: 28px;
+  --text-display: 24px;
+  --text-display--line-height: 32px;
 }
 
-html,
-body,
-#root {
-  height: 100%;
+/* Element defaults sit in the base layer so utilities (text-accent, outline-…) win. */
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--font-sans);
+    font-size: 13px;
+    line-height: 20px;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+  h1,
+  h2,
+  h3 {
+    text-wrap: balance;
+    letter-spacing: -0.005em;
+  }
+  a {
+    color: inherit;
+  }
+  .num {
+    font-variant-numeric: tabular-nums;
+  }
+  .eyebrow {
+    font-size: 11px;
+    line-height: 16px;
+    color: var(--muted);
+    font-weight: 500;
+  }
+  ::selection {
+    background: color-mix(in srgb, var(--accent) 25%, transparent);
+  }
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  .focus-inset:focus-visible {
+    outline-offset: -2px;
+  }
 }
-body {
-  background: var(--bg);
-  color: var(--fg);
-  font-family: var(--font-sans);
-  font-size: 14px;
-  -webkit-font-smoothing: antialiased;
+
+/* Motion: short and purposeful; nothing for people who asked for less. */
+@keyframes am-fade-in {
+  from {
+    opacity: 0;
+  }
 }
-h1,
-h2,
-h3 {
-  font-family: var(--font-display);
-  text-wrap: balance;
-  letter-spacing: -0.01em;
+@keyframes am-slide-in-right {
+  from {
+    transform: translateX(16px);
+    opacity: 0;
+  }
 }
-.num {
-  font-variant-numeric: tabular-nums;
+@keyframes am-rise {
+  from {
+    transform: translateY(8px);
+    opacity: 0;
+  }
 }
-.eyebrow {
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--muted);
-  font-weight: 600;
+@keyframes am-shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
 }
-:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
+.am-fade-in {
+  animation: am-fade-in 180ms var(--ease);
+}
+.am-drawer-in {
+  animation: am-slide-in-right 180ms var(--ease);
+}
+.am-rise {
+  animation: am-rise 180ms var(--ease);
+}
+.am-skeleton {
+  background: linear-gradient(90deg, var(--surface-2) 25%, var(--surface-3) 37%, var(--surface-2) 63%);
+  background-size: 400% 100%;
+  animation: am-shimmer 1.2s ease-in-out infinite;
+  border-radius: var(--radius-sm);
 }
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
   *::after {
     animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }
+
+/* Demo-only effects (Phase −1 demo). */
 @keyframes flash-in {
   from {
     background: var(--accent-soft);
@@ -166,22 +276,41 @@ h3 {
 /* React Flow theming through tokens */
 .react-flow {
   --xy-background-color: var(--bg);
-  --xy-edge-stroke: var(--muted);
+  --xy-edge-stroke: var(--line-strong);
+  --xy-edge-stroke-width: 1.5;
   --xy-edge-stroke-selected: var(--accent);
+  --xy-connectionline-stroke: var(--accent);
+  --xy-handle-background-color: var(--surface);
+  --xy-handle-border-color: var(--control);
   --xy-controls-button-background-color: var(--surface);
   --xy-controls-button-background-color-hover: var(--surface-2);
   --xy-controls-button-color: var(--fg);
+  --xy-controls-button-color-hover: var(--fg);
   --xy-controls-button-border-color: var(--line);
   --xy-minimap-background-color: var(--surface);
-  --xy-background-pattern-dots-color: var(--line);
+  --xy-minimap-mask-background-color: color-mix(in srgb, var(--bg) 70%, transparent);
+  --xy-background-pattern-dots-color: var(--line-strong);
   --xy-attribution-background-color: transparent;
+  --xy-selection-background-color: color-mix(in srgb, var(--accent) 10%, transparent);
+  --xy-selection-border: 1px dashed var(--accent);
 }
 .react-flow__edge-textbg {
   fill: var(--surface);
 }
 .react-flow__edge-text {
-  fill: var(--muted);
+  fill: var(--fg-2);
   font-size: 11px;
+  font-weight: 500;
+}
+.react-flow__edge.selected .react-flow__edge-path,
+.react-flow__edge:focus-visible .react-flow__edge-path {
+  stroke: var(--accent);
+  stroke-width: 2.5;
+}
+.react-flow__node:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: var(--radius-lg);
 }
 
 /* GrapesJS panel tweaks so the editor sits inside our console */
@@ -198,4 +327,13 @@ h3 {
 .gjs-four-color,
 .gjs-four-color-h:hover {
   color: var(--accent);
+}
+
+/* GrapesJS: use the app's accent instead of its pink highlight. */
+.gjs-four-color,
+.gjs-four-color-h:hover {
+  color: #88a9f7 !important;
+}
+.gjs-selected {
+  outline-color: #2457d6 !important;
 }

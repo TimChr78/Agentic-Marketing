@@ -135,16 +135,20 @@ export function sesWebhook(deps: AdapterDeps) {
 export const sesAdapter = defineAdapter({
   id: 'ses',
   label: 'Amazon SES',
+  docsUrl: 'https://docs.aws.amazon.com/ses/latest/dg/send-email-api.html',
   tracking: 'configurable',
   trackingNote:
     'SES tracks opens and clicks only when the AWS configuration set used for the message enables open or click tracking; the platform does not add tracking options.',
   config: z.object({
-    region: z.string().regex(/^[a-z]{2}(-[a-z]+)+-\d$/, 'An AWS region such as eu-west-1'),
-    accessKeyId: z.string().min(16),
+    region: z
+      .string()
+      .regex(/^[a-z]{2}(-[a-z]+)+-\d$/, 'An AWS region such as eu-west-1')
+      .describe('AWS region of your SES account, e.g. eu-west-1'),
+    accessKeyId: z.string().min(16).describe('Access key id of an IAM user allowed to send with SES'),
     configurationSet: z.string().optional().describe('Configuration set that publishes delivery events to SNS'),
-    marketingConfigurationSet: z.string().optional(),
+    marketingConfigurationSet: z.string().optional().describe('Configuration set for marketing e-mail, if different'),
   }),
-  secrets: z.object({ secretAccessKey: z.string().min(20) }),
+  secrets: z.object({ secretAccessKey: z.string().min(20).describe('Secret access key of that IAM user') }),
   create: (config, secrets, deps) => {
     const aws = new AwsClient({
       accessKeyId: config.accessKeyId,

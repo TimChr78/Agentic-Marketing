@@ -2,7 +2,6 @@ import { lazy, Suspense, useEffect } from 'react';
 import {
   BarChart3,
   Bot,
-  Database,
   CheckCircle2,
   Globe,
   LayoutDashboard,
@@ -23,7 +22,6 @@ import { Analytics } from './screens/Analytics';
 import { Approvals } from './screens/Approvals';
 import { Setup } from './screens/Setup';
 import { Copilot } from './copilot/Copilot';
-import { LiveWorkspace } from './screens/LiveWorkspace';
 
 // GrapesJS is large; load it only when the e-mail editor opens.
 const EmailEditor = lazy(() => import('./screens/EmailEditor'));
@@ -37,7 +35,6 @@ const nav: { route: Route; label: string; icon: typeof Workflow }[] = [
   { route: 'analytics', label: 'Analytics', icon: BarChart3 },
   { route: 'approvals', label: 'Approvals', icon: CheckCircle2 },
   { route: 'setup', label: 'Channels & MCP', icon: PlugZap },
-  { route: 'workspace', label: 'Live workspace (API)', icon: Database },
 ];
 
 const fullBleed: Route[] = ['email'];
@@ -63,7 +60,7 @@ export default function App() {
             <div className="text-[17px] font-bold leading-tight" style={{ fontFamily: 'var(--font-display)' }}>
               agentic<span className="text-accent">·</span>marketing
             </div>
-            <div className="text-[11px] text-muted lg:mt-0.5">Workspace: Fjeldvej Outdoor</div>
+            <div className="text-[11px] text-muted lg:mt-0.5">Demo workspace: Fjeldvej Outdoor</div>
           </div>
           <button
             className="rounded-md bg-agent-soft p-2 text-agent lg:hidden"
@@ -92,7 +89,12 @@ export default function App() {
           ))}
         </nav>
         <div className="mx-4 mt-6 hidden rounded-md border border-dashed border-line p-3 text-[11px] leading-relaxed text-muted lg:block">
-          Phase −1 demo. Backend is mocked in the browser; every action goes through the same command layer the MCP server will expose.
+          Demo with sample data. The backend is mocked in the browser; nothing you do here reaches a real workspace.
+          {import.meta.env.MODE !== 'single' && (
+            <a href="/" className="mt-2 block font-medium text-accent hover:underline">
+              Sign in to your workspace
+            </a>
+          )}
         </div>
         <div className="mt-4 hidden px-3 pb-5 lg:block">
           <button
@@ -118,7 +120,6 @@ export default function App() {
           {route === 'analytics' && <Analytics />}
           {route === 'approvals' && <Approvals />}
           {route === 'setup' && <Setup />}
-          {route === 'workspace' && <LiveWorkspace />}
         </Suspense>
       </main>
 

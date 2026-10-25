@@ -63,6 +63,7 @@ const ORDER: ArtifactType[] = [
   'purposes',
   'tracking_plan',
   'delivery_policy',
+  'brand',
   'segment',
   'email_template',
   'sms_template',

@@ -7,6 +7,8 @@ export const workspaces = pgTable('workspaces', {
   id: uuid('id').primaryKey(),
   name: text('name').notNull(),
   approvalPolicy: text('approval_policy').$type<ApprovalPolicy>().notNull(),
+  /** IANA time zone used to display dates in the UI. */
+  timeZone: text('time_zone').notNull().default('UTC'),
   /** Addresses (besides members) that admins allow test e-mails to. */
   seedList: text('seed_list').array().notNull().default([]),
   createdAt: ts('created_at').notNull().defaultNow(),
@@ -622,6 +624,20 @@ export const apiTokens = pgTable(
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
 );
 
+export const apiTokenChanges = pgTable(
+  'api_token_changes',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    tokenId: text('token_id').notNull(),
+    changedBy: text('changed_by').notNull(),
+    changedAt: ts('changed_at').notNull().defaultNow(),
+    changes: jsonb('changes').$type<Record<string, unknown>>().notNull(),
+    steppedUp: boolean('stepped_up').notNull().default(false),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
 export const webhookEndpoints = pgTable(
   'webhook_endpoints',
   {
@@ -742,6 +758,38 @@ export const warehouseExports = pgTable(
     updatedAt: ts('updated_at').notNull().defaultNow(),
   },
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
+export const assets = pgTable(
+  'assets',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    name: text('name').notNull(),
+    fileName: text('file_name').notNull(),
+    contentType: text('content_type').notNull(),
+    byteSize: integer('byte_size').notNull(),
+    sha256: text('sha256').notNull(),
+    width: integer('width'),
+    height: integer('height'),
+    altText: text('alt_text').notNull().default(''),
+    createdBy: text('created_by').notNull(),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+    deletedAt: ts('deleted_at'),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
+/** The file bytes, apart from the metadata so assets.list never reads them. */
+export const assetBlobs = pgTable(
+  'asset_blobs',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    assetId: text('asset_id').notNull(),
+    data: bytea('data').notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.assetId] })],
 );
 
 export const edgeTargets = pgTable('edge_targets', {

@@ -42,7 +42,7 @@ services:
 
   app:
     # Pull the release image; docker-compose.build.yml builds this checkout from source instead.
-    image: ghcr.io/timchr78/agentic-marketing:${AM_VERSION:-0.1.2}
+    image: ghcr.io/timchr78/agentic-marketing:${AM_VERSION:-0.2.0}
     depends_on:
       postgres:
         condition: service_healthy
@@ -62,6 +62,10 @@ services:
       TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-}
       EGRESS_ALLOWED_HOSTS: ${EGRESS_ALLOWED_HOSTS:-}
       EMAIL_TRACK_CLICKS: ${EMAIL_TRACK_CLICKS:-true}
+      STRICT_INPUTS: ${STRICT_INPUTS:-false}
+      MCP_TEXT_CONTENT: ${MCP_TEXT_CONTENT:-json}
+      MCP_TOOL_NAME_STYLE: ${MCP_TOOL_NAME_STYLE:-dotted}
+      ASSET_MAX_BYTES: ${ASSET_MAX_BYTES:-5242880}
       RETENTION_UNCONFIRMED_DAYS: ${RETENTION_UNCONFIRMED_DAYS:-30}
       RETENTION_LOG_DAYS: ${RETENTION_LOG_DAYS:-180}
       TRUSTED_ORIGINS: ${TRUSTED_ORIGINS:-}

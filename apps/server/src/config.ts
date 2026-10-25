@@ -9,6 +9,18 @@ const Env = z.object({
     .enum(['true', 'false'])
     .default('false')
     .describe('Start without migrating (Kubernetes: a migration job runs before each upgrade)'),
+  STRICT_INPUTS: z
+    .enum(['true', 'false'])
+    .default('false')
+    .describe('Reject unknown command input keys instead of accepting them with a warning (roll it out before flipping this)'),
+  MCP_TEXT_CONTENT: z
+    .enum(['json', 'summary'])
+    .default('json')
+    .describe('Text block of an MCP tool result: the full result as JSON, or a one-line summary (structuredContent is always complete)'),
+  MCP_TOOL_NAME_STYLE: z
+    .enum(['dotted', 'underscore'])
+    .default('dotted')
+    .describe('MCP tool names: command names such as artifacts.list, or underscore names such as artifacts_list'),
   ROLE: z.string().default('all').describe('Comma-separated roles: api, ingest, worker, scheduler, or all'),
   PORT: z.coerce.number().int().default(3000),
   PUBLIC_PORT: z.coerce
@@ -17,7 +29,9 @@ const Env = z.object({
     .min(1)
     .max(65535)
     .optional()
-    .describe('Optional second listener that serves only /f, /u, /c, /hooks, /healthz and /readyz; point the public tunnel or proxy here'),
+    .describe(
+      'Optional second listener that serves only /f, /u, /c, /a, /hooks, /healthz and /readyz; point the public tunnel or proxy here',
+    ),
   WEB_DIST: z
     .string()
     .optional()
@@ -121,6 +135,12 @@ const Env = z.object({
     .enum(['true', 'false'])
     .default('true')
     .describe('Rewrite links in e-mails to count clicks (open pixels are never added)'),
+  ASSET_MAX_BYTES: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .default(5_242_880)
+    .describe('Largest asset (image or PDF) the library accepts, in bytes; default 5 MB'),
   RETENTION_UNCONFIRMED_DAYS: z.coerce
     .number()
     .int()
@@ -179,6 +199,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     // run from /app, where the built UI sits next to the server.
     webDist: e.WEB_DIST ?? fileURLToPath(new URL('../../../apps/web/dist', import.meta.url)),
     skipMigrations: e.SKIP_MIGRATIONS === 'true',
+    strictInputs: e.STRICT_INPUTS === 'true',
+    mcpTextContent: e.MCP_TEXT_CONTENT,
+    mcpToolNameStyle: e.MCP_TOOL_NAME_STYLE,
     publicUrl: (e.PUBLIC_URL ?? `http://localhost:${e.PORT}`).replace(/\/$/, ''),
     linksUrl: (e.PUBLIC_LINKS_URL ?? e.PUBLIC_URL ?? `http://localhost:${e.PORT}`).replace(/\/$/, ''),
     clientIpHeaders: clientIpHeaders.length ? clientIpHeaders : ['x-forwarded-for'],
@@ -219,6 +242,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     nats: { url: e.NATS_URL, namespace: e.NATS_NAMESPACE, retentionHours: e.NATS_RETENTION_HOURS },
     valkey: { url: e.VALKEY_URL, prefix: e.VALKEY_PREFIX },
     trackClicks: e.EMAIL_TRACK_CLICKS === 'true',
+    assetMaxBytes: e.ASSET_MAX_BYTES,
     egress: {
       allowedHosts: e.EGRESS_ALLOWED_HOSTS.split(',')
         .map((h) => h.trim())

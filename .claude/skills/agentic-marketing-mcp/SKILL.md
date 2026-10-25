@@ -10,7 +10,7 @@ Every capability is a **command**, and every command is an MCP tool with the sam
 ## Connect
 
 - **Interactive agents** (Claude, IDEs): add the server URL `https://<platform>/mcp`. The client discovers OAuth. The person signs in and chooses which permissions (scopes) to grant; read-only is the default.
-- **Scripts and automation** (cron agents, n8n): a person creates an API token in the UI (Integrations → API tokens) with the scopes needed. Send it as `Authorization: Bearer amk_…` to `/mcp` or `/v1/<command>`.
+- **Scripts and automation** (cron agents, n8n): a person creates an API token in the UI (Settings → Integrations and API tokens) with the scopes needed. Send it as `Authorization: Bearer amk_…` to `/mcp` or `/v1/<command>`.
 
 You act as an **agent principal**: the person's role permissions, limited to the granted scopes. Some tools are never available to agents, whatever the scopes:
 - approving;
@@ -35,7 +35,7 @@ Tools marked "Needs the … permission" are allowed by the person's role but wer
    - journeys: `journeys.simulate {artifactId, profileId?, events?, ai?, actions?}`;
    - broadcasts: `broadcasts.preview {artifactId}` gives the audience, would-send count and skip reasons;
    - prompts: `prompts.test {artifactId}` queues the test cases; read the results with `prompts.testRun {runId}` until `status` is `done`.
-4. **Request publishing.** `artifacts.requestPublish {artifactId, note}`. Under the usual policy ("agent changes need a person") this creates an approval request: tell the person what to approve and why (the note shows in Approvals). Publishing also runs publish checks, e.g. that referenced templates and segments are published.
+4. **Submit for review.** `artifacts.requestPublish {artifactId, note}`. Under the usual policy ("agent changes need a person") this creates an approval request. The result has `reviewUrl` (the request in the admin UI, where the person sees the rendered e-mail, form, journey, segment or broadcast) and `next` (what happens now): pass the link on with a one-line summary. The note shows to the reviewer. Publishing also runs publish checks, e.g. that referenced templates and segments are published.
 5. **Report.** Give the ids you created and the results of your checks (counts, simulation outcome). Do not claim something was sent or published until `artifacts.get` shows `publishedVersion` or `broadcasts.status` says so.
 
 ## Guardrails (built in, do not try to work around them)
@@ -51,7 +51,9 @@ Read [references/tools.md](references/tools.md) for the full list with effects a
 
 | Area | Tools |
 |---|---|
-| Artifacts | `artifacts.types`, `.list`, `.get`, `.create`, `.updateDraft`, `.history`, `.diff`, `.requestPublish`; `approvals.list` |
+| Artifacts | `artifacts.types`, `.list`, `.get`, `.create`, `.updateDraft`, `.history`, `.diff`, `.requestPublish`; `approvals.list`, `approvals.get` |
+| Assets | `assets.upload` (base64, PNG/JPEG/GIF/WebP/PDF), `.list`, `.get`, `.update` (alt text), `.delete`; use the returned `url` in templates and the brand |
+| Brand | artifact type `brand` (one per workspace); `hostedPages.preview` renders the confirm/unsubscribe pages with a draft brand |
 | People | `profiles.find {type:"email", value}`, `profiles.get`, `profiles.events`, `profiles.list`, `consent.history`, `segments.ofProfile` |
 | Segments | `segments.preview`, `segments.members`, `segments.refresh` |
 | E-mail | `templates.preview`, `templates.sendTest`, `messages.list`, `messages.stats`; `messages.sendEmail` (needs `messages:send`) |
@@ -91,3 +93,10 @@ Worked examples with full payloads are in [references/recipes.md](references/rec
 - **Journey nodes:**
   - kinds: `trigger`, `wait`, `waitEvent`, `goal`, `branch`, `split`, `email`, `updateProfile`, `webhook`, `action`, `transform`, `aiDecide`, `aiGenerate`, `exit`;
   - give `next` edges explicitly when a node has several outcomes (branch: `[yes, no]`; waitEvent and goal: `[matched, timeout]`; action: `[ok, error]`; split: one per weight; aiDecide: one per option).
+
+## Inputs and results (0.2)
+
+- Date-times (`sendAt`, `before`, `recordedAt`) take ISO 8601 with `Z` or an offset (`2026-10-30T09:00:00+01:00`) and are stored in UTC. The workspace's time zone is in `workspace.get` (`timeZone`).
+- Unknown input keys are not ignored silently: the result carries `warnings` naming the key and the allowed keys. Servers with `STRICT_INPUTS=true` reject them. Read the warnings and fix the call.
+- Every tool declares an output schema; read `structuredContent` rather than parsing the text block.
+- `workspace.get` returns `permissionsExplained`: what each of your permissions lets you do under the current approval policy.

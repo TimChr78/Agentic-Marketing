@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { type CommandContext, defineCommand } from '@agentic-marketing/commands';
 import { AppError, newId, sha256 } from '@agentic-marketing/core';
 import { type Db, type Role, schema } from '@agentic-marketing/db';
+import { verifyPassword as verifyBetterAuthPassword } from 'better-auth/crypto';
 import { and, desc, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
 
@@ -12,6 +13,15 @@ import { z } from 'zod';
 /** Names and e-mail addresses of people, which live in the auth tables rather than in a workspace. */
 export interface Directory {
   users(ids: string[]): Promise<Map<string, { email: string; name: string }>>;
+  /** Workspaces a person belongs to, for the workspace switcher. */
+  memberships(userId: string): Promise<{ id: string; name: string; role: Role }[]>;
+  /** Display names of registered OAuth clients, by client id. */
+  oauthClients(clientIds: string[]): Promise<Map<string, string>>;
+  /**
+   * Checks a person's current password against their Better Auth credential account. People who
+   * sign in with single sign-on have no password and return 'no_password'.
+   */
+  verifyPassword(userId: string, password: string): Promise<'ok' | 'wrong' | 'no_password'>;
   /** Single sign-on providers of a workspace (without secrets). */
   ssoProviders(workspaceId: string): Promise<SsoProviderInfo[]>;
 }
@@ -41,6 +51,35 @@ export function authDirectory(db: Db): Directory {
         [ids],
       );
       return new Map(rows.map((r) => [r.id, { email: r.email, name: r.name }]));
+    },
+    async memberships(userId) {
+      // Cross-workspace by nature: the command runs inside the current workspace's RLS scope.
+      const { rows } = await db.admin.query<{ id: string; name: string; role: Role }>(
+        `SELECT w.id, w.name, m.role
+           FROM workspace_members m
+           JOIN workspaces w ON w.id = m.workspace_id
+          WHERE m.user_id = $1
+          ORDER BY w.name, w.created_at`,
+        [userId],
+      );
+      return rows;
+    },
+    async oauthClients(clientIds) {
+      if (!clientIds.length) return new Map();
+      const { rows } = await db.admin.query<{ clientId: string; name: string | null }>(
+        'SELECT "clientId", name FROM "oauthClient" WHERE "clientId" = ANY($1)',
+        [clientIds],
+      );
+      return new Map(rows.map((r) => [r.clientId, r.name ?? '']));
+    },
+    async verifyPassword(userId, password) {
+      const { rows } = await db.admin.query<{ password: string | null }>(
+        `SELECT password FROM "account" WHERE "userId" = $1 AND "providerId" = 'credential' LIMIT 1`,
+        [userId],
+      );
+      const hash = rows[0]?.password;
+      if (!hash) return 'no_password';
+      return (await verifyBetterAuthPassword({ hash, password })) ? 'ok' : 'wrong';
     },
     async ssoProviders(workspaceId) {
       const { rows } = await db.admin.query<Record<string, unknown>>(
@@ -91,6 +130,19 @@ async function memberOf(ctx: CommandContext, userId: string) {
 }
 
 const Member = z.object({ userId: z.string(), email: z.string(), name: z.string(), role: RoleSchema, since: z.string() });
+
+export const listMemberships = defineCommand({
+  name: 'workspace.memberships',
+  title: 'Your workspaces',
+  description:
+    'The workspaces you belong to and your role in each. Switch workspace by sending the chosen id in the X-Workspace-Id header on REST calls (the admin UI stores it after you pick one).',
+  input: z.object({}),
+  output: z.object({ workspaces: z.array(z.object({ id: z.string(), name: z.string(), role: RoleSchema })) }),
+  permission: null,
+  effect: 'read',
+  humansOnly: true,
+  handler: async (_input, ctx) => ({ workspaces: await ctx.services.directory.memberships(ctx.principal.userId) }),
+});
 
 export const listMembers = defineCommand({
   name: 'members.list',
@@ -259,7 +311,15 @@ export const removeMember = defineCommand({
   },
 });
 
-export const memberCommands = [listMembers, inviteMember, listInvitations, revokeInvitation, setMemberRole, removeMember] as const;
+export const memberCommands = [
+  listMembers,
+  listMemberships,
+  inviteMember,
+  listInvitations,
+  revokeInvitation,
+  setMemberRole,
+  removeMember,
+] as const;
 
 // Accepting an invitation. The invitee is not a member yet, so this command is not part of the
 // public registry: the server finds the workspace from the token and runs it for the signed-in

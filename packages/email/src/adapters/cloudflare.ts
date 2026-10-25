@@ -17,13 +17,17 @@ interface SendResult {
 export const cloudflareAdapter = defineAdapter({
   id: 'cloudflare',
   label: 'Cloudflare Email Service',
+  docsUrl: 'https://developers.cloudflare.com/email-service/',
   tracking: 'none',
   trackingNote: 'Cloudflare Email Service does not add tracking (per its documentation; verify for your account).',
   config: z.object({
-    accountId: z.string().regex(/^[0-9a-f]{32}$/, 'The 32-character Cloudflare account id'),
-    apiBase: z.url().default('https://api.cloudflare.com/client/v4'),
+    accountId: z
+      .string()
+      .regex(/^[0-9a-f]{32}$/, 'The 32-character Cloudflare account id')
+      .describe('Cloudflare account id (32 characters)'),
+    apiBase: z.url().default('https://api.cloudflare.com/client/v4').describe('API base URL; change only for testing'),
   }),
-  secrets: z.object({ apiToken: z.string().min(20) }),
+  secrets: z.object({ apiToken: z.string().min(20).describe('API token with Email Sending permission') }),
   create: (config, secrets, { fetch }) => ({
     async send(m) {
       const res = await fetch(`${config.apiBase}/accounts/${config.accountId}/email/sending/send`, {

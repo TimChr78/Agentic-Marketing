@@ -45,18 +45,18 @@ A light pilot before Phase 6: run the platform for a real site, the owner's [mar
 Umami already runs in the homelab behind a **Cloudflare Tunnel** (`analytics.martechsignal.com`), so the platform reuses that tunnel and **option A is the default here**.
 
 - **Option A, default here (recommended): a hostname on the existing tunnel**, pointed at the public-only listener.
-  - Set `PUBLIC_PORT=3001` on the platform. It keeps serving the admin UI, REST and MCP on `3000` (LAN/VPN only) and additionally serves **only** `/f`, `/u`, `/c` and `/hooks` (plus `/healthz` and `/readyz`) on `3001`; everything else is 404 there.
+  - Set `PUBLIC_PORT=3001` on the platform. It keeps serving the admin UI, REST and MCP on `3000` (LAN/VPN only) and additionally serves **only** `/f`, `/u`, `/c`, `/a` and `/hooks` (plus `/healthz` and `/readyz`) on `3001`; everything else is 404 there.
   - In the tunnel config, point the new hostname at that port with **no path rule**:
     ```yaml
     ingress:
       - hostname: analytics.martechsignal.com     # existing Umami rule
         service: http://umami:3000
       - hostname: am.martechsignal.com
-        service: http://app:3001                  # public listener: only f/u/c/hooks exist here
+        service: http://app:3001                  # public listener: only f/u/c/a/hooks exist here
       - service: http_status:404
     ```
     For a tunnel managed in the dashboard, add one public hostname: `am.martechsignal.com` → `http://app:3001`. No second entry and no path regex are needed.
-  - If a path rule is unavoidable, use the strict form `^/(f|u|c|hooks)(/[^/.%][^/%]*)+/?$` with a catch-all to `http_status:404`. A loose rule is unsafe because cloudflared matches the **raw** path and forwards it raw: `/f/../v1/workspace.get` passes any rule that only checks the prefix, then the app resolves it to the admin API. The server now also rejects dot-segments, encoded dots/slashes and backslashes with 400 on both listeners, but the separate listener is the structural fix.
+  - If a path rule is unavoidable, use the strict form `^/(f|u|c|a|hooks)(/[^/.%][^/%]*)+/?$` with a catch-all to `http_status:404`. A loose rule is unsafe because cloudflared matches the **raw** path and forwards it raw: `/f/../v1/workspace.get` passes any rule that only checks the prefix, then the app resolves it to the admin API. The server now also rejects dot-segments, encoded dots/slashes and backslashes with 400 on both listeners, but the separate listener is the structural fix.
   - Platform settings: `PUBLIC_LINKS_URL=https://am.martechsignal.com`, `CLIENT_IP_HEADER=cf-connecting-ip` (the tunnel passes the visitor's IP).
   - Site: the form posts to `https://am.martechsignal.com/f/<form id>`. The CSP's `form-action` swaps `https://app.kit.com` for `https://am.martechsignal.com`. Nothing else changes; the site worker stays as it is.
   - Bounce and complaint webhooks (`/hooks/...`) are served by the same public listener; with a path rule, the strict regex above already includes them.
@@ -68,11 +68,15 @@ Umami already runs in the homelab behind a **Cloudflare Tunnel** (`analytics.mar
 - **E-mail sending:** Cloudflare does not send bulk mail. Keep the SMTP relay (with the relay's bounce webhooks if it has them, ADR-0011), or use SES or Postmark. Add SPF, DKIM and DMARC for the sending domain in Cloudflare DNS, and remove Kit's sending-domain records after the switch.
 - **Edge cache:** the worker caches HTML for 5 minutes, so personalization must stay client-side (the SDK), which it already is.
 
+## Assets
+
+Images and PDFs for e-mails and hosted pages live in the asset library (`assets.upload`, `assets.list`, `assets.get`, `assets.update`, `assets.delete` over MCP or REST). Uploads are checked against their declared type (PNG, JPEG, GIF, WebP or PDF; SVG is refused), images record their pixel size, and each asset gets a stable public URL `${PUBLIC_LINKS_URL}/a/<id>/<file name>`. Anyone with that URL can fetch the file, so treat asset ids as unlisted rather than secret and never upload confidential documents; this is also why `/a` is served by the public-only listener. The size limit defaults to 5 MB and is set with `ASSET_MAX_BYTES` (bytes). Deleting an asset that a latest or published artifact still references is refused unless the caller forces it, and agents may never force; a deleted asset's URL answers 410 Gone.
+
 ## Replacing Kit: cutover without losing signups
 
 1. Build and test everything with your own address: the form, the confirmation, the welcome e-mail, a test broadcast to a one-person segment.
 2. **Switch the forms first.** Change the generator's subscribe partial (about 200 pages) to post to the platform, and deploy. From now on, new signups land in the platform.
-3. **Then export from Kit** (Subscribers → export, active only) and import in the UI: People & data → Import subscribers. The import maps Kit's columns (`email_address`, `first_name`, `created_at`, `state`), keeps the subscription date and "Kit" as proof, skips inactive rows and duplicates, and uploads in batches of 5,000. Because the export happens after the switch, nobody who signed up in between is lost.
+3. **Then export from Kit** (Subscribers → export, active only) and import in the UI: Audience → Imports. The import maps Kit's columns (`email_address`, `first_name`, `created_at`, `state`), keeps the subscription date and "Kit" as proof, skips inactive rows and duplicates, and uploads in batches of 5,000. Because the export happens after the switch, nobody who signed up in between is lost.
 4. **Rebuild Kit's automations** (a welcome sequence, if any) as a journey triggered by `Subscription Confirmed`. People imported from Kit do not trigger it; they already had their welcome.
 5. **The first Friday issue from the platform.** Mention the change in one line ("same newsletter, new sending address") to limit spam complaints, and watch bounces and complaints in `broadcasts.status`.
 6. **Close Kit** after one quiet issue: cancel scheduled broadcasts there, export a final archive, delete the subscriber data (GDPR: no copies without a purpose), cancel the plan, and remove Kit's DNS records.
@@ -104,24 +108,32 @@ Umami already runs in the homelab behind a **Cloudflare Tunnel** (`analytics.mar
    curl --path-as-is -s -o /dev/null -w '%{http_code}\n' -X POST https://am.martechsignal.com/f/../v1/workspace.get   # 400 or 404
    curl --path-as-is -s -o /dev/null -w '%{http_code}\n' -X POST https://am.martechsignal.com/f/%2e%2e/v1/workspace.get # 400 or 404
    ```
-   Neither may answer 401 from the admin API. If the tunnel still uses a path rule, use `^/(f|u|c|hooks)(/[^/.%][^/%]*)+/?$`.
+   Neither may answer 401 from the admin API. If the tunnel still uses a path rule, use `^/(f|u|c|a|hooks)(/[^/.%][^/%]*)+/?$`.
 3. **Signup.**
    - Create the confirmation template (purpose `onboarding`), the form (DOI, `successUrl` and `confirmedUrl` pages on the site, `allowedOrigins: ["https://martechsignal.com"]`) and the two small pages (`/subscribe/check-your-inbox/`, `/subscribe/welcome/`).
    - Change the generator's subscribe partial to post to `https://am.martechsignal.com/f/<form id>` with the honeypot field (see "Replacing Kit" for the order).
    - Update the CSP: `form-action 'self' https://am.martechsignal.com`, and drop `app.kit.com` from `form-action` and `connect-src`.
-4. **Import.** After the forms are switched, export active Kit subscribers and import them in the UI (People & data → Import subscribers).
+4. **Import.** After the forms are switched, export active Kit subscribers and import them in the UI (Audience → Imports).
 5. **Newsletter.**
    - Segment `{"consent": "marketing_email"}` ("Newsletter subscribers").
-   - Each week: Hermes drafts the issue template and a `broadcast` with `sendAt` Friday 07:00 UTC over MCP, runs `broadcasts.preview` and requests publishing; Tim approves; check with `broadcasts.status`.
+   - Each week: Hermes drafts the issue template and a `broadcast` with `sendAt` Friday 09:00 Copenhagen time (e.g. `2026-10-30T09:00:00+01:00`; offsets are accepted since 0.2) over MCP, runs `broadcasts.preview` and submits both for review. Each `requestPublish` returns a `reviewUrl`; Hermes sends Tim that link. Tim opens it (on a phone if need be), sees the rendered e-mail, the segment and the number of recipients, sends himself a test if wanted, and approves. Check sending under Build → Broadcasts → Sending, or with `broadcasts.status`.
 6. **Welcome journey.** Trigger on the `Subscription Confirmed` event: welcome e-mail → wait 3 days → a "start here" e-mail with the three most-read reviews. (A branch on e-mail clicks is not possible yet; see known limits.)
 7. **Measure.** Umami keeps on-site analytics. The platform reports the newsletter (`broadcasts.status`, `messages.stats`), signups (`Form Submitted` / `Subscription Confirmed` counts) and the journey (`journeys.stats`).
 
 **Done when:** a real signup gets the confirmation and the welcome e-mail; imported subscribers and new ones receive one Friday issue sent by a broadcast that Hermes drafted and Tim approved; and unsubscribe and bounces work end to end.
 
+## Upgrading the pilot to 0.2
+
+1. Pull 0.2.0 (`AM_VERSION=0.2.0`); migrations 0023–0025 run on start and only add tables and a column.
+2. The public listener (`PUBLIC_PORT=3001`) already serves `/a/` for assets. With a path rule instead, add `a` (rule above).
+3. Settings → Workspace: time zone `Europe/Copenhagen`.
+4. Design → Assets: upload the logo; Design → Brand: site name "MartechSignal", `https://martechsignal.com`, the logo and the site's accent colour; check Design → Hosted pages, then publish the brand.
+5. Keep `STRICT_INPUTS=false` for the first week. Search the logs for `command input has unknown keys`; if Hermes sends any, fix its prompts or tool use, then set `STRICT_INPUTS=true`.
+6. If Hermes's token needs different scopes, edit it under Settings → Integrations and API tokens (no new token needed).
+
 ## Known limits found while assessing
 
 - People who never confirm keep a profile without consent until retention removes it. The scheduler runs hourly: form-only profiles with no consent record, no other identity and no merge are removed after `RETENTION_UNCONFIRMED_DAYS` (default 30), without suppression so they can sign up again. Finished deliveries and AI calls are removed after `RETENTION_LOG_DAYS` (default 180). `profiles.erase` remains available for an immediate erasure request; it is not needed for routine cleanup.
 - Broadcasts have no A/B subject test or send-time optimisation; a broadcast goes to the segment as it is at send time.
-- No dedicated UI for forms and broadcasts yet. They are artifacts, so the generic artifact editor, MCP and REST work.
 - No consent banner component; phase B needs one.
 - E-mail clicks are message events, not events on the person's profile, so segments and journey branches cannot use "clicked the newsletter" yet. A small follow-up: publish an `Email Link Clicked` event to the bus from the click route.

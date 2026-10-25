@@ -6,6 +6,8 @@ export default defineConfig({
     projects: [
       { extends: true, test: { name: 'packages', include: ['packages/*/test/**/*.test.ts'] } },
       { extends: true, test: { name: 'server', include: ['apps/server/test/**/*.test.ts'] } },
+      // The admin UI: unit and component tests in a DOM.
+      { extends: true, test: { name: 'web', include: ['apps/web/test/**/*.test.{ts,tsx}'], environment: 'jsdom' } },
     ],
     fileParallelism: false,
     testTimeout: 20_000,

@@ -1,9 +1,17 @@
+import {
+  type BrandCopy,
+  HOSTED_PAGE_HEADERS,
+  type HostedPageKind,
+  publishedSingleton,
+  renderHostedPage,
+  resolveBrand,
+} from '@agentic-marketing/artifacts';
 import { type Db, schema } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { eq } from 'drizzle-orm';
-import { Hono } from 'hono';
+import { type Context, Hono } from 'hono';
 import type { DeliveryEvent } from './adapters';
 import { applyDeliveryEvents, type Msg, messageEvent, withdraw } from './deliveryEvents';
 import type { EmailServices } from './gateway';
@@ -21,13 +29,6 @@ export interface EmailRouteDeps {
   events: EventStore;
   email: EmailServices;
 }
-
-const page = (
-  title: string,
-  body: string,
-) => `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${title}</title>
-<style>:root{color-scheme:light dark}body{font:16px/1.5 system-ui,sans-serif;margin:0;padding:48px 16px;background:Canvas;color:CanvasText}main{max-width:420px;margin:0 auto}button{font:inherit;padding:9px 16px;border-radius:6px;border:1px solid #2f5bea;background:#2f5bea;color:#fff;cursor:pointer}p{opacity:.8}</style>
-</head><body><main>${body}</main></body></html>`;
 
 export function emailRoutes(deps: EmailRouteDeps) {
   const app = new Hono();
@@ -63,9 +64,20 @@ export function emailRoutes(deps: EmailRouteDeps) {
     return c.json({ ok: result.status === 200, events: result.events.length }, result.status);
   });
 
+  /** The published brand for the workspace a link belongs to; drafts never render. */
+  const hostedPage = async (kind: HostedPageKind, workspaceId: string | null, copy?: Partial<BrandCopy>) => {
+    const brand = workspaceId ? await deps.db.withWorkspace(workspaceId, (tx) => publishedSingleton(tx, 'brand')) : null;
+    return renderHostedPage(kind, resolveBrand(brand), { copy });
+  };
+  const hosted = (c: Context, html: string, status: 200 | 404) => c.html(html, status, HOSTED_PAGE_HEADERS);
+  const invalidLink = {
+    expiredTitle: 'This link is not valid',
+    expiredBody: 'Use the unsubscribe link from a recent e-mail.',
+  };
+
   const unsubscribe = async (token: string) => {
     const link = deps.email.links.verify<UnsubscribeLink>(token);
-    if (!link) return false;
+    if (!link) return null;
     const recorded = await deps.db.withWorkspace(link.w, async (tx) => {
       const [m] = await tx.select().from(schema.messages).where(eq(schema.messages.id, link.m));
       const msg: Msg =
@@ -84,28 +96,19 @@ export function emailRoutes(deps: EmailRouteDeps) {
       return messageEvent(msg, { eventId: 'unsubscribe-link', type: 'unsubscribed', at: new Date().toISOString() }, '');
     });
     await deps.events.insertMessageEvents([recorded]);
-    return true;
+    return link;
   };
 
-  app.get('/u/:token', (c) => {
-    if (!deps.email.links.verify(c.req.param('token')))
-      return c.html(page('Link not valid', '<h1>This link is not valid</h1><p>Use the unsubscribe link from a recent e-mail.</p>'), 404);
-    return c.html(
-      page(
-        'Unsubscribe',
-        `<h1>Unsubscribe?</h1><p>You will no longer receive these e-mails.</p><form method="post"><button>Unsubscribe</button></form>`,
-      ),
-    );
+  app.get('/u/:token', async (c) => {
+    const link = deps.email.links.verify<UnsubscribeLink>(c.req.param('token'));
+    if (!link) return hosted(c, await hostedPage('expired', null, invalidLink), 404);
+    return hosted(c, await hostedPage('unsubscribe', link.w), 200);
   });
   // Mail clients POST here directly (RFC 8058 one-click); the page's button does the same.
   app.post('/u/:token', async (c) => {
-    if (!(await unsubscribe(c.req.param('token')))) return c.html(page('Link not valid', '<h1>This link is not valid</h1>'), 404);
-    return c.html(
-      page(
-        'Unsubscribed',
-        '<h1>You are unsubscribed</h1><p>It can take a moment before running campaigns notice. Sorry for the noise.</p>',
-      ),
-    );
+    const link = await unsubscribe(c.req.param('token'));
+    if (!link) return hosted(c, await hostedPage('expired', null, invalidLink), 404);
+    return hosted(c, await hostedPage('unsubscribed', link.w), 200);
   });
 
   app.get('/c/:token', async (c) => {

@@ -95,7 +95,16 @@ export const listSecrets = defineCommand({
   title: 'List secrets',
   description: 'Names of stored secrets with who changed them and when. Values are never returned.',
   input: z.object({}),
-  output: z.object({ secrets: z.array(z.object({ name: z.string(), updatedBy: z.string(), updatedAt: z.string() })) }),
+  output: z.object({
+    secrets: z.array(
+      z.object({
+        name: z.string(),
+        updatedBy: z.string(),
+        updatedByName: z.string().optional().describe('Name of the person who last set it'),
+        updatedAt: z.string(),
+      }),
+    ),
+  }),
   permission: 'secrets:read',
   effect: 'read',
   handler: async (_input, ctx) => {
@@ -103,7 +112,18 @@ export const listSecrets = defineCommand({
       .select({ name: schema.secrets.name, updatedBy: schema.secrets.updatedBy, updatedAt: schema.secrets.updatedAt })
       .from(schema.secrets)
       .orderBy(schema.secrets.name);
-    return { secrets: rows.map((r) => ({ ...r, updatedAt: r.updatedAt.toISOString() })) };
+    // People's names live in the auth tables; the auth package provides the directory.
+    const directory = (ctx.services as { directory?: { users(ids: string[]): Promise<Map<string, { name: string; email: string }>> } })
+      .directory;
+    const people = directory
+      ? await directory.users([...new Set(rows.map((r) => r.updatedBy))])
+      : new Map<string, { name: string; email: string }>();
+    return {
+      secrets: rows.map((r) => {
+        const p = people.get(r.updatedBy);
+        return { ...r, updatedByName: p ? p.name || p.email : undefined, updatedAt: r.updatedAt.toISOString() };
+      }),
+    };
   },
 });
 
