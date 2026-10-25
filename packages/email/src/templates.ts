@@ -72,7 +72,7 @@ export const sendTestEmail = defineCommand({
   name: 'templates.sendTest',
   title: 'Send a test e-mail',
   description:
-    'Send a template version through the provider the real send would use: by default the latest draft (or the latest version when there is no draft). Recipients are limited to workspace members and the admin-configured seed list (workspace.setSeedList), at most 10 per call; `to` defaults to you. Rendered with each recipient’s profile when the workspace knows their address, otherwise with sample data, and with "[Test]" in the subject. Purpose/consent checks are skipped, suppressions still apply, and each copy is recorded as a test message (never counted in reporting) and an audit entry. No profile or consent is written; agents drafting newsletters can run it with the artifacts:write scope.',
+    'Send a template version through the provider the real send would use: by default the latest draft (or the latest version when there is no draft). Recipients are limited to workspace members and the admin-configured seed list (workspace.setSeedList), at most 10 per call; `to` defaults to you. Rendered with each recipient’s profile when the workspace knows their address, otherwise with sample data, and with "[Test]" in the subject. Purpose/consent checks are skipped, suppressions still apply, and each copy is recorded as a test message (never counted in reporting) and an audit entry. No profile or consent is written; agents drafting newsletters can run it with the artifacts:write scope. Approvers may run it without `to`, sending to themselves only.',
   input: z.object({
     artifactId: z.string().regex(/^eml_[0-9a-f]{32}$/),
     version: z.number().int().min(1).optional().describe('Default: the latest draft, else the latest version'),
@@ -80,6 +80,9 @@ export const sendTestEmail = defineCommand({
   }),
   output: testSendOutput,
   permission: 'artifacts:write',
+  // An approver often wants the e-mail in their own inbox before approving; a test to anyone else
+  // still needs artifacts:write.
+  selfService: { permission: 'artifacts:approve', allows: (input) => input.to === undefined },
   effect: 'write',
   target: (i) => i.artifactId,
   handler: async (input, ctx) => {
