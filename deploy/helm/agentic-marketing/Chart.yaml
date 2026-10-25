@@ -2,7 +2,7 @@ apiVersion: v2
 name: agentic-marketing
 description: Agentic Marketing, the self-hosted agent-first marketing platform (one image, four roles)
 type: application
-version: 0.2.1
-appVersion: "0.2.1"
+version: 0.2.2
+appVersion: "0.2.2"
 home: https://github.com/TimChr78/Agentic-Marketing
 keywords: [marketing, cdp, mcp, email, journeys]
