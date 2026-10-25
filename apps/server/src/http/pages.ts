@@ -23,14 +23,15 @@ const layout = (title: string, body: string) => `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${title} · Agentic Marketing</title>
 <style>
-  :root { --bg:#f4f6f9; --fg:#141a24; --muted:#5d6779; --accent:#2f5bea; --line:#dce1e9; --card:#fff; color-scheme: light dark; }
-  @media (prefers-color-scheme: dark) { :root { --bg:#0e1117; --fg:#e5e9f0; --muted:#98a2b3; --accent:#7091f8; --line:#29303f; --card:#151a23; } }
-  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 system-ui, sans-serif; padding:48px max(16px, env(safe-area-inset-left)); }
-  main { max-width: 420px; margin: 0 auto; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 28px; }
-  h1 { font-size: 22px; margin: 0 0 4px; } p { color: var(--muted); margin: 0 0 18px; }
+  :root { --bg:#f7f8fa; --fg:#14171c; --muted:#646c79; --accent:#2457d6; --accent-fg:#fff; --line:#c9ced6; --card:#fff; color-scheme: light dark; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#0e1013; --fg:#e7e9ed; --muted:#8d95a3; --accent:#7097f5; --accent-fg:#0e1013; --line:#3a404b; --card:#15181d; } }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.55 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; padding:48px max(16px, env(safe-area-inset-left)); }
+  main { max-width: 420px; margin: 0 auto; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 28px; }
+  h1 { font-size: 20px; line-height: 28px; margin: 0 0 4px; } p { color: var(--muted); margin: 0 0 18px; }
   label { display:block; margin: 10px 0; } input[type=email], input[type=password], input[type=text] { width:100%; box-sizing:border-box; padding:9px 10px; border:1px solid var(--line); border-radius:6px; background:transparent; color:inherit; font:inherit; }
   button { padding: 9px 16px; border-radius: 6px; border: 1px solid var(--line); background: transparent; color: inherit; font: inherit; cursor: pointer; }
-  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); font-weight: 500; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .scope { display:flex; gap:10px; align-items:flex-start; } .scope code { font-size: 12px; color: var(--muted); }
   #err { color: #c42b2b; min-height: 1.5em; }
 </style></head><body><main>${body}</main></body></html>`;
