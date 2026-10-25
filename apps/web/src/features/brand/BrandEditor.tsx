@@ -34,7 +34,7 @@ export function BrandFields({ value, onChange, readOnly, errors, prefix = '', ov
   const checks = [
     { label: 'Text on page background', ratio: contrast(colors.text, colors.background) },
     { label: 'Text on card', ratio: contrast(colors.text, colors.surface) },
-    { label: 'Button text on button', ratio: contrast(colors.accentText, colors.accent) },
+    { label: 'Button text on the accent colour', ratio: contrast(colors.accentText, colors.accent) },
     { label: 'Secondary text on card', ratio: contrast(colors.muted, colors.surface) },
   ].filter((c) => c.ratio !== null && c.ratio < 4.5);
   const fontPreset = FONT_PRESETS.find((f) => f.value === (value.fontStack ?? DEFAULT_FONT));

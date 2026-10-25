@@ -201,7 +201,7 @@ main{max-width:32rem;margin:0 auto}
 .site-name{margin:0;font-size:.95rem;font-weight:600;color:var(--muted);overflow-wrap:anywhere}
 h1{margin:0 0 .5rem;font-size:clamp(1.35rem,4.5vw,1.6rem);line-height:1.25;overflow-wrap:anywhere}
 p{margin:0 0 1.25rem;color:var(--muted);white-space:pre-line;overflow-wrap:anywhere}
-button{font:inherit;font-weight:600;min-height:44px;padding:.65rem 1.25rem;border:1px solid var(--accent);border-radius:var(--radius);background:var(--accent);color:var(--accentText);cursor:pointer}
+button{font:inherit;font-weight:600;min-height:44px;padding:.65rem 1.25rem;border:1px solid var(--accent);border-radius:var(--radius);background:var(--accent);color:var(--accent-text);cursor:pointer}
 button:hover{filter:brightness(.94)}
 button:focus-visible{outline:3px solid var(--text);outline-offset:3px}
 button[disabled]{cursor:not-allowed}
