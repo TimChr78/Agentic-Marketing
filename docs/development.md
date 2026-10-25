@@ -15,7 +15,7 @@ packages/
   edge-worker/ the decision API as a Cloudflare Worker, reading Workers KV (docs/deployment/edge.md)
 apps/
   server/      Hono app: REST (/v1/<command>, /openapi.json), MCP (/mcp), sign-in/consent, health; CLI
-  web/         React UI: live workspace against the real API (production build in the image at /) + Phase −1 demo (mocked, dev)
+  web/         React admin UI (app/ shell and router, ui/ design system, features/, pages/) served at /, and the mocked demo at /demo
 spikes/        throw-away prototypes with their FINDINGS.md (not part of CI or the image)
 ```
 
@@ -30,10 +30,10 @@ pnpm install
 cp .env.example .env          # fill AUTH_SECRET and MASTER_KEY (openssl rand -base64 32), point DATABASE_URL at Postgres
 pnpm --silent --filter @agentic-marketing/server cli bootstrap --email you@example.com --workspace 'My shop'
 pnpm dev                       # API on http://localhost:3000 (migrates on start)
-pnpm dev:web                   # UI on http://localhost:5173 → "Live workspace (API)", demo screens included
+pnpm dev:web                   # the admin UI on http://localhost:5173 (the demo is at /demo)
 ```
 
-For development the demo still starts; the production build is the live workspace only:
+The production build is the same app, with the demo as a separate chunk at `/demo`:
 
 ```bash
 pnpm --filter @agentic-marketing/web build:live   # writes apps/web/dist
@@ -80,17 +80,48 @@ The default file pulls `ghcr.io/timchr78/agentic-marketing:${AM_VERSION}` (pin t
 
 `scripts/smoke.sh` (also run in CI) does this end to end with a throw-away compose project: start, bootstrap, sign in, publish a signup form, and check its confirmation e-mail is sent.
 
+### The admin UI
+
+The UI follows [docs/design/DESIGN.md](design/DESIGN.md) (tokens, components, layout, accessibility); calls made
+while building it are in [docs/design/DECISIONS.md](design/DECISIONS.md). `apps/web/src/ui` is the component set
+(buttons, fields, drawers, modals, toasts, tables, tabs, menus, code and diff views), `app/` the shell, router,
+session and the typed API client (`api.call('<command>', input)`), `features/` the larger parts (approvals,
+previews, journey builder, providers, tokens, assets, brand) and `pages/` one file per route
+(`app/routes.tsx`). Every page uses the same commands an agent would; hide actions with `can('<permission>')`.
+
+A seeded server gives you a realistic workspace (a newsletter site with people in each role, an agent token,
+published prerequisites and pending approvals of every reviewed type) without touching your own data:
+
+```bash
+npx tsx apps/server/test/e2e/server.ts       # API + built UI on http://localhost:3100, a fresh am_e2e database
+API_URL=http://localhost:3100 pnpm dev:web   # or the dev UI against it on :5173
+```
+
+People: `alex@example.com` (owner), `sam@example.com` (builder), `jo@example.com` (approver),
+`vic@example.com` (viewer); password `correct-horse-battery-staple`. Set `TRUSTED_ORIGINS` if you use another
+origin.
+
+Tests for the UI:
+
+```bash
+pnpm vitest run --project web                 # unit and component tests (jsdom)
+pnpm e2e                                      # Playwright: builds the UI, starts the seeded server, runs e2e/*.spec.ts
+E2E_BASE=http://localhost:5173 pnpm e2e       # against a running dev UI and seeded server instead
+CHROMIUM=/usr/bin/chromium pnpm e2e           # use a system Chromium instead of Playwright's download
+node e2e/screenshots.mjs docs/design/screenshots   # screenshots of every screen, light and dark, 1440 and 768 px
+```
+
 ### Collecting events
 
-Add a source in the UI ("People & data") or with `sources.create`. Browser sources get a public write key and only accept their allowed origins; by default they keep an event only when the visitor allowed the `analytics` purpose. On a site, use `@agentic-marketing/sdk-js` (`packages/sdk-js`), or any Segment-compatible library pointed at this server (`/v1/batch`, write key as the Basic auth user name). Events show up on the person's profile within a couple of seconds; `ROLE` decides which processes run the `api`, `ingest` and `worker` parts (all by default).
+Add a source with `sources.create` (REST or MCP). Browser sources get a public write key and only accept their allowed origins; by default they keep an event only when the visitor allowed the `analytics` purpose. On a site, use `@agentic-marketing/sdk-js` (`packages/sdk-js`), or any Segment-compatible library pointed at this server (`/v1/batch`, write key as the Basic auth user name). Events show up on the person's profile within a couple of seconds; `ROLE` decides which processes run the `api`, `ingest` and `worker` parts (all by default).
 
 ### Personalizing the website
 
-Mark elements with `data-am-placement="home_hero"`, put `antiFlickerSnippet()` from `@agentic-marketing/sdk-js` in the page head, and call `analytics.personalize()` after loading the SDK. Create a web experience for the placement (UI "Web experiences" or `artifacts.create` with type `experience`); published experiences are served by `POST /v1/decide` within 30 seconds. Visitors who have not allowed `web_personalization` only get page-based targeting (page, referrer, UTM, device).
+Mark elements with `data-am-placement="home_hero"`, put `antiFlickerSnippet()` from `@agentic-marketing/sdk-js` in the page head, and call `analytics.personalize()` after loading the SDK. Create a web experience for the placement (Build → Experiences, or `artifacts.create` with type `experience`); published experiences are served by `POST /v1/decide` within 30 seconds. Visitors who have not allowed `web_personalization` only get page-based targeting (page, referrer, UTM, device).
 
 ### AI providers and the copilot
 
-Add a provider under Live workspace → AI with your own key. Base URLs:
+Add a provider under Settings → Providers → AI with your own key. Base URLs:
 - Anthropic: `https://api.anthropic.com/v1`
 - OpenAI: `https://api.openai.com/v1`
 - Ollama: `http://<host>:11434/v1` (turn off structured outputs if the server does not support JSON-schema responses)

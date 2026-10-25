@@ -86,7 +86,7 @@ export function mcpServerFor(
   opts: { stepUp?: boolean; textContent?: McpTextContent; toolNameStyle?: McpToolNameStyle } = {},
 ) {
   const style = opts.toolNameStyle ?? 'dotted';
-  const server = new McpServer({ name: 'agentic-marketing', version: '0.1.2' }, { instructions: MCP_INSTRUCTIONS });
+  const server = new McpServer({ name: 'agentic-marketing', version: '0.2.0' }, { instructions: MCP_INSTRUCTIONS });
   server.registerResource(
     'guide',
     MCP_GUIDE_URI,
