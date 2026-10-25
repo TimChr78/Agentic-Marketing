@@ -1,10 +1,10 @@
 # Integrations: webhooks, API tokens, connectors and n8n
 
-How other systems talk to the platform and back. Design: [ADR-0013](architecture/adr/0013-integrations.md). In the UI, all of this is in Live workspace → Integrations.
+How other systems talk to the platform and back. Design: [ADR-0013](architecture/adr/0013-integrations.md). In the UI, all of this is under Settings → Integrations and API tokens.
 
 ## API tokens (scripts, n8n, cron)
 
-`apiTokens.create` (UI: Integrations → API tokens) makes a token `amk_…`, shown once.
+`apiTokens.create` (UI: Settings → Integrations and API tokens) makes a token `amk_…`, shown once. Admins can later rename it, narrow its scopes (applies on its next request) or widen them with their password (`apiTokens.update`); `apiTokens.get` shows its owner, last use and change history.
 - It acts as an **agent** for the person who made it. Its permissions are their current role's, limited to the scopes chosen.
 - An agent cannot run humans-only commands (approving, members, secrets, settings). Revoked or expired tokens, or tokens of someone who left the workspace, stop working at once.
 - Every call is in the audit log as `token:<id>`.

@@ -70,7 +70,7 @@ Only these are public: `f/` (forms and confirmations), `u/` (unsubscribe), `c/` 
 For other hosts (Netlify, Vercel, nginx), expose the same paths the same way. **Check:** `/` and `/v1/workspace.get` on the public hostname return 404, a form post returns 303, and `curl --path-as-is -X POST https://am.<site>/f/../v1/workspace.get` returns 400 or 404, never 401 (repeat with `/f/%2e%2e/v1/workspace.get`).
 
 ### 4. E-mail sending
-Add a provider in the UI (E-mails → providers) or with `emailProviders.create` (humans only):
+Add a provider in the UI (Settings → Providers → Add provider) or with `emailProviders.create` (humans only):
 - SMTP relay, SES, Postmark or Brevo; `useFor: ["transactional", "marketing"]`.
 - Register the provider's webhook URL for bounces and complaints.
 - Set up SPF, DKIM and DMARC for the sending domain.
@@ -96,7 +96,7 @@ Add a provider in the UI (E-mails → providers) or with `emailProviders.create`
 ### 6. Import existing subscribers
 Switch the site's forms to the platform **first**, then export, so nobody who signs up in between is lost.
 
-Export **active** subscribers from the old tool (Kit: Subscribers → export CSV). The person importing uses the UI: People & data → Import subscribers. It recognises Kit's columns (`email_address`, `first_name`, `created_at`, `state`), skips inactive rows and duplicates, and uploads in batches. For scripts, each row maps to:
+Export **active** subscribers from the old tool (Kit: Subscribers → export CSV). The person importing uses the UI: Audience → Imports. It recognises Kit's columns (`email_address`, `first_name`, `created_at`, `state`), skips inactive rows and duplicates, and uploads in batches. For scripts, each row maps to:
 ```json
 {"email":"…","traits":{"firstName":"…"},
  "consent":[{"purpose":"marketing_email","status":"granted","recordedAt":"<subscribed at, ISO>",

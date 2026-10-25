@@ -6,6 +6,10 @@ It runs as one Docker image (a TypeScript modular monolith) next to Postgres, Cl
 
 ## What it does
 
+![The approval drawer: the agent's e-mail rendered for review](docs/design/screenshots/approval-email-1440-light.png)
+
+- **An admin UI built for reviewing agents' work:** an approval drawer that shows the actual e-mail, form, journey, segment or broadcast with what changed and who asked; a journey builder with drag and drop; template, form, segment and brand editors; an asset library; light and dark themes; keyboard access throughout. Screens are in [docs/design/screenshots](docs/design/screenshots).
+
 - **Collect events:** Segment-compatible ingest (`/v1/batch`), a browser SDK, per-source consent rules, a tracking plan, bot filtering.
 - **Consent banner:** in the SDK, CSP-safe, with texts from your purposes and Google Consent Mode v2 signals. Ad click ids (`gclid`, `fbclid`, `msclkid`…) are kept only with `ad_measurement` consent.
 - **Know people:** identity resolution and merges, profiles with traits and events, a consent ledger per purpose, export and erasure (DSR).
@@ -110,7 +114,7 @@ Wave 1 (Phases −1 to 5) is complete: foundations, data platform, e-mail, segme
 
 | Phase | Theme | State |
 |---|---|---|
-| 6 | Pilot live and hardening | The code items are done: e-mail events on profiles, retention, UTM tagging, test sends, Newsletter screen, Docker smoke test. The MartechSignal run is next. |
+| 6 | Pilot live and hardening | The code items are done: e-mail events on profiles, retention, UTM tagging, test sends, Docker smoke test. 0.2.0 replaced the admin UI (navigation, approvals, journey builder, assets, brand). The MartechSignal run is next. |
 | 7 | Delivery beyond SMTP, and SMS | Done: Cloudflare Email Service adapter, delivery policy (caps, quiet hours, auto-pause), deliverability health and domain check, Twilio SMS. Later: GatewayAPI, SMS double opt-in, provider warm-up |
 | 8 | Consent everywhere | Done: consent banner with Consent Mode v2, ad purposes, click-id capture, OAuth 2.0 connections, shared rate limits, bot filtering |
 | 9 | Performance marketing | Done: conversions (Meta, Google, Microsoft), audience sync (Meta, Google), spend and ROAS. Later: Microsoft reporting and audiences, more platforms |
@@ -124,7 +128,9 @@ pnpm install
 pnpm lint && pnpm typecheck && pnpm test   # tests need Postgres, ClickHouse, NATS and Valkey
 scripts/smoke.sh                           # the Docker image end to end
 pnpm --filter @agentic-marketing/server cli loadtest --profiles 1000000   # segment refreshes at scale
-pnpm dev:web                               # the UI (a mocked demo without the API)
+pnpm dev:web                               # the admin UI on :5173 against the API (demo at /demo)
+npx tsx apps/server/test/e2e/server.ts     # a seeded workspace on :3100 for UI work
+pnpm e2e                                   # Playwright end-to-end tests of the UI
 ```
 
 See [docs/development.md](docs/development.md) for details.
