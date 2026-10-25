@@ -171,9 +171,10 @@ export function renderHostedPage(kind: HostedPageKind, brand: ResolvedBrand, ctx
   const logo = brand.logoUrl
     ? `<img class="logo" src="${escapeHtml(brand.logoUrl)}" alt="${escapeHtml(brand.logoAlt ?? brand.siteName ?? '')}" height="${brand.logoHeight}" style="height:${brand.logoHeight}px">`
     : '';
-  const header =
-    logo || brand.siteName
-      ? `<header class="brand">${logo}${brand.siteName ? `<p class="site-name">${escapeHtml(brand.siteName)}</p>` : ''}</header>`
+  const header = brand.logoUrl
+    ? `<header class="brand">${logo}</header>`
+    : brand.siteName
+      ? `<header class="brand"><p class="site-name">${escapeHtml(brand.siteName)}</p></header>`
       : '';
 
   const action = BUTTON_PAGES.has(kind)

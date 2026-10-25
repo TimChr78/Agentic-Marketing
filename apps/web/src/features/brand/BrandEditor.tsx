@@ -43,7 +43,7 @@ export function BrandFields({ value, onChange, readOnly, errors, prefix = '', ov
     <div className="space-y-6">
       <FieldGroup legend="Site">
         <div className="grid gap-4 sm:grid-cols-2">
-          <Field label="Site name" hint="Shown on every page and in “Back to …”." error={err('siteName')}>
+          <Field label="Site name" hint="Shown at the top when there is no logo, and in “Back to …”." error={err('siteName')}>
             <Input value={value.siteName ?? ''} readOnly={readOnly} maxLength={120} onChange={(e) => set({ siteName: e.target.value })} />
           </Field>
           <Field label="Site address" hint="Where “Back to …” goes. https://…" error={err('siteUrl')}>

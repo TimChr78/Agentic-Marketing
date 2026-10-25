@@ -128,6 +128,7 @@ describe('the double opt-in confirm page', () => {
     expect(html).toContain('src="https://cdn.martechsignal.com/logo.png"');
     expect(html).toContain('alt="Martech Signal logo"');
     expect(html).toContain('height="40"');
+    expect(html).not.toContain('class="site-name"'); // the logo replaces the name line (#113)
     expect(html).toContain('--background:#faf7f2');
     expect(html).toContain('--accent:#0f766e'); // the form's override wins
     expect(html).toContain('Formens egen titel');
@@ -217,7 +218,10 @@ describe('the double opt-in confirm page', () => {
     if (link.includes('/c/')) link = (await fetch(link, { redirect: 'manual' })).headers.get('location')!;
 
     const content = (await api().call('artifacts.get', { artifactId: ids.brand })).version.content as Record<string, unknown>;
-    await api().call('artifacts.updateDraft', { artifactId: ids.brand, content: { ...content, siteName: 'Draft Signal' } });
+    await api().call('artifacts.updateDraft', {
+      artifactId: ids.brand,
+      content: { ...content, siteName: 'Draft Signal', logoAlt: 'Draft Signal logo' },
+    });
     expect(await (await fetch(link)).text()).toContain('Martech Signal');
     expect(await (await fetch(link)).text()).not.toContain('Draft Signal');
 

@@ -807,7 +807,7 @@ const brandCopy = z.object({
 });
 /** All brand fields optional, with no defaults: the shape of a form's partial brand override. */
 const brandFields = {
-  siteName: z.string().max(120).optional().describe('Shown on every hosted page and in "Back to <site>"'),
+  siteName: z.string().max(120).optional().describe('Shown at the top of hosted pages without a logo, and in "Back to <site>"'),
   siteUrl: BrandUrl.optional().describe('Where "Back to <site>" points; https, or http on localhost'),
   logoUrl: BrandLogoUrl.optional().describe('Logo shown at the top; https URL, e.g. an asset public URL'),
   logoAlt: z.string().max(200).optional().describe('Logo alt text; the site name when omitted'),

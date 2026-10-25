@@ -482,7 +482,7 @@ function HostedPagesEditor({
 
   return (
     <div className="space-y-4 rounded-lg border border-line p-4">
-      <Field label="Site name" hint="Shown on the page and in “Back to …”." error={errors['hostedPages.siteName']}>
+      <Field label="Site name" hint="Shown at the top when there is no logo, and in “Back to …”." error={errors['hostedPages.siteName']}>
         <Input
           value={brand.siteName ?? ''}
           maxLength={120}
