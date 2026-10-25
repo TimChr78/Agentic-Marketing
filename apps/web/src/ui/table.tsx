@@ -28,7 +28,7 @@ export function TableFrame({
   toolbar?: ReactNode;
 }) {
   return (
-    <div className={cx('min-w-0 overflow-hidden rounded-lg border border-line bg-surface', className)}>
+    <div className={cx('am-frame min-w-0 overflow-hidden rounded-lg border border-line bg-surface', className)}>
       {toolbar && <div className="flex flex-wrap items-center gap-2 border-b border-line px-3 py-2">{toolbar}</div>}
       {error ? (
         <div className="p-3">

@@ -141,6 +141,7 @@ export default function PeoplePage() {
                     compact
                     aria-label="Search by e-mail or profile id"
                     placeholder="E-mail or prf_… profile id"
+                    className="pl-8"
                     value={query}
                     onChange={(e) => setQuery(e.target.value)}
                   />

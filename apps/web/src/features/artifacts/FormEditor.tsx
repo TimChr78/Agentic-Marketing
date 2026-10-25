@@ -259,7 +259,7 @@ export function FormEditor({ artifact, content, onChange, readOnly, errors }: Ed
 
       <aside className="min-w-0 lg:sticky lg:top-4 lg:self-start" aria-label="Live preview">
         <p className="mb-2 text-[12px] font-medium text-fg-2">Preview, with your unsaved changes</p>
-        <FormPreview content={content} />
+        <FormPreview content={content} stacked />
       </aside>
     </div>
   );

@@ -43,11 +43,11 @@ const url = (u?: string) =>
   );
 
 /** A signup form as visitors see it, plus what happens on submit (#41). */
-export function FormPreview({ content }: { content: FormContent }) {
+export function FormPreview({ content, stacked }: { content: FormContent; stacked?: boolean }) {
   const traits = content.traits ?? ['firstName'];
   return (
     <div className="space-y-4">
-      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+      <div className={stacked ? 'grid gap-4' : 'grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]'}>
         <Card title="What visitors see" description="Fields and consent text; the site renders the form itself.">
           <div className="space-y-3 p-4" aria-hidden>
             <div>

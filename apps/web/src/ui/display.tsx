@@ -170,7 +170,7 @@ export function Alert({
 
 export function Card({ children, className, title, description, action, padded }: { children: ReactNode; className?: string; title?: ReactNode; description?: ReactNode; action?: ReactNode; padded?: boolean }) {
   return (
-    <section className={cx('min-w-0 rounded-lg border border-line bg-surface', className)}>
+    <section className={cx('min-w-0 rounded-lg border border-line bg-surface [&>.am-frame]:rounded-t-none [&>.am-frame]:border-0', className)}>
       {(title || action) && (
         <header className="flex items-start justify-between gap-3 border-b border-line px-4 py-3">
           <div className="min-w-0">

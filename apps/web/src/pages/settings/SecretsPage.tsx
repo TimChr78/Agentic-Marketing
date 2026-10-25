@@ -135,13 +135,13 @@ export default function SecretsPage() {
               <Tr key={s.name}>
                 <Td>
                   <Mono>{s.name}</Mono>
-                  <div className="mt-0.5 text-[12px] text-muted md:hidden">{s.updatedBy}</div>
+                  <div className="mt-0.5 text-[12px] text-muted md:hidden">{s.updatedByName ?? s.updatedBy}</div>
                 </Td>
                 <Td className="whitespace-nowrap" title={formatDateTime(s.updatedAt, { seconds: true, zone: true })}>
                   {timeAgo(s.updatedAt)}
                 </Td>
                 <Td className="hidden md:table-cell">
-                  <span className="font-mono text-[12px]">{s.updatedBy}</span>
+                  <span>{s.updatedByName ?? <span className="font-mono text-[12px]">{s.updatedBy}</span>}</span>
                 </Td>
                 {canWrite && (
                   <Td className="text-right" onClick={(e) => e.stopPropagation()}>
