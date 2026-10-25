@@ -5,8 +5,8 @@ import {
   type BrandCopy,
   DEFAULT_PURPOSES,
   type FormDefinition,
-  HOSTED_PAGE_HEADERS,
   type HostedPageKind,
+  hostedPageHeaders,
   originOfUrl,
   publishedSingleton,
   publishValidators,
@@ -163,19 +163,25 @@ export function formsApi(deps: FormsDeps) {
     return f ? { ws, ...f } : null;
   };
 
-  /** The published brand for the token's workspace plus the form's override; drafts never render. */
+  /**
+   * The published brand for the token's workspace plus the form's override; drafts never render.
+   * The confirm page's POST may redirect to the form's confirmedUrl, so its origin is allowed as a
+   * form-action on that page (#115).
+   */
   const hostedPage = async (kind: HostedPageKind, t: DoiToken | null, ctx: { copy?: Partial<BrandCopy> } = {}) => {
-    if (!t) return renderHostedPage(kind, resolveBrand(), ctx);
+    if (!t) return { html: renderHostedPage(kind, resolveBrand(), ctx), redirectsTo: null };
     const { form, brand } = await deps.db.withWorkspace(t.w, async (tx) => ({
       form: await publishedForm(tx, t.f, t.v),
       brand: await publishedSingleton(tx, 'brand'),
     }));
-    return renderHostedPage(kind, resolveBrand(brand, form?.def.hostedPages), {
+    const html = renderHostedPage(kind, resolveBrand(brand, form?.def.hostedPages), {
       fallbackSiteUrl: form ? formOrigin(form.def) : null,
       ...ctx,
     });
+    return { html, redirectsTo: kind === 'confirm' ? originOfUrl(form?.def.confirmedUrl) : null };
   };
-  const hosted = (c: Context, html: string, status: 200 | 404 | 410) => c.html(html, status, HOSTED_PAGE_HEADERS);
+  const hosted = (c: Context, page: { html: string; redirectsTo: string | null }, status: 200 | 404 | 410) =>
+    c.html(page.html, status, hostedPageHeaders([page.redirectsTo]));
   const headerNames = deps.clientIpHeaders ?? (deps.clientIpHeader ? [deps.clientIpHeader] : ['x-forwarded-for']);
   const ipOf = (c: Context) =>
     resolveClientIp({
@@ -316,7 +322,9 @@ export function formsApi(deps: FormsDeps) {
     };
     const { accepted } = acceptItems([item], { id: t.f, workspaceId: t.w, kind: 'server', requiredPurpose: null }, await loadPolicy(t.w));
     await deps.bus.publish(accepted);
-    return c.redirect(form.def.confirmedUrl, 303);
+    // Without a thank-you page of its own, the site shows the branded confirmed page in place.
+    if (form.def.confirmedUrl) return c.redirect(form.def.confirmedUrl, 303);
+    return hosted(c, await hostedPage('confirmed', t), 200);
   });
   return app;
 }

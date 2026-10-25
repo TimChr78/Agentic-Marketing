@@ -124,14 +124,24 @@ function siteLabel(brand: ResolvedBrand, siteUrl: string | null): string {
   return 'the site';
 }
 
-/** Strict headers for every hosted page: no scripts, no framing, no caching, no referrer leak. */
-export const HOSTED_PAGE_HEADERS = {
-  'content-security-policy':
-    "default-src 'none'; img-src https: data:; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
-  'referrer-policy': 'no-referrer',
-  'x-content-type-options': 'nosniff',
-  'cache-control': 'no-store',
-} as const;
+/**
+ * Strict headers for every hosted page: no scripts, no framing, no caching, no referrer leak.
+ * `form-action` also governs the redirects that follow a form submission (CSP3, enforced by
+ * Chromium), so a page whose POST answers with a redirect to another site must list that site's
+ * origin (#115). Pass only origins from `originOfUrl`; anything else is dropped.
+ */
+export function hostedPageHeaders(redirectOrigins: (string | null | undefined)[] = []) {
+  const extra = [...new Set(redirectOrigins.filter((o): o is string => !!o && originOfUrl(o) === o))];
+  return {
+    'content-security-policy': `default-src 'none'; img-src https: data:; style-src 'unsafe-inline'; form-action ${["'self'", ...extra].join(' ')}; frame-ancestors 'none'; base-uri 'none'`,
+    'referrer-policy': 'no-referrer',
+    'x-content-type-options': 'nosniff',
+    'cache-control': 'no-store',
+  };
+}
+
+/** The headers for pages whose forms post back to the links host and are answered in place. */
+export const HOSTED_PAGE_HEADERS = hostedPageHeaders();
 
 const BUTTON_PAGES: ReadonlySet<HostedPageKind> = new Set(['confirm', 'unsubscribe']);
 const BACK_LINK_PAGES: ReadonlySet<HostedPageKind> = new Set(['expired', 'confirmed', 'unsubscribe', 'unsubscribed']);
@@ -161,9 +171,10 @@ export function renderHostedPage(kind: HostedPageKind, brand: ResolvedBrand, ctx
   const logo = brand.logoUrl
     ? `<img class="logo" src="${escapeHtml(brand.logoUrl)}" alt="${escapeHtml(brand.logoAlt ?? brand.siteName ?? '')}" height="${brand.logoHeight}" style="height:${brand.logoHeight}px">`
     : '';
-  const header =
-    logo || brand.siteName
-      ? `<header class="brand">${logo}${brand.siteName ? `<p class="site-name">${escapeHtml(brand.siteName)}</p>` : ''}</header>`
+  const header = brand.logoUrl
+    ? `<header class="brand">${logo}</header>`
+    : brand.siteName
+      ? `<header class="brand"><p class="site-name">${escapeHtml(brand.siteName)}</p></header>`
       : '';
 
   const action = BUTTON_PAGES.has(kind)
@@ -191,7 +202,7 @@ main{max-width:32rem;margin:0 auto}
 .site-name{margin:0;font-size:.95rem;font-weight:600;color:var(--muted);overflow-wrap:anywhere}
 h1{margin:0 0 .5rem;font-size:clamp(1.35rem,4.5vw,1.6rem);line-height:1.25;overflow-wrap:anywhere}
 p{margin:0 0 1.25rem;color:var(--muted);white-space:pre-line;overflow-wrap:anywhere}
-button{font:inherit;font-weight:600;min-height:44px;padding:.65rem 1.25rem;border:1px solid var(--accent);border-radius:var(--radius);background:var(--accent);color:var(--accentText);cursor:pointer}
+button{font:inherit;font-weight:600;min-height:44px;padding:.65rem 1.25rem;border:1px solid var(--accent);border-radius:var(--radius);background:var(--accent);color:var(--accent-text);cursor:pointer}
 button:hover{filter:brightness(.94)}
 button:focus-visible{outline:3px solid var(--text);outline-offset:3px}
 button[disabled]{cursor:not-allowed}

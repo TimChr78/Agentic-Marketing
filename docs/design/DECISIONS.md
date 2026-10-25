@@ -128,6 +128,17 @@ considered and why. Anything that needed the owner's decision is listed under **
   SVG is refused (it can carry scripts); bytes are sniffed, not trusted from the declared type. Usage is
   found by the asset id in latest and published artifact versions, and delete warns with the list.
 
+### D28. `confirmedUrl` is optional; the confirm page allows its origin in `form-action` (0.2.2, #115)
+- **Options:** render the confirmed page and link (or meta-refresh) to the site; keep the 303 and widen
+  `form-action` per response; make `confirmedUrl` optional.
+- **Why:** Chromium applies `form-action` to the redirect after a form POST, so `form-action 'self'` blocked
+  the 303 to the site's welcome page after the confirmation was already recorded. The 303 is kept (no
+  extra click, no meta-refresh, which a strict CSP would also have to allow), and only the confirm page adds
+  the origin of its own form's `confirmedUrl`; every other directive stays as it was. Without
+  `confirmedUrl` the POST answers 200 with the branded confirmed page in place, like unsubscribe already
+  did, so that page from #37 is finally served. Unsubscribe and expired never redirect, so they keep
+  `form-action 'self'`. The REST/MCP change is additive: forms that set `confirmedUrl` behave as before.
+
 ## Journey builder (#33)
 
 ### D20. Outcomes are positional; removing a middle one points it at a new Exit

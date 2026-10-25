@@ -39,6 +39,7 @@ const brandContent = () => ({
     confirmTitle: 'Bekræft din tilmelding',
     confirmBody: 'Ét klik, og du er med.',
     confirmButton: 'Ja, tilmeld mig',
+    confirmedTitle: 'Du er tilmeldt',
     expiredTitle: 'Linket er udløbet',
     expiredBody: 'Tilmeld dig igen, så sender vi et nyt link.',
     unsubscribeTitle: 'Afmeld',
@@ -116,6 +117,8 @@ describe('the double opt-in confirm page', () => {
     expect(res.status).toBe(200);
     expect(res.headers.get('content-security-policy')).toContain("default-src 'none'");
     expect(res.headers.get('content-security-policy')).toContain("frame-ancestors 'none'");
+    // The POST redirects to the site's welcome page; form-action covers that redirect (#115).
+    expect(res.headers.get('content-security-policy')).toContain(`form-action 'self' ${SITE};`);
     expect(res.headers.get('referrer-policy')).toBe('no-referrer');
     expect(res.headers.get('x-content-type-options')).toBe('nosniff');
     expect(res.headers.get('cache-control')).toBe('no-store');
@@ -125,6 +128,7 @@ describe('the double opt-in confirm page', () => {
     expect(html).toContain('src="https://cdn.martechsignal.com/logo.png"');
     expect(html).toContain('alt="Martech Signal logo"');
     expect(html).toContain('height="40"');
+    expect(html).not.toContain('class="site-name"'); // the logo replaces the name line (#113)
     expect(html).toContain('--background:#faf7f2');
     expect(html).toContain('--accent:#0f766e'); // the form's override wins
     expect(html).toContain('Formens egen titel');
@@ -151,6 +155,60 @@ describe('the double opt-in confirm page', () => {
     expect((await fetch(link, { method: 'POST', redirect: 'manual' })).status).toBe(303);
   }, 30_000);
 
+  it('shows the branded confirmed page in place when the form has no confirmedUrl (#115)', async () => {
+    const form = (
+      await api().call('artifacts.create', {
+        type: 'form',
+        name: 'No thank-you page',
+        content: {
+          purposes: ['marketing_email'],
+          doubleOptIn: true,
+          confirmationTemplate: ids.template,
+          consentText: 'Send me the newsletter.',
+          successUrl: `${SITE}/thanks`,
+          allowedOrigins: [SITE],
+        },
+      })
+    ).artifactId;
+    await publish(form);
+    const post = await fetch(`${t.base}/f/${form}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded', origin: SITE },
+      body: new URLSearchParams({ email: 'bea@example.com' }).toString(),
+      redirect: 'manual',
+    });
+    expect(post.status).toBe(303);
+    const mail = await eventually(
+      async () => mailTo('bea@example.com'),
+      (m) => m.length === 1,
+    );
+    let link = linkFrom(mail[0].html, /href="([^"]*\/(?:c|f\/confirm)\/[^"]+)"/);
+    if (link.includes('/c/')) link = (await fetch(link, { redirect: 'manual' })).headers.get('location')!;
+
+    const page = await fetch(link);
+    expect(page.status).toBe(200);
+    // Nothing to redirect to, so the page allows posting to itself only.
+    expect(page.headers.get('content-security-policy')).toContain("form-action 'self';");
+
+    const confirmed = await fetch(link, { method: 'POST', redirect: 'manual' });
+    expect(confirmed.status).toBe(200);
+    expect(confirmed.headers.get('content-security-policy')).toContain("default-src 'none'");
+    const html = await confirmed.text();
+    expect(html).toContain('Du er tilmeldt'); // the brand's confirmedTitle
+    expect(html).not.toContain('<form');
+    const { profileId } = await api().call('profiles.find', { type: 'email', value: 'bea@example.com' });
+    const { records } = await eventually(
+      () => api().call('consent.history', { profileId: profileId! }),
+      (r) => r.records.length > 0,
+    );
+    expect(records[0]).toMatchObject({ purpose: 'marketing_email', status: 'granted', source: 'form' });
+
+    // The same link confirms once; a second click shows the same page and records nothing new.
+    expect((await fetch(link, { method: 'POST', redirect: 'manual' })).status).toBe(200);
+    await new Promise((r) => setTimeout(r, 500));
+    expect((await api().call('consent.history', { profileId: profileId! })).records).toHaveLength(1);
+  }, 30_000);
+
   it('does not use a draft brand until it is published', async () => {
     const mail = await eventually(
       async () => mailTo('ada@example.com'),
@@ -160,7 +218,10 @@ describe('the double opt-in confirm page', () => {
     if (link.includes('/c/')) link = (await fetch(link, { redirect: 'manual' })).headers.get('location')!;
 
     const content = (await api().call('artifacts.get', { artifactId: ids.brand })).version.content as Record<string, unknown>;
-    await api().call('artifacts.updateDraft', { artifactId: ids.brand, content: { ...content, siteName: 'Draft Signal' } });
+    await api().call('artifacts.updateDraft', {
+      artifactId: ids.brand,
+      content: { ...content, siteName: 'Draft Signal', logoAlt: 'Draft Signal logo' },
+    });
     expect(await (await fetch(link)).text()).toContain('Martech Signal');
     expect(await (await fetch(link)).text()).not.toContain('Draft Signal');
 
@@ -243,6 +304,7 @@ describe('the unsubscribe page', () => {
     expect(html).toContain('Draft Signal');
     expect(html).toContain('--accent:#1d4ed8');
     expect(html).toContain('Afmeld');
+    expect(page.headers.get('content-security-policy')).toContain("form-action 'self';");
     expect(html).toContain('Tilbage til Draft Signal');
     expect(html).toContain('href="https://martechsignal.com"');
     expect(html).toContain('<form method="post">');

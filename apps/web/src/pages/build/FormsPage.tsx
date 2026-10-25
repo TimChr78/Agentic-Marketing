@@ -26,7 +26,6 @@ export default function FormsPage() {
           consentText: 'Send me the newsletter. I can unsubscribe at any time.',
           traits: ['firstName'],
           successUrl: '/thanks',
-          confirmedUrl: '/welcome',
         }),
       }}
     />
