@@ -1,3 +1,5 @@
+import { ADAPTER_TRACKING } from '@agentic-marketing/artifacts';
+import { adapters } from '@agentic-marketing/email';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { startTestServer, type User } from './harness';
 
@@ -92,5 +94,11 @@ describe('system.status', () => {
       adapter: null,
       tracking: null,
     });
+  });
+});
+
+describe('system.status tracking mapping', () => {
+  it('matches what each e-mail adapter declares', () => {
+    expect(ADAPTER_TRACKING).toEqual(Object.fromEntries(Object.entries(adapters).map(([id, a]) => [id, a.tracking])));
   });
 });

@@ -92,8 +92,8 @@ const Adapter = z.enum(['smtp', 'ses', 'postmark', 'brevo', 'cloudflare', 'log']
 const Tracking = z.enum(['forced', 'configurable', 'none']);
 
 // The e-mail package owns provider tracking details, but it depends on this one, so mirror the
-// low-risk mapping here rather than introducing a cycle.
-const ADAPTER_TRACKING: Record<z.output<typeof Adapter>, z.output<typeof Tracking>> = {
+// low-risk mapping here rather than introducing a cycle (v025-system-status.test.ts keeps them equal).
+export const ADAPTER_TRACKING: Record<z.output<typeof Adapter>, z.output<typeof Tracking>> = {
   smtp: 'none',
   ses: 'configurable',
   postmark: 'configurable',
