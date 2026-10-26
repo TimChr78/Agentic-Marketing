@@ -24,10 +24,30 @@ RUN pnpm install --frozen-lockfile --prod=false --filter "@agentic-marketing/web
 RUN pnpm --filter @agentic-marketing/web build:live
 
 FROM base
+# The commit this image was built from, reported as `commit` by /healthz and /readyz.
+ARG GIT_SHA
+ENV AM_GIT_SHA=$GIT_SHA
 COPY --from=deps /app /app
 COPY --from=web /app/apps/web/dist /app/apps/web/dist
+# `am init` reads the template from the image root, even when the working directory is a mount.
+COPY .env.example /app/.env.example
 # `am` is the admin CLI without pnpm's script banner (which would echo arguments such as secrets).
-RUN printf '#!/bin/sh\nexec pnpm --silent --filter @agentic-marketing/server cli "$@"\n' > /usr/local/bin/am && chmod +x /usr/local/bin/am
+# --dir lets `docker run -w /work … am init` work; pnpm leaves INIT_CWD pointing at /work.
+RUN printf '#!/bin/sh\nexec pnpm --dir /app --silent --filter @agentic-marketing/server cli "$@"\n' > /usr/local/bin/am && chmod +x /usr/local/bin/am
+# pg_dump/pg_restore must match the postgres:16 server in docker-compose.yml. Debian's own
+# postgresql-client can be an older major, so install version 16 from PGDG for this base image's
+# codename (the repository serves both amd64 and arm64). Run as root, before USER node.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl \
+ && install -d /usr/share/postgresql-common/pgdg \
+ && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+ && . /etc/os-release \
+ && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends postgresql-client-16 \
+ && rm -rf /var/lib/apt/lists/*
+# The named `backups` volume inherits this directory's owner (node, uid 1000).
+RUN mkdir -p /backups && chown node:node /backups
 USER node
 EXPOSE 3000
 HEALTHCHECK --interval=15s --timeout=3s CMD node -e "fetch('http://localhost:3000/readyz').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"

@@ -5,6 +5,7 @@ import type { Db } from '@agentic-marketing/db';
 import { createRoute, OpenAPIHono, z } from '@hono/zod-openapi';
 import { bodyLimit } from 'hono/body-limit';
 import { commands } from '../registry';
+import { VERSION } from '../version';
 
 const ErrorBody = z.object({ error: z.string(), message: z.string(), details: z.unknown().optional() });
 const errors = Object.fromEntries(
@@ -105,6 +106,6 @@ export function restApi(deps: { auth: Auth; db: Db; executor: Executor; assetMax
       return c.json(out as object, 200);
     });
   }
-  api.doc31('/openapi.json', { openapi: '3.1.0', info: { title: 'Agentic Marketing API', version: '0.2.0' } });
+  api.doc31('/openapi.json', { openapi: '3.1.0', info: { title: 'Agentic Marketing API', version: VERSION } });
   return api;
 }

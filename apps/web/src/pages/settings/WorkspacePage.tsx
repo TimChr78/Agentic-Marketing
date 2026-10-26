@@ -197,6 +197,8 @@ export default function WorkspacePage() {
             </div>
           </form>
         </Card>
+
+        <p className="pt-1 text-center text-[12px] text-muted">Agentic Marketing {workspace.serverVersion}</p>
       </div>
     </div>
   );

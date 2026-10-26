@@ -1,9 +1,15 @@
 # Self-hosted single node: Postgres (configuration, profiles), ClickHouse (events), NATS JetStream
 # (event bus), Valkey (session state for personalization) and the app.
+#
+# Never edit this file. Put site-specific changes (an external network, bind mounts, resource
+# limits, backups) in compose.override.yaml, which Compose reads automatically. Upgrading then means
+# replacing this file with the new release's copy and bumping AM_VERSION, with no merge to resolve.
+#
 # Copy .env.example to .env and fill in the secrets first.
 services:
   postgres:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_USER: am
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
@@ -17,6 +23,7 @@ services:
 
   clickhouse:
     image: clickhouse/clickhouse-server:26.8
+    restart: unless-stopped
     environment:
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1  # row policies need it
     # Cap the whole container (server, caches and queries); ClickHouse's own limits still apply inside it.
@@ -31,27 +38,40 @@ services:
       retries: 20
 
   nats:
-    image: nats:2.15.0
-    command: ["-js", "-sd", "/data"]
+    # The alpine variant has a shell and wget for the healthcheck; the plain image has neither.
+    image: nats:2.15.0-alpine
+    restart: unless-stopped
+    # -m 8222 serves the monitoring endpoint the healthcheck reads.
+    command: ["-js", "-sd", "/data", "-m", "8222"]
     volumes:
       - natsdata:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- 'http://127.0.0.1:8222/healthz?js-enabled-only=true'"]
+      interval: 5s
+      retries: 20
 
   valkey:
     image: valkey/valkey:8.1.9
+    restart: unless-stopped
     command: ["valkey-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD-SHELL", "valkey-cli ping"]
+      interval: 5s
+      retries: 10
 
   app:
     # Pull the release image; docker-compose.build.yml builds this checkout from source instead.
     image: ghcr.io/timchr78/agentic-marketing:${AM_VERSION:-0.2.3}
+    restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
       clickhouse:
         condition: service_healthy
       nats:
-        condition: service_started
+        condition: service_healthy
       valkey:
-        condition: service_started
+        condition: service_healthy
     environment:
       ROLE: all
       PORT: 3000
@@ -80,12 +100,20 @@ services:
       NATS_RETENTION_HOURS: ${NATS_RETENTION_HOURS:-24}
       VALKEY_URL: redis://valkey:6379
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      BACKUP_DIR: /backups
+      SKIP_PRE_UPGRADE_BACKUP: ${SKIP_PRE_UPGRADE_BACKUP:-false}
+    volumes:
+      - backups:/backups
     ports:
       - "${AM_PORT:-3000}:3000"
-      # To expose the public-only listener, set PUBLIC_PORT (e.g. 3001) above and uncomment:
-      # - "${PUBLIC_PORT:-3001}:${PUBLIC_PORT:-3001}"
+      # The public-only listener is always published, loopback-only by default. With PUBLIC_PORT
+      # unset nothing listens on the container port, so the mapping is harmless. A tunnel on this
+      # Compose network reaches http://app:3001 directly; one on another host or network sets e.g.
+      # PUBLIC_BIND=0.0.0.0:3001 (or a LAN address).
+      - "${PUBLIC_BIND:-127.0.0.1:3001}:${PUBLIC_PORT:-3001}"
 
 volumes:
   pgdata:
   chdata:
   natsdata:
+  backups:

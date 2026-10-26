@@ -323,7 +323,7 @@ export const adPerformance = defineCommand({
           await ch.query({
             query: `SELECT anonymous_id, timestamp, name, toString(properties) AS properties FROM events FINAL
                     WHERE workspace_id = {ws:UUID} AND name IN {names:Array(String)} AND anonymous_id != ''
-                      AND timestamp >= {since:DateTime64(3)} AND timestamp < {untilEnd:DateTime64(3)}
+                      AND timestamp >= {since:DateTime64(3, 'UTC')} AND timestamp < {untilEnd:DateTime64(3, 'UTC')}
                     LIMIT 100000`,
             query_params: { ws, names, since: `${since} 00:00:00`, untilEnd: `${day(new Date(Date.parse(until) + 86_400_000))} 00:00:00` },
             format: 'JSONEachRow',
@@ -340,7 +340,7 @@ export const adPerformance = defineCommand({
                       coalesce(nullIf(decodeURLFormComponent(extractURLParameter(toString(context.page.url), 'utm_source')), ''), toString(context.campaign.source)) AS source
                     FROM events FINAL
                     WHERE workspace_id = {ws:UUID} AND anonymous_id IN {visitors:Array(String)}
-                      AND timestamp >= {from:DateTime64(3)} AND campaign != ''
+                      AND timestamp >= {from:DateTime64(3, 'UTC')} AND campaign != ''
                     ORDER BY timestamp`,
             query_params: { ws, visitors, from: `${day(new Date(Date.parse(since) - input.windowDays * 86_400_000))} 00:00:00` },
             format: 'JSONEachRow',

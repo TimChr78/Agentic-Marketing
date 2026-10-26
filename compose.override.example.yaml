@@ -1,0 +1,79 @@
+# Optional site-specific Compose settings. Copy this file to compose.override.yaml next to
+# docker-compose.yml; Compose reads compose.override.yaml automatically, so the release file stays
+# untouched and an upgrade only replaces docker-compose.yml and bumps AM_VERSION.
+#
+# Every example is commented out. Uncomment one block at a time: each block is a complete file on
+# its own. If you need more than one, merge their entries under a single `services:` key.
+#
+# The named volumes in docker-compose.yml stay declared when you replace them with bind mounts;
+# Compose merges a service's volume entries by container path, so the bind mount wins.
+
+# (a) A tunnel container (cloudflared, for example) on another Docker network.
+# Attach the app to that network and keep `default`, so it still reaches Postgres, ClickHouse, NATS
+# and Valkey. With PUBLIC_PORT=3001, point the tunnel at http://app:3001. If the tunnel is on
+# another host or network instead, set PUBLIC_BIND=0.0.0.0:3001 in .env and point it at this host.
+#
+# services:
+#   app:
+#     networks:
+#       - default
+#       - umami-net
+#
+# networks:
+#   default: {}
+#   umami-net:
+#     external: true
+
+# (b) Bind mounts instead of named volumes. Owners of the host directories:
+# - Postgres: the Alpine image's entrypoint drops to uid 70 (postgres);
+# - ClickHouse: uid 101 (clickhouse);
+# - NATS: the official Alpine image runs as root (uid 0), so it writes as root.
+# Create the directories and give each to its user, e.g.:
+#   mkdir -p /srv/am/{pgdata,clickhouse,nats}
+#   chown 70:70 /srv/am/pgdata && chown 101:101 /srv/am/clickhouse
+#
+# services:
+#   postgres:
+#     volumes:
+#       - /srv/am/pgdata:/var/lib/postgresql/data
+#   clickhouse:
+#     volumes:
+#       - /srv/am/clickhouse:/var/lib/clickhouse
+#   nats:
+#     volumes:
+#       - /srv/am/nats:/data
+
+# (c) Resource limits for the app and Postgres. ClickHouse already has CLICKHOUSE_MEM_LIMIT in
+# docker-compose.yml; adjust the values to the host.
+#
+# services:
+#   app:
+#     mem_limit: 1g
+#     cpus: 2
+#   postgres:
+#     mem_limit: 1g
+#     cpus: 1
+
+# (d) Scheduled backups (docs/deployment/backups.md). The `backups` volume is shared with the app,
+# so `am restore` sees the files this service writes.
+#
+# services:
+#   backup:
+#     image: ghcr.io/timchr78/agentic-marketing:${AM_VERSION}
+#     command: ["am", "backup", "--schedule", "--clickhouse"]
+#     environment:
+#       # Only the database URLs are needed; AUTH_SECRET, MASTER_KEY and APP_DB_PASSWORD stay on
+#       # the app service.
+#       DATABASE_URL: postgres://am:${POSTGRES_PASSWORD}@postgres:5432/am
+#       CLICKHOUSE_URL: http://clickhouse:8123
+#       CLICKHOUSE_DATABASE: am
+#       BACKUP_CRON: "${BACKUP_CRON:-30 3 * * *}"
+#       BACKUP_KEEP_DAYS: "${BACKUP_KEEP_DAYS:-14}"
+#     volumes:
+#       - backups:/backups
+#     restart: unless-stopped
+#     depends_on:
+#       postgres:
+#         condition: service_healthy
+#       clickhouse:
+#         condition: service_healthy
