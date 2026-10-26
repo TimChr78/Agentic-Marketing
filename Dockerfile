@@ -31,6 +31,8 @@ COPY --from=deps /app /app
 COPY --from=web /app/apps/web/dist /app/apps/web/dist
 # `am init` reads the template from the image root, even when the working directory is a mount.
 COPY .env.example /app/.env.example
+# `am upgrade-notes` merges the upgrade blocks of the releases a skip-upgrade jumps over.
+COPY CHANGELOG.md /app/CHANGELOG.md
 # `am` is the admin CLI without pnpm's script banner (which would echo arguments such as secrets).
 # --dir lets `docker run -w /work … am init` work; pnpm leaves INIT_CWD pointing at /work.
 RUN printf '#!/bin/sh\nexec pnpm --dir /app --silent --filter @agentic-marketing/server cli "$@"\n' > /usr/local/bin/am && chmod +x /usr/local/bin/am

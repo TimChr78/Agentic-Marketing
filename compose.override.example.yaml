@@ -10,27 +10,36 @@
 
 # (a) A tunnel container (cloudflared, for example) on another Docker network.
 # Attach the app to that network and keep `default`, so it still reaches Postgres, ClickHouse, NATS
-# and Valkey. With PUBLIC_PORT=3001, point the tunnel at http://app:3001. If the tunnel is on
-# another host or network instead, set PUBLIC_BIND=0.0.0.0:3001 in .env and point it at this host.
+# and Valkey. Replace `tunnel` with the name of the network your tunnel container is on. With
+# PUBLIC_PORT=3001, point the tunnel at http://app:3001 (or the container name, e.g.
+# http://agentic-marketing-app-1:3001). The tunnel then needs no host port for the public listener:
+# `!override` (Compose 2.24 or newer) replaces the app's port list, so only the admin port is
+# published. If the tunnel is on another host instead, keep the mapping and set
+# PUBLIC_BIND=0.0.0.0:3001 in .env.
 #
 # services:
 #   app:
 #     networks:
 #       - default
-#       - umami-net
+#       - tunnel
+#     ports: !override
+#       - "${AM_PORT:-3000}:3000"
 #
 # networks:
 #   default: {}
-#   umami-net:
+#   tunnel:
 #     external: true
 
 # (b) Bind mounts instead of named volumes. Owners of the host directories:
 # - Postgres: the Alpine image's entrypoint drops to uid 70 (postgres);
 # - ClickHouse: uid 101 (clickhouse);
-# - NATS: the official Alpine image runs as root (uid 0), so it writes as root.
+# - NATS: the official Alpine image runs as root (uid 0), so it writes as root;
+# - backups: the app (and the backup service) run as uid 1000 (node). Keep backups off the Docker
+#   image file on a NAS (Unraid's docker.img), e.g. on the array.
 # Create the directories and give each to its user, e.g.:
-#   mkdir -p /srv/am/{pgdata,clickhouse,nats}
-#   chown 70:70 /srv/am/pgdata && chown 101:101 /srv/am/clickhouse
+#   mkdir -p /srv/am/{pgdata,clickhouse,nats,backups}
+#   chown 70:70 /srv/am/pgdata && chown 101:101 /srv/am/clickhouse && chown 1000:1000 /srv/am/backups
+#   chmod 700 /srv/am/backups
 #
 # services:
 #   postgres:
@@ -42,6 +51,10 @@
 #   nats:
 #     volumes:
 #       - /srv/am/nats:/data
+#   app:
+#     volumes:
+#       - /srv/am/backups:/backups
+#   # and the same line on the `backup` service of block (d), if you use it
 
 # (c) Resource limits for the app and Postgres. ClickHouse already has CLICKHOUSE_MEM_LIMIT in
 # docker-compose.yml; adjust the values to the host.

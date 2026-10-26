@@ -18,7 +18,7 @@ import { runLoadTest } from './loadtest';
 //   pnpm cli reset-password --email you@example.com
 //   pnpm cli rotate-keys    (after setting a new MASTER_KEY and the old one in MASTER_KEY_PREVIOUS, or a new KEY_PROVIDER)
 //   pnpm cli loadtest --profiles 1000000 [--keep]   (synthetic data in a throwaway workspace)
-//   pnpm cli init | doctor | smoke | backup | restore   (operations: see src/ops/)
+//   pnpm cli init | doctor | smoke | backup | restore | upgrade-notes   (operations: see src/ops/)
 // Passwords come from AM_BOOTSTRAP_PASSWORD / AM_RESET_PASSWORD, a hidden terminal prompt, or stdin
 // (bootstrap also still accepts --password, with a deprecation warning).
 const envFile = resolve(dirname(fileURLToPath(import.meta.url)), '../../../.env');
@@ -38,6 +38,7 @@ const operations: Record<string, () => Promise<{ run: (args: string[]) => Promis
   smoke: () => import('./ops/smoke'),
   backup: () => import('./ops/backup'),
   restore: () => import('./ops/restore'),
+  'upgrade-notes': () => import('./ops/upgrade-notes'),
 };
 
 if (command && Object.hasOwn(operations, command)) {

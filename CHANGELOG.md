@@ -26,7 +26,7 @@ Phase 12 of [wave 3](docs/architecture/roadmap-wave-3.md#phase-12-install-and-up
 
 ### Upgrading from 0.2.3
 
-- **Migrations:** none. Because nothing is pending, the new automatic pre-upgrade backup does not run on this upgrade; it runs from the next release with a migration. Take one by hand if you want it: `docker compose exec app am backup` after upgrading writes to the new `backups` volume.
+- **Migrations:** none from 0.2.3, so from 0.2.3 the new automatic pre-upgrade backup does not run (take one by hand after upgrading: `docker compose exec app am backup`). Coming from 0.2.2 or older, 0.2.3's migration `0027_journey_consent_exits.sql` is pending, and the pre-upgrade backup does run. Back up by hand before upgrading from a version without `am backup`: `docker compose exec -T postgres pg_dump -U am -Fc am > pre-upgrade.dump`.
 - **Configuration:** new, all optional: `PUBLIC_BIND` (default `127.0.0.1:3001`, Compose only), `SKIP_PRE_UPGRADE_BACKUP` (default `false`), `BACKUP_DIR` (set to `/backups` by Compose), and for the optional backup service `BACKUP_CRON` (default `30 3 * * *`) and `BACKUP_KEEP_DAYS` (default 14). `docker-compose.yml` adds the `backups` volume and switches NATS to `nats:2.15.0-alpine` (same version, same data volume).
 - **Breaking changes:** none.
 - **Manual steps:**
