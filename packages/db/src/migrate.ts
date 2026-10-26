@@ -68,6 +68,8 @@ const MIGRATION_RELEASES: Record<string, string> = {
   // This change. A database at this head has a server_versions row, so the fallback is for tests
   // and for a migrate that ran without the server.
   '0028_server_versions.sql': '0.2.5',
+  // Phase 13 (#124); the release that first ships this head.
+  '0029_input_warnings.sql': '0.2.6',
 };
 
 export function releaseForMigrationHead(head: string | null): string | null {

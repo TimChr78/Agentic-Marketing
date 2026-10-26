@@ -30,6 +30,7 @@ import { rejectUnsafeRawPath } from './http/raw-path';
 import { restApi } from './http/rest';
 import { scimApi } from './http/scim';
 import { staticSite } from './http/static';
+import { createInputWarningRecorder } from './inputWarnings';
 import { keyProviderFor } from './keys';
 import { COMMIT, VERSION } from './version';
 
@@ -58,6 +59,7 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
   const events = withEmailProfileEvents(clickHouseStore(config.clickhouse), { db, bus });
   // Snapshot writes also queue for the edge (Workers KV) where a workspace turned it on.
   const hot = edgeMirror(valkeyHotState(config.valkey), db);
+  const inputWarnings = createInputWarningRecorder(db);
   const email = {
     publicUrl: config.linksUrl,
     links: linkSigner(config.authSecret),
@@ -79,11 +81,20 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
       publicUrl: config.publicUrl,
       db,
       serverVersion: VERSION,
+      strictInputs: config.strictInputs,
+      stepUpLimiter: {
+        lockedUntil: (userId) => hot.failureLock(`stepup:${userId}`),
+        recordFailure: (userId) =>
+          hot.recordFailure(`stepup:${userId}`, config.stepUp.maxFailures, config.stepUp.windowSeconds, config.stepUp.lockoutSeconds),
+        reset: (userId) => hot.clearFailures(`stepup:${userId}`),
+      },
     },
     {
       strictInputs: config.strictInputs,
-      onUnknownKeys: (command, unknown) =>
-        logger.warn({ command, unknownKeys: unknown.map((u) => u.path) }, 'command input has unknown keys'),
+      onUnknownKeys: (command, unknown, principal) => {
+        logger.warn({ command, unknownKeys: unknown.map((u) => u.path) }, 'command input has unknown keys');
+        inputWarnings.record(command, unknown, principal);
+      },
     },
   );
 

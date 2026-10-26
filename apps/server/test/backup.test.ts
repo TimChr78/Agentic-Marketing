@@ -257,7 +257,7 @@ describe.skipIf(!pgToolsReady)('backup and restore', () => {
 
   it('falls back to the migration head when server_versions is empty', async () => {
     await pool.query('DELETE FROM server_versions');
-    expect(await lastServerVersion(dbUrl.toString())).toBe('0.2.5');
+    expect(await lastServerVersion(dbUrl.toString())).toBe('0.2.6');
   });
 
   it('names a pre-upgrade backup after the newest release in a migration-head range', async () => {

@@ -1,7 +1,7 @@
 import { defineCommand, type Permission } from '@agentic-marketing/commands';
 import { AppError, canonicalJson, sha256 } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
-import { and, desc, eq, lt, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, lt, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { resolveActors } from './commands';
 
@@ -144,6 +144,130 @@ export const getStatus = defineCommand({
         tracking: shown ? ADAPTER_TRACKING[shown.adapter] : null,
       },
       pendingApprovals: pending?.count ?? 0,
+    };
+  },
+});
+
+export const inputWarnings = defineCommand({
+  name: 'system.inputWarnings',
+  title: 'Unknown command inputs by client',
+  description:
+    'Command input keys that clients sent and the API ignored, per client, with first/last seen and counts. Use it to fix your own calls or to decide whether STRICT_INPUTS is safe to turn on. An API token or OAuth agent sees only its own rows; a person sees their own and their tokens’; workspace admins see every client. Only key paths are stored, never the values. `safeToEnableStrict` is true when no visible client sent an unknown key in the last 7 days, and `strictInputs` reports whether this server already rejects them.',
+  input: z.object({
+    sinceDays: z.number().int().min(1).max(365).default(30).describe('How many days back to include (default 30; rows are kept for 30)'),
+  }),
+  output: z.object({
+    sinceDays: z.number().int().describe('The window these rows cover'),
+    strictInputs: z.boolean().describe('Whether this server rejects unknown input keys (STRICT_INPUTS)'),
+    safeToEnableStrict: z
+      .boolean()
+      .describe('True when no visible client sent an unknown key in the last 7 days, so strict mode would reject nothing'),
+    clients: z.array(
+      z.object({
+        principalType: z.enum(['user', 'token', 'oauth_client']).describe('What identified the client'),
+        principalId: z.string().describe('Token id, user id or OAuth client id'),
+        clientLabel: z.string().describe('Token name, person name or e-mail, or OAuth client name'),
+        quietDays: z.number().int().describe('Days since this client last sent an unknown key'),
+        lastSeen: z.string().describe('When this client last sent an unknown key (ISO 8601)'),
+        total: z.number().int().describe('How many unknown keys this client sent in the window'),
+        commands: z.array(
+          z.object({
+            command: z.string().describe('Command the client called'),
+            keys: z.array(
+              z.object({
+                keyPath: z.string().describe('Dotted path of the key the input schema does not accept'),
+                count: z.number().int().describe('How many times the client sent it'),
+                firstSeen: z.string().describe('First time it was seen (ISO 8601)'),
+                lastSeen: z.string().describe('Last time it was seen (ISO 8601)'),
+              }),
+            ),
+          }),
+        ),
+      }),
+    ),
+  }),
+  permission: 'artifacts:read',
+  effect: 'read',
+  handler: async (input, ctx) => {
+    const p = ctx.principal;
+    // Agents see their own client; people see their own rows and their tokens'; admins see all.
+    const visible =
+      p.type === 'agent'
+        ? p.clientId?.startsWith('token:')
+          ? and(eq(schema.inputWarnings.principalType, 'token'), eq(schema.inputWarnings.principalId, p.clientId.slice('token:'.length)))
+          : and(eq(schema.inputWarnings.principalType, 'oauth_client'), eq(schema.inputWarnings.principalId, p.clientId ?? p.userId))
+        : p.permissions.has('workspace:admin')
+          ? undefined
+          : or(
+              and(eq(schema.inputWarnings.principalType, 'user'), eq(schema.inputWarnings.principalId, p.userId)),
+              and(
+                eq(schema.inputWarnings.principalType, 'token'),
+                inArray(
+                  schema.inputWarnings.principalId,
+                  ctx.tx.select({ id: schema.apiTokens.id }).from(schema.apiTokens).where(eq(schema.apiTokens.userId, p.userId)),
+                ),
+              ),
+            );
+
+    const since = new Date(Date.now() - input.sinceDays * 86_400_000);
+    const rows = await ctx.tx
+      .select()
+      .from(schema.inputWarnings)
+      .where(and(visible, gte(schema.inputWarnings.lastSeen, since)))
+      .orderBy(schema.inputWarnings.command, schema.inputWarnings.keyPath);
+    const recent = await ctx.tx
+      .select({ count: sql<number>`count(*)::int` })
+      .from(schema.inputWarnings)
+      .where(and(visible, gte(schema.inputWarnings.lastSeen, new Date(Date.now() - 7 * 86_400_000))));
+
+    const clients = new Map<
+      string,
+      {
+        principalType: 'user' | 'token' | 'oauth_client';
+        principalId: string;
+        clientLabel: string;
+        lastSeen: Date;
+        total: number;
+        commands: Map<string, { keyPath: string; count: number; firstSeen: Date; lastSeen: Date }[]>;
+      }
+    >();
+    for (const row of rows) {
+      const key = `${row.principalType}|${row.principalId}`;
+      const client = clients.get(key) ?? {
+        principalType: row.principalType,
+        principalId: row.principalId,
+        clientLabel: row.clientLabel,
+        lastSeen: row.lastSeen,
+        total: 0,
+        commands: new Map(),
+      };
+      client.lastSeen = row.lastSeen > client.lastSeen ? row.lastSeen : client.lastSeen;
+      client.total += row.count;
+      const keys = client.commands.get(row.command) ?? [];
+      keys.push({ keyPath: row.keyPath, count: row.count, firstSeen: row.firstSeen, lastSeen: row.lastSeen });
+      client.commands.set(row.command, keys);
+      clients.set(key, client);
+    }
+
+    return {
+      sinceDays: input.sinceDays,
+      strictInputs: ctx.services.strictInputs,
+      safeToEnableStrict: (recent[0]?.count ?? 0) === 0,
+      clients: [...clients.values()]
+        .sort((a, b) => b.lastSeen.getTime() - a.lastSeen.getTime())
+        .map((client) => ({
+          ...client,
+          quietDays: Math.floor((Date.now() - client.lastSeen.getTime()) / 86_400_000),
+          lastSeen: client.lastSeen.toISOString(),
+          commands: [...client.commands]
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([command, keys]) => ({
+              command,
+              keys: keys
+                .sort((a, b) => b.count - a.count || a.keyPath.localeCompare(b.keyPath))
+                .map((k) => ({ ...k, firstSeen: k.firstSeen.toISOString(), lastSeen: k.lastSeen.toISOString() })),
+            })),
+        })),
     };
   },
 });
@@ -314,6 +438,7 @@ export const verifyAudit = defineCommand({
 export const workspaceCommands = [
   getWorkspace,
   getStatus,
+  inputWarnings,
   updateWorkspace,
   setSeedList,
   setApprovalPolicy,
