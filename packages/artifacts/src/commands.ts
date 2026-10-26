@@ -1,7 +1,7 @@
 import { type CommandContext, defineCommand } from '@agentic-marketing/commands';
 import { AppError, canonicalJson, hashValue, newId } from '@agentic-marketing/core';
 import { schema, type VersionState } from '@agentic-marketing/db';
-import { and, desc, eq, gt, inArray } from 'drizzle-orm';
+import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { diffJson } from './diff';
 import {
@@ -633,7 +633,7 @@ export const discardDraft = defineCommand({
       .orderBy(desc(schema.artifactVersions.number));
     const discarded = versions.filter((v) => v.number > a.publishedVersion!).map((v) => v.number);
     if (discarded.length === 0) throw new AppError('conflict', 'There is no draft to discard.');
-    // A pending request points at one of these versions; the reviewer must reject or withdraw it
+    // A pending request points at one of these versions; the reviewer must reject it
     // first, otherwise an approval could publish a version that no longer exists.
     const [pending] = await ctx.tx
       .select({ version: schema.approvalRequests.version })
@@ -648,21 +648,11 @@ export const discardDraft = defineCommand({
     if (pending)
       throw new AppError(
         'conflict',
-        `Version ${pending.version} is waiting for approval. Reject or withdraw that request before discarding the draft.`,
+        `Version ${pending.version} is waiting for approval. Reject that request before discarding the draft.`,
       );
-    await ctx.tx
-      .delete(schema.artifactVersions)
-      .where(
-        and(
-          eq(schema.artifactVersions.workspaceId, ws),
-          eq(schema.artifactVersions.artifactId, a.id),
-          gt(schema.artifactVersions.number, a.publishedVersion),
-        ),
-      );
-    await ctx.tx
-      .update(schema.artifacts)
-      .set({ latestVersion: a.publishedVersion, updatedAt: new Date() })
-      .where(and(eq(schema.artifacts.workspaceId, ws), eq(schema.artifacts.id, a.id)));
+    // The app role cannot delete versions; this function deletes exactly the drafts after the live
+    // version (migration 0031) and moves the artifact back to it.
+    await ctx.tx.execute(sql`SELECT discard_artifact_drafts(${a.id})`);
     return { artifactId: a.id, version: a.publishedVersion, state: 'published' as const, discardedVersions: discarded };
   },
 });
