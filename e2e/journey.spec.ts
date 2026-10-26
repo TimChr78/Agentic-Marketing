@@ -60,4 +60,24 @@ test('journey builder: add by drag, connect, delete by keyboard and context menu
   expect(byKind.trigger.next).toEqual([{ to: byKind.wait.id }]);
   expect(byKind.wait.next).toEqual([{ to: byKind.exit.id }]);
   expect(byKind.wait.position).toBeTruthy();
+
+  // A published journey stays published when a person moves a step: the layout is saved beside
+  // the version, not as a draft (issue #117). A click alone must not move the step either.
+  await call(page.request, 'artifacts.requestPublish', { artifactId: id, note: 'Ready for the e2e' });
+  const live = await call(page.request, 'artifacts.get', { artifactId: id });
+  expect(live.version.state).toBe('published');
+  await wait.click();
+  await page.waitForTimeout(1500); // past the autosave delay; a click must not have queued a save
+  expect((await call(page.request, 'artifacts.get', { artifactId: id })).latestVersion).toBe(live.latestVersion);
+
+  const box = (await wait.boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width / 2 + 30, box.y + box.height / 2 + 20, { steps: 8 });
+  await page.mouse.up();
+  await expect(page.getByText('Layout saved')).toBeVisible({ timeout: 15_000 });
+  const moved = await call(page.request, 'artifacts.get', { artifactId: id });
+  expect(moved.latestVersion).toBe(live.latestVersion);
+  expect(moved.version.state).toBe('published');
+  expect(moved.layout.positions[byKind.wait.id]).not.toEqual(byKind.wait.position);
 });

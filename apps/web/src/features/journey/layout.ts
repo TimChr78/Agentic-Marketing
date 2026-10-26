@@ -40,7 +40,18 @@ export function autoLayout(nodes: JNode[]): Record<string, { x: number; y: numbe
   return out;
 }
 
-export function positionsOf(nodes: JNode[]) {
+export type Positions = Record<string, { x: number; y: number }>;
+
+export function positionsOf(nodes: JNode[], layout?: Positions | null) {
   const auto = autoLayout(nodes);
-  return Object.fromEntries(nodes.map((n) => [n.id, n.position ?? auto[n.id]!]));
+  return Object.fromEntries(nodes.map((n) => [n.id, layout?.[n.id] ?? n.position ?? auto[n.id]!]));
+}
+
+/**
+ * Version content with the saved layout on top. The layout record is the latest arrangement; the
+ * version's own positions are the fallback for journeys nobody has moved since.
+ */
+export function withLayout<C extends { nodes?: JNode[] }>(content: C, layout?: Positions | null): C {
+  if (!layout || !content.nodes) return content;
+  return { ...content, nodes: content.nodes.map((n) => (layout[n.id] ? { ...n, position: layout[n.id] } : n)) };
 }

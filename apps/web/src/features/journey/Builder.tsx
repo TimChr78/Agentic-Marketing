@@ -290,6 +290,7 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
               fitView
               fitViewOptions={{ padding: 0.2 }}
               minZoom={0.2}
+              nodeDragThreshold={5}
               proOptions={{ hideAttribution: true }}
               deleteKeyCode={null}
               nodesConnectable={!readOnly}

@@ -7,6 +7,7 @@ import { Card, EmptyState, formatDateTime, LoadingBlock, StatusPill, Table, Tabl
 const verb: Record<string, string> = {
   'artifacts.create': 'Created',
   'artifacts.updateDraft': 'Edited the draft',
+  'artifacts.discardDraft': 'Discarded the draft',
   'artifacts.requestPublish': 'Asked to publish',
   'approvals.approve': 'Approved',
   'approvals.reject': 'Rejected',
