@@ -83,6 +83,10 @@ Goal: the pilot's weekly loop (Hermes drafts the issue, Tim approves, the broadc
 
 Done when four consecutive Friday issues go out with one approval each and the pilot runbook has no step that works around the platform.
 
+**Status (2026-10-26): built, waiting for the pilot.** Every item above, and #138/#139, is implemented for 0.2.6 (see the CHANGELOG). Still open:
+- the evidence itself: four Friday issues with one approval each (bundles, #107), and a quiet week of `system.inputWarnings` before `STRICT_INPUTS=true` becomes the default (#124);
+- #45: close once Hermes has confirmed the dotted tool names work for it (or switched to `MCP_TOOL_NAME_STYLE=underscore`).
+
 Housekeeping: #45 is resolved (MCP instructions, `artifacts.types({type})`, and the template-per-issue pattern documented on the broadcast type) and can be closed once the dotted tool names are checked against Hermes.
 
 ## Phase 14: admin UI for daily use
