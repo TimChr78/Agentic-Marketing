@@ -1,0 +1,22 @@
+# Optional scheduled backups. Copy this service into a compose.override.yaml next to the release
+# bundle and start it with `docker compose up -d backup`; never edit docker-compose.yml. The
+# `backups` volume is shared with the app, so `am restore` sees the files this service writes.
+#
+# services:
+#   backup:
+#     image: ghcr.io/timchr78/agentic-marketing:${AM_VERSION}
+#     command: ["am", "backup", "--schedule", "--clickhouse"]
+#     environment:
+#       # Only the database URLs are needed; AUTH_SECRET, MASTER_KEY and APP_DB_PASSWORD stay on
+#       # the app service.
+#       DATABASE_URL: postgres://am:${POSTGRES_PASSWORD}@postgres:5432/am
+#       CLICKHOUSE_URL: http://clickhouse:8123
+#       CLICKHOUSE_DATABASE: am
+#       BACKUP_CRON: "${BACKUP_CRON:-30 3 * * *}"
+#       BACKUP_KEEP_DAYS: "${BACKUP_KEEP_DAYS:-14}"
+#     volumes:
+#       - backups:/backups
+#     restart: unless-stopped
+#     depends_on:
+#       postgres:
+#         condition: service_healthy

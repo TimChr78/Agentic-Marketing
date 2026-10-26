@@ -57,6 +57,18 @@ jobs:
           package-manager-cache: false
       # pnpm comes from corepack, pinned by `packageManager` in package.json.
       - run: corepack enable
+      # Ubuntu's postgresql-client can be older than the postgres:16 service above. Backups need a
+      # matching pg_dump/pg_restore, so install 16 from PGDG (the runner's codename is in VERSION_CODENAME).
+      - name: Install PostgreSQL 16 client tools
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+          . /etc/os-release
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends postgresql-client-16
+          pg_dump --version
+          pg_dump --version | grep -Eq '\(PostgreSQL\) 16\.'
       # Spikes (with large benchmark dependencies) are not part of CI.
       - run: pnpm install --frozen-lockfile --filter "./packages/**" --filter "./apps/**" --filter "agentic-marketing"
       - run: pnpm lint

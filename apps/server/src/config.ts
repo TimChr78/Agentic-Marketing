@@ -9,6 +9,14 @@ const Env = z.object({
     .enum(['true', 'false'])
     .default('false')
     .describe('Start without migrating (Kubernetes: a migration job runs before each upgrade)'),
+  SKIP_PRE_UPGRADE_BACKUP: z
+    .enum(['true', 'false'])
+    .default('false')
+    .describe('Do not take the automatic Postgres backup before pending migrations run (e.g. when an external backup job covers it)'),
+  BACKUP_DIR: z
+    .string()
+    .optional()
+    .describe('Where `am backup` and the pre-upgrade backup write; default: /backups when writable, else ./backups'),
   STRICT_INPUTS: z
     .enum(['true', 'false'])
     .default('false')
@@ -199,6 +207,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     // run from /app, where the built UI sits next to the server.
     webDist: e.WEB_DIST ?? fileURLToPath(new URL('../../../apps/web/dist', import.meta.url)),
     skipMigrations: e.SKIP_MIGRATIONS === 'true',
+    skipPreUpgradeBackup: e.SKIP_PRE_UPGRADE_BACKUP === 'true',
+    backupDir: e.BACKUP_DIR,
     strictInputs: e.STRICT_INPUTS === 'true',
     mcpTextContent: e.MCP_TEXT_CONTENT,
     mcpToolNameStyle: e.MCP_TOOL_NAME_STYLE,

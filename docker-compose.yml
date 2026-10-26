@@ -80,6 +80,10 @@ services:
       NATS_RETENTION_HOURS: ${NATS_RETENTION_HOURS:-24}
       VALKEY_URL: redis://valkey:6379
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      BACKUP_DIR: /backups
+      SKIP_PRE_UPGRADE_BACKUP: ${SKIP_PRE_UPGRADE_BACKUP:-false}
+    volumes:
+      - backups:/backups
     ports:
       - "${AM_PORT:-3000}:3000"
       # To expose the public-only listener, set PUBLIC_PORT (e.g. 3001) above and uncomment:
@@ -89,3 +93,4 @@ volumes:
   pgdata:
   chdata:
   natsdata:
+  backups:

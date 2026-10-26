@@ -1,11 +1,12 @@
 import { migrateAuth } from '@agentic-marketing/auth';
-import { migrate } from '@agentic-marketing/db';
+import { migrate, migrationFiles } from '@agentic-marketing/db';
 import { migrateClickHouse } from '@agentic-marketing/events';
 import { initTelemetry, logger, shutdownTelemetry } from '@agentic-marketing/telemetry';
 import { serve } from '@hono/node-server';
 import { createServer } from './app';
 import { loadConfig } from './config';
 import { publicOnly } from './http/public-only';
+import { createBackup, keepDaysFromEnv } from './ops/backup-lib';
 import { startScheduler, startWorkers } from './workers';
 
 // One image, several roles (ADR-0002): `api` (UI, REST, MCP), `ingest` (event collection),
@@ -16,6 +17,7 @@ initTelemetry('agentic-marketing');
 const srv = createServer(config);
 const { app, db } = srv;
 if (!config.skipMigrations) {
+  await preUpgradeBackup(db, config);
   await migrate(db.admin, { appRolePassword: config.appDbPassword, appRole: config.appDbRole, log: (m) => logger.info(m) });
   await migrateAuth({ baseUrl: config.publicUrl, secret: config.authSecret, db });
   await migrateClickHouse(config.clickhouse.url, config.clickhouse.database, (m) => logger.info(m), config.clickhouse);
@@ -55,3 +57,30 @@ const shutdown = async () => {
 };
 process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
+
+/**
+ * A dump before migrations change the schema, so an upgrade can always go back. It must never
+ * block a start: development machines usually have no pg_dump, and a read-only directory should
+ * only warn. Only databases that already carry a migration head need one.
+ */
+async function preUpgradeBackup(db: ReturnType<typeof createServer>['db'], config: ReturnType<typeof loadConfig>) {
+  if (config.skipPreUpgradeBackup) return;
+  try {
+    const present = await db.admin.query<{ present: boolean }>("SELECT to_regclass('public.schema_migrations') IS NOT NULL AS present");
+    if (!present.rows[0]?.present) return;
+    const { rows } = await db.admin.query<{ version: string }>('SELECT version FROM schema_migrations');
+    if (!rows.length) return;
+    const applied = new Set(rows.map((row) => row.version));
+    if (migrationFiles().every((file) => applied.has(file))) return;
+
+    const { dir } = await createBackup({
+      dir: config.backupDir,
+      databaseUrl: config.adminDatabaseUrl,
+      keepDays: keepDaysFromEnv(),
+      log: (message) => logger.info(message),
+    });
+    logger.info({ path: dir }, 'pre-upgrade backup written (set SKIP_PRE_UPGRADE_BACKUP=true to skip it)');
+  } catch (err) {
+    logger.warn({ reason: (err as Error).message }, 'pre-upgrade backup skipped; migrations continue');
+  }
+}
