@@ -47,6 +47,9 @@ export const listMessages = defineCommand({
         purpose: z.string(),
         status: Status,
         reason: z.string().nullable(),
+        attempts: z.number().int().describe('How many times delivery was tried'),
+        nextAttemptAt: z.string().nullable().describe('When a queued retry becomes claimable'),
+        lastError: z.string().nullable().describe('The last failure or refusal; never provider credentials'),
         notBefore: z.string().nullable().describe('Held back until then (quiet hours, a paused stream)'),
         segments: z.number().nullable().describe('SMS segments used'),
         test: z.boolean().describe('A test send, not counted in reporting'),
@@ -77,6 +80,11 @@ export const listMessages = defineCommand({
         purpose: r.purpose,
         status: r.status,
         reason: r.reason,
+        attempts: r.attempts,
+        nextAttemptAt: r.nextAttemptAt?.toISOString() ?? null,
+        // `reason` is the message's last failure/refusal; provider errors carry only the
+        // provider's own message (never the API key or SMTP password).
+        lastError: r.reason,
         notBefore: r.notBefore?.toISOString() ?? null,
         segments: r.segments,
         test: r.test,

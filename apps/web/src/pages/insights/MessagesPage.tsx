@@ -66,7 +66,7 @@ export default function MessagesPage() {
     <div>
       <PageHeader
         title="Messages"
-        description="Every e-mail and SMS the gateway handled, newest first, with the reason when one was not sent. Filters narrow the latest 200 messages."
+        description="Every e-mail and SMS the gateway handled, newest first, with attempts, when a retry is due and the reason when one was not sent. Filters narrow the latest 200 messages."
         actions={
           can('artifacts:read') && (
             <Field label="Period" className="w-[150px]">
@@ -109,7 +109,7 @@ export default function MessagesPage() {
         loading={list.loading}
         error={list.error}
         onRetry={list.reload}
-        columns={5}
+        columns={7}
         isEmpty={rows.length === 0}
         toolbar={
           all.length > 0 && (
@@ -178,6 +178,7 @@ export default function MessagesPage() {
               <Th className="hidden sm:table-cell">Channel</Th>
               <Th>Person</Th>
               <Th className="hidden lg:table-cell">Purpose</Th>
+              <Th className="hidden md:table-cell">Attempts</Th>
               <Th>What happened</Th>
               <Th>When</Th>
             </tr>
@@ -202,8 +203,16 @@ export default function MessagesPage() {
                   {m.purpose.replace(/_/g, ' ')}
                   {m.test && <span className="ml-1 text-muted">· test</span>}
                 </Td>
+                <Td className="hidden md:table-cell">
+                  {m.attempts > 0 ? m.attempts : <span className="text-muted">—</span>}
+                </Td>
                 <Td className="max-w-[360px]">
-                  {m.reason ? (
+                  {m.status === 'queued' && m.nextAttemptAt ? (
+                    <span className="line-clamp-2">
+                      Retrying at {formatDateTime(m.nextAttemptAt)}
+                      {m.lastError ? ` · ${m.lastError}` : ''}
+                    </span>
+                  ) : m.reason ? (
                     <span className="line-clamp-2">{m.reason}</span>
                   ) : m.events.length ? (
                     <span className="line-clamp-2">

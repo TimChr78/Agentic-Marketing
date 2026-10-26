@@ -245,3 +245,96 @@ describe('e-mail end to end', () => {
     expect(ws).toBeTruthy();
   });
 });
+
+describe('retry schedule', () => {
+  it('retries a failed transactional send in seconds, keeps marketing on the old backoff, and reports why', async () => {
+    // A workspace of its own, with a provider that refuses connections, so these failures cannot
+    // disturb the working relay above.
+    const retryWs = await t.workspaceWith([[owner, 'owner']]);
+    const api = t.api(owner, retryWs);
+    const { key } = await api.call('sources.create', { name: 'Retry backend', kind: 'server' });
+    const userId = `u-retry-${Date.now()}`;
+    const email = `${userId}@example.com`;
+    const res = await fetch(`${t.base}/v1/batch`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Basic ${Buffer.from(`${key}:`).toString('base64')}` },
+      body: JSON.stringify({
+        batch: [
+          { type: 'identify', userId, traits: { email }, timestamp: '2026-10-26T08:00:00Z' },
+          {
+            type: 'track',
+            event: 'Segment Consent Preference Updated',
+            userId,
+            timestamp: '2026-10-26T08:00:01Z',
+            context: { consent: { categoryPreferences: { marketing_email: true } } },
+          },
+        ],
+      }),
+    });
+    expect(res.status).toBe(200);
+    const { profileId } = await eventually(
+      () => api.call('profiles.find', { type: 'user_id', value: userId }),
+      (r) => !!r.profileId,
+    );
+
+    const transactional = await api.call('artifacts.create', {
+      type: 'email_template',
+      name: 'Confirm your address',
+      content: {
+        purpose: 'onboarding',
+        subject: 'Confirm your address',
+        mjml: `<mjml><mj-body><mj-section><mj-column><mj-text>Confirm at {{ confirm_url }}</mj-text></mj-column></mj-section></mj-body></mjml>`,
+      },
+    });
+    const marketing = await api.call('artifacts.create', {
+      type: 'email_template',
+      name: 'Retry marketing',
+      content: { ...template, subject: 'News that retries' },
+    });
+    await api.call('artifacts.requestPublish', { artifactId: transactional.artifactId, note: 'retry test' });
+    await api.call('artifacts.requestPublish', { artifactId: marketing.artifactId, note: 'retry test' });
+    await api.call('emailProviders.create', {
+      name: 'Dead relay',
+      adapter: 'smtp',
+      config: { host: '127.0.0.1', port: 2528, requireTls: false },
+      secrets: { password: 'irrelevant' },
+      fromEmail: 'news@shop.example.com',
+      useFor: ['marketing', 'transactional'],
+    });
+
+    const txn = await api.call('messages.sendEmail', { profileId: profileId!, templateId: transactional.artifactId });
+    const mkt = await api.call('messages.sendEmail', { profileId: profileId!, templateId: marketing.artifactId });
+    expect(txn.status).toBe('queued');
+    expect(mkt.status).toBe('queued');
+
+    // The worker fails both against the dead relay. A transactional message is due in seconds; a
+    // marketing one keeps 30 s on the first attempt.
+    const failed = await eventually(
+      async () => (await api.call('messages.list', { profileId: profileId!, limit: 10 })).messages,
+      (rows) => rows.length === 2 && rows.every((r) => r.attempts >= 1 && r.status === 'queued' && r.nextAttemptAt),
+    );
+    const txnRow = failed.find((r) => r.templateId === transactional.artifactId)!;
+    const mktRow = failed.find((r) => r.templateId === marketing.artifactId)!;
+    const secondsUntil = (iso: string | null) => (new Date(iso!).getTime() - Date.now()) / 1000;
+    expect(secondsUntil(txnRow.nextAttemptAt)).toBeGreaterThan(5);
+    expect(secondsUntil(txnRow.nextAttemptAt)).toBeLessThan(15);
+    expect(secondsUntil(mktRow.nextAttemptAt)).toBeGreaterThan(20);
+    expect(secondsUntil(mktRow.nextAttemptAt)).toBeLessThan(35);
+    expect(txnRow.lastError).toContain('provider_error');
+    expect(mktRow.lastError).toContain('provider_error');
+
+    // Move only the transactional retry into the past, as waiting ten seconds would. Its next
+    // attempt must then happen; the marketing row stays where its own backoff put it.
+    await t.srv.db.admin.query(`UPDATE messages SET next_attempt_at = now() - interval '1 second' WHERE id = $1`, [txn.messageId]);
+    const retried = await eventually(
+      async () => (await api.call('messages.list', { profileId: profileId!, limit: 10 })).messages,
+      (rows) => (rows.find((r) => r.id === txn.messageId)?.attempts ?? 0) >= 2,
+    );
+    expect(retried.find((r) => r.id === txn.messageId)).toMatchObject({
+      attempts: 2,
+      status: 'queued',
+      lastError: expect.stringContaining('provider_error'),
+    });
+    expect(retried.find((r) => r.id === mkt.messageId)?.attempts).toBe(1);
+  }, 30_000);
+});

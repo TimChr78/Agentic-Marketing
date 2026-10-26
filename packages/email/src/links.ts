@@ -61,25 +61,70 @@ export interface Utm {
 }
 
 /**
+ * One URL's UTM tags, shared by the HTML and text parts so both agree. Returns null when the
+ * link is the platform's own, points elsewhere than `domains`, already carries utm_ parameters
+ * or is not a URL (e.g. still holds a Liquid placeholder).
+ */
+function taggedUrl(raw: string, utm: Utm, skip: string[]): string | null {
+  if (skip.some((s) => raw.startsWith(s)) || raw.includes('{{')) return null;
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    return null;
+  }
+  if (utm.domains?.length && !utm.domains.some((d) => u.hostname === d || u.hostname.endsWith(`.${d}`))) return null;
+  if ([...u.searchParams.keys()].some((k) => k.startsWith('utm_'))) return null;
+  u.searchParams.set('utm_source', utm.source);
+  u.searchParams.set('utm_medium', utm.medium);
+  if (utm.campaign) u.searchParams.set('utm_campaign', utm.campaign);
+  return u.toString();
+}
+
+/**
  * Adds utm_source, utm_medium and utm_campaign to links in the e-mail so the site's analytics
  * (Umami, Matomo…) attributes the visits. Links that already have utm_ parameters, and the
  * platform's own links (unsubscribe, confirmation), are left alone.
  */
 export function tagLinks(html: string, utm: Utm, skip: string[]): string {
   return html.replace(/(<a\b[^>]*?\bhref=")(https?:\/\/[^"]+)(")/gi, (all, pre: string, url: string, post: string) => {
-    const decoded = url.replace(/&amp;/g, '&');
-    if (skip.some((s) => decoded.startsWith(s)) || decoded.includes('{{')) return all;
-    let u: URL;
-    try {
-      u = new URL(decoded);
-    } catch {
-      return all;
+    const tagged = taggedUrl(url.replace(/&amp;/g, '&'), utm, skip);
+    if (tagged === null) return all;
+    return `${pre}${tagged.replace(/&/g, '&amp;')}${post}`;
+  });
+}
+
+/** Sentence punctuation and an unmatched closing bracket after a bare URL are not part of it. */
+function trimUrlTail(raw: string): { url: string; tail: string } {
+  let end = raw.length;
+  while (end > 0) {
+    const ch = raw[end - 1];
+    if ('.,;:!?'.includes(ch)) {
+      end--;
+      continue;
     }
-    if (utm.domains?.length && !utm.domains.some((d) => u.hostname === d || u.hostname.endsWith(`.${d}`))) return all;
-    if ([...u.searchParams.keys()].some((k) => k.startsWith('utm_'))) return all;
-    u.searchParams.set('utm_source', utm.source);
-    u.searchParams.set('utm_medium', utm.medium);
-    if (utm.campaign) u.searchParams.set('utm_campaign', utm.campaign);
-    return `${pre}${u.toString().replace(/&/g, '&amp;')}${post}`;
+    if (ch === ')') {
+      const before = raw.slice(0, end);
+      const opens = before.split('(').length - 1;
+      const closes = before.split(')').length - 1;
+      if (closes > opens) {
+        end--;
+        continue;
+      }
+    }
+    break;
+  }
+  return { url: raw.slice(0, end), tail: raw.slice(end) };
+}
+
+/**
+ * The plain-text sibling of `tagLinks`. It handles bare URLs and the `[https://…]` links that
+ * html-to-text produces, and keeps trailing punctuation outside the tagged URL.
+ */
+export function tagTextLinks(text: string, utm: Utm, skip: string[]): string {
+  return text.replace(/https?:\/\/[^\s<>"'`\]]+/gi, (raw: string) => {
+    const { url, tail } = trimUrlTail(raw);
+    const tagged = taggedUrl(url, utm, skip);
+    return tagged === null ? raw : `${tagged}${tail}`;
   });
 }

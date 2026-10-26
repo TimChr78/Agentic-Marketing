@@ -8,7 +8,7 @@ import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, inArray, or } from 'drizzle-orm';
 import type { Decision, EmailServices } from '../gateway';
 import type { ClickLink } from '../links';
-import { decisionEvent, defer, MAX_ATTEMPTS } from '../outbox';
+import { decisionEvent, defer, MAX_ATTEMPTS, retryDelaySeconds } from '../outbox';
 import { checkPolicy, isMarketing } from '../policy';
 import { type PushKind, type PushRegistration, type PushTransport, pushAdapters } from './adapters';
 import { pushTransportFor } from './providers';
@@ -158,7 +158,7 @@ export async function deliverPush(db: Db, ws: string, id: string, deps: { kp: Ke
     } catch (e) {
       return finish('failed', `render_error: ${(e as Error).message.split('\n')[0]}`);
     }
-    const stream = isMarketing(v.basis) ? 'marketing' : 'transactional';
+    const stream: 'marketing' | 'transactional' = isMarketing(v.basis) ? 'marketing' : 'transactional';
     const providers = (await tx.select().from(schema.pushProviders).where(eq(schema.pushProviders.enabled, true))).filter((p) =>
       p.useFor.includes(stream),
     );
@@ -187,6 +187,7 @@ export async function deliverPush(db: Db, ws: string, id: string, deps: { kp: Ke
       kind: 'send' as const,
       m,
       sends,
+      stream,
       out: {
         messageId: m.id,
         title: text.title,
@@ -204,7 +205,7 @@ export async function deliverPush(db: Db, ws: string, id: string, deps: { kp: Ke
     await deps.events.insertMessageEvents([prepared.event]);
     return;
   }
-  const { m, sends, out } = prepared;
+  const { m, sends, out, stream } = prepared;
   const delivered: { device: string; id: string | null; provider: string; adapter: string }[] = [];
   const gone: string[] = [];
   const errors: string[] = [];
@@ -249,9 +250,10 @@ export async function deliverPush(db: Db, ws: string, id: string, deps: { kp: Ke
       ? `provider_error: ${errors.join('; ')}`.slice(0, 500)
       : 'no_address: every registered device has unsubscribed';
     if (errors.length) logger.warn({ messageId: id, retry, errors }, 'push send failed');
+    const nextAttemptAt = retry ? new Date(Date.now() + retryDelaySeconds(stream, m.attempts) * 1000) : null;
     await tx
       .update(schema.messages)
-      .set({ status: retry ? 'queued' : errors.length ? 'failed' : 'suppressed', reason, updatedAt: new Date() })
+      .set({ status: retry ? 'queued' : errors.length ? 'failed' : 'suppressed', reason, nextAttemptAt, updatedAt: new Date() })
       .where(eq(schema.messages.id, id));
     return decisionEvent(m, retry ? 'queued' : errors.length ? 'failed' : 'suppressed', reason);
   });
