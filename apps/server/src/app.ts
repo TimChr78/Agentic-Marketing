@@ -31,6 +31,7 @@ import { restApi } from './http/rest';
 import { scimApi } from './http/scim';
 import { staticSite } from './http/static';
 import { keyProviderFor } from './keys';
+import { COMMIT, VERSION } from './version';
 
 /** `overrides` exist for tests, e.g. a stub transport for Client ID Metadata Documents. */
 export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'> = {}) {
@@ -77,6 +78,7 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
       egress: config.egress,
       publicUrl: config.publicUrl,
       db,
+      serverVersion: VERSION,
     },
     {
       strictInputs: config.strictInputs,
@@ -114,15 +116,17 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
     return c.json({ error: 'internal', message: 'Something went wrong on our side.', requestId }, 500);
   });
 
-  app.get('/healthz', (c) => c.json({ ok: true }));
+  // Operators and release checks read the running build here, not from a hard-coded literal.
+  const build = COMMIT ? { version: VERSION, commit: COMMIT } : { version: VERSION };
+  app.get('/healthz', (c) => c.json({ ok: true, ...build }));
   app.get('/readyz', async (c) => {
     try {
       await db.ping();
       if (!(await events.ping())) throw new Error('ClickHouse is not reachable');
       if (!(await hot.ping())) throw new Error('Valkey is not reachable');
-      return c.json({ ok: true });
+      return c.json({ ok: true, ...build });
     } catch {
-      return c.json({ ok: false }, 503);
+      return c.json({ ok: false, ...build }, 503);
     }
   });
 

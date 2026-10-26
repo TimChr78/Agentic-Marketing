@@ -11,6 +11,7 @@ import { dynamicTool, isStepCount, jsonSchema, type ModelMessage, streamText } f
 import { and, desc, eq } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { z } from 'zod';
+import { VERSION } from '../version';
 import { mcpServerFor } from './mcp';
 
 // The in-app copilot (agents-and-mcp.md §6) is just another MCP client: it acts as an agent
@@ -137,7 +138,7 @@ export function copilotApi(deps: { auth: Auth; db: Db; executor: Executor; kp: K
         };
         let messages: ModelMessage[] = [];
         const server = mcpServerFor(principal, deps.executor);
-        const client = new Client({ name: 'copilot', version: '0.2.0' });
+        const client = new Client({ name: 'copilot', version: VERSION });
         const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
         const started = Date.now();
         let usage = { inputTokens: 0, outputTokens: 0 };

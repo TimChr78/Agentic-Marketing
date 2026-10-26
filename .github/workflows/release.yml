@@ -104,6 +104,7 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: GIT_SHA=${{ steps.version.outputs.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
