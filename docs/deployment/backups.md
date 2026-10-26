@@ -33,7 +33,7 @@ am backup --to ./backups
 The directory name is `am-<version>-<UTC timestamp>` and contains:
 
 ```text
-am-0.2.3-20261026T031500Z/
+am-0.2.4-20261027T031500Z/
   manifest.json
   postgres.dump              # pg_dump -Fc --no-owner
   clickhouse/                # only with --clickhouse
@@ -105,7 +105,7 @@ Restoring replaces the database. Stop the app first so it cannot write while tab
 
 ```bash
 docker compose stop app
-docker compose run --rm app am restore /backups/am-0.2.3-20261026T031500Z --yes
+docker compose run --rm app am restore /backups/am-0.2.4-20261027T031500Z --yes
 docker compose start app
 ```
 
