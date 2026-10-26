@@ -2,7 +2,8 @@
 # Builds the Compose bundle of a release and checks its notes (#119):
 #   scripts/release-bundle.sh 0.3.0 [OUT_DIR]   (OUT_DIR defaults to dist)
 # Writes OUT_DIR/agentic-marketing-compose-<version>.tar.gz with docker-compose.yml, .env.example,
-# compose.override.example.yaml and UPGRADING.md in one directory, so a self-hoster installs and
+# compose.override.example.yaml, UPGRADING.md and CHANGELOG.md (every release's upgrade block, for
+# upgrades that skip releases) in one directory, so a self-hoster installs and
 # upgrades from the release page alone. The release workflow runs it; so can anyone, to check a
 # release before tagging it.
 set -euo pipefail
@@ -29,7 +30,7 @@ name="agentic-marketing-compose-$v"
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
 mkdir -p "$stage/$name" "$out"
-cp docker-compose.yml .env.example compose.override.example.yaml UPGRADING.md "$stage/$name/"
+cp docker-compose.yml .env.example compose.override.example.yaml UPGRADING.md CHANGELOG.md "$stage/$name/"
 # Reproducible archive: fixed order, owner and times.
 tar -C "$stage" --sort=name --owner=0 --group=0 --numeric-owner --mtime='1970-01-01 00:00Z' -cf - "$name" | gzip -n >"$out/$name.tar.gz"
 echo "$out/$name.tar.gz"

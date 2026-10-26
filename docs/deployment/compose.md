@@ -26,12 +26,12 @@ The example has commented blocks for a tunnel on another Docker network, bind mo
 
 ## The public listener
 
-Set `PUBLIC_PORT` (e.g. `3001`) to add a listener that serves only `/f`, `/u`, `/c`, `/a`, `/hooks`, `/healthz` and `/readyz`; everything else is 404 there. The compose file always publishes it, on `127.0.0.1` by default, so there is nothing to uncomment:
+Set `PUBLIC_PORT` (e.g. `3001`) to add a listener that serves only `/f`, `/u`, `/c`, `/a`, `/hooks`, `/healthz` and `/readyz`; everything else is 404 there. The compose file publishes it on `PUBLIC_BIND`, the host side as `host:port` (default `127.0.0.1:3210`, loopback only), so there is nothing to uncomment:
 
-- a tunnel container on the same Compose network (or attached with the override) points at `http://app:3001`;
+- a tunnel container on the same Compose network (or attached with the override) points at `http://app:3001` and needs no host port at all: drop the mapping with `ports: !override` in `compose.override.yaml` (block (a) of the example; Compose 2.24 or newer);
 - a tunnel or proxy on another host or network sets `PUBLIC_BIND=0.0.0.0:3001` (or a LAN address) in `.env` and points at this host.
 
-With `PUBLIC_PORT` unset the app does not listen on the container port, so the loopback-only mapping is harmless. Change `PUBLIC_BIND` (and `PUBLIC_PORT` to match) if port 3001 is taken on the host.
+`PUBLIC_BIND` only chooses the host side; the container port stays `PUBLIC_PORT`. With `PUBLIC_PORT` unset the app does not listen on the container port, so the loopback-only mapping is harmless. Before upgrading, check that the host port is free: `ss -ltn | grep ':3210 '` should print nothing (3001 was the default in 0.2.4 and collides with Uptime Kuma and dashdot).
 
 ## Restarts and health
 

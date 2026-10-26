@@ -1,15 +1,18 @@
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import type { Dirent } from 'node:fs';
 import { accessSync, createReadStream, createWriteStream, constants as fsConstants, readFileSync, statSync } from 'node:fs';
-import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
-import { ensureAppRoleInDatabase, latestMigration, migrationHead } from '@agentic-marketing/db';
+import { ensureAppRoleInDatabase, lastServerVersion, latestMigration, listWorkspaceIds, migrationHead } from '@agentic-marketing/db';
 
 // Backup and restore without loading the full server configuration: an operator must be able to
 // run them with only DATABASE_URL (and CLICKHOUSE_URL for events), even when other secrets are
 // missing. Everything here reads the few environment variables it needs directly.
+
+export type BackupKind = 'pre-upgrade' | 'manual' | 'scheduled';
 
 export interface FileEntry {
   file: string;
@@ -17,25 +20,52 @@ export interface FileEntry {
   sha256: string;
 }
 
-export interface ClickHouseTableEntry extends FileEntry {
-  name: string;
+/** One exported ClickHouse file: a whole table, or one workspace's rows when it has a row policy. */
+export interface ClickHouseFileEntry extends FileEntry {
+  workspace?: string;
   rows: number;
 }
 
-export interface BackupManifest {
+export interface ClickHouseTableEntry {
+  name: string;
+  /** `system.tables.total_rows` read just before the export; the comparison that catches lost rows. */
+  totalRowsBefore: number;
+  files: ClickHouseFileEntry[];
+}
+
+/** 0.2.4's shape. Read for Postgres-only restores; its ClickHouse part is refused (see restoreBackup). */
+export interface BackupManifestV1 {
   format: 1;
   version: string;
+  migrationHead: string | null;
+  createdAt: string;
+  postgres: FileEntry;
+  clickhouse?: { tables: (FileEntry & { name: string; rows: number })[] };
+}
+
+export interface BackupManifest {
+  format: 2;
+  kind: BackupKind;
+  /** The build that wrote this backup. */
+  version: string;
+  /** The version the backed-up data was last running, or null when it cannot be known. */
+  fromVersion: string | null;
+  /** Only for a pre-upgrade backup: the build that was about to migrate the database. */
+  toVersion?: string;
   migrationHead: string | null;
   createdAt: string;
   postgres: FileEntry;
   clickhouse?: { tables: ClickHouseTableEntry[] };
 }
 
+export type AnyBackupManifest = BackupManifest | BackupManifestV1;
+
 export interface CreateBackupOptions {
   /** Overrides BACKUP_DIR; relative paths resolve under INIT_CWD. */
   dir?: string;
   databaseUrl?: string;
   clickhouse?: boolean;
+  kind?: BackupKind;
   keepDays?: number;
   env?: NodeJS.ProcessEnv;
   log?: (message: string) => void;
@@ -146,6 +176,25 @@ async function fileEntry(root: string, file: string): Promise<FileEntry> {
   return { file, bytes: info.size, sha256: await sha256File(path) };
 }
 
+// A backup holds subscriber addresses, consent records and encrypted data; a bind mount makes
+// 0755/0644 readable by every user on the host. The CLI also sets umask 077, and these chmods
+// cover the pre-upgrade backup taken by the server process and any caller with a lax umask.
+const BACKUP_DIR_MODE = 0o700;
+const BACKUP_FILE_MODE = 0o600;
+
+async function secureDir(path: string): Promise<void> {
+  await chmod(path, BACKUP_DIR_MODE);
+}
+
+async function secureFile(path: string): Promise<void> {
+  await chmod(path, BACKUP_FILE_MODE);
+}
+
+/** Directory names cannot carry a dash variant safely; keep the release range readable anyway. */
+function versionForName(version: string | null): string {
+  return (version ?? 'unknown').replace(/[^A-Za-z0-9._-]+/g, '-');
+}
+
 /** Runs pg_dump -Fc --no-owner; connection details travel through PG* variables. */
 export async function dumpPostgres(databaseUrl: string, outFile: string): Promise<void> {
   await run('pg_dump', ['-Fc', '--no-owner', '--file', outFile], postgresClientEnv(databaseUrl));
@@ -166,40 +215,59 @@ export async function createBackup(opts: CreateBackupOptions = {}): Promise<{ di
   if (!databaseUrl) throw new Error('DATABASE_URL is not set');
   const dir = opts.dir ? resolveUserPath(opts.dir, env) : resolveBackupDir(env);
   const keepDays = opts.keepDays ?? keepDaysFromEnv(env);
+  const kind = opts.kind ?? 'manual';
   const version = readVersion();
   const createdAt = new Date();
   const stamp = createdAt
     .toISOString()
     .replace(/[-:]/g, '')
     .replace(/\.\d{3}Z$/, 'Z');
-  const name = `am-${version}-${stamp}`;
+  const migrationHeadValue = await migrationHead(databaseUrl);
+  // The version the data was running, not this build: on upgrade the two differ.
+  const fromVersion = await lastServerVersion(databaseUrl, migrationHeadValue);
+  const name =
+    kind === 'pre-upgrade'
+      ? `am-pre-upgrade-${versionForName(fromVersion)}-to-${versionForName(version)}-${stamp}`
+      : `am-${kind}-${versionForName(version)}-${stamp}`;
   const finalDir = join(dir, name);
   // A partial backup must never look like a completed one: write under a dot-prefixed name and
   // rename only after the manifest exists.
   const tempDir = join(dir, `.${name}.partial`);
 
   await mkdir(dir, { recursive: true });
+  await secureDir(dir);
   await rm(tempDir, { recursive: true, force: true });
-  await mkdir(tempDir, { recursive: true });
+  await mkdir(tempDir, { recursive: true, mode: BACKUP_DIR_MODE });
+  await secureDir(tempDir);
 
   try {
     log(`dumping Postgres to ${join(name, 'postgres.dump')}`);
-    await dumpPostgres(databaseUrl, join(tempDir, 'postgres.dump'));
+    const dumpPath = join(tempDir, 'postgres.dump');
+    await dumpPostgres(databaseUrl, dumpPath);
+    await secureFile(dumpPath);
     const manifest: BackupManifest = {
-      format: 1,
+      format: 2,
+      kind,
       version,
-      migrationHead: await migrationHead(databaseUrl),
+      fromVersion,
+      ...(kind === 'pre-upgrade' ? { toVersion: version } : {}),
+      migrationHead: migrationHeadValue,
       createdAt: createdAt.toISOString(),
       postgres: await fileEntry(tempDir, 'postgres.dump'),
     };
 
     if (opts.clickhouse) {
       log('exporting ClickHouse tables');
-      manifest.clickhouse = { tables: await exportClickHouse({ env, outDir: tempDir, log }) };
+      manifest.clickhouse = {
+        tables: await exportClickHouse({ env, databaseUrl, outDir: tempDir, log }),
+      };
     }
 
-    await writeFile(join(tempDir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
+    const manifestFile = join(tempDir, 'manifest.json');
+    await writeFile(manifestFile, `${JSON.stringify(manifest, null, 2)}\n`, { mode: BACKUP_FILE_MODE });
+    await secureFile(manifestFile);
     await rename(tempDir, finalDir);
+    await secureDir(finalDir);
     log(`backup written to ${finalDir}`);
     if (keepDays !== undefined) {
       try {
@@ -263,10 +331,14 @@ async function clickhouseRequest(
   database: string,
   query: string,
   init: RequestInit = {},
+  params: Record<string, string> = {},
 ): Promise<Response> {
   const target = new URL(endpoint.url);
   target.searchParams.set('query', query);
   target.searchParams.set('database', database);
+  // Custom settings travel as query parameters with their SQL_ prefix (the server allows only
+  // that prefix by default); SQL_workspace is what the row policy reads.
+  for (const [key, value] of Object.entries(params)) target.searchParams.set(key, value);
   const headers = new Headers(endpoint.headers);
   if (init.headers) for (const [key, value] of new Headers(init.headers)) headers.set(key, value);
   const response = await fetch(target, { ...init, headers });
@@ -277,9 +349,24 @@ async function clickhouseRequest(
   return response;
 }
 
-/** Streams every MergeTree-family table as Native; views and materialized views are skipped. */
+/** Rows a SELECT actually produced, from the summary ClickHouse fills with wait_end_of_query=1. */
+function summaryRows(response: Response, table: string): number {
+  const raw = response.headers.get('x-clickhouse-summary');
+  if (!raw) throw new Error(`ClickHouse did not return X-ClickHouse-Summary for ${table}; cannot verify the export`);
+  const summary = JSON.parse(raw) as { result_rows?: string | number };
+  const rows = Number(summary.result_rows);
+  if (!Number.isFinite(rows)) throw new Error(`ClickHouse summary for ${table} has no result_rows; cannot verify the export`);
+  return rows;
+}
+
+/**
+ * Streams every MergeTree-family table as Native. A table with a SELECT row policy returns only
+ * the rows of the workspace in SQL_workspace, so it is exported once per workspace (ids from
+ * Postgres) and the files are restored together; tables without a policy are one file.
+ */
 export async function exportClickHouse(opts: {
   env?: NodeJS.ProcessEnv;
+  databaseUrl?: string;
   outDir: string;
   url?: string;
   database?: string;
@@ -298,31 +385,88 @@ export async function exportClickHouse(opts: {
     .split('\n')
     .filter((line) => line.trim())
     .map((line) => JSON.parse(line) as { name: string; total_rows: string | number });
+  // Ask ClickHouse which tables are filtered, rather than hard-coding the list from the events
+  // package: an operator's extra policy must not silently produce an empty export.
+  const policies = await clickhouseRequest(
+    endpoint,
+    database,
+    'SELECT DISTINCT table FROM system.row_policies WHERE database = currentDatabase() AND select_filter IS NOT NULL FORMAT JSONEachRow',
+    { method: 'GET' },
+  );
+  const scoped = new Set(
+    (await policies.text())
+      .split('\n')
+      .filter((line) => line.trim())
+      .map((line) => (JSON.parse(line) as { table: string }).table),
+  );
 
-  await mkdir(join(opts.outDir, 'clickhouse'), { recursive: true });
+  const databaseUrl = opts.databaseUrl ?? env.DATABASE_URL;
+  let workspaceIds: string[] = [];
+  if (tables.some((table) => scoped.has(table.name))) {
+    if (!databaseUrl) throw new Error('DATABASE_URL is not set; it is needed to export tables that have row policies');
+    workspaceIds = await listWorkspaceIds(databaseUrl);
+    opts.log?.(`exporting row-policy tables for ${workspaceIds.length} workspace(s)`);
+  }
+
+  await mkdir(join(opts.outDir, 'clickhouse'), { recursive: true, mode: BACKUP_DIR_MODE });
+  await secureDir(join(opts.outDir, 'clickhouse'));
   const result: ClickHouseTableEntry[] = [];
   for (const table of tables) {
     const name = assertIdentifier(table.name, 'ClickHouse table');
-    const file = `clickhouse/${name}.native`;
-    const response = await clickhouseRequest(
-      endpoint,
-      database,
-      `SELECT * FROM ${quoteIdentifier(database)}.${quoteIdentifier(name)} FORMAT Native`,
-      { method: 'GET' },
-    );
-    if (!response.body) throw new Error(`ClickHouse returned no data for ${database}.${name}`);
-    await pipeline(
-      Readable.fromWeb(response.body as unknown as import('node:stream/web').ReadableStream),
-      createWriteStream(join(opts.outDir, file)),
-    );
-    const entry = await fileEntry(opts.outDir, file);
-    result.push({ name, rows: Number(table.total_rows) || 0, ...entry });
-    opts.log?.(`exported ClickHouse ${database}.${name} (${entry.bytes} bytes)`);
+    const totalRowsBefore = Number(table.total_rows) || 0;
+    const fileEntries: ClickHouseFileEntry[] = [];
+    // The policy is FOR SELECT only, so an export runs once per workspace with the setting set;
+    // the same workspace filter is written out so a changed policy cannot widen the result.
+    const targets = scoped.has(name) ? workspaceIds.map((workspace) => ({ workspace })) : [{ workspace: undefined }];
+    if (scoped.has(name)) {
+      const tableDir = `clickhouse/${name}`;
+      await mkdir(join(opts.outDir, tableDir), { recursive: true, mode: BACKUP_DIR_MODE });
+      await secureDir(join(opts.outDir, tableDir));
+    }
+    for (const target of targets) {
+      const workspace = target.workspace;
+      if (workspace !== undefined && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(workspace))
+        throw new Error(`Invalid workspace id ${workspace}`);
+      const file = workspace === undefined ? `clickhouse/${name}.native` : `clickhouse/${name}/${workspace}.native`;
+      const where = workspace === undefined ? '' : ` WHERE workspace_id = '${workspace}'`;
+      const response = await clickhouseRequest(
+        endpoint,
+        database,
+        `SELECT * FROM ${quoteIdentifier(database)}.${quoteIdentifier(name)}${where} FORMAT Native`,
+        { method: 'GET' },
+        { wait_end_of_query: '1', ...(workspace === undefined ? {} : { SQL_workspace: workspace }) },
+      );
+      if (!response.body) throw new Error(`ClickHouse returned no data for ${database}.${name}`);
+      const path = join(opts.outDir, file);
+      await pipeline(
+        Readable.fromWeb(response.body as unknown as import('node:stream/web').ReadableStream),
+        createWriteStream(path, { mode: BACKUP_FILE_MODE }),
+      );
+      await secureFile(path);
+      const entry = await fileEntry(opts.outDir, file);
+      const rows = summaryRows(response, `${database}.${name}`);
+      fileEntries.push({ ...(workspace === undefined ? {} : { workspace }), rows, ...entry });
+      opts.log?.(
+        `exported ClickHouse ${database}.${name}${workspace ? ` workspace ${workspace}` : ''} (${rows} rows, ${entry.bytes} bytes)`,
+      );
+    }
+    const exported = fileEntries.reduce((sum, entry) => sum + entry.rows, 0);
+    if (totalRowsBefore > 0 && exported === 0)
+      throw new Error(
+        `ClickHouse table ${database}.${name} has ${totalRowsBefore} rows but the export wrote none; ` +
+          'refusing to write a backup that claims data it does not contain',
+      );
+    if (totalRowsBefore !== exported)
+      opts.log?.(
+        `warning: ClickHouse ${database}.${name} had ${totalRowsBefore} rows before the export and ${exported} were exported ` +
+          '(live ingestion, merges, or rows of workspaces no longer in Postgres); both are recorded in the manifest',
+      );
+    result.push({ name, totalRowsBefore, files: fileEntries });
   }
   return result;
 }
 
-/** Replaces each table's contents with the Native file from a backup. */
+/** Replaces each table's contents with every Native file from a backup (one per workspace, or one). */
 export async function restoreClickHouse(opts: {
   runDir: string;
   tables: ClickHouseTableEntry[];
@@ -336,16 +480,19 @@ export async function restoreClickHouse(opts: {
   const endpoint = clickhouseEndpoint(opts.url ?? env.CLICKHOUSE_URL);
   for (const table of opts.tables) {
     const name = assertIdentifier(table.name, 'ClickHouse table');
-    const path = resolve(opts.runDir, table.file);
-    if (!path.startsWith(resolve(opts.runDir) + sep)) throw new Error(`manifest path escapes the backup: ${table.file}`);
     opts.log?.(`restoring ClickHouse ${database}.${name}`);
     await clickhouseRequest(endpoint, database, `TRUNCATE TABLE ${quoteIdentifier(database)}.${quoteIdentifier(name)}`, { method: 'POST' });
-    await clickhouseRequest(endpoint, database, `INSERT INTO ${quoteIdentifier(database)}.${quoteIdentifier(name)} FORMAT Native`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/octet-stream' },
-      body: Readable.toWeb(createReadStream(path)) as unknown as BodyInit,
-      duplex: 'half',
-    } as RequestInit);
+    for (const file of table.files) {
+      const path = resolve(opts.runDir, file.file);
+      if (!path.startsWith(resolve(opts.runDir) + sep)) throw new Error(`manifest path escapes the backup: ${file.file}`);
+      // Inserts are not filtered by a SELECT policy, so each workspace's file goes in as-is.
+      await clickhouseRequest(endpoint, database, `INSERT INTO ${quoteIdentifier(database)}.${quoteIdentifier(name)} FORMAT Native`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/octet-stream' },
+        body: Readable.toWeb(createReadStream(path)) as unknown as BodyInit,
+        duplex: 'half',
+      } as RequestInit);
+    }
   }
 }
 
@@ -361,24 +508,103 @@ function isFileEntry(value: unknown): value is FileEntry {
   return typeof v.file === 'string' && typeof v.bytes === 'number' && typeof v.sha256 === 'string';
 }
 
+const BACKUP_KINDS: BackupKind[] = ['pre-upgrade', 'manual', 'scheduled'];
+
 /** Reads and structurally checks manifest.json (checksums are verified separately). */
-export async function readManifest(dir: string): Promise<BackupManifest> {
-  const manifest = JSON.parse(await readFile(join(dir, 'manifest.json'), 'utf8')) as Partial<BackupManifest>;
-  if (manifest.format !== 1) throw new Error(`unsupported backup format ${String(manifest.format)}; this version reads format 1`);
+export async function readManifest(dir: string): Promise<AnyBackupManifest> {
+  const manifest = JSON.parse(await readFile(join(dir, 'manifest.json'), 'utf8')) as Record<string, unknown>;
+  if (manifest.format !== 1 && manifest.format !== 2)
+    throw new Error(`unsupported backup format ${String(manifest.format)}; this version reads formats 1 and 2`);
   if (typeof manifest.version !== 'string' || !manifest.version) throw new Error('manifest.json has no version');
   if (typeof manifest.createdAt !== 'string' || !manifest.createdAt) throw new Error('manifest.json has no createdAt');
   if (manifest.migrationHead !== null && typeof manifest.migrationHead !== 'string')
     throw new Error('manifest.json has an invalid migrationHead');
   if (!isFileEntry(manifest.postgres)) throw new Error('manifest.json has no valid postgres entry');
-  if (manifest.clickhouse !== undefined) {
-    if (!manifest.clickhouse || !Array.isArray(manifest.clickhouse.tables))
-      throw new Error('manifest.json has an invalid clickhouse entry');
-    for (const table of manifest.clickhouse.tables) {
-      if (!isFileEntry(table) || typeof table.name !== 'string' || typeof table.rows !== 'number')
-        throw new Error('manifest.json has an invalid ClickHouse table entry');
+  const clickhouse = manifest.clickhouse as { tables?: unknown } | undefined;
+  if (clickhouse !== undefined) {
+    if (!clickhouse || !Array.isArray(clickhouse.tables)) throw new Error('manifest.json has an invalid clickhouse entry');
+    if (manifest.format === 1) {
+      for (const table of clickhouse.tables) {
+        const t = table as Record<string, unknown>;
+        if (!isFileEntry(t) || typeof t.name !== 'string' || typeof t.rows !== 'number')
+          throw new Error('manifest.json has an invalid ClickHouse table entry');
+      }
+    } else {
+      for (const table of clickhouse.tables) {
+        const t = table as { name?: unknown; files?: unknown };
+        if (typeof t.name !== 'string' || !Array.isArray(t.files)) throw new Error('manifest.json has an invalid ClickHouse table entry');
+        for (const file of t.files) {
+          if (!isFileEntry(file) || typeof (file as { rows?: unknown }).rows !== 'number')
+            throw new Error('manifest.json has an invalid ClickHouse file entry');
+          const workspace = (file as { workspace?: unknown }).workspace;
+          if (workspace !== undefined && typeof workspace !== 'string')
+            throw new Error('manifest.json has an invalid ClickHouse file workspace');
+        }
+      }
     }
   }
-  return manifest as BackupManifest;
+  if (manifest.format === 2) {
+    if (!BACKUP_KINDS.includes(manifest.kind as BackupKind)) throw new Error('manifest.json has an invalid kind');
+    if (manifest.fromVersion !== null && typeof manifest.fromVersion !== 'string')
+      throw new Error('manifest.json has an invalid fromVersion');
+    if (manifest.toVersion !== undefined && typeof manifest.toVersion !== 'string')
+      throw new Error('manifest.json has an invalid toVersion');
+  }
+  return manifest as unknown as AnyBackupManifest;
+}
+
+/** A row for `am backup --list`, from a completed backup's manifest. */
+export interface BackupListing {
+  name: string;
+  dir: string;
+  kind: string;
+  dataVersion: string | null;
+  migrationHead: string | null;
+  createdAt: string;
+  bytes: number;
+  clickhouse: boolean;
+}
+
+function manifestBytes(manifest: AnyBackupManifest): number {
+  let bytes = manifest.postgres.bytes;
+  for (const table of manifest.clickhouse?.tables ?? []) {
+    if (manifest.format === 1) bytes += (table as FileEntry).bytes;
+    else for (const file of (table as ClickHouseTableEntry).files) bytes += file.bytes;
+  }
+  return bytes;
+}
+
+/** Completed backups in a directory, newest first. Partial dot-directories are not backups. */
+export async function listBackups(dir: string): Promise<BackupListing[]> {
+  const listings: BackupListing[] = [];
+  let entries: Dirent[];
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch (err) {
+    // A directory that does not exist yet simply has no backups; --list should not fail.
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw err;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !entry.name.startsWith('am-')) continue;
+    try {
+      const path = join(dir, entry.name);
+      const manifest = await readManifest(path);
+      listings.push({
+        name: entry.name,
+        dir: path,
+        kind: manifest.format === 1 ? 'unknown' : manifest.kind,
+        dataVersion: manifest.format === 1 ? manifest.version : manifest.fromVersion,
+        migrationHead: manifest.migrationHead,
+        createdAt: manifest.createdAt,
+        bytes: manifestBytes(manifest),
+        clickhouse: manifest.clickhouse !== undefined,
+      });
+    } catch {
+      // No manifest (or an unreadable one): not a completed backup, so it is not listed.
+    }
+  }
+  return listings.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
 async function verifyEntry(root: string, entry: FileEntry): Promise<void> {
@@ -398,7 +624,7 @@ async function verifyEntry(root: string, entry: FileEntry): Promise<void> {
  * Verifies a backup, refuses a newer schema unless forced, then replaces Postgres (and optionally
  * ClickHouse). It does not stop the app: the caller warns the operator to do that first.
  */
-export async function restoreBackup(opts: RestoreBackupOptions): Promise<BackupManifest> {
+export async function restoreBackup(opts: RestoreBackupOptions): Promise<AnyBackupManifest> {
   const env = opts.env ?? process.env;
   const log = opts.log ?? (() => {});
   const dir = resolveUserPath(opts.dir, env);
@@ -414,8 +640,19 @@ export async function restoreBackup(opts: RestoreBackupOptions): Promise<BackupM
     );
 
   if (opts.clickhouse) {
+    // 0.2.4 wrote format 1 and its ClickHouse files are empty whenever the default row policies
+    // are on (#129). Truncating and loading them would delete the event history without a warning.
+    if (manifest.format === 1 && manifest.clickhouse)
+      throw new Error(
+        'This backup was made by 0.2.4, whose ClickHouse export is empty under row policies (#129); ' +
+          'restoring it would delete your event history. Restore Postgres only (omit --clickhouse).',
+      );
     if (!manifest.clickhouse) throw new Error('this backup has no ClickHouse tables; take a backup with --clickhouse first');
-    for (const table of manifest.clickhouse.tables) await verifyEntry(dir, table);
+    // Verify every file before the first TRUNCATE: a half-verified restore must not empty a table.
+    for (const table of manifest.clickhouse.tables) {
+      if (manifest.format === 1) await verifyEntry(dir, table as FileEntry);
+      else for (const file of (table as ClickHouseTableEntry).files) await verifyEntry(dir, file);
+    }
   }
 
   const databaseUrl = opts.databaseUrl ?? env.DATABASE_URL;
@@ -435,7 +672,7 @@ export async function restoreBackup(opts: RestoreBackupOptions): Promise<BackupM
 
   if (opts.clickhouse && manifest.clickhouse) {
     log('restoring ClickHouse');
-    await restoreClickHouse({ runDir: dir, tables: manifest.clickhouse.tables, env, log });
+    await restoreClickHouse({ runDir: dir, tables: manifest.clickhouse.tables as ClickHouseTableEntry[], env, log });
   }
   log('restore complete; start the app again (it applies any migrations this version still needs)');
   return manifest;
@@ -538,6 +775,79 @@ function sleepUntilNextMinute(signal: AbortSignal): Promise<void> {
   });
 }
 
+/**
+ * The heartbeat the scheduler writes for `am backup --health`. The timestamp is both the JSON
+ * value and the file mtime, so a liveness check works even if the body is being replaced.
+ */
+export interface ScheduleStatus {
+  lastRunAt: string | null;
+  lastOk: boolean;
+  lastError?: string;
+  nextRunAt: string;
+}
+
+export const SCHEDULE_STATUS_FILE = '.schedule-status.json';
+const SCHEDULE_STALE_MS = 2 * 60_000;
+
+function scheduleStatusPath(dir: string): string {
+  return join(dir, SCHEDULE_STATUS_FILE);
+}
+
+export async function writeScheduleStatus(dir: string, status: ScheduleStatus): Promise<void> {
+  await mkdir(dir, { recursive: true });
+  await secureDir(dir);
+  const path = scheduleStatusPath(dir);
+  const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  // Rename keeps readers from seeing a half-written file; both name and mode are restricted.
+  await writeFile(temp, `${JSON.stringify(status, null, 2)}\n`, { mode: BACKUP_FILE_MODE });
+  await secureFile(temp);
+  await rename(temp, path);
+  await secureFile(path);
+}
+
+export async function readScheduleStatus(dir: string): Promise<ScheduleStatus | null> {
+  try {
+    return JSON.parse(await readFile(scheduleStatusPath(dir), 'utf8')) as ScheduleStatus;
+  } catch {
+    return null;
+  }
+}
+
+/** Next minute on which the cron expression matches, in UTC. */
+export function nextCronRun(spec: CronSpec, from: Date): Date {
+  const next = new Date(Math.floor(from.getTime() / 60_000) * 60_000 + 60_000);
+  // Five years of minutes: enough for any valid five-field expression (leap days included).
+  for (let i = 0; i < 5 * 366 * 24 * 60; i += 1) {
+    if (cronMatches(spec, next)) return next;
+    next.setUTCMinutes(next.getUTCMinutes() + 1);
+  }
+  throw new Error(`BACKUP_CRON "${spec.expression}" never matches`);
+}
+
+export async function backupHealth(
+  opts: { dir?: string; env?: NodeJS.ProcessEnv; now?: Date } = {},
+): Promise<{ ok: boolean; reason: string }> {
+  const env = opts.env ?? process.env;
+  const dir = opts.dir ? resolveUserPath(opts.dir, env) : resolveBackupDir(env);
+  const path = scheduleStatusPath(dir);
+  let age: number;
+  try {
+    age = (opts.now ?? new Date()).getTime() - (await stat(path)).mtimeMs;
+  } catch {
+    return { ok: false, reason: `no scheduler heartbeat at ${path}` };
+  }
+  if (age > SCHEDULE_STALE_MS) {
+    return { ok: false, reason: `scheduler heartbeat is ${Math.round(age / 1000)}s old; the backup service may be stuck` };
+  }
+  const status = await readScheduleStatus(dir);
+  if (!status) return { ok: false, reason: `scheduler heartbeat at ${path} is unreadable` };
+  if (!status.lastOk) {
+    const when = status.lastRunAt ? ` at ${status.lastRunAt}` : '';
+    return { ok: false, reason: `last scheduled backup${when} failed: ${status.lastError ?? 'unknown error'}` };
+  }
+  return { ok: true, reason: `scheduler alive; next backup at ${status.nextRunAt}` };
+}
+
 /** `am backup --schedule`: checks the cron expression every minute and keeps going on failure. */
 export async function runScheduledBackups(
   opts: { clickhouse?: boolean; env?: NodeJS.ProcessEnv; log?: (message: string) => void } = {},
@@ -565,6 +875,26 @@ export async function runScheduledBackups(
   }
   log(`scheduled backups: ${expression} (UTC), keeping ${keepDays} days`);
 
+  const dir = env.BACKUP_DIR?.trim() ? resolveUserPath(env.BACKUP_DIR.trim(), env) : resolveBackupDir(env);
+  const status: ScheduleStatus = {
+    lastRunAt: null,
+    lastOk: true,
+    nextRunAt: nextCronRun(spec, new Date()).toISOString(),
+  };
+  const heartbeat = async () => {
+    // Touching the file every minute is what --health uses to tell a live scheduler from a hung one.
+    status.nextRunAt = nextCronRun(spec, new Date()).toISOString();
+    try {
+      await writeScheduleStatus(dir, status);
+    } catch (err) {
+      log(`could not write schedule status: ${(err as Error).message}`);
+    }
+  };
+  await heartbeat();
+
+  // A backup can take longer than the health window; keep proving the scheduler is alive while
+  // createBackup runs, not only between minutes.
+  const heartbeatTimer = setInterval(() => void heartbeat(), 60_000);
   const stop = new AbortController();
   const onStop = () => stop.abort();
   process.once('SIGTERM', onStop);
@@ -576,16 +906,25 @@ export async function runScheduledBackups(
       const minute = now.toISOString().slice(0, 16);
       if (minute !== lastRunMinute && cronMatches(spec, now)) {
         lastRunMinute = minute;
+        status.lastRunAt = now.toISOString();
         try {
           // createBackup logs the final path; a failure is not fatal for the scheduler.
-          await createBackup({ clickhouse: opts.clickhouse, keepDays, env, log });
+          await createBackup({ clickhouse: opts.clickhouse, keepDays, kind: 'scheduled', env, log, dir });
+          status.lastOk = true;
+          delete status.lastError;
         } catch (err) {
-          log(`backup failed: ${(err as Error).message}`);
+          status.lastOk = false;
+          status.lastError = (err as Error).message;
+          log(`backup failed: ${status.lastError}`);
         }
+        await heartbeat();
+      } else {
+        await heartbeat();
       }
       await sleepUntilNextMinute(stop.signal);
     }
   } finally {
+    clearInterval(heartbeatTimer);
     process.off('SIGTERM', onStop);
     process.off('SIGINT', onStop);
   }

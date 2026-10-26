@@ -2,6 +2,30 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+Fixes from the MartechSignal pilot's upgrade to 0.2.4 (#129–#135), the last step of [Phase 12](docs/architecture/roadmap-wave-3.md#phase-12-install-and-upgrade). **ClickHouse backups made with 0.2.4 contain no event data** (#129); take a new one after upgrading. REST and MCP stay backwards compatible: one new read-only command, `system.status`. One migration runs at start-up.
+
+### Fixed
+
+- **#129 — `am backup --clickhouse` wrote empty event tables (data loss on restore).** Tables with a workspace row policy (the Compose default, `CLICKHOUSE_ROW_POLICIES=required`) were read without `SQL_workspace`, so the policy returned no rows while the manifest claimed them. They are now exported once per workspace (`clickhouse/<table>/<workspace>.native`); the manifest records the rows actually written (format 2), and a backup fails when a non-empty table exports nothing. `am restore --clickhouse` refuses a 0.2.4 (format 1) backup, which would have replaced the event history with nothing; restore its Postgres part without `--clickhouse`. A test now backs up and restores with the row policies on.
+- **#130 — backups:** the automatic one is named after both versions, `am-pre-upgrade-<from>-to-<to>-<time>`, and others `am-manual-…` / `am-scheduled-…`; manifests record `kind`, `fromVersion` and `toVersion`, and `am backup --list` shows them. The version a database last ran is recorded in a new `server_versions` table (for older databases it is derived from the migration head). Backup directories are created `0700` and files `0600` (they hold subscriber data). The scheduled `backup` service has its own healthcheck, `am backup --health`, instead of the web server's, which kept it "unhealthy".
+- **#131 — `am doctor --env-file -`** reads the file from stdin, so the upgrade check works on a `0600` `.env` owned by root (it said "not found" because pnpm passed the flag to Node); an unreadable file now says why, with owner and mode. `am --help`, `am help`, `am version` and `am <command> --help` work without any configuration, and a configuration error prints one line ("Configuration is incomplete: …") instead of a stack trace.
+- **#132 — `am doctor` false positives:** `COMPOSE_*` and `DOCKER_*` are no longer unknown; "new variables" means new since the version you come from (the `AM_VERSION` in the file, or `--from`), leaves out what Compose supplies, and lists optional ones as info; DMARC inherited from the organizational domain counts (and `p=none` warns); the public-port hint describes `PUBLIC_BIND` and `ports: !override`.
+- **#133 — `am smoke`:** the provider check uses the new read-only `system.status` (version, whether enabled providers cover marketing and transactional mail, pending approvals; no addresses or secrets), so it passes with an ordinary API token; network errors say why (`connect ECONNREFUSED …`, `getaddrinfo ENOTFOUND …`); the signup check's side effects (a profile and a real confirmation e-mail) are documented, with `--cleanup` where the credentials allow erasing.
+- **#134 — Compose:** the public listener's host port defaults to `127.0.0.1:3210` (3001 collides with Uptime Kuma and dashdot). The override example shows a tunnel on a Docker network without any host port (`ports: !override`), a neutral network name, and a `/backups` bind mount owned by uid 1000.
+- **#135 — upgrading across releases:** `am upgrade-notes <version>` merges the upgrade notes of every release since that version; the image and the Compose bundle include `CHANGELOG.md`. `UPGRADING.md` covers skipping releases, backing up from versions without `am backup`, rolling back to releases without a bundle, and runs `am doctor` with the new image before `.env` changes. The 0.2.4 notes now say what applies when coming from 0.2.2.
+
+### Upgrading from 0.2.4
+
+- **Migrations:** `0028_server_versions.sql` (a small table of the versions that ran). The app takes its pre-upgrade backup first, now named `am-pre-upgrade-0.2.4-to-0.2.5-…`. Coming from 0.2.2 or older, 0.2.3's migration runs too: `am upgrade-notes 0.2.2` lists everything.
+- **Configuration:** no new variables. The default of `PUBLIC_BIND` changes from `127.0.0.1:3001` to `127.0.0.1:3210`.
+- **Breaking changes:** none in REST, MCP or artifacts. `am restore --clickhouse` refuses backups made by 0.2.4 (their ClickHouse part is empty).
+- **Manual steps:**
+  - If you relied on the default host port 3001 for the public listener (a tunnel or proxy on the host pointing at `127.0.0.1:3001`), set `PUBLIC_BIND=127.0.0.1:3001` in `.env` or move the proxy to 3210. With `PUBLIC_BIND` already set, nothing changes. A tunnel on a Docker network needs no host port: see block (a) of `compose.override.example.yaml`.
+  - After upgrading, take a new ClickHouse backup (`docker compose exec app am backup --clickhouse`): 0.2.4's have no event data. If you run the scheduled `backup` service, add the `healthcheck` from block (d) of the override example.
+- **Upgrade:** download `agentic-marketing-compose-<version>.tar.gz`, replace `docker-compose.yml` with its copy, check your configuration with the new image (`AM_VERSION=<version> docker compose run --rm --no-deps -T app am doctor --env-file - < .env`), then set `AM_VERSION=<version>` in `.env` and `docker compose pull && docker compose up -d` (Helm: the chart of the same version). Then `docker compose exec app am doctor`.
+
 ## [0.2.4] - 2026-10-26
 
 Phase 12 of [wave 3](docs/architecture/roadmap-wave-3.md#phase-12-install-and-upgrade): installing, upgrading, checking and restoring the platform without a checkout or local edits. It is a patch release because everything is additive: REST and MCP stay backwards compatible (`workspace.get` gains one output field), every new setting is optional, and no migration runs. This is the first release with a Compose bundle and the fixed upgrade block below.
@@ -26,7 +50,7 @@ Phase 12 of [wave 3](docs/architecture/roadmap-wave-3.md#phase-12-install-and-up
 
 ### Upgrading from 0.2.3
 
-- **Migrations:** none. Because nothing is pending, the new automatic pre-upgrade backup does not run on this upgrade; it runs from the next release with a migration. Take one by hand if you want it: `docker compose exec app am backup` after upgrading writes to the new `backups` volume.
+- **Migrations:** none from 0.2.3, so from 0.2.3 the new automatic pre-upgrade backup does not run (take one by hand after upgrading: `docker compose exec app am backup`). Coming from 0.2.2 or older, 0.2.3's migration `0027_journey_consent_exits.sql` is pending, and the pre-upgrade backup does run. Back up by hand before upgrading from a version without `am backup`: `docker compose exec -T postgres pg_dump -U am -Fc am > pre-upgrade.dump`.
 - **Configuration:** new, all optional: `PUBLIC_BIND` (default `127.0.0.1:3001`, Compose only), `SKIP_PRE_UPGRADE_BACKUP` (default `false`), `BACKUP_DIR` (set to `/backups` by Compose), and for the optional backup service `BACKUP_CRON` (default `30 3 * * *`) and `BACKUP_KEEP_DAYS` (default 14). `docker-compose.yml` adds the `backups` volume and switches NATS to `nats:2.15.0-alpine` (same version, same data volume).
 - **Breaking changes:** none.
 - **Manual steps:**

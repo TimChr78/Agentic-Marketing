@@ -52,8 +52,8 @@ for _ in $(seq 30); do
 done
 [ -n "$sent" ] || { echo "no confirmation e-mail was sent" >&2; exit 1; }
 
-# The checks an operator runs after an upgrade (am smoke), inside the container against both
+# The checks an operator runs after an upgrade (am smoke) with a narrow token, as an agent has, inside the container against both
 # listeners: admin paths hidden on the public one, dot-segments refused, MCP, the provider, a signup.
-TOKEN=$(call apiTokens.create '{"name":"smoke","scopes":["workspace:admin"]}' | json '.token')
+TOKEN=$(call apiTokens.create '{"name":"smoke","scopes":["artifacts:read"]}' | json '.token')
 dc exec -T -e AM_TOKEN="$TOKEN" app am smoke --public-url http://localhost:3001 --admin-url http://localhost:3000 \
   --form "$FORM" --email grace@example.com

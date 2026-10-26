@@ -26,19 +26,31 @@ type RpcMessage = {
   result?: Record<string, unknown>;
   error?: { code?: unknown; message?: unknown };
 };
+type SystemStatus = {
+  serverVersion: string;
+  emailProvider: {
+    configured: boolean;
+    marketing: boolean;
+    transactional: boolean;
+    adapter: string | null;
+    tracking: string | null;
+  };
+};
 
-const USAGE = `usage: am smoke --public-url URL [--admin-url URL] [--token amk_…] [--form FORM_ID] [--email ADDRESS] [--asset PATH] [--json]
+const USAGE = `usage: am smoke --public-url URL [--admin-url URL] [--token amk_…] [--form FORM_ID] [--email ADDRESS] [--cleanup] [--asset PATH] [--json]
 
   --public-url  public listener, e.g. https://links.example.com or https://example.com/am
   --admin-url   admin listener, e.g. http://localhost:3000
-  --token       API token (or set AM_TOKEN) with workspace:admin
+  --token       API token (or set AM_TOKEN) with artifacts:read; add profiles:read for --cleanup
   --form        published form id (frm_…) for a signup round trip
   --email       address that should receive the signup confirmation
+  --cleanup     with --form and --email, try to erase the profile the signup created
   --asset       public asset path, e.g. /a/ast_…/logo.png
   --json        print { ok, checks } instead of a table
 
 Checks a publicly reachable install: health and assets work, admin routes and dot-segment
 traversal are hidden, MCP and the e-mail provider answer, and a form redirects as expected.
+A signup check creates a real profile in the live workspace; a double opt-in form also sends a real e-mail.
 Exits 1 if any check fails.`;
 
 export async function run(args: string[]): Promise<number> {
@@ -48,6 +60,7 @@ export async function run(args: string[]): Promise<number> {
     token?: string;
     form?: string;
     email?: string;
+    cleanup?: boolean;
     asset?: string;
     json?: boolean;
     help?: boolean;
@@ -61,6 +74,7 @@ export async function run(args: string[]): Promise<number> {
         token: { type: 'string' },
         form: { type: 'string' },
         email: { type: 'string' },
+        cleanup: { type: 'boolean' },
         asset: { type: 'string' },
         json: { type: 'boolean' },
         help: { type: 'boolean' },
@@ -98,6 +112,7 @@ export async function run(args: string[]): Promise<number> {
   const form = values.form?.trim() || undefined;
   const email = values.email?.trim() || undefined;
   const asset = values.asset?.trim() || undefined;
+  const cleanup = values.cleanup === true;
   const checks: Check[] = [];
 
   await check(checks, 'public.health', undefined, async () => {
@@ -169,7 +184,9 @@ export async function run(args: string[]): Promise<number> {
     });
     await res.body?.cancel();
     if (res.status !== 200) throw new Error(`GET /readyz returned HTTP ${res.status}`);
-    return 'HTTP 200';
+    // The version is useful, but the token may not be able to read status; health still passes then.
+    const status = token ? await systemStatus(adminTarget!, token).catch(() => null) : null;
+    return status ? `HTTP 200, server ${status.serverVersion}` : 'HTTP 200';
   });
 
   await check(checks, 'admin.mcp', adminTarget ? (token ? undefined : 'needs --token or AM_TOKEN') : 'needs --admin-url', async () => {
@@ -209,40 +226,40 @@ export async function run(args: string[]): Promise<number> {
   });
 
   await check(checks, 'admin.provider', adminTarget ? (token ? undefined : 'needs --token or AM_TOKEN') : 'needs --admin-url', async () => {
-    const res = await fetch(adminTarget!.origin + publicPath(adminTarget!, '/v1/emailProviders.list'), {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${token}`, accept: 'application/json' },
-      body: '{}',
-      signal: AbortSignal.timeout(TIMEOUT_MS),
-    });
-    const text = await res.text();
-    if (res.status !== 200) throw new Error(`POST /v1/emailProviders.list returned HTTP ${res.status}${bodySuffix(text)}`);
-    let body: { providers?: unknown };
-    try {
-      body = JSON.parse(text) as { providers?: unknown };
-    } catch {
-      throw new Error('emailProviders.list returned non-JSON');
-    }
-    if (!Array.isArray(body.providers)) throw new Error('emailProviders.list returned no providers array');
-    if (body.providers.length === 0) throw new Error('no e-mail provider configured');
-    return `${body.providers.length} provider${body.providers.length === 1 ? '' : 's'} configured`;
+    const status = await systemStatus(adminTarget!, token!);
+    const { marketing, transactional, adapter } = status.emailProvider;
+    const missing = [!marketing ? 'marketing' : '', !transactional ? 'transactional' : ''].filter(Boolean);
+    if (missing.length)
+      throw new Error(`no enabled e-mail provider for ${missing.length === 2 ? 'marketing and transactional' : missing[0]} mail`);
+    return `${adapter ?? 'unknown'} provider configured for marketing and transactional mail`;
   });
 
-  await check(checks, 'public.signup', form && email ? undefined : 'needs --form and --email', async () => {
-    const body = new URLSearchParams({ email: email! }).toString();
-    const res = await fetch(publicTarget.origin + publicPath(publicTarget, `/f/${form}`), {
-      method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'text/html' },
-      body,
-      signal: AbortSignal.timeout(TIMEOUT_MS),
-      redirect: 'manual',
-    });
-    const location = res.headers.get('location');
-    await res.body?.cancel();
-    if (res.status !== 303) throw new Error(`POST /f/${form} returned HTTP ${res.status}${location ? `, Location ${location}` : ''}`);
-    if (!location) throw new Error(`POST /f/${form} returned 303 without a Location header`);
-    return `303 → ${location}; a confirmation e-mail should arrive at ${email}`;
-  });
+  await check(
+    checks,
+    'public.signup',
+    !form || !email
+      ? 'needs --form and --email'
+      : cleanup && (!adminTarget || !token)
+        ? 'needs --admin-url and --token for --cleanup'
+        : undefined,
+    async () => {
+      const body = new URLSearchParams({ email: email! }).toString();
+      const res = await fetch(publicTarget.origin + publicPath(publicTarget, `/f/${form}`), {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'text/html' },
+        body,
+        signal: AbortSignal.timeout(TIMEOUT_MS),
+        redirect: 'manual',
+      });
+      const location = res.headers.get('location');
+      await res.body?.cancel();
+      if (res.status !== 303) throw new Error(`POST /f/${form} returned HTTP ${res.status}${location ? `, Location ${location}` : ''}`);
+      if (!location) throw new Error(`POST /f/${form} returned 303 without a Location header`);
+      const detail = `303 → ${location}; a confirmation e-mail should arrive at ${email}`;
+      if (!cleanup) return detail;
+      return `${detail}; ${await cleanupSignupProfile(adminTarget!, token!, email!)}`;
+    },
+  );
 
   const ok = checks.every((c) => c.status !== 'fail');
   if (values.json) {
@@ -406,10 +423,96 @@ function bodySuffix(text: string): string {
   return oneLine ? ` (${oneLine.slice(0, 200)})` : '';
 }
 
+/** Call an admin command with a token; the REST surface returns the output directly. */
+async function restCommand(target: Target, token: string, command: string, input: unknown): Promise<Record<string, unknown>> {
+  const res = await fetch(target.origin + publicPath(target, `/v1/${command}`), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${token}`, accept: 'application/json' },
+    body: JSON.stringify(input),
+    signal: AbortSignal.timeout(TIMEOUT_MS),
+    redirect: 'manual',
+  });
+  const text = await res.text();
+  if (res.status !== 200) throw new Error(`POST /v1/${command} returned HTTP ${res.status}${bodySuffix(text)}`);
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    throw new Error(`${command} returned non-JSON`);
+  }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error(`${command} returned unexpected JSON`);
+  return body as Record<string, unknown>;
+}
+
+async function systemStatus(target: Target, token: string): Promise<SystemStatus> {
+  const body = await restCommand(target, token, 'system.status', {});
+  const provider = body.emailProvider;
+  if (typeof body.serverVersion !== 'string' || !provider || typeof provider !== 'object' || Array.isArray(provider))
+    throw new Error('system.status returned an unexpected body');
+  const p = provider as Record<string, unknown>;
+  if (typeof p.configured !== 'boolean' || typeof p.marketing !== 'boolean' || typeof p.transactional !== 'boolean')
+    throw new Error('system.status returned an unexpected body');
+  return {
+    serverVersion: body.serverVersion,
+    emailProvider: {
+      configured: p.configured,
+      marketing: p.marketing,
+      transactional: p.transactional,
+      adapter: typeof p.adapter === 'string' ? p.adapter : null,
+      tracking: typeof p.tracking === 'string' ? p.tracking : null,
+    },
+  };
+}
+
+/** Erase the profile a signup created, or say plainly why it is still there. */
+async function cleanupSignupProfile(target: Target, token: string, email: string): Promise<string> {
+  const leftInPlace =
+    'left in place: erase with profiles.erase or let the unconfirmed-signup retention (RETENTION_UNCONFIRMED_DAYS) remove it';
+  let profileId: string | null = null;
+  try {
+    // The public listener only queues the event; a worker creates the profile shortly afterwards.
+    for (let attempt = 0; attempt < 10 && !profileId; attempt++) {
+      if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 200));
+      const found = await restCommand(target, token, 'profiles.find', { type: 'email', value: email });
+      profileId = typeof found.profileId === 'string' ? found.profileId : null;
+    }
+  } catch (err) {
+    return `${leftInPlace} (could not look it up: ${messageOf(err)})`;
+  }
+  if (!profileId) return 'no profile found to erase';
+  try {
+    await restCommand(target, token, 'profiles.erase', { profileId, reason: 'am smoke signup cleanup' });
+    return `profile ${profileId} erased`;
+  } catch (err) {
+    return `profile ${profileId} ${leftInPlace} (${messageOf(err)})`;
+  }
+}
+
 function messageOf(err: unknown): string {
   if (err instanceof Error) {
     if (err.name === 'TimeoutError' || err.name === 'AbortError') return `timed out after ${TIMEOUT_MS / 1000} s`;
-    return err.message || err.name;
+    const base = err.message || err.name;
+    const cause = causeText(err.cause);
+    return cause ? `${base}: ${cause}` : base;
   }
   return String(err);
+}
+
+/** Node puts the useful part of a network failure in `err.cause`; "fetch failed" alone hides it. */
+function causeText(cause: unknown): string | undefined {
+  if (cause === undefined || cause === null) return undefined;
+  if (cause instanceof AggregateError) {
+    const parts = cause.errors.map(causeText).filter((part): part is string => !!part);
+    return parts.length ? parts.join('; ') : describeError(cause);
+  }
+  if (cause instanceof Error) return describeError(cause);
+  return String(cause);
+}
+
+function describeError(err: Error): string {
+  const code = (err as Error & { code?: unknown }).code;
+  const message = err.message || err.name;
+  const text = typeof code === 'string' && !message.includes(code) ? `${code} ${message}` : message;
+  const nested = causeText(err.cause);
+  return nested ? `${text}: ${nested}` : text;
 }

@@ -125,7 +125,7 @@ jobs:
           awk -v v="$v" '$0 ~ "^## \\[" v "\\]" {on=1; next} /^## \[/ {on=0} on' CHANGELOG.md > notes.md
           printf '\n**Image:** `ghcr.io/%s/agentic-marketing:%s`\n' "${GITHUB_REPOSITORY_OWNER,,}" "$v" >> notes.md
           bundle="agentic-marketing-compose-$v.tar.gz"
-          printf '\n**Compose bundle:** `%s` (sha256 `%s`): `docker-compose.yml`, `.env.example`, `compose.override.example.yaml` and `UPGRADING.md`. All checksums are in `SHA256SUMS`.\n' \
+          printf '\n**Compose bundle:** `%s` (sha256 `%s`): `docker-compose.yml`, `.env.example`, `compose.override.example.yaml`, `UPGRADING.md` and `CHANGELOG.md`. All checksums are in `SHA256SUMS`. Skipping releases? `am upgrade-notes <your version>` merges the upgrade notes of every release in between.\n' \
             "$bundle" "$(awk -v f="$bundle" '$2 == f {print $1}' dist/SHA256SUMS)" >> notes.md
           flags=""
           [ "${{ steps.version.outputs.prerelease }}" = "true" ] && flags="--prerelease"

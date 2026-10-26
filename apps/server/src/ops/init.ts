@@ -12,6 +12,15 @@ import { isMcpResourceUrlAllowed } from '@agentic-marketing/auth';
 const TEMPLATE = new URL('../../../../.env.example', import.meta.url);
 const GENERATED = ['POSTGRES_PASSWORD', 'APP_DB_PASSWORD', 'AUTH_SECRET', 'MASTER_KEY'] as const;
 
+const USAGE = `usage: am init [--out PATH] [--force] [--public-url URL] [--links-url URL]
+
+Writes .env from .env.example with fresh secrets. It never prints a secret.
+
+  --out PATH          Where to write, relative to where you ran the command (default: .env).
+  --force             Overwrite an existing file.
+  --public-url URL    Address people and AI agents use (admin UI, REST and MCP).
+  --links-url URL     Address used in e-mails and hosted pages; empty uses PUBLIC_URL.`;
+
 function templateValue(template: string, key: string): string {
   for (const line of template.split(/\r?\n/)) {
     const match = /^([A-Z0-9_]+)=(.*)$/.exec(line);
@@ -73,6 +82,7 @@ export async function run(args: string[]): Promise<number> {
   let values: {
     out?: string;
     force?: boolean;
+    help?: boolean;
     'public-url'?: string;
     'links-url'?: string;
   };
@@ -82,13 +92,19 @@ export async function run(args: string[]): Promise<number> {
       options: {
         out: { type: 'string' },
         force: { type: 'boolean' },
+        help: { type: 'boolean', short: 'h' },
         'public-url': { type: 'string' },
         'links-url': { type: 'string' },
       },
     }));
   } catch (err) {
     console.error(`am init: ${err instanceof Error ? err.message : String(err)}`);
+    console.error(USAGE);
     return 1;
+  }
+  if (values.help) {
+    console.log(USAGE);
+    return 0;
   }
 
   const cwd = process.env.INIT_CWD ?? process.cwd();

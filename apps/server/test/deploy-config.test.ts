@@ -88,7 +88,7 @@ describe('compose production defaults', () => {
   it('publishes the public listener from PUBLIC_BIND without edits', () => {
     const app = service(compose, 'app');
     expect(app).toMatch(/PUBLIC_PORT: \$\{PUBLIC_PORT:-\}/);
-    expect(app).toMatch(/"\$\{PUBLIC_BIND:-127\.0\.0\.1:3001\}:\$\{PUBLIC_PORT:-3001\}"/);
+    expect(app).toMatch(/"\$\{PUBLIC_BIND:-127\.0\.0\.1:3210\}:\$\{PUBLIC_PORT:-3001\}"/);
     const mapping = app.split('\n').find((line) => line.includes('PUBLIC_BIND') && line.trim().startsWith('-'));
     expect(mapping).toBeTruthy();
     expect(mapping).not.toContain('#');
@@ -149,7 +149,7 @@ describe('.env.example', () => {
   });
 
   it('documents the public listener bind address', () => {
-    expect(envExample).toMatch(/^# PUBLIC_BIND=127\.0\.0\.1:3001$/m);
+    expect(envExample).toMatch(/^# PUBLIC_BIND=127\.0\.0\.1:3210$/m);
     expect(envExample).toMatch(/PUBLIC_BIND[\s\S]{0,300}(tunnel|network)/i);
   });
 });

@@ -8,44 +8,83 @@ It does not read the database or the server configuration, so it works from the 
 docker compose exec app am smoke --public-url https://links.example.com
 ```
 
+## Token scope
+
+Create a token in **Settings → API tokens** (or with `apiTokens.create`) and grant only `artifacts:read`. That is enough for every token-based check: `system.status` is readable by any authenticated principal, so the provider check no longer needs an admin token (API tokens cannot hold `workspace:admin` anyway). Add `profiles:read` only if you use `--cleanup`, which looks up the profile a signup created. A token is shown once. Read it from `AM_TOKEN` so it does not land in shell history.
+
+`profiles.erase` is deliberately people-only, so `am smoke --cleanup` cannot erase a profile with an API token. It still finds the profile, reports its id, and says what to do next.
+
 ## Flags
 
 | Flag | Meaning |
 |---|---|
 | `--public-url URL` | Required. The public listener, e.g. `https://links.example.com`. If the site proxies a path, give the prefix too: `https://example.com/am`. |
 | `--admin-url URL` | The admin listener, usually `http://localhost:3000` from inside the app container. Needed for the `admin.*` checks. |
-| `--token amk_…` | An API token with `workspace:admin`. Read from `AM_TOKEN` when the flag is omitted, so the token does not land in shell history. |
+| `--token amk_…` | An API token with `artifacts:read`, plus `profiles:read` for `--cleanup`. Read from `AM_TOKEN` when the flag is omitted. |
 | `--form FORM_ID` | A published form (`frm_…`) for the signup round trip. |
-| `--email ADDRESS` | The address to submit to the form. Use an address you can check, or a plus address such as `you+smoke@example.com`. |
+| `--email ADDRESS` | The address to submit to the form. Use an address you can check, preferably a plus address such as `you+smoke@example.com`. |
+| `--cleanup` | After the signup check, look up the profile by e-mail and try to erase it. Needs `--admin-url` and a token with `profiles:read`. |
 | `--asset PATH` | A public asset path to fetch, e.g. `/a/ast_…/logo.png`. |
 | `--json` | Print `{ "ok": true|false, "checks": [...] }` instead of the table. |
 
-Create the token in **Settings → API tokens** (or with `apiTokens.create`) and grant only `workspace:admin`. A token is shown once. The form and asset flags are optional; leave them out if you do not have a test form or asset.
+The form and asset flags are optional; leave them out if you do not have a test form or asset.
+
+## What the signup check really does
+
+`POST /f/<form>` is not a dry run. A submission writes to the live workspace:
+
+- It creates or updates a customer profile, keyed by the form's anonymous id, with the e-mail address as a trait.
+- With a **double opt-in** form it also creates a pending (unconfirmed) signup in the live workspace and sends a real confirmation e-mail through the configured provider. Until someone clicks the link, the profile has no consent for the form's purposes, so it is not in consent-based segments and will not receive consent-based sends.
+- A form **without** double opt-in records consent immediately, because that is what the form promises.
+- The profile and its form identifier stay until they are erased or cleaned up. The unconfirmed-signup retention (`RETENTION_UNCONFIRMED_DAYS`, 30 days by default) removes profiles that still have no consent and only a form anonymous id; the scheduler applies it. A signup that recorded consent is not removed by that retention.
+
+Use an address you own, such as `you+smoke@example.com`. Do not use a stranger's address or a list member.
+
+`--cleanup` runs after the form answers `303`: it retries `profiles.find` for the submitted address (workers create the profile just after the HTTP response), then calls `profiles.erase` with the reason `am smoke signup cleanup`. When erasure is not allowed, the check still passes and its detail says:
+
+```text
+left in place: erase with profiles.erase or let the unconfirmed-signup retention (RETENTION_UNCONFIRMED_DAYS) remove it
+```
+
+That is the normal result for an API token, because `profiles.erase` can only be run by a person. Erase the profile as a person in the admin UI, or let the retention pass remove it. Smoke signups are not excluded from profile counts or statistics; only consent-based segments and sends ignore an unconfirmed one.
 
 ## What each check proves
 
-| Check | What it does | What a pass means |
+| Check | Needs | What it does and what a pass means |
 |---|---|---|
-| `public.health` | `GET <public>/healthz` | The public listener is reachable and the server answers `200` with `{"ok":true}`. The server's `version` is shown when present. |
-| `public.admin-hidden` | `POST /v1/workspace.get`, `POST /mcp`, `GET /`, `GET /api/auth/get-session`, `GET /openapi.json` on the public URL | All five answer `404`. The public listener exposes only forms, links, pages, assets and probes; the admin API, MCP and UI are not reachable through the site. |
-| `public.dot-segments` | Sends `/f/../v1/workspace.get`, `/f/%2e%2e/v1/workspace.get` and `/hooks/..%2fmcp` exactly as written (no client normalisation) | Every one answers `400`. Traversal through a public prefix cannot reach the admin API, even encoded. |
-| `public.assets` | `GET <public><asset>` | The asset answers `200` with a non-HTML content type, so uploads and the public asset route still work. |
-| `admin.health` | `GET <admin>/readyz` | Postgres, ClickHouse and Valkey are reachable: `200` means the admin listener is ready. |
-| `admin.mcp` | MCP `initialize`, then `tools/list`, with `Authorization: Bearer <token>` | The MCP endpoint accepts the token and lists at least one tool; the detail says how many. Missing token skips the check. |
-| `admin.provider` | `POST /v1/emailProviders.list` with the bearer token | At least one e-mail provider is configured. It fails with `no e-mail provider configured` when deliveries would have nowhere to go. |
-| `public.signup` | Posts an HTML form (`email=…`) to `<public>/f/<form>` | The form answers `303` with a `Location` header. A confirmation e-mail should arrive at the address (double opt-in forms send it asynchronously). |
+| `public.health` | — | `GET <public>/healthz` answers `200` with `{"ok":true}`. The server's `version` is shown when present. |
+| `public.admin-hidden` | — | `POST /v1/workspace.get`, `POST /mcp`, `GET /`, `GET /api/auth/get-session` and `GET /openapi.json` on the public URL all answer `404`. The public listener exposes only forms, links, pages, assets and probes. |
+| `public.dot-segments` | — | Sends `/f/../v1/workspace.get`, `/f/%2e%2e/v1/workspace.get` and `/hooks/..%2fmcp` exactly as written (no client normalisation); every one answers `400`. |
+| `public.assets` | `--asset` | `GET <public><asset>` answers `200` with a non-HTML content type, so uploads and the public asset route still work. |
+| `admin.health` | `--admin-url`; token optional | `GET <admin>/readyz` answers `200`, so Postgres, ClickHouse and Valkey are reachable. With a token that can read `system.status`, the detail also shows the running server version. |
+| `admin.mcp` | `--admin-url`, token | MCP `initialize` and `tools/list` accept the token and list at least one tool; the detail says how many. |
+| `admin.provider` | `--admin-url`, token | `system.status` says an enabled provider covers both marketing and transactional mail, and names its adapter. It fails with which one is missing, without revealing addresses, hosts or secrets. |
+| `public.signup` | `--form`, `--email`; `--cleanup` also needs `--admin-url` and `profiles:read` | Posts an HTML form (`email=…`) to `<public>/f/<form>`. The form answers `303` with a `Location` header. The signup side effects above are real. |
 
 Checks that need a flag are reported as `skip`, not `fail`. A skip does not change the exit code. A failed check does not stop later checks, so one run shows every problem.
+
+## Errors and timeouts
+
+A failed network check includes the underlying cause instead of only `fetch failed`, for example:
+
+```text
+fetch failed: connect ECONNREFUSED 127.0.0.1:3000
+fetch failed: getaddrinfo ENOTFOUND links.example.com
+fetch failed: CERT_HAS_EXPIRED certificate has expired
+```
+
+Every request has a five-second timeout, reported as `timed out after 5 s`. A REST command that answers with a non-`200` status includes the status and a short body excerpt, which usually names the missing permission or input.
 
 ## Run it after an upgrade
 
 ```bash
-export AM_TOKEN=amk_…   # workspace:admin
+export AM_TOKEN=amk_…   # artifacts:read, plus profiles:read for --cleanup
 docker compose exec -e AM_TOKEN app am smoke \
   --public-url https://links.example.com \
   --admin-url http://localhost:3000 \
   --form frm_… \
   --email you+smoke@example.com \
+  --cleanup \
   --asset /a/ast_…/logo.png
 ```
 
@@ -62,7 +101,7 @@ With `--json` the same result is machine-readable:
 }
 ```
 
-`ok` is true only when there are no failures. Each check has a five-second timeout, so a hung listener fails instead of blocking the upgrade.
+`ok` is true only when there are no failures.
 
 ## Path prefixes and proxies
 
@@ -81,4 +120,4 @@ docker compose exec -e AM_TOKEN app am smoke \
   --json
 ```
 
-The form, asset and provider checks need those objects to exist in the test instance; create them (or reuse the ones `scripts/smoke.sh` creates) before running the command. The public and admin URLs depend on the published ports in the Compose file.
+The form, asset and provider checks need those objects to exist in the test instance; create them (or reuse the ones `scripts/smoke.sh` creates) before running the command. The public and admin URLs depend on the published ports in the Compose file. Leave out `--form`/`--email` in a throwaway check unless you want the real signup side effects described above.

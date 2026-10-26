@@ -43,7 +43,7 @@ beforeAll(async () => {
   await t.workspaceWith([[owner, 'owner']], 'none');
   const api = t.api(owner);
 
-  token = (await api.call('apiTokens.create', { name: 'smoke', scopes: ['workspace:admin'] })).token;
+  token = (await api.call('apiTokens.create', { name: 'smoke', scopes: ['artifacts:read', 'profiles:read'] })).token;
   await api.call('emailProviders.create', {
     name: 'Outbox',
     adapter: 'log',
@@ -107,9 +107,50 @@ describe('am smoke', () => {
       'public.signup',
     ]);
     expect(report.checks.filter((c) => c.status !== 'pass')).toEqual([]);
+    expect(report.checks.find((c) => c.id === 'admin.health')?.detail).toContain('server ');
     expect(report.checks.find((c) => c.id === 'admin.mcp')?.detail).toMatch(/\d+ tools available/);
-    expect(report.checks.find((c) => c.id === 'admin.provider')?.detail).toContain('1 provider configured');
+    expect(report.checks.find((c) => c.id === 'admin.provider')?.detail).toContain(
+      'log provider configured for marketing and transactional mail',
+    );
     expect(report.checks.find((c) => c.id === 'public.signup')?.detail).toContain(`${SITE}/thanks`);
+  });
+
+  it('reports the underlying cause of a network failure', async () => {
+    const res = await smoke(['--public-url', 'http://127.0.0.1:65534', '--json']);
+
+    expect(res.code).toBe(1);
+    const report = JSON.parse(res.out) as { ok: boolean; checks: { id: string; status: string; detail: string }[] };
+    const health = report.checks.find((c) => c.id === 'public.health');
+    expect(health?.status).toBe('fail');
+    expect(health?.detail).toMatch(/fetch failed:.*(ECONNREFUSED|connect)/);
+  });
+
+  it('says why a token cannot clean up the profile a signup created', async () => {
+    const address = `cleanup-${Date.now()}@example.com`;
+    const res = await smoke([
+      '--public-url',
+      t.publicBase!,
+      '--admin-url',
+      t.base,
+      '--token',
+      token,
+      '--form',
+      formId,
+      '--email',
+      address,
+      '--cleanup',
+      '--json',
+    ]);
+
+    expect(res.code, res.out).toBe(0);
+    const report = JSON.parse(res.out) as { ok: boolean; checks: { id: string; status: string; detail: string }[] };
+    const signup = report.checks.find((c) => c.id === 'public.signup');
+    expect(signup?.status).toBe('pass');
+    expect(signup?.detail).toContain('left in place');
+    expect(signup?.detail).toContain('RETENTION_UNCONFIRMED_DAYS');
+    expect(signup?.detail).toContain('profiles.erase');
+    // The profile really exists, so the cleanup message is about real data, not a lookup bug.
+    expect((await t.api(owner).call('profiles.find', { type: 'email', value: address })).profileId).toMatch(/^prf_/);
   });
 
   it('fails admin-hidden when the public URL is really the admin listener', async () => {
