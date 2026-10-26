@@ -1,7 +1,7 @@
 import { type CommandContext, defineCommand } from '@agentic-marketing/commands';
-import { AppError, hashValue, newId } from '@agentic-marketing/core';
+import { AppError, canonicalJson, hashValue, newId } from '@agentic-marketing/core';
 import { schema, type VersionState } from '@agentic-marketing/db';
-import { and, desc, eq, inArray } from 'drizzle-orm';
+import { and, desc, eq, gt, inArray } from 'drizzle-orm';
 import { z } from 'zod';
 import { diffJson } from './diff';
 import {
@@ -315,11 +315,56 @@ export const createArtifact = defineCommand({
   },
 });
 
+type Positions = Record<string, { x: number; y: number }>;
+
+const LayoutSchema = z.object({
+  positions: z.record(z.string(), z.object({ x: z.number(), y: z.number() })).describe('Canvas position per step id'),
+  updatedAt: z.string(),
+  updatedBy: z.string(),
+});
+
+/** A journey with its canvas positions removed: what must differ for a real new version. */
+function withoutPositions(content: unknown): unknown {
+  if (!content || typeof content !== 'object') return content;
+  const nodes = (content as { nodes?: unknown }).nodes;
+  if (!Array.isArray(nodes)) return content;
+  return {
+    ...(content as Record<string, unknown>),
+    nodes: nodes.map((node) => {
+      if (!node || typeof node !== 'object') return node;
+      const { position: _position, ...rest } = node as Record<string, unknown>;
+      return rest;
+    }),
+  };
+}
+
+function positionsOf(content: unknown): Positions {
+  const nodes = (content as { nodes?: unknown } | null)?.nodes;
+  const out: Positions = {};
+  if (!Array.isArray(nodes)) return out;
+  for (const value of nodes) {
+    const node = value as { id?: unknown; position?: { x?: unknown; y?: unknown } };
+    if (typeof node.id === 'string' && typeof node.position?.x === 'number' && typeof node.position.y === 'number')
+      out[node.id] = { x: node.position.x, y: node.position.y };
+  }
+  return out;
+}
+
+async function saveLayout(ctx: CommandContext, artifactId: string, positions: Positions) {
+  await ctx.tx
+    .insert(schema.artifactLayout)
+    .values({ workspaceId: ctx.principal.workspaceId, artifactId, layout: positions, updatedBy: ctx.principal.userId })
+    .onConflictDoUpdate({
+      target: [schema.artifactLayout.workspaceId, schema.artifactLayout.artifactId],
+      set: { layout: positions, updatedAt: new Date(), updatedBy: ctx.principal.userId },
+    });
+}
+
 export const updateDraft = defineCommand({
   name: 'artifacts.updateDraft',
   title: 'Update artifact draft',
   description:
-    'Replace the content of an artifact. Edits the current draft, or starts a new draft version when the latest version is published, in review or rejected. Pass `expectedContentHash` (from artifacts.get) to avoid overwriting someone else’s concurrent edit.',
+    'Replace the content of an artifact. Edits the current draft, or starts a new draft version when the latest version is published, in review or rejected. A journey edit that only moves steps is saved as layout and creates no version. Pass `expectedContentHash` (from artifacts.get) to avoid overwriting someone else’s concurrent edit.',
   input: z.object({
     artifactId: ArtifactId,
     content: z.unknown(),
@@ -335,6 +380,7 @@ export const updateDraft = defineCommand({
     version: z.number().int(),
     state: VersionStateSchema,
     contentHash: z.string(),
+    layoutOnly: z.boolean().describe('True when only step positions changed, so no version was created'),
     warnings: z.array(DraftWarningSchema).describe('Settings that must be filled in before this artifact can be published'),
   }),
   permission: 'artifacts:write',
@@ -358,6 +404,24 @@ export const updateDraft = defineCommand({
         .set({ name: input.name })
         .where(and(eq(schema.artifacts.workspaceId, ws), eq(schema.artifacts.id, a.id)));
 
+    // Moving steps is layout, not content: store it beside the version and leave the draft alone.
+    // Canonical JSON ignores key order, so without positions this compares only real content.
+    const layoutOnly =
+      a.type === 'journey' &&
+      canonicalJson(content) !== canonicalJson(latest.content) &&
+      canonicalJson(withoutPositions(content)) === canonicalJson(withoutPositions(latest.content));
+    if (layoutOnly) {
+      await saveLayout(ctx, a.id, positionsOf(content));
+      return {
+        artifactId: a.id,
+        version: latest.number,
+        state: latest.state,
+        contentHash: latest.contentHash,
+        layoutOnly: true,
+        warnings,
+      };
+    }
+
     if (latest.state === 'draft') {
       await ctx.tx
         .update(schema.artifactVersions)
@@ -373,7 +437,8 @@ export const updateDraft = defineCommand({
         .update(schema.artifacts)
         .set({ updatedAt: new Date() })
         .where(and(eq(schema.artifacts.workspaceId, ws), eq(schema.artifacts.id, a.id)));
-      return { artifactId: a.id, version: latest.number, state: 'draft' as const, contentHash, warnings };
+      if (a.type === 'journey') await saveLayout(ctx, a.id, positionsOf(content));
+      return { artifactId: a.id, version: latest.number, state: 'draft' as const, contentHash, layoutOnly: false, warnings };
     }
     const number = latest.number + 1;
     await ctx.tx.insert(schema.artifactVersions).values({
@@ -391,14 +456,16 @@ export const updateDraft = defineCommand({
       .update(schema.artifacts)
       .set({ latestVersion: number, updatedAt: new Date() })
       .where(and(eq(schema.artifacts.workspaceId, ws), eq(schema.artifacts.id, a.id)));
-    return { artifactId: a.id, version: number, state: 'draft' as const, contentHash, warnings };
+    if (a.type === 'journey') await saveLayout(ctx, a.id, positionsOf(content));
+    return { artifactId: a.id, version: number, state: 'draft' as const, contentHash, layoutOnly: false, warnings };
   },
 });
 
 export const getArtifact = defineCommand({
   name: 'artifacts.get',
   title: 'Get artifact',
-  description: 'Read an artifact with the content of one version (default: the latest).',
+  description:
+    'Read an artifact with the content of one version (default: the latest). `layout` holds canvas positions for the builder; agents never need it to edit a journey.',
   input: z.object({ artifactId: ArtifactId, version: z.number().int().positive().optional() }),
   output: z.object({
     id: z.string(),
@@ -407,12 +474,17 @@ export const getArtifact = defineCommand({
     latestVersion: z.number().int(),
     publishedVersion: z.number().int().nullable(),
     version: VersionSummary.extend({ content: z.unknown() }),
+    layout: LayoutSchema.nullable().describe('Saved canvas layout, when a person has moved steps; otherwise null'),
   }),
   permission: 'artifacts:read',
   effect: 'read',
   handler: async (input, ctx) => {
     const a = await loadArtifact(ctx, input.artifactId);
     const v = await loadVersion(ctx, a.id, input.version ?? a.latestVersion);
+    const [layout] = await ctx.tx
+      .select()
+      .from(schema.artifactLayout)
+      .where(and(eq(schema.artifactLayout.workspaceId, ctx.principal.workspaceId), eq(schema.artifactLayout.artifactId, a.id)));
     return {
       id: a.id,
       type: a.type,
@@ -420,6 +492,13 @@ export const getArtifact = defineCommand({
       latestVersion: a.latestVersion,
       publishedVersion: a.publishedVersion,
       version: { ...(await withAuthorNames(ctx, [toSummary(v)]))[0]!, content: v.content },
+      layout: layout
+        ? {
+            positions: layout.layout as Positions,
+            updatedAt: layout.updatedAt.toISOString(),
+            updatedBy: layout.updatedBy,
+          }
+        : null,
     };
   },
 });
@@ -512,6 +591,7 @@ export const diff = defineCommand({
         after: z.unknown().optional(),
       }),
     ),
+    layoutOnly: z.boolean().describe('True when every change is a step position (for example an old draft made by moving steps)'),
   }),
   permission: 'artifacts:read',
   effect: 'read',
@@ -521,7 +601,69 @@ export const diff = defineCommand({
     const toN = input.to ?? a.latestVersion;
     const before = fromN ? (await loadVersion(ctx, a.id, fromN)).content : {};
     const after = (await loadVersion(ctx, a.id, toN)).content;
-    return { from: fromN ?? null, to: toN, changes: diffJson(before, after) };
+    const changes = diffJson(before, after);
+    const layoutOnly = changes.length > 0 && changes.every((c) => /^nodes\[[^\]]+\]\.position(\.|$)/.test(c.path));
+    return { from: fromN ?? null, to: toN, changes, layoutOnly };
+  },
+});
+
+export const discardDraft = defineCommand({
+  name: 'artifacts.discardDraft',
+  title: 'Discard draft',
+  description:
+    'Delete the unpublished versions after the live one and return the artifact to its live version. Refuses when nothing is live, there is no draft, or the draft is waiting for approval.',
+  input: z.object({ artifactId: ArtifactId }),
+  output: z.object({
+    artifactId: z.string(),
+    version: z.number().int().describe('The live version this artifact is back on'),
+    state: z.literal('published'),
+    discardedVersions: z.array(z.number().int()),
+  }),
+  permission: 'artifacts:write',
+  effect: 'write',
+  target: (i) => i.artifactId,
+  handler: async (input, ctx) => {
+    const a = await loadArtifact(ctx, input.artifactId);
+    if (!a.publishedVersion) throw new AppError('conflict', 'This artifact has no live version, so there is nothing to go back to.');
+    const ws = ctx.principal.workspaceId;
+    const versions = await ctx.tx
+      .select({ number: schema.artifactVersions.number })
+      .from(schema.artifactVersions)
+      .where(and(eq(schema.artifactVersions.workspaceId, ws), eq(schema.artifactVersions.artifactId, a.id)))
+      .orderBy(desc(schema.artifactVersions.number));
+    const discarded = versions.filter((v) => v.number > a.publishedVersion!).map((v) => v.number);
+    if (discarded.length === 0) throw new AppError('conflict', 'There is no draft to discard.');
+    // A pending request points at one of these versions; the reviewer must reject or withdraw it
+    // first, otherwise an approval could publish a version that no longer exists.
+    const [pending] = await ctx.tx
+      .select({ version: schema.approvalRequests.version })
+      .from(schema.approvalRequests)
+      .where(
+        and(
+          eq(schema.approvalRequests.workspaceId, ws),
+          eq(schema.approvalRequests.artifactId, a.id),
+          eq(schema.approvalRequests.status, 'pending'),
+        ),
+      );
+    if (pending)
+      throw new AppError(
+        'conflict',
+        `Version ${pending.version} is waiting for approval. Reject or withdraw that request before discarding the draft.`,
+      );
+    await ctx.tx
+      .delete(schema.artifactVersions)
+      .where(
+        and(
+          eq(schema.artifactVersions.workspaceId, ws),
+          eq(schema.artifactVersions.artifactId, a.id),
+          gt(schema.artifactVersions.number, a.publishedVersion),
+        ),
+      );
+    await ctx.tx
+      .update(schema.artifacts)
+      .set({ latestVersion: a.publishedVersion, updatedAt: new Date() })
+      .where(and(eq(schema.artifacts.workspaceId, ws), eq(schema.artifacts.id, a.id)));
+    return { artifactId: a.id, version: a.publishedVersion, state: 'published' as const, discardedVersions: discarded };
   },
 });
 
@@ -1110,6 +1252,7 @@ export const artifactCommands = [
   listArtifacts,
   history,
   diff,
+  discardDraft,
   requestPublish,
   requestPublishBundle,
   listApprovals,

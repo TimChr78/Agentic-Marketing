@@ -79,6 +79,19 @@ export const artifactVersions = pgTable(
   (t) => [primaryKey({ columns: [t.workspaceId, t.artifactId, t.number] })],
 );
 
+/** Canvas positions, separate from the versioned content so moving a step is not a draft (issue #117). */
+export const artifactLayout = pgTable(
+  'artifact_layout',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    artifactId: text('artifact_id').notNull(),
+    layout: jsonb('layout').notNull(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+    updatedBy: text('updated_by').notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.artifactId] })],
+);
+
 export const approvalRequests = pgTable(
   'approval_requests',
   {
