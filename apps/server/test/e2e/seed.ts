@@ -83,7 +83,7 @@ export async function seed(t: T, opts: { confirmedUrl?: string } = {}) {
     ],
     'agent_changes',
   );
-  await t.srv.db.admin.query(`UPDATE workspaces SET name = 'MartechSignal', time_zone = 'Europe/Copenhagen' WHERE id = $1`, [ws]);
+  await t.srv.db.admin.query(`UPDATE workspaces SET name = 'MartechSignal', time_zone = 'UTC' WHERE id = $1`, [ws]);
   const sandbox = await t.workspaceWith([[users.owner, 'admin']], 'none');
   await t.srv.db.admin.query(`UPDATE workspaces SET name = 'Sandbox' WHERE id = $1`, [sandbox]);
 
@@ -221,6 +221,12 @@ export async function seed(t: T, opts: { confirmedUrl?: string } = {}) {
   });
   await builder.call('apiTokens.create', { name: 'n8n reporting', scopes: ['artifacts:read'] });
   const agent = createClient<Commands>({ baseUrl: t.base, headers: { authorization: `Bearer ${token.token}` } });
+  // An agent cannot administer workspace settings (#106); it proposes, and the owner approves
+  // the change from the Approvals page.
+  await agent.call('workspace.proposeUpdate', {
+    timeZone: 'Europe/Copenhagen',
+    note: 'The editorial team and most readers are in Denmark; display dates in Copenhagen time.',
+  });
   const ask = (id: string, note: string) => agent.call('artifacts.requestPublish', { artifactId: id, note });
 
   const issue43 = await agent.call('artifacts.create', {

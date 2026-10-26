@@ -114,6 +114,26 @@ export const approvalRequests = pgTable(
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
 );
 
+/** Low-risk workspace settings an agent proposed for a person to approve (#106). */
+export const workspaceProposals = pgTable(
+  'workspace_proposals',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    changes: jsonb('changes').notNull(),
+    note: text('note').notNull(),
+    status: text('status').$type<'pending' | 'approved' | 'rejected' | 'superseded'>().notNull(),
+    requestedByType: text('requested_by_type').$type<'user' | 'agent'>().notNull(),
+    requestedById: text('requested_by_id').notNull(),
+    requestedByClient: text('requested_by_client'),
+    decidedBy: text('decided_by'),
+    decidedAt: ts('decided_at'),
+    decisionNote: text('decision_note'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
 export const auditLog = pgTable('audit_log', {
   seq: bigserial('seq', { mode: 'number' }).primaryKey(),
   workspaceId: uuid('workspace_id').notNull(),
