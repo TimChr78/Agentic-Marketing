@@ -90,7 +90,7 @@ describe('am doctor offline checks', () => {
     const missing = checkPublicPort({ ...good, PUBLIC_PORT: '' });
     expect(missing.status).toBe('warn');
     expect(missing.hint).toContain('PUBLIC_BIND');
-    expect(missing.hint).toContain('127.0.0.1:3001');
+    expect(missing.hint).toContain('127.0.0.1:3210');
     expect(missing.hint).toContain('ports: !override');
     expect(checkPublicPort(good).status).toBe('ok');
     expect(checkPublicPort({ ...good, PUBLIC_BIND: '0.0.0.0:3101' }).message).toContain('0.0.0.0:3101');
