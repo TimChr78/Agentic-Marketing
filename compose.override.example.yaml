@@ -85,6 +85,13 @@
 #     volumes:
 #       - backups:/backups
 #     restart: unless-stopped
+#     # The image's own healthcheck asks the web server, which this service doesn't run; this one
+#     # fails when the scheduler stopped or its last backup failed.
+#     healthcheck:
+#       test: ["CMD", "am", "backup", "--health"]
+#       interval: 1m
+#       timeout: 10s
+#       retries: 3
 #     depends_on:
 #       postgres:
 #         condition: service_healthy

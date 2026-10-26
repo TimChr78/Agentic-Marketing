@@ -38,11 +38,15 @@ const { app, db } = srv;
 if (!config.skipMigrations) {
   await preUpgradeBackup(db, config);
   await migrate(db.admin, { appRolePassword: config.appDbPassword, appRole: config.appDbRole, log: (m) => logger.info(m) });
-  // After the table exists (migration 0028), so the next pre-upgrade backup knows where it came from.
-  await recordServerVersion(db.admin, VERSION);
   await migrateAuth({ baseUrl: config.publicUrl, secret: config.authSecret, db });
   await migrateClickHouse(config.clickhouse.url, config.clickhouse.database, (m) => logger.info(m), config.clickhouse);
 }
+
+// The version this database last ran, so the next pre-upgrade backup knows where its data came from.
+// Also with SKIP_MIGRATIONS (a migration job ran first); never a reason not to start.
+await recordServerVersion(db.admin, VERSION).catch((err) =>
+  logger.warn({ reason: (err as Error).message }, 'could not record the server version'),
+);
 
 const servers: { close: () => void }[] = [];
 if (config.roles.has('api') || config.roles.has('ingest')) {

@@ -12,6 +12,7 @@ full server configuration, so they work while the app is stopped.
 | ClickHouse | Event history and analytics (events, message events, journey events, ad spend). Losing it loses historical stats; profiles and consent in Postgres are unaffected. | Only with `--clickhouse`. |
 | NATS JetStream | Up to `NATS_RETENTION_HOURS` of in-flight events waiting for a worker. | No: it is a replayable buffer, not a source of truth. |
 | Valkey | Session state, caches and hot-state mirrors. | No: ephemeral and rebuilt from Postgres/events. |
+| `.env` | The secrets, including `MASTER_KEY`, which encrypts the provider and connector secrets stored in Postgres. | **No: keep a copy yourself**, apart from the backups (a password manager, say). A restored database is of little use without the `MASTER_KEY` it was encrypted with. |
 
 Back up a consistent pair when you can: a Postgres-only restore brings profiles and consent back,
 but the event history stays as it was at the restore point. Taking both in the same run keeps them
