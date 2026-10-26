@@ -2,6 +2,39 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+[Phase 13](docs/architecture/roadmap-wave-3.md#phase-13-pilot-correctness): the pilot's weekly loop without workarounds. A weekly issue is one review instead of two, confirmations retry in seconds, looking at a journey no longer creates a draft, and unknown input keys are recorded per client. Plus the two leftovers from Phase 12. REST and MCP stay backwards compatible: new commands and new output fields only. Four migrations run at start-up.
+
+### Added
+
+- **Approval bundles (#107).** `artifacts.requestPublishBundle {artifactIds, note}` submits artifacts that depend on each other (this week's e-mail template and the broadcast that sends it, a form and its confirmation template) for one review. References between them are checked as if they were published; approving any of them publishes all in dependency order in one transaction, and rejecting rejects all. The Approvals page shows a bundle as one row ("+ 1 reviewed together"), and the drawer shows its members, previews the broadcast with the template under review and sends a test of it. `approvals.list` and `approvals.get` return `bundle` (its members in publish order), `approvals.approve` returns everything it `published`, and `broadcasts.preview` and `broadcasts.sendTest` take `templateVersion`. The MCP instructions, the broadcast type and the pilot guide describe the one-review flow.
+- **Evidence for strict inputs (#124).** Unknown command-input keys are recorded per client (API token, person or OAuth client): key paths only, never values, kept 30 days. `system.inputWarnings` shows them: an agent sees its own, an admin sees all, with days since the last one and `safeToEnableStrict` after a quiet week. Settings → API tokens shows them per token, with a banner when it is safe to set `STRICT_INPUTS=true`. The evidence survives restarts and upgrades, unlike the log line (which stays).
+- **`artifacts.discardDraft` (#117)** returns an artifact to its live version, also from the editor's "…" menu ("Discard draft (back to live vN)"). It refuses while a version is waiting for approval.
+- **Message retries are visible (#109):** `messages.list` returns `attempts`, `nextAttemptAt` and `lastError`, shown under Insights → Messages.
+
+### Changed
+
+- **Fast retries for confirmations and transactional mail (#109).** A failed double opt-in confirmation was retried after about 5 minutes, while the person was looking at "check your inbox". Transactional and onboarding messages now retry after 10 s, 30 s, 1 min and 2 min; marketing keeps the slower backoff (SMS and push too).
+- **Layout is not content (#117).** In the journey builder, a click no longer nudges a step (5 px drag threshold), and moving steps saves the layout without creating a version, so a live journey shows no draft after someone looked at it. Autosave says "Layout saved"; `artifacts.get` returns `layout`, and `artifacts.diff` marks position-only changes as `layoutOnly`.
+- **The password step-up on API token edits is rate-limited (#61):** 5 wrong passwords in 15 minutes lock it for 15 minutes (`STEP_UP_MAX_FAILURES`, `STEP_UP_WINDOW_SECONDS`, `STEP_UP_LOCKOUT_SECONDS`), counted in Valkey; a correct password resets the count.
+
+### Fixed
+
+- **#118 — UTM tags in the plain-text part too.** Templates with `utm` tagged links in the HTML part only; the text part (generated or written by hand) now gets the same tags with the same rules.
+- **#138 — the public listener's default host port no longer collides with the admin port.** 0.2.5's default `127.0.0.1:3210` made `docker compose up` fail on installs with `AM_PORT=3210`. The default is now `127.0.0.1:3201`, and `am doctor` fails when `PUBLIC_BIND`'s host port equals `AM_PORT`.
+- **#139 — clearer output:** `am backup --list` marks 0.2.4 backups as `legacy` with an unusable ClickHouse part; a pre-upgrade backup from a database whose version is only known from its migration head is named after the newest release in that range; `am upgrade-notes` says how many releases it covers; `am smoke --cleanup` says which scopes it needs and when retention removes the test signup.
+
+### Upgrading from 0.2.5
+
+- **Migrations:** `0029_input_warnings.sql`, `0030_message_retries.sql`, `0031_artifact_layout.sql` (with the `discard_artifact_drafts` function) and `0032_approval_bundles.sql`: new tables and columns only. The app takes its pre-upgrade backup first.
+- **Configuration:** new, optional: `STEP_UP_MAX_FAILURES` (5), `STEP_UP_WINDOW_SECONDS` (900) and `STEP_UP_LOCKOUT_SECONDS` (900). The default of `PUBLIC_BIND` changes from `127.0.0.1:3210` to `127.0.0.1:3201`.
+- **Breaking changes:** none.
+- **Manual steps:**
+  - If a tunnel or proxy on the host relies on the default host port of the public listener (`127.0.0.1:3210`), set `PUBLIC_BIND=127.0.0.1:3210` in `.env` or move it to 3201. With `PUBLIC_BIND` set, or a tunnel on a Docker network, nothing changes.
+  - Agents that publish newsletters: switch the weekly template + broadcast to `artifacts.requestPublishBundle` (the MCP instructions say so; agents that read them pick it up).
+- **Upgrade:** download `agentic-marketing-compose-<version>.tar.gz`, replace `docker-compose.yml` with its copy, check your configuration with the new image (`AM_VERSION=<version> docker compose run --rm --no-deps -T app am doctor --env-file - < .env`), then set `AM_VERSION=<version>` in `.env` and `docker compose pull && docker compose up -d` (Helm: the chart of the same version). Then `docker compose exec app am doctor`.
+
 ## [0.2.5] - 2026-10-26
 
 Fixes from the MartechSignal pilot's upgrade to 0.2.4 (#129–#135), the last step of [Phase 12](docs/architecture/roadmap-wave-3.md#phase-12-install-and-upgrade). **ClickHouse backups made with 0.2.4 contain no event data** (#129); take a new one after upgrading. REST and MCP stay backwards compatible: one new read-only command, `system.status`. One migration runs at start-up.
