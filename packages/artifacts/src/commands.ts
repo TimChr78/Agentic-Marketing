@@ -23,7 +23,7 @@ const ArtifactId = z
   .describe('Artifact id, e.g. "jrn_0192…"');
 const VersionStateSchema = z.enum(['draft', 'in_review', 'published', 'superseded', 'rejected']);
 const Author = z.object({ type: z.enum(['user', 'agent']), id: z.string(), client: z.string().nullable() });
-const Requester = z.object({
+export const Requester = z.object({
   kind: z.enum(['person', 'token', 'oauth_client']),
   displayName: z.string(),
   personName: z.string().nullable(),

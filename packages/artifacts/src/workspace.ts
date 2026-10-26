@@ -1,9 +1,9 @@
-import { defineCommand, type Permission } from '@agentic-marketing/commands';
-import { AppError, canonicalJson, sha256 } from '@agentic-marketing/core';
+import { type CommandContext, defineCommand, type Permission } from '@agentic-marketing/commands';
+import { AppError, canonicalJson, newId, sha256 } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
 import { and, desc, eq, gte, inArray, lt, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
-import { resolveActors } from './commands';
+import { Requester, resolveActors } from './commands';
 
 const Policy = z.enum(['none', 'agent_changes', 'all_publishes']);
 
@@ -272,6 +272,23 @@ export const inputWarnings = defineCommand({
   },
 });
 
+const WorkspaceName = z.string().trim().min(1).max(120);
+
+/** The admin UI page for a workspace proposal (only SERVICES with a public URL can build absolute links). */
+const proposalUrl = (publicUrl: string | undefined, proposalId: string) =>
+  publicUrl ? `${publicUrl}/approvals?proposal=${proposalId}` : null;
+
+function assertTimeZone(timeZone: string) {
+  if (!TIME_ZONES.has(timeZone)) throw new AppError('invalid_input', 'timeZone must be an IANA time zone name, e.g. Europe/Copenhagen.');
+}
+
+/** Applies setting changes the same way for a person's direct edit and an approved agent proposal. */
+async function applyWorkspaceChanges(ctx: CommandContext, changes: { name?: string; timeZone?: string }) {
+  const [w] = await ctx.tx.update(schema.workspaces).set(changes).where(eq(schema.workspaces.id, ctx.principal.workspaceId)).returning();
+  if (!w) throw new AppError('not_found', 'This workspace does not exist any more.');
+  return { id: w.id, name: w.name, timeZone: w.timeZone };
+}
+
 export const updateWorkspace = defineCommand({
   name: 'workspace.update',
   title: 'Update workspace',
@@ -279,7 +296,7 @@ export const updateWorkspace = defineCommand({
     'Admins: change the workspace name or its display time zone (an IANA name such as Europe/Copenhagen; dates are shown in it).',
   input: z
     .object({
-      name: z.string().trim().min(1).max(120).optional().describe('New workspace name'),
+      name: WorkspaceName.optional().describe('New workspace name'),
       timeZone: TimeZone.optional().describe('IANA time zone, e.g. Europe/Copenhagen'),
     })
     .refine((input) => input.name !== undefined || input.timeZone !== undefined, 'Give a new name, timeZone, or both.'),
@@ -288,15 +305,234 @@ export const updateWorkspace = defineCommand({
   effect: 'write',
   humansOnly: true,
   handler: async (input, ctx) => {
-    if (input.timeZone !== undefined && !TIME_ZONES.has(input.timeZone))
-      throw new AppError('invalid_input', 'timeZone must be an IANA time zone name, e.g. Europe/Copenhagen.');
-    const changes = {
+    if (input.timeZone !== undefined) assertTimeZone(input.timeZone);
+    return applyWorkspaceChanges(ctx, {
       ...(input.name === undefined ? {} : { name: input.name }),
       ...(input.timeZone === undefined ? {} : { timeZone: input.timeZone }),
-    };
-    const [w] = await ctx.tx.update(schema.workspaces).set(changes).where(eq(schema.workspaces.id, ctx.principal.workspaceId)).returning();
+    });
+  },
+});
+
+const ProposalChange = z.object({
+  from: z.string().describe('The value before the proposal'),
+  to: z.string().describe('The value the proposal asks for'),
+});
+const ProposalChanges = z.object({
+  name: ProposalChange.optional(),
+  timeZone: ProposalChange.optional(),
+});
+const ProposalStatus = z.enum(['pending', 'approved', 'rejected', 'superseded']);
+const ProposalOut = z.object({
+  id: z.string(),
+  changes: ProposalChanges,
+  note: z.string(),
+  status: ProposalStatus,
+  requester: Requester,
+  decidedBy: z.object({ id: z.string(), name: z.string() }).nullable().describe('The person who approved or rejected it'),
+  decisionNote: z.string().nullable(),
+  decidedAt: z.string().nullable(),
+  createdAt: z.string(),
+  reviewUrl: z.string().nullable().describe('Admin UI page where a person decides this proposal'),
+});
+
+type ProposalField = 'name' | 'timeZone';
+
+/** Turns stored diffs into the values to set, ignoring a field that is absent. */
+function proposalValues(changes: z.output<typeof ProposalChanges>) {
+  return {
+    ...(changes.name === undefined ? {} : { name: changes.name.to }),
+    ...(changes.timeZone === undefined ? {} : { timeZone: changes.timeZone.to }),
+  };
+}
+
+export const proposeWorkspaceUpdate = defineCommand({
+  name: 'workspace.proposeUpdate',
+  title: 'Propose a workspace setting change',
+  description:
+    'Agents and people with artifacts:write can propose low-risk workspace settings for a person to approve: the name and the display time zone (an IANA name such as Europe/Copenhagen). Use it instead of workspace.update, which needs workspace:admin. A newer pending proposal for the same setting supersedes the older one. A person approves or rejects it in the admin UI; nothing changes until then.',
+  input: z
+    .object({
+      name: WorkspaceName.optional().describe('Proposed workspace name'),
+      timeZone: TimeZone.optional().describe('Proposed IANA time zone, e.g. Europe/Copenhagen'),
+      note: z.string().trim().min(1).max(1000).describe('Why this change, for the reviewer'),
+    })
+    .strict(),
+  output: z.object({
+    proposalId: z.string(),
+    status: z.literal('pending'),
+    changes: ProposalChanges,
+    reviewUrl: z.string().nullable().describe('Admin UI approvals page where a person decides this proposal'),
+    next: z.string().describe('What happens next, and how to check the result'),
+  }),
+  permission: 'artifacts:write',
+  effect: 'write',
+  handler: async (input, ctx) => {
+    if (input.name === undefined && input.timeZone === undefined)
+      throw new AppError('invalid_input', 'Give a new name, timeZone, or both; nothing would change.');
+    if (input.timeZone !== undefined) assertTimeZone(input.timeZone);
+    const [w] = await ctx.tx
+      .select({ name: schema.workspaces.name, timeZone: schema.workspaces.timeZone })
+      .from(schema.workspaces)
+      .where(eq(schema.workspaces.id, ctx.principal.workspaceId));
     if (!w) throw new AppError('not_found', 'This workspace does not exist any more.');
-    return { id: w.id, name: w.name, timeZone: w.timeZone };
+
+    const changes: z.output<typeof ProposalChanges> = {
+      ...(input.name === undefined || input.name === w.name ? {} : { name: { from: w.name, to: input.name } }),
+      ...(input.timeZone === undefined || input.timeZone === w.timeZone ? {} : { timeZone: { from: w.timeZone, to: input.timeZone } }),
+    };
+    const fields = Object.keys(changes) as ProposalField[];
+    if (!fields.length) throw new AppError('invalid_input', 'Nothing would change: the workspace already has these settings.');
+
+    // Only proposals that touch one of these settings are superseded, so a separate pending
+    // proposal for another setting is left alone.
+    const pending = await ctx.tx
+      .select({ id: schema.workspaceProposals.id, changes: schema.workspaceProposals.changes })
+      .from(schema.workspaceProposals)
+      .where(and(eq(schema.workspaceProposals.workspaceId, ctx.principal.workspaceId), eq(schema.workspaceProposals.status, 'pending')));
+    const superseded = pending
+      .filter((p) => fields.some((field) => (p.changes as Record<string, unknown>)[field] !== undefined))
+      .map((p) => p.id);
+    if (superseded.length) {
+      await ctx.tx
+        .update(schema.workspaceProposals)
+        .set({ status: 'superseded' })
+        .where(
+          and(eq(schema.workspaceProposals.workspaceId, ctx.principal.workspaceId), inArray(schema.workspaceProposals.id, superseded)),
+        );
+    }
+
+    const proposalId = newId('wsp');
+    await ctx.tx.insert(schema.workspaceProposals).values({
+      workspaceId: ctx.principal.workspaceId,
+      id: proposalId,
+      changes,
+      note: input.note,
+      status: 'pending',
+      requestedByType: ctx.principal.type,
+      requestedById: ctx.principal.userId,
+      requestedByClient: ctx.principal.clientId ?? null,
+    });
+    const reviewUrl = proposalUrl(ctx.services.publicUrl, proposalId);
+    return {
+      proposalId,
+      status: 'pending' as const,
+      changes,
+      reviewUrl,
+      next: reviewUrl
+        ? `A person must approve this in the admin UI: ${reviewUrl}. Check the result with workspace.proposals.`
+        : 'A person must approve this in the admin UI. Check the result with workspace.proposals.',
+    };
+  },
+});
+
+export const listWorkspaceProposals = defineCommand({
+  name: 'workspace.proposals',
+  title: 'List workspace setting proposals',
+  description:
+    'Workspace setting changes agents and people proposed, newest first (default: pending). Shows the diff (for example UTC → Europe/Copenhagen), the note, who asked and, once decided, who decided and why. Any reader can see them; only admins decide.',
+  input: z.object({
+    status: ProposalStatus.default('pending').describe('Which proposals to list'),
+    limit: z.number().int().min(1).max(200).default(50),
+  }),
+  output: z.object({ proposals: z.array(ProposalOut) }),
+  permission: 'artifacts:read',
+  effect: 'read',
+  handler: async (input, ctx) => {
+    const rows = await ctx.tx
+      .select()
+      .from(schema.workspaceProposals)
+      .where(and(eq(schema.workspaceProposals.workspaceId, ctx.principal.workspaceId), eq(schema.workspaceProposals.status, input.status)))
+      .orderBy(desc(schema.workspaceProposals.createdAt))
+      .limit(input.limit);
+    const requesters = await resolveActors(
+      ctx,
+      rows.map((r) => ({ key: r.id, type: r.requestedByType, id: r.requestedById, client: r.requestedByClient })),
+    );
+    const deciders = await resolveActors(
+      ctx,
+      rows
+        .filter((r) => r.decidedBy !== null)
+        .map((r) => ({ key: `decided:${r.id}`, type: 'user' as const, id: r.decidedBy!, client: null })),
+    );
+    return {
+      proposals: rows.map((r) => ({
+        id: r.id,
+        changes: r.changes as z.output<typeof ProposalChanges>,
+        note: r.note,
+        status: r.status,
+        requester: requesters.get(r.id)!,
+        decidedBy: r.decidedBy ? { id: r.decidedBy, name: deciders.get(`decided:${r.id}`)?.displayName ?? r.decidedBy } : null,
+        decisionNote: r.decisionNote,
+        decidedAt: r.decidedAt?.toISOString() ?? null,
+        createdAt: r.createdAt.toISOString(),
+        reviewUrl: proposalUrl(ctx.services.publicUrl, r.id),
+      })),
+    };
+  },
+});
+
+export const approveWorkspaceProposal = defineCommand({
+  name: 'workspace.approveProposal',
+  title: 'Approve a workspace setting change',
+  description:
+    'Admins: approve a pending workspace setting proposal and apply it at once. The diff is applied as written; if the setting already has the proposed value it is marked approved without changing anything.',
+  input: z.object({
+    proposalId: z.string(),
+    note: z.string().trim().max(1000).optional().describe('Optional note for the requester'),
+  }),
+  output: z.object({
+    proposalId: z.string(),
+    status: z.literal('approved'),
+    workspace: z.object({ id: z.string(), name: z.string(), timeZone: z.string() }),
+  }),
+  permission: 'workspace:admin',
+  effect: 'write',
+  humansOnly: true,
+  target: (i) => i.proposalId,
+  handler: async (input, ctx) => {
+    const [p] = await ctx.tx
+      .select()
+      .from(schema.workspaceProposals)
+      .where(and(eq(schema.workspaceProposals.workspaceId, ctx.principal.workspaceId), eq(schema.workspaceProposals.id, input.proposalId)))
+      .for('update');
+    if (!p) throw new AppError('not_found', `Workspace proposal ${input.proposalId} does not exist in this workspace.`);
+    if (p.status !== 'pending') throw new AppError('conflict', `This proposal was already ${p.status}.`);
+    const workspace = await applyWorkspaceChanges(ctx, proposalValues(p.changes as z.output<typeof ProposalChanges>));
+    await ctx.tx
+      .update(schema.workspaceProposals)
+      .set({ status: 'approved', decidedBy: ctx.principal.userId, decidedAt: new Date(), decisionNote: input.note ?? null })
+      .where(and(eq(schema.workspaceProposals.workspaceId, ctx.principal.workspaceId), eq(schema.workspaceProposals.id, p.id)));
+    return { proposalId: p.id, status: 'approved' as const, workspace };
+  },
+});
+
+export const rejectWorkspaceProposal = defineCommand({
+  name: 'workspace.rejectProposal',
+  title: 'Reject a workspace setting change',
+  description:
+    'Admins: reject a pending workspace setting proposal. Nothing changes; the requester sees your reason in workspace.proposals. Tell them what to propose instead.',
+  input: z.object({
+    proposalId: z.string(),
+    note: z.string().trim().min(1).max(1000).describe('Tell the requester what to change'),
+  }),
+  output: z.object({ proposalId: z.string(), status: z.literal('rejected') }),
+  permission: 'workspace:admin',
+  effect: 'write',
+  humansOnly: true,
+  target: (i) => i.proposalId,
+  handler: async (input, ctx) => {
+    const [p] = await ctx.tx
+      .select()
+      .from(schema.workspaceProposals)
+      .where(and(eq(schema.workspaceProposals.workspaceId, ctx.principal.workspaceId), eq(schema.workspaceProposals.id, input.proposalId)))
+      .for('update');
+    if (!p) throw new AppError('not_found', `Workspace proposal ${input.proposalId} does not exist in this workspace.`);
+    if (p.status !== 'pending') throw new AppError('conflict', `This proposal was already ${p.status}.`);
+    await ctx.tx
+      .update(schema.workspaceProposals)
+      .set({ status: 'rejected', decidedBy: ctx.principal.userId, decidedAt: new Date(), decisionNote: input.note })
+      .where(and(eq(schema.workspaceProposals.workspaceId, ctx.principal.workspaceId), eq(schema.workspaceProposals.id, p.id)));
+    return { proposalId: p.id, status: 'rejected' as const };
   },
 });
 
@@ -440,6 +676,10 @@ export const workspaceCommands = [
   getStatus,
   inputWarnings,
   updateWorkspace,
+  proposeWorkspaceUpdate,
+  listWorkspaceProposals,
+  approveWorkspaceProposal,
+  rejectWorkspaceProposal,
   setSeedList,
   setApprovalPolicy,
   listAudit,

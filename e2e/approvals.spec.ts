@@ -87,8 +87,25 @@ test.describe('approvals (#41)', () => {
     await signIn(page, PEOPLE.viewer);
     await page.goto('/approvals');
     await expect(page.getByRole('button', { name: /Approve selected/ })).toHaveCount(0);
+    await expect(page.getByRole('region', { name: 'Workspace settings' })).toContainText('An admin decides workspace settings.');
     await page.getByRole('row', { name: /Newsletter signup/ }).click();
     await expect(page.getByRole('dialog')).toContainText('Your role can review changes but not approve them.');
     await expect(page.getByRole('navigation', { name: 'Main' }).getByRole('link', { name: 'Providers' })).toHaveCount(0);
+  });
+
+  test('the owner approves the time zone Hermes proposed (#106)', async ({ page }) => {
+    await signIn(page, PEOPLE.owner);
+    await page.goto('/approvals');
+    const card = page.getByRole('region', { name: 'Workspace settings' });
+    await expect(card).toContainText('Time zone:');
+    await expect(card).toContainText('UTC');
+    await expect(card).toContainText('Europe/Copenhagen');
+    await expect(card).toContainText('Hermes');
+    await expect(card).toContainText('token of Sam Rivera');
+    await card.getByRole('button', { name: 'Approve', exact: true }).click();
+    await expect(page.getByText('Approved the workspace settings change')).toBeVisible();
+    await expect(card).toHaveCount(0);
+    const ws = await call(page.request, 'workspace.get', {});
+    expect(ws.timeZone).toBe('Europe/Copenhagen');
   });
 });
