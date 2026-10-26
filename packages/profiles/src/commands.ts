@@ -471,6 +471,8 @@ export async function removeProfiles(
   if (anon.length) await tx.delete(schema.pushSubscriptions).where(inArray(schema.pushSubscriptions.anonymousId, anon));
   if (users.length) await tx.delete(schema.pushSubscriptions).where(inArray(schema.pushSubscriptions.userId, users));
   await tx.delete(schema.messages).where(inArray(schema.messages.profileId, family));
+  // Out of every journey: no later step runs, and the participant's context (the trigger event) goes too.
+  await tx.delete(schema.journeyParticipants).where(inArray(schema.journeyParticipants.profileId, family));
   const suppress = opts.suppress ? ids.filter((i) => i.type === 'email' || i.type === 'phone') : [];
   if (suppress.length)
     await tx

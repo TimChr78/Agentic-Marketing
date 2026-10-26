@@ -1,4 +1,4 @@
-import type { Purposes } from '@agentic-marketing/artifacts';
+import { DEFAULT_PURPOSES, type Purposes, publishedSingleton } from '@agentic-marketing/artifacts';
 import { type ConsentSource, type ConsentStatus, schema, type Tx } from '@agentic-marketing/db';
 import { and, eq, inArray, type SQL, sql } from 'drizzle-orm';
 
@@ -52,11 +52,11 @@ export async function recordConsent(tx: Tx, workspaceId: string, profileId: stri
     )
     .onConflictDoNothing()
     .returning({ id: schema.consentRecords.id });
-  if (inserted.length) await recomputeConsentState(tx, workspaceId, profileId);
+  if (inserted.length) await recomputeConsentState(tx, workspaceId, profileId, purposes);
   return inserted.length;
 }
 
-export async function recomputeConsentState(tx: Tx, workspaceId: string, profileId: string) {
+export async function recomputeConsentState(tx: Tx, workspaceId: string, profileId: string, purposes?: Purposes) {
   const family = await mergedFamily(tx, workspaceId, profileId);
   await tx
     .delete(schema.consentState)
@@ -67,6 +67,7 @@ export async function recomputeConsentState(tx: Tx, workspaceId: string, profile
     FROM consent_records
     WHERE workspace_id = ${workspaceId} AND ${inArray(schema.consentRecords.profileId, family)}
     ORDER BY purpose, channel, recorded_at DESC, id DESC`);
+  await exitRefusedJourneys(tx, workspaceId, profileId, purposes);
 }
 
 export async function consentStateOf(tx: Tx, workspaceId: string, profileId: string) {
@@ -123,6 +124,43 @@ export function consentStatusSql(profileId: SQL, purpose: string, channel?: stri
       AND (c.channel = '' OR c.updated_at >= coalesce((SELECT a.updated_at FROM consent_state a
         WHERE a.profile_id = c.profile_id AND a.purpose = c.purpose AND a.channel = ''), '-infinity'::timestamptz))
     ORDER BY ${isRefusal} DESC, c.updated_at DESC LIMIT 1)`;
+}
+
+/**
+ * The purposes a person has refused: the current status without a channel is a refusal and the
+ * purpose's basis stops on it (consent, legitimate interest). Contract and legal obligation don't.
+ * Not having consented yet (e.g. a pending double opt-in) is not a refusal.
+ */
+export function refusedPurposes<T extends ConsentRow>(rows: T[], purposes: Purposes): string[] {
+  return [...new Set(rows.map((r) => r.purpose))].filter((purpose) => {
+    const status = currentConsent(rows, purpose)?.status;
+    return !!status && refusal(status) && !purposeAllowed(basisOf(purposes, purpose), status as ConsentStatus);
+  });
+}
+
+/**
+ * Exits the person's active journey participants whose journey purpose they refused (#108), so
+ * no later step runs and the journey stops counting them. The journey sweeper checks the same
+ * rule before every step, for anything that changes consent without passing here.
+ */
+export async function exitRefusedJourneys(tx: Tx, workspaceId: string, profileId: string, purposes?: Purposes) {
+  const rows = await consentStateOf(tx, workspaceId, profileId);
+  if (!rows.some((r) => refusal(r.status))) return 0;
+  const all = purposes ?? (await publishedSingleton(tx, 'purposes'))?.purposes ?? DEFAULT_PURPOSES;
+  const refused = refusedPurposes(rows, all);
+  if (!refused.length) return 0;
+  const res = await tx.execute(sql`
+    UPDATE journey_participants p
+    SET status = 'exited', error = 'consent_withdrawn: ' || (v.content->>'purpose'), due_at = NULL, waiting_event = NULL,
+      updated_at = now()
+    FROM artifact_versions v
+    WHERE p.workspace_id = ${workspaceId} AND p.profile_id = ${profileId} AND p.status IN ('ready', 'waiting')
+      AND v.workspace_id = p.workspace_id AND v.artifact_id = p.journey_id AND v.number = p.version
+      AND v.content->>'purpose' IN (${sql.join(
+        refused.map((r) => sql`${r}`),
+        sql`, `,
+      )})`);
+  return res.rowCount ?? 0;
 }
 
 /** purposeAllowed in SQL, over a status expression such as consentStatusSql (never NULL). */
