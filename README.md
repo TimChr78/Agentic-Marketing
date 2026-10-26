@@ -56,11 +56,19 @@ It runs as one Docker image (a TypeScript modular monolith) next to Postgres, Cl
 
 ## Quick start (Docker)
 
+Download `agentic-marketing-compose-<version>.tar.gz` from the [latest release](https://github.com/TimChr78/Agentic-Marketing/releases) (no checkout needed), then:
+
 ```bash
-cp .env.example .env        # fill in the secrets: openssl rand -base64 32
+tar xzf agentic-marketing-compose-<version>.tar.gz && cd agentic-marketing-compose-<version>
+# writes .env with generated secrets (never printed) and asks for the public URLs
+docker run --rm -it -v "$PWD:/work" -w /work --user "$(id -u):$(id -g)" \
+  ghcr.io/timchr78/agentic-marketing:<version> am init
 docker compose up -d        # pulls the released image
 docker compose exec app am bootstrap --email you@example.com --workspace 'My site'
+docker compose exec app am doctor   # configuration, services, sending domains
 ```
+
+In a checkout, `pnpm --silent --filter @agentic-marketing/server cli init` does the same. Never edit `docker-compose.yml`: site-specific settings go in `compose.override.yaml` (see [`compose.override.example.yaml`](compose.override.example.yaml) and [the Compose guide](docs/deployment/compose.md)), so an upgrade replaces the release file and nothing else.
 
 `AM_VERSION` (default `0.2.3`) selects the released image `ghcr.io/timchr78/agentic-marketing`. Pin a version instead of `latest` so restarts and `docker compose pull` do not silently change what runs. `AM_PORT` (default `3000`) is the published host port: the app still listens on 3000 inside the container, so keep `PUBLIC_URL` and `PUBLIC_LINKS_URL` in step with it. ClickHouse is capped at `CLICKHOUSE_MEM_LIMIT` (default `2g`), which covers the whole container (server, caches and query memory); ClickHouse's own limits such as `max_server_memory_usage` still apply inside it, and 2g is a starting point for the single-node pilot.
 
@@ -78,7 +86,7 @@ Open http://localhost:3000 for the admin UI (it is built into the image and serv
 
 MCP requires `PUBLIC_URL` to be HTTPS. With a plain-HTTP address on a LAN the admin UI and REST API still work, but MCP/OAuth client endpoints are disabled; expose the server over HTTPS (e.g. with Tailscale or a Cloudflare Tunnel) to enable MCP.
 
-Running it behind a proxy or a Cloudflare Tunnel: set `PUBLIC_URL`, `PUBLIC_LINKS_URL`, `CLIENT_IP_HEADER` (an ordered list, e.g. `cf-connecting-ip,x-forwarded-for`) and `TRUSTED_PROXY_CIDRS` for the tunnel/proxy ranges (see [`.env.example`](.env.example)). Set `PUBLIC_PORT` to add a public-only listener (`/f`, `/u`, `/c`, `/a`, `/hooks`, `/healthz`, `/readyz`) and point the tunnel there, so no path rule is needed. Admin LAN traffic without a forwarding header uses the socket address.
+Running it behind a proxy or a Cloudflare Tunnel: set `PUBLIC_URL`, `PUBLIC_LINKS_URL`, `CLIENT_IP_HEADER` (an ordered list, e.g. `cf-connecting-ip,x-forwarded-for`) and `TRUSTED_PROXY_CIDRS` for the tunnel/proxy ranges (see [`.env.example`](.env.example)). Set `PUBLIC_PORT` (e.g. `3001`) to add a public-only listener (`/f`, `/u`, `/c`, `/a`, `/hooks`, `/healthz`, `/readyz`) and point the tunnel there, so no path rule is needed: a tunnel on the Compose network uses `http://app:3001`; for one on another host, publish it with `PUBLIC_BIND=0.0.0.0:3001`. Admin LAN traffic without a forwarding header uses the socket address.
 
 The compose file keeps Postgres, ClickHouse and NATS data in named volumes. To use host directories instead, add bind mounts in `compose.override.yaml` (see `compose.override.example.yaml`, never edit `docker-compose.yml`). The containers run as their own users (Postgres uid 70 in the Alpine image, ClickHouse uid 101; NATS runs as root), so `chown` the host directories to match or the services will fail to write; named volumes avoid that.
 
@@ -89,6 +97,7 @@ On Kubernetes: the Helm chart in [`deploy/helm`](deploy/helm/agentic-marketing) 
 - [Development](docs/development.md): layout, running locally, tests, key rotation.
 - [Kubernetes reference deployment](docs/deployment/kubernetes.md): Helm, OpenBao or AWS KMS keys, sizing.
 - [Docker Compose deployment](docs/deployment/compose.md): the release files, the override file, upgrades.
+- [Operations](docs/deployment/operations.md) (`am init`, `am doctor`), [backups and restore](docs/deployment/backups.md) and [post-upgrade checks](docs/deployment/smoke.md) (`am smoke`).
 - [Edge decisions](docs/deployment/edge.md): the decision API on Cloudflare Workers.
 - [Push notifications](docs/push.md): browsers, Android and Apple apps.
 - [Single sign-on, SCIM and agent permissions](docs/identity.md).
@@ -101,9 +110,9 @@ On Kubernetes: the Helm chart in [`deploy/helm`](deploy/helm/agentic-marketing) 
 
 ## Releases and upgrading
 
-Releases are on [GitHub](https://github.com/TimChr78/Agentic-Marketing/releases), with the image `ghcr.io/timchr78/agentic-marketing:<version>` (linux/amd64 and linux/arm64) and the packaged Helm chart; what changed is in the [changelog](CHANGELOG.md). The current release is **0.2.3**, a pre-release. A release is made by pushing a version tag, or by running the Release workflow (Actions → Release → Run workflow) with the version, which tags the current `main`.
+Releases are on [GitHub](https://github.com/TimChr78/Agentic-Marketing/releases), with the image `ghcr.io/timchr78/agentic-marketing:<version>` (linux/amd64 and linux/arm64), the packaged Helm chart, the Compose bundle (`docker-compose.yml`, `.env.example`, `compose.override.example.yaml`, [`UPGRADING.md`](UPGRADING.md)) and `SHA256SUMS`; what changed is in the [changelog](CHANGELOG.md). `/healthz`, MCP `serverInfo`, OpenAPI, `workspace.get` and Settings → Workspace show the running version. The current release is **0.2.3**, a pre-release. A release is made by pushing a version tag, or by running the Release workflow (Actions → Release → Run workflow) with the version, which tags the current `main`.
 
-Upgrading: database migrations run when the server starts. With `SKIP_MIGRATIONS=true` (several replicas, Kubernetes) run `cli migrate` first; the Helm chart does this in a Job before each upgrade. Migrations only move forward, so back up Postgres before upgrading. While the version is 0.x, read the changelog before each upgrade: commands and artifact formats may still change.
+Upgrading: follow [UPGRADING.md](UPGRADING.md), and read the release's **Upgrading from** block, which always lists migrations, configuration, breaking changes, manual steps and the one-line upgrade. Database migrations run when the server starts, and only move forward: the app takes a Postgres backup to the `backups` volume before it migrates (unless `SKIP_PRE_UPGRADE_BACKUP=true`), and `am backup` / `am restore` do it by hand ([backups](docs/deployment/backups.md)). With `SKIP_MIGRATIONS=true` (several replicas, Kubernetes) run `cli migrate` first; the Helm chart does this in a Job before each upgrade. After an upgrade, `am smoke` checks the public host the way visitors and agents see it. While the version is 0.x, commands and artifact formats may still change.
 
 Security problems: see [SECURITY.md](SECURITY.md).
 

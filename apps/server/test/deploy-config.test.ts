@@ -106,14 +106,14 @@ describe('compose override example', () => {
     expect(uncommented).toEqual([]);
   });
 
-  it('shows an external network, bind mounts, limits and the backup placeholder', () => {
+  it('shows an external network, bind mounts, limits and the scheduled backup service', () => {
     expect(composeOverride).toMatch(/external:\s*true/);
     expect(composeOverride).toMatch(/tunnel container/i);
     expect(composeOverride).toContain('/srv/am/pgdata:/var/lib/postgresql/data');
     expect(composeOverride).toContain('/srv/am/clickhouse:/var/lib/clickhouse');
     expect(composeOverride).toContain('/srv/am/nats:/data');
     expect(composeOverride).toMatch(/mem_limit:/);
-    expect(composeOverride).toContain('# Backups: see docs/deployment/backups.md');
+    expect(composeOverride).toMatch(/#\s+command: \["am", "backup", "--schedule"/);
   });
 });
 
