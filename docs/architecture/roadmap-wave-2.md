@@ -1,5 +1,7 @@
 # Roadmap, wave 2 (replanned 2026-10-22)
 
+> **Wave 3 (from 2026-10-26):** wave 2 is built. The next phases, from the open issues, are in [roadmap-wave-3.md](roadmap-wave-3.md).
+
 Wave 1 (Phases −1 to 5 and the MartechSignal pilot) built the platform end to end: data platform, e-mail, segments, journeys, web personalization, AI runtime, integrations, and the newsletter features for a content site. Wave 2 takes in:
 - every limitation recorded along the way;
 - the original Phase 6 (breadth and scale);

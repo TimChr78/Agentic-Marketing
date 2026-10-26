@@ -40,6 +40,7 @@ An open-source, self-hostable, **event-driven marketing platform built agent-fir
 | [deployment-and-scaling.md](deployment-and-scaling.md) | Self-host topology, scaling path to 10M profiles and multi-tenant SaaS |
 | [roadmap.md](roadmap.md) | Phased delivery plan for a team of one (wave 1) |
 | [roadmap-wave-2.md](roadmap-wave-2.md) | Wave 2: prioritised phases after the pilot, with every known limitation placed |
+| [roadmap-wave-3.md](roadmap-wave-3.md) | Wave 3: install and upgrade first, then pilot correctness, the newsletter, measurement and bounded agent autonomy; what is parked and why |
 | [performance-marketing.md](performance-marketing.md) | Google, Meta and Microsoft ads: conversions, audiences, spend and ROAS |
 | [email-and-sms-delivery.md](email-and-sms-delivery.md) | Sending beyond SMTP (SES, Postmark, Cloudflare Email Service) and the SMS channel |
 | [open-questions.md](open-questions.md) | Decisions still needed from the product owner |

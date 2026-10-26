@@ -121,6 +121,17 @@ Wave 1 (Phases −1 to 5) is complete: foundations, data platform, e-mail, segme
 | 10 | Scale and operations | Done: correctness (AI budget reservations, prompt test jobs, merge-safe journeys, journey version migration, instant experience updates), scale (segments evaluated in SQL, ClickHouse row policies, a load test to 1M profiles), operations (Helm chart, OpenBao and AWS KMS keys, warehouse export, config as code) |
 | 11 | Enterprise and ecosystem | Part a done (single sign-on with OIDC and SAML, SCIM provisioning, MCP scope step-up). Part b done (AI: classify, text per segment, review samples, a streaming copilot with stored conversations). Part c done (sequential and Bayesian experiment statistics, edge decide on Cloudflare Workers, a visual composer and preview links). Part d done (push: web push, FCM, APNs). Part e done (Salesforce, the Shopify app with customer import, conversions to LinkedIn, TikTok and Pinterest) |
 
+[Wave 3](docs/architecture/roadmap-wave-3.md), planned from the open issues:
+
+| Phase | Theme | State |
+|---|---|---|
+| 12 | Install and upgrade | Next: Compose bundle per release, compose defaults, `am init` / `doctor` / `smoke`, backups and restore, the running version everywhere |
+| 13 | Pilot correctness | Planned: consent exits from journeys, approval bundles, fast confirmation retries, layout-only journey edits |
+| 14 | Admin UI for daily use | Planned |
+| 15 | Newsletter and lifecycle e-mail | Planned: preference centre, archive and web version, content blocks, pre-send checks |
+| 16 | Measure and report | Planned: metric layer, campaigns, holdouts, alerts |
+| 17 | Agents with bounded autonomy | Planned: a design for agent controls first, then business context, autonomy modes, the campaign agent |
+
 ## Development
 
 ```bash
