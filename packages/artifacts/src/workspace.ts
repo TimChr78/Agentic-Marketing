@@ -1,7 +1,7 @@
 import { defineCommand, type Permission } from '@agentic-marketing/commands';
 import { AppError, canonicalJson, sha256 } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
-import { and, desc, eq, lt } from 'drizzle-orm';
+import { and, desc, eq, lt, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { resolveActors } from './commands';
 
@@ -84,6 +84,66 @@ export const getWorkspace = defineCommand({
         permission,
         meaning: explainPermission(permission, w.approvalPolicy, p.type),
       })),
+    };
+  },
+});
+
+const Adapter = z.enum(['smtp', 'ses', 'postmark', 'brevo', 'cloudflare', 'log']);
+const Tracking = z.enum(['forced', 'configurable', 'none']);
+
+// The e-mail package owns provider tracking details, but it depends on this one, so mirror the
+// low-risk mapping here rather than introducing a cycle.
+const ADAPTER_TRACKING: Record<z.output<typeof Adapter>, z.output<typeof Tracking>> = {
+  smtp: 'none',
+  ses: 'configurable',
+  postmark: 'configurable',
+  brevo: 'forced',
+  cloudflare: 'none',
+  log: 'none',
+};
+
+export const getStatus = defineCommand({
+  name: 'system.status',
+  title: 'Server status',
+  description:
+    'The running server version, whether enabled e-mail providers cover marketing and transactional mail, and how many approval requests are waiting for a person. Read-only; it never returns provider addresses, hosts or secrets.',
+  input: z.object({}),
+  output: z.object({
+    serverVersion: z.string().describe('Version of the running server, e.g. 0.2.4'),
+    emailProvider: z.object({
+      configured: z.boolean().describe('Whether an enabled provider covers both marketing and transactional mail'),
+      marketing: z.boolean().describe('Whether an enabled provider is assigned to marketing mail'),
+      transactional: z.boolean().describe('Whether an enabled provider is assigned to transactional mail'),
+      adapter: Adapter.nullable().describe('Adapter of the marketing provider, else the transactional one'),
+      tracking: Tracking.nullable().describe('Whether that provider adds open and click tracking itself'),
+    }),
+    pendingApprovals: z.number().int().describe('Approval requests waiting for a person to decide'),
+  }),
+  permission: 'artifacts:read',
+  effect: 'read',
+  handler: async (_input, ctx) => {
+    const providers = await ctx.tx
+      .select({ adapter: schema.emailProviders.adapter, useFor: schema.emailProviders.useFor })
+      .from(schema.emailProviders)
+      .where(eq(schema.emailProviders.enabled, true))
+      .orderBy(schema.emailProviders.createdAt);
+    const marketing = providers.find((p) => p.useFor.includes('marketing'));
+    const transactional = providers.find((p) => p.useFor.includes('transactional'));
+    const shown = marketing ?? transactional;
+    const [pending] = await ctx.tx
+      .select({ count: sql<number>`count(*)::int` })
+      .from(schema.approvalRequests)
+      .where(eq(schema.approvalRequests.status, 'pending'));
+    return {
+      serverVersion: ctx.services.serverVersion,
+      emailProvider: {
+        configured: !!marketing && !!transactional,
+        marketing: !!marketing,
+        transactional: !!transactional,
+        adapter: shown?.adapter ?? null,
+        tracking: shown ? ADAPTER_TRACKING[shown.adapter] : null,
+      },
+      pendingApprovals: pending?.count ?? 0,
     };
   },
 });
@@ -251,4 +311,12 @@ export const verifyAudit = defineCommand({
   },
 });
 
-export const workspaceCommands = [getWorkspace, updateWorkspace, setSeedList, setApprovalPolicy, listAudit, verifyAudit] as const;
+export const workspaceCommands = [
+  getWorkspace,
+  getStatus,
+  updateWorkspace,
+  setSeedList,
+  setApprovalPolicy,
+  listAudit,
+  verifyAudit,
+] as const;
