@@ -60,7 +60,7 @@ export const getWorkspace = defineCommand({
     approvalPolicy: Policy,
     timeZone: z.string().describe('IANA time zone of the workspace, e.g. Europe/Copenhagen'),
     seedList: z.array(z.string()).describe('Addresses (besides members) that test sends may go to'),
-    serverVersion: z.string().describe('Version of the running server, e.g. 0.2.4'),
+    serverVersion: z.string().describe('Version of the running server, e.g. 0.2.5'),
     you: z.object({ type: z.enum(['user', 'agent']), userId: z.string(), role: z.string(), permissions: z.array(z.string()) }),
     permissionsExplained: z
       .array(z.object({ permission: z.string(), meaning: z.string() }))
@@ -109,7 +109,7 @@ export const getStatus = defineCommand({
     'The running server version, whether enabled e-mail providers cover marketing and transactional mail, and how many approval requests are waiting for a person. Read-only; it never returns provider addresses, hosts or secrets.',
   input: z.object({}),
   output: z.object({
-    serverVersion: z.string().describe('Version of the running server, e.g. 0.2.4'),
+    serverVersion: z.string().describe('Version of the running server, e.g. 0.2.5'),
     emailProvider: z.object({
       configured: z.boolean().describe('Whether an enabled provider covers both marketing and transactional mail'),
       marketing: z.boolean().describe('Whether an enabled provider is assigned to marketing mail'),
