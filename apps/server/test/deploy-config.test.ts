@@ -7,8 +7,10 @@ import { describe, expect, it } from 'vitest';
 const root = fileURLToPath(new URL('../../../', import.meta.url));
 const read = (name: string) => readFile(join(root, name), 'utf8');
 
-const [compose, buildOverlay, envExample, smoke, readme, dockerfile, dockerignore, ci] = await Promise.all([
+const [compose, composeOverride, composeDoc, buildOverlay, envExample, smoke, readme, dockerfile, dockerignore, ci] = await Promise.all([
   read('docker-compose.yml'),
+  read('compose.override.example.yaml'),
+  read('docs/deployment/compose.md'),
   read('docker-compose.build.yml'),
   read('.env.example'),
   read('scripts/smoke.sh'),
@@ -28,6 +30,16 @@ function service(text: string, name: string): string {
   return next < 0 ? body : body.slice(0, next);
 }
 
+/** The top-level service keys, i.e. the two-space keys under `services:`. */
+function serviceNames(text: string): string[] {
+  const start = text.indexOf('\nservices:');
+  if (start < 0) throw new Error('services section is missing');
+  const rest = text.slice(start + '\nservices:'.length);
+  const end = rest.search(/^\S/m);
+  const body = end < 0 ? rest : rest.slice(0, end);
+  return [...body.matchAll(/^ {2}([a-z][\w-]*):$/gm)].map((match) => match[1]);
+}
+
 describe('compose deployment configuration', () => {
   const app = service(compose, 'app');
   const clickhouse = service(compose, 'clickhouse');
@@ -44,6 +56,73 @@ describe('compose deployment configuration', () => {
 
   it('caps ClickHouse memory with CLICKHOUSE_MEM_LIMIT', () => {
     expect(clickhouse).toMatch(/mem_limit:\s*\$\{CLICKHOUSE_MEM_LIMIT:-2g\}/);
+  });
+});
+
+describe('compose production defaults', () => {
+  it('restarts every service unless stopped', () => {
+    const names = serviceNames(compose);
+    expect(names).toEqual(expect.arrayContaining(['postgres', 'clickhouse', 'nats', 'valkey', 'app']));
+    for (const name of names) {
+      expect(service(compose, name)).toMatch(/^ {4}restart: unless-stopped$/m);
+    }
+  });
+
+  it('health-checks NATS on its monitoring endpoint and Valkey through the CLI', () => {
+    const nats = service(compose, 'nats');
+    expect(nats).toContain('image: nats:2.15.0-alpine');
+    expect(nats).toContain('"-m", "8222"');
+    expect(nats).toMatch(/healthz\?js-enabled-only=true/);
+    expect(nats).toMatch(/interval: 5s[\s\S]*retries: 20/);
+    const valkey = service(compose, 'valkey');
+    expect(valkey).toContain('valkey-cli ping');
+    expect(valkey).toMatch(/interval: 5s[\s\S]*retries: 10/);
+  });
+
+  it('waits for NATS and Valkey to be healthy', () => {
+    const app = service(compose, 'app');
+    expect(app).toMatch(/nats:\n\s+condition: service_healthy/);
+    expect(app).toMatch(/valkey:\n\s+condition: service_healthy/);
+  });
+
+  it('publishes the public listener from PUBLIC_BIND without edits', () => {
+    const app = service(compose, 'app');
+    expect(app).toMatch(/PUBLIC_PORT: \$\{PUBLIC_PORT:-\}/);
+    expect(app).toMatch(/"\$\{PUBLIC_BIND:-127\.0\.0\.1:3001\}:\$\{PUBLIC_PORT:-3001\}"/);
+    const mapping = app.split('\n').find((line) => line.includes('PUBLIC_BIND') && line.trim().startsWith('-'));
+    expect(mapping).toBeTruthy();
+    expect(mapping).not.toContain('#');
+  });
+
+  it('forbids editing the release file and points at the override', () => {
+    expect(compose).toMatch(/Never edit this file/i);
+    expect(compose).toContain('compose.override.yaml');
+  });
+});
+
+describe('compose override example', () => {
+  it('keeps every example commented, so copying it changes nothing', () => {
+    const uncommented = composeOverride.split('\n').filter((line) => line.trim() !== '' && !line.trimStart().startsWith('#'));
+    expect(uncommented).toEqual([]);
+  });
+
+  it('shows an external network, bind mounts, limits and the backup placeholder', () => {
+    expect(composeOverride).toMatch(/external:\s*true/);
+    expect(composeOverride).toMatch(/tunnel container/i);
+    expect(composeOverride).toContain('/srv/am/pgdata:/var/lib/postgresql/data');
+    expect(composeOverride).toContain('/srv/am/clickhouse:/var/lib/clickhouse');
+    expect(composeOverride).toContain('/srv/am/nats:/data');
+    expect(composeOverride).toMatch(/mem_limit:/);
+    expect(composeOverride).toContain('# Backups: see docs/deployment/backups.md');
+  });
+});
+
+describe('compose documentation', () => {
+  it('documents install, the never-edit rule and the upgrade commands', () => {
+    expect(composeDoc).toContain('Never edit docker-compose.yml');
+    expect(composeDoc).toContain('compose.override.yaml');
+    expect(composeDoc).toContain('docker compose pull');
+    expect(composeDoc).toContain('docker compose up -d');
   });
 });
 
@@ -67,6 +146,11 @@ describe('.env.example', () => {
     expect(envExample).toContain('CLICKHOUSE_MEM_LIMIT=2g');
     expect(envExample).toMatch(/^#\s*AM_BUILD_IMAGE=/m);
     expect(envExample).toMatch(/pin|latest/i);
+  });
+
+  it('documents the public listener bind address', () => {
+    expect(envExample).toMatch(/^# PUBLIC_BIND=127\.0\.0\.1:3001$/m);
+    expect(envExample).toMatch(/PUBLIC_BIND[\s\S]{0,300}(tunnel|network)/i);
   });
 });
 

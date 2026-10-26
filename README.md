@@ -88,6 +88,7 @@ On Kubernetes: the Helm chart in [`deploy/helm`](deploy/helm/agentic-marketing) 
 
 - [Development](docs/development.md): layout, running locally, tests, key rotation.
 - [Kubernetes reference deployment](docs/deployment/kubernetes.md): Helm, OpenBao or AWS KMS keys, sizing.
+- [Docker Compose deployment](docs/deployment/compose.md): the release files, the override file, upgrades.
 - [Edge decisions](docs/deployment/edge.md): the decision API on Cloudflare Workers.
 - [Push notifications](docs/push.md): browsers, Android and Apple apps.
 - [Single sign-on, SCIM and agent permissions](docs/identity.md).
