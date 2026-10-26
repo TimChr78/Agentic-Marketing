@@ -2,9 +2,9 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
-## [Unreleased]
+## [0.2.4] - 2026-10-26
 
-Phase 12 of [wave 3](docs/architecture/roadmap-wave-3.md#phase-12-install-and-upgrade): installing, upgrading, checking and restoring the platform without a checkout or local edits. REST and MCP stay backwards compatible: `workspace.get` gains one output field. No migration.
+Phase 12 of [wave 3](docs/architecture/roadmap-wave-3.md#phase-12-install-and-upgrade): installing, upgrading, checking and restoring the platform without a checkout or local edits. It is a patch release because everything is additive: REST and MCP stay backwards compatible (`workspace.get` gains one output field), every new setting is optional, and no migration runs. This is the first release with a Compose bundle and the fixed upgrade block below.
 
 ### Added
 
@@ -26,11 +26,14 @@ Phase 12 of [wave 3](docs/architecture/roadmap-wave-3.md#phase-12-install-and-up
 
 ### Upgrading from 0.2.3
 
-- **Migrations:** none.
-- **Configuration:** new, all optional: `PUBLIC_BIND` (default `127.0.0.1:3001`, Compose only), `SKIP_PRE_UPGRADE_BACKUP` (default `false`), `BACKUP_DIR` (set to `/backups` by Compose), and for the backup service `BACKUP_CRON` (default `30 3 * * *`) and `BACKUP_KEEP_DAYS` (default 14). `docker-compose.yml` adds the `backups` volume.
-- **Breaking changes:** none in REST, MCP or artifacts. Compose: the public listener's port is now always published (loopback-only by default), so host port 3001 must be free, or set `PUBLIC_BIND`.
-- **Manual steps:** if you edited `docker-compose.yml`, move those edits into `compose.override.yaml` before replacing the file. If you uncommented the public listener's port line, remove that edit; `PUBLIC_BIND` replaces it. Optionally add the `backup` service from `compose.override.example.yaml`.
-- **Upgrade:** set `AM_VERSION=<version>` in `.env`, replace `docker-compose.yml` with the bundle's copy, then `docker compose pull && docker compose up -d` (Helm: the chart of the same version). Then `docker compose exec app am doctor`.
+- **Migrations:** none. Because nothing is pending, the new automatic pre-upgrade backup does not run on this upgrade; it runs from the next release with a migration. Take one by hand if you want it: `docker compose exec app am backup` after upgrading writes to the new `backups` volume.
+- **Configuration:** new, all optional: `PUBLIC_BIND` (default `127.0.0.1:3001`, Compose only), `SKIP_PRE_UPGRADE_BACKUP` (default `false`), `BACKUP_DIR` (set to `/backups` by Compose), and for the optional backup service `BACKUP_CRON` (default `30 3 * * *`) and `BACKUP_KEEP_DAYS` (default 14). `docker-compose.yml` adds the `backups` volume and switches NATS to `nats:2.15.0-alpine` (same version, same data volume).
+- **Breaking changes:** none.
+- **Manual steps:**
+  - If you edited `docker-compose.yml`, move those edits into `compose.override.yaml` (start from `compose.override.example.yaml`) before replacing the file. If you uncommented the public listener's port line, drop that edit: the mapping is now always there.
+  - Compose now publishes the public listener's port on the host, loopback-only by default. If host port 3001 is already in use, set `PUBLIC_BIND` (e.g. `127.0.0.1:3101`) in `.env`, or `docker compose up` fails to bind it. A tunnel on another host needs `PUBLIC_BIND=0.0.0.0:3001`.
+  - Optionally add the `backup` service from `compose.override.example.yaml`.
+- **Upgrade:** download `agentic-marketing-compose-0.2.4.tar.gz` from the release, replace `docker-compose.yml` with its copy, set `AM_VERSION=0.2.4` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.2.4). Then `docker compose exec app am doctor`.
 
 ## [0.2.3] - 2026-10-26
 

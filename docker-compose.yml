@@ -61,7 +61,7 @@ services:
 
   app:
     # Pull the release image; docker-compose.build.yml builds this checkout from source instead.
-    image: ghcr.io/timchr78/agentic-marketing:${AM_VERSION:-0.2.3}
+    image: ghcr.io/timchr78/agentic-marketing:${AM_VERSION:-0.2.4}
     restart: unless-stopped
     depends_on:
       postgres:

@@ -60,7 +60,7 @@ export const getWorkspace = defineCommand({
     approvalPolicy: Policy,
     timeZone: z.string().describe('IANA time zone of the workspace, e.g. Europe/Copenhagen'),
     seedList: z.array(z.string()).describe('Addresses (besides members) that test sends may go to'),
-    serverVersion: z.string().describe('Version of the running server, e.g. 0.2.3'),
+    serverVersion: z.string().describe('Version of the running server, e.g. 0.2.4'),
     you: z.object({ type: z.enum(['user', 'agent']), userId: z.string(), role: z.string(), permissions: z.array(z.string()) }),
     permissionsExplained: z
       .array(z.object({ permission: z.string(), meaning: z.string() }))
