@@ -17,6 +17,7 @@ import {
   liveChecks,
   offlineChecks,
 } from '../src/ops/checks';
+import { VERSION } from '../src/version';
 
 const good: Env = {
   AUTH_SECRET: 'a'.repeat(40),
@@ -140,9 +141,10 @@ describe('am doctor offline checks', () => {
     expect(missing?.message).not.toContain('WEB_DIST');
     expect(missing?.message).not.toContain('DATABASE_URL');
 
-    const current = envFileChecks('AM_VERSION=0.2.4\nAUTH_SECRET=x\nAPP_DB_PASSWORD=y\n', example, '0.2.4');
+    // Coming from the running version itself: nothing is new (whatever version this build is).
+    const current = envFileChecks(`AM_VERSION=${VERSION}\nAUTH_SECRET=x\nAPP_DB_PASSWORD=y\n`, example, VERSION);
     expect(current.find((item) => item.id === 'env-file.missing')?.status).toBe('ok');
-    expect(current.find((item) => item.id === 'env-file.missing')?.message).toContain('no variables added since 0.2.4');
+    expect(current.find((item) => item.id === 'env-file.missing')?.message).toContain(`no variables added since ${VERSION}`);
   });
 
   it('takes the from-version from AM_VERSION and warns only about new required keys', () => {
