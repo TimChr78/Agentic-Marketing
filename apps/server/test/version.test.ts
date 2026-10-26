@@ -72,3 +72,13 @@ describe('the running server', () => {
     expect((await t.api(owner).call('workspace.get', {})).serverVersion).toBe(VERSION);
   });
 });
+
+describe('migration heads', () => {
+  it('maps the newest migration to a release, so backups can name where old data came from', async () => {
+    const { latestMigration, releaseForMigrationHead } = await import('@agentic-marketing/db');
+    expect(
+      releaseForMigrationHead(latestMigration() ?? null),
+      `add ${latestMigration()} to MIGRATION_RELEASES in packages/db/src/migrate.ts`,
+    ).toBeTruthy();
+  });
+});

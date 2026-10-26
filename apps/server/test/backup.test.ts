@@ -264,7 +264,7 @@ describe.skipIf(!pgToolsReady)('backup and restore', () => {
     // 0.2.4 left no server_versions row and shares its head with 0.2.3, so the data version is a
     // range. The name takes the newest release; the manifest keeps the range and says why.
     await pool.query('DROP TABLE server_versions');
-    await pool.query("DELETE FROM schema_migrations WHERE version = '0028_server_versions.sql'");
+    await pool.query("DELETE FROM schema_migrations WHERE version > '0027_journey_consent_exits.sql'");
     const { dir, manifest: preUpgrade } = await withEnv(env, () =>
       createBackup({ dir: backupDir, kind: 'pre-upgrade', env: process.env, log: () => {} }),
     );

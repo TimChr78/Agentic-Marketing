@@ -65,11 +65,10 @@ const MIGRATION_RELEASES: Record<string, string> = {
   '0025_assets.sql': '0.2.0',
   '0026_consent_segments_recompute.sql': '0.2.1–0.2.2',
   '0027_journey_consent_exits.sql': '0.2.3–0.2.4',
-  // This change. A database at this head has a server_versions row, so the fallback is for tests
-  // and for a migrate that ran without the server.
+  // From here a database has a server_versions row; the map is for a migrate that ran without the
+  // server, and for tests. Keep the newest migration listed (a test checks it).
   '0028_server_versions.sql': '0.2.5',
-  // Phase 13 (#124); the release that first ships this head.
-  '0029_input_warnings.sql': '0.2.6',
+  '0032_approval_bundles.sql': '0.2.6',
 };
 
 export function releaseForMigrationHead(head: string | null): string | null {
