@@ -44,6 +44,10 @@ export function ApprovalDrawer({ id, queue, onClose, onDecided }: { id: string; 
 
   const a = d.data;
   const pending = a?.status === 'pending';
+  // Reviewed together with other changes (#107): deciding this one decides all of them.
+  const bundle = a?.bundle ?? null;
+  const bundleVersions = bundle ? Object.fromEntries(bundle.members.map((m) => [m.artifactId, m.version])) : undefined;
+  const bundledTemplate = a?.artifactType === 'broadcast' ? bundleVersions?.[String((a.content as { template?: string }).template ?? '')] : undefined;
   const canApprove = can('artifacts:approve');
   const ownRequest = a?.requestedBy.type === 'user' && a.requestedBy.id === user.id;
   // Approvers can test to their own address (the commands accept artifacts:approve without `to`).
@@ -67,8 +71,9 @@ export function ApprovalDrawer({ id, queue, onClose, onDecided }: { id: string; 
     try {
       if (kind === 'approve') await api.call('approvals.approve', { approvalId: a.id });
       else await api.call('approvals.reject', { approvalId: a.id, note: reason.trim() });
-      invalidateArtifact(a.artifactId);
-      toast.success(kind === 'approve' ? `Approved “${a.artifactName}”. Version ${a.version} is live.` : `Rejected “${a.artifactName}”. The author sees your reason.`);
+      for (const m of bundle?.members ?? [a]) invalidateArtifact(m.artifactId);
+      const what = bundle ? `${bundle.members.length} changes (${bundle.members.map((m) => `“${m.artifactName}”`).join(', ')})` : `“${a.artifactName}”`;
+      toast.success(kind === 'approve' ? (bundle ? `Approved ${what}. They are live.` : `Approved ${what}. Version ${a.version} is live.`) : `Rejected ${what}. The author sees your reason.`);
       onDecided();
       next();
     } catch (e) {
@@ -84,7 +89,7 @@ export function ApprovalDrawer({ id, queue, onClose, onDecided }: { id: string; 
     try {
       const r =
         a.artifactType === 'broadcast'
-          ? await api.call('broadcasts.sendTest', { artifactId: a.artifactId, version: a.version })
+          ? await api.call('broadcasts.sendTest', { artifactId: a.artifactId, version: a.version, templateVersion: bundledTemplate })
           : await api.call('templates.sendTest', { artifactId: a.artifactId, version: a.version });
       toast.success(`Test sent to ${r.to}: “${r.subject}”.`);
     } catch (e) {
@@ -148,16 +153,16 @@ export function ApprovalDrawer({ id, queue, onClose, onDecided }: { id: string; 
                         Cancel
                       </Button>
                       <Button variant="danger" icon={<X size={14} />} loading={busy === 'reject'} onClick={() => decide('reject')}>
-                        Reject with reason
+                        {bundle ? `Reject all ${bundle.members.length} with reason` : 'Reject with reason'}
                       </Button>
                     </>
                   ) : (
                     <>
                       <Button variant="danger" icon={<X size={14} />} onClick={() => setRejecting(true)}>
-                        Reject
+                        {bundle ? 'Reject all' : 'Reject'}
                       </Button>
                       <Button variant="primary" icon={<Check size={14} />} loading={busy === 'approve'} onClick={() => decide('approve')}>
-                        Approve and publish
+                        {bundle ? `Approve all ${bundle.members.length} and publish` : 'Approve and publish'}
                       </Button>
                     </>
                   )}
@@ -187,6 +192,31 @@ export function ApprovalDrawer({ id, queue, onClose, onDecided }: { id: string; 
             </div>
             {a.note && <p className="mt-2 text-[14px] leading-[22px] whitespace-pre-wrap text-fg">{a.note}</p>}
           </section>
+          {bundle && (
+            <section aria-label="Reviewed together" className="rounded-lg border border-line px-4 py-3">
+              <p className="text-[13px] text-fg-2">
+                Reviewed together: {pending ? 'approving publishes all of them, in this order, in one step; rejecting rejects all.' : 'these were decided together.'}
+              </p>
+              <ol className="mt-2 flex flex-wrap gap-2">
+                {bundle.members.map((m, i) => (
+                  <li key={m.approvalId}>
+                    <button
+                      type="button"
+                      onClick={() => m.approvalId !== a.id && navigate(`/approvals/${m.approvalId}`)}
+                      aria-current={m.approvalId === a.id ? 'true' : undefined}
+                      className={
+                        m.approvalId === a.id
+                          ? 'rounded-md border border-[var(--accent)] bg-surface-2 px-2.5 py-1 text-[13px] font-medium text-fg'
+                          : 'rounded-md border border-line px-2.5 py-1 text-[13px] text-fg-2 hover:bg-surface-2'
+                      }
+                    >
+                      {i + 1}. {m.artifactName} <span className="text-muted">· {typeLabel(m.artifactType)} v{m.version}</span>
+                    </button>
+                  </li>
+                ))}
+              </ol>
+            </section>
+          )}
           {stale && (
             <Alert tone="warn" title={`A newer draft (v${a.artifactLatestVersion}) exists`}>
               Approving publishes version {a.version}, the one shown here. The newer draft stays a draft.
@@ -204,7 +234,7 @@ export function ApprovalDrawer({ id, queue, onClose, onDecided }: { id: string; 
               { key: 'history', label: 'History' },
             ]}
           >
-            {tab === 'preview' && <ArtifactPreview type={a.artifactType} artifactId={a.artifactId} version={a.version} content={a.content} compact />}
+            {tab === 'preview' && <ArtifactPreview type={a.artifactType} artifactId={a.artifactId} version={a.version} content={a.content} compact bundle={bundleVersions} />}
             {tab === 'changes' && <DiffView changes={a.diff.changes} from={a.diff.from} to={a.diff.to} />}
             {tab === 'content' && <JsonView value={a.content} label={`Version ${a.version} as JSON (what agents read and write)`} maxHeight={600} />}
             {tab === 'history' && <History a={a} />}

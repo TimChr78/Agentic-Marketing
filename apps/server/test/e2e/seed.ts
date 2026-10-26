@@ -251,6 +251,26 @@ export async function seed(t: T, opts: { confirmedUrl?: string } = {}) {
   });
   await ask(bc.artifactId, 'Resend #42 on Friday morning, Copenhagen time.');
 
+  // The weekly flow since #107: next issue's template and the broadcast that sends it, one review.
+  const issue44 = await agent.call('artifacts.create', {
+    type: 'email_template',
+    name: 'Weekly Signal #44',
+    content: {
+      purpose: 'marketing_email',
+      subject: 'Signal #44: one review per issue',
+      mjml: mjml('Signal #44', 'This issue and its send were approved together.'),
+    },
+  });
+  const send44 = await agent.call('artifacts.create', {
+    type: 'broadcast',
+    name: 'Send Signal #44',
+    content: { template: issue44.artifactId, segment: engaged.artifactId, sendAt: '2026-11-06T09:00:00+01:00' },
+  });
+  await agent.call('artifacts.requestPublishBundle', {
+    artifactIds: [send44.artifactId, issue44.artifactId],
+    note: 'Issue 44 and its Friday send, for one review.',
+  });
+
   await agent.call('artifacts.updateDraft', {
     artifactId: engaged.artifactId,
     content: {

@@ -35,6 +35,29 @@ test.describe('approvals (#41)', () => {
     await expect(page.getByRole('row', { name: /Weekly Signal #43/ })).toHaveCount(0);
   });
 
+  test('a template and its broadcast are one row, one review and one approval (#107)', async ({ page }) => {
+    await signIn(page, PEOPLE.approver);
+    await page.goto('/approvals');
+    const row = page.getByRole('row', { name: /Send Signal #44/ });
+    await expect(row).toContainText('+ 1 reviewed together');
+    await expect(page.getByRole('row', { name: /Weekly Signal #44/ })).toHaveCount(0);
+
+    await row.getByRole('link', { name: 'Send Signal #44' }).click();
+    const drawer = page.getByRole('dialog', { name: 'Send Signal #44' });
+    await expect(drawer).toContainText('Reviewed together');
+    await expect(drawer).toContainText('reviewed together with this broadcast');
+    await expect(drawer.frameLocator('iframe[title^="E-mail preview"]').getByText('This issue and its send were approved together.')).toBeVisible();
+    await drawer.getByRole('button', { name: /Weekly Signal #44/ }).click();
+    await expect(page.getByRole('dialog', { name: 'Weekly Signal #44' })).toContainText('Reviewed together');
+
+    await page.getByRole('dialog', { name: 'Weekly Signal #44' }).getByRole('button', { name: 'Approve all 2 and publish' }).click();
+    await expect(page.getByText(/Approved 2 changes/)).toBeVisible();
+    const list = await call(page.request, 'approvals.list', { status: 'approved' });
+    const names = list.approvals.map((a: any) => a.artifactName);
+    expect(names).toContain('Weekly Signal #44');
+    expect(names).toContain('Send Signal #44');
+  });
+
   test('batch approve is possible only for viewed items; the drawer works at 390 px', async ({ page }) => {
     await signIn(page, PEOPLE.approver);
     await page.setViewportSize({ width: 390, height: 844 });

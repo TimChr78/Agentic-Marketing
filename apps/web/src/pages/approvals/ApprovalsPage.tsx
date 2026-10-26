@@ -27,9 +27,15 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
   const [batching, setBatching] = useState(false);
   useViewedTick();
 
-  const items = list.data?.approvals ?? [];
+  const all = list.data?.approvals ?? [];
+  // A bundle (#107) is one decision, so it is one row: the member the others exist for (the
+  // broadcast, the form) stands for it, and counts as viewed once every member's preview was opened.
+  const items = all.filter((a) => {
+    const lead = a.bundle?.members.at(-1)?.approvalId;
+    return !lead || lead === a.id || !all.some((x) => x.id === lead);
+  });
   const canApprove = can('artifacts:approve');
-  const viewed = (a: Approval) => wasViewed(user!.id, a.id, a.version);
+  const viewed = (a: Approval) => (a.bundle ? a.bundle.members.every((m) => wasViewed(user!.id, m.approvalId, m.version)) : wasViewed(user!.id, a.id, a.version));
   const selectable = items.filter((a) => a.status === 'pending' && viewed(a));
   const chosen = items.filter((a) => selected.has(a.id) && viewed(a));
   const notViewed = items.filter((a) => a.status === 'pending' && !viewed(a)).length;
@@ -45,11 +51,13 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
         <>
           <p>Each one is published at once:</p>
           <ul className="mt-2 list-disc pl-5">
-            {chosen.map((a) => (
-              <li key={a.id}>
-                {a.artifactName} <span className="text-muted">({typeLabel(a.artifactType)}, v{a.version})</span>
-              </li>
-            ))}
+            {chosen.flatMap((a) =>
+              (a.bundle?.members ?? [a]).map((m) => (
+                <li key={'approvalId' in m ? m.approvalId : m.id}>
+                  {m.artifactName} <span className="text-muted">({typeLabel(m.artifactType)}, v{m.version})</span>
+                </li>
+              )),
+            )}
           </ul>
         </>
       ),
@@ -122,7 +130,10 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
               <li key={a.id}>
                 <Link to={`/approvals/${a.id}${status === 'pending' ? '' : `?status=${status}`}`} className="block px-4 py-3 hover:bg-surface-2">
                   <div className="flex items-start justify-between gap-2">
-                    <span className="font-medium text-fg">{a.artifactName}</span>
+                    <span className="font-medium text-fg">
+                      {a.artifactName}
+                      <BundleNote a={a} />
+                    </span>
                     <ViewedPill a={a} viewed={viewed(a)} />
                   </div>
                   <div className="mt-1 flex flex-wrap items-center gap-2 text-[12px] text-muted">
@@ -181,6 +192,7 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
                     <Link to={`/approvals/${a.id}${status === 'pending' ? '' : `?status=${status}`}`} className="font-medium text-fg hover:underline" onClick={(e) => e.stopPropagation()}>
                       {a.artifactName}
                     </Link>
+                    <BundleNote a={a} />
                     <div className="mt-0.5 flex items-center gap-1.5 text-[12px] text-muted">
                       {typeLabel(a.artifactType)} · v{a.version} · {a.artifactPublishedVersion ? `changes live v${a.artifactPublishedVersion}` : 'new'}
                     </div>
@@ -226,5 +238,16 @@ function ViewedPill({ a, viewed }: { a: Approval; viewed: boolean }) {
     </StatusPill>
   ) : (
     <StatusPill tone="warn">Not yet viewed</StatusPill>
+  );
+}
+
+/** "+ 1 reviewed together", naming the other members of a bundle. */
+function BundleNote({ a }: { a: Approval }) {
+  const others = a.bundle?.members.filter((m) => m.approvalId !== a.id) ?? [];
+  if (!others.length) return null;
+  return (
+    <span className="ml-1.5 text-[12px] font-normal text-muted" title={others.map((m) => `${m.artifactName} (${typeLabel(m.artifactType)})`).join(', ')}>
+      + {others.length} reviewed together
+    </span>
   );
 }
