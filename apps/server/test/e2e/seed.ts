@@ -64,7 +64,8 @@ function png(w: number, h: number, rgb: [number, number, number]) {
   ]);
 }
 
-export async function seed(t: T) {
+/** `confirmedUrl`: where the signup form sends people after they confirm (default: the pilot site). */
+export async function seed(t: T, opts: { confirmedUrl?: string } = {}) {
   const users = {
     owner: await t.signUp(PEOPLE.owner.email),
     builder: await t.signUp(PEOPLE.builder.email),
@@ -174,7 +175,7 @@ export async function seed(t: T) {
       consentText: 'Send me the weekly MartechSignal newsletter. Unsubscribe at any time.',
       traits: ['firstName'],
       successUrl: 'https://martechsignal.example/thanks',
-      confirmedUrl: 'https://martechsignal.example/welcome',
+      confirmedUrl: opts.confirmedUrl ?? 'https://martechsignal.example/welcome',
       allowedOrigins: ['https://martechsignal.example'],
     },
   });

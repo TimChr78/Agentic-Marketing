@@ -14,13 +14,17 @@ const t = await startTestServer('e2e', port, {
   PUBLIC_LINKS_URL: `http://localhost:${port}`,
   TRUSTED_ORIGINS: 'http://localhost:5173',
 });
-const s = await seed(t);
+// The signup form confirms to the site's welcome page, which the fixtures port below plays: a
+// real cross-origin redirect after the confirm POST, with no DNS and no request interception.
+const fixturesBase = `http://127.0.0.1:${port + 1}`;
+const s = await seed(t, { confirmedUrl: `${fixturesBase}/welcome` });
 
 // Test-only fixtures on the next port (never part of the product): the links a subscriber would
 // get by e-mail, signed with this server's key, so the hosted-page specs can click them in a
 // real browser (#115).
 const fixtures = new Hono();
 fixtures.get('/forms', (c) => c.json(s.forms));
+fixtures.get('/welcome', (c) => c.html('<h1>Welcome aboard</h1>'));
 fixtures.post('/confirm-link', async (c) => {
   const { form, anonymousId } = await c.req.json<{ form: string; anonymousId: string }>();
   const { rows } = await t.srv.db.admin.query<{ published_version: number }>('SELECT published_version FROM artifacts WHERE id = $1', [

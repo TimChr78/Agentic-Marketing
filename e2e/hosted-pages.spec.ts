@@ -39,8 +39,8 @@ async function consentOf(page: Page, email: string) {
 test.describe('hosted pages (#115)', () => {
   test('confirming with a confirmedUrl on the site lands on that page', async ({ page }) => {
     const forms = (await (await page.request.get(`${fixtures}/forms`)).json()) as { signup: string; footer: string };
-    // The site's thank-you page, served here so the test needs no network.
-    await page.route(`${SITE}/**`, (route) => route.fulfill({ contentType: 'text/html', body: '<h1>Welcome aboard</h1>' }));
+    // The seeded form confirms to the site's welcome page, played by the fixtures port: a real
+    // cross-origin redirect. (page.route does not reliably see a redirect's target.)
     const blocked: string[] = [];
     page.on('console', (m) => {
       if (/form-action/.test(m.text())) blocked.push(m.text());
@@ -52,7 +52,7 @@ test.describe('hosted pages (#115)', () => {
     await expect(page.getByRole('heading', { name: 'Confirm your subscription' })).toBeVisible();
     await page.getByRole('button', { name: 'Yes, subscribe me' }).click();
 
-    await expect(page).toHaveURL(`${SITE}/welcome`);
+    await expect(page).toHaveURL(`${fixtures}/welcome`);
     await expect(page.getByRole('heading', { name: 'Welcome aboard' })).toBeVisible();
     expect(blocked).toEqual([]);
 
