@@ -4,7 +4,7 @@ import { migrateClickHouse } from '@agentic-marketing/events';
 import { initTelemetry, logger, shutdownTelemetry } from '@agentic-marketing/telemetry';
 import { serve } from '@hono/node-server';
 import { createServer } from './app';
-import { loadConfig } from './config';
+import { ConfigError, loadConfig } from './config';
 import { publicOnly } from './http/public-only';
 import { createBackup, keepDaysFromEnv } from './ops/backup-lib';
 import { offlineChecks } from './ops/checks';
@@ -13,7 +13,15 @@ import { startScheduler, startWorkers } from './workers';
 
 // One image, several roles (ADR-0002): `api` (UI, REST, MCP), `ingest` (event collection),
 // `worker` (event consumers) and `scheduler` (arrives with the journey runtime).
-const config = loadConfig();
+let config: ReturnType<typeof loadConfig>;
+try {
+  config = loadConfig();
+} catch (err) {
+  if (!(err instanceof ConfigError)) throw err;
+  // A container log should say what to fix, not show a stack from loadConfig.
+  console.error(err.message);
+  process.exit(1);
+}
 initTelemetry('agentic-marketing');
 logger.info({ version: VERSION, commit: COMMIT }, 'agentic-marketing starting');
 // The offline part of `am doctor`, as warnings: a diagnostic never keeps the server from starting.
