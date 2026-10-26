@@ -44,6 +44,15 @@ export interface HotState {
   /** A version stamp shared by all processes: `bump` changes it, `stamp` reads it (cache invalidation). */
   bump(key: string): Promise<void>;
   stamp(key: string): Promise<string>;
+  /** When `key` is locked out after repeated failures, or null. */
+  failureLock(key: string): Promise<Date | null>;
+  /**
+   * Counts a failure in a window shared by all processes. Once `limit` failures happen inside
+   * `windowSeconds`, further attempts are refused until `blockSeconds` has passed.
+   */
+  recordFailure(key: string, limit: number, windowSeconds: number, blockSeconds: number): Promise<Date | null>;
+  /** Forgets earlier failures, e.g. after a correct password. */
+  clearFailures(key: string): Promise<void>;
   ping(): Promise<boolean>;
   close(): Promise<void>;
 }
@@ -62,6 +71,39 @@ if tokens >= n then tokens = tokens - n; ok = 1 end
 redis.call('HSET', KEYS[1], 't', tostring(tokens), 'a', tostring(now))
 redis.call('PEXPIRE', KEYS[1], math.ceil(burst / rate * 1000) + 1000)
 return ok`;
+
+// Failure counters for step-up checks (#61). The window and the lockout are explicit so the
+// caller can say when to retry. Expiry is set from the server clock, not the client's.
+const FAILURE_STATE = `
+local t = redis.call('TIME')
+local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+local b = redis.call('HMGET', KEYS[1], 'c', 'b')
+local count = tonumber(b[1]) or 0
+local blockedUntil = tonumber(b[2]) or 0
+if blockedUntil > 0 and blockedUntil <= now then
+  redis.call('DEL', KEYS[1])
+  return {0, 0}
+end
+if blockedUntil > now then return {count, blockedUntil} end
+return {count, 0}`;
+
+const RECORD_FAILURE = `
+local t = redis.call('TIME')
+local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+local limit, windowMs, blockMs = tonumber(ARGV[1]), tonumber(ARGV[2]), tonumber(ARGV[3])
+local b = redis.call('HMGET', KEYS[1], 'c', 'w', 'b')
+local count = tonumber(b[1]) or 0
+local windowStart = tonumber(b[2]) or 0
+local blockedUntil = tonumber(b[3]) or 0
+if blockedUntil > now then return {count, blockedUntil} end
+if blockedUntil > 0 then count, windowStart, blockedUntil = 0, 0, 0 end
+if windowStart == 0 or now - windowStart >= windowMs then count, windowStart = 0, now end
+count = count + 1
+local lock = 0
+if count >= limit then lock = now + blockMs end
+redis.call('HSET', KEYS[1], 'c', tostring(count), 'w', tostring(windowStart), 'b', tostring(lock))
+redis.call('PEXPIRE', KEYS[1], windowMs + blockMs + 1000)
+return {count, lock}`;
 
 export function valkeyHotState(opts: { url: string; prefix?: string }): HotState {
   const client = new Valkey(opts.url, { lazyConnect: true, maxRetriesPerRequest: 2, enableAutoPipelining: true });
@@ -145,6 +187,27 @@ export function valkeyHotState(opts: { url: string; prefix?: string }): HotState
 
     async take(key, n, rate, burst) {
       return (await client.eval(TAKE, 1, `${p}:rl:${key}`, rate, burst, n)) === 1;
+    },
+
+    async failureLock(key) {
+      const [, blockedUntil] = (await client.eval(FAILURE_STATE, 1, `${p}:fail:${key}`)) as [number, number];
+      return Number(blockedUntil) > 0 ? new Date(Number(blockedUntil)) : null;
+    },
+
+    async recordFailure(key, limit, windowSeconds, blockSeconds) {
+      const [, blockedUntil] = (await client.eval(
+        RECORD_FAILURE,
+        1,
+        `${p}:fail:${key}`,
+        limit,
+        windowSeconds * 1000,
+        blockSeconds * 1000,
+      )) as [number, number];
+      return Number(blockedUntil) > 0 ? new Date(Number(blockedUntil)) : null;
+    },
+
+    async clearFailures(key) {
+      await client.del(`${p}:fail:${key}`);
     },
 
     async ping() {

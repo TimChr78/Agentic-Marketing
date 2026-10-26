@@ -76,6 +76,11 @@ export const ENV_SINCE: Record<string, string> = {
   BACKUP_KEEP_DAYS: '0.2.4',
   PUBLIC_BIND: '0.2.4',
   SKIP_PRE_UPGRADE_BACKUP: '0.2.4',
+
+  // 0.2.6 (issue #61)
+  STEP_UP_LOCKOUT_SECONDS: '0.2.6',
+  STEP_UP_MAX_FAILURES: '0.2.6',
+  STEP_UP_WINDOW_SECONDS: '0.2.6',
 };
 
 /**

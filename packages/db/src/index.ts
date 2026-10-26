@@ -10,6 +10,7 @@ export type {
   ConsentStatus,
   DeliveryStatus,
   IdentifierType,
+  InputWarningPrincipal,
   MessageStatus,
   ParticipantStatus,
   Role,

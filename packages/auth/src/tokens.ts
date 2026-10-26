@@ -288,13 +288,28 @@ export const updateApiToken = defineCommand({
           );
         throw new AppError('forbidden', `${reason} Confirm with your password to widen it.`);
       }
+      // Token widening is a password check like sign-in, so it needs the same kind of limit (#61).
+      const limiter = ctx.services.stepUpLimiter;
+      const blockedUntil = await limiter?.lockedUntil(ctx.principal.userId);
+      if (blockedUntil) {
+        const minutes = Math.max(1, Math.ceil((blockedUntil.getTime() - Date.now()) / 60_000));
+        throw new AppError(
+          'forbidden',
+          `Too many incorrect password attempts. Try again in ${minutes} minute${minutes === 1 ? '' : 's'} (after ${blockedUntil.toISOString()}).`,
+        );
+      }
       const state = await ctx.services.directory.verifyPassword(ctx.principal.userId, input.password);
       if (state === 'no_password')
         throw new AppError(
           'forbidden',
           'You sign in with single sign-on, so there is no password to confirm widening this token. Ask another admin with a password to make this change.',
         );
-      if (state === 'wrong') throw new AppError('forbidden', 'The password is not correct.');
+      if (state === 'wrong') {
+        await limiter?.recordFailure(ctx.principal.userId);
+        throw new AppError('forbidden', 'The password is not correct.');
+      }
+      // A correct password clears earlier failures so one typo does not count towards a later lockout.
+      await limiter?.reset(ctx.principal.userId);
       steppedUp = true;
     }
 

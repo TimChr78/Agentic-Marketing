@@ -161,6 +161,24 @@ const Env = z.object({
     .min(1)
     .default(180)
     .describe('Days finished webhook and action deliveries and AI call logs are kept'),
+  STEP_UP_MAX_FAILURES: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .default(5)
+    .describe('Wrong passwords allowed when widening an API token inside the window before it locks for a while'),
+  STEP_UP_WINDOW_SECONDS: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .default(900)
+    .describe('Window in which wrong password step-ups count towards the token-widening lockout'),
+  STEP_UP_LOCKOUT_SECONDS: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .default(900)
+    .describe('How long further token-widening password checks are refused after too many wrong passwords'),
   TRUSTED_ORIGINS: z
     .string()
     .optional()
@@ -295,6 +313,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
         .filter(Boolean),
     },
     retention: { unconfirmedDays: e.RETENTION_UNCONFIRMED_DAYS, logDays: e.RETENTION_LOG_DAYS },
+    stepUp: {
+      maxFailures: e.STEP_UP_MAX_FAILURES,
+      windowSeconds: e.STEP_UP_WINDOW_SECONDS,
+      lockoutSeconds: e.STEP_UP_LOCKOUT_SECONDS,
+    },
     trustedOrigins: e.TRUSTED_ORIGINS?.split(',').map((o) => o.trim()) ?? [],
     sso: { domainVerification: e.SSO_DOMAIN_VERIFICATION === 'true' },
   };

@@ -19,6 +19,20 @@ export interface Services {
   publicUrl?: string;
   /** Version of the running server, so command output can show it (workspace.get). */
   serverVersion: string;
+  /** Whether unknown input keys are rejected rather than warned about (STRICT_INPUTS). */
+  strictInputs: boolean;
+  /** Shared counter for wrong passwords on token widening (#61), so every process sees the lockout. */
+  stepUpLimiter?: StepUpLimiter;
+}
+
+/** A failure counter shared by all processes, e.g. Valkey. Times are absolute so callers can explain the wait. */
+export interface StepUpLimiter {
+  /** When this person may try again, or null when they are not locked out. */
+  lockedUntil(userId: string): Promise<Date | null>;
+  /** Counts a wrong password and returns the lockout it started, if any. */
+  recordFailure(userId: string): Promise<Date | null>;
+  /** Forgets earlier failures after a correct password. */
+  reset(userId: string): Promise<void>;
 }
 
 export interface CommandContext {
@@ -74,8 +88,8 @@ export interface ExecuteOptions {
 export interface ExecutorOptions {
   /** Reject unknown input keys instead of ignoring them with a warning (STRICT_INPUTS). */
   strictInputs?: boolean;
-  /** Called with the unknown keys a non-strict executor ignored, e.g. to log them. */
-  onUnknownKeys?: (command: string, unknown: UnknownInputKey[]) => void;
+  /** Called with the unknown keys a non-strict executor ignored, e.g. to log and persist them. */
+  onUnknownKeys?: (command: string, unknown: UnknownInputKey[], principal: Principal) => void;
 }
 
 const tracer = trace.getTracer('@agentic-marketing/commands');
@@ -171,7 +185,7 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
       const parsed = cmd.input.safeParse(input);
       if (!parsed.success)
         return fail(new AppError('invalid_input', 'The input does not match the command schema.', z.treeifyError(parsed.error)));
-      if (unknown.length) options.onUnknownKeys?.(cmd.name, unknown);
+      if (unknown.length) options.onUnknownKeys?.(cmd.name, unknown, principal);
       target = cmd.target?.(parsed.data);
       if (cmd.humansOnly && principal.type !== 'user')
         return fail(new AppError('forbidden', `${cmd.name} can only be run by a person, not by an agent.`));

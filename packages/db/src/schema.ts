@@ -638,6 +638,25 @@ export const apiTokenChanges = pgTable(
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
 );
 
+export type InputWarningPrincipal = 'user' | 'token' | 'oauth_client';
+
+/** Unknown command-input keys a client sent, so strict mode can be rolled out on evidence (#124). */
+export const inputWarnings = pgTable(
+  'input_warnings',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    principalType: text('principal_type').$type<InputWarningPrincipal>().notNull(),
+    principalId: text('principal_id').notNull(),
+    clientLabel: text('client_label').notNull(),
+    command: text('command').notNull(),
+    keyPath: text('key_path').notNull(),
+    firstSeen: ts('first_seen').notNull().defaultNow(),
+    lastSeen: ts('last_seen').notNull().defaultNow(),
+    count: integer('count').notNull().default(1),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.principalType, t.principalId, t.command, t.keyPath] })],
+);
+
 export const webhookEndpoints = pgTable(
   'webhook_endpoints',
   {
