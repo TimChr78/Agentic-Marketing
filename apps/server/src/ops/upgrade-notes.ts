@@ -65,7 +65,8 @@ export function mergeUpgradeNotes(releases: ReleaseNotes[], from: string, to: st
   const shaped = between.filter((r) => LABELS.every((l) => r.fields[l] !== undefined));
   const freeForm = between.filter((r) => !shaped.includes(r));
   const indent = (s: string) => s.replace(/\n/g, '\n  ');
-  const out = [`Upgrading from ${from} to ${to}: ${between.map((r) => r.version).join(', ')}.`, ''];
+  const listed = between.map((r) => r.version).join(', ');
+  const out = [`Upgrading from ${from} to ${to} (${between.length} release${between.length === 1 ? '' : 's'}: ${listed}).`, ''];
   if (freeForm.length) {
     out.push(
       `Read these releases' notes in full first (they predate the fixed upgrade block): ${freeForm.map((r) => r.version).join(', ')}.`,

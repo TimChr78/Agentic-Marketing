@@ -23,11 +23,18 @@ describe('am upgrade-notes', () => {
 
   it('merges every release between two versions, older free-form blocks in full', () => {
     const notes = mergeUpgradeNotes(releases, '0.2.2', '0.2.4');
-    expect(notes).toContain('Upgrading from 0.2.2 to 0.2.4: 0.2.3, 0.2.4.');
+    expect(notes).toContain('Upgrading from 0.2.2 to 0.2.4 (2 releases: 0.2.3, 0.2.4).');
     expect(notes).toContain('0027_journey_consent_exits.sql');
     expect(notes).toMatch(/Migrations:\n- 0\.2\.4: /);
     expect(notes).toMatch(/Upgrade \(0\.2\.4\):/);
     expect(notes).not.toContain('0.2.2 (upgrading');
+  });
+
+  it('counts the releases in the header', () => {
+    expect(mergeUpgradeNotes(releases, '0.2.4', '0.2.5')).toMatch(/^Upgrading from 0\.2\.4 to 0\.2\.5 \(1 release: 0\.2\.5\)\.$/m);
+    expect(mergeUpgradeNotes(releases, '0.2.2', '0.2.5')).toMatch(
+      /^Upgrading from 0\.2\.2 to 0\.2\.5 \(3 releases: 0\.2\.3, 0\.2\.4, 0\.2\.5\)\.$/m,
+    );
   });
 
   it('says when there is nothing to do', () => {

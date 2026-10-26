@@ -41,10 +41,13 @@ const USAGE = `usage: am smoke --public-url URL [--admin-url URL] [--token amk_�
 
   --public-url  public listener, e.g. https://links.example.com or https://example.com/am
   --admin-url   admin listener, e.g. http://localhost:3000
-  --token       API token (or set AM_TOKEN) with artifacts:read; add profiles:read for --cleanup
+  --token       API token (or set AM_TOKEN) with artifacts:read. --cleanup also needs profiles:read
+                to find the signup; profiles.erase is people-only, so a token never erases it and
+                the unconfirmed signup goes with retention after RETENTION_UNCONFIRMED_DAYS.
   --form        published form id (frm_…) for a signup round trip
   --email       address that should receive the signup confirmation
-  --cleanup     with --form and --email, try to erase the profile the signup created
+  --cleanup     with --form and --email, look up the profile the signup created and try to erase it
+                (needs profiles:read; erasing itself needs a person with profiles:erase)
   --asset       public asset path, e.g. /a/ast_…/logo.png
   --json        print { ok, checks } instead of a table
 
@@ -464,10 +467,19 @@ async function systemStatus(target: Target, token: string): Promise<SystemStatus
   };
 }
 
-/** Erase the profile a signup created, or say plainly why it is still there. */
+/** The retention window; smoke loads no config, so read the environment or use the default. */
+function retentionDays(env: NodeJS.ProcessEnv = process.env): number {
+  const days = Number(env.RETENTION_UNCONFIRMED_DAYS?.trim());
+  return Number.isInteger(days) && days >= 1 ? days : 30;
+}
+
+/** Erase the profile a signup created, or say plainly why it is still there and when it goes. */
 async function cleanupSignupProfile(target: Target, token: string, email: string): Promise<string> {
+  const days = retentionDays();
   const leftInPlace =
-    'left in place: erase with profiles.erase or let the unconfirmed-signup retention (RETENTION_UNCONFIRMED_DAYS) remove it';
+    `left in place: profiles.erase is people-only, so an API token cannot erase it; ` +
+    `if the signup stays unconfirmed, retention (RETENTION_UNCONFIRMED_DAYS) removes it after ${days} days, ` +
+    'or erase it as a person in the admin UI';
   let profileId: string | null = null;
   try {
     // The public listener only queues the event; a worker creates the profile shortly afterwards.

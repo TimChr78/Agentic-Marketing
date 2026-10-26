@@ -195,6 +195,14 @@ function versionForName(version: string | null): string {
   return (version ?? 'unknown').replace(/[^A-Za-z0-9._-]+/g, '-');
 }
 
+/**
+ * A head-derived release range ("0.2.3–0.2.4") names several releases. A backup keeps the range in
+ * its manifest but uses the newest release in its directory name, where the en dash cannot go.
+ */
+function newestRelease(version: string | null): string | null {
+  return version?.split('–').at(-1)?.trim() || null;
+}
+
 /** Runs pg_dump -Fc --no-owner; connection details travel through PG* variables. */
 export async function dumpPostgres(databaseUrl: string, outFile: string): Promise<void> {
   await run('pg_dump', ['-Fc', '--no-owner', '--file', outFile], postgresClientEnv(databaseUrl));
@@ -224,7 +232,11 @@ export async function createBackup(opts: CreateBackupOptions = {}): Promise<{ di
     .replace(/\.\d{3}Z$/, 'Z');
   const migrationHeadValue = await migrationHead(databaseUrl);
   // The version the data was running, not this build: on upgrade the two differ.
-  const fromVersion = await lastServerVersion(databaseUrl, migrationHeadValue);
+  const recordedFromVersion = await lastServerVersion(databaseUrl, migrationHeadValue);
+  const fromVersion = newestRelease(recordedFromVersion);
+  // The name needs one version; the manifest keeps the full range and says where it came from.
+  const fromVersionLabel =
+    recordedFromVersion && recordedFromVersion !== fromVersion ? `${recordedFromVersion} (from migration head)` : recordedFromVersion;
   const name =
     kind === 'pre-upgrade'
       ? `am-pre-upgrade-${versionForName(fromVersion)}-to-${versionForName(version)}-${stamp}`
@@ -249,7 +261,7 @@ export async function createBackup(opts: CreateBackupOptions = {}): Promise<{ di
       format: 2,
       kind,
       version,
-      fromVersion,
+      fromVersion: fromVersionLabel,
       ...(kind === 'pre-upgrade' ? { toVersion: version } : {}),
       migrationHead: migrationHeadValue,
       createdAt: createdAt.toISOString(),
@@ -562,7 +574,8 @@ export interface BackupListing {
   migrationHead: string | null;
   createdAt: string;
   bytes: number;
-  clickhouse: boolean;
+  /** What `--list` shows; a 0.2.4 (format 1) backup's ClickHouse part cannot be restored. */
+  clickhouse: string;
 }
 
 function manifestBytes(manifest: AnyBackupManifest): number {
@@ -590,15 +603,18 @@ export async function listBackups(dir: string): Promise<BackupListing[]> {
     try {
       const path = join(dir, entry.name);
       const manifest = await readManifest(path);
+      const legacy = manifest.format === 1;
       listings.push({
         name: entry.name,
         dir: path,
-        kind: manifest.format === 1 ? 'unknown' : manifest.kind,
-        dataVersion: manifest.format === 1 ? manifest.version : manifest.fromVersion,
+        kind: legacy ? 'legacy' : manifest.kind,
+        dataVersion: legacy ? manifest.version : manifest.fromVersion,
         migrationHead: manifest.migrationHead,
         createdAt: manifest.createdAt,
         bytes: manifestBytes(manifest),
-        clickhouse: manifest.clickhouse !== undefined,
+        // 0.2.4 exported ClickHouse under row policies as empty files (#129), so "yes" would
+        // suggest `am restore --clickhouse` can use them.
+        clickhouse: manifest.clickhouse === undefined ? 'no' : legacy ? `empty (${manifest.version}, unusable)` : 'yes',
       });
     } catch {
       // No manifest (or an unreadable one): not a completed backup, so it is not listed.

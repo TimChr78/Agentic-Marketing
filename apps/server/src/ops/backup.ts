@@ -45,7 +45,7 @@ async function list(dir: string): Promise<number> {
     backup.migrationHead ?? 'none',
     backup.createdAt,
     humanBytes(backup.bytes),
-    backup.clickhouse ? 'yes' : 'no',
+    backup.clickhouse,
   ]);
   const headers = ['name', 'kind', 'data version', 'migration head', 'created', 'size', 'clickhouse'];
   const widths = headers.map((header, index) => Math.max(header.length, ...rows.map((row) => row[index].length)));
