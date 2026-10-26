@@ -214,29 +214,28 @@ export function dependencyOrder<M extends { id: string; content: unknown }>(memb
   return order;
 }
 
-class DryRun extends Error {}
-
 /**
- * Checks that the members can be published together, by publishing them in order in a savepoint
- * that is then rolled back: references inside the bundle resolve exactly as on approval, and
- * nothing is kept (publish listeners are not called).
+ * Checks that the members can be published together, by publishing them in order and then rolling
+ * back to a savepoint: references inside the bundle resolve exactly as on approval, and nothing is
+ * kept (publish listeners are not called). Commands run on one connection inside a manual BEGIN,
+ * so this uses SAVEPOINT directly: drizzle's tx.transaction() would issue a second BEGIN, and its
+ * rollback would end the command's whole transaction.
  */
 async function checkBundlePublishable(ctx: CommandContext, ordered: { id: string; name: string; version: number }[]) {
+  const dry: CommandContext = { ...ctx, afterCommit: () => {} };
+  await ctx.tx.execute(sql`SAVEPOINT bundle_check`);
   try {
-    await ctx.tx.transaction(async (savepoint) => {
-      const dry: CommandContext = { ...ctx, tx: savepoint, afterCommit: () => {} };
-      for (const m of ordered) {
-        try {
-          await publishVersion(dry, m.id, m.version);
-        } catch (err) {
-          if (err instanceof AppError) throw new AppError(err.code, `“${m.name}” (${m.id}): ${err.message}`, err.details);
-          throw err;
-        }
+    for (const m of ordered) {
+      try {
+        await publishVersion(dry, m.id, m.version);
+      } catch (err) {
+        if (err instanceof AppError) throw new AppError(err.code, `“${m.name}” (${m.id}): ${err.message}`, err.details);
+        throw err;
       }
-      throw new DryRun();
-    });
-  } catch (err) {
-    if (!(err instanceof DryRun)) throw err;
+    }
+  } finally {
+    await ctx.tx.execute(sql`ROLLBACK TO SAVEPOINT bundle_check`);
+    await ctx.tx.execute(sql`RELEASE SAVEPOINT bundle_check`);
   }
 }
 
