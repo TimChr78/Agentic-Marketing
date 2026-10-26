@@ -20,8 +20,8 @@ Two rules are added for wave 3:
 
 | Phase | Theme | Main contents | Depends on | Size* | "Done" means |
 |---|---|---|---|---|---|
-| **12** | **Install and upgrade** | Compose bundle per release, production-ready compose defaults, `am init` / `am doctor` / `am smoke`, backups and restore, the running version everywhere, release checks that catch regressions | – | M | A new self-hoster installs, upgrades and restores from the release page alone, and `am doctor` tells them what is wrong |
-| **13** | **Pilot correctness** | Consent exits from journeys, UTM in plain text, fast retries for confirmations, layout-only journey edits, approval bundles, agents proposing settings, strict inputs evidence | – | M | Four weekly issues in a row with no manual workaround in the pilot runbook |
+| **12** ✅ | **Install and upgrade** (done in 0.2.4–0.2.5) | Compose bundle per release, production-ready compose defaults, `am init` / `am doctor` / `am smoke`, backups and restore, the running version everywhere, release checks that catch regressions | – | M | A new self-hoster installs, upgrades and restores from the release page alone, and `am doctor` tells them what is wrong |
+| **13** | **Pilot correctness** | Consent exits from journeys, UTM in plain text, fast retries for confirmations, layout-only journey edits, approval bundles, agents proposing settings, strict inputs evidence, the leftovers from Phase 12 | – | M | Four weekly issues in a row with no manual workaround in the pilot runbook |
 | **14** | **Admin UI for daily use** | Full-width layouts, smaller bundles, server-side filters and aggregates, structured editors for experiences and purposes, live journey stats, SVG logos, small fixes | – | M | The weekly review and approval flow is comfortable on a wide screen and a phone |
 | **15** | **Newsletter and lifecycle e-mail** | Preference centre with topics, newsletter archive and web version, reusable content blocks, pre-send checks, subject A/B tests and send windows, static audiences, two journey building blocks | 13 | L | The pilot's issues use shared blocks, readers manage topics, and every issue has a web version |
 | **16** | **Measure and report** | A read-only metric layer, campaign object and evaluation, holdouts, threshold alerts | 15 | L | An agent answers "how did the last four issues and the welcome journey do" from one command, with uplift against a holdout |
@@ -62,6 +62,11 @@ Goal: a self-hoster installs, upgrades, checks and restores the platform without
 
 Done when a fresh Compose install and an upgrade from 0.2.2 both work from the release page alone, `am doctor` is green on the pilot, and a restore has been tested in CI.
 
+**Status (2026-10-26): done.** Shipped in [0.2.4](../../CHANGELOG.md#024---2026-10-26) (#119–#123, #59, #54) and [0.2.5](../../CHANGELOG.md#025---2026-10-26) (#129–#135, the pilot's findings from upgrading to 0.2.4). The pilot upgraded 0.2.2 → 0.2.4 → 0.2.5 from the release page, `am doctor` and `am smoke` run there, and CI backs up and restores Postgres and ClickHouse with the row policies on. What the pilot found on 0.2.5 (#138, #139) is minor and moved to Phase 13. Lessons:
+- the first real upgrade found seven problems the tests had not; a release is only checked once the pilot has upgraded with it;
+- tests must run the production defaults: the ClickHouse backup was empty under the default row policies, and the test used a table without one (#129);
+- `am doctor` is only useful when it has no false positives (#132).
+
 ## Phase 13: pilot correctness
 
 Goal: the pilot's weekly loop (Hermes drafts the issue, Tim approves, the broadcast goes out, the welcome journey runs) needs no workaround.
@@ -74,6 +79,7 @@ Goal: the pilot's weekly loop (Hermes drafts the issue, Tim approves, the broadc
 - **Agents propose settings** (#106): `workspace.proposeUpdate` for low-risk settings (time zone, name), applied when a person approves. Never for providers, tokens, secrets, members, roles or the approval policy.
 - **Evidence for strict inputs** (#124): unknown-key events per client in Postgres (key names, not values), shown per token and over `system.inputWarnings`, with a "safe to turn on" hint. Then make `STRICT_INPUTS=true` the default in the first minor release after the pilot's clients have sent no unknown keys for a week.
 - **Step-up rate limit** (#61) on token edits, as for sign-in.
+- **Leftovers from Phase 12:** the public listener's default host port collides with `AM_PORT=3210` and `am doctor` misses it (#138, the one that can stop an upgrade); clearer backup, upgrade-notes and smoke output (#139).
 
 Done when four consecutive Friday issues go out with one approval each and the pilot runbook has no step that works around the platform.
 
