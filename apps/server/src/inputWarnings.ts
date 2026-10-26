@@ -8,6 +8,11 @@ import { sql } from 'drizzle-orm';
 // must never slow down or fail the command that caused them. Only key paths are stored.
 
 const FLUSH_MS = 2_000;
+// Evidence, not a log of everything: a client sending many made-up keys must not grow the table
+// (or this process) without bound. A few keys per call and a few thousand per window show the problem.
+const MAX_KEYS_PER_CALL = 50;
+const MAX_PENDING = 5_000;
+const MAX_PATH = 200;
 
 interface Pending {
   workspaceId: string;
@@ -139,19 +144,20 @@ export function createInputWarningRecorder(db: Db) {
     record(command: string, unknown: UnknownInputKey[], principal: Principal) {
       const client = clientOf(principal);
       const now = new Date();
-      for (const item of unknown) {
-        const key = [principal.workspaceId, client.type, client.id, command, item.path].join('\u0000');
+      for (const item of unknown.slice(0, MAX_KEYS_PER_CALL)) {
+        const path = item.path.slice(0, MAX_PATH);
+        const key = [principal.workspaceId, client.type, client.id, command, path].join('\u0000');
         const seen = pending.get(key);
         if (seen) {
           seen.count++;
           seen.lastSeen = now;
-        } else {
+        } else if (pending.size < MAX_PENDING) {
           pending.set(key, {
             workspaceId: principal.workspaceId,
             principalType: client.type,
             principalId: client.id,
             command,
-            keyPath: item.path,
+            keyPath: path,
             firstSeen: now,
             lastSeen: now,
             count: 1,
