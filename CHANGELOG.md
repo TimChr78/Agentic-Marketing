@@ -4,12 +4,13 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 
 ## [Unreleased]
 
-[Phase 13](docs/architecture/roadmap-wave-3.md#phase-13-pilot-correctness): the pilot's weekly loop without workarounds. A weekly issue is one review instead of two, confirmations retry in seconds, looking at a journey no longer creates a draft, and unknown input keys are recorded per client. Plus the two leftovers from Phase 12. REST and MCP stay backwards compatible: new commands and new output fields only. Four migrations run at start-up.
+[Phase 13](docs/architecture/roadmap-wave-3.md#phase-13-pilot-correctness): the pilot's weekly loop without workarounds. A weekly issue is one review instead of two, confirmations retry in seconds, looking at a journey no longer creates a draft, and unknown input keys are recorded per client. Plus the two leftovers from Phase 12. REST and MCP stay backwards compatible: new commands and new output fields only. Five migrations run at start-up.
 
 ### Added
 
 - **Approval bundles (#107).** `artifacts.requestPublishBundle {artifactIds, note}` submits artifacts that depend on each other (this week's e-mail template and the broadcast that sends it, a form and its confirmation template) for one review. References between them are checked as if they were published; approving any of them publishes all in dependency order in one transaction, and rejecting rejects all. The Approvals page shows a bundle as one row ("+ 1 reviewed together"), and the drawer shows its members, previews the broadcast with the template under review and sends a test of it. `approvals.list` and `approvals.get` return `bundle` (its members in publish order), `approvals.approve` returns everything it `published`, and `broadcasts.preview` and `broadcasts.sendTest` take `templateVersion`. The MCP instructions, the broadcast type and the pilot guide describe the one-review flow.
 - **Evidence for strict inputs (#124).** Unknown command-input keys are recorded per client (API token, person or OAuth client): key paths only, never values, kept 30 days. `system.inputWarnings` shows them: an agent sees its own, an admin sees all, with days since the last one and `safeToEnableStrict` after a quiet week. Settings → API tokens shows them per token, with a banner when it is safe to set `STRICT_INPUTS=true`. The evidence survives restarts and upgrades, unlike the log line (which stays).
+- **Agents propose workspace settings (#106).** Agents still can't change workspace settings, but `workspace.proposeUpdate {name?, timeZone?, note}` (with `artifacts:write`) proposes the name or the time zone; an admin approves or rejects it on the Approvals page ("Time zone: UTC → Europe/Copenhagen"), and approval applies it like `workspace.update`. `workspace.proposals` lists them; a newer proposal for the same setting supersedes a pending one. Providers, tokens, secrets, members, roles and the approval policy can't be proposed.
 - **`artifacts.discardDraft` (#117)** returns an artifact to its live version, also from the editor's "…" menu ("Discard draft (back to live vN)"). It refuses while a version is waiting for approval.
 - **Message retries are visible (#109):** `messages.list` returns `attempts`, `nextAttemptAt` and `lastError`, shown under Insights → Messages.
 
@@ -27,7 +28,7 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 
 ### Upgrading from 0.2.5
 
-- **Migrations:** `0029_input_warnings.sql`, `0030_message_retries.sql`, `0031_artifact_layout.sql` (with the `discard_artifact_drafts` function) and `0032_approval_bundles.sql`: new tables and columns only. The app takes its pre-upgrade backup first.
+- **Migrations:** `0029_input_warnings.sql`, `0030_message_retries.sql`, `0031_artifact_layout.sql` (with the `discard_artifact_drafts` function), `0032_approval_bundles.sql` and `0033_workspace_proposals.sql`: new tables and columns only. The app takes its pre-upgrade backup first.
 - **Configuration:** new, optional: `STEP_UP_MAX_FAILURES` (5), `STEP_UP_WINDOW_SECONDS` (900) and `STEP_UP_LOCKOUT_SECONDS` (900). The default of `PUBLIC_BIND` changes from `127.0.0.1:3210` to `127.0.0.1:3201`.
 - **Breaking changes:** none.
 - **Manual steps:**

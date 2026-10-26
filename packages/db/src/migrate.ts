@@ -68,7 +68,6 @@ const MIGRATION_RELEASES: Record<string, string> = {
   // From here a database has a server_versions row; the map is for a migrate that ran without the
   // server, and for tests. Keep the newest migration listed (a test checks it).
   '0028_server_versions.sql': '0.2.5',
-  '0032_approval_bundles.sql': '0.2.6',
   '0033_workspace_proposals.sql': '0.2.6',
 };
 
