@@ -6,6 +6,7 @@ import { serve } from '@hono/node-server';
 import { createServer } from './app';
 import { loadConfig } from './config';
 import { publicOnly } from './http/public-only';
+import { offlineChecks } from './ops/checks';
 import { COMMIT, VERSION } from './version';
 import { startScheduler, startWorkers } from './workers';
 
@@ -14,6 +15,14 @@ import { startScheduler, startWorkers } from './workers';
 const config = loadConfig();
 initTelemetry('agentic-marketing');
 logger.info({ version: VERSION, commit: COMMIT }, 'agentic-marketing starting');
+// The offline part of `am doctor`, as warnings: a diagnostic never keeps the server from starting.
+try {
+  for (const check of offlineChecks(process.env)) {
+    if (check.status !== 'ok') logger.warn({ check: check.id, hint: check.hint }, check.message);
+  }
+} catch (err) {
+  logger.warn({ err }, 'startup configuration checks failed');
+}
 
 const srv = createServer(config);
 const { app, db } = srv;
