@@ -190,6 +190,56 @@ async function publishVersion(ctx: CommandContext, artifactId: string, number: n
   for (const l of publishListeners) ctx.afterCommit ? ctx.afterCommit(() => l(ctx, artifact)) : await l(ctx, artifact);
 }
 
+/**
+ * The order to publish artifacts that refer to each other (#107): an artifact comes after every
+ * other member its content names (a broadcast after its template, a form after its confirmation
+ * template). Throws on a cycle.
+ */
+export function dependencyOrder<M extends { id: string; content: unknown }>(members: M[]): M[] {
+  const ids = new Set(members.map((m) => m.id));
+  const needs = new Map(
+    members.map((m) => {
+      const text = JSON.stringify(m.content);
+      return [m.id, new Set([...ids].filter((other) => other !== m.id && text.includes(other)))];
+    }),
+  );
+  const order: M[] = [];
+  const remaining = [...members];
+  while (remaining.length) {
+    const i = remaining.findIndex((m) => [...needs.get(m.id)!].every((d) => order.some((o) => o.id === d)));
+    if (i < 0)
+      throw new AppError('invalid_input', `These artifacts refer to each other in a circle: ${remaining.map((m) => m.id).join(', ')}.`);
+    order.push(...remaining.splice(i, 1));
+  }
+  return order;
+}
+
+class DryRun extends Error {}
+
+/**
+ * Checks that the members can be published together, by publishing them in order in a savepoint
+ * that is then rolled back: references inside the bundle resolve exactly as on approval, and
+ * nothing is kept (publish listeners are not called).
+ */
+async function checkBundlePublishable(ctx: CommandContext, ordered: { id: string; name: string; version: number }[]) {
+  try {
+    await ctx.tx.transaction(async (savepoint) => {
+      const dry: CommandContext = { ...ctx, tx: savepoint, afterCommit: () => {} };
+      for (const m of ordered) {
+        try {
+          await publishVersion(dry, m.id, m.version);
+        } catch (err) {
+          if (err instanceof AppError) throw new AppError(err.code, `“${m.name}” (${m.id}): ${err.message}`, err.details);
+          throw err;
+        }
+      }
+      throw new DryRun();
+    });
+  } catch (err) {
+    if (!(err instanceof DryRun)) throw err;
+  }
+}
+
 export const listTypes = defineCommand({
   name: 'artifacts.types',
   title: 'List artifact types',
@@ -545,6 +595,111 @@ export const requestPublish = defineCommand({
   },
 });
 
+export const requestPublishBundle = defineCommand({
+  name: 'artifacts.requestPublishBundle',
+  title: 'Submit several artifacts for one review',
+  description:
+    "Submits the latest drafts of artifacts that belong together for ONE review, e.g. this week's e-mail template and the broadcast that sends it, or a form and its confirmation template. References between them are checked as if they were already published; a person approves or rejects them together, and approval publishes them in dependency order in one step (all or nothing). Publishes directly when the approval policy allows it. Use it instead of two requestPublish rounds whenever one artifact refers to another unpublished one.",
+  input: z.object({
+    artifactIds: z.array(ArtifactId).min(2).max(10).describe('The artifacts to publish together, in any order'),
+    note: z.string().min(1).max(1000).describe('What changed and why, for the reviewer'),
+  }),
+  output: z.object({
+    status: z.enum(['published', 'in_review']),
+    bundleId: z.string().nullable(),
+    members: z
+      .array(
+        z.object({
+          artifactId: z.string(),
+          name: z.string(),
+          type: z.string(),
+          version: z.number().int(),
+          approvalId: z.string().nullable(),
+        }),
+      )
+      .describe('In the order they are published'),
+    policy: z.string(),
+    reviewUrl: z.string().nullable().describe('Admin UI page where a person reviews the whole bundle; null when it was published directly'),
+    next: z.string(),
+  }),
+  permission: 'artifacts:publish',
+  effect: 'publish',
+  target: (i) => i.artifactIds.join(','),
+  handler: async (input, ctx) => {
+    const ids = [...new Set(input.artifactIds)];
+    if (ids.length < 2)
+      throw new AppError('invalid_input', 'A bundle needs at least two different artifacts; use artifacts.requestPublish for one.');
+    const members = [];
+    for (const id of ids) {
+      const a = await loadArtifact(ctx, id);
+      const v = await loadVersion(ctx, a.id, a.latestVersion);
+      if (v.state !== 'draft')
+        throw new AppError(
+          'conflict',
+          `The latest version of “${a.name}” (v${v.number}) is ${v.state.replace('_', ' ')}, not a draft. Edit it first to create a new draft.`,
+        );
+      members.push({ id: a.id, name: a.name, type: a.type, version: v.number, content: v.content, authorType: v.authorType });
+    }
+    const ordered = dependencyOrder(members);
+    await checkBundlePublishable(ctx, ordered);
+    const [w] = await ctx.tx
+      .select({ policy: schema.workspaces.approvalPolicy })
+      .from(schema.workspaces)
+      .where(eq(schema.workspaces.id, ctx.principal.workspaceId));
+    const needsApproval =
+      w.policy === 'all_publishes' ||
+      (w.policy === 'agent_changes' && (ctx.principal.type === 'agent' || ordered.some((m) => m.authorType === 'agent')));
+    const out = (approvalIds: (string | null)[]) =>
+      ordered.map((m, i) => ({ artifactId: m.id, name: m.name, type: m.type, version: m.version, approvalId: approvalIds[i] }));
+    if (!needsApproval) {
+      for (const m of ordered) await publishVersion(ctx, m.id, m.version);
+      return {
+        status: 'published' as const,
+        bundleId: null,
+        members: out(ordered.map(() => null)),
+        policy: w.policy,
+        reviewUrl: null,
+        next: `Published ${ordered.map((m) => `“${m.name}” v${m.version}`).join(', ')}; they are live now.`,
+      };
+    }
+    const bundleId = newId('apb');
+    const approvalIds = ordered.map(() => newId('apr'));
+    for (const [i, m] of ordered.entries()) {
+      await setVersionState(ctx, m.id, m.version, 'in_review');
+      await ctx.tx.insert(schema.approvalRequests).values({
+        workspaceId: ctx.principal.workspaceId,
+        id: approvalIds[i],
+        artifactId: m.id,
+        version: m.version,
+        status: 'pending',
+        requestedByType: ctx.principal.type,
+        requestedById: ctx.principal.userId,
+        requestedByClient: ctx.principal.clientId ?? null,
+        note: input.note,
+        bundleId,
+      });
+    }
+    // The last member is the one the others exist for (the broadcast, the form): open on it.
+    const reviewUrl = approvalUrl(ctx.services.publicUrl, approvalIds.at(-1)!);
+    return {
+      status: 'in_review' as const,
+      bundleId,
+      members: out(approvalIds),
+      policy: w.policy,
+      reviewUrl,
+      next: `A person reviews all ${ordered.length} together${reviewUrl ? ` in the admin UI: ${reviewUrl}` : ' in the admin UI'}; approving publishes them in this order. Check the result with approvals.list or artifacts.get.`,
+    };
+  },
+});
+
+const BundleMember = z.object({
+  approvalId: z.string(),
+  artifactId: z.string(),
+  artifactName: z.string(),
+  artifactType: z.string(),
+  version: z.number().int(),
+});
+
 const Approval = z.object({
   id: z.string(),
   artifactId: z.string(),
@@ -561,6 +716,10 @@ const Approval = z.object({
   artifactLatestVersion: z.number().int(),
   artifactPublishedVersion: z.number().int().nullable(),
   reviewUrl: z.string().nullable().describe('Admin UI page for this approval request'),
+  bundle: z
+    .object({ id: z.string(), members: z.array(BundleMember).describe('In the order they are published') })
+    .nullable()
+    .describe('Set when this request is reviewed together with others (artifacts.requestPublishBundle): deciding one decides all'),
 });
 
 type ApprovalRow = typeof schema.approvalRequests.$inferSelect;
@@ -647,7 +806,49 @@ export async function withAuthorNames<V extends { number: number; author: { type
   return versions.map((v) => ({ ...v, by: names.get(String(v.number))! }));
 }
 
-const approvalOut = (ctx: CommandContext, r: ApprovalRow, a: ArtifactRow, requester: RequesterOut) => ({
+type Bundles = Map<string, z.output<typeof BundleMember>[]>;
+
+/** The members of the given bundles, in publish order. */
+async function bundlesOf(ctx: CommandContext, rows: ApprovalRow[]): Promise<Bundles> {
+  const ids = [...new Set(rows.map((r) => r.bundleId).filter((id): id is string => !!id))];
+  if (!ids.length) return new Map();
+  const members = await ctx.tx
+    .select({ r: schema.approvalRequests, a: schema.artifacts, content: schema.artifactVersions.content })
+    .from(schema.approvalRequests)
+    .innerJoin(
+      schema.artifacts,
+      and(
+        eq(schema.artifacts.workspaceId, schema.approvalRequests.workspaceId),
+        eq(schema.artifacts.id, schema.approvalRequests.artifactId),
+      ),
+    )
+    .innerJoin(
+      schema.artifactVersions,
+      and(
+        eq(schema.artifactVersions.workspaceId, schema.approvalRequests.workspaceId),
+        eq(schema.artifactVersions.artifactId, schema.approvalRequests.artifactId),
+        eq(schema.artifactVersions.number, schema.approvalRequests.version),
+      ),
+    )
+    .where(inArray(schema.approvalRequests.bundleId, ids));
+  const out: Bundles = new Map();
+  for (const id of ids) {
+    const own = members.filter((m) => m.r.bundleId === id).map((m) => ({ id: m.a.id, content: m.content, m }));
+    out.set(
+      id,
+      dependencyOrder(own).map(({ m }) => ({
+        approvalId: m.r.id,
+        artifactId: m.a.id,
+        artifactName: m.a.name,
+        artifactType: m.a.type,
+        version: m.r.version,
+      })),
+    );
+  }
+  return out;
+}
+
+const approvalOut = (ctx: CommandContext, r: ApprovalRow, a: ArtifactRow, requester: RequesterOut, bundles: Bundles = new Map()) => ({
   id: r.id,
   artifactId: r.artifactId,
   artifactName: a.name,
@@ -663,6 +864,7 @@ const approvalOut = (ctx: CommandContext, r: ApprovalRow, a: ArtifactRow, reques
   artifactLatestVersion: a.latestVersion,
   artifactPublishedVersion: a.publishedVersion,
   reviewUrl: approvalUrl(ctx.services.publicUrl, r.id),
+  bundle: r.bundleId ? { id: r.bundleId, members: bundles.get(r.bundleId) ?? [] } : null,
 });
 
 export const listApprovals = defineCommand({
@@ -700,7 +902,11 @@ export const listApprovals = defineCommand({
       ctx,
       rows.map(({ r }) => r),
     );
-    return { approvals: rows.map(({ r, a }) => approvalOut(ctx, r, a, requesters.get(r.id)!)) };
+    const bundles = await bundlesOf(
+      ctx,
+      rows.map(({ r }) => r),
+    );
+    return { approvals: rows.map(({ r, a }) => approvalOut(ctx, r, a, requesters.get(r.id)!, bundles)) };
   },
 });
 
@@ -767,7 +973,7 @@ export const getApproval = defineCommand({
           ]
         : [];
     return {
-      ...approvalOut(ctx, row.r, row.a, requester),
+      ...approvalOut(ctx, row.r, row.a, requester, await bundlesOf(ctx, [row.r])),
       content: version.content,
       publishedContent: published?.content ?? null,
       publishedVersion: row.a.publishedVersion,
@@ -802,31 +1008,74 @@ async function decide(ctx: CommandContext, approvalId: string) {
   return r;
 }
 
+/** The request itself, or every pending request of its bundle in publish order (#107). */
+async function bundleMembers(ctx: CommandContext, r: ApprovalRow) {
+  if (!r.bundleId) return [r];
+  const rows = await ctx.tx
+    .select({ r: schema.approvalRequests, content: schema.artifactVersions.content })
+    .from(schema.approvalRequests)
+    .innerJoin(
+      schema.artifactVersions,
+      and(
+        eq(schema.artifactVersions.workspaceId, schema.approvalRequests.workspaceId),
+        eq(schema.artifactVersions.artifactId, schema.approvalRequests.artifactId),
+        eq(schema.artifactVersions.number, schema.approvalRequests.version),
+      ),
+    )
+    .where(and(eq(schema.approvalRequests.workspaceId, ctx.principal.workspaceId), eq(schema.approvalRequests.bundleId, r.bundleId)));
+  const decided = rows.find((x) => x.r.status !== 'pending');
+  if (decided) throw new AppError('conflict', `Part of this bundle (${decided.r.id}) was already ${decided.r.status}.`);
+  return dependencyOrder(rows.map((x) => ({ id: x.r.artifactId, content: x.content, row: x.r }))).map((x) => x.row);
+}
+
 export const approve = defineCommand({
   name: 'approvals.approve',
   title: 'Approve and publish',
-  description: 'Approve a pending request and publish that version. Only people can approve.',
+  description:
+    'Approve a pending request and publish that version; for a bundle, every request in it, published in dependency order in one step. Only people can approve.',
   input: z.object({ approvalId: z.string(), note: z.string().max(1000).optional() }),
-  output: z.object({ status: z.literal('approved'), artifactId: z.string(), version: z.number().int() }),
+  output: z.object({
+    status: z.literal('approved'),
+    artifactId: z.string(),
+    version: z.number().int(),
+    published: z
+      .array(z.object({ artifactId: z.string(), version: z.number().int() }))
+      .describe('Everything this approval published, in order (more than one for a bundle)'),
+  }),
   permission: 'artifacts:approve',
   effect: 'publish',
   humansOnly: true,
   target: (i) => i.approvalId,
   handler: async (input, ctx) => {
     const r = await decide(ctx, input.approvalId);
-    await publishVersion(ctx, r.artifactId, r.version);
+    const members = await bundleMembers(ctx, r);
+    for (const m of members) await publishVersion(ctx, m.artifactId, m.version);
     await ctx.tx
       .update(schema.approvalRequests)
       .set({ status: 'approved', decidedBy: ctx.principal.userId, decidedAt: new Date(), decisionNote: input.note ?? null })
-      .where(and(eq(schema.approvalRequests.workspaceId, ctx.principal.workspaceId), eq(schema.approvalRequests.id, r.id)));
-    return { status: 'approved' as const, artifactId: r.artifactId, version: r.version };
+      .where(
+        and(
+          eq(schema.approvalRequests.workspaceId, ctx.principal.workspaceId),
+          inArray(
+            schema.approvalRequests.id,
+            members.map((m) => m.id),
+          ),
+        ),
+      );
+    return {
+      status: 'approved' as const,
+      artifactId: r.artifactId,
+      version: r.version,
+      published: members.map((m) => ({ artifactId: m.artifactId, version: m.version })),
+    };
   },
 });
 
 export const reject = defineCommand({
   name: 'approvals.reject',
   title: 'Reject a change',
-  description: 'Reject a pending request. The version stays in history as rejected; editing the artifact starts a new draft.',
+  description:
+    'Reject a pending request (for a bundle: every request in it). The versions stay in history as rejected; editing an artifact starts a new draft.',
   input: z.object({ approvalId: z.string(), note: z.string().min(1).max(1000).describe('Tell the author what to change') }),
   output: z.object({ status: z.literal('rejected'), artifactId: z.string(), version: z.number().int() }),
   permission: 'artifacts:approve',
@@ -835,11 +1084,20 @@ export const reject = defineCommand({
   target: (i) => i.approvalId,
   handler: async (input, ctx) => {
     const r = await decide(ctx, input.approvalId);
-    await setVersionState(ctx, r.artifactId, r.version, 'rejected');
+    const members = await bundleMembers(ctx, r);
+    for (const m of members) await setVersionState(ctx, m.artifactId, m.version, 'rejected');
     await ctx.tx
       .update(schema.approvalRequests)
       .set({ status: 'rejected', decidedBy: ctx.principal.userId, decidedAt: new Date(), decisionNote: input.note })
-      .where(and(eq(schema.approvalRequests.workspaceId, ctx.principal.workspaceId), eq(schema.approvalRequests.id, r.id)));
+      .where(
+        and(
+          eq(schema.approvalRequests.workspaceId, ctx.principal.workspaceId),
+          inArray(
+            schema.approvalRequests.id,
+            members.map((m) => m.id),
+          ),
+        ),
+      );
     return { status: 'rejected' as const, artifactId: r.artifactId, version: r.version };
   },
 });
@@ -853,6 +1111,7 @@ export const artifactCommands = [
   history,
   diff,
   requestPublish,
+  requestPublishBundle,
   listApprovals,
   getApproval,
   approve,

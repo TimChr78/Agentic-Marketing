@@ -94,6 +94,8 @@ export const approvalRequests = pgTable(
     decidedBy: text('decided_by'),
     decidedAt: ts('decided_at'),
     decisionNote: text('decision_note'),
+    /** Requests reviewed and published together (#107); null for a single request. */
+    bundleId: text('bundle_id'),
     createdAt: ts('created_at').notNull().defaultNow(),
   },
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
