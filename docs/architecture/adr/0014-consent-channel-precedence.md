@@ -27,6 +27,7 @@ Consequences of rule 2, on purpose:
 ## Rollout
 - Migration `0026_consent_segments_recompute.sql` forgets the last run of each published segment that tests consent (directly or through another segment), so the segment scheduler recomputes them on its next round (about 30 s after start). People who unsubscribed before the upgrade leave those segments with a "Segment Exited" event.
 - Unsubscribes (link, provider webhook unsubscribe or complaint) now re-evaluate the person's segments right away instead of on the next scheduled run, and form confirmations and imports re-evaluate consent segments in the streaming path.
+- 0.2.3 (#108): journeys use rule 2 too. When a person's current status for a journey's purpose becomes a refusal that the basis stops on (consent or legitimate interest; contract and legal obligation never stop), their active participants exit with `consent_withdrawn: <purpose>`. Every consent change does this at once (`exitRefusedJourneys`), the sweeper checks the same rule before each step, erasure deletes the person's participants, and migration `0027_journey_consent_exits.sql` exits those who refused before the upgrade. Not having consented yet (a pending double opt-in) is not a refusal: such people stay, and the gateway keeps holding their marketing messages.
 
 ## Alternatives considered
 - **Make a channel withdrawal also rewrite the `''` row** when the consent came from an all-channels source. Rejected: the ledger is append-only evidence, and a synthetic record would claim the person withdrew on every channel.

@@ -199,16 +199,17 @@ describe('abandoned browse (built by an MCP agent)', () => {
       await new Promise((r) => setTimeout(r, 1500));
       await send([...browse('bo'), ...browse('cy')]);
 
+      // Cy refused marketing e-mail, the journey's purpose, so leaves before any step (0.2.3, #108).
       const stats = await eventually(
         () => call('journeys.stats', { artifactId: journey.artifactId }),
-        (s) => s.waitingAt?.wait === 2,
+        (s) => s.waitingAt?.wait === 1 && s.now.exited === 1,
       );
-      expect(stats.now.waiting).toBe(2);
+      expect(stats.now.waiting).toBe(1);
 
       await fastForward(journey.artifactId);
       await eventually(
         () => call('journeys.stats', { artifactId: journey.artifactId }),
-        (s) => s.now.completed === 2,
+        (s) => s.now.completed === 1,
       );
       const mail = await eventually(
         async () => mailTo('bo@example.com', 'tents'),
@@ -220,8 +221,7 @@ describe('abandoned browse (built by an MCP agent)', () => {
 
       const owners = t.api(owner);
       const cy = (await owners.call('profiles.find', { type: 'user_id', value: 'cy' })).profileId!;
-      const { messages } = await owners.call('messages.list', { profileId: cy });
-      expect(messages[0]).toMatchObject({ status: 'suppressed', reason: expect.stringContaining('no_lawful_basis') });
+      expect((await owners.call('messages.list', { profileId: cy })).messages).toHaveLength(0);
 
       // The agent can explain the path a given person would take.
       const sim = await call('journeys.simulate', { artifactId: journey.artifactId, profileId: cy });

@@ -3,7 +3,7 @@ import { newId } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import { requestEmail, requestPush, requestSms } from '@agentic-marketing/email';
 import type { EventStore, JourneyEvent } from '@agentic-marketing/events';
-import { consentStateOf, currentConsent, purposeAllowed, type ResolvedEvent } from '@agentic-marketing/profiles';
+import { consentStateOf, currentConsent, purposeAllowed, type ResolvedEvent, refusedPurposes } from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { contextFor, ENTERED, evaluate, publishedSegments } from '@agentic-marketing/segments';
 import { logger } from '@agentic-marketing/telemetry';
@@ -352,8 +352,34 @@ export async function sweep(db: Db, deps: JourneyDeps, opts: { batch?: number; n
           ),
         );
       const segments = await publishedSegments(tx);
+      const purposes = (await publishedSingleton(tx, 'purposes'))?.purposes ?? DEFAULT_PURPOSES;
       for (const p of list) {
         const t = now();
+        // Someone who refused the journey's purpose leaves before the next step (#108). Consent
+        // changes exit them at once (exitRefusedJourneys); this catches whatever got past that.
+        const purpose = await graphOf(tx, p.journeyId, p.version)
+          .then((g) => g.purpose)
+          .catch(() => null);
+        if (purpose && refusedPurposes(await consentStateOf(tx, ws, p.profileId), purposes).includes(purpose)) {
+          const detail = `consent_withdrawn: ${purpose}`;
+          await tx
+            .update(schema.journeyParticipants)
+            .set({ status: 'exited', error: detail, dueAt: null, waitingEvent: null, updatedAt: t })
+            .where(eq(schema.journeyParticipants.id, p.id));
+          journeyEvents.push({
+            workspaceId: ws,
+            journeyId: p.journeyId,
+            version: p.version,
+            participantId: p.id,
+            profileId: p.profileId,
+            node: p.node,
+            type: 'exited',
+            seq: p.seq + 1,
+            at: t.toISOString(),
+            detail,
+          });
+          continue;
+        }
         const state: ParticipantState = {
           node: p.node,
           status: p.status,
