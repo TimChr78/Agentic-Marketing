@@ -63,6 +63,63 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
 
+  # The admin UI in a real browser against the production build and a seeded server
+  # (apps/server/test/e2e/server.ts), so browser-only regressions such as #115 fail the build.
+  e2e:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: am
+          POSTGRES_PASSWORD: am
+          POSTGRES_DB: am
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U am"
+          --health-interval 5s
+          --health-retries 10
+      clickhouse:
+        image: clickhouse/clickhouse-server:26.8
+        env:
+          CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+        ports: ["8123:8123"]
+        options: >-
+          --health-cmd "wget -qO- http://127.0.0.1:8123/ping"
+          --health-interval 5s
+          --health-retries 20
+      valkey:
+        image: valkey/valkey:8.1.9
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 5s
+          --health-retries 10
+    env:
+      CI: true
+      VALKEY_URL: redis://localhost:6379
+      TEST_DATABASE_URL: postgres://am:am@localhost:5432/am_test
+      CLICKHOUSE_URL: http://localhost:8123
+      CLICKHOUSE_ROW_POLICIES: required
+      NATS_URL: nats://localhost:4222
+    steps:
+      - uses: actions/checkout@v5
+      - run: docker run -d --name nats -p 4222:4222 nats:2.15.0 -js
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile --filter "./packages/**" --filter "./apps/**" --filter "agentic-marketing"
+      - run: npx playwright install --with-deps chromium
+      - run: pnpm e2e
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-traces
+          path: test-results/
+          retention-days: 14
+
   # The Docker image as a self-hoster runs it: docker compose up, bootstrap, sign in, a signup form
   # that sends its confirmation e-mail.
   docker-smoke:
