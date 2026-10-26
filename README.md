@@ -80,7 +80,7 @@ MCP requires `PUBLIC_URL` to be HTTPS. With a plain-HTTP address on a LAN the ad
 
 Running it behind a proxy or a Cloudflare Tunnel: set `PUBLIC_URL`, `PUBLIC_LINKS_URL`, `CLIENT_IP_HEADER` (an ordered list, e.g. `cf-connecting-ip,x-forwarded-for`) and `TRUSTED_PROXY_CIDRS` for the tunnel/proxy ranges (see [`.env.example`](.env.example)). Set `PUBLIC_PORT` to add a public-only listener (`/f`, `/u`, `/c`, `/a`, `/hooks`, `/healthz`, `/readyz`) and point the tunnel there, so no path rule is needed. Admin LAN traffic without a forwarding header uses the socket address.
 
-The compose file keeps Postgres, ClickHouse and NATS data in named volumes. To use host directories instead, replace those volume entries, e.g. `- /srv/am/pgdata:/var/lib/postgresql/data`, `- /srv/am/clickhouse:/var/lib/clickhouse` and `- /srv/am/nats:/data`. The containers run as their own users (Postgres uid 70 in the Alpine image, ClickHouse uid 101, NATS uid 1000), so `chown` the host directories to match the image you use or the services will fail to write; named volumes avoid that.
+The compose file keeps Postgres, ClickHouse and NATS data in named volumes. To use host directories instead, add bind mounts in `compose.override.yaml` (see `compose.override.example.yaml`, never edit `docker-compose.yml`). The containers run as their own users (Postgres uid 70 in the Alpine image, ClickHouse uid 101; NATS runs as root), so `chown` the host directories to match or the services will fail to write; named volumes avoid that.
 
 On Kubernetes: the Helm chart in [`deploy/helm`](deploy/helm/agentic-marketing) runs each role as its own Deployment; see the [reference deployment](docs/deployment/kubernetes.md).
 
