@@ -100,6 +100,10 @@ services:
       NATS_RETENTION_HOURS: ${NATS_RETENTION_HOURS:-24}
       VALKEY_URL: redis://valkey:6379
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      BACKUP_DIR: /backups
+      SKIP_PRE_UPGRADE_BACKUP: ${SKIP_PRE_UPGRADE_BACKUP:-false}
+    volumes:
+      - backups:/backups
     ports:
       - "${AM_PORT:-3000}:3000"
       # The public-only listener is always published, loopback-only by default. With PUBLIC_PORT
@@ -112,3 +116,4 @@ volumes:
   pgdata:
   chdata:
   natsdata:
+  backups:
