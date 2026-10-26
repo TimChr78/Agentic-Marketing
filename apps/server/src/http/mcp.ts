@@ -6,6 +6,7 @@ import { requireMcpAuth } from '@better-auth/mcp';
 import { type AuthInfo, createMcpHandler, McpServer, type StandardSchemaWithJSON } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import { commands } from '../registry';
+import { VERSION } from '../version';
 import { MCP_GUIDE_URI, MCP_INSTRUCTIONS } from './mcpInstructions';
 
 // MCP surface (spec 2026-07-28, SDK v2): a stateless server per request for the authenticated
@@ -86,7 +87,7 @@ export function mcpServerFor(
   opts: { stepUp?: boolean; textContent?: McpTextContent; toolNameStyle?: McpToolNameStyle } = {},
 ) {
   const style = opts.toolNameStyle ?? 'dotted';
-  const server = new McpServer({ name: 'agentic-marketing', version: '0.2.0' }, { instructions: MCP_INSTRUCTIONS });
+  const server = new McpServer({ name: 'agentic-marketing', version: VERSION }, { instructions: MCP_INSTRUCTIONS });
   server.registerResource(
     'guide',
     MCP_GUIDE_URI,

@@ -24,6 +24,9 @@ RUN pnpm install --frozen-lockfile --prod=false --filter "@agentic-marketing/web
 RUN pnpm --filter @agentic-marketing/web build:live
 
 FROM base
+# The commit this image was built from, reported as `commit` by /healthz and /readyz.
+ARG GIT_SHA
+ENV AM_GIT_SHA=$GIT_SHA
 COPY --from=deps /app /app
 COPY --from=web /app/apps/web/dist /app/apps/web/dist
 # `am` is the admin CLI without pnpm's script banner (which would echo arguments such as secrets).

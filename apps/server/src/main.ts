@@ -6,12 +6,14 @@ import { serve } from '@hono/node-server';
 import { createServer } from './app';
 import { loadConfig } from './config';
 import { publicOnly } from './http/public-only';
+import { COMMIT, VERSION } from './version';
 import { startScheduler, startWorkers } from './workers';
 
 // One image, several roles (ADR-0002): `api` (UI, REST, MCP), `ingest` (event collection),
 // `worker` (event consumers) and `scheduler` (arrives with the journey runtime).
 const config = loadConfig();
 initTelemetry('agentic-marketing');
+logger.info({ version: VERSION, commit: COMMIT }, 'agentic-marketing starting');
 
 const srv = createServer(config);
 const { app, db } = srv;
