@@ -33,7 +33,7 @@ const MIGRATIONS_DIR = fileURLToPath(new URL('../../../../packages/db/migrations
 // default from docker-compose.yml so a changed port in a release does not make this hint stale.
 // The image has no compose file; the fallback is the current release default.
 const DEFAULT_PUBLIC_BIND = (() => {
-  const fallback = '127.0.0.1:3210';
+  const fallback = '127.0.0.1:3201';
   try {
     const compose = fileURLToPath(new URL('../../../../docker-compose.yml', import.meta.url));
     if (!existsSync(compose)) return fallback;
@@ -226,6 +226,56 @@ export function checkPublicPort(env: Env): Check {
   return { id, status: 'ok', message: `PUBLIC_PORT=${port} is set and published on ${bind}`, hint };
 }
 
+/** The host-side port of a PUBLIC_BIND value: "127.0.0.1:3201", "0.0.0.0:3000" and "[::1]:3201". */
+function hostPort(bind: string): number | undefined {
+  const match = /:(\d+)$/.exec(bind.trim());
+  if (!match) return undefined;
+  const port = Number(match[1]);
+  return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : undefined;
+}
+
+/**
+ * Compose always publishes the public listener, even when PUBLIC_PORT is unset, so a host port
+ * equal to AM_PORT makes `docker compose up` fail with "address already in use". PUBLIC_BIND and
+ * AM_PORT are Compose settings the app container does not see, so `am doctor --env-file` passes
+ * them in; this compares the two values instead of probing the host's ports, which a container
+ * could not see.
+ */
+export function checkPorts(env: Env): Check {
+  const id = 'ports';
+  const bind = (env.PUBLIC_BIND ?? '').trim() || DEFAULT_PUBLIC_BIND;
+  const adminRaw = (env.AM_PORT ?? '').trim();
+  const admin = adminRaw ? Number(adminRaw) : 3000;
+  const publicPort = hostPort(bind);
+  const drop = '`ports: !override` in compose.override.yaml';
+  if (!Number.isInteger(admin) || admin < 1 || admin > 65535)
+    return {
+      id,
+      status: 'fail',
+      message: `AM_PORT is not a valid port: ${adminRaw}`,
+      hint: 'Use a number between 1 and 65535, for example 3210.',
+    };
+  if (publicPort === undefined)
+    return {
+      id,
+      status: 'fail',
+      message: `PUBLIC_BIND has no usable port: ${bind}`,
+      hint: 'Use host:port, for example 127.0.0.1:3201.',
+    };
+  if (publicPort === admin)
+    return {
+      id,
+      status: 'fail',
+      message: `PUBLIC_BIND publishes the public listener on port ${publicPort}, the same as AM_PORT`,
+      hint: `Set PUBLIC_BIND to another port (for example 127.0.0.1:3201), or drop the public mapping with ${drop}. Compose would try to bind ${bind} and ${admin} and fail with "address already in use"; on the host, check with \`ss -ltn | grep ':${publicPort} '\`.`,
+    };
+  return {
+    id,
+    status: 'ok',
+    message: `PUBLIC_BIND publishes the public listener on ${bind}, which does not collide with AM_PORT=${admin}`,
+  };
+}
+
 export function checkTrustedProxyCidrs(env: Env): Check {
   const id = 'trusted-proxy-cidrs';
   const value = (env.TRUSTED_PROXY_CIDRS ?? '').trim();
@@ -248,6 +298,7 @@ export function offlineChecks(env: Env): Check[] {
     checkPublicUrl(env),
     checkPublicLinksUrl(env),
     checkPublicPort(env),
+    checkPorts(env),
     checkTrustedProxyCidrs(env),
   ];
 }

@@ -14,7 +14,8 @@
 # PUBLIC_PORT=3001, point the tunnel at http://app:3001 (or the container name, e.g.
 # http://agentic-marketing-app-1:3001). The tunnel then needs no host port for the public listener:
 # `!override` (Compose 2.24 or newer) replaces the app's port list, so only the admin port is
-# published. If the tunnel is on another host instead, keep the mapping and set
+# published. The release mapping's default host side is 127.0.0.1:3201 (loopback only), so it never
+# takes the admin port. If the tunnel is on another host instead, keep the mapping and set
 # PUBLIC_BIND=0.0.0.0:3001 in .env.
 #
 # services:
