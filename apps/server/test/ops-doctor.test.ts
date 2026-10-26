@@ -86,11 +86,14 @@ describe('am doctor offline checks', () => {
     expect(checkPublicLinksUrl({ ...good, PUBLIC_LINKS_URL: 'nope' }).status).toBe('fail');
   });
 
-  it('recommends a separate public listener', () => {
+  it('recommends a separate public listener and names the published address', () => {
     const missing = checkPublicPort({ ...good, PUBLIC_PORT: '' });
     expect(missing.status).toBe('warn');
     expect(missing.hint).toContain('PUBLIC_BIND');
+    expect(missing.hint).toContain('127.0.0.1:3001');
+    expect(missing.hint).toContain('ports: !override');
     expect(checkPublicPort(good).status).toBe('ok');
+    expect(checkPublicPort({ ...good, PUBLIC_BIND: '0.0.0.0:3101' }).message).toContain('0.0.0.0:3101');
     expect(checkPublicPort({ ...good, PUBLIC_PORT: '70000' }).status).toBe('fail');
   });
 
@@ -115,19 +118,52 @@ describe('am doctor offline checks', () => {
     expect(envFileKeys(text, true)).toEqual(['AUTH_SECRET', 'PUBLIC_PORT', 'DATABASE_URL']);
   });
 
-  it('compares an env file with the template', () => {
-    const example = 'AUTH_SECRET=\n# PUBLIC_PORT=3001\nDATABASE_URL=postgres://localhost/am\n';
-    const unknown = envFileChecks('AUTH_SECRET=x\nDATABASE_URL=y\nOLD_KEY=1\n', example);
+  it('reports unknown keys but ignores Compose and Docker variables', () => {
+    const example = 'AM_VERSION=0.2.4\nAUTH_SECRET=\n';
+    const unknown = envFileChecks(
+      'AM_VERSION=0.2.4\nAUTH_SECRET=x\nCOMPOSE_FILE=./compose.yaml\nDOCKER_HOST=tcp://example\nOLD_KEY=1\n',
+      example,
+    );
     expect(unknown.find((item) => item.id === 'env-file.unknown')?.status).toBe('warn');
     expect(unknown.find((item) => item.id === 'env-file.unknown')?.message).toContain('OLD_KEY');
-    expect(unknown.find((item) => item.id === 'env-file.missing')?.status).toBe('ok');
+    expect(unknown.find((item) => item.id === 'env-file.unknown')?.message).not.toContain('COMPOSE_FILE');
+    expect(unknown.find((item) => item.id === 'env-file.unknown')?.message).not.toContain('DOCKER_HOST');
+  });
 
-    const missing = envFileChecks('AUTH_SECRET=x\n', example);
-    expect(missing.find((item) => item.id === 'env-file.missing')?.status).toBe('warn');
-    expect(missing.find((item) => item.id === 'env-file.missing')?.message).toContain('DATABASE_URL');
+  it('reports only variables added after the version the file comes from', () => {
+    const example = 'AM_VERSION=0.2.4\nAUTH_SECRET=\nAPP_DB_PASSWORD=\n# SKIP_PRE_UPGRADE_BACKUP=false\n';
+    const older = envFileChecks('AM_VERSION=0.2.3\nAUTH_SECRET=x\nAPP_DB_PASSWORD=y\n', example, '0.2.3');
+    const missing = older.find((item) => item.id === 'env-file.missing');
+    expect(missing?.status).toBe('info');
+    expect(missing?.message).toContain('SKIP_PRE_UPGRADE_BACKUP');
+    expect(missing?.message).not.toContain('ASSET_MAX_BYTES');
+    expect(missing?.message).not.toContain('WEB_DIST');
+    expect(missing?.message).not.toContain('DATABASE_URL');
 
-    const clean = envFileChecks('AUTH_SECRET=x\nDATABASE_URL=y\n', example);
-    expect(clean.every((item) => item.status === 'ok')).toBe(true);
+    const current = envFileChecks('AM_VERSION=0.2.4\nAUTH_SECRET=x\nAPP_DB_PASSWORD=y\n', example, '0.2.4');
+    expect(current.find((item) => item.id === 'env-file.missing')?.status).toBe('ok');
+    expect(current.find((item) => item.id === 'env-file.missing')?.message).toContain('no variables added since 0.2.4');
+  });
+
+  it('takes the from-version from AM_VERSION and warns only about new required keys', () => {
+    const example = 'AM_VERSION=0.2.4\nAUTH_SECRET=\nAPP_DB_PASSWORD=\n';
+    const fromFile = envFileChecks('AM_VERSION=0.2.3\nAUTH_SECRET=x\nAPP_DB_PASSWORD=y\n', example);
+    expect(fromFile.find((item) => item.id === 'env-file.missing')?.status).toBe('info');
+
+    const unknownVersion = envFileChecks('AUTH_SECRET=x\nAPP_DB_PASSWORD=y\n', example);
+    expect(unknownVersion.find((item) => item.id === 'env-file.missing')?.status).toBe('info');
+
+    const required = envFileChecks('AM_VERSION=0.1.0\nDATABASE_URL=y\n', example, '0.0.0');
+    const requiredCheck = required.find((item) => item.id === 'env-file.missing');
+    expect(requiredCheck?.status).toBe('warn');
+    expect(requiredCheck?.message).toContain('AUTH_SECRET');
+  });
+
+  it('accepts Compose-supplied and internal values as absent', () => {
+    const example = 'DATABASE_URL=\nWEB_DIST=\nTRUSTED_ORIGINS=\nPORT=\nAUTH_SECRET=\nAPP_DB_PASSWORD=\n';
+    const checks = envFileChecks('AUTH_SECRET=x\nAPP_DB_PASSWORD=y\n', example, '0.0.0');
+    const message = checks.find((item) => item.id === 'env-file.missing')?.message ?? '';
+    for (const key of ['DATABASE_URL', 'WEB_DIST', 'TRUSTED_ORIGINS', 'PORT']) expect(message, key).not.toContain(`${key} (`);
   });
 
   it('does not require providers for DNS and egress', async () => {
@@ -135,6 +171,57 @@ describe('am doctor offline checks', () => {
     const [egress] = await checkEgress([]);
     expect(dns.status).toBe('ok');
     expect(egress.status).toBe('ok');
+  });
+});
+
+describe('am doctor sending-domain checks', () => {
+  const provider = (from_email: string) => [{ adapter: 'log', from_email, config: null }];
+
+  it('inherits DMARC from the organizational domain', async () => {
+    const looked: string[] = [];
+    const lookup = async (name: string) => {
+      looked.push(name);
+      if (name === 'mail.example.com') return ['v=spf1 include:example.net -all'];
+      if (name === '_dmarc.example.com') return ['v=DMARC1; p=quarantine; adkim=s'];
+      return [];
+    };
+    const [check] = await checkSendingDomains(provider('news@mail.example.com'), lookup);
+    expect(check.status).toBe('ok');
+    expect(check.message).toContain('inherited from example.com (p=quarantine)');
+    expect(looked).toContain('_dmarc.mail.example.com');
+    expect(looked).toContain('_dmarc.example.com');
+  });
+
+  it('treats known two-label public suffixes as organizational domains', async () => {
+    const looked: string[] = [];
+    const lookup = async (name: string) => {
+      looked.push(name);
+      if (name === 'shop.example.co.uk') return ['v=spf1 -all'];
+      if (name === '_dmarc.example.co.uk') return ['v=DMARC1; p=reject'];
+      return [];
+    };
+    const [check] = await checkSendingDomains(provider('news@shop.example.co.uk'), lookup);
+    expect(check.status).toBe('ok');
+    expect(check.message).toContain('inherited from example.co.uk (p=reject)');
+    expect(looked).not.toContain('_dmarc.co.uk');
+  });
+
+  it('warns when no DMARC record exists anywhere', async () => {
+    const lookup = async (name: string) => (name === 'example.com' ? ['v=spf1 -all'] : []);
+    const [check] = await checkSendingDomains(provider('news@example.com'), lookup);
+    expect(check.status).toBe('warn');
+    expect(check.message).toContain('missing DMARC');
+  });
+
+  it('warns when the effective policy is p=none', async () => {
+    const lookup = async (name: string) => {
+      if (name === 'example.com') return ['v=spf1 -all'];
+      if (name === '_dmarc.example.com') return ['v=DMARC1; p=none; rua=mailto:dmarc@example.com'];
+      return [];
+    };
+    const [check] = await checkSendingDomains(provider('news@example.com'), lookup);
+    expect(check.status).toBe('warn');
+    expect(check.message).toContain('p=none');
   });
 });
 

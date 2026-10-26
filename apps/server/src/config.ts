@@ -174,14 +174,47 @@ const Env = z.object({
 /** Every key the server understands, for tooling such as `am doctor --env-file`. */
 export const ENV_KEYS = Object.keys(Env.shape);
 
+/** Keys without a default and not optional: the ones a fresh install has to provide. */
+export const REQUIRED_ENV_KEYS = Object.entries(Env.shape)
+  .filter(([, schema]) => !schema.isOptional())
+  .map(([key]) => key);
+
+/**
+ * A configuration problem an operator can act on. Callers print the message without a stack
+ * trace: the stack points at loadConfig, not at anything they can fix.
+ */
+export class ConfigError extends Error {
+  override name = 'ConfigError';
+}
+
+/** Turn a zod issue into one short phrase, using the names the operator sees in .env. */
+function issueText(issue: z.core.$ZodIssue): string {
+  const key = issue.path.map(String).join('.') || 'configuration';
+  // Messages written next to the schema (AUTH_SECRET's, TRUSTED_PROXY_CIDRS') already read well.
+  if (issue.message.startsWith(`${key} `)) return issue.message;
+  switch (issue.code) {
+    case 'invalid_type':
+      return issue.input === undefined ? `${key} is missing` : `${key} is invalid`;
+    case 'too_small':
+      return issue.origin === 'string' ? `${key} must be at least ${issue.minimum} characters` : `${key} must be at least ${issue.minimum}`;
+    case 'too_big':
+      return issue.origin === 'string' ? `${key} must be at most ${issue.maximum} characters` : `${key} must be at most ${issue.maximum}`;
+    case 'invalid_format':
+      return issue.format === 'url' ? `${key} must be a valid URL` : `${key} has an invalid format`;
+    case 'invalid_value':
+      return `${key} must be one of ${issue.values.map(String).join(', ')}`;
+    default:
+      return `${key}: ${issue.message}`;
+  }
+}
+
 export type Config = ReturnType<typeof loadConfig>;
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   // docker compose passes unset variables as empty strings: treat them as not set.
   const parsed = Env.safeParse(Object.fromEntries(Object.entries(env).filter(([, v]) => v !== '')));
   if (!parsed.success) {
-    const issues = parsed.error.issues.map((i) => `  ${i.path.join('.')}: ${i.message}`).join('\n');
-    throw new Error(`Invalid configuration:\n${issues}`);
+    throw new ConfigError(`Configuration is incomplete: ${parsed.error.issues.map(issueText).join(', ')}`);
   }
   const e = parsed.data;
   const missing = (names: string[]) => names.filter((n) => !e[n as keyof typeof e]);
@@ -191,7 +224,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
       : e.KEY_PROVIDER === 'openbao'
         ? [...missing(['OPENBAO_ADDR']), ...(e.OPENBAO_TOKEN || e.OPENBAO_TOKEN_FILE ? [] : ['OPENBAO_TOKEN or OPENBAO_TOKEN_FILE'])]
         : missing(['AWS_KMS_KEY_ID', 'AWS_REGION', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY']);
-  if (needed.length) throw new Error(`Invalid configuration:\n  KEY_PROVIDER=${e.KEY_PROVIDER} needs ${needed.join(', ')}`);
+  if (needed.length) throw new ConfigError(`Configuration is incomplete: KEY_PROVIDER=${e.KEY_PROVIDER} needs ${needed.join(', ')}`);
   const appUrl = new URL(e.DATABASE_URL);
   appUrl.username = e.APP_DB_ROLE;
   appUrl.password = e.APP_DB_PASSWORD;

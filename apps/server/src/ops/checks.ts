@@ -1,17 +1,20 @@
 import { Resolver } from 'node:dns/promises';
+import { existsSync, readFileSync } from 'node:fs';
 import { readdir } from 'node:fs/promises';
 import { connect } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { isMcpResourceUrlAllowed } from '@agentic-marketing/auth';
 import { createDb, type Db } from '@agentic-marketing/db';
 import { valkeyHotState } from '@agentic-marketing/hotstate';
-import { type Config, ENV_KEYS, loadConfig } from '../config';
+import { type Config, ENV_KEYS, loadConfig, REQUIRED_ENV_KEYS } from '../config';
+import { VERSION } from '../version';
+import { compareVersions, envKeysSince, INTERNAL_ENV_KEYS, isComposeOrDockerKey, SUPPLIED_BY_COMPOSE } from './env-history';
 
 // Checks for `am doctor`. The offline ones are pure functions over the environment so they can run
 // before the stack exists (and are easy to unit-test). The live ones give up after a few seconds:
 // a diagnostic must never hang.
 
-export type CheckStatus = 'ok' | 'warn' | 'fail';
+export type CheckStatus = 'ok' | 'info' | 'warn' | 'fail';
 
 export interface Check {
   id: string;
@@ -25,6 +28,20 @@ export type Env = Record<string, string | undefined>;
 const TIMEOUT_MS = 3000;
 const SECONDS = TIMEOUT_MS / 1000;
 const MIGRATIONS_DIR = fileURLToPath(new URL('../../../../packages/db/migrations', import.meta.url));
+
+// The host side of the public listener is a Compose setting, not one the container sees. Read the
+// default from docker-compose.yml so a changed port in a release does not make this hint stale.
+// The image has no compose file; the fallback is the current release default.
+const DEFAULT_PUBLIC_BIND = (() => {
+  const fallback = '127.0.0.1:3210';
+  try {
+    const compose = fileURLToPath(new URL('../../../../docker-compose.yml', import.meta.url));
+    if (!existsSync(compose)) return fallback;
+    return /\$\{PUBLIC_BIND:-([^}]+)\}:/.exec(readFileSync(compose, 'utf8'))?.[1] ?? fallback;
+  } catch {
+    return fallback;
+  }
+})();
 
 const messageOf = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
@@ -189,8 +206,8 @@ export function checkPublicLinksUrl(env: Env): Check {
 export function checkPublicPort(env: Env): Check {
   const id = 'public-port';
   const value = (env.PUBLIC_PORT ?? '').trim();
-  const hint =
-    'Publish it on a loopback-only host address (for example PUBLIC_BIND=127.0.0.1 in a compose override) and point the tunnel or proxy at it.';
+  const bind = (env.PUBLIC_BIND ?? '').trim() || DEFAULT_PUBLIC_BIND;
+  const hint = `docker compose publishes it on the host at ${bind} (PUBLIC_BIND in .env); point the tunnel or proxy there. A tunnel container on a Docker network reaches the app directly, so no host port is needed: remove the mapping with \`ports: !override\` in compose.override.yaml.`;
   if (!value)
     return {
       id,
@@ -206,7 +223,7 @@ export function checkPublicPort(env: Env): Check {
       message: `PUBLIC_PORT is not a valid port: ${value}`,
       hint: 'Use a number between 1 and 65535, for example 3001.',
     };
-  return { id, status: 'ok', message: `PUBLIC_PORT=${port} is set`, hint };
+  return { id, status: 'ok', message: `PUBLIC_PORT=${port} is set and published on ${bind}`, hint };
 }
 
 export function checkTrustedProxyCidrs(env: Env): Check {
@@ -252,14 +269,34 @@ export function envFileKeys(text: string, commented = false): string[] {
   return keys;
 }
 
-/** Compare an env file with the template and with the keys the current server understands. */
-export function envFileChecks(fileText: string, exampleText: string): Check[] {
+/** The uncommented values in an env file, for checks that need the value rather than the key. */
+export function envFileValues(text: string): Record<string, string> {
+  const values: Record<string, string> = {};
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#')) continue;
+    const match = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(line);
+    if (!match) continue;
+    let value = match[2].trim();
+    if (value.length >= 2 && ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))))
+      value = value.slice(1, -1);
+    values[match[1]] = value;
+  }
+  return values;
+}
+
+/**
+ * Compare an env file with the template and with the keys the current server understands.
+ * `from` is the release the file comes from; without it the file's AM_VERSION is used. Variables
+ * that are only new since a later release are not this install's problem.
+ */
+export function envFileChecks(fileText: string, exampleText: string, from?: string): Check[] {
   const known = new Set([...envFileKeys(exampleText, true), ...ENV_KEYS]);
   const present = new Set(envFileKeys(fileText));
-  const expected = new Set(envFileKeys(exampleText));
-  const unknown = [...present].filter((key) => !known.has(key)).sort();
-  const missing = [...expected].filter((key) => !present.has(key)).sort();
-  return [
+  // Docker Compose reads COMPOSE_* and DOCKER_* from .env too; they are not app configuration.
+  const unknown = [...present].filter((key) => !known.has(key) && !isComposeOrDockerKey(key)).sort();
+  const fromVersion = (from ?? envFileValues(fileText).AM_VERSION)?.trim();
+  const checks: Check[] = [
     unknown.length
       ? {
           id: 'env-file.unknown',
@@ -268,15 +305,57 @@ export function envFileChecks(fileText: string, exampleText: string): Check[] {
           hint: 'Remove them or compare with the current .env.example; the server ignores keys it does not know.',
         }
       : { id: 'env-file.unknown', status: 'ok', message: 'no unknown or obsolete keys' },
-    missing.length
+  ];
+
+  if (!fromVersion) {
+    checks.push({
+      id: 'env-file.missing',
+      status: 'info',
+      message: 'AM_VERSION is not set, so variables new since your version cannot be listed',
+      hint: 'Set AM_VERSION in .env or pass --from <version>; that is the version you are upgrading from.',
+    });
+    return checks;
+  }
+  if (compareVersions(fromVersion, VERSION) === null) {
+    checks.push({
+      id: 'env-file.missing',
+      status: 'info',
+      message: `could not compare "${fromVersion}" with the running version ${VERSION}`,
+      hint: 'Pass a release version such as 0.2.3 with --from.',
+    });
+    return checks;
+  }
+
+  const newer = (envKeysSince(fromVersion) ?? []).filter(
+    (key) => !present.has(key) && !SUPPLIED_BY_COMPOSE.has(key) && !INTERNAL_ENV_KEYS.has(key),
+  );
+  const required = newer.filter((key) => REQUIRED_ENV_KEYS.includes(key));
+  const optional = newer.filter((key) => !REQUIRED_ENV_KEYS.includes(key));
+  checks.push(
+    newer.length
       ? {
           id: 'env-file.missing',
-          status: 'warn',
-          message: `new in this version: ${missing.join(', ')}`,
-          hint: 'Add them from the current .env.example; defaults apply until you do.',
+          status: required.length ? 'warn' : 'info',
+          message: `new since ${fromVersion}: ${[
+            required.length ? `${required.join(', ')} (required)` : '',
+            optional.length ? `${optional.join(', ')} (optional, defaults apply)` : '',
+          ]
+            .filter(Boolean)
+            .join('; ')}`,
+          hint: required.length
+            ? 'Add the required keys from the current .env.example before starting the new version.'
+            : 'Add any you want from the current .env.example; the defaults apply until you do.',
         }
-      : { id: 'env-file.missing', status: 'ok', message: 'all keys in .env.example are present' },
-  ];
+      : {
+          id: 'env-file.missing',
+          status: 'ok',
+          message:
+            compareVersions(fromVersion, VERSION) === 0
+              ? `no variables added since ${fromVersion} (the running version)`
+              : `no variables added after ${fromVersion}`,
+        },
+  );
+  return checks;
 }
 
 export function checkConfig(env: Env = process.env): { check: Check; config?: Config } {
@@ -461,6 +540,9 @@ async function readProviders(db: Db): Promise<ProviderRow[] | null> {
   }
 }
 
+/** TXT lookup, injectable so tests do not need DNS. */
+export type TxtLookup = (name: string) => Promise<string[]>;
+
 async function txtRecords(name: string): Promise<string[]> {
   const resolver = new Resolver({ timeout: TIMEOUT_MS, tries: 1 });
   try {
@@ -473,7 +555,43 @@ async function txtRecords(name: string): Promise<string[]> {
   }
 }
 
-export async function checkSendingDomains(providers: ProviderRow[]): Promise<Check[]> {
+// DMARC is inherited from the organizational domain. A full public-suffix list is overkill here;
+// these are the two-label suffixes our users are likely to send from.
+const TWO_LABEL_SUFFIXES = new Set(['ac.uk', 'co.nz', 'co.uk', 'com.au', 'org.uk']);
+
+function dmarcLookupNames(domain: string): string[] {
+  const labels = domain.replace(/\.$/, '').toLowerCase().split('.').filter(Boolean);
+  // A single label is a top-level suffix, never a place to look for a policy.
+  if (labels.length < 2) return [];
+  const suffixLength = TWO_LABEL_SUFFIXES.has(labels.slice(-2).join('.')) ? 3 : 2;
+  const organizationalLabels = Math.min(labels.length, suffixLength);
+  const names: string[] = [];
+  // From the exact domain up to the organizational domain, never the suffix itself.
+  for (let start = 0; start <= labels.length - organizationalLabels; start++) names.push(`_dmarc.${labels.slice(start).join('.')}`);
+  return names;
+}
+
+function dmarcPolicy(record: string): string | undefined {
+  return /(?:^|;)\s*p\s*=\s*([a-z]+)/i.exec(record)?.[1]?.toLowerCase();
+}
+
+interface DmarcRecord {
+  /** The domain whose `_dmarc` record was found; absent when there is none anywhere. */
+  foundAt?: string;
+  policy?: string;
+}
+
+async function findDmarc(domain: string, lookup: TxtLookup): Promise<DmarcRecord> {
+  const names = dmarcLookupNames(domain);
+  const answers = await Promise.all(names.map(async (name) => ({ name, records: await lookup(name) })));
+  for (const answer of answers) {
+    const record = answer.records.map((value) => value.trim()).find((value) => /^v=DMARC1(?:\s|;|$)/i.test(value));
+    if (record) return { foundAt: answer.name.slice('_dmarc.'.length), policy: dmarcPolicy(record) };
+  }
+  return {};
+}
+
+export async function checkSendingDomains(providers: ProviderRow[], lookup: TxtLookup = txtRecords): Promise<Check[]> {
   const domains = [
     ...new Set(
       providers.map((provider) => provider.from_email?.split('@')[1]?.trim().toLowerCase()).filter((domain): domain is string => !!domain),
@@ -493,16 +611,38 @@ export async function checkSendingDomains(providers: ProviderRow[]): Promise<Che
 
   return Promise.all(
     domains.map(async (domain) => {
-      const [spf, dmarc] = await Promise.all([txtRecords(domain), txtRecords(`_dmarc.${domain}`)]);
+      const [spf, dmarc] = await Promise.all([lookup(domain), findDmarc(domain, lookup)]);
       const hasSpf = spf.some((record) => /^v=spf1(?:\s|$)/i.test(record));
-      const hasDmarc = dmarc.some((record) => /^v=DMARC1(?:\s|;|$)/i.test(record));
-      if (hasSpf && hasDmarc) return { id: `dns.${domain}`, status: 'ok' as const, message: `SPF and DMARC records found for ${domain}` };
-      const missing = [hasSpf ? null : 'SPF', hasDmarc ? null : 'DMARC'].filter(Boolean).join(' and ');
+      const inherited = dmarc.foundAt && dmarc.foundAt !== domain;
+      const inheritedFrom = inherited ? ` (inherited from ${dmarc.foundAt} (p=${dmarc.policy ?? 'none'}))` : '';
+
+      if (!dmarc.foundAt)
+        return {
+          id: `dns.${domain}`,
+          status: 'warn' as const,
+          message: `${domain} is missing ${[hasSpf ? null : 'SPF', 'DMARC'].filter(Boolean).join(' and ')}`,
+          hint: 'Publish an SPF TXT record (`v=spf1 ...`) and a DMARC TXT record at `_dmarc.<domain>` (or at the organizational domain). DKIM selectors depend on the provider; enable DKIM there.',
+        };
+      if (dmarc.policy === 'none')
+        return {
+          id: `dns.${domain}`,
+          status: 'warn' as const,
+          message: `${domain} has DMARC p=none${inherited ? ` (inherited from ${dmarc.foundAt})` : ''}; it only monitors`,
+          hint: 'Move to p=quarantine (then p=reject) once the reports show your legitimate mail passes SPF and DKIM.',
+        };
+      if (!hasSpf)
+        return {
+          id: `dns.${domain}`,
+          status: 'warn' as const,
+          message: `${domain} is missing SPF${inheritedFrom}`,
+          hint: 'Publish an SPF TXT record (`v=spf1 ...`). DKIM selectors depend on the provider; enable DKIM there.',
+        };
       return {
         id: `dns.${domain}`,
-        status: 'warn' as const,
-        message: `${domain} is missing ${missing}`,
-        hint: 'Publish an SPF TXT record (`v=spf1 ...`) and a DMARC TXT record at `_dmarc.<domain>`. DKIM selectors depend on the provider; enable DKIM there.',
+        status: 'ok' as const,
+        message: inherited
+          ? `SPF found; DMARC for ${domain} inherited from ${dmarc.foundAt} (p=${dmarc.policy ?? 'none'})`
+          : `SPF and DMARC records found for ${domain}`,
       };
     }),
   );

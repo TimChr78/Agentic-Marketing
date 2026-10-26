@@ -35,7 +35,9 @@ COPY .env.example /app/.env.example
 COPY CHANGELOG.md /app/CHANGELOG.md
 # `am` is the admin CLI without pnpm's script banner (which would echo arguments such as secrets).
 # --dir lets `docker run -w /work … am init` work; pnpm leaves INIT_CWD pointing at /work.
-RUN printf '#!/bin/sh\nexec pnpm --dir /app --silent --filter @agentic-marketing/server cli "$@"\n' > /usr/local/bin/am && chmod +x /usr/local/bin/am
+# The `--` keeps pnpm from eating the CLI's flags: without it `am doctor --env-file X` passes
+# --env-file to node, which fails with "node: X: not found".
+RUN printf '#!/bin/sh\nexec pnpm --dir /app --silent --filter @agentic-marketing/server cli -- "$@"\n' > /usr/local/bin/am && chmod +x /usr/local/bin/am
 # pg_dump/pg_restore must match the postgres:16 server in docker-compose.yml. Debian's own
 # postgresql-client can be an older major, so install version 16 from PGDG for this base image's
 # codename (the repository serves both amd64 and arm64). Run as root, before USER node.
