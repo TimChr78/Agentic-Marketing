@@ -21,6 +21,7 @@ AUTH_SECRET=$(openssl rand -base64 32)
 MASTER_KEY=$(openssl rand -base64 32)
 PUBLIC_URL=http://localhost:3000
 AM_PORT=3000
+PUBLIC_PORT=3001
 ENV
 
 # Always build through the overlay: the default compose file pulls the release image.
@@ -44,9 +45,15 @@ FORM=$(call artifacts.create "{\"type\":\"form\",\"name\":\"Newsletter\",\"conte
 call artifacts.requestPublish "{\"artifactId\":\"$FORM\",\"note\":\"smoke\"}" >/dev/null
 curl -fsS -H 'content-type: application/json' -d '{"email":"ada@example.com"}' "http://localhost:3000/f/$FORM" | grep -q '"ok":true' && echo "form accepted"
 
+sent=""
 for _ in $(seq 30); do
-  if call messages.list '{"limit":5}' | grep -q '"status":"sent"'; then echo "confirmation e-mail sent"; exit 0; fi
+  if call messages.list '{"limit":5}' | grep -q '"status":"sent"'; then sent=1; echo "confirmation e-mail sent"; break; fi
   sleep 1
 done
-echo "no confirmation e-mail was sent" >&2
-exit 1
+[ -n "$sent" ] || { echo "no confirmation e-mail was sent" >&2; exit 1; }
+
+# The checks an operator runs after an upgrade (am smoke), inside the container against both
+# listeners: admin paths hidden on the public one, dot-segments refused, MCP, the provider, a signup.
+TOKEN=$(call apiTokens.create '{"name":"smoke","scopes":["workspace:admin"]}' | json '.token')
+dc exec -T -e AM_TOKEN="$TOKEN" app am smoke --public-url http://localhost:3001 --admin-url http://localhost:3000 \
+  --form "$FORM" --email grace@example.com
