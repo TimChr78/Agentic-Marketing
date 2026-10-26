@@ -30,21 +30,58 @@ docker compose exec app am backup --clickhouse
 am backup --to ./backups
 ```
 
-The directory name is `am-<version>-<UTC timestamp>` and contains:
+The name records the kind and the version the data was running:
+
+| Kind | Name |
+|---|---|
+| manual | `am-manual-<build version>-<UTC stamp>` |
+| scheduled | `am-scheduled-<build version>-<UTC stamp>` |
+| automatic before upgrade | `am-pre-upgrade-<data version>-to-<new version>-<UTC stamp>` |
+
+The UTC stamp looks like `20261027T031500Z`. `am-pre-upgrade` exists so the pair of versions is
+obvious in a directory listing: the version the data last ran and the build that is about to migrate
+it. Backups from 0.2.4 keep their older `am-<version>-<stamp>` name; retention still recognises them.
+
+The directory contains:
 
 ```text
-am-0.2.4-20261027T031500Z/
+am-manual-0.2.5-20261027T031500Z/
   manifest.json
-  postgres.dump              # pg_dump -Fc --no-owner
-  clickhouse/                # only with --clickhouse
-    events.native
-    message_events.native
-    ...
+  postgres.dump                    # pg_dump -Fc --no-owner
+  clickhouse/                      # only with --clickhouse
+    events/
+      0f7c…-…-….native             # one file per workspace
+      8a2d…-…-….native
+    message_events/
+      0f7c…-…-….native
+    ad_spend/
+      0f7c…-…-….native
+    some_table_without_a_row_policy.native
 ```
 
-`manifest.json` records the format version, the app version, the highest applied
-`schema_migrations` version, the creation time, and each file's size and SHA-256. `am restore` uses
-the migration head to refuse a backup from a newer release.
+Tables whose `workspace_id` has a ClickHouse row policy (`events`, `message_events`,
+`journey_events` and `ad_spend` by default) are exported once per workspace with `SQL_workspace`
+set. A plain `SELECT` under that policy would return no rows, which is why 0.2.4 produced empty
+files. Tables without the policy export as a single file. The export asks `system.row_policies`
+which tables are filtered, so a custom policy is not missed.
+
+`manifest.json` is format 2. It records the kind, the build that wrote it (`version`), the data
+version (`fromVersion`), `toVersion` for a pre-upgrade backup, the highest applied
+`schema_migrations` version, the creation time, the Postgres file, and for each ClickHouse table
+its `totalRowsBefore` and a `files` list with `workspace`, `file`, `rows`, `bytes` and `sha256`.
+`rows` is the number of rows ClickHouse actually returned (from `X-ClickHouse-Summary`), never the
+table's estimated total.
+
+The data version is the newest `last_started_at` row in `server_versions`, written by the app at
+startup. A database that last ran 0.2.4 or earlier has no such table yet; the backup then maps its
+migration head to the release that shipped it (for example `0027_journey_consent_exits.sql` is
+0.2.3–0.2.4). That is accurate enough to label an upgrade and is recorded in `fromVersion`.
+
+If a table had rows before the export but none were written, the backup fails: an empty ClickHouse
+file is data loss, not a valid backup. If the counts differ for a benign reason (events arriving
+during the export, background merges of a ReplacingMergeTree, or rows belonging to workspaces that
+no longer exist in Postgres), both numbers go into the manifest and the log warns; the backup still
+succeeds.
 
 Where it writes:
 
@@ -56,9 +93,27 @@ The `pg_dump`, `pg_restore` and ClickHouse HTTP calls stream to disk. The image 
 `postgresql-client-16`, matching the `postgres:16` service. Outside the image, install the
 PostgreSQL 16 client tools; a missing `pg_dump` stops the backup with an error.
 
+Backups contain subscriber addresses and consent records. The CLI sets umask `077` and creates the
+backup directory (including the hidden `.partial` directory used during a run) with mode `0700` and
+every file, including `manifest.json`, with `0600`, even when a bind-mounted host directory is
+otherwise world-readable.
+Keep the directory that way; do not loosen the modes to share a backup over a network.
+
 `--keep-days N` (or `BACKUP_KEEP_DAYS`) deletes completed `am-*` directories older than N days
 after a successful backup. It only removes directories that contain a `manifest.json`; partial
-backups use a hidden temporary name until they are complete.
+backups use a hidden temporary name until they are complete. Both the current names and the
+0.2.4 `am-<version>-<stamp>` names match.
+
+## Listing backups
+
+```bash
+am backup --list
+am backup --list --dir /backups
+```
+
+Prints name, kind, data version, migration head, creation time, total size and whether ClickHouse
+is included, newest first. `--dir` defaults to the same `BACKUP_DIR` / `/backups` / `./backups`
+rule as a backup. Only completed directories with a readable manifest are listed.
 
 ## Scheduled backups
 
@@ -83,6 +138,24 @@ run is logged and the next minute is still checked; `docker compose stop backup`
 the loop after the current run. The container needs only `DATABASE_URL`, `CLICKHOUSE_URL` and
 `CLICKHOUSE_DATABASE`; it does not read `AUTH_SECRET` or `MASTER_KEY`.
 
+The scheduler writes `<BACKUP_DIR>/.schedule-status.json` (`0600`) at start and after every
+minute tick: `{ lastRunAt, lastOk, lastError?, nextRunAt }`. Check it from a healthcheck with:
+
+```bash
+am backup --health
+```
+
+It exits 0 when the heartbeat is less than 2 minutes old and the last run did not fail; otherwise
+it exits 1 and prints one line saying why. A Compose healthcheck can use:
+
+```yaml
+healthcheck:
+  test: ['CMD', 'am', 'backup', '--health']
+  interval: 1m
+  timeout: 10s
+  retries: 3
+```
+
 Keep the `backups` volume out of the quick `docker compose down -v` path, and copy it off the host
 regularly. A backup on the same disk as the database is not a disaster-recovery plan.
 
@@ -93,11 +166,13 @@ and whether any migration files are still pending. If both are true it takes a P
 (it does not export ClickHouse) and logs the path. This happens only when migrations are about to
 change the schema, not on every start.
 
-The backup goes to `BACKUP_DIR`, `/backups` or `./backups` as above and obeys `BACKUP_KEEP_DAYS`.
-Set `SKIP_PRE_UPGRADE_BACKUP=true` to turn it off, for example when an external job already backs up
-Postgres. A missing `pg_dump`, an unwritable directory or a dump failure only logs a warning:
-startup continues, because a development machine or a read-only container should still boot.
-`SKIP_MIGRATIONS=true` also skips it, since this role is not running migrations at all.
+The backup is named `am-pre-upgrade-<from>-to-<to>-<stamp>`, where `<from>` is the version the
+database last ran (`server_versions`, or the migration-head map for a database older than 0.2.5)
+and `<to>` is this build. It goes to `BACKUP_DIR`, `/backups` or `./backups` as above and obeys
+`BACKUP_KEEP_DAYS`. Set `SKIP_PRE_UPGRADE_BACKUP=true` to turn it off, for example when an external
+job already backs up Postgres. A missing `pg_dump`, an unwritable directory or a dump failure only
+logs a warning: startup continues, because a development machine or a read-only container should
+still boot. `SKIP_MIGRATIONS=true` also skips it, since this role is not running migrations at all.
 
 ## Restoring
 
@@ -105,23 +180,35 @@ Restoring replaces the database. Stop the app first so it cannot write while tab
 
 ```bash
 docker compose stop app
-docker compose run --rm app am restore /backups/am-0.2.4-20261027T031500Z --yes
+docker compose run --rm app am restore /backups/am-manual-0.2.5-20261027T031500Z --yes
 docker compose start app
 ```
 
 The one-off restore container mounts the same `backups` volume as `docker compose exec app am
 backup`, so it sees those backups. Without `--yes`, an interactive terminal asks you to type
 `restore`; a non-interactive run refuses. `--clickhouse` also truncates and reloads every ClickHouse
-table in the manifest. Start the app once against the target ClickHouse before restoring with
-`--clickhouse`, so the tables exist; the restore replaces their contents but does not create them.
+table in the manifest, inserting each workspace file. Start the app once against the target
+ClickHouse before restoring with `--clickhouse`, so the tables exist; the restore replaces their
+contents but does not create them.
 
 `am restore`:
 
-- checks every file's size and SHA-256 before touching the database;
+- checks every file's size and SHA-256 before touching the database — and for `--clickhouse`, every
+  ClickHouse file before the first `TRUNCATE`;
 - refuses a manifest whose migration head is newer than this build knows, with a message to upgrade
   the image; `--force` overrides that check (use it only when you know the schema is compatible);
 - creates or updates the `am_app` role before loading, so the dump's `GRANT`s to it apply;
 - runs `pg_restore --clean --if-exists --no-owner`, then reports the restored version.
+
+Backups from 0.2.4 are format 1. Their ClickHouse export is empty whenever row policies are on
+(the default), so `am restore --clickhouse` refuses that part with:
+
+> This backup was made by 0.2.4, whose ClickHouse export is empty under row policies (#129);
+> restoring it would delete your event history. Restore Postgres only (omit --clickhouse).
+
+Restoring such a backup without `--clickhouse` is supported and safe. If you need the ClickHouse
+data, take a fresh backup before upgrading, while you still have the 0.2.4 database; the truncate in
+the restore is what turns an empty export into data loss.
 
 The dump keeps table privileges even with `--no-owner` (that flag only skips ownership changes), so
 the app role can read and write after the restore. At the same migration head the next app start
@@ -149,6 +236,9 @@ A backup is only useful if a restore works. Do a drill on a scratch host or proj
 
 The integration test in `apps/server/test/backup.test.ts` does the Postgres part automatically when
 `pg_dump` is on `PATH` (CI installs PostgreSQL 16): it creates a database, inserts a marker, backs
-it up, deletes the row, restores, and checks that the row comes back. It also checks that a newer
-migration head and a corrupted checksum are refused. A separate test round-trips one ClickHouse
-table when ClickHouse is reachable.
+it up, deletes the row, restores, and checks that the row comes back. It also checks the manifest
+kind and versions, the `0700`/`0600` modes, `--list`, a newer migration head, a corrupted checksum,
+and that a 0.2.4 format 1 backup with ClickHouse data is refused. When ClickHouse is reachable, a
+test creates the real schema with row policies, writes events for two workspaces, and checks that
+the backup has one non-empty file per workspace, that restore brings back each workspace's rows,
+and that a query without `SQL_workspace` still sees none.

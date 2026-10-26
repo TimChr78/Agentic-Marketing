@@ -56,7 +56,11 @@ export async function run(args: string[]): Promise<number> {
       clickhouse: values.clickhouse,
       log: (message) => console.log(message),
     });
-    console.log(`restored ${manifest.version} from ${resolveUserPath(backupDir)} (migration head ${manifest.migrationHead ?? 'none'})`);
+    const dataVersion = manifest.format === 1 ? manifest.version : (manifest.fromVersion ?? 'unknown');
+    console.log(
+      `restored ${manifest.version} from ${resolveUserPath(backupDir)} ` +
+        `(data version ${dataVersion}, migration head ${manifest.migrationHead ?? 'none'})`,
+    );
     return 0;
   } catch (err) {
     console.error(`restore failed: ${(err as Error).message}`);

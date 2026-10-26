@@ -1,13 +1,27 @@
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { cp, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { latestMigration, migrate } from '@agentic-marketing/db';
+import { lastServerVersion, latestMigration, migrate, recordServerVersion } from '@agentic-marketing/db';
+import { migrateClickHouse } from '@agentic-marketing/events';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { run as backupRun } from '../src/ops/backup';
-import { type BackupManifest, cronMatches, exportClickHouse, parseCron, restoreClickHouse } from '../src/ops/backup-lib';
+import {
+  type BackupManifest,
+  backupHealth,
+  createBackup,
+  cronMatches,
+  exportClickHouse,
+  listBackups,
+  nextCronRun,
+  parseCron,
+  readScheduleStatus,
+  restoreBackup,
+  restoreClickHouse,
+  writeScheduleStatus,
+} from '../src/ops/backup-lib';
 import { run as restoreRun } from '../src/ops/restore';
 
 function toolMajor(tool: string): number {
@@ -38,10 +52,11 @@ async function withEnv<T>(overrides: Record<string, string>, fn: () => Promise<T
   }
 }
 
-async function clickhouse(query: string, database?: string): Promise<string> {
+async function clickhouse(query: string, database?: string, settings: Record<string, string> = {}): Promise<string> {
   const url = new URL(chUrl);
   url.searchParams.set('query', query);
   if (database) url.searchParams.set('database', database);
+  for (const [key, value] of Object.entries(settings)) url.searchParams.set(key, value);
   const response = await fetch(url, { method: 'POST' });
   if (!response.ok) throw new Error(`ClickHouse: ${response.status} ${await response.text()}`);
   return response.text();
@@ -76,6 +91,35 @@ describe('cron matcher', () => {
     for (const bad of ['* * * *', '60 * * * *', '*/0 * * * *', '5-1 * * * *', 'foo * * * *', '1,,2 * * * *', '1-2-3 * * * *', '-5 * * * *'])
       expect(() => parseCron(bad)).toThrow();
   });
+
+  it('finds the next matching minute', () => {
+    const next = nextCronRun(parseCron('30 3 * * *'), new Date('2026-10-26T03:10:00Z'));
+    expect(next.toISOString()).toBe('2026-10-26T03:30:00.000Z');
+  });
+});
+
+describe('scheduler health', () => {
+  it('reports a missing, stale, failed or healthy heartbeat', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'am-health-'));
+    try {
+      expect((await backupHealth({ dir })).ok).toBe(false);
+      expect((await backupHealth({ dir })).reason).toMatch(/no scheduler heartbeat/);
+
+      const status = { lastRunAt: new Date().toISOString(), lastOk: true, nextRunAt: '2026-10-27T03:30:00.000Z' };
+      await writeScheduleStatus(dir, status);
+      expect(await readScheduleStatus(dir)).toEqual(status);
+      expect((await backupHealth({ dir })).ok).toBe(true);
+      expect(await backupHealth({ dir, now: new Date(Date.now() + 3 * 60_000) })).toMatchObject({ ok: false });
+
+      await writeScheduleStatus(dir, { ...status, lastOk: false, lastError: 'pg_dump failed' });
+      const failed = await backupHealth({ dir });
+      expect(failed.ok).toBe(false);
+      expect(failed.reason).toMatch(/pg_dump failed/);
+      expect((await stat(join(dir, '.schedule-status.json'))).mode & 0o777).toBe(0o600);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe.skipIf(!chUp)('ClickHouse export and restore', () => {
@@ -89,8 +133,11 @@ describe.skipIf(!chUp)('ClickHouse export and restore', () => {
 
       const tables = await exportClickHouse({ url: chUrl, database, outDir: out });
       expect(tables.map((table) => table.name)).toEqual(['events']);
-      expect(tables[0].bytes).toBeGreaterThan(0);
-      expect(tables[0].sha256).toMatch(/^[0-9a-f]{64}$/);
+      expect(tables[0].totalRowsBefore).toBe(1);
+      expect(tables[0].files).toHaveLength(1);
+      expect(tables[0].files[0].rows).toBe(1);
+      expect(tables[0].files[0].bytes).toBeGreaterThan(0);
+      expect(tables[0].files[0].sha256).toMatch(/^[0-9a-f]{64}$/);
 
       await clickhouse(`TRUNCATE TABLE ${database}.events`);
       await restoreClickHouse({ runDir: out, tables, url: chUrl, database });
@@ -136,6 +183,9 @@ describe.skipIf(!pgToolsReady)('backup and restore', () => {
 
     pool = new pg.Pool({ connectionString: dbUrl.toString() });
     await migrate(pool, { appRolePassword: password, appRole: role });
+    // Pretend 0.2.4 ran this database: the backup must label the data with that, not with the
+    // build that takes the backup.
+    await recordServerVersion(pool, '0.2.4');
     await pool.query('CREATE TABLE backup_marker (id integer PRIMARY KEY, note text NOT NULL)');
     await pool.query("INSERT INTO backup_marker VALUES (1, 'before')");
     // pg_restore must bring this grant back too; the app connects as this role, not as the owner.
@@ -163,13 +213,38 @@ describe.skipIf(!pgToolsReady)('backup and restore', () => {
     if (backupDir) await rm(backupDir, { recursive: true, force: true });
   }, 120_000);
 
-  it('writes a complete manifest with a migration head', () => {
-    expect(manifest.format).toBe(1);
+  it('writes a format 2 manifest with kind, versions and a migration head', () => {
+    expect(manifest.format).toBe(2);
+    expect(manifest.kind).toBe('manual');
     expect(manifest.version).toMatch(/^\d+\.\d+\.\d+/);
+    expect(manifest.fromVersion).toBe('0.2.4');
     expect(manifest.migrationHead).toBe(latestMigration());
     expect(manifest.postgres.file).toBe('postgres.dump');
     expect(manifest.postgres.bytes).toBeGreaterThan(0);
     expect(manifest.postgres.sha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(manifest.clickhouse).toBeUndefined();
+  });
+
+  it('names manual and pre-upgrade backups after their kind and versions', async () => {
+    expect(backupPath.split('/').pop()).toMatch(/^am-manual-\d+\.\d+\.\d+-\d{8}T\d{6}Z$/);
+    // The CLI always takes a manual backup; exercise the pre-upgrade name through createBackup.
+    const { dir } = await withEnv(env, () => createBackup({ dir: backupDir, kind: 'pre-upgrade', env: process.env, log: () => {} }));
+    expect(dir.split('/').pop()).toMatch(/^am-pre-upgrade-0\.2\.4-to-\d+\.\d+\.\d+-\d{8}T\d{6}Z$/);
+    await rm(dir, { recursive: true, force: true });
+  }, 120_000);
+
+  it('creates private directories and files', async () => {
+    expect((await stat(backupDir)).mode & 0o777).toBe(0o700);
+    expect((await stat(backupPath)).mode & 0o777).toBe(0o700);
+    expect((await stat(join(backupPath, 'postgres.dump'))).mode & 0o777).toBe(0o600);
+    expect((await stat(join(backupPath, 'manifest.json'))).mode & 0o777).toBe(0o600);
+  });
+
+  it('lists backups newest first with their kind and data version', async () => {
+    const listings = await listBackups(backupDir);
+    expect(listings[0].name).toBe(backupPath.split('/').pop());
+    expect(listings[0]).toMatchObject({ kind: 'manual', dataVersion: '0.2.4', clickhouse: false });
+    expect(listings[0].bytes).toBeGreaterThan(0);
   });
 
   it('restores the deleted Postgres row', async () => {
@@ -179,6 +254,11 @@ describe.skipIf(!pgToolsReady)('backup and restore', () => {
     const { rows: grants } = await pool.query<{ can: boolean }>("SELECT has_table_privilege($1, 'backup_marker', 'SELECT') AS can", [role]);
     expect(grants[0]?.can).toBe(true);
   }, 120_000);
+
+  it('falls back to the migration head when server_versions is empty', async () => {
+    await pool.query('DELETE FROM server_versions');
+    expect(await lastServerVersion(dbUrl.toString())).toBe('0.2.5');
+  });
 
   it('refuses a newer migration head unless forced', async () => {
     const newer = join(backupDir, 'newer');
@@ -196,4 +276,122 @@ describe.skipIf(!pgToolsReady)('backup and restore', () => {
     await writeFile(join(bad, 'postgres.dump'), dump);
     expect(await withEnv(env, () => restoreRun([bad, '--yes']))).toBe(1);
   }, 60_000);
+
+  it('refuses the ClickHouse part of a format 1 backup', async () => {
+    const old = join(backupDir, 'format1');
+    await cp(backupPath, old, { recursive: true });
+    await writeFile(join(old, 'clickhouse.native'), 'not a real export');
+    const format1 = {
+      format: 1,
+      version: '0.2.4',
+      migrationHead: manifest.migrationHead,
+      createdAt: manifest.createdAt,
+      postgres: manifest.postgres,
+      clickhouse: {
+        tables: [{ name: 'events', file: 'clickhouse.native', rows: 0, bytes: 17, sha256: '0'.repeat(64) }],
+      },
+    };
+    await writeFile(join(old, 'manifest.json'), JSON.stringify(format1));
+    await expect(
+      restoreBackup({ dir: old, clickhouse: true, databaseUrl: dbUrl.toString(), env: process.env, log: () => {} }),
+    ).rejects.toThrow(/made by 0\.2\.4, whose ClickHouse export is empty under row policies \(#129\)/);
+  }, 60_000);
+});
+
+describe.skipIf(!pgToolsReady || !chUp)('ClickHouse backup under row policies (#129)', () => {
+  const suffix = randomUUID().replace(/-/g, '').slice(0, 10);
+  const dbName = `am_backup_ch_${suffix}`;
+  const chDatabase = `am_backup_ch_${suffix}`;
+  const role = `am_app_ch_${suffix}`;
+  const password = 'backup_test_password';
+  const base = new URL(process.env.TEST_DATABASE_URL ?? 'postgres://am:am@localhost:5432/am_test');
+  const dbUrl = new URL(base);
+  dbUrl.pathname = `/${dbName}`;
+  const maintenanceUrl = new URL(base);
+  maintenanceUrl.pathname = '/postgres';
+  const workspaceA = randomUUID();
+  const workspaceB = randomUUID();
+
+  let pool: pg.Pool;
+  let backupDir: string;
+
+  const env = {
+    DATABASE_URL: dbUrl.toString(),
+    APP_DB_ROLE: role,
+    APP_DB_PASSWORD: password,
+    CLICKHOUSE_URL: chUrl,
+    CLICKHOUSE_DATABASE: chDatabase,
+  };
+
+  beforeAll(async () => {
+    const maintenance = new pg.Client({ connectionString: maintenanceUrl.toString() });
+    await maintenance.connect();
+    await maintenance.query(`DROP DATABASE IF EXISTS ${dbName} WITH (FORCE)`);
+    await maintenance.query(`CREATE DATABASE ${dbName}`);
+    await maintenance.end();
+
+    pool = new pg.Pool({ connectionString: dbUrl.toString() });
+    await migrate(pool, { appRolePassword: password, appRole: role });
+    await pool.query('INSERT INTO workspaces (id, name) VALUES ($1, $2), ($3, $4)', [workspaceA, 'A', workspaceB, 'B']);
+
+    await clickhouse(`DROP DATABASE IF EXISTS ${chDatabase}`);
+    // The same migration and row policies the server applies at startup.
+    await migrateClickHouse(chUrl, chDatabase, () => {}, { rowPolicies: 'required' });
+    for (const [workspace, count] of [
+      [workspaceA, 3],
+      [workspaceB, 2],
+    ] as const) {
+      for (let i = 0; i < count; i += 1) {
+        await clickhouse(
+          `INSERT INTO ${chDatabase}.events
+             (workspace_id, event_id, source_id, received_at, timestamp, type, name, anonymous_id, user_id, properties, traits, context, consent)
+           VALUES ('${workspace}', 'evt-${i}', 'src', now64(3), now64(3), 'track', 'page_viewed', 'anon-${i}', '', '{}', '{}', '{}', {})`,
+        );
+      }
+    }
+    // A policy with no setting must hide everything: this is the 0.2.4 bug in one assertion.
+    expect(Number((await clickhouse(`SELECT count() FROM ${chDatabase}.events`)).trim())).toBe(0);
+
+    backupDir = await mkdtemp(join(tmpdir(), 'am-backup-ch-'));
+    expect(await withEnv(env, () => backupRun(['--to', backupDir, '--clickhouse']))).toBe(0);
+  }, 180_000);
+
+  afterAll(async () => {
+    await pool?.end();
+    const maintenance = new pg.Client({ connectionString: maintenanceUrl.toString() });
+    await maintenance.connect();
+    await maintenance.query(`DROP DATABASE IF EXISTS ${dbName} WITH (FORCE)`);
+    await maintenance.query(`DROP ROLE IF EXISTS ${role}`);
+    await maintenance.end();
+    await clickhouse(`DROP DATABASE IF EXISTS ${chDatabase}`).catch(() => {});
+    if (backupDir) await rm(backupDir, { recursive: true, force: true });
+  }, 120_000);
+
+  it('exports one non-empty file per workspace and restores the per-workspace counts', async () => {
+    const dir = join(backupDir, (await readdir(backupDir)).find((name) => name.startsWith('am-')) ?? '');
+    const manifest = JSON.parse(await readFile(join(dir, 'manifest.json'), 'utf8')) as BackupManifest;
+    expect(manifest.format).toBe(2);
+    const events = manifest.clickhouse?.tables.find((table) => table.name === 'events');
+    expect(events).toBeDefined();
+    expect(events?.totalRowsBefore).toBe(5);
+    expect(events?.files).toHaveLength(2);
+    expect(events?.files.map((file) => file.workspace).sort()).toEqual([workspaceA, workspaceB].sort());
+    for (const file of events?.files ?? []) {
+      expect(file.rows).toBe(file.workspace === workspaceA ? 3 : 2);
+      expect(file.file).toBe(`clickhouse/events/${file.workspace}.native`);
+      expect(file.bytes).toBeGreaterThan(0);
+      expect((await stat(join(dir, file.file))).mode & 0o777).toBe(0o600);
+    }
+
+    await clickhouse(`TRUNCATE TABLE ${chDatabase}.events`);
+    expect(await withEnv(env, () => restoreRun([dir, '--yes', '--clickhouse']))).toBe(0);
+
+    expect(Number((await clickhouse(`SELECT count() FROM ${chDatabase}.events`, chDatabase, { SQL_workspace: workspaceA })).trim())).toBe(
+      3,
+    );
+    expect(Number((await clickhouse(`SELECT count() FROM ${chDatabase}.events`, chDatabase, { SQL_workspace: workspaceB })).trim())).toBe(
+      2,
+    );
+    expect(Number((await clickhouse(`SELECT count() FROM ${chDatabase}.events`)).trim())).toBe(0);
+  }, 180_000);
 });

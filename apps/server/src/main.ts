@@ -1,5 +1,5 @@
 import { migrateAuth } from '@agentic-marketing/auth';
-import { migrate, migrationFiles } from '@agentic-marketing/db';
+import { migrate, migrationFiles, recordServerVersion } from '@agentic-marketing/db';
 import { migrateClickHouse } from '@agentic-marketing/events';
 import { initTelemetry, logger, shutdownTelemetry } from '@agentic-marketing/telemetry';
 import { serve } from '@hono/node-server';
@@ -30,6 +30,8 @@ const { app, db } = srv;
 if (!config.skipMigrations) {
   await preUpgradeBackup(db, config);
   await migrate(db.admin, { appRolePassword: config.appDbPassword, appRole: config.appDbRole, log: (m) => logger.info(m) });
+  // After the table exists (migration 0028), so the next pre-upgrade backup knows where it came from.
+  await recordServerVersion(db.admin, VERSION);
   await migrateAuth({ baseUrl: config.publicUrl, secret: config.authSecret, db });
   await migrateClickHouse(config.clickhouse.url, config.clickhouse.database, (m) => logger.info(m), config.clickhouse);
 }
@@ -87,6 +89,7 @@ async function preUpgradeBackup(db: ReturnType<typeof createServer>['db'], confi
     const { dir } = await createBackup({
       dir: config.backupDir,
       databaseUrl: config.adminDatabaseUrl,
+      kind: 'pre-upgrade',
       keepDays: keepDaysFromEnv(),
       log: (message) => logger.info(message),
     });

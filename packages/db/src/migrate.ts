@@ -20,21 +20,90 @@ export function latestMigration(): string | undefined {
   return migrationFiles().at(-1);
 }
 
+/** One short-lived admin connection for the read-only helpers below. */
+async function withPgClient<T>(databaseUrl: string, fn: (client: pg.Client) => Promise<T>): Promise<T> {
+  const client = new pg.Client({ connectionString: databaseUrl });
+  await client.connect();
+  try {
+    return await fn(client);
+  } finally {
+    await client.end();
+  }
+}
+
 /**
  * The app role's highest applied migration, or null when the database was never migrated.
  * `to_regclass` is checked first so a backup of a fresh database still works.
  */
-export async function migrationHead(databaseUrl: string): Promise<string | null> {
-  const client = new pg.Client({ connectionString: databaseUrl });
-  await client.connect();
-  try {
+export function migrationHead(databaseUrl: string): Promise<string | null> {
+  return withPgClient(databaseUrl, async (client) => {
     const present = await client.query<{ present: boolean }>("SELECT to_regclass('public.schema_migrations') IS NOT NULL AS present");
     if (!present.rows[0]?.present) return null;
     const { rows } = await client.query<{ version: string }>('SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1');
     return rows[0]?.version ?? null;
-  } finally {
-    await client.end();
-  }
+  });
+}
+
+/** Every workspace id, sorted so a ClickHouse export writes its files in a stable order. */
+export function listWorkspaceIds(databaseUrl: string): Promise<string[]> {
+  return withPgClient(databaseUrl, async (client) => {
+    const present = await client.query<{ present: boolean }>("SELECT to_regclass('public.workspaces') IS NOT NULL AS present");
+    if (!present.rows[0]?.present) return [];
+    const { rows } = await client.query<{ id: string }>('SELECT id::text AS id FROM workspaces ORDER BY id');
+    return rows.map((row) => row.id);
+  });
+}
+
+/**
+ * The release each migration head shipped in, newest last. Releases that share a head are a range:
+ * the migration itself cannot tell them apart. Only heads are listed; a database in the middle of
+ * a release's migrations never ran a published version.
+ */
+const MIGRATION_RELEASES: Record<string, string> = {
+  '0021_connectors.sql': '0.1.0–0.1.1',
+  '0022_test_sends.sql': '0.1.2',
+  '0025_assets.sql': '0.2.0',
+  '0026_consent_segments_recompute.sql': '0.2.1–0.2.2',
+  '0027_journey_consent_exits.sql': '0.2.3–0.2.4',
+  // This change. A database at this head has a server_versions row, so the fallback is for tests
+  // and for a migrate that ran without the server.
+  '0028_server_versions.sql': '0.2.5',
+};
+
+export function releaseForMigrationHead(head: string | null): string | null {
+  return head ? (MIGRATION_RELEASES[head] ?? null) : null;
+}
+
+/**
+ * The version the database last ran: the newest server_versions row, else the release whose
+ * migration head it has (an upgrade from 0.2.4 or earlier has no server_versions table yet).
+ */
+export function lastServerVersion(databaseUrl: string, head?: string | null): Promise<string | null> {
+  return withPgClient(databaseUrl, async (client) => {
+    const present = await client.query<{ present: boolean }>("SELECT to_regclass('public.server_versions') IS NOT NULL AS present");
+    if (present.rows[0]?.present) {
+      const { rows } = await client.query<{ version: string }>(
+        'SELECT version FROM server_versions ORDER BY last_started_at DESC, first_started_at DESC LIMIT 1',
+      );
+      if (rows[0]?.version) return rows[0].version;
+    }
+    if (head !== undefined) return releaseForMigrationHead(head);
+    const presentMigrations = await client.query<{ present: boolean }>(
+      "SELECT to_regclass('public.schema_migrations') IS NOT NULL AS present",
+    );
+    if (!presentMigrations.rows[0]?.present) return null;
+    const { rows } = await client.query<{ version: string }>('SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1');
+    return releaseForMigrationHead(rows[0]?.version ?? null);
+  });
+}
+
+/** Records this build as running now. first_started_at stays at the first start of this version. */
+export async function recordServerVersion(admin: Pick<pg.Pool, 'query'>, version: string): Promise<void> {
+  await admin.query(
+    `INSERT INTO server_versions (version) VALUES ($1)
+     ON CONFLICT (version) DO UPDATE SET last_started_at = now()`,
+    [version],
+  );
 }
 
 type RoleClient = Pick<pg.Client, 'query' | 'escapeLiteral'>;
