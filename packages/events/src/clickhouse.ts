@@ -283,7 +283,7 @@ export function clickHouseStore(opts: { url: string; database: string }): EventS
       const rs = await query(workspaceId, {
         query: `SELECT event_id, type, name, timestamp, received_at, anonymous_id, user_id, properties, context
                 FROM events FINAL
-                WHERE ${idFilter} ${o.before ? 'AND timestamp < {before:DateTime64(3)}' : ''}
+                WHERE ${idFilter} ${o.before ? "AND timestamp < {before:DateTime64(3, 'UTC')}" : ''}
                 ORDER BY timestamp DESC LIMIT {limit:UInt32}`,
         query_params: { ...params(workspaceId, ids), limit: o.limit ?? 100, before: o.before?.replace('Z', '') },
         format: 'JSONEachRow',
@@ -337,12 +337,12 @@ export function clickHouseStore(opts: { url: string; database: string }): EventS
               SELECT anonymous_id AS visitor, argMin(toString(properties.variant_id), timestamp) AS variant, min(timestamp) AS first
               FROM events FINAL
               WHERE workspace_id = {ws:UUID} AND name = 'Experience Viewed' AND toString(properties.experience_id) = {exp:String}
-                AND anonymous_id != '' AND timestamp >= {since:DateTime64(3)}
+                AND anonymous_id != '' AND timestamp >= {since:DateTime64(3, 'UTC')}
               GROUP BY anonymous_id),
             goals AS (
               SELECT anonymous_id AS visitor, max(timestamp) AS last
               FROM events FINAL
-              WHERE workspace_id = {ws:UUID} AND name = {goal:String} AND anonymous_id != '' AND timestamp >= {since:DateTime64(3)}
+              WHERE workspace_id = {ws:UUID} AND name = {goal:String} AND anonymous_id != '' AND timestamp >= {since:DateTime64(3, 'UTC')}
               GROUP BY anonymous_id)
           SELECT e.variant AS variant, count() AS exposed, countIf(g.visitor != '' AND g.last >= e.first) AS converted
           FROM exposures e LEFT JOIN goals g ON g.visitor = e.visitor
@@ -407,7 +407,7 @@ export function clickHouseStore(opts: { url: string; database: string }): EventS
     async messageStats(workspaceId, q) {
       const rs = await query(workspaceId, {
         query: `SELECT type, uniqExact(message_id) AS c FROM message_events FINAL
-                WHERE workspace_id = {ws:UUID} AND at >= {since:DateTime64(3)}
+                WHERE workspace_id = {ws:UUID} AND at >= {since:DateTime64(3, 'UTC')}
                 ${q.templateId ? 'AND template_id = {t:String}' : ''} ${q.journeyId ? 'AND journey_id = {j:String}' : ''}
                 GROUP BY type`,
         query_params: { ws: workspaceId, since: q.since.toISOString().replace('Z', ''), t: q.templateId ?? '', j: q.journeyId ?? '' },

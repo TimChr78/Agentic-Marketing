@@ -187,6 +187,15 @@ pnpm test        # unit + integration; needs Postgres (TEST_DATABASE_URL, defaul
 
 CI (`.github/workflows/ci.yml`) runs the same three against a Postgres service container.
 
+### Services without Docker
+
+The tests need the four services on localhost, not Docker: native packages or the projects' own binaries work. Two ClickHouse settings matter outside the official image:
+
+- start it with `--custom_settings_prefixes=SQL_` (the image's default config has it): the row-policy tests set `SQL_workspace`, and without the prefix ClickHouse rejects the setting;
+- any server time zone works. Event times are stored and queried as UTC (query parameters are typed `DateTime64(3, 'UTC')`; `packages/events/test/utc-params.test.ts` enforces it).
+
+For example, ClickHouse's single binary: `clickhouse server -- --path=./data/ch/ --http_port=8123 --tcp_port=9000 --listen_host=127.0.0.1 --custom_settings_prefixes=SQL_`, Postgres 16 with `max_connections=300` (the integration tests run files in parallel), `nats-server -js` and `valkey-server --save "" --appendonly no`.
+
 ## Conventions
 
 - Dependencies are pinned to exact versions that have been published for at least two weeks (`.npmrc` `save-exact`). Better Auth packages are pinned together via `pnpm.overrides`.
