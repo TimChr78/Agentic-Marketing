@@ -6,11 +6,20 @@ import { serve } from '@hono/node-server';
 import { createServer } from './app';
 import { loadConfig } from './config';
 import { publicOnly } from './http/public-only';
+import { offlineChecks } from './ops/checks';
 import { startScheduler, startWorkers } from './workers';
 
 // One image, several roles (ADR-0002): `api` (UI, REST, MCP), `ingest` (event collection),
 // `worker` (event consumers) and `scheduler` (arrives with the journey runtime).
 const config = loadConfig();
+try {
+  for (const check of offlineChecks(process.env)) {
+    if (check.status !== 'ok') logger.warn({ check: check.id, hint: check.hint }, check.message);
+  }
+} catch (err) {
+  // A diagnostic must never keep the server from starting.
+  logger.warn({ err }, 'startup configuration checks failed');
+}
 initTelemetry('agentic-marketing');
 
 const srv = createServer(config);

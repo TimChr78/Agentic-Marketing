@@ -163,6 +163,9 @@ const Env = z.object({
     .describe('Require a DNS TXT record proving an SSO provider owns its e-mail domain'),
 });
 
+/** Every key the server understands, for tooling such as `am doctor --env-file`. */
+export const ENV_KEYS = Object.keys(Env.shape);
+
 export type Config = ReturnType<typeof loadConfig>;
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env) {

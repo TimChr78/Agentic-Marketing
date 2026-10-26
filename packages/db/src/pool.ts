@@ -10,6 +10,10 @@ export interface DbConfig {
   /** Application role `am_app`: everything the command layer does, always under RLS. */
   appUrl: string;
   poolSize?: number;
+  /** Give up on a new connection after this many milliseconds (health checks must not hang). */
+  connectionTimeoutMillis?: number;
+  /** Abort a query that runs longer than this many milliseconds (health checks must not hang). */
+  queryTimeoutMillis?: number;
 }
 
 export interface Db {
@@ -26,8 +30,12 @@ export interface Db {
 }
 
 export function createDb(config: DbConfig): Db {
-  const admin = new pg.Pool({ connectionString: config.adminUrl, max: 5 });
-  const app = new pg.Pool({ connectionString: config.appUrl, max: config.poolSize ?? 20 });
+  const timeouts = {
+    ...(config.connectionTimeoutMillis === undefined ? {} : { connectionTimeoutMillis: config.connectionTimeoutMillis }),
+    ...(config.queryTimeoutMillis === undefined ? {} : { query_timeout: config.queryTimeoutMillis }),
+  };
+  const admin = new pg.Pool({ connectionString: config.adminUrl, max: 5, ...timeouts });
+  const app = new pg.Pool({ connectionString: config.appUrl, max: config.poolSize ?? 20, ...timeouts });
   return {
     admin,
     app,

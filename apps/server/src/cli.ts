@@ -24,7 +24,10 @@ import { runLoadTest } from './loadtest';
 const envFile = resolve(dirname(fileURLToPath(import.meta.url)), '../../../.env');
 if (existsSync(envFile)) process.loadEnvFile(envFile);
 
-const [command, ...rest] = process.argv.slice(2);
+const argv = process.argv.slice(2);
+// `pnpm cli -- doctor` passes the separator through; Node's own `--` puts it there too.
+if (argv[0] === '--') argv.shift();
+const [command, ...rest] = argv;
 
 // Operations that run before (or without) migrating: `init` before there is a .env, `backup` and
 // `restore` before a migration touches the schema, `doctor` and `smoke` to check an install. Each
