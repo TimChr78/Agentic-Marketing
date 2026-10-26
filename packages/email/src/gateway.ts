@@ -8,8 +8,8 @@ import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, lt, sql } from 'drizzle-orm';
 import { type AdapterDeps, MESSAGE_ID_HEADER } from './adapters';
 import { applyDeliveryEvents } from './deliveryEvents';
-import { type ClickLink, type LinkSigner, tagLinks, trackLinks, type UnsubscribeLink } from './links';
-import { decisionEvent, defer, MAX_ATTEMPTS } from './outbox';
+import { type ClickLink, type LinkSigner, tagLinks, tagTextLinks, trackLinks, type UnsubscribeLink } from './links';
+import { decisionEvent, defer, MAX_ATTEMPTS, retryDelaySeconds } from './outbox';
 import { checkPolicy } from './policy';
 import { transportFor } from './providers';
 import { deliverPush } from './push/gateway';
@@ -170,10 +170,12 @@ export async function deliverRound(
     );
     const claimed = await db.withWorkspace(ws, async (tx) => {
       const res = await tx.execute<{ id: string; channel: string }>(sql`
-        UPDATE messages SET status = 'sending', attempts = attempts + 1, updated_at = now()
+        UPDATE messages SET status = 'sending', attempts = attempts + 1, updated_at = now(), next_attempt_at = NULL
         WHERE (workspace_id, id) IN (
           SELECT workspace_id, id FROM messages
-          WHERE status = 'queued' AND updated_at <= now() - make_interval(secs => 30 * attempts * attempts)
+          WHERE status = 'queued'
+            AND ((next_attempt_at IS NOT NULL AND next_attempt_at <= now())
+              OR (next_attempt_at IS NULL AND updated_at <= now() - make_interval(secs => 30 * attempts * attempts)))
             AND (not_before IS NULL OR not_before <= now())
           ORDER BY created_at LIMIT ${deps.batch ?? 50} FOR UPDATE SKIP LOCKED)
         RETURNING id, channel`);
@@ -230,7 +232,9 @@ async function deliverOne(db: Db, ws: string, id: string, deps: { kp: KeyProvide
     } catch (e) {
       return finish('failed', `render_error: ${(e as Error).message.split('\n')[0]}`);
     }
-    const tagged = tpl.utm ? tagLinks(rendered.html, tpl.utm, [deps.email.publicUrl]) : rendered.html;
+    const skipUtm = [deps.email.publicUrl];
+    const tagged = tpl.utm ? tagLinks(rendered.html, tpl.utm, skipUtm) : rendered.html;
+    const text = tpl.utm ? tagTextLinks(rendered.text, tpl.utm, skipUtm) : rendered.text;
     const html = deps.email.trackClicks
       ? trackLinks(tagged, (url) => `${deps.email.publicUrl}/c/${deps.email.links.sign({ w: ws, m: m.id, url } satisfies ClickLink)}`, [
           unsubscribe,
@@ -253,7 +257,7 @@ async function deliverOne(db: Db, ws: string, id: string, deps: { kp: KeyProvide
         to: v.email,
         subject: rendered.subject,
         html,
-        text: rendered.text,
+        text,
         headers,
         stream,
       },
@@ -280,11 +284,12 @@ async function deliverOne(db: Db, ws: string, id: string, deps: { kp: KeyProvide
   } catch (e) {
     const reason = `provider_error: ${(e as Error).message.split('\n')[0]}`;
     const retry = m.attempts < MAX_ATTEMPTS;
+    const nextAttemptAt = retry ? new Date(Date.now() + retryDelaySeconds(out.stream, m.attempts) * 1000) : null;
     logger.warn({ messageId: id, provider: provider.adapter, retry, err: (e as Error).message }, 'e-mail send failed');
     await db.withWorkspace(ws, (tx) =>
       tx
         .update(schema.messages)
-        .set({ status: retry ? 'queued' : 'failed', reason, providerId: provider.id, updatedAt: new Date() })
+        .set({ status: retry ? 'queued' : 'failed', reason, providerId: provider.id, nextAttemptAt, updatedAt: new Date() })
         .where(eq(schema.messages.id, id)),
     );
     event = decisionEvent(m, retry ? 'queued' : 'failed', reason, provider.adapter);

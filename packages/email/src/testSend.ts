@@ -7,7 +7,7 @@ import { logger } from '@agentic-marketing/telemetry';
 import { and, eq } from 'drizzle-orm';
 import { z } from 'zod';
 import { MESSAGE_ID_HEADER } from './adapters';
-import { tagLinks } from './links';
+import { tagLinks, tagTextLinks } from './links';
 import { transportFor } from './providers';
 import { renderTemplate } from './render';
 
@@ -191,6 +191,7 @@ export async function sendTestMessages(ctx: CommandContext, opts: TestSendOption
 
       const subject = `[Test] ${rendered.subject}`;
       const html = opts.template.utm ? tagLinks(rendered.html, opts.template.utm, [noop]) : rendered.html;
+      const text = opts.template.utm ? tagTextLinks(rendered.text, opts.template.utm, [noop]) : rendered.text;
       try {
         const { providerMessageId } = await transport.send({
           messageId: message.id,
@@ -199,7 +200,7 @@ export async function sendTestMessages(ctx: CommandContext, opts: TestSendOption
           to: email,
           subject,
           html,
-          text: rendered.text,
+          text,
           headers: { [MESSAGE_ID_HEADER]: message.id },
           stream: opts.stream,
         });

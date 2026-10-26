@@ -6,6 +6,19 @@ import { eq } from 'drizzle-orm';
 
 export const MAX_ATTEMPTS = 4;
 
+// Seconds before the next attempt after 1, 2, 3 … failures. Transactional and onboarding mail
+// (confirmations, account notices) is retried quickly because someone is waiting; marketing keeps
+// the slower backoff that grows with attempts, for deliverability. After the table, both fall
+// back to 30 × attempts² seconds.
+const RETRY_SECONDS = {
+  transactional: [10, 30, 60, 120],
+  marketing: [],
+} as const;
+
+export function retryDelaySeconds(stream: 'marketing' | 'transactional', attempts: number): number {
+  return RETRY_SECONDS[stream][attempts - 1] ?? 30 * attempts * attempts;
+}
+
 export function decisionEvent(
   m: typeof schema.messages.$inferSelect,
   type: MessageEvent['type'],

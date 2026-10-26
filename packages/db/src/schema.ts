@@ -339,6 +339,8 @@ export const messages = pgTable(
     attempts: integer('attempts').notNull().default(0),
     /** Held back until then (quiet hours, a paused stream). */
     notBefore: ts('not_before'),
+    /** When a queued retry becomes claimable; null keeps the old updated_at-based backoff. */
+    nextAttemptAt: ts('next_attempt_at'),
     /** SMS segments used. */
     segments: integer('segments'),
     /** A test send: sent for checking, never counted in reporting or delivery policy. */
