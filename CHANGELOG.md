@@ -2,6 +2,38 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+[Phase 14](docs/architecture/roadmap-wave-3.md#phase-14-admin-ui-for-daily-use): the screens used every week are quick and roomy. Pages use the window, the journey builder gets the space (with full screen and live stats), lists load a third less, lists filter on the server, experiences and purposes get real editors, and SVG logos work. REST and MCP stay backwards compatible: new commands, new optional inputs and new output fields. One migration runs at start-up.
+
+### Added
+
+- **Live stats on the journey canvas (#58):** "Show stats" on a published journey puts "passed N · waiting M" on each step, refreshed every 30 seconds.
+- **Structured editors for experiences and purposes (#57):** placement, trigger, targeting, variants with weights, holdout, goal and analysis for experiences; key, basis, channels, double opt-in and the legitimate-interest record for purposes. The JSON stays one tab away, in sync. Keys of purposes in force are locked.
+- **Prompt test runs show their progress (#56):** every case with its status, latency and tokens, totals per run, and `prompts.testRuns` lists runs, so the Tests tab resumes a run still in progress. The prompt editor sets `cache`.
+- **SVG logos (#111):** `assets.upload` accepts SVG. It is cleaned against an allow-list (no scripts, event handlers, external references, `foreignObject`, DOCTYPE or `@import`, and every `url()` must point inside the file); the upload says what was removed. SVGs are served under the sandbox CSP, and a PNG rendition at 2× is made for e-mail, which uses it automatically (most e-mail clients don't show SVG); hosted pages use the SVG.
+- **Server-side filters and aggregates (#55):** `profiles.list` returns each person's current consent per purpose and, with `profiles:pii`, their e-mail; `messages.list` filters by channel, status, purpose and time, with a cursor; `consent.summary` counts people per purpose and status; `ai.usage` adds the model and an estimated cost; `sendingDomains.list` shows SPF, DKIM and DMARC of the sending domains to builders (no provider details); `purposes.list` returns `requiresDoubleOptIn`. The People, Messages, Consent, Purposes, AI usage and Deliverability pages use them.
+
+### Changed
+
+- **The admin UI uses the window (#114):** page widths are three tokens (reading, default, full) instead of a 1280 px cap. Data pages widen to 1600 px, settings stay at a readable width, and editors are full width; nothing changes below 1280 px. The journey builder is full-bleed, with collapsible palette and inspector, a full-screen mode (`F`, `Esc`) and a smaller minimap.
+- **Lists load less (#60):** React Flow loads only with a journey graph and ECharts only with a chart; the Approvals list loads 37% less (171 → 109 kB gzipped), and sign-in and the lists load none of GrapesJS, MJML, React Flow or ECharts. A CI check keeps it so.
+- **`ai.usage` has a row per day, kind and model** (it was per day and kind). Clients adding up rows are unaffected; clients expecting one row per day and kind should group by those.
+- The approvals badge counts a bundle once, like the list.
+
+### Fixed
+
+- **#62 — drawer tabs on phones:** short labels ("Changes") and a fade where the row scrolls.
+- **#110 — the demo greeting** uses the demo persona's name and the visitor's time of day.
+
+### Upgrading from 0.2.6
+
+- **Migrations:** `0034_asset_renditions.sql` (PNG renditions of SVG assets, and `image/svg+xml` as an asset type).
+- **Configuration:** none.
+- **Breaking changes:** none. `ai.usage` returns more rows (one per model).
+- **Manual steps:** none. To use an SVG logo, upload it in Design → Assets and pick it in Design → Brand.
+- **Upgrade:** download `agentic-marketing-compose-<version>.tar.gz`, replace `docker-compose.yml` with its copy, check your configuration with the new image (`AM_VERSION=<version> docker compose run --rm --no-deps -T app am doctor --env-file - < .env`), then set `AM_VERSION=<version>` in `.env` and `docker compose pull && docker compose up -d` (Helm: the chart of the same version). Then `docker compose exec app am doctor`.
+
 ## [0.2.6] - 2026-10-27
 
 [Phase 13](docs/architecture/roadmap-wave-3.md#phase-13-pilot-correctness): the pilot's weekly loop without workarounds. A weekly issue is one review instead of two, confirmations retry in seconds, looking at a journey no longer creates a draft, and unknown input keys are recorded per client. Plus the two leftovers from Phase 12. REST and MCP stay backwards compatible: new commands and new output fields only. Five migrations run at start-up.
