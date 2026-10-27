@@ -87,7 +87,8 @@ export async function campaignMemberIds(tx: Tx, campaignId: string): Promise<str
  * Publishing a campaign checks that its members exist and that no sending member already belongs to
  * another published campaign. Content (templates, segments, experiences, forms) may be shared.
  */
-publishValidators.set('campaign', async (content, tx, artifactId) => {
+publishValidators.set('campaign', async (content, tx, artifact) => {
+  const artifactId = artifact?.id;
   const c = content as CampaignDefinition;
   const problems: string[] = [];
   const ids = [...new Set(c.members.map((m) => m.artifactId))];

@@ -6,16 +6,18 @@ import {
   publishValidators,
 } from '@agentic-marketing/artifacts';
 import { defineCommand } from '@agentic-marketing/commands';
-import { AppError, newUuid } from '@agentic-marketing/core';
+import { AppError, isoDateTime, newUuid } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
 import { checkPushRecipient, checkRecipient, checkSmsRecipient } from '@agentic-marketing/email';
+import type { JourneyEvent } from '@agentic-marketing/events';
 import { consentStateOf, purposeAllowed } from '@agentic-marketing/profiles';
 import { contextFor, durationSeconds, evaluate, publishedSegments } from '@agentic-marketing/segments';
-import { and, desc, eq, inArray, isNotNull, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, isNotNull, lte, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { matchesCondition } from './conditions';
 import { duplicateEntryKey, resolveEntryKey } from './entry';
 import { compile, unsupported } from './graph';
+import { analyseHoldout, assignHoldout, holdoutHashVersion } from './holdout';
 import { advance, type ParticipantState } from './interpreter';
 
 const JourneyId = z.string().regex(/^jrn_[0-9a-f]{32}$/);
@@ -32,10 +34,38 @@ function conditionSegments(condition: unknown): string[] {
 }
 
 /** Journeys can be published only with runnable nodes and published templates and segments. */
-publishValidators.set('journey', async (content, tx: Tx) => {
+publishValidators.set('journey', async (content, tx, artifact) => {
   const def = content as JourneyDefinition;
   const problems = unsupported(def);
   for (const check of journeyChecks) problems.push(...(await check(def, tx)));
+  // A changed percentage is a new scope. Refuse it once people are assigned unless the content
+  // explicitly starts a new scope; assignments under the old version stay, so the result never
+  // mixes two randomisations. A percentage that already has assignments is an established scope
+  // and can be re-published (even after a reset to a newer one).
+  if (def.controlGroup && artifact && !def.controlGroup.reset) {
+    const hashVersion = holdoutHashVersion(def.controlGroup.percent);
+    const scope = and(
+      eq(schema.holdoutAssignments.workspaceId, artifact.workspaceId),
+      eq(schema.holdoutAssignments.scopeType, 'journey'),
+      eq(schema.holdoutAssignments.scopeId, artifact.id),
+    );
+    const [any] = await tx
+      .select({ hashVersion: schema.holdoutAssignments.hashVersion })
+      .from(schema.holdoutAssignments)
+      .where(scope)
+      .limit(1);
+    if (any) {
+      const [current] = await tx
+        .select({ hashVersion: schema.holdoutAssignments.hashVersion })
+        .from(schema.holdoutAssignments)
+        .where(and(scope, eq(schema.holdoutAssignments.hashVersion, hashVersion)))
+        .limit(1);
+      if (!current)
+        problems.push(
+          'The control group percentage changed after people were assigned. Set controlGroup.reset: true to start a new scope; people already assigned keep their old arm, and reports count only the new scope.',
+        );
+    }
+  }
   const templates = def.nodes
     .filter((n) => n.kind === 'email' || n.kind === 'sms' || n.kind === 'push')
     .map((n) => String(n.config.template));
@@ -145,6 +175,121 @@ export const journeyStats = defineCommand({
   },
 });
 
+export const journeyHoldoutResult = defineCommand({
+  name: 'journeys.holdoutResult',
+  title: 'Journey uplift against its control group',
+  description:
+    "Per arm (control, treatment): people assigned, goal conversions, conversion rate and e-mail unsubscribes. Reports absolute and relative lift, Newcombe's 95% interval for the difference of proportions, whether the minimum sample size is met in both arms, and a verdict. Verdicts other than not_enough_data need both samples and an interval that excludes zero.",
+  input: z.object({
+    journeyId: JourneyId,
+    from: isoDateTime('from').optional().describe('Count assignments and goal events at or after this time'),
+    to: isoDateTime('to').optional().describe('Count assignments and goal events at or before this time'),
+  }),
+  output: z.object({
+    journeyId: z.string(),
+    controlGroup: z
+      .object({ percent: z.number(), minSampleSize: z.number(), hashVersion: z.string() })
+      .describe('The live scope and its hash version'),
+    from: z.string().nullable(),
+    to: z.string().nullable(),
+    control: z.object({
+      entered: z.number().int(),
+      converted: z.number().int(),
+      unsubscribed: z.number().int().describe('E-mail unsubscribes, the guardrail'),
+      conversionRate: z.number(),
+      unsubscribeRate: z.number(),
+    }),
+    treatment: z.object({
+      entered: z.number().int(),
+      converted: z.number().int(),
+      unsubscribed: z.number().int().describe('E-mail unsubscribes, the guardrail'),
+      conversionRate: z.number(),
+      unsubscribeRate: z.number(),
+    }),
+    absoluteLift: z.number().describe('Treatment conversion rate minus control'),
+    relativeLift: z.number().nullable().describe('Absolute lift divided by the control rate; null when control never converted'),
+    ci95: z.tuple([z.number(), z.number()]).nullable().describe("Newcombe's 95% interval for the difference of proportions"),
+    minSampleSizeMet: z.boolean(),
+    verdict: z.enum(['not_enough_data', 'no_clear_difference', 'treatment_better', 'treatment_worse']),
+    note: z.string(),
+  }),
+  permission: 'artifacts:read',
+  effect: 'read',
+  target: (i) => i.journeyId,
+  handler: async (input, ctx) => {
+    const [a] = await ctx.tx
+      .select({ publishedVersion: schema.artifacts.publishedVersion })
+      .from(schema.artifacts)
+      .where(eq(schema.artifacts.id, input.journeyId));
+    if (!a) throw new AppError('not_found', `No journey ${input.journeyId}.`);
+    if (!a.publishedVersion)
+      throw new AppError('not_found', `Journey ${input.journeyId} has no published version; publish it before measuring uplift.`);
+    const { def } = await loadDefinition(ctx.tx, input.journeyId, a.publishedVersion);
+    const cg = def.controlGroup;
+    if (!cg)
+      throw new AppError(
+        'invalid_input',
+        'This journey has no control group. Set controlGroup {percent} and publish it to measure uplift.',
+      );
+
+    const ws = ctx.principal.workspaceId;
+    const hashVersion = holdoutHashVersion(cg.percent);
+    const from = input.from ? new Date(input.from) : undefined;
+    const to = input.to ? new Date(input.to) : undefined;
+    const assignments = await ctx.tx
+      .select({ profileId: schema.holdoutAssignments.profileId, arm: schema.holdoutAssignments.arm })
+      .from(schema.holdoutAssignments)
+      .where(
+        and(
+          eq(schema.holdoutAssignments.workspaceId, ws),
+          eq(schema.holdoutAssignments.scopeType, 'journey'),
+          eq(schema.holdoutAssignments.scopeId, input.journeyId),
+          eq(schema.holdoutAssignments.hashVersion, hashVersion),
+          from ? gte(schema.holdoutAssignments.assignedAt, from) : undefined,
+          to ? lte(schema.holdoutAssignments.assignedAt, to) : undefined,
+        ),
+      );
+    const counts = {
+      control: { entered: 0, converted: 0, unsubscribed: 0 },
+      treatment: { entered: 0, converted: 0, unsubscribed: 0 },
+    };
+    const people = { control: new Set<string>(), treatment: new Set<string>() };
+    for (const row of assignments) {
+      counts[row.arm].entered++;
+      people[row.arm].add(row.profileId);
+    }
+    // Outcomes come from ClickHouse (the journey's goal events and the e-mail unsubscribe
+    // guardrail), joined in code to the Postgres assignments. The event store applies the row
+    // policies through settingsFor, so a query never crosses workspaces.
+    const outcomes = await ctx.services.events.journeyHoldoutOutcomes(ws, { journeyId: input.journeyId, from, to });
+    const converted = new Set(outcomes.converted);
+    const unsubscribed = new Set(outcomes.unsubscribed);
+    for (const arm of ['control', 'treatment'] as const) {
+      for (const profileId of people[arm]) {
+        if (converted.has(profileId)) counts[arm].converted++;
+        if (unsubscribed.has(profileId)) counts[arm].unsubscribed++;
+      }
+    }
+    const analysis = analyseHoldout(counts.control, counts.treatment, cg.minSampleSize);
+    const note =
+      analysis.verdict === 'not_enough_data'
+        ? `Need at least ${cg.minSampleSize} people in each arm; ${counts.control.entered} control and ${counts.treatment.entered} treatment so far.`
+        : analysis.verdict === 'no_clear_difference'
+          ? 'The 95% interval for the difference includes zero, so the journey has not shown a clear effect yet.'
+          : analysis.verdict === 'treatment_better'
+            ? 'Treatment converted at a higher rate and the 95% interval excludes zero; the journey looks incremental.'
+            : 'Treatment converted at a lower rate and the 95% interval excludes zero; the journey looks harmful.';
+    return {
+      journeyId: input.journeyId,
+      controlGroup: { percent: cg.percent, minSampleSize: cg.minSampleSize, hashVersion },
+      from: input.from ?? null,
+      to: input.to ?? null,
+      ...analysis,
+      note,
+    };
+  },
+});
+
 export const enrollProfiles = defineCommand({
   name: 'journeys.enroll',
   title: 'Put people into a journey',
@@ -168,6 +313,7 @@ export const enrollProfiles = defineCommand({
     const { def } = await loadDefinition(ctx.tx, a.id, a.publishedVersion);
     const g = compile(def);
     let entered = 0;
+    const holdout: JourneyEvent[] = [];
     for (const profileId of input.profileIds) {
       if (g.trigger.reentry !== 'always') {
         const [prior] = await ctx.tx
@@ -185,19 +331,40 @@ export const enrollProfiles = defineCommand({
       }
       const [p] = await ctx.tx.select({ id: schema.profiles.id }).from(schema.profiles).where(eq(schema.profiles.id, profileId));
       if (!p) continue;
-      await ctx.tx.insert(schema.journeyParticipants).values({
-        workspaceId: ctx.principal.workspaceId,
-        journeyId: a.id,
-        version: a.publishedVersion,
-        profileId,
-        entryKey: `manual:${newUuid()}`,
-        node: g.start,
-        status: 'ready',
-        dueAt: new Date(),
-        context: { event: { name: 'manual', properties: { reason: input.reason ?? '' } } },
-      });
+      const assigned = await assignHoldout(ctx.tx, ctx.principal.workspaceId, { type: 'journey', id: a.id }, g.controlGroup, profileId);
+      const [participant] = await ctx.tx
+        .insert(schema.journeyParticipants)
+        .values({
+          workspaceId: ctx.principal.workspaceId,
+          journeyId: a.id,
+          version: a.publishedVersion,
+          profileId,
+          entryKey: `manual:${newUuid()}`,
+          node: g.start,
+          status: 'ready',
+          dueAt: new Date(),
+          context: {
+            event: { name: 'manual', properties: { reason: input.reason ?? '' } },
+            ...(assigned ? { holdout: assigned.assignment } : {}),
+          },
+        })
+        .returning({ id: schema.journeyParticipants.id });
       entered++;
+      if (assigned?.created && participant)
+        holdout.push({
+          workspaceId: ctx.principal.workspaceId,
+          journeyId: a.id,
+          version: a.publishedVersion,
+          participantId: participant.id,
+          profileId,
+          node: g.start,
+          type: 'holdout_assigned',
+          seq: 0,
+          at: new Date().toISOString(),
+          detail: `arm=${assigned.assignment.arm} percent=${assigned.assignment.percent} hash=${assigned.assignment.hashVersion}`,
+        });
     }
+    if (holdout.length) ctx.afterCommit?.(() => ctx.services.events.insertJourneyEvents(holdout).catch(() => {}));
     return { entered, skipped: input.profileIds.length - entered };
   },
 });
@@ -577,4 +744,4 @@ export const migrateJourney = defineCommand({
   },
 });
 
-export const journeyCommands = [journeyStats, enrollProfiles, simulateJourney, migrateJourney] as const;
+export const journeyCommands = [journeyStats, journeyHoldoutResult, enrollProfiles, simulateJourney, migrateJourney] as const;

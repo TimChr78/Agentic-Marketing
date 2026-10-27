@@ -159,7 +159,7 @@ async function setVersionState(ctx: CommandContext, artifactId: string, number: 
     );
 }
 
-async function checkPublishable(ctx: CommandContext, type: string, content: unknown, artifactId?: string) {
+async function checkPublishable(ctx: CommandContext, type: string, content: unknown, artifactId: string) {
   const schema = artifactTypes[type as ArtifactType]?.content as z.ZodType | undefined;
   if (schema) {
     const parsed = schema.safeParse(content);
@@ -171,7 +171,12 @@ async function checkPublishable(ctx: CommandContext, type: string, content: unkn
       });
     }
   }
-  const problems = (await publishValidators.get(type as ArtifactType)?.(content, ctx.tx, artifactId)) ?? [];
+  const problems =
+    (await publishValidators.get(type as ArtifactType)?.(content, ctx.tx, {
+      id: artifactId,
+      type,
+      workspaceId: ctx.principal.workspaceId,
+    })) ?? [];
   if (problems.length) throw new AppError('invalid_input', `This ${type} cannot be published yet: ${problems.join('; ')}`, { problems });
 }
 

@@ -14,6 +14,7 @@ import {
   Mono,
   PageHeader,
   Select,
+  StatusPill,
   Table,
   TableFrame,
   Tag,
@@ -39,6 +40,10 @@ export default function JourneyStatsPage() {
 
   const stats = useApi(() => api.call('journeys.stats', { artifactId: selected }), [selected], { skip: !selected });
   const artifact = useApi(() => api.call('artifacts.get', { artifactId: selected }), [selected], { skip: !selected });
+  const hasControl =
+    artifact.data?.version.state === 'published' &&
+    !!((artifact.data.version.content as { controlGroup?: unknown } | undefined)?.controlGroup);
+  const holdout = useApi(() => api.call('journeys.holdoutResult', { journeyId: selected }), [selected], { skip: !selected || !hasControl });
 
   const nodes = ((artifact.data?.version.content as { nodes?: Node[] } | undefined)?.nodes ?? []).filter(Boolean);
   const s = stats.data;
@@ -119,6 +124,8 @@ export default function JourneyStatsPage() {
                 <StatCard label="Converted" value={s.now.converted.toLocaleString()} tone={s.now.converted > 0 ? 'good' : undefined} />
               </StatGrid>
 
+              {hasControl && <HoldoutCard result={holdout.data} loading={holdout.loading} error={holdout.error ?? undefined} />}
+
               <TableFrame
                 columns={3}
                 isEmpty={nodeRows.length === 0}
@@ -160,6 +167,93 @@ export default function JourneyStatsPage() {
           ) : null}
         </div>
       )}
+    </div>
+  );
+}
+
+/** Treatment against control, with the interval and the guardrail (#67). */
+type HoldoutArm = { entered: number; converted: number; unsubscribed: number; conversionRate: number; unsubscribeRate: number };
+type HoldoutResult = {
+  controlGroup: { percent: number; minSampleSize: number; hashVersion: string };
+  control: HoldoutArm;
+  treatment: HoldoutArm;
+  absoluteLift: number;
+  relativeLift: number | null;
+  ci95: [number, number] | null;
+  minSampleSizeMet: boolean;
+  verdict: 'not_enough_data' | 'no_clear_difference' | 'treatment_better' | 'treatment_worse';
+  note: string;
+};
+
+const VERDICT: Record<HoldoutResult['verdict'], { label: string; tone: 'neutral' | 'good' | 'warn' | 'bad' }> = {
+  not_enough_data: { label: 'Not enough data yet', tone: 'warn' },
+  no_clear_difference: { label: 'No clear difference', tone: 'neutral' },
+  treatment_better: { label: 'Treatment better', tone: 'good' },
+  treatment_worse: { label: 'Treatment worse', tone: 'bad' },
+};
+
+function HoldoutCard({ result, loading, error }: { result?: HoldoutResult; loading?: boolean; error?: string }) {
+  if (error) return <Alert tone="bad" title="Couldn't load the holdout result">{error}</Alert>;
+  if (!result) return loading ? <LoadingBlock lines={4} label="Loading the holdout result" /> : null;
+  const pct = (x: number) => `${Math.round(x * 1000) / 10}%`;
+  const v = VERDICT[result.verdict];
+  const arms = [
+    { label: 'Control', ...result.control },
+    { label: 'Treatment', ...result.treatment },
+  ];
+  return (
+    <div className="rounded-lg border border-line bg-surface p-4">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <p className="text-[13px] font-semibold">Holdout result</p>
+          <p className="text-[12px] text-muted">
+            {result.controlGroup.percent}% control, at least {result.controlGroup.minSampleSize} per arm
+          </p>
+        </div>
+        <StatusPill tone={v.tone}>{v.label}</StatusPill>
+      </div>
+      {result.verdict === 'not_enough_data' && (
+        <Alert tone="info" className="mt-3" title="Not enough data yet">
+          {result.note}
+        </Alert>
+      )}
+      <div className="mt-3">
+        <TableFrame columns={5} isEmpty={false}>
+          <Table label="Holdout arms">
+            <THead>
+              <tr>
+                <Th>Arm</Th>
+                <Th align="right">Assigned</Th>
+                <Th align="right">Reached goal</Th>
+                <Th align="right">Conversion</Th>
+                <Th align="right">Unsubscribed</Th>
+              </tr>
+            </THead>
+            <tbody>
+              {arms.map((a) => (
+                <Tr key={a.label}>
+                  <Td>
+                    <span className="font-medium text-fg">{a.label}</span>
+                  </Td>
+                  <Td align="right">{a.entered.toLocaleString()}</Td>
+                  <Td align="right">{a.converted.toLocaleString()}</Td>
+                  <Td align="right">{pct(a.conversionRate)}</Td>
+                  <Td align="right">{pct(a.unsubscribeRate)}</Td>
+                </Tr>
+              ))}
+            </tbody>
+          </Table>
+        </TableFrame>
+      </div>
+      <p className="mt-3 text-[12px] text-fg-2">
+        Lift: <strong>{pct(result.absoluteLift)}</strong> absolute
+        {result.relativeLift !== null ? ` (${pct(result.relativeLift)} relative)` : ''}
+        {result.ci95 ? ` · 95% CI ${pct(result.ci95[0])} to ${pct(result.ci95[1])}` : ''}
+      </p>
+      <p className="mt-1 text-[12px] text-muted">
+        Difference of conversion rates, Newcombe's interval. Unsubscribes are the e-mail guardrail; control gets no e-mail, so its rate is expected
+        to be zero. {result.verdict !== 'not_enough_data' ? result.note : ''}
+      </p>
     </div>
   );
 }

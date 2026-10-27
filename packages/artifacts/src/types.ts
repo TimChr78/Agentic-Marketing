@@ -170,9 +170,19 @@ export const journeyNodeConfigs = {
   exit: z.object({}),
 } as const;
 
+const controlGroup = z.object({
+  percent: z.number().int().min(1).max(50).describe('Share of entrants held out from every channel step, in percent'),
+  minSampleSize: z.number().int().min(1).default(200).describe('Both arms need at least this many people before a verdict'),
+  reset: z
+    .boolean()
+    .default(false)
+    .describe('Allow a changed percentage to start a new scope after people were assigned (they keep their old arm)'),
+});
+
 const journeyBase = {
   purpose: Key.describe('Purpose key of the messages, e.g. "marketing_email"; the send gateway derives the lawful basis from it'),
   goal: z.string().max(200).optional(),
+  controlGroup: controlGroup.optional().describe('A deterministic control group: no channel messages, still measured'),
   nodes: z.array(journeyNode).min(1).max(200),
 };
 
@@ -1178,7 +1188,7 @@ export const artifactTypes = {
     prefix: 'jrn',
     label: 'Journey',
     description:
-      'A customer journey graph: trigger, steps and branches. waitUntil holds a person until a segment condition matches (checked on their events and segment changes, with a sweeper recheck and a bounded timeout) and continues on [matched, timeout]; event triggers may choose entryKey {source: "event_property", property: "order_id"} so a business key, not the ingestion message id, decides re-entry and duplicate suppression.',
+      'A customer journey graph: trigger, steps and branches. waitUntil holds a person until a segment condition matches (checked on their events and segment changes, with a sweeper recheck and a bounded timeout) and continues on [matched, timeout]; event triggers may choose entryKey {source: "event_property", property: "order_id"} so a business key, not the ingestion message id, decides re-entry and duplicate suppression. controlGroup {percent, minSampleSize?} holds a deterministic share of entrants out of every e-mail, SMS and push step while they still wait, branch and reach the goal; read the measured lift with journeys.holdoutResult. Changing the percentage after people are assigned needs controlGroup.reset: true, which starts a new scope.',
     content: journey,
   },
   email_block: {
@@ -1444,7 +1454,11 @@ class OnePerType<V> extends Map<ArtifactType, V> {
 
 export const contentValidators = new OnePerType<ContentValidator>('content validator');
 /** Checks that only apply to publishing (a draft may be unfinished), e.g. referenced templates exist. */
-export type PublishValidator = (content: unknown, tx: import('@agentic-marketing/db').Tx, artifactId?: string) => Promise<string[]>;
+export type PublishValidator = (
+  content: unknown,
+  tx: import('@agentic-marketing/db').Tx,
+  artifact?: { id: string; type: string; workspaceId: string },
+) => Promise<string[]>;
 export const publishValidators = new OnePerType<PublishValidator>('publish validator');
 
 /**
