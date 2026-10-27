@@ -140,6 +140,7 @@ export interface RenderVars {
   preferences_url?: string;
   /** Signed "view in browser" link; a harmless placeholder in previews. */
   web_url?: string;
+  topic_unsubscribe_url?: string;
   [k: string]: unknown;
 }
 

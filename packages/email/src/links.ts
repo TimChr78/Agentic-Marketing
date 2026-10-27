@@ -37,6 +37,10 @@ export interface UnsubscribeLink {
   u: string; // purpose
   m: string; // message
 }
+/** A topic-level unsubscribe; the purpose stays as it is. */
+export interface TopicLink extends UnsubscribeLink {
+  topic: string;
+}
 export interface ClickLink {
   w: string;
   m: string;

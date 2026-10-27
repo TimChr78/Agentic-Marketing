@@ -1,21 +1,25 @@
 import {
   type BrandCopy,
+  DEFAULT_PURPOSES,
   HOSTED_PAGE_HEADERS,
   type HostedPageKind,
+  type PreferencePurpose,
   publishedSingleton,
   renderHostedPage,
+  renderPreferencesPage,
   resolveBrand,
 } from '@agentic-marketing/artifacts';
 import { type Db, schema } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
+import { effectiveTopicStatus, findTopic, recordTopicPreference, topicChoicesOf } from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { type Context, Hono } from 'hono';
 import type { DeliveryEvent } from './adapters';
 import { applyDeliveryEvents, type Msg, messageEvent, withdraw } from './deliveryEvents';
 import type { EmailServices } from './gateway';
-import type { ClickLink, UnsubscribeLink } from './links';
+import type { ClickLink, TopicLink, UnsubscribeLink } from './links';
 import { transportFor, webhookTokenHash } from './providers';
 import { smsRoutes } from './sms/routes';
 
@@ -77,15 +81,28 @@ export function emailRoutes(deps: EmailRouteDeps) {
   });
 
   /** The published brand for the workspace a link belongs to; drafts never render. */
-  const hostedPage = async (kind: HostedPageKind, workspaceId: string | null, copy?: Partial<BrandCopy>) => {
+  const hostedPage = async (
+    kind: HostedPageKind,
+    workspaceId: string | null,
+    opts: { copy?: Partial<BrandCopy>; manageUrl?: string | null } = {},
+  ) => {
     const brand = workspaceId ? await deps.db.withWorkspace(workspaceId, (tx) => publishedSingleton(tx, 'brand')) : null;
-    return renderHostedPage(kind, resolveBrand(brand), { copy });
+    return renderHostedPage(kind, resolveBrand(brand), opts);
   };
   const hosted = (c: Context, html: string, status: 200 | 404) => c.html(html, status, HOSTED_PAGE_HEADERS);
   const invalidLink = {
-    expiredTitle: 'This link is not valid',
-    expiredBody: 'Use the unsubscribe link from a recent e-mail.',
+    copy: { expiredTitle: 'This link is not valid', expiredBody: 'Use the unsubscribe link from a recent e-mail.' },
   };
+  const purposesOf = async (ws: string) =>
+    deps.db.withWorkspace(ws, async (tx) => (await publishedSingleton(tx, 'purposes'))?.purposes ?? DEFAULT_PURPOSES);
+  const profileExists = (ws: string, profileId: string) =>
+    deps.db.withWorkspace(ws, async (tx) => {
+      const [row] = await tx
+        .select({ id: schema.profiles.id })
+        .from(schema.profiles)
+        .where(and(eq(schema.profiles.workspaceId, ws), eq(schema.profiles.id, profileId)));
+      return !!row;
+    });
 
   const unsubscribe = async (token: string) => {
     const link = deps.email.links.verify<UnsubscribeLink>(token);
@@ -112,6 +129,37 @@ export function emailRoutes(deps: EmailRouteDeps) {
     return link;
   };
 
+  /** The marketing purposes with topics a person can choose about, with their effective status. */
+  const preferencePurposes = async (ws: string, profileId: string): Promise<PreferencePurpose[]> => {
+    const { purposes, choices } = await deps.db.withWorkspace(ws, async (tx) => ({
+      purposes: (await publishedSingleton(tx, 'purposes'))?.purposes ?? DEFAULT_PURPOSES,
+      choices: await topicChoicesOf(tx, ws, profileId),
+    }));
+    return purposes
+      .filter((p) => p.basis !== 'contract' && p.basis !== 'legal_obligation' && (p.topics ?? []).length > 0)
+      .map((p) => ({
+        key: p.key,
+        name: p.name,
+        description: p.description,
+        topics: (p.topics ?? []).map((t) => ({
+          key: t.key,
+          name: t.name,
+          description: t.description,
+          status: effectiveTopicStatus(choices, t),
+        })),
+      }));
+  };
+  const preferenceToken = (token: string) => deps.email.links.verify<UnsubscribeLink>(token);
+  const topicToken = (token: string) => {
+    const link = deps.email.links.verify<TopicLink>(token);
+    return link?.topic ? link : null;
+  };
+  /** The topic's display name, only when it really belongs to the purpose in the token. */
+  const topicOf = async (ws: string, purpose: string, topic: string) => {
+    const found = findTopic(await purposesOf(ws), topic);
+    return found?.purpose.key === purpose ? found.topic : null;
+  };
+
   app.get('/u/:token', async (c) => {
     const link = deps.email.links.verify<UnsubscribeLink>(c.req.param('token'));
     if (!link) return hosted(c, await hostedPage('expired', null, invalidLink), 404);
@@ -119,9 +167,103 @@ export function emailRoutes(deps: EmailRouteDeps) {
   });
   // Mail clients POST here directly (RFC 8058 one-click); the page's button does the same.
   app.post('/u/:token', async (c) => {
-    const link = await unsubscribe(c.req.param('token'));
+    const token = c.req.param('token');
+    const link = await unsubscribe(token);
     if (!link) return hosted(c, await hostedPage('expired', null, invalidLink), 404);
-    return hosted(c, await hostedPage('unsubscribed', link.w), 200);
+    return hosted(c, await hostedPage('unsubscribed', link.w, { manageUrl: `${deps.email.publicUrl}/u/p/${token}` }), 200);
+  });
+
+  // The preference centre (#84): a GET only shows choices; the POST is the only thing that saves.
+  // The token is the same signed payload as the unsubscribe link, so mail scanners that follow
+  // links cannot change anything.
+  app.get('/u/p/:token', async (c) => {
+    const link = preferenceToken(c.req.param('token'));
+    if (!link || !(await profileExists(link.w, link.p))) return hosted(c, await hostedPage('expired', null, invalidLink), 404);
+    const brand = await deps.db.withWorkspace(link.w, (tx) => publishedSingleton(tx, 'brand'));
+    const purposes = await preferencePurposes(link.w, link.p);
+    return hosted(c, renderPreferencesPage(resolveBrand(brand), { action: '', purposes }), 200);
+  });
+  app.post('/u/p/:token', async (c) => {
+    const token = c.req.param('token');
+    const link = preferenceToken(token);
+    if (!link || !(await profileExists(link.w, link.p))) return hosted(c, await hostedPage('expired', null, invalidLink), 404);
+    const body = await c.req.parseBody();
+    const action = typeof body.action === 'string' ? body.action : '';
+    // "Unsubscribe from all marketing" is the one-click unsubscribe link's own behaviour.
+    if (action === 'unsubscribe_all') {
+      const done = await unsubscribe(token);
+      if (!done) return hosted(c, await hostedPage('expired', null, invalidLink), 404);
+      return hosted(c, await hostedPage('unsubscribed', done.w, { manageUrl: `${deps.email.publicUrl}/u/p/${token}` }), 200);
+    }
+    const purposes = (await purposesOf(link.w)).filter(
+      (p) => p.basis !== 'contract' && p.basis !== 'legal_obligation' && (p.topics ?? []).length > 0,
+    );
+    const choices = await deps.db.withWorkspace(link.w, (tx) => topicChoicesOf(tx, link.w, link.p));
+    const changes: { purpose: string; topic: string; status: 'subscribed' | 'unsubscribed' }[] = [];
+    for (const purpose of purposes)
+      for (const topic of purpose.topics ?? []) {
+        const next = body[`topic:${topic.key}`] === 'subscribed' ? 'subscribed' : 'unsubscribed';
+        if (next !== effectiveTopicStatus(choices, topic)) changes.push({ purpose: purpose.key, topic: topic.key, status: next });
+      }
+    if (changes.length) {
+      await deps.db.withWorkspace(link.w, async (tx) => {
+        for (const change of changes)
+          await recordTopicPreference(tx, link.w, link.p, change.purpose, change.topic, change.status, 'preference_center', {
+            note: 'Changed on the preference centre',
+            proof: { page: 'preference_center' },
+          });
+      });
+      await consentChanged(link.w, [link.p], `preferences:${link.p}`);
+    }
+    const brand = await deps.db.withWorkspace(link.w, (tx) => publishedSingleton(tx, 'brand'));
+    return hosted(
+      c,
+      renderPreferencesPage(resolveBrand(brand), { action: '', purposes: await preferencePurposes(link.w, link.p), saved: true }),
+      200,
+    );
+  });
+
+  // A topic link only turns that finer choice off; the purpose's consent is untouched.
+  app.get('/u/t/:token', async (c) => {
+    const link = topicToken(c.req.param('token'));
+    if (!link || !(await profileExists(link.w, link.p))) return hosted(c, await hostedPage('expired', null, invalidLink), 404);
+    const topic = await topicOf(link.w, link.u, link.topic);
+    if (!topic) return hosted(c, await hostedPage('expired', null, invalidLink), 404);
+    return hosted(
+      c,
+      await hostedPage('unsubscribe', link.w, {
+        copy: {
+          unsubscribeTitle: `Unsubscribe from ${topic.name}`,
+          unsubscribeBody: `You will no longer receive e-mails about ${topic.name}. Your other choices stay as they are.`,
+          unsubscribeButton: `Unsubscribe from ${topic.name}`,
+        },
+      }),
+      200,
+    );
+  });
+  app.post('/u/t/:token', async (c) => {
+    const token = c.req.param('token');
+    const link = topicToken(token);
+    if (!link || !(await profileExists(link.w, link.p))) return hosted(c, await hostedPage('expired', null, invalidLink), 404);
+    const topic = await topicOf(link.w, link.u, link.topic);
+    if (!topic) return hosted(c, await hostedPage('expired', null, invalidLink), 404);
+    await deps.db.withWorkspace(link.w, (tx) =>
+      recordTopicPreference(tx, link.w, link.p, link.u, topic.key, 'unsubscribed', 'unsubscribe_link', {
+        proof: { messageId: link.m, via: 'topic unsubscribe link' },
+      }),
+    );
+    await consentChanged(link.w, [link.p], `topic-unsubscribe:${link.m}`);
+    return hosted(
+      c,
+      await hostedPage('unsubscribed', link.w, {
+        copy: {
+          unsubscribedTitle: `Unsubscribed from ${topic.name}`,
+          unsubscribedBody: `You will no longer receive e-mails about ${topic.name}.`,
+        },
+        manageUrl: `${deps.email.publicUrl}/u/p/${token}`,
+      }),
+      200,
+    );
   });
 
   app.get('/c/:token', async (c) => {

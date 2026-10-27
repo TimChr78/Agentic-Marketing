@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { DEFAULT_PURPOSES, publishedSingleton, type SegmentCondition } from '@agentic-marketing/artifacts';
 import { AppError } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
-import { consentStatusSql, purposeAllowedSql } from '@agentic-marketing/profiles';
+import { consentStatusSql, findTopic, purposeAllowedSql, topicSubscribedSql } from '@agentic-marketing/profiles';
 import { type SQL, sql } from 'drizzle-orm';
 import { durationSeconds, type EvalContext, traitPredicate } from './evaluate';
 
@@ -32,6 +32,7 @@ export async function compile(cond: SegmentCondition, ctx: SqlContext): Promise<
   if ('trait' in cond) return traitPredicate(cond, ctx);
   if ('event' in cond) return eventPredicate(cond, ctx);
   if ('consent' in cond) return consentPredicate(cond.consent, ctx);
+  if ('topic' in cond) return topicPredicate(cond.topic, ctx);
   const stack = ctx._stack ?? [];
   if (stack.includes(cond.segment))
     throw new AppError('invalid_input', `Segments refer to each other in a loop: ${[...stack, cond.segment].join(' → ')}`);
@@ -55,6 +56,14 @@ async function consentPredicate(purpose: string, ctx: SqlContext): Promise<SQL> 
   if (!p) throw new AppError('invalid_input', `Unknown purpose "${purpose}" in a consent condition. See purposes.list.`);
   // The same rule as consentSet in evaluate.ts (currentConsent and purposeAllowed).
   return purposeAllowedSql(p.basis, consentStatusSql(sql`${schema.profiles.id}`, purpose));
+}
+
+async function topicPredicate(topic: string, ctx: SqlContext): Promise<SQL> {
+  ctx._purposes ??= publishedSingleton(ctx.tx, 'purposes').then((p) => p?.purposes ?? DEFAULT_PURPOSES);
+  const found = findTopic(await ctx._purposes, topic);
+  if (!found) throw new AppError('invalid_input', `Unknown topic "${topic}" in a segment condition. See purposes.list.`);
+  // The same rule as topicSet in evaluate.ts, including the topic's default.
+  return topicSubscribedSql(sql`${schema.profiles.id}`, topic, found.topic.default);
 }
 
 async function eventPredicate(c: Extract<SegmentCondition, { event: string }>, ctx: SqlContext): Promise<SQL> {

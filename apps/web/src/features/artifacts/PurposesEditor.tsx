@@ -18,6 +18,14 @@ interface Lia {
   [key: string]: unknown;
 }
 
+export interface Topic {
+  key: string;
+  name: string;
+  description?: string;
+  default?: 'subscribed' | 'unsubscribed';
+  [key: string]: unknown;
+}
+
 export interface Purpose {
   key: string;
   name: string;
@@ -25,6 +33,7 @@ export interface Purpose {
   basis: Basis;
   channels: Channel[];
   requiresDoubleOptIn?: boolean;
+  topics?: Topic[];
   lia?: Lia;
   [key: string]: unknown;
 }
@@ -81,6 +90,31 @@ export function changeBasis(purpose: Purpose, basis: Basis): Purpose {
 export function isKeyLocked(key: string, inUse: Iterable<string>): boolean {
   for (const used of inUse) if (used === key) return true;
   return false;
+}
+
+/** Add a topic with a free key, e.g. newsletter_2, valid under the topic key pattern. */
+export function addTopic(purpose: Purpose): Purpose {
+  const topics = purpose.topics ?? [];
+  const keys = new Set(topics.map((t) => t.key));
+  let n = topics.length + 1;
+  while (keys.has(`topic_${n}`)) n++;
+  return {
+    ...purpose,
+    topics: [...topics, { key: `topic_${n}`, name: `Topic ${n}`, description: '', default: 'subscribed' }],
+  };
+}
+
+export function updateTopic(purpose: Purpose, index: number, patch: Partial<Topic>): Purpose {
+  return { ...purpose, topics: (purpose.topics ?? []).map((t, i) => (i === index ? { ...t, ...patch } : t)) };
+}
+
+export function removeTopic(purpose: Purpose, index: number): Purpose {
+  return { ...purpose, topics: (purpose.topics ?? []).filter((_, i) => i !== index) };
+}
+
+/** The topics of one purpose, for the template and broadcast pickers. */
+export function topicsOf(purposes: { key: string; topics?: Topic[] }[], purpose: string | undefined): Topic[] {
+  return purposes.find((p) => p.key === purpose)?.topics ?? [];
 }
 
 export function PurposesEditor({ content, onChange, readOnly, errors, warnings }: EditorProps<PurposesContent>) {
@@ -229,6 +263,76 @@ export function PurposesEditor({ content, onChange, readOnly, errors, warnings }
                 ))}
               </div>
               {errors[`purposes.${i}.channels`] && <p className="mt-1 text-[12px] text-bad">{errors[`purposes.${i}.channels`]}</p>}
+            </fieldset>
+
+            <fieldset className="min-w-0 space-y-2">
+              <legend className="mb-1 text-[12px] font-medium text-fg-2">Topics under purpose {n}</legend>
+              <p className="text-[12px] text-muted">
+                Optional finer choices, e.g. newsletter and product news. People can refuse a topic without leaving the purpose; consent for the purpose still decides whether anything may be sent.
+              </p>
+              {(purpose.topics ?? []).map((topic, j) => (
+                <div key={j} className="space-y-2 rounded-md border border-line bg-surface-2 p-3">
+                  <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,0.8fr)_auto] sm:items-end">
+                    <Field label={`Topic key ${j + 1}`} error={errors[`purposes.${i}.topics.${j}.key`]} required>
+                      <Input
+                        value={topic.key}
+                        readOnly={readOnly}
+                        maxLength={41}
+                        spellCheck={false}
+                        placeholder="newsletter"
+                        onChange={(e) => set({ purposes: updatePurpose(purposes, i, updateTopic(purpose, j, { key: e.target.value })) })}
+                      />
+                    </Field>
+                    <Field label={`Topic name ${j + 1}`} error={errors[`purposes.${i}.topics.${j}.name`]} required>
+                      <Input
+                        value={topic.name}
+                        readOnly={readOnly}
+                        maxLength={120}
+                        placeholder="Weekly newsletter"
+                        onChange={(e) => set({ purposes: updatePurpose(purposes, i, updateTopic(purpose, j, { name: e.target.value })) })}
+                      />
+                    </Field>
+                    <Field label={`Default ${j + 1}`} hint="Until the person chooses." error={errors[`purposes.${i}.topics.${j}.default`]}>
+                      <Select
+                        value={topic.default ?? 'subscribed'}
+                        disabled={readOnly}
+                        onChange={(e) =>
+                          set({
+                            purposes: updatePurpose(purposes, i, updateTopic(purpose, j, { default: e.target.value as 'subscribed' | 'unsubscribed' })),
+                          })
+                        }
+                      >
+                        <option value="subscribed">Subscribed</option>
+                        <option value="unsubscribed">Unsubscribed</option>
+                      </Select>
+                    </Field>
+                    {!readOnly && (
+                      <IconButton
+                        label={`Remove topic ${j + 1} from purpose ${n}`}
+                        icon={<Trash2 size={14} />}
+                        size="sm"
+                        variant="danger"
+                        onClick={() => set({ purposes: updatePurpose(purposes, i, removeTopic(purpose, j)) })}
+                      />
+                    )}
+                  </div>
+                  <Field label={`Topic description ${j + 1}`} error={errors[`purposes.${i}.topics.${j}.description`]}>
+                    <Input
+                      value={topic.description ?? ''}
+                      readOnly={readOnly}
+                      maxLength={500}
+                      placeholder="What people get, in plain words"
+                      onChange={(e) => set({ purposes: updatePurpose(purposes, i, updateTopic(purpose, j, { description: e.target.value })) })}
+                    />
+                  </Field>
+                </div>
+              ))}
+              {!readOnly && (purpose.topics ?? []).length < 20 && (
+                <Button size="sm" variant="secondary" icon={<Plus size={13} />} onClick={() => set({ purposes: updatePurpose(purposes, i, addTopic(purpose)) })}>
+                  Add topic
+                </Button>
+              )}
+              {errors[`purposes.${i}.topics`] && <p className="text-[12px] text-bad">{errors[`purposes.${i}.topics`]}</p>}
             </fieldset>
 
             {purpose.basis === 'legitimate_interest' && (

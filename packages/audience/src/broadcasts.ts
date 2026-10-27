@@ -12,6 +12,7 @@ import {
   sendTestMessages,
   testRecipientsInput,
   testSendOutput,
+  topicProblems,
 } from '@agentic-marketing/email';
 import type { EventStore } from '@agentic-marketing/events';
 import type { KeyProvider } from '@agentic-marketing/secrets';
@@ -42,6 +43,10 @@ publishValidators.set('broadcast', async (content, tx: Tx) => {
   const problems: string[] = [];
   const [type, label] = channelOf(b.template);
   if (!(await published(tx, b.template, type))) problems.push(`${b.template} is not a published ${label} template`);
+  else if (b.topic) {
+    const meta = await purposeOf(tx, b.template);
+    if (meta) problems.push(...(await topicProblems(tx, meta.purpose, b.topic)));
+  }
   if (!(await published(tx, b.segment, 'segment'))) problems.push(`${b.segment} is not a published segment`);
   return problems;
 });
@@ -71,10 +76,13 @@ async function definition(tx: Tx, id: string, version?: number) {
   return { artifact: a, version: number, def: artifactTypes.broadcast.content.parse(v.content) as BroadcastDefinition };
 }
 
-/** The template's purpose: of its published version, or of `version` (a template reviewed in the same bundle, #107). */
+/** The template's purpose and topic: of its published version, or of `version` (a template reviewed in the same bundle, #107). */
 async function purposeOf(tx: Tx, templateId: string, version?: number) {
   const [row] = await tx
-    .select({ purpose: sql<string>`${schema.artifactVersions.content} ->> 'purpose'` })
+    .select({
+      purpose: sql<string>`${schema.artifactVersions.content} ->> 'purpose'`,
+      topic: sql<string | null>`${schema.artifactVersions.content} ->> 'topic'`,
+    })
     .from(schema.artifacts)
     .innerJoin(
       schema.artifactVersions,
@@ -87,7 +95,7 @@ async function purposeOf(tx: Tx, templateId: string, version?: number) {
       ),
     )
     .where(eq(schema.artifacts.id, templateId));
-  return row?.purpose ?? null;
+  return row ? { purpose: row.purpose, topic: row.topic } : null;
 }
 
 export const previewBroadcast = defineCommand({
@@ -119,7 +127,8 @@ export const previewBroadcast = defineCommand({
   target: (i) => i.artifactId,
   handler: async (input, ctx) => {
     const { def } = await definition(ctx.tx, input.artifactId, input.version);
-    const purpose = await purposeOf(ctx.tx, def.template, input.templateVersion);
+    const templateMeta = await purposeOf(ctx.tx, def.template, input.templateVersion);
+    const purpose = templateMeta?.purpose;
     if (!purpose)
       throw new AppError(
         'conflict',
@@ -127,6 +136,7 @@ export const previewBroadcast = defineCommand({
           ? `${def.template} has no version ${input.templateVersion}.`
           : `${def.template} has no published version yet; pass templateVersion to preview with a draft.`,
       );
+    const topic = def.topic ?? templateMeta.topic ?? null;
     const [{ n }] = await ctx.tx
       .select({ n: sql<number>`count(*)::int` })
       .from(schema.segmentMemberships)
@@ -139,7 +149,7 @@ export const previewBroadcast = defineCommand({
     let wouldSend = 0;
     const wouldSkip: Record<string, number> = {};
     for (const m of members) {
-      const v = await checkFor(def.template)(ctx.tx, ctx.principal.workspaceId, ctx.services.keyProvider, m.profileId, purpose);
+      const v = await checkFor(def.template)(ctx.tx, ctx.principal.workspaceId, ctx.services.keyProvider, m.profileId, purpose, topic);
       if (v.ok) wouldSend++;
       else {
         const reason = v.reason.split(':')[0];
@@ -358,6 +368,7 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
       const d = await requestFor(def.template)(tx, ws, deps.kp, deps.events, {
         profileId: m.profileId,
         templateId: def.template,
+        topic: def.topic,
         idempotencyKey: `bct:${broadcastId}:${m.profileId}`,
         // Messages record the journey or broadcast that sent them.
         journeyId: broadcastId,

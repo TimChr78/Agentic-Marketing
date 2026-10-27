@@ -1,5 +1,12 @@
 import { DEFAULT_PURPOSES, type Purposes, publishedSingleton } from '@agentic-marketing/artifacts';
-import { type ConsentSource, type ConsentStatus, schema, type Tx } from '@agentic-marketing/db';
+import {
+  type ConsentSource,
+  type ConsentStatus,
+  schema,
+  type TopicPreferenceSource,
+  type TopicStatus,
+  type Tx,
+} from '@agentic-marketing/db';
 import { and, eq, inArray, type SQL, sql } from 'drizzle-orm';
 
 // The consent and objection ledger (security-and-privacy.md §2). Records are append-only;
@@ -243,4 +250,123 @@ export async function consentSummary(tx: Tx, workspaceId: string, purposeKeys: s
   }
   for (const s of summary.values()) s.channels.sort((a, b) => a.channel.localeCompare(b.channel));
   return [...summary.values()];
+}
+
+// Topics are finer choices within a purpose (#84). They never replace consent: a purpose still
+// needs its lawful basis, and a topic choice only decides which of its messages reach the person.
+
+export type TopicDefinition = Purposes[number]['topics'][number];
+
+/** The purpose and topic a key belongs to, or undefined when no purpose defines it. */
+export function findTopic(purposes: Purposes, key: string): { purpose: Purposes[number]; topic: TopicDefinition } | undefined {
+  for (const purpose of purposes) for (const topic of purpose.topics ?? []) if (topic.key === key) return { purpose, topic };
+  return undefined;
+}
+
+export interface TopicChoiceRow {
+  topic: string;
+  status: TopicStatus;
+  source?: TopicPreferenceSource;
+  updatedAt?: Date;
+}
+
+/** The person's choice when they made one, otherwise the topic's default. */
+export function effectiveTopicStatus(rows: TopicChoiceRow[], topic: { key: string; default: TopicStatus }): TopicStatus {
+  return rows.find((r) => r.topic === topic.key)?.status ?? topic.default;
+}
+
+export async function topicChoicesOf(tx: Tx, workspaceId: string, profileId: string): Promise<TopicChoiceRow[]> {
+  return tx
+    .select({
+      topic: schema.topicPreferences.topic,
+      status: schema.topicPreferences.status,
+      source: schema.topicPreferences.source,
+      updatedAt: schema.topicPreferences.updatedAt,
+    })
+    .from(schema.topicPreferences)
+    .where(and(eq(schema.topicPreferences.workspaceId, workspaceId), eq(schema.topicPreferences.profileId, profileId)));
+}
+
+/** The topic status as a boolean SQL predicate over the profile whose id `profileId` evaluates to. */
+export function topicSubscribedSql(profileId: SQL, topic: string, defaultStatus: TopicStatus): SQL {
+  return sql`(coalesce((SELECT tp.status FROM topic_preferences tp
+    WHERE tp.profile_id = ${profileId} AND tp.topic = ${topic}), ${defaultStatus}) = 'subscribed')`;
+}
+
+export interface TopicSummary {
+  purpose: string;
+  topic: string;
+  subscribed: number;
+  unsubscribed: number;
+}
+
+/**
+ * How many active people currently subscribe to each topic, counting the topic's default for
+ * people with no choice. One query, like consentSummary.
+ */
+export async function topicSummary(tx: Tx, workspaceId: string, purposes: Purposes): Promise<TopicSummary[]> {
+  const definitions = purposes.flatMap((p) => (p.topics ?? []).map((t) => ({ purpose: p.key, topic: t.key, default: t.default })));
+  if (!definitions.length) return [];
+  const [{ n: total }] = (
+    await tx.execute<{ n: number }>(
+      sql`SELECT count(*)::int AS n FROM profiles WHERE workspace_id = ${workspaceId} AND merged_into IS NULL`,
+    )
+  ).rows;
+  const rows = await tx.execute<{ topic: string; status: TopicStatus; n: number }>(sql`
+    SELECT topic, status, count(*)::int AS n FROM topic_preferences
+    WHERE workspace_id = ${workspaceId} GROUP BY topic, status`);
+  const counts = new Map<string, { subscribed: number; unsubscribed: number }>();
+  for (const row of rows.rows) {
+    const c = counts.get(row.topic) ?? { subscribed: 0, unsubscribed: 0 };
+    c[row.status] += Number(row.n);
+    counts.set(row.topic, c);
+  }
+  return definitions.map((d) => {
+    const c = counts.get(d.topic) ?? { subscribed: 0, unsubscribed: 0 };
+    if (d.default === 'subscribed')
+      return { purpose: d.purpose, topic: d.topic, subscribed: Math.max(0, total - c.unsubscribed), unsubscribed: c.unsubscribed };
+    return { purpose: d.purpose, topic: d.topic, subscribed: c.subscribed, unsubscribed: Math.max(0, total - c.subscribed) };
+  });
+}
+
+/** Records one topic choice and appends the evidence. Returns whether the current status changed. */
+export async function recordTopicPreference(
+  tx: Tx,
+  workspaceId: string,
+  profileId: string,
+  purpose: string,
+  topic: string,
+  status: TopicStatus,
+  source: TopicPreferenceSource,
+  opts: { note?: string; proof?: Record<string, unknown>; recordedBy?: string } = {},
+) {
+  const [current] = await tx
+    .select({ status: schema.topicPreferences.status })
+    .from(schema.topicPreferences)
+    .where(
+      and(
+        eq(schema.topicPreferences.workspaceId, workspaceId),
+        eq(schema.topicPreferences.profileId, profileId),
+        eq(schema.topicPreferences.topic, topic),
+      ),
+    );
+  await tx
+    .insert(schema.topicPreferences)
+    .values({ workspaceId, profileId, topic, status, source, updatedAt: new Date() })
+    .onConflictDoUpdate({
+      target: [schema.topicPreferences.workspaceId, schema.topicPreferences.profileId, schema.topicPreferences.topic],
+      set: { status, source, updatedAt: new Date() },
+    });
+  await tx.insert(schema.topicPreferenceHistory).values({
+    workspaceId,
+    profileId,
+    topic,
+    purpose,
+    status,
+    source,
+    note: opts.note ?? null,
+    proof: opts.proof ?? {},
+    recordedBy: opts.recordedBy ?? null,
+  });
+  return current?.status !== status;
 }

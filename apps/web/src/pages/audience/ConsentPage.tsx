@@ -50,6 +50,8 @@ export default function ConsentPage() {
   const purposes = useApi(() => api.call('purposes.list', {}), [], { skip: !can('artifacts:read') });
   const summary = useApi(() => api.call('consent.summary', {}), [], { skip: !can('profiles:read') });
   const counts = new Map((summary.data?.purposes ?? []).map((p) => [p.purpose, p]));
+  const topicCounts = new Map<string, { topic: string; subscribed: number; unsubscribed: number }[]>();
+  for (const t of summary.data?.topics ?? []) topicCounts.set(t.purpose, [...(topicCounts.get(t.purpose) ?? []), t]);
   const profile = useApi(() => api.call('profiles.get', { profileId: person!.id }), [person?.id], { skip: !person });
   const history = useApi(() => api.call('consent.history', { profileId: person!.id }), [person?.id], { skip: !person });
 
@@ -146,6 +148,11 @@ export default function ConsentPage() {
                       {c.channels.length > 0 && (
                         <p className="mt-1">
                           {c.channels.map((ch) => `${ch.channel}: ${ch.granted} allowed, ${refused(ch)} refused`).join(' · ')}
+                        </p>
+                      )}
+                      {(topicCounts.get(p.key) ?? []).length > 0 && (
+                        <p className="mt-1">
+                          {(topicCounts.get(p.key) ?? []).map((t) => `${t.topic}: ${t.subscribed} subscribed`).join(' · ')}
                         </p>
                       )}
                     </div>

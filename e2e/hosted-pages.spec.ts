@@ -116,4 +116,27 @@ test.describe('hosted pages (#115)', () => {
     const latest = await consentOf(page, 'reader1@example.net');
     await expect.poll(latest).toMatchObject({ status: 'withdrawn', source: 'unsubscribe' });
   });
+
+  test('the preference centre saves a topic choice', async ({ page }) => {
+    await signIn(page, PEOPLE.owner);
+    const { profileId } = await call<{ profileId: string }>(page.request, 'profiles.find', { type: 'email', value: 'reader2@example.net' });
+    const r = await page.request.post(`${fixtures}/preferences-link`, { data: { profileId } });
+    const { url } = (await r.json()) as { url: string };
+
+    await page.goto(url);
+    await expect(page.getByRole('heading', { name: 'Your preferences' })).toBeVisible();
+    const newsletter = page.locator('input[name="topic:newsletter"]');
+    await expect(newsletter).toBeChecked();
+    await expect(page.locator('input[name="topic:product_news"]')).not.toBeChecked();
+
+    await newsletter.uncheck();
+    await page.getByRole('button', { name: 'Save' }).click();
+    await expect(page.getByText('Your preferences are saved.')).toBeVisible();
+    await expect(newsletter).not.toBeChecked();
+
+    const prefs = await call<{ topics: { topic: string; status: string; source: string | null }[] }>(page.request, 'topics.preferences', {
+      profileId,
+    });
+    expect(prefs.topics.find((t) => t.topic === 'newsletter')).toMatchObject({ status: 'unsubscribed', source: 'preference_center' });
+  });
 });

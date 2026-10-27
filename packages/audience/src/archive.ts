@@ -93,6 +93,7 @@ function archiveVars(t: { sampleData?: Record<string, unknown> }) {
     unsubscribe_url: '#',
     preferences_url: '#',
     web_url: '#',
+    topic_unsubscribe_url: '#',
   };
 }
 

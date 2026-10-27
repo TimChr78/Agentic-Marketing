@@ -17,16 +17,20 @@ import { type AssetInfo, checkEmailTemplate, emailPublishProblems, type LinkCach
 import { isMarketing } from './policy';
 import { renderTemplate, validateTemplate } from './render';
 import { sendTestMessages, testRecipientsInput, testSendOutput } from './testSend';
+import { topicProblems } from './topicValidation';
 
 contentValidators.set('email_template', (c) => validateTemplate(c as EmailTemplate));
 
-// Publishing runs the same checks as templates.check, without link reachability: a blocking finding
-// (no unsubscribe link, a javascript: link, a missing asset) refuses the publish; warnings never do.
+// The one publish check of an e-mail template (a second registration would throw): its topic belongs
+// to its purpose (#84), its blocks are published (#73), then the same checks as templates.check
+// without link reachability (#90): a blocking finding refuses the publish; warnings never do.
 publishValidators.set('email_template', async (content, tx) => {
-  // Blocks first: a template naming an unpublished block can't render, so the checks below can't run.
+  const t = content as EmailTemplate;
+  const topic = await topicProblems(tx, t.purpose, t.topic);
+  if (topic.length) return topic;
+  // A template naming an unpublished block can't render, so the checks below can't run.
   const blockProblems = await blockPublishProblems(content, tx);
   if (blockProblems.length) return blockProblems;
-  const t = content as EmailTemplate;
   const purposes = (await publishedSingleton(tx, 'purposes'))?.purposes ?? DEFAULT_PURPOSES;
   const purpose = purposes.find((p) => p.key === t.purpose);
   return emailPublishProblems(t, {

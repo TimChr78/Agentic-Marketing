@@ -5,6 +5,7 @@ import { useApi } from '../../app/useApi';
 import { Alert, Button, Field, Input, LoadingBlock, Segmented, Select, Textarea } from '../../ui';
 import type { EditorProps } from '../artifacts/ArtifactDetailPage';
 import { JsonEditor } from '../artifacts/JsonEditor';
+import { topicsOf } from '../artifacts/PurposesEditor';
 import { AssetPicker } from '../assets/AssetPicker';
 import { BlockPicker } from '../blocks/BlockPicker';
 import { imageTag, lostLiquid } from './liquid';
@@ -14,6 +15,7 @@ const VisualMjml = lazy(() => import('./VisualMjml'));
 
 export interface TemplateContent {
   purpose: string;
+  topic?: string;
   subject: string;
   preheader?: string;
   mjml: string;
@@ -69,7 +71,7 @@ export function TemplateEditor({ artifact, content, onChange, readOnly, errors }
 
   return (
     <div className="space-y-5">
-      <div className="grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,2fr)_minmax(0,1fr)]">
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,2fr)_minmax(0,1fr)_minmax(0,1fr)]">
         <Field label="Subject" hint="Liquid works here, e.g. {{ profile.firstName | default: 'there' }}." error={errors.subject} required>
           <Input value={content.subject ?? ''} readOnly={readOnly} maxLength={300} onChange={(e) => set({ subject: e.target.value })} />
         </Field>
@@ -77,11 +79,33 @@ export function TemplateEditor({ artifact, content, onChange, readOnly, errors }
           <Input value={content.preheader ?? ''} readOnly={readOnly} maxLength={300} onChange={(e) => set({ preheader: e.target.value || undefined })} />
         </Field>
         <Field label="Purpose" hint="Decides consent and the unsubscribe link." error={errors.purpose} required>
-          <Select value={content.purpose ?? ''} disabled={readOnly || purposes.loading} onChange={(e) => set({ purpose: e.target.value })}>
+          <Select
+            value={content.purpose ?? ''}
+            disabled={readOnly || purposes.loading}
+            onChange={(e) => {
+              const purpose = e.target.value;
+              const keys = topicsOf(purposes.data?.purposes ?? [], purpose).map((t) => t.key);
+              set({ purpose, topic: content.topic && keys.includes(content.topic) ? content.topic : undefined });
+            }}
+          >
             {!purposes.data?.purposes.some((p) => p.key === content.purpose) && <option value={content.purpose}>{content.purpose || 'Choose…'}</option>}
             {purposes.data?.purposes.map((p) => (
               <option key={p.key} value={p.key}>
                 {p.name} ({p.key})
+              </option>
+            ))}
+          </Select>
+        </Field>
+        <Field label="Topic (optional)" hint="A finer choice under the purpose." error={errors.topic}>
+          <Select
+            value={content.topic ?? ''}
+            disabled={readOnly || purposes.loading || topicsOf(purposes.data?.purposes ?? [], content.purpose).length === 0}
+            onChange={(e) => set({ topic: e.target.value || undefined })}
+          >
+            <option value="">{topicsOf(purposes.data?.purposes ?? [], content.purpose).length ? 'No topic' : 'No topics'}</option>
+            {topicsOf(purposes.data?.purposes ?? [], content.purpose).map((t) => (
+              <option key={t.key} value={t.key}>
+                {t.name} ({t.key})
               </option>
             ))}
           </Select>
