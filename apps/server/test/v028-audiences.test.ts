@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { eventually, startTestServer, type User } from './harness';
+import { eventually, rejects, startTestServer, type User } from './harness';
 
 // Phase 15 (#83): static lists and snapshots. Membership is a stored list, edited by command or
 // CSV and mirrored into segment_memberships; the refresh job leaves it alone, sends still apply
@@ -200,6 +200,12 @@ describe('static and snapshot audiences', () => {
     await api().call('segments.refresh', { artifactId: dynamic });
     expect((await api().call('segments.members', { artifactId: dynamic })).total).toBe(4);
     expect((await api().call('segments.members', { artifactId: snapshot.artifactId })).total).toBe(3);
+    // Only a refresh changes a snapshot: it must not drift between review and send.
+    const members = await api().call('segments.members', { artifactId: dynamic });
+    const edit = await rejects(
+      api().call('audiences.remove', { segmentId: snapshot.artifactId, profileIds: [members.members[0].profileId] }),
+    );
+    expect(edit.message).toMatch(/refreshSnapshot/);
 
     const refreshed = await api().call('audiences.refreshSnapshot', { segmentId: snapshot.artifactId });
     expect(refreshed).toMatchObject({ members: 4, added: 1, removed: 0 });

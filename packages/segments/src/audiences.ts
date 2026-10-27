@@ -41,12 +41,20 @@ async function latestSegment(tx: Tx, workspaceId: string, id: string): Promise<L
   return { id, name: a.name, version: a.latestVersion, definition: artifactTypes.segment.content.parse(v.content) };
 }
 
-/** Editing membership is only meaningful for a stored list. */
+/**
+ * Editing membership is only meaningful for a static list. A snapshot changes only through
+ * audiences.refreshSnapshot: it exists so the audience can't change between review and send.
+ */
 function requireList(seg: ListSegment): void {
   if (seg.definition.mode === 'dynamic')
     throw new AppError(
       'invalid_input',
-      `${seg.id} is a dynamic segment; its members come from its rule. Create a static or snapshot segment to edit a list.`,
+      `${seg.id} is a dynamic segment; its members come from its rule. Create a static segment to edit a list.`,
+    );
+  if (seg.definition.mode === 'snapshot')
+    throw new AppError(
+      'invalid_input',
+      `${seg.id} is a snapshot of ${seg.definition.sourceSegment ?? 'another segment'}; it changes only with audiences.refreshSnapshot.`,
     );
 }
 
