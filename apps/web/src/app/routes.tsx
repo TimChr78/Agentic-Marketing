@@ -45,6 +45,7 @@ const ROUTES: { path: string; page: Page; needs?: string[] }[] = [
   { path: '/insights/analytics', page: p(() => import('../pages/insights/AnalyticsPage')), needs: ['artifacts:read'] },
   { path: '/insights/messages', page: p(() => import('../pages/insights/MessagesPage')), needs: ['profiles:read'] },
   { path: '/insights/deliverability', page: p(() => import('../pages/insights/DeliverabilityPage')), needs: ['artifacts:read'] },
+  { path: '/insights/alerts', page: p(() => import('../pages/insights/AlertsPage')), needs: ['artifacts:read'] },
   { path: '/insights/journeys', page: p(() => import('../pages/insights/JourneyStatsPage')), needs: ['artifacts:read'] },
   { path: '/insights/ai', page: p(() => import('../pages/insights/AiUsagePage')), needs: ['artifacts:read'] },
 

@@ -104,7 +104,7 @@ export const DIMENSIONS: Record<DimensionId, DimensionDef> = {
 export const TIME_DIMENSIONS: ReadonlySet<DimensionId> = new Set(['day', 'week', 'month']);
 
 /** What a base measure counts. Kept internal: the catalogue's public face is `aggregation`. */
-export type Counting = 'profiles' | 'participants' | 'events' | 'revenue' | 'segment_members';
+export type Counting = 'profiles' | 'participants' | 'events' | 'rows' | 'revenue' | 'segment_members';
 
 export interface BaseMeasureDef {
   kind: 'base';
@@ -210,6 +210,7 @@ const measures: MeasureDef[] = [
   emailBase('email.unsubscribed', 'unsubscribed', 'Distinct people who unsubscribed from the e-mail’s purpose.'),
   emailRatio('email.click_rate', 'email.clicked', 'email.delivered', 'Distinct clickers divided by distinct people delivered.'),
   emailRatio('email.bounce_rate', 'email.bounced', 'email.sent', 'Distinct bounces divided by distinct people sent.'),
+  emailRatio('email.complaint_rate', 'email.complained', 'email.sent', 'Distinct spam complaints divided by distinct people sent.'),
   emailRatio(
     'email.unsubscribe_rate',
     'email.unsubscribed',
@@ -228,6 +229,18 @@ const measures: MeasureDef[] = [
   journeyBase('journey.exited', ['exited'], 'Distinct participants who exited before the end, including consent withdrawals.'),
   journeyBase('journey.goal_reached', ['converted'], 'Distinct participants who reached the journey’s goal.'),
   journeyBase('journey.step_reached', ['step', 'resumed'], 'Distinct participants who reached each step.'),
+  {
+    kind: 'base',
+    id: 'journey.failed',
+    description: 'Failed journey steps: each recorded failure, not each participant. Use the journey filter to watch one journey.',
+    unit: 'count',
+    source: 'journey_events',
+    aggregation: 'count',
+    counting: 'rows',
+    eventTypes: ['failed'],
+    dimensions: JOURNEY_DIMENSIONS,
+    defaultGrain: 'day',
+  },
 
   {
     kind: 'base',

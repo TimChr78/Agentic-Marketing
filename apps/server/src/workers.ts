@@ -1,5 +1,6 @@
 import { clickIdHook, conversionHook, runAudienceSyncs, runSpendImport } from '@agentic-marketing/ads';
 import { runAiWorker } from '@agentic-marketing/ai';
+import { runAlertEvaluator } from '@agentic-marketing/alerts';
 import { consentHook, runBroadcasts, runRetention } from '@agentic-marketing/audience';
 import { runDeliveryWorker } from '@agentic-marketing/email';
 import { runSink } from '@agentic-marketing/events';
@@ -16,10 +17,17 @@ import type { createServer } from './app';
 export function startScheduler(
   srv: ReturnType<typeof createServer>,
   signal: AbortSignal,
-  opts: { segmentTickMs?: number; broadcastTickMs?: number; warehouseTickMs?: number; warehouseLagMs?: number; edgeTickMs?: number } = {},
+  opts: {
+    segmentTickMs?: number;
+    broadcastTickMs?: number;
+    warehouseTickMs?: number;
+    warehouseLagMs?: number;
+    edgeTickMs?: number;
+    alertTickMs?: number;
+  } = {},
 ): Promise<void>[] {
   logger.info(
-    'scheduler role: segment recomputation, broadcasts, retention, OAuth token refresh, audience sync, ad spend import, warehouse exports, edge sync',
+    'scheduler role: segment recomputation, broadcasts, retention, OAuth token refresh, audience sync, ad spend import, warehouse exports, edge sync, threshold alerts',
   );
   return [
     runSegmentScheduler(
@@ -50,6 +58,18 @@ export function startScheduler(
       signal,
     ),
     runEdgeSync({ db: srv.db, hot: srv.hot, kp: srv.keyProvider, egress: srv.egress, tickMs: opts.edgeTickMs }, signal),
+    runAlertEvaluator(
+      {
+        db: srv.db,
+        events: srv.events,
+        kp: srv.keyProvider,
+        email: srv.email,
+        directory: srv.directory,
+        publicUrl: srv.publicUrl,
+      },
+      signal,
+      { tickMs: opts.alertTickMs },
+    ),
   ];
 }
 

@@ -191,6 +191,8 @@ export async function startTestServer(name: string, port: number, env: Record<st
       warehouseTickMs: 300,
       warehouseLagMs: 0,
       edgeTickMs: 200,
+      // Alert tests drive the evaluator directly with a fixed clock; keep the background loop out of the way.
+      alertTickMs: 86_400_000,
     }),
   ];
 

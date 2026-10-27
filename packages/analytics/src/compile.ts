@@ -152,6 +152,10 @@ function baseExpression(base: MeasureDef, valueExpression: string): string {
       return `uniqExactIf(participant_id, (${types}))`;
     case 'events':
       return 'uniqExact(event_id)';
+    // A failure or other row-shaped event has no event id; count matching rows. The event types
+    // are part of the condition so this stays correct when a query mixes measures.
+    case 'rows':
+      return types ? `countIf(${types})` : 'count()';
     case 'revenue':
       return `sum(${valueExpression})`;
     case 'segment_members':

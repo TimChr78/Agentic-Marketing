@@ -71,6 +71,7 @@ export const NAV: NavGroup[] = [
       { path: '/insights/analytics', label: 'Analytics', needs: ['artifacts:read'] },
       { path: '/insights/messages', label: 'Messages', needs: ['profiles:read'] },
       { path: '/insights/deliverability', label: 'Deliverability', needs: ['artifacts:read'] },
+      { path: '/insights/alerts', label: 'Alerts', needs: ['artifacts:read'] },
       { path: '/insights/journeys', label: 'Journey stats', needs: ['artifacts:read'] },
       { path: '/insights/ai', label: 'AI usage', needs: ['artifacts:read'] },
     ],
