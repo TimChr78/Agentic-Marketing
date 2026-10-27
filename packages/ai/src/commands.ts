@@ -5,7 +5,7 @@ import { and, desc, eq, gte, lt, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { classifyCommands } from './classify';
 import { copilotCommands } from './copilot';
-import { testPrompt, testRunResults } from './prompts';
+import { listTestRuns, testPrompt, testRunResults } from './prompts';
 import { createAiProvider, deleteAiProvider, listAiProviders, updateAiProvider } from './providers';
 
 // The decision log and usage: every AI call (journey steps, prompt tests, copilot turns) with
@@ -139,6 +139,7 @@ export const aiCommands = [
   deleteAiProvider,
   testPrompt,
   testRunResults,
+  listTestRuns,
   listAiCalls,
   aiUsage,
   ...classifyCommands,
