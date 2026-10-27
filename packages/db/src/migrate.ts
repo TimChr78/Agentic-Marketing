@@ -70,7 +70,7 @@ const MIGRATION_RELEASES: Record<string, string> = {
   '0028_server_versions.sql': '0.2.5',
   '0033_workspace_proposals.sql': '0.2.6',
   '0034_asset_renditions.sql': '0.2.7',
-  '0038_static_audiences.sql': '0.2.8',
+  '0039_journey_wait_until_entry_keys.sql': '0.2.8',
 };
 
 export function releaseForMigrationHead(head: string | null): string | null {

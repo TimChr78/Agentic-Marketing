@@ -38,6 +38,9 @@ export function localWarnings(nodes: JNode[]): Record<string, string[]> {
       case 'goal':
         if (empty('event')) add(n.id, 'Choose the event to wait for.');
         break;
+      case 'waitUntil':
+        if (c.condition === undefined || c.condition === null) add(n.id, 'Set the condition to wait for.');
+        break;
       case 'branch':
         if (empty('segment') && c.condition === undefined) add(n.id, 'Set the condition or segment that decides yes or no.');
         break;

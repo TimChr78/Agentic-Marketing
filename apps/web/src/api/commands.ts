@@ -37,7 +37,7 @@ const obj = (properties: Record<string, JsonSchema>, required: string[] = []): J
 });
 const str = (description: string, extra: JsonSchema = {}): JsonSchema => ({ type: 'string', description, ...extra });
 
-const nodeKinds: NodeKind[] = ['trigger', 'wait', 'waitEvent', 'branch', 'split', 'email', 'webhook', 'updateProfile', 'aiDecide', 'aiGenerate', 'goal', 'exit'];
+const nodeKinds: NodeKind[] = ['trigger', 'wait', 'waitEvent', 'waitUntil', 'branch', 'split', 'email', 'webhook', 'updateProfile', 'aiDecide', 'aiGenerate', 'goal', 'exit'];
 
 function publishedVersion(j: Journey) {
   return j.versions.find((v) => v.state === 'published');
@@ -467,6 +467,11 @@ export function simulate(journeyId: string, profileId?: string) {
         hours += durationHours(current.config.timeout) || 48;
         pick = out.find((e) => e.label === (p.orders > 2 ? 'clicked' : 'timeout')) ?? out[0];
         note = p.orders > 2 ? 'Event arrived before timeout' : 'Timed out without event';
+        break;
+      case 'waitUntil':
+        hours += durationHours(current.config.timeout) || 24 * 14;
+        pick = out.find((e) => e.label === (p.segments.length ? 'matched' : 'timeout')) ?? out[0];
+        note = p.segments.length ? 'Condition matched before timeout' : 'Timed out waiting for the condition';
         break;
       case 'branch':
         pick = out.find((e) => e.label === 'no') ?? out[0];

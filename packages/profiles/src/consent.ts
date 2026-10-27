@@ -159,7 +159,7 @@ export async function exitRefusedJourneys(tx: Tx, workspaceId: string, profileId
   const res = await tx.execute(sql`
     UPDATE journey_participants p
     SET status = 'exited', error = 'consent_withdrawn: ' || (v.content->>'purpose'), due_at = NULL, waiting_event = NULL,
-      updated_at = now()
+      waiting_until = NULL, updated_at = now()
     FROM artifact_versions v
     WHERE p.workspace_id = ${workspaceId} AND p.profile_id = ${profileId} AND p.status IN ('ready', 'waiting')
       AND v.workspace_id = p.workspace_id AND v.artifact_id = p.journey_id AND v.number = p.version

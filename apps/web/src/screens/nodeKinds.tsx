@@ -23,6 +23,7 @@ export const kindMeta: Record<NodeKind, { label: string; icon: LucideIcon; group
   trigger: { label: 'Trigger', icon: Zap, group: 'Trigger', defaults: { event: 'signed_up', reentry: 'once' } },
   wait: { label: 'Wait', icon: Clock, group: 'Flow', defaults: { duration: 'P1D' } },
   waitEvent: { label: 'Wait for event', icon: Hourglass, group: 'Flow', defaults: { event: 'email_clicked', timeout: 'P2D' } },
+  waitUntil: { label: 'Wait until', icon: Hourglass, group: 'Flow', defaults: { condition: { trait: 'plan', op: 'eq', value: 'pro' }, timeout: 'P14D', recheck: 'PT1H' } },
   branch: { label: 'Branch', icon: GitBranch, group: 'Flow', defaults: { condition: 'trait.orders_count ≥ 1' } },
   split: { label: 'A/B split', icon: Shuffle, group: 'Flow', defaults: { a: 50, b: 50, holdout: 10 } },
   goal: { label: 'Goal', icon: Flag, group: 'Flow', defaults: { event: 'order_completed', within: 'P14D' } },
@@ -47,6 +48,8 @@ export function configSummary(n: JourneyNode) {
       return String(c.duration);
     case 'waitEvent':
       return `${c.event} · timeout ${c.timeout}`;
+    case 'waitUntil':
+      return `until match · timeout ${c.timeout}`;
     case 'branch':
       return String(c.condition);
     case 'split':

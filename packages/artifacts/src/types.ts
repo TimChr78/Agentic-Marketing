@@ -15,6 +15,7 @@ const nodeKinds = [
   'trigger',
   'wait',
   'waitEvent',
+  'waitUntil',
   'branch',
   'split',
   'email',
@@ -44,7 +45,7 @@ const journeyNode = z.object({
     .array(z.object({ to: z.string(), label: z.string().max(40).optional() }))
     .optional()
     .describe(
-      'Steps this one continues to, in order (waitEvent/goal: [matched, timeout]; branch: [yes, no]; split: one per weight). Omit to continue with the following node.',
+      'Steps this one continues to, in order (waitEvent/goal/waitUntil: [matched, timeout]; branch: [yes, no]; split: one per weight). Omit to continue with the following node.',
     ),
   position: z.object({ x: z.number(), y: z.number() }).optional().describe('Canvas position; no effect on behaviour'),
 });
@@ -52,6 +53,18 @@ const journeyNode = z.object({
 const Iso = z.string().regex(/^P(\d+W|\d+D|T\d+H|T\d+M|\d+DT\d+H)$/, 'ISO 8601 duration such as P2D, PT6H, P1W');
 const SegmentRef = z.string().regex(/^seg_[0-9a-f]{32}$/);
 const PromptRef = z.string().regex(/^prm_[0-9a-f]{32}$/, 'A prompt id (prm_…)');
+
+/** Seconds in an ISO duration; the node schemas reject durations outside their bounds. */
+function secondsIn(iso: string): number {
+  const units: Record<string, number> = { W: 604_800, D: 86_400, H: 3_600, M: 60 };
+  let total = 0;
+  for (const [, n, unit] of iso
+    .replace(/^P/, '')
+    .replace('T', '')
+    .matchAll(/(\d+)([WDHM])/g))
+    total += Number(n) * units[unit];
+  return total;
+}
 
 /** Settings per node kind (validated on save). Kinds without one cannot be published yet. */
 export const journeyNodeConfigs = {
@@ -63,10 +76,41 @@ export const journeyNodeConfigs = {
         .enum(['once', 'after_exit', 'always'])
         .default('once')
         .describe('once: never again; after_exit: when not in the journey; always: every time'),
+      entryKey: z
+        .object({
+          source: z
+            .enum(['message_id', 'event_property'])
+            .default('message_id')
+            .describe('message_id: the ingestion id (default); event_property: a business key from the event, e.g. order_id'),
+          property: z
+            .string()
+            .regex(/^[A-Za-z0-9_]{1,64}(\.[A-Za-z0-9_]{1,64})*$/)
+            .max(200)
+            .optional()
+            .describe('Dot path into event.properties; required for event_property, e.g. "order_id" or "order.id"'),
+          onMissing: z
+            .enum(['skip', 'message_id'])
+            .default('skip')
+            .describe('When the property is empty or too long: skip the entry (default), or fall back to the event message id'),
+        })
+        .refine((c) => c.source !== 'event_property' || !!c.property, 'property is required when source is event_property')
+        .optional()
+        .describe('What makes two events "the same thing" for re-entry and duplicate suppression'),
     })
-    .refine((c) => !!c.event !== !!c.segment, 'Set exactly one of event or segment'),
+    .refine((c) => !!c.event !== !!c.segment, 'Set exactly one of event or segment')
+    .refine((c) => !c.entryKey || !!c.event, 'entryKey needs an event trigger'),
   wait: z.object({ duration: Iso }),
   waitEvent: z.object({ event: z.string().min(1).max(200), timeout: Iso }),
+  waitUntil: z
+    .object({
+      condition: z
+        .lazy(() => segmentCondition)
+        .describe('A segment condition, evaluated for the person; may reference a segment with { segment: "seg_…" }'),
+      timeout: Iso.describe('The longest wait, at most P90D'),
+      recheck: Iso.default('PT1H').describe('How often the sweeper checks as a fallback, at least PT5M'),
+    })
+    .refine((c) => secondsIn(c.timeout) <= 90 * 86_400, 'timeout is at most P90D')
+    .refine((c) => secondsIn(c.recheck) >= 5 * 60, 'recheck is at least PT5M'),
   goal: z.object({ event: z.string().min(1).max(200), within: Iso }),
   branch: z
     .object({ segment: SegmentRef.optional(), condition: z.unknown().optional().describe('A segment condition, evaluated for the person') })
@@ -156,7 +200,7 @@ function checkJourneyStructure(nodes: z.output<typeof journeyNode>[], ctx: z.Ref
       ctx.addIssue({ code: 'custom', path: ['nodes', index, 'next'], message: `Branch "${n.id}" needs two edges: [yes, no]` });
     if (n.kind === 'action' && edges > 2)
       ctx.addIssue({ code: 'custom', path: ['nodes', index, 'next'], message: `Action "${n.id}" has at most two edges: [ok, error]` });
-    if ((n.kind === 'waitEvent' || n.kind === 'goal') && edges > 2)
+    if ((n.kind === 'waitEvent' || n.kind === 'waitUntil' || n.kind === 'goal') && edges > 2)
       ctx.addIssue({ code: 'custom', path: ['nodes', index, 'next'], message: `"${n.id}" has at most two edges: [matched, timeout]` });
   });
   const triggers = nodes.filter((n) => n.kind === 'trigger').length;
@@ -1066,7 +1110,13 @@ export type Purposes = z.output<typeof purposes>['purposes'];
 
 export const artifactTypes = {
   note: { prefix: 'not', label: 'Note', description: 'Free-form note, used to exercise the artifact system.', content: note },
-  journey: { prefix: 'jrn', label: 'Journey', description: 'A customer journey graph: trigger, steps and branches.', content: journey },
+  journey: {
+    prefix: 'jrn',
+    label: 'Journey',
+    description:
+      'A customer journey graph: trigger, steps and branches. waitUntil holds a person until a segment condition matches (checked on their events and segment changes, with a sweeper recheck and a bounded timeout) and continues on [matched, timeout]; event triggers may choose entryKey {source: "event_property", property: "order_id"} so a business key, not the ingestion message id, decides re-entry and duplicate suppression.',
+    content: journey,
+  },
   email_block: {
     prefix: 'blk',
     label: 'E-mail block',

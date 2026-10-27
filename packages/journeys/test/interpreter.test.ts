@@ -21,23 +21,33 @@ const welcome = compile({
     { id: 'x', kind: 'exit', label: 'Done', config: {} },
   ],
 });
-const fresh: ParticipantState = { node: 't', status: 'ready', seq: 0, dueAt: null, waitingEvent: null, matched: false, converted: false };
+const fresh: ParticipantState = {
+  node: 't',
+  status: 'ready',
+  seq: 0,
+  dueAt: null,
+  waitingEvent: null,
+  waitingUntil: null,
+  matched: false,
+  converted: false,
+};
 const t0 = new Date('2026-10-22T10:00:00Z');
+const env = { key: '1', branch: async () => false, condition: async () => false };
 
 describe('journey interpreter', () => {
   it('runs until a wait, with keyed side effects', async () => {
-    const out = await advance(welcome, fresh, t0, { key: '1', branch: async () => false });
+    const out = await advance(welcome, fresh, t0, env);
     expect(out.effects).toEqual([{ kind: 'email', node: 'e1', seq: 2, template: tpl(1) }]);
     expect(out.state).toMatchObject({ node: 'w', status: 'waiting', seq: 3, dueAt: new Date('2026-10-24T10:00:00Z') });
   });
 
   it('resumes after the timer, branches, and waits for the goal', async () => {
-    const waiting = (await advance(welcome, fresh, t0, { key: '1', branch: async () => false })).state;
-    const out = await advance(welcome, waiting, new Date('2026-10-24T10:00:00Z'), { key: '1', branch: async () => true });
+    const waiting = (await advance(welcome, fresh, t0, env)).state;
+    const out = await advance(welcome, waiting, new Date('2026-10-24T10:00:00Z'), { ...env, branch: async () => true });
     expect(out.effects.map((e) => e.node)).toEqual(['e2']);
     expect(out.state).toMatchObject({ node: 'g', status: 'waiting', waitingEvent: 'Order Completed' });
     const converted = await advance(welcome, { ...out.state, matched: true }, new Date('2026-10-25T10:00:00Z'), {
-      key: '1',
+      ...env,
       branch: async () => true,
     });
     expect(converted.state).toMatchObject({ status: 'exited', converted: true, node: 'x' });
@@ -45,8 +55,8 @@ describe('journey interpreter', () => {
   });
 
   it('re-running the same step yields the same effect keys (idempotent sends)', async () => {
-    const a = await advance(welcome, fresh, t0, { key: '7', branch: async () => false });
-    const b = await advance(welcome, fresh, t0, { key: '7', branch: async () => false });
+    const a = await advance(welcome, fresh, t0, env);
+    const b = await advance(welcome, fresh, t0, env);
     expect(a.effects).toEqual(b.effects);
   });
 

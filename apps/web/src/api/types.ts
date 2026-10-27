@@ -47,6 +47,7 @@ export type NodeKind =
   | 'trigger'
   | 'wait'
   | 'waitEvent'
+  | 'waitUntil'
   | 'branch'
   | 'split'
   | 'email'
@@ -65,7 +66,7 @@ export interface JourneyNode {
   id: string;
   kind: NodeKind;
   label: string;
-  config: Record<string, string | number | boolean>;
+  config: Record<string, unknown>;
   position: { x: number; y: number };
   stats?: { entered: number; active: number };
 }
