@@ -29,6 +29,8 @@ const ROUTES: { path: string; page: Page; needs?: string[] }[] = [
 
   { path: '/design/templates', page: p(() => import('../pages/design/TemplatesPage')), needs: ['artifacts:read'] },
   { path: '/design/templates/:id', page: p(() => import('../pages/design/TemplatePage')), needs: ['artifacts:read'] },
+  { path: '/design/blocks', page: p(() => import('../pages/design/BlocksPage')), needs: ['artifacts:read'] },
+  { path: '/design/blocks/:id', page: p(() => import('../pages/design/BlockPage')), needs: ['artifacts:read'] },
   { path: '/design/assets', page: p(() => import('../pages/design/AssetsPage')), needs: ['artifacts:read'] },
   { path: '/design/hosted-pages', page: p(() => import('../pages/design/HostedPagesPage')), needs: ['artifacts:read'] },
   { path: '/design/brand', page: p(() => import('../pages/design/BrandPage')), needs: ['artifacts:read'] },

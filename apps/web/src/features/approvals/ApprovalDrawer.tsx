@@ -8,6 +8,7 @@ import { useWorkspace } from '../../app/session';
 import { useApi } from '../../app/useApi';
 import { Alert, Button, DiffView, Drawer, Field, JsonView, LoadingBlock, Meta, StatusPill, Tabs, Textarea, formatDateTime, timeAgo, useToast } from '../../ui';
 import { invalidateArtifact } from '../artifactCache';
+import { BlockUsage } from '../blocks/BlockUsage';
 import { ArtifactPreview } from '../previews/ArtifactPreview';
 import { RequesterView } from './requester';
 import { markViewed } from './viewed';
@@ -217,6 +218,7 @@ export function ApprovalDrawer({ id, queue, onClose, onDecided }: { id: string; 
               </ol>
             </section>
           )}
+          {a.artifactType === 'email_block' && <BlockUsage artifactId={a.artifactId} />}
           {stale && (
             <Alert tone="warn" title={`A newer draft (v${a.artifactLatestVersion}) exists`}>
               Approving publishes version {a.version}, the one shown here. The newer draft stays a draft.

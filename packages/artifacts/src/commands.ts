@@ -12,6 +12,7 @@ import {
   contentValidators,
   draftContentSchemas,
   publishValidators,
+  referencesOf,
 } from './types';
 
 // Generic, versioned artifacts with a configurable approval pipeline (journeys-and-editors.md §5).
@@ -474,6 +475,9 @@ export const getArtifact = defineCommand({
     publishedVersion: z.number().int().nullable(),
     version: VersionSummary.extend({ content: z.unknown() }),
     layout: LayoutSchema.nullable().describe('Saved canvas layout, when a person has moved steps; otherwise null'),
+    references: z
+      .array(z.string())
+      .describe('Ids this version refers to, e.g. the block ids an e-mail template uses; empty for most types'),
   }),
   permission: 'artifacts:read',
   effect: 'read',
@@ -498,6 +502,7 @@ export const getArtifact = defineCommand({
             updatedBy: layout.updatedBy,
           }
         : null,
+      references: referencesOf(a.type, v.content),
     };
   },
 });

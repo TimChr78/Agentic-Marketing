@@ -286,13 +286,55 @@ const purposes = z.object({
       }
     }),
 });
+// Reusable e-mail blocks (#73): a fragment of MJML that templates include with
+// {% block 'blk_…', key: value %}. Parameters are typed so a block can be reused across issues
+// without flattening the layout into every template.
+const BlockParam = z.object({
+  key: z
+    .string()
+    .regex(/^[a-z][a-z0-9_]{0,30}$/)
+    .describe('Used in the block as {{ block.<key> }}'),
+  label: z.string().min(1).max(120).describe('Shown next to the value when a person fills it in'),
+  type: z.enum(['text', 'url', 'image', 'color', 'html']).describe('html is inserted raw; the others are escaped'),
+  required: z.boolean().default(false),
+  default: z.string().max(5000).optional().describe('Used when the template does not pass the parameter'),
+  maxLength: z.number().int().min(1).max(5000).optional(),
+});
+const emailBlock = z
+  .object({
+    description: z.string().max(1000).optional(),
+    category: z.enum(['header', 'footer', 'section', 'cta', 'legal', 'other']),
+    mjml: z
+      .string()
+      .min(1)
+      .max(100_000)
+      .describe(
+        "An MJML fragment (mj-section/mj-column), not a whole <mjml> document. Parameters are Liquid under block.*, e.g. {{ block.title }}; profile.*, unsubscribe_url and the other template variables also work. Use it in a template with {% block 'blk_…', title: 'This week' %}. Blocks cannot use other blocks in v1.",
+      ),
+    params: z.array(BlockParam).max(50).default([]),
+  })
+  .superRefine((b, ctx) => {
+    const keys = new Set<string>();
+    for (const p of b.params) {
+      if (keys.has(p.key)) ctx.addIssue({ code: 'custom', message: `Duplicate parameter key "${p.key}"` });
+      keys.add(p.key);
+    }
+    if (/<mjml[\s>]/i.test(b.mjml)) ctx.addIssue({ code: 'custom', message: 'A block is an MJML fragment, not a whole <mjml> document' });
+  });
+
 const emailTemplate = z.object({
   purpose: Key.describe(
     'Purpose key, e.g. "marketing_email" or "onboarding"; decides the lawful basis and whether an unsubscribe link is required',
   ),
   subject: z.string().min(1).max(300).describe('Liquid, e.g. "Welcome, {{ profile.firstName | default: \'friend\' }}"'),
   preheader: z.string().max(300).optional().describe('Preview text shown after the subject in inboxes'),
-  mjml: z.string().min(1).max(300_000).describe('MJML with Liquid. Variables: profile.*, event.*, unsubscribe_url, preferences_url'),
+  mjml: z
+    .string()
+    .min(1)
+    .max(300_000)
+    .describe(
+      "MJML with Liquid. Variables: profile.*, event.*, unsubscribe_url, preferences_url. Reusable blocks: {% block 'blk_…', key: value %}.",
+    ),
   text: z.string().max(100_000).optional().describe('Plain-text part (Liquid). Generated from the HTML when omitted'),
   sampleData: z.record(z.string(), z.unknown()).optional().describe('Example variables for previews, e.g. {"profile":{"firstName":"Ada"}}'),
   utm: z
@@ -888,11 +930,20 @@ export type PromptDefinition = z.output<typeof prompt>;
 export type ExperienceDefinition = z.output<typeof experience>;
 export type SegmentDefinition = z.output<typeof segment>;
 export type EmailTemplate = z.output<typeof emailTemplate>;
+export type EmailBlock = z.output<typeof emailBlock>;
+export type EmailBlockParam = z.output<typeof BlockParam>;
 export type Purposes = z.output<typeof purposes>['purposes'];
 
 export const artifactTypes = {
   note: { prefix: 'not', label: 'Note', description: 'Free-form note, used to exercise the artifact system.', content: note },
   journey: { prefix: 'jrn', label: 'Journey', description: 'A customer journey graph: trigger, steps and branches.', content: journey },
+  email_block: {
+    prefix: 'blk',
+    label: 'E-mail block',
+    description:
+      "A reusable MJML fragment with typed parameters, e.g. a header, footer or CTA. Templates include its published version with {% block 'blk_…', key: value %}; parameters are Liquid under block.* (html values are inserted raw, others escaped). Preview it with blocks.preview; see where it is used with blocks.usage. A template can be published only when its blocks are published; submit a new block and its template together with artifacts.requestPublishBundle.",
+    content: emailBlock,
+  },
   email_template: {
     prefix: 'eml',
     label: 'E-mail template',
@@ -1117,4 +1168,15 @@ export const contentValidators = new Map<ArtifactType, ContentValidator>();
 /** Checks that only apply to publishing (a draft may be unfinished), e.g. referenced templates exist. */
 export type PublishValidator = (content: unknown, tx: import('@agentic-marketing/db').Tx) => Promise<string[]>;
 export const publishValidators = new Map<ArtifactType, PublishValidator>();
+
+/**
+ * Ids an artifact's content refers to, for display in artifacts.get (e.g. the blocks an e-mail
+ * template uses) and for checks that need no database. Registered by the package that owns the
+ * content language, so this package stays free of e-mail specifics.
+ */
+export type ReferenceExtractor = (content: unknown) => string[];
+export const referenceExtractors = new Map<ArtifactType, ReferenceExtractor>();
+export function referencesOf(type: string, content: unknown): string[] {
+  return referenceExtractors.get(type as ArtifactType)?.(content) ?? [];
+}
 export type JourneyDefinition = z.output<typeof journey>;
