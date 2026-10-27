@@ -27,6 +27,11 @@ export interface EmailServices {
   adapterDeps: AdapterDeps;
   /** Click tracking (on by default, ADR: clicks on, open pixels off). */
   trackClicks: boolean;
+  /**
+   * One request under the egress policy, for templates.check link reachability: HEAD, or a ranged
+   * GET. Wired by the server so the checks never open a socket of their own.
+   */
+  checkLinks?: (url: string, method: 'HEAD' | 'GET') => Promise<{ status: number }>;
 }
 
 declare module '@agentic-marketing/commands' {

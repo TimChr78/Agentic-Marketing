@@ -16,7 +16,7 @@ import { emailRoutes, linkSigner, pushRoutes } from '@agentic-marketing/email';
 import { clickHouseStore, lazyNatsBus } from '@agentic-marketing/events';
 import { valkeyHotState } from '@agentic-marketing/hotstate';
 import { ingestApi } from '@agentic-marketing/ingest';
-import { egressFetch, egressHttp2, inboundApi, oauthRoutes } from '@agentic-marketing/integrations';
+import { egressFetch, egressHttp2, inboundApi, oauthRoutes, safeRequest } from '@agentic-marketing/integrations';
 import { decideApi, edgeMirror } from '@agentic-marketing/personalize';
 import { refreshPeople } from '@agentic-marketing/segments';
 import { logger } from '@agentic-marketing/telemetry';
@@ -66,6 +66,17 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
     // Provider adapters reach the outside world through the egress guard too.
     adapterDeps: { fetch: egressFetch(config.egress), http2: egressHttp2(config.egress) },
     trackClicks: config.trackClicks,
+    // Pre-send link checks use the same guard as webhooks: no redirects, private addresses refused
+    // unless EGRESS_ALLOWED_HOSTS allows them, and a five second ceiling per link.
+    checkLinks: async (url: string, method: 'HEAD' | 'GET') => ({
+      status: (
+        await safeRequest(
+          url,
+          { method, headers: method === 'GET' ? { range: 'bytes=0-0' } : {}, timeoutMs: 5000, maxBytes: 4096 },
+          config.egress,
+        )
+      ).status,
+    }),
   };
   const executor = createExecutor(
     db,

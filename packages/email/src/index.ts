@@ -1,4 +1,5 @@
 export * from './adapters';
+export * from './checks';
 export * from './deliverability';
 export * from './gateway';
 export * from './links';

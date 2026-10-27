@@ -3,6 +3,7 @@ import { useState } from 'react';
 import { api } from '../../app/api';
 import { useApi } from '../../app/useApi';
 import { Alert, CodeView, LoadingBlock, Meta, Segmented, Tabs } from '../../ui';
+import { ChecksPanel } from './ChecksPanel';
 
 /** Wraps rendered e-mail HTML so links open outside the sandboxed preview. */
 export function emailDoc(html: string) {
@@ -44,6 +45,7 @@ export function EmailPreview({ artifactId, version, compact }: { artifactId: str
           </ul>
         </Alert>
       )}
+      <ChecksPanel artifactId={artifactId} version={version} />
       <div className="flex flex-wrap items-center justify-between gap-2">
         <Tabs
           label="Version"
