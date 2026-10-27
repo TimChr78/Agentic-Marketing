@@ -485,6 +485,40 @@ export const segmentMemberships = pgTable(
   (t) => [primaryKey({ columns: [t.workspaceId, t.segmentId, t.profileId] })],
 );
 
+/** Static list membership: the source of truth that is copied into segment_memberships on change (#83). */
+export const segmentListMembers = pgTable(
+  'segment_list_members',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    segmentId: text('segment_id').notNull(),
+    profileId: text('profile_id').notNull(),
+    addedAt: ts('added_at').notNull().defaultNow(),
+    addedBy: text('added_by'),
+    source: text('source').$type<'manual' | 'api' | 'csv' | 'snapshot'>().notNull().default('manual'),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.segmentId, t.profileId] })],
+);
+
+/** Provenance of list changes. `unmatched` holds row numbers and reasons only, never personal data. */
+export const segmentListImports = pgTable(
+  'segment_list_imports',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    segmentId: text('segment_id').notNull(),
+    fileName: text('file_name'),
+    fileSha256: text('file_sha256'),
+    rows: integer('rows').notNull(),
+    matched: integer('matched').notNull(),
+    added: integer('added').notNull(),
+    unmatched: jsonb('unmatched').$type<{ row: number; reason: string }[]>().notNull().default([]),
+    actor: text('actor'),
+    source: text('source').$type<'csv' | 'snapshot'>().notNull().default('csv'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
 export const segmentRuns = pgTable(
   'segment_runs',
   {
