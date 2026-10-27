@@ -9,6 +9,7 @@ const base: Record<string, string> = {
   experience: '/build/experiences',
   prompt: '/build/prompts',
   email_template: '/design/templates',
+  email_block: '/design/blocks',
 };
 
 export function artifactPath(type: string, id: string): string {
@@ -21,6 +22,7 @@ export const TYPE_LABEL: Record<string, string> = {
   note: 'Note',
   journey: 'Journey',
   email_template: 'E-mail template',
+  email_block: 'E-mail block',
   sms_template: 'SMS template',
   push_template: 'Push template',
   segment: 'Segment',

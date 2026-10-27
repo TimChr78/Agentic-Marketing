@@ -5,6 +5,7 @@ import { schema } from '@agentic-marketing/db';
 import { profileForMessage } from '@agentic-marketing/profiles';
 import { and, desc, eq } from 'drizzle-orm';
 import { z } from 'zod';
+import { blockResolver } from './blocks';
 import { renderTemplate, validateTemplate } from './render';
 import { sendTestMessages, testRecipientsInput, testSendOutput } from './testSend';
 
@@ -61,7 +62,7 @@ export const previewTemplate = defineCommand({
       vars = { ...vars, profile: p.vars };
     }
     try {
-      return { version: v.number, ...(await renderTemplate(t, vars)) };
+      return { version: v.number, ...(await renderTemplate(t, vars, { blocks: blockResolver(ctx.tx) })) };
     } catch (e) {
       throw new AppError('invalid_input', `The template could not be rendered with this data: ${(e as Error).message.split('\n')[0]}`);
     }

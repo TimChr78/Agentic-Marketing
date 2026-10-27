@@ -7,6 +7,7 @@ import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, lt, sql } from 'drizzle-orm';
 import { type AdapterDeps, MESSAGE_ID_HEADER } from './adapters';
+import { blockResolver } from './blocks';
 import { applyDeliveryEvents } from './deliveryEvents';
 import { type ClickLink, type LinkSigner, tagLinks, tagTextLinks, trackLinks, type UnsubscribeLink } from './links';
 import { decisionEvent, defer, MAX_ATTEMPTS, retryDelaySeconds } from './outbox';
@@ -228,7 +229,11 @@ async function deliverOne(db: Db, ws: string, id: string, deps: { kp: KeyProvide
     const unsubscribe = `${deps.email.publicUrl}/u/${deps.email.links.sign({ w: ws, p: v.profileId, u: m.purpose, m: m.id } satisfies UnsubscribeLink)}`;
     let rendered: Awaited<ReturnType<typeof renderTemplate>>;
     try {
-      rendered = await renderTemplate(tpl, { ...m.data, profile: v.vars, unsubscribe_url: unsubscribe, preferences_url: unsubscribe });
+      rendered = await renderTemplate(
+        tpl,
+        { ...m.data, profile: v.vars, unsubscribe_url: unsubscribe, preferences_url: unsubscribe },
+        { blocks: blockResolver(tx) },
+      );
     } catch (e) {
       return finish('failed', `render_error: ${(e as Error).message.split('\n')[0]}`);
     }

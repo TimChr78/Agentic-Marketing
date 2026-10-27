@@ -1,4 +1,4 @@
-import { Code2, ImageIcon, Paintbrush } from 'lucide-react';
+import { Blocks, Code2, ImageIcon, Paintbrush } from 'lucide-react';
 import { lazy, Suspense, useMemo, useRef, useState } from 'react';
 import { api } from '../../app/api';
 import { useApi } from '../../app/useApi';
@@ -6,6 +6,7 @@ import { Alert, Button, Field, Input, LoadingBlock, Segmented, Select, Textarea 
 import type { EditorProps } from '../artifacts/ArtifactDetailPage';
 import { JsonEditor } from '../artifacts/JsonEditor';
 import { AssetPicker } from '../assets/AssetPicker';
+import { BlockPicker } from '../blocks/BlockPicker';
 import { imageTag, lostLiquid } from './liquid';
 import type { VisualMjmlHandle } from './VisualMjml';
 
@@ -28,6 +29,7 @@ export interface TemplateContent {
 export function TemplateEditor({ artifact, content, onChange, readOnly, errors }: EditorProps<TemplateContent>) {
   const [mode, setMode] = useState<'visual' | 'code'>('visual');
   const [picking, setPicking] = useState(false);
+  const [pickingBlock, setPickingBlock] = useState(false);
   const purposes = useApi(() => api.call('purposes.list', {}), []);
   const visual = useRef<VisualMjmlHandle>(null);
   const code = useRef<HTMLTextAreaElement>(null);
@@ -48,6 +50,19 @@ export function TemplateEditor({ artifact, content, onChange, readOnly, errors }
     const el = code.current;
     const tag = imageTag(src, alt);
     if (!el) return set({ mjml: `${content.mjml}\n${tag}` });
+    const at = el.selectionStart ?? content.mjml.length;
+    set({ mjml: content.mjml.slice(0, at) + tag + content.mjml.slice(at) });
+  };
+
+  // The visual editor treats the tag as text and may escape it, so insert it in the code view:
+  // switch there and append when the textarea is not mounted yet.
+  const insertTag = (tag: string) => {
+    const el = mode === 'code' ? code.current : null;
+    if (!el) {
+      setMode('code');
+      set({ mjml: `${content.mjml}\n${tag}` });
+      return;
+    }
     const at = el.selectionStart ?? content.mjml.length;
     set({ mjml: content.mjml.slice(0, at) + tag + content.mjml.slice(at) });
   };
@@ -84,9 +99,14 @@ export function TemplateEditor({ artifact, content, onChange, readOnly, errors }
           ]}
         />
         {!readOnly && (
-          <Button size="sm" icon={<ImageIcon size={14} />} onClick={() => setPicking(true)}>
-            Insert image
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            <Button size="sm" icon={<Blocks size={14} />} onClick={() => setPickingBlock(true)}>
+              Insert block
+            </Button>
+            <Button size="sm" icon={<ImageIcon size={14} />} onClick={() => setPicking(true)}>
+              Insert image
+            </Button>
+          </div>
         )}
       </div>
       {lost.length > 0 && (
@@ -141,6 +161,7 @@ export function TemplateEditor({ artifact, content, onChange, readOnly, errors }
           }}
         />
       )}
+      {pickingBlock && <BlockPicker onClose={() => setPickingBlock(false)} onPick={insertTag} />}
     </div>
   );
 }

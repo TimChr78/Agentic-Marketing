@@ -7,6 +7,7 @@ import { logger } from '@agentic-marketing/telemetry';
 import { and, eq } from 'drizzle-orm';
 import { z } from 'zod';
 import { MESSAGE_ID_HEADER } from './adapters';
+import { blockResolver } from './blocks';
 import { tagLinks, tagTextLinks } from './links';
 import { transportFor } from './providers';
 import { renderTemplate } from './render';
@@ -171,13 +172,17 @@ export async function sendTestMessages(ctx: CommandContext, opts: TestSendOption
 
       let rendered: Awaited<ReturnType<typeof renderTemplate>>;
       try {
-        rendered = await renderTemplate(opts.template, {
-          ...(opts.template.sampleData ?? {}),
-          profile: person?.vars ?? {},
-          unsubscribe_url: noop,
-          preferences_url: noop,
-          confirm_url: `${ctx.services.email.publicUrl}/f/confirm/test`,
-        });
+        rendered = await renderTemplate(
+          opts.template,
+          {
+            ...(opts.template.sampleData ?? {}),
+            profile: person?.vars ?? {},
+            unsubscribe_url: noop,
+            preferences_url: noop,
+            confirm_url: `${ctx.services.email.publicUrl}/f/confirm/test`,
+          },
+          { blocks: blockResolver(ctx.tx) },
+        );
       } catch (e) {
         const reason = `render_error: ${(e as Error).message.split('\n')[0]}`;
         await ctx.tx

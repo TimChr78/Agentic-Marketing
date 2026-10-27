@@ -6,6 +6,7 @@ import { audienceCommands } from '@agentic-marketing/audience';
 import { listSsoProviders, memberCommands, scimCommands, tokenCommands } from '@agentic-marketing/auth';
 import type { AnyCommand } from '@agentic-marketing/commands';
 import {
+  blockCommands,
   deliverabilityCommands,
   messageCommands,
   providerCommands,
@@ -31,6 +32,7 @@ export const commands = [
   ...configCommands,
   ...warehouseCommands,
   ...templateCommands,
+  ...blockCommands,
   ...messageCommands,
   ...providerCommands,
   ...deliverabilityCommands,

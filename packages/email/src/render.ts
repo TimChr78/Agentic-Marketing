@@ -1,15 +1,46 @@
 /// <reference path="./mjml.d.ts" />
-import type { EmailTemplate } from '@agentic-marketing/artifacts';
+import type { EmailBlockParam, EmailTemplate } from '@agentic-marketing/artifacts';
 import { convert } from 'html-to-text';
-import { Liquid } from 'liquidjs';
+import { type Context, Hash, Liquid, Tag, type TagToken, type TopLevelToken, toPromise } from 'liquidjs';
 import mjml2html from 'mjml';
+import { isAllowedBlockUrl, parseBlockTagArgs } from './blockTags';
 
 // Rendering (ADR-0006): Liquid first, then MJML → HTML, then a text part. Liquid runs sandboxed:
 // no file system, no includes, bounded time and output, and every value is HTML-escaped unless
 // the template says `| raw`. MJML includes are disabled for the same reason.
 
+/** An `html` block parameter: inserted as-is, unlike every other value. */
+class RawHtml {
+  constructor(readonly value: string) {}
+}
+
+const ESCAPES: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+function escapeOutput(value: unknown): string {
+  if (value instanceof RawHtml) return value.value;
+  if (value === null || value === undefined) return '';
+  if (Array.isArray(value)) return value.map(escapeOutput).join('');
+  return String(value).replace(/[&<>"']/g, (c) => ESCAPES[c]!);
+}
+
+/** A block as the renderer needs it: the published fragment and its parameter schema. */
+export interface BlockDefinition {
+  id: string;
+  mjml: string;
+  params: EmailBlockParam[];
+}
+export type BlockResolver = (id: string) => Promise<BlockDefinition | null> | BlockDefinition | null;
+export interface RenderOptions {
+  /** Where {% block … %} looks up published blocks; without it the tag is a render error. */
+  blocks?: BlockResolver;
+}
+
+// Scope keys that must stay invisible to templates, so a block cannot reach the resolver or
+// call itself through one.
+const BLOCK_RESOLVER = Symbol('blockResolver');
+const IN_BLOCK = Symbol('inBlock');
+
 const engine = new Liquid({
-  outputEscape: 'escape',
+  outputEscape: escapeOutput,
   strictFilters: true,
   // Includes and layouts would read files; there are none to read.
   fs: {
@@ -30,6 +61,77 @@ const engine = new Liquid({
 });
 // `raw` keeps a value unescaped, e.g. a URL that is already safe HTML.
 engine.registerFilter('raw', (v: unknown) => v);
+
+/**
+ * Values pass the block's type checks before Liquid sees them: required ones must be there, URL
+ * and image parameters must be http(s) or asset links, and html is marked for raw insertion.
+ */
+function blockScope(block: BlockDefinition, passed: Record<string, unknown>): Record<string, string | RawHtml> {
+  const declared = new Map(block.params.map((p) => [p.key, p]));
+  for (const key of Object.keys(passed))
+    if (!declared.has(key))
+      throw new Error(`Block ${block.id} has no parameter "${key}". It accepts ${[...declared.keys()].join(', ') || 'no parameters'}.`);
+  const out: Record<string, string | RawHtml> = {};
+  for (const p of block.params) {
+    const raw = passed[p.key] ?? p.default;
+    if (raw === undefined || raw === null || raw === '') {
+      if (p.required) throw new Error(`Block ${block.id} needs the parameter "${p.key}"${p.label ? ` (${p.label})` : ''}.`);
+      out[p.key] = p.type === 'html' ? new RawHtml('') : '';
+      continue;
+    }
+    const value = String(raw);
+    if (p.maxLength && value.length > p.maxLength)
+      throw new Error(`Block ${block.id}: "${p.key}" is longer than ${p.maxLength} characters.`);
+    if ((p.type === 'url' || p.type === 'image') && !isAllowedBlockUrl(value))
+      throw new Error(`Block ${block.id}: "${p.key}" must be an http(s) or asset URL, not "${value.slice(0, 80)}".`);
+    out[p.key] = p.type === 'html' ? new RawHtml(value) : value;
+  }
+  return out;
+}
+
+/** `{% block 'blk_…', title: 'This week' %}` inlines the block's published MJML at render time. */
+class BlockTag extends Tag {
+  private readonly id: string;
+  private readonly hash: Hash | null;
+  constructor(token: TagToken, remainTokens: TopLevelToken[], liquid: Liquid) {
+    super(token, remainTokens, liquid);
+    const parsed = parseBlockTagArgs(token.args);
+    this.id = parsed.id;
+    this.hash = parsed.params ? new Hash(parsed.params) : null;
+  }
+  render(ctx: Context) {
+    return (async () => {
+      const env = ctx.environments as Record<PropertyKey, unknown>;
+      if (env[IN_BLOCK]) throw new Error('Blocks cannot use other blocks in v1.');
+      const resolve = env[BLOCK_RESOLVER] as BlockResolver | undefined;
+      if (!resolve) throw new Error(`Block ${this.id} cannot be rendered here: blocks are not available.`);
+      const block = await resolve(this.id);
+      if (!block) throw new Error(`Block ${this.id} is not published or does not exist. Publish it before the templates that use it.`);
+      const passed = this.hash ? ((await toPromise(this.hash.render(ctx))) as Record<string, unknown>) : {};
+      const scope = { ...ctx.environments, block: blockScope(block, passed), [IN_BLOCK]: true };
+      return await engine.parseAndRender(block.mjml, scope);
+    })();
+  }
+}
+engine.registerTag('block', BlockTag);
+
+/** The MJML of a block with its params and normal variables resolved; used by blocks.preview. */
+export async function renderBlockFragment(block: BlockDefinition, params: Record<string, unknown>, vars: RenderVars = {}): Promise<string> {
+  const scope = { ...vars, block: blockScope(block, params), [IN_BLOCK]: true };
+  return (await engine.parseAndRender(block.mjml, scope)) as string;
+}
+
+/** Same as renderBlockFragment, for the synchronous save-time validator. */
+export function renderBlockFragmentSync(block: BlockDefinition, params: Record<string, unknown>, vars: RenderVars = {}): string {
+  const scope = { ...vars, block: blockScope(block, params), [IN_BLOCK]: true };
+  return engine.parseAndRenderSync(block.mjml, scope) as string;
+}
+
+/** MJML → HTML with our asset URL fix; shared by templates and block previews. */
+export function compileMjml(mjml: string): { html: string; warnings: string[] } {
+  const out = mjml2html(mjml, { validationLevel: 'soft', ignoreIncludes: true, minify: false });
+  return { html: pngRenditionUrls(out.html), warnings: out.errors.map((e) => `mjml line ${e.line}: ${e.message}`) };
+}
 
 export interface RenderVars {
   profile?: Record<string, unknown>;
@@ -87,8 +189,13 @@ export function validateTemplate(t: EmailTemplate): string[] {
   return problems;
 }
 
-export async function renderTemplate(t: EmailTemplate, vars: RenderVars): Promise<Rendered> {
-  const scope = { unsubscribe_url: PLACEHOLDER_UNSUBSCRIBE, preferences_url: PLACEHOLDER_UNSUBSCRIBE, ...vars };
+export async function renderTemplate(t: EmailTemplate, vars: RenderVars, options: RenderOptions = {}): Promise<Rendered> {
+  const scope = {
+    unsubscribe_url: PLACEHOLDER_UNSUBSCRIBE,
+    preferences_url: PLACEHOLDER_UNSUBSCRIBE,
+    ...vars,
+    ...(options.blocks ? { [BLOCK_RESOLVER]: options.blocks } : {}),
+  };
   const [subject, preheader, mjmlSrc] = await Promise.all([
     engine.parseAndRender(t.subject, scope),
     t.preheader ? engine.parseAndRender(t.preheader, scope) : undefined,
@@ -101,7 +208,7 @@ export async function renderTemplate(t: EmailTemplate, vars: RenderVars): Promis
           m === '<mj-head>' ? `${m}<mj-preview>${preheader}</mj-preview>` : `<mj-head><mj-preview>${preheader}</mj-preview></mj-head>${m}`,
         )
       : mjmlSrc;
-  const out = mjml2html(withPreview, { validationLevel: 'soft', ignoreIncludes: true, minify: false });
+  const out = compileMjml(withPreview);
   const text = t.text
     ? await engine.parseAndRender(t.text, scope)
     : convert(out.html, {
@@ -114,9 +221,8 @@ export async function renderTemplate(t: EmailTemplate, vars: RenderVars): Promis
   return {
     subject: subject.replace(/\s+/g, ' ').trim(),
     preheader: preheader?.trim() || undefined,
-    // The brand logo and template images are assets too; SVG ones must travel as PNG.
-    html: pngRenditionUrls(out.html),
+    html: out.html,
     text: pngRenditionUrls(text).trim(),
-    warnings: out.errors.map((e) => `mjml line ${e.line}: ${e.message}`),
+    warnings: out.warnings,
   };
 }
