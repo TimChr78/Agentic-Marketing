@@ -46,6 +46,8 @@ export interface BusEvent {
   name: string;
   anonymousId: string;
   userId: string;
+  /** Resolved from the identifier at ingest, when the person is known. Empty for anonymous traffic. */
+  profileId?: string;
   /** When it happened, corrected for client clock skew. */
   timestamp: string;
   receivedAt: string;

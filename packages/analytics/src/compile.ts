@@ -21,6 +21,17 @@ export interface NormalizedFilters {
   variant?: string[];
   name?: string[];
   segment?: string[];
+  campaign?: string[];
+}
+
+/**
+ * The published campaigns' sending members, resolved in Postgres and passed to ClickHouse as
+ * arrays. `memberCampaignIds[i]` is the campaign that owns `memberIds[i]`; both are bounded by
+ * the campaign editor (50 campaigns × 50 members).
+ */
+export interface CampaignMap {
+  memberIds: string[];
+  memberCampaignIds: string[];
 }
 
 export interface BuildInput {
@@ -36,6 +47,7 @@ export interface BuildInput {
   order?: { by: string; dir: 'asc' | 'desc' };
   conversionRules: ConversionRule[];
   conversionNames: string[];
+  campaignMap?: CampaignMap;
 }
 
 export interface Column {
@@ -69,6 +81,8 @@ const SOURCE_TABLE: Record<SourceId, string> = {
   journey_events: 'journey_events',
   events: 'events',
   segment_memberships: 'segment_memberships',
+  // Campaign measures need a join between message_events and events; campaign.ts compiles them.
+  campaign: '',
 };
 
 const TIME_COLUMN: Record<SourceId, string> = {
@@ -76,6 +90,7 @@ const TIME_COLUMN: Record<SourceId, string> = {
   journey_events: 'at',
   events: 'timestamp',
   segment_memberships: '',
+  campaign: '',
 };
 
 const DIMENSION_SQL: Record<SourceId, Partial<Record<DimensionId, string>>> = {
@@ -91,6 +106,9 @@ const DIMENSION_SQL: Record<SourceId, Partial<Record<DimensionId, string>>> = {
     variant: 'variant',
     message_type:
       "multiIf(startsWith(journey_id, 'bct_'), 'broadcast', startsWith(journey_id, 'jrn_'), 'journey', journey_id = '', 'transactional', 'other')",
+    // The campaign map is a pair of parameter arrays; indexOf is 1-based and 0 means "not a
+    // campaign member", which arrayElement turns into the empty string (null in the result).
+    campaign: 'arrayElement({campaign_map_ids:Array(String)}, indexOf({campaign_map_members:Array(String)}, journey_id))',
   },
   journey_events: {
     day: "formatDateTime(toStartOfDay(at, {tz:String}), '%Y-%m-%d')",
@@ -98,6 +116,7 @@ const DIMENSION_SQL: Record<SourceId, Partial<Record<DimensionId, string>>> = {
     month: "formatDateTime(toStartOfMonth(at, {tz:String}), '%Y-%m-%d')",
     journey: 'journey_id',
     journey_step: 'node',
+    campaign: 'arrayElement({campaign_map_ids:Array(String)}, indexOf({campaign_map_members:Array(String)}, journey_id))',
   },
   events: {
     day: "formatDateTime(toStartOfDay(timestamp, {tz:String}), '%Y-%m-%d')",
@@ -107,6 +126,7 @@ const DIMENSION_SQL: Record<SourceId, Partial<Record<DimensionId, string>>> = {
   segment_memberships: {
     segment: 'segment_id',
   },
+  campaign: {},
 };
 
 /** Aggregate sort keys for dimensions where the label alone is not chronological. */
@@ -123,17 +143,23 @@ const FILTER_SQL: Record<SourceId, Partial<Record<keyof NormalizedFilters, strin
     channel: 'channel IN {filter_channel:Array(String)}',
     purpose: 'purpose IN {filter_purpose:Array(String)}',
     variant: 'variant IN {filter_variant:Array(String)}',
+    campaign: 'journey_id IN {filter_campaign:Array(String)}',
   },
-  journey_events: { journey: 'journey_id IN {filter_journey:Array(String)}' },
+  journey_events: {
+    journey: 'journey_id IN {filter_journey:Array(String)}',
+    campaign: 'journey_id IN {filter_campaign:Array(String)}',
+  },
   events: { name: 'name IN {filter_name:Array(String)}' },
   segment_memberships: { segment: 'segment_id IN {filter_segment:Array(String)}' },
+  campaign: {},
 };
 
 export const SOURCE_FILTERS: Record<SourceId, (keyof NormalizedFilters)[]> = {
-  message_events: ['template', 'broadcast', 'journey', 'channel', 'purpose', 'variant'],
-  journey_events: ['journey'],
+  message_events: ['template', 'broadcast', 'journey', 'channel', 'purpose', 'variant', 'campaign'],
+  journey_events: ['journey', 'campaign'],
   events: ['name'],
   segment_memberships: ['segment'],
+  campaign: ['campaign'],
 };
 
 export function dimensionExpression(source: SourceId, dimension: DimensionId): string {
@@ -156,6 +182,10 @@ function baseExpression(base: MeasureDef, valueExpression: string): string {
       return `sum(${valueExpression})`;
     case 'segment_members':
       throw new Error('segment membership is read from Postgres, not ClickHouse');
+    case 'campaign_recipients':
+    case 'campaign_converters':
+    case 'campaign_revenue':
+      throw new Error(`${base.id} is compiled by the campaign query builder`);
   }
 }
 
@@ -165,7 +195,7 @@ function kExpression(source: SourceId): string {
 }
 
 /** Value and currency expressions for the conversion map's rules, with their parameters. */
-function revenueExpressions(rules: ConversionRule[], params: Record<string, unknown>): { value: string; currency: string } {
+export function revenueExpressions(rules: ConversionRule[], params: Record<string, unknown>): { value: string; currency: string } {
   // One rule per event: a conversion event must not be counted twice when the map sends it to
   // several ad platforms.
   const byEvent = new Map<string, ConversionRule>();
@@ -215,6 +245,12 @@ export function buildQuery(input: BuildInput): CompiledQuery {
   const timeColumn = TIME_COLUMN[source];
   const revenue = measures.some((m) => m.id === 'revenue');
   const conversion = revenueExpressions(input.conversionRules, params);
+
+  // Campaign ids never travel as SQL text: the map is a pair of bounded Array(String) parameters.
+  if (dimensions.includes('campaign') || input.filters.campaign?.length) {
+    params.campaign_map_members = input.campaignMap?.memberIds ?? [];
+    params.campaign_map_ids = input.campaignMap?.memberCampaignIds ?? [];
+  }
 
   // Base measures are aggregated in the inner query, whether or not the caller asked for them:
   // ratios need their numerator and denominator after aggregation, never an average of ratios.
@@ -277,7 +313,8 @@ export function buildQuery(input: BuildInput): CompiledQuery {
   for (const key of SOURCE_FILTERS[source]) {
     const values = input.filters[key];
     if (!values?.length) continue;
-    params[`filter_${key}`] = values;
+    // The filter names campaigns; ClickHouse filters on their sending members, never on cmp_ ids.
+    params[`filter_${key}`] = key === 'campaign' ? (input.campaignMap?.memberIds ?? []) : values;
     where.push(FILTER_SQL[source][key] as string);
   }
   if (source === 'events') {

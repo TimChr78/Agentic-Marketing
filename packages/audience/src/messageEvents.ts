@@ -17,6 +17,51 @@ export const EMAIL_EVENTS: Partial<Record<MessageEvent['type'], string>> = {
   unsubscribed: 'Email Unsubscribed',
 };
 
+/**
+ * Adds the profile id to raw events before they reach ClickHouse. One lookup per workspace and
+ * batch resolves both identifiers; an unknown person keeps the empty string, so campaign
+ * attribution never guesses. This is what lets a conversion event join the message log.
+ */
+export function withResolvedEventProfiles(store: EventStore, db: Db): EventStore {
+  return {
+    ...store,
+    async insert(events) {
+      if (!events.length) return store.insert(events);
+      const unresolved = new Set(events.flatMap((e, i) => (e.profileId ? [] : [i])));
+      if (!unresolved.size) return store.insert(events);
+
+      const byWorkspace = new Map<string, { userIds: Set<string>; anonymousIds: Set<string> }>();
+      for (const i of unresolved) {
+        const e = events[i]!;
+        const entry = byWorkspace.get(e.workspaceId) ?? { userIds: new Set<string>(), anonymousIds: new Set<string>() };
+        if (e.userId) entry.userIds.add(e.userId);
+        if (e.anonymousId) entry.anonymousIds.add(e.anonymousId);
+        byWorkspace.set(e.workspaceId, entry);
+      }
+
+      const ids = new Map<string, string>();
+      for (const [workspaceId, entry] of byWorkspace) {
+        const { rows } = await db.admin.query<{ type: string; value: string; profile_id: string }>(
+          `SELECT type, value, profile_id FROM identifiers
+           WHERE workspace_id = $1
+             AND ((type = 'user_id' AND value = ANY($2)) OR (type = 'anonymous_id' AND value = ANY($3)))`,
+          [workspaceId, [...entry.userIds], [...entry.anonymousIds]],
+        );
+        for (const row of rows) ids.set(`${workspaceId}:${row.type}:${row.value}`, row.profile_id);
+      }
+
+      const resolved = events.map((e, i) => {
+        if (!unresolved.has(i)) return e;
+        const profileId =
+          (e.userId ? ids.get(`${e.workspaceId}:user_id:${e.userId}`) : undefined) ??
+          (e.anonymousId ? ids.get(`${e.workspaceId}:anonymous_id:${e.anonymousId}`) : undefined);
+        return profileId ? { ...e, profileId } : e;
+      });
+      return store.insert(resolved);
+    },
+  };
+}
+
 /** Wraps an event store so message events are also published to the bus as customer events. */
 export function withEmailProfileEvents(store: EventStore, deps: { db: Db; bus: EventBus }): EventStore {
   const { loadPolicy } = sourceLookups(deps.db);

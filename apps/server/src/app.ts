@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs';
 import { assetRoutes } from '@agentic-marketing/assets';
-import { archiveRoutes, formsApi, withEmailProfileEvents } from '@agentic-marketing/audience';
+import { archiveRoutes, formsApi, withEmailProfileEvents, withResolvedEventProfiles } from '@agentic-marketing/audience';
 import {
   type AuthConfig,
   acceptInvitation,
@@ -56,7 +56,7 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
   const keyProvider = keyProviderFor(config);
   const bus = lazyNatsBus(config.nats);
   // E-mail delivery events also become customer events (segments, journeys, webhooks).
-  const events = withEmailProfileEvents(clickHouseStore(config.clickhouse), { db, bus });
+  const events = withEmailProfileEvents(withResolvedEventProfiles(clickHouseStore(config.clickhouse), db), { db, bus });
   // Snapshot writes also queue for the edge (Workers KV) where a workspace turned it on.
   const hot = edgeMirror(valkeyHotState(config.valkey), db);
   const inputWarnings = createInputWarningRecorder(db);

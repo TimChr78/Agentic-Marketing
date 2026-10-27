@@ -12,12 +12,12 @@ import { checkPushRecipient, checkRecipient, checkSmsRecipient } from '@agentic-
 import type { JourneyEvent } from '@agentic-marketing/events';
 import { consentStateOf, purposeAllowed } from '@agentic-marketing/profiles';
 import { contextFor, durationSeconds, evaluate, publishedSegments } from '@agentic-marketing/segments';
-import { and, desc, eq, gte, inArray, isNotNull, lte, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNotNull, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { matchesCondition } from './conditions';
 import { duplicateEntryKey, resolveEntryKey } from './entry';
 import { compile, unsupported } from './graph';
-import { analyseHoldout, assignHoldout, holdoutHashVersion } from './holdout';
+import { assignHoldout, computeJourneyHoldout, holdoutHashVersion } from './holdout';
 import { advance, type ParticipantState } from './interpreter';
 
 const JourneyId = z.string().regex(/^jrn_[0-9a-f]{32}$/);
@@ -216,78 +216,11 @@ export const journeyHoldoutResult = defineCommand({
   permission: 'artifacts:read',
   effect: 'read',
   target: (i) => i.journeyId,
-  handler: async (input, ctx) => {
-    const [a] = await ctx.tx
-      .select({ publishedVersion: schema.artifacts.publishedVersion })
-      .from(schema.artifacts)
-      .where(eq(schema.artifacts.id, input.journeyId));
-    if (!a) throw new AppError('not_found', `No journey ${input.journeyId}.`);
-    if (!a.publishedVersion)
-      throw new AppError('not_found', `Journey ${input.journeyId} has no published version; publish it before measuring uplift.`);
-    const { def } = await loadDefinition(ctx.tx, input.journeyId, a.publishedVersion);
-    const cg = def.controlGroup;
-    if (!cg)
-      throw new AppError(
-        'invalid_input',
-        'This journey has no control group. Set controlGroup {percent} and publish it to measure uplift.',
-      );
-
-    const ws = ctx.principal.workspaceId;
-    const hashVersion = holdoutHashVersion(cg.percent);
-    const from = input.from ? new Date(input.from) : undefined;
-    const to = input.to ? new Date(input.to) : undefined;
-    const assignments = await ctx.tx
-      .select({ profileId: schema.holdoutAssignments.profileId, arm: schema.holdoutAssignments.arm })
-      .from(schema.holdoutAssignments)
-      .where(
-        and(
-          eq(schema.holdoutAssignments.workspaceId, ws),
-          eq(schema.holdoutAssignments.scopeType, 'journey'),
-          eq(schema.holdoutAssignments.scopeId, input.journeyId),
-          eq(schema.holdoutAssignments.hashVersion, hashVersion),
-          from ? gte(schema.holdoutAssignments.assignedAt, from) : undefined,
-          to ? lte(schema.holdoutAssignments.assignedAt, to) : undefined,
-        ),
-      );
-    const counts = {
-      control: { entered: 0, converted: 0, unsubscribed: 0 },
-      treatment: { entered: 0, converted: 0, unsubscribed: 0 },
-    };
-    const people = { control: new Set<string>(), treatment: new Set<string>() };
-    for (const row of assignments) {
-      counts[row.arm].entered++;
-      people[row.arm].add(row.profileId);
-    }
-    // Outcomes come from ClickHouse (the journey's goal events and the e-mail unsubscribe
-    // guardrail), joined in code to the Postgres assignments. The event store applies the row
-    // policies through settingsFor, so a query never crosses workspaces.
-    const outcomes = await ctx.services.events.journeyHoldoutOutcomes(ws, { journeyId: input.journeyId, from, to });
-    const converted = new Set(outcomes.converted);
-    const unsubscribed = new Set(outcomes.unsubscribed);
-    for (const arm of ['control', 'treatment'] as const) {
-      for (const profileId of people[arm]) {
-        if (converted.has(profileId)) counts[arm].converted++;
-        if (unsubscribed.has(profileId)) counts[arm].unsubscribed++;
-      }
-    }
-    const analysis = analyseHoldout(counts.control, counts.treatment, cg.minSampleSize);
-    const note =
-      analysis.verdict === 'not_enough_data'
-        ? `Need at least ${cg.minSampleSize} people in each arm; ${counts.control.entered} control and ${counts.treatment.entered} treatment so far.`
-        : analysis.verdict === 'no_clear_difference'
-          ? 'The 95% interval for the difference includes zero, so the journey has not shown a clear effect yet.'
-          : analysis.verdict === 'treatment_better'
-            ? 'Treatment converted at a higher rate and the 95% interval excludes zero; the journey looks incremental.'
-            : 'Treatment converted at a lower rate and the 95% interval excludes zero; the journey looks harmful.';
-    return {
-      journeyId: input.journeyId,
-      controlGroup: { percent: cg.percent, minSampleSize: cg.minSampleSize, hashVersion },
-      from: input.from ?? null,
-      to: input.to ?? null,
-      ...analysis,
-      note,
-    };
-  },
+  handler: async (input, ctx) =>
+    computeJourneyHoldout({ tx: ctx.tx, events: ctx.services.events, workspaceId: ctx.principal.workspaceId }, input.journeyId, {
+      ...(input.from ? { from: input.from } : {}),
+      ...(input.to ? { to: input.to } : {}),
+    }),
 });
 
 export const enrollProfiles = defineCommand({

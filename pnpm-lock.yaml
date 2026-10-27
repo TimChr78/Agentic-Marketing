@@ -328,6 +328,9 @@ importers:
       '@agentic-marketing/artifacts':
         specifier: workspace:*
         version: link:../artifacts
+      '@agentic-marketing/campaigns':
+        specifier: workspace:*
+        version: link:../campaigns
       '@agentic-marketing/commands':
         specifier: workspace:*
         version: link:../commands
@@ -340,6 +343,9 @@ importers:
       '@agentic-marketing/events':
         specifier: workspace:*
         version: link:../events
+      '@agentic-marketing/journeys':
+        specifier: workspace:*
+        version: link:../journeys
       '@agentic-marketing/telemetry':
         specifier: workspace:*
         version: link:../telemetry

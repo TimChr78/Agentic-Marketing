@@ -175,6 +175,7 @@ const toRow = (e: BusEvent) => ({
   name: e.name,
   anonymous_id: e.anonymousId,
   user_id: e.userId,
+  profile_id: e.profileId ?? '',
   properties: e.properties,
   traits: e.traits,
   context: e.context,

@@ -3,7 +3,8 @@
 // the UI offer comes from here; the compiler refuses anything that is not in this file.
 
 export type Unit = 'count' | 'ratio' | 'currency';
-export type SourceId = 'message_events' | 'journey_events' | 'events' | 'segment_memberships';
+/** `campaign` is a virtual source: its measures join message events to attributed conversion events. */
+export type SourceId = 'message_events' | 'journey_events' | 'events' | 'segment_memberships' | 'campaign';
 export type DimensionId =
   | 'day'
   | 'week'
@@ -16,7 +17,8 @@ export type DimensionId =
   | 'purpose'
   | 'variant'
   | 'message_type'
-  | 'segment';
+  | 'segment'
+  | 'campaign';
 
 export interface DimensionDef {
   id: DimensionId;
@@ -99,12 +101,26 @@ export const DIMENSIONS: Record<DimensionId, DimensionDef> = {
     time: false,
     sources: ['segment_memberships'],
   },
+  campaign: {
+    id: 'campaign',
+    description: 'Campaign id (cmp_…), resolved from the published campaign’s sending members.',
+    time: false,
+    sources: ['message_events', 'journey_events', 'campaign'],
+  },
 };
 
 export const TIME_DIMENSIONS: ReadonlySet<DimensionId> = new Set(['day', 'week', 'month']);
 
 /** What a base measure counts. Kept internal: the catalogue's public face is `aggregation`. */
-export type Counting = 'profiles' | 'participants' | 'events' | 'revenue' | 'segment_members';
+export type Counting =
+  | 'profiles'
+  | 'participants'
+  | 'events'
+  | 'revenue'
+  | 'segment_members'
+  | 'campaign_recipients'
+  | 'campaign_converters'
+  | 'campaign_revenue';
 
 export interface BaseMeasureDef {
   kind: 'base';
@@ -124,7 +140,8 @@ export interface RatioMeasureDef {
   kind: 'ratio';
   id: string;
   description: string;
-  unit: 'ratio';
+  /** Ratios are `ratio`, except revenue per recipient, which is money per person. */
+  unit: Unit;
   source: SourceId;
   aggregation: 'ratio';
   numerator: string;
@@ -146,10 +163,12 @@ const EMAIL_DIMENSIONS = [
   'purpose',
   'variant',
   'message_type',
+  'campaign',
 ] as const;
-const JOURNEY_DIMENSIONS = ['day', 'week', 'month', 'journey', 'journey_step'] as const;
+const JOURNEY_DIMENSIONS = ['day', 'week', 'month', 'journey', 'journey_step', 'campaign'] as const;
 const EVENT_DIMENSIONS = ['day', 'week', 'month'] as const;
 const SEGMENT_DIMENSIONS = ['segment'] as const;
+const CAMPAIGN_DIMENSIONS = ['day', 'week', 'month', 'campaign'] as const;
 
 const emailBase = (
   id: string,
@@ -263,6 +282,68 @@ const measures: MeasureDef[] = [
     counting: 'segment_members',
     dimensions: SEGMENT_DIMENSIONS,
     defaultGrain: null,
+  },
+
+  // Campaign evaluation (#66). These read message_events for the published campaign's sending
+  // members and events for the goal; they cannot share a query with the per-channel measures
+  // because the compiler's source is a single table.
+  {
+    kind: 'base',
+    id: 'campaign.recipients',
+    description: 'Distinct people who got a sent or delivered message from a campaign member in the range.',
+    unit: 'count',
+    source: 'campaign',
+    aggregation: 'distinct profiles',
+    counting: 'campaign_recipients',
+    dimensions: CAMPAIGN_DIMENSIONS,
+    defaultGrain: 'day',
+  },
+  {
+    kind: 'base',
+    id: 'campaign.converters',
+    description:
+      'Distinct people who converted after their first campaign message, within the campaign goal’s attribution window. Last touch within owned channels.',
+    unit: 'count',
+    source: 'campaign',
+    aggregation: 'distinct profiles',
+    counting: 'campaign_converters',
+    dimensions: CAMPAIGN_DIMENSIONS,
+    defaultGrain: 'day',
+  },
+  {
+    kind: 'ratio',
+    id: 'campaign.conversion_rate',
+    description: 'Campaign converters divided by campaign recipients.',
+    unit: 'ratio',
+    source: 'campaign',
+    aggregation: 'ratio',
+    numerator: 'campaign.converters',
+    denominator: 'campaign.recipients',
+    dimensions: CAMPAIGN_DIMENSIONS,
+    defaultGrain: 'day',
+  },
+  {
+    kind: 'base',
+    id: 'campaign.revenue',
+    description: 'Revenue from attributed campaign conversions, per currency. Different currencies are never added together.',
+    unit: 'currency',
+    source: 'campaign',
+    aggregation: 'sum',
+    counting: 'campaign_revenue',
+    dimensions: CAMPAIGN_DIMENSIONS,
+    defaultGrain: 'day',
+  },
+  {
+    kind: 'ratio',
+    id: 'campaign.revenue_per_recipient',
+    description: 'Attributed revenue divided by campaign recipients, in the conversion currency.',
+    unit: 'currency',
+    source: 'campaign',
+    aggregation: 'ratio',
+    numerator: 'campaign.revenue',
+    denominator: 'campaign.recipients',
+    dimensions: CAMPAIGN_DIMENSIONS,
+    defaultGrain: 'day',
   },
 ];
 
