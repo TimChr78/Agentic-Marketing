@@ -5,10 +5,12 @@ import { requestEmail, requestPush, requestSms } from '@agentic-marketing/email'
 import type { EventStore, JourneyEvent } from '@agentic-marketing/events';
 import { consentStateOf, currentConsent, purposeAllowed, type ResolvedEvent, refusedPurposes } from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
-import { contextFor, ENTERED, evaluate, publishedSegments } from '@agentic-marketing/segments';
+import { contextFor, ENTERED, evaluate, publishedSegments, relevant } from '@agentic-marketing/segments';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, inArray, isNotNull, sql } from 'drizzle-orm';
 import jsonata from 'jsonata';
+import { matchesCondition } from './conditions';
+import { duplicateEntryKey, noteEntrySkip, resolveEntryKey } from './entry';
 import { compile, type Graph } from './graph';
 import { type AiOutcome, advance, type Effect, type ParticipantState, type Step } from './interpreter';
 
@@ -60,7 +62,12 @@ export async function publishedJourneys(tx: Tx): Promise<PublishedJourney[]> {
 }
 
 /** Enters people into journeys whose trigger the events match, and wakes those waiting for them. */
-export async function matchEvents(tx: Tx, workspaceId: string, resolved: ResolvedEvent[]): Promise<{ entered: number; woken: number }> {
+export async function matchEvents(
+  tx: Tx,
+  workspaceId: string,
+  resolved: ResolvedEvent[],
+  deps: JourneyDeps,
+): Promise<{ entered: number; woken: number }> {
   if (!resolved.length) return { entered: 0, woken: 0 };
   const journeys = await publishedJourneys(tx);
   let entered = 0;
@@ -70,19 +77,34 @@ export async function matchEvents(tx: Tx, workspaceId: string, resolved: Resolve
       const t = j.graph.trigger;
       const hit = t.event ? t.event === e.name && e.name !== ENTERED : e.name === ENTERED && e.properties.segment_id === t.segment;
       if (!hit) continue;
+      const choice = resolveEntryKey(t, e);
+      if (!choice) {
+        await noteEntrySkip(tx, workspaceId, j.id, 'missing');
+        continue;
+      }
+      // A configured business key composes with re-entry: once per key, after_exit per active
+      // key, always ignores the key. Without it the old profile-based rule stays.
+      const keyed = !!t.event && t.entryKey?.source === 'event_property';
       if (t.reentry !== 'always') {
-        const [prior] = await tx
-          .select({ status: schema.journeyParticipants.status })
-          .from(schema.journeyParticipants)
-          .where(
-            and(
-              eq(schema.journeyParticipants.journeyId, j.id),
-              eq(schema.journeyParticipants.profileId, profileId),
-              t.reentry === 'after_exit' ? inArray(schema.journeyParticipants.status, ['ready', 'waiting']) : undefined,
-            ),
-          )
-          .limit(1);
-        if (prior) continue;
+        if (keyed) {
+          if (await duplicateEntryKey(tx, j.id, choice.key, t.reentry)) {
+            await noteEntrySkip(tx, workspaceId, j.id, 'duplicate');
+            continue;
+          }
+        } else {
+          const [prior] = await tx
+            .select({ status: schema.journeyParticipants.status })
+            .from(schema.journeyParticipants)
+            .where(
+              and(
+                eq(schema.journeyParticipants.journeyId, j.id),
+                eq(schema.journeyParticipants.profileId, profileId),
+                t.reentry === 'after_exit' ? inArray(schema.journeyParticipants.status, ['ready', 'waiting']) : undefined,
+              ),
+            )
+            .limit(1);
+          if (prior) continue;
+        }
       }
       const res = await tx
         .insert(schema.journeyParticipants)
@@ -91,7 +113,8 @@ export async function matchEvents(tx: Tx, workspaceId: string, resolved: Resolve
           journeyId: j.id,
           version: j.version,
           profileId,
-          entryKey: e.messageId,
+          // "always" ignores the business key, so every delivery is its own participant.
+          entryKey: t.reentry === 'always' ? e.messageId : choice.key,
           node: j.graph.start,
           status: 'ready',
           dueAt: new Date(),
@@ -99,6 +122,10 @@ export async function matchEvents(tx: Tx, workspaceId: string, resolved: Resolve
         })
         .onConflictDoNothing()
         .returning({ id: schema.journeyParticipants.id });
+      if (!res.length) {
+        if (keyed) await noteEntrySkip(tx, workspaceId, j.id, 'duplicate');
+        continue;
+      }
       entered += res.length;
     }
     // Wake whoever waits for this event (wait-for-event and goal nodes).
@@ -107,13 +134,60 @@ export async function matchEvents(tx: Tx, workspaceId: string, resolved: Resolve
       WHERE workspace_id = ${workspaceId} AND profile_id = ${profileId} AND waiting_event = ${e.name} AND status = 'waiting'`);
     woken += w.rowCount ?? 0;
   }
+  await wakeWaitUntil(tx, workspaceId, resolved, deps);
   return { entered, woken };
 }
 
+/**
+ * Re-evaluates wait-until participants of the people this batch touched. It reads only those
+ * people's participants; a journey-wide or all-profile scan never happens here.
+ */
+async function wakeWaitUntil(tx: Tx, workspaceId: string, resolved: ResolvedEvent[], deps: JourneyDeps) {
+  const byProfile = new Map<string, ResolvedEvent[]>();
+  for (const r of resolved) byProfile.set(r.profileId, [...(byProfile.get(r.profileId) ?? []), r]);
+  if (!byProfile.size) return;
+  const waiting = await tx
+    .select({
+      id: schema.journeyParticipants.id,
+      journeyId: schema.journeyParticipants.journeyId,
+      version: schema.journeyParticipants.version,
+      profileId: schema.journeyParticipants.profileId,
+      node: schema.journeyParticipants.node,
+    })
+    .from(schema.journeyParticipants)
+    .where(
+      and(
+        eq(schema.journeyParticipants.workspaceId, workspaceId),
+        inArray(schema.journeyParticipants.profileId, [...byProfile.keys()]),
+        eq(schema.journeyParticipants.status, 'waiting'),
+      ),
+    );
+  if (!waiting.length) return;
+  const segments = await publishedSegments(tx);
+  for (const p of waiting) {
+    const events = byProfile.get(p.profileId) ?? [];
+    try {
+      const graph = await graphOf(tx, p.journeyId, p.version);
+      const node = graph.nodes.get(p.node);
+      if (node?.kind !== 'waitUntil') continue;
+      if (!events.some(({ event }) => relevant(node.condition, event))) continue;
+      const pending = new Map([[p.profileId, events.map(({ event }) => event)]]);
+      if (!(await matchesCondition(tx, workspaceId, deps.events, segments, p.profileId, node.condition, pending))) continue;
+      await tx.execute(sql`
+        UPDATE journey_participants SET matched = true, due_at = now(), updated_at = now()
+        WHERE workspace_id = ${workspaceId} AND id = ${p.id} AND status = 'waiting' AND matched = false`);
+    } catch (err) {
+      // A broken condition should not swallow the whole batch; the sweeper will fail the
+      // participant at its next check or its timeout.
+      logger.warn({ err, participant: p.id }, 'wait-until re-evaluation failed');
+    }
+  }
+}
+
 /** The after-resolve hook for the profile workers. */
-export function journeyHook(db: Db) {
+export function journeyHook(db: Db, deps: JourneyDeps) {
   return async (workspaceId: string, resolved: ResolvedEvent[]) => {
-    await db.withWorkspace(workspaceId, (tx) => matchEvents(tx, workspaceId, resolved));
+    await db.withWorkspace(workspaceId, (tx) => matchEvents(tx, workspaceId, resolved, deps));
   };
 }
 
@@ -364,7 +438,7 @@ export async function sweep(db: Db, deps: JourneyDeps, opts: { batch?: number; n
           const detail = `consent_withdrawn: ${purpose}`;
           await tx
             .update(schema.journeyParticipants)
-            .set({ status: 'exited', error: detail, dueAt: null, waitingEvent: null, updatedAt: t })
+            .set({ status: 'exited', error: detail, dueAt: null, waitingEvent: null, waitingUntil: null, updatedAt: t })
             .where(eq(schema.journeyParticipants.id, p.id));
           journeyEvents.push({
             workspaceId: ws,
@@ -386,6 +460,7 @@ export async function sweep(db: Db, deps: JourneyDeps, opts: { batch?: number; n
           seq: p.seq,
           dueAt: p.dueAt,
           waitingEvent: p.waitingEvent,
+          waitingUntil: p.waitingUntil,
           matched: p.matched,
           converted: p.converted,
         };
@@ -413,12 +488,13 @@ export async function sweep(db: Db, deps: JourneyDeps, opts: { batch?: number; n
               const ids = await evaluate(n.condition!, contextFor(tx, ws, deps.events, segments, { scope: [p.profileId] }));
               return ids.has(p.profileId);
             },
+            condition: async (n) => matchesCondition(tx, ws, deps.events, segments, p.profileId, n.condition),
           });
         } catch (err) {
           const error = (err as Error).message;
           await tx
             .update(schema.journeyParticipants)
-            .set({ status: 'failed', error, dueAt: null, updatedAt: t })
+            .set({ status: 'failed', error, dueAt: null, waitingUntil: null, updatedAt: t })
             .where(eq(schema.journeyParticipants.id, p.id));
           journeyEvents.push({
             workspaceId: ws,

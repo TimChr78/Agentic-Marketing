@@ -12,6 +12,16 @@ export type Node =
   | { id: string; label: string; kind: 'trigger'; cfg: Cfg<'trigger'>; next: string | null }
   | { id: string; label: string; kind: 'wait'; ms: number; next: string | null }
   | { id: string; label: string; kind: 'waitEvent' | 'goal'; event: string; ms: number; matched: string | null; timeout: string | null }
+  | {
+      id: string;
+      label: string;
+      kind: 'waitUntil';
+      condition: SegmentCondition;
+      ms: number;
+      recheckMs: number;
+      matched: string | null;
+      timeout: string | null;
+    }
   | { id: string; label: string; kind: 'branch'; segment?: string; condition?: SegmentCondition; yes: string | null; no: string | null }
   | { id: string; label: string; kind: 'split'; weights: number[]; edges: string[] }
   | { id: string; label: string; kind: 'email' | 'sms' | 'push'; template: string; next: string | null }
@@ -71,6 +81,20 @@ export function compile(def: JourneyDefinition): Graph {
         const ms = durationSeconds('within' in c ? c.within : c.timeout) * 1000;
         // With one edge, both outcomes continue there.
         nodes.set(n.id, { ...base, kind: n.kind, event: c.event, ms, matched: edge(0), timeout: n.next?.[1]?.to ?? edge(0) });
+        break;
+      }
+      case 'waitUntil': {
+        const c = journeyNodeConfigs.waitUntil.parse(n.config);
+        nodes.set(n.id, {
+          ...base,
+          kind: 'waitUntil',
+          condition: c.condition,
+          ms: durationSeconds(c.timeout) * 1000,
+          recheckMs: durationSeconds(c.recheck) * 1000,
+          // With one edge, both outcomes continue there, as waitEvent does.
+          matched: edge(0),
+          timeout: n.next?.[1]?.to ?? edge(0),
+        });
         break;
       }
       case 'branch': {

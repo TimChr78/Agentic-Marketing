@@ -515,6 +515,8 @@ export const journeyParticipants = pgTable(
     seq: integer('seq').notNull().default(0),
     dueAt: ts('due_at'),
     waitingEvent: text('waiting_event'),
+    /** waitUntil's absolute timeout; dueAt is the next check, not the deadline. */
+    waitingUntil: ts('waiting_until'),
     matched: boolean('matched').notNull().default(false),
     converted: boolean('converted').notNull().default(false),
     context: jsonb('context').$type<Record<string, unknown>>().notNull().default({}),
@@ -523,6 +525,19 @@ export const journeyParticipants = pgTable(
     updatedAt: ts('updated_at').notNull().defaultNow(),
   },
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
+/** Why event-triggered entries were suppressed (#93); shown in journeys.stats. */
+export const journeyEntrySkips = pgTable(
+  'journey_entry_skips',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    journeyId: text('journey_id').notNull(),
+    duplicatesSkipped: integer('duplicates_skipped').notNull().default(0),
+    missingKeySkipped: integer('missing_key_skipped').notNull().default(0),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.journeyId] })],
 );
 
 export type AiUse = 'journeys' | 'copilot';

@@ -13,6 +13,8 @@ import { consentStateOf, purposeAllowed } from '@agentic-marketing/profiles';
 import { contextFor, durationSeconds, evaluate, publishedSegments } from '@agentic-marketing/segments';
 import { and, desc, eq, inArray, isNotNull, sql } from 'drizzle-orm';
 import { z } from 'zod';
+import { matchesCondition } from './conditions';
+import { duplicateEntryKey, resolveEntryKey } from './entry';
 import { compile, unsupported } from './graph';
 import { advance, type ParticipantState } from './interpreter';
 
@@ -20,6 +22,14 @@ const JourneyId = z.string().regex(/^jrn_[0-9a-f]{32}$/);
 
 /** Extra publish checks other packages add (e.g. that connections and their actions exist). */
 export const journeyChecks: ((def: JourneyDefinition, tx: Tx) => Promise<string[]>)[] = [];
+
+/** Segment ids inside a condition tree, so publishing checks that they are live. */
+function conditionSegments(condition: unknown): string[] {
+  if (!condition || typeof condition !== 'object') return [];
+  const c = condition as Record<string, unknown>;
+  if (typeof c.segment === 'string') return [c.segment];
+  return [c.all, c.any, c.not].flatMap((part) => (Array.isArray(part) ? part.flatMap(conditionSegments) : conditionSegments(part)));
+}
 
 /** Journeys can be published only with runnable nodes and published templates and segments. */
 publishValidators.set('journey', async (content, tx: Tx) => {
@@ -29,9 +39,12 @@ publishValidators.set('journey', async (content, tx: Tx) => {
   const templates = def.nodes
     .filter((n) => n.kind === 'email' || n.kind === 'sms' || n.kind === 'push')
     .map((n) => String(n.config.template));
-  const segments = def.nodes.flatMap((n) =>
-    (n.kind === 'trigger' || n.kind === 'branch') && n.config.segment ? [String(n.config.segment)] : [],
-  );
+  const segments = def.nodes.flatMap((n) => {
+    if (n.kind === 'trigger') return n.config.segment ? [String(n.config.segment)] : [];
+    if (n.kind === 'branch') return [...(n.config.segment ? [String(n.config.segment)] : []), ...conditionSegments(n.config.condition)];
+    if (n.kind === 'waitUntil') return conditionSegments(n.config.condition);
+    return [];
+  });
   const prompts = def.nodes.filter((n) => n.kind === 'aiDecide' || n.kind === 'aiGenerate');
   for (const n of prompts) {
     const [row] = await tx
@@ -87,7 +100,8 @@ async function loadDefinition(tx: Tx, id: string, version?: number) {
 export const journeyStats = defineCommand({
   name: 'journeys.stats',
   title: 'Journey statistics',
-  description: 'How many people are where in a journey right now, and how many reached each node, converted, completed or exited.',
+  description:
+    'How many people are where in a journey right now, and how many reached each node, converted, completed or exited. Also counts entries suppressed by a duplicate business key and by a missing entry-key property.',
   input: z.object({ artifactId: JourneyId }),
   output: z.object({
     now: z.object({
@@ -100,6 +114,8 @@ export const journeyStats = defineCommand({
     }),
     waitingAt: z.record(z.string(), z.number()).describe('Node id → people waiting there'),
     reached: z.record(z.string(), z.number()).describe('Node id → people who passed it'),
+    duplicatesSkipped: z.number().int().describe('Entries a repeated business key suppressed'),
+    missingKeySkipped: z.number().int().describe('Entries skipped because the entry-key property was missing'),
   }),
   permission: 'artifacts:read',
   effect: 'read',
@@ -124,7 +140,8 @@ export const journeyStats = defineCommand({
     const reached: Record<string, number> = {};
     for (const c of await ctx.services.events.journeyCounts(ctx.principal.workspaceId, input.artifactId))
       if (c.type === 'step' || c.type === 'resumed') reached[c.node] = Math.max(reached[c.node] ?? 0, c.count);
-    return { now, waitingAt, reached };
+    const [skips] = await ctx.tx.select().from(schema.journeyEntrySkips).where(eq(schema.journeyEntrySkips.journeyId, input.artifactId));
+    return { now, waitingAt, reached, duplicatesSkipped: skips?.duplicatesSkipped ?? 0, missingKeySkipped: skips?.missingKeySkipped ?? 0 };
   },
 });
 
@@ -189,7 +206,7 @@ export const simulateJourney = defineCommand({
   name: 'journeys.simulate',
   title: 'Simulate a journey',
   description:
-    'Walk through a journey version (default: latest) on a virtual clock, without sending anything. With a profile, e-mail steps say whether the gateway would send or why not, and branches use the person’s data. `events` lets you script what the person does (e.g. clicks after 1 day).',
+    'Walk through a journey version (default: latest) on a virtual clock, without sending anything. With a profile, e-mail steps say whether the gateway would send or why not, and branches use the person’s data. `events` lets you script what the person does (e.g. clicks after 1 day). `sampleEvent` resolves the trigger entry key and says whether that entry would be suppressed as a duplicate.',
   input: z.object({
     artifactId: JourneyId,
     version: z.number().int().min(1).optional(),
@@ -201,6 +218,14 @@ export const simulateJourney = defineCommand({
       .array(z.object({ event: z.string(), after: z.string().describe('ISO duration after entry, e.g. "P1D"') }))
       .max(50)
       .default([]),
+    sampleEvent: z
+      .object({
+        name: z.string().min(1).max(200).optional().describe('Defaults to the trigger event'),
+        messageId: z.string().min(1).max(500).optional(),
+        properties: z.record(z.string(), z.unknown()).default({}),
+      })
+      .optional()
+      .describe('An event to resolve the trigger entry key against, without sending it'),
     branches: z
       .record(z.string(), z.enum(['yes', 'no']))
       .default({})
@@ -220,6 +245,15 @@ export const simulateJourney = defineCommand({
     outcome: z.enum(['completed', 'exited', 'waiting']),
     converted: z.boolean(),
     steps: z.array(z.object({ after: z.string(), node: z.string(), label: z.string(), kind: z.string(), detail: z.string() })),
+    entry: z
+      .object({
+        key: z.string().nullable(),
+        source: z.enum(['message_id', 'event_property']),
+        duplicate: z.boolean(),
+        note: z.string(),
+      })
+      .optional()
+      .describe('The entry key a sample event resolves to, and whether it would be suppressed'),
   }),
   permission: 'artifacts:read',
   effect: 'read',
@@ -238,6 +272,47 @@ export const simulateJourney = defineCommand({
       .map((e) => ({ event: e.event, at: start.getTime() + durationSeconds(e.after) * 1000 }))
       .sort((a, b) => a.at - b.at);
     const segments = input.profileId ? await publishedSegments(ctx.tx) : [];
+    let entry: { key: string | null; source: 'message_id' | 'event_property'; duplicate: boolean; note: string } | undefined;
+    if (input.sampleEvent && graph.trigger.event) {
+      const choice = resolveEntryKey(graph.trigger, {
+        messageId: input.sampleEvent.messageId ?? 'simulated-message',
+        properties: input.sampleEvent.properties,
+      });
+      if (!choice)
+        entry = {
+          key: null,
+          source: 'event_property',
+          duplicate: false,
+          note: 'the key property is missing, so the entry would be skipped',
+        };
+      else {
+        const keyed = graph.trigger.entryKey?.source === 'event_property';
+        let duplicate = false;
+        if (keyed) duplicate = await duplicateEntryKey(ctx.tx, input.artifactId, choice.key, graph.trigger.reentry);
+        else if (graph.trigger.reentry !== 'always') {
+          if (input.profileId) {
+            const [prior] = await ctx.tx
+              .select({ id: schema.journeyParticipants.id })
+              .from(schema.journeyParticipants)
+              .where(
+                and(
+                  eq(schema.journeyParticipants.journeyId, input.artifactId),
+                  eq(schema.journeyParticipants.profileId, input.profileId),
+                  graph.trigger.reentry === 'after_exit' ? inArray(schema.journeyParticipants.status, ['ready', 'waiting']) : undefined,
+                ),
+              )
+              .limit(1);
+            duplicate = !!prior;
+          } else duplicate = await duplicateEntryKey(ctx.tx, input.artifactId, choice.key, graph.trigger.reentry);
+        }
+        entry = {
+          key: choice.key,
+          source: choice.source,
+          duplicate,
+          note: duplicate ? 'a participant with this key already exists under the re-entry rule' : 'it would enter',
+        };
+      }
+    }
     const fmt = (t: number) => {
       const m = Math.round((t - start.getTime()) / 60_000);
       return m < 60
@@ -253,6 +328,7 @@ export const simulateJourney = defineCommand({
       seq: 0,
       dueAt: start,
       waitingEvent: null,
+      waitingUntil: null,
       matched: false,
       converted: false,
     };
@@ -277,6 +353,8 @@ export const simulateJourney = defineCommand({
             input.profileId,
           );
         },
+        condition: async (n) =>
+          !!input.profileId && (await matchesCondition(ctx.tx, ws, ctx.services.events, segments, input.profileId, n.condition)),
       });
       const effects = new Map(out.effects.map((e) => [`${e.node}:${e.seq}`, e]));
       for (const s of out.steps) {
@@ -360,7 +438,8 @@ export const simulateJourney = defineCommand({
         if (
           s.type === 'step' ||
           s.type === 'converted' ||
-          (s.type === 'resumed' && (node.kind === 'aiDecide' || node.kind === 'aiGenerate' || node.kind === 'action'))
+          (s.type === 'resumed' &&
+            (node.kind === 'aiDecide' || node.kind === 'aiGenerate' || node.kind === 'action' || node.kind === 'waitUntil'))
         )
           steps.push({ after: fmt(clock), node: s.node, label: node.label, kind: node.kind, detail });
       }
@@ -369,6 +448,14 @@ export const simulateJourney = defineCommand({
       // AI and action steps answer right away in a simulation.
       const at = graph.nodes.get(state.node)!;
       if (at.kind === 'aiDecide' || at.kind === 'aiGenerate' || at.kind === 'action') {
+        state = { ...state, waitingEvent: null };
+        continue;
+      }
+      // A wait-until has no data changes during a simulation: show the wait and jump to its
+      // deadline instead of walking every hourly recheck.
+      if (at.kind === 'waitUntil') {
+        if (clock >= limit) break;
+        clock = Math.min(state.waitingUntil?.getTime() ?? limit, limit);
         state = { ...state, waitingEvent: null };
         continue;
       }
@@ -381,7 +468,7 @@ export const simulateJourney = defineCommand({
     }
     const outcome: 'completed' | 'exited' | 'waiting' =
       state.status === 'completed' || state.status === 'exited' ? state.status : 'waiting';
-    return { version, outcome, converted: state.converted, steps };
+    return { version, outcome, converted: state.converted, steps, entry };
   },
 });
 
@@ -446,6 +533,7 @@ export const migrateJourney = defineCommand({
                 status: 'exited',
                 dueAt: null,
                 waitingEvent: null,
+                waitingUntil: null,
                 error: `left in a migration to v${a.publishedVersion}`,
                 updatedAt: new Date(),
               })
@@ -469,6 +557,7 @@ export const migrateJourney = defineCommand({
                   status: 'ready',
                   dueAt: new Date(),
                   waitingEvent: null,
+                  waitingUntil: null,
                   matched: false,
                   updatedAt: new Date(),
                 },

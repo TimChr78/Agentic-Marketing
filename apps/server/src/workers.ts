@@ -84,7 +84,7 @@ export function startWorkers(
           conversionHook({ db: srv.db }),
           segmentHook({ db: srv.db, events: srv.events, bus: srv.bus }),
           snapshotHook({ db: srv.db, hot: srv.hot }),
-          journeyHook(srv.db),
+          journeyHook(srv.db, { kp: srv.keyProvider, events: srv.events }),
           webhookHook(srv.db),
         ],
       },
