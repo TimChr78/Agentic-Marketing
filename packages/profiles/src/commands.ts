@@ -551,12 +551,16 @@ export const exportProfile = defineCommand({
   name: 'profiles.export',
   title: 'Export a person’s data (access request)',
   description:
-    'Everything held about a person, for a data subject access or portability request: profile, personal data, identifiers, consent ledger and events.',
+    'Everything held about a person, for a data subject access or portability request: profile, personal data, identifiers, consent ledger, topic choices and their history, and events.',
   input: z.object({ profileId: ProfileId, maxEvents: z.number().int().min(0).max(100_000).default(10_000) }),
   output: z.object({
     exportedAt: z.string(),
     profile: ProfileOut,
     consentRecords: z.array(z.record(z.string(), z.unknown())),
+    topicChoices: z
+      .array(z.record(z.string(), z.unknown()))
+      .describe('Current choices per topic, from the preference centre and elsewhere (#84)'),
+    topicHistory: z.array(z.record(z.string(), z.unknown())).describe('Every topic choice with its source and evidence, oldest first'),
     events: z.array(z.record(z.string(), z.unknown())),
     aiDecisions: z
       .array(z.record(z.string(), z.unknown()))
@@ -645,7 +649,35 @@ export const exportProfile = defineCommand({
             lastNotifiedAt: d.lastSentAt?.toISOString() ?? null,
           }))
         : [];
-    return { exportedAt: new Date().toISOString(), profile, consentRecords: records, events, aiDecisions, adUploads, pushDevices };
+    const topicChoices = (
+      await ctx.tx.select().from(schema.topicPreferences).where(inArray(schema.topicPreferences.profileId, family))
+    ).map((t) => ({ topic: t.topic, status: t.status, source: t.source, updatedAt: t.updatedAt.toISOString() }));
+    const topicHistory = (
+      await ctx.tx
+        .select()
+        .from(schema.topicPreferenceHistory)
+        .where(inArray(schema.topicPreferenceHistory.profileId, family))
+        .orderBy(schema.topicPreferenceHistory.recordedAt)
+    ).map((h) => ({
+      at: h.recordedAt.toISOString(),
+      topic: h.topic,
+      purpose: h.purpose,
+      status: h.status,
+      source: h.source,
+      note: h.note,
+      proof: h.proof,
+    }));
+    return {
+      exportedAt: new Date().toISOString(),
+      profile,
+      consentRecords: records,
+      topicChoices,
+      topicHistory,
+      events,
+      aiDecisions,
+      adUploads,
+      pushDevices,
+    };
   },
 });
 

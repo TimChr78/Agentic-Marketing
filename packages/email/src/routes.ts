@@ -181,7 +181,8 @@ export function emailRoutes(deps: EmailRouteDeps) {
     if (!link || !(await profileExists(link.w, link.p))) return hosted(c, await hostedPage('expired', null, invalidLink), 404);
     const brand = await deps.db.withWorkspace(link.w, (tx) => publishedSingleton(tx, 'brand'));
     const purposes = await preferencePurposes(link.w, link.p);
-    return hosted(c, renderPreferencesPage(resolveBrand(brand), { action: '', purposes }), 200);
+    const leavePurposeName = (await purposesOf(link.w)).find((p) => p.key === link.u)?.name;
+    return hosted(c, renderPreferencesPage(resolveBrand(brand), { action: '', purposes, leavePurposeName }), 200);
   });
   app.post('/u/p/:token', async (c) => {
     const token = c.req.param('token');
@@ -189,7 +190,7 @@ export function emailRoutes(deps: EmailRouteDeps) {
     if (!link || !(await profileExists(link.w, link.p))) return hosted(c, await hostedPage('expired', null, invalidLink), 404);
     const body = await c.req.parseBody();
     const action = typeof body.action === 'string' ? body.action : '';
-    // "Unsubscribe from all marketing" is the one-click unsubscribe link's own behaviour.
+    // "Unsubscribe from <purpose>" is the one-click unsubscribe link's own behaviour.
     if (action === 'unsubscribe_all') {
       const done = await unsubscribe(token);
       if (!done) return hosted(c, await hostedPage('expired', null, invalidLink), 404);
@@ -218,7 +219,12 @@ export function emailRoutes(deps: EmailRouteDeps) {
     const brand = await deps.db.withWorkspace(link.w, (tx) => publishedSingleton(tx, 'brand'));
     return hosted(
       c,
-      renderPreferencesPage(resolveBrand(brand), { action: '', purposes: await preferencePurposes(link.w, link.p), saved: true }),
+      renderPreferencesPage(resolveBrand(brand), {
+        action: '',
+        purposes: await preferencePurposes(link.w, link.p),
+        saved: true,
+        leavePurposeName: (await purposesOf(link.w)).find((p) => p.key === link.u)?.name,
+      }),
       200,
     );
   });

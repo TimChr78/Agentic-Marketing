@@ -167,6 +167,11 @@ export interface PreferenceCentreContext {
   error?: string;
   /** Admin preview: buttons are disabled, so nothing can be submitted. */
   preview?: boolean;
+  /**
+   * The purpose the leave button withdraws: the e-mail's own, as its unsubscribe link does. The
+   * button names it, so it never promises more (e.g. "all marketing") than it does.
+   */
+  leavePurposeName?: string;
 }
 
 /**
@@ -250,7 +255,7 @@ button.danger{border-color:var(--text);color:var(--text)}
 <p>Choose what you hear about. You can change this at any time from any e-mail we send.</p>
 ${notice}${error}
 <form method="post" action="${escapeHtml(ctx.action)}">${purposes}
-<div class="actions"><button type="submit"${disabled}>Save</button><button type="submit" class="secondary danger" name="action" value="unsubscribe_all"${disabled}>Unsubscribe from all marketing</button></div>
+<div class="actions"><button type="submit"${disabled}>Save</button><button type="submit" class="secondary danger" name="action" value="unsubscribe_all"${disabled}>${escapeHtml(ctx.leavePurposeName ? `Unsubscribe from ${ctx.leavePurposeName}` : 'Unsubscribe')}</button></div>
 </form>
 </main></body>
 </html>`;

@@ -205,6 +205,9 @@ describe('the hosted preference centre (#84)', () => {
     expect(html).toContain('Product news');
     expect(html).toMatch(/name="topic:newsletter" value="subscribed" checked/);
     expect(html).not.toMatch(/name="topic:product_news" value="subscribed" checked/);
+    // The leave button names the purpose it withdraws, never "all marketing".
+    expect(html).toMatch(/>Unsubscribe from [^<]+<\/button>/);
+    expect(html).not.toContain('all marketing');
     expect(await counts('dee')).toEqual(before);
 
     // Uncheck newsletter (default subscribed) and check product news (default unsubscribed).
@@ -240,7 +243,7 @@ describe('the hosted preference centre (#84)', () => {
     expect(prefs.topics.find((x) => x.topic === 'product_news')).toMatchObject({ status: 'subscribed', source: 'preference_center' });
   });
 
-  it('"unsubscribe from all marketing" does exactly what the unsubscribe link does', async () => {
+  it('"unsubscribe from <purpose>" does exactly what the unsubscribe link does', async () => {
     const token = tokenFor('eve');
     const res = await fetch(`${t.base}/u/p/${token}`, {
       method: 'POST',
@@ -291,6 +294,10 @@ describe('agent rules and erasure (#84)', () => {
   it('erases topic choices and their history with the profile', async () => {
     const id = people.get('bo')!;
     await api().call('topics.set', { profileId: id, topic: 'newsletter', status: 'unsubscribed' });
+    // An access request includes the choice and its history (#84).
+    const exported = await api().call('profiles.export', { profileId: id, maxEvents: 0 });
+    expect(exported.topicChoices).toEqual([expect.objectContaining({ topic: 'newsletter', status: 'unsubscribed' })]);
+    expect(exported.topicHistory.at(-1)).toMatchObject({ topic: 'newsletter', status: 'unsubscribed' });
     await api().call('profiles.erase', { profileId: id, reason: 'test erasure' });
     const rows = await t.srv.db.withWorkspace(ws, (tx) =>
       tx.execute<{ prefs: number; history: number }>(
