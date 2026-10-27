@@ -120,6 +120,8 @@ Goal: make the platform good at what its live pilot does, owned-audience e-mail 
 
 Done when the pilot's issues are built from shared blocks, readers can choose topics, every issue has a web version, and a subject test has picked a winner.
 
+**Status (2026-10-27): built.** Every item above is implemented for 0.2.8. Done when the pilot has used them: issues from shared blocks, topics on the preference centre, web versions (and the archive, if wanted), and one subject test with a winner.
+
 ## Phase 16: measure and report
 
 Goal: answer "what worked" from the platform, for people and for agents. Today the answers are spread over `messages.stats`, `journeys.stats`, `experiences.results` and `ads.performance`, and the UI's campaign report still runs on fixtures.
