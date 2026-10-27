@@ -9,7 +9,7 @@ import { PEOPLE, seed } from './seed';
 // is `correct-horse-battery-staple`. Stop with Ctrl-C; the next start re-creates the database.
 
 const port = Number(process.env.E2E_PORT ?? 3100);
-const t = await startTestServer('e2e', port, {
+const t = await startTestServer(process.env.E2E_DB ?? 'e2e', port, {
   PUBLIC_URL: `http://localhost:${port}`,
   PUBLIC_LINKS_URL: `http://localhost:${port}`,
   TRUSTED_ORIGINS: 'http://localhost:5173',
