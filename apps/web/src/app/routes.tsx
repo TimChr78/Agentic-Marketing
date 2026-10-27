@@ -40,6 +40,7 @@ const ROUTES: { path: string; page: Page; needs?: string[] }[] = [
   { path: '/audience/consent', page: p(() => import('../pages/audience/ConsentPage')), needs: ['profiles:read'] },
   { path: '/audience/imports', page: p(() => import('../pages/audience/ImportsPage')), needs: ['profiles:write'] },
 
+  { path: '/insights/analytics', page: p(() => import('../pages/insights/AnalyticsPage')), needs: ['artifacts:read'] },
   { path: '/insights/messages', page: p(() => import('../pages/insights/MessagesPage')), needs: ['profiles:read'] },
   { path: '/insights/deliverability', page: p(() => import('../pages/insights/DeliverabilityPage')), needs: ['artifacts:read'] },
   { path: '/insights/journeys', page: p(() => import('../pages/insights/JourneyStatsPage')), needs: ['artifacts:read'] },

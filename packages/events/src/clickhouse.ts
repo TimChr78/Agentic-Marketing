@@ -129,6 +129,8 @@ export interface MessageEvent {
   templateId: string;
   templateVersion: number;
   journeyId: string;
+  /** Subject-test variant on the message (A, B, …); empty outside a test. */
+  variant?: string;
   reason: string;
   url: string;
 }
@@ -383,6 +385,7 @@ export function clickHouseStore(opts: { url: string; database: string }): EventS
           template_id: e.templateId,
           template_version: e.templateVersion,
           journey_id: e.journeyId,
+          variant: e.variant ?? '',
           reason: e.reason,
           url: e.url,
         })),

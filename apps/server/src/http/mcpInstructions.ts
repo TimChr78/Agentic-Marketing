@@ -17,6 +17,8 @@ Weekly newsletters use the template-per-issue pattern: one e-mail template per i
 
 Privacy and consent: segments cannot use personal traits (email, phone, name, birthday, address, ...); use non-personal traits, events and consent instead. Sends only reach people who consented to the purpose. Keep the unsubscribe link and purpose on e-mail templates. A purpose may define optional topics; a template or broadcast can name one, and people can refuse a topic without leaving the purpose. Check topics with purposes.list and a person's choices with topics.preferences; topics.set records a choice, but an agent may only record an unsubscribe, never a subscribe. A static list is for migrations and one-off sends; a snapshot freezes an audience so it cannot change between review and send. Membership is not consent: sends only reach people who consented to the purpose, and suppression and delivery policy still apply. Keep the unsubscribe link and purpose on e-mail templates.
 
+To answer "how did it do", use analytics.query or analytics.emailPerformance and analytics.journeyFunnel; never loop over raw stats commands to reconstruct a metric.
+
 Tool errors explain what to fix; fix the input and try again. This guide is also available as the resource agentic-marketing://guide.`;
 
 export const MCP_GUIDE_URI = 'agentic-marketing://guide';
