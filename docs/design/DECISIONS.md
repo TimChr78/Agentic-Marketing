@@ -125,8 +125,14 @@ considered and why. Anything that needed the owner's decision is listed under **
 - **Options:** S3-compatible storage (another service to run); Postgres `bytea` with a 5 MB default limit.
 - **Why:** Pilot sites use a few logos and images; Postgres keeps backups and RLS in one place and adds no
   service. Responses are immutable and cacheable (ETag, long max-age), so a CDN in front takes the load.
-  SVG is refused (it can carry scripts); bytes are sniffed, not trusted from the declared type. Usage is
-  found by the asset id in latest and published artifact versions, and delete warns with the list.
+  Bytes are sniffed, not trusted from the declared type. SVG is accepted after sanitising against an
+  allow-list: only drawing elements and presentation attributes survive, scripts, event handlers,
+  external `href`/`url()` and DOCTYPEs do not, and the upload reports what was removed. That is safe
+  because the sandbox CSP and `nosniff` still guard a directly opened file, `<img>` never runs an SVG's
+  scripts, and `/a` is on the public listener only. The original SVG is served to hosted pages; a PNG
+  rendition at 2× (capped at 2000 px) is stored with the asset and used in e-mail, where SVG does not
+  render. Usage is found by the asset id in latest and published artifact versions, and delete warns
+  with the list.
 
 ### D28. `confirmedUrl` is optional; the confirm page allows its origin in `form-action` (0.2.2, #115)
 - **Options:** render the confirmed page and link (or meta-refresh) to the site; keep the 303 and widen

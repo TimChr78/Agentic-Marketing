@@ -37,6 +37,29 @@ describe('template rendering', () => {
     expect(r.subject).toBe('Welcome, &lt;script&gt;alert(1)&lt;/script&gt;');
   });
 
+  it('uses the PNG rendition for an SVG asset image, so e-mail clients can show it', async () => {
+    const assetId = `ast_${'a'.repeat(32)}`;
+    const svg = `https://links.example.com/a/${assetId}/logo.svg`;
+    const r = await renderTemplate(
+      {
+        ...welcome,
+        mjml: `<mjml><mj-body><mj-section><mj-column><mj-image src="${svg}" alt="Logo" /><mj-text><a href="{{ unsubscribe_url | raw }}">Unsubscribe</a></mj-text></mj-column></mj-section></mj-body></mjml>`,
+      },
+      { unsubscribe_url: 'https://m.example.com/u/abc' },
+    );
+    expect(r.html).toContain(`https://links.example.com/a/${assetId}/logo.png`);
+    expect(r.html).not.toContain(`${assetId}/logo.svg`);
+    // A URL that is not one of our assets is left alone.
+    const other = await renderTemplate(
+      {
+        ...welcome,
+        mjml: `<mjml><mj-body><mj-section><mj-column><mj-image src="https://example.com/logo.svg" /><mj-text><a href="{{ unsubscribe_url | raw }}">Unsubscribe</a></mj-text></mj-column></mj-section></mj-body></mjml>`,
+      },
+      { unsubscribe_url: 'https://m.example.com/u/abc' },
+    );
+    expect(other.html).toContain('https://example.com/logo.svg');
+  });
+
   it('refuses includes and reports broken templates when saving', async () => {
     await expect(renderTemplate({ ...welcome, mjml: '{% include "/etc/passwd" %}' }, {})).rejects.toThrow();
     expect(validateTemplate({ ...welcome, subject: 'Hi {{ profile.name ' })[0]).toMatch(/^subject: Liquid error/);

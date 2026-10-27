@@ -8,7 +8,7 @@ import { rejects, startTestServer, type User } from './harness';
 const MAIN_PORT = 3403;
 const PUBLIC_PORT = 3404;
 
-type AssetContentType = 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp' | 'application/pdf';
+type AssetContentType = 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp' | 'image/svg+xml' | 'application/pdf';
 
 let t: Awaited<ReturnType<typeof startTestServer>>;
 let owner: User;
@@ -160,15 +160,15 @@ describe('assets.upload', () => {
     expect(sanitised.url.endsWith('/passwd.png')).toBe(true);
   });
 
-  it('refuses SVG, a declared type that does not match the bytes, and an oversized file', async () => {
-    const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>');
-    expect((await rejects(upload('logo.svg', 'image/png', svg))).message).toMatch(/SVG images are not supported/i);
-
+  it('refuses a declared type that does not match the bytes, and an oversized file', async () => {
     expect((await rejects(upload('wrong.png', 'image/jpeg', png(1, 1)))).message).toMatch(
       /The file is a image\/png, not the declared image\/jpeg/,
     );
     expect((await rejects(upload('garbage.png', 'image/png', Buffer.from('not an image')))).message).toMatch(
-      /not a PNG, JPEG, GIF, WebP or PDF/,
+      /not a PNG, JPEG, GIF, WebP, SVG or PDF/,
+    );
+    expect((await rejects(upload('not-an-svg.svg', 'image/svg+xml', Buffer.from('<div>no</div>')))).message).toMatch(
+      /not an SVG: an SVG is XML whose root element is <svg>/,
     );
 
     const tooBig = Buffer.alloc(1024 * 1024 + 1);
@@ -200,6 +200,128 @@ describe('assets.upload', () => {
     );
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ contentType: 'application/pdf', kind: 'file' });
+  });
+});
+
+describe('SVG logos', () => {
+  const svg = (body: string, attributes = 'xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 40"') =>
+    Buffer.from(`<svg ${attributes}>${body}</svg>`);
+
+  it('uploads a plain SVG, records its size and stores a PNG rendition at 2x', async () => {
+    const asset = await upload('logo.svg', 'image/svg+xml', svg('<rect width="120" height="40" fill="#123456"/>'));
+    expect(asset).toMatchObject({
+      fileName: 'logo.svg',
+      contentType: 'image/svg+xml',
+      kind: 'image',
+      width: 120,
+      height: 40,
+      sanitized: [],
+    });
+    expect(asset.rendition).toMatchObject({ contentType: 'image/png', width: 240, height: 80 });
+    expect(asset.url).toBe(`${t.base}/a/${asset.id}/logo.svg`);
+    expect(asset.rendition!.url).toBe(`${t.base}/a/${asset.id}/logo.png`);
+
+    // The served files keep the sandbox headers, and each says what it is.
+    const original = await fetch(asset.url);
+    expect(original.status).toBe(200);
+    expect(original.headers.get('content-type')).toBe('image/svg+xml');
+    expect(original.headers.get('content-security-policy')).toBe("default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; sandbox");
+    expect(original.headers.get('x-content-type-options')).toBe('nosniff');
+    expect(original.headers.get('content-disposition')).toBe('inline; filename="logo.svg"');
+
+    const rendition = await fetch(asset.rendition!.url);
+    expect(rendition.status).toBe(200);
+    expect(rendition.headers.get('content-type')).toBe('image/png');
+    expect(rendition.headers.get('x-content-type-options')).toBe('nosniff');
+    expect(rendition.headers.get('content-disposition')).toBe('inline; filename="logo.png"');
+    const pngBytes = Buffer.from(await rendition.arrayBuffer());
+    expect(pngBytes.subarray(0, 8)).toEqual(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+    expect(pngBytes.readUInt32BE(16)).toBe(240);
+    expect(pngBytes.readUInt32BE(20)).toBe(80);
+  });
+
+  it('drops a script and says so', async () => {
+    const asset = await upload('script.svg', 'image/svg+xml', svg('<script>alert(1)</script><rect width="10" height="10"/>'));
+    expect(asset.sanitized).toContain('script');
+    const served = await (await fetch(asset.url)).text();
+    expect(served).not.toContain('<script');
+    expect(served).toContain('<rect');
+  });
+
+  it('drops an event-handler attribute and says so', async () => {
+    const asset = await upload(
+      'onload.svg',
+      'image/svg+xml',
+      svg('<rect width="10" height="10"/>', 'xmlns="http://www.w3.org/2000/svg" onload="alert(1)"'),
+    );
+    expect(asset.sanitized).toContain('onload attribute');
+    expect(await (await fetch(asset.url)).text()).not.toContain('onload');
+  });
+
+  it('drops an external href but keeps a drawable shape', async () => {
+    const asset = await upload(
+      'href.svg',
+      'image/svg+xml',
+      svg('<use href="https://evil.example/x.svg#p"/><rect width="10" height="10"/>'),
+    );
+    expect(asset.sanitized).toContain('href attribute');
+    const served = await (await fetch(asset.url)).text();
+    expect(served).not.toContain('evil.example');
+    expect(served).toContain('<rect');
+  });
+
+  it('drops foreignObject and its contents', async () => {
+    const asset = await upload(
+      'foreign.svg',
+      'image/svg+xml',
+      svg('<foreignObject><div xmlns="http://www.w3.org/1999/xhtml">hi</div></foreignObject><rect width="10" height="10"/>'),
+    );
+    expect(asset.sanitized).toContain('foreignObject');
+    expect(await (await fetch(asset.url)).text()).not.toContain('foreignObject');
+  });
+
+  it('refuses a DOCTYPE outright, because entities expand on the server', async () => {
+    const doctype = Buffer.from('<!DOCTYPE svg [<!ENTITY boom "boom">]><svg xmlns="http://www.w3.org/2000/svg"><text>&boom;</text></svg>');
+    expect((await rejects(upload('entity.svg', 'image/svg+xml', doctype))).message).toMatch(/DOCTYPE is refused|DOCTYPE are refused/);
+  });
+
+  it('drops a style with @import and says so', async () => {
+    const asset = await upload(
+      'style.svg',
+      'image/svg+xml',
+      svg('<style>@import url(https://evil.example/x.css);</style><rect width="10" height="10"/>'),
+    );
+    expect(asset.sanitized.join(' ')).toMatch(/style with @import/);
+    expect(await (await fetch(asset.url)).text()).not.toContain('@import');
+  });
+
+  it('refuses an SVG with no drawable content left', async () => {
+    expect(await rejects(upload('empty.svg', 'image/svg+xml', svg('<script>alert(1)</script>')))).toMatchObject({
+      message: expect.stringMatching(/no drawable content/i),
+    });
+  });
+
+  it('gives e-mail the PNG rendition and hosted pages the SVG', async () => {
+    const logo = await upload('brand.svg', 'image/svg+xml', svg('<path d="M0 0h120v40H0z"/>'));
+    const template = await api.call('artifacts.create', {
+      type: 'email_template',
+      name: 'Logo e-mail',
+      content: {
+        purpose: 'onboarding',
+        subject: 'Hello',
+        mjml: `<mjml><mj-body><mj-section><mj-column><mj-image src="${logo.url}" alt="Logo" /></mj-column></mj-section></mj-body></mjml>`,
+      },
+    });
+    const email = await api.call('templates.preview', { artifactId: template.artifactId });
+    expect(email.html).toContain(logo.rendition!.url);
+    expect(email.html).not.toContain(logo.url);
+
+    const page = await api.call('hostedPages.preview', {
+      page: 'confirmed',
+      brand: { siteName: 'SVG Co', logoUrl: logo.url },
+    });
+    expect(page.html).toContain(`src="${logo.url}"`);
+    expect(page.html).not.toContain(logo.rendition!.url);
   });
 });
 

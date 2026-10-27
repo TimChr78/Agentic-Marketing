@@ -848,6 +848,24 @@ export const assetBlobs = pgTable(
   (t) => [primaryKey({ columns: [t.workspaceId, t.assetId] })],
 );
 
+/** A second stored object for formats e-mail cannot use: today only an SVG's PNG rendition. */
+export const assetRenditions = pgTable(
+  'asset_renditions',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    assetId: text('asset_id').notNull(),
+    kind: text('kind').$type<'png'>().notNull(),
+    contentType: text('content_type').$type<'image/png'>().notNull(),
+    byteSize: integer('byte_size').notNull(),
+    sha256: text('sha256').notNull(),
+    width: integer('width').notNull(),
+    height: integer('height').notNull(),
+    data: bytea('data').notNull(),
+    createdAt: ts('created_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.assetId, t.kind] })],
+);
+
 export const edgeTargets = pgTable('edge_targets', {
   workspaceId: uuid('workspace_id').primaryKey(),
   provider: text('provider').$type<'cloudflare'>().notNull().default('cloudflare'),
