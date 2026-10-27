@@ -81,3 +81,45 @@ test('journey builder: add by drag, connect, delete by keyboard and context menu
   expect(moved.version.state).toBe('published');
   expect(moved.layout.positions[byKind.wait.id]).not.toEqual(byKind.wait.position);
 });
+
+test('journey builder uses the window and shows live stats (#114, #58)', async ({ page }) => {
+  await signIn(page, PEOPLE.builder);
+  // A small published journey with a wait step, so stats has a live version to read.
+  const created = await call(page.request, 'artifacts.create', {
+    type: 'journey',
+    name: 'Wide canvas e2e',
+    content: {
+      purpose: 'marketing_email',
+      goal: 'Check the canvas width',
+      nodes: [
+        { id: 'n1', kind: 'trigger', label: 'Signed up', config: { event: 'Signed Up', reentry: 'once' }, next: [{ to: 'n2' }] },
+        { id: 'n2', kind: 'wait', label: 'Wait a day', config: { duration: 'P1D' }, next: [{ to: 'n3' }] },
+        { id: 'n3', kind: 'exit', label: 'Exit', config: {} },
+      ],
+    },
+  });
+  const published = await call(page.request, 'artifacts.requestPublish', { artifactId: created.artifactId, note: 'E2E canvas check' });
+  expect(published.status).toBe('published');
+
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await page.goto(`/build/journeys/${created.artifactId}`);
+  const canvas = page.locator('.react-flow');
+  await expect(canvas.locator('.react-flow__node')).toHaveCount(3);
+
+  // Both side panels are open by default: the canvas still gets at least 1300 px.
+  await expect(page.getByRole('button', { name: 'Hide step palette' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByRole('button', { name: 'Hide inspector' })).toHaveAttribute('aria-pressed', 'true');
+  expect((await canvas.boundingBox())!.width).toBeGreaterThanOrEqual(1300);
+
+  // #58: live stats for the published version, off until asked for.
+  await page.getByRole('button', { name: 'Show stats' }).click();
+  await expect(page.getByText('0 passed · 0 waiting').first()).toBeVisible();
+
+  // Full screen hides the app chrome; with the panels collapsed the canvas is the window.
+  await page.getByRole('button', { name: 'Hide step palette' }).click();
+  await page.getByRole('button', { name: 'Hide inspector' }).click();
+  await page.getByRole('button', { name: 'Full screen (F)' }).click();
+  expect((await canvas.boundingBox())!.width).toBeGreaterThanOrEqual(1900);
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('button', { name: 'Full screen (F)' })).toBeVisible();
+});

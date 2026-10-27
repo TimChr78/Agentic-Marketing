@@ -6,12 +6,13 @@ import { SourcesCard } from '../../features/integrations/SourcesCard';
 import { WebhooksCard } from '../../features/integrations/WebhooksCard';
 import { TokensCard } from '../../features/tokens/TokensCard';
 import { PageHeader } from '../../ui';
+import { pageWidth } from '../../ui/layout';
 
 export default function IntegrationsPage({ params }: { params: Record<string, string> }) {
   useCrumbs([{ label: 'Integrations and API tokens', to: '/settings/integrations' }, ...(params.id ? [{ label: 'Token' }] : [])]);
   const { can } = useSession();
   return (
-    <div className="space-y-5">
+    <div className={pageWidth('default', 'space-y-5')}>
       <PageHeader title="Integrations and API tokens" description="How agents, scripts and other tools reach this workspace, and what they may do." />
       <TokensCard openId={params.id} />
       <ConnectAgentCard />

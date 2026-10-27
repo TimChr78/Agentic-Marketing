@@ -13,9 +13,10 @@ import {
   useReactFlow,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { Copy, Maximize, Plus, Redo2, Settings2, Trash2, Undo2 } from 'lucide-react';
+import { Copy, BarChart3, Map as MapIcon, Maximize, Maximize2, Minimize2, PanelLeft, PanelRight, Plus, Redo2, Settings2, Trash2, Undo2 } from 'lucide-react';
 import { type KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../../app/api';
+import { useSession } from '../../app/session';
 import { useResolvedTheme } from '../../app/theme';
 import { useApi } from '../../app/useApi';
 import { Button, ContextMenu, cx, EmptyState, Field, IconButton, Input, Kbd, Menu, type MenuItem, Select, Tabs, useToast } from '../../ui';
@@ -34,6 +35,25 @@ import { SimulatePanel } from './SimulatePanel';
 type Sel = { kind: 'node'; id: string } | { kind: 'edge'; source: string; index: number } | null;
 const edgeId = (source: string, index: number) => `${source}:${index}`;
 
+// Builder chrome (panel visibility, live stats, minimap) is remembered per person on this device,
+// like the theme: `am.journey.<user id>.<key>`.
+const prefKey = (scope: string, key: string) => `am.journey.${scope}.${key}`;
+function readPref<T>(scope: string, key: string, fallback: T): T {
+  try {
+    const raw = localStorage.getItem(prefKey(scope, key));
+    return raw === null ? fallback : (JSON.parse(raw) as T);
+  } catch {
+    return fallback;
+  }
+}
+function writePref(scope: string, key: string, value: unknown) {
+  try {
+    localStorage.setItem(prefKey(scope, key), JSON.stringify(value));
+  } catch {
+    /* private mode or a full store: the preference is cosmetic */
+  }
+}
+
 /** The journey builder (#33). Edits the same JSON agents edit; the detail page autosaves it. */
 export function JourneyBuilder(p: EditorProps<JourneyContent>) {
   return (
@@ -47,10 +67,20 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
   const theme = useResolvedTheme();
   const toast = useToast();
   const rf = useReactFlow();
+  const { user } = useSession();
+  const scope = user?.id ?? 'anon';
   const nodes = content.nodes ?? [];
   const [sel, setSel] = useState<Sel>(null);
   const [panel, setPanel] = useState<'inspect' | 'check' | 'simulate'>('inspect');
   const [path, setPath] = useState<string[]>([]);
+  // The canvas gets the window's width (#114): both side panels can collapse, and full screen
+  // hides the app chrome. All of it is remembered per person.
+  const [paletteOpen, setPaletteOpen] = useState(() => readPref(scope, 'palette', true));
+  const [inspectorOpen, setInspectorOpen] = useState(() => readPref(scope, 'inspector', true));
+  const [showMinimap, setShowMinimap] = useState(() => readPref(scope, 'minimap', true));
+  const [showStats, setShowStats] = useState(() => readPref(scope, 'stats', false));
+  const [fullscreen, setFullscreen] = useState(false);
+  const [canvasWide, setCanvasWide] = useState(true);
   const [menu, setMenu] = useState<{ x: number; y: number; items: (MenuItem | 'separator')[] } | null>(null);
   const past = useRef<JNode[][]>([]);
   const future = useRef<JNode[][]>([]);
@@ -58,6 +88,38 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
   const wrapper = useRef<HTMLDivElement>(null);
   const root = useRef<HTMLDivElement>(null);
   const names = useArtifactNames(referencedIds(nodes));
+
+  const published = artifact.publishedVersion !== null && artifact.publishedVersion !== undefined;
+  // #58: per-step passed/waiting for the live version, refreshed while shown.
+  const stats = useApi(() => api.call('journeys.stats', { artifactId: artifact.id }), [artifact.id, artifact.publishedVersion], { skip: !showStats || !published });
+  const statData = showStats ? stats.data : undefined;
+  useEffect(() => {
+    if (!showStats || !published) return;
+    const timer = setInterval(() => void stats.reload(), 30_000);
+    return () => clearInterval(timer);
+  }, [showStats, published, stats.reload]);
+
+  const setPref = (key: string, value: boolean, set: (v: boolean) => void) => {
+    set(value);
+    writePref(scope, key, value);
+  };
+
+  useEffect(() => {
+    if (!fullscreen) return;
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = previous;
+    };
+  }, [fullscreen]);
+
+  useEffect(() => {
+    const el = wrapper.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(([entry]) => setCanvasWide((entry?.contentRect.width ?? 0) >= 900));
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
 
   useEffect(() => {
     past.current = [];
@@ -113,9 +175,16 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
         selected: sel?.kind === 'node' && sel.id === n.id,
         draggable: !readOnly,
         ariaLabel: `${KINDS[n.kind].label}: ${n.label}. ${summary(n, names)}${warnings[n.id]?.length ? `. Incomplete: ${warnings[n.id]!.join(' ')}` : ''}`,
-        data: { node: n, summary: summary(n, names), warnings: warnings[n.id] ?? [], readOnly, highlight: path.includes(n.id) } satisfies NodeData,
+        data: {
+          node: n,
+          summary: summary(n, names),
+          warnings: warnings[n.id] ?? [],
+          stats: statData ? { reached: statData.reached[n.id] ?? 0, waiting: statData.waitingAt[n.id] ?? 0 } : undefined,
+          readOnly,
+          highlight: path.includes(n.id),
+        } satisfies NodeData,
       })),
-    [nodes, positions, sel, readOnly, names, warnings, path],
+    [nodes, positions, sel, readOnly, names, warnings, path, statData],
   );
   const [rfNodes, setRfNodes] = useState<Node[]>(build);
   useEffect(() => setRfNodes(build()), [build]);
@@ -225,17 +294,50 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
       e.preventDefault();
       const el = wrapper.current?.querySelector(`[data-id="${selectedNode.id}"]`)?.getBoundingClientRect();
       setMenu({ x: el ? el.left + 24 : 200, y: el ? el.bottom : 200, items: nodeMenu(selectedNode) });
-    } else if (e.key === 'Escape') setSel(null);
+    } else if (!mod && e.key.toLowerCase() === 'f') {
+      e.preventDefault();
+      setFullscreen((v) => !v);
+    } else if (e.key === 'Escape') {
+      if (fullscreen) setFullscreen(false);
+      else setSel(null);
+    }
   };
 
   keyRef.current = (e) => onKeyDown(e as unknown as KeyboardEvent);
 
+  const gridCols = paletteOpen
+    ? inspectorOpen
+      ? 'lg:grid-cols-[156px_minmax(0,1fr)_224px]'
+      : 'lg:grid-cols-[156px_minmax(0,1fr)]'
+    : inspectorOpen
+      ? 'lg:grid-cols-[minmax(0,1fr)_224px]'
+      : 'lg:grid-cols-[minmax(0,1fr)]';
+
   return (
-    <div ref={root} className="grid gap-0 overflow-hidden rounded-lg border border-line bg-surface lg:h-[calc(100vh-232px)] lg:min-h-[560px] lg:grid-cols-[200px_minmax(0,1fr)_340px]">
-      <aside className="hidden border-r border-line lg:block">{!readOnly ? <Palette onAdd={addAfterSelection} /> : <p className="p-3 text-[12px] text-muted">Your role can view this journey but not edit it.</p>}</aside>
+    <div
+      ref={root}
+      className={cx(
+        'grid gap-0 overflow-hidden border border-line bg-surface',
+        fullscreen
+          ? 'fixed inset-0 z-50 h-dvh max-h-dvh rounded-none'
+          : // Full-bleed: cancel the shell's page padding so the canvas uses the whole window (#114).
+            '-mx-4 rounded-lg sm:-mx-6 lg:-mx-8 lg:h-[calc(100dvh-232px)] lg:min-h-[560px]',
+        gridCols,
+      )}
+    >
+      {paletteOpen && (
+        <aside className="hidden border-r border-line lg:block">{!readOnly ? <Palette onAdd={addAfterSelection} /> : <p className="p-3 text-[12px] text-muted">Your role can view this journey but not edit it.</p>}</aside>
+      )}
 
       <div className="flex min-h-[480px] min-w-0 flex-col">
         <div className="flex flex-wrap items-center gap-1 border-b border-line px-2 py-1.5">
+          <IconButton
+            className="hidden lg:inline-flex"
+            label={paletteOpen ? 'Hide step palette' : 'Show step palette'}
+            aria-pressed={paletteOpen}
+            icon={<PanelLeft size={15} />}
+            onClick={() => setPref('palette', !paletteOpen, setPaletteOpen)}
+          />
           {!readOnly && (
             <>
               <div className="lg:hidden">
@@ -256,7 +358,32 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
             </>
           )}
           <IconButton label="Fit to screen" icon={<Maximize size={15} />} onClick={() => rf.fitView({ padding: 0.2, duration: 200 })} />
-          <div className="ml-auto hidden xl:block">
+          <IconButton
+            className="hidden md:inline-flex"
+            label={showMinimap ? 'Hide minimap' : 'Show minimap'}
+            aria-pressed={showMinimap}
+            icon={<MapIcon size={15} />}
+            onClick={() => setPref('minimap', !showMinimap, setShowMinimap)}
+          />
+          <IconButton
+            label={fullscreen ? 'Leave full screen (Esc)' : 'Full screen (F)'}
+            aria-pressed={fullscreen}
+            icon={fullscreen ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
+            onClick={() => setFullscreen((v) => !v)}
+          />
+          {published && (
+            <Button size="sm" variant={showStats ? 'secondary' : 'ghost'} icon={<BarChart3 size={14} />} aria-pressed={showStats} onClick={() => setPref('stats', !showStats, setShowStats)}>
+              {showStats ? 'Hide stats' : 'Show stats'}
+            </Button>
+          )}
+          <IconButton
+            className="ml-auto"
+            label={inspectorOpen ? 'Hide inspector' : 'Show inspector'}
+            aria-pressed={inspectorOpen}
+            icon={<PanelRight size={15} />}
+            onClick={() => setPref('inspector', !inspectorOpen, setInspectorOpen)}
+          />
+          <div className="hidden xl:block">
             <Legend className="flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-fg-2" />
           </div>
         </div>
@@ -328,7 +455,15 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
             >
               <Background gap={16} size={1} />
               <Controls showInteractive={false} position="bottom-left" />
-              <MiniMap pannable zoomable className="!hidden md:!block" nodeColor={(n) => `var(--cat-${KINDS[(n.data as NodeData).node.kind].category})`} />
+              {showMinimap && canvasWide && (
+                <MiniMap
+                  pannable
+                  zoomable
+                  className="!hidden md:!block"
+                  style={{ width: 150, height: 96 }}
+                  nodeColor={(n) => `var(--cat-${KINDS[(n.data as NodeData).node.kind].category})`}
+                />
+              )}
             </ReactFlow>
           )}
         </div>
@@ -337,49 +472,52 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
         </p>
       </div>
 
-      <aside className={cx('min-h-0 border-t border-line lg:border-t-0 lg:border-l', 'flex flex-col')}>
-        <div className="px-3 pt-1">
-          <Tabs
-            label="Panel"
-            value={panel}
-            onChange={setPanel}
-            items={[
-              { key: 'inspect', label: selectedNode ? 'Step' : 'Journey' },
-              { key: 'check', label: 'Check', count: warnCount },
-              { key: 'simulate', label: 'Simulate' },
-            ]}
-          />
-        </div>
-        <div className="min-h-0 flex-1 overflow-y-auto">
-          {panel === 'inspect' &&
-            (selectedNode ? (
-              <Inspector
-                key={selectedNode.id}
-                node={selectedNode}
-                nodes={nodes}
-                warnings={warnings[selectedNode.id] ?? []}
-                readOnly={readOnly}
-                onChange={(n) => commit({ nodes: nodes.map((x) => (x.id === n.id ? n : x)) })}
-                onConnect={(i, target) => commit(target ? connect(nodes, selectedNode.id, i, target) : disconnect(nodes, selectedNode.id, i))}
-                onDelete={() => (commit(deleteNode(nodes, selectedNode.id)), setSel(null))}
-                onDuplicate={() => commit(duplicateNode(nodes, selectedNode.id))}
-              />
-            ) : (
-              <JourneySettings content={content} onChange={onChange} readOnly={readOnly} />
-            ))}
-          {panel === 'check' && <CheckList nodes={nodes} warnings={warnings} onSelect={(id) => (setSel({ kind: 'node', id }), setPanel('inspect'), rf.fitView({ nodes: [{ id }], duration: 250, maxZoom: 1.2 }))} />}
-          {panel === 'simulate' && (
-            <SimulatePanel
-              artifactId={artifact.id}
-              version={artifact.version.number}
-              nodes={nodes}
-              dirty={JSON.stringify(content) !== JSON.stringify(artifact.version.content)}
-              onPath={setPath}
-              onSelect={(id) => setSel({ kind: 'node', id })}
+      {inspectorOpen && (
+        <aside className={cx('min-h-0 border-t border-line lg:border-t-0 lg:border-l', 'flex flex-col')}>
+          <div className="px-3 pt-1">
+            <Tabs
+              label="Panel"
+              value={panel}
+              onChange={setPanel}
+              compact
+              items={[
+                { key: 'inspect', label: selectedNode ? 'Step' : 'Journey' },
+                { key: 'check', label: 'Check', count: warnCount },
+                { key: 'simulate', label: 'Simulate' },
+              ]}
             />
-          )}
-        </div>
-      </aside>
+          </div>
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            {panel === 'inspect' &&
+              (selectedNode ? (
+                <Inspector
+                  key={selectedNode.id}
+                  node={selectedNode}
+                  nodes={nodes}
+                  warnings={warnings[selectedNode.id] ?? []}
+                  readOnly={readOnly}
+                  onChange={(n) => commit({ nodes: nodes.map((x) => (x.id === n.id ? n : x)) })}
+                  onConnect={(i, target) => commit(target ? connect(nodes, selectedNode.id, i, target) : disconnect(nodes, selectedNode.id, i))}
+                  onDelete={() => (commit(deleteNode(nodes, selectedNode.id)), setSel(null))}
+                  onDuplicate={() => commit(duplicateNode(nodes, selectedNode.id))}
+                />
+              ) : (
+                <JourneySettings content={content} onChange={onChange} readOnly={readOnly} />
+              ))}
+            {panel === 'check' && <CheckList nodes={nodes} warnings={warnings} onSelect={(id) => (setSel({ kind: 'node', id }), setPanel('inspect'), rf.fitView({ nodes: [{ id }], duration: 250, maxZoom: 1.2 }))} />}
+            {panel === 'simulate' && (
+              <SimulatePanel
+                artifactId={artifact.id}
+                version={artifact.version.number}
+                nodes={nodes}
+                dirty={JSON.stringify(content) !== JSON.stringify(artifact.version.content)}
+                onPath={setPath}
+                onSelect={(id) => setSel({ kind: 'node', id })}
+              />
+            )}
+          </div>
+        </aside>
+      )}
       <ContextMenu at={menu} items={menu?.items ?? []} onClose={() => setMenu(null)} label="Step actions" />
     </div>
   );

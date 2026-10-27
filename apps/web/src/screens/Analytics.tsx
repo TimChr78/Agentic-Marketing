@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useStore } from '../mock/store';
 import { Card, Kpi, PageHeader, Pill, cx, dkk } from '../components/ui';
+import { pageWidth } from '../ui';
 import { Chart } from '../components/Chart';
 
 const funnelJourneys = ['jrn_cart', 'jrn_welcome'] as const;
@@ -13,7 +14,7 @@ export function Analytics() {
   const sum = (k: 'sent' | 'delivered' | 'clicks' | 'unsubscribes' | 'conversions' | 'revenue' | 'events') => daily.reduce((a, d) => a + d[k], 0);
 
   return (
-    <div className="mx-auto max-w-[1200px]">
+    <div className={pageWidth('default')}>
       <PageHeader eyebrow="Built-in analytics · ClickHouse" title="Analytics">
         <Pill tone="neutral">Last 30 days</Pill>
       </PageHeader>

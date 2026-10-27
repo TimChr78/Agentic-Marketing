@@ -22,6 +22,7 @@ import {
   Tr,
   useToast,
 } from '../../ui';
+import { pageWidth } from '../../ui/layout';
 
 type Purpose = Out<'purposes.list'>['purposes'][number];
 type PurposesContent = { purposes: (Purpose & { requiresDoubleOptIn?: boolean })[] };
@@ -92,7 +93,7 @@ export default function PurposesPage() {
   };
 
   return (
-    <div>
+    <div className={pageWidth('default')}>
       <PageHeader
         title="Purposes"
         description="The lawful reasons you may contact people, and the channels each covers. Changes go through review like other artifacts: edit the purposes artifact, submit it, and a person approves it."

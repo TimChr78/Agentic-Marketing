@@ -21,6 +21,9 @@ export function rng(seed: number) {
 const DAY = 86_400_000;
 export const NOW = Date.now();
 
+/** The person the demo workspace is signed in as (the sample user in the demo fixtures, #110). */
+export const DEMO_PERSONA = { name: 'Sara' } as const;
+
 const people: [string, string, string][] = [
   ['Anna Jensen', 'Copenhagen', 'DK'],
   ['Lukas Schmidt', 'Berlin', 'DE'],

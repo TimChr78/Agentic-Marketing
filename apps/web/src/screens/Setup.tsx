@@ -3,6 +3,7 @@ import { BarChart3, Bot, Copy, Mail, Plug, Webhook } from 'lucide-react';
 import { useStore } from '../mock/store';
 import { commands } from '../api/commands';
 import { Button, Card, PageHeader, Pill, cx, timeAgo } from '../components/ui';
+import { pageWidth } from '../ui';
 
 const effectTone = { read: 'neutral', write: 'accent', publish: 'agent', send: 'bad' } as const;
 
@@ -12,7 +13,7 @@ export function Setup() {
   const endpoint = 'https://marketing.homelab.example/mcp';
 
   return (
-    <div className="mx-auto max-w-[1200px]">
+    <div className={pageWidth('reading')}>
       <PageHeader eyebrow="Workspace setup" title="Channels & MCP" />
 
       <div className="grid gap-5 lg:grid-cols-2">

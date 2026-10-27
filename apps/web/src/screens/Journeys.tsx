@@ -21,6 +21,7 @@ import { useStore } from '../mock/store';
 import { exec } from '../api/commands';
 import type { Journey, JourneyEdge, JourneyNode, NodeKind } from '../api/types';
 import { AuthorBadge, Button, Card, PageHeader, Pill, cx, inputBase, inputCls, timeAgo } from '../components/ui';
+import { pageWidth } from '../ui';
 import { useTheme } from '../lib/theme';
 import { configSummary, kindMeta } from './nodeKinds';
 
@@ -35,7 +36,7 @@ export function Journeys() {
     );
 
   return (
-    <div className="mx-auto max-w-[1200px]">
+    <div className={pageWidth('default')}>
       <PageHeader eyebrow="Orchestration" title="Journeys">
         <Button variant="agent" onClick={() => useStore.getState().setCopilotOpen(true)}>
           Draft one with the copilot

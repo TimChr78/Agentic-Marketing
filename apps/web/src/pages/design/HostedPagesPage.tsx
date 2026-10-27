@@ -5,6 +5,7 @@ import { useCrumbs } from '../../app/page';
 import { useApi } from '../../app/useApi';
 import { HostedPreview } from '../../features/brand/HostedPreview';
 import { Card, Field, Meta, Mono, PageHeader, Select } from '../../ui';
+import { pageWidth } from '../../ui/layout';
 
 /** Design → Hosted pages (#37): what subscribers see on your links address, per form. */
 export default function HostedPagesPage() {
@@ -12,7 +13,7 @@ export default function HostedPagesPage() {
   const forms = useApi(() => api.call('artifacts.list', { type: 'form', limit: 200 }), []);
   const [formId, setFormId] = useState('');
   return (
-    <div className="space-y-5">
+    <div className={pageWidth('default', 'space-y-5')}>
       <PageHeader
         title="Hosted pages"
         description="The pages subscribers see on your links address after signing up and when they unsubscribe. They use the live brand, and a form can override parts of it."

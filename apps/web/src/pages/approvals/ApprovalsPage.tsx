@@ -31,6 +31,7 @@ import {
   useConfirm,
   useToast,
 } from '../../ui';
+import { pageWidth } from '../../ui/layout';
 
 type Approval = Out<'approvals.list'>['approvals'][number];
 type Proposal = Out<'workspace.proposals'>['proposals'][number];
@@ -119,7 +120,7 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
   );
 
   return (
-    <div>
+    <div className={pageWidth('default')}>
       <PageHeader
         title="Approvals"
         description="Changes waiting for a person. Open each one to see the actual e-mail, form, journey, segment or broadcast before you approve it."

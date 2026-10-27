@@ -26,6 +26,7 @@ import {
   Textarea,
   useToast,
 } from '../../ui';
+import { pageWidth } from '../../ui/layout';
 
 type Status = 'granted' | 'denied' | 'withdrawn' | 'objected';
 type Lookup = { id: string; from: string };
@@ -82,7 +83,7 @@ export default function ConsentPage() {
   const canRecord = can('profiles:write');
 
   return (
-    <div>
+    <div className={pageWidth('default')}>
       <PageHeader
         title="Consent"
         description="The purposes this workspace relies on, and the ledger of every choice a person has made. Look someone up to see or add records."

@@ -19,6 +19,7 @@ import {
   Tag,
   formatDateTime,
 } from '../../ui';
+import { pageWidth } from '../../ui/layout';
 
 type Health = Out<'deliverability.health'>;
 type Rates = Health['email']['marketing'];
@@ -56,7 +57,7 @@ export default function DeliverabilityPage() {
 
   const h = health.data;
   return (
-    <div>
+    <div className={pageWidth('default')}>
       <PageHeader
         title="Deliverability"
         description="Are sends landing, and are the sending domains set up correctly? Marketing pauses itself when complaints or bounces pass the policy thresholds."

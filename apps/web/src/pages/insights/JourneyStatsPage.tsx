@@ -22,6 +22,7 @@ import {
   THead,
   Tr,
 } from '../../ui';
+import { pageWidth } from '../../ui/layout';
 
 type Node = { id: string; label?: string; kind?: string };
 
@@ -59,7 +60,7 @@ export default function JourneyStatsPage() {
     });
 
   return (
-    <div>
+    <div className={pageWidth('default')}>
       <PageHeader
         title="Journey stats"
         description="How many people are at each step of a journey right now, and how many passed it."

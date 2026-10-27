@@ -3,6 +3,7 @@ import { Backpack, Footprints, Lock, RotateCcw, Shirt, ShoppingCart, Tent, type 
 import { useStore } from '../mock/store';
 import { sdk, useLive, type Decision } from '../mock/live';
 import { Button, Card, PageHeader, Pill, cx } from '../components/ui';
+import { pageWidth } from '../ui';
 
 type Category = 'shoes' | 'jackets' | 'tents' | 'backpacks';
 const products: { sku: string; name: string; price: number; category: Category }[] = [
@@ -36,7 +37,7 @@ export function LiveSite() {
   const shown = events.filter((e) => !onlyMine || e.anonymousId === live.anonymousId).slice(0, 30);
 
   return (
-    <div className="mx-auto max-w-[1300px]">
+    <div className={pageWidth('default')}>
       <PageHeader eyebrow="Ingest → session state → decide, in your browser" title="Live site demo">
         <Button variant="ghost" onClick={() => sdk.reset()}>
           <RotateCcw size={14} /> New visitor
