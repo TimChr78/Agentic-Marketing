@@ -268,6 +268,11 @@ describe('treatment and control (#67)', () => {
     expect(controlEvents.some((e) => e.type === 'step' && e.detail === 'skipped: control')).toBe(true);
     expect(controlEvents.some((e) => e.type === 'converted')).toBe(true);
 
+    // The result reads ClickHouse, which the sink fills asynchronously: wait for both conversions.
+    await eventually(
+      () => journeyEvents(journeyId, treatment.profileId),
+      (rows) => rows.some((r) => r.type === 'converted'),
+    );
     // Two assigned people cannot meet the default minimum of 200 per arm.
     const result = await api().call('journeys.holdoutResult', { journeyId });
     expect(result.minSampleSizeMet).toBe(false);
