@@ -224,6 +224,29 @@ async function segmentSet(id: string, ctx: EvalContext): Promise<Set<string>> {
   if (stack.includes(id)) throw new AppError('invalid_input', `Segments refer to each other in a loop: ${[...stack, id].join(' → ')}`);
   const def = await ctx.loadSegment?.(id);
   if (!def) throw new AppError('invalid_input', `Segment ${id} has no published version.`);
+  // Static and snapshot segments are explicit lists; their membership changes only through the
+  // audience commands, so evaluating the source rule again would contradict the stored list.
+  if (def.mode !== 'dynamic') {
+    const rows = await ctx.tx
+      .select({ profileId: schema.segmentMemberships.profileId })
+      .from(schema.segmentMemberships)
+      .innerJoin(
+        schema.profiles,
+        and(
+          eq(schema.profiles.workspaceId, ctx.workspaceId),
+          eq(schema.profiles.id, schema.segmentMemberships.profileId),
+          isNull(schema.profiles.mergedInto),
+        ),
+      )
+      .where(
+        and(
+          eq(schema.segmentMemberships.segmentId, id),
+          ctx.scope ? inArray(schema.segmentMemberships.profileId, ctx.scope.length ? ctx.scope : ['-']) : undefined,
+        ),
+      );
+    return new Set(rows.map((r) => r.profileId));
+  }
+  if (!def.condition) throw new AppError('invalid_input', `Segment ${id} has no condition.`);
   ctx._stack = [...stack, id];
   try {
     return await evaluate(def.condition, ctx);

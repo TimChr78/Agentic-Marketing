@@ -34,6 +34,7 @@ export async function runSegmentScheduler(
             const out: BusEvent[] = [];
             const changed = new Set<string>();
             for (const seg of all) {
+              if (seg.definition.mode !== 'dynamic') continue;
               const last = runs.get(seg.id);
               if (last && last.version === seg.version && Date.now() - last.at.getTime() < every) continue;
               const r = await refreshSegment(tx, ws, seg, deps.events, all);

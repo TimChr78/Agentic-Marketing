@@ -509,10 +509,32 @@ export const segmentCondition: z.ZodType<SegmentCondition> = z.lazy(() =>
       .strict(),
   ]),
 );
-const segment = z.object({
-  description: z.string().max(1000).default(''),
-  condition: segmentCondition,
-});
+export const segmentMode = z
+  .enum(['dynamic', 'static', 'snapshot'])
+  .default('dynamic')
+  .describe(
+    'dynamic: recomputed from condition; static: an explicit stored list (manual, CSV or API) that a refresh leaves alone — use one for migrations and one-off sends; snapshot: a frozen copy of another segment at a point in time — use one when the audience must not change between review and send',
+  );
+
+const segment = z
+  .object({
+    description: z.string().max(1000).default(''),
+    mode: segmentMode,
+    condition: segmentCondition.optional().describe('Who matches. Required for dynamic; omit for static and snapshot.'),
+    sourceSegment: SegmentRef.optional().describe('The segment a snapshot was copied from'),
+    snapshotAt: isoDateTime('snapshotAt').optional().describe('When the snapshot copied its source'),
+    snapshotVersion: z.number().int().min(1).optional().describe("The source segment's published version at the snapshot"),
+  })
+  .superRefine((s, ctx) => {
+    if (s.mode === 'dynamic' && !s.condition)
+      ctx.addIssue({ code: 'custom', path: ['condition'], message: 'A dynamic segment needs a condition.' });
+    if (s.mode !== 'dynamic' && s.condition)
+      ctx.addIssue({ code: 'custom', path: ['condition'], message: `A ${s.mode} segment has a member list, not a condition.` });
+    if (s.mode === 'snapshot' && !s.sourceSegment)
+      ctx.addIssue({ code: 'custom', path: ['sourceSegment'], message: 'A snapshot needs the segment it was copied from.' });
+    if (s.mode !== 'snapshot' && (s.sourceSegment || s.snapshotAt || s.snapshotVersion))
+      ctx.addIssue({ code: 'custom', path: ['sourceSegment'], message: 'Only a snapshot has a source segment.' });
+  });
 
 // Web experiences (channels-and-personalization.md §3). Targeting is evaluated on every page
 // request from hot state only, so it is a smaller language than segments: profile traits and
@@ -916,7 +938,7 @@ export const artifactTypes = {
     prefix: 'seg',
     label: 'Segment',
     description:
-      'A group of people defined by traits, events in a time window, consent and other segments. Preview it with segments.preview.',
+      'A group of people. Dynamic segments are defined by traits, events in a time window, consent and other segments, and are recomputed; static segments have an explicit member list (manual, CSV or API) for migrations and one-off sends; snapshots freeze another segment so the audience cannot change between review and send. Preview any mode with segments.preview, and edit lists with audiences.add, audiences.remove and audiences.import. Membership is not consent: sends still check consent, suppression and delivery policy.',
     content: segment,
   },
   experience: {

@@ -37,6 +37,10 @@ export async function compile(cond: SegmentCondition, ctx: SqlContext): Promise<
     throw new AppError('invalid_input', `Segments refer to each other in a loop: ${[...stack, cond.segment].join(' → ')}`);
   const def = await ctx.loadSegment?.(cond.segment);
   if (!def) throw new AppError('invalid_input', `Segment ${cond.segment} has no published version.`);
+  // A static/snapshot segment is a stored list; join it rather than recomputing its source rule.
+  if (def.mode !== 'dynamic')
+    return sql`EXISTS (SELECT 1 FROM segment_memberships sm WHERE sm.workspace_id = ${ctx.workspaceId} AND sm.segment_id = ${cond.segment} AND sm.profile_id = ${schema.profiles.id})`;
+  if (!def.condition) throw new AppError('invalid_input', `Segment ${cond.segment} has no condition.`);
   ctx._stack = [...stack, cond.segment];
   try {
     return await compile(def.condition, ctx);

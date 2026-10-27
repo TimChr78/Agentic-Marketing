@@ -1,3 +1,4 @@
+import type { SegmentCondition } from '@agentic-marketing/artifacts';
 import { newUuid } from '@agentic-marketing/core';
 import type { Db } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
@@ -20,7 +21,7 @@ export interface LoadTestReport {
 }
 
 /** Profile i: plan "pro" when i % 4 = 0, consent to marketing e-mail when i is even, i % 4 product views, an order when i % 10 = 0. */
-export const SEGMENTS: { name: string; condition: PublishedSegment['definition']['condition']; expected: (n: number) => number }[] = [
+export const SEGMENTS: { name: string; condition: SegmentCondition; expected: (n: number) => number }[] = [
   { name: 'trait: plan = pro', condition: { trait: 'plan', op: 'eq', value: 'pro' }, expected: (n) => count(n, (i) => i % 4 === 0) },
   {
     name: 'event: 2+ product views in 7 days',
@@ -106,7 +107,7 @@ export async function runLoadTest(
     id: `seg_${(i + 1).toString(16).padStart(32, '0')}`,
     name: s.name,
     version: 1,
-    definition: { description: '', condition: s.condition },
+    definition: { description: '', mode: 'dynamic' as const, condition: s.condition },
   }));
   const report: LoadTestReport = { profiles: n, events: eventCount, seedMs, segments: [], peakRssMb: 0 };
   try {
