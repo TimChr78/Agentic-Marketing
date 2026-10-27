@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { localWarnings, mergeWarnings } from '../src/features/journey/checks';
+import { positionsOf, withLayout } from '../src/features/journey/layout';
 import { edgesOf, type JNode, materialize } from '../src/features/journey/model';
 import { addNode, connect, deleteNode, disconnect, duplicateNode } from '../src/features/journey/ops';
 
@@ -63,5 +64,28 @@ describe('journey graph edits (#33)', () => {
     expect(w.n1).toBeUndefined();
     const merged = mergeWarnings(w, [{ nodeId: 'n2', message: 'Segment is not published' }]);
     expect(merged.n2).toEqual(['Segment is not published']);
+  });
+
+  it('reads the saved layout before the version positions, then auto layout (#117)', () => {
+    const nodes: JNode[] = [
+      { id: 'a', kind: 'trigger', label: 'A', config: {}, position: { x: 1, y: 2 } },
+      { id: 'b', kind: 'exit', label: 'B', config: {} },
+    ];
+    expect(positionsOf(nodes, { a: { x: 9, y: 9 } })).toMatchObject({ a: { x: 9, y: 9 } });
+    expect(positionsOf(nodes, { b: { x: 5, y: 6 } })).toMatchObject({ a: { x: 1, y: 2 }, b: { x: 5, y: 6 } });
+    expect(positionsOf(nodes).a).toEqual({ x: 1, y: 2 });
+  });
+
+  it('overlays the layout on version content without mutating it', () => {
+    const content = {
+      nodes: [
+        { id: 'a', kind: 'trigger' as const, label: 'A', config: {}, position: { x: 1, y: 2 } },
+        { id: 'b', kind: 'exit' as const, label: 'B', config: {}, position: { x: 3, y: 4 } },
+      ],
+    };
+    const merged = withLayout(content, { a: { x: 9, y: 9 } });
+    expect(merged.nodes?.[0]?.position).toEqual({ x: 9, y: 9 });
+    expect(merged.nodes?.[1]?.position).toEqual({ x: 3, y: 4 });
+    expect(content.nodes[0]!.position).toEqual({ x: 1, y: 2 });
   });
 });

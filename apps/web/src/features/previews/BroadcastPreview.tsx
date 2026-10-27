@@ -15,10 +15,25 @@ const skipText: Record<string, string> = {
   frequency_cap: 'Over the frequency cap',
 };
 
-/** A broadcast (#41): template, segment, who would get it now, and when it sends. */
-export function BroadcastPreview({ artifactId, version, content }: { artifactId: string; version?: number; content: { template?: string; segment?: string; sendAt?: string; description?: string } }) {
+/**
+ * A broadcast (#41): template, segment, who would get it now, and when it sends. `templateVersion`
+ * is the template version reviewed in the same approval bundle (#107), shown instead of the live one.
+ */
+export function BroadcastPreview({
+  artifactId,
+  version,
+  content,
+  templateVersion,
+}: {
+  artifactId: string;
+  version?: number;
+  content: { template?: string; segment?: string; sendAt?: string; description?: string };
+  templateVersion?: number;
+}) {
   const { can } = useSession();
-  const reach = useApi(() => api.call('broadcasts.preview', { artifactId, version }), [artifactId, version], { skip: !can('artifacts:read') });
+  const reach = useApi(() => api.call('broadcasts.preview', { artifactId, version, templateVersion }), [artifactId, version, templateVersion], {
+    skip: !can('artifacts:read'),
+  });
   const tpl = useArtifactRef(content.template);
   const isEmail = content.template?.startsWith('eml_');
   return (
@@ -57,9 +72,24 @@ export function BroadcastPreview({ artifactId, version, content }: { artifactId:
         </div>
       </Card>
       {isEmail && content.template && (
-        <Card title="The e-mail" description={tpl.artifact?.publishedVersion ? `Live version v${tpl.artifact.publishedVersion} of the template` : 'The template is not published yet; showing its latest draft'}>
+        <Card
+          title="The e-mail"
+          description={
+            templateVersion
+              ? `Version v${templateVersion} of the template, reviewed together with this broadcast`
+              : tpl.artifact?.publishedVersion
+                ? `Live version v${tpl.artifact.publishedVersion} of the template`
+                : 'The template is not published yet; showing its latest draft'
+          }
+        >
           <div className="p-4">
-            {tpl.artifact ? <EmailPreview compact artifactId={content.template} version={tpl.artifact.publishedVersion ?? undefined} /> : tpl.error ? <Alert tone="bad">{tpl.error}</Alert> : <Skeleton className="h-40" />}
+            {tpl.artifact ? (
+              <EmailPreview compact artifactId={content.template} version={templateVersion ?? tpl.artifact.publishedVersion ?? undefined} />
+            ) : tpl.error ? (
+              <Alert tone="bad">{tpl.error}</Alert>
+            ) : (
+              <Skeleton className="h-40" />
+            )}
           </div>
         </Card>
       )}

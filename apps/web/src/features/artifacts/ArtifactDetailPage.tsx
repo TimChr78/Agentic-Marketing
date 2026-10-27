@@ -1,4 +1,4 @@
-import { Copy, MoreHorizontal, Pencil, Send } from 'lucide-react';
+import { Copy, MoreHorizontal, Pencil, Send, Undo2 } from 'lucide-react';
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError, api, errText, type Out } from '../../app/api';
 import { typeLabel } from '../../app/artifactRoutes';
@@ -9,6 +9,8 @@ import { useWorkspace } from '../../app/session';
 import { useApi } from '../../app/useApi';
 import { Alert, Button, Field, fieldErrors, Input, LoadingBlock, Menu, Modal, PageHeader, StatePill, StatusPill, Tabs, Textarea, timeAgo, useToast } from '../../ui';
 import { invalidateArtifact } from '../artifactCache';
+import { withLayout } from '../journey/layout';
+import type { JNode } from '../journey/model';
 import { ArtifactPreview } from '../previews/ArtifactPreview';
 import { ActivityPanel } from './ActivityPanel';
 import { JsonEditor } from './JsonEditor';
@@ -74,11 +76,24 @@ export function ArtifactDetailPage({
   const [saving, setSaving] = useState(false);
   const [publishing, setPublishing] = useState(false);
   const [renaming, setRenaming] = useState(false);
+  const [discardOpen, setDiscardOpen] = useState(false);
+  const [discardError, setDiscardError] = useState<string | null>(null);
+  const [discarding, setDiscarding] = useState(false);
+  const [lastSave, setLastSave] = useState<'content' | 'layout' | null>(null);
 
+  // Journeys show the saved layout on top of the version's own positions, so moving a step counts
+  // as an unsaved change until it is saved, without pretending the version content changed.
+  const savedContent = useMemo(
+    () =>
+      a?.type === 'journey'
+        ? withLayout(a.version.content as { nodes?: JNode[] } & Record<string, unknown>, a.layout?.positions)
+        : a?.version.content,
+    [a],
+  );
   useEffect(() => {
-    if (a) setDraft(a.version.content);
-  }, [a]);
-  const dirty = !!a && draft !== undefined && JSON.stringify(draft) !== JSON.stringify(a.version.content);
+    if (savedContent !== undefined) setDraft(savedContent);
+  }, [savedContent]);
+  const dirty = draft !== undefined && JSON.stringify(draft) !== JSON.stringify(savedContent);
   const readOnly = !can('artifacts:write');
 
   useEffect(() => {
@@ -104,11 +119,14 @@ export function ArtifactDetailPage({
       try {
         const r = await api.call('artifacts.updateDraft', { artifactId: a.id, content: draft, expectedContentHash: a.version.contentHash, ...(opts.name ? { name: opts.name } : {}) });
         setWarnings(r.warnings);
+        setLastSave(r.layoutOnly ? 'layout' : 'content');
         invalidateArtifact(a.id);
         await art.reload();
         setSavedAt(Date.now());
-        if (!opts.quiet || r.version !== a.version.number)
-          toast.success(r.version === a.version.number ? 'Draft saved.' : `Saved as draft v${r.version}. The live version is unchanged until it is published.`);
+        if (!opts.quiet || r.version !== a.version.number) {
+          if (r.layoutOnly) toast.success('Layout saved.');
+          else toast.success(r.version === a.version.number ? 'Draft saved.' : `Saved as draft v${r.version}. The live version is unchanged until it is published.`);
+        }
         return true;
       } catch (e) {
         if (e instanceof ApiError && e.code === 'invalid_input') setErrors(fieldErrors(e.details));
@@ -160,6 +178,25 @@ export function ArtifactDetailPage({
   const directPublish = workspace.approvalPolicy === 'none' || (workspace.approvalPolicy === 'agent_changes' && latest.author.type === 'user');
   const canPublish = can('artifacts:publish') && latest.state === 'draft' && !dirty;
 
+  const discardDraft = async () => {
+    setDiscarding(true);
+    setDiscardError(null);
+    try {
+      const r = await api.call('artifacts.discardDraft', { artifactId: a.id });
+      toast.success(`Discarded the draft. Back on live v${r.version}.`);
+      setDiscardOpen(false);
+      setWarnings([]);
+      setSavedAt(null);
+      setLastSave(null);
+      invalidateArtifact(a.id);
+      await art.reload();
+    } catch (e) {
+      setDiscardError(errText(e));
+    } finally {
+      setDiscarding(false);
+    }
+  };
+
   return (
     <div>
       <PageHeader
@@ -180,12 +217,22 @@ export function ArtifactDetailPage({
             {extraActions?.(a)}
             {autosave && !readOnly && (
               <span className="text-[12px] text-muted" aria-live="polite">
-                {saving ? 'Saving…' : saveError ? 'Not saved, see below' : dirty ? 'Unsaved changes' : savedAt ? 'All changes saved' : 'Changes save automatically'}
+                {saving
+                  ? 'Saving…'
+                  : saveError
+                    ? 'Not saved, see below'
+                    : dirty
+                      ? 'Unsaved changes'
+                      : lastSave === 'layout'
+                        ? 'Layout saved'
+                        : savedAt
+                          ? 'All changes saved'
+                          : 'Changes save automatically'}
               </span>
             )}
             {dirty && !readOnly && (!autosave || conflict) && (
               <>
-                <Button variant="ghost" onClick={() => setDraft(a.version.content)}>
+                <Button variant="ghost" onClick={() => setDraft(savedContent)}>
                   Discard changes
                 </Button>
                 <Button variant="primary" loading={saving} onClick={() => void save()}>
@@ -207,6 +254,19 @@ export function ArtifactDetailPage({
               label="More actions"
               items={[
                 ...(readOnly ? [] : [{ label: 'Rename', icon: <Pencil />, onSelect: () => setRenaming(true) }]),
+                ...(a.publishedVersion && a.latestVersion > a.publishedVersion && !readOnly
+                  ? [
+                      {
+                        label: `Discard draft (back to live v${a.publishedVersion})`,
+                        icon: <Undo2 />,
+                        destructive: true,
+                        onSelect: () => {
+                          setDiscardError(null);
+                          setDiscardOpen(true);
+                        },
+                      },
+                    ]
+                  : []),
                 { label: 'Copy id', icon: <Copy />, hint: a.id.slice(0, 8), onSelect: () => void navigator.clipboard?.writeText(a.id) },
               ]}
               trigger={(p) => (
@@ -285,6 +345,35 @@ export function ArtifactDetailPage({
             if (ok) setRenaming(false);
           }}
         />
+      )}
+      {discardOpen && a.publishedVersion && (
+        <Modal
+          open
+          onClose={() => !discarding && setDiscardOpen(false)}
+          title={`Discard the draft and go back to live v${a.publishedVersion}?`}
+          footer={
+            <>
+              <Button onClick={() => setDiscardOpen(false)} disabled={discarding}>
+                Keep the draft
+              </Button>
+              <Button variant="danger" loading={discarding} onClick={() => void discardDraft()}>
+                Discard draft
+              </Button>
+            </>
+          }
+        >
+          <p>
+            {a.latestVersion === a.publishedVersion + 1
+              ? `Version v${a.latestVersion} is deleted.`
+              : `Versions v${a.publishedVersion + 1}–v${a.latestVersion} are deleted.`}{' '}
+            The artifact goes back to v{a.publishedVersion}, the version recipients use now.
+          </p>
+          {discardError && (
+            <Alert tone="bad" className="mt-3">
+              {discardError}
+            </Alert>
+          )}
+        </Modal>
       )}
     </div>
   );

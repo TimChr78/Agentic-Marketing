@@ -16,10 +16,14 @@ type Token = Out<'apiTokens.list'>['tokens'][number];
 export function TokensCard({ openId }: { openId?: string }) {
   const { can, workspace } = useWorkspace();
   const list = useApi(() => api.call('apiTokens.list', {}), []);
+  const warnings = useApi(() => api.call('system.inputWarnings', {}), []);
   const [creating, setCreating] = useState(false);
   const [created, setCreated] = useState<{ name: string; token: string } | null>(null);
   const tokens = list.data?.tokens ?? [];
   const admin = can('workspace:admin');
+  const ignored = new Map(
+    (warnings.data?.clients ?? []).filter((c) => c.principalType === 'token').map((c) => [c.principalId, c]),
+  );
   const open = (id: string) => navigate(`/settings/integrations/tokens/${id}`);
   return (
     <Card
@@ -31,6 +35,13 @@ export function TokensCard({ openId }: { openId?: string }) {
         </Button>
       }
     >
+      {admin && warnings.data && !warnings.data.strictInputs && warnings.data.safeToEnableStrict && (
+        <div className="px-4 pt-4">
+          <Alert tone="good">
+            No client has sent unknown input keys for 7 days: it's safe to set <Mono>STRICT_INPUTS=true</Mono>.
+          </Alert>
+        </div>
+      )}
       <TableFrame
         className="rounded-none border-0"
         loading={list.loading}
@@ -62,6 +73,21 @@ export function TokensCard({ openId }: { openId?: string }) {
                     {t.name}
                   </button>
                   <div className="font-mono text-[11px] text-muted">{t.tokenHint}</div>
+                  {ignored.has(t.id) && (
+                    <details className="mt-1 text-[12px] text-muted" onClick={(e) => e.stopPropagation()}>
+                      <summary className="cursor-pointer hover:text-fg">
+                        Inputs the API ignored: {ignored.get(t.id)!.total} in the last {warnings.data?.sinceDays ?? 30} days (last{' '}
+                        {timeAgo(ignored.get(t.id)!.lastSeen)})
+                      </summary>
+                      <ul className="mt-1.5 space-y-0.5">
+                        {ignored.get(t.id)!.commands.map((c) => (
+                          <li key={c.command}>
+                            <Mono>{c.command}</Mono> → {c.keys.map((k) => `${k.keyPath} (${k.count})`).join(', ')}
+                          </li>
+                        ))}
+                      </ul>
+                    </details>
+                  )}
                 </Td>
                 {admin && <Td>{t.ownerName}</Td>}
                 <Td className="hidden max-w-[360px] lg:table-cell">

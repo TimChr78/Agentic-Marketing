@@ -12,7 +12,7 @@ docker compose exec app am smoke --public-url https://links.example.com
 
 Create a token in **Settings → API tokens** (or with `apiTokens.create`) and grant only `artifacts:read`. That is enough for every token-based check: `system.status` is readable by any authenticated principal, so the provider check no longer needs an admin token (API tokens cannot hold `workspace:admin` anyway). Add `profiles:read` only if you use `--cleanup`, which looks up the profile a signup created. A token is shown once. Read it from `AM_TOKEN` so it does not land in shell history.
 
-`profiles.erase` is deliberately people-only, so `am smoke --cleanup` cannot erase a profile with an API token. It still finds the profile, reports its id, and says what to do next.
+`profiles.erase` needs both the `profiles:erase` scope and a person: it is deliberately people-only, so no API token can erase a profile, whatever scopes it carries. `am smoke --cleanup` with a token therefore finds the profile, reports its id, and says what to do next. If the signup was never confirmed, the unconfirmed-signup retention (`RETENTION_UNCONFIRMED_DAYS`, 30 days by default) removes it; a signup that recorded consent is not removed by that retention, so erase it as a person in the admin UI.
 
 ## Flags
 
@@ -20,10 +20,10 @@ Create a token in **Settings → API tokens** (or with `apiTokens.create`) and g
 |---|---|
 | `--public-url URL` | Required. The public listener, e.g. `https://links.example.com`. If the site proxies a path, give the prefix too: `https://example.com/am`. |
 | `--admin-url URL` | The admin listener, usually `http://localhost:3000` from inside the app container. Needed for the `admin.*` checks. |
-| `--token amk_…` | An API token with `artifacts:read`, plus `profiles:read` for `--cleanup`. Read from `AM_TOKEN` when the flag is omitted. |
+| `--token amk_…` | An API token with `artifacts:read`, plus `profiles:read` for `--cleanup` (which only finds the profile; no token can erase). Read from `AM_TOKEN` when the flag is omitted. |
 | `--form FORM_ID` | A published form (`frm_…`) for the signup round trip. |
 | `--email ADDRESS` | The address to submit to the form. Use an address you can check, preferably a plus address such as `you+smoke@example.com`. |
-| `--cleanup` | After the signup check, look up the profile by e-mail and try to erase it. Needs `--admin-url` and a token with `profiles:read`. |
+| `--cleanup` | After the signup check, look up the profile by e-mail and try to erase it. Needs `--admin-url` and a token with `profiles:read`; `profiles.erase` needs `profiles:erase` and a person, so the detail says when retention removes an unconfirmed signup (`RETENTION_UNCONFIRMED_DAYS`, 30 days by default). |
 | `--asset PATH` | A public asset path to fetch, e.g. `/a/ast_…/logo.png`. |
 | `--json` | Print `{ "ok": true|false, "checks": [...] }` instead of the table. |
 
@@ -43,10 +43,10 @@ Use an address you own, such as `you+smoke@example.com`. Do not use a stranger's
 `--cleanup` runs after the form answers `303`: it retries `profiles.find` for the submitted address (workers create the profile just after the HTTP response), then calls `profiles.erase` with the reason `am smoke signup cleanup`. When erasure is not allowed, the check still passes and its detail says:
 
 ```text
-left in place: erase with profiles.erase or let the unconfirmed-signup retention (RETENTION_UNCONFIRMED_DAYS) remove it
+left in place: profiles.erase is people-only, so an API token cannot erase it; if the signup stays unconfirmed, retention (RETENTION_UNCONFIRMED_DAYS) removes it after 30 days, or erase it as a person in the admin UI
 ```
 
-That is the normal result for an API token, because `profiles.erase` can only be run by a person. Erase the profile as a person in the admin UI, or let the retention pass remove it. Smoke signups are not excluded from profile counts or statistics; only consent-based segments and sends ignore an unconfirmed one.
+That is the normal result for an API token, because `profiles.erase` needs `profiles:erase` and can only be run by a person. Erase the profile as a person in the admin UI, or let the retention pass remove an unconfirmed signup after `RETENTION_UNCONFIRMED_DAYS` (30 days by default); a signup that recorded consent is not removed by that retention. Smoke signups are not excluded from profile counts or statistics; only consent-based segments and sends ignore an unconfirmed one.
 
 ## What each check proves
 
@@ -59,7 +59,7 @@ That is the normal result for an API token, because `profiles.erase` can only be
 | `admin.health` | `--admin-url`; token optional | `GET <admin>/readyz` answers `200`, so Postgres, ClickHouse and Valkey are reachable. With a token that can read `system.status`, the detail also shows the running server version. |
 | `admin.mcp` | `--admin-url`, token | MCP `initialize` and `tools/list` accept the token and list at least one tool; the detail says how many. |
 | `admin.provider` | `--admin-url`, token | `system.status` says an enabled provider covers both marketing and transactional mail, and names its adapter. It fails with which one is missing, without revealing addresses, hosts or secrets. |
-| `public.signup` | `--form`, `--email`; `--cleanup` also needs `--admin-url` and `profiles:read` | Posts an HTML form (`email=…`) to `<public>/f/<form>`. The form answers `303` with a `Location` header. The signup side effects above are real. |
+| `public.signup` | `--form`, `--email`; `--cleanup` also needs `--admin-url` and `profiles:read` (finding only; erasing needs a person) | Posts an HTML form (`email=…`) to `<public>/f/<form>`. The form answers `303` with a `Location` header. The signup side effects above are real. |
 
 Checks that need a flag are reported as `skip`, not `fail`. A skip does not change the exit code. A failed check does not stop later checks, so one run shows every problem.
 
@@ -78,7 +78,7 @@ Every request has a five-second timeout, reported as `timed out after 5 s`. A RE
 ## Run it after an upgrade
 
 ```bash
-export AM_TOKEN=amk_…   # artifacts:read, plus profiles:read for --cleanup
+export AM_TOKEN=amk_…   # artifacts:read, plus profiles:read for --cleanup (finding only)
 docker compose exec -e AM_TOKEN app am smoke \
   --public-url https://links.example.com \
   --admin-url http://localhost:3000 \

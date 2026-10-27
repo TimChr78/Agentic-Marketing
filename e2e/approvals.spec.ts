@@ -35,6 +35,29 @@ test.describe('approvals (#41)', () => {
     await expect(page.getByRole('row', { name: /Weekly Signal #43/ })).toHaveCount(0);
   });
 
+  test('a template and its broadcast are one row, one review and one approval (#107)', async ({ page }) => {
+    await signIn(page, PEOPLE.approver);
+    await page.goto('/approvals');
+    const row = page.getByRole('row', { name: /Send Signal #44/ });
+    await expect(row).toContainText('+ 1 reviewed together');
+    await expect(page.getByRole('row', { name: /Weekly Signal #44/ })).toHaveCount(0);
+
+    await row.getByRole('link', { name: 'Send Signal #44' }).click();
+    const drawer = page.getByRole('dialog', { name: 'Send Signal #44' });
+    await expect(drawer).toContainText('Reviewed together');
+    await expect(drawer).toContainText('reviewed together with this broadcast');
+    await expect(drawer.frameLocator('iframe[title^="E-mail preview"]').getByText('This issue and its send were approved together.')).toBeVisible();
+    await drawer.getByRole('button', { name: /Weekly Signal #44/ }).click();
+    await expect(page.getByRole('dialog', { name: 'Weekly Signal #44' })).toContainText('Reviewed together');
+
+    await page.getByRole('dialog', { name: 'Weekly Signal #44' }).getByRole('button', { name: 'Approve all 2 and publish' }).click();
+    await expect(page.getByText(/Approved 2 changes/)).toBeVisible();
+    const list = await call(page.request, 'approvals.list', { status: 'approved' });
+    const names = list.approvals.map((a: any) => a.artifactName);
+    expect(names).toContain('Weekly Signal #44');
+    expect(names).toContain('Send Signal #44');
+  });
+
   test('batch approve is possible only for viewed items; the drawer works at 390 px', async ({ page }) => {
     await signIn(page, PEOPLE.approver);
     await page.setViewportSize({ width: 390, height: 844 });
@@ -64,8 +87,25 @@ test.describe('approvals (#41)', () => {
     await signIn(page, PEOPLE.viewer);
     await page.goto('/approvals');
     await expect(page.getByRole('button', { name: /Approve selected/ })).toHaveCount(0);
+    await expect(page.getByRole('region', { name: 'Workspace settings' })).toContainText('An admin decides workspace settings.');
     await page.getByRole('row', { name: /Newsletter signup/ }).click();
     await expect(page.getByRole('dialog')).toContainText('Your role can review changes but not approve them.');
     await expect(page.getByRole('navigation', { name: 'Main' }).getByRole('link', { name: 'Providers' })).toHaveCount(0);
+  });
+
+  test('the owner approves the time zone Hermes proposed (#106)', async ({ page }) => {
+    await signIn(page, PEOPLE.owner);
+    await page.goto('/approvals');
+    const card = page.getByRole('region', { name: 'Workspace settings' });
+    await expect(card).toContainText('Time zone:');
+    await expect(card).toContainText('UTC');
+    await expect(card).toContainText('Europe/Copenhagen');
+    await expect(card).toContainText('Hermes');
+    await expect(card).toContainText('token of Sam Rivera');
+    await card.getByRole('button', { name: 'Approve', exact: true }).click();
+    await expect(page.getByText('Approved the workspace settings change')).toBeVisible();
+    await expect(card).toHaveCount(0);
+    const ws = await call(page.request, 'workspace.get', {});
+    expect(ws.timeZone).toBe('Europe/Copenhagen');
   });
 });

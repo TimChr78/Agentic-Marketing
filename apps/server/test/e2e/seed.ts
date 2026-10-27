@@ -83,7 +83,7 @@ export async function seed(t: T, opts: { confirmedUrl?: string } = {}) {
     ],
     'agent_changes',
   );
-  await t.srv.db.admin.query(`UPDATE workspaces SET name = 'MartechSignal', time_zone = 'Europe/Copenhagen' WHERE id = $1`, [ws]);
+  await t.srv.db.admin.query(`UPDATE workspaces SET name = 'MartechSignal', time_zone = 'UTC' WHERE id = $1`, [ws]);
   const sandbox = await t.workspaceWith([[users.owner, 'admin']], 'none');
   await t.srv.db.admin.query(`UPDATE workspaces SET name = 'Sandbox' WHERE id = $1`, [sandbox]);
 
@@ -221,6 +221,12 @@ export async function seed(t: T, opts: { confirmedUrl?: string } = {}) {
   });
   await builder.call('apiTokens.create', { name: 'n8n reporting', scopes: ['artifacts:read'] });
   const agent = createClient<Commands>({ baseUrl: t.base, headers: { authorization: `Bearer ${token.token}` } });
+  // An agent cannot administer workspace settings (#106); it proposes, and the owner approves
+  // the change from the Approvals page.
+  await agent.call('workspace.proposeUpdate', {
+    timeZone: 'Europe/Copenhagen',
+    note: 'The editorial team and most readers are in Denmark; display dates in Copenhagen time.',
+  });
   const ask = (id: string, note: string) => agent.call('artifacts.requestPublish', { artifactId: id, note });
 
   const issue43 = await agent.call('artifacts.create', {
@@ -250,6 +256,26 @@ export async function seed(t: T, opts: { confirmedUrl?: string } = {}) {
     },
   });
   await ask(bc.artifactId, 'Resend #42 on Friday morning, Copenhagen time.');
+
+  // The weekly flow since #107: next issue's template and the broadcast that sends it, one review.
+  const issue44 = await agent.call('artifacts.create', {
+    type: 'email_template',
+    name: 'Weekly Signal #44',
+    content: {
+      purpose: 'marketing_email',
+      subject: 'Signal #44: one review per issue',
+      mjml: mjml('Signal #44', 'This issue and its send were approved together.'),
+    },
+  });
+  const send44 = await agent.call('artifacts.create', {
+    type: 'broadcast',
+    name: 'Send Signal #44',
+    content: { template: issue44.artifactId, segment: engaged.artifactId, sendAt: '2026-11-06T09:00:00+01:00' },
+  });
+  await agent.call('artifacts.requestPublishBundle', {
+    artifactIds: [send44.artifactId, issue44.artifactId],
+    note: 'Issue 44 and its Friday send, for one review.',
+  });
 
   await agent.call('artifacts.updateDraft', {
     artifactId: engaged.artifactId,

@@ -71,7 +71,8 @@ async function definition(tx: Tx, id: string, version?: number) {
   return { artifact: a, version: number, def: artifactTypes.broadcast.content.parse(v.content) as BroadcastDefinition };
 }
 
-async function purposeOf(tx: Tx, templateId: string) {
+/** The template's purpose: of its published version, or of `version` (a template reviewed in the same bundle, #107). */
+async function purposeOf(tx: Tx, templateId: string, version?: number) {
   const [row] = await tx
     .select({ purpose: sql<string>`${schema.artifactVersions.content} ->> 'purpose'` })
     .from(schema.artifacts)
@@ -80,7 +81,9 @@ async function purposeOf(tx: Tx, templateId: string) {
       and(
         eq(schema.artifactVersions.workspaceId, schema.artifacts.workspaceId),
         eq(schema.artifactVersions.artifactId, schema.artifacts.id),
-        eq(schema.artifactVersions.number, schema.artifacts.publishedVersion),
+        version === undefined
+          ? eq(schema.artifactVersions.number, schema.artifacts.publishedVersion)
+          : eq(schema.artifactVersions.number, version),
       ),
     )
     .where(eq(schema.artifacts.id, templateId));
@@ -92,7 +95,18 @@ export const previewBroadcast = defineCommand({
   title: 'Preview a broadcast’s audience',
   description:
     'Who a broadcast (default: its latest version) would reach right now: the segment size and, for up to 2,000 members, how many the send gateway would send to and why it would skip the others (no consent, suppressed, no address). Sends nothing.',
-  input: z.object({ artifactId: BroadcastId, version: z.number().int().min(1).optional() }),
+  input: z.object({
+    artifactId: BroadcastId,
+    version: z.number().int().min(1).optional(),
+    templateVersion: z
+      .number()
+      .int()
+      .min(1)
+      .optional()
+      .describe(
+        "The template version to assume, e.g. the one reviewed in the same approval bundle; default: the template's published version",
+      ),
+  }),
   output: z.object({
     audience: z.number(),
     checked: z.number(),
@@ -105,8 +119,14 @@ export const previewBroadcast = defineCommand({
   target: (i) => i.artifactId,
   handler: async (input, ctx) => {
     const { def } = await definition(ctx.tx, input.artifactId, input.version);
-    const purpose = await purposeOf(ctx.tx, def.template);
-    if (!purpose) throw new AppError('conflict', `${def.template} has no published version yet.`);
+    const purpose = await purposeOf(ctx.tx, def.template, input.templateVersion);
+    if (!purpose)
+      throw new AppError(
+        'conflict',
+        input.templateVersion
+          ? `${def.template} has no version ${input.templateVersion}.`
+          : `${def.template} has no published version yet; pass templateVersion to preview with a draft.`,
+      );
     const [{ n }] = await ctx.tx
       .select({ n: sql<number>`count(*)::int` })
       .from(schema.segmentMemberships)
@@ -138,6 +158,14 @@ export const sendTestBroadcast = defineCommand({
   input: z.object({
     artifactId: BroadcastId,
     version: z.number().int().min(1).optional().describe('Default: the latest draft, else the latest version'),
+    templateVersion: z
+      .number()
+      .int()
+      .min(1)
+      .optional()
+      .describe(
+        "The template version to send, e.g. the one reviewed in the same approval bundle; default: the template's published version, else its latest",
+      ),
     to: testRecipientsInput,
   }),
   output: testSendOutput,
@@ -179,7 +207,7 @@ export const sendTestBroadcast = defineCommand({
       .from(schema.artifacts)
       .where(and(eq(schema.artifacts.id, def.template), eq(schema.artifacts.type, 'email_template')));
     if (!template) throw new AppError('not_found', `No e-mail template ${def.template}.`);
-    const templateVersion = template.publishedVersion ?? template.latestVersion;
+    const templateVersion = input.templateVersion ?? template.publishedVersion ?? template.latestVersion;
     const [tv] = await ctx.tx
       .select({ content: schema.artifactVersions.content })
       .from(schema.artifactVersions)

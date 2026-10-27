@@ -7,7 +7,7 @@ import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, gte, inArray, sql } from 'drizzle-orm';
 import type { Decision, EmailServices } from '../gateway';
-import { decisionEvent, defer, MAX_ATTEMPTS } from '../outbox';
+import { decisionEvent, defer, MAX_ATTEMPTS, retryDelaySeconds } from '../outbox';
 import { checkPolicy, isMarketing } from '../policy';
 import { billingOf, smsTransportFor, smsWebhookPath } from './providers';
 import { renderSms } from './render';
@@ -158,7 +158,7 @@ export async function deliverSms(db: Db, ws: string, id: string, deps: { kp: Key
     if (hold.ok === false) return finish('suppressed', hold.reason);
     if (hold.ok === 'later') return defer(tx, m, hold.until, hold.reason);
     const marketing = isMarketing(v.basis);
-    const stream = marketing ? 'marketing' : 'transactional';
+    const stream: 'marketing' | 'transactional' = marketing ? 'marketing' : 'transactional';
     const provider = (await tx.select().from(schema.smsProviders).where(eq(schema.smsProviders.enabled, true))).find((p) =>
       p.useFor.includes(stream),
     );
@@ -179,6 +179,7 @@ export async function deliverSms(db: Db, ws: string, id: string, deps: { kp: Key
       kind: 'send' as const,
       m,
       provider,
+      stream,
       segments: text.segments,
       transport: await smsTransportFor(tx, provider, deps.kp, deps.email.adapterDeps),
       out: {
@@ -195,7 +196,7 @@ export async function deliverSms(db: Db, ws: string, id: string, deps: { kp: Key
     await deps.events.insertMessageEvents([prepared.event]);
     return;
   }
-  const { m, provider, transport, out } = prepared;
+  const { m, provider, transport, out, stream } = prepared;
   let event: MessageEvent;
   try {
     const sent = await transport.send(out);
@@ -216,11 +217,12 @@ export async function deliverSms(db: Db, ws: string, id: string, deps: { kp: Key
   } catch (e) {
     const reason = `provider_error: ${(e as Error).message.split('\n')[0]}`;
     const retry = m.attempts < MAX_ATTEMPTS;
+    const nextAttemptAt = retry ? new Date(Date.now() + retryDelaySeconds(stream, m.attempts) * 1000) : null;
     logger.warn({ messageId: id, provider: provider.adapter, retry, err: (e as Error).message }, 'SMS send failed');
     await db.withWorkspace(ws, (tx) =>
       tx
         .update(schema.messages)
-        .set({ status: retry ? 'queued' : 'failed', reason, providerId: provider.id, updatedAt: new Date() })
+        .set({ status: retry ? 'queued' : 'failed', reason, providerId: provider.id, nextAttemptAt, updatedAt: new Date() })
         .where(eq(schema.messages.id, id)),
     );
     event = decisionEvent(m, retry ? 'queued' : 'failed', reason, provider.adapter);

@@ -79,6 +79,19 @@ export const artifactVersions = pgTable(
   (t) => [primaryKey({ columns: [t.workspaceId, t.artifactId, t.number] })],
 );
 
+/** Canvas positions, separate from the versioned content so moving a step is not a draft (issue #117). */
+export const artifactLayout = pgTable(
+  'artifact_layout',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    artifactId: text('artifact_id').notNull(),
+    layout: jsonb('layout').notNull(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+    updatedBy: text('updated_by').notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.artifactId] })],
+);
+
 export const approvalRequests = pgTable(
   'approval_requests',
   {
@@ -91,6 +104,28 @@ export const approvalRequests = pgTable(
     requestedById: text('requested_by_id').notNull(),
     requestedByClient: text('requested_by_client'),
     note: text('note').notNull(),
+    decidedBy: text('decided_by'),
+    decidedAt: ts('decided_at'),
+    decisionNote: text('decision_note'),
+    /** Requests reviewed and published together (#107); null for a single request. */
+    bundleId: text('bundle_id'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
+/** Low-risk workspace settings an agent proposed for a person to approve (#106). */
+export const workspaceProposals = pgTable(
+  'workspace_proposals',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    changes: jsonb('changes').notNull(),
+    note: text('note').notNull(),
+    status: text('status').$type<'pending' | 'approved' | 'rejected' | 'superseded'>().notNull(),
+    requestedByType: text('requested_by_type').$type<'user' | 'agent'>().notNull(),
+    requestedById: text('requested_by_id').notNull(),
+    requestedByClient: text('requested_by_client'),
     decidedBy: text('decided_by'),
     decidedAt: ts('decided_at'),
     decisionNote: text('decision_note'),
@@ -339,6 +374,8 @@ export const messages = pgTable(
     attempts: integer('attempts').notNull().default(0),
     /** Held back until then (quiet hours, a paused stream). */
     notBefore: ts('not_before'),
+    /** When a queued retry becomes claimable; null keeps the old updated_at-based backoff. */
+    nextAttemptAt: ts('next_attempt_at'),
     /** SMS segments used. */
     segments: integer('segments'),
     /** A test send: sent for checking, never counted in reporting or delivery policy. */
@@ -636,6 +673,25 @@ export const apiTokenChanges = pgTable(
     steppedUp: boolean('stepped_up').notNull().default(false),
   },
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
+export type InputWarningPrincipal = 'user' | 'token' | 'oauth_client';
+
+/** Unknown command-input keys a client sent, so strict mode can be rolled out on evidence (#124). */
+export const inputWarnings = pgTable(
+  'input_warnings',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    principalType: text('principal_type').$type<InputWarningPrincipal>().notNull(),
+    principalId: text('principal_id').notNull(),
+    clientLabel: text('client_label').notNull(),
+    command: text('command').notNull(),
+    keyPath: text('key_path').notNull(),
+    firstSeen: ts('first_seen').notNull().defaultNow(),
+    lastSeen: ts('last_seen').notNull().defaultNow(),
+    count: integer('count').notNull().default(1),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.principalType, t.principalId, t.command, t.keyPath] })],
 );
 
 export const webhookEndpoints = pgTable(

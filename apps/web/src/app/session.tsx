@@ -89,11 +89,20 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   const refreshPending = useCallback(() => {
     if (status !== 'ready') return;
-    api
+    // The nav badge counts what this person can act on: approvals, plus pending workspace
+    // setting proposals for admins (everyone else can see proposals but not decide them).
+    const approvals = api
       .call('approvals.list', { status: 'pending', limit: 200 })
-      .then((r) => setPending(r.approvals.length))
-      .catch(() => {});
-  }, [status]);
+      .then((r) => r.approvals.length)
+      .catch(() => 0);
+    const proposals = workspace?.you.permissions.includes('workspace:admin')
+      ? api
+          .call('workspace.proposals', { status: 'pending', limit: 200 })
+          .then((r) => r.proposals.length)
+          .catch(() => 0)
+      : Promise.resolve(0);
+    Promise.all([approvals, proposals]).then(([a, p]) => setPending(a + p));
+  }, [status, workspace]);
   useEffect(() => {
     refreshPending();
     const t = setInterval(refreshPending, 60_000);

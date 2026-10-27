@@ -149,6 +149,8 @@ describe('am smoke', () => {
     expect(signup?.detail).toContain('left in place');
     expect(signup?.detail).toContain('RETENTION_UNCONFIRMED_DAYS');
     expect(signup?.detail).toContain('profiles.erase');
+    expect(signup?.detail).toContain('people-only');
+    expect(signup?.detail).toContain('30 days');
     // The profile really exists, so the cleanup message is about real data, not a lookup bug.
     expect((await t.api(owner).call('profiles.find', { type: 'email', value: address })).profileId).toMatch(/^prf_/);
   });
@@ -170,5 +172,9 @@ describe('am smoke', () => {
     const res = await smoke([]);
     expect(res.code).toBe(2);
     expect(res.err).toContain('usage: am smoke --public-url URL');
+    // The usage names the scopes --cleanup needs and why a token can never erase.
+    expect(res.err).toContain('profiles:read');
+    expect(res.err).toContain('people-only');
+    expect(res.err).toContain('RETENTION_UNCONFIRMED_DAYS');
   });
 });

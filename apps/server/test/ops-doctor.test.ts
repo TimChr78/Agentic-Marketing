@@ -91,11 +91,28 @@ describe('am doctor offline checks', () => {
     const missing = checkPublicPort({ ...good, PUBLIC_PORT: '' });
     expect(missing.status).toBe('warn');
     expect(missing.hint).toContain('PUBLIC_BIND');
-    expect(missing.hint).toContain('127.0.0.1:3210');
+    expect(missing.hint).toContain('127.0.0.1:3201');
     expect(missing.hint).toContain('ports: !override');
     expect(checkPublicPort(good).status).toBe('ok');
     expect(checkPublicPort({ ...good, PUBLIC_BIND: '0.0.0.0:3101' }).message).toContain('0.0.0.0:3101');
     expect(checkPublicPort({ ...good, PUBLIC_PORT: '70000' }).status).toBe('fail');
+  });
+
+  it('fails when the public listener and the admin port share a host port', () => {
+    const collision = check({ ...good, AM_PORT: '3210', PUBLIC_BIND: '127.0.0.1:3210' }, 'ports');
+    expect(collision?.status).toBe('fail');
+    expect(collision?.message).toContain('3210');
+    expect(collision?.hint).toContain('PUBLIC_BIND');
+    expect(collision?.hint).toContain('ports: !override');
+    expect(collision?.hint).toContain("ss -ltn | grep ':3210 '");
+
+    // The new default does not collide with an admin port that used to break the upgrade.
+    expect(check({ ...good, AM_PORT: '3210' }, 'ports')?.status).toBe('ok');
+    expect(check(good, 'ports')?.status).toBe('ok');
+
+    // Any host address collides: it is the port, not the interface, that Compose binds.
+    expect(check({ ...good, PUBLIC_BIND: '0.0.0.0:3000' }, 'ports')?.status).toBe('fail');
+    expect(check({ ...good, AM_PORT: 'nope' }, 'ports')?.status).toBe('fail');
   });
 
   it('warns when forwarded headers are trusted from anywhere', () => {

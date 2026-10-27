@@ -1,7 +1,7 @@
 import { type CommandContext, defineCommand } from '@agentic-marketing/commands';
-import { AppError, hashValue, newId } from '@agentic-marketing/core';
+import { AppError, canonicalJson, hashValue, newId } from '@agentic-marketing/core';
 import { schema, type VersionState } from '@agentic-marketing/db';
-import { and, desc, eq, inArray } from 'drizzle-orm';
+import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { diffJson } from './diff';
 import {
@@ -23,7 +23,7 @@ const ArtifactId = z
   .describe('Artifact id, e.g. "jrn_0192…"');
 const VersionStateSchema = z.enum(['draft', 'in_review', 'published', 'superseded', 'rejected']);
 const Author = z.object({ type: z.enum(['user', 'agent']), id: z.string(), client: z.string().nullable() });
-const Requester = z.object({
+export const Requester = z.object({
   kind: z.enum(['person', 'token', 'oauth_client']),
   displayName: z.string(),
   personName: z.string().nullable(),
@@ -190,6 +190,55 @@ async function publishVersion(ctx: CommandContext, artifactId: string, number: n
   for (const l of publishListeners) ctx.afterCommit ? ctx.afterCommit(() => l(ctx, artifact)) : await l(ctx, artifact);
 }
 
+/**
+ * The order to publish artifacts that refer to each other (#107): an artifact comes after every
+ * other member its content names (a broadcast after its template, a form after its confirmation
+ * template). Throws on a cycle.
+ */
+export function dependencyOrder<M extends { id: string; content: unknown }>(members: M[]): M[] {
+  const ids = new Set(members.map((m) => m.id));
+  const needs = new Map(
+    members.map((m) => {
+      const text = JSON.stringify(m.content);
+      return [m.id, new Set([...ids].filter((other) => other !== m.id && text.includes(other)))];
+    }),
+  );
+  const order: M[] = [];
+  const remaining = [...members];
+  while (remaining.length) {
+    const i = remaining.findIndex((m) => [...needs.get(m.id)!].every((d) => order.some((o) => o.id === d)));
+    if (i < 0)
+      throw new AppError('invalid_input', `These artifacts refer to each other in a circle: ${remaining.map((m) => m.id).join(', ')}.`);
+    order.push(...remaining.splice(i, 1));
+  }
+  return order;
+}
+
+/**
+ * Checks that the members can be published together, by publishing them in order and then rolling
+ * back to a savepoint: references inside the bundle resolve exactly as on approval, and nothing is
+ * kept (publish listeners are not called). Commands run on one connection inside a manual BEGIN,
+ * so this uses SAVEPOINT directly: drizzle's tx.transaction() would issue a second BEGIN, and its
+ * rollback would end the command's whole transaction.
+ */
+async function checkBundlePublishable(ctx: CommandContext, ordered: { id: string; name: string; version: number }[]) {
+  const dry: CommandContext = { ...ctx, afterCommit: () => {} };
+  await ctx.tx.execute(sql`SAVEPOINT bundle_check`);
+  try {
+    for (const m of ordered) {
+      try {
+        await publishVersion(dry, m.id, m.version);
+      } catch (err) {
+        if (err instanceof AppError) throw new AppError(err.code, `“${m.name}” (${m.id}): ${err.message}`, err.details);
+        throw err;
+      }
+    }
+  } finally {
+    await ctx.tx.execute(sql`ROLLBACK TO SAVEPOINT bundle_check`);
+    await ctx.tx.execute(sql`RELEASE SAVEPOINT bundle_check`);
+  }
+}
+
 export const listTypes = defineCommand({
   name: 'artifacts.types',
   title: 'List artifact types',
@@ -265,11 +314,56 @@ export const createArtifact = defineCommand({
   },
 });
 
+type Positions = Record<string, { x: number; y: number }>;
+
+const LayoutSchema = z.object({
+  positions: z.record(z.string(), z.object({ x: z.number(), y: z.number() })).describe('Canvas position per step id'),
+  updatedAt: z.string(),
+  updatedBy: z.string(),
+});
+
+/** A journey with its canvas positions removed: what must differ for a real new version. */
+function withoutPositions(content: unknown): unknown {
+  if (!content || typeof content !== 'object') return content;
+  const nodes = (content as { nodes?: unknown }).nodes;
+  if (!Array.isArray(nodes)) return content;
+  return {
+    ...(content as Record<string, unknown>),
+    nodes: nodes.map((node) => {
+      if (!node || typeof node !== 'object') return node;
+      const { position: _position, ...rest } = node as Record<string, unknown>;
+      return rest;
+    }),
+  };
+}
+
+function positionsOf(content: unknown): Positions {
+  const nodes = (content as { nodes?: unknown } | null)?.nodes;
+  const out: Positions = {};
+  if (!Array.isArray(nodes)) return out;
+  for (const value of nodes) {
+    const node = value as { id?: unknown; position?: { x?: unknown; y?: unknown } };
+    if (typeof node.id === 'string' && typeof node.position?.x === 'number' && typeof node.position.y === 'number')
+      out[node.id] = { x: node.position.x, y: node.position.y };
+  }
+  return out;
+}
+
+async function saveLayout(ctx: CommandContext, artifactId: string, positions: Positions) {
+  await ctx.tx
+    .insert(schema.artifactLayout)
+    .values({ workspaceId: ctx.principal.workspaceId, artifactId, layout: positions, updatedBy: ctx.principal.userId })
+    .onConflictDoUpdate({
+      target: [schema.artifactLayout.workspaceId, schema.artifactLayout.artifactId],
+      set: { layout: positions, updatedAt: new Date(), updatedBy: ctx.principal.userId },
+    });
+}
+
 export const updateDraft = defineCommand({
   name: 'artifacts.updateDraft',
   title: 'Update artifact draft',
   description:
-    'Replace the content of an artifact. Edits the current draft, or starts a new draft version when the latest version is published, in review or rejected. Pass `expectedContentHash` (from artifacts.get) to avoid overwriting someone else’s concurrent edit.',
+    'Replace the content of an artifact. Edits the current draft, or starts a new draft version when the latest version is published, in review or rejected. A journey edit that only moves steps is saved as layout and creates no version. Pass `expectedContentHash` (from artifacts.get) to avoid overwriting someone else’s concurrent edit.',
   input: z.object({
     artifactId: ArtifactId,
     content: z.unknown(),
@@ -285,6 +379,7 @@ export const updateDraft = defineCommand({
     version: z.number().int(),
     state: VersionStateSchema,
     contentHash: z.string(),
+    layoutOnly: z.boolean().describe('True when only step positions changed, so no version was created'),
     warnings: z.array(DraftWarningSchema).describe('Settings that must be filled in before this artifact can be published'),
   }),
   permission: 'artifacts:write',
@@ -308,6 +403,24 @@ export const updateDraft = defineCommand({
         .set({ name: input.name })
         .where(and(eq(schema.artifacts.workspaceId, ws), eq(schema.artifacts.id, a.id)));
 
+    // Moving steps is layout, not content: store it beside the version and leave the draft alone.
+    // Canonical JSON ignores key order, so without positions this compares only real content.
+    const layoutOnly =
+      a.type === 'journey' &&
+      canonicalJson(content) !== canonicalJson(latest.content) &&
+      canonicalJson(withoutPositions(content)) === canonicalJson(withoutPositions(latest.content));
+    if (layoutOnly) {
+      await saveLayout(ctx, a.id, positionsOf(content));
+      return {
+        artifactId: a.id,
+        version: latest.number,
+        state: latest.state,
+        contentHash: latest.contentHash,
+        layoutOnly: true,
+        warnings,
+      };
+    }
+
     if (latest.state === 'draft') {
       await ctx.tx
         .update(schema.artifactVersions)
@@ -323,7 +436,8 @@ export const updateDraft = defineCommand({
         .update(schema.artifacts)
         .set({ updatedAt: new Date() })
         .where(and(eq(schema.artifacts.workspaceId, ws), eq(schema.artifacts.id, a.id)));
-      return { artifactId: a.id, version: latest.number, state: 'draft' as const, contentHash, warnings };
+      if (a.type === 'journey') await saveLayout(ctx, a.id, positionsOf(content));
+      return { artifactId: a.id, version: latest.number, state: 'draft' as const, contentHash, layoutOnly: false, warnings };
     }
     const number = latest.number + 1;
     await ctx.tx.insert(schema.artifactVersions).values({
@@ -341,14 +455,16 @@ export const updateDraft = defineCommand({
       .update(schema.artifacts)
       .set({ latestVersion: number, updatedAt: new Date() })
       .where(and(eq(schema.artifacts.workspaceId, ws), eq(schema.artifacts.id, a.id)));
-    return { artifactId: a.id, version: number, state: 'draft' as const, contentHash, warnings };
+    if (a.type === 'journey') await saveLayout(ctx, a.id, positionsOf(content));
+    return { artifactId: a.id, version: number, state: 'draft' as const, contentHash, layoutOnly: false, warnings };
   },
 });
 
 export const getArtifact = defineCommand({
   name: 'artifacts.get',
   title: 'Get artifact',
-  description: 'Read an artifact with the content of one version (default: the latest).',
+  description:
+    'Read an artifact with the content of one version (default: the latest). `layout` holds canvas positions for the builder; agents never need it to edit a journey.',
   input: z.object({ artifactId: ArtifactId, version: z.number().int().positive().optional() }),
   output: z.object({
     id: z.string(),
@@ -357,12 +473,17 @@ export const getArtifact = defineCommand({
     latestVersion: z.number().int(),
     publishedVersion: z.number().int().nullable(),
     version: VersionSummary.extend({ content: z.unknown() }),
+    layout: LayoutSchema.nullable().describe('Saved canvas layout, when a person has moved steps; otherwise null'),
   }),
   permission: 'artifacts:read',
   effect: 'read',
   handler: async (input, ctx) => {
     const a = await loadArtifact(ctx, input.artifactId);
     const v = await loadVersion(ctx, a.id, input.version ?? a.latestVersion);
+    const [layout] = await ctx.tx
+      .select()
+      .from(schema.artifactLayout)
+      .where(and(eq(schema.artifactLayout.workspaceId, ctx.principal.workspaceId), eq(schema.artifactLayout.artifactId, a.id)));
     return {
       id: a.id,
       type: a.type,
@@ -370,6 +491,13 @@ export const getArtifact = defineCommand({
       latestVersion: a.latestVersion,
       publishedVersion: a.publishedVersion,
       version: { ...(await withAuthorNames(ctx, [toSummary(v)]))[0]!, content: v.content },
+      layout: layout
+        ? {
+            positions: layout.layout as Positions,
+            updatedAt: layout.updatedAt.toISOString(),
+            updatedBy: layout.updatedBy,
+          }
+        : null,
     };
   },
 });
@@ -462,6 +590,7 @@ export const diff = defineCommand({
         after: z.unknown().optional(),
       }),
     ),
+    layoutOnly: z.boolean().describe('True when every change is a step position (for example an old draft made by moving steps)'),
   }),
   permission: 'artifacts:read',
   effect: 'read',
@@ -471,7 +600,59 @@ export const diff = defineCommand({
     const toN = input.to ?? a.latestVersion;
     const before = fromN ? (await loadVersion(ctx, a.id, fromN)).content : {};
     const after = (await loadVersion(ctx, a.id, toN)).content;
-    return { from: fromN ?? null, to: toN, changes: diffJson(before, after) };
+    const changes = diffJson(before, after);
+    const layoutOnly = changes.length > 0 && changes.every((c) => /^nodes\[[^\]]+\]\.position(\.|$)/.test(c.path));
+    return { from: fromN ?? null, to: toN, changes, layoutOnly };
+  },
+});
+
+export const discardDraft = defineCommand({
+  name: 'artifacts.discardDraft',
+  title: 'Discard draft',
+  description:
+    'Delete the unpublished versions after the live one and return the artifact to its live version. Refuses when nothing is live, there is no draft, or the draft is waiting for approval.',
+  input: z.object({ artifactId: ArtifactId }),
+  output: z.object({
+    artifactId: z.string(),
+    version: z.number().int().describe('The live version this artifact is back on'),
+    state: z.literal('published'),
+    discardedVersions: z.array(z.number().int()),
+  }),
+  permission: 'artifacts:write',
+  effect: 'write',
+  target: (i) => i.artifactId,
+  handler: async (input, ctx) => {
+    const a = await loadArtifact(ctx, input.artifactId);
+    if (!a.publishedVersion) throw new AppError('conflict', 'This artifact has no live version, so there is nothing to go back to.');
+    const ws = ctx.principal.workspaceId;
+    const versions = await ctx.tx
+      .select({ number: schema.artifactVersions.number })
+      .from(schema.artifactVersions)
+      .where(and(eq(schema.artifactVersions.workspaceId, ws), eq(schema.artifactVersions.artifactId, a.id)))
+      .orderBy(desc(schema.artifactVersions.number));
+    const discarded = versions.filter((v) => v.number > a.publishedVersion!).map((v) => v.number);
+    if (discarded.length === 0) throw new AppError('conflict', 'There is no draft to discard.');
+    // A pending request points at one of these versions; the reviewer must reject it
+    // first, otherwise an approval could publish a version that no longer exists.
+    const [pending] = await ctx.tx
+      .select({ version: schema.approvalRequests.version })
+      .from(schema.approvalRequests)
+      .where(
+        and(
+          eq(schema.approvalRequests.workspaceId, ws),
+          eq(schema.approvalRequests.artifactId, a.id),
+          eq(schema.approvalRequests.status, 'pending'),
+        ),
+      );
+    if (pending)
+      throw new AppError(
+        'conflict',
+        `Version ${pending.version} is waiting for approval. Reject that request before discarding the draft.`,
+      );
+    // The app role cannot delete versions; this function deletes exactly the drafts after the live
+    // version (migration 0031) and moves the artifact back to it.
+    await ctx.tx.execute(sql`SELECT discard_artifact_drafts(${a.id})`);
+    return { artifactId: a.id, version: a.publishedVersion, state: 'published' as const, discardedVersions: discarded };
   },
 });
 
@@ -545,6 +726,111 @@ export const requestPublish = defineCommand({
   },
 });
 
+export const requestPublishBundle = defineCommand({
+  name: 'artifacts.requestPublishBundle',
+  title: 'Submit several artifacts for one review',
+  description:
+    "Submits the latest drafts of artifacts that belong together for ONE review, e.g. this week's e-mail template and the broadcast that sends it, or a form and its confirmation template. References between them are checked as if they were already published; a person approves or rejects them together, and approval publishes them in dependency order in one step (all or nothing). Publishes directly when the approval policy allows it. Use it instead of two requestPublish rounds whenever one artifact refers to another unpublished one.",
+  input: z.object({
+    artifactIds: z.array(ArtifactId).min(2).max(10).describe('The artifacts to publish together, in any order'),
+    note: z.string().min(1).max(1000).describe('What changed and why, for the reviewer'),
+  }),
+  output: z.object({
+    status: z.enum(['published', 'in_review']),
+    bundleId: z.string().nullable(),
+    members: z
+      .array(
+        z.object({
+          artifactId: z.string(),
+          name: z.string(),
+          type: z.string(),
+          version: z.number().int(),
+          approvalId: z.string().nullable(),
+        }),
+      )
+      .describe('In the order they are published'),
+    policy: z.string(),
+    reviewUrl: z.string().nullable().describe('Admin UI page where a person reviews the whole bundle; null when it was published directly'),
+    next: z.string(),
+  }),
+  permission: 'artifacts:publish',
+  effect: 'publish',
+  target: (i) => i.artifactIds.join(','),
+  handler: async (input, ctx) => {
+    const ids = [...new Set(input.artifactIds)];
+    if (ids.length < 2)
+      throw new AppError('invalid_input', 'A bundle needs at least two different artifacts; use artifacts.requestPublish for one.');
+    const members = [];
+    for (const id of ids) {
+      const a = await loadArtifact(ctx, id);
+      const v = await loadVersion(ctx, a.id, a.latestVersion);
+      if (v.state !== 'draft')
+        throw new AppError(
+          'conflict',
+          `The latest version of “${a.name}” (v${v.number}) is ${v.state.replace('_', ' ')}, not a draft. Edit it first to create a new draft.`,
+        );
+      members.push({ id: a.id, name: a.name, type: a.type, version: v.number, content: v.content, authorType: v.authorType });
+    }
+    const ordered = dependencyOrder(members);
+    await checkBundlePublishable(ctx, ordered);
+    const [w] = await ctx.tx
+      .select({ policy: schema.workspaces.approvalPolicy })
+      .from(schema.workspaces)
+      .where(eq(schema.workspaces.id, ctx.principal.workspaceId));
+    const needsApproval =
+      w.policy === 'all_publishes' ||
+      (w.policy === 'agent_changes' && (ctx.principal.type === 'agent' || ordered.some((m) => m.authorType === 'agent')));
+    const out = (approvalIds: (string | null)[]) =>
+      ordered.map((m, i) => ({ artifactId: m.id, name: m.name, type: m.type, version: m.version, approvalId: approvalIds[i] }));
+    if (!needsApproval) {
+      for (const m of ordered) await publishVersion(ctx, m.id, m.version);
+      return {
+        status: 'published' as const,
+        bundleId: null,
+        members: out(ordered.map(() => null)),
+        policy: w.policy,
+        reviewUrl: null,
+        next: `Published ${ordered.map((m) => `“${m.name}” v${m.version}`).join(', ')}; they are live now.`,
+      };
+    }
+    const bundleId = newId('apb');
+    const approvalIds = ordered.map(() => newId('apr'));
+    for (const [i, m] of ordered.entries()) {
+      await setVersionState(ctx, m.id, m.version, 'in_review');
+      await ctx.tx.insert(schema.approvalRequests).values({
+        workspaceId: ctx.principal.workspaceId,
+        id: approvalIds[i],
+        artifactId: m.id,
+        version: m.version,
+        status: 'pending',
+        requestedByType: ctx.principal.type,
+        requestedById: ctx.principal.userId,
+        requestedByClient: ctx.principal.clientId ?? null,
+        note: input.note,
+        bundleId,
+      });
+    }
+    // The last member is the one the others exist for (the broadcast, the form): open on it.
+    const reviewUrl = approvalUrl(ctx.services.publicUrl, approvalIds.at(-1)!);
+    return {
+      status: 'in_review' as const,
+      bundleId,
+      members: out(approvalIds),
+      policy: w.policy,
+      reviewUrl,
+      next: `A person reviews all ${ordered.length} together${reviewUrl ? ` in the admin UI: ${reviewUrl}` : ' in the admin UI'}; approving publishes them in this order. Check the result with approvals.list or artifacts.get.`,
+    };
+  },
+});
+
+const BundleMember = z.object({
+  approvalId: z.string(),
+  artifactId: z.string(),
+  artifactName: z.string(),
+  artifactType: z.string(),
+  version: z.number().int(),
+});
+
 const Approval = z.object({
   id: z.string(),
   artifactId: z.string(),
@@ -561,6 +847,10 @@ const Approval = z.object({
   artifactLatestVersion: z.number().int(),
   artifactPublishedVersion: z.number().int().nullable(),
   reviewUrl: z.string().nullable().describe('Admin UI page for this approval request'),
+  bundle: z
+    .object({ id: z.string(), members: z.array(BundleMember).describe('In the order they are published') })
+    .nullable()
+    .describe('Set when this request is reviewed together with others (artifacts.requestPublishBundle): deciding one decides all'),
 });
 
 type ApprovalRow = typeof schema.approvalRequests.$inferSelect;
@@ -647,7 +937,49 @@ export async function withAuthorNames<V extends { number: number; author: { type
   return versions.map((v) => ({ ...v, by: names.get(String(v.number))! }));
 }
 
-const approvalOut = (ctx: CommandContext, r: ApprovalRow, a: ArtifactRow, requester: RequesterOut) => ({
+type Bundles = Map<string, z.output<typeof BundleMember>[]>;
+
+/** The members of the given bundles, in publish order. */
+async function bundlesOf(ctx: CommandContext, rows: ApprovalRow[]): Promise<Bundles> {
+  const ids = [...new Set(rows.map((r) => r.bundleId).filter((id): id is string => !!id))];
+  if (!ids.length) return new Map();
+  const members = await ctx.tx
+    .select({ r: schema.approvalRequests, a: schema.artifacts, content: schema.artifactVersions.content })
+    .from(schema.approvalRequests)
+    .innerJoin(
+      schema.artifacts,
+      and(
+        eq(schema.artifacts.workspaceId, schema.approvalRequests.workspaceId),
+        eq(schema.artifacts.id, schema.approvalRequests.artifactId),
+      ),
+    )
+    .innerJoin(
+      schema.artifactVersions,
+      and(
+        eq(schema.artifactVersions.workspaceId, schema.approvalRequests.workspaceId),
+        eq(schema.artifactVersions.artifactId, schema.approvalRequests.artifactId),
+        eq(schema.artifactVersions.number, schema.approvalRequests.version),
+      ),
+    )
+    .where(inArray(schema.approvalRequests.bundleId, ids));
+  const out: Bundles = new Map();
+  for (const id of ids) {
+    const own = members.filter((m) => m.r.bundleId === id).map((m) => ({ id: m.a.id, content: m.content, m }));
+    out.set(
+      id,
+      dependencyOrder(own).map(({ m }) => ({
+        approvalId: m.r.id,
+        artifactId: m.a.id,
+        artifactName: m.a.name,
+        artifactType: m.a.type,
+        version: m.r.version,
+      })),
+    );
+  }
+  return out;
+}
+
+const approvalOut = (ctx: CommandContext, r: ApprovalRow, a: ArtifactRow, requester: RequesterOut, bundles: Bundles = new Map()) => ({
   id: r.id,
   artifactId: r.artifactId,
   artifactName: a.name,
@@ -663,6 +995,7 @@ const approvalOut = (ctx: CommandContext, r: ApprovalRow, a: ArtifactRow, reques
   artifactLatestVersion: a.latestVersion,
   artifactPublishedVersion: a.publishedVersion,
   reviewUrl: approvalUrl(ctx.services.publicUrl, r.id),
+  bundle: r.bundleId ? { id: r.bundleId, members: bundles.get(r.bundleId) ?? [] } : null,
 });
 
 export const listApprovals = defineCommand({
@@ -700,7 +1033,11 @@ export const listApprovals = defineCommand({
       ctx,
       rows.map(({ r }) => r),
     );
-    return { approvals: rows.map(({ r, a }) => approvalOut(ctx, r, a, requesters.get(r.id)!)) };
+    const bundles = await bundlesOf(
+      ctx,
+      rows.map(({ r }) => r),
+    );
+    return { approvals: rows.map(({ r, a }) => approvalOut(ctx, r, a, requesters.get(r.id)!, bundles)) };
   },
 });
 
@@ -767,7 +1104,7 @@ export const getApproval = defineCommand({
           ]
         : [];
     return {
-      ...approvalOut(ctx, row.r, row.a, requester),
+      ...approvalOut(ctx, row.r, row.a, requester, await bundlesOf(ctx, [row.r])),
       content: version.content,
       publishedContent: published?.content ?? null,
       publishedVersion: row.a.publishedVersion,
@@ -802,31 +1139,74 @@ async function decide(ctx: CommandContext, approvalId: string) {
   return r;
 }
 
+/** The request itself, or every pending request of its bundle in publish order (#107). */
+async function bundleMembers(ctx: CommandContext, r: ApprovalRow) {
+  if (!r.bundleId) return [r];
+  const rows = await ctx.tx
+    .select({ r: schema.approvalRequests, content: schema.artifactVersions.content })
+    .from(schema.approvalRequests)
+    .innerJoin(
+      schema.artifactVersions,
+      and(
+        eq(schema.artifactVersions.workspaceId, schema.approvalRequests.workspaceId),
+        eq(schema.artifactVersions.artifactId, schema.approvalRequests.artifactId),
+        eq(schema.artifactVersions.number, schema.approvalRequests.version),
+      ),
+    )
+    .where(and(eq(schema.approvalRequests.workspaceId, ctx.principal.workspaceId), eq(schema.approvalRequests.bundleId, r.bundleId)));
+  const decided = rows.find((x) => x.r.status !== 'pending');
+  if (decided) throw new AppError('conflict', `Part of this bundle (${decided.r.id}) was already ${decided.r.status}.`);
+  return dependencyOrder(rows.map((x) => ({ id: x.r.artifactId, content: x.content, row: x.r }))).map((x) => x.row);
+}
+
 export const approve = defineCommand({
   name: 'approvals.approve',
   title: 'Approve and publish',
-  description: 'Approve a pending request and publish that version. Only people can approve.',
+  description:
+    'Approve a pending request and publish that version; for a bundle, every request in it, published in dependency order in one step. Only people can approve.',
   input: z.object({ approvalId: z.string(), note: z.string().max(1000).optional() }),
-  output: z.object({ status: z.literal('approved'), artifactId: z.string(), version: z.number().int() }),
+  output: z.object({
+    status: z.literal('approved'),
+    artifactId: z.string(),
+    version: z.number().int(),
+    published: z
+      .array(z.object({ artifactId: z.string(), version: z.number().int() }))
+      .describe('Everything this approval published, in order (more than one for a bundle)'),
+  }),
   permission: 'artifacts:approve',
   effect: 'publish',
   humansOnly: true,
   target: (i) => i.approvalId,
   handler: async (input, ctx) => {
     const r = await decide(ctx, input.approvalId);
-    await publishVersion(ctx, r.artifactId, r.version);
+    const members = await bundleMembers(ctx, r);
+    for (const m of members) await publishVersion(ctx, m.artifactId, m.version);
     await ctx.tx
       .update(schema.approvalRequests)
       .set({ status: 'approved', decidedBy: ctx.principal.userId, decidedAt: new Date(), decisionNote: input.note ?? null })
-      .where(and(eq(schema.approvalRequests.workspaceId, ctx.principal.workspaceId), eq(schema.approvalRequests.id, r.id)));
-    return { status: 'approved' as const, artifactId: r.artifactId, version: r.version };
+      .where(
+        and(
+          eq(schema.approvalRequests.workspaceId, ctx.principal.workspaceId),
+          inArray(
+            schema.approvalRequests.id,
+            members.map((m) => m.id),
+          ),
+        ),
+      );
+    return {
+      status: 'approved' as const,
+      artifactId: r.artifactId,
+      version: r.version,
+      published: members.map((m) => ({ artifactId: m.artifactId, version: m.version })),
+    };
   },
 });
 
 export const reject = defineCommand({
   name: 'approvals.reject',
   title: 'Reject a change',
-  description: 'Reject a pending request. The version stays in history as rejected; editing the artifact starts a new draft.',
+  description:
+    'Reject a pending request (for a bundle: every request in it). The versions stay in history as rejected; editing an artifact starts a new draft.',
   input: z.object({ approvalId: z.string(), note: z.string().min(1).max(1000).describe('Tell the author what to change') }),
   output: z.object({ status: z.literal('rejected'), artifactId: z.string(), version: z.number().int() }),
   permission: 'artifacts:approve',
@@ -835,11 +1215,20 @@ export const reject = defineCommand({
   target: (i) => i.approvalId,
   handler: async (input, ctx) => {
     const r = await decide(ctx, input.approvalId);
-    await setVersionState(ctx, r.artifactId, r.version, 'rejected');
+    const members = await bundleMembers(ctx, r);
+    for (const m of members) await setVersionState(ctx, m.artifactId, m.version, 'rejected');
     await ctx.tx
       .update(schema.approvalRequests)
       .set({ status: 'rejected', decidedBy: ctx.principal.userId, decidedAt: new Date(), decisionNote: input.note })
-      .where(and(eq(schema.approvalRequests.workspaceId, ctx.principal.workspaceId), eq(schema.approvalRequests.id, r.id)));
+      .where(
+        and(
+          eq(schema.approvalRequests.workspaceId, ctx.principal.workspaceId),
+          inArray(
+            schema.approvalRequests.id,
+            members.map((m) => m.id),
+          ),
+        ),
+      );
     return { status: 'rejected' as const, artifactId: r.artifactId, version: r.version };
   },
 });
@@ -852,7 +1241,9 @@ export const artifactCommands = [
   listArtifacts,
   history,
   diff,
+  discardDraft,
   requestPublish,
+  requestPublishBundle,
   listApprovals,
   getApproval,
   approve,

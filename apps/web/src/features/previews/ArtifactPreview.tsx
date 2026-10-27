@@ -10,8 +10,25 @@ import { SegmentPreview } from './SegmentPreview';
 /** Types the approval drawer can show as the real thing rather than JSON. */
 export const PREVIEWABLE = new Set(['email_template', 'form', 'journey', 'segment', 'broadcast']);
 
-/** The object itself, by type (#41). Falls back to its content as JSON. */
-export function ArtifactPreview({ type, artifactId, version, content, compact }: { type: string; artifactId: string; version?: number; content: unknown; compact?: boolean }) {
+/**
+ * The object itself, by type (#41). Falls back to its content as JSON. `bundle` maps the other
+ * artifacts reviewed together (#107) to their versions under review, e.g. a broadcast's template.
+ */
+export function ArtifactPreview({
+  type,
+  artifactId,
+  version,
+  content,
+  compact,
+  bundle,
+}: {
+  type: string;
+  artifactId: string;
+  version?: number;
+  content: unknown;
+  compact?: boolean;
+  bundle?: Record<string, number>;
+}) {
   switch (type) {
     case 'email_template':
       return <EmailPreview artifactId={artifactId} version={version} compact={compact} />;
@@ -20,7 +37,14 @@ export function ArtifactPreview({ type, artifactId, version, content, compact }:
     case 'segment':
       return <SegmentPreview artifactId={artifactId} version={version} content={content as { condition?: unknown }} />;
     case 'broadcast':
-      return <BroadcastPreview artifactId={artifactId} version={version} content={content as { template?: string; segment?: string }} />;
+      return (
+        <BroadcastPreview
+          artifactId={artifactId}
+          version={version}
+          content={content as { template?: string; segment?: string }}
+          templateVersion={bundle?.[(content as { template?: string }).template ?? '']}
+        />
+      );
     case 'journey':
       return <JourneyPreview content={content as JourneyContent} height={compact ? 420 : 560} />;
     default:

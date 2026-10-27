@@ -35,7 +35,7 @@ Tools marked "Needs the … permission" are allowed by the person's role but wer
    - journeys: `journeys.simulate {artifactId, profileId?, events?, ai?, actions?}`;
    - broadcasts: `broadcasts.preview {artifactId}` gives the audience, would-send count and skip reasons;
    - prompts: `prompts.test {artifactId}` queues the test cases; read the results with `prompts.testRun {runId}` until `status` is `done`.
-4. **Submit for review.** `artifacts.requestPublish {artifactId, note}`. Under the usual policy ("agent changes need a person") this creates an approval request. The result has `reviewUrl` (the request in the admin UI, where the person sees the rendered e-mail, form, journey, segment or broadcast) and `next` (what happens now): pass the link on with a one-line summary. The note shows to the reviewer. Publishing also runs publish checks, e.g. that referenced templates and segments are published.
+4. **Submit for review.** `artifacts.requestPublish {artifactId, note}`. Under the usual policy ("agent changes need a person") this creates an approval request. The result has `reviewUrl` (the request in the admin UI, where the person sees the rendered e-mail, form, journey, segment or broadcast) and `next` (what happens now): pass the link on with a one-line summary. The note shows to the reviewer. Publishing also runs publish checks, e.g. that referenced templates and segments are published. When an artifact refers to another draft (a broadcast and this week's template, a form and its confirmation e-mail), submit them together with `artifacts.requestPublishBundle {artifactIds, note}`: one review, one approval, published in dependency order.
 5. **Report.** Give the ids you created and the results of your checks (counts, simulation outcome). Do not claim something was sent or published until `artifacts.get` shows `publishedVersion` or `broadcasts.status` says so.
 
 ## Guardrails (built in, do not try to work around them)
@@ -51,7 +51,7 @@ Read [references/tools.md](references/tools.md) for the full list with effects a
 
 | Area | Tools |
 |---|---|
-| Artifacts | `artifacts.types`, `.list`, `.get`, `.create`, `.updateDraft`, `.history`, `.diff`, `.requestPublish`; `approvals.list`, `approvals.get` |
+| Artifacts | `artifacts.types`, `.list`, `.get`, `.create`, `.updateDraft`, `.history`, `.diff`, `.requestPublish`, `.requestPublishBundle`; `approvals.list`, `approvals.get` |
 | Assets | `assets.upload` (base64, PNG/JPEG/GIF/WebP/PDF), `.list`, `.get`, `.update` (alt text), `.delete`; use the returned `url` in templates and the brand |
 | Brand | artifact type `brand` (one per workspace); `hostedPages.preview` renders the confirm/unsubscribe pages with a draft brand |
 | People | `profiles.find {type:"email", value}`, `profiles.get`, `profiles.events`, `profiles.list`, `consent.history`, `segments.ofProfile` |

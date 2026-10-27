@@ -9,6 +9,7 @@ import { logger } from '@agentic-marketing/telemetry';
 //   consent recorded, are removed after `unconfirmedDays`. Without suppression, so they can
 //   sign up again later.
 // - Operational logs: finished webhook and action deliveries and AI calls after `logDays`.
+// - Unknown input-key evidence after 30 days: recent behaviour is what a strict-mode rollout needs.
 
 export interface RetentionDeps {
   db: Db;
@@ -18,7 +19,12 @@ export interface RetentionDeps {
   logDays: number;
 }
 
-export async function runRetentionOnce(deps: RetentionDeps): Promise<{ profiles: number; deliveries: number; aiCalls: number }> {
+/** Evidence for STRICT_INPUTS is only useful for a recent rollout window (#124). */
+const INPUT_WARNING_DAYS = 30;
+
+export async function runRetentionOnce(
+  deps: RetentionDeps,
+): Promise<{ profiles: number; deliveries: number; aiCalls: number; inputWarnings: number }> {
   const { rows } = await deps.db.admin.query<{ workspace_id: string; id: string }>(
     `SELECT p.workspace_id, p.id FROM profiles p
      WHERE p.merged_into IS NULL AND p.first_seen < now() - make_interval(days => $1)
@@ -48,9 +54,20 @@ export async function runRetentionOnce(deps: RetentionDeps): Promise<{ profiles:
     `DELETE FROM ai_calls WHERE status IN ('done', 'fallback', 'failed') AND created_at < now() - make_interval(days => $1)`,
     [deps.logDays],
   );
-  if (profiles || deliveries.rowCount || aiCalls.rowCount)
-    logger.info({ profiles, deliveries: deliveries.rowCount, aiCalls: aiCalls.rowCount }, 'retention removed old data');
-  return { profiles, deliveries: deliveries.rowCount ?? 0, aiCalls: aiCalls.rowCount ?? 0 };
+  const inputWarnings = await deps.db.admin.query(`DELETE FROM input_warnings WHERE last_seen < now() - make_interval(days => $1)`, [
+    INPUT_WARNING_DAYS,
+  ]);
+  if (profiles || deliveries.rowCount || aiCalls.rowCount || inputWarnings.rowCount)
+    logger.info(
+      { profiles, deliveries: deliveries.rowCount, aiCalls: aiCalls.rowCount, inputWarnings: inputWarnings.rowCount },
+      'retention removed old data',
+    );
+  return {
+    profiles,
+    deliveries: deliveries.rowCount ?? 0,
+    aiCalls: aiCalls.rowCount ?? 0,
+    inputWarnings: inputWarnings.rowCount ?? 0,
+  };
 }
 
 export async function runRetention(deps: RetentionDeps, signal: AbortSignal, tickMs = 3_600_000) {

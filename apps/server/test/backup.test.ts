@@ -243,7 +243,7 @@ describe.skipIf(!pgToolsReady)('backup and restore', () => {
   it('lists backups newest first with their kind and data version', async () => {
     const listings = await listBackups(backupDir);
     expect(listings[0].name).toBe(backupPath.split('/').pop());
-    expect(listings[0]).toMatchObject({ kind: 'manual', dataVersion: '0.2.4', clickhouse: false });
+    expect(listings[0]).toMatchObject({ kind: 'manual', dataVersion: '0.2.4', clickhouse: 'no' });
     expect(listings[0].bytes).toBeGreaterThan(0);
   });
 
@@ -257,8 +257,22 @@ describe.skipIf(!pgToolsReady)('backup and restore', () => {
 
   it('falls back to the migration head when server_versions is empty', async () => {
     await pool.query('DELETE FROM server_versions');
-    expect(await lastServerVersion(dbUrl.toString())).toBe('0.2.5');
+    expect(await lastServerVersion(dbUrl.toString())).toBe('0.2.6');
   });
+
+  it('names a pre-upgrade backup after the newest release in a migration-head range', async () => {
+    // 0.2.4 left no server_versions row and shares its head with 0.2.3, so the data version is a
+    // range. The name takes the newest release; the manifest keeps the range and says why.
+    await pool.query('DROP TABLE server_versions');
+    await pool.query("DELETE FROM schema_migrations WHERE version > '0027_journey_consent_exits.sql'");
+    const { dir, manifest: preUpgrade } = await withEnv(env, () =>
+      createBackup({ dir: backupDir, kind: 'pre-upgrade', env: process.env, log: () => {} }),
+    );
+    expect(dir.split('/').pop()).toMatch(/^am-pre-upgrade-0\.2\.4-to-\d+\.\d+\.\d+-\d{8}T\d{6}Z$/);
+    expect(preUpgrade.fromVersion).toBe('0.2.3–0.2.4 (from migration head)');
+    expect(preUpgrade.migrationHead).toBe('0027_journey_consent_exits.sql');
+    await rm(dir, { recursive: true, force: true });
+  }, 120_000);
 
   it('refuses a newer migration head unless forced', async () => {
     const newer = join(backupDir, 'newer');
@@ -277,8 +291,8 @@ describe.skipIf(!pgToolsReady)('backup and restore', () => {
     expect(await withEnv(env, () => restoreRun([bad, '--yes']))).toBe(1);
   }, 60_000);
 
-  it('refuses the ClickHouse part of a format 1 backup', async () => {
-    const old = join(backupDir, 'format1');
+  it('lists a format 1 backup as legacy with an unusable ClickHouse part', async () => {
+    const old = join(backupDir, 'am-legacy');
     await cp(backupPath, old, { recursive: true });
     await writeFile(join(old, 'clickhouse.native'), 'not a real export');
     const format1 = {
@@ -292,6 +306,8 @@ describe.skipIf(!pgToolsReady)('backup and restore', () => {
       },
     };
     await writeFile(join(old, 'manifest.json'), JSON.stringify(format1));
+    const legacy = (await listBackups(backupDir)).find((entry) => entry.name === 'am-legacy');
+    expect(legacy).toMatchObject({ kind: 'legacy', dataVersion: '0.2.4', clickhouse: 'empty (0.2.4, unusable)' });
     await expect(
       restoreBackup({ dir: old, clickhouse: true, databaseUrl: dbUrl.toString(), env: process.env, log: () => {} }),
     ).rejects.toThrow(/made by 0\.2\.4, whose ClickHouse export is empty under row policies \(#129\)/);

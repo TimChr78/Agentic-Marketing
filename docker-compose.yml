@@ -106,12 +106,12 @@ services:
       - backups:/backups
     ports:
       - "${AM_PORT:-3000}:3000"
-      # The public-only listener, published on PUBLIC_BIND (host:port, loopback-only by default; 3210
-      # because 3001 is a common homelab port). With PUBLIC_PORT unset nothing listens behind it. A
-      # tunnel on a Docker network reaches http://app:3001 and needs no host port: drop the mapping
-      # with `ports: !override` in compose.override.yaml. A tunnel on another host sets e.g.
-      # PUBLIC_BIND=0.0.0.0:3001.
-      - "${PUBLIC_BIND:-127.0.0.1:3210}:${PUBLIC_PORT:-3001}"
+      # The public-only listener, published on PUBLIC_BIND (host:port, loopback-only by default; 3201
+      # because 3001 is a common homelab port and 3210 is a natural admin port). With PUBLIC_PORT
+      # unset nothing listens behind it. A tunnel on a Docker network reaches http://app:3001 and
+      # needs no host port: drop the mapping with `ports: !override` in compose.override.yaml. A
+      # tunnel on another host sets e.g. PUBLIC_BIND=0.0.0.0:3001.
+      - "${PUBLIC_BIND:-127.0.0.1:3201}:${PUBLIC_PORT:-3001}"
 
 volumes:
   pgdata:

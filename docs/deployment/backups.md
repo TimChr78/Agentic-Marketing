@@ -41,7 +41,10 @@ The name records the kind and the version the data was running:
 
 The UTC stamp looks like `20261027T031500Z`. `am-pre-upgrade` exists so the pair of versions is
 obvious in a directory listing: the version the data last ran and the build that is about to migrate
-it. Backups from 0.2.4 keep their older `am-<version>-<stamp>` name; retention still recognises them.
+it. When the migration head maps to a range (for example `0.2.3–0.2.4`), the name uses the newest
+release (`0.2.4`) and the manifest's `fromVersion` keeps the range as
+`0.2.3–0.2.4 (from migration head)`. Backups from 0.2.4 keep their older `am-<version>-<stamp>`
+name; retention still recognises them.
 
 The directory contains:
 
@@ -112,9 +115,11 @@ am backup --list
 am backup --list --dir /backups
 ```
 
-Prints name, kind, data version, migration head, creation time, total size and whether ClickHouse
-is included, newest first. `--dir` defaults to the same `BACKUP_DIR` / `/backups` / `./backups`
-rule as a backup. Only completed directories with a readable manifest are listed.
+Prints name, kind, data version, migration head, creation time, total size and the state of the
+ClickHouse part, newest first. Format-1 backups (0.2.4) show kind `legacy` and ClickHouse
+`empty (0.2.4, unusable)`, because their ClickHouse export is empty under row policies and
+`am restore --clickhouse` refuses it. `--dir` defaults to the same `BACKUP_DIR` / `/backups` /
+`./backups` rule as a backup. Only completed directories with a readable manifest are listed.
 
 ## Scheduled backups
 
