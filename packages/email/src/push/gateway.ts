@@ -27,6 +27,8 @@ export interface PushRequest {
   /** Overrides the template's topic, e.g. a broadcast's choice. */
   topic?: string;
   data?: Record<string, unknown>;
+  /** Hold the message until then (a recipient-local send window). */
+  notBefore?: Date;
 }
 
 type Verdict =
@@ -135,6 +137,7 @@ export async function requestPush(tx: Tx, workspaceId: string, kp: KeyProvider, 
       status,
       reason,
       data: req.data ?? {},
+      notBefore: req.notBefore ?? null,
     })
     .returning();
   await events.insertMessageEvents([decisionEvent(m, status, reason ?? '')]);

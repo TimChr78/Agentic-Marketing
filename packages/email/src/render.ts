@@ -193,6 +193,22 @@ export function validateTemplate(t: EmailTemplate): string[] {
   return problems;
 }
 
+/** Parse a subject on its own, for a broadcast subject test (the same Liquid rules as the template). */
+export function validateSubject(subject: string): string | null {
+  try {
+    engine.parse(subject);
+    return null;
+  } catch (e) {
+    return `Liquid error: ${(e as Error).message.split('\n')[0]}`;
+  }
+}
+
+/** Render a subject override with the same sandbox and scope as the template's own subject. */
+export async function renderSubject(subject: string, vars: RenderVars): Promise<string> {
+  const scope = { unsubscribe_url: PLACEHOLDER_UNSUBSCRIBE, preferences_url: PLACEHOLDER_UNSUBSCRIBE, web_url: PLACEHOLDER_WEB, ...vars };
+  return (await engine.parseAndRender(subject, scope)).replace(/\s+/g, ' ').trim();
+}
+
 export async function renderTemplate(t: EmailTemplate, vars: RenderVars, options: RenderOptions = {}): Promise<Rendered> {
   const scope = {
     unsubscribe_url: PLACEHOLDER_UNSUBSCRIBE,

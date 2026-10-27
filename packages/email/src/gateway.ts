@@ -30,7 +30,7 @@ import { decisionEvent, defer, MAX_ATTEMPTS, retryDelaySeconds } from './outbox'
 import { checkPolicy } from './policy';
 import { transportFor } from './providers';
 import { deliverPush } from './push/gateway';
-import { renderTemplate } from './render';
+import { renderSubject, renderTemplate } from './render';
 import { deliverSms } from './sms/gateway';
 
 // The send gateway (ADR-0007). Every e-mail is requested here and goes out through an outbox:
@@ -65,6 +65,12 @@ export interface EmailRequest {
   /** Overrides the template's topic, e.g. a broadcast's choice. */
   topic?: string;
   data?: Record<string, unknown>;
+  /** A broadcast subject-test variant, recorded on the message for per-variant reporting. */
+  variant?: string;
+  /** Replaces the template's subject (a subject test), rendered with the same variables. */
+  subject?: string;
+  /** Hold the message until then (a recipient-local send window). */
+  notBefore?: Date;
 }
 
 export interface Decision {
@@ -189,7 +195,9 @@ export async function requestEmail(tx: Tx, workspaceId: string, kp: KeyProvider,
       status,
       reason,
       recipientHash,
-      data: req.data ?? {},
+      variant: req.variant ?? null,
+      notBefore: req.notBefore ?? null,
+      data: req.subject ? { ...(req.data ?? {}), __subject: req.subject } : (req.data ?? {}),
     })
     .returning();
   await events.insertMessageEvents([decisionEvent(m, status, reason ?? '')]);
@@ -293,20 +301,20 @@ async function deliverOne(db: Db, ws: string, id: string, deps: { kp: KeyProvide
     // this person on the links host (#100). Like the unsubscribe link, it lasts as long as the
     // message is kept; the route also understands an optional expiry (`x`) for future use.
     const web = `${deps.email.publicUrl}/n/w/${deps.email.links.sign({ w: ws, m: m.id } satisfies WebLink)}`;
+    const vars = {
+      ...m.data,
+      profile: v.vars,
+      unsubscribe_url: unsubscribe,
+      preferences_url: preferences,
+      web_url: web,
+      ...(topicUnsubscribe ? { topic_unsubscribe_url: topicUnsubscribe } : {}),
+    };
     let rendered: Awaited<ReturnType<typeof renderTemplate>>;
     try {
-      rendered = await renderTemplate(
-        tpl,
-        {
-          ...m.data,
-          profile: v.vars,
-          unsubscribe_url: unsubscribe,
-          preferences_url: preferences,
-          web_url: web,
-          ...(topicUnsubscribe ? { topic_unsubscribe_url: topicUnsubscribe } : {}),
-        },
-        { blocks: blockResolver(tx) },
-      );
+      rendered = await renderTemplate(tpl, vars, { blocks: blockResolver(tx) });
+      // A subject test overrides the template subject; render it with the same variables.
+      const subject = m.data.__subject;
+      if (typeof subject === 'string') rendered.subject = await renderSubject(subject, vars);
     } catch (e) {
       return finish('failed', `render_error: ${(e as Error).message.split('\n')[0]}`);
     }

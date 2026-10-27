@@ -967,6 +967,48 @@ const form = z
   })
   .refine((f) => !f.doubleOptIn || !!f.confirmationTemplate, 'Double opt-in needs a confirmationTemplate');
 
+// Durations a broadcast can use for a subject test and a send window. Deliberately small: the
+// newsletter use case needs hours to two days, not months.
+const BroadcastDuration = z.string().regex(/^P(\d+W|\d+D|T\d+H|T\d+M|\d+DT\d+H|\d+DT\d+M)$/, 'ISO 8601 duration such as PT1H, P1D or P2D');
+
+const Minutes = (iso: string) => {
+  const m = /^P(?:(\d+)W)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?)?$/.exec(iso);
+  return m ? Number(m[1] ?? 0) * 10_080 + Number(m[2] ?? 0) * 1_440 + Number(m[3] ?? 0) * 60 + Number(m[4] ?? 0) : 0;
+};
+
+const subjectTest = z
+  .object({
+    subjects: z
+      .array(z.string().min(1).max(300))
+      .min(2)
+      .max(4)
+      .describe(
+        'The subject lines to test, variant A first (A–D). Liquid is allowed, with the same rules as the template subject; each replaces the template’s subject. List the template’s own subject first to include it.',
+      ),
+    samplePercent: z.number().int().min(10).max(50).default(20).describe('Share of the audience that gets a test subject'),
+    metric: z
+      .enum(['click', 'open'])
+      .default('click')
+      .describe('Which event picks the winner; clicks are reliable, opens are not (Apple Mail Privacy Protection)'),
+    decideAfter: BroadcastDuration.default('PT4H').describe('How long the sample runs before the winner goes to the rest, PT1H–P2D'),
+  })
+  .refine((t) => {
+    const m = Minutes(t.decideAfter);
+    return m >= 60 && m <= 2_880;
+  }, 'decideAfter must be between PT1H and P2D');
+
+const sendWindow = z.object({
+  start: Clock.describe('Window opens, HH:MM in each reader’s time zone'),
+  end: Clock.describe('Window closes, HH:MM in each reader’s time zone; may cross midnight'),
+  days: z
+    .array(z.enum(['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']))
+    .min(1)
+    .max(7)
+    .optional()
+    .describe('Days the window is open, in the reader’s time zone; omit for every day'),
+  maxDelay: BroadcastDuration.default('P1D').describe('How long a held message may wait for its window; later openings are skipped'),
+});
+
 const broadcast = z.object({
   template: z
     .string()
@@ -977,6 +1019,16 @@ const broadcast = z.object({
   segment: z.string().regex(/^seg_[0-9a-f]{32}$/, 'A segment id (seg_…)'),
   topic: TopicKey.optional().describe("Optional topic under the template's purpose; overrides the template's own topic when set"),
   sendAt: isoDateTime('sendAt').optional().describe('When to start sending; default: as soon as it is published'),
+  subjectTest: subjectTest
+    .optional()
+    .describe(
+      'E-mail subject A/B test: send 2–4 subjects to a deterministic sample of the audience, then after decideAfter send the winning subject to the rest. Variant A is subjects[0]; the remainder are B, C, D. Results are in broadcasts.status and the message records its variant.',
+    ),
+  sendWindow: sendWindow
+    .optional()
+    .describe(
+      'Recipient-local send window: hold each message until start–end in the reader’s time zone (profile trait "timezone", else the workspace delivery policy’s time zone), on the listed days. A window later than sendAt + maxDelay is skipped with reason outside_send_window.',
+    ),
   description: z.string().max(500).optional(),
   archive: z
     .object({
@@ -1001,6 +1053,8 @@ export type PushTemplate = z.output<typeof pushTemplate>;
 export type DeliveryPolicy = z.output<typeof deliveryPolicy>;
 export const DEFAULT_DELIVERY_POLICY: DeliveryPolicy = deliveryPolicy.parse({});
 export type BroadcastDefinition = z.output<typeof broadcast>;
+export type SubjectTestDefinition = NonNullable<BroadcastDefinition['subjectTest']>;
+export type SendWindowDefinition = NonNullable<BroadcastDefinition['sendWindow']>;
 export type TrackingPlan = z.output<typeof trackingPlan>;
 export type PromptDefinition = z.output<typeof prompt>;
 export type ExperienceDefinition = z.output<typeof experience>;
@@ -1079,7 +1133,7 @@ export const artifactTypes = {
     prefix: 'bct',
     label: 'Broadcast',
     description:
-      'A one-off send of an e-mail template to a segment at a set time, e.g. a weekly newsletter. Use the template-per-issue pattern: each issue is its own e-mail template (copy the previous issue as a starting point), and the broadcast references it. Broadcasts carry no per-send data. Submit the template and the broadcast together with artifacts.requestPublishBundle for one review. Check it with broadcasts.preview (with templateVersion while the template is unpublished). Set archive {publish:true, slug?, summary?} to publish the issue to the workspace archive after it has been sent; agents may set it because it is content, and a person still reviews the broadcast.',
+      'A one-off send of an e-mail template to a segment at a set time, e.g. a weekly newsletter. Use the template-per-issue pattern: each issue is its own e-mail template (copy the previous issue as a starting point), and the broadcast references it. Broadcasts carry no per-send data. Optional subjectTest tries 2–4 subject lines on a sample, then sends the winner to the rest after decideAfter (metric click or open); optional sendWindow sends only inside start–end in each reader’s time zone, holding messages until the next opening and skipping those beyond maxDelay. Submit the template and the broadcast together with artifacts.requestPublishBundle for one review. Check it with broadcasts.preview (with templateVersion while the template is unpublished). Set archive {publish:true, slug?, summary?} to publish the issue to the workspace archive after it has been sent; agents may set it because it is content, and a person still reviews the broadcast.',
     content: broadcast,
   },
   tracking_plan: {

@@ -412,6 +412,8 @@ export const messages = pgTable(
     notBefore: ts('not_before'),
     /** When a queued retry becomes claimable; null keeps the old updated_at-based backoff. */
     nextAttemptAt: ts('next_attempt_at'),
+    /** The subject variant of a broadcast test (A, B, …), for counting results per subject. */
+    variant: text('variant'),
     /** SMS segments used. */
     segments: integer('segments'),
     /** A test send: sent for checking, never counted in reporting or delivery policy. */
@@ -848,9 +850,37 @@ export const broadcastRuns = pgTable(
     recipients: integer('recipients').notNull().default(0),
     queued: integer('queued').notNull().default(0),
     skipped: integer('skipped').notNull().default(0),
+    /** Skipped because the next opening of the broadcast's send window was too far away. */
+    windowSkipped: integer('window_skipped').notNull().default(0),
     error: text('error'),
     startedAt: ts('started_at'),
     finishedAt: ts('finished_at'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.broadcastId] })],
+);
+
+export type BroadcastTestState = 'sampling' | 'deciding' | 'winner_sent';
+
+/**
+ * A subject test on a broadcast: 2–4 subjects go to a deterministic sample; after `decideAt` the
+ * winner goes to the rest. The state machine survives crashes because the run's cursor and this
+ * row change in one transaction.
+ */
+export const broadcastTests = pgTable(
+  'broadcast_tests',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    broadcastId: text('broadcast_id').notNull(),
+    subjects: jsonb('subjects').$type<string[]>().notNull(),
+    samplePercent: integer('sample_percent').notNull(),
+    metric: text('metric').$type<'click' | 'open'>().notNull(),
+    state: text('state').$type<BroadcastTestState>().notNull().default('sampling'),
+    /** When the decision happens: the first sample send plus the test's decideAfter. */
+    decideAt: ts('decide_at'),
+    winner: text('winner'),
+    reason: text('reason'),
+    decidedAt: ts('decided_at'),
     createdAt: ts('created_at').notNull().defaultNow(),
   },
   (t) => [primaryKey({ columns: [t.workspaceId, t.broadcastId] })],

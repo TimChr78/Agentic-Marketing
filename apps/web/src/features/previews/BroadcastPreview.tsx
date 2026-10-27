@@ -27,7 +27,14 @@ export function BroadcastPreview({
 }: {
   artifactId: string;
   version?: number;
-  content: { template?: string; segment?: string; sendAt?: string; description?: string };
+  content: {
+    template?: string;
+    segment?: string;
+    sendAt?: string;
+    description?: string;
+    subjectTest?: { subjects: string[]; samplePercent: number; metric: 'click' | 'open'; decideAfter: string };
+    sendWindow?: { start: string; end: string; days?: string[]; maxDelay?: string };
+  };
   templateVersion?: number;
 }) {
   const { can } = useSession();
@@ -59,6 +66,28 @@ export function BroadcastPreview({
           </ul>
           {reach.data.checked < reach.data.audience && <p className="mt-1">Estimated from {reach.data.checked.toLocaleString()} people checked.</p>}
         </Alert>
+      )}
+      {content.sendWindow && (
+        <p className="text-[13px] text-fg-2">
+          Sends between {content.sendWindow.start} and {content.sendWindow.end} in each reader’s time zone
+          {content.sendWindow.days?.length ? `, on ${content.sendWindow.days.join(', ')}` : ', every day'}. Anyone outside it waits for the next opening;
+          those whose next opening is more than {content.sendWindow.maxDelay ?? 'P1D'} after the send time are skipped.
+        </p>
+      )}
+      {content.subjectTest && (
+        <Card
+          title="Subject test"
+          description={`${content.subjectTest.samplePercent}% of the audience gets one of ${content.subjectTest.subjects.length} subjects; after ${content.subjectTest.decideAfter} the winner by ${content.subjectTest.metric === 'click' ? 'clicks' : 'opens'} goes to the rest.`}
+        >
+          <div className="space-y-1.5 p-4">
+            {content.subjectTest.subjects.map((subject, i) => (
+              <div key={i} className="flex gap-2 text-[13px]">
+                <span className="w-4 shrink-0 text-muted">{String.fromCharCode(65 + i)}</span>
+                <span className="min-w-0 break-words text-fg-2">{subject || <span className="text-muted">(empty)</span>}</span>
+              </div>
+            ))}
+          </div>
+        </Card>
       )}
       <Card>
         <div className="p-4">

@@ -24,6 +24,8 @@ export interface SmsRequest {
   /** Overrides the template's topic, e.g. a broadcast's choice. */
   topic?: string;
   data?: Record<string, unknown>;
+  /** Hold the message until then (a recipient-local send window). */
+  notBefore?: Date;
 }
 
 type Verdict =
@@ -120,6 +122,7 @@ export async function requestSms(tx: Tx, workspaceId: string, kp: KeyProvider, e
       status,
       reason,
       recipientHash,
+      notBefore: req.notBefore ?? null,
       data: req.data ?? {},
     })
     .returning();
