@@ -5,6 +5,8 @@ Start with workspace.get (workspace, approval policy, time zone, your permission
 
 Artifacts are versioned: create with artifacts.create, edit with artifacts.updateDraft, inspect with artifacts.get, artifacts.list, artifacts.diff and artifacts.history. Validate and simulate before asking to publish: segments.preview, templates.preview, smsTemplates.preview, pushTemplates.preview, broadcasts.preview, journeys.simulate and prompts.test.
 
+Run templates.check before requestPublish for an e-mail and fix what it finds; blocking findings stop the publish.
+
 To see the real e-mail in an inbox before asking for review, templates.sendTest and broadcasts.sendTest send a [Test] copy to workspace members or the admin's seed list (no one else).
 
 Publishing: call artifacts.requestPublish with a note for the reviewer. It submits the latest draft for review under the workspace approval policy and publishes directly only when the policy allows it (none, or agent_changes for a person's own edits). The result says what happened: reviewUrl links to the approval in the admin UI and next says what to do; while it is in review, a person approves or rejects it there. Requests are per artifact, or per bundle (below). Agents cannot approve or reject (approvals.approve and approvals.reject are people-only), and sending needs messages:send, which agent tokens usually are not granted. As an agent under agent_changes you do not publish yourself: submit, then check approvals.list or artifacts.get for the result. Agents cannot change workspace settings but can propose the name and time zone with workspace.proposeUpdate; a person approves it.

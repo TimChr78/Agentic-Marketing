@@ -4,7 +4,6 @@ import {
   type EmailBlock,
   type EmailBlockParam,
   type EmailTemplate,
-  publishValidators,
   referenceExtractors,
 } from '@agentic-marketing/artifacts';
 import { defineCommand } from '@agentic-marketing/commands';
@@ -63,8 +62,12 @@ export function validateBlockContent(block: EmailBlock): string[] {
 
 contentValidators.set('email_block', (content) => validateBlockContent(content as EmailBlock));
 
-/** A template can use blocks; it can be published only with the published versions of those blocks. */
-publishValidators.set('email_template', async (content, tx: Tx) => {
+/**
+ * A template can use blocks; it can be published only with the published versions of those blocks.
+ * templates.ts registers the one email_template publish validator and calls this first (a second
+ * publishValidators.set would replace the first).
+ */
+export async function blockPublishProblems(content: unknown, tx: Tx): Promise<string[]> {
   const ids = blockIdsIn((content as EmailTemplate).mjml ?? '');
   if (!ids.length) return [];
   const found = await tx
@@ -73,7 +76,7 @@ publishValidators.set('email_template', async (content, tx: Tx) => {
     .where(and(inArray(schema.artifacts.id, ids), eq(schema.artifacts.type, 'email_block'), isNotNull(schema.artifacts.publishedVersion)));
   const published = new Set(found.map((f) => f.id));
   return ids.filter((id) => !published.has(id)).map((id) => `${id} is not a published e-mail block`);
-});
+}
 
 /** artifacts.get lists the block ids a template uses, so a reviewer sees the references. */
 referenceExtractors.set('email_template', (content) => blockIdsIn((content as EmailTemplate).mjml ?? ''));

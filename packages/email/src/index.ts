@@ -1,6 +1,7 @@
 export * from './adapters';
 export * from './blocks';
 export * from './blockTags';
+export * from './checks';
 export * from './deliverability';
 export * from './gateway';
 export * from './links';
