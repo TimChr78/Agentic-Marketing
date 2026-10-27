@@ -1,13 +1,12 @@
 import { RefreshCw, Search, Upload, Users } from 'lucide-react';
 import { useState } from 'react';
-import { api, errText, type Out } from '../../app/api';
+import { api, errText } from '../../app/api';
 import { ButtonLink } from '../../app/links';
 import { useCrumbs } from '../../app/page';
 import { Link, navigate } from '../../app/router';
 import { useSession } from '../../app/session';
 import { useApi } from '../../app/useApi';
 import { ConsentSummary } from '../../features/audience/consent';
-import { visibleEmail } from '../../features/audience/profile';
 import {
   Alert,
   Button,
@@ -16,7 +15,6 @@ import {
   Input,
   Mono,
   PageHeader,
-  Skeleton,
   Tag,
   Table,
   TableFrame,
@@ -28,8 +26,6 @@ import {
   timeAgo,
   useToast,
 } from '../../ui';
-
-type Detail = Out<'profiles.get'>;
 
 const PROFILE_ID = /^prf_[0-9a-f]{32}$/;
 
@@ -45,30 +41,6 @@ export default function PeoplePage() {
 
   const list = useApi(() => api.call('profiles.list', { limit: 50 }), []);
   const rows = list.data?.profiles ?? [];
-
-  // profiles.list never returns consent (or personal data), so the visible rows are read once
-  // more for their current consent state. Personal values stay "[hidden]" without profiles:pii.
-  const ids = rows.map((p) => p.id);
-  const idsKey = ids.join(',');
-  const details = useApi(
-    async () =>
-      new Map(
-        (
-          await Promise.all(
-            ids.map(async (id) => {
-              try {
-                return [id, await api.call('profiles.get', { profileId: id })] as const;
-              } catch {
-                return null;
-              }
-            }),
-          )
-        ).filter((x): x is readonly [string, Detail] => x !== null),
-      ),
-    [idsKey],
-    { skip: ids.length === 0 },
-  );
-  const byId = details.data;
 
   const find = async () => {
     const q = query.trim();
@@ -187,9 +159,9 @@ export default function PeoplePage() {
           </THead>
           <tbody>
             {rows.map((p) => {
-              const d = byId?.get(p.id);
-              const email = visibleEmail(d);
-              const traits = Object.entries(d?.traits ?? p.traits).slice(0, 2);
+              const consent = p.consent.filter((c): c is { purpose: string; status: string } => c.status !== null);
+              const email = p.email;
+              const traits = Object.entries(p.traits).slice(0, 2);
               return (
                 <Tr key={p.id} href={`/audience/people/${p.id}`} onClick={() => navigate(`/audience/people/${p.id}`)}>
                   <Td>
@@ -207,25 +179,19 @@ export default function PeoplePage() {
                   </Td>
                   {pii && (
                     <Td className="hidden md:table-cell">
-                      {d === undefined ? (
-                        details.loading ? <Skeleton className="w-32" /> : <span className="text-muted">Not available</span>
-                      ) : email ? (
-                        <span className="break-all">{email}</span>
-                      ) : (
-                        <span className="text-muted">Not captured</span>
-                      )}
+                      {email ? <span className="break-all">{email}</span> : <span className="text-muted">Not captured</span>}
                     </Td>
                   )}
                   <Td className="hidden lg:table-cell">
-                    {d === undefined ? (
-                      details.loading ? <Skeleton className="w-40" /> : <span className="text-muted">Not available</span>
-                    ) : traits.length ? (
+                    {traits.length ? (
                       <span className="line-clamp-2">{traits.map(([k, v]) => `${k}: ${String(v)}`).join(' · ')}</span>
                     ) : (
                       <span className="text-muted">No traits</span>
                     )}
                   </Td>
-                  <Td>{d === undefined ? details.loading ? <Skeleton className="w-24" /> : <span className="text-muted">Not available</span> : <ConsentSummary consent={d.consent} />}</Td>
+                  <Td>
+                    <ConsentSummary consent={consent} />
+                  </Td>
                   <Td className="whitespace-nowrap" title={formatDateTime(p.lastSeen)}>
                     {timeAgo(p.lastSeen)}
                   </Td>

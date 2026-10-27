@@ -68,17 +68,34 @@ export default function AiUsagePage() {
   }, [usage.data]);
 
   const byKind = useMemo(() => {
-    const map = new Map<string, { calls: number; fallbacks: number; inputTokens: number; outputTokens: number }>();
+    const map = new Map<
+      string,
+      { calls: number; fallbacks: number; inputTokens: number; outputTokens: number; cost: number | null; unpriced: boolean; models: Set<string> }
+    >();
     for (const r of usage.data?.days ?? []) {
-      const row = map.get(r.kind) ?? { calls: 0, fallbacks: 0, inputTokens: 0, outputTokens: 0 };
+      const row = map.get(r.kind) ?? {
+        calls: 0,
+        fallbacks: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        cost: null,
+        unpriced: false,
+        models: new Set<string>(),
+      };
       row.calls += r.calls;
       row.fallbacks += r.fallbacks;
       row.inputTokens += r.inputTokens;
       row.outputTokens += r.outputTokens;
+      if (r.model) row.models.add(r.model);
+      // Unknown models have no price, so the kind's total is a floor, marked with "+".
+      if (r.cost === null) row.unpriced = true;
+      else row.cost = (row.cost ?? 0) + r.cost;
       map.set(r.kind, row);
     }
     return Array.from(map.entries()).sort((a, b) => b[1].calls - a[1].calls);
   }, [usage.data]);
+
+  const usd = (x: number) => (x >= 1 ? `$${x.toFixed(2)}` : `$${x.toFixed(4)}`);
 
   const callRows = calls.data?.calls ?? [];
   const reviewRows = reviews.data?.reviews ?? [];
@@ -117,7 +134,8 @@ export default function AiUsagePage() {
             <StatCard label="Fallbacks and failures" value={totals.fallbacks.toLocaleString()} tone={totals.fallbacks > 0 ? 'warn' : undefined} />
           </StatGrid>
           <p className="-mt-3 mb-5 text-[12px] text-muted">
-            Last {days} days. Token counts are per call as reported by the provider; the server does not return a cost, so none is shown.
+            Last {days} days. Token counts are per call as reported by the provider. Cost is an estimate from a price table in code (USD per million
+            tokens); models without a price are left out.
           </p>
 
           <div className="mb-5 overflow-hidden rounded-lg border border-line bg-surface">
@@ -131,10 +149,12 @@ export default function AiUsagePage() {
                 <THead>
                   <tr>
                     <Th>Kind</Th>
+                    <Th>Models</Th>
                     <Th align="right">Calls</Th>
                     <Th align="right">Fallbacks</Th>
                     <Th align="right">Input tokens</Th>
                     <Th align="right">Output tokens</Th>
+                    <Th align="right">Est. cost</Th>
                   </tr>
                 </THead>
                 <tbody>
@@ -143,10 +163,25 @@ export default function AiUsagePage() {
                       <Td>
                         <Tag>{k}</Tag>
                       </Td>
+                      <Td className="max-w-[260px]">
+                        <span className="line-clamp-2">
+                          {r.models.size ? [...r.models].join(', ') : <span className="text-muted">Unknown</span>}
+                        </span>
+                      </Td>
                       <Td align="right">{r.calls.toLocaleString()}</Td>
                       <Td align="right">{r.fallbacks.toLocaleString()}</Td>
                       <Td align="right">{r.inputTokens.toLocaleString()}</Td>
                       <Td align="right">{r.outputTokens.toLocaleString()}</Td>
+                      <Td align="right" className="whitespace-nowrap">
+                        {r.cost === null ? (
+                          <span className="text-muted">—</span>
+                        ) : (
+                          <>
+                            {usd(r.cost)}
+                            {r.unpriced && <span className="text-muted">+</span>}
+                          </>
+                        )}
+                      </Td>
                     </Tr>
                   ))}
                 </tbody>

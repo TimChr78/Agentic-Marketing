@@ -3,9 +3,9 @@ import { type CommandContext, defineCommand } from '@agentic-marketing/commands'
 import { AppError, isoDateTime, newId } from '@agentic-marketing/core';
 import { type IdentifierType, schema, type Tx } from '@agentic-marketing/db';
 import type {} from '@agentic-marketing/hotstate';
-import { and, desc, eq, inArray, isNull, lt, or } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, lt, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
-import { consentStateOf, currentConsent, mergedFamily, purposeAllowed, recordConsent } from './consent';
+import { consentStateOf, consentStatusSql, consentSummary, currentConsent, mergedFamily, purposeAllowed, recordConsent } from './consent';
 import { personCrypto } from './crypto';
 
 // Profile, consent and data-subject-request commands. Personal data is decrypted only for
@@ -103,7 +103,8 @@ async function profileOut(ctx: CommandContext, p: typeof schema.profiles.$inferS
 export const listProfiles = defineCommand({
   name: 'profiles.list',
   title: 'Recently active profiles',
-  description: 'People (known and anonymous) by most recent activity, without personal data. Page with `before` (a lastSeen value).',
+  description:
+    'People (known and anonymous) by most recent activity, with their current consent per purpose and, with profiles:pii, their e-mail. Page with `before` (a lastSeen value).',
   input: z.object({ limit: z.number().int().min(1).max(200).default(50), before: isoDateTime('before').optional() }),
   output: z.object({
     profiles: z.array(
@@ -113,36 +114,62 @@ export const listProfiles = defineCommand({
         known: z.boolean(),
         lastSeen: z.string(),
         firstSeen: z.string(),
+        consent: z
+          .array(z.object({ purpose: z.string(), status: z.string().nullable() }))
+          .describe('The current status per purpose in force; null when the person has recorded none'),
+        email: z.string().nullable().describe('The person’s e-mail; always null without profiles:pii'),
       }),
     ),
   }),
   permission: 'profiles:read',
   effect: 'read',
   handler: async (input, ctx) => {
+    const purposes = await purposesOf(ctx);
+    // One query for the page: consentStatusSql is the shared rule (ADR-0014) as a scalar subquery.
+    const consent = purposes.length
+      ? sql<Record<string, string | null>>`jsonb_build_object(${sql.join(
+          purposes.flatMap((p) => [sql`${p.key}::text`, consentStatusSql(sql`${schema.profiles.id}`, p.key)]),
+          sql`, `,
+        )})`
+      : sql<Record<string, string | null>>`'{}'::jsonb`;
     const rows = await ctx.tx
-      .select()
+      .select({
+        id: schema.profiles.id,
+        traits: schema.profiles.traits,
+        lastSeen: schema.profiles.lastSeen,
+        firstSeen: schema.profiles.firstSeen,
+        consent,
+      })
       .from(schema.profiles)
       .where(and(isNull(schema.profiles.mergedInto), input.before ? lt(schema.profiles.lastSeen, new Date(input.before)) : undefined))
       .orderBy(desc(schema.profiles.lastSeen))
       .limit(input.limit);
-    const knownIds = rows.length
-      ? new Set(
-          (
-            await ctx.tx
-              .select({ profileId: schema.identifiers.profileId })
-              .from(schema.identifiers)
-              .where(
-                and(
-                  inArray(
-                    schema.identifiers.profileId,
-                    rows.map((r) => r.id),
-                  ),
-                  inArray(schema.identifiers.type, ['user_id', 'email', 'phone']),
-                ),
-              )
-          ).map((r) => r.profileId),
-        )
-      : new Set<string>();
+    const identifierRows = rows.length
+      ? await ctx.tx
+          .select({ profileId: schema.identifiers.profileId, type: schema.identifiers.type, valueEnc: schema.identifiers.valueEnc })
+          .from(schema.identifiers)
+          .where(
+            and(
+              inArray(
+                schema.identifiers.profileId,
+                rows.map((r) => r.id),
+              ),
+              inArray(schema.identifiers.type, ['user_id', 'email', 'phone']),
+            ),
+          )
+      : [];
+    const knownIds = new Set(identifierRows.map((r) => r.profileId));
+    // Decrypting a page is two extra queries, and only for a caller who may see personal data.
+    const plan = ctx.principal.type === 'agent' ? await publishedSingleton(ctx.tx, 'tracking_plan') : null;
+    const showEmail = piiFilter(ctx, plan)('email');
+    const emails = identifierRows.filter((r) => r.type === 'email' && r.valueEnc);
+    const opened =
+      showEmail && emails.length
+        ? await personCrypto(ctx.tx, ctx.principal.workspaceId, ctx.services.keyProvider).openMany<string>(
+            emails.map((r) => ({ profileId: r.profileId, sealed: r.valueEnc as Buffer })),
+          )
+        : [];
+    const emailOf = new Map(emails.map((r, i) => [r.profileId, opened[i] ?? null]));
     return {
       profiles: rows.map((r) => ({
         id: r.id,
@@ -150,6 +177,8 @@ export const listProfiles = defineCommand({
         known: knownIds.has(r.id),
         lastSeen: r.lastSeen.toISOString(),
         firstSeen: r.firstSeen.toISOString(),
+        consent: purposes.map((p) => ({ purpose: p.key, status: r.consent?.[p.key] ?? null })),
+        email: showEmail ? (emailOf.get(r.id) ?? null) : null,
       })),
     };
   },
@@ -237,12 +266,20 @@ export const profileEvents = defineCommand({
 export const listPurposes = defineCommand({
   name: 'purposes.list',
   title: 'Processing purposes',
-  description: 'The purposes in force (the published purposes artifact, or the defaults) with their lawful basis.',
+  description:
+    'The purposes in force (the published purposes artifact, or the defaults) with their lawful basis, channels and whether consent needs double opt-in.',
   input: z.object({}),
   output: z.object({
     source: z.enum(['published', 'default']),
     purposes: z.array(
-      z.object({ key: z.string(), name: z.string(), basis: z.string(), channels: z.array(z.string()), description: z.string() }),
+      z.object({
+        key: z.string(),
+        name: z.string(),
+        basis: z.string(),
+        channels: z.array(z.string()),
+        description: z.string(),
+        requiresDoubleOptIn: z.boolean().describe('Whether a consent for this purpose counts only after a confirmed opt-in'),
+      }),
     ),
   }),
   permission: 'artifacts:read',
@@ -251,6 +288,45 @@ export const listPurposes = defineCommand({
     const published = await publishedSingleton(ctx.tx, 'purposes');
     return { source: published ? ('published' as const) : ('default' as const), purposes: published?.purposes ?? DEFAULT_PURPOSES };
   },
+});
+
+export const consentSummaryCommand = defineCommand({
+  name: 'consent.summary',
+  title: 'Consent per purpose',
+  description:
+    'How many people currently allow or refuse each purpose, overall and per channel, using the same current-status rule as sends and segments.',
+  input: z.object({}),
+  output: z.object({
+    purposes: z.array(
+      z.object({
+        purpose: z.string(),
+        granted: z.number().int().describe('People whose current status for the purpose is "granted"'),
+        denied: z.number().int(),
+        withdrawn: z.number().int(),
+        objected: z.number().int(),
+        channels: z
+          .array(
+            z.object({
+              channel: z.string().describe('A channel that has records for this purpose, e.g. "email"'),
+              granted: z.number().int(),
+              denied: z.number().int(),
+              withdrawn: z.number().int(),
+              objected: z.number().int(),
+            }),
+          )
+          .describe('The same counts for each channel on its own'),
+      }),
+    ),
+  }),
+  permission: 'profiles:read',
+  effect: 'read',
+  handler: async (_i, ctx) => ({
+    purposes: await consentSummary(
+      ctx.tx,
+      ctx.principal.workspaceId,
+      (await purposesOf(ctx)).map((p) => p.key),
+    ),
+  }),
 });
 
 export const recordConsentCommand = defineCommand({
@@ -522,6 +598,7 @@ export const profileCommands = [
   getProfile,
   profileEvents,
   listPurposes,
+  consentSummaryCommand,
   recordConsentCommand,
   consentHistory,
   exportProfile,

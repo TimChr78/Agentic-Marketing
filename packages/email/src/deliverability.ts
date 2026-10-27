@@ -108,6 +108,61 @@ const Rates = z.object({
   reason: z.string().nullable(),
 });
 
+/**
+ * The from-domains of the enabled providers with the same SPF, DKIM and DMARC check the admin
+ * page runs. No provider id, settings host or credential is returned, so a builder can look
+ * after a sending domain without workspace:admin.
+ */
+export const listSendingDomains = defineCommand({
+  name: 'sendingDomains.list',
+  title: 'Sending domains and their DNS checks',
+  description:
+    'The domains enabled e-mail providers send from, with SPF, DKIM and DMARC results and what to add when a record is missing. Provider ids, hosts and credentials are never returned.',
+  input: z.object({
+    dkimSelectors: z
+      .array(z.string().regex(/^[A-Za-z0-9_.-]{1,100}$/))
+      .max(5)
+      .default([])
+      .describe("Selectors from the provider's DNS settings; empty checks SPF and DMARC only"),
+  }),
+  output: z.object({
+    checkedAt: z.string(),
+    domains: z.array(
+      DomainReport.extend({
+        uses: z.array(z.enum(['transactional', 'marketing'])).describe('The provider uses sharing this domain'),
+      }),
+    ),
+  }),
+  permission: 'artifacts:read',
+  effect: 'read',
+  handler: async (input, ctx) => {
+    const rows = await ctx.tx
+      .select({ fromEmail: schema.emailProviders.fromEmail, adapter: schema.emailProviders.adapter, useFor: schema.emailProviders.useFor })
+      .from(schema.emailProviders)
+      .where(eq(schema.emailProviders.enabled, true));
+    // One check per domain. If two providers share a domain, the first one's adapter decides
+    // the SPF include to look for; the uses are merged.
+    const byDomain = new Map<string, { adapter: string; uses: Set<'transactional' | 'marketing'> }>();
+    for (const r of rows) {
+      const domain = r.fromEmail.split('@')[1]?.trim().toLowerCase();
+      if (!domain) continue;
+      const entry = byDomain.get(domain) ?? { adapter: r.adapter, uses: new Set() };
+      for (const u of r.useFor) entry.uses.add(u);
+      byDomain.set(domain, entry);
+    }
+    const resolver = new Resolver({ timeout: 3000 });
+    const domains = await Promise.all(
+      [...byDomain.entries()]
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(async ([domain, entry]) => ({
+          ...(await checkDomainRecords(domain, entry.adapter, input.dkimSelectors, resolver)),
+          uses: [...entry.uses].sort(),
+        })),
+    );
+    return { checkedAt: new Date().toISOString(), domains };
+  },
+});
+
 export const deliverabilityHealth = defineCommand({
   name: 'deliverability.health',
   title: 'Bounce and complaint rates',
@@ -138,4 +193,4 @@ export const deliverabilityHealth = defineCommand({
   },
 });
 
-export const deliverabilityCommands = [checkDomain, deliverabilityHealth] as const;
+export const deliverabilityCommands = [checkDomain, listSendingDomains, deliverabilityHealth] as const;

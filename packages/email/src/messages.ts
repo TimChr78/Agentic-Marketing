@@ -1,10 +1,30 @@
 import { defineCommand } from '@agentic-marketing/commands';
+import { AppError, isoDateTime } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, gte, lte, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { requestEmail } from './gateway';
 
 const Status = z.enum(['queued', 'sending', 'sent', 'suppressed', 'failed', 'delivered', 'bounced', 'complained']);
+
+// A page is ordered by (created_at, id) newest first, so the cursor carries both. created_at is
+// written with microseconds; keeping them in the cursor means a page boundary never skips or
+// repeats a row that shares a millisecond with the last one.
+const CURSOR = /^m1\.([A-Za-z0-9_-]+)$/;
+
+function decodeCursor(cursor: string) {
+  const m = CURSOR.exec(cursor);
+  if (!m) throw new AppError('invalid_input', 'cursor is not one from an earlier messages.list call.');
+  try {
+    const v = JSON.parse(Buffer.from(m[1], 'base64url').toString('utf8')) as { at?: unknown; id?: unknown };
+    if (typeof v.at !== 'string' || typeof v.id !== 'string' || Number.isNaN(Date.parse(v.at))) throw new Error('bad cursor');
+    return { at: v.at, id: v.id };
+  } catch {
+    throw new AppError('invalid_input', 'cursor is not one from an earlier messages.list call.');
+  }
+}
+
+const encodeCursor = (at: string, id: string) => `m1.${Buffer.from(JSON.stringify({ at, id })).toString('base64url')}`;
 
 export const sendEmail = defineCommand({
   name: 'messages.sendEmail',
@@ -28,12 +48,22 @@ export const listMessages = defineCommand({
   name: 'messages.list',
   title: 'Messages and what happened to them',
   description:
-    'Recent messages, optionally for one person, with their status and the reason when one was not sent ("why didn’t Ada get this?"), plus delivery events.',
+    'Recent messages, newest first, with their status and the reason when one was not sent ("why didn’t Ada get this?"), plus delivery events. Filter by person, channel, status, purpose or time, and page with `cursor` until `nextCursor` is null.',
   input: z.object({
     profileId: z
       .string()
       .regex(/^prf_[0-9a-f]{32}$/)
       .optional(),
+    channel: z.string().min(1).max(32).optional().describe('e.g. email, sms or push'),
+    status: Status.optional(),
+    purpose: z
+      .string()
+      .regex(/^[a-z][a-z0-9_]{0,63}$/)
+      .optional()
+      .describe('The purpose the message was sent under, e.g. marketing_email'),
+    since: isoDateTime('since').optional().describe('Only messages created at or after this time'),
+    until: isoDateTime('until').optional().describe('Only messages created at or before this time'),
+    cursor: z.string().max(500).optional().describe('`nextCursor` from an earlier call'),
     limit: z.number().int().min(1).max(200).default(50),
   }),
   output: z.object({
@@ -57,21 +87,41 @@ export const listMessages = defineCommand({
         events: z.array(z.object({ type: z.string(), at: z.string(), reason: z.string(), url: z.string() })),
       }),
     ),
+    nextCursor: z.string().nullable().describe('Pass as `cursor` for the next page; null when this is the last page'),
   }),
   permission: 'profiles:read',
   effect: 'read',
   handler: async (input, ctx) => {
+    const c = schema.messages;
+    const cursor = input.cursor ? decodeCursor(input.cursor) : null;
     const rows = await ctx.tx
-      .select()
-      .from(schema.messages)
-      .where(and(input.profileId ? eq(schema.messages.profileId, input.profileId) : undefined))
-      .orderBy(desc(schema.messages.createdAt))
-      .limit(input.limit);
-    const events = rows.length
-      ? await ctx.services.events.messageEventsOf(ctx.principal.workspaceId, { messageIds: rows.map((r) => r.id) }, 1000)
+      .select({
+        message: c,
+        // Full precision for the cursor; the displayed createdAt stays an ISO string.
+        at: sql<string>`to_char(${c.createdAt} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
+      })
+      .from(c)
+      .where(
+        and(
+          input.profileId ? eq(c.profileId, input.profileId) : undefined,
+          input.channel ? eq(c.channel, input.channel) : undefined,
+          input.status ? eq(c.status, input.status) : undefined,
+          input.purpose ? eq(c.purpose, input.purpose) : undefined,
+          input.since ? gte(c.createdAt, new Date(input.since)) : undefined,
+          input.until ? lte(c.createdAt, new Date(input.until)) : undefined,
+          cursor ? sql`(${c.createdAt}, ${c.id}) < (${cursor.at}::timestamptz, ${cursor.id})` : undefined,
+        ),
+      )
+      .orderBy(desc(c.createdAt), desc(c.id))
+      .limit(input.limit + 1);
+    const hasMore = rows.length > input.limit;
+    const page = hasMore ? rows.slice(0, input.limit) : rows;
+    const events = page.length
+      ? await ctx.services.events.messageEventsOf(ctx.principal.workspaceId, { messageIds: page.map((r) => r.message.id) }, 1000)
       : [];
+    const last = page.at(-1);
     return {
-      messages: rows.map((r) => ({
+      messages: page.map(({ message: r }) => ({
         id: r.id,
         channel: r.channel,
         profileId: r.profileId,
@@ -94,6 +144,7 @@ export const listMessages = defineCommand({
           .sort((a, b) => a.at.localeCompare(b.at))
           .map((e) => ({ type: e.type, at: e.at, reason: e.reason, url: e.url })),
       })),
+      nextCursor: hasMore && last ? encodeCursor(last.at, last.message.id) : null,
     };
   },
 });

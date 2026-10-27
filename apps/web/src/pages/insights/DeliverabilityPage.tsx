@@ -1,6 +1,6 @@
 import { Gauge, ShieldCheck } from 'lucide-react';
 import { useState } from 'react';
-import { api, errText, type Out } from '../../app/api';
+import { api, type Out } from '../../app/api';
 import { ButtonLink } from '../../app/links';
 import { useCrumbs } from '../../app/page';
 import { useSession } from '../../app/session';
@@ -22,8 +22,7 @@ import {
 
 type Health = Out<'deliverability.health'>;
 type Rates = Health['email']['marketing'];
-type Report = Out<'emailProviders.checkDomain'>;
-type Check = { loading: boolean; report?: Report; error?: string; checkedAt?: string };
+type Report = Out<'sendingDomains.list'>['domains'][number];
 
 const pct = (x: number) => `${(x * 100).toFixed(2)}%`;
 const rateTone = { ok: 'good', warn: 'warn', paused: 'bad' } as const;
@@ -34,24 +33,25 @@ export default function DeliverabilityPage() {
   const { can } = useSession();
   const admin = can('workspace:admin');
   const [selectors, setSelectors] = useState('');
-  const [checks, setChecks] = useState<Record<string, Check>>({});
+  const [applied, setApplied] = useState('');
 
   const health = useApi(() => api.call('deliverability.health', {}), []);
-  const providers = useApi(() => api.call('emailProviders.list', {}), [], { skip: !admin });
+  // The read-only domain list needs artifacts:read, so a builder sees the DNS checks too.
+  const domains = useApi(
+    () =>
+      api.call('sendingDomains.list', {
+        dkimSelectors: applied
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean)
+          .slice(0, 5),
+      }),
+    [applied],
+  );
 
-  const runCheck = async (id: string) => {
-    const list = selectors
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean)
-      .slice(0, 5);
-    setChecks((c) => ({ ...c, [id]: { loading: true } }));
-    try {
-      const report = await api.call('emailProviders.checkDomain', { id, dkimSelectors: list });
-      setChecks((c) => ({ ...c, [id]: { loading: false, report, checkedAt: new Date().toISOString() } }));
-    } catch (e) {
-      setChecks((c) => ({ ...c, [id]: { loading: false, error: errText(e) } }));
-    }
+  const check = () => {
+    if (selectors === applied) void domains.reload();
+    else setApplied(selectors);
   };
 
   const h = health.data;
@@ -99,86 +99,81 @@ export default function DeliverabilityPage() {
                 <ShieldCheck size={15} className="text-muted" aria-hidden />
                 Sending domains
               </h2>
-              <p className="mt-0.5 text-[12px] text-muted">SPF, DKIM and DMARC per provider, with the record to add when one is missing.</p>
+              <p className="mt-0.5 text-[12px] text-muted">
+                SPF, DKIM and DMARC for the domains enabled providers send from, with the record to add when one is missing.
+              </p>
             </div>
           </div>
 
-          {!admin ? (
-            <Alert tone="info">
-              Domain checks need the e-mail provider settings, which require <Mono>workspace:admin</Mono>. Ask a workspace admin to check the sending
-              domains.
-            </Alert>
-          ) : (
-            <>
-              <Field
-                label="DKIM selectors"
-                hint="Comma-separated selectors from the provider's DNS settings (up to 5). Leave empty to check SPF and DMARC only."
-                className="mb-3 max-w-[520px]"
-              >
-                <Input
-                  value={selectors}
-                  onChange={(e) => setSelectors(e.target.value)}
-                  placeholder="selector1, selector2"
-                  autoComplete="off"
-                />
-              </Field>
+          <Field
+            label="DKIM selectors"
+            hint="Comma-separated selectors from the provider's DNS settings (up to 5). Leave empty to check SPF and DMARC only."
+            className="mb-3 max-w-[560px]"
+          >
+            <div className="flex flex-wrap items-center gap-2">
+              <Input
+                value={selectors}
+                onChange={(e) => setSelectors(e.target.value)}
+                placeholder="selector1, selector2"
+                autoComplete="off"
+              />
+              <Button size="sm" loading={domains.refreshing} onClick={check}>
+                Check domains
+              </Button>
+            </div>
+          </Field>
 
-              {providers.loading ? (
-                <LoadingBlock lines={3} label="Loading e-mail providers" />
-              ) : providers.error ? (
-                <Alert tone="bad" title="Couldn't load the e-mail providers" onRetry={providers.reload}>
-                  {providers.error}
-                </Alert>
-              ) : (providers.data?.providers.length ?? 0) === 0 ? (
-                <div className="rounded-lg border border-line bg-surface">
-                  <EmptyState
-                    title="No sending providers yet"
-                    action={<ButtonLink to="/settings/providers" variant="primary">Add a provider</ButtonLink>}
-                  >
-                    Add an e-mail provider under Settings → Providers, then check its sending domain here.
-                  </EmptyState>
-                </div>
-              ) : (
-                <div className="space-y-3">
-                  {providers.data?.providers.map((p) => {
-                    const check = checks[p.id];
-                    return (
-                      <Card
-                        key={p.id}
-                        title={p.name}
-                        description={
-                          <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                            <Mono className="bg-transparent px-0">{p.fromEmail}</Mono>
-                            <span>{p.adapter}</span>
-                            {p.useFor.map((u) => (
-                              <Tag key={u}>{u}</Tag>
-                            ))}
-                            {!p.enabled && <StatusPill tone="neutral">Disabled</StatusPill>}
-                          </span>
-                        }
-                        action={
-                          <Button size="sm" loading={check?.loading} onClick={() => void runCheck(p.id)}>
-                            Check domain
-                          </Button>
-                        }
-                      >
-                        <div className="p-4">
-                          {!check ? (
-                            <p className="text-[13px] text-muted">Run a check to look up SPF, DKIM and DMARC for this domain.</p>
-                          ) : check.error ? (
-                            <Alert tone="bad">{check.error}</Alert>
-                          ) : check.report ? (
-                            <DomainReportView report={check.report} checkedAt={check.checkedAt} />
-                          ) : (
-                            <LoadingBlock lines={3} label="Checking DNS" />
-                          )}
-                        </div>
-                      </Card>
-                    );
-                  })}
-                </div>
-              )}
-            </>
+          {domains.loading ? (
+            <LoadingBlock lines={3} label="Checking sending domains" />
+          ) : domains.error ? (
+            <Alert tone="bad" title="Couldn't check the sending domains" onRetry={domains.reload}>
+              {domains.error}
+            </Alert>
+          ) : (domains.data?.domains.length ?? 0) === 0 ? (
+            <div className="rounded-lg border border-line bg-surface">
+              <EmptyState
+                title="No sending domains yet"
+                action={
+                  admin && (
+                    <ButtonLink to="/settings/providers" variant="primary">
+                      Add a provider
+                    </ButtonLink>
+                  )
+                }
+              >
+                {admin
+                  ? 'Add an e-mail provider under Settings → Providers, then check its sending domain here.'
+                  : 'No enabled e-mail provider has a sending domain yet. Ask a workspace admin to add one under Settings → Providers.'}
+              </EmptyState>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {domains.data?.domains.map((d) => (
+                <Card
+                  key={d.domain}
+                  title={d.domain}
+                  description={
+                    <span className="flex flex-wrap items-center gap-1.5">
+                      {d.uses.map((u) => (
+                        <Tag key={u}>{u}</Tag>
+                      ))}
+                      <span className="text-[12px] text-muted">
+                        Checked {domains.data?.checkedAt ? formatDateTime(domains.data.checkedAt) : 'just now'}
+                      </span>
+                    </span>
+                  }
+                  action={
+                    <Button size="sm" loading={domains.refreshing} onClick={check}>
+                      Check again
+                    </Button>
+                  }
+                >
+                  <div className="p-4">
+                    <DomainReportView report={d} />
+                  </div>
+                </Card>
+              ))}
+            </div>
           )}
         </section>
       </div>
@@ -201,14 +196,12 @@ function Stream({ label, rates }: { label: string; rates: Rates }) {
   );
 }
 
-function DomainReportView({ report, checkedAt }: { report: Report; checkedAt?: string }) {
+function DomainReportView({ report }: { report: Report }) {
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-2">
         <StatusPill tone={report.ok ? 'good' : 'bad'}>{report.ok ? 'Domain passes' : 'Needs attention'}</StatusPill>
-        <span className="text-[12px] text-muted">
-          {checkedAt ? `Checked ${formatDateTime(checkedAt)}` : 'Checked just now'} · {report.domain}
-        </span>
+        <span className="text-[12px] text-muted">{report.domain}</span>
       </div>
       <dl className="space-y-3 text-[13px]">
         <CheckRow name="SPF" ok={report.spf.ok} record={report.spf.record} advice={report.spf.advice} />
