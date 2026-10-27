@@ -2,7 +2,7 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
-## [Unreleased]
+## [0.2.9] - 2026-10-27
 
 [Phase 16](docs/architecture/roadmap-wave-3.md#phase-16-measure-and-report): answer "what worked" from the platform, for people and for agents. A read-only metric layer answers questions in one call; campaigns group the work under a goal and report it; control groups measure uplift instead of assuming it; and alerts say when deliverability, signups or journeys go wrong. REST and MCP stay backwards compatible: new commands and artifact types only. Two Postgres and two ClickHouse migrations run at start-up.
 

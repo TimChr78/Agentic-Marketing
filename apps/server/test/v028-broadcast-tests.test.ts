@@ -202,7 +202,13 @@ describe('subject A/B test', () => {
     for (const m of sampleMessages) byVariant.set(m.variant!, (byVariant.get(m.variant!) ?? 0) + 1);
     expect(byVariant.get('A')).toBeGreaterThanOrEqual(20);
     expect(byVariant.get('B')).toBeGreaterThanOrEqual(20);
-    expect(Math.abs((byVariant.get('A') ?? 0) - (byVariant.get('B') ?? 0))).toBeLessThanOrEqual(10);
+    // The split is a hash of random profile ids, so it is binomial: with ~60 sends the difference
+    // has a standard deviation near 8. Each arm within 30–70% is about three standard deviations.
+    for (const v of ['A', 'B']) {
+      const share = (byVariant.get(v) ?? 0) / sampleMessages.length;
+      expect(share).toBeGreaterThanOrEqual(0.3);
+      expect(share).toBeLessThanOrEqual(0.7);
+    }
     await eventually(
       () => status(winnerId),
       (s) => (s.test?.variants.reduce((n, v) => n + v.sent, 0) ?? 0) === sampleMessages.length,
