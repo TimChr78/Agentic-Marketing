@@ -2,7 +2,7 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
-## [Unreleased]
+## [0.2.8] - 2026-10-27
 
 [Phase 15](docs/architecture/roadmap-wave-3.md#phase-15-newsletter-and-lifecycle-e-mail): what a newsletter publisher expects from Kit, Beehiiv or Buttondown. Issues are built from shared blocks and checked before they go out; readers choose topics; every issue has a web version and can be published to an archive with RSS; subject lines can be tested; audiences can be fixed lists; and journeys can wait for a condition. REST and MCP stay backwards compatible: new commands, new optional fields and new template variables. Five migrations run at start-up, and one new public path (`/n`) needs a proxy rule where proxies filter paths.
 
