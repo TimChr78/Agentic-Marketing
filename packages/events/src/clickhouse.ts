@@ -56,6 +56,13 @@ export interface EventStore {
     workspaceId: string,
     q: { journeyId: string; from?: Date; to?: Date },
   ): Promise<{ converted: string[]; unsubscribed: string[] }>;
+  /** Goal events by name in a time window, with the identifiers that tie them to a profile. */
+  conversionEvents(
+    workspaceId: string,
+    q: { names: string[]; from: Date; to: Date; limit?: number },
+  ): Promise<{ anonymousId: string; userId: string; name: string; timestamp: number; properties: Record<string, unknown> }[]>;
+  /** People who unsubscribed from any message sent by these journeys or broadcasts, in a time window. */
+  unsubscribedProfiles(workspaceId: string, q: { journeyIds: string[]; from?: Date; to?: Date }): Promise<string[]>;
   messageEventsOf(workspaceId: string, filter: { messageIds?: string[]; profileId?: string }, limit?: number): Promise<MessageEvent[]>;
   ping(): Promise<boolean>;
   close(): Promise<void>;
@@ -465,6 +472,45 @@ export function clickHouseStore(opts: { url: string; database: string }): EventS
         converted: (await converted.json<{ profile_id: string }>()).map((r) => r.profile_id),
         unsubscribed: (await unsubscribed.json<{ profile_id: string }>()).map((r) => r.profile_id),
       };
+    },
+    async conversionEvents(workspaceId, q) {
+      if (!q.names.length) return [];
+      const rs = await query(workspaceId, {
+        query: `SELECT anonymous_id, user_id, name, timestamp, properties FROM events FINAL
+                WHERE workspace_id = {ws:UUID} AND name IN {names:Array(String)}
+                  AND timestamp >= {from:DateTime64(3, 'UTC')} AND timestamp <= {to:DateTime64(3, 'UTC')}
+                ORDER BY timestamp LIMIT {limit:UInt32}`,
+        query_params: {
+          ws: workspaceId,
+          names: q.names,
+          from: q.from.toISOString().replace('Z', ''),
+          to: q.to.toISOString().replace('Z', ''),
+          limit: q.limit ?? 100_000,
+        },
+        format: 'JSONEachRow',
+      });
+      return (await rs.json<Record<string, never>>()).map((r) => ({
+        anonymousId: r.anonymous_id,
+        userId: r.user_id,
+        name: r.name,
+        timestamp: Date.parse(`${String(r.timestamp).replace(' ', 'T')}Z`),
+        properties: typeof r.properties === 'string' ? JSON.parse(r.properties) : (r.properties as Record<string, unknown>),
+      }));
+    },
+    async unsubscribedProfiles(workspaceId, q) {
+      if (!q.journeyIds.length) return [];
+      const from = q.from?.toISOString().replace('Z', '');
+      const to = q.to?.toISOString().replace('Z', '');
+      const rs = await query(workspaceId, {
+        query: `SELECT DISTINCT profile_id FROM message_events FINAL
+                WHERE workspace_id = {ws:UUID} AND journey_id IN {ids:Array(String)}
+                  AND type = 'unsubscribed' AND channel = 'email'
+                ${from ? "AND at >= {from:DateTime64(3, 'UTC')}" : ''}
+                ${to ? "AND at <= {to:DateTime64(3, 'UTC')}" : ''}`,
+        query_params: { ws: workspaceId, ids: q.journeyIds, ...(from ? { from } : {}), ...(to ? { to } : {}) },
+        format: 'JSONEachRow',
+      });
+      return (await rs.json<{ profile_id: string }>()).map((r) => r.profile_id);
     },
     async messageEventsOf(workspaceId, filter, limit = 200) {
       const rs = await query(workspaceId, {

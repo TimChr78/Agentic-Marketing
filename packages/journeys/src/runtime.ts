@@ -1,4 +1,5 @@
 import { artifactTypes, DEFAULT_PURPOSES, type JourneyDefinition, publishedSingleton } from '@agentic-marketing/artifacts';
+import { type PublishedCampaign, publishedCampaigns } from '@agentic-marketing/campaigns';
 import { newId } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import { requestEmail, requestPush, requestSms } from '@agentic-marketing/email';
@@ -12,7 +13,7 @@ import jsonata from 'jsonata';
 import { matchesCondition } from './conditions';
 import { duplicateEntryKey, noteEntrySkip, resolveEntryKey } from './entry';
 import { compile, type Graph } from './graph';
-import { assignHoldout } from './holdout';
+import { assignHoldout, holdoutDetail } from './holdout';
 import { type AiOutcome, advance, type Effect, type ParticipantState, type Step } from './interpreter';
 
 // The journey runtime (ADR-0004): trigger matching and wake-ups run as a post-commit hook of the
@@ -71,6 +72,11 @@ export async function matchEvents(
 ): Promise<{ entered: number; woken: number; holdout: JourneyEvent[] }> {
   if (!resolved.length) return { entered: 0, woken: 0, holdout: [] };
   const journeys = await publishedJourneys(tx);
+  // A campaign's control group is the outer scope: its sending members inherit the campaign's
+  // assignment instead of randomising the same person again. Loaded once per batch.
+  const campaignOf = new Map<string, PublishedCampaign>();
+  for (const c of await publishedCampaigns(tx))
+    if (c.content.controlGroup) for (const m of c.content.members) campaignOf.set(m.artifactId, c);
   let entered = 0;
   let woken = 0;
   const holdout: JourneyEvent[] = [];
@@ -109,8 +115,12 @@ export async function matchEvents(
         }
       }
       // The arm is chosen at entry, before the sweeper can send anything. Entry itself does not
-      // check consent; sends do, so the control group is drawn from everyone who entered.
-      const assigned = await assignHoldout(tx, workspaceId, { type: 'journey', id: j.id }, j.graph.controlGroup, profileId);
+      // check consent; sends do, so the control group is drawn from everyone who entered. A journey
+      // inside a campaign with a control group uses the campaign's arm, not its own.
+      const campaign = campaignOf.get(j.id);
+      const assigned = campaign
+        ? await assignHoldout(tx, workspaceId, { type: 'campaign', id: campaign.id }, campaign.content.controlGroup, profileId)
+        : await assignHoldout(tx, workspaceId, { type: 'journey', id: j.id }, j.graph.controlGroup, profileId);
       const res = await tx
         .insert(schema.journeyParticipants)
         .values({
@@ -125,7 +135,15 @@ export async function matchEvents(
           dueAt: new Date(),
           context: {
             event: { name: e.name, properties: e.properties },
-            ...(assigned ? { holdout: assigned.assignment } : {}),
+            ...(assigned
+              ? {
+                  holdout: {
+                    ...assigned.assignment,
+                    scope: campaign ? 'campaign' : 'journey',
+                    ...(campaign ? { campaignId: campaign.id } : {}),
+                  },
+                }
+              : {}),
           },
         })
         .onConflictDoNothing()
@@ -138,15 +156,17 @@ export async function matchEvents(
       if (assigned?.created)
         holdout.push({
           workspaceId,
-          journeyId: j.id,
-          version: j.version,
+          // A campaign assignment belongs to the campaign scope, so its event names the campaign
+          // even when a journey entry happened to assign it first.
+          journeyId: campaign?.id ?? j.id,
+          version: campaign?.version ?? j.version,
           participantId: res[0]!.id,
           profileId,
           node: j.graph.start,
           type: 'holdout_assigned',
           seq: 0,
           at: new Date().toISOString(),
-          detail: `arm=${assigned.assignment.arm} percent=${assigned.assignment.percent} hash=${assigned.assignment.hashVersion}`,
+          detail: holdoutDetail(assigned.assignment, campaign?.id),
         });
     }
     // Wake whoever waits for this event (wait-for-event and goal nodes).

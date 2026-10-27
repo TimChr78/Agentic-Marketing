@@ -1,13 +1,17 @@
 import { createHash } from 'node:crypto';
 import {
   artifactTypes,
+  assignHoldout,
   type BroadcastDefinition,
   type EmailTemplate,
+  holdoutDetail,
+  holdoutParticipantId,
   publishValidators,
   type SendWindowDefinition,
 } from '@agentic-marketing/artifacts';
+import { campaignWithControlForMember } from '@agentic-marketing/campaigns';
 import { defineCommand } from '@agentic-marketing/commands';
-import { AppError } from '@agentic-marketing/core';
+import { AppError, newId } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import {
   checkPushRecipient,
@@ -25,7 +29,7 @@ import {
   topicProblems,
   validateSubject,
 } from '@agentic-marketing/email';
-import type { EventStore } from '@agentic-marketing/events';
+import type { EventStore, JourneyEvent } from '@agentic-marketing/events';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, asc, desc, eq, gt, inArray, isNotNull, sql } from 'drizzle-orm';
@@ -234,6 +238,85 @@ async function purposeOf(tx: Tx, templateId: string, version?: number) {
     )
     .where(eq(schema.artifacts.id, templateId));
   return row ? { purpose: row.purpose, topic: row.topic } : null;
+}
+
+/** The published version and purpose of a template, for recording a control-group suppression. */
+async function publishedTemplateInfo(tx: Tx, templateId: string): Promise<{ version: number; purpose: string }> {
+  const [row] = await tx
+    .select({
+      version: schema.artifacts.publishedVersion,
+      purpose: sql<string | null>`${schema.artifactVersions.content} ->> 'purpose'`,
+    })
+    .from(schema.artifacts)
+    .innerJoin(
+      schema.artifactVersions,
+      and(
+        eq(schema.artifactVersions.workspaceId, schema.artifacts.workspaceId),
+        eq(schema.artifactVersions.artifactId, schema.artifacts.id),
+        eq(schema.artifactVersions.number, schema.artifacts.publishedVersion),
+      ),
+    )
+    .where(eq(schema.artifacts.id, templateId));
+  return { version: row?.version ?? 0, purpose: row?.purpose ?? 'unknown' };
+}
+
+/**
+ * Records a broadcast message that was not sent because the person is in the campaign's control
+ * group. It is a suppression, like consent or a send window, not a failure: the message log and
+ * ClickHouse keep it with the reason, and the run counts it as skipped.
+ */
+async function suppressForControl(
+  tx: Tx,
+  deps: BroadcastDeps,
+  ws: string,
+  broadcastId: string,
+  def: BroadcastDefinition,
+  info: { version: number; purpose: string },
+  profileId: string,
+  variant: string | undefined,
+  campaignId: string,
+): Promise<void> {
+  const channel = def.template.startsWith('sms_') ? 'sms' : def.template.startsWith('psh_') ? 'push' : 'email';
+  const reason = `holdout_control: campaign ${campaignId} holds this person out of every sending member`;
+  const [m] = await tx
+    .insert(schema.messages)
+    .values({
+      workspaceId: ws,
+      id: newId('msg'),
+      idempotencyKey: `bct:${broadcastId}:${profileId}`,
+      channel,
+      profileId,
+      purpose: info.purpose,
+      templateId: def.template,
+      templateVersion: info.version,
+      journeyId: broadcastId,
+      status: 'suppressed',
+      reason,
+      variant: variant ?? null,
+    })
+    .onConflictDoNothing()
+    .returning({ id: schema.messages.id });
+  if (!m) return;
+  // Same shape as the gateway's decision event, so reports see one suppressed message per person.
+  await deps.events.insertMessageEvents([
+    {
+      workspaceId: ws,
+      messageId: m.id,
+      eventId: 'decision:suppressed:holdout',
+      type: 'suppressed',
+      at: new Date().toISOString(),
+      profileId,
+      channel,
+      purpose: info.purpose,
+      provider: '',
+      templateId: def.template,
+      templateVersion: info.version,
+      journeyId: broadcastId,
+      variant: variant ?? '',
+      reason,
+      url: '',
+    },
+  ]);
 }
 
 export const previewBroadcast = defineCommand({
@@ -641,14 +724,19 @@ async function schedule(db: Db) {
 
 /** Sends one batch of a due run. Returns whether the run has more to do. */
 async function sendBatch(db: Db, ws: string, broadcastId: string, deps: BroadcastDeps): Promise<boolean> {
-  return db.withWorkspace(ws, async (tx) => {
+  const out = await db.withWorkspace(ws, async (tx) => {
     const [run] = await tx
       .select()
       .from(schema.broadcastRuns)
       .where(and(eq(schema.broadcastRuns.broadcastId, broadcastId), inArray(schema.broadcastRuns.status, ['scheduled', 'running'])))
       .for('update', { skipLocked: true });
-    if (!run) return false;
+    if (!run) return { more: false, holdout: [] as JourneyEvent[] };
     const { def } = await definition(tx, broadcastId, run.version);
+    // A broadcast sends for at most one published campaign. When that campaign has a control
+    // group, the arm belongs to the campaign, so a second member cannot randomise the person again.
+    const campaign = await campaignWithControlForMember(tx, broadcastId);
+    const controlTemplate = campaign ? await publishedTemplateInfo(tx, def.template) : null;
+    const holdoutEvents: JourneyEvent[] = [];
     let [test] = await tx.select().from(schema.broadcastTests).where(eq(schema.broadcastTests.broadcastId, broadcastId));
     // A run made before the test row existed (or by an older version) grows one here.
     if (!test && def.subjectTest) {
@@ -689,7 +777,7 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
         .update(schema.broadcastRuns)
         .set({ status: 'running', leaseUntil: test.decideAt ?? new Date(now.getTime() + LEASE_MS) })
         .where(eq(schema.broadcastRuns.broadcastId, broadcastId));
-      return false;
+      return { more: false, holdout: holdoutEvents };
     }
 
     const members = await tx
@@ -733,11 +821,36 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
     for (const m of members) {
       if (test?.state === 'sampling' && !subjectAssignment(m.profileId, broadcastId, test.samplePercent, test.subjects.length)) continue;
       if (test?.state === 'winner_sent' && already.has(m.profileId)) continue;
-      recipients++;
       const variant =
         test?.state === 'sampling'
           ? (subjectAssignment(m.profileId, broadcastId, test.samplePercent, test.subjects.length) ?? undefined)
           : (test?.winner ?? undefined);
+      // The first time this person is about to get anything from a sending member, record their
+      // campaign arm. Later members read the same row.
+      const holdout = campaign
+        ? await assignHoldout(tx, ws, { type: 'campaign', id: campaign.id }, campaign.content.controlGroup, m.profileId)
+        : null;
+      if (campaign && holdout?.created)
+        holdoutEvents.push({
+          workspaceId: ws,
+          journeyId: campaign.id,
+          version: campaign.version,
+          participantId: holdoutParticipantId(m.profileId),
+          profileId: m.profileId,
+          node: '',
+          type: 'holdout_assigned',
+          seq: 0,
+          at: now.toISOString(),
+          detail: holdoutDetail(holdout.assignment, campaign.id),
+        });
+      recipients++;
+      // Control gets no message from any of the campaign's sending members. A suppression with
+      // its own reason keeps the decision visible without counting it as a failed send.
+      if (campaign && controlTemplate && holdout?.assignment.arm === 'control') {
+        await suppressForControl(tx, deps, ws, broadcastId, def, controlTemplate, m.profileId, variant, campaign.id);
+        skipped++;
+        continue;
+      }
       const subject = variant && test ? test.subjects[variant.charCodeAt(0) - 65] : undefined;
 
       let notBefore: Date | undefined;
@@ -817,10 +930,15 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
       .where(eq(schema.broadcastRuns.broadcastId, broadcastId));
     if (sampling && finished) {
       await tx.update(schema.broadcastTests).set({ state: 'deciding' }).where(eq(schema.broadcastTests.broadcastId, broadcastId));
-      return false;
+      return { more: false, holdout: holdoutEvents };
     }
-    return !finished;
+    return { more: !finished, holdout: holdoutEvents };
   });
+  // ClickHouse is outside the transaction, as for journeys: an assignment that committed still
+  // measures from the table, and a lost event only affects the timeline.
+  if (out.holdout.length)
+    await deps.events.insertJourneyEvents(out.holdout).catch((err) => logger.warn({ err }, 'holdout events not stored'));
+  return out.more;
 }
 
 /** One scheduler tick: schedule new broadcasts, then work through the due ones. */

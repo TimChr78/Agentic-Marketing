@@ -1138,6 +1138,11 @@ const campaign = z
       .describe(
         'Shared utm_campaign for e-mails sent by this campaign’s broadcasts and journeys. A template that sets its own utm.campaign keeps it; the template wins.',
       ),
+    controlGroup: controlGroup
+      .optional()
+      .describe(
+        'A deterministic control group for the whole campaign: control people receive nothing from any of its sending members and are still measured, so uplift is the campaign’s, not one member’s. Members inherit it; a journey member cannot also define its own.',
+      ),
     members: z
       .array(z.object({ artifactId: CampaignMemberRef, role: z.enum(['primary', 'follow_up', 'content']).default('primary') }))
       .max(50)
@@ -1264,7 +1269,7 @@ export const artifactTypes = {
     prefix: 'cmp',
     label: 'Campaign',
     description:
-      'A thin grouping of existing broadcasts, journeys, templates, experiences, forms and segments under one goal and one UTM campaign, so results can be reported per campaign. This is not an ad platform campaign (those live under ads.* and keep their own ids); link the two later by id. Members are references, never copies: editing or archiving a campaign does not change or delete them. A broadcast or journey that sends can belong to only one published campaign, so attribution is unambiguous; templates, segments and experiences may be shared. Shared UTM campaign: when a broadcast or journey in a published campaign with utmCampaign sends an e-mail, its utm_campaign is the campaign’s value unless the template sets its own utm.campaign, which wins. Only templates with utm settings tag their links; the campaign never turns tagging on. Look up membership with campaigns.of and campaigns.members. Publish the campaign with its new members in one review using artifacts.requestPublishBundle.',
+      'A thin grouping of existing broadcasts, journeys, templates, experiences, forms and segments under one goal and one UTM campaign, so results can be reported per campaign. This is not an ad platform campaign (those live under ads.* and keep their own ids); link the two later by id. Members are references, never copies: editing or archiving a campaign does not change or delete them. A broadcast or journey that sends can belong to only one published campaign, so attribution is unambiguous; templates, segments and experiences may be shared. Shared UTM campaign: when a broadcast or journey in a published campaign with utmCampaign sends an e-mail, its utm_campaign is the campaign’s value unless the template sets its own utm.campaign, which wins. Only templates with utm settings tag their links; the campaign never turns tagging on. controlGroup {percent, minSampleSize?} keeps a deterministic share of everyone who is about to receive from any sending member out of every message from all of them, and it is measured once for the whole campaign with campaigns.holdoutResult; members inherit the campaign’s assignment and a journey member cannot define its own. A changed percentage after people were assigned needs controlGroup.reset: true. Look up membership with campaigns.of and campaigns.members. Publish the campaign with its new members in one review using artifacts.requestPublishBundle.',
     content: campaign,
   },
   tracking_plan: {

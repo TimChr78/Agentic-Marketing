@@ -1,7 +1,7 @@
 import { Plus, Trash2 } from 'lucide-react';
 import { api } from '../../app/api';
 import { useApi } from '../../app/useApi';
-import { Button, DateTimeInput, Field, FieldGroup, IconButton, Input, Select, Textarea } from '../../ui';
+import { Button, Checkbox, DateTimeInput, Field, FieldGroup, IconButton, Input, Select, Textarea } from '../../ui';
 import type { EditorProps } from './ArtifactDetailPage';
 
 // A campaign (#65): a thin parent. The goal says what success means, utmCampaign ties the e-mail
@@ -25,10 +25,18 @@ interface CampaignMember {
   [key: string]: unknown;
 }
 
+interface CampaignControlGroup {
+  percent?: number;
+  minSampleSize?: number;
+  reset?: boolean;
+  [key: string]: unknown;
+}
+
 interface CampaignContent {
   description?: string;
   goal?: CampaignGoal;
   utmCampaign?: string;
+  controlGroup?: CampaignControlGroup;
   members?: CampaignMember[];
   startsAt?: string;
   endsAt?: string;
@@ -78,6 +86,9 @@ export function CampaignEditor({ content, onChange, readOnly, errors }: EditorPr
     if (next) set({ members: [...members, { artifactId: next.id, role: 'primary' }] });
   };
   const needsEvent = goal.kind === 'conversion' || goal.kind === 'revenue';
+  const cg = content.controlGroup;
+  const setCg = (patch: Partial<CampaignControlGroup>) =>
+    set({ controlGroup: { percent: 10, minSampleSize: 200, ...cg, ...patch } });
 
   return (
     <div className="max-w-[900px] space-y-5">
@@ -136,6 +147,62 @@ export function CampaignEditor({ content, onChange, readOnly, errors }: EditorPr
             />
           </Field>
         </div>
+      </FieldGroup>
+
+      <FieldGroup
+        legend="Control group"
+        hint="Measures the campaign's incremental effect: people in control get no message from any of its sending members, but their goal events still count."
+      >
+        <Checkbox
+          label="Hold back a control group"
+          hint="One assignment for the whole campaign; a journey member cannot also define its own control group."
+          checked={!!cg}
+          disabled={readOnly}
+          onChange={(e) => {
+            if (e.target.checked) setCg({ percent: 10, minSampleSize: 200 });
+            else set({ controlGroup: undefined });
+          }}
+        />
+        {cg && (
+          <div className="space-y-3">
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Field label="Share in control" hint="1–50%, assigned once per person for the campaign." error={errors['controlGroup.percent']}>
+                <Input
+                  type="number"
+                  min={1}
+                  max={50}
+                  value={cg.percent ?? 10}
+                  readOnly={readOnly}
+                  onChange={(e) => setCg({ percent: Math.max(1, Math.min(50, Math.round(Number(e.target.value) || 1))) })}
+                />
+              </Field>
+              <Field
+                label="Minimum sample size"
+                hint="Both arms need this many people before a verdict, default 200."
+                error={errors['controlGroup.minSampleSize']}
+              >
+                <Input
+                  type="number"
+                  min={1}
+                  value={cg.minSampleSize ?? 200}
+                  readOnly={readOnly}
+                  onChange={(e) => setCg({ minSampleSize: Math.max(1, Math.round(Number(e.target.value) || 1)) })}
+                />
+              </Field>
+            </div>
+            <p className="text-[12px] text-muted">
+              Control people receive nothing from this campaign’s broadcasts or journeys, yet they are measured against the campaign goal. Read the
+              result with <span className="font-mono">campaigns.holdoutResult</span>.
+            </p>
+            <Checkbox
+              label="Start a new scope if the percentage changes"
+              hint="Publishing a changed percentage after people were assigned is refused unless this is ticked. People keep their old arm."
+              checked={!!cg.reset}
+              disabled={readOnly}
+              onChange={(e) => setCg({ reset: e.target.checked })}
+            />
+          </div>
+        )}
       </FieldGroup>
 
       <FieldGroup legend="Shared UTM campaign">

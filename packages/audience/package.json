@@ -12,6 +12,7 @@
   "dependencies": {
     "@agentic-marketing/ads": "workspace:*",
     "@agentic-marketing/artifacts": "workspace:*",
+    "@agentic-marketing/campaigns": "workspace:*",
     "@agentic-marketing/commands": "workspace:*",
     "@agentic-marketing/core": "workspace:*",
     "@agentic-marketing/db": "workspace:*",

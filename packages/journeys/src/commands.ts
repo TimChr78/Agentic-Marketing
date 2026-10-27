@@ -5,6 +5,7 @@ import {
   publishedSingleton,
   publishValidators,
 } from '@agentic-marketing/artifacts';
+import { campaignWithControlForMember } from '@agentic-marketing/campaigns';
 import { defineCommand } from '@agentic-marketing/commands';
 import { AppError, isoDateTime, newUuid } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
@@ -17,7 +18,7 @@ import { z } from 'zod';
 import { matchesCondition } from './conditions';
 import { duplicateEntryKey, resolveEntryKey } from './entry';
 import { compile, unsupported } from './graph';
-import { analyseHoldout, assignHoldout, holdoutHashVersion } from './holdout';
+import { analyseHoldout, assignHoldout, holdoutDetail, holdoutHashVersion } from './holdout';
 import { advance, type ParticipantState } from './interpreter';
 
 const JourneyId = z.string().regex(/^jrn_[0-9a-f]{32}$/);
@@ -65,6 +66,15 @@ publishValidators.set('journey', async (content, tx, artifact) => {
           'The control group percentage changed after people were assigned. Set controlGroup.reset: true to start a new scope; people already assigned keep their old arm, and reports count only the new scope.',
         );
     }
+  }
+  // One scope only: a campaign's control group already covers this journey as a sending member,
+  // so a second randomisation here would split people differently inside the same campaign.
+  if (def.controlGroup && artifact) {
+    const campaign = await campaignWithControlForMember(tx, artifact.id);
+    if (campaign)
+      problems.push(
+        `This journey defines a controlGroup, but it is a sending member of the published campaign “${campaign.name}” (${campaign.id}), which has one. Use only one scope: remove the journey’s controlGroup (it inherits the campaign’s) or the campaign’s.`,
+      );
   }
   const templates = def.nodes
     .filter((n) => n.kind === 'email' || n.kind === 'sms' || n.kind === 'push')
@@ -331,7 +341,16 @@ export const enrollProfiles = defineCommand({
       }
       const [p] = await ctx.tx.select({ id: schema.profiles.id }).from(schema.profiles).where(eq(schema.profiles.id, profileId));
       if (!p) continue;
-      const assigned = await assignHoldout(ctx.tx, ctx.principal.workspaceId, { type: 'journey', id: a.id }, g.controlGroup, profileId);
+      const campaign = await campaignWithControlForMember(ctx.tx, a.id);
+      const assigned = campaign
+        ? await assignHoldout(
+            ctx.tx,
+            ctx.principal.workspaceId,
+            { type: 'campaign', id: campaign.id },
+            campaign.content.controlGroup,
+            profileId,
+          )
+        : await assignHoldout(ctx.tx, ctx.principal.workspaceId, { type: 'journey', id: a.id }, g.controlGroup, profileId);
       const [participant] = await ctx.tx
         .insert(schema.journeyParticipants)
         .values({
@@ -345,7 +364,15 @@ export const enrollProfiles = defineCommand({
           dueAt: new Date(),
           context: {
             event: { name: 'manual', properties: { reason: input.reason ?? '' } },
-            ...(assigned ? { holdout: assigned.assignment } : {}),
+            ...(assigned
+              ? {
+                  holdout: {
+                    ...assigned.assignment,
+                    scope: campaign ? 'campaign' : 'journey',
+                    ...(campaign ? { campaignId: campaign.id } : {}),
+                  },
+                }
+              : {}),
           },
         })
         .returning({ id: schema.journeyParticipants.id });
@@ -353,15 +380,15 @@ export const enrollProfiles = defineCommand({
       if (assigned?.created && participant)
         holdout.push({
           workspaceId: ctx.principal.workspaceId,
-          journeyId: a.id,
-          version: a.publishedVersion,
+          journeyId: campaign?.id ?? a.id,
+          version: campaign?.version ?? a.publishedVersion,
           participantId: participant.id,
           profileId,
           node: g.start,
           type: 'holdout_assigned',
           seq: 0,
           at: new Date().toISOString(),
-          detail: `arm=${assigned.assignment.arm} percent=${assigned.assignment.percent} hash=${assigned.assignment.hashVersion}`,
+          detail: holdoutDetail(assigned.assignment, campaign?.id),
         });
     }
     if (holdout.length) ctx.afterCommit?.(() => ctx.services.events.insertJourneyEvents(holdout).catch(() => {}));
