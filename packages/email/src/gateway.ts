@@ -1,4 +1,5 @@
 import { DEFAULT_PURPOSES, type EmailTemplate, publishedSingleton } from '@agentic-marketing/artifacts';
+import { type CampaignUtmCache, campaignUtmCampaign } from '@agentic-marketing/campaigns';
 import { newId, newUuid } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import type { EventStore, MessageEvent } from '@agentic-marketing/events';
@@ -218,6 +219,9 @@ export async function deliverRound(
     `SELECT DISTINCT workspace_id FROM messages WHERE status IN ('queued', 'sending') LIMIT 100`,
   );
   let handled = 0;
+  // Shared campaign lookups for this batch: the first message of a broadcast or journey in a
+  // campaign loads the campaign once, the rest hit the map (never a query per message).
+  const utmCache: CampaignUtmCache = new Map();
   for (const { workspace_id: ws } of workspaces) {
     // A message stuck in "sending" means a worker stopped mid-send: the outcome is unknown, and
     // sending again could duplicate it, so it is marked failed for a person to look at.
@@ -247,14 +251,20 @@ export async function deliverRound(
     for (const { id, channel } of claimed) {
       if (channel === 'sms') await deliverSms(db, ws, id, deps);
       else if (channel === 'push') await deliverPush(db, ws, id, deps);
-      else await deliverOne(db, ws, id, deps);
+      else await deliverOne(db, ws, id, deps, utmCache);
       handled++;
     }
   }
   return handled;
 }
 
-async function deliverOne(db: Db, ws: string, id: string, deps: { kp: KeyProvider; events: EventStore; email: EmailServices }) {
+async function deliverOne(
+  db: Db,
+  ws: string,
+  id: string,
+  deps: { kp: KeyProvider; events: EventStore; email: EmailServices },
+  utmCache: CampaignUtmCache,
+) {
   type Prepared =
     | { kind: 'done'; event: MessageEvent }
     | {
@@ -319,8 +329,17 @@ async function deliverOne(db: Db, ws: string, id: string, deps: { kp: KeyProvide
       return finish('failed', `render_error: ${(e as Error).message.split('\n')[0]}`);
     }
     const skipUtm = [deps.email.publicUrl];
-    const tagged = tpl.utm ? tagLinks(rendered.html, tpl.utm, skipUtm) : rendered.html;
-    const text = tpl.utm ? tagTextLinks(rendered.text, tpl.utm, skipUtm) : rendered.text;
+    // Shared UTM campaign: the campaign supplies utm_campaign unless the template sets its own
+    // (explicit beats inherited). The message carries the broadcast or journey id, which is the
+    // member the campaign lists. A template with no UTM settings is tagged with the defaults, so a
+    // campaign can turn attribution on for its members without editing every template.
+    let utm = tpl.utm;
+    if (!utm?.campaign && m.journeyId) {
+      const inherited = await campaignUtmCampaign(tx, m.journeyId, utmCache);
+      if (inherited) utm = { source: 'newsletter', medium: 'email', ...utm, campaign: inherited };
+    }
+    const tagged = utm ? tagLinks(rendered.html, utm, skipUtm) : rendered.html;
+    const text = utm ? tagTextLinks(rendered.text, utm, skipUtm) : rendered.text;
     const ownLinks = [unsubscribe, preferences, web, ...(topicUnsubscribe ? [topicUnsubscribe] : [])];
     const html = deps.email.trackClicks
       ? trackLinks(

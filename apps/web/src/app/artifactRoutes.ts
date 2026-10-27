@@ -4,6 +4,7 @@
 const base: Record<string, string> = {
   journey: '/build/journeys',
   broadcast: '/build/broadcasts',
+  campaign: '/build/campaigns',
   form: '/build/forms',
   segment: '/build/segments',
   experience: '/build/experiences',
@@ -31,6 +32,7 @@ export const TYPE_LABEL: Record<string, string> = {
   form: 'Signup form',
   brand: 'Brand',
   broadcast: 'Broadcast',
+  campaign: 'Campaign',
   tracking_plan: 'Tracking plan',
   purposes: 'Purposes',
   conversion_map: 'Conversion map',

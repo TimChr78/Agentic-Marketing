@@ -34,6 +34,7 @@ export const NAV: NavGroup[] = [
     items: [
       { path: '/build/journeys', label: 'Journeys', needs: ['artifacts:read'] },
       { path: '/build/broadcasts', label: 'Broadcasts', needs: ['artifacts:read'] },
+      { path: '/build/campaigns', label: 'Campaigns', needs: ['artifacts:read'] },
       { path: '/build/forms', label: 'Forms', needs: ['artifacts:read'] },
       { path: '/build/segments', label: 'Segments', needs: ['artifacts:read'] },
       { path: '/build/experiences', label: 'Experiences', needs: ['artifacts:read'] },

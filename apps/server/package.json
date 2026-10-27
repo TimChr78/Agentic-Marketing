@@ -16,6 +16,7 @@
     "@agentic-marketing/assets": "workspace:*",
     "@agentic-marketing/audience": "workspace:*",
     "@agentic-marketing/auth": "workspace:*",
+    "@agentic-marketing/campaigns": "workspace:*",
     "@agentic-marketing/client": "workspace:*",
     "@agentic-marketing/commands": "workspace:*",
     "@agentic-marketing/core": "workspace:*",
