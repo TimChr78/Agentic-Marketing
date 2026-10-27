@@ -1,6 +1,6 @@
 import { Pencil, Plus } from 'lucide-react';
 import { useState } from 'react';
-import { api, errText, type Out } from '../../app/api';
+import { api, errText } from '../../app/api';
 import { useCrumbs } from '../../app/page';
 import { navigate } from '../../app/router';
 import { ButtonLink } from '../../app/links';
@@ -24,9 +24,6 @@ import {
 } from '../../ui';
 import { pageWidth } from '../../ui/layout';
 
-type Purpose = Out<'purposes.list'>['purposes'][number];
-type PurposesContent = { purposes: (Purpose & { requiresDoubleOptIn?: boolean })[] };
-
 const BASIS_LABEL: Record<string, string> = {
   consent: 'Consent',
   legitimate_interest: 'Legitimate interest',
@@ -35,6 +32,8 @@ const BASIS_LABEL: Record<string, string> = {
 };
 
 const basisLabel = (basis: string) => BASIS_LABEL[basis] ?? basis.replace(/_/g, ' ');
+
+const refused = (c: { denied: number; withdrawn: number; objected: number }) => c.denied + c.withdrawn + c.objected;
 
 /** Purposes: the purposes in force, and a link into the purposes artifact where they are edited. */
 export default function PurposesPage() {
@@ -46,14 +45,11 @@ export default function PurposesPage() {
       api.call('purposes.list', {}),
       api.call('artifacts.list', { type: 'purposes', limit: 1 }),
     ]);
-    const artifact = list.artifacts[0] ?? null;
-    let published: PurposesContent | null = null;
-    if (artifact?.publishedVersion) {
-      const g = await api.call('artifacts.get', { artifactId: artifact.id, version: artifact.publishedVersion });
-      published = g.version.content as PurposesContent;
-    }
-    return { ...current, artifact, published };
+    return { ...current, artifact: list.artifacts[0] ?? null };
   }, []);
+  // Counts are about people, not the artifact, so they are a separate read under profiles:read.
+  const summary = useApi(() => api.call('consent.summary', {}), [], { skip: !can('profiles:read') });
+  const counts = new Map((summary.data?.purposes ?? []).map((p) => [p.purpose, p]));
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -61,7 +57,6 @@ export default function PurposesPage() {
   const artifact = data.data?.artifact ?? null;
   const source = data.data?.source ?? 'default';
   const canWrite = can('artifacts:write');
-  const doubleOptIn = new Map((data.data?.published?.purposes ?? []).map((p) => [p.key, !!p.requiresDoubleOptIn]));
 
   const create = async () => {
     if (!data.data) return;
@@ -78,7 +73,7 @@ export default function PurposesPage() {
             description: p.description,
             basis: p.basis,
             channels: p.channels,
-            requiresDoubleOptIn: false,
+            requiresDoubleOptIn: p.requiresDoubleOptIn,
           })),
         },
         note: 'Created from the default purposes.',
@@ -132,7 +127,7 @@ export default function PurposesPage() {
         loading={data.loading}
         error={data.error}
         onRetry={data.reload}
-        columns={4}
+        columns={5}
         isEmpty={purposes.length === 0}
         empty={<EmptyState title="No purposes">Add purposes to the purposes artifact. Until then the built-in defaults apply.</EmptyState>}
       >
@@ -142,12 +137,13 @@ export default function PurposesPage() {
               <Th>Purpose</Th>
               <Th>Lawful basis</Th>
               <Th>Channels</Th>
+              <Th>People</Th>
               <Th>Double opt-in</Th>
             </tr>
           </THead>
           <tbody>
             {purposes.map((p) => {
-              const doubleOptInOn = doubleOptIn.get(p.key) ?? false;
+              const c = counts.get(p.key);
               return (
                 <Tr key={p.key}>
                   <Td>
@@ -161,15 +157,34 @@ export default function PurposesPage() {
                   <Td>
                     {p.channels.length ? (
                       <span className="flex flex-wrap gap-1">
-                        {p.channels.map((c) => (
-                          <Tag key={c}>{c}</Tag>
+                        {p.channels.map((ch) => (
+                          <Tag key={ch}>{ch}</Tag>
                         ))}
                       </span>
                     ) : (
                       <span className="text-muted">None</span>
                     )}
                   </Td>
-                  <Td>{doubleOptInOn ? 'Yes' : <span className="text-muted">No</span>}</Td>
+                  <Td>
+                    {summary.loading ? (
+                      <span className="text-muted">…</span>
+                    ) : c ? (
+                      <div className="space-y-1">
+                        <span className="flex flex-wrap gap-1">
+                          <StatusPill tone="good">{c.granted} allowed</StatusPill>
+                          {refused(c) > 0 && <StatusPill tone="warn">{refused(c)} refused</StatusPill>}
+                        </span>
+                        {c.channels.length > 0 && (
+                          <div className="text-[12px] text-muted">
+                            {c.channels.map((ch) => `${ch.channel}: ${ch.granted} allowed, ${refused(ch)} refused`).join(' · ')}
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <span className="text-muted">—</span>
+                    )}
+                  </Td>
+                  <Td>{p.requiresDoubleOptIn ? 'Yes' : <span className="text-muted">No</span>}</Td>
                 </Tr>
               );
             })}

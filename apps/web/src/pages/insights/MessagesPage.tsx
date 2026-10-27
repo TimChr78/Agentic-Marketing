@@ -1,6 +1,6 @@
 import { Search } from 'lucide-react';
-import { useState } from 'react';
-import { api } from '../../app/api';
+import { useEffect, useState } from 'react';
+import { api, errText, type Out } from '../../app/api';
 import { ButtonLink } from '../../app/links';
 import { useCrumbs } from '../../app/page';
 import { Link } from '../../app/router';
@@ -9,6 +9,7 @@ import { useApi } from '../../app/useApi';
 import { StatCard, StatGrid } from '../../features/insights/Stats';
 import {
   Alert,
+  Button,
   EmptyState,
   Field,
   Input,
@@ -26,6 +27,22 @@ import {
   timeAgo,
 } from '../../ui';
 import { pageWidth } from '../../ui/layout';
+
+type Message = Out<'messages.list'>['messages'][number];
+type MessageStatus = Message['status'];
+
+const PROFILE_ID = /^prf_[0-9a-f]{32}$/;
+const CHANNELS = ['email', 'sms', 'push'];
+const STATUSES: MessageStatus[] = [
+  'queued',
+  'sending',
+  'sent',
+  'suppressed',
+  'failed',
+  'delivered',
+  'bounced',
+  'complained',
+];
 
 const tone = {
   queued: 'neutral',
@@ -46,19 +63,48 @@ export default function MessagesPage() {
   const [person, setPerson] = useState('');
   const [channel, setChannel] = useState('');
   const [status, setStatus] = useState('');
+  const [more, setMore] = useState<{ rows: Message[]; cursor: string | null; loaded: boolean }>({
+    rows: [],
+    cursor: null,
+    loaded: false,
+  });
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [moreError, setMoreError] = useState<string | null>(null);
 
-  const list = useApi(() => api.call('messages.list', { limit: 200 }), []);
+  const profileId = PROFILE_ID.test(person.trim()) ? person.trim() : '';
+  const filterKey = `${profileId}|${channel}|${status}`;
+  const filters = {
+    ...(profileId ? { profileId } : {}),
+    ...(channel ? { channel } : {}),
+    ...(status ? { status: status as MessageStatus } : {}),
+  };
+
+  const list = useApi(() => api.call('messages.list', { limit: 50, ...filters }), [filterKey]);
   const stats = useApi(() => api.call('messages.stats', { days }), [days], { skip: !can('artifacts:read') });
 
-  const all = list.data?.messages ?? [];
-  const channels = Array.from(new Set(all.map((m) => m.channel))).sort();
-  const statuses = Array.from(new Set(all.map((m) => m.status))).sort();
-  const rows = all.filter(
-    (m) =>
-      (!person || (m.profileId ?? '').toLowerCase().includes(person.trim().toLowerCase())) &&
-      (!channel || m.channel === channel) &&
-      (!status || m.status === status),
-  );
+  // A filter change is a new list; pages loaded for the old one no longer belong to it.
+  useEffect(() => {
+    setMore({ rows: [], cursor: null, loaded: false });
+    setMoreError(null);
+  }, [filterKey]);
+
+  const all = [...(list.data?.messages ?? []), ...more.rows];
+  const cursor = more.loaded ? more.cursor : (list.data?.nextCursor ?? null);
+  const filtered = !!person.trim() || !!channel || !!status;
+
+  const loadMore = async () => {
+    if (!cursor || loadingMore) return;
+    setLoadingMore(true);
+    setMoreError(null);
+    try {
+      const r = await api.call('messages.list', { limit: 50, cursor, ...filters });
+      setMore((m) => ({ rows: [...m.rows, ...r.messages], cursor: r.nextCursor, loaded: true }));
+    } catch (e) {
+      setMoreError(errText(e));
+    } finally {
+      setLoadingMore(false);
+    }
+  };
 
   const count = (key: string) => stats.data?.counts[key] ?? 0;
   const hasOpens = stats.data?.counts.opened !== undefined;
@@ -67,7 +113,7 @@ export default function MessagesPage() {
     <div className={pageWidth('default')}>
       <PageHeader
         title="Messages"
-        description="Every e-mail and SMS the gateway handled, newest first, with attempts, when a retry is due and the reason when one was not sent. Filters narrow the latest 200 messages."
+        description="Every e-mail and SMS the gateway handled, newest first, with attempts, when a retry is due and the reason when one was not sent. Filters and paging run on the server."
         actions={
           can('artifacts:read') && (
             <Field label="Period" className="w-[150px]">
@@ -111,45 +157,49 @@ export default function MessagesPage() {
         error={list.error}
         onRetry={list.reload}
         columns={7}
-        isEmpty={rows.length === 0}
+        isEmpty={all.length === 0}
         toolbar={
-          all.length > 0 && (
-            <>
-              <div className="relative w-full max-w-[240px]">
-                <Search size={14} className="pointer-events-none absolute top-1/2 left-2.5 -translate-y-1/2 text-muted" aria-hidden />
-                <Input
-                  compact
-                  aria-label="Filter by profile id"
-                  placeholder="Profile id"
-                  value={person}
-                  onChange={(e) => setPerson(e.target.value)}
-                  className="pl-8"
-                />
-              </div>
-              <Select compact aria-label="Channel" value={channel} onChange={(e) => setChannel(e.target.value)} className="w-auto">
-                <option value="">All channels</option>
-                {channels.map((c) => (
-                  <option key={c} value={c}>
-                    {c}
-                  </option>
-                ))}
-              </Select>
-              <Select compact aria-label="Status" value={status} onChange={(e) => setStatus(e.target.value)} className="w-auto">
-                <option value="">All statuses</option>
-                {statuses.map((s) => (
-                  <option key={s} value={s}>
-                    {s}
-                  </option>
-                ))}
-              </Select>
-              <span className="ml-auto text-[12px] text-muted">
-                {rows.length === all.length ? `${all.length.toLocaleString()} messages` : `${rows.length.toLocaleString()} of ${all.length.toLocaleString()}`}
-              </span>
-            </>
-          )
+          <>
+            <div className="relative w-full max-w-[240px]">
+              <Search size={14} className="pointer-events-none absolute top-1/2 left-2.5 -translate-y-1/2 text-muted" aria-hidden />
+              <Input
+                compact
+                aria-label="Filter by profile id"
+                placeholder="Profile id (prf_…)"
+                value={person}
+                onChange={(e) => setPerson(e.target.value)}
+                className="pl-8"
+              />
+            </div>
+            <Select compact aria-label="Channel" value={channel} onChange={(e) => setChannel(e.target.value)} className="w-auto">
+              <option value="">All channels</option>
+              {CHANNELS.map((c) => (
+                <option key={c} value={c}>
+                  {c}
+                </option>
+              ))}
+            </Select>
+            <Select compact aria-label="Status" value={status} onChange={(e) => setStatus(e.target.value)} className="w-auto">
+              <option value="">All statuses</option>
+              {STATUSES.map((s) => (
+                <option key={s} value={s}>
+                  {s}
+                </option>
+              ))}
+            </Select>
+            {person.trim() && !profileId && <span className="text-[12px] text-warn">Enter the full profile id, prf_…</span>}
+            <span className="ml-auto text-[12px] text-muted">
+              {all.length.toLocaleString()} message{all.length === 1 ? '' : 's'}
+              {cursor ? ' · more available' : ''}
+            </span>
+          </>
         }
         empty={
-          all.length === 0 ? (
+          filtered ? (
+            <EmptyState compact title="Nothing matches">
+              Clear the person, channel or status filter.
+            </EmptyState>
+          ) : (
             <EmptyState
               title="No messages yet"
               action={
@@ -164,10 +214,6 @@ export default function MessagesPage() {
               }
             >
               Sends from broadcasts, journeys and the messages API appear here with their status and delivery events.
-            </EmptyState>
-          ) : (
-            <EmptyState compact title="Nothing matches">
-              Clear the person, channel or status filter.
             </EmptyState>
           )
         }
@@ -185,7 +231,7 @@ export default function MessagesPage() {
             </tr>
           </THead>
           <tbody>
-            {rows.map((m) => (
+            {all.map((m) => (
               <Tr key={m.id}>
                 <Td>
                   <StatusPill tone={tone[m.status] ?? 'neutral'}>{m.status}</StatusPill>
@@ -234,6 +280,18 @@ export default function MessagesPage() {
           </tbody>
         </Table>
       </TableFrame>
+      {moreError && (
+        <Alert tone="bad" className="mt-3">
+          {moreError}
+        </Alert>
+      )}
+      {cursor && (
+        <div className="mt-3 flex justify-center">
+          <Button onClick={() => void loadMore()} loading={loadingMore}>
+            Load more
+          </Button>
+        </div>
+      )}
     </div>
   );
 }

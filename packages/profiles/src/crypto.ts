@@ -1,7 +1,7 @@
 import { createHmac } from 'node:crypto';
 import { schema, type Tx } from '@agentic-marketing/db';
 import { activeDataKey, dataKeyById, type KeyProvider, newDataKey, open, seal } from '@agentic-marketing/secrets';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 
 // Per-person encryption (crypto-shredding) and identifier matching. Keys are memoised for one
 // transaction; nothing here is cached across requests.
@@ -65,6 +65,38 @@ export function personCrypto(tx: Tx, workspaceId: string, kp: KeyProvider) {
       if (!sealed) return undefined;
       const key = await c.profileKey(profileId);
       return key ? (JSON.parse(open(key, unpack(sealed)).toString('utf8')) as T) : undefined;
+    },
+
+    /**
+     * Opens a page of sealed values with two queries (the profile keys, then their data keys),
+     * not one run of open() per person. Used by profiles.list, which returns up to 200 rows.
+     */
+    async openMany<T>(items: { profileId: string; sealed: Buffer }[]): Promise<(T | undefined)[]> {
+      if (!items.length) return [];
+      const ids = [...new Set(items.map((i) => i.profileId))];
+      const keys = await tx
+        .select()
+        .from(schema.profileKeys)
+        .where(and(eq(schema.profileKeys.workspaceId, workspaceId), inArray(schema.profileKeys.profileId, ids)));
+      const dataKeyIds = [...new Set(keys.map((k) => k.dataKeyId))];
+      const wrapped = dataKeyIds.length
+        ? await tx
+            .select()
+            .from(schema.dataKeys)
+            .where(and(eq(schema.dataKeys.workspaceId, workspaceId), inArray(schema.dataKeys.id, dataKeyIds)))
+        : [];
+      const dataKeys = new Map(await Promise.all(wrapped.map(async (k) => [k.id, await kp.unwrap(k.wrappedKey, k.kekId)] as const)));
+      // Unwrap each person's key once, here, then use it for every value of theirs on the page.
+      const keyOf = new Map(
+        keys.flatMap((k) => {
+          const dataKey = dataKeys.get(k.dataKeyId);
+          return dataKey ? [[k.profileId, open(dataKey, unpack(k.wrappedKey))] as const] : [];
+        }),
+      );
+      return items.map(({ profileId, sealed }) => {
+        const key = keyOf.get(profileId);
+        return key ? (JSON.parse(open(key, unpack(sealed)).toString('utf8')) as T) : undefined;
+      });
     },
   };
   return c;
