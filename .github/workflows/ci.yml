@@ -125,6 +125,8 @@ jobs:
       - run: pnpm install --frozen-lockfile --filter "./packages/**" --filter "./apps/**" --filter "agentic-marketing"
       - run: npx playwright install --with-deps chromium
       - run: pnpm e2e
+      # #60: `pnpm e2e` built the live UI, so its manifest now exists for the bundle-size check.
+      - run: npx vitest run apps/web/test/bundle.test.ts
       - if: failure()
         uses: actions/upload-artifact@v4
         with:

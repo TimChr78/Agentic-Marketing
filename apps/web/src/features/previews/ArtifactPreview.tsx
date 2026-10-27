@@ -1,11 +1,14 @@
-import { JsonView } from '../../ui';
+import { lazy, Suspense } from 'react';
+import { JsonView, LoadingBlock } from '../../ui';
 import { referencedIds, useArtifactNames } from '../artifactCache';
-import { JourneyGraph } from '../journey/JourneyGraph';
 import type { JourneyContent } from '../journey/model';
 import { BroadcastPreview } from './BroadcastPreview';
 import { EmailPreview } from './EmailPreview';
 import { type FormContent, FormPreview } from './FormPreview';
 import { SegmentPreview } from './SegmentPreview';
+
+// React Flow is large and only needed when an approval actually previews a journey (#60).
+const JourneyGraph = lazy(() => import('../journey/JourneyGraph').then((m) => ({ default: m.JourneyGraph })));
 
 /** Types the approval drawer can show as the real thing rather than JSON. */
 export const PREVIEWABLE = new Set(['email_template', 'form', 'journey', 'segment', 'broadcast']);
@@ -60,7 +63,15 @@ function JourneyPreview({ content, height }: { content: JourneyContent; height: 
         Purpose <strong className="font-medium">{content.purpose}</strong>
         {content.goal ? <> · Goal: {content.goal}</> : null}
       </p>
-      <JourneyGraph nodes={content.nodes ?? []} names={names} height={height} />
+      <Suspense
+        fallback={
+          <div style={{ height }} className="overflow-hidden rounded-md border border-line bg-surface-2">
+            <LoadingBlock lines={6} label="Loading the journey graph" />
+          </div>
+        }
+      >
+        <JourneyGraph nodes={content.nodes ?? []} names={names} height={height} />
+      </Suspense>
     </div>
   );
 }
