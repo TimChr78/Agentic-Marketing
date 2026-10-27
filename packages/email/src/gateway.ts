@@ -331,12 +331,12 @@ async function deliverOne(
     const skipUtm = [deps.email.publicUrl];
     // Shared UTM campaign: the campaign supplies utm_campaign unless the template sets its own
     // (explicit beats inherited). The message carries the broadcast or journey id, which is the
-    // member the campaign lists. A template with no UTM settings is tagged with the defaults, so a
-    // campaign can turn attribution on for its members without editing every template.
+    // member the campaign lists. Only templates that tag links (their own utm settings: source,
+    // medium, domains) inherit it: a campaign never turns tagging on or guesses a source.
     let utm = tpl.utm;
-    if (!utm?.campaign && m.journeyId) {
+    if (utm && !utm.campaign && m.journeyId) {
       const inherited = await campaignUtmCampaign(tx, m.journeyId, utmCache);
-      if (inherited) utm = { source: 'newsletter', medium: 'email', ...utm, campaign: inherited };
+      if (inherited) utm = { ...utm, campaign: inherited };
     }
     const tagged = utm ? tagLinks(rendered.html, utm, skipUtm) : rendered.html;
     const text = utm ? tagTextLinks(rendered.text, utm, skipUtm) : rendered.text;
