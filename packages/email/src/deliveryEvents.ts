@@ -28,6 +28,7 @@ export function messageEvent(
     templateId: m.templateId ?? '',
     templateVersion: m.templateVersion ?? 0,
     journeyId: m.journeyId ?? '',
+    variant: m.variant ?? '',
     reason: '',
     url: '',
     ...e,

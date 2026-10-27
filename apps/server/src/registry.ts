@@ -1,5 +1,6 @@
 import { adAudienceCommands, adCommands, spendCommands } from '@agentic-marketing/ads';
 import { aiCommands } from '@agentic-marketing/ai';
+import { analyticsCommands } from '@agentic-marketing/analytics';
 import { artifactCommands, configCommands, workspaceCommands } from '@agentic-marketing/artifacts';
 import { assetCommands } from '@agentic-marketing/assets';
 import { audienceCommands } from '@agentic-marketing/audience';
@@ -53,6 +54,7 @@ export const commands = [
   ...experienceCommands,
   ...edgeCommands,
   ...aiCommands,
+  ...analyticsCommands,
   ...audienceCommands,
   ...campaignCommands,
   ...connectionCommands,
