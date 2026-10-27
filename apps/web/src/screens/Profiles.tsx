@@ -4,6 +4,7 @@ import { useStore } from '../mock/store';
 import { exec } from '../api/commands';
 import type { Profile } from '../api/types';
 import { Button, Card, PageHeader, Pill, cx, dkk, inputBase, timeAgo } from '../components/ui';
+import { pageWidth } from '../ui';
 
 export function Profiles() {
   const { profiles, openProfileId, navigate } = useStore();
@@ -13,7 +14,7 @@ export function Profiles() {
 
   const list = profiles.filter((p) => [p.name, p.email, p.city, ...p.segments].some((v) => v?.toLowerCase().includes(q.toLowerCase())));
   return (
-    <div className="mx-auto max-w-[1200px]">
+    <div className={pageWidth('default')}>
       <PageHeader eyebrow="Customer data" title="Profiles">
         <div className="relative">
           <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted" />
@@ -100,7 +101,7 @@ function ProfileDetail({ profile: p, onBack }: { profile: Profile; onBack: () =>
   }
 
   return (
-    <div className="mx-auto max-w-[1200px]">
+    <div className={pageWidth('default')}>
       <button className="mb-3 flex items-center gap-1 text-[13px] text-muted hover:text-fg" onClick={onBack}>
         <ArrowLeft size={14} /> Profiles
       </button>

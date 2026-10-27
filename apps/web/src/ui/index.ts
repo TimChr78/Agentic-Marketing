@@ -6,6 +6,7 @@ export * from './diff';
 export * from './display';
 export * from './focus';
 export * from './form';
+export * from './layout';
 export * from './menu';
 export * from './overlay';
 export * from './table';

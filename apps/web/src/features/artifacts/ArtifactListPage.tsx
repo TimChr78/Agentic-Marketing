@@ -7,6 +7,7 @@ import { Link, navigate } from '../../app/router';
 import { useSession } from '../../app/session';
 import { useApi } from '../../app/useApi';
 import { Alert, Button, EmptyState, Field, Input, Modal, PageHeader, Select, StatePill, StatusPill, Table, TableFrame, Td, Th, THead, timeAgo, Tr, useToast } from '../../ui';
+import { pageWidth } from '../../ui/layout';
 
 export type ArtifactRow = Out<'artifacts.list'>['artifacts'][number];
 
@@ -64,7 +65,7 @@ export function ArtifactListPage<S = Record<string, never>>({
   const canCreate = !!create && can('artifacts:write');
 
   return (
-    <div>
+    <div className={pageWidth('default')}>
       <PageHeader
         title={title}
         description={description}

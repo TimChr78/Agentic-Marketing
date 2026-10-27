@@ -25,6 +25,7 @@ import {
   formatDateTime,
   timeAgo,
 } from '../../ui';
+import { pageWidth } from '../../ui/layout';
 
 const tone = {
   queued: 'neutral',
@@ -63,7 +64,7 @@ export default function MessagesPage() {
   const hasOpens = stats.data?.counts.opened !== undefined;
 
   return (
-    <div>
+    <div className={pageWidth('default')}>
       <PageHeader
         title="Messages"
         description="Every e-mail and SMS the gateway handled, newest first, with attempts, when a retry is due and the reason when one was not sent. Filters narrow the latest 200 messages."

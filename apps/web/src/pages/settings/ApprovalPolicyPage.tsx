@@ -3,6 +3,7 @@ import { api, errText } from '../../app/api';
 import { useCrumbs } from '../../app/page';
 import { useWorkspace, type Workspace } from '../../app/session';
 import { Alert, Button, Card, Meta, PageHeader, RadioCards, StatusPill, useConfirm, useToast } from '../../ui';
+import { pageWidth } from '../../ui/layout';
 
 type Policy = Workspace['approvalPolicy'];
 
@@ -97,7 +98,7 @@ export default function ApprovalPolicyPage() {
   }));
 
   return (
-    <div>
+    <div className={pageWidth('reading')}>
       <PageHeader
         title="Approval policy"
         description="How much review a change needs before it goes live. Under every policy, agents can never approve a change."

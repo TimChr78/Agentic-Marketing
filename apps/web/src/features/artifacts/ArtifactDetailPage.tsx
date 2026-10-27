@@ -8,6 +8,7 @@ import { addNavigationGuard } from '../../app/router';
 import { useWorkspace } from '../../app/session';
 import { useApi } from '../../app/useApi';
 import { Alert, Button, Field, fieldErrors, Input, LoadingBlock, Menu, Modal, PageHeader, StatePill, StatusPill, Tabs, Textarea, timeAgo, useToast } from '../../ui';
+import { pageWidth } from '../../ui/layout';
 import { invalidateArtifact } from '../artifactCache';
 import { withLayout } from '../journey/layout';
 import type { JNode } from '../journey/model';
@@ -198,7 +199,7 @@ export function ArtifactDetailPage({
   };
 
   return (
-    <div>
+    <div className={pageWidth(wide ? 'full' : 'default')}>
       <PageHeader
         title={a.name}
         meta={

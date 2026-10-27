@@ -54,8 +54,11 @@ export const NodeView = memo(function NodeView({ data, selected }: NodeProps) {
               <AlertTriangle size={12} aria-hidden /> Incomplete
             </span>
           )}
-          {stats?.reached !== undefined && <span className="text-muted tabular-nums">{stats.reached.toLocaleString()} passed</span>}
-          {stats?.waiting ? <span className="text-muted tabular-nums">{stats.waiting.toLocaleString()} waiting</span> : null}
+          {stats && (
+            <span className="text-muted tabular-nums">
+              {(stats.reached ?? 0).toLocaleString()} passed · {(stats.waiting ?? 0).toLocaleString()} waiting
+            </span>
+          )}
         </div>
       )}
       {Array.from({ length: outs }, (_, i) => {

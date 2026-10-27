@@ -229,7 +229,7 @@ export function ApprovalDrawer({ id, queue, onClose, onDecided }: { id: string; 
             onChange={setTab}
             items={[
               { key: 'preview', label: 'Preview' },
-              { key: 'changes', label: a.publishedVersion ? 'Changes' : 'Content changes', count: a.diff.changes.length },
+              { key: 'changes', label: a.publishedVersion ? 'Changes' : 'Content changes', shortLabel: 'Changes', count: a.diff.changes.length },
               { key: 'content', label: 'Content' },
               { key: 'history', label: 'History' },
             ]}

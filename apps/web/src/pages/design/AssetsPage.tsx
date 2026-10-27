@@ -9,6 +9,7 @@ import { useApi } from '../../app/useApi';
 import { AssetGrid, AssetThumb } from '../../features/assets/AssetGrid';
 import { ACCEPT, type Asset, formatBytes, uploadFile } from '../../features/assets/upload';
 import { Alert, Button, CodeView, cx, Drawer, EmptyState, Field, formatDateTime, Input, LoadingBlock, Meta, PageHeader, Select, Skeleton, StatusPill, Textarea, useConfirm, useToast } from '../../ui';
+import { pageWidth } from '../../ui/layout';
 
 /** Asset library (#35): upload, search, alt text, where each asset is used, safe delete. */
 export default function AssetsPage() {
@@ -60,7 +61,7 @@ export default function AssetsPage() {
         setDragging(false);
         void upload([...e.dataTransfer.files]);
       }}
-      className={cx('min-h-[60vh] rounded-xl', dragging && 'outline-2 outline-offset-8 outline-accent outline-dashed')}
+      className={cx(pageWidth('default'), 'min-h-[60vh] rounded-xl', dragging && 'outline-2 outline-offset-8 outline-accent outline-dashed')}
     >
       <PageHeader
         title="Assets"

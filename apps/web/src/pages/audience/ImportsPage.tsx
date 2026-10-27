@@ -23,6 +23,7 @@ import {
   formatDateTime,
   useToast,
 } from '../../ui';
+import { pageWidth } from '../../ui/layout';
 
 type ConsentStatus = 'granted' | 'denied' | 'withdrawn' | 'objected';
 type Result = { accepted: number; rejected: { email: string; error: string }[] };
@@ -119,7 +120,7 @@ export default function ImportsPage() {
   };
 
   return (
-    <div>
+    <div className={pageWidth('reading')}>
       <PageHeader
         title="Imports"
         description="Bring in subscribers from another tool with the consent they gave there. Only people can import consent, and every row keeps its evidence."

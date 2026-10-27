@@ -26,6 +26,7 @@ import {
   formatDateTime,
   timeAgo,
 } from '../../ui';
+import { pageWidth } from '../../ui/layout';
 
 type Call = Out<'ai.calls'>['calls'][number];
 type Kind = Call['kind'];
@@ -85,7 +86,7 @@ export default function AiUsagePage() {
   const quality = reviews.data?.quality ?? [];
 
   return (
-    <div>
+    <div className={pageWidth('default')}>
       <PageHeader
         title="AI usage"
         description="Tokens spent, fallbacks taken and every decision the AI runtime made. Prompts and provider settings live elsewhere."

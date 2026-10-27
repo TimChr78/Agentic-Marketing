@@ -28,6 +28,7 @@ import {
   timeAgo,
   useToast,
 } from '../../ui';
+import { pageWidth } from '../../ui/layout';
 
 type Detail = Out<'profiles.get'>;
 
@@ -100,7 +101,7 @@ export default function PeoplePage() {
   };
 
   return (
-    <div>
+    <div className={pageWidth('default')}>
       <PageHeader
         title="People"
         description="Everyone this workspace has seen, most recent activity first. Search by e-mail without revealing personal data, open a person for their consent and events."

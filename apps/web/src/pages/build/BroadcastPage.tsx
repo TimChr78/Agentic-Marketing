@@ -7,6 +7,7 @@ export default function BroadcastPage({ params }: { params: Record<string, strin
     <ArtifactDetailPage
       id={params.id}
       crumbs={[{ label: 'Broadcasts', to: '/build/broadcasts' }]}
+      wide
       editor={(p) => <BroadcastEditor {...p} />}
       extraTabs={[{ key: 'sending', label: 'Sending', render: (a) => <BroadcastStatus artifact={a} /> }]}
     />

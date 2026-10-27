@@ -3,6 +3,7 @@ import { api, errText } from '../../app/api';
 import { useCrumbs } from '../../app/page';
 import { useWorkspace } from '../../app/session';
 import { Alert, Button, Card, Field, Input, PageHeader, Select, Textarea, useToast } from '../../ui';
+import { pageWidth } from '../../ui/layout';
 
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -106,7 +107,7 @@ export default function WorkspacePage() {
   };
 
   return (
-    <div>
+    <div className={pageWidth('reading')}>
       <PageHeader
         title="Workspace"
         description="The name and time zone everyone sees, and the addresses that may receive test sends."
