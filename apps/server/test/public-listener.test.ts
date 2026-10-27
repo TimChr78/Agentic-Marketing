@@ -2,7 +2,7 @@ import http from 'node:http';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { startTestServer } from './harness';
 
-// The optional public listener has no path rule: only /f, /u, /c, /hooks and the probes exist.
+// The optional public listener has no path rule: only /f, /u, /c, /n, /hooks and the probes exist.
 // Requests are sent with node:http because fetch and most clients normalise `..` before sending.
 
 const MAIN_PORT = 3299;

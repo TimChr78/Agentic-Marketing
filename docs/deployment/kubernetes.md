@@ -11,7 +11,7 @@ The Helm chart in [`deploy/helm/agentic-marketing`](../../deploy/helm/agentic-ma
 
 The Ingress sends the public collection paths to `ingest` and everything else to `api`. The Job runs `cli migrate` (Postgres, auth tables, ClickHouse and its row policies) after the first install and before each upgrade; the roles start with `SKIP_MIGRATIONS=true`.
 
-If the platform is reached through a tunnel or proxy that should see only the public paths, set `PUBLIC_PORT` (e.g. `3001`) on the `api` and `ingest` roles: the server adds a listener that serves only `/f`, `/u`, `/c`, `/a`, `/hooks`, `/healthz` and `/readyz`. The chart does not publish a second Service port, so expose it through your own Service/Ingress or keep the path split above. Both listeners reject raw dot-segment and encoded-separator paths with 400, so a loose proxy rule cannot reach the admin API.
+If the platform is reached through a tunnel or proxy that should see only the public paths, set `PUBLIC_PORT` (e.g. `3001`) on the `api` and `ingest` roles: the server adds a listener that serves only `/f`, `/u`, `/c`, `/a`, `/n`, `/hooks`, `/healthz` and `/readyz`. The chart does not publish a second Service port, so expose it through your own Service/Ingress or keep the path split above. Both listeners reject raw dot-segment and encoded-separator paths with 400, so a loose proxy rule cannot reach the admin API.
 
 Postgres, ClickHouse, NATS JetStream and Valkey are not in the chart. Use managed services or the operators you already run (CloudNativePG, the Altinity ClickHouse operator, the NATS Helm chart with JetStream, Valkey or Redis).
 

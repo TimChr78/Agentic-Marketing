@@ -43,6 +43,13 @@ export interface ClickLink {
   url: string;
 }
 
+/** The signed "view this e-mail in the browser" link (#100). `x` is an optional expiry, in ms. */
+export interface WebLink {
+  w: string;
+  m: string;
+  x?: number;
+}
+
 /** Rewrites http(s) links for click tracking, except the unsubscribe and preference links. */
 export function trackLinks(html: string, wrap: (url: string) => string, skip: string[]): string {
   return html.replace(/(<a\b[^>]*?\bhref=")(https?:\/\/[^"]+)(")/gi, (all, pre: string, url: string, post: string) => {

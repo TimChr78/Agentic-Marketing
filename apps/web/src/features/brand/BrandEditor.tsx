@@ -1,6 +1,6 @@
 import { ImageIcon, X } from 'lucide-react';
 import { useState } from 'react';
-import { Alert, Button, Field, FieldGroup, Input, Select, Textarea } from '../../ui';
+import { Alert, Button, Checkbox, Field, FieldGroup, Input, Select, Textarea } from '../../ui';
 import type { EditorProps } from '../artifacts/ArtifactDetailPage';
 import { AssetPicker } from '../assets/AssetPicker';
 import { COLOR_LABEL, COPY_GROUPS, type ColorKey, contrast, DEFAULT_COLORS, DEFAULT_COPY, DEFAULT_FONT, FONT_PRESETS } from './defaults';
@@ -17,6 +17,13 @@ export interface BrandContent {
   radius?: number;
   language?: string;
   copy?: Partial<Record<keyof typeof DEFAULT_COPY, string>>;
+  archive?: {
+    enabled?: boolean;
+    title?: string;
+    description?: string;
+    slug?: string;
+    subscribeUrl?: string;
+  };
 }
 
 const prune = <T extends Record<string, unknown>>(o: T): T => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined && v !== '')) as T;
@@ -54,6 +61,63 @@ export function BrandFields({ value, onChange, readOnly, errors, prefix = '', ov
           <Input value={value.language ?? ''} readOnly={readOnly} placeholder={override ? 'Workspace brand' : 'en'} maxLength={35} onChange={(e) => set({ language: e.target.value })} />
         </Field>
       </FieldGroup>
+
+      {!override && (
+      <FieldGroup
+        legend="Newsletter archive"
+        hint="A public archive of sent issues on your links address (/n/<slug>/), with RSS and a sitemap. Published issues use the template version that was sent, without any reader's personal data."
+      >
+        <Checkbox
+          label="Publish a newsletter archive"
+          hint="Only sent broadcasts that are also marked “Publish to the archive” appear."
+          checked={value.archive?.enabled ?? false}
+          disabled={readOnly}
+          onChange={(e) => set({ archive: { ...(value.archive ?? {}), enabled: e.target.checked } })}
+        />
+        {value.archive?.enabled && (
+          <>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Field label="Archive title" hint="Shown on the index and in the feed." error={err('archive.title')}>
+                <Input
+                  value={value.archive?.title ?? ''}
+                  readOnly={readOnly}
+                  maxLength={120}
+                  placeholder={value.siteName || 'Newsletter archive'}
+                  onChange={(e) => set({ archive: { ...(value.archive ?? {}), title: e.target.value } })}
+                />
+              </Field>
+              <Field label="Archive address" hint="Lowercase letters, digits and hyphens; unique on this install." error={err('archive.slug')} required>
+                <Input
+                  value={value.archive?.slug ?? ''}
+                  readOnly={readOnly}
+                  maxLength={41}
+                  placeholder="newsletter"
+                  onChange={(e) => set({ archive: { ...(value.archive ?? {}), slug: e.target.value.toLowerCase() } })}
+                />
+              </Field>
+            </div>
+            <Field label="Description" hint="A sentence for the index and the feed." error={err('archive.description')}>
+              <Textarea
+                rows={2}
+                value={value.archive?.description ?? ''}
+                readOnly={readOnly}
+                maxLength={500}
+                onChange={(e) => set({ archive: { ...(value.archive ?? {}), description: e.target.value } })}
+              />
+            </Field>
+            <Field label="Subscribe link" hint="Optional. Shown as the archive's subscribe button, e.g. your signup form." error={err('archive.subscribeUrl')}>
+              <Input
+                type="url"
+                value={value.archive?.subscribeUrl ?? ''}
+                readOnly={readOnly}
+                placeholder="https://example.com/#signup"
+                onChange={(e) => set({ archive: { ...(value.archive ?? {}), subscribeUrl: e.target.value } })}
+              />
+            </Field>
+          </>
+        )}
+      </FieldGroup>
+      )}
 
       <FieldGroup legend="Logo">
         <div className="flex flex-wrap items-center gap-3">

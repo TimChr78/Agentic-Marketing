@@ -138,6 +138,8 @@ export interface RenderVars {
   event?: Record<string, unknown>;
   unsubscribe_url?: string;
   preferences_url?: string;
+  /** Signed "view in browser" link; a harmless placeholder in previews. */
+  web_url?: string;
   [k: string]: unknown;
 }
 
@@ -150,6 +152,7 @@ export interface Rendered {
 }
 
 const PLACEHOLDER_UNSUBSCRIBE = 'https://example.invalid/unsubscribe';
+const PLACEHOLDER_WEB = 'https://example.invalid/web';
 
 /**
  * E-mail clients rarely render SVG. Our assets answer `/a/<id>/<file>.png` with the PNG rendition,
@@ -193,6 +196,7 @@ export async function renderTemplate(t: EmailTemplate, vars: RenderVars, options
   const scope = {
     unsubscribe_url: PLACEHOLDER_UNSUBSCRIBE,
     preferences_url: PLACEHOLDER_UNSUBSCRIBE,
+    web_url: PLACEHOLDER_WEB,
     ...vars,
     ...(options.blocks ? { [BLOCK_RESOLVER]: options.blocks } : {}),
   };

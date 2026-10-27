@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Ban, Clock, RefreshCw } from 'lucide-react';
+import { Ban, Clock, ExternalLink, RefreshCw } from 'lucide-react';
 import { api, errText } from '../../app/api';
 import { useWorkspace } from '../../app/session';
 import { useApi } from '../../app/useApi';
@@ -26,7 +26,9 @@ export function BroadcastStatus({ artifact }: { artifact: Artifact }) {
   const [cancelError, setCancelError] = useState<string | null>(null);
   const published = artifact.publishedVersion !== null;
   const status = useApi(() => api.call('broadcasts.status', { artifactId: artifact.id }), [artifact.id], { skip: !published });
+  const archive = useApi(() => api.call('archive.issues', {}), [artifact.id], { skip: !published });
   const run = status.data?.run;
+  const archived = archive.data?.issues.find((i) => i.artifactId === artifact.id);
   const cancellable = run?.status === 'scheduled' || run?.status === 'running';
   const sending = run?.status === 'running';
 
@@ -83,6 +85,11 @@ export function BroadcastStatus({ artifact }: { artifact: Artifact }) {
         <Button size="sm" variant="ghost" icon={<RefreshCw size={14} />} onClick={status.reload}>
           Refresh
         </Button>
+        {archived && (
+          <a href={archived.url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-[12px] font-medium text-accent hover:underline">
+            View in the archive <ExternalLink size={12} />
+          </a>
+        )}
         {cancellable && can('messages:send') && (
           <Button size="sm" variant="danger" icon={<Ban size={14} />} className="ml-auto" onClick={() => void cancel()}>
             Cancel sending
