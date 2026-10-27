@@ -3,7 +3,7 @@ import { defineCommand } from '@agentic-marketing/commands';
 import { AppError, newId } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
 import { generateText, Output } from 'ai';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, desc, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import type { PersonContext } from './context';
 import { AiUnavailable, modelFor, type ReadyModel } from './providers';
@@ -163,6 +163,64 @@ const TestResult = z.object({
   problems: z.array(z.string()),
 });
 
+const TestCaseStatus = z.enum(['pending', 'running', 'done', 'failed']);
+
+const TestCaseRun = z.object({
+  index: z.number().int(),
+  name: z.string(),
+  status: TestCaseStatus,
+  passed: z.boolean(),
+  answer: z.unknown().describe('Empty until the case has an answer.'),
+  problems: z.array(z.string()),
+  latencyMs: z.number().nullable(),
+  inputTokens: z.number().int(),
+  outputTokens: z.number().int(),
+});
+
+type CallRow = typeof schema.aiCalls.$inferSelect;
+
+const caseStatus = (status: CallRow['status']): z.infer<typeof TestCaseStatus> =>
+  status === 'done' ? 'done' : status === 'running' ? 'running' : status === 'pending' ? 'pending' : 'failed';
+
+/** One run's rows as the list of cases the UI shows, plus the totals of what it cost. */
+function runSummary(rows: CallRow[]) {
+  const cases = rows
+    .map((r) => {
+      const status = caseStatus(r.status);
+      return {
+        index: Number((r.input as { index?: number }).index ?? 0),
+        name: String((r.input as { test?: string }).test ?? ''),
+        status,
+        passed: status === 'done',
+        answer: status === 'done' || status === 'failed' ? (r.output ?? null) : null,
+        problems: status === 'failed' && r.error ? r.error.split('; ') : [],
+        latencyMs: r.latencyMs ?? null,
+        inputTokens: r.inputTokens,
+        outputTokens: r.outputTokens,
+      };
+    })
+    .sort((a, b) => a.index - b.index);
+  const finished = cases.filter((c) => c.status === 'done' || c.status === 'failed');
+  return {
+    cases,
+    status: finished.length === cases.length ? ('done' as const) : ('running' as const),
+    total: cases.length,
+    finished: finished.length,
+    pending: cases.length - finished.length,
+    passed: finished.filter((c) => c.passed).length,
+    failed: finished.filter((c) => !c.passed).length,
+    inputTokens: cases.reduce((n, c) => n + c.inputTokens, 0),
+    outputTokens: cases.reduce((n, c) => n + c.outputTokens, 0),
+    latencyMs: cases.reduce((n, c) => n + (c.latencyMs ?? 0), 0),
+    finishedAt: rows.every((r) => r.finishedAt)
+      ? (rows
+          .map((r) => r.finishedAt as Date)
+          .sort((a, b) => b.getTime() - a.getTime())[0]
+          ?.toISOString() ?? null)
+      : null,
+  };
+}
+
 type TestCase = PromptDefinition['tests'][number];
 
 /** Runs one test case and checks its expectations. */
@@ -246,13 +304,23 @@ export const testPrompt = defineCommand({
 export const testRunResults = defineCommand({
   name: 'prompts.testRun',
   title: 'Results of a prompt test run',
-  description: 'The results of prompts.test: "running" until every case has an answer, then which passed and why the others failed.',
+  description:
+    'The results of prompts.test: every case with its status, answer, latency and tokens, and the totals. "running" until every case has an answer.',
   input: z.object({ runId: z.string().regex(/^run_[0-9a-f]{32}$/) }),
   output: z.object({
     status: z.enum(['running', 'done']),
     version: z.number().nullable(),
+    total: z.number().int(),
+    finished: z.number().int(),
+    pending: z.number().int(),
     passed: z.number(),
     failed: z.number(),
+    inputTokens: z.number().int(),
+    outputTokens: z.number().int(),
+    latencyMs: z.number().int(),
+    finishedAt: z.string().nullable(),
+    cases: z.array(TestCaseRun),
+    /** The cases that have an answer, for clients that only show results. */
     results: z.array(TestResult),
   }),
   permission: 'artifacts:read',
@@ -263,23 +331,104 @@ export const testRunResults = defineCommand({
       .from(schema.aiCalls)
       .where(and(eq(schema.aiCalls.kind, 'test'), sql`${schema.aiCalls.input} ->> 'runId' = ${input.runId}`));
     if (!rows.length) throw new AppError('not_found', `No test run ${input.runId}.`);
-    rows.sort((x, y) => Number((x.input as { index?: number }).index) - Number((y.input as { index?: number }).index));
-    const running = rows.some((r) => r.status === 'pending' || r.status === 'running');
-    const results = rows
-      .filter((r) => r.status === 'done' || r.status === 'failed')
-      .map((r) => ({
-        name: String((r.input as { test?: string }).test ?? ''),
-        passed: r.status === 'done',
-        answer: r.output ?? null,
-        problems: r.error ? r.error.split('; ') : [],
-      }));
-    const passed = results.filter((r) => r.passed).length;
+    const summary = runSummary(rows);
     return {
-      status: running ? ('running' as const) : ('done' as const),
+      status: summary.status,
       version: rows[0].promptVersion,
-      passed,
-      failed: results.length - passed,
-      results,
+      total: summary.total,
+      finished: summary.finished,
+      pending: summary.pending,
+      passed: summary.passed,
+      failed: summary.failed,
+      inputTokens: summary.inputTokens,
+      outputTokens: summary.outputTokens,
+      latencyMs: summary.latencyMs,
+      finishedAt: summary.finishedAt,
+      cases: summary.cases,
+      results: summary.cases
+        .filter((c) => c.status === 'done' || c.status === 'failed')
+        .map(({ name, passed, answer, problems }) => ({ name, passed, answer, problems })),
     };
+  },
+});
+
+// The latest run of a prompt (and version) is what the Tests tab resumes: polling survives
+// leaving the tab, because a run keeps going on the worker.
+export const listTestRuns = defineCommand({
+  name: 'prompts.testRuns',
+  title: 'List a prompt’s test runs',
+  description: 'Test runs of a prompt (optionally one version), newest first, with status and totals. Use one to resume polling its runId.',
+  input: z.object({
+    artifactId: z.string().regex(/^prm_[0-9a-f]{32}$/),
+    version: z.number().int().min(1).optional().describe('Only runs of this version; default: every version'),
+    limit: z.number().int().min(1).max(50).default(20),
+  }),
+  output: z.object({
+    runs: z.array(
+      z.object({
+        runId: z.string(),
+        version: z.number().nullable(),
+        status: z.enum(['running', 'done']),
+        total: z.number().int(),
+        finished: z.number().int(),
+        pending: z.number().int(),
+        passed: z.number(),
+        failed: z.number(),
+        inputTokens: z.number().int(),
+        outputTokens: z.number().int(),
+        latencyMs: z.number().int(),
+        startedAt: z.string(),
+        finishedAt: z.string().nullable(),
+      }),
+    ),
+  }),
+  permission: 'artifacts:read',
+  effect: 'read',
+  target: (i) => i.artifactId,
+  handler: async (input, ctx) => {
+    const rows = await ctx.tx
+      .select()
+      .from(schema.aiCalls)
+      .where(
+        and(
+          eq(schema.aiCalls.kind, 'test'),
+          eq(schema.aiCalls.promptId, input.artifactId),
+          input.version ? eq(schema.aiCalls.promptVersion, input.version) : undefined,
+        ),
+      )
+      .orderBy(desc(schema.aiCalls.createdAt));
+    const byRun = new Map<string, CallRow[]>();
+    for (const row of rows) {
+      const runId = String((row.input as { runId?: string }).runId ?? '');
+      if (!runId) continue;
+      const run = byRun.get(runId);
+      if (run) run.push(row);
+      else byRun.set(runId, [row]);
+    }
+    const runs = [...byRun.entries()]
+      .map(([runId, runRows]) => {
+        const summary = runSummary(runRows);
+        return {
+          runId,
+          version: runRows[0].promptVersion,
+          status: summary.status,
+          total: summary.total,
+          finished: summary.finished,
+          pending: summary.pending,
+          passed: summary.passed,
+          failed: summary.failed,
+          inputTokens: summary.inputTokens,
+          outputTokens: summary.outputTokens,
+          latencyMs: summary.latencyMs,
+          startedAt: runRows
+            .map((r) => r.createdAt)
+            .sort((a, b) => a.getTime() - b.getTime())[0]
+            .toISOString(),
+          finishedAt: summary.finishedAt,
+        };
+      })
+      .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
+      .slice(0, input.limit);
+    return { runs };
   },
 });

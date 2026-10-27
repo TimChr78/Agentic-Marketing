@@ -14,7 +14,9 @@ import { withLayout } from '../journey/layout';
 import type { JNode } from '../journey/model';
 import { ArtifactPreview } from '../previews/ArtifactPreview';
 import { ActivityPanel } from './ActivityPanel';
+import { ExperienceEditor } from './ExperienceEditor';
 import { JsonEditor } from './JsonEditor';
+import { PurposesEditor } from './PurposesEditor';
 import { VersionsPanel } from './VersionsPanel';
 
 export type Artifact = Out<'artifacts.get'>;
@@ -30,6 +32,12 @@ export interface EditorProps<C = any> {
   /** Settings to fill in before publishing (draft warnings). */
   warnings: DraftWarning[];
 }
+
+/** Types with a structured editor of their own; the rest use the JSON editor. */
+const DEFAULT_EDITORS: Partial<Record<string, (p: EditorProps) => ReactNode>> = {
+  experience: (p) => <ExperienceEditor {...p} />,
+  purposes: (p) => <PurposesEditor {...p} />,
+};
 
 type Tab = string;
 
@@ -175,6 +183,7 @@ export function ArtifactDetailPage({
     );
 
   const latest = a.version;
+  const pageEditor = editor ?? DEFAULT_EDITORS[a.type];
   const pending = pendingReq.data?.approvals[0];
   const directPublish = workspace.approvalPolicy === 'none' || (workspace.approvalPolicy === 'agent_changes' && latest.author.type === 'user');
   const canPublish = can('artifacts:publish') && latest.state === 'draft' && !dirty;
@@ -302,19 +311,31 @@ export function ArtifactDetailPage({
           { key: 'content', label: dirty ? 'Content •' : 'Content' },
           ...(preview ? [{ key: 'preview', label: 'Preview' }] : []),
           ...extraTabs.map((t) => ({ key: t.key, label: t.label })),
+          ...(!editor && pageEditor ? [{ key: 'json', label: 'JSON' }] : []),
           { key: 'versions', label: 'Versions', count: a.latestVersion },
           { key: 'activity', label: 'Activity' },
         ]}
       >
         {tab === 'content' &&
           draft !== undefined &&
-          (editor ? (
-            editor({ artifact: a, content: draft, onChange: setDraft, readOnly, errors, warnings })
+          (pageEditor ? (
+            pageEditor({ artifact: a, content: draft, onChange: setDraft, readOnly, errors, warnings })
           ) : (
             <div className={wide ? '' : 'max-w-[900px]'}>
               <JsonEditor value={draft} onChange={setDraft} readOnly={readOnly} />
             </div>
           ))}
+        {tab === 'json' && draft !== undefined && (
+          <div className="max-w-[900px]">
+            <JsonEditor
+              value={draft}
+              onChange={setDraft}
+              readOnly={readOnly}
+              label="Content (JSON)"
+              hint="The same content the editor changes, and what agents read and write. Call artifacts.types for the schema."
+            />
+          </div>
+        )}
         {tab === 'preview' && (
           <div className="max-w-[1100px] space-y-3">
             {dirty && <Alert tone="info">The preview shows the saved version {latest.number}. Save to preview your changes.</Alert>}
