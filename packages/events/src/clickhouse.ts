@@ -51,6 +51,18 @@ export interface EventStore {
   ): Promise<Record<string, number>>;
   /** Per node and event type counts for a journey (analytics, canvas overlays). */
   journeyCounts(workspaceId: string, journeyId: string): Promise<{ node: string; type: string; count: number }[]>;
+  /** Profiles that reached the journey's goal or unsubscribed from its e-mail, in a time window. */
+  journeyHoldoutOutcomes(
+    workspaceId: string,
+    q: { journeyId: string; from?: Date; to?: Date },
+  ): Promise<{ converted: string[]; unsubscribed: string[] }>;
+  /** Goal events by name in a time window, with the identifiers that tie them to a profile. */
+  conversionEvents(
+    workspaceId: string,
+    q: { names: string[]; from: Date; to: Date; limit?: number },
+  ): Promise<{ anonymousId: string; userId: string; name: string; timestamp: number; properties: Record<string, unknown> }[]>;
+  /** People who unsubscribed from any message sent by these journeys or broadcasts, in a time window. */
+  unsubscribedProfiles(workspaceId: string, q: { journeyIds: string[]; from?: Date; to?: Date }): Promise<string[]>;
   messageEventsOf(workspaceId: string, filter: { messageIds?: string[]; profileId?: string }, limit?: number): Promise<MessageEvent[]>;
   ping(): Promise<boolean>;
   close(): Promise<void>;
@@ -129,6 +141,8 @@ export interface MessageEvent {
   templateId: string;
   templateVersion: number;
   journeyId: string;
+  /** Subject-test variant on the message (A, B, …); empty outside a test. */
+  variant?: string;
   reason: string;
   url: string;
 }
@@ -140,7 +154,7 @@ export interface JourneyEvent {
   participantId: number;
   profileId: string;
   node: string;
-  type: 'entered' | 'step' | 'waiting' | 'resumed' | 'converted' | 'completed' | 'exited' | 'failed';
+  type: 'entered' | 'step' | 'waiting' | 'resumed' | 'converted' | 'completed' | 'exited' | 'failed' | 'holdout_assigned';
   seq: number;
   at: string;
   detail: string;
@@ -168,6 +182,7 @@ const toRow = (e: BusEvent) => ({
   name: e.name,
   anonymous_id: e.anonymousId,
   user_id: e.userId,
+  profile_id: e.profileId ?? '',
   properties: e.properties,
   traits: e.traits,
   context: e.context,
@@ -383,6 +398,7 @@ export function clickHouseStore(opts: { url: string; database: string }): EventS
           template_id: e.templateId,
           template_version: e.templateVersion,
           journey_id: e.journeyId,
+          variant: e.variant ?? '',
           reason: e.reason,
           url: e.url,
         })),
@@ -433,6 +449,69 @@ export function clickHouseStore(opts: { url: string; database: string }): EventS
         format: 'JSONEachRow',
       });
       return (await rs.json<{ node: string; type: string; c: number }>()).map((r) => ({ node: r.node, type: r.type, count: Number(r.c) }));
+    },
+    async journeyHoldoutOutcomes(workspaceId, q) {
+      const from = q.from?.toISOString().replace('Z', '');
+      const to = q.to?.toISOString().replace('Z', '');
+      const converted = await query(workspaceId, {
+        query: `SELECT DISTINCT profile_id FROM journey_events FINAL
+                WHERE workspace_id = {ws:UUID} AND journey_id = {j:String} AND type = 'converted'
+                ${from ? "AND at >= {from:DateTime64(3, 'UTC')}" : ''}
+                ${to ? "AND at <= {to:DateTime64(3, 'UTC')}" : ''}`,
+        query_params: { ws: workspaceId, j: q.journeyId, ...(from ? { from } : {}), ...(to ? { to } : {}) },
+        format: 'JSONEachRow',
+      });
+      const unsubscribed = await query(workspaceId, {
+        query: `SELECT DISTINCT profile_id FROM message_events FINAL
+                WHERE workspace_id = {ws:UUID} AND journey_id = {j:String} AND type = 'unsubscribed' AND channel = 'email'
+                ${from ? "AND at >= {from:DateTime64(3, 'UTC')}" : ''}
+                ${to ? "AND at <= {to:DateTime64(3, 'UTC')}" : ''}`,
+        query_params: { ws: workspaceId, j: q.journeyId, ...(from ? { from } : {}), ...(to ? { to } : {}) },
+        format: 'JSONEachRow',
+      });
+      return {
+        converted: (await converted.json<{ profile_id: string }>()).map((r) => r.profile_id),
+        unsubscribed: (await unsubscribed.json<{ profile_id: string }>()).map((r) => r.profile_id),
+      };
+    },
+    async conversionEvents(workspaceId, q) {
+      if (!q.names.length) return [];
+      const rs = await query(workspaceId, {
+        query: `SELECT anonymous_id, user_id, name, timestamp, properties FROM events FINAL
+                WHERE workspace_id = {ws:UUID} AND name IN {names:Array(String)}
+                  AND timestamp >= {from:DateTime64(3, 'UTC')} AND timestamp <= {to:DateTime64(3, 'UTC')}
+                ORDER BY timestamp LIMIT {limit:UInt32}`,
+        query_params: {
+          ws: workspaceId,
+          names: q.names,
+          from: q.from.toISOString().replace('Z', ''),
+          to: q.to.toISOString().replace('Z', ''),
+          limit: q.limit ?? 100_000,
+        },
+        format: 'JSONEachRow',
+      });
+      return (await rs.json<Record<string, never>>()).map((r) => ({
+        anonymousId: r.anonymous_id,
+        userId: r.user_id,
+        name: r.name,
+        timestamp: Date.parse(`${String(r.timestamp).replace(' ', 'T')}Z`),
+        properties: typeof r.properties === 'string' ? JSON.parse(r.properties) : (r.properties as Record<string, unknown>),
+      }));
+    },
+    async unsubscribedProfiles(workspaceId, q) {
+      if (!q.journeyIds.length) return [];
+      const from = q.from?.toISOString().replace('Z', '');
+      const to = q.to?.toISOString().replace('Z', '');
+      const rs = await query(workspaceId, {
+        query: `SELECT DISTINCT profile_id FROM message_events FINAL
+                WHERE workspace_id = {ws:UUID} AND journey_id IN {ids:Array(String)}
+                  AND type = 'unsubscribed' AND channel = 'email'
+                ${from ? "AND at >= {from:DateTime64(3, 'UTC')}" : ''}
+                ${to ? "AND at <= {to:DateTime64(3, 'UTC')}" : ''}`,
+        query_params: { ws: workspaceId, ids: q.journeyIds, ...(from ? { from } : {}), ...(to ? { to } : {}) },
+        format: 'JSONEachRow',
+      });
+      return (await rs.json<{ profile_id: string }>()).map((r) => r.profile_id);
     },
     async messageEventsOf(workspaceId, filter, limit = 200) {
       const rs = await query(workspaceId, {

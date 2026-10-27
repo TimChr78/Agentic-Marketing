@@ -134,6 +134,8 @@ Goal: answer "what worked" from the platform, for people and for agents. Today t
 
 Done when one `analytics.query` call answers how the last four issues and the welcome journey did, and a journey reports uplift against its holdout.
 
+**Status (2026-10-27): built.** Every item above is implemented for 0.2.9, and both conditions are covered by tests: one `analytics.query` call returns the last four issues, and `journeys.holdoutResult` reports lift with an interval against a journey's control group. Done for the pilot when the welcome journey has run with a control group long enough for a verdict.
+
 ## Phase 17: agents with bounded autonomy
 
 Goal: move from "agents draft, people approve every change" to "agents act within limits people set", which is what the product is for. This needs the metric layer (an agent must see results to act on them) and the approval bundles from Phase 13.

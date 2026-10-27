@@ -13,13 +13,13 @@ import {
   useReactFlow,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { Copy, BarChart3, Map as MapIcon, Maximize, Maximize2, Minimize2, PanelLeft, PanelRight, Plus, Redo2, Settings2, Trash2, Undo2 } from 'lucide-react';
+import { Copy, BarChart3, Map as MapIcon, Maximize, Maximize2, Minimize2, PanelLeft, PanelRight, Plus, Redo2, Settings2, ShieldCheck, Trash2, Undo2 } from 'lucide-react';
 import { type KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../../app/api';
 import { useSession } from '../../app/session';
 import { useResolvedTheme } from '../../app/theme';
 import { useApi } from '../../app/useApi';
-import { Button, ContextMenu, cx, EmptyState, Field, IconButton, Input, Kbd, Menu, type MenuItem, Select, Tabs, useToast } from '../../ui';
+import { Button, Checkbox, ContextMenu, cx, EmptyState, Field, IconButton, Input, Kbd, Menu, type MenuItem, Select, Tag, Tabs, useToast } from '../../ui';
 import type { EditorProps } from '../artifacts/ArtifactDetailPage';
 import { referencedIds, useArtifactNames } from '../artifactCache';
 import { localWarnings, mergeWarnings } from './checks';
@@ -376,6 +376,11 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
               {showStats ? 'Hide stats' : 'Show stats'}
             </Button>
           )}
+          {content.controlGroup && (
+            <Tag icon={<ShieldCheck size={12} aria-hidden />} className="hidden sm:inline-flex">
+              Control {content.controlGroup.percent}%
+            </Tag>
+          )}
           <IconButton
             className="ml-auto"
             label={inspectorOpen ? 'Hide inspector' : 'Show inspector'}
@@ -502,7 +507,7 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
                   onDuplicate={() => commit(duplicateNode(nodes, selectedNode.id))}
                 />
               ) : (
-                <JourneySettings content={content} onChange={onChange} readOnly={readOnly} />
+                <JourneySettings content={content} onChange={onChange} readOnly={readOnly} artifactId={artifact.id} published={published} />
               ))}
             {panel === 'check' && <CheckList nodes={nodes} warnings={warnings} onSelect={(id) => (setSel({ kind: 'node', id }), setPanel('inspect'), rf.fitView({ nodes: [{ id }], duration: 250, maxZoom: 1.2 }))} />}
             {panel === 'simulate' && (
@@ -544,13 +549,44 @@ function CheckList({ nodes, warnings, onSelect }: { nodes: JNode[]; warnings: Re
   );
 }
 
-function JourneySettings({ content, onChange, readOnly }: { content: JourneyContent; onChange: (c: JourneyContent) => void; readOnly: boolean }) {
-  return <JourneyMeta content={content} onChange={onChange} readOnly={readOnly} />;
+function JourneySettings({
+  content,
+  onChange,
+  readOnly,
+  artifactId,
+  published,
+}: {
+  content: JourneyContent;
+  onChange: (c: JourneyContent) => void;
+  readOnly: boolean;
+  artifactId: string;
+  published: boolean;
+}) {
+  return <JourneyMeta content={content} onChange={onChange} readOnly={readOnly} artifactId={artifactId} published={published} />;
 }
 
-
-function JourneyMeta({ content, onChange, readOnly }: { content: JourneyContent; onChange: (c: JourneyContent) => void; readOnly: boolean }) {
+function JourneyMeta({
+  content,
+  onChange,
+  readOnly,
+  artifactId,
+  published,
+}: {
+  content: JourneyContent;
+  onChange: (c: JourneyContent) => void;
+  readOnly: boolean;
+  artifactId: string;
+  published: boolean;
+}) {
   const purposes = useApi(() => api.call('purposes.list', {}), []);
+  // A rough expected control size from the people already in the journey, not a forecast.
+  const stats = useApi(() => api.call('journeys.stats', { artifactId }), [artifactId], { skip: !published });
+  const total = stats.data
+    ? stats.data.now.ready + stats.data.now.waiting + stats.data.now.completed + stats.data.now.exited + stats.data.now.failed
+    : 0;
+  const cg = content.controlGroup;
+  const setCg = (patch: Partial<NonNullable<JourneyContent['controlGroup']>>) =>
+    onChange({ ...content, controlGroup: { percent: 10, minSampleSize: 200, ...cg, ...patch } });
   return (
     <div className="space-y-4 p-4">
       <p className="text-[12px] text-muted">Select a step to edit it. These settings apply to the whole journey.</p>
@@ -567,6 +603,60 @@ function JourneyMeta({ content, onChange, readOnly }: { content: JourneyContent;
       <Field label="Goal" hint="What success looks like, for the team and for reports.">
         <Input value={content.goal ?? ''} readOnly={readOnly} maxLength={200} onChange={(e) => onChange({ ...content, goal: e.target.value || undefined })} />
       </Field>
+
+      <div className="rounded-md border border-line p-3">
+        <Checkbox
+          label="Control group"
+          hint="Hold back a share of entrants from every e-mail, SMS and push step, and still measure whether they reach the goal."
+          checked={!!cg}
+          disabled={readOnly}
+          onChange={(e) => {
+            if (e.target.checked) setCg({ percent: 10, minSampleSize: 200 });
+            else onChange({ ...content, controlGroup: undefined });
+          }}
+        />
+        {cg && (
+          <div className="mt-3 space-y-3">
+            <Field label="Share in control" hint="1–50%. Assigned once per person per journey scope.">
+              <Input
+                type="number"
+                min={1}
+                max={50}
+                value={cg.percent}
+                readOnly={readOnly}
+                onChange={(e) => setCg({ percent: Math.max(1, Math.min(50, Math.round(Number(e.target.value) || 1))) })}
+              />
+            </Field>
+            <Field label="Minimum sample size" hint="Both arms need this many people before a verdict, default 200.">
+              <Input
+                type="number"
+                min={1}
+                value={cg.minSampleSize ?? 200}
+                readOnly={readOnly}
+                onChange={(e) => setCg({ minSampleSize: Math.max(1, Math.round(Number(e.target.value) || 1)) })}
+              />
+            </Field>
+            <p className="text-[12px] text-muted">
+              Control people still wait, branch and reach the goal; they just get no marketing messages. Their conversions show what would have
+              happened without the journey. Read the result with <span className="font-mono">journeys.holdoutResult</span>.
+            </p>
+            {published && total > 0 && (
+              <p className="text-[12px] text-fg-2">
+                About <strong>{Math.round((total * cg.percent) / 100).toLocaleString()}</strong> of the {total.toLocaleString()} people in this journey
+                so far would be control.
+              </p>
+            )}
+            <Checkbox
+              label="Start a new scope if the percentage changes"
+              hint="Publishing a changed percentage after people were assigned is refused unless this is ticked. People keep their old arm."
+              checked={!!cg.reset}
+              disabled={readOnly}
+              onChange={(e) => setCg({ reset: e.target.checked })}
+            />
+          </div>
+        )}
+      </div>
+
       <div>
         <p className="mb-1.5 text-[12px] font-medium text-fg-2">Step colours</p>
         <Legend className="grid grid-cols-2 gap-1.5 text-[12px] text-fg-2" />

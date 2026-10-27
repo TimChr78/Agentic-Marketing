@@ -159,7 +159,7 @@ async function setVersionState(ctx: CommandContext, artifactId: string, number: 
     );
 }
 
-async function checkPublishable(ctx: CommandContext, type: string, content: unknown) {
+async function checkPublishable(ctx: CommandContext, type: string, content: unknown, artifactId: string) {
   const schema = artifactTypes[type as ArtifactType]?.content as z.ZodType | undefined;
   if (schema) {
     const parsed = schema.safeParse(content);
@@ -171,7 +171,12 @@ async function checkPublishable(ctx: CommandContext, type: string, content: unkn
       });
     }
   }
-  const problems = (await publishValidators.get(type as ArtifactType)?.(content, ctx.tx)) ?? [];
+  const problems =
+    (await publishValidators.get(type as ArtifactType)?.(content, ctx.tx, {
+      id: artifactId,
+      type,
+      workspaceId: ctx.principal.workspaceId,
+    })) ?? [];
   if (problems.length) throw new AppError('invalid_input', `This ${type} cannot be published yet: ${problems.join('; ')}`, { problems });
 }
 
@@ -180,7 +185,7 @@ export const publishListeners: ((ctx: CommandContext, artifact: { id: string; ty
 
 async function publishVersion(ctx: CommandContext, artifactId: string, number: number) {
   const a = await loadArtifact(ctx, artifactId);
-  await checkPublishable(ctx, a.type, (await loadVersion(ctx, artifactId, number)).content);
+  await checkPublishable(ctx, a.type, (await loadVersion(ctx, artifactId, number)).content, artifactId);
   if (a.publishedVersion && a.publishedVersion !== number) await setVersionState(ctx, artifactId, a.publishedVersion, 'superseded');
   await setVersionState(ctx, artifactId, number, 'published');
   await ctx.tx
@@ -686,7 +691,7 @@ export const requestPublish = defineCommand({
         'conflict',
         `The latest version (v${v.number}) is ${v.state.replace('_', ' ')}, not a draft. Edit it first to create a new draft.`,
       );
-    await checkPublishable(ctx, a.type, v.content);
+    await checkPublishable(ctx, a.type, v.content, a.id);
     const [w] = await ctx.tx
       .select({ policy: schema.workspaces.approvalPolicy })
       .from(schema.workspaces)

@@ -47,6 +47,8 @@ export interface Graph {
   start: string;
   /** The journey's purpose; webhook steps need a lawful basis for it. */
   purpose: string;
+  /** When set, this share of entrants walks the graph with every channel step skipped (#67). */
+  controlGroup?: { percent: number; minSampleSize: number; reset: boolean };
   trigger: Cfg<'trigger'>;
   nodes: Map<string, Node>;
 }
@@ -182,7 +184,7 @@ export function compile(def: JourneyDefinition): Graph {
     }
   });
   if (!trigger) throw new Error('journey without trigger');
-  return { start, purpose: def.purpose, trigger, nodes };
+  return { start, purpose: def.purpose, controlGroup: def.controlGroup, trigger, nodes };
 }
 
 /** Problems that block publishing a journey: kinds that cannot run yet, and missing e-mail templates or segments. */

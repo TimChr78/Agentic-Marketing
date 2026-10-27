@@ -1,9 +1,12 @@
 import { adAudienceCommands, adCommands, spendCommands } from '@agentic-marketing/ads';
 import { aiCommands } from '@agentic-marketing/ai';
+import { alertsCommands } from '@agentic-marketing/alerts';
+import { analyticsCommands } from '@agentic-marketing/analytics';
 import { artifactCommands, configCommands, workspaceCommands } from '@agentic-marketing/artifacts';
 import { assetCommands } from '@agentic-marketing/assets';
 import { audienceCommands } from '@agentic-marketing/audience';
 import { listSsoProviders, memberCommands, scimCommands, tokenCommands } from '@agentic-marketing/auth';
+import { campaignCommands } from '@agentic-marketing/campaigns';
 import type { AnyCommand } from '@agentic-marketing/commands';
 import {
   blockCommands,
@@ -52,7 +55,10 @@ export const commands = [
   ...experienceCommands,
   ...edgeCommands,
   ...aiCommands,
+  ...analyticsCommands,
+  ...alertsCommands,
   ...audienceCommands,
+  ...campaignCommands,
   ...connectionCommands,
   importShopifyCustomers,
   ...adCommands,

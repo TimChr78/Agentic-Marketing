@@ -76,6 +76,7 @@ const ORDER: ArtifactType[] = [
   'audience_sync',
   'broadcast',
   'journey',
+  'campaign',
   'note',
 ];
 

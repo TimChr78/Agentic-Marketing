@@ -1,4 +1,5 @@
 import { artifactTypes, DEFAULT_PURPOSES, type JourneyDefinition, publishedSingleton } from '@agentic-marketing/artifacts';
+import { type PublishedCampaign, publishedCampaigns } from '@agentic-marketing/campaigns';
 import { newId } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import { requestEmail, requestPush, requestSms } from '@agentic-marketing/email';
@@ -12,6 +13,7 @@ import jsonata from 'jsonata';
 import { matchesCondition } from './conditions';
 import { duplicateEntryKey, noteEntrySkip, resolveEntryKey } from './entry';
 import { compile, type Graph } from './graph';
+import { assignHoldout, holdoutDetail } from './holdout';
 import { type AiOutcome, advance, type Effect, type ParticipantState, type Step } from './interpreter';
 
 // The journey runtime (ADR-0004): trigger matching and wake-ups run as a post-commit hook of the
@@ -67,11 +69,17 @@ export async function matchEvents(
   workspaceId: string,
   resolved: ResolvedEvent[],
   deps: JourneyDeps,
-): Promise<{ entered: number; woken: number }> {
-  if (!resolved.length) return { entered: 0, woken: 0 };
+): Promise<{ entered: number; woken: number; holdout: JourneyEvent[] }> {
+  if (!resolved.length) return { entered: 0, woken: 0, holdout: [] };
   const journeys = await publishedJourneys(tx);
+  // A campaign's control group is the outer scope: its sending members inherit the campaign's
+  // assignment instead of randomising the same person again. Loaded once per batch.
+  const campaignOf = new Map<string, PublishedCampaign>();
+  for (const c of await publishedCampaigns(tx))
+    if (c.content.controlGroup) for (const m of c.content.members) campaignOf.set(m.artifactId, c);
   let entered = 0;
   let woken = 0;
+  const holdout: JourneyEvent[] = [];
   for (const { event: e, profileId } of resolved) {
     for (const j of journeys) {
       const t = j.graph.trigger;
@@ -106,6 +114,13 @@ export async function matchEvents(
           if (prior) continue;
         }
       }
+      // The arm is chosen at entry, before the sweeper can send anything. Entry itself does not
+      // check consent; sends do, so the control group is drawn from everyone who entered. A journey
+      // inside a campaign with a control group uses the campaign's arm, not its own.
+      const campaign = campaignOf.get(j.id);
+      const assigned = campaign
+        ? await assignHoldout(tx, workspaceId, { type: 'campaign', id: campaign.id }, campaign.content.controlGroup, profileId)
+        : await assignHoldout(tx, workspaceId, { type: 'journey', id: j.id }, j.graph.controlGroup, profileId);
       const res = await tx
         .insert(schema.journeyParticipants)
         .values({
@@ -118,7 +133,18 @@ export async function matchEvents(
           node: j.graph.start,
           status: 'ready',
           dueAt: new Date(),
-          context: { event: { name: e.name, properties: e.properties } },
+          context: {
+            event: { name: e.name, properties: e.properties },
+            ...(assigned
+              ? {
+                  holdout: {
+                    ...assigned.assignment,
+                    scope: campaign ? 'campaign' : 'journey',
+                    ...(campaign ? { campaignId: campaign.id } : {}),
+                  },
+                }
+              : {}),
+          },
         })
         .onConflictDoNothing()
         .returning({ id: schema.journeyParticipants.id });
@@ -127,6 +153,21 @@ export async function matchEvents(
         continue;
       }
       entered += res.length;
+      if (assigned?.created)
+        holdout.push({
+          workspaceId,
+          // A campaign assignment belongs to the campaign scope, so its event names the campaign
+          // even when a journey entry happened to assign it first.
+          journeyId: campaign?.id ?? j.id,
+          version: campaign?.version ?? j.version,
+          participantId: res[0]!.id,
+          profileId,
+          node: j.graph.start,
+          type: 'holdout_assigned',
+          seq: 0,
+          at: new Date().toISOString(),
+          detail: holdoutDetail(assigned.assignment, campaign?.id),
+        });
     }
     // Wake whoever waits for this event (wait-for-event and goal nodes).
     const w = await tx.execute(sql`
@@ -135,7 +176,7 @@ export async function matchEvents(
     woken += w.rowCount ?? 0;
   }
   await wakeWaitUntil(tx, workspaceId, resolved, deps);
-  return { entered, woken };
+  return { entered, woken, holdout };
 }
 
 /**
@@ -187,7 +228,13 @@ async function wakeWaitUntil(tx: Tx, workspaceId: string, resolved: ResolvedEven
 /** The after-resolve hook for the profile workers. */
 export function journeyHook(db: Db, deps: JourneyDeps) {
   return async (workspaceId: string, resolved: ResolvedEvent[]) => {
-    await db.withWorkspace(workspaceId, (tx) => matchEvents(tx, workspaceId, resolved, deps));
+    let holdout: JourneyEvent[] = [];
+    await db.withWorkspace(workspaceId, async (tx) => {
+      holdout = (await matchEvents(tx, workspaceId, resolved, deps)).holdout;
+    });
+    // ClickHouse is outside the transaction: an assignment that committed but whose event did not
+    // is still measured from the table, and a lost event only affects the timeline.
+    if (holdout.length) await deps.events.insertJourneyEvents(holdout).catch((err) => logger.warn({ err }, 'holdout events not stored'));
   };
 }
 
@@ -251,7 +298,7 @@ async function applyEffect(
   eff: Effect,
   deps: JourneyDeps,
   graph: Graph,
-  flags: { wakeNow: boolean },
+  flags: { wakeNow: boolean; control: boolean },
 ): Promise<string | null> {
   if (eff.kind === 'transform') {
     try {
@@ -358,6 +405,7 @@ async function applyEffect(
     return null;
   }
   if (eff.kind === 'email') {
+    if (flags.control) return 'skipped: control';
     const d = await requestEmail(tx, workspaceId, deps.kp, deps.events, {
       profileId: p.profileId,
       templateId: eff.template,
@@ -368,6 +416,7 @@ async function applyEffect(
     return `e-mail ${d.status}${d.reason ? `: ${d.reason}` : ''}`;
   }
   if (eff.kind === 'sms') {
+    if (flags.control) return 'skipped: control';
     const d = await requestSms(tx, workspaceId, deps.kp, deps.events, {
       profileId: p.profileId,
       templateId: eff.template,
@@ -378,6 +427,7 @@ async function applyEffect(
     return `SMS ${d.status}${d.reason ? `: ${d.reason}` : ''}`;
   }
   if (eff.kind === 'push') {
+    if (flags.control) return 'skipped: control';
     const d = await requestPush(tx, workspaceId, deps.kp, deps.events, {
       profileId: p.profileId,
       templateId: eff.template,
@@ -511,7 +561,8 @@ export async function sweep(db: Db, deps: JourneyDeps, opts: { batch?: number; n
           continue;
         }
         const details = new Map<string, string>();
-        const flags = { wakeNow: false };
+        const held = (p.context as { holdout?: { arm?: string } }).holdout;
+        const flags = { wakeNow: false, control: held?.arm === 'control' };
         const graph = await graphOf(tx, p.journeyId, p.version);
         for (const eff of result.effects) {
           const d = await applyEffect(tx, ws, p, eff, deps, graph, flags);

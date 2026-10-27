@@ -222,6 +222,9 @@ async function merge(tx: Tx, workspaceId: string, from: string, into: string, cr
   await tx.execute(
     sql`UPDATE journey_participants SET profile_id = ${into}, updated_at = now() WHERE workspace_id = ${workspaceId} AND profile_id = ${from}`,
   );
+  // Holdout arms follow too: the survivor keeps its arm for a scope and otherwise inherits the
+  // merged profile's (earliest wins). The function is the app role's only way to move these rows.
+  await tx.execute(sql`SELECT merge_holdout_assignments(${from}, ${into})`);
 
   const srcPii = (await crypto.open<Record<string, unknown>>(from, src.pii)) ?? {};
   const dstPii = (await crypto.open<Record<string, unknown>>(into, dst.pii)) ?? {};

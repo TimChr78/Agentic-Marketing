@@ -18,6 +18,8 @@ const ROUTES: { path: string; page: Page; needs?: string[] }[] = [
   { path: '/build/journeys/:id', page: p(() => import('../pages/build/JourneyPage')), needs: ['artifacts:read'] },
   { path: '/build/broadcasts', page: p(() => import('../pages/build/BroadcastsPage')), needs: ['artifacts:read'] },
   { path: '/build/broadcasts/:id', page: p(() => import('../pages/build/BroadcastPage')), needs: ['artifacts:read'] },
+  { path: '/build/campaigns', page: p(() => import('../pages/build/CampaignsPage')), needs: ['artifacts:read'] },
+  { path: '/build/campaigns/:id', page: p(() => import('../pages/build/CampaignPage')), needs: ['artifacts:read'] },
   { path: '/build/forms', page: p(() => import('../pages/build/FormsPage')), needs: ['artifacts:read'] },
   { path: '/build/forms/:id', page: p(() => import('../pages/build/FormPage')), needs: ['artifacts:read'] },
   { path: '/build/segments', page: p(() => import('../pages/build/SegmentsPage')), needs: ['artifacts:read'] },
@@ -40,8 +42,10 @@ const ROUTES: { path: string; page: Page; needs?: string[] }[] = [
   { path: '/audience/consent', page: p(() => import('../pages/audience/ConsentPage')), needs: ['profiles:read'] },
   { path: '/audience/imports', page: p(() => import('../pages/audience/ImportsPage')), needs: ['profiles:write'] },
 
+  { path: '/insights/analytics', page: p(() => import('../pages/insights/AnalyticsPage')), needs: ['artifacts:read'] },
   { path: '/insights/messages', page: p(() => import('../pages/insights/MessagesPage')), needs: ['profiles:read'] },
   { path: '/insights/deliverability', page: p(() => import('../pages/insights/DeliverabilityPage')), needs: ['artifacts:read'] },
+  { path: '/insights/alerts', page: p(() => import('../pages/insights/AlertsPage')), needs: ['artifacts:read'] },
   { path: '/insights/journeys', page: p(() => import('../pages/insights/JourneyStatsPage')), needs: ['artifacts:read'] },
   { path: '/insights/ai', page: p(() => import('../pages/insights/AiUsagePage')), needs: ['artifacts:read'] },
 

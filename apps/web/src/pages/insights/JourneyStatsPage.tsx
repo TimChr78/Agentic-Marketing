@@ -5,6 +5,7 @@ import { ButtonLink } from '../../app/links';
 import { useCrumbs } from '../../app/page';
 import { useSession } from '../../app/session';
 import { useApi } from '../../app/useApi';
+import { HoldoutCard } from '../../features/insights/HoldoutCard';
 import { StatCard, StatGrid } from '../../features/insights/Stats';
 import {
   Alert,
@@ -39,6 +40,10 @@ export default function JourneyStatsPage() {
 
   const stats = useApi(() => api.call('journeys.stats', { artifactId: selected }), [selected], { skip: !selected });
   const artifact = useApi(() => api.call('artifacts.get', { artifactId: selected }), [selected], { skip: !selected });
+  const hasControl =
+    artifact.data?.version.state === 'published' &&
+    !!((artifact.data.version.content as { controlGroup?: unknown } | undefined)?.controlGroup);
+  const holdout = useApi(() => api.call('journeys.holdoutResult', { journeyId: selected }), [selected], { skip: !selected || !hasControl });
 
   const nodes = ((artifact.data?.version.content as { nodes?: Node[] } | undefined)?.nodes ?? []).filter(Boolean);
   const s = stats.data;
@@ -118,6 +123,8 @@ export default function JourneyStatsPage() {
                 <StatCard label="Failed" value={s.now.failed.toLocaleString()} tone={s.now.failed > 0 ? 'bad' : undefined} />
                 <StatCard label="Converted" value={s.now.converted.toLocaleString()} tone={s.now.converted > 0 ? 'good' : undefined} />
               </StatGrid>
+
+              {hasControl && <HoldoutCard result={holdout.data} loading={holdout.loading} error={holdout.error ?? undefined} />}
 
               <TableFrame
                 columns={3}
