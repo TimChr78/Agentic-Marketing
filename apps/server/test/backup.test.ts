@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { cp, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { lastServerVersion, latestMigration, migrate, recordServerVersion } from '@agentic-marketing/db';
+import { lastServerVersion, latestMigration, migrate, recordServerVersion, releaseForMigrationHead } from '@agentic-marketing/db';
 import { migrateClickHouse } from '@agentic-marketing/events';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -257,7 +257,8 @@ describe.skipIf(!pgToolsReady)('backup and restore', () => {
 
   it('falls back to the migration head when server_versions is empty', async () => {
     await pool.query('DELETE FROM server_versions');
-    expect(await lastServerVersion(dbUrl.toString())).toBe('0.2.6');
+    // The release of the newest migration, whatever this build's newest is.
+    expect(await lastServerVersion(dbUrl.toString())).toBe(releaseForMigrationHead(latestMigration() ?? null));
   });
 
   it('names a pre-upgrade backup after the newest release in a migration-head range', async () => {
