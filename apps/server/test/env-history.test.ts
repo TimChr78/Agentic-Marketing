@@ -13,8 +13,12 @@ describe('environment variable history', () => {
   });
 
   it('knows what each release added', () => {
-    expect(envKeysSince('0.2.4')).toEqual([]);
-    expect(envKeysSince('0.2.3')).toEqual(['BACKUP_CRON', 'BACKUP_DIR', 'BACKUP_KEEP_DAYS', 'PUBLIC_BIND', 'SKIP_PRE_UPGRADE_BACKUP']);
+    // Lists of what releases up to the running one added; later ones only appear once released.
+    expect(envKeysSince('0.2.5')).toEqual(['STEP_UP_LOCKOUT_SECONDS', 'STEP_UP_MAX_FAILURES', 'STEP_UP_WINDOW_SECONDS']);
+    expect(envKeysSince('0.2.4')).toEqual(envKeysSince('0.2.5'));
+    expect(envKeysSince('0.2.3')).toEqual(
+      expect.arrayContaining(['BACKUP_CRON', 'BACKUP_DIR', 'BACKUP_KEEP_DAYS', 'PUBLIC_BIND', 'SKIP_PRE_UPGRADE_BACKUP']),
+    );
     expect(envKeysSince('0.1.2')).toEqual(
       expect.arrayContaining(['ASSET_MAX_BYTES', 'MCP_TEXT_CONTENT', 'MCP_TOOL_NAME_STYLE', 'STRICT_INPUTS']),
     );
