@@ -3,6 +3,7 @@ import { useCrumbs } from '../../app/page';
 import { useWorkspace } from '../../app/session';
 import { roleLabel } from '../../features/settings/roles';
 import { Card, Meta, Mono, PageHeader, RadioCards, Tag } from '../../ui';
+import { pageWidth } from '../../ui/layout';
 
 const THEME_OPTIONS: { value: ThemePref; label: string; hint: string }[] = [
   { value: 'system', label: 'System', hint: 'Follows your device setting.' },
@@ -18,7 +19,7 @@ export default function PreferencesPage() {
   const explained = workspace.permissionsExplained;
 
   return (
-    <div>
+    <div className={pageWidth('reading')}>
       <PageHeader title="Preferences" description="Your appearance on this device, and what your account and role allow." />
       <div className="grid gap-5 lg:grid-cols-2">
         <Card title="Appearance" description="Kept for you on this device." padded>

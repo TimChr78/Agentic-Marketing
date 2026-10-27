@@ -81,7 +81,8 @@ export function Shell({ children }: { children: ReactNode }) {
           <ThemeMenu />
           <UserMenu />
         </header>
-        <main id="main" tabIndex={-1} className="mx-auto w-full max-w-[1280px] px-4 py-6 outline-none sm:px-6 lg:px-8">
+        {/* The page, not the shell, decides its width (#114): see ui/layout.ts pageWidth(). */}
+        <main id="main" tabIndex={-1} className="w-full px-4 py-6 outline-none sm:px-6 lg:px-8">
           <CrumbsProvider onChange={setCrumbs}>{children}</CrumbsProvider>
         </main>
       </div>

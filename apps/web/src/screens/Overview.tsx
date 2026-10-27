@@ -1,7 +1,9 @@
 import { ArrowRight, Bot, Globe, Mail, ShieldCheck, Workflow } from 'lucide-react';
 import { useStore } from '../mock/store';
+import { DEMO_PERSONA } from '../mock/seed';
 import { AuthorBadge, Card, Kpi, PageHeader, Pill, dkk, timeAgo } from '../components/ui';
 import { Chart } from '../components/Chart';
+import { pageWidth } from '../ui';
 
 const tour = [
   { icon: Globe, title: 'Browse the demo shop', text: 'Accept cookies, view three trail shoes and watch the hero change in-session.', route: 'live' as const },
@@ -9,6 +11,12 @@ const tour = [
   { icon: ShieldCheck, title: 'Review the agent’s change', text: 'Agent-authored journeys wait for a human. Diff, approve, publish.', route: 'approvals' as const },
   { icon: Workflow, title: 'Simulate a customer', text: 'Open a journey and dry-run it for one profile with a virtual clock.', route: 'journeys' as const },
 ];
+
+/** Greet the viewer by their own clock, not a fixed afternoon (#110). */
+function greeting(date = new Date()) {
+  const hour = date.getHours();
+  return hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening';
+}
 
 export function Overview() {
   const { daily, journeys, approvals, events, audit, navigate, setCopilotOpen } = useStore();
@@ -18,8 +26,8 @@ export function Overview() {
   const agentActivity = audit.filter((a) => a.principal.type === 'agent').slice(0, 5);
 
   return (
-    <div className="mx-auto max-w-[1200px]">
-      <PageHeader eyebrow="Overview · last 30 days" title="Good afternoon, Tim" />
+    <div className={pageWidth('default')}>
+      <PageHeader eyebrow="Overview · last 30 days" title={`${greeting()}, ${DEMO_PERSONA.name}`} />
 
       <Card className="mb-5 grid grid-cols-2 divide-line md:grid-cols-5 md:divide-x">
         <Kpi label="Messages sent" value={sum('sent').toLocaleString('en')} delta={4.2} />

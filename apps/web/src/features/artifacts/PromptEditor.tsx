@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Plus, Trash2 } from 'lucide-react';
+import { api } from '../../app/api';
+import { useApi } from '../../app/useApi';
 import { Button, Checkbox, Field, FieldGroup, IconButton, Input, Select, Textarea } from '../../ui';
 import type { EditorProps } from './ArtifactDetailPage';
 import { JsonEditor } from './JsonEditor';
@@ -20,6 +22,12 @@ interface PromptSlot {
   fallback: string;
 }
 
+interface PromptCache {
+  segments?: string[];
+  ttlHours?: number;
+  [key: string]: unknown;
+}
+
 interface PromptContent {
   kind?: 'decide' | 'generate' | 'classify';
   instructions?: string;
@@ -32,7 +40,7 @@ interface PromptContent {
   tests?: unknown[];
   trait?: string;
   review?: { sampleRate?: number; [key: string]: unknown };
-  cache?: unknown;
+  cache?: PromptCache;
   [key: string]: unknown;
 }
 
@@ -115,6 +123,8 @@ export function PromptEditor({ content, onChange, readOnly, errors }: EditorProp
   const options = content.options ?? [];
   const slots = content.slots ?? [];
   const forbidden = content.forbidden ?? [];
+  const segments = useApi(() => api.call('artifacts.list', { type: 'segment' as never, limit: 200 }), []);
+  const cacheSegments = content.cache?.segments ?? [];
   const [forbiddenText, setForbiddenText] = useState(forbidden.join('\n'));
   useEffect(() => {
     const parsed = forbiddenText
@@ -330,6 +340,65 @@ export function PromptEditor({ content, onChange, readOnly, errors }: EditorProp
               }}
             />
           </Field>
+
+          <FieldGroup legend="Cache" hint="Reuse one generated text for everyone in the same segments, from the segment names alone (no personal data).">
+            <Checkbox
+              checked={!!content.cache}
+              disabled={readOnly}
+              label="Reuse generated text per segment"
+              hint="Each combination of the segments below gets its own text until the cache expires."
+              onChange={(e) => (e.target.checked ? set({ cache: { segments: [], ttlHours: 24 } }) : remove('cache'))}
+            />
+            {content.cache && (
+              <>
+                <div>
+                  <p className="mb-1 text-[12px] font-medium text-fg-2">Segments</p>
+                  <p className="text-[12px] text-muted">Choose at least one. Text is written once per combination, so people in the same segments see the same words.</p>
+                  <div className="mt-2 space-y-1.5">
+                    {segments.loading && <p className="text-[12px] text-muted">Loading segments…</p>}
+                    {segments.error && <p className="text-[12px] text-bad">Couldn't load the segments: {segments.error}</p>}
+                    {segments.data?.artifacts.map((a) => (
+                      <Checkbox
+                        key={a.id}
+                        checked={cacheSegments.includes(a.id)}
+                        disabled={readOnly}
+                        label={
+                          <>
+                            {a.name}{' '}
+                            {a.publishedVersion ? <span className="text-muted">· live v{a.publishedVersion}</span> : <span className="text-muted">· not live yet</span>}
+                          </>
+                        }
+                        onChange={(e) =>
+                          set({
+                            cache: {
+                              ...content.cache,
+                              segments: e.target.checked ? [...cacheSegments, a.id] : cacheSegments.filter((id) => id !== a.id),
+                            },
+                          })
+                        }
+                      />
+                    ))}
+                    {!segments.loading && !segments.error && !segments.data?.artifacts.length && (
+                      <p className="text-[12px] text-muted">This workspace has no segments yet. Create one under Build → Segments.</p>
+                    )}
+                  </div>
+                  {errors['cache.segments'] && <p className="mt-1 text-[12px] text-bad">{errors['cache.segments']}</p>}
+                </div>
+                <NumberField
+                  label="Keep cached text for"
+                  value={content.cache.ttlHours ?? 24}
+                  min={1}
+                  max={720}
+                  step={1}
+                  unit="hours"
+                  hint="After this, the next person in those segments gets fresh text."
+                  error={errors['cache.ttlHours']}
+                  readOnly={readOnly}
+                  onChange={(n) => set({ cache: { ...content.cache, ttlHours: Math.round(n) } })}
+                />
+              </>
+            )}
+          </FieldGroup>
         </>
       )}
 

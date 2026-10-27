@@ -68,6 +68,22 @@ test.describe('approvals (#41)', () => {
     const drawer = page.getByRole('dialog', { name: 'Engaged readers' });
     await expect(drawer).toContainText('Estimated size now');
     await expect(drawer.getByRole('button', { name: 'Approve and publish' })).toBeInViewport();
+    // #62: at 390 px the tab row either fits every tab, or shows a fade that says it scrolls.
+    const tablist = drawer.getByRole('tablist', { name: 'Review' });
+    if (await tablist.evaluate((el) => el.scrollWidth > el.clientWidth + 1)) {
+      await expect(drawer.locator('[data-scroll-fade="right"]')).toHaveCount(1);
+    } else {
+      const viewport = page.viewportSize()!;
+      for (const box of await tablist.getByRole('tab').evaluateAll((els) =>
+        els.map((el) => {
+          const r = el.getBoundingClientRect();
+          return { left: r.left, right: r.right };
+        }),
+      )) {
+        expect(box.left).toBeGreaterThanOrEqual(0);
+        expect(box.right).toBeLessThanOrEqual(viewport.width + 1);
+      }
+    }
     await drawer.getByRole('tab', { name: /Changes/ }).click();
     await expect(drawer).toContainText('condition');
     await drawer.getByRole('button', { name: 'Close' }).click();

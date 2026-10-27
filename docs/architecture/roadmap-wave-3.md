@@ -104,6 +104,8 @@ Goal: the screens a person uses every week (approvals, journeys, people, message
 
 Done when the approval drawer and the journey builder pass a review on a 2000 px screen and at 390 px.
 
+**Status (2026-10-27): built and reviewed.** Every item above is implemented for the next release. At 2000 px the journey canvas is about 1,390 px wide with both panels open (e2e checks ≥ 1,300 px at 1920), and the approval drawer shows the bundle, the audience and the e-mail; at 390 px the drawer's tabs fit and the builder stays usable. What is left is the pilot's own impression on a wide screen and a phone.
+
 ## Phase 15: newsletter and lifecycle e-mail
 
 Goal: make the platform good at what its live pilot does, owned-audience e-mail for a content site, before widening it. Each item here is something a newsletter publisher expects from Kit, Beehiiv or Buttondown.

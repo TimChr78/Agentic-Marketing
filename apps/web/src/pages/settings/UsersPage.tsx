@@ -33,6 +33,7 @@ import {
   useToast,
   formatDate,
 } from '../../ui';
+import { pageWidth } from '../../ui/layout';
 
 type Member = Out<'members.list'>['members'][number];
 type Invitation = Out<'invitations.list'>['invitations'][number];
@@ -147,7 +148,7 @@ export default function UsersPage() {
   };
 
   return (
-    <div>
+    <div className={pageWidth('default')}>
       <PageHeader
         title="Users and roles"
         description="People in this workspace and what they can do. An invitation creates a one-time link to share; no e-mail is sent."

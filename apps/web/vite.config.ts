@@ -16,5 +16,7 @@ export default defineConfig(({ mode }) => ({
   build: {
     outDir: mode === 'single' ? 'dist-single' : 'dist',
     chunkSizeWarningLimit: 6000,
+    // The bundle-size check (#60) reads the chunk graph from here; the single-file build has none.
+    manifest: mode !== 'single',
   },
 }));

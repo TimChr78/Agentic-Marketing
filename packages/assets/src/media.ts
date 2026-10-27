@@ -1,14 +1,35 @@
-// Content sniffing and image dimensions without a dependency: the five formats the asset library
-// accepts are simple enough to recognise from their headers, and a mismatch between the declared
-// content type and the bytes is a mistake worth reporting clearly.
+// Content sniffing and image dimensions without a dependency: the raster formats the asset
+// library accepts are simple enough to recognise from their headers, and a mismatch between the
+// declared content type and the bytes is a mistake worth reporting clearly. SVG is text, so its
+// root element is checked instead (the sanitiser validates the rest).
 
-export const ASSET_CONTENT_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'application/pdf'] as const;
+export const ASSET_CONTENT_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/svg+xml', 'application/pdf'] as const;
 export type AssetContentType = (typeof ASSET_CONTENT_TYPES)[number];
 
 export type ImageSize = { width: number; height: number };
 
-/** What the bytes look like, including SVG so the error can say why it is not accepted. */
-export function sniffContentType(data: Buffer): AssetContentType | 'image/svg+xml' | null {
+/** The start of the document with byte-order mark, XML declaration and leading comments removed. */
+function xmlStart(text: string): string {
+  let rest = text.replace(/^\uFEFF/, '').trimStart();
+  for (;;) {
+    if (rest.startsWith('<?')) {
+      const end = rest.indexOf('?>');
+      if (end < 0) return '';
+      rest = rest.slice(end + 2).trimStart();
+      continue;
+    }
+    if (rest.startsWith('<!--')) {
+      const end = rest.indexOf('-->');
+      if (end < 0) return '';
+      rest = rest.slice(end + 3).trimStart();
+      continue;
+    }
+    return rest;
+  }
+}
+
+/** What the bytes look like. An SVG is XML whose root element is <svg>; anything else is not one. */
+export function sniffContentType(data: Buffer): AssetContentType | null {
   if (data.length >= 8 && data.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
     return 'image/png';
   }
@@ -17,12 +38,14 @@ export function sniffContentType(data: Buffer): AssetContentType | 'image/svg+xm
   if (head.startsWith('GIF87a') || head.startsWith('GIF89a')) return 'image/gif';
   if (head.startsWith('RIFF') && head.slice(8, 12) === 'WEBP') return 'image/webp';
   if (data.subarray(0, 5).toString('latin1') === '%PDF-') return 'application/pdf';
-  const text = data.subarray(0, 4096).toString('utf8').trimStart().toLowerCase();
-  if (text.startsWith('<svg') || (text.startsWith('<?xml') && text.includes('<svg'))) return 'image/svg+xml';
+  const text = xmlStart(data.subarray(0, 8192).toString('utf8'));
+  // A DOCTYPE is refused by the sanitiser; still recognise the document as SVG so that message wins.
+  if (/^<!doctype/i.test(text)) return /<svg[\s/>]/i.test(text) ? 'image/svg+xml' : null;
+  if (/^<svg[\s/>]/i.test(text)) return 'image/svg+xml';
   return null;
 }
 
-/** Pixel size from the header of a PNG, JPEG, GIF or WebP; null for PDFs and unreadable images. */
+/** Pixel size from the header of a PNG, JPEG, GIF or WebP, or from an SVG's viewBox/width/height. */
 export function imageSize(data: Buffer, contentType: AssetContentType): ImageSize | null {
   try {
     switch (contentType) {
@@ -34,12 +57,56 @@ export function imageSize(data: Buffer, contentType: AssetContentType): ImageSiz
         return gifSize(data);
       case 'image/webp':
         return webpSize(data);
+      case 'image/svg+xml':
+        return svgSize(data);
       default:
         return null;
     }
   } catch {
     return null;
   }
+}
+
+function parseAttributes(source: string): Record<string, string> {
+  const attributes: Record<string, string> = {};
+  for (const match of source.matchAll(/([:\w-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g)) {
+    attributes[match[1]!] = match[2] ?? match[3] ?? '';
+  }
+  return attributes;
+}
+
+function dimension(value: string | undefined): number | null {
+  const match = /^\s*([0-9]*\.?[0-9]+)\s*(px|pt|pc|mm|cm|in)?\s*$/i.exec(value ?? '');
+  if (!match) return null;
+  const number = Number(match[1]);
+  if (!(number > 0)) return null;
+  const factor: Record<string, number> = { px: 1, pt: 96 / 72, pc: 16, mm: 96 / 25.4, cm: 96 / 2.54, in: 96 };
+  return Math.max(1, Math.round(number * (match[2] ? factor[match[2].toLowerCase()]! : 1)));
+}
+
+/** Intrinsic size from an SVG root's attributes, preferring width/height and falling back to viewBox. */
+export function svgSizeFromAttributes(attributes: Record<string, string>): ImageSize | null {
+  const viewBox = (attributes.viewBox ?? attributes.viewbox ?? '')
+    .trim()
+    .split(/[\s,]+/)
+    .map(Number);
+  const boxWidth = viewBox.length === 4 && viewBox[2]! > 0 ? viewBox[2]! : null;
+  const boxHeight = viewBox.length === 4 && viewBox[3]! > 0 ? viewBox[3]! : null;
+  const width = dimension(attributes.width);
+  const height = dimension(attributes.height);
+  if (width && height) return { width, height };
+  if (width && boxWidth && boxHeight) return { width, height: Math.max(1, Math.round((width * boxHeight) / boxWidth)) };
+  if (height && boxWidth && boxHeight) return { width: Math.max(1, Math.round((height * boxWidth) / boxHeight)), height };
+  if (boxWidth && boxHeight) return { width: Math.max(1, Math.round(boxWidth)), height: Math.max(1, Math.round(boxHeight)) };
+  if (width) return { width, height: width };
+  if (height) return { width: height, height };
+  return null;
+}
+
+export function svgSize(data: Buffer): ImageSize | null {
+  const text = xmlStart(data.subarray(0, 8192).toString('utf8'));
+  const root = /^<svg\b([^>]*)>/i.exec(text);
+  return root ? svgSizeFromAttributes(parseAttributes(root[1] ?? '')) : null;
 }
 
 function size(width: number, height: number): ImageSize | null {
@@ -98,6 +165,16 @@ function webpSize(data: Buffer): ImageSize | null {
     return size(data.readUInt16LE(26) & 0x3fff, data.readUInt16LE(28) & 0x3fff);
   }
   return null;
+}
+
+/** The file name for an SVG: a real .svg extension, so the PNG rendition URL is predictable. */
+export function svgFileName(input: string): string {
+  return /\.svg$/i.test(input) ? input.replace(/\.svg$/i, '.svg') : `${extensionlessName(input)}.svg`;
+}
+
+/** The PNG rendition keeps the asset's base name and swaps the extension; the id still identifies it. */
+export function renditionFileName(fileName: string): string {
+  return `${fileName.replace(/\.[^.]*$/, '') || fileName}.png`;
 }
 
 /** A safe file name and URL segment: no paths, quotes, spaces or control characters. */

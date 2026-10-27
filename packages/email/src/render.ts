@@ -49,6 +49,14 @@ export interface Rendered {
 
 const PLACEHOLDER_UNSUBSCRIBE = 'https://example.invalid/unsubscribe';
 
+/**
+ * E-mail clients rarely render SVG. Our assets answer `/a/<id>/<file>.png` with the PNG rendition,
+ * so point an asset URL in an e-mail at that path. Only our asset ids match; other URLs stay.
+ */
+export function pngRenditionUrls(value: string): string {
+  return value.replace(/(\/a\/ast_[0-9a-f]{32}\/[A-Za-z0-9._-]+)\.svg\b/gi, '$1.png');
+}
+
 /** Problems that make a template unusable, for saving: Liquid that does not parse, MJML that does not compile. */
 export function validateTemplate(t: EmailTemplate): string[] {
   const problems: string[] = [];
@@ -106,8 +114,9 @@ export async function renderTemplate(t: EmailTemplate, vars: RenderVars): Promis
   return {
     subject: subject.replace(/\s+/g, ' ').trim(),
     preheader: preheader?.trim() || undefined,
-    html: out.html,
-    text: text.trim(),
+    // The brand logo and template images are assets too; SVG ones must travel as PNG.
+    html: pngRenditionUrls(out.html),
+    text: pngRenditionUrls(text).trim(),
     warnings: out.errors.map((e) => `mjml line ${e.line}: ${e.message}`),
   };
 }

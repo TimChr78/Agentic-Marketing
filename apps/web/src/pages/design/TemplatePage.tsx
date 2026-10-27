@@ -11,6 +11,7 @@ export default function TemplatePage({ params }: { params: Record<string, string
     <ArtifactDetailPage
       id={params.id}
       crumbs={[{ label: 'E-mail templates', to: '/design/templates' }]}
+      wide
       editor={(p) => <TemplateEditor {...p} />}
       extraActions={(a) => <SendTest id={a.id} version={a.version.number} />}
     />

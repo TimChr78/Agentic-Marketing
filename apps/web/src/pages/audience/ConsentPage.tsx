@@ -21,17 +21,21 @@ import {
   Mono,
   PageHeader,
   Select,
+  StatusPill,
   TableFrame,
   Tag,
   Textarea,
   useToast,
 } from '../../ui';
+import { pageWidth } from '../../ui/layout';
 
 type Status = 'granted' | 'denied' | 'withdrawn' | 'objected';
 type Lookup = { id: string; from: string };
 
 const PROFILE_ID = /^prf_[0-9a-f]{32}$/;
 const PURPOSE = /^[a-z][a-z0-9_]{0,63}$/;
+
+const refused = (c: { denied: number; withdrawn: number; objected: number }) => c.denied + c.withdrawn + c.objected;
 
 /** Purposes in force and the append-only ledger they are recorded in. */
 export default function ConsentPage() {
@@ -44,6 +48,8 @@ export default function ConsentPage() {
   const [recording, setRecording] = useState(false);
 
   const purposes = useApi(() => api.call('purposes.list', {}), [], { skip: !can('artifacts:read') });
+  const summary = useApi(() => api.call('consent.summary', {}), [], { skip: !can('profiles:read') });
+  const counts = new Map((summary.data?.purposes ?? []).map((p) => [p.purpose, p]));
   const profile = useApi(() => api.call('profiles.get', { profileId: person!.id }), [person?.id], { skip: !person });
   const history = useApi(() => api.call('consent.history', { profileId: person!.id }), [person?.id], { skip: !person });
 
@@ -82,7 +88,7 @@ export default function ConsentPage() {
   const canRecord = can('profiles:write');
 
   return (
-    <div>
+    <div className={pageWidth('default')}>
       <PageHeader
         title="Consent"
         description="The purposes this workspace relies on, and the ledger of every choice a person has made. Look someone up to see or add records."
@@ -112,25 +118,41 @@ export default function ConsentPage() {
           </Alert>
         ) : (
           <div className="grid gap-2.5 sm:grid-cols-2 xl:grid-cols-3">
-            {(purposes.data?.purposes ?? []).map((p) => (
-              <Card key={p.key} padded>
-                <div className="flex items-start justify-between gap-2">
-                  <div className="min-w-0">
-                    <h3 className="text-[14px] font-semibold text-fg">{p.name}</h3>
-                    <Mono className="mt-0.5 inline-block bg-transparent px-0 text-muted">{p.key}</Mono>
+            {(purposes.data?.purposes ?? []).map((p) => {
+              const c = counts.get(p.key);
+              return (
+                <Card key={p.key} padded>
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <h3 className="text-[14px] font-semibold text-fg">{p.name}</h3>
+                      <Mono className="mt-0.5 inline-block bg-transparent px-0 text-muted">{p.key}</Mono>
+                    </div>
+                    <Tag>{p.basis.replace(/_/g, ' ')}</Tag>
                   </div>
-                  <Tag>{p.basis.replace(/_/g, ' ')}</Tag>
-                </div>
-                <p className="mt-2 text-[13px] text-fg-2">{p.description}</p>
-                {p.channels.length > 0 && (
-                  <div className="mt-2 flex flex-wrap gap-1">
-                    {p.channels.map((c) => (
-                      <Tag key={c}>{c}</Tag>
-                    ))}
-                  </div>
-                )}
-              </Card>
-            ))}
+                  <p className="mt-2 text-[13px] text-fg-2">{p.description}</p>
+                  {p.channels.length > 0 && (
+                    <div className="mt-2 flex flex-wrap gap-1">
+                      {p.channels.map((ch) => (
+                        <Tag key={ch}>{ch}</Tag>
+                      ))}
+                    </div>
+                  )}
+                  {c && (
+                    <div className="mt-2 border-t border-line pt-2 text-[12px] text-muted">
+                      <span className="flex flex-wrap items-center gap-1.5">
+                        <StatusPill tone="good">{c.granted} allowed</StatusPill>
+                        {refused(c) > 0 && <StatusPill tone="warn">{refused(c)} refused</StatusPill>}
+                      </span>
+                      {c.channels.length > 0 && (
+                        <p className="mt-1">
+                          {c.channels.map((ch) => `${ch.channel}: ${ch.granted} allowed, ${refused(ch)} refused`).join(' · ')}
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </Card>
+              );
+            })}
           </div>
         )}
       </section>

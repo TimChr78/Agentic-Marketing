@@ -31,6 +31,7 @@ import {
   useConfirm,
   useToast,
 } from '../../ui';
+import { pageWidth } from '../../ui/layout';
 
 type Tab = 'overview' | 'consent' | 'events' | 'segments' | 'messages';
 
@@ -131,7 +132,7 @@ export default function PersonPage({ params }: { params: Record<string, string> 
   if (profile.loading) return <LoadingBlock lines={8} label="Loading person" />;
   if (profile.error || !p) {
     return (
-      <div>
+      <div className={pageWidth('default')}>
         <PageHeader title="Person" description="One person’s profile, consent and activity." />
         <Alert tone="bad" title="Couldn’t open this person" onRetry={profile.reload}>
           {profile.error}
@@ -166,7 +167,7 @@ export default function PersonPage({ params }: { params: Record<string, string> 
   ];
 
   return (
-    <div>
+    <div className={pageWidth('default')}>
       <PageHeader
         title={personLabel(p, p.id)}
         description={email ? `Person ${p.id}` : 'Personal data is hidden for your role; you can still see traits and consent.'}

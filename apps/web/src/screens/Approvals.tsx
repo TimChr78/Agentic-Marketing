@@ -4,6 +4,7 @@ import { useStore } from '../mock/store';
 import { exec } from '../api/commands';
 import type { ApprovalPolicy } from '../api/types';
 import { AuthorBadge, Button, Card, PageHeader, Pill, cx, timeAgo } from '../components/ui';
+import { pageWidth } from '../ui';
 
 const policies: { id: ApprovalPolicy; label: string; text: string }[] = [
   { id: 'none', label: 'No approvals', text: 'Single-person workspace: publish directly.' },
@@ -24,7 +25,7 @@ export function Approvals() {
   }
 
   return (
-    <div className="mx-auto max-w-[1200px]">
+    <div className={pageWidth('default')}>
       <PageHeader eyebrow="Versioning & governance" title="Approvals" />
 
       <Card title="Workspace approval policy" className="mb-5">

@@ -52,7 +52,7 @@ Read [references/tools.md](references/tools.md) for the full list with effects a
 | Area | Tools |
 |---|---|
 | Artifacts | `artifacts.types`, `.list`, `.get`, `.create`, `.updateDraft`, `.history`, `.diff`, `.requestPublish`, `.requestPublishBundle`; `approvals.list`, `approvals.get` |
-| Assets | `assets.upload` (base64, PNG/JPEG/GIF/WebP/PDF), `.list`, `.get`, `.update` (alt text), `.delete`; use the returned `url` in templates and the brand |
+| Assets | `assets.upload` (base64, PNG/JPEG/GIF/WebP/SVG/PDF; an SVG is sanitised and returns a `rendition` PNG for e-mail), `.list`, `.get`, `.update` (alt text), `.delete`; use the returned `url` in templates and the brand |
 | Brand | artifact type `brand` (one per workspace); `hostedPages.preview` renders the confirm/unsubscribe pages with a draft brand |
 | People | `profiles.find {type:"email", value}`, `profiles.get`, `profiles.events`, `profiles.list`, `consent.history`, `segments.ofProfile` |
 | Segments | `segments.preview`, `segments.members`, `segments.refresh` |

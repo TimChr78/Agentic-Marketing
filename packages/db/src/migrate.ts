@@ -69,6 +69,7 @@ const MIGRATION_RELEASES: Record<string, string> = {
   // server, and for tests. Keep the newest migration listed (a test checks it).
   '0028_server_versions.sql': '0.2.5',
   '0033_workspace_proposals.sql': '0.2.6',
+  '0034_asset_renditions.sql': '0.2.7',
 };
 
 export function releaseForMigrationHead(head: string | null): string | null {

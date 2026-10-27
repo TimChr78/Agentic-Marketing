@@ -179,3 +179,68 @@ export function purposeAllowed(basis: string, status: ConsentStatus | undefined)
   if (basis === 'legitimate_interest') return status !== 'objected' && status !== 'withdrawn' && status !== 'denied';
   return true;
 }
+
+export interface ConsentCounts {
+  granted: number;
+  denied: number;
+  withdrawn: number;
+  objected: number;
+}
+
+const EMPTY_COUNTS = (): ConsentCounts => ({ granted: 0, denied: 0, withdrawn: 0, objected: 0 });
+
+export interface PurposeConsentSummary extends ConsentCounts {
+  purpose: string;
+  /** Named channels that have rows for this purpose; `channel` is never ''. */
+  channels: ({ channel: string } & ConsentCounts)[];
+}
+
+/**
+ * How many people currently allow or refuse each purpose (and each named channel that has rows),
+ * with the same rule as sends and segments. One query per rule, never one per person.
+ */
+export async function consentSummary(tx: Tx, workspaceId: string, purposeKeys: string[]): Promise<PurposeConsentSummary[]> {
+  const overall = await tx.execute<{ purpose: string; status: ConsentStatus; n: number }>(sql`
+    WITH winner AS (
+      SELECT DISTINCT ON (c.profile_id, c.purpose) c.purpose, c.status
+      FROM consent_state c
+      WHERE c.workspace_id = ${workspaceId}
+        AND (c.channel = '' OR c.updated_at >= coalesce((
+          SELECT a.updated_at FROM consent_state a
+          WHERE a.workspace_id = c.workspace_id AND a.profile_id = c.profile_id AND a.purpose = c.purpose AND a.channel = ''
+        ), '-infinity'::timestamptz))
+      ORDER BY c.profile_id, c.purpose, (c.status IN ('withdrawn', 'objected', 'denied')) DESC, c.updated_at DESC
+    )
+    SELECT purpose, status, count(*)::int AS n FROM winner GROUP BY purpose, status`);
+  const perChannel = await tx.execute<{ channel: string; purpose: string; status: ConsentStatus; n: number }>(sql`
+    WITH ch AS (
+      SELECT DISTINCT channel FROM consent_state WHERE workspace_id = ${workspaceId} AND channel <> ''
+    ), winner AS (
+      SELECT ch.channel, c.purpose, c.status, row_number() OVER (
+        PARTITION BY ch.channel, c.profile_id, c.purpose
+        ORDER BY c.updated_at DESC, (c.status IN ('withdrawn', 'objected', 'denied')) DESC) AS rn
+      FROM ch CROSS JOIN consent_state c
+      WHERE c.workspace_id = ${workspaceId} AND c.channel IN ('', ch.channel)
+    )
+    SELECT channel, purpose, status, count(*)::int AS n FROM winner WHERE rn = 1 GROUP BY channel, purpose, status`);
+
+  const summary = new Map(
+    purposeKeys.map((purpose) => [purpose, { purpose, ...EMPTY_COUNTS(), channels: [] as PurposeConsentSummary['channels'] }]),
+  );
+  for (const row of overall.rows) {
+    const s = summary.get(row.purpose);
+    if (s) s[row.status] += Number(row.n);
+  }
+  for (const row of perChannel.rows) {
+    const s = summary.get(row.purpose);
+    if (!s) continue;
+    let channel = s.channels.find((c) => c.channel === row.channel);
+    if (!channel) {
+      channel = { channel: row.channel, ...EMPTY_COUNTS() };
+      s.channels.push(channel);
+    }
+    channel[row.status] += Number(row.n);
+  }
+  for (const s of summary.values()) s.channels.sort((a, b) => a.channel.localeCompare(b.channel));
+  return [...summary.values()];
+}

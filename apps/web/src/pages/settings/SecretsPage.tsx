@@ -26,6 +26,7 @@ import {
   useConfirm,
   useToast,
 } from '../../ui';
+import { pageWidth } from '../../ui/layout';
 
 type Secret = Out<'secrets.list'>['secrets'][number];
 type Editing = { mode: 'add' } | { mode: 'rotate'; secret: Secret };
@@ -77,7 +78,7 @@ export default function SecretsPage() {
   };
 
   return (
-    <div>
+    <div className={pageWidth('default')}>
       <PageHeader
         title="Secrets"
         description="Credentials for providers, integrations and agents. Values are encrypted and can never be read back; you can only replace them."

@@ -22,7 +22,7 @@ export function AssetPicker({ onPick, onClose, kind = 'image', title = 'Choose a
       title={title}
       footer={
         <>
-          <input ref={file} type="file" hidden accept={kind === 'image' ? 'image/png,image/jpeg,image/gif,image/webp' : 'application/pdf'} onChange={async (e) => {
+          <input ref={file} type="file" hidden accept={kind === 'image' ? 'image/png,image/jpeg,image/gif,image/webp,image/svg+xml' : 'application/pdf'} onChange={async (e) => {
             const f = e.target.files?.[0];
             e.target.value = '';
             if (!f) return;
@@ -62,7 +62,7 @@ export function AssetPicker({ onPick, onClose, kind = 'image', title = 'Choose a
           ) : list.data!.assets.length ? (
             <AssetGrid assets={list.data!.assets} onOpen={setSelected} selectedId={selected?.id} />
           ) : (
-            <EmptyState compact title={q ? 'Nothing matches' : 'No images yet'}>{q ? 'Try another search.' : 'Upload a PNG, JPEG, GIF or WebP.'}</EmptyState>
+            <EmptyState compact title={q ? 'Nothing matches' : 'No images yet'}>{q ? 'Try another search.' : 'Upload a PNG, JPEG, GIF, WebP or SVG.'}</EmptyState>
           )}
         </div>
       </div>

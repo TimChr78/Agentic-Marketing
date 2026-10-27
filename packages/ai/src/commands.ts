@@ -5,7 +5,7 @@ import { and, desc, eq, gte, lt, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { classifyCommands } from './classify';
 import { copilotCommands } from './copilot';
-import { testPrompt, testRunResults } from './prompts';
+import { listTestRuns, testPrompt, testRunResults } from './prompts';
 import { createAiProvider, deleteAiProvider, listAiProviders, updateAiProvider } from './providers';
 
 // The decision log and usage: every AI call (journey steps, prompt tests, copilot turns) with
@@ -93,20 +93,39 @@ export const listAiCalls = defineCommand({
   },
 });
 
+// Estimated list prices in USD per million tokens (input, output) by model id. Estimates only:
+// providers change prices and negotiated rates differ. A model not in the table has no cost.
+const MODEL_PRICES: Record<string, { input: number; output: number }> = {
+  'claude-opus-4-1': { input: 15, output: 75 },
+  'claude-sonnet-4-5': { input: 3, output: 15 },
+  'claude-haiku-4-5': { input: 1, output: 5 },
+  'gpt-4o': { input: 2.5, output: 10 },
+  'gpt-4o-mini': { input: 0.15, output: 0.6 },
+};
+
+/** An estimated cost in USD, or null when the model is not in the table. */
+function estimatedCost(model: string | null, inputTokens: number, outputTokens: number): number | null {
+  const price = model ? MODEL_PRICES[model] : undefined;
+  if (!price) return null;
+  return Math.round(((inputTokens * price.input + outputTokens * price.output) / 1_000_000) * 1e6) / 1e6;
+}
+
 export const aiUsage = defineCommand({
   name: 'ai.usage',
   title: 'AI usage',
-  description: 'Tokens, calls and fallbacks per day and kind over the last days.',
+  description: 'Tokens, calls, fallbacks and estimated cost per day, kind and model over the last days.',
   input: z.object({ days: z.number().int().min(1).max(90).default(30) }),
   output: z.object({
     days: z.array(
       z.object({
         day: z.string(),
         kind: z.string(),
+        model: z.string().nullable().describe('The model id the calls used; null when none was recorded'),
         calls: z.number(),
         fallbacks: z.number(),
         inputTokens: z.number(),
         outputTokens: z.number(),
+        cost: z.number().nullable().describe('Estimated USD from a price table in code; null for an unknown model'),
       }),
     ),
   }),
@@ -119,6 +138,7 @@ export const aiUsage = defineCommand({
       .select({
         day,
         kind: c.kind,
+        model: c.model,
         calls: sql<number>`count(*)::int`,
         fallbacks: sql<number>`count(*) FILTER (WHERE ${c.status} IN ('fallback', 'failed'))::int`,
         inputTokens: sql<number>`coalesce(sum(${c.inputTokens}), 0)::int`,
@@ -126,9 +146,9 @@ export const aiUsage = defineCommand({
       })
       .from(c)
       .where(gte(c.createdAt, new Date(Date.now() - input.days * 86_400_000)))
-      .groupBy(day, c.kind)
-      .orderBy(day);
-    return { days: rows };
+      .groupBy(day, c.kind, c.model)
+      .orderBy(day, c.kind);
+    return { days: rows.map((r) => ({ ...r, cost: estimatedCost(r.model, r.inputTokens, r.outputTokens) })) };
   },
 });
 
@@ -139,6 +159,7 @@ export const aiCommands = [
   deleteAiProvider,
   testPrompt,
   testRunResults,
+  listTestRuns,
   listAiCalls,
   aiUsage,
   ...classifyCommands,
