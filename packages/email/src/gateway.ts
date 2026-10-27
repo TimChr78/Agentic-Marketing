@@ -2,18 +2,35 @@ import { DEFAULT_PURPOSES, type EmailTemplate, publishedSingleton } from '@agent
 import { newId, newUuid } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import type { EventStore, MessageEvent } from '@agentic-marketing/events';
-import { consentStateOf, currentConsent, profileForMessage, purposeAllowed } from '@agentic-marketing/profiles';
+import {
+  consentStateOf,
+  currentConsent,
+  effectiveTopicStatus,
+  profileForMessage,
+  purposeAllowed,
+  topicChoicesOf,
+} from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, lt, sql } from 'drizzle-orm';
 import { type AdapterDeps, MESSAGE_ID_HEADER } from './adapters';
+import { blockResolver } from './blocks';
 import { applyDeliveryEvents } from './deliveryEvents';
-import { type ClickLink, type LinkSigner, tagLinks, tagTextLinks, trackLinks, type UnsubscribeLink } from './links';
+import {
+  type ClickLink,
+  type LinkSigner,
+  type TopicLink,
+  tagLinks,
+  tagTextLinks,
+  trackLinks,
+  type UnsubscribeLink,
+  type WebLink,
+} from './links';
 import { decisionEvent, defer, MAX_ATTEMPTS, retryDelaySeconds } from './outbox';
 import { checkPolicy } from './policy';
 import { transportFor } from './providers';
 import { deliverPush } from './push/gateway';
-import { renderTemplate } from './render';
+import { renderSubject, renderTemplate } from './render';
 import { deliverSms } from './sms/gateway';
 
 // The send gateway (ADR-0007). Every e-mail is requested here and goes out through an outbox:
@@ -27,6 +44,11 @@ export interface EmailServices {
   adapterDeps: AdapterDeps;
   /** Click tracking (on by default, ADR: clicks on, open pixels off). */
   trackClicks: boolean;
+  /**
+   * One request under the egress policy, for templates.check link reachability: HEAD, or a ranged
+   * GET. Wired by the server so the checks never open a socket of their own.
+   */
+  checkLinks?: (url: string, method: 'HEAD' | 'GET') => Promise<{ status: number }>;
 }
 
 declare module '@agentic-marketing/commands' {
@@ -40,7 +62,15 @@ export interface EmailRequest {
   templateId: string;
   idempotencyKey?: string;
   journeyId?: string;
+  /** Overrides the template's topic, e.g. a broadcast's choice. */
+  topic?: string;
   data?: Record<string, unknown>;
+  /** A broadcast subject-test variant, recorded on the message for per-variant reporting. */
+  variant?: string;
+  /** Replaces the template's subject (a subject test), rendered with the same variables. */
+  subject?: string;
+  /** Hold the message until then (a recipient-local send window). */
+  notBefore?: Date;
 }
 
 export interface Decision {
@@ -77,8 +107,35 @@ type Verdict =
   | { ok: true; email: string; emailHash: string; vars: Record<string, unknown>; basis: string; profileId: string }
   | { ok: false; reason: string };
 
-/** Lawful basis, address and suppression for one person and purpose. */
-export async function checkRecipient(tx: Tx, workspaceId: string, kp: KeyProvider, profileId: string, purpose: string): Promise<Verdict> {
+/**
+ * Why a topic stops a marketing message, or null. Transactional purposes (contract and legal
+ * obligation) are never topic-gated; a topic the purpose does not define is ignored.
+ */
+export async function topicSuppression(
+  tx: Tx,
+  workspaceId: string,
+  profileId: string,
+  purpose: { key: string; basis: string; topics?: { key: string; default: 'subscribed' | 'unsubscribed' }[] },
+  topic: string | null | undefined,
+) {
+  if (!topic || purpose.basis === 'contract' || purpose.basis === 'legal_obligation') return null;
+  const def = (purpose.topics ?? []).find((t) => t.key === topic);
+  if (!def) return null;
+  const status = effectiveTopicStatus(await topicChoicesOf(tx, workspaceId, profileId), def);
+  return status === 'subscribed'
+    ? null
+    : `topic_unsubscribed: the person unsubscribed from topic "${topic}" under purpose "${purpose.key}"`;
+}
+
+/** Lawful basis, topic, address and suppression for one person and purpose. */
+export async function checkRecipient(
+  tx: Tx,
+  workspaceId: string,
+  kp: KeyProvider,
+  profileId: string,
+  purpose: string,
+  topic?: string | null,
+): Promise<Verdict> {
   const person = await profileForMessage(tx, workspaceId, profileId, kp);
   if (!person) return { ok: false, reason: 'no_profile: the person does not exist (or was erased)' };
   if (!person.email || !person.emailHash) return { ok: false, reason: 'no_address: no e-mail address is known for this person' };
@@ -90,6 +147,8 @@ export async function checkRecipient(tx: Tx, workspaceId: string, kp: KeyProvide
       ok: false,
       reason: `no_lawful_basis: purpose "${purpose}" is based on ${p.basis.replace('_', ' ')} and the person's status is ${state?.status ?? 'unknown (no record)'}`,
     };
+  const blocked = await topicSuppression(tx, workspaceId, person.id, p, topic);
+  if (blocked) return { ok: false, reason: blocked };
   const [sup] = await tx
     .select()
     .from(schema.suppressions)
@@ -109,6 +168,7 @@ export async function requestEmail(tx: Tx, workspaceId: string, kp: KeyProvider,
 
   const tpl = await publishedTemplate(tx, req.templateId);
   const purpose = tpl?.template?.purpose ?? 'unknown';
+  const topic = req.topic ?? tpl?.template?.topic ?? null;
   let status: Decision['status'] = 'queued';
   let reason: string | null = null;
   let profileId = req.profileId;
@@ -116,7 +176,7 @@ export async function requestEmail(tx: Tx, workspaceId: string, kp: KeyProvider,
   if (!tpl) [status, reason] = ['failed', `no_template: ${req.templateId} is not an e-mail template in this workspace`];
   else if (!tpl.template) [status, reason] = ['failed', `not_published: template ${req.templateId} has no published version`];
   else {
-    const v = await checkRecipient(tx, workspaceId, kp, req.profileId, purpose);
+    const v = await checkRecipient(tx, workspaceId, kp, req.profileId, purpose, topic);
     if (!v.ok) [status, reason] = ['suppressed', v.reason];
     else [profileId, recipientHash] = [v.profileId, v.emailHash];
   }
@@ -128,13 +188,16 @@ export async function requestEmail(tx: Tx, workspaceId: string, kp: KeyProvider,
       idempotencyKey: key,
       profileId,
       purpose,
+      topic,
       templateId: req.templateId,
       templateVersion: tpl?.version ?? null,
       journeyId: req.journeyId ?? null,
       status,
       reason,
       recipientHash,
-      data: req.data ?? {},
+      variant: req.variant ?? null,
+      notBefore: req.notBefore ?? null,
+      data: req.subject ? { ...(req.data ?? {}), __subject: req.subject } : (req.data ?? {}),
     })
     .returning();
   await events.insertMessageEvents([decisionEvent(m, status, reason ?? '')]);
@@ -210,7 +273,7 @@ async function deliverOne(db: Db, ws: string, id: string, deps: { kp: KeyProvide
     };
     const tpl = m.templateId ? await publishedTemplateVersion(tx, m.templateId, m.templateVersion) : null;
     if (!tpl) return finish('failed', 'no_template: the template version is gone');
-    const v = await checkRecipient(tx, ws, deps.kp, m.profileId ?? '', m.purpose);
+    const v = await checkRecipient(tx, ws, deps.kp, m.profileId ?? '', m.purpose, m.topic ?? tpl.topic);
     if (!v.ok) return finish('suppressed', v.reason);
     const hold = await checkPolicy(
       tx,
@@ -225,20 +288,46 @@ async function deliverOne(db: Db, ws: string, id: string, deps: { kp: KeyProvide
     const provider = providers.find((p) => p.useFor.includes(stream));
     if (!provider) return finish('failed', `no_provider: no enabled e-mail provider is set up for ${stream} messages`);
 
-    const unsubscribe = `${deps.email.publicUrl}/u/${deps.email.links.sign({ w: ws, p: v.profileId, u: m.purpose, m: m.id } satisfies UnsubscribeLink)}`;
+    const unsubscribePayload = { w: ws, p: v.profileId, u: m.purpose, m: m.id } satisfies UnsubscribeLink;
+    const unsubscribeToken = deps.email.links.sign(unsubscribePayload);
+    const unsubscribe = `${deps.email.publicUrl}/u/${unsubscribeToken}`;
+    const preferences = `${deps.email.publicUrl}/u/p/${unsubscribeToken}`;
+    const effectiveTopic = m.topic ?? tpl.topic ?? null;
+    // A topic link never withdraws the purpose; it only turns that finer choice off.
+    const topicUnsubscribe = effectiveTopic
+      ? `${deps.email.publicUrl}/u/t/${deps.email.links.sign({ ...unsubscribePayload, topic: effectiveTopic } satisfies TopicLink)}`
+      : null;
+    // "View in browser" is signed per message and recipient; it re-renders this exact e-mail for
+    // this person on the links host (#100). Like the unsubscribe link, it lasts as long as the
+    // message is kept; the route also understands an optional expiry (`x`) for future use.
+    const web = `${deps.email.publicUrl}/n/w/${deps.email.links.sign({ w: ws, m: m.id } satisfies WebLink)}`;
+    const vars = {
+      ...m.data,
+      profile: v.vars,
+      unsubscribe_url: unsubscribe,
+      preferences_url: preferences,
+      web_url: web,
+      ...(topicUnsubscribe ? { topic_unsubscribe_url: topicUnsubscribe } : {}),
+    };
     let rendered: Awaited<ReturnType<typeof renderTemplate>>;
     try {
-      rendered = await renderTemplate(tpl, { ...m.data, profile: v.vars, unsubscribe_url: unsubscribe, preferences_url: unsubscribe });
+      rendered = await renderTemplate(tpl, vars, { blocks: blockResolver(tx) });
+      // A subject test overrides the template subject; render it with the same variables.
+      const subject = m.data.__subject;
+      if (typeof subject === 'string') rendered.subject = await renderSubject(subject, vars);
     } catch (e) {
       return finish('failed', `render_error: ${(e as Error).message.split('\n')[0]}`);
     }
     const skipUtm = [deps.email.publicUrl];
     const tagged = tpl.utm ? tagLinks(rendered.html, tpl.utm, skipUtm) : rendered.html;
     const text = tpl.utm ? tagTextLinks(rendered.text, tpl.utm, skipUtm) : rendered.text;
+    const ownLinks = [unsubscribe, preferences, web, ...(topicUnsubscribe ? [topicUnsubscribe] : [])];
     const html = deps.email.trackClicks
-      ? trackLinks(tagged, (url) => `${deps.email.publicUrl}/c/${deps.email.links.sign({ w: ws, m: m.id, url } satisfies ClickLink)}`, [
-          unsubscribe,
-        ])
+      ? trackLinks(
+          tagged,
+          (url) => `${deps.email.publicUrl}/c/${deps.email.links.sign({ w: ws, m: m.id, url } satisfies ClickLink)}`,
+          ownLinks,
+        )
       : tagged;
     const headers: Record<string, string> = { [MESSAGE_ID_HEADER]: m.id };
     if (stream === 'marketing') {

@@ -7,6 +7,7 @@ import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, gte, inArray, sql } from 'drizzle-orm';
 import type { Decision, EmailServices } from '../gateway';
+import { topicSuppression } from '../gateway';
 import { decisionEvent, defer, MAX_ATTEMPTS, retryDelaySeconds } from '../outbox';
 import { checkPolicy, isMarketing } from '../policy';
 import { billingOf, smsTransportFor, smsWebhookPath } from './providers';
@@ -20,7 +21,11 @@ export interface SmsRequest {
   templateId: string;
   idempotencyKey?: string;
   journeyId?: string;
+  /** Overrides the template's topic, e.g. a broadcast's choice. */
+  topic?: string;
   data?: Record<string, unknown>;
+  /** Hold the message until then (a recipient-local send window). */
+  notBefore?: Date;
 }
 
 type Verdict =
@@ -36,6 +41,7 @@ export async function checkSmsRecipient(
   kp: KeyProvider,
   profileId: string,
   purpose: string,
+  topic?: string | null,
 ): Promise<Verdict> {
   const person = await profileForMessage(tx, workspaceId, profileId, kp);
   if (!person) return { ok: false, reason: 'no_profile: the person does not exist (or was erased)' };
@@ -48,6 +54,8 @@ export async function checkSmsRecipient(
       ok: false,
       reason: `no_lawful_basis: purpose "${purpose}" is based on ${p.basis.replace('_', ' ')} and the person's status is ${state?.status ?? 'unknown (no record)'}`,
     };
+  const blocked = await topicSuppression(tx, workspaceId, person.id, p, topic);
+  if (blocked) return { ok: false, reason: blocked };
   const [sup] = await tx
     .select()
     .from(schema.suppressions)
@@ -86,6 +94,7 @@ export async function requestSms(tx: Tx, workspaceId: string, kp: KeyProvider, e
 
   const tpl = await publishedSmsTemplate(tx, req.templateId);
   const purpose = tpl?.template?.purpose ?? 'unknown';
+  const topic = req.topic ?? tpl?.template?.topic ?? null;
   let status: Decision['status'] = 'queued';
   let reason: string | null = null;
   let profileId = req.profileId;
@@ -93,7 +102,7 @@ export async function requestSms(tx: Tx, workspaceId: string, kp: KeyProvider, e
   if (!tpl) [status, reason] = ['failed', `no_template: ${req.templateId} is not an SMS template in this workspace`];
   else if (!tpl.template) [status, reason] = ['failed', `not_published: template ${req.templateId} has no published version`];
   else {
-    const v = await checkSmsRecipient(tx, workspaceId, kp, req.profileId, purpose);
+    const v = await checkSmsRecipient(tx, workspaceId, kp, req.profileId, purpose, topic);
     if (!v.ok) [status, reason] = ['suppressed', v.reason];
     else [profileId, recipientHash] = [v.profileId, v.phoneHash];
   }
@@ -106,12 +115,14 @@ export async function requestSms(tx: Tx, workspaceId: string, kp: KeyProvider, e
       channel: 'sms',
       profileId,
       purpose,
+      topic,
       templateId: req.templateId,
       templateVersion: tpl?.version ?? null,
       journeyId: req.journeyId ?? null,
       status,
       reason,
       recipientHash,
+      notBefore: req.notBefore ?? null,
       data: req.data ?? {},
     })
     .returning();
@@ -146,7 +157,7 @@ export async function deliverSms(db: Db, ws: string, id: string, deps: { kp: Key
     };
     const tpl = m.templateId ? await publishedSmsTemplate(tx, m.templateId, m.templateVersion) : null;
     if (!tpl?.template) return finish('failed', 'no_template: the template version is gone');
-    const v = await checkSmsRecipient(tx, ws, deps.kp, m.profileId ?? '', m.purpose);
+    const v = await checkSmsRecipient(tx, ws, deps.kp, m.profileId ?? '', m.purpose, m.topic ?? tpl.template.topic);
     if (!v.ok) return finish('suppressed', v.reason);
     const purposes = await purposesOf(tx);
     const hold = await checkPolicy(

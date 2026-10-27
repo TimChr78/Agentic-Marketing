@@ -36,33 +36,23 @@ test('create an experience with two variants in the editor and save', async ({ p
 
 test('edit a purpose description and save, without renaming its key', async ({ page }) => {
   await signIn(page, PEOPLE.builder);
-  const created = await call(page.request, 'artifacts.create', {
-    type: 'purposes',
-    name: 'Purposes',
-    content: {
-      purposes: [
-        {
-          key: 'marketing_email',
-          name: 'Marketing e-mail',
-          description: 'News and offers by e-mail.',
-          basis: 'consent',
-          channels: ['email'],
-          requiresDoubleOptIn: false,
-        },
-      ],
-    },
-  });
-  await page.goto(`/artifacts/${created.artifactId}`);
+  const list = await call<{ artifacts: { id: string }[] }>(page.request, 'artifacts.list', { type: 'purposes' });
+  const artifactId = list.artifacts[0].id;
+  const before = await call<{ version: { content: { purposes: { key: string }[] } } }>(page.request, 'artifacts.get', { artifactId });
+  const n = before.version.content.purposes.findIndex((p) => p.key === 'marketing_email') + 1;
+  await page.goto(`/artifacts/${artifactId}`);
 
   // marketing_email is in force, so its key is locked and only the description changes.
-  await expect(page.getByLabel('Key of purpose 1')).not.toBeEditable();
-  await expect(page.getByLabel('Description of purpose 1')).toHaveValue('News and offers by e-mail.');
-  await page.getByLabel('Description of purpose 1').fill('Weekly news and occasional offers, by e-mail.');
+  await expect(page.getByLabel(`Key of purpose ${n}`)).not.toBeEditable();
+  await expect(page.getByLabel(`Description of purpose ${n}`)).toHaveValue('News and offers by e-mail.');
+  await page.getByLabel(`Description of purpose ${n}`).fill('Weekly news and occasional offers, by e-mail.');
   await page.getByRole('button', { name: 'Save draft' }).click();
-  await expect(page.getByText('Draft saved.')).toBeVisible();
+  await expect(page.getByText(/Saved as draft v|Draft saved\./)).toBeVisible();
 
-  const saved = await call(page.request, 'artifacts.get', { artifactId: created.artifactId });
-  expect(saved.version.content.purposes[0]).toMatchObject({
+  const saved = await call<{ version: { content: { purposes: { key: string; description: string }[] } } }>(page.request, 'artifacts.get', {
+    artifactId,
+  });
+  expect(saved.version.content.purposes.find((p) => p.key === 'marketing_email')).toMatchObject({
     key: 'marketing_email',
     description: 'Weekly news and occasional offers, by e-mail.',
   });

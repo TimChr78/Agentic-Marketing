@@ -1,15 +1,17 @@
-import { contentValidators, DEFAULT_PURPOSES, publishedSingleton, type SmsTemplate } from '@agentic-marketing/artifacts';
+import { contentValidators, DEFAULT_PURPOSES, publishedSingleton, publishValidators, type SmsTemplate } from '@agentic-marketing/artifacts';
 import { defineCommand } from '@agentic-marketing/commands';
 import { AppError } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
 import { and, desc, eq } from 'drizzle-orm';
 import { z } from 'zod';
 import { isMarketing } from '../policy';
+import { topicProblems } from '../topicValidation';
 import { requestSms } from './gateway';
 import { billingOf } from './providers';
-import { renderSms, validateSmsTemplate } from './render';
+import { renderSms, STOP_FOOTER, validateSmsTemplate } from './render';
 
 contentValidators.set('sms_template', (c) => validateSmsTemplate(c as SmsTemplate));
+publishValidators.set('sms_template', async (c, tx) => topicProblems(tx, (c as SmsTemplate).purpose, (c as SmsTemplate).topic));
 
 const Status = z.enum(['queued', 'sending', 'sent', 'suppressed', 'failed', 'delivered', 'bounced', 'complained']);
 
@@ -85,6 +87,10 @@ export const previewSms = defineCommand({
     if (text.encoding === 'UCS-2') warnings.push('Characters outside GSM-7 (e.g. emoji) cut a segment to 70 characters');
     if (!purposes.find((p) => p.key === t.purpose)?.channels.includes('sms'))
       warnings.push(`Purpose "${t.purpose}" is not marked for the sms channel`);
+    // Marketing texts always leave with an opt-out; say so when the body itself has none, so the
+    // author knows the wording arrives at the end rather than in the copy.
+    if (stream === 'marketing' && text.body.endsWith(STOP_FOOTER))
+      warnings.push('No opt-out wording in the message: " Reply STOP to opt out." is added to every marketing text');
     return {
       version: v.number,
       body: text.body,

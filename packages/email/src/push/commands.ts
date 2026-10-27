@@ -1,15 +1,23 @@
-import { contentValidators, DEFAULT_PURPOSES, type PushTemplate, publishedSingleton } from '@agentic-marketing/artifacts';
+import {
+  contentValidators,
+  DEFAULT_PURPOSES,
+  type PushTemplate,
+  publishedSingleton,
+  publishValidators,
+} from '@agentic-marketing/artifacts';
 import { defineCommand } from '@agentic-marketing/commands';
 import { AppError } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
 import { profileForMessage } from '@agentic-marketing/profiles';
 import { and, desc, eq } from 'drizzle-orm';
 import { z } from 'zod';
+import { topicProblems } from '../topicValidation';
 import { MAX_PAYLOAD } from './crypto';
 import { devicesOf, requestPush } from './gateway';
 import { renderPush, validatePushTemplate } from './render';
 
 contentValidators.set('push_template', (c) => validatePushTemplate(c as PushTemplate));
+publishValidators.set('push_template', async (c, tx) => topicProblems(tx, (c as PushTemplate).purpose, (c as PushTemplate).topic));
 
 const Status = z.enum(['queued', 'sending', 'sent', 'suppressed', 'failed', 'delivered', 'bounced', 'complained']);
 const ProfileId = z.string().regex(/^prf_[0-9a-f]{32}$/);

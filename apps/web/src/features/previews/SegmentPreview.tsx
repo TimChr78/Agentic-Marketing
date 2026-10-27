@@ -5,10 +5,19 @@ import { useApi } from '../../app/useApi';
 import { Alert, Card, Skeleton } from '../../ui';
 import { ConditionView } from './ConditionView';
 
-/** A segment's condition in words and its estimated size now (#41). */
-export function SegmentPreview({ artifactId, version, content }: { artifactId: string; version?: number; content: { description?: string; condition?: unknown } }) {
+/** A segment's condition in words, or its mode, and its estimated size now (#41, #83). */
+export function SegmentPreview({
+  artifactId,
+  version,
+  content,
+}: {
+  artifactId: string;
+  version?: number;
+  content: { description?: string; mode?: 'dynamic' | 'static' | 'snapshot'; condition?: unknown; sourceSegment?: string; snapshotVersion?: number };
+}) {
   const { can } = useSession();
   const size = useApi(() => api.call('segments.preview', { artifactId, version }), [artifactId, version], { skip: !can('profiles:read') });
+  const mode = content.mode ?? 'dynamic';
   return (
     <div className="space-y-4">
       {content.description && <p className="text-[13px] text-fg-2">{content.description}</p>}
@@ -30,7 +39,21 @@ export function SegmentPreview({ artifactId, version, content }: { artifactId: s
         </div>
       </div>
       <Card title="Who is in it">
-        <div className="p-4">{content.condition ? <ConditionView condition={content.condition} /> : <Alert tone="warn">No condition yet.</Alert>}</div>
+        <div className="p-4">
+          {mode === 'dynamic' ? (
+            content.condition ? (
+              <ConditionView condition={content.condition} />
+            ) : (
+              <Alert tone="warn">No condition yet.</Alert>
+            )
+          ) : (
+            <p className="text-[13px] text-fg-2">
+              {mode === 'snapshot'
+                ? `A frozen snapshot of ${content.sourceSegment ?? 'another segment'}${content.snapshotVersion ? ` at v${content.snapshotVersion}` : ''}. Its members stay fixed until it is refreshed.`
+                : 'A static list: an explicit set of people, changed by hand, CSV or API. A refresh never changes it.'}
+            </p>
+          )}
+        </div>
       </Card>
     </div>
   );

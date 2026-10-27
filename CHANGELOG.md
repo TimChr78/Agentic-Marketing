@@ -2,6 +2,34 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+[Phase 15](docs/architecture/roadmap-wave-3.md#phase-15-newsletter-and-lifecycle-e-mail): what a newsletter publisher expects from Kit, Beehiiv or Buttondown. Issues are built from shared blocks and checked before they go out; readers choose topics; every issue has a web version and can be published to an archive with RSS; subject lines can be tested; audiences can be fixed lists; and journeys can wait for a condition. REST and MCP stay backwards compatible: new commands, new optional fields and new template variables. Five migrations run at start-up, and one new public path (`/n`) needs a proxy rule where proxies filter paths.
+
+### Added
+
+- **Reusable e-mail blocks (#73).** A new `email_block` artifact holds an MJML fragment with typed parameters (text, url, image, color, html); templates include its published version with `{% block 'blk_…', title: 'This week' %}`. Text parameters are escaped, html ones inserted raw; required and URL parameters are checked. A template can publish only with published blocks, and `artifacts.requestPublishBundle` takes a new block and its template together. `blocks.preview` and `blocks.usage` (which templates use a block); Design → Blocks in the admin UI.
+- **Pre-send checks (#90).** `templates.check` lists concrete findings (blocking, warning, info) for compliance, links, images, size (Gmail clipping), personalisation and the subject line; blocking ones (no unsubscribe link, a `javascript:` link, a missing asset) refuse publishing. Link reachability is checked on request only, through the egress guard, cached for an hour, and never for personalised or the platform's own links. The template preview and the approval drawer show the checks.
+- **Topics and a preference centre (#84).** A purpose may define topics (e.g. `newsletter`, `product_news`); templates and broadcasts may name one. People choose topics on a branded preference centre (`preferences_url`, now `/u/p/…`); a message for a refused topic is suppressed (`topic_unsubscribed`); `topic_unsubscribe_url` leaves just that topic. Segments can use `{ topic: '<key>' }`. Every choice is recorded with its source; `topics.preferences`, `topics.set` (agents may only record an unsubscribe), topics in `purposes.list` and counts in `consent.summary`; `profiles.export` includes topic choices and history.
+- **Web version and newsletter archive (#100).** `{{ web_url }}` in a template is a signed "view in browser" link that shows that e-mail to its recipient. A workspace can publish an archive on the links host at `/n/<slug>/` (Design → Brand → Newsletter archive): an index, one page per sent issue (rendered without anyone's personal data, with Open Graph and JSON-LD), RSS and a sitemap. Broadcasts opt in with `archive: { publish: true }`; `archive.issues` lists them.
+- **Subject line tests (#88).** A broadcast's `subjectTest` sends 2–4 subjects to a sample (10–50%), then the winning subject to everyone else after `decideAfter`, chosen by clicks (default) or opens; ties and samples under 20 per variant fall back to the first subject. `broadcasts.status` shows the variants and the winner; `messages.stats` filters by variant.
+- **Send windows (#70).** A broadcast's `sendWindow` (e.g. 09:00–17:00 on weekdays) holds each message until the window opens in the reader's time zone, and skips readers beyond `maxDelay` (`outside_send_window`).
+- **Static lists and snapshots (#83).** Segments have a `mode`: `dynamic` (as before), `static` (people added by hand, by id or e-mail, or by CSV import with per-row results and history) or `snapshot` (a frozen copy of another segment, changed only by `audiences.refreshSnapshot`). Membership is not consent: sends still check it. Commands `audiences.add`, `.remove`, `.import`, `.imports`, `.snapshot`, `.refreshSnapshot`.
+- **Wait until (#92).** A journey step `waitUntil` holds a person until a segment condition matches, checked on their events and segment changes (with a recheck and a timeout up to 90 days), and continues on matched or timeout.
+- **Entry keys (#93).** An event trigger can enter people once per business key (e.g. `order_id`) instead of once per event, with `onMissing` skip or fallback; `journeys.stats` counts skipped duplicates.
+
+### Changed
+
+- **A registry guard:** registering a second content or publish check for the same artifact type now fails at start-up. Two Phase 15 features each registered the e-mail template's publish check, and the second silently replaced the first.
+
+### Upgrading from 0.2.7
+
+- **Migrations:** `0035_topic_preferences.sql`, `0036_archive_slugs.sql`, `0037_subject_tests.sql`, `0038_static_audiences.sql` and `0039_journey_wait_until_entry_keys.sql` (new tables, columns and indexes, and one function). Existing templates, broadcasts, segments and journeys behave as before until they use the new options.
+- **Configuration:** none.
+- **Breaking changes:** none. `preferences_url` now opens the preference centre instead of the unsubscribe link (the one-click unsubscribe link and `List-Unsubscribe` headers are unchanged).
+- **Manual steps:** if a proxy or tunnel lets through only some public paths (a path rule), add `n` for the web version and the archive, e.g. `^/(f|u|c|a|n|hooks)(/[^/.%][^/%]*)+/?$`. The public-only listener (`PUBLIC_PORT`) needs nothing. Nothing else is needed; topics, the archive, blocks and tests are opt-in.
+- **Upgrade:** download `agentic-marketing-compose-<version>.tar.gz`, replace `docker-compose.yml` with its copy, check your configuration with the new image (`AM_VERSION=<version> docker compose run --rm --no-deps -T app am doctor --env-file - < .env`), then set `AM_VERSION=<version>` in `.env` and `docker compose pull && docker compose up -d` (Helm: the chart of the same version). Then `docker compose exec app am doctor`.
+
 ## [0.2.7] - 2026-10-27
 
 [Phase 14](docs/architecture/roadmap-wave-3.md#phase-14-admin-ui-for-daily-use): the screens used every week are quick and roomy. Pages use the window, the journey builder gets the space (with full screen and live stats), lists load a third less, lists filter on the server, experiences and purposes get real editors, and SVG logos work. REST and MCP stay backwards compatible: new commands, new optional inputs and new output fields. One migration runs at start-up.

@@ -1,4 +1,7 @@
 export * from './adapters';
+export * from './blocks';
+export * from './blockTags';
+export * from './checks';
 export * from './deliverability';
 export * from './gateway';
 export * from './links';
@@ -20,3 +23,4 @@ export * from './sms/providers';
 export * from './sms/routes';
 export * from './templates';
 export * from './testSend';
+export * from './topicValidation';

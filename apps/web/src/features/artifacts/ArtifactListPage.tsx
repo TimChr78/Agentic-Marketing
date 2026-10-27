@@ -21,6 +21,8 @@ export interface CreateSpec<S> {
   validate?: (state: S) => Record<string, string>;
   /** The draft content to create. */
   content: (name: string, state: S) => unknown;
+  /** Create differently, e.g. a command that also copies members; defaults to artifacts.create with `content`. */
+  create?: (name: string, state: S) => Promise<{ artifactId: string }>;
   defaultName?: string;
 }
 
@@ -183,7 +185,9 @@ function CreateDialog<S>({ type, spec, onClose }: { type: string; spec: CreateSp
     setBusy(true);
     setError(null);
     try {
-      const r = await api.call('artifacts.create', { type: type as never, name: name.trim(), content: spec.content(name.trim(), state) });
+      const r = spec.create
+        ? await spec.create(name.trim(), state)
+        : await api.call('artifacts.create', { type: type as never, name: name.trim(), content: spec.content(name.trim(), state) });
       toast.success(`Created “${name.trim()}” as a draft.`);
       onClose();
       navigate(artifactPath(type, r.artifactId));

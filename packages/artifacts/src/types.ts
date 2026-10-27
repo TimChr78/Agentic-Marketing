@@ -15,6 +15,7 @@ const nodeKinds = [
   'trigger',
   'wait',
   'waitEvent',
+  'waitUntil',
   'branch',
   'split',
   'email',
@@ -44,7 +45,7 @@ const journeyNode = z.object({
     .array(z.object({ to: z.string(), label: z.string().max(40).optional() }))
     .optional()
     .describe(
-      'Steps this one continues to, in order (waitEvent/goal: [matched, timeout]; branch: [yes, no]; split: one per weight). Omit to continue with the following node.',
+      'Steps this one continues to, in order (waitEvent/goal/waitUntil: [matched, timeout]; branch: [yes, no]; split: one per weight). Omit to continue with the following node.',
     ),
   position: z.object({ x: z.number(), y: z.number() }).optional().describe('Canvas position; no effect on behaviour'),
 });
@@ -52,6 +53,18 @@ const journeyNode = z.object({
 const Iso = z.string().regex(/^P(\d+W|\d+D|T\d+H|T\d+M|\d+DT\d+H)$/, 'ISO 8601 duration such as P2D, PT6H, P1W');
 const SegmentRef = z.string().regex(/^seg_[0-9a-f]{32}$/);
 const PromptRef = z.string().regex(/^prm_[0-9a-f]{32}$/, 'A prompt id (prm_…)');
+
+/** Seconds in an ISO duration; the node schemas reject durations outside their bounds. */
+function secondsIn(iso: string): number {
+  const units: Record<string, number> = { W: 604_800, D: 86_400, H: 3_600, M: 60 };
+  let total = 0;
+  for (const [, n, unit] of iso
+    .replace(/^P/, '')
+    .replace('T', '')
+    .matchAll(/(\d+)([WDHM])/g))
+    total += Number(n) * units[unit];
+  return total;
+}
 
 /** Settings per node kind (validated on save). Kinds without one cannot be published yet. */
 export const journeyNodeConfigs = {
@@ -63,10 +76,41 @@ export const journeyNodeConfigs = {
         .enum(['once', 'after_exit', 'always'])
         .default('once')
         .describe('once: never again; after_exit: when not in the journey; always: every time'),
+      entryKey: z
+        .object({
+          source: z
+            .enum(['message_id', 'event_property'])
+            .default('message_id')
+            .describe('message_id: the ingestion id (default); event_property: a business key from the event, e.g. order_id'),
+          property: z
+            .string()
+            .regex(/^[A-Za-z0-9_]{1,64}(\.[A-Za-z0-9_]{1,64})*$/)
+            .max(200)
+            .optional()
+            .describe('Dot path into event.properties; required for event_property, e.g. "order_id" or "order.id"'),
+          onMissing: z
+            .enum(['skip', 'message_id'])
+            .default('skip')
+            .describe('When the property is empty or too long: skip the entry (default), or fall back to the event message id'),
+        })
+        .refine((c) => c.source !== 'event_property' || !!c.property, 'property is required when source is event_property')
+        .optional()
+        .describe('What makes two events "the same thing" for re-entry and duplicate suppression'),
     })
-    .refine((c) => !!c.event !== !!c.segment, 'Set exactly one of event or segment'),
+    .refine((c) => !!c.event !== !!c.segment, 'Set exactly one of event or segment')
+    .refine((c) => !c.entryKey || !!c.event, 'entryKey needs an event trigger'),
   wait: z.object({ duration: Iso }),
   waitEvent: z.object({ event: z.string().min(1).max(200), timeout: Iso }),
+  waitUntil: z
+    .object({
+      condition: z
+        .lazy(() => segmentCondition)
+        .describe('A segment condition, evaluated for the person; may reference a segment with { segment: "seg_…" }'),
+      timeout: Iso.describe('The longest wait, at most P90D'),
+      recheck: Iso.default('PT1H').describe('How often the sweeper checks as a fallback, at least PT5M'),
+    })
+    .refine((c) => secondsIn(c.timeout) <= 90 * 86_400, 'timeout is at most P90D')
+    .refine((c) => secondsIn(c.recheck) >= 5 * 60, 'recheck is at least PT5M'),
   goal: z.object({ event: z.string().min(1).max(200), within: Iso }),
   branch: z
     .object({ segment: SegmentRef.optional(), condition: z.unknown().optional().describe('A segment condition, evaluated for the person') })
@@ -156,7 +200,7 @@ function checkJourneyStructure(nodes: z.output<typeof journeyNode>[], ctx: z.Ref
       ctx.addIssue({ code: 'custom', path: ['nodes', index, 'next'], message: `Branch "${n.id}" needs two edges: [yes, no]` });
     if (n.kind === 'action' && edges > 2)
       ctx.addIssue({ code: 'custom', path: ['nodes', index, 'next'], message: `Action "${n.id}" has at most two edges: [ok, error]` });
-    if ((n.kind === 'waitEvent' || n.kind === 'goal') && edges > 2)
+    if ((n.kind === 'waitEvent' || n.kind === 'waitUntil' || n.kind === 'goal') && edges > 2)
       ctx.addIssue({ code: 'custom', path: ['nodes', index, 'next'], message: `"${n.id}" has at most two edges: [matched, timeout]` });
   });
   const triggers = nodes.filter((n) => n.kind === 'trigger').length;
@@ -258,6 +302,13 @@ const trackingPlan = z.object({
 });
 
 const LawfulBasis = z.enum(['consent', 'legitimate_interest', 'contract', 'legal_obligation']);
+const TopicKey = z.string().regex(/^[a-z][a-z0-9_]{1,40}$/, 'Lowercase letters, digits and _, starting with a letter');
+const topic = z.object({
+  key: TopicKey.describe('Stable key used by templates, broadcasts and segments, e.g. "newsletter"'),
+  name: z.string().min(1).max(120).describe('Shown to people on the preference centre'),
+  description: z.string().max(500).default('').describe('Optional plain words under the name'),
+  default: z.enum(['subscribed', 'unsubscribed']).default('subscribed').describe('Effective status until the person chooses'),
+});
 const purposes = z.object({
   purposes: z
     .array(
@@ -268,6 +319,11 @@ const purposes = z.object({
         basis: LawfulBasis,
         channels: z.array(z.enum(['email', 'web', 'sms', 'push', 'webhook'])).default([]),
         requiresDoubleOptIn: z.boolean().default(false),
+        topics: z
+          .array(topic)
+          .max(20)
+          .default([])
+          .describe('Finer choices within this purpose; consent for the purpose stays the lawful-basis gate'),
         lia: z
           .object({ assessment: z.string().min(1).max(5000), owner: z.string().min(1).max(200), reviewBy: z.iso.date() })
           .optional()
@@ -278,21 +334,69 @@ const purposes = z.object({
     .max(50)
     .superRefine((ps, ctx) => {
       const keys = new Set<string>();
+      const topicKeys = new Set<string>();
       for (const p of ps) {
         if (keys.has(p.key)) ctx.addIssue({ code: 'custom', message: `Duplicate purpose key "${p.key}"` });
         keys.add(p.key);
         if (p.basis === 'legitimate_interest' && !p.lia)
           ctx.addIssue({ code: 'custom', message: `Purpose "${p.key}" is based on legitimate interest and needs an LIA record (lia)` });
+        for (const t of p.topics) {
+          if (topicKeys.has(t.key)) ctx.addIssue({ code: 'custom', message: `Duplicate topic key "${t.key}"` });
+          topicKeys.add(t.key);
+        }
       }
     }),
 });
+// Reusable e-mail blocks (#73): a fragment of MJML that templates include with
+// {% block 'blk_…', key: value %}. Parameters are typed so a block can be reused across issues
+// without flattening the layout into every template.
+const BlockParam = z.object({
+  key: z
+    .string()
+    .regex(/^[a-z][a-z0-9_]{0,30}$/)
+    .describe('Used in the block as {{ block.<key> }}'),
+  label: z.string().min(1).max(120).describe('Shown next to the value when a person fills it in'),
+  type: z.enum(['text', 'url', 'image', 'color', 'html']).describe('html is inserted raw; the others are escaped'),
+  required: z.boolean().default(false),
+  default: z.string().max(5000).optional().describe('Used when the template does not pass the parameter'),
+  maxLength: z.number().int().min(1).max(5000).optional(),
+});
+const emailBlock = z
+  .object({
+    description: z.string().max(1000).optional(),
+    category: z.enum(['header', 'footer', 'section', 'cta', 'legal', 'other']),
+    mjml: z
+      .string()
+      .min(1)
+      .max(100_000)
+      .describe(
+        "An MJML fragment (mj-section/mj-column), not a whole <mjml> document. Parameters are Liquid under block.*, e.g. {{ block.title }}; profile.*, unsubscribe_url and the other template variables also work. Use it in a template with {% block 'blk_…', title: 'This week' %}. Blocks cannot use other blocks in v1.",
+      ),
+    params: z.array(BlockParam).max(50).default([]),
+  })
+  .superRefine((b, ctx) => {
+    const keys = new Set<string>();
+    for (const p of b.params) {
+      if (keys.has(p.key)) ctx.addIssue({ code: 'custom', message: `Duplicate parameter key "${p.key}"` });
+      keys.add(p.key);
+    }
+    if (/<mjml[\s>]/i.test(b.mjml)) ctx.addIssue({ code: 'custom', message: 'A block is an MJML fragment, not a whole <mjml> document' });
+  });
+
 const emailTemplate = z.object({
   purpose: Key.describe(
     'Purpose key, e.g. "marketing_email" or "onboarding"; decides the lawful basis and whether an unsubscribe link is required',
   ),
+  topic: TopicKey.optional().describe("Optional topic under this template's purpose; people can refuse it without leaving the purpose"),
   subject: z.string().min(1).max(300).describe('Liquid, e.g. "Welcome, {{ profile.firstName | default: \'friend\' }}"'),
   preheader: z.string().max(300).optional().describe('Preview text shown after the subject in inboxes'),
-  mjml: z.string().min(1).max(300_000).describe('MJML with Liquid. Variables: profile.*, event.*, unsubscribe_url, preferences_url'),
+  mjml: z
+    .string()
+    .min(1)
+    .max(300_000)
+    .describe(
+      "MJML with Liquid. Variables: profile.*, event.*, unsubscribe_url, preferences_url, topic_unsubscribe_url (when the template has a topic), web_url (a signed “view in browser” link). Reusable blocks: {% block 'blk_…', key: value %}.",
+    ),
   text: z.string().max(100_000).optional().describe('Plain-text part (Liquid). Generated from the HTML when omitted'),
   sampleData: z.record(z.string(), z.unknown()).optional().describe('Example variables for previews, e.g. {"profile":{"firstName":"Ada"}}'),
   utm: z
@@ -308,6 +412,7 @@ const emailTemplate = z.object({
 
 const smsTemplate = z.object({
   purpose: Key.describe('Purpose key, e.g. "marketing_sms" or "service_sms"; decides the lawful basis'),
+  topic: TopicKey.optional().describe("Optional topic under this template's purpose; people can refuse it without leaving the purpose"),
   body: z
     .string()
     .min(1)
@@ -320,6 +425,7 @@ const smsTemplate = z.object({
 
 const pushTemplate = z.object({
   purpose: Key.describe('Purpose key, e.g. "marketing_push" or "service_push"; decides the lawful basis'),
+  topic: TopicKey.optional().describe("Optional topic under this template's purpose; people can refuse it without leaving the purpose"),
   title: z
     .string()
     .min(1)
@@ -467,6 +573,7 @@ export type SegmentCondition =
     }
   | { event: string; where?: Record<string, string | number | boolean>; count?: { gte?: number; lte?: number }; within?: string }
   | { consent: string }
+  | { topic: string }
   | { segment: string };
 export const segmentCondition: z.ZodType<SegmentCondition> = z.lazy(() =>
   z.union([
@@ -501,6 +608,14 @@ export const segmentCondition: z.ZodType<SegmentCondition> = z.lazy(() =>
       .strict(),
     z
       .object({
+        topic: z
+          .string()
+          .regex(/^[a-z][a-z0-9_]{1,40}$/)
+          .describe('Topic the person currently subscribes to, using its default when they have no choice'),
+      })
+      .strict(),
+    z
+      .object({
         segment: z
           .string()
           .regex(/^seg_[0-9a-f]{32}$/)
@@ -509,10 +624,32 @@ export const segmentCondition: z.ZodType<SegmentCondition> = z.lazy(() =>
       .strict(),
   ]),
 );
-const segment = z.object({
-  description: z.string().max(1000).default(''),
-  condition: segmentCondition,
-});
+export const segmentMode = z
+  .enum(['dynamic', 'static', 'snapshot'])
+  .default('dynamic')
+  .describe(
+    'dynamic: recomputed from condition; static: an explicit stored list (manual, CSV or API) that a refresh leaves alone — use one for migrations and one-off sends; snapshot: a frozen copy of another segment at a point in time — use one when the audience must not change between review and send',
+  );
+
+const segment = z
+  .object({
+    description: z.string().max(1000).default(''),
+    mode: segmentMode,
+    condition: segmentCondition.optional().describe('Who matches. Required for dynamic; omit for static and snapshot.'),
+    sourceSegment: SegmentRef.optional().describe('The segment a snapshot was copied from'),
+    snapshotAt: isoDateTime('snapshotAt').optional().describe('When the snapshot copied its source'),
+    snapshotVersion: z.number().int().min(1).optional().describe("The source segment's published version at the snapshot"),
+  })
+  .superRefine((s, ctx) => {
+    if (s.mode === 'dynamic' && !s.condition)
+      ctx.addIssue({ code: 'custom', path: ['condition'], message: 'A dynamic segment needs a condition.' });
+    if (s.mode !== 'dynamic' && s.condition)
+      ctx.addIssue({ code: 'custom', path: ['condition'], message: `A ${s.mode} segment has a member list, not a condition.` });
+    if (s.mode === 'snapshot' && !s.sourceSegment)
+      ctx.addIssue({ code: 'custom', path: ['sourceSegment'], message: 'A snapshot needs the segment it was copied from.' });
+    if (s.mode !== 'snapshot' && (s.sourceSegment || s.snapshotAt || s.snapshotVersion))
+      ctx.addIssue({ code: 'custom', path: ['sourceSegment'], message: 'Only a snapshot has a source segment.' });
+  });
 
 // Web experiences (channels-and-personalization.md §3). Targeting is evaluated on every page
 // request from hot state only, so it is a smaller language than segments: profile traits and
@@ -818,12 +955,26 @@ const brandFields = {
   language: BrandLanguage.optional().describe('Page language (BCP 47), default "en"'),
   copy: brandCopy.optional(),
 };
+// Public newsletter archive (#100): one per workspace, on the shared links host. The slug is the
+// workspace's place there (/n/<slug>/); publish-time validation keeps it unique across the install.
+const ArchiveSlug = z
+  .string()
+  .regex(/^[a-z0-9][a-z0-9-]{1,40}$/, 'Use 2–41 lowercase letters, digits and hyphens, starting with a letter or digit')
+  .describe('Archive address on the links host: /n/<slug>/');
+const brandArchive = z.object({
+  enabled: z.boolean().default(false).describe('Serve the public archive on the links host'),
+  title: z.string().max(120).optional().describe('Archive title; defaults to the site name'),
+  description: z.string().max(500).optional().describe('Shown on the archive index and in its feed'),
+  slug: ArchiveSlug.optional().describe('Required when the archive is enabled; unique per install'),
+  subscribeUrl: z.string().max(2000).optional().describe('Optional signup form URL for the archive’s “Subscribe” call to action'),
+});
 const brandInput = z.object(brandFields);
 const brand = brandInput.extend({
   logoHeight: z.number().int().min(16).max(96).default(32).describe('Logo height in px'),
   colors: brandColors.default({}),
   radius: z.number().int().min(0).max(24).default(8).describe('Corner radius in px'),
   language: BrandLanguage.default('en'),
+  archive: brandArchive.default({ enabled: false }),
 });
 
 const form = z
@@ -860,6 +1011,48 @@ const form = z
   })
   .refine((f) => !f.doubleOptIn || !!f.confirmationTemplate, 'Double opt-in needs a confirmationTemplate');
 
+// Durations a broadcast can use for a subject test and a send window. Deliberately small: the
+// newsletter use case needs hours to two days, not months.
+const BroadcastDuration = z.string().regex(/^P(\d+W|\d+D|T\d+H|T\d+M|\d+DT\d+H|\d+DT\d+M)$/, 'ISO 8601 duration such as PT1H, P1D or P2D');
+
+const Minutes = (iso: string) => {
+  const m = /^P(?:(\d+)W)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?)?$/.exec(iso);
+  return m ? Number(m[1] ?? 0) * 10_080 + Number(m[2] ?? 0) * 1_440 + Number(m[3] ?? 0) * 60 + Number(m[4] ?? 0) : 0;
+};
+
+const subjectTest = z
+  .object({
+    subjects: z
+      .array(z.string().min(1).max(300))
+      .min(2)
+      .max(4)
+      .describe(
+        'The subject lines to test, variant A first (A–D). Liquid is allowed, with the same rules as the template subject; each replaces the template’s subject. List the template’s own subject first to include it.',
+      ),
+    samplePercent: z.number().int().min(10).max(50).default(20).describe('Share of the audience that gets a test subject'),
+    metric: z
+      .enum(['click', 'open'])
+      .default('click')
+      .describe('Which event picks the winner; clicks are reliable, opens are not (Apple Mail Privacy Protection)'),
+    decideAfter: BroadcastDuration.default('PT4H').describe('How long the sample runs before the winner goes to the rest, PT1H–P2D'),
+  })
+  .refine((t) => {
+    const m = Minutes(t.decideAfter);
+    return m >= 60 && m <= 2_880;
+  }, 'decideAfter must be between PT1H and P2D');
+
+const sendWindow = z.object({
+  start: Clock.describe('Window opens, HH:MM in each reader’s time zone'),
+  end: Clock.describe('Window closes, HH:MM in each reader’s time zone; may cross midnight'),
+  days: z
+    .array(z.enum(['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']))
+    .min(1)
+    .max(7)
+    .optional()
+    .describe('Days the window is open, in the reader’s time zone; omit for every day'),
+  maxDelay: BroadcastDuration.default('P1D').describe('How long a held message may wait for its window; later openings are skipped'),
+});
+
 const broadcast = z.object({
   template: z
     .string()
@@ -868,8 +1061,29 @@ const broadcast = z.object({
       'An e-mail, SMS or push template id (eml_…, sms_… or psh_…). For a newsletter, use one template per issue (copy the previous issue as a starting point): broadcasts carry no per-send data, so a shared layout cannot be filled per issue. The template must be published first, or be submitted together with the broadcast (artifacts.requestPublishBundle).',
     ),
   segment: z.string().regex(/^seg_[0-9a-f]{32}$/, 'A segment id (seg_…)'),
+  topic: TopicKey.optional().describe("Optional topic under the template's purpose; overrides the template's own topic when set"),
   sendAt: isoDateTime('sendAt').optional().describe('When to start sending; default: as soon as it is published'),
+  subjectTest: subjectTest
+    .optional()
+    .describe(
+      'E-mail subject A/B test: send 2–4 subjects to a deterministic sample of the audience, then after decideAfter send the winning subject to the rest. Variant A is subjects[0]; the remainder are B, C, D. Results are in broadcasts.status and the message records its variant.',
+    ),
+  sendWindow: sendWindow
+    .optional()
+    .describe(
+      'Recipient-local send window: hold each message until start–end in the reader’s time zone (profile trait "timezone", else the workspace delivery policy’s time zone), on the listed days. A window later than sendAt + maxDelay is skipped with reason outside_send_window.',
+    ),
   description: z.string().max(500).optional(),
+  archive: z
+    .object({
+      publish: z.boolean().default(false).describe('Publish this sent issue to the workspace archive'),
+      slug: ArchiveSlug.optional().describe('Issue address under /n/<archive slug>/; default: the subject plus the send date'),
+      summary: z.string().max(500).optional().describe('Archive index and feed summary; default: the template preheader'),
+    })
+    .optional()
+    .describe(
+      'Optional newsletter archive entry (#100): publish this issue once it has been sent. The issue is rendered from the template version that was sent, with empty personalisation, so never put a person’s data in a template. Set publish false in a later published version to remove a published issue.',
+    ),
 });
 
 export type FormDefinition = z.output<typeof form>;
@@ -883,16 +1097,33 @@ export type PushTemplate = z.output<typeof pushTemplate>;
 export type DeliveryPolicy = z.output<typeof deliveryPolicy>;
 export const DEFAULT_DELIVERY_POLICY: DeliveryPolicy = deliveryPolicy.parse({});
 export type BroadcastDefinition = z.output<typeof broadcast>;
+export type SubjectTestDefinition = NonNullable<BroadcastDefinition['subjectTest']>;
+export type SendWindowDefinition = NonNullable<BroadcastDefinition['sendWindow']>;
 export type TrackingPlan = z.output<typeof trackingPlan>;
 export type PromptDefinition = z.output<typeof prompt>;
 export type ExperienceDefinition = z.output<typeof experience>;
 export type SegmentDefinition = z.output<typeof segment>;
 export type EmailTemplate = z.output<typeof emailTemplate>;
+export type EmailBlock = z.output<typeof emailBlock>;
+export type EmailBlockParam = z.output<typeof BlockParam>;
 export type Purposes = z.output<typeof purposes>['purposes'];
 
 export const artifactTypes = {
   note: { prefix: 'not', label: 'Note', description: 'Free-form note, used to exercise the artifact system.', content: note },
-  journey: { prefix: 'jrn', label: 'Journey', description: 'A customer journey graph: trigger, steps and branches.', content: journey },
+  journey: {
+    prefix: 'jrn',
+    label: 'Journey',
+    description:
+      'A customer journey graph: trigger, steps and branches. waitUntil holds a person until a segment condition matches (checked on their events and segment changes, with a sweeper recheck and a bounded timeout) and continues on [matched, timeout]; event triggers may choose entryKey {source: "event_property", property: "order_id"} so a business key, not the ingestion message id, decides re-entry and duplicate suppression.',
+    content: journey,
+  },
+  email_block: {
+    prefix: 'blk',
+    label: 'E-mail block',
+    description:
+      "A reusable MJML fragment with typed parameters, e.g. a header, footer or CTA. Templates include its published version with {% block 'blk_…', key: value %}; parameters are Liquid under block.* (html values are inserted raw, others escaped). Preview it with blocks.preview; see where it is used with blocks.usage. A template can be published only when its blocks are published; submit a new block and its template together with artifacts.requestPublishBundle.",
+    content: emailBlock,
+  },
   email_template: {
     prefix: 'eml',
     label: 'E-mail template',
@@ -916,7 +1147,7 @@ export const artifactTypes = {
     prefix: 'seg',
     label: 'Segment',
     description:
-      'A group of people defined by traits, events in a time window, consent and other segments. Preview it with segments.preview.',
+      'A group of people. Dynamic segments are defined by traits, events in a time window, consent and other segments, and are recomputed; static segments have an explicit member list (manual, CSV or API) for migrations and one-off sends; snapshots freeze another segment so the audience cannot change between review and send. Preview any mode with segments.preview, and edit lists with audiences.add, audiences.remove and audiences.import. Membership is not consent: sends still check consent, suppression and delivery policy.',
     content: segment,
   },
   experience: {
@@ -944,7 +1175,7 @@ export const artifactTypes = {
     prefix: 'brd',
     label: 'Brand',
     description:
-      'The workspace’s brand for the pages subscribers see on the platform domain: double opt-in confirm and expired, unsubscribe and unsubscribed. Site name, URL for “Back to …”, logo, colours, font stack, radius, language and copy overrides. One per workspace; the published version is live. Preview it with hostedPages.preview.',
+      'The workspace’s brand for the pages subscribers see on the platform domain: double opt-in confirm and expired, unsubscribe and unsubscribed. Site name, URL for “Back to …”, logo, colours, font stack, radius, language and copy overrides. It also holds the optional public newsletter archive settings (enabled, title, description, slug, subscribe URL) served at <links URL>/n/<slug>/. One per workspace; the published version is live. Preview it with hostedPages.preview.',
     content: brand,
     singleton: true,
   },
@@ -952,7 +1183,7 @@ export const artifactTypes = {
     prefix: 'bct',
     label: 'Broadcast',
     description:
-      'A one-off send of an e-mail template to a segment at a set time, e.g. a weekly newsletter. Use the template-per-issue pattern: each issue is its own e-mail template (copy the previous issue as a starting point), and the broadcast references it. Broadcasts carry no per-send data. Submit the template and the broadcast together with artifacts.requestPublishBundle for one review. Check it with broadcasts.preview (with templateVersion while the template is unpublished).',
+      'A one-off send of an e-mail template to a segment at a set time, e.g. a weekly newsletter. Use the template-per-issue pattern: each issue is its own e-mail template (copy the previous issue as a starting point), and the broadcast references it. Broadcasts carry no per-send data. Optional subjectTest tries 2–4 subject lines on a sample, then sends the winner to the rest after decideAfter (metric click or open); optional sendWindow sends only inside start–end in each reader’s time zone, holding messages until the next opening and skipping those beyond maxDelay. Submit the template and the broadcast together with artifacts.requestPublishBundle for one review. Check it with broadcasts.preview (with templateVersion while the template is unpublished). Set archive {publish:true, slug?, summary?} to publish the issue to the workspace archive after it has been sent; agents may set it because it is content, and a person still reviews the broadcast.',
     content: broadcast,
   },
   tracking_plan: {
@@ -967,7 +1198,7 @@ export const artifactTypes = {
     prefix: 'pur',
     label: 'Purposes',
     description:
-      'Processing purposes with their lawful basis (consent, legitimate interest with LIA, contract, legal obligation). One per workspace.',
+      'Processing purposes with their lawful basis (consent, legitimate interest with LIA, contract, legal obligation), and optional topics under each purpose that people can refuse on their own. One per workspace.',
     content: purposes,
     singleton: true,
   },
@@ -1005,6 +1236,7 @@ export const DEFAULT_PURPOSES: Purposes = [
     basis: 'contract',
     channels: ['web'],
     requiresDoubleOptIn: false,
+    topics: [],
   },
   {
     key: 'analytics',
@@ -1013,6 +1245,7 @@ export const DEFAULT_PURPOSES: Purposes = [
     basis: 'consent',
     channels: ['web'],
     requiresDoubleOptIn: false,
+    topics: [],
   },
   {
     key: 'web_personalization',
@@ -1021,6 +1254,7 @@ export const DEFAULT_PURPOSES: Purposes = [
     basis: 'consent',
     channels: ['web'],
     requiresDoubleOptIn: false,
+    topics: [],
   },
   {
     key: 'onboarding',
@@ -1029,6 +1263,7 @@ export const DEFAULT_PURPOSES: Purposes = [
     basis: 'contract',
     channels: ['email'],
     requiresDoubleOptIn: false,
+    topics: [],
   },
   {
     key: 'marketing_email',
@@ -1037,6 +1272,7 @@ export const DEFAULT_PURPOSES: Purposes = [
     basis: 'consent',
     channels: ['email'],
     requiresDoubleOptIn: false,
+    topics: [],
   },
   {
     key: 'marketing_sms',
@@ -1045,6 +1281,7 @@ export const DEFAULT_PURPOSES: Purposes = [
     basis: 'consent',
     channels: ['sms'],
     requiresDoubleOptIn: false,
+    topics: [],
   },
   {
     key: 'service_sms',
@@ -1053,6 +1290,7 @@ export const DEFAULT_PURPOSES: Purposes = [
     basis: 'contract',
     channels: ['sms'],
     requiresDoubleOptIn: false,
+    topics: [],
   },
   {
     key: 'marketing_push',
@@ -1061,6 +1299,7 @@ export const DEFAULT_PURPOSES: Purposes = [
     basis: 'consent',
     channels: ['push'],
     requiresDoubleOptIn: false,
+    topics: [],
   },
   {
     key: 'service_push',
@@ -1069,6 +1308,7 @@ export const DEFAULT_PURPOSES: Purposes = [
     basis: 'contract',
     channels: ['push'],
     requiresDoubleOptIn: false,
+    topics: [],
   },
   {
     key: 'ad_measurement',
@@ -1077,6 +1317,7 @@ export const DEFAULT_PURPOSES: Purposes = [
     basis: 'consent',
     channels: ['web'],
     requiresDoubleOptIn: false,
+    topics: [],
   },
   {
     key: 'ad_targeting',
@@ -1085,6 +1326,7 @@ export const DEFAULT_PURPOSES: Purposes = [
     basis: 'consent',
     channels: ['web'],
     requiresDoubleOptIn: false,
+    topics: [],
   },
   {
     key: 'ai_processing',
@@ -1093,6 +1335,7 @@ export const DEFAULT_PURPOSES: Purposes = [
     basis: 'consent',
     channels: [],
     requiresDoubleOptIn: false,
+    topics: [],
   },
 ];
 
@@ -1113,8 +1356,34 @@ draftContentSchemas.set('journey', journeyDraft);
  * them; artifact commands run them on every save so agents get the errors right away.
  */
 export type ContentValidator = (content: unknown) => string[];
-export const contentValidators = new Map<ArtifactType, ContentValidator>();
+/**
+ * A registry with one entry per artifact type. Packages register their checks at import time; a
+ * second registration for the same type would silently replace the first (it happened: e-mail
+ * blocks and pre-send checks both registered the e-mail template's publish check), so it throws.
+ */
+class OnePerType<V> extends Map<ArtifactType, V> {
+  constructor(private readonly what: string) {
+    super();
+  }
+  override set(type: ArtifactType, value: V): this {
+    if (this.what && this.has(type)) throw new Error(`${type} already has a ${this.what}; combine them in one function`);
+    return super.set(type, value);
+  }
+}
+
+export const contentValidators = new OnePerType<ContentValidator>('content validator');
 /** Checks that only apply to publishing (a draft may be unfinished), e.g. referenced templates exist. */
 export type PublishValidator = (content: unknown, tx: import('@agentic-marketing/db').Tx) => Promise<string[]>;
-export const publishValidators = new Map<ArtifactType, PublishValidator>();
+export const publishValidators = new OnePerType<PublishValidator>('publish validator');
+
+/**
+ * Ids an artifact's content refers to, for display in artifacts.get (e.g. the blocks an e-mail
+ * template uses) and for checks that need no database. Registered by the package that owns the
+ * content language, so this package stays free of e-mail specifics.
+ */
+export type ReferenceExtractor = (content: unknown) => string[];
+export const referenceExtractors = new OnePerType<ReferenceExtractor>('reference extractor');
+export function referencesOf(type: string, content: unknown): string[] {
+  return referenceExtractors.get(type as ArtifactType)?.(content) ?? [];
+}
 export type JourneyDefinition = z.output<typeof journey>;

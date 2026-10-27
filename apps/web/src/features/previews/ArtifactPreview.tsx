@@ -2,6 +2,7 @@ import { lazy, Suspense } from 'react';
 import { JsonView, LoadingBlock } from '../../ui';
 import { referencedIds, useArtifactNames } from '../artifactCache';
 import type { JourneyContent } from '../journey/model';
+import { BlockPreview } from './BlockPreview';
 import { BroadcastPreview } from './BroadcastPreview';
 import { EmailPreview } from './EmailPreview';
 import { type FormContent, FormPreview } from './FormPreview';
@@ -11,7 +12,7 @@ import { SegmentPreview } from './SegmentPreview';
 const JourneyGraph = lazy(() => import('../journey/JourneyGraph').then((m) => ({ default: m.JourneyGraph })));
 
 /** Types the approval drawer can show as the real thing rather than JSON. */
-export const PREVIEWABLE = new Set(['email_template', 'form', 'journey', 'segment', 'broadcast']);
+export const PREVIEWABLE = new Set(['email_template', 'email_block', 'form', 'journey', 'segment', 'broadcast']);
 
 /**
  * The object itself, by type (#41). Falls back to its content as JSON. `bundle` maps the other
@@ -35,6 +36,8 @@ export function ArtifactPreview({
   switch (type) {
     case 'email_template':
       return <EmailPreview artifactId={artifactId} version={version} compact={compact} />;
+    case 'email_block':
+      return <BlockPreview artifactId={artifactId} version={version} compact={compact} />;
     case 'form':
       return <FormPreview content={content as FormContent} />;
     case 'segment':

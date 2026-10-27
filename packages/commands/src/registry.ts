@@ -17,6 +17,8 @@ export type Surface = 'rest' | 'mcp' | 'scim' | 'internal';
 export interface Services {
   /** Public URL of the server, e.g. for admin UI deep links in command output. */
   publicUrl?: string;
+  /** Links host (PUBLIC_LINKS_URL), for shareable unsubscribe, form, web-version and archive URLs. */
+  linksUrl?: string;
   /** Version of the running server, so command output can show it (workspace.get). */
   serverVersion: string;
   /** Whether unknown input keys are rejected rather than warned about (STRICT_INPUTS). */

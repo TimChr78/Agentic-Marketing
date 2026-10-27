@@ -1,11 +1,13 @@
-import { Code2, ImageIcon, Paintbrush } from 'lucide-react';
+import { Blocks, Code2, ImageIcon, Paintbrush } from 'lucide-react';
 import { lazy, Suspense, useMemo, useRef, useState } from 'react';
 import { api } from '../../app/api';
 import { useApi } from '../../app/useApi';
 import { Alert, Button, Field, Input, LoadingBlock, Segmented, Select, Textarea } from '../../ui';
 import type { EditorProps } from '../artifacts/ArtifactDetailPage';
 import { JsonEditor } from '../artifacts/JsonEditor';
+import { topicsOf } from '../artifacts/PurposesEditor';
 import { AssetPicker } from '../assets/AssetPicker';
+import { BlockPicker } from '../blocks/BlockPicker';
 import { imageTag, lostLiquid } from './liquid';
 import type { VisualMjmlHandle } from './VisualMjml';
 
@@ -13,6 +15,7 @@ const VisualMjml = lazy(() => import('./VisualMjml'));
 
 export interface TemplateContent {
   purpose: string;
+  topic?: string;
   subject: string;
   preheader?: string;
   mjml: string;
@@ -28,6 +31,7 @@ export interface TemplateContent {
 export function TemplateEditor({ artifact, content, onChange, readOnly, errors }: EditorProps<TemplateContent>) {
   const [mode, setMode] = useState<'visual' | 'code'>('visual');
   const [picking, setPicking] = useState(false);
+  const [pickingBlock, setPickingBlock] = useState(false);
   const purposes = useApi(() => api.call('purposes.list', {}), []);
   const visual = useRef<VisualMjmlHandle>(null);
   const code = useRef<HTMLTextAreaElement>(null);
@@ -52,9 +56,22 @@ export function TemplateEditor({ artifact, content, onChange, readOnly, errors }
     set({ mjml: content.mjml.slice(0, at) + tag + content.mjml.slice(at) });
   };
 
+  // The visual editor treats the tag as text and may escape it, so insert it in the code view:
+  // switch there and append when the textarea is not mounted yet.
+  const insertTag = (tag: string) => {
+    const el = mode === 'code' ? code.current : null;
+    if (!el) {
+      setMode('code');
+      set({ mjml: `${content.mjml}\n${tag}` });
+      return;
+    }
+    const at = el.selectionStart ?? content.mjml.length;
+    set({ mjml: content.mjml.slice(0, at) + tag + content.mjml.slice(at) });
+  };
+
   return (
     <div className="space-y-5">
-      <div className="grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,2fr)_minmax(0,1fr)]">
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,2fr)_minmax(0,1fr)_minmax(0,1fr)]">
         <Field label="Subject" hint="Liquid works here, e.g. {{ profile.firstName | default: 'there' }}." error={errors.subject} required>
           <Input value={content.subject ?? ''} readOnly={readOnly} maxLength={300} onChange={(e) => set({ subject: e.target.value })} />
         </Field>
@@ -62,11 +79,33 @@ export function TemplateEditor({ artifact, content, onChange, readOnly, errors }
           <Input value={content.preheader ?? ''} readOnly={readOnly} maxLength={300} onChange={(e) => set({ preheader: e.target.value || undefined })} />
         </Field>
         <Field label="Purpose" hint="Decides consent and the unsubscribe link." error={errors.purpose} required>
-          <Select value={content.purpose ?? ''} disabled={readOnly || purposes.loading} onChange={(e) => set({ purpose: e.target.value })}>
+          <Select
+            value={content.purpose ?? ''}
+            disabled={readOnly || purposes.loading}
+            onChange={(e) => {
+              const purpose = e.target.value;
+              const keys = topicsOf(purposes.data?.purposes ?? [], purpose).map((t) => t.key);
+              set({ purpose, topic: content.topic && keys.includes(content.topic) ? content.topic : undefined });
+            }}
+          >
             {!purposes.data?.purposes.some((p) => p.key === content.purpose) && <option value={content.purpose}>{content.purpose || 'Choose…'}</option>}
             {purposes.data?.purposes.map((p) => (
               <option key={p.key} value={p.key}>
                 {p.name} ({p.key})
+              </option>
+            ))}
+          </Select>
+        </Field>
+        <Field label="Topic (optional)" hint="A finer choice under the purpose." error={errors.topic}>
+          <Select
+            value={content.topic ?? ''}
+            disabled={readOnly || purposes.loading || topicsOf(purposes.data?.purposes ?? [], content.purpose).length === 0}
+            onChange={(e) => set({ topic: e.target.value || undefined })}
+          >
+            <option value="">{topicsOf(purposes.data?.purposes ?? [], content.purpose).length ? 'No topic' : 'No topics'}</option>
+            {topicsOf(purposes.data?.purposes ?? [], content.purpose).map((t) => (
+              <option key={t.key} value={t.key}>
+                {t.name} ({t.key})
               </option>
             ))}
           </Select>
@@ -84,9 +123,14 @@ export function TemplateEditor({ artifact, content, onChange, readOnly, errors }
           ]}
         />
         {!readOnly && (
-          <Button size="sm" icon={<ImageIcon size={14} />} onClick={() => setPicking(true)}>
-            Insert image
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            <Button size="sm" icon={<Blocks size={14} />} onClick={() => setPickingBlock(true)}>
+              Insert block
+            </Button>
+            <Button size="sm" icon={<ImageIcon size={14} />} onClick={() => setPicking(true)}>
+              Insert image
+            </Button>
+          </div>
         )}
       </div>
       {lost.length > 0 && (
@@ -141,6 +185,7 @@ export function TemplateEditor({ artifact, content, onChange, readOnly, errors }
           }}
         />
       )}
+      {pickingBlock && <BlockPicker onClose={() => setPickingBlock(false)} onPick={insertTag} />}
     </div>
   );
 }

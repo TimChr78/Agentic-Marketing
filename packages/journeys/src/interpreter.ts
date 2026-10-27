@@ -11,7 +11,9 @@ export interface ParticipantState {
   seq: number;
   dueAt: Date | null;
   waitingEvent: string | null;
-  /** Set by the event matcher when the awaited event arrived. */
+  /** waitUntil: the absolute timeout; dueAt is the next check, at most `recheck` away. */
+  waitingUntil: Date | null;
+  /** Set by the event matcher when the awaited event arrived or the waitUntil condition matched. */
   matched: boolean;
   converted: boolean;
 }
@@ -48,6 +50,8 @@ export interface Step {
 export interface Env {
   /** Whether the person matches a branch's segment or condition. */
   branch(node: Extract<Graph['nodes'] extends Map<string, infer N> ? N : never, { kind: 'branch' }>): Promise<boolean>;
+  /** Whether the person matches a waitUntil condition now. */
+  condition(node: Extract<Graph['nodes'] extends Map<string, infer N> ? N : never, { kind: 'waitUntil' }>): Promise<boolean>;
   /** A stable key for deterministic random choices (A/B split). */
   key: string;
   /** The AI worker's answer for a step the participant waited at, if it came in time. */
@@ -80,7 +84,11 @@ export async function advance(
   let resuming = p.status === 'waiting';
   const end = (status: 'completed' | 'exited', at: string) => {
     steps.push({ node: at, seq, type: status, detail: '' });
-    return { state: { node: at, status, seq, dueAt: null, waitingEvent: null, matched: false, converted }, effects, steps };
+    return {
+      state: { node: at, status, seq, dueAt: null, waitingEvent: null, waitingUntil: null, matched: false, converted },
+      effects,
+      steps,
+    };
   };
   const goTo = (next: string | null) => {
     if (next === null) return false;
@@ -117,7 +125,16 @@ export async function advance(
         if (!resuming) {
           steps.push({ node: n.id, seq, type: 'waiting', detail: `until ${new Date(now.getTime() + n.ms).toISOString()}` });
           return {
-            state: { node, status: 'waiting', seq, dueAt: new Date(now.getTime() + n.ms), waitingEvent: null, matched: false, converted },
+            state: {
+              node,
+              status: 'waiting',
+              seq,
+              dueAt: new Date(now.getTime() + n.ms),
+              waitingEvent: null,
+              waitingUntil: null,
+              matched: false,
+              converted,
+            },
             effects,
             steps,
           };
@@ -136,6 +153,7 @@ export async function advance(
               seq,
               dueAt: new Date(now.getTime() + n.ms),
               waitingEvent: n.event,
+              waitingUntil: null,
               matched: false,
               converted,
             },
@@ -150,6 +168,64 @@ export async function advance(
         }
         if (!goTo(p.matched ? n.matched : n.timeout)) return end('completed', n.id);
         break;
+      }
+      case 'waitUntil': {
+        const deadline = p.waitingUntil ?? new Date(now.getTime() + n.ms);
+        if (!resuming) {
+          const yes = await env.condition(n);
+          steps[steps.length - 1].detail = yes ? 'matched now' : `would wait until ${deadline.toISOString()}`;
+          if (yes) {
+            if (!goTo(n.matched)) return end('completed', n.id);
+            break;
+          }
+          steps.push({ node: n.id, seq, type: 'waiting', detail: `until ${deadline.toISOString()}` });
+          return {
+            state: {
+              node,
+              status: 'waiting',
+              seq,
+              dueAt: new Date(Math.min(now.getTime() + n.recheckMs, deadline.getTime())),
+              waitingEvent: null,
+              waitingUntil: deadline,
+              matched: false,
+              converted,
+            },
+            effects,
+            steps,
+          };
+        }
+        resuming = false;
+        if (p.matched) {
+          steps[steps.length - 1].detail = 'matched';
+          if (!goTo(n.matched)) return end('completed', n.id);
+          break;
+        }
+        if (now.getTime() >= deadline.getTime()) {
+          steps[steps.length - 1].detail = 'timed out';
+          if (!goTo(n.timeout)) return end('completed', n.id);
+          break;
+        }
+        // The sweeper's fallback check, or an event that was not enough on its own.
+        if (await env.condition(n)) {
+          steps[steps.length - 1].detail = 'matched';
+          if (!goTo(n.matched)) return end('completed', n.id);
+          break;
+        }
+        steps[steps.length - 1].detail = 'not yet';
+        return {
+          state: {
+            node,
+            status: 'waiting',
+            seq,
+            dueAt: new Date(Math.min(now.getTime() + n.recheckMs, deadline.getTime())),
+            waitingEvent: null,
+            waitingUntil: deadline,
+            matched: false,
+            converted,
+          },
+          effects,
+          steps,
+        };
       }
       case 'branch': {
         const yes = await env.branch(n);
@@ -169,7 +245,16 @@ export async function advance(
           effects.push({ kind: 'ai', node: n.id, seq, task: n.kind === 'aiDecide' ? 'decide' : 'generate', prompt: n.prompt });
           steps.push({ node: n.id, seq, type: 'waiting', detail: 'for the AI' });
           return {
-            state: { node, status: 'waiting', seq, dueAt: new Date(now.getTime() + n.ms), waitingEvent: null, matched: false, converted },
+            state: {
+              node,
+              status: 'waiting',
+              seq,
+              dueAt: new Date(now.getTime() + n.ms),
+              waitingEvent: null,
+              waitingUntil: null,
+              matched: false,
+              converted,
+            },
             effects,
             steps,
           };
@@ -203,7 +288,16 @@ export async function advance(
           effects.push({ kind: 'action', node: n.id, seq, connection: n.connection, action: n.action, input: n.input });
           steps.push({ node: n.id, seq, type: 'waiting', detail: `for ${n.action}` });
           return {
-            state: { node, status: 'waiting', seq, dueAt: new Date(now.getTime() + n.ms), waitingEvent: null, matched: false, converted },
+            state: {
+              node,
+              status: 'waiting',
+              seq,
+              dueAt: new Date(now.getTime() + n.ms),
+              waitingEvent: null,
+              waitingUntil: null,
+              matched: false,
+              converted,
+            },
             effects,
             steps,
           };

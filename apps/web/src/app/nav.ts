@@ -46,6 +46,7 @@ export const NAV: NavGroup[] = [
     icon: Brush,
     items: [
       { path: '/design/templates', label: 'E-mail templates', needs: ['artifacts:read'] },
+      { path: '/design/blocks', label: 'Blocks', needs: ['artifacts:read'] },
       { path: '/design/assets', label: 'Assets', needs: ['artifacts:read'] },
       { path: '/design/hosted-pages', label: 'Hosted pages', needs: ['artifacts:read'] },
       { path: '/design/brand', label: 'Brand', needs: ['artifacts:read'] },

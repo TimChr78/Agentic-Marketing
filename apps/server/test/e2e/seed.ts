@@ -1,4 +1,5 @@
 import { deflateSync } from 'node:zlib';
+import { DEFAULT_PURPOSES } from '@agentic-marketing/artifacts';
 import { createClient } from '@agentic-marketing/client';
 import type { Commands } from '../../src/registry';
 import type { startTestServer } from '../harness';
@@ -122,9 +123,36 @@ export async function seed(t: T, opts: { confirmedUrl?: string } = {}) {
       logoAlt: 'MartechSignal',
       colors: { accent: '#1d4ed8' },
       language: 'en',
+      archive: {
+        enabled: true,
+        title: 'The MartechSignal archive',
+        description: 'Every issue of the weekly Signal, on the web.',
+        slug: 'martechsignal',
+        subscribeUrl: 'https://martechsignal.example/#signup',
+      },
     },
   });
   await pub(brand.artifactId, 'Initial brand');
+
+  // Topics under the newsletter purpose (#84), so the hosted preference centre has choices.
+  const purposes = await owner.call('artifacts.create', {
+    type: 'purposes',
+    name: 'Purposes',
+    content: {
+      purposes: DEFAULT_PURPOSES.map((p) =>
+        p.key === 'marketing_email'
+          ? {
+              ...p,
+              topics: [
+                { key: 'newsletter', name: 'Weekly newsletter', description: 'The Friday issue', default: 'subscribed' as const },
+                { key: 'product_news', name: 'Product news', description: 'Launches and changes', default: 'unsubscribed' as const },
+              ],
+            }
+          : p,
+      ),
+    },
+  });
+  await pub(purposes.artifactId, 'Purposes with topics');
 
   const confirm = await owner.call('artifacts.create', {
     type: 'email_template',
@@ -211,6 +239,29 @@ export async function seed(t: T, opts: { confirmedUrl?: string } = {}) {
       ],
     })),
   });
+
+  // One sent issue for the public archive (#100), recorded as done without sending: sendAt is far
+  // enough in the future that the scheduler never picks it up, and the archive reads the run.
+  const archivedBroadcast = await owner.call('artifacts.create', {
+    type: 'broadcast',
+    name: 'Signal #41: the archive issue',
+    content: {
+      template: issue42.artifactId,
+      segment: subscribers.artifactId,
+      sendAt: '2027-01-08T09:00:00Z',
+      archive: { publish: true, summary: 'The issue that opened the archive.' },
+    },
+  });
+  await pub(archivedBroadcast.artifactId, 'Archive example');
+  const archivedVersion = await owner.call('artifacts.get', { artifactId: archivedBroadcast.artifactId });
+  await t.srv.db.admin.query(
+    `INSERT INTO broadcast_runs (workspace_id, broadcast_id, version, status, send_at, started_at, finished_at)
+     VALUES ($1, $2, $3, 'done', now(), now(), now())
+     ON CONFLICT (workspace_id, broadcast_id)
+     DO UPDATE SET status = 'done', started_at = now(), finished_at = now()`,
+    [ws, archivedBroadcast.artifactId, archivedVersion.publishedVersion],
+  );
+  const archivedIssue = (await owner.call('archive.issues', {})).issues.find((i) => i.artifactId === archivedBroadcast.artifactId);
 
   // The agent: an API token owned by the builder, as Hermes uses on the pilot.
   const builder = t.api(users.builder, ws);
@@ -354,5 +405,12 @@ export async function seed(t: T, opts: { confirmedUrl?: string } = {}) {
     },
   });
 
-  return { ws, sandbox, users, token: token.token, forms: { signup: form.artifactId, footer: footerForm.artifactId } };
+  return {
+    ws,
+    sandbox,
+    users,
+    token: token.token,
+    forms: { signup: form.artifactId, footer: footerForm.artifactId },
+    archive: { slug: 'martechsignal', issueUrl: archivedIssue?.url ?? '' },
+  };
 }

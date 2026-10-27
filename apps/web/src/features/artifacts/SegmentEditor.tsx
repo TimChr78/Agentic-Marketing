@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Plus, Trash2, Users } from 'lucide-react';
+import { List, Plus, Trash2, Users } from 'lucide-react';
 import { api, errText } from '../../app/api';
 import { useSession } from '../../app/session';
 import { useApi } from '../../app/useApi';
 import { Button, Field, IconButton, Input, JsonView, Select, Skeleton, Textarea } from '../../ui';
 import type { EditorProps } from './ArtifactDetailPage';
+import { ListAudiencePanel } from './ListAudiencePanel';
 
 // Segment condition builder: the same tree agents read and write, edited as rows instead of JSON.
 // A condition is a group ({all}/{any}) or one leaf: trait, event, consent, segment or not.
@@ -45,7 +46,11 @@ type Kind = 'trait' | 'event' | 'consent' | 'segment' | 'not' | 'group';
 
 interface SegmentContent {
   description?: string;
+  mode?: 'dynamic' | 'static' | 'snapshot';
   condition?: Condition;
+  sourceSegment?: string;
+  snapshotAt?: string;
+  snapshotVersion?: number;
   [key: string]: unknown;
 }
 
@@ -76,8 +81,38 @@ export function SegmentEditor({ artifact, content, onChange, readOnly, errors }:
   const set = (patch: Partial<SegmentContent>) => onChange({ ...content, ...patch });
   const group = useMemo(() => groupOf(content.condition), [content.condition]);
   const condition = useMemo(() => buildTopCondition(group.mode, group.rows), [group]);
+  const mode = content.mode ?? 'dynamic';
 
   const emit = (mode: Mode, rows: Condition[]) => set({ condition: buildTopCondition(mode, rows) });
+
+  if (mode !== 'dynamic') {
+    return (
+      <div className="max-w-[900px] space-y-5">
+        <Field label="Description" hint="For the team; people in the segment never see it." error={errors.description}>
+          <Textarea
+            rows={2}
+            maxLength={1000}
+            value={content.description ?? ''}
+            readOnly={readOnly}
+            onChange={(e) => set({ description: e.target.value })}
+          />
+        </Field>
+        <div className="flex items-start gap-3 rounded-md border border-line bg-surface-2 px-3.5 py-3">
+          <List size={18} className="mt-0.5 shrink-0 text-muted" aria-hidden />
+          <div>
+            <p className="text-[13px] font-medium text-fg">{mode === 'snapshot' ? 'Snapshot audience' : 'Static list'}</p>
+            <p className="text-[12px] text-muted">
+              {mode === 'snapshot'
+                ? 'A frozen copy of another segment. Its members do not follow the source until it is refreshed.'
+                : 'An explicit member list. A segment refresh never changes it.'}{' '}
+              Edit the list below; it is data, so it does not create an artifact version.
+            </p>
+          </div>
+        </div>
+        <ListAudiencePanel artifactId={artifact.id} content={content} />
+      </div>
+    );
+  }
 
   return (
     <div className="max-w-[900px] space-y-5">

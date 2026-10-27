@@ -316,6 +316,40 @@ export const suppressions = pgTable(
   (t) => [primaryKey({ columns: [t.workspaceId, t.channel, t.valueHash] })],
 );
 
+export type TopicStatus = 'subscribed' | 'unsubscribed';
+export type TopicPreferenceSource = 'preference_center' | 'unsubscribe_link' | 'api' | 'agent' | 'import' | 'form' | 'sdk';
+/** Current topic choice per person; the topic's default applies when a person has no row. */
+export const topicPreferences = pgTable(
+  'topic_preferences',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    profileId: text('profile_id').notNull(),
+    topic: text('topic').notNull(),
+    status: text('status').$type<TopicStatus>().notNull(),
+    source: text('source').$type<TopicPreferenceSource>().notNull(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.profileId, t.topic] })],
+);
+
+/** Append-only topic decisions, with the purpose they sat under and the evidence. */
+export const topicPreferenceHistory = pgTable(
+  'topic_preference_history',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: bigserial('id', { mode: 'number' }).notNull(),
+    profileId: text('profile_id').notNull(),
+    topic: text('topic').notNull(),
+    purpose: text('purpose').notNull(),
+    status: text('status').$type<TopicStatus>().notNull(),
+    source: text('source').$type<TopicPreferenceSource>().notNull(),
+    note: text('note'),
+    proof: jsonb('proof').$type<Record<string, unknown>>().notNull().default({}),
+    recordedAt: ts('recorded_at').notNull().defaultNow(),
+    recordedBy: text('recorded_by'),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
 export const erasures = pgTable(
   'erasures',
   {
@@ -362,6 +396,8 @@ export const messages = pgTable(
     channel: text('channel').notNull().default('email'),
     profileId: text('profile_id'),
     purpose: text('purpose').notNull(),
+    /** The topic the message was sent under, if any; kept so delivery re-checks the same choice. */
+    topic: text('topic'),
     templateId: text('template_id'),
     templateVersion: integer('template_version'),
     journeyId: text('journey_id'),
@@ -376,6 +412,8 @@ export const messages = pgTable(
     notBefore: ts('not_before'),
     /** When a queued retry becomes claimable; null keeps the old updated_at-based backoff. */
     nextAttemptAt: ts('next_attempt_at'),
+    /** The subject variant of a broadcast test (A, B, …), for counting results per subject. */
+    variant: text('variant'),
     /** SMS segments used. */
     segments: integer('segments'),
     /** A test send: sent for checking, never counted in reporting or delivery policy. */
@@ -485,6 +523,40 @@ export const segmentMemberships = pgTable(
   (t) => [primaryKey({ columns: [t.workspaceId, t.segmentId, t.profileId] })],
 );
 
+/** Static list membership: the source of truth that is copied into segment_memberships on change (#83). */
+export const segmentListMembers = pgTable(
+  'segment_list_members',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    segmentId: text('segment_id').notNull(),
+    profileId: text('profile_id').notNull(),
+    addedAt: ts('added_at').notNull().defaultNow(),
+    addedBy: text('added_by'),
+    source: text('source').$type<'manual' | 'api' | 'csv' | 'snapshot'>().notNull().default('manual'),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.segmentId, t.profileId] })],
+);
+
+/** Provenance of list changes. `unmatched` holds row numbers and reasons only, never personal data. */
+export const segmentListImports = pgTable(
+  'segment_list_imports',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    segmentId: text('segment_id').notNull(),
+    fileName: text('file_name'),
+    fileSha256: text('file_sha256'),
+    rows: integer('rows').notNull(),
+    matched: integer('matched').notNull(),
+    added: integer('added').notNull(),
+    unmatched: jsonb('unmatched').$type<{ row: number; reason: string }[]>().notNull().default([]),
+    actor: text('actor'),
+    source: text('source').$type<'csv' | 'snapshot'>().notNull().default('csv'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
 export const segmentRuns = pgTable(
   'segment_runs',
   {
@@ -515,6 +587,8 @@ export const journeyParticipants = pgTable(
     seq: integer('seq').notNull().default(0),
     dueAt: ts('due_at'),
     waitingEvent: text('waiting_event'),
+    /** waitUntil's absolute timeout; dueAt is the next check, not the deadline. */
+    waitingUntil: ts('waiting_until'),
     matched: boolean('matched').notNull().default(false),
     converted: boolean('converted').notNull().default(false),
     context: jsonb('context').$type<Record<string, unknown>>().notNull().default({}),
@@ -523,6 +597,19 @@ export const journeyParticipants = pgTable(
     updatedAt: ts('updated_at').notNull().defaultNow(),
   },
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
+/** Why event-triggered entries were suppressed (#93); shown in journeys.stats. */
+export const journeyEntrySkips = pgTable(
+  'journey_entry_skips',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    journeyId: text('journey_id').notNull(),
+    duplicatesSkipped: integer('duplicates_skipped').notNull().default(0),
+    missingKeySkipped: integer('missing_key_skipped').notNull().default(0),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.journeyId] })],
 );
 
 export type AiUse = 'journeys' | 'copilot';
@@ -778,9 +865,37 @@ export const broadcastRuns = pgTable(
     recipients: integer('recipients').notNull().default(0),
     queued: integer('queued').notNull().default(0),
     skipped: integer('skipped').notNull().default(0),
+    /** Skipped because the next opening of the broadcast's send window was too far away. */
+    windowSkipped: integer('window_skipped').notNull().default(0),
     error: text('error'),
     startedAt: ts('started_at'),
     finishedAt: ts('finished_at'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.broadcastId] })],
+);
+
+export type BroadcastTestState = 'sampling' | 'deciding' | 'winner_sent';
+
+/**
+ * A subject test on a broadcast: 2–4 subjects go to a deterministic sample; after `decideAt` the
+ * winner goes to the rest. The state machine survives crashes because the run's cursor and this
+ * row change in one transaction.
+ */
+export const broadcastTests = pgTable(
+  'broadcast_tests',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    broadcastId: text('broadcast_id').notNull(),
+    subjects: jsonb('subjects').$type<string[]>().notNull(),
+    samplePercent: integer('sample_percent').notNull(),
+    metric: text('metric').$type<'click' | 'open'>().notNull(),
+    state: text('state').$type<BroadcastTestState>().notNull().default('sampling'),
+    /** When the decision happens: the first sample send plus the test's decideAfter. */
+    decideAt: ts('decide_at'),
+    winner: text('winner'),
+    reason: text('reason'),
+    decidedAt: ts('decided_at'),
     createdAt: ts('created_at').notNull().defaultNow(),
   },
   (t) => [primaryKey({ columns: [t.workspaceId, t.broadcastId] })],

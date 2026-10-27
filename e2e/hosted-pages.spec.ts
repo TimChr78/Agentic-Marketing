@@ -80,6 +80,27 @@ test.describe('hosted pages (#115)', () => {
     await expect.poll(latest).toMatchObject({ status: 'granted', source: 'form' });
   });
 
+  test('the public archive shows a sent issue without the reader’s personal data', async ({ page }) => {
+    const index = await page.request.get('/n/martechsignal/');
+    expect(index.status()).toBe(200);
+    const indexHtml = await index.text();
+    expect(indexHtml).toContain('The MartechSignal archive');
+    expect(indexHtml).toContain('Signal #42');
+
+    await signIn(page, PEOPLE.owner);
+    const { issues } = await call<{ issues: { url: string; subject: string }[] }>(page.request, 'archive.issues', {});
+    const issue = issues.find((i) => i.subject.includes('Signal #42'));
+    expect(issue).toBeTruthy();
+
+    await page.goto(issue!.url);
+    await expect(page.getByRole('heading', { name: /Signal #42/ })).toBeVisible();
+    await expect(page.locator('link[rel="canonical"]')).toHaveAttribute('href', issue!.url);
+    expect(await page.locator('script[type="application/ld+json"]').textContent()).toContain('"@type":"Article"');
+    // The template's sample profile ("Ada") must not leak into the public page.
+    await expect(page.getByText('Hi there')).toBeVisible();
+    await expect(page.getByText('Hi Ada')).toHaveCount(0);
+  });
+
   test('the unsubscribe button shows the unsubscribed page', async ({ page }) => {
     await signIn(page, PEOPLE.owner);
     const { profileId } = await call<{ profileId: string }>(page.request, 'profiles.find', { type: 'email', value: 'reader1@example.net' });
@@ -94,5 +115,28 @@ test.describe('hosted pages (#115)', () => {
 
     const latest = await consentOf(page, 'reader1@example.net');
     await expect.poll(latest).toMatchObject({ status: 'withdrawn', source: 'unsubscribe' });
+  });
+
+  test('the preference centre saves a topic choice', async ({ page }) => {
+    await signIn(page, PEOPLE.owner);
+    const { profileId } = await call<{ profileId: string }>(page.request, 'profiles.find', { type: 'email', value: 'reader2@example.net' });
+    const r = await page.request.post(`${fixtures}/preferences-link`, { data: { profileId } });
+    const { url } = (await r.json()) as { url: string };
+
+    await page.goto(url);
+    await expect(page.getByRole('heading', { name: 'Your preferences' })).toBeVisible();
+    const newsletter = page.locator('input[name="topic:newsletter"]');
+    await expect(newsletter).toBeChecked();
+    await expect(page.locator('input[name="topic:product_news"]')).not.toBeChecked();
+
+    await newsletter.uncheck();
+    await page.getByRole('button', { name: 'Save' }).click();
+    await expect(page.getByText('Your preferences are saved.')).toBeVisible();
+    await expect(newsletter).not.toBeChecked();
+
+    const prefs = await call<{ topics: { topic: string; status: string; source: string | null }[] }>(page.request, 'topics.preferences', {
+      profileId,
+    });
+    expect(prefs.topics.find((t) => t.topic === 'newsletter')).toMatchObject({ status: 'unsubscribed', source: 'preference_center' });
   });
 });

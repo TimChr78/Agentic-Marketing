@@ -7,7 +7,7 @@ import { JsonEditor } from '../artifacts/JsonEditor';
 import { durationText } from '../previews/ConditionView';
 import { edgeLabel, type JNode, KINDS, maxEdges } from './model';
 
-const DURATIONS = ['PT30M', 'PT1H', 'PT6H', 'PT12H', 'P1D', 'P2D', 'P3D', 'P5D', 'P1W', 'P2W', 'P30D'];
+const DURATIONS = ['PT5M', 'PT30M', 'PT1H', 'PT6H', 'PT12H', 'P1D', 'P2D', 'P3D', 'P5D', 'P1W', 'P2W', 'P30D', 'P90D'];
 
 function DurationSelect({ value, onChange, disabled, label, hint }: { value: unknown; onChange: (v: string) => void; disabled?: boolean; label: string; hint?: string }) {
   const v = typeof value === 'string' ? value : '';
@@ -51,10 +51,30 @@ export function Inspector({
   const meta = KINDS[node.kind];
   const c = node.config as Record<string, any>;
   const setC = (p: Record<string, unknown>) => onChange({ ...node, config: Object.fromEntries(Object.entries({ ...c, ...p }).filter(([, v]) => v !== undefined)) });
+  const entryKey = (c.entryKey ?? {}) as { source?: 'message_id' | 'event_property'; property?: string; onMissing?: 'skip' | 'message_id' };
+  const setEntryKey = (p: Record<string, unknown>) => setC({ entryKey: { ...entryKey, ...p } });
+  const condition = (c.condition ?? {}) as Record<string, unknown>;
+  const directSegment = typeof condition.segment === 'string' ? condition.segment : undefined;
   const outs = maxEdges(node);
   const targets = nodes.filter((n) => n.id !== node.id && n.kind !== 'trigger');
   const webhooks = useApi(() => api.call('webhooks.list', {}), [], { skip: node.kind !== 'webhook' });
   const connections = useApi(() => api.call('connections.list', {}), [], { skip: node.kind !== 'action' });
+  // The tracking plan can suggest a stable business key for an event trigger.
+  const planId = useApi(() => api.call('artifacts.list', { type: 'tracking_plan', limit: 1 }), [], {
+    skip: node.kind !== 'trigger' || c.segment !== undefined,
+  });
+  const plan = useApi(
+    async () => {
+      const id = planId.data?.artifacts[0]?.id;
+      return id ? api.call('artifacts.get', { artifactId: id }) : null;
+    },
+    [planId.data],
+    { skip: !planId.data?.artifacts[0] },
+  );
+  const plannedProperties = (
+    plan.data?.version.content as { events?: { name: string; properties: { name: string; type: string }[] }[] } | undefined
+  )?.events?.find((e) => e.name === c.event)?.properties;
+  const idProperty = plannedProperties?.find((p) => /_id$/.test(p.name) && ['string', 'number', 'any'].includes(p.type));
 
   return (
     <div className="space-y-5 p-4">
@@ -100,10 +120,43 @@ export function Inspector({
               <Input value={c.event ?? ''} readOnly={readOnly} onChange={(e) => setC({ event: e.target.value })} />
             </Field>
           )}
+          {c.segment === undefined && (
+            <FieldGroup
+              legend="Entry key"
+              hint={
+                idProperty
+                  ? `The tracking plan has "${idProperty.name}": use it so retries and replays do not enter the person twice.`
+                  : 'By default the ingestion message id decides; use a stable business property such as order_id instead.'
+              }
+            >
+              <Segmented
+                label="Entry key"
+                value={entryKey.source ?? 'message_id'}
+                onChange={(v) => !readOnly && setEntryKey({ source: v })}
+                items={[
+                  { key: 'message_id', label: 'Message id' },
+                  { key: 'event_property', label: 'Event property' },
+                ]}
+              />
+              {entryKey.source === 'event_property' && (
+                <>
+                  <Field label="Property" hint="A dot path into the event's properties, e.g. order_id or order.id. It must not change later.">
+                    <Input value={entryKey.property ?? ''} readOnly={readOnly} placeholder="order_id" onChange={(e) => setEntryKey({ property: e.target.value })} />
+                  </Field>
+                  <Field label="When it is missing" hint="Empty or longer than 200 characters counts as missing.">
+                    <Select value={entryKey.onMissing ?? 'skip'} disabled={readOnly} onChange={(e) => setEntryKey({ onMissing: e.target.value })}>
+                      <option value="skip">Skip the entry</option>
+                      <option value="message_id">Use the message id</option>
+                    </Select>
+                  </Field>
+                </>
+              )}
+            </FieldGroup>
+          )}
           <Field label="Enter again">
             <Select value={c.reentry ?? 'once'} disabled={readOnly} onChange={(e) => setC({ reentry: e.target.value })}>
-              <option value="once">Never: once per person</option>
-              <option value="after_exit">After leaving the journey</option>
+              <option value="once">{entryKey.source === 'event_property' ? 'Never: once per key' : 'Never: once per person'}</option>
+              <option value="after_exit">{entryKey.source === 'event_property' ? 'After leaving, per key' : 'After leaving the journey'}</option>
               <option value="always">Every time</option>
             </Select>
           </Field>
@@ -126,6 +179,41 @@ export function Inspector({
             <DurationSelect label="Counts within" value={c.within} disabled={readOnly} onChange={(v) => setC({ within: v })} />
           )}
         </>
+      )}
+      {node.kind === 'waitUntil' && (
+        <FieldGroup legend="Until the person matches">
+          <Segmented
+            label="Wait until the person"
+            value={directSegment ? 'segment' : 'condition'}
+            onChange={(v) =>
+              !readOnly && setC({ condition: v === 'segment' ? { segment: directSegment ?? '' } : { trait: 'city', op: 'eq', value: '' } })
+            }
+            items={[
+              { key: 'segment', label: 'Is in a segment' },
+              { key: 'condition', label: 'Matches a condition' },
+            ]}
+          />
+          {directSegment ? (
+            <ArtifactSelect type="segment" value={directSegment || undefined} disabled={readOnly} onChange={(v) => setC({ condition: { segment: v } })} />
+          ) : (
+            <JsonEditor
+              label="Condition"
+              hint="A segment condition, e.g. {&quot;trait&quot;:&quot;plan&quot;,&quot;op&quot;:&quot;eq&quot;,&quot;value&quot;:&quot;pro&quot;}."
+              value={c.condition}
+              onChange={(v) => setC({ condition: v })}
+              readOnly={readOnly}
+              rows={5}
+            />
+          )}
+          <DurationSelect label="Give up after" hint="At most 90 days. Then it takes the “timeout” path." value={c.timeout} disabled={readOnly} onChange={(v) => setC({ timeout: v })} />
+          <DurationSelect
+            label="Check at least every"
+            hint="The fallback check, at least 5 minutes. Events and segment changes are checked at once."
+            value={c.recheck ?? 'PT1H'}
+            disabled={readOnly}
+            onChange={(v) => setC({ recheck: v })}
+          />
+        </FieldGroup>
       )}
       {node.kind === 'branch' && (
         <FieldGroup legend="Yes when the person…">

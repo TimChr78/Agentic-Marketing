@@ -8,6 +8,7 @@ export type NodeKind =
   | 'trigger'
   | 'wait'
   | 'waitEvent'
+  | 'waitUntil'
   | 'branch'
   | 'split'
   | 'email'
@@ -55,6 +56,7 @@ export const KINDS: Record<NodeKind, { label: string; category: Category; icon: 
   push: { label: 'Push', category: 'message', icon: Bell, hint: 'Send a push notification' },
   wait: { label: 'Wait', category: 'wait', icon: Clock, hint: 'Pause for a while' },
   waitEvent: { label: 'Wait for event', category: 'wait', icon: Hourglass, hint: 'Pause until an event or a timeout' },
+  waitUntil: { label: 'Wait until', category: 'wait', icon: Hourglass, hint: 'Hold until the person matches a condition, or the timeout' },
   branch: { label: 'Branch', category: 'logic', icon: GitBranch, hint: 'Yes or no on a condition' },
   split: { label: 'Split', category: 'logic', icon: Shuffle, hint: 'Random split by weight' },
   goal: { label: 'Goal', category: 'logic', icon: Target, hint: 'Count a conversion' },
@@ -66,12 +68,13 @@ export const KINDS: Record<NodeKind, { label: string; category: Category; icon: 
   transform: { label: 'Transform', category: 'action', icon: Variable, hint: 'Compute a variable' },
   exit: { label: 'Exit', category: 'exit', icon: LogOut, hint: 'Leave the journey' },
 };
-export const PALETTE_ORDER: NodeKind[] = ['trigger', 'email', 'sms', 'push', 'wait', 'waitEvent', 'branch', 'split', 'goal', 'aiDecide', 'aiGenerate', 'webhook', 'action', 'updateProfile', 'transform', 'exit'];
+export const PALETTE_ORDER: NodeKind[] = ['trigger', 'email', 'sms', 'push', 'wait', 'waitEvent', 'waitUntil', 'branch', 'split', 'goal', 'aiDecide', 'aiGenerate', 'webhook', 'action', 'updateProfile', 'transform', 'exit'];
 
 export const DEFAULTS: Record<NodeKind, Record<string, unknown>> = {
   trigger: { event: 'Signed Up', reentry: 'once' },
   wait: { duration: 'P1D' },
   waitEvent: { event: 'Order Completed', timeout: 'P2D' },
+  waitUntil: { condition: { trait: 'plan', op: 'eq', value: 'pro' }, timeout: 'P14D', recheck: 'PT1H' },
   goal: { event: 'Order Completed', within: 'P14D' },
   branch: { condition: { trait: 'city', op: 'eq', value: '' } },
   split: { weights: [50, 50] },
@@ -91,6 +94,7 @@ export const DEFAULTS: Record<NodeKind, Record<string, unknown>> = {
 export const EDGE_LABELS: Partial<Record<NodeKind, string[]>> = {
   branch: ['yes', 'no'],
   waitEvent: ['matched', 'timeout'],
+  waitUntil: ['matched', 'timeout'],
   goal: ['converted', 'timeout'],
   action: ['ok', 'error'],
 };
@@ -151,6 +155,8 @@ export function summary(n: JNode, names: (id: string) => string | undefined = ()
       return c.duration ? durationText(String(c.duration)) : 'Set a duration';
     case 'waitEvent':
       return c.event ? `Until “${c.event}”, at most ${durationText(String(c.timeout ?? ''))}` : 'Choose an event';
+    case 'waitUntil':
+      return c.condition ? `Until the condition matches, at most ${durationText(String(c.timeout ?? ''))}` : 'Set a condition';
     case 'goal':
       return c.event ? `“${c.event}” within ${durationText(String(c.within ?? ''))}` : 'Choose an event';
     case 'branch':

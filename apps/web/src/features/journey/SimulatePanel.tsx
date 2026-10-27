@@ -1,7 +1,7 @@
 import { Play, Plus, Trash2 } from 'lucide-react';
 import { useState } from 'react';
 import { api, errText, type Out } from '../../app/api';
-import { Alert, Button, Field, Input, Select, StatusPill } from '../../ui';
+import { Alert, Button, Field, Input, Select, StatusPill, Textarea } from '../../ui';
 import { durationText } from '../previews/ConditionView';
 import type { JNode } from './model';
 
@@ -15,14 +15,37 @@ export function SimulatePanel({ artifactId, version, nodes, dirty, onPath, onSel
   const [events, setEvents] = useState<{ event: string; after: string }[]>([]);
   const [branches, setBranches] = useState<Record<string, 'yes' | 'no'>>({});
   const [ai, setAi] = useState<Record<string, string>>({});
+  const [sampleName, setSampleName] = useState('');
+  const [sampleProperties, setSampleProperties] = useState('{}');
   const [result, setResult] = useState<Result | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const trigger = nodes.find((n) => n.kind === 'trigger');
+  const entryKey = trigger?.config.entryKey as { source?: string; property?: string } | undefined;
   const run = async () => {
     setBusy(true);
     setError(null);
     try {
-      const r = await api.call('journeys.simulate', { artifactId, version, events: events.filter((e) => e.event), branches, ai });
+      let sampleEvent: { name?: string; properties: Record<string, unknown> } | undefined;
+      if (entryKey?.source === 'event_property') {
+        try {
+          sampleEvent = {
+            name: sampleName || String(trigger?.config.event ?? ''),
+            properties: sampleProperties.trim() ? (JSON.parse(sampleProperties) as Record<string, unknown>) : {},
+          };
+        } catch {
+          setError('The sample event properties must be JSON.');
+          return;
+        }
+      }
+      const r = await api.call('journeys.simulate', {
+        artifactId,
+        version,
+        events: events.filter((e) => e.event),
+        branches,
+        ai,
+        ...(sampleEvent ? { sampleEvent } : {}),
+      });
       setResult(r);
       onPath(r.steps.map((s) => s.node));
     } catch (e) {
@@ -61,6 +84,18 @@ export function SimulatePanel({ artifactId, version, nodes, dirty, onPath, onSel
           Add event
         </Button>
       </div>
+      {entryKey?.source === 'event_property' && (
+        <div className="space-y-2">
+          <p className="text-[12px] font-medium text-fg-2">Entry key sample</p>
+          <p className="text-[12px] text-muted">The trigger deduplicates on “{entryKey.property}”. Try an event to see its key and whether it would be a duplicate.</p>
+          <Field label="Event name">
+            <Input compact value={sampleName} placeholder={String(trigger?.config.event ?? '')} onChange={(e) => setSampleName(e.target.value)} />
+          </Field>
+          <Field label="Properties (JSON)" hint="For example {&quot;order_id&quot;:&quot;A-1&quot;}.">
+            <Textarea mono rows={2} value={sampleProperties} onChange={(e) => setSampleProperties(e.target.value)} />
+          </Field>
+        </div>
+      )}
       {branchNodes.length > 0 && (
         <div className="space-y-2">
           <p className="text-[12px] font-medium text-fg-2">Branch answers</p>
@@ -102,6 +137,13 @@ export function SimulatePanel({ artifactId, version, nodes, dirty, onPath, onSel
             </StatusPill>
             {result.converted && <StatusPill tone="good">Reached the goal</StatusPill>}
           </div>
+          {result.entry && (
+            <Alert tone={result.entry.duplicate ? 'warn' : 'info'} title="Entry key">
+              {result.entry.key
+                ? `${result.entry.key} — ${result.entry.duplicate ? 'a duplicate, so it would not enter' : 'it would enter'}`
+                : `Skipped: ${result.entry.note}`}
+            </Alert>
+          )}
           <ol className="space-y-1 border-l-2 border-line pl-3 text-[13px]">
             {result.steps.map((s, i) => (
               <li key={i}>

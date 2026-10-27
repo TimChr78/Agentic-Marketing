@@ -108,6 +108,18 @@ async function membershipEvents(
   ].filter((e): e is BusEvent => !!e);
 }
 
+/** Change events for a list edit, which happens outside the rule evaluator (static/snapshot lists). */
+export function listChangeEvents(
+  tx: Tx,
+  workspaceId: string,
+  seg: PublishedSegment,
+  entered: string[],
+  exited: string[],
+  cause: string,
+): Promise<BusEvent[]> {
+  return membershipEvents(tx, workspaceId, seg, entered, exited, () => cause);
+}
+
 /** Publishes in slices, so a refresh that moves a million people does not hold a million pending acks. */
 export async function publishInSlices(bus: EventBus, events: BusEvent[], size = 5000) {
   for (let i = 0; i < events.length; i += size) await bus.publish(events.slice(i, i + size));
@@ -146,6 +158,15 @@ async function applyDiff(tx: Tx, workspaceId: string, segId: string, members: Se
  * events to publish. Only the people who entered or left pass through memory.
  */
 export async function refreshSegment(tx: Tx, workspaceId: string, seg: PublishedSegment, events: EventStore, all: PublishedSegment[]) {
+  // A list owns its membership: the refresh job must not recompute it away.
+  if (seg.definition.mode !== 'dynamic') {
+    const [row] = await tx
+      .select({ n: sql<number>`count(*)::int` })
+      .from(schema.segmentMemberships)
+      .where(eq(schema.segmentMemberships.segmentId, seg.id));
+    return { members: row?.n ?? 0, entered: 0, exited: 0, changes: [] as BusEvent[], changedProfiles: [] as string[] };
+  }
+  if (!seg.definition.condition) throw new Error(`Dynamic segment ${seg.id} has no condition`);
   const started = Date.now();
   const members = await materialize(seg.definition.condition, contextFor(tx, workspaceId, events, all));
   // The diff lands in a temporary table first, so the id lookup below is planned with real row counts.
@@ -229,7 +250,8 @@ export async function streamUpdate(tx: Tx, workspaceId: string, resolved: Resolv
   const segments = await publishedSegments(tx);
   const out: BusEvent[] = [];
   for (const seg of segments) {
-    const touched = useful.filter((r) => relevant(seg.definition.condition, r.event));
+    if (seg.definition.mode !== 'dynamic' || !seg.definition.condition) continue;
+    const touched = useful.filter((r) => relevant(seg.definition.condition!, r.event));
     if (!touched.length) continue;
     const scope = [...new Set(touched.map((r) => r.profileId))];
     const pending = new Map<string, BusEvent[]>();
@@ -252,6 +274,7 @@ export async function refreshPeople(tx: Tx, workspaceId: string, profileIds: str
   const segments = await publishedSegments(tx);
   const out: BusEvent[] = [];
   for (const seg of segments) {
+    if (seg.definition.mode !== 'dynamic' || !seg.definition.condition) continue;
     const members = await evaluate(seg.definition.condition, contextFor(tx, workspaceId, events, segments, { scope }));
     const { entered, exited } = await applyDiff(tx, workspaceId, seg.id, members, scope);
     out.push(...(await membershipEvents(tx, workspaceId, seg, entered, exited, () => cause)));

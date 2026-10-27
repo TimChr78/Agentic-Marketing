@@ -12,6 +12,7 @@ export const API_PATH_PREFIXES = [
   '/u',
   '/c',
   '/a',
+  '/n',
   '/.well-known',
   '/healthz',
   '/readyz',

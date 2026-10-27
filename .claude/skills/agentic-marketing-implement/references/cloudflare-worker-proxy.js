@@ -3,6 +3,7 @@
 //   /am/f/<form>            signup forms (POST) and /am/f/confirm/<token> (double opt-in)
 //   /am/u/<token>           unsubscribe (RFC 8058 one-click POST too)
 //   /am/c/<token>           e-mail click redirects
+//   /am/n/…                 newsletter archive and signed web versions
 //   /am/v1/batch, /am/v1/decide, /am/v1/consent/purposes   tracking, personalization and the
 //                           consent banner's texts (only if the site uses the SDK)
 // Everything else (admin UI, REST commands, MCP, OAuth) is NOT reachable through the site.
@@ -13,7 +14,7 @@
 //   AM_ACCESS_SECRET Cloudflare Access service token secret     (optional, recommended)
 // Platform settings: PUBLIC_LINKS_URL=https://<site>/am and CLIENT_IP_HEADER=x-am-client-ip.
 
-const AM_PUBLIC = /^\/(f\/[A-Za-z0-9_./-]+|u\/[A-Za-z0-9_.-]+|c\/[A-Za-z0-9_.-]+|v1\/(batch|b|decide|consent\/purposes))$/;
+const AM_PUBLIC = /^\/(f\/[A-Za-z0-9_./-]+|u\/[A-Za-z0-9_.-]+|c\/[A-Za-z0-9_.-]+|n\/[A-Za-z0-9_./-]+|v1\/(batch|b|decide|consent\/purposes))$/;
 
 export async function proxyAgenticMarketing(request, env, url) {
   const path = url.pathname.slice('/am'.length);

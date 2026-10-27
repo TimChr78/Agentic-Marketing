@@ -37,10 +37,21 @@ export interface UnsubscribeLink {
   u: string; // purpose
   m: string; // message
 }
+/** A topic-level unsubscribe; the purpose stays as it is. */
+export interface TopicLink extends UnsubscribeLink {
+  topic: string;
+}
 export interface ClickLink {
   w: string;
   m: string;
   url: string;
+}
+
+/** The signed "view this e-mail in the browser" link (#100). `x` is an optional expiry, in ms. */
+export interface WebLink {
+  w: string;
+  m: string;
+  x?: number;
 }
 
 /** Rewrites http(s) links for click tracking, except the unsubscribe and preference links. */

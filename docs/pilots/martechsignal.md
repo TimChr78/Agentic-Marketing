@@ -45,18 +45,18 @@ A light pilot before Phase 6: run the platform for a real site, the owner's [mar
 Umami already runs in the homelab behind a **Cloudflare Tunnel** (`analytics.martechsignal.com`), so the platform reuses that tunnel and **option A is the default here**.
 
 - **Option A, default here (recommended): a hostname on the existing tunnel**, pointed at the public-only listener.
-  - Set `PUBLIC_PORT=3001` on the platform. It keeps serving the admin UI, REST and MCP on `3000` (LAN/VPN only) and additionally serves **only** `/f`, `/u`, `/c`, `/a` and `/hooks` (plus `/healthz` and `/readyz`) on `3001`; everything else is 404 there.
+  - Set `PUBLIC_PORT=3001` on the platform. It keeps serving the admin UI, REST and MCP on `3000` (LAN/VPN only) and additionally serves **only** `/f`, `/u`, `/c`, `/a`, `/n` and `/hooks` (plus `/healthz` and `/readyz`) on `3001`; everything else is 404 there.
   - In the tunnel config, point the new hostname at that port with **no path rule**:
     ```yaml
     ingress:
       - hostname: analytics.martechsignal.com     # existing Umami rule
         service: http://umami:3000
       - hostname: am.martechsignal.com
-        service: http://app:3001                  # public listener: only f/u/c/a/hooks exist here
+        service: http://app:3001                  # public listener: only f/u/c/a/n/hooks exist here
       - service: http_status:404
     ```
     For a tunnel managed in the dashboard, add one public hostname: `am.martechsignal.com` → `http://app:3001`. No second entry and no path regex are needed.
-  - If a path rule is unavoidable, use the strict form `^/(f|u|c|a|hooks)(/[^/.%][^/%]*)+/?$` with a catch-all to `http_status:404`. A loose rule is unsafe because cloudflared matches the **raw** path and forwards it raw: `/f/../v1/workspace.get` passes any rule that only checks the prefix, then the app resolves it to the admin API. The server now also rejects dot-segments, encoded dots/slashes and backslashes with 400 on both listeners, but the separate listener is the structural fix.
+  - If a path rule is unavoidable, use the strict form `^/(f|u|c|a|n|hooks)(/[^/.%][^/%]*)+/?$` with a catch-all to `http_status:404`. A loose rule is unsafe because cloudflared matches the **raw** path and forwards it raw: `/f/../v1/workspace.get` passes any rule that only checks the prefix, then the app resolves it to the admin API. The server now also rejects dot-segments, encoded dots/slashes and backslashes with 400 on both listeners, but the separate listener is the structural fix.
   - Platform settings: `PUBLIC_LINKS_URL=https://am.martechsignal.com`, `CLIENT_IP_HEADER=cf-connecting-ip,x-forwarded-for` and `TRUSTED_PROXY_CIDRS=<tunnel connector>,<Tailscale admin proxy>` (see "Client IP behind two ingress paths").
   - Site: the form posts to `https://am.martechsignal.com/f/<form id>`. The CSP's `form-action` swaps `https://app.kit.com` for `https://am.martechsignal.com`. Nothing else changes; the site worker stays as it is.
   - Bounce and complaint webhooks (`/hooks/...`) are served by the same public listener; with a path rule, the strict regex above already includes them.
@@ -133,7 +133,7 @@ The site's Kit list has one subscriber, the owner, so **there is no Kit import f
    curl --path-as-is -s -o /dev/null -w '%{http_code}\n' -X POST https://am.martechsignal.com/f/../v1/workspace.get   # 400 or 404
    curl --path-as-is -s -o /dev/null -w '%{http_code}\n' -X POST https://am.martechsignal.com/f/%2e%2e/v1/workspace.get # 400 or 404
    ```
-   Neither may answer 401 from the admin API. If the tunnel still uses a path rule, use `^/(f|u|c|a|hooks)(/[^/.%][^/%]*)+/?$`.
+   Neither may answer 401 from the admin API. If the tunnel still uses a path rule, use `^/(f|u|c|a|n|hooks)(/[^/.%][^/%]*)+/?$`.
 3. **Provider switch.** Add Postmark for marketing (Broadcast message stream, open and click tracking off) and Cloudflare Email Service for transactional e-mail if needed; check that Settings → Providers shows `tracking: configurable` (or `none`) for the marketing provider, and disable Brevo for marketing. Do this before switching the forms, so no real subscriber lands on a forced-tracking provider.
 4. **Signup.**
    - Create the confirmation template (purpose `onboarding`), the form (DOI, `successUrl` and `confirmedUrl` pages on the site, `allowedOrigins: ["https://martechsignal.com"]`) and the two small pages (`/subscribe/check-your-inbox/`, `/subscribe/welcome/`). Since 0.2.2 the confirm page on `am.martechsignal.com` allows the `confirmedUrl` origin in its own `form-action`, so "Yes, subscribe me" lands on `/subscribe/welcome/` (#115; on 0.2.0 and 0.2.1 the browser stayed on the confirm page). Without `confirmedUrl` the branded confirmed page is shown instead. Test the click in a real browser before go-live.
@@ -143,6 +143,7 @@ The site's Kit list has one subscriber, the owner, so **there is no Kit import f
 6. **Newsletter.**
    - Segment `{"consent": "marketing_email"}` ("Newsletter subscribers").
    - Each week: Hermes drafts the issue template and a `broadcast` with `sendAt` Friday 09:00 Copenhagen time (e.g. `2026-10-30T09:00:00+01:00`; offsets are accepted since 0.2) over MCP, runs `broadcasts.preview` (with the template's `templateVersion`) and submits both together with `artifacts.requestPublishBundle` (0.2.6 and later; before that, two `requestPublish` rounds). The result's `reviewUrl` is one review for both; Hermes sends Tim that link. Tim opens it (on a phone if need be), sees the rendered e-mail, the segment and the number of recipients, sends himself a test if wanted, and approves. Check sending under Build → Broadcasts → Sending, or with `broadcasts.status`.
+   - **Topics (0.2.8, #84):** when the site starts sending more than one kind of mail, add topics under `marketing_email` (for example `newsletter` and `product_news`) in Settings → Purposes, and name one on the issue's template or broadcast. The unsubscribe link keeps its one-click purpose-wide behaviour; `preferences_url` now opens a branded preference centre where readers can choose topics or unsubscribe from the purpose (the button names it, e.g. "Unsubscribe from Marketing e-mail"). A message for a refused topic is suppressed with `topic_unsubscribed`. Leave topics out if there is only one kind of mail; the purpose alone is enough.
 7. **Welcome journey.** Trigger on the `Subscription Confirmed` event: welcome e-mail → wait 3 days → a "start here" e-mail with the three most-read reviews. (A branch on e-mail clicks is not possible yet; see known limits.)
 8. **Measure.** Umami keeps on-site analytics. The platform reports the newsletter (`broadcasts.status`, `messages.stats`), signups (`Form Submitted` / `Subscription Confirmed` counts) and the journey (`journeys.stats`).
 

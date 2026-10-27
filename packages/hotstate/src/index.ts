@@ -44,6 +44,9 @@ export interface HotState {
   /** A version stamp shared by all processes: `bump` changes it, `stamp` reads it (cache invalidation). */
   bump(key: string): Promise<void>;
   stamp(key: string): Promise<string>;
+  /** A short-lived string shared by all processes (e.g. a link-check result); null when absent. */
+  cached(key: string): Promise<string | null>;
+  cache(key: string, value: string, ttlSeconds: number): Promise<void>;
   /** When `key` is locked out after repeated failures, or null. */
   failureLock(key: string): Promise<Date | null>;
   /**
@@ -183,6 +186,13 @@ export function valkeyHotState(opts: { url: string; prefix?: string }): HotState
     },
     async stamp(key) {
       return (await client.get(`${p}:v:${key}`)) ?? '0';
+    },
+
+    async cached(key) {
+      return client.get(`${p}:c:${key}`);
+    },
+    async cache(key, value, ttlSeconds) {
+      await client.set(`${p}:c:${key}`, value, 'EX', ttlSeconds);
     },
 
     async take(key, n, rate, burst) {

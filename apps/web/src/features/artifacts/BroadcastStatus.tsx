@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Ban, Clock, RefreshCw } from 'lucide-react';
+import { Ban, Clock, ExternalLink, RefreshCw } from 'lucide-react';
 import { api, errText } from '../../app/api';
 import { useWorkspace } from '../../app/session';
 import { useApi } from '../../app/useApi';
@@ -17,6 +17,7 @@ const runLabel = { not_scheduled: 'Not scheduled', scheduled: 'Scheduled', runni
 const MESSAGE_ORDER = ['sent', 'delivered', 'opened', 'clicked', 'bounced', 'complained', 'unsubscribed', 'failed'];
 
 const label = (key: string) => key.replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase());
+const pct = (n: number | null) => (n === null ? '—' : `${n.toFixed(2).replace(/\.?0+$/, '')}%`);
 
 /** Sending status and results of one broadcast, in its own tab on the artifact page. */
 export function BroadcastStatus({ artifact }: { artifact: Artifact }) {
@@ -26,7 +27,9 @@ export function BroadcastStatus({ artifact }: { artifact: Artifact }) {
   const [cancelError, setCancelError] = useState<string | null>(null);
   const published = artifact.publishedVersion !== null;
   const status = useApi(() => api.call('broadcasts.status', { artifactId: artifact.id }), [artifact.id], { skip: !published });
+  const archive = useApi(() => api.call('archive.issues', {}), [artifact.id], { skip: !published });
   const run = status.data?.run;
+  const archived = archive.data?.issues.find((i) => i.artifactId === artifact.id);
   const cancellable = run?.status === 'scheduled' || run?.status === 'running';
   const sending = run?.status === 'running';
 
@@ -54,6 +57,7 @@ export function BroadcastStatus({ artifact }: { artifact: Artifact }) {
 
   const messages = status.data.messages;
   const keys = [...MESSAGE_ORDER.filter((k) => k in messages), ...Object.keys(messages).filter((k) => !MESSAGE_ORDER.includes(k))];
+  const test = status.data.test;
 
   const cancel = async () => {
     const ok = await confirm({
@@ -83,6 +87,11 @@ export function BroadcastStatus({ artifact }: { artifact: Artifact }) {
         <Button size="sm" variant="ghost" icon={<RefreshCw size={14} />} onClick={status.reload}>
           Refresh
         </Button>
+        {archived && (
+          <a href={archived.url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-[12px] font-medium text-accent hover:underline">
+            View in the archive <ExternalLink size={12} />
+          </a>
+        )}
         {cancellable && can('messages:send') && (
           <Button size="sm" variant="danger" icon={<Ban size={14} />} className="ml-auto" onClick={() => void cancel()}>
             Cancel sending
@@ -111,10 +120,72 @@ export function BroadcastStatus({ artifact }: { artifact: Artifact }) {
         <StatCard label="Recipients" value={run.recipients.toLocaleString()} hint="In the segment when it was scheduled" />
         <StatCard label="Queued" value={run.queued.toLocaleString()} hint="Waiting to be sent" />
         <StatCard label="Skipped" value={run.skipped.toLocaleString()} hint="Not eligible, no consent or gone" tone={run.skipped > 0 ? 'warn' : undefined} />
+        {run.windowSkipped > 0 && (
+          <StatCard
+            label="Outside send window"
+            value={run.windowSkipped.toLocaleString()}
+            hint="Their next local window was later than the longest wait"
+            tone="warn"
+          />
+        )}
         {keys.map((k) => (
           <StatCard key={k} label={label(k)} value={(messages[k] ?? 0).toLocaleString()} />
         ))}
       </StatGrid>
+
+      {test && (
+        <div className="rounded-md border border-line bg-surface">
+          <div className="flex flex-wrap items-center gap-2 border-b border-line px-4 py-3">
+            <span className="text-[13px] font-semibold text-fg">Subject test</span>
+            <StatusPill tone={test.state === 'winner_sent' ? 'good' : 'info'}>
+              {test.state === 'sampling' ? 'Sampling' : test.state === 'deciding' ? 'Waiting to decide' : 'Winner sent'}
+            </StatusPill>
+            {test.winner && <span className="text-[12px] text-muted">Variant {test.winner} wins</span>}
+            <span className="ml-auto text-[12px] text-muted">
+              {test.state === 'winner_sent'
+                ? `Rest sent ${test.restAt ? formatDateTime(test.restAt, { zone: true }) : ''}`
+                : test.restAt
+                  ? `Rest goes ${formatDateTime(test.restAt, { zone: true })}`
+                  : 'Decides after the first sample sends'}
+            </span>
+          </div>
+          <div className="space-y-2 p-4">
+            <table className="w-full text-[13px]">
+              <thead>
+                <tr className="text-left text-[12px] text-muted">
+                  <th className="pb-1 font-medium">Variant</th>
+                  <th className="pb-1 font-medium">Subject</th>
+                  <th className="pb-1 text-right font-medium">Sent</th>
+                  <th className="pb-1 text-right font-medium">Delivered</th>
+                  <th className="pb-1 text-right font-medium">Opened</th>
+                  <th className="pb-1 text-right font-medium">Clicked</th>
+                  <th className="pb-1 text-right font-medium">{test.metric === 'click' ? 'Click rate' : 'Open rate'}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {test.variants.map((v) => (
+                  <tr key={v.variant} className={v.variant === test.winner ? 'font-semibold' : undefined}>
+                    <td className="py-1 pr-3">{v.variant}</td>
+                    <td className="max-w-[280px] truncate py-1 pr-3" title={v.subject}>
+                      {v.subject}
+                    </td>
+                    <td className="py-1 text-right tabular-nums">{v.sent.toLocaleString()}</td>
+                    <td className="py-1 text-right tabular-nums">{v.delivered.toLocaleString()}</td>
+                    <td className="py-1 text-right tabular-nums">{v.opened.toLocaleString()}</td>
+                    <td className="py-1 text-right tabular-nums">{v.clicked.toLocaleString()}</td>
+                    <td className="py-1 text-right tabular-nums">{pct(test.metric === 'click' ? v.clickRate : v.openRate)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <p className="text-[12px] text-muted">
+              {test.samplePercent}% sample; decided after {test.decideAfter}
+              {test.reason ? ` — ${test.reason}.` : '.'} {test.metric === 'click' ? 'Clicks' : 'Opens'} pick the winner; ties and fewer than 20 sends in
+              a variant stay with variant A.
+            </p>
+          </div>
+        </div>
+      )}
 
       <dl className="grid grid-cols-[minmax(96px,max-content)_minmax(0,1fr)] gap-x-4 gap-y-1.5 text-[13px]">
         {run.startedAt && (
