@@ -1086,6 +1086,69 @@ const broadcast = z.object({
     ),
 });
 
+// Campaigns (#65): a thin parent for a launch or a newsletter series. It groups existing artifacts
+// under one goal and one UTM campaign so results can be reported per campaign; it does not run
+// anything itself.
+const CampaignMemberRef = z
+  .string()
+  .regex(
+    /^(bct|jrn|eml|sms|psh|exp|frm|seg)_[0-9a-f]{32}$/,
+    'A broadcast, journey, e-mail/SMS/push template, experience, form or segment id',
+  )
+  .describe('A broadcast (bct_…), journey (jrn_…), template (eml_/sms_/psh_…), experience (exp_…), form (frm_…) or segment (seg_…)');
+const campaign = z
+  .object({
+    description: z.string().max(1000).optional().describe('What this campaign is for, in plain words'),
+    goal: z
+      .object({
+        kind: z
+          .enum(['conversion', 'revenue', 'engagement', 'signups', 'custom'])
+          .describe('The outcome the campaign is judged on; conversion and revenue also name the event that counts'),
+        event: z
+          .string()
+          .min(1)
+          .max(200)
+          .optional()
+          .describe('The event that counts as the conversion, e.g. "Order Completed"; required for conversion and revenue'),
+        target: z.number().min(0).max(1_000_000_000).optional().describe('What success looks like: a count, or revenue'),
+        attributionDays: z.number().int().min(1).max(30).default(7).describe('How long after a send a conversion still counts'),
+      })
+      .superRefine((g, ctx) => {
+        if ((g.kind === 'conversion' || g.kind === 'revenue') && !g.event)
+          ctx.addIssue({
+            code: 'custom',
+            path: ['event'],
+            message: 'A conversion or revenue goal needs the event that counts as the conversion',
+          });
+      }),
+    utmCampaign: z
+      .string()
+      .regex(/^[a-z0-9][a-z0-9_-]{0,60}$/, 'Lowercase letters, digits, _ and -; start with a letter or digit')
+      .optional()
+      .describe(
+        'Shared utm_campaign for e-mails sent by this campaign’s broadcasts and journeys. A template that sets its own utm.campaign keeps it; the template wins.',
+      ),
+    members: z
+      .array(z.object({ artifactId: CampaignMemberRef, role: z.enum(['primary', 'follow_up', 'content']).default('primary') }))
+      .max(50)
+      .default([])
+      .describe(
+        'Existing broadcasts, journeys, templates, experiences, forms and segments. A broadcast or journey can send for only one published campaign; templates, segments and experiences may be shared.',
+      ),
+    startsAt: isoDateTime('startsAt').optional().describe('When the campaign is planned to start; informational'),
+    endsAt: isoDateTime('endsAt').optional().describe('When it is planned to end; informational'),
+  })
+  .superRefine((c, ctx) => {
+    const seen = new Set<string>();
+    for (const [i, m] of c.members.entries()) {
+      if (seen.has(m.artifactId))
+        ctx.addIssue({ code: 'custom', path: ['members', i, 'artifactId'], message: `${m.artifactId} is already a member` });
+      seen.add(m.artifactId);
+    }
+    if (c.startsAt && c.endsAt && c.endsAt <= c.startsAt)
+      ctx.addIssue({ code: 'custom', path: ['endsAt'], message: 'endsAt must be after startsAt' });
+  });
+
 export type FormDefinition = z.output<typeof form>;
 export type Brand = z.output<typeof brand>;
 export type BrandOverride = z.output<typeof brandInput>;
@@ -1097,6 +1160,7 @@ export type PushTemplate = z.output<typeof pushTemplate>;
 export type DeliveryPolicy = z.output<typeof deliveryPolicy>;
 export const DEFAULT_DELIVERY_POLICY: DeliveryPolicy = deliveryPolicy.parse({});
 export type BroadcastDefinition = z.output<typeof broadcast>;
+export type CampaignDefinition = z.output<typeof campaign>;
 export type SubjectTestDefinition = NonNullable<BroadcastDefinition['subjectTest']>;
 export type SendWindowDefinition = NonNullable<BroadcastDefinition['sendWindow']>;
 export type TrackingPlan = z.output<typeof trackingPlan>;
@@ -1185,6 +1249,13 @@ export const artifactTypes = {
     description:
       'A one-off send of an e-mail template to a segment at a set time, e.g. a weekly newsletter. Use the template-per-issue pattern: each issue is its own e-mail template (copy the previous issue as a starting point), and the broadcast references it. Broadcasts carry no per-send data. Optional subjectTest tries 2–4 subject lines on a sample, then sends the winner to the rest after decideAfter (metric click or open); optional sendWindow sends only inside start–end in each reader’s time zone, holding messages until the next opening and skipping those beyond maxDelay. Submit the template and the broadcast together with artifacts.requestPublishBundle for one review. Check it with broadcasts.preview (with templateVersion while the template is unpublished). Set archive {publish:true, slug?, summary?} to publish the issue to the workspace archive after it has been sent; agents may set it because it is content, and a person still reviews the broadcast.',
     content: broadcast,
+  },
+  campaign: {
+    prefix: 'cmp',
+    label: 'Campaign',
+    description:
+      'A thin grouping of existing broadcasts, journeys, templates, experiences, forms and segments under one goal and one UTM campaign, so results can be reported per campaign. This is not an ad platform campaign (those live under ads.* and keep their own ids); link the two later by id. Members are references, never copies: editing or archiving a campaign does not change or delete them. A broadcast or journey that sends can belong to only one published campaign, so attribution is unambiguous; templates, segments and experiences may be shared. Shared UTM campaign: when a broadcast or journey in a published campaign with utmCampaign sends an e-mail, its utm_campaign is the campaign’s value unless the template sets its own utm.campaign, which wins; a template with no utm settings is tagged with utm_source=newsletter and utm_medium=email. Look up membership with campaigns.of and campaigns.members. Publish the campaign with its new members in one review using artifacts.requestPublishBundle.',
+    content: campaign,
   },
   tracking_plan: {
     prefix: 'tpl',
@@ -1373,7 +1444,7 @@ class OnePerType<V> extends Map<ArtifactType, V> {
 
 export const contentValidators = new OnePerType<ContentValidator>('content validator');
 /** Checks that only apply to publishing (a draft may be unfinished), e.g. referenced templates exist. */
-export type PublishValidator = (content: unknown, tx: import('@agentic-marketing/db').Tx) => Promise<string[]>;
+export type PublishValidator = (content: unknown, tx: import('@agentic-marketing/db').Tx, artifactId?: string) => Promise<string[]>;
 export const publishValidators = new OnePerType<PublishValidator>('publish validator');
 
 /**
