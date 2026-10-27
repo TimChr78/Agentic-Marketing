@@ -2,7 +2,7 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
-## [Unreleased]
+## [0.2.7] - 2026-10-27
 
 [Phase 14](docs/architecture/roadmap-wave-3.md#phase-14-admin-ui-for-daily-use): the screens used every week are quick and roomy. Pages use the window, the journey builder gets the space (with full screen and live stats), lists load a third less, lists filter on the server, experiences and purposes get real editors, and SVG logos work. REST and MCP stay backwards compatible: new commands, new optional inputs and new output fields. One migration runs at start-up.
 
