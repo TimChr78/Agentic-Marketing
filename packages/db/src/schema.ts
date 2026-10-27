@@ -1,4 +1,17 @@
-import { bigint, bigserial, boolean, customType, integer, jsonb, pgTable, primaryKey, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import {
+  bigint,
+  bigserial,
+  boolean,
+  customType,
+  doublePrecision,
+  integer,
+  jsonb,
+  pgTable,
+  primaryKey,
+  text,
+  timestamp,
+  uuid,
+} from 'drizzle-orm/pg-core';
 
 const bytea = customType<{ data: Buffer }>({ dataType: () => 'bytea' });
 const ts = (name: string) => timestamp(name, { withTimezone: true });
@@ -917,6 +930,57 @@ export const broadcastTests = pgTable(
     createdAt: ts('created_at').notNull().defaultNow(),
   },
   (t) => [primaryKey({ columns: [t.workspaceId, t.broadcastId] })],
+);
+
+export type AlertKind = 'deliverability' | 'signup_drop' | 'journey_errors';
+export type AlertChannel = { type: 'webhook'; webhookId: string } | { type: 'email'; userIds: string[] };
+export type AlertNotification = {
+  event: 'firing' | 'resolved' | 'test';
+  channel: 'webhook' | 'email';
+  target: string;
+  at: string;
+  status: 'sent' | 'failed';
+  deliveryId?: string;
+  error?: string;
+};
+
+/** A threshold rule over the metric layer; `config` is kind-specific and validated by the alerts package. */
+export const alertRules = pgTable(
+  'alert_rules',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    name: text('name').notNull(),
+    kind: text('kind').$type<AlertKind>().notNull(),
+    config: jsonb('config').$type<Record<string, unknown>>().notNull().default({}),
+    channels: jsonb('channels').$type<AlertChannel[]>().notNull().default([]),
+    enabled: boolean('enabled').notNull().default(true),
+    createdBy: text('created_by').notNull(),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
+/**
+ * One firing episode. The open row (resolved_at null) is the dedupe key: the scheduler finds it
+ * instead of notifying again. Resolving updates the same row, so history keeps fired_at.
+ */
+export const alertEvents = pgTable(
+  'alert_events',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    ruleId: text('rule_id').notNull(),
+    state: text('state').$type<'firing' | 'resolved'>().notNull(),
+    value: doublePrecision('value').notNull(),
+    threshold: doublePrecision('threshold').notNull(),
+    window: text('window').notNull(),
+    firedAt: ts('fired_at').notNull().defaultNow(),
+    resolvedAt: ts('resolved_at'),
+    notified: jsonb('notified').$type<AlertNotification[]>().notNull().default([]),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
 );
 
 export type ApprovalPolicy = 'none' | 'agent_changes' | 'all_publishes';

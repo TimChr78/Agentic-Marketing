@@ -54,6 +54,7 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
     ...overrides,
   });
   const keyProvider = keyProviderFor(config);
+  const directory = authDirectory(db);
   const bus = lazyNatsBus(config.nats);
   // E-mail delivery events also become customer events (segments, journeys, webhooks).
   const events = withEmailProfileEvents(clickHouseStore(config.clickhouse), { db, bus });
@@ -82,7 +83,7 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
     db,
     {
       keyProvider,
-      directory: authDirectory(db),
+      directory,
       events,
       bus,
       email,
@@ -254,11 +255,13 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
     auth,
     executor,
     keyProvider,
+    directory,
     bus,
     events,
     email,
     hot,
     egress: config.egress,
+    publicUrl: config.publicUrl,
     linksUrl: config.linksUrl,
     retention: config.retention,
   };

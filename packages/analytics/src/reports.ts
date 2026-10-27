@@ -17,6 +17,7 @@ const EMAIL_MEASURES = [
   'email.unsubscribed',
   'email.click_rate',
   'email.bounce_rate',
+  'email.complaint_rate',
   'email.unsubscribe_rate',
   'email.open_rate',
 ];
