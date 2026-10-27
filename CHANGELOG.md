@@ -2,6 +2,30 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+[Phase 16](docs/architecture/roadmap-wave-3.md#phase-16-measure-and-report): answer "what worked" from the platform, for people and for agents. A read-only metric layer answers questions in one call; campaigns group the work under a goal and report it; control groups measure uplift instead of assuming it; and alerts say when deliverability, signups or journeys go wrong. REST and MCP stay backwards compatible: new commands and artifact types only. Two Postgres and two ClickHouse migrations run at start-up.
+
+### Added
+
+- **A read-only metric layer (#75).** `analytics.query` over a fixed catalogue of measures (e-mail sent, delivered, bounced, complained, opened, clicked, unsubscribed and their rates; journey entered, completed, exited, goal reached, failed; conversions; revenue per currency; segment size) by dimensions (day, week, month in the workspace time zone; channel, template, broadcast, journey, journey step, purpose, subject-test variant, message type, segment, campaign). No SQL or table names as input: every query is built from the catalogue with parameters, scoped to the caller's workspace, and rows about fewer than 5 people are hidden in breakdowns. E-mail measures count distinct people. Named reports `analytics.emailPerformance` and `analytics.journeyFunnel`; `analytics.metrics.list` lists the catalogue; Insights → Analytics shows the same numbers. "How did the last four issues do" is one call (`dimensions: ['broadcast']`, newest first, `limit: 4`).
+- **Campaigns (#65).** A `campaign` artifact groups broadcasts, journeys, templates, experiences, forms and segments under a goal (conversion, revenue, engagement, signups) with an attribution window and a shared `utmCampaign`, which templates that tag their links inherit unless they set their own. A sending member belongs to one published campaign, so results aren't counted twice. `campaigns.of`, `campaigns.members`, `campaigns.archive`; Build → Campaigns.
+- **Campaign evaluation (#66).** `analytics.campaignSummary` reports recipients, delivery, clicks, unsubscribes and complaints, converters and revenue per currency (people who converted within the goal's window after their first campaign message), progress against the target, a funnel, per-member results and members' holdout results, or a readiness state before the first send. The campaign's Evaluation tab shows it.
+- **Control groups (#67)** for journeys and campaigns: a fixed share (1–50%) of people is assigned to control by a stable hash, gets no messages from the journey or from any of the campaign's members, and is still measured. `journeys.holdoutResult` and `campaigns.holdoutResult` report conversions per arm, absolute and relative lift with a 95% interval (Newcombe), a sample-size check and a plain verdict, with the unsubscribe rate as a guardrail. A journey inside a campaign uses the campaign's control group; changing the share after people were assigned needs `reset`.
+- **Threshold alerts (#76).** Rules for deliverability (bounce or complaint rate above a threshold, with a minimum volume), signup drops (confirmed signups against the previous window) and journey errors, evaluated every five minutes through the metric layer, notifying once when they fire and once when they resolve, to a signed webhook or by e-mail to members (aggregates only). `alerts.list/get/create/update/delete/test/history`; Insights → Alerts.
+
+### Changed
+
+- Conversion events carry the person's profile id (resolved when they are collected), so campaign attribution can join them to messages. Events collected before this release, or before a person was known, are not attributed.
+
+### Upgrading from 0.2.8
+
+- **Migrations:** Postgres `0041_holdout_assignments.sql` and `0043_alerts.sql`; ClickHouse `0005_message_events_variant.sql` and `0006_events_profile_id.sql`. All additive.
+- **Configuration:** none.
+- **Breaking changes:** none.
+- **Manual steps:** none. Campaigns, control groups and alerts are opt-in; campaign revenue and conversions count events from this release on.
+- **Upgrade:** download `agentic-marketing-compose-<version>.tar.gz`, replace `docker-compose.yml` with its copy, check your configuration with the new image (`AM_VERSION=<version> docker compose run --rm --no-deps -T app am doctor --env-file - < .env`), then set `AM_VERSION=<version>` in `.env` and `docker compose pull && docker compose up -d` (Helm: the chart of the same version). Then `docker compose exec app am doctor`.
+
 ## [0.2.8] - 2026-10-27
 
 [Phase 15](docs/architecture/roadmap-wave-3.md#phase-15-newsletter-and-lifecycle-e-mail): what a newsletter publisher expects from Kit, Beehiiv or Buttondown. Issues are built from shared blocks and checked before they go out; readers choose topics; every issue has a web version and can be published to an archive with RSS; subject lines can be tested; audiences can be fixed lists; and journeys can wait for a condition. REST and MCP stay backwards compatible: new commands, new optional fields and new template variables. Five migrations run at start-up, and one new public path (`/n`) needs a proxy rule where proxies filter paths.
