@@ -11,6 +11,8 @@ import { pageWidth } from '../../ui/layout';
 export default function HostedPagesPage() {
   useCrumbs([{ label: 'Hosted pages' }]);
   const forms = useApi(() => api.call('artifacts.list', { type: 'form', limit: 200 }), []);
+  const archive = useApi(() => api.call('archive.issues', {}), []);
+  const archiveSettings = archive.data?.settings;
   const [formId, setFormId] = useState('');
   return (
     <div className={pageWidth('default', 'space-y-5')}>
@@ -36,11 +38,33 @@ export default function HostedPagesPage() {
               </Select>
             </Field>
           </Card>
+          <Card title="Newsletter archive" padded>
+            {archiveSettings?.enabled && archiveSettings.indexUrl ? (
+              <>
+                <p className="text-[13px] text-fg-2">Sent issues marked “Publish to the archive” appear here, with RSS and a sitemap.</p>
+                <p className="mt-2 text-[13px]">
+                  <a className="font-medium text-accent hover:underline" href={archiveSettings.indexUrl} target="_blank" rel="noreferrer">
+                    Open the live archive
+                  </a>
+                </p>
+                <p className="mt-1 text-[12px] text-muted">
+                  <Mono>{archiveSettings.indexUrl}</Mono>
+                </p>
+              </>
+            ) : (
+              <>
+                <p className="text-[13px] text-fg-2">No public archive yet. Turn it on and choose an address in the brand.</p>
+                <p className="mt-2 text-[13px]"><ButtonLink to="/design/brand">Set up the archive</ButtonLink></p>
+              </>
+            )}
+          </Card>
           <Card title="Where they appear" padded>
             <Meta
               items={[
                 ['Confirm', <Mono>/f/confirm/…</Mono>],
                 ['Unsubscribe', <Mono>/u/…</Mono>],
+                ['Web version', <Mono>/n/w/…</Mono>],
+                ['Archive', <Mono>{'/n/<slug>/'}</Mono>],
               ]}
             />
             <ul className="mt-3 list-disc space-y-1.5 pl-4 text-[13px] text-fg-2">

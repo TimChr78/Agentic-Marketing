@@ -292,7 +292,13 @@ const emailTemplate = z.object({
   ),
   subject: z.string().min(1).max(300).describe('Liquid, e.g. "Welcome, {{ profile.firstName | default: \'friend\' }}"'),
   preheader: z.string().max(300).optional().describe('Preview text shown after the subject in inboxes'),
-  mjml: z.string().min(1).max(300_000).describe('MJML with Liquid. Variables: profile.*, event.*, unsubscribe_url, preferences_url'),
+  mjml: z
+    .string()
+    .min(1)
+    .max(300_000)
+    .describe(
+      'MJML with Liquid. Variables: profile.*, event.*, unsubscribe_url, preferences_url, web_url (a signed “view in browser” link)',
+    ),
   text: z.string().max(100_000).optional().describe('Plain-text part (Liquid). Generated from the HTML when omitted'),
   sampleData: z.record(z.string(), z.unknown()).optional().describe('Example variables for previews, e.g. {"profile":{"firstName":"Ada"}}'),
   utm: z
@@ -818,12 +824,26 @@ const brandFields = {
   language: BrandLanguage.optional().describe('Page language (BCP 47), default "en"'),
   copy: brandCopy.optional(),
 };
+// Public newsletter archive (#100): one per workspace, on the shared links host. The slug is the
+// workspace's place there (/n/<slug>/); publish-time validation keeps it unique across the install.
+const ArchiveSlug = z
+  .string()
+  .regex(/^[a-z0-9][a-z0-9-]{1,40}$/, 'Use 2–41 lowercase letters, digits and hyphens, starting with a letter or digit')
+  .describe('Archive address on the links host: /n/<slug>/');
+const brandArchive = z.object({
+  enabled: z.boolean().default(false).describe('Serve the public archive on the links host'),
+  title: z.string().max(120).optional().describe('Archive title; defaults to the site name'),
+  description: z.string().max(500).optional().describe('Shown on the archive index and in its feed'),
+  slug: ArchiveSlug.optional().describe('Required when the archive is enabled; unique per install'),
+  subscribeUrl: z.string().max(2000).optional().describe('Optional signup form URL for the archive’s “Subscribe” call to action'),
+});
 const brandInput = z.object(brandFields);
 const brand = brandInput.extend({
   logoHeight: z.number().int().min(16).max(96).default(32).describe('Logo height in px'),
   colors: brandColors.default({}),
   radius: z.number().int().min(0).max(24).default(8).describe('Corner radius in px'),
   language: BrandLanguage.default('en'),
+  archive: brandArchive.default({ enabled: false }),
 });
 
 const form = z
@@ -870,6 +890,16 @@ const broadcast = z.object({
   segment: z.string().regex(/^seg_[0-9a-f]{32}$/, 'A segment id (seg_…)'),
   sendAt: isoDateTime('sendAt').optional().describe('When to start sending; default: as soon as it is published'),
   description: z.string().max(500).optional(),
+  archive: z
+    .object({
+      publish: z.boolean().default(false).describe('Publish this sent issue to the workspace archive'),
+      slug: ArchiveSlug.optional().describe('Issue address under /n/<archive slug>/; default: the subject plus the send date'),
+      summary: z.string().max(500).optional().describe('Archive index and feed summary; default: the template preheader'),
+    })
+    .optional()
+    .describe(
+      'Optional newsletter archive entry (#100): publish this issue once it has been sent. The issue is rendered from the template version that was sent, with empty personalisation, so never put a person’s data in a template. Set publish false in a later published version to remove a published issue.',
+    ),
 });
 
 export type FormDefinition = z.output<typeof form>;
@@ -944,7 +974,7 @@ export const artifactTypes = {
     prefix: 'brd',
     label: 'Brand',
     description:
-      'The workspace’s brand for the pages subscribers see on the platform domain: double opt-in confirm and expired, unsubscribe and unsubscribed. Site name, URL for “Back to …”, logo, colours, font stack, radius, language and copy overrides. One per workspace; the published version is live. Preview it with hostedPages.preview.',
+      'The workspace’s brand for the pages subscribers see on the platform domain: double opt-in confirm and expired, unsubscribe and unsubscribed. Site name, URL for “Back to …”, logo, colours, font stack, radius, language and copy overrides. It also holds the optional public newsletter archive settings (enabled, title, description, slug, subscribe URL) served at <links URL>/n/<slug>/. One per workspace; the published version is live. Preview it with hostedPages.preview.',
     content: brand,
     singleton: true,
   },
@@ -952,7 +982,7 @@ export const artifactTypes = {
     prefix: 'bct',
     label: 'Broadcast',
     description:
-      'A one-off send of an e-mail template to a segment at a set time, e.g. a weekly newsletter. Use the template-per-issue pattern: each issue is its own e-mail template (copy the previous issue as a starting point), and the broadcast references it. Broadcasts carry no per-send data. Submit the template and the broadcast together with artifacts.requestPublishBundle for one review. Check it with broadcasts.preview (with templateVersion while the template is unpublished).',
+      'A one-off send of an e-mail template to a segment at a set time, e.g. a weekly newsletter. Use the template-per-issue pattern: each issue is its own e-mail template (copy the previous issue as a starting point), and the broadcast references it. Broadcasts carry no per-send data. Submit the template and the broadcast together with artifacts.requestPublishBundle for one review. Check it with broadcasts.preview (with templateVersion while the template is unpublished). Set archive {publish:true, slug?, summary?} to publish the issue to the workspace archive after it has been sent; agents may set it because it is content, and a person still reviews the broadcast.',
     content: broadcast,
   },
   tracking_plan: {
@@ -1114,7 +1144,15 @@ draftContentSchemas.set('journey', journeyDraft);
  */
 export type ContentValidator = (content: unknown) => string[];
 export const contentValidators = new Map<ArtifactType, ContentValidator>();
-/** Checks that only apply to publishing (a draft may be unfinished), e.g. referenced templates exist. */
-export type PublishValidator = (content: unknown, tx: import('@agentic-marketing/db').Tx) => Promise<string[]>;
+/**
+ * Checks that only apply to publishing (a draft may be unfinished), e.g. referenced templates
+ * exist. `db` and `workspaceId` are supplied for the rare install-wide check (an archive slug).
+ */
+export type PublishValidator = (
+  content: unknown,
+  tx: import('@agentic-marketing/db').Tx,
+  db?: import('@agentic-marketing/db').Db,
+  workspaceId?: string,
+) => Promise<string[]>;
 export const publishValidators = new Map<ArtifactType, PublishValidator>();
 export type JourneyDefinition = z.output<typeof journey>;

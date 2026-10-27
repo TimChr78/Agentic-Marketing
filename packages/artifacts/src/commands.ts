@@ -170,7 +170,7 @@ async function checkPublishable(ctx: CommandContext, type: string, content: unkn
       });
     }
   }
-  const problems = (await publishValidators.get(type as ArtifactType)?.(content, ctx.tx)) ?? [];
+  const problems = (await publishValidators.get(type as ArtifactType)?.(content, ctx.tx, ctx.db, ctx.principal.workspaceId)) ?? [];
   if (problems.length) throw new AppError('invalid_input', `This ${type} cannot be published yet: ${problems.join('; ')}`, { problems });
 }
 

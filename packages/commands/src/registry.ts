@@ -17,6 +17,8 @@ export type Surface = 'rest' | 'mcp' | 'scim' | 'internal';
 export interface Services {
   /** Public URL of the server, e.g. for admin UI deep links in command output. */
   publicUrl?: string;
+  /** Links host (PUBLIC_LINKS_URL), for shareable unsubscribe, form, web-version and archive URLs. */
+  linksUrl?: string;
   /** Version of the running server, so command output can show it (workspace.get). */
   serverVersion: string;
   /** Whether unknown input keys are rejected rather than warned about (STRICT_INPUTS). */
@@ -38,6 +40,11 @@ export interface StepUpLimiter {
 export interface CommandContext {
   principal: Principal;
   tx: Tx;
+  /**
+   * The database, for the few checks that need another workspace (e.g. a public archive slug being
+   * unique per install). Ordinary reads and writes go through the workspace-scoped `tx`.
+   */
+  db: Db;
   services: Services;
   /** Runs `fn` once the command's transaction has committed (e.g. to invalidate caches); errors are logged, not thrown. */
   afterCommit?: (fn: () => Promise<void>) => void;
@@ -225,7 +232,7 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
               }
             }
             const out = withInputWarnings(
-              cmd.output.parse(await cmd.handler(parsed.data, { principal, tx, services, afterCommit: (fn) => committed.push(fn) })),
+              cmd.output.parse(await cmd.handler(parsed.data, { principal, tx, db, services, afterCommit: (fn) => committed.push(fn) })),
               unknownMessages,
             ) as z.output<C['output']>;
             if (opts.idempotencyKey)

@@ -80,6 +80,27 @@ test.describe('hosted pages (#115)', () => {
     await expect.poll(latest).toMatchObject({ status: 'granted', source: 'form' });
   });
 
+  test('the public archive shows a sent issue without the reader’s personal data', async ({ page }) => {
+    const index = await page.request.get('/n/martechsignal/');
+    expect(index.status()).toBe(200);
+    const indexHtml = await index.text();
+    expect(indexHtml).toContain('The MartechSignal archive');
+    expect(indexHtml).toContain('Signal #42');
+
+    await signIn(page, PEOPLE.owner);
+    const { issues } = await call<{ issues: { url: string; subject: string }[] }>(page.request, 'archive.issues', {});
+    const issue = issues.find((i) => i.subject.includes('Signal #42'));
+    expect(issue).toBeTruthy();
+
+    await page.goto(issue!.url);
+    await expect(page.getByRole('heading', { name: /Signal #42/ })).toBeVisible();
+    await expect(page.locator('link[rel="canonical"]')).toHaveAttribute('href', issue!.url);
+    expect(await page.locator('script[type="application/ld+json"]').textContent()).toContain('"@type":"Article"');
+    // The template's sample profile ("Ada") must not leak into the public page.
+    await expect(page.getByText('Hi there')).toBeVisible();
+    await expect(page.getByText('Hi Ada')).toHaveCount(0);
+  });
+
   test('the unsubscribe button shows the unsubscribed page', async ({ page }) => {
     await signIn(page, PEOPLE.owner);
     const { profileId } = await call<{ profileId: string }>(page.request, 'profiles.find', { type: 'email', value: 'reader1@example.net' });

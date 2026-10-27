@@ -38,7 +38,7 @@ const Env = z.object({
     .max(65535)
     .optional()
     .describe(
-      'Optional second listener that serves only /f, /u, /c, /a, /hooks, /healthz and /readyz; point the public tunnel or proxy here',
+      'Optional second listener that serves only /f, /u, /c, /a, /n, /hooks, /healthz and /readyz; point the public tunnel or proxy here',
     ),
   WEB_DIST: z
     .string()

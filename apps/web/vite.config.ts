@@ -11,7 +11,7 @@ export default defineConfig(({ mode }) => ({
   // session cookie works without CORS.
   server: {
     // Public links (/a assets, /f forms, /u unsubscribe) as regexes, so /approvals and /audience stay in the app.
-    proxy: Object.fromEntries(['/api', '/v1', '/mcp', '/openapi.json', '^/(a|f|u|c)/'].map((p) => [p, process.env.API_URL ?? 'http://localhost:3000'])),
+    proxy: Object.fromEntries(['/api', '/v1', '/mcp', '/openapi.json', '^/(a|f|u|c|n)/'].map((p) => [p, process.env.API_URL ?? 'http://localhost:3000'])),
   },
   build: {
     outDir: mode === 'single' ? 'dist-single' : 'dist',

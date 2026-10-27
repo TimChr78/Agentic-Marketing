@@ -1,4 +1,4 @@
-import { Alert, DateTimeInput, Field, FieldGroup, Textarea } from '../../ui';
+import { Alert, Checkbox, DateTimeInput, Field, FieldGroup, Input, Textarea } from '../../ui';
 import { getWorkspaceTimeZone } from '../../ui/time';
 import { RefName } from '../previews/FormPreview';
 import type { EditorProps } from './ArtifactDetailPage';
@@ -9,6 +9,7 @@ interface Broadcast {
   segment?: string;
   sendAt?: string;
   description?: string;
+  archive?: { publish?: boolean; slug?: string; summary?: string };
 }
 
 /** A broadcast: which template, to which segment, when (in the workspace time zone, #51). */
@@ -29,6 +30,40 @@ export function BroadcastEditor({ content, onChange, readOnly, errors }: EditorP
           <DateTimeInput value={content.sendAt ?? null} onChange={(v) => set({ sendAt: v ?? undefined })} disabled={readOnly} />
         </Field>
         {content.sendAt && new Date(content.sendAt).getTime() < Date.now() && <Alert tone="warn">This time is in the past: it would send as soon as it is published.</Alert>}
+      </FieldGroup>
+      <FieldGroup
+        legend="Newsletter archive"
+        hint="After it has been sent, this issue can appear on the workspace archive (Design → Brand → Newsletter archive)."
+      >
+        <Checkbox
+          label="Publish to the archive"
+          hint="Only sent issues appear. The page uses the template version that was sent, with empty personalisation."
+          checked={content.archive?.publish ?? false}
+          disabled={readOnly}
+          onChange={(e) => set({ archive: { ...(content.archive ?? {}), publish: e.target.checked } })}
+        />
+        {content.archive?.publish && (
+          <>
+            <Field label="Issue address" hint="Optional. Default: the subject plus the send date; lowercase letters, digits and hyphens." error={errors['archive.slug']}>
+              <Input
+                value={content.archive?.slug ?? ''}
+                readOnly={readOnly}
+                maxLength={41}
+                placeholder="signal-43"
+                onChange={(e) => set({ archive: { ...(content.archive ?? {}), slug: e.target.value.toLowerCase() } })}
+              />
+            </Field>
+            <Field label="Summary" hint="Optional. Shown on the archive index and in RSS; default: the template preheader." error={errors['archive.summary']}>
+              <Textarea
+                rows={2}
+                value={content.archive?.summary ?? ''}
+                readOnly={readOnly}
+                maxLength={500}
+                onChange={(e) => set({ archive: { ...(content.archive ?? {}), summary: e.target.value } })}
+              />
+            </Field>
+          </>
+        )}
       </FieldGroup>
       <Field label="Description" hint="For the team; recipients never see it." error={errors.description}>
         <Textarea rows={2} value={content.description ?? ''} onChange={(e) => set({ description: e.target.value })} readOnly={readOnly} maxLength={500} />

@@ -8,7 +8,7 @@ import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, lt, sql } from 'drizzle-orm';
 import { type AdapterDeps, MESSAGE_ID_HEADER } from './adapters';
 import { applyDeliveryEvents } from './deliveryEvents';
-import { type ClickLink, type LinkSigner, tagLinks, tagTextLinks, trackLinks, type UnsubscribeLink } from './links';
+import { type ClickLink, type LinkSigner, tagLinks, tagTextLinks, trackLinks, type UnsubscribeLink, type WebLink } from './links';
 import { decisionEvent, defer, MAX_ATTEMPTS, retryDelaySeconds } from './outbox';
 import { checkPolicy } from './policy';
 import { transportFor } from './providers';
@@ -226,9 +226,19 @@ async function deliverOne(db: Db, ws: string, id: string, deps: { kp: KeyProvide
     if (!provider) return finish('failed', `no_provider: no enabled e-mail provider is set up for ${stream} messages`);
 
     const unsubscribe = `${deps.email.publicUrl}/u/${deps.email.links.sign({ w: ws, p: v.profileId, u: m.purpose, m: m.id } satisfies UnsubscribeLink)}`;
+    // "View in browser" is signed per message and recipient; it re-renders this exact e-mail for
+    // this person on the links host (#100). Like the unsubscribe link, it lasts as long as the
+    // message is kept; the route also understands an optional expiry (`x`) for future use.
+    const web = `${deps.email.publicUrl}/n/w/${deps.email.links.sign({ w: ws, m: m.id } satisfies WebLink)}`;
     let rendered: Awaited<ReturnType<typeof renderTemplate>>;
     try {
-      rendered = await renderTemplate(tpl, { ...m.data, profile: v.vars, unsubscribe_url: unsubscribe, preferences_url: unsubscribe });
+      rendered = await renderTemplate(tpl, {
+        ...m.data,
+        profile: v.vars,
+        unsubscribe_url: unsubscribe,
+        preferences_url: unsubscribe,
+        web_url: web,
+      });
     } catch (e) {
       return finish('failed', `render_error: ${(e as Error).message.split('\n')[0]}`);
     }
@@ -238,6 +248,7 @@ async function deliverOne(db: Db, ws: string, id: string, deps: { kp: KeyProvide
     const html = deps.email.trackClicks
       ? trackLinks(tagged, (url) => `${deps.email.publicUrl}/c/${deps.email.links.sign({ w: ws, m: m.id, url } satisfies ClickLink)}`, [
           unsubscribe,
+          web,
         ])
       : tagged;
     const headers: Record<string, string> = { [MESSAGE_ID_HEADER]: m.id };

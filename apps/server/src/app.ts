@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs';
 import { assetRoutes } from '@agentic-marketing/assets';
-import { formsApi, withEmailProfileEvents } from '@agentic-marketing/audience';
+import { archiveRoutes, formsApi, withEmailProfileEvents } from '@agentic-marketing/audience';
 import {
   type AuthConfig,
   acceptInvitation,
@@ -79,6 +79,7 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
       hot,
       egress: config.egress,
       publicUrl: config.publicUrl,
+      linksUrl: config.linksUrl,
       db,
       serverVersion: VERSION,
       strictInputs: config.strictInputs,
@@ -197,6 +198,9 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
   if (config.roles.has('api')) app.route('/', oauthRoutes({ db, kp: keyProvider, egress: config.egress }));
   // Public asset links, on both roles that front the public edge (like /f and /u).
   if (config.roles.has('api') || config.roles.has('ingest')) app.route('/', assetRoutes({ db }));
+  // The public newsletter archive and signed web versions, on the same links host (#100).
+  if (config.roles.has('api') || config.roles.has('ingest'))
+    app.route('/', archiveRoutes({ db, kp: keyProvider, links: email.links, linksUrl: config.linksUrl }));
   if (config.roles.has('ingest'))
     app.route(
       '/',
