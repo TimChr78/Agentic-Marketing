@@ -176,6 +176,7 @@ export async function sendTestMessages(ctx: CommandContext, opts: TestSendOption
           profile: person?.vars ?? {},
           unsubscribe_url: noop,
           preferences_url: noop,
+          topic_unsubscribe_url: noop,
           confirm_url: `${ctx.services.email.publicUrl}/f/confirm/test`,
         });
       } catch (e) {

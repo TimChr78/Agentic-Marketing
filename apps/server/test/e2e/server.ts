@@ -46,6 +46,11 @@ fixtures.post('/unsubscribe-link', async (c) => {
   const token = t.srv.email.links.sign({ w: s.ws, p: profileId, u: 'marketing_email', m: `e2e-${Date.now()}` });
   return c.json({ url: `${t.base}/u/${token}` });
 });
+fixtures.post('/preferences-link', async (c) => {
+  const { profileId } = await c.req.json<{ profileId: string }>();
+  const token = t.srv.email.links.sign({ w: s.ws, p: profileId, u: 'marketing_email', m: `e2e-pref-${Date.now()}` });
+  return c.json({ url: `${t.base}/u/p/${token}` });
+});
 const fixturesHttp = serve({ fetch: fixtures.fetch, port: port + 1, hostname: '127.0.0.1' });
 
 console.log(`\nReady on ${t.base}`);

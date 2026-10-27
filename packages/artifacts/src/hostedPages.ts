@@ -71,6 +71,8 @@ export interface HostedPageContext {
   preview?: boolean;
   /** Copy overrides for one rendering (e.g. "this signup is no longer available"). */
   copy?: Partial<BrandCopy>;
+  /** A link to the preference centre, offered after an unsubscribe (#84). */
+  manageUrl?: string | null;
 }
 
 /** Merges a published brand and an optional form override, filling safe defaults. */
@@ -143,6 +145,117 @@ export function hostedPageHeaders(redirectOrigins: (string | null | undefined)[]
 /** The headers for pages whose forms post back to the links host and are answered in place. */
 export const HOSTED_PAGE_HEADERS = hostedPageHeaders();
 
+export interface PreferenceTopic {
+  key: string;
+  name: string;
+  description: string;
+  status: 'subscribed' | 'unsubscribed';
+}
+
+export interface PreferencePurpose {
+  key: string;
+  name: string;
+  description: string;
+  topics: PreferenceTopic[];
+}
+
+export interface PreferenceCentreContext {
+  /** Where the form posts; the signed token stays in the URL, never in a hidden field. */
+  action: string;
+  purposes: PreferencePurpose[];
+  saved?: boolean;
+  error?: string;
+  /** Admin preview: buttons are disabled, so nothing can be submitted. */
+  preview?: boolean;
+}
+
+/**
+ * The preference centre (#84): purposes with their topics, each checkbox reflecting the person's
+ * effective status (their choice, or the topic's default). It uses the same brand, escaping and
+ * header policy as the other hosted pages, and no scripts.
+ */
+export function renderPreferencesPage(brand: ResolvedBrand, ctx: PreferenceCentreContext): string {
+  const colors = Object.entries(brand.colors)
+    .map(([name, value]) => `--${name.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)}:${value}`)
+    .join(';');
+  const logo = brand.logoUrl
+    ? `<img class="logo" src="${escapeHtml(brand.logoUrl)}" alt="${escapeHtml(brand.logoAlt ?? brand.siteName ?? '')}" height="${brand.logoHeight}" style="height:${brand.logoHeight}px">`
+    : '';
+  const header = brand.logoUrl
+    ? `<header class="brand">${logo}</header>`
+    : brand.siteName
+      ? `<header class="brand"><p class="site-name">${escapeHtml(brand.siteName)}</p></header>`
+      : '';
+  const disabled = ctx.preview ? ' disabled aria-disabled="true"' : '';
+  const notice = ctx.saved ? '<p class="notice" role="status">Your preferences are saved.</p>' : '';
+  const error = ctx.error ? `<p class="error" role="alert">${escapeHtml(ctx.error)}</p>` : '';
+  const purposes = ctx.purposes
+    .map(
+      (p) => `<section class="purpose">
+<h2>${escapeHtml(p.name)}</h2>
+${p.description ? `<p class="description">${escapeHtml(p.description)}</p>` : ''}
+<fieldset><legend>Topics</legend>${p.topics
+        .map(
+          (
+            t,
+          ) => `<label class="topic"><input type="checkbox" name="topic:${escapeHtml(t.key)}" value="subscribed"${t.status === 'subscribed' ? ' checked' : ''}${disabled}>
+<span><span class="topic-name">${escapeHtml(t.name)}</span>${t.description ? `<span class="topic-description">${escapeHtml(t.description)}</span>` : ''}</span></label>`,
+        )
+        .join('')}</fieldset>
+</section>`,
+    )
+    .join('');
+  return `<!doctype html>
+<html lang="${escapeHtml(brand.language)}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Your preferences</title>
+<style>
+:root{color-scheme:light;${colors};--radius:${brand.radius}px}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{min-height:100vh;padding:24px 12px;background:var(--background);color:var(--text);font-family:${brand.fontStack};font-size:16px;line-height:1.5}
+main{max-width:36rem;margin:0 auto}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:clamp(20px,6vw,32px)}
+.brand{margin:0 0 1.25rem}
+.logo{display:block;max-width:100%;width:auto;margin:0 0 .75rem}
+.site-name{margin:0;font-size:.95rem;font-weight:600;color:var(--muted);overflow-wrap:anywhere}
+h1{margin:0 0 .5rem;font-size:clamp(1.35rem,4.5vw,1.6rem);line-height:1.25;overflow-wrap:anywhere}
+h2{margin:0 0 .25rem;font-size:1.05rem;line-height:1.3}
+p{margin:0 0 1rem;color:var(--muted);overflow-wrap:anywhere}
+.description{margin:0 0 .75rem;font-size:.95rem}
+.purpose{margin:0 0 1.5rem;padding:0 0 1rem;border-bottom:1px solid var(--border)}
+.purpose:last-of-type{border-bottom:0}
+fieldset{margin:0;padding:0;border:0;min-width:0}
+legend{padding:0;margin:0 0 .5rem;font-size:.85rem;font-weight:600;color:var(--muted)}
+.topic{display:flex;gap:.65rem;align-items:flex-start;padding:.5rem 0;cursor:pointer}
+.topic input{margin:.2rem 0 0;width:1.1rem;height:1.1rem;accent-color:var(--accent);flex:none}
+.topic-name{display:block;font-weight:600;color:var(--text)}
+.topic-description{display:block;font-size:.9rem;color:var(--muted)}
+.actions{display:flex;flex-wrap:wrap;gap:.75rem;align-items:center;margin-top:1.25rem}
+button{font:inherit;font-weight:600;min-height:44px;padding:.65rem 1.25rem;border:1px solid var(--accent);border-radius:var(--radius);background:var(--accent);color:var(--accent-text);cursor:pointer}
+button:hover{filter:brightness(.94)}
+button:focus-visible{outline:3px solid var(--text);outline-offset:3px}
+button[disabled]{cursor:not-allowed}
+button.secondary{background:transparent;color:var(--accent)}
+button.danger{border-color:var(--text);color:var(--text)}
+.notice{margin:0 0 1rem;padding:.65rem .85rem;border:1px solid var(--accent);border-radius:var(--radius);color:var(--text)}
+.error{margin:0 0 1rem;padding:.65rem .85rem;border:1px solid var(--text);border-radius:var(--radius);color:var(--text)}
+@media (max-width:400px){body{padding:16px 10px}.card{padding:20px 16px}}
+</style>
+</head>
+<body><main class="card">${header}<h1>Your preferences</h1>
+<p>Choose what you hear about. You can change this at any time from any e-mail we send.</p>
+${notice}${error}
+<form method="post" action="${escapeHtml(ctx.action)}">${purposes}
+<div class="actions"><button type="submit"${disabled}>Save</button><button type="submit" class="secondary danger" name="action" value="unsubscribe_all"${disabled}>Unsubscribe from all marketing</button></div>
+</form>
+</main></body>
+</html>`;
+}
+
 const BUTTON_PAGES: ReadonlySet<HostedPageKind> = new Set(['confirm', 'unsubscribe']);
 const BACK_LINK_PAGES: ReadonlySet<HostedPageKind> = new Set(['expired', 'confirmed', 'unsubscribe', 'unsubscribed']);
 
@@ -182,6 +295,10 @@ export function renderHostedPage(kind: HostedPageKind, brand: ResolvedBrand, ctx
     : '';
   const back =
     BACK_LINK_PAGES.has(kind) && siteUrl ? `<p class="back"><a href="${escapeHtml(siteUrl)}">${text(copy.backToSite)}</a></p>` : '';
+  const manage =
+    kind === 'unsubscribed' && ctx.manageUrl
+      ? `<p class="back"><a href="${escapeHtml(ctx.manageUrl)}">Manage your preferences</a></p>`
+      : '';
 
   return `<!doctype html>
 <html lang="${escapeHtml(brand.language)}">
@@ -212,6 +329,6 @@ a:focus-visible{outline:3px solid var(--text);outline-offset:3px;border-radius:2
 @media (max-width:400px){body{padding:16px 10px}.card{padding:20px 16px}}
 </style>
 </head>
-<body><main class="card">${header}<h1>${text(page.title)}</h1><p>${text(page.body)}</p>${action}${back}</main></body>
+<body><main class="card">${header}<h1>${text(page.title)}</h1><p>${text(page.body)}</p>${action}${back}${manage}</main></body>
 </html>`;
 }

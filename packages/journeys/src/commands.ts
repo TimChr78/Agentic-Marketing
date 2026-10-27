@@ -286,7 +286,10 @@ export const simulateJourney = defineCommand({
         if (eff?.kind === 'email') {
           if (input.profileId) {
             const [tpl] = await ctx.tx
-              .select({ purpose: sql<string>`${schema.artifactVersions.content} ->> 'purpose'` })
+              .select({
+                purpose: sql<string>`${schema.artifactVersions.content} ->> 'purpose'`,
+                topic: sql<string | null>`${schema.artifactVersions.content} ->> 'topic'`,
+              })
               .from(schema.artifacts)
               .innerJoin(
                 schema.artifactVersions,
@@ -298,14 +301,17 @@ export const simulateJourney = defineCommand({
               )
               .where(eq(schema.artifacts.id, eff.template));
             const v = tpl
-              ? await checkRecipient(ctx.tx, ws, ctx.services.keyProvider, input.profileId, tpl.purpose)
+              ? await checkRecipient(ctx.tx, ws, ctx.services.keyProvider, input.profileId, tpl.purpose, tpl.topic)
               : { ok: false as const, reason: 'not_published: the template has no published version' };
             detail = v.ok ? `would send ${eff.template}` : `would not send: ${v.reason}`;
           } else detail = `would send ${eff.template}`;
         } else if (eff?.kind === 'sms') {
           if (input.profileId) {
             const [tpl] = await ctx.tx
-              .select({ purpose: sql<string>`${schema.artifactVersions.content} ->> 'purpose'` })
+              .select({
+                purpose: sql<string>`${schema.artifactVersions.content} ->> 'purpose'`,
+                topic: sql<string | null>`${schema.artifactVersions.content} ->> 'topic'`,
+              })
               .from(schema.artifacts)
               .innerJoin(
                 schema.artifactVersions,
@@ -317,14 +323,17 @@ export const simulateJourney = defineCommand({
               )
               .where(eq(schema.artifacts.id, eff.template));
             const v = tpl
-              ? await checkSmsRecipient(ctx.tx, ws, ctx.services.keyProvider, input.profileId, tpl.purpose)
+              ? await checkSmsRecipient(ctx.tx, ws, ctx.services.keyProvider, input.profileId, tpl.purpose, tpl.topic)
               : { ok: false as const, reason: 'not_published: the template has no published version' };
             detail = v.ok ? `would text ${eff.template}` : `would not text: ${v.reason}`;
           } else detail = `would text ${eff.template}`;
         } else if (eff?.kind === 'push') {
           if (input.profileId) {
             const [tpl] = await ctx.tx
-              .select({ purpose: sql<string>`${schema.artifactVersions.content} ->> 'purpose'` })
+              .select({
+                purpose: sql<string>`${schema.artifactVersions.content} ->> 'purpose'`,
+                topic: sql<string | null>`${schema.artifactVersions.content} ->> 'topic'`,
+              })
               .from(schema.artifacts)
               .innerJoin(
                 schema.artifactVersions,
@@ -336,7 +345,7 @@ export const simulateJourney = defineCommand({
               )
               .where(eq(schema.artifacts.id, eff.template));
             const v = tpl
-              ? await checkPushRecipient(ctx.tx, ws, ctx.services.keyProvider, input.profileId, tpl.purpose)
+              ? await checkPushRecipient(ctx.tx, ws, ctx.services.keyProvider, input.profileId, tpl.purpose, tpl.topic)
               : { ok: false as const, reason: 'not_published: the template has no published version' };
             detail = v.ok
               ? `would notify ${eff.template} (${v.devices} device${v.devices === 1 ? '' : 's'})`

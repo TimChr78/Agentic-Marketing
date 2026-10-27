@@ -68,6 +68,7 @@ export default function PersonPage({ params }: { params: Record<string, string> 
   const resolvedId = p?.id ?? id;
   const events = useApi(() => api.call('profiles.events', { profileId: resolvedId, limit: 100 }), [resolvedId]);
   const consent = useApi(() => api.call('consent.history', { profileId: resolvedId }), [resolvedId]);
+  const topics = useApi(() => api.call('topics.preferences', { profileId: resolvedId }), [resolvedId]);
   const segments = useApi(() => api.call('segments.ofProfile', { profileId: resolvedId }), [resolvedId]);
   const messages = useApi(() => api.call('messages.list', { profileId: resolvedId, limit: 50 }), [resolvedId]);
 
@@ -142,6 +143,7 @@ export default function PersonPage({ params }: { params: Record<string, string> 
   }
 
   const consentRecords = consent.data?.records ?? [];
+  const topicRows = topics.data?.topics ?? [];
   const eventRows = events.data?.events ?? [];
   const segmentRows = segments.data?.segments ?? [];
   const messageRows = messages.data?.messages ?? [];
@@ -234,19 +236,58 @@ export default function PersonPage({ params }: { params: Record<string, string> 
       )}
 
       {tab === 'consent' && (
-        <TableFrame
-          loading={consent.loading}
-          error={consent.error}
-          onRetry={consent.reload}
-          columns={5}
-          isEmpty={consentRecords.length === 0}
-          empty={<EmptyState compact title="No consent choices recorded" />}
-        >
-          <p className="border-b border-line px-4 py-2 text-[12px] text-muted">
-            The consent ledger is append-only. Each row adds a record; the latest per purpose and channel is the current choice.
-          </p>
-          <ConsentHistoryTable records={consentRecords} />
-        </TableFrame>
+        <div className="space-y-4">
+          {topicRows.length > 0 && (
+            <div className="rounded-lg border border-line bg-surface p-4">
+              <h2 className="mb-1 text-[14px] font-semibold">Topic preferences</h2>
+              <p className="mb-3 text-[12px] text-muted">
+                Finer choices within a purpose. A topic never replaces the purpose’s consent; when the person made no choice, the topic’s default applies.
+              </p>
+              <Table label="Topic preferences">
+                <THead>
+                  <tr>
+                    <Th>Purpose</Th>
+                    <Th>Topic</Th>
+                    <Th>Choice</Th>
+                    <Th>Since</Th>
+                    <Th>Source</Th>
+                  </tr>
+                </THead>
+                <tbody>
+                  {topicRows.map((t) => (
+                    <Tr key={`${t.purpose}:${t.topic}`}>
+                      <Td className="font-medium text-fg">{t.purposeName}</Td>
+                      <Td>
+                        {t.name} <span className="text-muted">({t.topic})</span>
+                      </Td>
+                      <Td>
+                        <StatusPill tone={t.status === 'subscribed' ? 'good' : 'warn'}>{t.status}</StatusPill>
+                        {!t.source && <span className="ml-1.5 text-[12px] text-muted">default</span>}
+                      </Td>
+                      <Td className="whitespace-nowrap" title={t.updatedAt ? formatDateTime(t.updatedAt) : undefined}>
+                        {t.updatedAt ? timeAgo(t.updatedAt) : <span className="text-muted">—</span>}
+                      </Td>
+                      <Td>{t.source ? t.source.replace(/_/g, ' ') : <span className="text-muted">Default</span>}</Td>
+                    </Tr>
+                  ))}
+                </tbody>
+              </Table>
+            </div>
+          )}
+          <TableFrame
+            loading={consent.loading}
+            error={consent.error}
+            onRetry={consent.reload}
+            columns={5}
+            isEmpty={consentRecords.length === 0}
+            empty={<EmptyState compact title="No consent choices recorded" />}
+          >
+            <p className="border-b border-line px-4 py-2 text-[12px] text-muted">
+              The consent ledger is append-only. Each row adds a record; the latest per purpose and channel is the current choice.
+            </p>
+            <ConsentHistoryTable records={consentRecords} />
+          </TableFrame>
+        </div>
       )}
 
       {tab === 'events' && (

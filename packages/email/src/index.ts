@@ -20,3 +20,4 @@ export * from './sms/providers';
 export * from './sms/routes';
 export * from './templates';
 export * from './testSend';
+export * from './topicValidation';

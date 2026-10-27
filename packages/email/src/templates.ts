@@ -1,4 +1,10 @@
-import { contentValidators, DEFAULT_PURPOSES, type EmailTemplate, publishedSingleton } from '@agentic-marketing/artifacts';
+import {
+  contentValidators,
+  DEFAULT_PURPOSES,
+  type EmailTemplate,
+  publishedSingleton,
+  publishValidators,
+} from '@agentic-marketing/artifacts';
 import { defineCommand } from '@agentic-marketing/commands';
 import { AppError } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
@@ -7,8 +13,10 @@ import { and, desc, eq } from 'drizzle-orm';
 import { z } from 'zod';
 import { renderTemplate, validateTemplate } from './render';
 import { sendTestMessages, testRecipientsInput, testSendOutput } from './testSend';
+import { topicProblems } from './topicValidation';
 
 contentValidators.set('email_template', (c) => validateTemplate(c as EmailTemplate));
+publishValidators.set('email_template', async (c, tx) => topicProblems(tx, (c as EmailTemplate).purpose, (c as EmailTemplate).topic));
 
 export const previewTemplate = defineCommand({
   name: 'templates.preview',

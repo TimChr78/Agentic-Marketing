@@ -13,7 +13,7 @@ Dependencies: a double opt-in form needs its confirmation e-mail template, a bro
 
 Weekly newsletters use the template-per-issue pattern: one e-mail template per issue. Broadcasts have no per-send data, so a shared layout template cannot be filled with each issue's content. For every issue, create a new email_template (copy the previous issue's template as a starting point) and a broadcast that references it, then submit both with artifacts.requestPublishBundle: the reviewer sees the e-mail, the audience and the send time in one request.
 
-Privacy and consent: segments cannot use personal traits (email, phone, name, birthday, address, ...); use non-personal traits, events and consent instead. Sends only reach people who consented to the purpose. Keep the unsubscribe link and purpose on e-mail templates.
+Privacy and consent: segments cannot use personal traits (email, phone, name, birthday, address, ...); use non-personal traits, events and consent instead. Sends only reach people who consented to the purpose. Keep the unsubscribe link and purpose on e-mail templates. A purpose may define optional topics; a template or broadcast can name one, and people can refuse a topic without leaving the purpose. Check topics with purposes.list and a person's choices with topics.preferences; topics.set records a choice, but an agent may only record an unsubscribe, never a subscribe.
 
 Tool errors explain what to fix; fix the input and try again. This guide is also available as the resource agentic-marketing://guide.`;
 

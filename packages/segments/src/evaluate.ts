@@ -9,7 +9,7 @@ import {
 import { AppError } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
 import type { BusEvent, EventStore } from '@agentic-marketing/events';
-import { currentConsent, purposeAllowed } from '@agentic-marketing/profiles';
+import { currentConsent, effectiveTopicStatus, findTopic, purposeAllowed } from '@agentic-marketing/profiles';
 import { and, eq, inArray, isNull, type SQL, sql } from 'drizzle-orm';
 
 // Segment evaluation as set algebra over profile ids. The same code serves batch recomputation
@@ -80,6 +80,7 @@ export async function evaluate(cond: SegmentCondition, ctx: EvalContext): Promis
   if ('trait' in cond) return traitSet(cond, ctx);
   if ('event' in cond) return eventSet(cond, ctx);
   if ('consent' in cond) return consentSet(cond.consent, ctx);
+  if ('topic' in cond) return topicSet(cond.topic, ctx);
   return segmentSet(cond.segment, ctx);
 }
 
@@ -219,6 +220,28 @@ async function consentSet(purpose: string, ctx: EvalContext): Promise<Set<string
   return new Set([...all].filter((id) => purposeAllowed(p.basis, currentConsent(byProfile.get(id) ?? [], purpose)?.status)));
 }
 
+async function topicSet(topic: string, ctx: EvalContext): Promise<Set<string>> {
+  ctx._purposes ??= publishedSingleton(ctx.tx, 'purposes').then((p) => p?.purposes ?? DEFAULT_PURPOSES);
+  const found = findTopic(await ctx._purposes, topic);
+  if (!found) throw new AppError('invalid_input', `Unknown topic "${topic}" in a segment condition. See purposes.list.`);
+  const all = await universe(ctx);
+  const rows = await ctx.tx
+    .select({
+      profileId: schema.topicPreferences.profileId,
+      topic: schema.topicPreferences.topic,
+      status: schema.topicPreferences.status,
+    })
+    .from(schema.topicPreferences)
+    .where(
+      ctx.scope
+        ? inArray(schema.topicPreferences.profileId, ctx.scope.length ? ctx.scope : ['-'])
+        : eq(schema.topicPreferences.topic, topic),
+    );
+  const byProfile = new Map<string, { topic: string; status: 'subscribed' | 'unsubscribed' }[]>();
+  for (const r of rows) byProfile.set(r.profileId, [...(byProfile.get(r.profileId) ?? []), r]);
+  return new Set([...all].filter((id) => effectiveTopicStatus(byProfile.get(id) ?? [], found.topic) === 'subscribed'));
+}
+
 async function segmentSet(id: string, ctx: EvalContext): Promise<Set<string>> {
   const stack = ctx._stack ?? [];
   if (stack.includes(id)) throw new AppError('invalid_input', `Segments refer to each other in a loop: ${[...stack, id].join(' → ')}`);
@@ -239,6 +262,8 @@ export function relevant(cond: SegmentCondition, e: BusEvent): boolean {
   if ('not' in cond) return relevant(cond.not, e);
   if ('event' in cond) return cond.event === e.name;
   if ('segment' in cond) return true;
+  // Topic choices change from the preference centre or commands, never from an event.
+  if ('topic' in cond) return false;
   // Form confirmations (frm_) and imports (imp_) carry no consent field; the consent hook records theirs.
   if ('consent' in cond && /^(frm|imp)_/.test(e.sourceId)) return true;
   return Object.keys(e.traits).length > 0 || Object.keys(e.consent).length > 0 || e.type === 'identify';

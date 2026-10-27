@@ -1,4 +1,5 @@
 import { deflateSync } from 'node:zlib';
+import { DEFAULT_PURPOSES } from '@agentic-marketing/artifacts';
 import { createClient } from '@agentic-marketing/client';
 import type { Commands } from '../../src/registry';
 import type { startTestServer } from '../harness';
@@ -125,6 +126,26 @@ export async function seed(t: T, opts: { confirmedUrl?: string } = {}) {
     },
   });
   await pub(brand.artifactId, 'Initial brand');
+
+  // Topics under the newsletter purpose (#84), so the hosted preference centre has choices.
+  const purposes = await owner.call('artifacts.create', {
+    type: 'purposes',
+    name: 'Purposes',
+    content: {
+      purposes: DEFAULT_PURPOSES.map((p) =>
+        p.key === 'marketing_email'
+          ? {
+              ...p,
+              topics: [
+                { key: 'newsletter', name: 'Weekly newsletter', description: 'The Friday issue', default: 'subscribed' as const },
+                { key: 'product_news', name: 'Product news', description: 'Launches and changes', default: 'unsubscribed' as const },
+              ],
+            }
+          : p,
+      ),
+    },
+  });
+  await pub(purposes.artifactId, 'Purposes with topics');
 
   const confirm = await owner.call('artifacts.create', {
     type: 'email_template',

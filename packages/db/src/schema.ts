@@ -316,6 +316,40 @@ export const suppressions = pgTable(
   (t) => [primaryKey({ columns: [t.workspaceId, t.channel, t.valueHash] })],
 );
 
+export type TopicStatus = 'subscribed' | 'unsubscribed';
+export type TopicPreferenceSource = 'preference_center' | 'unsubscribe_link' | 'api' | 'agent' | 'import' | 'form' | 'sdk';
+/** Current topic choice per person; the topic's default applies when a person has no row. */
+export const topicPreferences = pgTable(
+  'topic_preferences',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    profileId: text('profile_id').notNull(),
+    topic: text('topic').notNull(),
+    status: text('status').$type<TopicStatus>().notNull(),
+    source: text('source').$type<TopicPreferenceSource>().notNull(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.profileId, t.topic] })],
+);
+
+/** Append-only topic decisions, with the purpose they sat under and the evidence. */
+export const topicPreferenceHistory = pgTable(
+  'topic_preference_history',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: bigserial('id', { mode: 'number' }).notNull(),
+    profileId: text('profile_id').notNull(),
+    topic: text('topic').notNull(),
+    purpose: text('purpose').notNull(),
+    status: text('status').$type<TopicStatus>().notNull(),
+    source: text('source').$type<TopicPreferenceSource>().notNull(),
+    note: text('note'),
+    proof: jsonb('proof').$type<Record<string, unknown>>().notNull().default({}),
+    recordedAt: ts('recorded_at').notNull().defaultNow(),
+    recordedBy: text('recorded_by'),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
 export const erasures = pgTable(
   'erasures',
   {
@@ -362,6 +396,8 @@ export const messages = pgTable(
     channel: text('channel').notNull().default('email'),
     profileId: text('profile_id'),
     purpose: text('purpose').notNull(),
+    /** The topic the message was sent under, if any; kept so delivery re-checks the same choice. */
+    topic: text('topic'),
     templateId: text('template_id'),
     templateVersion: integer('template_version'),
     journeyId: text('journey_id'),

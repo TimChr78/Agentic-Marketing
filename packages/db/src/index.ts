@@ -14,6 +14,8 @@ export type {
   MessageStatus,
   ParticipantStatus,
   Role,
+  TopicPreferenceSource,
+  TopicStatus,
   VersionState,
   WarehouseDataset,
 } from './schema';

@@ -51,7 +51,17 @@ describe('consent gate', () => {
   it('holds legitimate-interest purposes unless the visitor objected', () => {
     const li: WorkspacePolicy = {
       plan: null,
-      purposes: [{ key: 'analytics', name: 'A', description: '', basis: 'legitimate_interest', channels: [], requiresDoubleOptIn: false }],
+      purposes: [
+        {
+          key: 'analytics',
+          name: 'A',
+          description: '',
+          basis: 'legitimate_interest',
+          channels: [],
+          requiresDoubleOptIn: false,
+          topics: [],
+        },
+      ],
     };
     expect(run({ type: 'track', event: 'x', anonymousId: 'a' }, browser, li).kind).toBe('accepted');
     expect(

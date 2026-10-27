@@ -12,10 +12,14 @@ import {
 } from '../src/features/artifacts/ExperienceEditor';
 import {
   addPurpose,
+  addTopic,
   changeBasis,
   isKeyLocked,
   removePurpose,
+  removeTopic,
+  topicsOf,
   updatePurpose,
+  updateTopic,
   type Purpose,
 } from '../src/features/artifacts/PurposesEditor';
 
@@ -88,5 +92,20 @@ describe('purposes editor content (#57)', () => {
     expect(changeBasis(withLia, 'contract').lia).toBeUndefined();
     expect(isKeyLocked('marketing_email', ['marketing_email', 'analytics'])).toBe(true);
     expect(isKeyLocked('new_purpose', ['marketing_email'])).toBe(false);
+  });
+
+  it('adds, edits and removes topics under a purpose (#84)', () => {
+    const withTopic = addTopic(purpose());
+    expect(withTopic.topics).toEqual([{ key: 'topic_1', name: 'Topic 1', description: '', default: 'subscribed' }]);
+    const next = addTopic(withTopic);
+    expect(next.topics?.map((t) => t.key)).toEqual(['topic_1', 'topic_2']);
+    expect(addTopic(next).topics?.map((t) => t.key)).toEqual(['topic_1', 'topic_2', 'topic_3']);
+
+    const edited = updateTopic(next, 0, { key: 'newsletter', name: 'Weekly newsletter', default: 'unsubscribed' });
+    expect(edited.topics?.[0]).toMatchObject({ key: 'newsletter', name: 'Weekly newsletter', default: 'unsubscribed' });
+    expect(edited.topics?.[1]).toEqual(next.topics?.[1]);
+    expect(removeTopic(edited, 0).topics?.map((t) => t.key)).toEqual(['topic_2']);
+    expect(topicsOf([edited, purpose({ key: 'analytics' })], 'marketing_email').map((t) => t.key)).toEqual(['newsletter', 'topic_2']);
+    expect(topicsOf([edited], 'onboarding')).toEqual([]);
   });
 });

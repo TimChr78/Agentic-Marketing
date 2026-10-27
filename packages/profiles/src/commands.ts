@@ -5,7 +5,20 @@ import { type IdentifierType, schema, type Tx } from '@agentic-marketing/db';
 import type {} from '@agentic-marketing/hotstate';
 import { and, desc, eq, inArray, isNull, lt, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
-import { consentStateOf, consentStatusSql, consentSummary, currentConsent, mergedFamily, purposeAllowed, recordConsent } from './consent';
+import {
+  consentStateOf,
+  consentStatusSql,
+  consentSummary,
+  currentConsent,
+  effectiveTopicStatus,
+  findTopic,
+  mergedFamily,
+  purposeAllowed,
+  recordConsent,
+  recordTopicPreference,
+  topicChoicesOf,
+  topicSummary,
+} from './consent';
 import { personCrypto } from './crypto';
 
 // Profile, consent and data-subject-request commands. Personal data is decrypted only for
@@ -279,6 +292,16 @@ export const listPurposes = defineCommand({
         channels: z.array(z.string()),
         description: z.string(),
         requiresDoubleOptIn: z.boolean().describe('Whether a consent for this purpose counts only after a confirmed opt-in'),
+        topics: z
+          .array(
+            z.object({
+              key: z.string(),
+              name: z.string(),
+              description: z.string(),
+              default: z.enum(['subscribed', 'unsubscribed']),
+            }),
+          )
+          .describe('Finer choices within the purpose; the purpose stays the lawful-basis gate'),
       }),
     ),
   }),
@@ -286,7 +309,8 @@ export const listPurposes = defineCommand({
   effect: 'read',
   handler: async (_i, ctx) => {
     const published = await publishedSingleton(ctx.tx, 'purposes');
-    return { source: published ? ('published' as const) : ('default' as const), purposes: published?.purposes ?? DEFAULT_PURPOSES };
+    const purposes = (published?.purposes ?? DEFAULT_PURPOSES).map((p) => ({ ...p, topics: p.topics ?? [] }));
+    return { source: published ? ('published' as const) : ('default' as const), purposes };
   },
 });
 
@@ -317,16 +341,33 @@ export const consentSummaryCommand = defineCommand({
           .describe('The same counts for each channel on its own'),
       }),
     ),
+    topics: z
+      .array(
+        z.object({
+          purpose: z.string(),
+          topic: z.string(),
+          subscribed: z
+            .number()
+            .int()
+            .describe('Active people who currently subscribe, counting the topic default for people with no choice'),
+          unsubscribed: z.number().int(),
+        }),
+      )
+      .describe('Topic choices under each purpose'),
   }),
   permission: 'profiles:read',
   effect: 'read',
-  handler: async (_i, ctx) => ({
-    purposes: await consentSummary(
-      ctx.tx,
-      ctx.principal.workspaceId,
-      (await purposesOf(ctx)).map((p) => p.key),
-    ),
-  }),
+  handler: async (_i, ctx) => {
+    const all = await purposesOf(ctx);
+    return {
+      purposes: await consentSummary(
+        ctx.tx,
+        ctx.principal.workspaceId,
+        all.map((p) => p.key),
+      ),
+      topics: await topicSummary(ctx.tx, ctx.principal.workspaceId, all),
+    };
+  },
 });
 
 export const recordConsentCommand = defineCommand({
@@ -411,6 +452,98 @@ export const consentHistory = defineCommand({
         recordedBy: r.recordedBy,
       })),
     };
+  },
+});
+
+export const topicPreferencesCommand = defineCommand({
+  name: 'topics.preferences',
+  title: 'A person’s topic choices',
+  description:
+    'The topics under each purpose with the person’s current choice: their own record, or the topic’s default when they have made none. A topic is a finer choice within a purpose and never replaces consent for it.',
+  input: z.object({ profileId: ProfileId }),
+  output: z.object({
+    topics: z.array(
+      z.object({
+        purpose: z.string(),
+        purposeName: z.string(),
+        topic: z.string(),
+        name: z.string(),
+        description: z.string(),
+        default: z.enum(['subscribed', 'unsubscribed']).describe('What applies when the person has made no choice'),
+        status: z.enum(['subscribed', 'unsubscribed']),
+        source: z.string().nullable().describe('Where their own choice came from; null when the default applies'),
+        updatedAt: z.string().nullable(),
+      }),
+    ),
+  }),
+  permission: 'profiles:read',
+  effect: 'read',
+  target: (i) => i.profileId,
+  handler: async (input, ctx) => {
+    const p = await canonical(ctx, input.profileId);
+    const purposes = await purposesOf(ctx);
+    const choices = await topicChoicesOf(ctx.tx, ctx.principal.workspaceId, p.id);
+    return {
+      topics: purposes.flatMap((purpose) =>
+        (purpose.topics ?? []).map((topic) => {
+          const row = choices.find((c) => c.topic === topic.key);
+          return {
+            purpose: purpose.key,
+            purposeName: purpose.name,
+            topic: topic.key,
+            name: topic.name,
+            description: topic.description,
+            default: topic.default,
+            status: effectiveTopicStatus(choices, topic),
+            source: row?.source ?? null,
+            updatedAt: row?.updatedAt?.toISOString() ?? null,
+          };
+        }),
+      ),
+    };
+  },
+});
+
+export const setTopicPreference = defineCommand({
+  name: 'topics.set',
+  title: 'Record a topic choice for a person',
+  description:
+    'Record that a person subscribes to or unsubscribes from one topic, with a note as evidence. Agents may only record an unsubscribe, never a subscribe. The purpose’s consent is separate and unchanged.',
+  input: z.object({
+    profileId: ProfileId,
+    topic: z
+      .string()
+      .regex(/^[a-z][a-z0-9_]{1,40}$/)
+      .describe('A topic key from purposes.list'),
+    status: z.enum(['subscribed', 'unsubscribed']),
+    note: z.string().max(1000).optional().describe('What they asked for and where, e.g. "asked by e-mail on 2026-10-27"'),
+  }),
+  output: z.object({
+    recorded: z.boolean().describe('Whether the current choice changed'),
+    topic: z.string(),
+    purpose: z.string(),
+    status: z.enum(['subscribed', 'unsubscribed']),
+  }),
+  permission: 'profiles:write',
+  effect: 'write',
+  target: (i) => i.profileId,
+  handler: async (input, ctx) => {
+    if (ctx.principal.type === 'agent' && input.status === 'subscribed')
+      throw new AppError('forbidden', 'Agents cannot subscribe someone to a topic; only a person (or the person’s own action) can.');
+    const p = await canonical(ctx, input.profileId);
+    const found = findTopic(await purposesOf(ctx), input.topic);
+    if (!found) throw new AppError('invalid_input', `Unknown topic "${input.topic}". See purposes.list for the topics in force.`);
+    const recorded = await recordTopicPreference(
+      ctx.tx,
+      ctx.principal.workspaceId,
+      p.id,
+      found.purpose.key,
+      found.topic.key,
+      input.status,
+      ctx.principal.type === 'agent' ? 'agent' : 'api',
+      { note: input.note, recordedBy: ctx.principal.userId },
+    );
+    return { recorded, topic: found.topic.key, purpose: found.purpose.key, status: input.status };
   },
 });
 
@@ -601,6 +734,8 @@ export const profileCommands = [
   consentSummaryCommand,
   recordConsentCommand,
   consentHistory,
+  topicPreferencesCommand,
+  setTopicPreference,
   exportProfile,
   eraseProfile,
 ] as const;

@@ -258,6 +258,13 @@ const trackingPlan = z.object({
 });
 
 const LawfulBasis = z.enum(['consent', 'legitimate_interest', 'contract', 'legal_obligation']);
+const TopicKey = z.string().regex(/^[a-z][a-z0-9_]{1,40}$/, 'Lowercase letters, digits and _, starting with a letter');
+const topic = z.object({
+  key: TopicKey.describe('Stable key used by templates, broadcasts and segments, e.g. "newsletter"'),
+  name: z.string().min(1).max(120).describe('Shown to people on the preference centre'),
+  description: z.string().max(500).default('').describe('Optional plain words under the name'),
+  default: z.enum(['subscribed', 'unsubscribed']).default('subscribed').describe('Effective status until the person chooses'),
+});
 const purposes = z.object({
   purposes: z
     .array(
@@ -268,6 +275,11 @@ const purposes = z.object({
         basis: LawfulBasis,
         channels: z.array(z.enum(['email', 'web', 'sms', 'push', 'webhook'])).default([]),
         requiresDoubleOptIn: z.boolean().default(false),
+        topics: z
+          .array(topic)
+          .max(20)
+          .default([])
+          .describe('Finer choices within this purpose; consent for the purpose stays the lawful-basis gate'),
         lia: z
           .object({ assessment: z.string().min(1).max(5000), owner: z.string().min(1).max(200), reviewBy: z.iso.date() })
           .optional()
@@ -278,11 +290,16 @@ const purposes = z.object({
     .max(50)
     .superRefine((ps, ctx) => {
       const keys = new Set<string>();
+      const topicKeys = new Set<string>();
       for (const p of ps) {
         if (keys.has(p.key)) ctx.addIssue({ code: 'custom', message: `Duplicate purpose key "${p.key}"` });
         keys.add(p.key);
         if (p.basis === 'legitimate_interest' && !p.lia)
           ctx.addIssue({ code: 'custom', message: `Purpose "${p.key}" is based on legitimate interest and needs an LIA record (lia)` });
+        for (const t of p.topics) {
+          if (topicKeys.has(t.key)) ctx.addIssue({ code: 'custom', message: `Duplicate topic key "${t.key}"` });
+          topicKeys.add(t.key);
+        }
       }
     }),
 });
@@ -290,9 +307,16 @@ const emailTemplate = z.object({
   purpose: Key.describe(
     'Purpose key, e.g. "marketing_email" or "onboarding"; decides the lawful basis and whether an unsubscribe link is required',
   ),
+  topic: TopicKey.optional().describe("Optional topic under this template's purpose; people can refuse it without leaving the purpose"),
   subject: z.string().min(1).max(300).describe('Liquid, e.g. "Welcome, {{ profile.firstName | default: \'friend\' }}"'),
   preheader: z.string().max(300).optional().describe('Preview text shown after the subject in inboxes'),
-  mjml: z.string().min(1).max(300_000).describe('MJML with Liquid. Variables: profile.*, event.*, unsubscribe_url, preferences_url'),
+  mjml: z
+    .string()
+    .min(1)
+    .max(300_000)
+    .describe(
+      'MJML with Liquid. Variables: profile.*, event.*, unsubscribe_url, preferences_url, topic_unsubscribe_url (when the template has a topic)',
+    ),
   text: z.string().max(100_000).optional().describe('Plain-text part (Liquid). Generated from the HTML when omitted'),
   sampleData: z.record(z.string(), z.unknown()).optional().describe('Example variables for previews, e.g. {"profile":{"firstName":"Ada"}}'),
   utm: z
@@ -308,6 +332,7 @@ const emailTemplate = z.object({
 
 const smsTemplate = z.object({
   purpose: Key.describe('Purpose key, e.g. "marketing_sms" or "service_sms"; decides the lawful basis'),
+  topic: TopicKey.optional().describe("Optional topic under this template's purpose; people can refuse it without leaving the purpose"),
   body: z
     .string()
     .min(1)
@@ -320,6 +345,7 @@ const smsTemplate = z.object({
 
 const pushTemplate = z.object({
   purpose: Key.describe('Purpose key, e.g. "marketing_push" or "service_push"; decides the lawful basis'),
+  topic: TopicKey.optional().describe("Optional topic under this template's purpose; people can refuse it without leaving the purpose"),
   title: z
     .string()
     .min(1)
@@ -467,6 +493,7 @@ export type SegmentCondition =
     }
   | { event: string; where?: Record<string, string | number | boolean>; count?: { gte?: number; lte?: number }; within?: string }
   | { consent: string }
+  | { topic: string }
   | { segment: string };
 export const segmentCondition: z.ZodType<SegmentCondition> = z.lazy(() =>
   z.union([
@@ -497,6 +524,14 @@ export const segmentCondition: z.ZodType<SegmentCondition> = z.lazy(() =>
           .string()
           .regex(/^[a-z][a-z0-9_]{0,63}$/)
           .describe('Purpose the person allows (by its lawful basis)'),
+      })
+      .strict(),
+    z
+      .object({
+        topic: z
+          .string()
+          .regex(/^[a-z][a-z0-9_]{1,40}$/)
+          .describe('Topic the person currently subscribes to, using its default when they have no choice'),
       })
       .strict(),
     z
@@ -868,6 +903,7 @@ const broadcast = z.object({
       'An e-mail, SMS or push template id (eml_…, sms_… or psh_…). For a newsletter, use one template per issue (copy the previous issue as a starting point): broadcasts carry no per-send data, so a shared layout cannot be filled per issue. The template must be published first, or be submitted together with the broadcast (artifacts.requestPublishBundle).',
     ),
   segment: z.string().regex(/^seg_[0-9a-f]{32}$/, 'A segment id (seg_…)'),
+  topic: TopicKey.optional().describe("Optional topic under the template's purpose; overrides the template's own topic when set"),
   sendAt: isoDateTime('sendAt').optional().describe('When to start sending; default: as soon as it is published'),
   description: z.string().max(500).optional(),
 });
@@ -967,7 +1003,7 @@ export const artifactTypes = {
     prefix: 'pur',
     label: 'Purposes',
     description:
-      'Processing purposes with their lawful basis (consent, legitimate interest with LIA, contract, legal obligation). One per workspace.',
+      'Processing purposes with their lawful basis (consent, legitimate interest with LIA, contract, legal obligation), and optional topics under each purpose that people can refuse on their own. One per workspace.',
     content: purposes,
     singleton: true,
   },
@@ -1005,6 +1041,7 @@ export const DEFAULT_PURPOSES: Purposes = [
     basis: 'contract',
     channels: ['web'],
     requiresDoubleOptIn: false,
+    topics: [],
   },
   {
     key: 'analytics',
@@ -1013,6 +1050,7 @@ export const DEFAULT_PURPOSES: Purposes = [
     basis: 'consent',
     channels: ['web'],
     requiresDoubleOptIn: false,
+    topics: [],
   },
   {
     key: 'web_personalization',
@@ -1021,6 +1059,7 @@ export const DEFAULT_PURPOSES: Purposes = [
     basis: 'consent',
     channels: ['web'],
     requiresDoubleOptIn: false,
+    topics: [],
   },
   {
     key: 'onboarding',
@@ -1029,6 +1068,7 @@ export const DEFAULT_PURPOSES: Purposes = [
     basis: 'contract',
     channels: ['email'],
     requiresDoubleOptIn: false,
+    topics: [],
   },
   {
     key: 'marketing_email',
@@ -1037,6 +1077,7 @@ export const DEFAULT_PURPOSES: Purposes = [
     basis: 'consent',
     channels: ['email'],
     requiresDoubleOptIn: false,
+    topics: [],
   },
   {
     key: 'marketing_sms',
@@ -1045,6 +1086,7 @@ export const DEFAULT_PURPOSES: Purposes = [
     basis: 'consent',
     channels: ['sms'],
     requiresDoubleOptIn: false,
+    topics: [],
   },
   {
     key: 'service_sms',
@@ -1053,6 +1095,7 @@ export const DEFAULT_PURPOSES: Purposes = [
     basis: 'contract',
     channels: ['sms'],
     requiresDoubleOptIn: false,
+    topics: [],
   },
   {
     key: 'marketing_push',
@@ -1061,6 +1104,7 @@ export const DEFAULT_PURPOSES: Purposes = [
     basis: 'consent',
     channels: ['push'],
     requiresDoubleOptIn: false,
+    topics: [],
   },
   {
     key: 'service_push',
@@ -1069,6 +1113,7 @@ export const DEFAULT_PURPOSES: Purposes = [
     basis: 'contract',
     channels: ['push'],
     requiresDoubleOptIn: false,
+    topics: [],
   },
   {
     key: 'ad_measurement',
@@ -1077,6 +1122,7 @@ export const DEFAULT_PURPOSES: Purposes = [
     basis: 'consent',
     channels: ['web'],
     requiresDoubleOptIn: false,
+    topics: [],
   },
   {
     key: 'ad_targeting',
@@ -1085,6 +1131,7 @@ export const DEFAULT_PURPOSES: Purposes = [
     basis: 'consent',
     channels: ['web'],
     requiresDoubleOptIn: false,
+    topics: [],
   },
   {
     key: 'ai_processing',
@@ -1093,6 +1140,7 @@ export const DEFAULT_PURPOSES: Purposes = [
     basis: 'consent',
     channels: [],
     requiresDoubleOptIn: false,
+    topics: [],
   },
 ];
 

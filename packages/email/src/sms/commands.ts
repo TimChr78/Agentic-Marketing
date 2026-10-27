@@ -1,15 +1,17 @@
-import { contentValidators, DEFAULT_PURPOSES, publishedSingleton, type SmsTemplate } from '@agentic-marketing/artifacts';
+import { contentValidators, DEFAULT_PURPOSES, publishedSingleton, publishValidators, type SmsTemplate } from '@agentic-marketing/artifacts';
 import { defineCommand } from '@agentic-marketing/commands';
 import { AppError } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
 import { and, desc, eq } from 'drizzle-orm';
 import { z } from 'zod';
 import { isMarketing } from '../policy';
+import { topicProblems } from '../topicValidation';
 import { requestSms } from './gateway';
 import { billingOf } from './providers';
 import { renderSms, validateSmsTemplate } from './render';
 
 contentValidators.set('sms_template', (c) => validateSmsTemplate(c as SmsTemplate));
+publishValidators.set('sms_template', async (c, tx) => topicProblems(tx, (c as SmsTemplate).purpose, (c as SmsTemplate).topic));
 
 const Status = z.enum(['queued', 'sending', 'sent', 'suppressed', 'failed', 'delivered', 'bounced', 'complained']);
 

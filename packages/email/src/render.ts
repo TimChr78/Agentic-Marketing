@@ -36,6 +36,7 @@ export interface RenderVars {
   event?: Record<string, unknown>;
   unsubscribe_url?: string;
   preferences_url?: string;
+  topic_unsubscribe_url?: string;
   [k: string]: unknown;
 }
 
