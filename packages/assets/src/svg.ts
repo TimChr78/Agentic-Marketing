@@ -144,19 +144,23 @@ function unsafeCss(css: string): string | null {
   if (/expression\s*\(/i.test(css)) return 'expression()';
   if (/javascript:/i.test(css)) return 'javascript:';
   if (/-moz-binding/i.test(css)) return 'binding';
-  for (const match of css.matchAll(/url\(\s*(['"]?)(.*?)\1\s*\)/gi)) {
-    if (!match[2]!.startsWith('#')) return 'external url()';
-  }
+  if (externalUrl(css)) return 'external url()';
   return null;
+}
+
+/**
+ * Every url( must point inside the document (#id). Checked on the opening, not on a matched pair:
+ * CSS accepts an unterminated url( at the end of a value, which a (…) pattern would miss.
+ */
+function externalUrl(value: string): boolean {
+  return /url\(\s*(?!['"]?\s*#)/i.test(value);
 }
 
 /** An attribute value may use url(#id) but nothing outside the document. */
 function unsafeValue(value: string): string | null {
   if (/javascript:/i.test(value)) return 'javascript:';
   if (/expression\s*\(/i.test(value)) return 'expression()';
-  for (const match of value.matchAll(/url\(\s*(['"]?)(.*?)\1\s*\)/gi)) {
-    if (!match[2]!.startsWith('#')) return 'external url()';
-  }
+  if (externalUrl(value)) return 'external url()';
   return null;
 }
 
