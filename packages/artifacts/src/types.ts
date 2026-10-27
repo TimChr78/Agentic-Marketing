@@ -1164,10 +1164,25 @@ draftContentSchemas.set('journey', journeyDraft);
  * them; artifact commands run them on every save so agents get the errors right away.
  */
 export type ContentValidator = (content: unknown) => string[];
-export const contentValidators = new Map<ArtifactType, ContentValidator>();
+/**
+ * A registry with one entry per artifact type. Packages register their checks at import time; a
+ * second registration for the same type would silently replace the first (it happened: e-mail
+ * blocks and pre-send checks both registered the e-mail template's publish check), so it throws.
+ */
+class OnePerType<V> extends Map<ArtifactType, V> {
+  constructor(private readonly what: string) {
+    super();
+  }
+  override set(type: ArtifactType, value: V): this {
+    if (this.what && this.has(type)) throw new Error(`${type} already has a ${this.what}; combine them in one function`);
+    return super.set(type, value);
+  }
+}
+
+export const contentValidators = new OnePerType<ContentValidator>('content validator');
 /** Checks that only apply to publishing (a draft may be unfinished), e.g. referenced templates exist. */
 export type PublishValidator = (content: unknown, tx: import('@agentic-marketing/db').Tx) => Promise<string[]>;
-export const publishValidators = new Map<ArtifactType, PublishValidator>();
+export const publishValidators = new OnePerType<PublishValidator>('publish validator');
 
 /**
  * Ids an artifact's content refers to, for display in artifacts.get (e.g. the blocks an e-mail
@@ -1175,7 +1190,7 @@ export const publishValidators = new Map<ArtifactType, PublishValidator>();
  * content language, so this package stays free of e-mail specifics.
  */
 export type ReferenceExtractor = (content: unknown) => string[];
-export const referenceExtractors = new Map<ArtifactType, ReferenceExtractor>();
+export const referenceExtractors = new OnePerType<ReferenceExtractor>('reference extractor');
 export function referencesOf(type: string, content: unknown): string[] {
   return referenceExtractors.get(type as ArtifactType)?.(content) ?? [];
 }
