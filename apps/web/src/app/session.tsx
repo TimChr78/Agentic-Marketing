@@ -93,7 +93,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     // setting proposals for admins (everyone else can see proposals but not decide them).
     const approvals = api
       .call('approvals.list', { status: 'pending', limit: 200 })
-      .then((r) => r.approvals.length)
+      // A bundle (#107) is one decision, as in the list.
+      .then((r) => new Set(r.approvals.map((a) => a.bundle?.id ?? a.id)).size)
       .catch(() => 0);
     const proposals = workspace?.you.permissions.includes('workspace:admin')
       ? api
