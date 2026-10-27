@@ -612,6 +612,24 @@ export const journeyEntrySkips = pgTable(
   (t) => [primaryKey({ columns: [t.workspaceId, t.journeyId] })],
 );
 
+/**
+ * A person's arm in a holdout scope (#67). The row is the source of truth: it survives re-entry,
+ * restarts and profile merges, and gives measurement a stable population per scope version.
+ */
+export const holdoutAssignments = pgTable(
+  'holdout_assignments',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    scopeType: text('scope_type').$type<'journey' | 'campaign'>().notNull(),
+    scopeId: text('scope_id').notNull(),
+    hashVersion: text('hash_version').notNull(),
+    profileId: text('profile_id').notNull(),
+    arm: text('arm').$type<'control' | 'treatment'>().notNull(),
+    assignedAt: ts('assigned_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.scopeType, t.scopeId, t.hashVersion, t.profileId] })],
+);
+
 export type AiUse = 'journeys' | 'copilot';
 export const aiProviders = pgTable(
   'ai_providers',

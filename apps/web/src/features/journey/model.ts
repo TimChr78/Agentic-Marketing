@@ -34,6 +34,7 @@ export interface JNode {
 export interface JourneyContent {
   purpose: string;
   goal?: string;
+  controlGroup?: { percent: number; minSampleSize?: number; reset?: boolean };
   nodes: JNode[];
 }
 

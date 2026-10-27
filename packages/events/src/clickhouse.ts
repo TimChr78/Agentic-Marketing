@@ -51,6 +51,11 @@ export interface EventStore {
   ): Promise<Record<string, number>>;
   /** Per node and event type counts for a journey (analytics, canvas overlays). */
   journeyCounts(workspaceId: string, journeyId: string): Promise<{ node: string; type: string; count: number }[]>;
+  /** Profiles that reached the journey's goal or unsubscribed from its e-mail, in a time window. */
+  journeyHoldoutOutcomes(
+    workspaceId: string,
+    q: { journeyId: string; from?: Date; to?: Date },
+  ): Promise<{ converted: string[]; unsubscribed: string[] }>;
   messageEventsOf(workspaceId: string, filter: { messageIds?: string[]; profileId?: string }, limit?: number): Promise<MessageEvent[]>;
   ping(): Promise<boolean>;
   close(): Promise<void>;
@@ -140,7 +145,7 @@ export interface JourneyEvent {
   participantId: number;
   profileId: string;
   node: string;
-  type: 'entered' | 'step' | 'waiting' | 'resumed' | 'converted' | 'completed' | 'exited' | 'failed';
+  type: 'entered' | 'step' | 'waiting' | 'resumed' | 'converted' | 'completed' | 'exited' | 'failed' | 'holdout_assigned';
   seq: number;
   at: string;
   detail: string;
@@ -433,6 +438,30 @@ export function clickHouseStore(opts: { url: string; database: string }): EventS
         format: 'JSONEachRow',
       });
       return (await rs.json<{ node: string; type: string; c: number }>()).map((r) => ({ node: r.node, type: r.type, count: Number(r.c) }));
+    },
+    async journeyHoldoutOutcomes(workspaceId, q) {
+      const from = q.from?.toISOString().replace('Z', '');
+      const to = q.to?.toISOString().replace('Z', '');
+      const converted = await query(workspaceId, {
+        query: `SELECT DISTINCT profile_id FROM journey_events FINAL
+                WHERE workspace_id = {ws:UUID} AND journey_id = {j:String} AND type = 'converted'
+                ${from ? "AND at >= {from:DateTime64(3, 'UTC')}" : ''}
+                ${to ? "AND at <= {to:DateTime64(3, 'UTC')}" : ''}`,
+        query_params: { ws: workspaceId, j: q.journeyId, ...(from ? { from } : {}), ...(to ? { to } : {}) },
+        format: 'JSONEachRow',
+      });
+      const unsubscribed = await query(workspaceId, {
+        query: `SELECT DISTINCT profile_id FROM message_events FINAL
+                WHERE workspace_id = {ws:UUID} AND journey_id = {j:String} AND type = 'unsubscribed' AND channel = 'email'
+                ${from ? "AND at >= {from:DateTime64(3, 'UTC')}" : ''}
+                ${to ? "AND at <= {to:DateTime64(3, 'UTC')}" : ''}`,
+        query_params: { ws: workspaceId, j: q.journeyId, ...(from ? { from } : {}), ...(to ? { to } : {}) },
+        format: 'JSONEachRow',
+      });
+      return {
+        converted: (await converted.json<{ profile_id: string }>()).map((r) => r.profile_id),
+        unsubscribed: (await unsubscribed.json<{ profile_id: string }>()).map((r) => r.profile_id),
+      };
     },
     async messageEventsOf(workspaceId, filter, limit = 200) {
       const rs = await query(workspaceId, {
