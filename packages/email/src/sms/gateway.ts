@@ -21,6 +21,8 @@ export interface SmsRequest {
   idempotencyKey?: string;
   journeyId?: string;
   data?: Record<string, unknown>;
+  /** Hold the message until then (a recipient-local send window). */
+  notBefore?: Date;
 }
 
 type Verdict =
@@ -112,6 +114,7 @@ export async function requestSms(tx: Tx, workspaceId: string, kp: KeyProvider, e
       status,
       reason,
       recipientHash,
+      notBefore: req.notBefore ?? null,
       data: req.data ?? {},
     })
     .returning();
