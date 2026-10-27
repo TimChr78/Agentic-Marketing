@@ -17,7 +17,7 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 ### Changed
 
 - **The admin UI uses the window (#114):** page widths are three tokens (reading, default, full) instead of a 1280 px cap. Data pages widen to 1600 px, settings stay at a readable width, and editors are full width; nothing changes below 1280 px. The journey builder is full-bleed, with collapsible palette and inspector, a full-screen mode (`F`, `Esc`) and a smaller minimap.
-- **Lists load less (#60):** React Flow loads only with a journey graph and ECharts only with a chart; the Approvals list loads 37% less (171 → 109 kB gzipped), and sign-in and the lists load none of GrapesJS, MJML, React Flow or ECharts. A CI check keeps it so.
+- **Lists load less (#60):** React Flow loads only with a journey graph and ECharts only with a chart; the Approvals list loads 36% less (171 → 109 kB gzipped), and sign-in and the lists load none of GrapesJS, MJML, React Flow or ECharts. A CI check keeps it so.
 - **`ai.usage` has a row per day, kind and model** (it was per day and kind). Clients adding up rows are unaffected; clients expecting one row per day and kind should group by those.
 - The approvals badge counts a bundle once, like the list.
 
