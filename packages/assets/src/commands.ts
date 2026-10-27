@@ -11,9 +11,13 @@ import {
   extensionlessName,
   imageSize,
   megabytes,
+  renditionFileName,
   sanitiseFileName,
   sniffContentType,
+  svgFileName,
 } from './media';
+import { rasteriseSvg } from './raster';
+import { sanitiseSvg } from './svg';
 
 declare module '@agentic-marketing/commands' {
   interface Services {
@@ -21,8 +25,17 @@ declare module '@agentic-marketing/commands' {
   }
 }
 
-const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'] as const;
+const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/svg+xml'] as const;
 const AssetId = z.string().regex(/^ast_[0-9a-f]{32}$/, 'Not an asset id. Use the id from assets.list.');
+
+const Rendition = z.object({
+  contentType: z.string(),
+  byteSize: z.number().int(),
+  width: z.number().int(),
+  height: z.number().int(),
+  /** The PNG URL e-mail may use; the asset's own url stays the SVG for hosted pages. */
+  url: z.string(),
+});
 
 const Asset = z.object({
   id: z.string(),
@@ -35,6 +48,9 @@ const Asset = z.object({
   height: z.number().int().nullable(),
   altText: z.string(),
   url: z.string(),
+  rendition: Rendition.nullable(),
+  /** Parts removed from an SVG upload; empty for raster images and PDFs. */
+  sanitized: z.array(z.string()),
   createdAt: z.string(),
   updatedAt: z.string(),
   createdBy: z.string(),
@@ -105,7 +121,9 @@ function usageCounts(rows: UsageRow[]): Map<string, number> {
   return new Map([...usageByAsset(rows)].map(([assetId, byArtifact]) => [assetId, byArtifact.size]));
 }
 
-function toAsset(row: AssetRow, publicUrl: string, usageCount: number) {
+type RenditionRow = Pick<typeof schema.assetRenditions.$inferSelect, 'assetId' | 'contentType' | 'byteSize' | 'width' | 'height'>;
+
+function toAsset(row: AssetRow, publicUrl: string, usageCount: number, rendition?: RenditionRow | null, sanitized: string[] = []) {
   return {
     id: row.id,
     name: row.name,
@@ -117,11 +135,37 @@ function toAsset(row: AssetRow, publicUrl: string, usageCount: number) {
     height: row.height,
     altText: row.altText,
     url: `${publicUrl}/a/${row.id}/${row.fileName}`,
+    rendition: rendition
+      ? {
+          contentType: rendition.contentType,
+          byteSize: rendition.byteSize,
+          width: rendition.width,
+          height: rendition.height,
+          url: `${publicUrl}/a/${row.id}/${renditionFileName(row.fileName)}`,
+        }
+      : null,
+    sanitized,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
     createdBy: row.createdBy,
     usageCount,
   };
+}
+
+/** Rendition metadata without the PNG bytes, for list responses. */
+async function renditionsFor(tx: Tx, assetIds: string[]): Promise<Map<string, RenditionRow>> {
+  if (!assetIds.length) return new Map();
+  const rows = await tx
+    .select({
+      assetId: schema.assetRenditions.assetId,
+      contentType: schema.assetRenditions.contentType,
+      byteSize: schema.assetRenditions.byteSize,
+      width: schema.assetRenditions.width,
+      height: schema.assetRenditions.height,
+    })
+    .from(schema.assetRenditions)
+    .where(inArray(schema.assetRenditions.assetId, assetIds));
+  return new Map(rows.map((row) => [row.assetId, row]));
 }
 
 async function loadAsset(ctx: CommandContext, id: string): Promise<AssetRow> {
@@ -140,7 +184,7 @@ function decodeBase64(value: string, maxBytes: number): Buffer {
     throw new AppError('invalid_input', 'dataBase64 is not valid base64. Encode the file bytes with standard base64.');
   }
   const data = Buffer.from(compact.padEnd(Math.ceil(compact.length / 4) * 4, '='), 'base64');
-  if (!data.length) throw new AppError('invalid_input', 'The file is empty. Upload a PNG, JPEG, GIF, WebP or PDF with content.');
+  if (!data.length) throw new AppError('invalid_input', 'The file is empty. Upload a PNG, JPEG, GIF, WebP, SVG or PDF with content.');
   if (data.length > maxBytes) {
     throw new AppError(
       'invalid_input',
@@ -153,13 +197,13 @@ function decodeBase64(value: string, maxBytes: number): Buffer {
 function checkedBytes(data: Buffer, declared: AssetContentType): Buffer {
   const detected = sniffContentType(data);
   if (!detected) {
-    throw new AppError('invalid_input', 'The file is not a PNG, JPEG, GIF, WebP or PDF. Check the file and upload it again.');
-  }
-  if (detected === 'image/svg+xml') {
-    throw new AppError(
-      'invalid_input',
-      'SVG images are not supported because they can carry scripts. Upload a PNG, JPEG, GIF or WebP instead.',
-    );
+    if (declared === 'image/svg+xml') {
+      throw new AppError(
+        'invalid_input',
+        'The file is not an SVG: an SVG is XML whose root element is <svg>. Check the file and upload it again.',
+      );
+    }
+    throw new AppError('invalid_input', 'The file is not a PNG, JPEG, GIF, WebP, SVG or PDF. Check the file and upload it again.');
   }
   if (detected !== declared) {
     throw new AppError(
@@ -191,13 +235,13 @@ export const uploadAsset = defineCommand({
   name: 'assets.upload',
   title: 'Upload an asset',
   description:
-    'Upload a PNG, JPEG, GIF, WebP image or a PDF for e-mails and hosted pages. The declared content type is checked against the bytes; images record their pixel size. Returns a stable public URL.',
+    'Upload a PNG, JPEG, GIF, WebP or SVG image, or a PDF, for e-mails and hosted pages. The declared content type is checked against the bytes; images record their pixel size. An SVG is sanitised (unsafe elements and attributes are removed and listed in `sanitized`) and a PNG rendition is stored for e-mail. Returns a stable public URL.',
   input: z.object({
     name: z.string().trim().min(1).max(120).optional().describe('Display name; defaults to the file name without its extension'),
     fileName: z.string().trim().min(1).max(200).describe('Original file name, e.g. "welcome.png"; sanitised for the URL'),
     contentType: z.enum(
       ASSET_CONTENT_TYPES,
-      'The content type is not supported. Use image/png, image/jpeg, image/gif, image/webp or application/pdf.',
+      'The content type is not supported. Use image/png, image/jpeg, image/gif, image/webp, image/svg+xml or application/pdf.',
     ),
     dataBase64: z.string().min(1).describe('The file bytes as standard base64 (without a data: prefix)'),
     altText: z.string().max(500).optional().describe('Alternative text for images, read by screen readers'),
@@ -209,8 +253,17 @@ export const uploadAsset = defineCommand({
   target: (input) => input.fileName,
   handler: async (input, ctx) => {
     const { publicUrl, maxBytes } = ctx.services.assets;
-    const data = checkedBytes(decodeBase64(input.dataBase64, maxBytes), input.contentType);
-    const fileName = sanitiseFileName(input.fileName);
+    let data = checkedBytes(decodeBase64(input.dataBase64, maxBytes), input.contentType);
+    let sanitized: string[] = [];
+    let rendition: ReturnType<typeof rasteriseSvg> | null = null;
+    if (input.contentType === 'image/svg+xml') {
+      const clean = sanitiseSvg(data);
+      data = Buffer.from(clean.svg, 'utf8');
+      sanitized = clean.sanitized;
+      rendition = rasteriseSvg(clean.svg, clean.size);
+    }
+    const fileName =
+      input.contentType === 'image/svg+xml' ? svgFileName(sanitiseFileName(input.fileName)) : sanitiseFileName(input.fileName);
     const size = imageSize(data, input.contentType);
     const id = newId('ast');
     const now = new Date();
@@ -233,7 +286,34 @@ export const uploadAsset = defineCommand({
     await ctx.tx.insert(schema.assets).values(row);
     // Object-store driver: write here, and keep only a key in assets instead of the blob row.
     await ctx.tx.insert(schema.assetBlobs).values({ workspaceId: row.workspaceId, assetId: id, data });
-    return toAsset(row, publicUrl, 0);
+    if (rendition) {
+      await ctx.tx.insert(schema.assetRenditions).values({
+        workspaceId: row.workspaceId,
+        assetId: id,
+        kind: 'png',
+        contentType: 'image/png',
+        byteSize: rendition.data.length,
+        sha256: createHash('sha256').update(rendition.data).digest('hex'),
+        width: rendition.width,
+        height: rendition.height,
+        data: rendition.data,
+      });
+    }
+    return toAsset(
+      row,
+      publicUrl,
+      0,
+      rendition
+        ? {
+            assetId: id,
+            contentType: 'image/png',
+            byteSize: rendition.data.length,
+            width: rendition.width,
+            height: rendition.height,
+          }
+        : null,
+      sanitized,
+    );
   },
 });
 
@@ -244,7 +324,7 @@ export const listAssets = defineCommand({
     'Assets newest first, optionally filtered by a case-insensitive search across name, file name and alt text, and by kind. Page with the returned cursor.',
   input: z.object({
     query: z.string().max(200).optional().describe('Match name, file name or alt text, case-insensitive'),
-    kind: z.enum(['image', 'file']).optional().describe('image: PNG, JPEG, GIF or WebP; file: PDF'),
+    kind: z.enum(['image', 'file']).optional().describe('image: PNG, JPEG, GIF, WebP or SVG; file: PDF'),
     limit: z.number().int().min(1).max(200).default(50),
     cursor: z.string().max(500).optional().describe('nextCursor from the previous page'),
   }),
@@ -278,9 +358,13 @@ export const listAssets = defineCommand({
         page.map((r) => r.id),
       ),
     );
+    const renditions = await renditionsFor(
+      ctx.tx,
+      page.map((r) => r.id),
+    );
     const last = page.at(-1);
     return {
-      assets: page.map((row) => toAsset(row, publicUrl, counts.get(row.id) ?? 0)),
+      assets: page.map((row) => toAsset(row, publicUrl, counts.get(row.id) ?? 0, renditions.get(row.id))),
       nextCursor:
         rows.length > input.limit && last
           ? Buffer.from(JSON.stringify([last.createdAt.toISOString(), last.id])).toString('base64url')
@@ -303,7 +387,8 @@ export const getAsset = defineCommand({
     const row = await loadAsset(ctx, input.id);
     const usage = usageByAsset(await usageRows(ctx.tx, [row.id])).get(row.id);
     const entries = usage ? [...usage.values()] : [];
-    return { ...toAsset(row, publicUrl, entries.length), usage: entries };
+    const renditions = await renditionsFor(ctx.tx, [row.id]);
+    return { ...toAsset(row, publicUrl, entries.length, renditions.get(row.id)), usage: entries };
   },
 });
 
@@ -338,7 +423,8 @@ export const updateAsset = defineCommand({
       .returning();
     if (!row) throw new AppError('not_found', `Asset ${input.id} does not exist or was deleted.`);
     const count = usageCounts(await usageRows(ctx.tx, [row.id])).get(row.id) ?? 0;
-    return toAsset(row, publicUrl, count);
+    const renditions = await renditionsFor(ctx.tx, [row.id]);
+    return toAsset(row, publicUrl, count, renditions.get(row.id));
   },
 });
 
@@ -388,6 +474,9 @@ export const deleteAsset = defineCommand({
     await ctx.tx
       .delete(schema.assetBlobs)
       .where(and(eq(schema.assetBlobs.workspaceId, ctx.principal.workspaceId), eq(schema.assetBlobs.assetId, input.id)));
+    await ctx.tx
+      .delete(schema.assetRenditions)
+      .where(and(eq(schema.assetRenditions.workspaceId, ctx.principal.workspaceId), eq(schema.assetRenditions.assetId, input.id)));
     return { deleted: true };
   },
 });

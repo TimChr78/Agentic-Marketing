@@ -64,7 +64,7 @@ export default function AssetsPage() {
     >
       <PageHeader
         title="Assets"
-        description="Images and PDFs for e-mails and hosted pages, served from your public links address with long caching. PNG, JPEG, GIF, WebP or PDF; SVG is not allowed."
+        description="Images and PDFs for e-mails and hosted pages, served from your public links address with long caching. PNG, JPEG, GIF, WebP, SVG or PDF; SVG uploads are sanitised and get a PNG version for e-mail."
         actions={
           canWrite && (
             <>

@@ -13,8 +13,10 @@
     "@agentic-marketing/commands": "workspace:*",
     "@agentic-marketing/core": "workspace:*",
     "@agentic-marketing/db": "workspace:*",
+    "@resvg/resvg-js": "2.6.2",
     "drizzle-orm": "0.45.4",
     "hono": "4.13.13",
+    "htmlparser2": "9.1.0",
     "zod": "4.6.7"
   }
 }
