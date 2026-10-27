@@ -6,7 +6,8 @@ import type { EventStore } from '@agentic-marketing/events';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { z } from 'zod';
-import { buildQuery, type ConversionRule, type NormalizedFilters, SOURCE_FILTERS } from './compile';
+import { buildCampaignQuery, loadCampaignQueryMap } from './campaign';
+import { buildQuery, type CampaignMap, type CompiledQuery, type ConversionRule, type NormalizedFilters, SOURCE_FILTERS } from './compile';
 import { DIMENSIONS, type DimensionId, MEASURES, METRIC_CATALOG, type MeasureDef, measureIds, type SourceId } from './registry';
 
 // The read-only metric layer (#75): one typed query over a fixed catalogue. Nothing here accepts
@@ -29,6 +30,7 @@ export const filterInput = z
     variant: ValueOrList.optional(),
     name: ValueOrList.optional().describe('Conversion event names, instead of or in addition to the conversion map'),
     segment: ValueOrList.optional(),
+    campaign: ValueOrList.optional().describe('Campaign ids (cmp_…); resolved to their published sending members'),
   })
   .strict();
 
@@ -206,6 +208,7 @@ async function freshness(
   to: string,
   filters: NormalizedFilters,
   names: string[],
+  campaignMap?: CampaignMap,
 ): Promise<string | null> {
   const table = source === 'events' ? 'events' : source;
   const column = source === 'events' ? 'received_at' : 'at';
@@ -224,6 +227,11 @@ async function freshness(
   for (const key of SOURCE_FILTERS[source]) {
     const values = filters[key];
     if (!values?.length) continue;
+    if (key === 'campaign') {
+      params.filter_campaign = campaignMap?.memberIds ?? [];
+      where.push('journey_id IN {filter_campaign:Array(String)}');
+      continue;
+    }
     params[`filter_${key}`] = values;
     where.push(`${filterColumn[key]} IN {filter_${key}:Array(String)}`);
   }
@@ -301,21 +309,46 @@ async function execute(deps: Deps, input: QueryInput, measures: MeasureDef[], di
   if (source === 'segment_memberships') return segmentQuery(deps, input, filters);
 
   const timeZone = await workspaceTimeZone(deps.tx, deps.workspaceId);
-  const conversion = source === 'events' ? await conversionInput(deps.tx, filters) : { rules: [], names: [], hasMap: false };
-  const compiled = buildQuery({
-    workspaceId: deps.workspaceId,
-    measures,
-    dimensions,
-    source,
-    from: input.from,
-    to: input.to,
-    timeZone,
-    filters,
-    limit: input.limit,
-    order: input.order,
-    conversionRules: conversion.rules,
-    conversionNames: conversion.names,
-  });
+  const campaignSource = source === 'campaign';
+  const conversion =
+    source === 'events' || campaignSource ? await conversionInput(deps.tx, filters) : { rules: [], names: [], hasMap: false };
+
+  // The campaign mapping is resolved in Postgres and travels to ClickHouse as arrays. For the
+  // per-channel measures it is only needed for the campaign dimension or filter.
+  const needsCampaignMap = campaignSource || dimensions.includes('campaign') || !!filters.campaign?.length;
+  const queryMap = needsCampaignMap
+    ? await loadCampaignQueryMap(deps.tx, filters.campaign, campaignSource ? conversion.rules.map((r) => r.event) : [])
+    : undefined;
+
+  const compiled: CompiledQuery = campaignSource
+    ? buildCampaignQuery({
+        workspaceId: deps.workspaceId,
+        measures,
+        dimensions,
+        from: input.from,
+        to: input.to,
+        timeZone,
+        filters,
+        limit: input.limit,
+        order: input.order,
+        conversionRules: conversion.rules,
+        queryMap: queryMap!,
+      })
+    : buildQuery({
+        workspaceId: deps.workspaceId,
+        measures,
+        dimensions,
+        source,
+        from: input.from,
+        to: input.to,
+        timeZone,
+        filters,
+        limit: input.limit,
+        order: input.order,
+        conversionRules: conversion.rules,
+        conversionNames: conversion.names,
+        campaignMap: queryMap?.map,
+      });
 
   const started = Date.now();
   const result = await deps.events.client.query({
@@ -393,6 +426,10 @@ async function execute(deps: Deps, input: QueryInput, measures: MeasureDef[], di
     notes.push('No conversion map is published and no name filter was given, so there are no conversion events to count.');
   if (source === 'events' && !conversion.hasMap && conversion.names.length)
     notes.push('No conversion map is published; only the requested event names are counted.');
+  if (campaignSource)
+    notes.push(
+      'Campaign conversions are people who got a campaign message and converted within the goal’s attribution window of their first campaign message (first touch).',
+    );
   if (suppressed) notes.push(`Groups smaller than k=${K} have their measures suppressed.`);
 
   return {
@@ -403,7 +440,15 @@ async function execute(deps: Deps, input: QueryInput, measures: MeasureDef[], di
       currency: currencies.size === 1 && !currencies.has('UNKNOWN') ? [...currencies][0] : null,
       from: input.from,
       to: input.to,
-      freshness: await freshness(deps, source, input.from, input.to, filters, conversion.names),
+      freshness: await freshness(
+        deps,
+        campaignSource ? 'message_events' : source,
+        input.from,
+        input.to,
+        filters,
+        conversion.names,
+        queryMap?.map,
+      ),
       suppressed,
       k: K,
       notes,
@@ -454,7 +499,7 @@ export const analyticsMetricsList = defineCommand({
         description: z.string(),
         unit: z.enum(['count', 'ratio', 'currency']),
         aggregation: z.string(),
-        source: z.enum(['message_events', 'journey_events', 'events', 'segment_memberships']),
+        source: z.enum(['message_events', 'journey_events', 'events', 'segment_memberships', 'campaign']),
         dimensions: z.array(z.string()),
         defaultGrain: z.string().nullable(),
         kind: z.enum(['base', 'ratio']),

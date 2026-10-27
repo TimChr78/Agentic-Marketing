@@ -45,7 +45,7 @@ export function HoldoutCard({
   error,
   title = 'Holdout result',
 }: {
-  result?: HoldoutResult;
+  result?: HoldoutResult | null;
   loading?: boolean;
   error?: string;
   title?: string;
