@@ -27,11 +27,11 @@ test('create a mandate for an agent and see it on the agent page (#228)', async 
   await page.getByRole('button', { name: 'Create mandate' }).click();
   await expect(page).toHaveURL(/\/artifacts\/mnd_/);
   await expect(page.getByRole('combobox', { name: 'Agent', exact: true })).toHaveValue(agent!.id);
-  await expect(page.getByLabel('Purpose')).toHaveValue(/Act for this workspace/);
+  await expect(page.getByLabel('Purpose', { exact: true })).toHaveValue(/Act for this workspace/);
 
   const artifactId = page.url().split('/').pop()!;
-  await page.getByLabel('Purpose').fill('Send the weekly newsletter within the mandate.');
-  await page.getByLabel('Valid until').fill(new Date(Date.now() + 30 * 86_400_000).toISOString().slice(0, 10));
+  await page.getByLabel('Purpose', { exact: true }).fill('Send the weekly newsletter within the mandate.');
+  await page.getByLabel('Valid until', { exact: true }).fill(new Date(Date.now() + 30 * 86_400_000).toISOString().slice(0, 10));
   await page.getByRole('button', { name: 'Save draft' }).click();
   await expect(page.getByText(/Draft saved|Saved as draft/)).toBeVisible();
   const saved = await call<{ version: { content: { agent: string; purpose: string } } }>(page.request, 'artifacts.get', { artifactId });
