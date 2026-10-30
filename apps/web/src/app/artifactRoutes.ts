@@ -38,5 +38,7 @@ export const TYPE_LABEL: Record<string, string> = {
   conversion_map: 'Conversion map',
   audience_sync: 'Audience sync',
   delivery_policy: 'Delivery policy',
+  agent_mandate: 'Agent mandate',
+  business_context: 'Business context',
 };
 export const typeLabel = (t: string) => TYPE_LABEL[t] ?? t.replace(/_/g, ' ');

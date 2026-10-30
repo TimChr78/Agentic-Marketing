@@ -32,6 +32,7 @@ import { ArtifactPreview } from '../previews/ArtifactPreview';
 import { ActivityPanel } from './ActivityPanel';
 import { ExperienceEditor } from './ExperienceEditor';
 import { JsonEditor } from './JsonEditor';
+import { MandateEditor } from './MandateEditor';
 import { PurposesEditor } from './PurposesEditor';
 import { VersionsPanel } from './VersionsPanel';
 
@@ -53,6 +54,7 @@ export interface EditorProps<C = any> {
 const DEFAULT_EDITORS: Partial<Record<string, (p: EditorProps) => ReactNode>> = {
   experience: (p) => <ExperienceEditor {...p} />,
   purposes: (p) => <PurposesEditor {...p} />,
+  agent_mandate: (p) => <MandateEditor {...p} />,
 };
 
 type Tab = string;

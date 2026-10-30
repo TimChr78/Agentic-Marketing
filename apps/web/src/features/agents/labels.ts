@@ -66,6 +66,22 @@ export const ACTION_CLASS_LABEL: Record<string, string> = {
 /** The classes shown in the ceilings table, in the order the design lists them. */
 export const CEILING_CLASSES = Object.keys(ACTION_CLASS_LABEL);
 
+/** The action classes a mandate sets a level for (reading is never granted; #223). */
+export const MANDATE_CLASSES = [
+  'draft',
+  'content.publish',
+  'audience.publish',
+  'send.broadcast',
+  'send.direct',
+  'journey.live',
+  'experience.live',
+  'spend',
+  'data.write',
+  'settings',
+  'destructive',
+] as const;
+export type MandateClass = (typeof MANDATE_CLASSES)[number];
+
 /** Level 0–4 in words (design §3.3). */
 export const AUTONOMY_LEVEL = ['Observe', 'Propose', 'Act with veto', 'Act within limits', 'Run the loop'] as const;
 export const DEFAULT_LEVEL = 1;
