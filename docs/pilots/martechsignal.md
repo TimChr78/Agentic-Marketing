@@ -86,7 +86,7 @@ CLIENT_IP_HEADER=cf-connecting-ip,x-forwarded-for
 TRUSTED_PROXY_CIDRS=<tunnel connector>,<Tailscale admin proxy>
 ```
 
-- `CLIENT_IP_HEADER` is an ordered, comma-separated list: the first valid address of the first header present is used. The tunnel supplies `cf-connecting-ip`; `x-forwarded-for` covers a proxy that adds it.
+- `CLIENT_IP_HEADER` is an ordered, comma-separated list: the first header present is used. With `TRUSTED_PROXY_CIDRS` set, a multi-value header such as `x-forwarded-for` is read right to left, skipping hops in those ranges, so the client cannot prepend a spoofed address; a single-value header such as `cf-connecting-ip` is used as the proxy sets it.
 - `TRUSTED_PROXY_CIDRS` is a comma-separated list of IP addresses or CIDR ranges (IPv4 or IPv6, e.g. `10.0.0.0/8`). When set, forwarding headers are ignored unless the socket peer is in one of those ranges, so a client cannot choose its rate-limit bucket. Admin LAN traffic without such a header falls back to the socket address. Empty trusts headers from any source; set it to the addresses the app sees as its peer for the tunnel connector and the Tailscale admin proxy, plus loopback if it is reached directly.
 - This is the 0.1.1 fix for #31: before it, `x-forwarded-for` was hard-wired and one of the two paths resolved the wrong address.
 
