@@ -37,6 +37,15 @@ export interface Services {
   stepUpLimiter?: StepUpLimiter;
   /** The agent's active mandate (ADR-0016); registered by packages/artifacts through the server. */
   activeMandate?: (tx: Tx, agentId: string) => Promise<{ view: MandateView; outsideHours: string | null } | null>;
+  /**
+   * The independent check (ADR-0016, #231): a second model judges whether an autonomous action
+   * matches the agent's intent and mandate. Registered by the server when AI providers exist; a
+   * mandate that asks for it fails closed (to a person) when it is missing or errors.
+   */
+  independentCheck?: (
+    tx: Tx,
+    input: { principal: Principal; command: string; input: unknown; intent: string | null; policy: PolicyOutcome; mandate: MandateView },
+  ) => Promise<{ ok: boolean; reason: string }>;
   /** Why an agent's recent sends breach its mandate's guardrails, or null; registered by the server (metric layer). */
   mandateGuardrails?: (tx: Tx, workspaceId: string, agentId: string, mandate: MandateView) => Promise<string | null>;
 }
@@ -288,6 +297,15 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
                   approvable: cmd.approvable === true,
                   ...(mandate ? { mandate: mandate.view, outsideHours: mandate.outsideHours, guardrailBreach } : {}),
                 });
+                if (mandate && policy.mandate?.independentCheck && (policy.decision === 'allow' || policy.decision === 'hold'))
+                  policy = await withIndependentCheck(tx, services, policy, {
+                    principal,
+                    command: cmd.name,
+                    input: parsed.data,
+                    intent: intentOf(parsed.data),
+                    mandate: mandate.view,
+                    approvable: cmd.approvable === true,
+                  });
                 if (policy.decision === 'deny') throw new PolicyDeniedError(policy);
               }
               if (opts.idempotencyKey) {
@@ -391,6 +409,30 @@ async function recordAgentAction(
     mandateVersion: policy.mandate?.version ?? null,
     intent: intent?.slice(0, 2000) ?? null,
   });
+}
+
+/**
+ * Runs the mandate's independent check before an autonomous or held action. A mismatch, a missing
+ * check (no AI provider) or an error sends the action to a person: the check fails closed.
+ */
+async function withIndependentCheck(
+  tx: Tx,
+  services: Services,
+  policy: PolicyOutcome,
+  req: { principal: Principal; command: string; input: unknown; intent: string | null; mandate: MandateView; approvable: boolean },
+): Promise<PolicyOutcome> {
+  let verdict: { ok: boolean; reason: string };
+  if (!services.independentCheck)
+    verdict = { ok: false, reason: 'The mandate asks for an independent check, but no AI provider is set up.' };
+  else
+    verdict = await services
+      .independentCheck(tx, { ...req, policy })
+      .catch((err: Error) => ({ ok: false, reason: `The independent check failed: ${err.message}` }));
+  if (verdict.ok) return { ...policy, reasons: [...policy.reasons, `Independent check: ${verdict.reason}`] };
+  const reasons = [...policy.reasons, `Independent check: ${verdict.reason}`];
+  return req.approvable
+    ? { ...policy, decision: 'ask', level: 1, autonomous: false, reasons }
+    : { ...policy, decision: 'deny', level: 1, autonomous: false, reasons: [...reasons, `${req.command} cannot wait for an approval.`] };
 }
 
 /** What the agent said it is doing: an explicit intent, else the reviewer note or reason most commands take. */
