@@ -52,6 +52,12 @@ Read [references/tools.md](references/tools.md) for the full list with effects a
 | Area | Tools |
 |---|---|
 | Artifacts | `artifacts.types`, `.list`, `.get`, `.create`, `.updateDraft`, `.history`, `.diff`, `.requestPublish`, `.requestPublishBundle`; `approvals.list`, `approvals.get` |
+| Analytics | `analytics.query` (measures × up to three dimensions), `analytics.emailPerformance`, `analytics.journeyFunnel`, `analytics.campaignSummary`, `analytics.metrics.list` (the catalogue) |
+| Campaigns | `campaigns.of`, `campaigns.members`, `campaigns.archive`, `campaigns.holdoutResult`; campaigns are `campaign` artifacts grouping broadcasts, journeys, templates, experiences, forms and segments |
+| Alerts | `alerts.list`, `.get`, `.create`, `.update`, `.delete`, `.test`, `.history` |
+| Blocks | `blocks.preview`, `blocks.usage`; `templates.check` before publishing an e-mail |
+| Topics | `topics.preferences` (a person’s choices), `topics.set` (agents may only unsubscribe); topics live under a purpose |
+| Audiences | `audiences.add`, `.remove`, `.import`, `.imports`, `.snapshot`, `.refreshSnapshot` for static, CSV and snapshot segments |
 | Assets | `assets.upload` (base64, PNG/JPEG/GIF/WebP/SVG/PDF; an SVG is sanitised and returns a `rendition` PNG for e-mail), `.list`, `.get`, `.update` (alt text), `.delete`; use the returned `url` in templates and the brand |
 | Brand | artifact type `brand` (one per workspace); `hostedPages.preview` renders the confirm/unsubscribe pages with a draft brand |
 | People | `profiles.find {type:"email", value}`, `profiles.get`, `profiles.events`, `profiles.list`, `consent.history`, `segments.ofProfile` |
@@ -61,7 +67,7 @@ Read [references/tools.md](references/tools.md) for the full list with effects a
 | Deliverability | `deliverability.health`, `emailProviders.checkDomain` |
 | Ads | `ads.performance` (cost, conversions, CPA, ROAS per campaign), `ads.audiences`, `ads.conversions`, `ads.importSpend`, `ads.syncAudience`, `ads.test`; rules are the `conversion_map` and `audience_sync` artifacts (draft them, a person publishes) |
 | Newsletter | `broadcasts.preview`, `broadcasts.sendTest`, `broadcasts.status`, `broadcasts.cancel`; `workspace.setSeedList` (admin) |
-| Journeys | `journeys.simulate`, `journeys.stats`, `journeys.enroll` (needs `messages:send`), `journeys.migrate` (move people to the published version; dry run first) |
+| Journeys | `journeys.simulate`, `journeys.stats`, `journeys.holdoutResult`, `journeys.enroll` (needs `messages:send`), `journeys.migrate` (move people to the published version; dry run first) |
 | Web | `experiences.results` |
 | AI | `prompts.test` + `prompts.testRun`, `ai.calls`, `ai.usage`, `aiProviders.list` |
 | Integrations | `connectors.list`, `connections.list` (shows OAuth status), `connections.runAction`, `webhooks.list`, `deliveries.list`; `connections.authorize` is for people only |
@@ -75,11 +81,17 @@ Worked examples with full payloads are in [references/recipes.md](references/rec
 - a welcome journey after double opt-in;
 - a signup form with double opt-in;
 - an AI-chosen branch with a tested prompt;
-- reporting the week.
+- a campaign with a control group;
+- a weekly issue built from reusable blocks and published as a bundle;
+- topics, the preference centre and the archive;
+- a subject test and a recipient-local send window;
+- a static or CSV audience;
+- a journey wait and business entry keys;
+- reporting the week with the analytics layer.
 
 ## Content rules that save round trips
 
-- **Ids** look like `eml_` (template), `sms_` (SMS template), `dlp_` (delivery policy), `seg_` (segment), `jrn_` (journey), `bct_` (broadcast), `frm_` (form), `prm_` (prompt), `exp_` (experience), each followed by 32 hex characters.
+- **Ids** look like `not_` (note), `jrn_` (journey), `blk_` (e-mail block), `eml_` (e-mail template), `sms_` (SMS template), `psh_` (push template), `seg_` (segment), `exp_` (web experience), `prm_` (AI prompt), `frm_` (signup form), `brd_` (brand), `bct_` (broadcast), `cmp_` (campaign), `tpl_` (tracking plan), `pur_` (purposes), `cvm_` (conversion map), `aud_` (audience sync), `dlp_` (delivery policy), each followed by 32 hex characters. Assets are `ast_` and people are `prf_`.
 - **Durations** are ISO 8601: `PT6H`, `P2D`, `P1W`. **Timestamps** are ISO in UTC: `2026-10-30T07:00:00Z`.
 - **E-mail templates:** MJML with Liquid.
   - Variables: `{{ profile.firstName | default: "there" }}`, `{{ content.<slot> }}` (AI-generated text), and journey context.
@@ -91,10 +103,10 @@ Worked examples with full payloads are in [references/recipes.md](references/rec
 - **Delivery policy:** frequency caps, quiet hours and the auto-pause live in the workspace's `delivery_policy` artifact. A `queued` message with a `quiet_hours:` or `paused:` reason is held, not lost; a `frequency_cap:` reason means it was not sent.
 - **Segment conditions:** `{"trait":"plan","op":"eq","value":"pro"}`, `{"event":"Product Viewed","where":{"category":"tents"},"count":{"gte":2},"within":"P7D"}`, `{"consent":"marketing_email"}`, `{"segment":"seg_…"}`. Combine them with `{"all":[…]}`, `{"any":[…]}` and `{"not":…}`.
 - **Journey nodes:**
-  - kinds: `trigger`, `wait`, `waitEvent`, `goal`, `branch`, `split`, `email`, `updateProfile`, `webhook`, `action`, `transform`, `aiDecide`, `aiGenerate`, `exit`;
-  - give `next` edges explicitly when a node has several outcomes (branch: `[yes, no]`; waitEvent and goal: `[matched, timeout]`; action: `[ok, error]`; split: one per weight; aiDecide: one per option).
+  - kinds: `trigger`, `wait`, `waitEvent`, `waitUntil`, `branch`, `split`, `email`, `sms`, `push`, `webhook`, `action`, `transform`, `updateProfile`, `aiDecide`, `aiGenerate`, `goal`, `exit`;
+  - give `next` edges explicitly when a node has several outcomes (branch: `[yes, no]`; waitEvent, waitUntil and goal: `[matched, timeout]`; action: `[ok, error]`; split: one per weight; aiDecide: one per option).
 
-## Inputs and results (0.2)
+## Inputs and results
 
 - Date-times (`sendAt`, `before`, `recordedAt`) take ISO 8601 with `Z` or an offset (`2026-10-30T09:00:00+01:00`) and are stored in UTC. The workspace's time zone is in `workspace.get` (`timeZone`).
 - Unknown input keys are not ignored silently: the result carries `warnings` naming the key and the allowed keys. Servers with `STRICT_INPUTS=true` reject them. Read the warnings and fix the call.
