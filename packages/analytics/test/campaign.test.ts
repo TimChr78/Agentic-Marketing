@@ -199,14 +199,28 @@ describe('campaign query compiler', () => {
     expect(() => buildCampaignQuery(input({ measures: [measure('email.sent')] }))).toThrow('email.sent is not a campaign measure');
   });
 
-  it.fails('selects the base aliases its ratio output names (#173)', () => {
-    // The generic compiler selects every base it references (base_email_clicked, …), so an Output's
-    // numeratorAlias/denominatorAlias is always a column in the SQL. The campaign compiler instead
-    // inlines the division and never selects measure_campaign_converters or
-    // measure_campaign_recipients unless the caller asked for those measures too, so the same
-    // Output contract names columns that do not exist.
+  it('selects the base aliases its ratio output names (#209)', () => {
+    // The campaign compiler now selects every base a ratio names, as the generic compiler does, so an Output's numeratorAlias/denominatorAlias is always a column in the SQL.
     const compiled = buildCampaignQuery(input({ measures: [measure('campaign.conversion_rate')] }));
     expect(compiled.sql).toContain('AS measure_campaign_converters');
     expect(compiled.sql).toContain('AS measure_campaign_recipients');
+  });
+
+  it('selects the base aliases revenue_per_recipient alone names', () => {
+    const compiled = buildCampaignQuery(
+      input({
+        measures: [measure('campaign.revenue_per_recipient')],
+        conversionRules: [{ event: 'Order Completed', value: 'order.total', currency: 'DKK' }],
+      }),
+    );
+    expect(compiled.sql).toContain('AS measure_campaign_revenue');
+    expect(compiled.sql).toContain('AS measure_campaign_recipients');
+    expect(compiled.outputs.at(-1)).toEqual({
+      kind: 'measure',
+      measure: MEASURES['campaign.revenue_per_recipient'],
+      alias: 'measure_campaign_revenue_per_recipient',
+      numeratorAlias: 'measure_campaign_revenue',
+      denominatorAlias: 'measure_campaign_recipients',
+    });
   });
 });
