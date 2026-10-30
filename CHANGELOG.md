@@ -2,6 +2,12 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+### Changed
+
+- **Release provenance (#182).** A release now publishes SLSA build provenance attestations for the image and for the release files (Compose bundle, Helm chart, `SHA256SUMS`), and the image carries an SBOM; [Operations](../deployment/operations.md#verifying-a-release) shows how to check them with `gh attestation verify`.
+
 ## [0.2.10] - 2026-10-30
 
 A hygiene release ([#179](https://github.com/TimChr78/Agentic-Marketing/issues/179)): bug fixes, a faster and stricter build, releases gated on CI, and documentation that matches what ships. No new features. REST and MCP stay backwards compatible. One Postgres migration runs at start-up.

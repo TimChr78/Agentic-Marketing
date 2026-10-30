@@ -95,3 +95,19 @@ These run only when the configuration itself is valid. Each network operation gi
 | `egress.<adapter>` | The API host of each enabled provider adapter answers HTTP, or an SMTP relay accepts a TCP connection. Unreachable is a failure. | Allow outbound HTTPS or SMTP from the host and check the provider's configuration. The `log` adapter is skipped. |
 
 DNS and egress checks only see enabled e-mail providers. With no providers configured they pass without network traffic.
+
+## Verifying a release
+
+Every release carries SLSA build provenance from the release workflow (GitHub Actions). The image's provenance and its SBOM (one per platform) are attestations in the registry, next to the image; the Compose bundle, the Helm chart and `SHA256SUMS` carry their own, keyed by their sha256.
+
+```bash
+gh attestation verify oci://ghcr.io/timchr78/agentic-marketing:<version> --repo TimChr78/Agentic-Marketing
+gh attestation verify agentic-marketing-compose-<version>.tar.gz --repo TimChr78/Agentic-Marketing
+```
+
+The chart `.tgz` and `SHA256SUMS` verify the same way. To read the SBOM of the image, or its provenance:
+
+```bash
+docker buildx imagetools inspect ghcr.io/timchr78/agentic-marketing:<version> --format '{{ json .SBOM }}'
+docker buildx imagetools inspect ghcr.io/timchr78/agentic-marketing:<version> --format '{{ json .Provenance }}'
+```
