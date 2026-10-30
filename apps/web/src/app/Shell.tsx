@@ -1,5 +1,7 @@
 import { Bot, Check, ChevronDown, ChevronRight, LogOut, Menu as MenuIcon, Monitor, Moon, Search, Settings2, Sun, X } from 'lucide-react';
 import { type ReactNode, useEffect, useRef, useState } from 'react';
+import { useAutonomy } from '../features/agents/AutonomyProvider';
+import { switchNotice } from '../features/agents/labels';
 import { CopilotDrawer } from '../features/copilot/CopilotDrawer';
 import { Badge, cx, IconButton, Kbd, Menu } from '../ui';
 import { useFocusTrap } from '../ui/focus';
@@ -73,6 +75,7 @@ export function Shell({ children }: { children: ReactNode }) {
               ))}
             </ol>
           </nav>
+          <AgentModeBadge />
           <button
             type="button"
             onClick={() => setSearchOpen(true)}
@@ -95,6 +98,30 @@ export function Shell({ children }: { children: ReactNode }) {
       {searchOpen && <SearchPalette onClose={() => setSearchOpen(false)} />}
       <CopilotDrawer open={copilotOpen} onClose={() => setCopilotOpen(false)} />
     </div>
+  );
+}
+
+/**
+ * A standing reminder when the workspace is not fully on (#215): propose-only or off. It links to
+ * Settings → Agents so the person can see what is paused and switch it back.
+ */
+function AgentModeBadge() {
+  const { settings } = useAutonomy();
+  const notice = switchNotice(settings);
+  if (!notice) return null;
+  return (
+    <Link
+      to="/settings/agents"
+      aria-label={`${notice.label}. Change agent autonomy`}
+      title={notice.label}
+      className={cx(
+        'inline-flex h-7 shrink-0 items-center gap-1.5 rounded-full px-2 text-[11px] font-medium whitespace-nowrap',
+        notice.tone === 'warn' ? 'bg-warn-soft text-warn' : 'bg-bad-soft text-bad',
+      )}
+    >
+      <Bot size={13} aria-hidden />
+      <span className="hidden sm:inline">{notice.label}</span>
+    </Link>
   );
 }
 

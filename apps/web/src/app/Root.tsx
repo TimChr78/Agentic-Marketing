@@ -1,4 +1,5 @@
 import { Suspense } from 'react';
+import { AutonomyProvider } from '../features/agents/AutonomyProvider';
 import { Alert, Button, LoadingBlock, ToastProvider } from '../ui';
 import { Routes } from './routes';
 import { Shell } from './Shell';
@@ -44,11 +45,13 @@ function Gate() {
       </Centered>
     );
   return (
-    <Shell>
-      <Suspense fallback={<LoadingBlock lines={6} />}>
-        <Routes />
-      </Suspense>
-    </Shell>
+    <AutonomyProvider>
+      <Shell>
+        <Suspense fallback={<LoadingBlock lines={6} />}>
+          <Routes />
+        </Suspense>
+      </Shell>
+    </AutonomyProvider>
   );
 }
 
