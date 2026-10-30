@@ -27,7 +27,7 @@
     "html-to-text": "9.0.5",
     "htmlparser2": "9.1.0",
     "liquidjs": "10.30.0",
-    "mjml": "4.18.0",
+    "mjml": "5.0.0",
     "nodemailer": "10.3.1",
     "zod": "4.6.7"
   },
