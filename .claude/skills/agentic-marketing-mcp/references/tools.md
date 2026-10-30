@@ -4,135 +4,185 @@ Generated from the command registry (`apps/server/src/registry.ts`). **Effect**:
 
 | Tool | Effect | Permission | Who | What |
 |---|---|---|---|---|
-| `artifacts.types` | read | artifacts:read | people and agents | List artifact types |
-| `artifacts.create` | write | artifacts:write | people and agents | Create artifact draft |
-| `artifacts.updateDraft` | write | artifacts:write | people and agents | Update artifact draft |
-| `artifacts.get` | read | artifacts:read | people and agents | Get artifact |
-| `artifacts.list` | read | artifacts:read | people and agents | List artifacts |
-| `artifacts.history` | read | artifacts:read | people and agents | Artifact version history |
-| `artifacts.diff` | read | artifacts:read | people and agents | Diff two versions |
-| `artifacts.requestPublish` | publish | artifacts:publish | people and agents | Publish (or request approval) |
-| `approvals.list` | read | artifacts:read | people and agents | List approval requests |
-| `approvals.approve` | publish | artifacts:approve | people only | Approve and publish |
-| `approvals.reject` | write | artifacts:approve | people only | Reject a change |
-| `config.export` | read | artifacts:read | people and agents | Export artifacts as a bundle |
-| `config.import` | write | artifacts:write | people and agents | Import a bundle of artifacts (dry run first; publishing needs artifacts:publish) |
-| `templates.preview` | read | artifacts:read | people and agents | Preview an e-mail template |
-| `templates.sendTest` | write | artifacts:write | people and agents | Send a test e-mail to members or the admin seed list (marked as a test) |
-| `messages.sendEmail` | write | messages:send | people and agents | Send an e-mail to a person |
-| `messages.sendSms` | write | messages:send | people and agents | Send a text message to a person |
-| `smsTemplates.preview` | read | artifacts:read | people and agents | Preview an SMS template (segments, cost) |
-| `messages.sendPush` | write | messages:send | people and agents | Send a push notification to a person (all their devices) |
-| `pushTemplates.preview` | read | artifacts:read | people and agents | Preview a push template |
-| `push.devices` | read | profiles:read | people and agents | Devices a person gets notifications on |
-| `deliverability.health` | read | artifacts:read | people and agents | Bounce and complaint rates |
-| `emailProviders.checkDomain` | read | artifacts:read | people and agents | Check a provider's sending domain (SPF, DKIM, DMARC) |
-| `smsProviders.list` | read | workspace:admin | people and agents | List SMS providers |
-| `smsProviders.create` | write | workspace:admin | people only | Add an SMS provider |
-| `smsProviders.update` | write | workspace:admin | people only | Change an SMS provider |
-| `smsProviders.delete` | destructive | workspace:admin | people only | Delete an SMS provider |
-| `pushProviders.list` | read | workspace:admin | people and agents | List push providers (web push, FCM, APNs) |
-| `pushProviders.create` | write | workspace:admin | people only | Add a push provider |
-| `pushProviders.update` | write | workspace:admin | people only | Change a push provider |
-| `pushProviders.delete` | destructive | workspace:admin | people only | Delete a push provider |
-| `warehouse.list` | read | workspace:admin | people and agents | List warehouse exports |
-| `warehouse.create` | write | workspace:admin | people only | Add a warehouse export |
-| `warehouse.update` | write | workspace:admin | people only | Change a warehouse export |
-| `warehouse.run` | write | workspace:admin | people and agents | Run a warehouse export now |
-| `warehouse.delete` | write | workspace:admin | people only | Remove a warehouse export |
-| `messages.list` | read | profiles:read | people and agents | Messages and what happened to them |
-| `messages.stats` | read | artifacts:read | people and agents | E-mail performance |
-| `emailProviders.list` | read | workspace:admin | people and agents | List e-mail providers, including `tracking`, `trackingNote` and privacy warnings |
-| `emailProviders.create` | write | workspace:admin | people only | Add an e-mail provider |
-| `emailProviders.update` | write | workspace:admin | people only | Change an e-mail provider |
-| `emailProviders.rotateWebhook` | write | workspace:admin | people only | Replace an e-mail provider webhook URL |
-| `emailProviders.delete` | destructive | workspace:admin | people only | Delete an e-mail provider |
-| `workspace.get` | read | artifacts:read | people and agents | Current workspace |
-| `workspace.setSeedList` | write | workspace:admin | people only | Set the test-send seed list |
-| `workspace.setApprovalPolicy` | write | workspace:admin | people only | Set approval policy |
-| `audit.list` | read | audit:read | people and agents | Read audit log |
-| `audit.verify` | read | audit:read | people and agents | Verify audit log integrity |
-| `members.list` | read | workspace:admin | people and agents | List members |
-| `members.invite` | write | workspace:admin | people only | Invite a person |
-| `invitations.list` | read | workspace:admin | people and agents | List invitations |
-| `invitations.revoke` | write | workspace:admin | people only | Revoke an invitation |
-| `members.setRole` | write | workspace:admin | people only | Change a member’s role |
-| `members.remove` | destructive | workspace:admin | people only | Remove a member |
-| `sso.list` | read | workspace:admin | people and agents | Single sign-on providers |
-| `scim.status` | read | workspace:admin | people and agents | SCIM provisioning status |
-| `scim.configure` | write | workspace:admin | people only | Configure SCIM provisioning |
-| `scim.rotateToken` | write | workspace:admin | people only | Create the SCIM token |
-| `apiTokens.create` | write | – | people only | Create an API token |
-| `apiTokens.list` | read | – | people and agents | List API tokens (not an MCP tool) |
-| `apiTokens.revoke` | destructive | – | people only | Revoke an API token |
-| `sources.list` | read | workspace:admin | people and agents | List event sources |
-| `sources.create` | write | workspace:admin | people only | Add an event source |
-| `sources.update` | write | workspace:admin | people only | Change an event source |
-| `sources.rotateKey` | write | workspace:admin | people only | Replace a source’s write key |
-| `sources.delete` | destructive | workspace:admin | people only | Delete an event source |
-| `profiles.list` | read | profiles:read | people and agents | Recently active profiles |
-| `profiles.find` | read | profiles:read | people and agents | Find a person |
-| `profiles.get` | read | profiles:read | people and agents | Read a profile |
-| `profiles.events` | read | profiles:read | people and agents | A person’s events |
-| `purposes.list` | read | artifacts:read | people and agents | Processing purposes |
-| `consent.record` | write | profiles:write | people and agents | Record consent or an objection (agents: restrictions only) |
-| `consent.history` | read | profiles:read | people and agents | Consent ledger of a person |
-| `profiles.export` | read | profiles:pii | people only | Export a person’s data (access request) |
-| `profiles.erase` | destructive | profiles:erase | people only | Erase a person (erasure request) |
-| `profiles.import` | write | profiles:write | people only | Import people with their consent |
-| `segments.preview` | read | profiles:read | people and agents | Preview a segment |
-| `segments.members` | read | profiles:read | people and agents | Members of a segment |
-| `segments.refresh` | write | artifacts:publish | people and agents | Recompute a segment now |
-| `segments.ofProfile` | read | profiles:read | people and agents | Segments a person is in |
-| `journeys.stats` | read | artifacts:read | people and agents | Journey statistics |
-| `journeys.enroll` | write | messages:send | people and agents | Put people into a journey |
-| `journeys.simulate` | read | artifacts:read | people and agents | Simulate a journey |
-| `journeys.migrate` | publish | artifacts:publish | people and agents | Move participants to the published version |
-| `broadcasts.preview` | read | artifacts:read | people and agents | Preview a broadcast’s audience |
-| `broadcasts.sendTest` | write | artifacts:write | people and agents | Send a broadcast test e-mail (marked as a test) |
-| `broadcasts.status` | read | artifacts:read | people and agents | Broadcast status and results |
-| `broadcasts.cancel` | write | messages:send | people and agents | Cancel a broadcast |
-| `archive.issues` | read | artifacts:read | people and agents | Public newsletter archive settings and published issue URLs |
-| `experiences.results` | read | artifacts:read | people and agents | Experiment results (fixed, sequential and Bayesian; `recommendation` follows the experience’s `analysis.method`) |
-| `edge.status` | read | workspace:admin | people and agents | Edge decisions status (Cloudflare Workers KV) |
-| `edge.configure` | write | workspace:admin | people only | Mirror decisions to Cloudflare Workers KV |
-| `edge.sync` | write | workspace:admin | people and agents | Sync the edge now, optionally backfilling snapshots |
-| `aiProviders.list` | read | artifacts:read | people and agents | List AI providers |
-| `aiProviders.create` | write | workspace:admin | people only | Add an AI provider |
-| `aiProviders.update` | write | workspace:admin | people only | Change an AI provider |
-| `aiProviders.delete` | destructive | workspace:admin | people only | Delete an AI provider |
-| `prompts.test` | write | artifacts:write | people and agents | Queue a prompt’s test cases (uses tokens) |
-| `prompts.testRun` | read | artifacts:read | people and agents | Results of a prompt test run |
-| `ai.calls` | read | artifacts:read | people and agents | AI decision log |
-| `ai.usage` | read | artifacts:read | people and agents | AI usage |
-| `ai.classify` | write | profiles:write | people and agents | Classify a text (queued; uses tokens) |
-| `ai.classification` | read | artifacts:read | people and agents | Result of a classification |
-| `ai.reviews` | read | artifacts:read | people and agents | AI answers to review, and quality per prompt |
-| `ai.review` | write | artifacts:read | people only | Review an AI answer |
-| `copilot.conversations` | read | artifacts:read | people only | My copilot conversations |
-| `copilot.conversation` | read | artifacts:read | people only | A copilot conversation |
-| `copilot.deleteConversation` | write | artifacts:read | people only | Delete a copilot conversation |
-| `connectors.list` | read | artifacts:read | people and agents | List connectors |
-| `connections.list` | read | artifacts:read | people and agents | List connections |
-| `connections.create` | write | workspace:admin | people only | Add a connection |
-| `connections.update` | write | workspace:admin | people only | Change a connection |
-| `connections.delete` | destructive | workspace:admin | people only | Delete a connection |
-| `connections.runAction` | write | messages:send | people and agents | Run a connector action |
-| `shopify.importCustomers` | write | workspace:admin | people and agents | Import a page of Shopify customers (with e-mail consent when the connection syncs it) |
-| `connections.authorize` | write | workspace:admin | people only | Connect an OAuth 2.0 connection |
-| `ads.test` | write | workspace:admin | people and agents | Test an ad platform connection |
-| `ads.conversions` | read | artifacts:read | people and agents | Conversions sent to ad platforms |
-| `ads.performance` | read | artifacts:read | people and agents | Ad spend, conversions and ROAS per campaign |
-| `ads.importSpend` | write | artifacts:write | people and agents | Import ad spend now |
-| `ads.audiences` | read | artifacts:read | people and agents | Audience syncs and their state |
-| `ads.syncAudience` | write | messages:send | people and agents | Sync an audience now |
-| `webhooks.list` | read | artifacts:read | people and agents | List webhook endpoints |
-| `webhooks.create` | write | workspace:admin | people only | Add a webhook endpoint |
-| `webhooks.update` | write | workspace:admin | people only | Change a webhook endpoint |
-| `webhooks.delete` | destructive | workspace:admin | people only | Delete a webhook endpoint |
-| `webhooks.test` | write | workspace:admin | people and agents | Send a test webhook |
-| `deliveries.list` | read | artifacts:read | people and agents | Webhook and action deliveries |
-| `deliveries.retry` | write | workspace:admin | people and agents | Retry a delivery |
-| `secrets.set` | write | secrets:write | people only | Store a secret |
-| `secrets.list` | read | secrets:read | people and agents | List secrets |
-| `secrets.delete` | destructive | secrets:write | people only | Delete a secret |
+| `ads.audiences` | read | artifacts:read | people and agents | Published audience syncs (segment → Meta custom audience / Google Customer Match list) with how many people are synced, the last run and its error. Members are people in the segment who allowed ad_targeting and have an e-mail or phone. |
+| `ads.conversions` | read | artifacts:read | people and agents | Recent conversions queued for the ad platforms, newest first: event, platform, status (pending, done, dead) and the platform error. Only people who allowed ad_measurement are ever queued. |
+| `ads.importSpend` | write | artifacts:write | people and agents | Fetches daily cost, impressions, clicks and platform conversions per campaign for the last N days from Meta or Google Ads (it also runs every 6 hours for the last 3 days). |
+| `ads.performance` | read | artifacts:read | people and agents | Cost, impressions, clicks and the platform's own conversions per campaign, next to our conversions and revenue (events in the conversion map) attributed by last utm_campaign touch (campaign id or name) within the window, with CPA and ROAS. Revenue is summed as is; keep one currency per workspace. |
+| `ads.syncAudience` | write | messages:send | people and agents | Reconciles one published audience sync right away instead of waiting for the next run (every 15 minutes). Sends hashed identifiers to the platforms. |
+| `ads.test` | write | workspace:admin | people and agents | Sends a sample conversion in the platform's test mode: Meta and TikTok with the connection's testEventCode (it shows under Test events), Google with validateOnly (checked, not recorded), Pinterest with test=true. The identifiers are made up. |
+| `ai.calls` | read | artifacts:read | people and agents | Recent AI calls, newest first: journey decisions and generated texts with their rationale, fallbacks with the reason, prompt tests and copilot turns. Filter by journey, prompt, profile or kind. |
+| `ai.classification` | read | artifacts:read | people and agents | The outcome of an ai.classify call: the label and a rationale once the AI worker has answered (status done), or why it failed. |
+| `ai.classify` | write | profiles:write | people and agents | Label a text with one of a published classify prompt’s labels (e.g. the intent of an e-mail reply). Returns a callId at once; the AI worker answers within seconds: read it with ai.classification. With profileId, the person’s AI consent is checked and, if the prompt names a `trait`, the label is stored on their profile. |
+| `ai.review` | write | artifacts:read | people only | Record whether a sampled AI answer was good or bad, with a note on what was wrong. People only: reviews are the human check on the model. |
+| `ai.reviews` | read | artifacts:read | people and agents | Sampled AI answers (prompts with review.sampleRate) for a person to check, newest first, and per prompt how many were reviewed and the share judged good. |
+| `ai.usage` | read | artifacts:read | people and agents | Tokens, calls, fallbacks and estimated cost per day, kind and model over the last days. |
+| `aiProviders.create` | write | workspace:admin | people only | Add an OpenAI- or Anthropic-compatible LLM provider with your own API key. |
+| `aiProviders.delete` | destructive | workspace:admin | people only | Remove a provider and its key. AI steps without a provider take their fallback. |
+| `aiProviders.list` | read | artifacts:read | people and agents | LLM providers set up with the workspace’s own API keys, what they are used for, and tokens used this month. Keys are never returned. |
+| `aiProviders.update` | write | workspace:admin | people only | Change settings, uses, budget or the API key. |
+| `alerts.create` | write | workspace:admin | people and agents | Watch a metric and notify when it crosses a threshold. Kinds: deliverability (bounce or complaint rate over a window, above a fraction, with a minimum number of sends), signup_drop (confirmed signups below a percentage of the previous window), journey_errors (failed journey steps above a count). Channels are existing webhook endpoints (whk_…) and/or workspace members by user id; e-mail carries aggregates only. Writes need workspace:admin, the same permission as configuring webhooks. |
+| `alerts.delete` | destructive | workspace:admin | people and agents | Delete a rule and its firing history. Pending alert notifications already queued are sent or retried normally. |
+| `alerts.get` | read | artifacts:read | people and agents | One alert rule with its kind-specific configuration, channels and the open firing event, if any. Values and thresholds are fractions for rates and counts for counts. |
+| `alerts.history` | read | artifacts:read | people and agents | Firing and resolved episodes, newest first, with the value, threshold, window and notification outcomes. Filter by rule with ruleId; limit defaults to 50. |
+| `alerts.list` | read | artifacts:read | people and agents | Threshold rules over the analytics metric layer, with their channels and whether each is currently firing (and since when). Rules are workspace-scoped; history is in alerts.history. |
+| `alerts.test` | write | workspace:admin | people and agents | Send one test notification to the rule’s webhook and e-mail channels with representative values, without opening a firing event. Use it after creating or changing a rule. |
+| `alerts.update` | write | workspace:admin | people and agents | Change a rule’s name, configuration, channels or enabled state. The kind is fixed; update the configuration to match it. Turning a rule off stops evaluation but keeps its history. |
+| `analytics.campaignSummary` | read | artifacts:read | people and agents | One campaign’s goal and attribution: recipients, delivered, clickers, unsubscribers, complaint and unsubscribe rates, converters, conversion rate, revenue per currency and per recipient, progress towards the target when set, and the recipients → delivered → clicked → converted funnel. Includes a row per sending member (broadcast or journey) and the holdout result for journey members with a control group. A campaign that has not sent yet returns state "not_started" with readiness instead of zeros. |
+| `analytics.emailPerformance` | read | artifacts:read | people and agents | Sent, delivered, bounced, complained, opened, clicked and unsubscribed people, with click, bounce, unsubscribe and open rates, by template, broadcast, journey or day. Opens are only counted where tracking is enabled. Breakdowns hide groups smaller than k=5 and say so in meta.suppressed. |
+| `analytics.journeyFunnel` | read | artifacts:read | people and agents | One journey over a period: entered → each step reached → goal reached → completed or exited, with the drop-off and drop-off rate between steps. Step counts come from journey_events; groups smaller than k=5 are suppressed and counted in meta.suppressed. |
+| `analytics.metrics.list` | read | artifacts:read | people and agents | The measures and dimensions analytics.query accepts, with each measure’s unit, aggregation, source and allowed dimensions. Use it before building a query or a picker. |
+| `analytics.query` | read | artifacts:read | people and agents | Read a fixed catalogue of marketing measures, broken down by up to three dimensions. Measures have stable ids (email.sent, email.delivered, email.click_rate, journey.entered, conversions, revenue, segment.members, …); ratios are computed from their base measures after aggregation, never averaged. The workspace time zone decides day, week and month boundaries. Breakdowns by anything other than a time dimension hide rows with fewer than k=5 people behind their counts and report how many were suppressed in meta.suppressed; totals are never suppressed. There is no SQL, table or expression input, and the workspace always comes from the caller. Results are cached for 60 seconds; each query is limited to 10 seconds and at most 5000 rows. |
+| `apiTokens.create` | write | – | people only | A token for scripts and automation tools (Authorization: Bearer amk_…), acting as an agent for you with the scopes you choose (never more than your role allows). Shown once. (not an MCP tool) |
+| `apiTokens.get` | read | – | people and agents | A token with its owner, last use and change history (newest first). Your own tokens, or anyone’s for admins. The token value is never shown again. (not an MCP tool) |
+| `apiTokens.list` | read | – | people and agents | Your API tokens (admins: everyone’s), with scopes and last use. Token values are never shown again. (not an MCP tool) |
+| `apiTokens.revoke` | destructive | – | people only | Stop a token from working, at once. Your own tokens, or anyone’s for admins. (not an MCP tool) |
+| `apiTokens.update` | write | workspace:admin | people only | Change a token’s name, scopes or expiry. A token acts with its owner’s current role intersected with its scopes, so it never has more than the owner’s role allows. Removing scopes, renaming and shortening the expiry apply at once; adding scopes or extending the expiry needs your password, because it widens what the token can do. |
+| `approvals.approve` | publish | artifacts:approve | people only | Approve a pending request and publish that version; for a bundle, every request in it, published in dependency order in one step. Only people can approve. |
+| `approvals.get` | read | artifacts:read | people and agents | An approval request with the version under review, the published version, a structural diff from the published version to the reviewed one, and the decision history. |
+| `approvals.list` | read | artifacts:read | people and agents | Approval requests in this workspace (default: pending), oldest first, optionally for one artifact. |
+| `approvals.reject` | write | artifacts:approve | people only | Reject a pending request (for a bundle: every request in it). The versions stay in history as rejected; editing an artifact starts a new draft. |
+| `archive.issues` | read | artifacts:read | people and agents | The workspace’s public newsletter archive settings and its published issues, newest first, with their URLs on the links host. Includes only broadcasts that were sent and whose live version says archive.publish; drafts never appear. Use it to check a broadcast’s archive URL or to link the live archive. |
+| `artifacts.create` | write | artifacts:write | people and agents | Create a new artifact (journey, note, …) as version 1 in draft state. Nothing is live until it is published with artifacts.requestPublish. |
+| `artifacts.diff` | read | artifacts:read | people and agents | Structural difference between two versions of an artifact (default: published → latest). Lists added, removed and changed fields. |
+| `artifacts.discardDraft` | write | artifacts:write | people and agents | Delete the unpublished versions after the live one and return the artifact to its live version. Refuses when nothing is live, there is no draft, or the draft is waiting for approval. |
+| `artifacts.get` | read | artifacts:read | people and agents | Read an artifact with the content of one version (default: the latest). `layout` holds canvas positions for the builder; agents never need it to edit a journey. |
+| `artifacts.history` | read | artifacts:read | people and agents | All versions of an artifact with state, author and note, newest first. |
+| `artifacts.list` | read | artifacts:read | people and agents | List artifacts in this workspace, newest first, optionally filtered by type. |
+| `artifacts.requestPublish` | publish | artifacts:publish | people and agents | Submits the latest draft for review under the workspace approval policy; publishes directly only when the policy allows it (policy `none`, or `agent_changes` for a person's own edits). A person then approves or rejects it in the admin UI. Check the result with approvals.list or artifacts.get. |
+| `artifacts.requestPublishBundle` | publish | artifacts:publish | people and agents | Submits the latest drafts of artifacts that belong together for ONE review, e.g. this week's e-mail template and the broadcast that sends it, or a form and its confirmation template. References between them are checked as if they were already published; a person approves or rejects them together, and approval publishes them in dependency order in one step (all or nothing). Publishes directly when the approval policy allows it. Use it instead of two requestPublish rounds whenever one artifact refers to another unpublished one. |
+| `artifacts.types` | read | artifacts:read | people and agents | The artifact types this workspace supports, each with the JSON Schema its content must match. Pass type to get one type (the full list is large, about 66 KB); omit it for all. Read this before creating content. |
+| `artifacts.updateDraft` | write | artifacts:write | people and agents | Replace the content of an artifact. Edits the current draft, or starts a new draft version when the latest version is published, in review or rejected. A journey edit that only moves steps is saved as layout and creates no version. Pass `expectedContentHash` (from artifacts.get) to avoid overwriting someone else’s concurrent edit. |
+| `assets.delete` | destructive | artifacts:write | people and agents | Delete an asset. Deleting is refused while a latest or published artifact still references it, unless force is true (people only). The public URL then answers 410 Gone. |
+| `assets.get` | read | artifacts:read | people and agents | One asset with its public URL and the latest or published artifacts that reference it. |
+| `assets.list` | read | artifacts:read | people and agents | Assets newest first, optionally filtered by a case-insensitive search across name, file name and alt text, and by kind. Page with the returned cursor. |
+| `assets.update` | write | artifacts:write | people and agents | Change an asset’s display name or alternative text. The file bytes and public URL cannot be changed. |
+| `assets.upload` | write | artifacts:write | people and agents | Upload a PNG, JPEG, GIF, WebP or SVG image, or a PDF, for e-mails and hosted pages. The declared content type is checked against the bytes; images record their pixel size. An SVG is sanitised (unsafe elements and attributes are removed and listed in `sanitized`) and a PNG rendition is stored for e-mail. Returns a stable public URL. |
+| `audiences.add` | write | profiles:write | people only | Add up to 1,000 people to a static or snapshot segment by profile id, e-mail or user id. Adding someone twice changes nothing. Membership is not consent: sends still check consent, suppression and delivery policy. |
+| `audiences.import` | write | profiles:write | people only | Parse a CSV (up to 5 MB) and add the people in one column to a static or snapshot segment. Use dryRun to preview matches and unmatched rows before applying; re-importing adds nobody twice. Ids are matched by e-mail hash, user id or profile id. Unmatched rows are reported by row number and reason only, without personal data. Membership is not consent. |
+| `audiences.imports` | read | profiles:read | people and agents | Recent CSV imports and snapshot refreshes of a segment: counts, file name, hash and who did it. Unmatched rows are row numbers and reasons only. Membership in the list is not consent to receive anything. |
+| `audiences.refreshSnapshot` | write | profiles:write | people only | Re-copy the source segment’s current members into a snapshot, recording an import row with source "snapshot" and emitting Segment Entered/Exited for the change. The snapshot’s content and source version stay as they were, so this is a data change, not an artifact version. Membership is not consent. |
+| `audiences.remove` | write | profiles:write | people only | Remove up to 1,000 people from a static or snapshot segment by profile id, e-mail or user id. Removing someone who is not on the list changes nothing. |
+| `audiences.snapshot` | write | profiles:write | people only | Create a draft snapshot segment from another segment’s current members and the source’s published version, frozen until refreshed with audiences.refreshSnapshot. It still needs the normal approval before it can be used. Use it when the audience must not change between review and send. Membership is not consent. |
+| `audit.list` | read | audit:read | people and agents | Who ran which command, through which surface, on what, and whether it succeeded. Newest first; page with `beforeSeq`. |
+| `audit.verify` | read | audit:read | people and agents | Recompute the hash chain of this workspace’s audit log and report the first entry that does not match, if any. |
+| `blocks.preview` | read | artifacts:read | people and agents | Render a block version (default: the latest) to HTML with its default parameters, or with values you pass. Nothing is sent. |
+| `blocks.usage` | read | artifacts:read | people and agents | Templates whose latest or published version uses this block, so a reviewer can see what a change affects. Scans the template content for {% block … %}. |
+| `broadcasts.cancel` | write | messages:send | people and agents | Stop a scheduled or running broadcast. People already sent to keep their e-mail; nobody else gets it. Cannot be undone. |
+| `broadcasts.preview` | read | artifacts:read | people and agents | Who a broadcast (default: its latest version) would reach right now: the segment size and, for up to 2,000 members, how many the send gateway would send to and why it would skip the others (no consent, suppressed, no address). Sends nothing. |
+| `broadcasts.sendTest` | write | artifacts:write | people and agents | Send a broadcast’s e-mail to members of this workspace or the admin-configured seed list (workspace.setSeedList), at most 10 per call, with "[Test]" in the subject. Uses the broadcast version you name (default: its latest draft), and the template version the broadcast would send (the template’s published version, or its latest draft while it has none) through the marketing provider. Purpose/consent checks are skipped, suppressions still apply, and each copy is recorded as a test message (never counted in reporting) and an audit entry. No profile or consent is written; agents drafting newsletters can run it with the artifacts:write scope. Approvers may run it without `to`, sending to themselves only. |
+| `broadcasts.status` | read | artifacts:read | people and agents | Where a broadcast is (scheduled, running, done, cancelled) with how many people it reached and skipped, and what became of the e-mails: sent, delivered, bounced, complained, clicked, unsubscribed. A subject test reports its state, the variants with counts and rates, the winner and when the rest goes out. |
+| `campaigns.archive` | write | artifacts:write | people and agents | Stop treating a campaign as live without touching its members: they keep their content, versions and sends. An archived campaign no longer answers campaigns.of or supplies a shared UTM campaign. |
+| `campaigns.holdoutResult` | read | artifacts:read | people and agents | Per arm (control, treatment): people assigned, people who did the campaign goal within the attribution window after their assignment, conversion rate, revenue per currency and e-mail unsubscribes. Reports absolute and relative lift, Newcombe's 95% interval for the difference of proportions, whether the minimum sample size is met in both arms, and a verdict. Verdicts other than not_enough_data need both samples and an interval that excludes zero. The campaign's control group covers every sending member. |
+| `campaigns.members` | read | artifacts:read | people and agents | The members of a campaign’s published version (or its latest draft when it has never been published), with name, type, whether each is published or a draft, and the last send or run for sending members. |
+| `campaigns.of` | read | artifacts:read | people and agents | The published campaigns that list this broadcast, journey, template, experience, form or segment as a member, with the member’s role and the campaign goal and UTM campaign. Empty when it belongs to none. |
+| `config.export` | read | artifacts:read | people and agents | Every artifact of the workspace (published version, or the latest draft with includeDrafts) as one JSON bundle for git and config.import. Archived artifacts are left out. |
+| `config.import` | write | artifacts:write | people and agents | Apply a bundle from config.export: creates missing artifacts (keeping their ids), puts changed content in a new draft, leaves equal ones alone. With publish, the drafts go through artifacts.requestPublish in dependency order, so the approval policy applies. Starts as a dry run; pass dryRun: false to apply. Nothing is deleted. |
+| `connections.authorize` | write | workspace:admin | people only | Starts the OAuth 2.0 authorization for a connection: open the returned URL in a browser, sign in at the provider and allow access. The connection is connected when the provider sends you back. |
+| `connections.create` | write | workspace:admin | people only | Connect a connector with settings and secrets. For connectors that receive webhooks, returns the inbound URL path once: register it (prefixed with your public URL) at the other system. |
+| `connections.delete` | destructive | workspace:admin | people only | Remove a connection, its secrets and its inbound URL. Journey steps that use it take their error edge. |
+| `connections.list` | read | artifacts:read | people and agents | Configured connections (a connector with settings). Secrets and inbound URLs are never shown again. |
+| `connections.runAction` | write | messages:send | people and agents | Call an action of a connection once, e.g. to try it before using it in a journey. It reaches the outside world. |
+| `connections.update` | write | workspace:admin | people only | Change name, settings, secrets (replaced as a whole when given) or whether it is enabled. |
+| `connectors.list` | read | artifacts:read | people and agents | Connectors this install offers: what they receive (inbound webhooks) and the actions journeys can call, with settings, secrets and input schemas. |
+| `consent.history` | read | profiles:read | people and agents | Every consent, refusal, withdrawal and objection recorded for a person (including merged profiles), oldest first. |
+| `consent.record` | write | profiles:write | people and agents | Add an entry to a person’s consent ledger, e.g. a consent given on a form or an objection by phone. Agents may only record restrictions (denied, withdrawn, objected), never a consent. |
+| `consent.summary` | read | profiles:read | people and agents | How many people currently allow or refuse each purpose, overall and per channel, using the same current-status rule as sends and segments. |
+| `copilot.conversation` | read | artifacts:read | people only | What was said in one of your copilot conversations: your messages, the answers and the tools the copilot used. |
+| `copilot.conversations` | read | artifacts:read | people only | Your copilot conversations in this workspace, most recent first. |
+| `copilot.deleteConversation` | write | artifacts:read | people only | Delete one of your copilot conversations and everything said in it. |
+| `deliverability.health` | read | artifacts:read | people and agents | Bounce and complaint rates per channel and stream over the delivery policy window, with the thresholds. "paused": marketing messages are being held until the rate falls or the policy changes. |
+| `deliveries.list` | read | artifacts:read | people and agents | Recent deliveries to webhook endpoints and connector actions, newest first, with attempts, status codes and errors. `dead` ones gave up. |
+| `deliveries.retry` | write | workspace:admin | people and agents | Send a dead or failed webhook delivery again now. |
+| `edge.configure` | write | workspace:admin | people only | Mirror the decision API to Cloudflare Workers KV: the account and KV namespace the edge worker is bound to, and an API token with "Workers KV Storage: Edit". With snapshots off, only page, referrer, UTM and device targeting work at the edge (fewer KV writes). |
+| `edge.status` | read | workspace:admin | people and agents | Whether experiences and profile snapshots are mirrored to Cloudflare Workers KV for the edge worker, and how the last sync went. |
+| `edge.sync` | write | workspace:admin | people and agents | Push experiences and write keys to KV at the next sync (within seconds). With backfillSnapshots, also write the snapshots of everyone, not only of people active since edge decisions were turned on. |
+| `emailProviders.checkDomain` | read | artifacts:read | people and agents | Looks up SPF, DKIM and DMARC for the provider's from-domain and says what to add. DKIM needs the selectors from the provider's DNS settings (e.g. the three SES tokens). |
+| `emailProviders.create` | write | workspace:admin | people only | Add a delivery provider. `useFor` decides which messages go through it: transactional (contract/legal purposes) and/or marketing. Returns the full webhook URL for delivery events once; register it with the provider. |
+| `emailProviders.delete` | destructive | workspace:admin | people only | Remove a provider and its credentials. Messages already sent keep their history. |
+| `emailProviders.list` | read | workspace:admin | people and agents | Configured delivery providers (SMTP, Amazon SES, Postmark, Brevo) and what they are used for. Credentials are never returned. |
+| `emailProviders.rotateWebhook` | write | workspace:admin | people only | Issue a new webhook URL for delivery events. The old URL stops working immediately; replace it with the provider. |
+| `emailProviders.update` | write | workspace:admin | people only | Change settings, sender, uses or credentials (credentials are replaced as a whole when given). |
+| `experiences.results` | read | artifacts:read | people and agents | Exposures, conversions (the goal event after first exposure) and conversion rates per variant of a web experience, compared with the control (holdout, or else the first variant): lift, fixed-horizon p-value and 95% interval, an always-valid sequential p-value, and Bayesian probabilities to beat the control and to be best. `recommendation` follows the experience’s analysis method. |
+| `hostedPages.preview` | read | artifacts:read | people and agents | Render one of the pages subscribers see on the links host (double opt-in confirm, confirmed, expired, unsubscribe or unsubscribed) with the published workspace brand, or a brand draft you pass, and optionally a form’s hostedPages override. Returns the same HTML document the public route serves; the button is disabled and nothing is sent. |
+| `invitations.list` | read | workspace:admin | people and agents | Invitations of this workspace, newest first. Pending invitations past their expiry are reported as expired. |
+| `invitations.revoke` | write | workspace:admin | people only | Make a pending invitation link stop working. |
+| `journeys.enroll` | write | messages:send | people and agents | Enter people into a published journey directly (an API or agent trigger), regardless of its trigger. Re-entry rules still apply. |
+| `journeys.holdoutResult` | read | artifacts:read | people and agents | Per arm (control, treatment): people assigned, goal conversions, conversion rate and e-mail unsubscribes. Reports absolute and relative lift, Newcombe's 95% interval for the difference of proportions, whether the minimum sample size is met in both arms, and a verdict. Verdicts other than not_enough_data need both samples and an interval that excludes zero. |
+| `journeys.migrate` | publish | artifacts:publish | people and agents | Moves people who are still in an older version of a journey onto the published one. A participant whose node exists in the new version (same id and kind) keeps its place and any wait; `mapping` moves others (old node id → new node id) and they restart that step; the rest stay on their version, or exit with unmatched="exit". Try it with dryRun first. |
+| `journeys.simulate` | read | artifacts:read | people and agents | Walk through a journey version (default: latest) on a virtual clock, without sending anything. With a profile, e-mail steps say whether the gateway would send or why not, and branches use the person’s data. `events` lets you script what the person does (e.g. clicks after 1 day). `sampleEvent` resolves the trigger entry key and says whether that entry would be suppressed as a duplicate. |
+| `journeys.stats` | read | artifacts:read | people and agents | How many people are where in a journey right now, and how many reached each node, converted, completed or exited. Also counts entries suppressed by a duplicate business key and by a missing entry-key property. |
+| `members.invite` | write | workspace:admin | people only | Create a one-time invitation link for an e-mail address, valid for 7 days. The token is shown only in this response; share the link with the person. They accept it while signed in with that e-mail address. |
+| `members.list` | read | workspace:admin | people and agents | People in this workspace and their roles. |
+| `members.remove` | destructive | workspace:admin | people only | Take a person out of this workspace. Their sessions and connected agents lose access immediately. The last owner cannot be removed. |
+| `members.setRole` | write | workspace:admin | people only | Give a member another role. Only owners can make someone an owner or change an owner; the last owner cannot be demoted. |
+| `messages.list` | read | profiles:read | people and agents | Recent messages, newest first, with their status and the reason when one was not sent ("why didn’t Ada get this?"), plus delivery events. Filter by person, channel, status, purpose or time, and page with `cursor` until `nextCursor` is null. |
+| `messages.sendEmail` | write | messages:send | people and agents | Ask the send gateway to e-mail one person with a published template. The gateway checks the lawful basis of the template’s purpose, the person’s consent and objections, the suppression list and the address; the answer says whether it was queued or why not. Repeat-safe with `idempotencyKey`. |
+| `messages.sendPush` | write | messages:send | people and agents | Ask the send gateway to notify one person, on every device they registered, with a published push template. Same checks as e-mail (lawful basis, consent, delivery policy); the answer says whether it was queued or why not. Repeat-safe with `idempotencyKey`. |
+| `messages.sendSms` | write | messages:send | people and agents | Ask the send gateway to text one person with a published SMS template. Same checks as e-mail (lawful basis, consent, suppression, delivery policy) plus the provider's monthly budget; the answer says whether it was queued or why not. Repeat-safe with `idempotencyKey`. |
+| `messages.stats` | read | artifacts:read | people and agents | Messages and what became of them over the last `days`, for the workspace, one template or one journey: decided, sent, delivered, bounced, complained, clicked, unsubscribed, with rates relative to sent. Opens are not tracked (no pixels). |
+| `profiles.erase` | destructive | profiles:erase | people only | Permanently remove a person: profile and merged profiles, identifiers, consent ledger and events. Their encryption key is destroyed, so copies in backups become unreadable. Hashes of their e-mail and phone are kept on a suppression list so they are never contacted again. |
+| `profiles.events` | read | profiles:read | people and agents | Events of a person across all their anonymous and user ids, newest first. Page with `before` (a timestamp). |
+| `profiles.export` | read | profiles:pii | people only | Everything held about a person, for a data subject access or portability request: profile, personal data, identifiers, consent ledger, topic choices and their history, and events. |
+| `profiles.find` | read | profiles:read | people and agents | Look a person up by e-mail, phone, user id or anonymous id. E-mail and phone are matched by hash, so this works without seeing personal data. |
+| `profiles.get` | read | profiles:read | people and agents | A person’s traits, identifiers and consent. Personal values are shown only with profiles:pii (agents: only traits the tracking plan marks agentVisible). A merged profile id returns the profile it was merged into. |
+| `profiles.import` | write | profiles:write | people only | Bring in up to 5,000 people per call (e.g. newsletter subscribers exported from another tool) with their consent history and proof. Re-importing the same rows changes nothing. Only people can import consent. |
+| `profiles.list` | read | profiles:read | people and agents | People (known and anonymous) by most recent activity, with their current consent per purpose and, with profiles:pii, their e-mail. Page with `before` (a lastSeen value). |
+| `prompts.test` | write | artifacts:write | people and agents | Queues every test case of a prompt version (default: the latest) to run against the journeys AI provider; the AI worker runs them within seconds. Read the results with prompts.testRun. Uses tokens; each call is logged. |
+| `prompts.testRun` | read | artifacts:read | people and agents | The results of prompts.test: every case with its status, answer, latency and tokens, and the totals. "running" until every case has an answer. |
+| `prompts.testRuns` | read | artifacts:read | people and agents | Test runs of a prompt (optionally one version), newest first, with status and totals. Use one to resume polling its runId. |
+| `purposes.list` | read | artifacts:read | people and agents | The purposes in force (the published purposes artifact, or the defaults) with their lawful basis, channels and whether consent needs double opt-in. |
+| `push.devices` | read | profiles:read | people and agents | The browsers and apps registered for push notifications by one person: kind and dates only, never the endpoint or token. |
+| `pushProviders.create` | write | workspace:admin | people only | Add a push provider. webpush (browsers): give `config.subject` (mailto: or https: contact); the VAPID keys are generated. fcm (Android): `config.projectId` and the service account (`secrets.clientEmail`, `secrets.privateKey`). apns (Apple): `config.teamId`, `keyId`, `topic` and the .p8 key as `secrets.privateKey`. `useFor`: transactional and/or marketing. |
+| `pushProviders.delete` | destructive | workspace:admin | people only | Remove a provider and its credentials. Notifications already sent keep their history. |
+| `pushProviders.list` | read | workspace:admin | people and agents | Configured push providers (web push, FCM, APNs) with their uses. Credentials are never returned; the VAPID public key is. |
+| `pushProviders.update` | write | workspace:admin | people only | Change settings, uses or credentials (replaced as a whole when given). Changing a web push key pair unsubscribes every browser, so it is refused; add a new provider instead. |
+| `pushTemplates.preview` | read | artifacts:read | people and agents | Render a push template version (default: the latest) with its sample data or data you pass: the title, body and link as sent, and warnings about length (devices cut long text). |
+| `scim.configure` | write | workspace:admin | people only | Turn SCIM provisioning on or off, set the role new people get, and map identity-provider group names to roles (the highest one wins). While on, single sign-on no longer adds members by itself. Owners are never changed by SCIM. |
+| `scim.rotateToken` | write | workspace:admin | people only | Create (or replace) the bearer token the identity provider uses for /scim/v2. It is shown once; the previous token stops working. |
+| `scim.status` | read | workspace:admin | people and agents | Whether SCIM provisioning is on, the default role, how groups map to roles, and how many people and groups it manages. |
+| `secrets.delete` | destructive | secrets:write | people only | Permanently delete a stored secret. |
+| `secrets.list` | read | secrets:read | people and agents | Names of stored secrets with who changed them and when. Values are never returned. |
+| `secrets.set` | write | secrets:write | people only | Store or replace a secret such as a provider API key. Secrets are encrypted and can never be read back through the API. |
+| `segments.members` | read | profiles:read | people and agents | Current members of a published segment, oldest membership first. Works for dynamic, static and snapshot segments; an e-mail is included only for people who may see personal data. Page with `after` (a profile id). |
+| `segments.ofProfile` | read | profiles:read | people and agents | The segments a person is currently a member of. |
+| `segments.preview` | read | profiles:read | people and agents | Count who matches a segment definition right now, with a sample. Pass a saved segment (any version) or a condition to try out. |
+| `segments.refresh` | write | artifacts:publish | people and agents | Recompute the published dynamic segment for everyone and emit "Segment Entered"/"Segment Exited" events for the changes (journeys may react). Static and snapshot segments keep their stored list. Segments are also recomputed on a schedule. |
+| `sendingDomains.list` | read | artifacts:read | people and agents | The domains enabled e-mail providers send from, with SPF, DKIM and DMARC results and what to add when a record is missing. Provider ids, hosts and credentials are never returned. |
+| `shopify.importCustomers` | write | workspace:admin | people and agents | Imports one page (up to 250) of a Shopify app connection's customers as people: name, e-mail, phone, order count, and, when the connection's syncEmailConsent is on, their e-mail marketing consent with Shopify as the proof. Repeat with the returned cursor until done. Importing again updates people; it does not duplicate them. |
+| `smsProviders.create` | write | workspace:admin | people only | Add an SMS provider. `useFor`: transactional (service texts) and/or marketing. Returns the webhook path: set <links URL><webhookPath>/inbound as the number's incoming-message webhook, so STOP and HELP work. |
+| `smsProviders.delete` | destructive | workspace:admin | people only | Remove a provider and its credentials. Texts already sent keep their history. |
+| `smsProviders.list` | read | workspace:admin | people and agents | Configured SMS providers (Twilio) with sender, uses, price and budget. Credentials are never returned. |
+| `smsProviders.update` | write | workspace:admin | people only | Change settings, sender, uses, price and budget, or credentials (replaced as a whole when given). |
+| `smsTemplates.preview` | read | artifacts:read | people and agents | Render an SMS template version (default: the latest) with its sample data or data you pass: the text as sent (with the opt-out footer for marketing), its encoding, segments, and the estimated cost with the provider that would send it. |
+| `sources.create` | write | workspace:admin | people only | Add a website (browser: public write key, only from allowed origins, events need the visitor’s consent for `requiredPurpose`) or a server (secret key, shown only in this response). Send events with the Segment HTTP API to /v1/batch. |
+| `sources.delete` | destructive | workspace:admin | people only | Delete a source; its key stops working within a minute. Events already collected are kept. |
+| `sources.list` | read | workspace:admin | people and agents | Websites and servers that send events, with their settings. Server keys are never shown again. |
+| `sources.rotateKey` | write | workspace:admin | people only | Issue a new write key; the old one stops working within a minute. Update your site or server with the new key. |
+| `sources.update` | write | workspace:admin | people only | Rename, enable/disable, or change allowed origins or the required purpose of a source. |
+| `sso.list` | read | workspace:admin | people and agents | The OIDC and SAML identity providers people of this workspace sign in with: domain, whether it is verified, the role new people get and whether passwords are turned off for the domain. Set them up as an owner or admin under Settings (the /api/auth/sso endpoints). |
+| `system.inputWarnings` | read | artifacts:read | people and agents | Command input keys that clients sent and the API ignored, per client, with first/last seen and counts. Use it to fix your own calls or to decide whether STRICT_INPUTS is safe to turn on. An API token or OAuth agent sees only its own rows; a person sees their own and their tokens’; workspace admins see every client. Only key paths are stored, never the values. `safeToEnableStrict` is true when no visible client sent an unknown key in the last 7 days, and `strictInputs` reports whether this server already rejects them. |
+| `system.status` | read | artifacts:read | people and agents | The running server version, whether enabled e-mail providers cover marketing and transactional mail, and how many approval requests are waiting for a person. Read-only; it never returns provider addresses, hosts or secrets. |
+| `templates.check` | read | artifacts:read | people and agents | Run the pre-send checks on a template version (default: the latest), rendered with its sample data as the preview is: unsubscribe and purpose compliance, links (malformed, unsafe schemes, shorteners, missing text), images (alt text, missing assets, weight, SVG), rendering size and preheader, unresolved personalisation, and the subject line. Returns concrete findings with severity, category, location and a fix; nothing is sent. Always run it before artifacts.requestPublish and fix what it finds. Blocking findings also stop publishing. With checkLinks: true it also fetches up to 30 links (HEAD, GET fallback, 5 s timeout, serial by 4, cached for an hour): 404/410/5xx are warnings, 401/403/405 are unverified notes. It never fetches a personalised URL or the platform’s own links, and private addresses are refused by the egress policy. |
+| `templates.preview` | read | artifacts:read | people and agents | Render a template version (default: the latest) to subject, HTML and text, with its sample data, data you pass, or a real person (needs profiles:pii). Nothing is sent. |
+| `templates.sendTest` | write | artifacts:write | people and agents | Send a template version through the provider the real send would use: by default the latest draft (or the latest version when there is no draft). Recipients are limited to workspace members and the admin-configured seed list (workspace.setSeedList), at most 10 per call; `to` defaults to you. Rendered with each recipient’s profile when the workspace knows their address, otherwise with sample data, and with "[Test]" in the subject. Purpose/consent checks are skipped, suppressions still apply, and each copy is recorded as a test message (never counted in reporting) and an audit entry. No profile or consent is written; agents drafting newsletters can run it with the artifacts:write scope. Approvers may run it without `to`, sending to themselves only. |
+| `topics.preferences` | read | profiles:read | people and agents | The topics under each purpose with the person’s current choice: their own record, or the topic’s default when they have made none. A topic is a finer choice within a purpose and never replaces consent for it. |
+| `topics.set` | write | profiles:write | people and agents | Record that a person subscribes to or unsubscribes from one topic, with a note as evidence. Agents may only record an unsubscribe, never a subscribe. The purpose’s consent is separate and unchanged. |
+| `warehouse.create` | write | workspace:admin | people only | Export pseudonymous data on a schedule: profiles (non-personal traits), user and anonymous ids, consent, segment memberships, events and message events, plus erasures. `postgres` upserts into am_* tables of a schema (secrets: { url }); `s3` writes gzipped NDJSON files that BigQuery, Snowflake and others load (config: bucket, region, endpoint, prefix; secrets: accessKeyId, secretAccessKey). |
+| `warehouse.delete` | write | workspace:admin | people only | Stop exporting and forget the destination and its credentials. Data already exported stays where it is. |
+| `warehouse.list` | read | workspace:admin | people and agents | Warehouse destinations (Postgres, S3-compatible storage), what they receive, and how the last run went. Credentials are never returned. |
+| `warehouse.run` | write | workspace:admin | people and agents | Run the export at the next scheduler tick (within about 30 seconds) instead of waiting for its interval. Check the outcome with warehouse.list. |
+| `warehouse.update` | write | workspace:admin | people only | Change settings, datasets, the interval or credentials (replaced as a whole when given), or pause it. |
+| `webhooks.create` | write | workspace:admin | people only | An HTTPS endpoint (n8n, Zapier, your own service) that receives signed JSON (Standard Webhooks headers). With a purpose, only events of people for whom it is allowed are sent. Returns the signing secret once. |
+| `webhooks.delete` | destructive | workspace:admin | people only | Stop sending to an endpoint. Pending deliveries to it are dropped. |
+| `webhooks.list` | read | artifacts:read | people and agents | Endpoints that receive events and journey webhook steps. Signing secrets are never shown again. |
+| `webhooks.test` | write | workspace:admin | people and agents | Queue a "ping" delivery to an endpoint; see the outcome with deliveries.list. |
+| `webhooks.update` | write | workspace:admin | people only | Change URL, events, purpose or whether it is enabled. `rotateSecret` returns a new signing secret once. |
+| `workspace.approveProposal` | write | workspace:admin | people only | Admins: approve a pending workspace setting proposal and apply it at once. The diff is applied as written; if the setting already has the proposed value it is marked approved without changing anything. |
+| `workspace.get` | read | artifacts:read | people and agents | The workspace you are acting in, its approval policy, time zone, test-send seed list, and your role and permissions explained. |
+| `workspace.memberships` | read | – | people only | The workspaces you belong to and your role in each. Switch workspace by sending the chosen id in the X-Workspace-Id header on REST calls (the admin UI stores it after you pick one). (not an MCP tool) |
+| `workspace.proposals` | read | artifacts:read | people and agents | Workspace setting changes agents and people proposed, newest first (default: pending). Shows the diff (for example UTC → Europe/Copenhagen), the note, who asked and, once decided, who decided and why. Any reader can see them; only admins decide. |
+| `workspace.proposeUpdate` | write | artifacts:write | people and agents | Agents and people with artifacts:write can propose low-risk workspace settings for a person to approve: the name and the display time zone (an IANA name such as Europe/Copenhagen). Use it instead of workspace.update, which needs workspace:admin. A newer pending proposal for the same setting supersedes the older one. A person approves or rejects it in the admin UI; nothing changes until then. |
+| `workspace.rejectProposal` | write | workspace:admin | people only | Admins: reject a pending workspace setting proposal. Nothing changes; the requester sees your reason in workspace.proposals. Tell them what to propose instead. |
+| `workspace.setApprovalPolicy` | write | workspace:admin | people only | none: publish directly (single-person teams). agent_changes: anything an agent wrote needs a person to approve. all_publishes: every publish needs approval by someone other than the requester. |
+| `workspace.setSeedList` | write | workspace:admin | people only | Admins: replace the list of e-mail addresses (besides workspace members) that templates.sendTest and broadcasts.sendTest may send to. Use it for monitoring inboxes. At most 50 addresses; does not affect real broadcasts. Only people can change it. |
+| `workspace.update` | write | workspace:admin | people only | Admins: change the workspace name or its display time zone (an IANA name such as Europe/Copenhagen; dates are shown in it). |
