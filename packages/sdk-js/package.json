@@ -1,7 +1,7 @@
 {
   "name": "@agentic-marketing/sdk-js",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Browser SDK for Agentic Marketing: Segment-compatible tracking with consent built in.",
   "license": "MIT",
   "type": "module",
