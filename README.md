@@ -96,6 +96,7 @@ On Kubernetes: the Helm chart in [`deploy/helm`](deploy/helm/agentic-marketing) 
 
 ## Documentation
 
+- [Agents](docs/agents.md): connecting an agent over MCP or REST, the workspace's limits, and mandates with autonomy levels and templates by role.
 - [Development](docs/development.md): layout, running locally, tests, key rotation.
 - [Kubernetes reference deployment](docs/deployment/kubernetes.md): Helm, OpenBao or AWS KMS keys, sizing.
 - [Docker Compose deployment](docs/deployment/compose.md): the release files, the override file, upgrades.
