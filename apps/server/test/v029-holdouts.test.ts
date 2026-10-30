@@ -167,19 +167,19 @@ afterAll(() => t?.close());
 
 describe('deterministic assignment (#67)', () => {
   it('keeps the same arm across re-entries and records one assignment', async () => {
-    const journeyId = await createJourney('Re-entry', { percent: 50, reentry: 'always' });
+    const journeyId = await createJourney('Re-entry', { percent: 50, reentry: 'always', event: 'Reentry Start' });
     const userId = 'holdout-reentry';
     await send([{ type: 'identify', userId, traits: { email: `${userId}@example.com` } }]);
     const profileId = await profileIdOf(userId);
     const hash = holdoutHashVersion(50);
     const expected = armFor(50, ws, journeyId, hash, profileId);
 
-    await send([{ type: 'track', event: 'Holdout Start', userId }]);
+    await send([{ type: 'track', event: 'Reentry Start', userId }]);
     await eventually(
       () => assignmentCount(journeyId),
       (n) => n === 1,
     );
-    await send([{ type: 'track', event: 'Holdout Start', userId }]);
+    await send([{ type: 'track', event: 'Reentry Start', userId }]);
 
     const participants = await eventually(
       async () =>
@@ -214,7 +214,7 @@ describe('deterministic assignment (#67)', () => {
 
 describe('treatment and control (#67)', () => {
   it('sends to treatment but skips every channel step for control, while both reach the goal', async () => {
-    const journeyId = await createJourney('Arms', { percent: 50 });
+    const journeyId = await createJourney('Arms', { percent: 50, event: 'Arms Start' });
     const hash = holdoutHashVersion(50);
 
     // The arm depends on the generated profile id, so identify first and pick one of each.
@@ -227,8 +227,8 @@ describe('treatment and control (#67)', () => {
     expect(treatment).toBeDefined();
 
     await send([
-      { type: 'track', event: 'Holdout Start', userId: control.userId },
-      { type: 'track', event: 'Holdout Start', userId: treatment.userId },
+      { type: 'track', event: 'Arms Start', userId: control.userId },
+      { type: 'track', event: 'Arms Start', userId: treatment.userId },
     ]);
 
     // Control walks past the e-mail node without a message; treatment gets one.
@@ -379,11 +379,11 @@ describe('result statistics (#67)', () => {
 
 describe('scope changes (#67)', () => {
   it('refuses a changed percentage after assignments, and allows it with reset', async () => {
-    const journeyId = await createJourney('Scope', { percent: 10, minSampleSize: 1 });
+    const journeyId = await createJourney('Scope', { percent: 10, minSampleSize: 1, event: 'Scope Start' });
     const userId = 'holdout-scope';
     await send([
       { type: 'identify', userId, traits: { email: `${userId}@example.com` } },
-      { type: 'track', event: 'Holdout Start', userId },
+      { type: 'track', event: 'Scope Start', userId },
     ]);
     await eventually(
       () => assignmentCount(journeyId),
@@ -485,11 +485,11 @@ describe('profile merges (#67)', () => {
 
 describe('erasure (#67)', () => {
   it('removes the assignment with the profile', async () => {
-    const journeyId = await createJourney('Erasure', { percent: 50, minSampleSize: 1 });
+    const journeyId = await createJourney('Erasure', { percent: 50, minSampleSize: 1, event: 'Erasure Start' });
     const userId = 'holdout-erase';
     await send([
       { type: 'identify', userId, traits: { email: `${userId}@example.com` } },
-      { type: 'track', event: 'Holdout Start', userId },
+      { type: 'track', event: 'Erasure Start', userId },
     ]);
     const profileId = await profileIdOf(userId);
     await eventually(
