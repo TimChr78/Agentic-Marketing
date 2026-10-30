@@ -44,6 +44,7 @@ Tools marked "Needs the … permission" are allowed by the person's role but wer
 - **Agents cannot record a consent**; they can only record restrictions (`consent.record` with `denied`, `withdrawn` or `objected`). Consent comes from forms, double opt-in, the SDK or a person's import.
 - **Personal data is masked.** Agents see only traits the tracking plan marks `agentVisible`, and only with `profiles:pii`.
 - **Writes are drafts.** Nothing reaches customers until a person approves, when the policy requires it.
+- **The agent policy.** Every write is checked against the workspace's autonomy settings (`workspace.autonomy`). A publish that reaches more people than the audience threshold (1,000 by default), or that comes after your daily change limit, goes to a person even when the approval policy would publish it: the result is `in_review` with `heldBecause` saying why. An action that cannot wait for a person (a direct send, `journeys.enroll`, `segments.refresh` while the workspace is propose-only) is refused with the reason. Plan within the limits: read `workspace.autonomy` and `agents.get` (your counts for the last 24 hours) first. With the switch `off` you can only read; when you are paused, every call is refused with the reason, so ask the person.
 
 ## Tool catalog (by area)
 

@@ -62,7 +62,7 @@ Evaluation in the send gateway: `consent` basis → needs `granted`; `legitimate
 | SSRF via webhooks / HTTP nodes / connector URLs | Egress proxy or resolver guard blocking private/link-local/metadata ranges; per-workspace allow-lists |
 | Template injection | LiquidJS sandbox (no filesystem, no code), output escaping by default, render time & loop limits |
 | Prompt injection via profile/event data reaching LLMs | Data is passed as clearly delimited data, LLM outputs are schema-validated and can only choose among configured options; AI nodes cannot call platform tools in v1 |
-| Malicious MCP/agent behaviour | Scopes, drafts + approvals, AI budgets, the send gateway, audit; per-agent limits, audience thresholds and a per-agent kill switch are planned in wave 4 Phase 17 ([agentic-autonomy.md](agentic-autonomy.md)) |
+| Malicious MCP/agent behaviour | Scopes, drafts + approvals, the policy engine (audience threshold, per-agent limits, the autonomy switch), pausing an agent, AI budgets, the send gateway, the action ledger and audit ([agentic-autonomy.md](agentic-autonomy.md)) |
 | Abuse of public write keys | Origin allow-list, rate limits, schema validation, payload size limits, bot filtering |
 | XSS in editors/experiences | CSP, sanitization of experience HTML (DOMPurify), editors in sandboxed iframes where possible |
 | Supply chain | Lockfile, Renovate, `pnpm audit`/OSV scanning, SBOM (Syft), signed images (cosign), minimal base images |

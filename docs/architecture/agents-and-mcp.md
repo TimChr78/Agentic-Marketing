@@ -51,11 +51,12 @@ The command layer is the only place that does authorization, validation, idempot
 |---|---|
 | Writes produce **drafts**; publishing follows the workspace approval policy | on |
 | `send` / `publish` / `destructive` effects require an explicit scope | not granted to agents by default |
-| Audience-size threshold above which a send needs human approval | **Planned** (wave 4, Phase 17); not enforced yet |
-| Per-agent rate limits & daily budgets (commands, sends, LLM tokens) | **Planned** (Phase 17). Shipped today: monthly AI budgets per provider, the delivery policy's caps |
+| Audience-size threshold above which an agent action needs a person, whatever the approval policy | 1,000 people (`workspace.setAutonomy`) |
+| Per-agent limits per 24 hours (changes, direct messages); AI budgets per provider; the delivery policy's caps | 500 changes, 1,000 messages (`workspace.setAutonomy`). LLM token budgets per agent come with hosted agents (Phase 19) |
 | PII visibility: agents see only attributes the schema marks `agent_visible`; others are masked | on |
-| Kill switch: revoke/pause an agent principal and all its pending drafts | **Planned** (Phase 17). Today: revoke a token, or remove the member (their sessions and connected agents lose access) |
+| Kill switch: pause or revoke an agent (all its credentials) and hold its pending approvals; a workspace switch (on, propose only, off) | always available (`agents.pause`, `workspace.setAutonomy`) |
 | Full audit trail: principal, tool, input hash, result, linked versions | always |
+| Policy engine: every agent write classified, its impact estimated, and allowed, sent to a person or refused with reasons; the action ledger (`agents.activity`) | always (ADR-0016) |
 
 ## 4. LLM gateway (bring your own keys)
 
