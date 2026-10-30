@@ -85,6 +85,8 @@ export async function activeMandate(tx: Tx, agentId: string, now = new Date()): 
         limits: m.limits,
         holdWindow: m.holdWindow,
         independentCheck: m.independentCheck,
+        guardrails: m.guardrails,
+        purpose: m.purpose,
       },
     };
   }

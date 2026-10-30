@@ -1,3 +1,4 @@
+import { mandateGuardrailBreach } from './agents/guardrails';
 import { existsSync } from 'node:fs';
 import { assetRoutes } from '@agentic-marketing/assets';
 import { archiveRoutes, broadcastImpact, formsApi, withEmailProfileEvents, withResolvedEventProfiles } from '@agentic-marketing/audience';
@@ -9,7 +10,7 @@ import {
   invitationWorkspace,
   isMcpResourceUrlAllowed,
 } from '@agentic-marketing/auth';
-import { createExecutor, userPrincipal } from '@agentic-marketing/commands';
+import { createExecutor, type Services, userPrincipal } from '@agentic-marketing/commands';
 import { AppError, newUuid, RESOLVED_CLIENT_IP_HEADER, remoteAddressFromEnv, resolveClientIp } from '@agentic-marketing/core';
 import { createDb } from '@agentic-marketing/db';
 import { emailRoutes, linkSigner, pushRoutes } from '@agentic-marketing/email';
@@ -17,6 +18,7 @@ import { clickHouseStore, lazyNatsBus } from '@agentic-marketing/events';
 import { valkeyHotState } from '@agentic-marketing/hotstate';
 import { ingestApi } from '@agentic-marketing/ingest';
 import { egressFetch, egressHttp2, inboundApi, oauthRoutes, safeRequest } from '@agentic-marketing/integrations';
+import { activeMandate } from '@agentic-marketing/artifacts';
 import { journeyImpact } from '@agentic-marketing/journeys';
 import { decideApi, edgeMirror } from '@agentic-marketing/personalize';
 import { refreshPeople } from '@agentic-marketing/segments';
@@ -81,34 +83,38 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
       ).status,
     }),
   };
+  const services: Services = {
+  keyProvider,
+  directory,
+  events,
+  bus,
+  email,
+  assets: { publicUrl: config.linksUrl, maxBytes: config.assetMaxBytes },
+  hot,
+  egress: config.egress,
+  publicUrl: config.publicUrl,
+  linksUrl: config.linksUrl,
+  db,
+  serverVersion: VERSION,
+  strictInputs: config.strictInputs,
+  // Reach of publishing, for the agent policy engine (ADR-0016).
+  artifactImpact: {
+    broadcast: (tx, id, version) => broadcastImpact(tx, id, version),
+    journey: (tx, id) => journeyImpact(tx, id),
+  },
+  stepUpLimiter: {
+    lockedUntil: (userId) => hot.failureLock(`stepup:${userId}`),
+    recordFailure: (userId) =>
+      hot.recordFailure(`stepup:${userId}`, config.stepUp.maxFailures, config.stepUp.windowSeconds, config.stepUp.lockoutSeconds),
+    reset: (userId) => hot.clearFailures(`stepup:${userId}`),
+  },
+    // The agent's active mandate and its guardrails on its own sends (ADR-0016, #224).
+    activeMandate: (tx, agentId) => activeMandate(tx, agentId),
+    mandateGuardrails: (tx, workspaceId, agentId, mandate) => mandateGuardrailBreach({ tx, events, workspaceId }, agentId, mandate),
+  };
   const executor = createExecutor(
     db,
-    {
-      keyProvider,
-      directory,
-      events,
-      bus,
-      email,
-      assets: { publicUrl: config.linksUrl, maxBytes: config.assetMaxBytes },
-      hot,
-      egress: config.egress,
-      publicUrl: config.publicUrl,
-      linksUrl: config.linksUrl,
-      db,
-      serverVersion: VERSION,
-      strictInputs: config.strictInputs,
-      // Reach of publishing, for the agent policy engine (ADR-0016).
-      artifactImpact: {
-        broadcast: (tx, id, version) => broadcastImpact(tx, id, version),
-        journey: (tx, id) => journeyImpact(tx, id),
-      },
-      stepUpLimiter: {
-        lockedUntil: (userId) => hot.failureLock(`stepup:${userId}`),
-        recordFailure: (userId) =>
-          hot.recordFailure(`stepup:${userId}`, config.stepUp.maxFailures, config.stepUp.windowSeconds, config.stepUp.lockoutSeconds),
-        reset: (userId) => hot.clearFailures(`stepup:${userId}`),
-      },
-    },
+    services,
     {
       strictInputs: config.strictInputs,
       onUnknownKeys: (command, unknown, principal) => {
@@ -274,5 +280,6 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
     linksUrl: config.linksUrl,
     retention: config.retention,
     erasureGraceHours: config.erasureGraceHours,
+    services,
   };
 }

@@ -1,3 +1,4 @@
+import { runHolds } from './agents/holds';
 import { clickIdHook, conversionHook, runAudienceSyncs, runSpendImport } from '@agentic-marketing/ads';
 import { runAiWorker } from '@agentic-marketing/ai';
 import { runAlertEvaluator } from '@agentic-marketing/alerts';
@@ -24,10 +25,11 @@ export function startScheduler(
     warehouseLagMs?: number;
     edgeTickMs?: number;
     alertTickMs?: number;
+    holdTickMs?: number;
   } = {},
 ): Promise<void>[] {
   logger.info(
-    'scheduler role: segment recomputation, broadcasts, retention, OAuth token refresh, audience sync, ad spend import, warehouse exports, edge sync, threshold alerts',
+    'scheduler role: segment recomputation, broadcasts, retention, OAuth token refresh, audience sync, ad spend import, warehouse exports, edge sync, threshold alerts, held agent changes',
   );
   return [
     runSegmentScheduler(
@@ -70,6 +72,7 @@ export function startScheduler(
       signal,
       { tickMs: opts.alertTickMs },
     ),
+    runHolds({ db: srv.db, services: srv.services }, signal, opts.holdTickMs),
   ];
 }
 

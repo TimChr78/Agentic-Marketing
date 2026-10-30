@@ -1,3 +1,4 @@
+import { holdWindowMs } from './mandates';
 import { type CommandContext, defineCommand } from '@agentic-marketing/commands';
 import { AppError, canonicalJson, hashValue, newId } from '@agentic-marketing/core';
 import { schema, type VersionState } from '@agentic-marketing/db';
@@ -681,6 +682,12 @@ export const discardDraft = defineCommand({
   },
 });
 
+/** When a held agent change (level 2) runs unless vetoed, or null when it is not held. */
+function holdFor(ctx: CommandContext): Date | null {
+  if (ctx.policy?.decision !== 'hold') return null;
+  return new Date(Date.now() + holdWindowMs(ctx.policy.mandate?.holdWindow ?? 'PT2H'));
+}
+
 export const requestPublish = defineCommand({
   name: 'artifacts.requestPublish',
   title: 'Submit for review (or publish)',
@@ -688,8 +695,9 @@ export const requestPublish = defineCommand({
     "Submits the latest draft for review under the workspace approval policy; publishes directly only when the policy allows it (policy `none`, or `agent_changes` for a person's own edits). A person then approves or rejects it in the admin UI. Check the result with approvals.list or artifacts.get.",
   input: z.object({ artifactId: ArtifactId, note: z.string().min(1).max(1000).describe('What changed and why, for the reviewer') }),
   output: z.object({
-    status: z.enum(['published', 'in_review']),
+    status: z.enum(['published', 'in_review', 'on_hold']).describe('on_hold: an agent change that runs at runsAt unless a person vetoes it'),
     version: z.number().int(),
+    runsAt: z.string().nullable().optional().describe('For on_hold: when it runs unless a person rejects it'),
     approvalId: z.string().nullable(),
     policy: z.string(),
     reviewUrl: z.string().nullable().describe('Admin UI page where a person approves this; null when it was published directly'),
@@ -728,7 +736,11 @@ export const requestPublish = defineCommand({
       w.policy === 'all_publishes' ||
       (w.policy === 'agent_changes' && (ctx.principal.type === 'agent' || v.authorType === 'agent')) ||
       ctx.policy?.decision === 'ask';
-    if (!needsApproval) {
+    // A mandate decides for its agent (ADR-0016): level 3 publishes without the approval policy,
+    // level 2 waits for a veto window.
+    const hold = holdFor(ctx);
+    const autonomous = ctx.policy?.decision === 'allow' && ctx.policy.autonomous === true;
+    if (autonomous || (!needsApproval && !hold)) {
       await publishVersion(ctx, a.id, v.number);
       return {
         status: 'published' as const,
@@ -751,18 +763,22 @@ export const requestPublish = defineCommand({
       requestedById: ctx.principal.userId,
       requestedByClient: ctx.principal.clientId ?? null,
       note: noteWithPolicy(input.note, ctx),
+      holdUntil: hold,
     });
     const reviewUrl = approvalUrl(ctx.services.publicUrl, approvalId);
     return {
-      ...(ctx.policy?.decision === 'ask' ? { heldBecause: ctx.policy.reasons } : {}),
-      status: 'in_review' as const,
+      ...(ctx.policy?.decision === 'ask' || hold ? { heldBecause: ctx.policy?.reasons ?? [] } : {}),
+      status: hold ? ('on_hold' as const) : ('in_review' as const),
+      runsAt: hold?.toISOString() ?? null,
       version: v.number,
       approvalId,
       policy: w.policy,
       reviewUrl,
-      next: reviewUrl
-        ? `A person must approve this in the admin UI: ${reviewUrl}. Check the result with approvals.list or artifacts.get.`
-        : 'A person must approve this in the admin UI. Check the result with approvals.list or artifacts.get.',
+      next: hold
+        ? `Held: it publishes at ${hold.toISOString()} unless a person rejects it${reviewUrl ? ` (${reviewUrl})` : ''}. Check the result with artifacts.get.`
+        : reviewUrl
+          ? `A person must approve this in the admin UI: ${reviewUrl}. Check the result with approvals.list or artifacts.get.`
+          : 'A person must approve this in the admin UI. Check the result with approvals.list or artifacts.get.',
     };
   },
 });
@@ -777,8 +793,9 @@ export const requestPublishBundle = defineCommand({
     note: z.string().min(1).max(1000).describe('What changed and why, for the reviewer'),
   }),
   output: z.object({
-    status: z.enum(['published', 'in_review']),
+    status: z.enum(['published', 'in_review', 'on_hold']).describe('on_hold: agent changes that run at runsAt unless a person vetoes them'),
     bundleId: z.string().nullable(),
+    runsAt: z.string().nullable().optional().describe('For on_hold: when they run unless a person rejects them'),
     members: z
       .array(
         z.object({
@@ -837,9 +854,11 @@ export const requestPublishBundle = defineCommand({
       w.policy === 'all_publishes' ||
       (w.policy === 'agent_changes' && (ctx.principal.type === 'agent' || ordered.some((m) => m.authorType === 'agent'))) ||
       ctx.policy?.decision === 'ask';
+    const hold = holdFor(ctx);
+    const autonomous = ctx.policy?.decision === 'allow' && ctx.policy.autonomous === true;
     const out = (approvalIds: (string | null)[]) =>
       ordered.map((m, i) => ({ artifactId: m.id, name: m.name, type: m.type, version: m.version, approvalId: approvalIds[i] }));
-    if (!needsApproval) {
+    if (autonomous || (!needsApproval && !hold)) {
       for (const m of ordered) await publishVersion(ctx, m.id, m.version);
       return {
         status: 'published' as const,
@@ -865,18 +884,22 @@ export const requestPublishBundle = defineCommand({
         requestedByClient: ctx.principal.clientId ?? null,
         note: noteWithPolicy(input.note, ctx),
         bundleId,
+        holdUntil: hold,
       });
     }
     // The last member is the one the others exist for (the broadcast, the form): open on it.
     const reviewUrl = approvalUrl(ctx.services.publicUrl, approvalIds.at(-1)!);
     return {
-      ...(ctx.policy?.decision === 'ask' ? { heldBecause: ctx.policy.reasons } : {}),
-      status: 'in_review' as const,
+      ...(ctx.policy?.decision === 'ask' || hold ? { heldBecause: ctx.policy?.reasons ?? [] } : {}),
+      status: hold ? ('on_hold' as const) : ('in_review' as const),
+      runsAt: hold?.toISOString() ?? null,
       bundleId,
       members: out(approvalIds),
       policy: w.policy,
       reviewUrl,
-      next: `A person reviews all ${ordered.length} together${reviewUrl ? ` in the admin UI: ${reviewUrl}` : ' in the admin UI'}; approving publishes them in this order. Check the result with approvals.list or artifacts.get.`,
+      next: hold
+        ? `Held: all ${ordered.length} publish together at ${hold.toISOString()} unless a person rejects them${reviewUrl ? ` (${reviewUrl})` : ''}. Check the result with artifacts.get.`
+        : `A person reviews all ${ordered.length} together${reviewUrl ? ` in the admin UI: ${reviewUrl}` : ' in the admin UI'}; approving publishes them in this order. Check the result with approvals.list or artifacts.get.`,
     };
   },
 });

@@ -119,6 +119,8 @@ export interface MandateView {
   };
   holdWindow: string;
   independentCheck: boolean;
+  guardrails: { unsubscribeRate?: number; complaintRate?: number; bounceRate?: number; window: string; minSent: number };
+  purpose: string;
 }
 
 /** Classes whose actions cannot be undone once they ran: working hours apply to them. */

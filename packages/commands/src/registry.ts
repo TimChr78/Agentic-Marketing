@@ -3,7 +3,16 @@ import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import { SpanStatusCode, trace } from '@opentelemetry/api';
 import { and, desc, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
-import { type ActionClass, type AgentCounters, autonomySettings, decide, type Impact, type PolicyOutcome } from './policy';
+import {
+  type ActionClass,
+  type AgentCounters,
+  autonomySettings,
+  decide,
+  type Impact,
+  type MandateView,
+  type PolicyOutcome,
+  REACH_CLASSES,
+} from './policy';
 import type { Permission, Principal } from './principal';
 import { findUnknownInputKeys, type UnknownInputKey, unknownKeyMessages } from './unknownKeys';
 
@@ -26,6 +35,10 @@ export interface Services {
   strictInputs: boolean;
   /** Shared counter for wrong passwords on token widening (#61), so every process sees the lockout. */
   stepUpLimiter?: StepUpLimiter;
+  /** The agent's active mandate (ADR-0016); registered by packages/artifacts through the server. */
+  activeMandate?: (tx: Tx, agentId: string) => Promise<{ view: MandateView; outsideHours: string | null } | null>;
+  /** Why an agent's recent sends breach its mandate's guardrails, or null; registered by the server (metric layer). */
+  mandateGuardrails?: (tx: Tx, workspaceId: string, agentId: string, mandate: MandateView) => Promise<string | null>;
 }
 
 /** A failure counter shared by all processes, e.g. Valkey. Times are absolute so callers can explain the wait. */
@@ -260,13 +273,20 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
                 const base = { principal, tx, services };
                 const impact = cmd.impact ? await cmd.impact(parsed.data, base) : {};
                 const [ws] = await tx.select({ autonomy: schema.workspaces.autonomy }).from(schema.workspaces);
+                const actionClass = impact.actionClass ?? actionClassOf(cmd);
+                const mandate = actionClass === 'read' ? null : ((await services.activeMandate?.(tx, agent.id)) ?? null);
+                const guardrailBreach =
+                  mandate && REACH_CLASSES.includes(actionClass) && services.mandateGuardrails
+                    ? await services.mandateGuardrails(tx, principal.workspaceId, agent.id, mandate.view)
+                    : null;
                 policy = decide({
                   command: cmd.name,
-                  actionClass: impact.actionClass ?? actionClassOf(cmd),
+                  actionClass,
                   impact,
                   settings: autonomySettings(ws?.autonomy),
                   counters: await agentCounters(tx, agent.id),
                   approvable: cmd.approvable === true,
+                  ...(mandate ? { mandate: mandate.view, outsideHours: mandate.outsideHours, guardrailBreach } : {}),
                 });
                 if (policy.decision === 'deny') throw new PolicyDeniedError(policy);
               }
@@ -298,7 +318,7 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
                   response: redact(out, cmd.sensitiveOutput) as object,
                 });
               if (cmd.effect !== 'read') await appendAudit(tx, principal, opts.surface, cmd, inputHash, target);
-              if (agent && policy) await recordAgentAction(tx, agent.id, cmd, policy, opts.surface, target, null);
+              if (agent && policy) await recordAgentAction(tx, agent.id, cmd, policy, opts.surface, target, null, intentOf(parsed.data));
               return out;
             },
             // Reads see one consistent snapshot; writes keep read-committed so their locks see the latest rows.
@@ -318,7 +338,16 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
         if (agent && outcome)
           await db
             .withWorkspace(principal.workspaceId, (tx) =>
-              recordAgentAction(tx, agent.id, cmd, outcome, opts.surface, target, err instanceof Error ? err.message : String(err)),
+              recordAgentAction(
+                tx,
+                agent.id,
+                cmd,
+                outcome,
+                opts.surface,
+                target,
+                err instanceof Error ? err.message : String(err),
+                intentOf(parsed.data),
+              ),
             )
             .catch((e) => span.recordException(e as Error));
         if (err instanceof AppError) return fail(err);
@@ -344,6 +373,7 @@ async function recordAgentAction(
   surface: Surface,
   target: string | undefined,
   error: string | null,
+  intent: string | null,
 ) {
   await tx.insert(schema.agentActions).values({
     workspaceId: sql`nullif(current_setting('app.workspace_id', true), '')::uuid`,
@@ -357,26 +387,51 @@ async function recordAgentAction(
     error: error?.slice(0, 1000) ?? null,
     target: target ?? null,
     surface,
+    mandateId: policy.mandate?.id ?? null,
+    mandateVersion: policy.mandate?.version ?? null,
+    intent: intent?.slice(0, 2000) ?? null,
   });
+}
+
+/** What the agent said it is doing: an explicit intent, else the reviewer note or reason most commands take. */
+function intentOf(input: unknown): string | null {
+  if (!input || typeof input !== 'object') return null;
+  const i = input as Record<string, unknown>;
+  for (const key of ['intent', 'note', 'reason']) if (typeof i[key] === 'string' && i[key]) return i[key] as string;
+  return null;
 }
 
 /** What an agent did in the last 24 hours: changes it made itself, and messages it sent directly. */
 export async function agentCounters(tx: Tx, agentId: string): Promise<AgentCounters> {
+  const [prev] = await tx
+    .select({ people: sql<number | null>`(${schema.agentActions.impact}->>'people')::int` })
+    .from(schema.agentActions)
+    .where(
+      and(
+        eq(schema.agentActions.agentId, agentId),
+        eq(schema.agentActions.actionClass, 'send.broadcast'),
+        sql`${schema.agentActions.decision} IN ('allow', 'hold')`,
+        eq(schema.agentActions.ok, true),
+      ),
+    )
+    .orderBy(desc(schema.agentActions.id))
+    .limit(1);
   const [row] = await tx
     .select({
       changes: sql<number>`count(*) FILTER (WHERE ${schema.agentActions.actionClass} <> 'draft')::int`,
       messages: sql<number>`coalesce(sum((${schema.agentActions.impact}->>'people')::int) FILTER (WHERE ${schema.agentActions.actionClass} = 'send.direct'), 0)::int`,
+      sends: sql<number>`count(*) FILTER (WHERE ${schema.agentActions.actionClass} = 'send.broadcast')::int`,
     })
     .from(schema.agentActions)
     .where(
       and(
         eq(schema.agentActions.agentId, agentId),
-        eq(schema.agentActions.decision, 'allow'),
+        sql`${schema.agentActions.decision} IN ('allow', 'hold')`,
         eq(schema.agentActions.ok, true),
         sql`${schema.agentActions.at} > now() - interval '24 hours'`,
       ),
     );
-  return { changes: row?.changes ?? 0, messages: row?.messages ?? 0 };
+  return { changes: row?.changes ?? 0, messages: row?.messages ?? 0, sends: row?.sends ?? 0, previousSendPeople: prev?.people ?? null };
 }
 
 /**
