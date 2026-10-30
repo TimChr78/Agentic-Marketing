@@ -173,7 +173,13 @@ export interface SafeResponse {
   body: string;
 }
 
-/** One HTTP request under the egress policy. Throws EgressError when the target is not allowed. */
+/**
+ * One HTTP request under the egress policy. Throws EgressError when the target is not allowed.
+ *
+ * Bounds: `maxBytes` (default 256 KiB) is a reading limit, not a retention limit: the response is
+ * aborted as soon as it is crossed. `timeoutMs` (default 10 s) is a total deadline for the whole
+ * request, connect, headers and body included, so a server that trickles bytes cannot keep it open.
+ */
 export function safeRequest(
   url: string,
   init: { method?: string; headers?: Record<string, string>; body?: string | Buffer; timeoutMs?: number; maxBytes?: number },
@@ -184,7 +190,17 @@ export function safeRequest(
   const u = new URL(url);
   const guardedLookup = lookupFor(u, policy);
   const maxBytes = init.maxBytes ?? 256 * 1024;
+  const timeoutMs = init.timeoutMs ?? 10_000;
   return new Promise((resolve, reject) => {
+    let settled = false;
+    let deadline: NodeJS.Timeout;
+    const finish = (err: Error | null, value?: SafeResponse) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      if (err) reject(err);
+      else resolve(value!);
+    };
     const req = (u.protocol === 'https:' ? httpsRequest : httpRequest)(
       u,
       {
@@ -196,27 +212,36 @@ export function safeRequest(
           ...init.headers,
         },
         lookup: guardedLookup,
-        timeout: init.timeoutMs ?? 10_000,
       },
       (res) => {
         const chunks: Buffer[] = [];
         let size = 0;
         res.on('data', (c: Buffer) => {
           size += c.length;
-          if (size <= maxBytes) chunks.push(c);
+          if (size > maxBytes) {
+            // Stop reading at once instead of draining: an endless or oversized body would keep
+            // the worker and the connection busy. Destroying the request destroys the response.
+            req.destroy();
+            finish(new EgressError(`response exceeds ${maxBytes} bytes`));
+            return;
+          }
+          chunks.push(c);
         });
         res.on('end', () =>
-          resolve({
+          finish(null, {
             status: res.statusCode ?? 0,
             headers: Object.fromEntries(Object.entries(res.headers).map(([k, v]) => [k, Array.isArray(v) ? v.join(', ') : (v ?? '')])),
             body: Buffer.concat(chunks).toString('utf8'),
           }),
         );
-        res.on('error', reject);
+        res.on('error', (err) => finish(err));
       },
     );
-    req.on('timeout', () => req.destroy(new Error(`timed out after ${init.timeoutMs ?? 10_000} ms`)));
-    req.on('error', reject);
+    deadline = setTimeout(() => {
+      req.destroy();
+      finish(new EgressError(`timed out after ${timeoutMs} ms`));
+    }, timeoutMs);
+    req.on('error', (err) => finish(err));
     if (init.body !== undefined) req.write(init.body);
     req.end();
   });
@@ -249,12 +274,15 @@ export function egressFetch(policy: EgressPolicy): typeof fetch {
 
 export type Http2Request = (
   url: string,
-  init: { method?: string; headers?: Record<string, string>; body?: string | Buffer; timeoutMs?: number },
+  init: { method?: string; headers?: Record<string, string>; body?: string | Buffer; timeoutMs?: number; maxBytes?: number },
 ) => Promise<SafeResponse>;
 
 /**
  * One HTTP/2 request under the egress policy, for providers that only speak HTTP/2 (Apple's push
  * service). http:// targets use HTTP/2 without TLS (prior knowledge), for test servers.
+ *
+ * The same bounds as `safeRequest` apply: `maxBytes` (default 256 KiB) aborts the stream as soon
+ * as the response crosses it, and `timeoutMs` (default 30 s) is a total deadline for the request.
  */
 export function egressHttp2(policy: EgressPolicy): Http2Request {
   return (url, init) => {
@@ -262,15 +290,23 @@ export function egressHttp2(policy: EgressPolicy): Http2Request {
     if (problem) return Promise.reject(new EgressError(problem));
     const u = new URL(url);
     const timeout = init.timeoutMs ?? 30_000;
+    const maxBytes = init.maxBytes ?? 256 * 1024;
     return new Promise((resolve, reject) => {
+      let settled = false;
+      let deadline: NodeJS.Timeout;
       const session = http2Connect(u.origin, { lookup: lookupFor(u, policy) });
-      const fail = (err: Error) => {
-        session.destroy();
-        reject(err);
+      const finish = (err: Error | null, value?: SafeResponse) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(deadline);
+        if (err) session.destroy();
+        else session.close();
+        if (err) reject(err);
+        else resolve(value!);
       };
-      session.on('error', fail);
+      deadline = setTimeout(() => finish(new EgressError(`timed out after ${timeout} ms`)), timeout);
+      session.on('error', (err) => finish(err));
       const req = session.request({ ':method': init.method ?? 'POST', ':path': `${u.pathname}${u.search}`, ...init.headers });
-      req.setTimeout(timeout, () => req.close());
       let status = 0;
       let headers: Record<string, string> = {};
       req.on('response', (h) => {
@@ -282,13 +318,20 @@ export function egressHttp2(policy: EgressPolicy): Http2Request {
         );
       });
       const chunks: Buffer[] = [];
-      req.on('data', (c: Buffer) => chunks.push(c));
-      req.on('end', () => {
-        session.close();
-        if (!status) return reject(new Error(`no response within ${timeout} ms`));
-        resolve({ status, headers, body: Buffer.concat(chunks).toString('utf8') });
+      let size = 0;
+      req.on('data', (c: Buffer) => {
+        size += c.length;
+        if (size > maxBytes) {
+          finish(new EgressError(`response exceeds ${maxBytes} bytes`));
+          return;
+        }
+        chunks.push(c);
       });
-      req.on('error', fail);
+      req.on('end', () => {
+        if (!status) return finish(new Error(`no response within ${timeout} ms`));
+        finish(null, { status, headers, body: Buffer.concat(chunks).toString('utf8') });
+      });
+      req.on('error', (err) => finish(err));
       if (init.body !== undefined) req.end(init.body);
       else req.end();
     });
