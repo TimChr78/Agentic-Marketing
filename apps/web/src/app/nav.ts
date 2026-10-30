@@ -85,6 +85,7 @@ export const NAV: NavGroup[] = [
       { path: '/settings/integrations', label: 'Integrations and API tokens', needs: [] },
       { path: '/settings/secrets', label: 'Secrets', needs: ['secrets:read'] },
       { path: '/settings/users', label: 'Users and roles', needs: ['workspace:admin'] },
+      { path: '/settings/agents', label: 'Agents', needs: ['artifacts:read'] },
       { path: '/settings/approval-policy', label: 'Approval policy', needs: ['artifacts:read'] },
       { path: '/settings/purposes', label: 'Purposes', needs: ['artifacts:read'] },
       { path: '/settings/workspace', label: 'Workspace', needs: ['workspace:admin'] },
