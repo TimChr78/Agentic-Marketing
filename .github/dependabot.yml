@@ -1,0 +1,33 @@
+# Weekly dependency PRs (#177). Dependabot treats a pnpm workspace as the npm ecosystem at the
+# workspace root. Minor and patch updates come grouped in one PR; majors one by one.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 10
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
+    # The spikes are throwaway benchmarks, not part of CI or the image.
+    exclude-paths:
+      - spikes/**
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      actions:
+        patterns: ['*']
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    # The Node major follows `engines` in package.json; change both together, by hand.
+    ignore:
+      - dependency-name: node
+        update-types: [version-update:semver-major]

@@ -1,5 +1,6 @@
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { renderTemplate, validateTemplate } from '../src/render';
+import { compileMjml, renderTemplate, validateTemplate } from '../src/render';
 
 const welcome = {
   purpose: 'marketing_email',
@@ -69,5 +70,29 @@ describe('template rendering', () => {
     ]);
     expect(validateTemplate(welcome)).toEqual([]);
     expect(validateTemplate({ ...welcome, purpose: 'onboarding', mjml: welcome.mjml.replace('unsubscribe_url', 'x') })).toEqual([]);
+  });
+});
+
+// #177: mjml 4 ships the mj-include traversal (GHSA-45h5-66jx-r2wf) and html-minifier's ReDoS
+// (GHSA-pfq8-rq6v-vf5m) without a patched 4.x. Both are unreachable while we compile with
+// `ignoreIncludes: true` and `minify: false`; these tests fail if that changes.
+describe('mjml advisories stay unreachable', () => {
+  const secret = fileURLToPath(new URL('./fixtures/include-secret.mjml', import.meta.url));
+
+  it('does not follow mj-include, by absolute or relative path', () => {
+    for (const path of [secret, '../test/fixtures/include-secret.mjml']) {
+      const { html } = compileMjml(`<mjml><mj-body><mj-include path="${path}" /></mj-body></mjml>`);
+      expect(html).not.toContain('INCLUDED-SECRET');
+    }
+    const problems = validateTemplate({ ...welcome, mjml: welcome.mjml.replace('<mj-body>', `<mj-body><mj-include path="${secret}" />`) });
+    expect(problems.join('\n')).not.toContain('INCLUDED-SECRET');
+  });
+
+  it('compiles a large input with many attributes quickly (no minifier pass)', () => {
+    const attrs = Array.from({ length: 200 }, (_, i) => `data-a${i}="${'x'.repeat(50)}"`).join(' ');
+    const rows = Array.from({ length: 200 }, () => `<mj-text><p ${attrs}>hej</p></mj-text>`).join('');
+    const started = Date.now();
+    compileMjml(`<mjml><mj-body><mj-section><mj-column>${rows}</mj-column></mj-section></mj-body></mjml>`);
+    expect(Date.now() - started).toBeLessThan(10_000);
   });
 });

@@ -24,7 +24,15 @@
       "@types/mjml-core": "5.1.0",
       "@better-auth/oauth-provider": "1.7.7",
       "@better-auth/core": "1.7.7",
-      "better-auth": "1.7.7"
+      "better-auth": "1.7.7",
+      "happy-dom": "^21.0.4"
+    },
+    "auditConfig": {
+      "ignoreGhsas": [
+        "GHSA-pfq8-rq6v-vf5m",
+        "GHSA-45h5-66jx-r2wf",
+        "GHSA-w5hq-g745-h8pq"
+      ]
     }
   },
   "devDependencies": {
