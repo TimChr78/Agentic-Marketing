@@ -229,7 +229,10 @@ export async function broadcastImpact(tx: Tx, artifactId: string, version: numbe
     .from(schema.segmentMemberships)
     .where(eq(schema.segmentMemberships.segmentId, def.segment));
   // The template may be unpublished (reviewed in the same bundle): fall back to its latest version.
-  const [tpl] = await tx.select({ latest: schema.artifacts.latestVersion }).from(schema.artifacts).where(eq(schema.artifacts.id, def.template));
+  const [tpl] = await tx
+    .select({ latest: schema.artifacts.latestVersion })
+    .from(schema.artifacts)
+    .where(eq(schema.artifacts.id, def.template));
   const meta = (await purposeOf(tx, def.template)) ?? (tpl ? await purposeOf(tx, def.template, tpl.latest) : undefined);
   const topic = def.topic ?? meta?.topic ?? null;
   const channel = def.template.startsWith('sms_') ? 'sms' : def.template.startsWith('psh_') ? 'push' : 'email';

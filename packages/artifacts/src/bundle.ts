@@ -85,7 +85,7 @@ const Change = z.object({
   type: z.string(),
   name: z.string(),
   action: z.enum(['create', 'update', 'unchanged']),
-  publish: z.enum(['published', 'in_review', 'failed', 'skipped']).optional(),
+  publish: z.enum(['published', 'in_review', 'on_hold', 'failed', 'skipped']).optional(),
   problem: z.string().optional(),
 });
 

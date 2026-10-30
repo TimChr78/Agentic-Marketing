@@ -1,5 +1,5 @@
-import { mandateGuardrailBreach } from './agents/guardrails';
 import { existsSync } from 'node:fs';
+import { activeMandate } from '@agentic-marketing/artifacts';
 import { assetRoutes } from '@agentic-marketing/assets';
 import { archiveRoutes, broadcastImpact, formsApi, withEmailProfileEvents, withResolvedEventProfiles } from '@agentic-marketing/audience';
 import {
@@ -18,13 +18,13 @@ import { clickHouseStore, lazyNatsBus } from '@agentic-marketing/events';
 import { valkeyHotState } from '@agentic-marketing/hotstate';
 import { ingestApi } from '@agentic-marketing/ingest';
 import { egressFetch, egressHttp2, inboundApi, oauthRoutes, safeRequest } from '@agentic-marketing/integrations';
-import { activeMandate } from '@agentic-marketing/artifacts';
 import { journeyImpact } from '@agentic-marketing/journeys';
 import { decideApi, edgeMirror } from '@agentic-marketing/personalize';
 import { refreshPeople } from '@agentic-marketing/segments';
 import { logger } from '@agentic-marketing/telemetry';
 import { oauthProviderAuthServerMetadata, oauthProviderOpenIdConfigMetadata } from '@better-auth/oauth-provider';
 import { Hono } from 'hono';
+import { mandateGuardrailBreach } from './agents/guardrails';
 import type { Config } from './config';
 import { copilotApi } from './http/copilot';
 import { mcpEndpoint } from './http/mcp';
@@ -84,45 +84,41 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
     }),
   };
   const services: Services = {
-  keyProvider,
-  directory,
-  events,
-  bus,
-  email,
-  assets: { publicUrl: config.linksUrl, maxBytes: config.assetMaxBytes },
-  hot,
-  egress: config.egress,
-  publicUrl: config.publicUrl,
-  linksUrl: config.linksUrl,
-  db,
-  serverVersion: VERSION,
-  strictInputs: config.strictInputs,
-  // Reach of publishing, for the agent policy engine (ADR-0016).
-  artifactImpact: {
-    broadcast: (tx, id, version) => broadcastImpact(tx, id, version),
-    journey: (tx, id) => journeyImpact(tx, id),
-  },
-  stepUpLimiter: {
-    lockedUntil: (userId) => hot.failureLock(`stepup:${userId}`),
-    recordFailure: (userId) =>
-      hot.recordFailure(`stepup:${userId}`, config.stepUp.maxFailures, config.stepUp.windowSeconds, config.stepUp.lockoutSeconds),
-    reset: (userId) => hot.clearFailures(`stepup:${userId}`),
-  },
+    keyProvider,
+    directory,
+    events,
+    bus,
+    email,
+    assets: { publicUrl: config.linksUrl, maxBytes: config.assetMaxBytes },
+    hot,
+    egress: config.egress,
+    publicUrl: config.publicUrl,
+    linksUrl: config.linksUrl,
+    db,
+    serverVersion: VERSION,
+    strictInputs: config.strictInputs,
+    // Reach of publishing, for the agent policy engine (ADR-0016).
+    artifactImpact: {
+      broadcast: (tx, id, version) => broadcastImpact(tx, id, version),
+      journey: (tx, id) => journeyImpact(tx, id),
+    },
+    stepUpLimiter: {
+      lockedUntil: (userId) => hot.failureLock(`stepup:${userId}`),
+      recordFailure: (userId) =>
+        hot.recordFailure(`stepup:${userId}`, config.stepUp.maxFailures, config.stepUp.windowSeconds, config.stepUp.lockoutSeconds),
+      reset: (userId) => hot.clearFailures(`stepup:${userId}`),
+    },
     // The agent's active mandate and its guardrails on its own sends (ADR-0016, #224).
     activeMandate: (tx, agentId) => activeMandate(tx, agentId),
     mandateGuardrails: (tx, workspaceId, agentId, mandate) => mandateGuardrailBreach({ tx, events, workspaceId }, agentId, mandate),
   };
-  const executor = createExecutor(
-    db,
-    services,
-    {
-      strictInputs: config.strictInputs,
-      onUnknownKeys: (command, unknown, principal) => {
-        logger.warn({ command, unknownKeys: unknown.map((u) => u.path) }, 'command input has unknown keys');
-        inputWarnings.record(command, unknown, principal);
-      },
+  const executor = createExecutor(db, services, {
+    strictInputs: config.strictInputs,
+    onUnknownKeys: (command, unknown, principal) => {
+      logger.warn({ command, unknownKeys: unknown.map((u) => u.path) }, 'command input has unknown keys');
+      inputWarnings.record(command, unknown, principal);
     },
-  );
+  });
 
   const app = new Hono();
   // Baseline security headers on every response; routes with their own policy keep it (#178).

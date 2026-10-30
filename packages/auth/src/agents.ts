@@ -268,7 +268,12 @@ const Action = z.object({
   agentId: z.string(),
   command: z.string(),
   actionClass: z.string(),
-  decision: z.enum(['allow', 'ask', 'deny']).describe('allow: ran; ask: waited for a person; deny: refused'),
+  decision: z
+    .enum(['allow', 'hold', 'ask', 'deny'])
+    .describe('allow: ran; hold: waited for a veto window (level 2); ask: waited for a person; deny: refused'),
+  mandateId: z.string().nullable().describe('The mandate that decided, if any'),
+  mandateVersion: z.number().int().nullable(),
+  intent: z.string().nullable().describe('What the agent said it was doing'),
   reasons: z.array(z.string()),
   impact: z.record(z.string(), z.unknown()),
   ok: z.boolean(),
@@ -285,7 +290,7 @@ export const agentActivity = defineCommand({
     'The action ledger: every agent write with the policy decision (allow, ask = waited for a person, deny = refused) and its reasons, the impact estimate (e.g. people reached) and whether it succeeded. Newest first; page with `before`.',
   input: z.object({
     agentId: AGENT_ID.optional(),
-    decision: z.enum(['allow', 'ask', 'deny']).optional(),
+    decision: z.enum(['allow', 'hold', 'ask', 'deny']).optional(),
     actionClass: z.string().optional(),
     since: z.string().datetime().optional(),
     before: z.number().int().optional().describe('Return entries with a smaller id (the last id of the previous page)'),

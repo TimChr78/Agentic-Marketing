@@ -1205,7 +1205,10 @@ const MANDATE_CLASSES = [
   'destructive',
 ] as const;
 const agentMandate = z.object({
-  agent: z.string().regex(/^agt_[0-9a-f]{32}$/, 'An agent id, e.g. from agents.list').describe('The agent this mandate is for'),
+  agent: z
+    .string()
+    .regex(/^agt_[0-9a-f]{32}$/, 'An agent id, e.g. from agents.list')
+    .describe('The agent this mandate is for'),
   purpose: z.string().min(1).max(1000).describe('What the agent is for, in a sentence or two; shown on holds and in the independent check'),
   goals: z
     .array(
@@ -1219,7 +1222,11 @@ const agentMandate = z.object({
     .default([]),
   scope: z
     .object({
-      segments: z.array(z.string().regex(/^seg_[0-9a-f]{32}$/)).max(50).default([]).describe('Audiences the agent may send to; empty: none'),
+      segments: z
+        .array(z.string().regex(/^seg_[0-9a-f]{32}$/))
+        .max(50)
+        .default([])
+        .describe('Audiences the agent may send to; empty: none'),
       purposes: z.array(z.string()).max(20).default([]).describe('Purposes its messages may use; empty: any the segment allows'),
       topics: z.array(z.string()).max(20).default([]).describe('Topics its messages may use; empty: any'),
       channels: z.array(z.enum(['email', 'sms', 'push'])).default(['email']),
@@ -1264,7 +1271,10 @@ const agentMandate = z.object({
     })
     .optional()
     .describe('Irreversible actions (sends) outside these hours, in the workspace time zone, are held instead'),
-  blackoutDates: z.array(z.string().regex(/^\d{4}-\d{2}-\d{2}$/)).max(60).default([]),
+  blackoutDates: z
+    .array(z.string().regex(/^\d{4}-\d{2}-\d{2}$/))
+    .max(60)
+    .default([]),
   holdWindow: z
     .enum(['PT30M', 'PT1H', 'PT2H', 'PT4H', 'PT12H', 'PT24H'])
     .default('PT2H')
@@ -1285,7 +1295,10 @@ const businessContext = z.object({
   voice: z.string().max(4000).default('').describe('Tone and style; words to use and avoid'),
   avoid: z.array(z.string().max(500)).max(50).default([]).describe('Claims and topics never to use'),
   legal: z.string().max(4000).default('').describe('Disclaimers and lines that must appear'),
-  links: z.array(z.object({ label: z.string().max(120), url: z.string().url() })).max(30).default([]),
+  links: z
+    .array(z.object({ label: z.string().max(120), url: z.string().url() }))
+    .max(30)
+    .default([]),
 });
 
 export const artifactTypes = {

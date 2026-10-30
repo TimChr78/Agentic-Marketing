@@ -1,4 +1,3 @@
-import { holdWindowMs } from './mandates';
 import { type CommandContext, defineCommand } from '@agentic-marketing/commands';
 import { AppError, canonicalJson, hashValue, newId } from '@agentic-marketing/core';
 import { schema, type VersionState } from '@agentic-marketing/db';
@@ -6,6 +5,7 @@ import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { diffJson } from './diff';
 import { noteWithPolicy, publishImpact } from './impact';
+import { holdWindowMs } from './mandates';
 import {
   ARTIFACT_TYPES,
   type ArtifactType,
@@ -275,12 +275,15 @@ export const listTypes = defineCommand({
   }),
 });
 
-
 /** Types only people may write, whatever an agent's scopes (agent mandates, ADR-0016). */
 function refuseAgentsFor(ctx: CommandContext, type: string) {
   if (ctx.principal.type !== 'agent') return;
   const def = artifactTypes[type as ArtifactType] as { peopleOnly?: boolean; label: string } | undefined;
-  if (def?.peopleOnly) throw new AppError('forbidden', `Only people can create, change or publish ${def.label.toLowerCase()}s; agents cannot set their own borders.`);
+  if (def?.peopleOnly)
+    throw new AppError(
+      'forbidden',
+      `Only people can create, change or publish ${def.label.toLowerCase()}s; agents cannot set their own borders.`,
+    );
 }
 
 export const createArtifact = defineCommand({
@@ -695,7 +698,9 @@ export const requestPublish = defineCommand({
     "Submits the latest draft for review under the workspace approval policy; publishes directly only when the policy allows it (policy `none`, or `agent_changes` for a person's own edits). A person then approves or rejects it in the admin UI. Check the result with approvals.list or artifacts.get.",
   input: z.object({ artifactId: ArtifactId, note: z.string().min(1).max(1000).describe('What changed and why, for the reviewer') }),
   output: z.object({
-    status: z.enum(['published', 'in_review', 'on_hold']).describe('on_hold: an agent change that runs at runsAt unless a person vetoes it'),
+    status: z
+      .enum(['published', 'in_review', 'on_hold'])
+      .describe('on_hold: an agent change that runs at runsAt unless a person vetoes it'),
     version: z.number().int(),
     runsAt: z.string().nullable().optional().describe('For on_hold: when it runs unless a person rejects it'),
     approvalId: z.string().nullable(),
@@ -1337,14 +1342,22 @@ export async function runHeldChange(
   if (problem) {
     await ctx.tx
       .update(schema.approvalRequests)
-      .set({ holdUntil: null, note: sql`${schema.approvalRequests.note} || ${`\n\nNot run after its veto window: ${problem}. A person decides.`}` })
+      .set({
+        holdUntil: null,
+        note: sql`${schema.approvalRequests.note} || ${`\n\nNot run after its veto window: ${problem}. A person decides.`}`,
+      })
       .where(scope);
     return { status: 'needs_person', reason: problem };
   }
   for (const m of members) await publishVersion(ctx, m.artifactId, m.version);
   await ctx.tx
     .update(schema.approvalRequests)
-    .set({ status: 'approved', decidedBy: 'policy:hold', decidedAt: new Date(), decisionNote: 'Ran after its veto window ended without a veto.' })
+    .set({
+      status: 'approved',
+      decidedBy: 'policy:hold',
+      decidedAt: new Date(),
+      decisionNote: 'Ran after its veto window ended without a veto.',
+    })
     .where(scope);
   return { status: 'published' };
 }

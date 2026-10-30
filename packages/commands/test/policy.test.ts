@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { autonomySettings, decide, type PolicyInput } from '../src/policy';
+import { autonomySettings, decide, type MandateView, type PolicyInput } from '../src/policy';
 
 const base = (over: Partial<PolicyInput> = {}): PolicyInput => ({
   command: 'artifacts.requestPublish',
@@ -79,5 +79,92 @@ describe('the policy engine', () => {
     expect(decide(base({ settings, actionClass: 'read' })).decision).toBe('allow');
     expect(decide(base({ settings, actionClass: 'draft' })).decision).toBe('deny');
     expect(decide(base({ settings })).decision).toBe('deny');
+  });
+});
+
+describe('the policy engine with a mandate (#224)', () => {
+  const mandate = (over: Partial<MandateView> = {}): MandateView => ({
+    id: 'mnd_1',
+    version: 1,
+    levels: { 'send.broadcast': 3, 'content.publish': 3 },
+    scope: {
+      segments: ['seg_news'],
+      purposes: ['marketing_email'],
+      topics: ['newsletter'],
+      channels: ['email'],
+      artifactTypes: [],
+      artifacts: [],
+    },
+    limits: {},
+    holdWindow: 'PT2H',
+    independentCheck: false,
+    guardrails: { window: 'P7D', minSent: 100 },
+    purpose: 'Send the weekly newsletter',
+    ...over,
+  });
+  const settings = autonomySettings({ maxLevel: { 'send.broadcast': 3, 'content.publish': 3 } });
+  const send = (over: Partial<PolicyInput> = {}) =>
+    decide(
+      base({
+        actionClass: 'send.broadcast',
+        settings,
+        mandate: mandate(),
+        impact: {
+          people: 400,
+          touches: { segments: ['seg_news'], purposes: ['marketing_email'], topics: ['newsletter'], channels: ['email'] },
+        },
+        ...over,
+      }),
+    );
+
+  it('level 3 inside the scope and limits runs autonomously', () => {
+    expect(send()).toMatchObject({ decision: 'allow', autonomous: true, level: 3, mandate: { id: 'mnd_1', version: 1 } });
+  });
+
+  it('is capped by the workspace ceiling, whose default is a person', () => {
+    expect(send({ settings: autonomySettings({}) })).toMatchObject({ decision: 'ask', level: 1 });
+  });
+
+  it('level 2 holds for the veto window', () => {
+    const out = send({ mandate: mandate({ levels: { 'send.broadcast': 2 } }) });
+    expect(out).toMatchObject({ decision: 'hold', level: 2 });
+    expect(out.reasons[0]).toContain('PT2H');
+  });
+
+  it('anything outside the scope is only proposed', () => {
+    const out = send({ impact: { people: 400, touches: { segments: ['seg_other'], channels: ['email'] } } });
+    expect(out.decision).toBe('ask');
+    expect(out.reasons).toContain('Audience seg_other is outside this agent’s mandate.');
+  });
+
+  it('a mandate limit drops one level, the workspace threshold goes to a person', () => {
+    expect(send({ mandate: mandate({ limits: { recipientsPerSend: 300 } }) })).toMatchObject({ decision: 'hold', level: 2 });
+    expect(
+      send({ counters: { changes: 0, messages: 0, previousSendPeople: 300 }, mandate: mandate({ limits: { recipientGrowth: 1.2 } }) }),
+    ).toMatchObject({
+      decision: 'hold',
+    });
+    expect(send({ impact: { people: 5000, touches: { segments: ['seg_news'] } } })).toMatchObject({ decision: 'ask', level: 1 });
+  });
+
+  it('a guardrail breach goes to a person; outside working hours an irreversible action is held', () => {
+    expect(send({ guardrailBreach: 'unsubscribe rate 1%' })).toMatchObject({ decision: 'ask', reasons: ['unsubscribe rate 1%'] });
+    expect(send({ outsideHours: 'It is 23:00' })).toMatchObject({ decision: 'hold', level: 2 });
+  });
+
+  it('never makes settings or destructive changes autonomous, and refuses at level 0', () => {
+    expect(send({ actionClass: 'settings', mandate: mandate({ levels: { settings: 3 } }) }).decision).toBe('ask');
+    expect(send({ impact: { people: 1, needsPerson: 'Purposes always need a person.' } }).decision).toBe('ask');
+    expect(send({ mandate: mandate({ levels: { 'send.broadcast': 0 } }) })).toMatchObject({ decision: 'deny', level: 0 });
+  });
+
+  it('a non-approvable action at level 2 is refused rather than held', () => {
+    const out = send({
+      actionClass: 'send.direct',
+      approvable: false,
+      mandate: mandate({ levels: { 'send.direct': 2 } }),
+      settings: autonomySettings({ maxLevel: { 'send.direct': 3 } }),
+    });
+    expect(out.decision).toBe('deny');
   });
 });

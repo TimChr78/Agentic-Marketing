@@ -1,4 +1,3 @@
-import { runHolds } from './agents/holds';
 import { clickIdHook, conversionHook, runAudienceSyncs, runSpendImport } from '@agentic-marketing/ads';
 import { runAiWorker } from '@agentic-marketing/ai';
 import { runAlertEvaluator } from '@agentic-marketing/alerts';
@@ -12,6 +11,7 @@ import { runProfileWorkers } from '@agentic-marketing/profiles';
 import { runSegmentScheduler, segmentHook } from '@agentic-marketing/segments';
 import { logger } from '@agentic-marketing/telemetry';
 import { runWarehouseExports } from '@agentic-marketing/warehouse';
+import { runHolds } from './agents/holds';
 import type { createServer } from './app';
 
 /** Periodic jobs of the scheduler role. */

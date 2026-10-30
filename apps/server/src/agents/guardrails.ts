@@ -17,10 +17,12 @@ export async function mandateGuardrailBreach(
   mandate: MandateView,
 ): Promise<string | null> {
   const g = mandate.guardrails;
+  // Rates from the base counts: the metric layer's ratio measures hide small groups for privacy,
+  // while this check is an internal decision about the agent's own sends.
   const checks = [
-    ['email.unsubscribe_rate', 'unsubscribe', g.unsubscribeRate],
-    ['email.complaint_rate', 'complaint', g.complaintRate],
-    ['email.bounce_rate', 'bounce', g.bounceRate],
+    ['email.unsubscribed', 'unsubscribe', g.unsubscribeRate],
+    ['email.complained', 'complaint', g.complaintRate],
+    ['email.bounced', 'bounce', g.bounceRate],
   ] as const;
   if (!checks.some(([, , limit]) => limit !== undefined)) return null;
   const since = new Date(Date.now() - (WINDOW_DAYS[g.window] ?? 7) * 86_400_000);
@@ -59,8 +61,8 @@ export async function mandateGuardrailBreach(
   if (sent < g.minSent) return null;
   for (const [measure, label, limit] of checks) {
     if (limit === undefined) continue;
-    const rate = value(measure);
-    if (rate !== null && rate > limit)
+    const rate = (value(measure) ?? 0) / sent;
+    if (rate > limit)
       return `This agent’s sends in the last ${WINDOW_DAYS[g.window] ?? 7} days have a ${label} rate of ${pct(rate)}, above its mandate’s guardrail of ${pct(limit)}.`;
   }
   return null;

@@ -165,7 +165,11 @@ export function decide(input: PolicyInput): PolicyOutcome {
     actionClass,
     reasons,
     impact,
-    ...(mandate ? { mandate: { id: mandate.id, version: mandate.version, holdWindow: mandate.holdWindow, independentCheck: mandate.independentCheck } } : {}),
+    ...(mandate
+      ? {
+          mandate: { id: mandate.id, version: mandate.version, holdWindow: mandate.holdWindow, independentCheck: mandate.independentCheck },
+        }
+      : {}),
     ...extra,
   });
   if (actionClass === 'read') return out('allow', []);
@@ -234,7 +238,8 @@ function decideWithMandate(
   let ceiling = settings.maxLevel[actionClass] ?? 1;
   if (ceiling === 4 && !settings.allowLoops) ceiling = 3;
   let level = Math.min(granted, ceiling);
-  if (granted > ceiling) reasons.push(`The mandate grants level ${granted} (${LEVEL_NAMES[granted]}), the workspace allows at most ${ceiling}.`);
+  if (granted > ceiling)
+    reasons.push(`The mandate grants level ${granted} (${LEVEL_NAMES[granted]}), the workspace allows at most ${ceiling}.`);
   const capAt = (max: number, reason: string) => {
     if (level > max) level = max;
     reasons.push(reason);
@@ -244,7 +249,8 @@ function decideWithMandate(
     reasons.push(reason);
   };
 
-  if (settings.switch === 'propose_only') capAt(1, 'This workspace is set to propose-only: every agent change beyond a draft needs a person.');
+  if (settings.switch === 'propose_only')
+    capAt(1, 'This workspace is set to propose-only: every agent change beyond a draft needs a person.');
   if (ALWAYS_A_PERSON.includes(actionClass)) capAt(1, `A ${actionClass} change always needs a person, whatever the mandate.`);
   if (impact.needsPerson) capAt(1, impact.needsPerson);
   for (const v of scopeViolations(impact, mandate.scope)) capAt(1, v);
@@ -253,9 +259,15 @@ function decideWithMandate(
   if (REACH_CLASSES.includes(actionClass) && people > settings.audienceThreshold)
     capAt(1, `This reaches ${fmt(people)} people, above the workspace’s threshold of ${fmt(settings.audienceThreshold)} for agents.`);
   if (counters.changes >= settings.limits.changesPerDay)
-    capAt(1, `This agent made ${fmt(counters.changes)} changes in the last 24 hours, the workspace limit is ${fmt(settings.limits.changesPerDay)}.`);
+    capAt(
+      1,
+      `This agent made ${fmt(counters.changes)} changes in the last 24 hours, the workspace limit is ${fmt(settings.limits.changesPerDay)}.`,
+    );
   if (actionClass === 'send.direct' && counters.messages + people > settings.limits.messagesPerDay)
-    capAt(1, `This agent sent ${fmt(counters.messages)} messages in the last 24 hours, the workspace limit is ${fmt(settings.limits.messagesPerDay)}.`);
+    capAt(
+      1,
+      `This agent sent ${fmt(counters.messages)} messages in the last 24 hours, the workspace limit is ${fmt(settings.limits.messagesPerDay)}.`,
+    );
 
   const l = mandate.limits;
   if (l.recipientsPerSend !== undefined && REACH_CLASSES.includes(actionClass) && people > l.recipientsPerSend)
@@ -277,12 +289,16 @@ function decideWithMandate(
 
   if (level <= 0) return out('deny', [...reasons, `The mandate gives this agent level 0 (observe) for ${actionClass}.`], { level });
   if (level === 1) {
-    if (input.approvable) return out('ask', reasons.length ? reasons : [`The mandate gives level 1 (propose) for ${actionClass}.`], { level });
+    if (input.approvable)
+      return out('ask', reasons.length ? reasons : [`The mandate gives level 1 (propose) for ${actionClass}.`], { level });
     return out('deny', [...reasons, `${input.command} cannot wait for an approval at level 1, so a person has to do it.`], { level });
   }
   if (level === 2) {
-    if (input.approvable) return out('hold', [`Held for a veto window of ${mandate.holdWindow} (level 2, act with veto).`, ...reasons], { level });
-    return out('deny', [...reasons, `${input.command} cannot be held for a veto window; level 3 is needed to run it, or a person can.`], { level });
+    if (input.approvable)
+      return out('hold', [`Held for a veto window of ${mandate.holdWindow} (level 2, act with veto).`, ...reasons], { level });
+    return out('deny', [...reasons, `${input.command} cannot be held for a veto window; level 3 is needed to run it, or a person can.`], {
+      level,
+    });
   }
   return out('allow', reasons, { level, autonomous: true });
 }

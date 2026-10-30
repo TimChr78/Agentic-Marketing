@@ -36,7 +36,11 @@ function localNow(now: Date, timeZone: string) {
 }
 
 /** Why `now` is outside the mandate's working hours or on a blackout date (in the workspace time zone), or null. */
-export function outsideWorkingHours(m: Pick<AgentMandate, 'workingHours' | 'blackoutDates'>, timeZone: string, now = new Date()): string | null {
+export function outsideWorkingHours(
+  m: Pick<AgentMandate, 'workingHours' | 'blackoutDates'>,
+  timeZone: string,
+  now = new Date(),
+): string | null {
   const local = localNow(now, timeZone);
   if (m.blackoutDates.includes(local.date)) return `${local.date} is a blackout date in the agent’s mandate.`;
   const w = m.workingHours;
