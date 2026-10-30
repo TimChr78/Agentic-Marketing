@@ -142,7 +142,8 @@ export function PurposesEditor({ content, onChange, readOnly, errors, warnings }
       )}
 
       <p className="text-[13px] text-fg-2">
-        People see the name and description; journeys, forms and messages refer to the key. A key that is already in force cannot be renamed here.
+        People see the name and description; journeys, forms and messages refer to the key. A key that is already in force cannot be renamed
+        here.
       </p>
 
       {purposes.map((purpose, i) => {
@@ -193,7 +194,12 @@ export function PurposesEditor({ content, onChange, readOnly, errors, warnings }
                   onChange={(e) => set({ purposes: updatePurpose(purposes, i, { key: e.target.value }) })}
                 />
               </Field>
-              <Field label={`Name of purpose ${n}`} hint="Shown to people in consent banners and preferences." error={errors[`purposes.${i}.name`]} required>
+              <Field
+                label={`Name of purpose ${n}`}
+                hint="Shown to people in consent banners and preferences."
+                error={errors[`purposes.${i}.name`]}
+                required
+              >
                 <Input
                   value={purpose.name}
                   readOnly={readOnly}
@@ -268,7 +274,8 @@ export function PurposesEditor({ content, onChange, readOnly, errors, warnings }
             <fieldset className="min-w-0 space-y-2">
               <legend className="mb-1 text-[12px] font-medium text-fg-2">Topics under purpose {n}</legend>
               <p className="text-[12px] text-muted">
-                Optional finer choices, e.g. newsletter and product news. People can refuse a topic without leaving the purpose; consent for the purpose still decides whether anything may be sent.
+                Optional finer choices, e.g. newsletter and product news. People can refuse a topic without leaving the purpose; consent for
+                the purpose still decides whether anything may be sent.
               </p>
               {(purpose.topics ?? []).map((topic, j) => (
                 <div key={j} className="space-y-2 rounded-md border border-line bg-surface-2 p-3">
@@ -298,7 +305,11 @@ export function PurposesEditor({ content, onChange, readOnly, errors, warnings }
                         disabled={readOnly}
                         onChange={(e) =>
                           set({
-                            purposes: updatePurpose(purposes, i, updateTopic(purpose, j, { default: e.target.value as 'subscribed' | 'unsubscribed' })),
+                            purposes: updatePurpose(
+                              purposes,
+                              i,
+                              updateTopic(purpose, j, { default: e.target.value as 'subscribed' | 'unsubscribed' }),
+                            ),
                           })
                         }
                       >
@@ -322,13 +333,20 @@ export function PurposesEditor({ content, onChange, readOnly, errors, warnings }
                       readOnly={readOnly}
                       maxLength={500}
                       placeholder="What people get, in plain words"
-                      onChange={(e) => set({ purposes: updatePurpose(purposes, i, updateTopic(purpose, j, { description: e.target.value })) })}
+                      onChange={(e) =>
+                        set({ purposes: updatePurpose(purposes, i, updateTopic(purpose, j, { description: e.target.value })) })
+                      }
                     />
                   </Field>
                 </div>
               ))}
               {!readOnly && (purpose.topics ?? []).length < 20 && (
-                <Button size="sm" variant="secondary" icon={<Plus size={13} />} onClick={() => set({ purposes: updatePurpose(purposes, i, addTopic(purpose)) })}>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  icon={<Plus size={13} />}
+                  onClick={() => set({ purposes: updatePurpose(purposes, i, addTopic(purpose)) })}
+                >
                   Add topic
                 </Button>
               )}
@@ -338,7 +356,10 @@ export function PurposesEditor({ content, onChange, readOnly, errors, warnings }
             {purpose.basis === 'legitimate_interest' && (
               <div className="space-y-3 rounded-md border border-line bg-surface-2 p-3">
                 <p className="text-[12px] font-medium text-fg-2">Legitimate interest assessment (LIA)</p>
-                <p className="text-[12px] text-muted">Required for legitimate interest. Record why the interest outweighs the person's rights, who owns it and when it is reviewed.</p>
+                <p className="text-[12px] text-muted">
+                  Required for legitimate interest. Record why the interest outweighs the person's rights, who owns it and when it is
+                  reviewed.
+                </p>
                 {!purpose.lia && <p className="text-[12px] text-bad">Add an LIA record: all three fields are required.</p>}
                 <Field label={`LIA assessment for purpose ${n}`} error={errors[`purposes.${i}.lia.assessment`]}>
                   <Textarea
@@ -365,13 +386,21 @@ export function PurposesEditor({ content, onChange, readOnly, errors, warnings }
                       onChange={(e) =>
                         set({
                           purposes: updatePurpose(purposes, i, {
-                            lia: { assessment: purpose.lia?.assessment ?? '', owner: e.target.value, reviewBy: purpose.lia?.reviewBy ?? '' },
+                            lia: {
+                              assessment: purpose.lia?.assessment ?? '',
+                              owner: e.target.value,
+                              reviewBy: purpose.lia?.reviewBy ?? '',
+                            },
                           }),
                         })
                       }
                     />
                   </Field>
-                  <Field label={`LIA review date for purpose ${n}`} hint="The date the assessment is next reviewed." error={errors[`purposes.${i}.lia.reviewBy`]}>
+                  <Field
+                    label={`LIA review date for purpose ${n}`}
+                    hint="The date the assessment is next reviewed."
+                    error={errors[`purposes.${i}.lia.reviewBy`]}
+                  >
                     <Input
                       type="date"
                       value={purpose.lia?.reviewBy ?? ''}

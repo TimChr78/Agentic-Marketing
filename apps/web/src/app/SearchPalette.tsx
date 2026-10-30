@@ -40,11 +40,20 @@ export function SearchPalette({ onClose }: { onClose: () => void }) {
   const results = useMemo<Result[]>(() => {
     const needle = q.trim().toLowerCase();
     const pages: Result[] = visibleNav(can).flatMap((g) =>
-      g.path ? [{ key: g.path, label: g.label, hint: 'Page', to: g.path, page: true }] : g.items.map((i) => ({ key: i.path, label: i.label, hint: g.label, to: i.path, page: true })),
+      g.path
+        ? [{ key: g.path, label: g.label, hint: 'Page', to: g.path, page: true }]
+        : g.items.map((i) => ({ key: i.path, label: i.label, hint: g.label, to: i.path, page: true })),
     );
-    const arts: Result[] = (items ?? []).map((a) => ({ key: a.id, label: a.name, hint: typeLabel(a.type), to: artifactPath(a.type, a.id), state: a.latestState }));
+    const arts: Result[] = (items ?? []).map((a) => ({
+      key: a.id,
+      label: a.name,
+      hint: typeLabel(a.type),
+      to: artifactPath(a.type, a.id),
+      state: a.latestState,
+    }));
     if (!needle) return [...arts.slice(0, 8), ...pages.slice(0, 6)];
-    const hit = (r: Result) => r.label.toLowerCase().includes(needle) || r.hint.toLowerCase().includes(needle) || r.key.toLowerCase() === needle;
+    const hit = (r: Result) =>
+      r.label.toLowerCase().includes(needle) || r.hint.toLowerCase().includes(needle) || r.key.toLowerCase() === needle;
     return [...arts.filter(hit).slice(0, 20), ...pages.filter(hit).slice(0, 8)];
   }, [q, items, can]);
 
@@ -58,7 +67,13 @@ export function SearchPalette({ onClose }: { onClose: () => void }) {
   return createPortal(
     <div className="fixed inset-0 z-[60] flex items-start justify-center p-3 pt-[12vh]">
       <div className="am-fade-in absolute inset-0 bg-[var(--scrim)]" onClick={onClose} aria-hidden />
-      <div ref={ref} role="dialog" aria-modal="true" aria-label="Search" className="am-rise relative w-full max-w-[600px] overflow-hidden rounded-xl border border-line bg-surface shadow-2">
+      <div
+        ref={ref}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Search"
+        className="am-rise relative w-full max-w-[600px] overflow-hidden rounded-xl border border-line bg-surface shadow-2"
+      >
         <div className="flex items-center gap-2 border-b border-line px-3.5">
           <Search size={16} className="text-muted" aria-hidden />
           <input
@@ -89,7 +104,9 @@ export function SearchPalette({ onClose }: { onClose: () => void }) {
         <ul id="search-results" role="listbox" aria-label="Results" className="max-h-[52vh] overflow-y-auto p-1.5">
           {err && <li className="px-3 py-2 text-[13px] text-bad">{err}</li>}
           {items === null && !err && <li className="px-3 py-2 text-[13px] text-muted">Loading…</li>}
-          {items !== null && results.length === 0 && <li className="px-3 py-6 text-center text-[13px] text-muted">Nothing matches “{q}”.</li>}
+          {items !== null && results.length === 0 && (
+            <li className="px-3 py-6 text-center text-[13px] text-muted">Nothing matches “{q}”.</li>
+          )}
           {results.map((r, i) => (
             <li
               key={r.key}

@@ -3,7 +3,21 @@ import { type ButtonSize, type ButtonVariant, buttonClass, cx } from '../ui';
 import { Link } from './router';
 
 /** An in-app link that looks like a button (navigates without reloading). */
-export function ButtonLink({ to, variant = 'secondary', size = 'md', icon, children, className }: { to: string; variant?: ButtonVariant; size?: ButtonSize; icon?: ReactNode; children: ReactNode; className?: string }) {
+export function ButtonLink({
+  to,
+  variant = 'secondary',
+  size = 'md',
+  icon,
+  children,
+  className,
+}: {
+  to: string;
+  variant?: ButtonVariant;
+  size?: ButtonSize;
+  icon?: ReactNode;
+  children: ReactNode;
+  className?: string;
+}) {
   return (
     <Link to={to} className={buttonClass({ variant, size, className: cx('no-underline', className) })}>
       {icon}

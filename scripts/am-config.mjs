@@ -42,8 +42,7 @@ async function files(root) {
   const out = [];
   for (const type of await readdir(root, { withFileTypes: true }).catch(() => []))
     if (type.isDirectory())
-      for (const f of await readdir(join(root, type.name)))
-        if (f.endsWith('.json')) out.push(join(root, type.name, f));
+      for (const f of await readdir(join(root, type.name))) if (f.endsWith('.json')) out.push(join(root, type.name, f));
   return out;
 }
 
@@ -65,7 +64,9 @@ if (command === 'pull') {
     note: process.env.AM_NOTE ?? `am-config push${process.env.GITHUB_SHA ? ` ${process.env.GITHUB_SHA.slice(0, 7)}` : ''}`,
   });
   for (const c of out.changes.filter((x) => x.action !== 'unchanged' || x.publish === 'failed'))
-    console.log(`${c.action.padEnd(9)} ${c.type.padEnd(15)} ${c.name}${c.publish ? ` → ${c.publish}` : ''}${c.problem ? `: ${c.problem}` : ''}`);
+    console.log(
+      `${c.action.padEnd(9)} ${c.type.padEnd(15)} ${c.name}${c.publish ? ` → ${c.publish}` : ''}${c.problem ? `: ${c.problem}` : ''}`,
+    );
   const n = out.changes.filter((x) => x.action !== 'unchanged').length;
   console.log(`${out.dryRun ? 'dry run: ' : ''}${n} change(s), ${out.changes.length - n} unchanged`);
   if (out.changes.some((c) => c.publish === 'failed')) process.exitCode = 1;

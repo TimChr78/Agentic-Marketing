@@ -97,8 +97,8 @@ export default function ConsentPage() {
       />
 
       <Alert tone="info" className="mb-5">
-        The consent ledger is append-only. A record is never edited or deleted; to correct a choice, record a new one. The latest record per purpose and
-        channel is what the send gateway uses.
+        The consent ledger is append-only. A record is never edited or deleted; to correct a choice, record a new one. The latest record per
+        purpose and channel is what the send gateway uses.
       </Alert>
 
       <section className="mb-6" aria-labelledby="purposes-heading">
@@ -218,7 +218,12 @@ export default function ConsentPage() {
                         {personLabel(profile.data, profile.data.id)}
                       </Link>,
                     ],
-                    ['Profile id', <Mono key="id" className="break-all">{profile.data.id}</Mono>],
+                    [
+                      'Profile id',
+                      <Mono key="id" className="break-all">
+                        {profile.data.id}
+                      </Mono>,
+                    ],
                   ]}
                 />
               )
@@ -343,7 +348,9 @@ function RecordDrawer({
             <Input
               value={purpose}
               onChange={(e) => setPurpose(e.target.value)}
-              onBlur={() => setErrors((x) => ({ ...x, purpose: PURPOSE.test(purpose) ? '' : 'Use a lowercase key such as marketing_email.' }))}
+              onBlur={() =>
+                setErrors((x) => ({ ...x, purpose: PURPOSE.test(purpose) ? '' : 'Use a lowercase key such as marketing_email.' }))
+              }
               autoComplete="off"
             />
           )}
@@ -376,10 +383,7 @@ function RecordDrawer({
             <option value="unsubscribe">An unsubscribe</option>
           </Select>
         </Field>
-        <Field
-          label="Proof note"
-          hint="What they saw or signed, and when. For example “Homepage newsletter checkbox v3, 2026-10-20”."
-        >
+        <Field label="Proof note" hint="What they saw or signed, and when. For example “Homepage newsletter checkbox v3, 2026-10-20”.">
           <Textarea value={note} onChange={(e) => setNote(e.target.value)} rows={3} maxLength={2000} />
         </Field>
         {error && <Alert tone="bad">{error}</Alert>}

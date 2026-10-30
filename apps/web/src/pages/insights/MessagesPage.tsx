@@ -12,6 +12,7 @@ import {
   Button,
   EmptyState,
   Field,
+  formatDateTime,
   Input,
   Mono,
   PageHeader,
@@ -20,10 +21,9 @@ import {
   Table,
   TableFrame,
   Td,
-  Th,
   THead,
+  Th,
   Tr,
-  formatDateTime,
   timeAgo,
 } from '../../ui';
 import { pageWidth } from '../../ui/layout';
@@ -33,16 +33,7 @@ type MessageStatus = Message['status'];
 
 const PROFILE_ID = /^prf_[0-9a-f]{32}$/;
 const CHANNELS = ['email', 'sms', 'push'];
-const STATUSES: MessageStatus[] = [
-  'queued',
-  'sending',
-  'sent',
-  'suppressed',
-  'failed',
-  'delivered',
-  'bounced',
-  'complained',
-];
+const STATUSES: MessageStatus[] = ['queued', 'sending', 'sent', 'suppressed', 'failed', 'delivered', 'bounced', 'complained'];
 
 const tone = {
   queued: 'neutral',
@@ -250,9 +241,7 @@ export default function MessagesPage() {
                   {m.purpose.replace(/_/g, ' ')}
                   {m.test && <span className="ml-1 text-muted">· test</span>}
                 </Td>
-                <Td className="hidden md:table-cell">
-                  {m.attempts > 0 ? m.attempts : <span className="text-muted">—</span>}
-                </Td>
+                <Td className="hidden md:table-cell">{m.attempts > 0 ? m.attempts : <span className="text-muted">—</span>}</Td>
                 <Td className="max-w-[360px]">
                   {m.status === 'queued' && m.nextAttemptAt ? (
                     <span className="line-clamp-2">
@@ -269,7 +258,9 @@ export default function MessagesPage() {
                         .join(' · ')}
                     </span>
                   ) : (
-                    <span className="text-muted">{m.notBefore ? `Held until ${formatDateTime(m.notBefore)}` : 'No delivery events yet'}</span>
+                    <span className="text-muted">
+                      {m.notBefore ? `Held until ${formatDateTime(m.notBefore)}` : 'No delivery events yet'}
+                    </span>
                   )}
                 </Td>
                 <Td className="whitespace-nowrap" title={formatDateTime(m.createdAt)}>

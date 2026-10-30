@@ -1,12 +1,4 @@
-import {
-  BarChart3,
-  Blocks,
-  Brush,
-  CheckSquare,
-  type LucideIcon,
-  Settings,
-  Users,
-} from 'lucide-react';
+import { BarChart3, Blocks, Brush, CheckSquare, type LucideIcon, Settings, Users } from 'lucide-react';
 
 // The information architecture (#34). Each entry names the permission it needs; entries the
 // person's role cannot use are hidden, so the nav never leads to a page full of 403s.

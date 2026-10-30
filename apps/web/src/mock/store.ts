@@ -10,15 +10,7 @@ import type {
   Segment,
   TrackedEvent,
 } from '../api/types';
-import {
-  seedApprovals,
-  seedDaily,
-  seedExperiences,
-  seedJourneys,
-  seedProfiles,
-  seedSegments,
-  seedTemplates,
-} from './seed';
+import { seedApprovals, seedDaily, seedExperiences, seedJourneys, seedProfiles, seedSegments, seedTemplates } from './seed';
 
 // The mock "backend database". Only api/commands.ts writes to the domain slices;
 // screens read from here and call commands, just as they would against the real API.

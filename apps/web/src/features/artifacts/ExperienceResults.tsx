@@ -1,7 +1,7 @@
 import { RefreshCw } from 'lucide-react';
 import { api } from '../../app/api';
 import { useApi } from '../../app/useApi';
-import { Alert, Button, EmptyState, LoadingBlock, Table, TableFrame, Tag, Td, Th, THead, Tr } from '../../ui';
+import { Alert, Button, EmptyState, LoadingBlock, Table, TableFrame, Tag, Td, THead, Th, Tr } from '../../ui';
 import type { Artifact } from './ArtifactDetailPage';
 
 // Experiment results of a web experience: exposures, conversions and rates per variant, compared
@@ -67,7 +67,11 @@ export function ExperienceResults({ artifact }: { artifact: Artifact }) {
 
       <TableFrame
         isEmpty={!r.variants.length}
-        empty={<EmptyState title="No exposures yet" compact>When visitors see a variant, its exposures show here. Events arrive within a minute or two.</EmptyState>}
+        empty={
+          <EmptyState title="No exposures yet" compact>
+            When visitors see a variant, its exposures show here. Events arrive within a minute or two.
+          </EmptyState>
+        }
       >
         <Table label="Experiment results">
           <THead>
@@ -97,11 +101,18 @@ export function ExperienceResults({ artifact }: { artifact: Artifact }) {
                   <Td align="right">{v.exposed.toLocaleString()}</Td>
                   <Td align="right">{v.converted.toLocaleString()}</Td>
                   <Td align="right">{pct(v.rate)}</Td>
-                  <Td align="right" title={v.ci95 ? `95% interval for the difference in rate: ${points(v.ci95[0])} to ${points(v.ci95[1])}` : undefined}>
+                  <Td
+                    align="right"
+                    title={v.ci95 ? `95% interval for the difference in rate: ${points(v.ci95[0])} to ${points(v.ci95[1])}` : undefined}
+                  >
                     {isControl ? (
                       <span className="text-muted">—</span>
                     ) : (
-                      <span className={v.lift !== null && v.lift > 0 ? 'text-good' : v.lift !== null && v.lift < 0 ? 'text-bad' : undefined}>{pct(v.lift)}</span>
+                      <span
+                        className={v.lift !== null && v.lift > 0 ? 'text-good' : v.lift !== null && v.lift < 0 ? 'text-bad' : undefined}
+                      >
+                        {pct(v.lift)}
+                      </span>
                     )}
                   </Td>
                   <Td align="right">
@@ -113,7 +124,11 @@ export function ExperienceResults({ artifact }: { artifact: Artifact }) {
                           ? (v.sequentialP?.toFixed(3) ?? '—')
                           : (v.pValue?.toFixed(3) ?? '—')}
                   </Td>
-                  <Td align="right" className="hidden lg:table-cell" title={`Expected loss from choosing this variant: ${points(v.expectedLoss)}`}>
+                  <Td
+                    align="right"
+                    className="hidden lg:table-cell"
+                    title={`Expected loss from choosing this variant: ${points(v.expectedLoss)}`}
+                  >
                     {pct(v.probBest)}
                   </Td>
                 </Tr>

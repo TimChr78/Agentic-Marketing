@@ -1,4 +1,4 @@
-import type { ReactNode, ThHTMLAttributes, TdHTMLAttributes } from 'react';
+import type { ReactNode, TdHTMLAttributes, ThHTMLAttributes } from 'react';
 import { cx } from './cx';
 import { Alert, EmptyState, Skeleton } from './display';
 
@@ -71,13 +71,30 @@ export function Th({ className, align, ...p }: ThHTMLAttributes<HTMLTableCellEle
   return <th scope="col" {...p} className={cx('h-9 px-4 font-medium whitespace-nowrap', align === 'right' && 'text-right', className)} />;
 }
 
-export function Tr({ children, onClick, selected, className, href }: { children: ReactNode; onClick?: () => void; selected?: boolean; className?: string; href?: string }) {
+export function Tr({
+  children,
+  onClick,
+  selected,
+  className,
+  href,
+}: {
+  children: ReactNode;
+  onClick?: () => void;
+  selected?: boolean;
+  className?: string;
+  href?: string;
+}) {
   return (
     <tr
       onClick={onClick}
       aria-selected={selected || undefined}
       data-href={href}
-      className={cx('border-t border-line', (onClick || href) && 'cursor-pointer hover:bg-surface-2', selected && 'bg-surface-2', className)}
+      className={cx(
+        'border-t border-line',
+        (onClick || href) && 'cursor-pointer hover:bg-surface-2',
+        selected && 'bg-surface-2',
+        className,
+      )}
     >
       {children}
     </tr>

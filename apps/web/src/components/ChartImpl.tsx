@@ -1,12 +1,21 @@
-import { useEffect, useRef } from 'react';
 import * as echarts from 'echarts';
+import { useEffect, useRef } from 'react';
 import { useTheme } from '../lib/theme';
 import type { ChartColors, ChartProps } from './Chart';
 
 function readColors(): ChartColors {
   const cs = getComputedStyle(document.documentElement);
   const v = (k: string) => cs.getPropertyValue(`--${k}`).trim();
-  return { fg: v('fg'), muted: v('muted'), line: v('line'), accent: v('accent'), agent: v('agent'), good: v('good'), bad: v('bad'), surface: v('surface') };
+  return {
+    fg: v('fg'),
+    muted: v('muted'),
+    line: v('line'),
+    accent: v('accent'),
+    agent: v('agent'),
+    good: v('good'),
+    bad: v('bad'),
+    surface: v('surface'),
+  };
 }
 
 /** The ECharts half of Chart, in its own chunk so pages without a chart do not load it (#60). */

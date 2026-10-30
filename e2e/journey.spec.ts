@@ -14,7 +14,10 @@ test('journey builder: add by drag, connect, delete by keyboard and context menu
 
   // Drag "Wait" from the palette onto the canvas.
   const pane = await canvas.boundingBox();
-  await page.getByRole('navigation', { name: 'Steps' }).getByRole('button', { name: 'Wait', exact: true }).dragTo(canvas, { targetPosition: { x: pane!.width - 160, y: pane!.height / 2 } });
+  await page
+    .getByRole('navigation', { name: 'Steps' })
+    .getByRole('button', { name: 'Wait', exact: true })
+    .dragTo(canvas, { targetPosition: { x: pane!.width - 160, y: pane!.height / 2 } });
   await expect(canvas.locator('.react-flow__node')).toHaveCount(3);
   const wait = canvas.locator('.react-flow__node').filter({ hasText: 'Wait' }).filter({ hasText: '1 day' });
 

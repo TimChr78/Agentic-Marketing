@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
 import { Plus, Trash2 } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
 import { api } from '../../app/api';
 import { TextLink } from '../../app/links';
 import { useApi } from '../../app/useApi';
@@ -59,7 +59,12 @@ const COPY_DEFAULTS: { key: keyof BrandCopy; label: string; hint: string; rows: 
   { key: 'confirmBody', label: 'Confirm page body', hint: 'Default: One click and you are in.', rows: 3 },
   { key: 'confirmButton', label: 'Confirm button', hint: 'Default: Yes, subscribe me', rows: 2 },
   { key: 'expiredTitle', label: 'Expired page title', hint: 'Default: Link expired', rows: 2 },
-  { key: 'expiredBody', label: 'Expired page body', hint: 'Default: This link has expired. Please sign up again; we will send you a new link.', rows: 3 },
+  {
+    key: 'expiredBody',
+    label: 'Expired page body',
+    hint: 'Default: This link has expired. Please sign up again; we will send you a new link.',
+    rows: 3,
+  },
 ];
 
 export function FormEditor({ artifact, content, onChange, readOnly, errors }: EditorProps<FormContent>) {
@@ -95,29 +100,30 @@ export function FormEditor({ artifact, content, onChange, readOnly, errors }: Ed
                 </Alert>
               )}
               {purposes.data &&
-                [...purposes.data.purposes.map((p) => p.key), ...selectedPurposes.filter((k) => !purposes.data?.purposes.some((p) => p.key === k))].map(
-                  (key) => {
-                    const p = purposes.data?.purposes.find((x) => x.key === key);
-                    return (
-                      <Checkbox
-                        key={key}
-                        checked={selectedPurposes.includes(key)}
-                        disabled={readOnly}
-                        onChange={(e) =>
-                          set({
-                            purposes: e.target.checked ? [...selectedPurposes, key] : selectedPurposes.filter((k) => k !== key),
-                          })
-                        }
-                        label={
-                          <>
-                            {p?.name ?? key} <span className="text-muted">({key})</span>
-                          </>
-                        }
-                        hint={p?.description}
-                      />
-                    );
-                  },
-                )}
+                [
+                  ...purposes.data.purposes.map((p) => p.key),
+                  ...selectedPurposes.filter((k) => !purposes.data?.purposes.some((p) => p.key === k)),
+                ].map((key) => {
+                  const p = purposes.data?.purposes.find((x) => x.key === key);
+                  return (
+                    <Checkbox
+                      key={key}
+                      checked={selectedPurposes.includes(key)}
+                      disabled={readOnly}
+                      onChange={(e) =>
+                        set({
+                          purposes: e.target.checked ? [...selectedPurposes, key] : selectedPurposes.filter((k) => k !== key),
+                        })
+                      }
+                      label={
+                        <>
+                          {p?.name ?? key} <span className="text-muted">({key})</span>
+                        </>
+                      }
+                      hint={p?.description}
+                    />
+                  );
+                })}
             </div>
             {purposesError && <p className="text-[12px] text-bad">{purposesError}</p>}
           </fieldset>
@@ -221,7 +227,8 @@ export function FormEditor({ artifact, content, onChange, readOnly, errors }: Ed
               disabled={readOnly}
             />
             <p className="mt-1 text-[12px] text-muted">
-              The secret is stored under <TextLink to="/settings/secrets">Settings → Secrets</TextLink> as <code className="font-mono text-[12px]">turnstile.secret_key</code>.
+              The secret is stored under <TextLink to="/settings/secrets">Settings → Secrets</TextLink> as{' '}
+              <code className="font-mono text-[12px]">turnstile.secret_key</code>.
             </p>
             {errors.turnstile && <p className="mt-1 text-[12px] text-bad">{errors.turnstile}</p>}
           </div>
@@ -300,11 +307,7 @@ function TraitsEditor({
 
   return (
     <div className="space-y-2">
-      <Field
-        label="Traits"
-        hint="Trait names: a letter, then letters, digits or underscores. Up to 20."
-        error={error ?? local}
-      >
+      <Field label="Traits" hint="Trait names: a letter, then letters, digits or underscores. Up to 20." error={error ?? local}>
         <div className="flex items-start gap-2">
           <Input
             value={draft}
@@ -315,7 +318,8 @@ function TraitsEditor({
               setLocal(null);
             }}
             onBlur={() => {
-              if (draft.trim() && !TRAIT_RE.test(draft.trim())) setLocal('Use a letter, then letters, digits or underscores (up to 64 characters).');
+              if (draft.trim() && !TRAIT_RE.test(draft.trim()))
+                setLocal('Use a letter, then letters, digits or underscores (up to 64 characters).');
             }}
             onKeyDown={(e) => {
               if (e.key === 'Enter') {
@@ -491,7 +495,11 @@ function HostedPagesEditor({
         />
       </Field>
 
-      <Field label="Site URL" hint="Where “Back to …” points. Use https, or http on localhost." error={errors['hostedPages.siteUrl'] ?? siteUrlError}>
+      <Field
+        label="Site URL"
+        hint="Where “Back to …” points. Use https, or http on localhost."
+        error={errors['hostedPages.siteUrl'] ?? siteUrlError}
+      >
         <Input
           value={brand.siteUrl ?? ''}
           readOnly={readOnly}
@@ -509,7 +517,11 @@ function HostedPagesEditor({
         />
       </Field>
 
-      <Field label="Logo URL" hint="An https URL, for example an asset public URL. Optional." error={errors['hostedPages.logoUrl'] ?? logoUrlError}>
+      <Field
+        label="Logo URL"
+        hint="An https URL, for example an asset public URL. Optional."
+        error={errors['hostedPages.logoUrl'] ?? logoUrlError}
+      >
         <Input
           value={brand.logoUrl ?? ''}
           readOnly={readOnly}
@@ -521,13 +533,18 @@ function HostedPagesEditor({
           onBlur={(e) => {
             const v = e.target.value.trim();
             if (!v) return setLogoUrlError(null);
-            if (v !== e.target.value || v.length > 2000) return setLogoUrlError('Use an https URL for the logo (http only on localhost, for development)');
+            if (v !== e.target.value || v.length > 2000)
+              return setLogoUrlError('Use an https URL for the logo (http only on localhost, for development)');
             setLogoUrlError(brandUrlError(v, true));
           }}
         />
       </Field>
 
-      <Field label="Accent colour" hint="The primary button and links, e.g. #1d4ed8." error={errors['hostedPages.colors.accent'] ?? accentError}>
+      <Field
+        label="Accent colour"
+        hint="The primary button and links, e.g. #1d4ed8."
+        error={errors['hostedPages.colors.accent'] ?? accentError}
+      >
         <div className="flex items-center gap-2">
           <input
             type="color"
@@ -612,7 +629,9 @@ function brandUrlError(value: string, logo: boolean): string | null {
   } catch {
     // Not a URL at all.
   }
-  return logo ? 'Use an https URL for the logo (http only on localhost, for development)' : 'Use an https URL, or http on localhost for development';
+  return logo
+    ? 'Use an https URL for the logo (http only on localhost, for development)'
+    : 'Use an https URL, or http on localhost for development';
 }
 
 function hexForPicker(value?: string): string {

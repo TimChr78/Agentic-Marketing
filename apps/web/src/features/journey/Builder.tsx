@@ -1,4 +1,5 @@
 import {
+  applyNodeChanges,
   Background,
   type Connection,
   Controls,
@@ -9,19 +10,49 @@ import {
   type NodeChange,
   ReactFlow,
   ReactFlowProvider,
-  applyNodeChanges,
   useReactFlow,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { Copy, BarChart3, Map as MapIcon, Maximize, Maximize2, Minimize2, PanelLeft, PanelRight, Plus, Redo2, Settings2, ShieldCheck, Trash2, Undo2 } from 'lucide-react';
+import {
+  BarChart3,
+  Copy,
+  Map as MapIcon,
+  Maximize,
+  Maximize2,
+  Minimize2,
+  PanelLeft,
+  PanelRight,
+  Plus,
+  Redo2,
+  Settings2,
+  ShieldCheck,
+  Trash2,
+  Undo2,
+} from 'lucide-react';
 import { type KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../../app/api';
 import { useSession } from '../../app/session';
 import { useResolvedTheme } from '../../app/theme';
 import { useApi } from '../../app/useApi';
-import { Button, Checkbox, ContextMenu, cx, EmptyState, Field, IconButton, Input, Kbd, Menu, type MenuItem, Select, Tag, Tabs, useToast } from '../../ui';
-import type { EditorProps } from '../artifacts/ArtifactDetailPage';
+import {
+  Button,
+  Checkbox,
+  ContextMenu,
+  cx,
+  EmptyState,
+  Field,
+  IconButton,
+  Input,
+  Kbd,
+  Menu,
+  type MenuItem,
+  Select,
+  Tabs,
+  Tag,
+  useToast,
+} from '../../ui';
 import { referencedIds, useArtifactNames } from '../artifactCache';
+import type { EditorProps } from '../artifacts/ArtifactDetailPage';
 import { localWarnings, mergeWarnings } from './checks';
 import { Inspector } from './Inspector';
 import { Legend } from './Legend';
@@ -91,7 +122,9 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
 
   const published = artifact.publishedVersion !== null && artifact.publishedVersion !== undefined;
   // #58: per-step passed/waiting for the live version, refreshed while shown.
-  const stats = useApi(() => api.call('journeys.stats', { artifactId: artifact.id }), [artifact.id, artifact.publishedVersion], { skip: !showStats || !published });
+  const stats = useApi(() => api.call('journeys.stats', { artifactId: artifact.id }), [artifact.id, artifact.publishedVersion], {
+    skip: !showStats || !published,
+  });
   const statData = showStats ? stats.data : undefined;
   useEffect(() => {
     if (!showStats || !published) return;
@@ -223,7 +256,8 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
 
   const addAfterSelection = (kind: NodeKind) => {
     if (readOnly) return;
-    const from = selectedNode && selectedNode.kind !== 'exit' && (selectedNode.next?.length ?? 0) < maxEdges(selectedNode) ? selectedNode : undefined;
+    const from =
+      selectedNode && selectedNode.kind !== 'exit' && (selectedNode.next?.length ?? 0) < maxEdges(selectedNode) ? selectedNode : undefined;
     let position: { x: number; y: number };
     if (from) {
       const at = positions[from.id]!;
@@ -242,9 +276,21 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
     ...(readOnly
       ? []
       : ([
-          { label: 'Duplicate', icon: <Copy />, hint: 'Ctrl D', disabled: n.kind === 'trigger', onSelect: () => commit(duplicateNode(nodes, n.id)) },
+          {
+            label: 'Duplicate',
+            icon: <Copy />,
+            hint: 'Ctrl D',
+            disabled: n.kind === 'trigger',
+            onSelect: () => commit(duplicateNode(nodes, n.id)),
+          },
           'separator',
-          { label: 'Delete step', icon: <Trash2 />, hint: 'Del', destructive: true, onSelect: () => (commit(deleteNode(nodes, n.id)), setSel(null)) },
+          {
+            label: 'Delete step',
+            icon: <Trash2 />,
+            hint: 'Del',
+            destructive: true,
+            onSelect: () => (commit(deleteNode(nodes, n.id)), setSel(null)),
+          },
         ] as (MenuItem | 'separator')[])),
   ];
 
@@ -275,7 +321,19 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
       }
       const r = t.getBoundingClientRect();
       if (!readOnly)
-        setMenu({ x: r.left + r.width / 2, y: r.top + r.height / 2, items: [{ label: 'Delete connection', icon: <Trash2 />, hint: 'Del', destructive: true, onSelect: () => (commit(disconnect(nodes, source!, Number(index))), setSel(null)) }] });
+        setMenu({
+          x: r.left + r.width / 2,
+          y: r.top + r.height / 2,
+          items: [
+            {
+              label: 'Delete connection',
+              icon: <Trash2 />,
+              hint: 'Del',
+              destructive: true,
+              onSelect: () => (commit(disconnect(nodes, source!, Number(index))), setSel(null)),
+            },
+          ],
+        });
       return;
     }
     if ((e.key === 'Delete' || e.key === 'Backspace') && sel) {
@@ -326,7 +384,13 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
       )}
     >
       {paletteOpen && (
-        <aside className="hidden border-r border-line lg:block">{!readOnly ? <Palette onAdd={addAfterSelection} /> : <p className="p-3 text-[12px] text-muted">Your role can view this journey but not edit it.</p>}</aside>
+        <aside className="hidden border-r border-line lg:block">
+          {!readOnly ? (
+            <Palette onAdd={addAfterSelection} />
+          ) : (
+            <p className="p-3 text-[12px] text-muted">Your role can view this journey but not edit it.</p>
+          )}
+        </aside>
       )}
 
       <div className="flex min-h-[480px] min-w-0 flex-col">
@@ -344,7 +408,14 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
                 <Menu
                   label="Add step"
                   align="start"
-                  items={PALETTE_ORDER.map((k) => ({ label: KINDS[k].label, icon: (() => { const I = KINDS[k].icon; return <I style={{ color: `var(--cat-${KINDS[k].category})` }} />; })(), onSelect: () => addAfterSelection(k) }))}
+                  items={PALETTE_ORDER.map((k) => ({
+                    label: KINDS[k].label,
+                    icon: (() => {
+                      const I = KINDS[k].icon;
+                      return <I style={{ color: `var(--cat-${KINDS[k].category})` }} />;
+                    })(),
+                    onSelect: () => addAfterSelection(k),
+                  }))}
                   trigger={(t) => (
                     <Button {...t} size="sm" icon={<Plus size={14} />}>
                       Add step
@@ -372,7 +443,13 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
             onClick={() => setFullscreen((v) => !v)}
           />
           {published && (
-            <Button size="sm" variant={showStats ? 'secondary' : 'ghost'} icon={<BarChart3 size={14} />} aria-pressed={showStats} onClick={() => setPref('stats', !showStats, setShowStats)}>
+            <Button
+              size="sm"
+              variant={showStats ? 'secondary' : 'ghost'}
+              icon={<BarChart3 size={14} />}
+              aria-pressed={showStats}
+              onClick={() => setPref('stats', !showStats, setShowStats)}
+            >
               {showStats ? 'Hide stats' : 'Show stats'}
             </Button>
           )}
@@ -410,7 +487,16 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
           }}
         >
           {nodes.length === 0 ? (
-            <EmptyState title="Start with a trigger" action={!readOnly && <Button variant="primary" onClick={() => addAfterSelection('trigger')}>Add a trigger</Button>}>
+            <EmptyState
+              title="Start with a trigger"
+              action={
+                !readOnly && (
+                  <Button variant="primary" onClick={() => addAfterSelection('trigger')}>
+                    Add a trigger
+                  </Button>
+                )
+              }
+            >
               Drag steps from the left, or press them, to build the journey.
             </EmptyState>
           ) : (
@@ -426,7 +512,14 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
               proOptions={{ hideAttribution: true }}
               deleteKeyCode={null}
               nodesConnectable={!readOnly}
-              onNodesChange={(changes: NodeChange[]) => setRfNodes((ns) => applyNodeChanges(changes.filter((c) => c.type !== 'select' && c.type !== 'remove'), ns))}
+              onNodesChange={(changes: NodeChange[]) =>
+                setRfNodes((ns) =>
+                  applyNodeChanges(
+                    changes.filter((c) => c.type !== 'select' && c.type !== 'remove'),
+                    ns,
+                  ),
+                )
+              }
               onNodeDragStop={() => commit({ nodes: withPositions(nodes, Object.fromEntries(rfNodes.map((n) => [n.id, n.position]))) })}
               onNodeClick={(_, n) => {
                 setSel({ kind: 'node', id: n.id });
@@ -441,7 +534,9 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
               isValidConnection={(c) => {
                 const src = nodes.find((n) => n.id === c.source);
                 const i = Number(c.sourceHandle?.split('-')[1] ?? 0);
-                return !!src && c.source !== c.target && i <= (src.next?.length ?? 0) && nodes.find((n) => n.id === c.target)?.kind !== 'trigger';
+                return (
+                  !!src && c.source !== c.target && i <= (src.next?.length ?? 0) && nodes.find((n) => n.id === c.target)?.kind !== 'trigger'
+                );
               }}
               onNodeContextMenu={(e, n) => {
                 e.preventDefault();
@@ -454,7 +549,19 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
                 const [source, index] = edge.id.split(':');
                 setSel({ kind: 'edge', source: source!, index: Number(index) });
                 if (!readOnly)
-                  setMenu({ x: e.clientX, y: e.clientY, items: [{ label: 'Delete connection', icon: <Trash2 />, hint: 'Del', destructive: true, onSelect: () => (commit(disconnect(nodes, source!, Number(index))), setSel(null)) }] });
+                  setMenu({
+                    x: e.clientX,
+                    y: e.clientY,
+                    items: [
+                      {
+                        label: 'Delete connection',
+                        icon: <Trash2 />,
+                        hint: 'Del',
+                        destructive: true,
+                        onSelect: () => (commit(disconnect(nodes, source!, Number(index))), setSel(null)),
+                      },
+                    ],
+                  });
               }}
               aria-label={`Journey canvas, ${nodes.length} steps. Tab to a step, Enter to select it, Delete removes the selection, Shift F10 opens its menu.`}
             >
@@ -473,7 +580,8 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
           )}
         </div>
         <p className="border-t border-line px-3 py-1.5 text-[11px] text-muted">
-          <Kbd>Del</Kbd> delete · <Kbd>Ctrl Z</Kbd> undo · <Kbd>Ctrl D</Kbd> duplicate · right-click or <Kbd>Shift F10</Kbd> for more · drag from a dot to connect
+          <Kbd>Del</Kbd> delete · <Kbd>Ctrl Z</Kbd> undo · <Kbd>Ctrl D</Kbd> duplicate · right-click or <Kbd>Shift F10</Kbd> for more · drag
+          from a dot to connect
         </p>
       </div>
 
@@ -502,14 +610,24 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
                   warnings={warnings[selectedNode.id] ?? []}
                   readOnly={readOnly}
                   onChange={(n) => commit({ nodes: nodes.map((x) => (x.id === n.id ? n : x)) })}
-                  onConnect={(i, target) => commit(target ? connect(nodes, selectedNode.id, i, target) : disconnect(nodes, selectedNode.id, i))}
+                  onConnect={(i, target) =>
+                    commit(target ? connect(nodes, selectedNode.id, i, target) : disconnect(nodes, selectedNode.id, i))
+                  }
                   onDelete={() => (commit(deleteNode(nodes, selectedNode.id)), setSel(null))}
                   onDuplicate={() => commit(duplicateNode(nodes, selectedNode.id))}
                 />
               ) : (
                 <JourneySettings content={content} onChange={onChange} readOnly={readOnly} artifactId={artifact.id} published={published} />
               ))}
-            {panel === 'check' && <CheckList nodes={nodes} warnings={warnings} onSelect={(id) => (setSel({ kind: 'node', id }), setPanel('inspect'), rf.fitView({ nodes: [{ id }], duration: 250, maxZoom: 1.2 }))} />}
+            {panel === 'check' && (
+              <CheckList
+                nodes={nodes}
+                warnings={warnings}
+                onSelect={(id) => (
+                  setSel({ kind: 'node', id }), setPanel('inspect'), rf.fitView({ nodes: [{ id }], duration: 250, maxZoom: 1.2 })
+                )}
+              />
+            )}
             {panel === 'simulate' && (
               <SimulatePanel
                 artifactId={artifact.id}
@@ -530,7 +648,12 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
 
 function CheckList({ nodes, warnings, onSelect }: { nodes: JNode[]; warnings: Record<string, string[]>; onSelect: (id: string) => void }) {
   const items = nodes.filter((n) => warnings[n.id]?.length);
-  if (!items.length) return <EmptyState compact title="Ready to publish">Every step has what it needs. Simulate it, then submit it for review.</EmptyState>;
+  if (!items.length)
+    return (
+      <EmptyState compact title="Ready to publish">
+        Every step has what it needs. Simulate it, then submit it for review.
+      </EmptyState>
+    );
   return (
     <ul className="divide-y divide-line">
       {items.map((n) => (
@@ -601,7 +724,12 @@ function JourneyMeta({
         </Select>
       </Field>
       <Field label="Goal" hint="What success looks like, for the team and for reports.">
-        <Input value={content.goal ?? ''} readOnly={readOnly} maxLength={200} onChange={(e) => onChange({ ...content, goal: e.target.value || undefined })} />
+        <Input
+          value={content.goal ?? ''}
+          readOnly={readOnly}
+          maxLength={200}
+          onChange={(e) => onChange({ ...content, goal: e.target.value || undefined })}
+        />
       </Field>
 
       <div className="rounded-md border border-line p-3">
@@ -637,13 +765,13 @@ function JourneyMeta({
               />
             </Field>
             <p className="text-[12px] text-muted">
-              Control people still wait, branch and reach the goal; they just get no marketing messages. Their conversions show what would have
-              happened without the journey. Read the result with <span className="font-mono">journeys.holdoutResult</span>.
+              Control people still wait, branch and reach the goal; they just get no marketing messages. Their conversions show what would
+              have happened without the journey. Read the result with <span className="font-mono">journeys.holdoutResult</span>.
             </p>
             {published && total > 0 && (
               <p className="text-[12px] text-fg-2">
-                About <strong>{Math.round((total * cg.percent) / 100).toLocaleString()}</strong> of the {total.toLocaleString()} people in this journey
-                so far would be control.
+                About <strong>{Math.round((total * cg.percent) / 100).toLocaleString()}</strong> of the {total.toLocaleString()} people in
+                this journey so far would be control.
               </p>
             )}
             <Checkbox

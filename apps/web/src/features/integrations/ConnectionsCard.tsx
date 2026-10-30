@@ -1,5 +1,8 @@
-import { useState } from 'react';
 import { ExternalLink, MoreHorizontal, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react';
+import { useState } from 'react';
+import { ApiError, api, errText, type Out } from '../../app/api';
+import { useWorkspace } from '../../app/session';
+import { useApi } from '../../app/useApi';
 import {
   Alert,
   Button,
@@ -10,6 +13,7 @@ import {
   EmptyState,
   Field,
   FieldGroup,
+  fieldErrors,
   Input,
   LoadingBlock,
   Menu,
@@ -19,17 +23,13 @@ import {
   Table,
   TableFrame,
   Tag,
-  THead,
   Td,
+  THead,
   Th,
   Tr,
-  fieldErrors,
   useConfirm,
   useToast,
 } from '../../ui';
-import { ApiError, api, errText, type Out } from '../../app/api';
-import { useApi } from '../../app/useApi';
-import { useWorkspace } from '../../app/session';
 import { cleanValues, defaultsOf, humanize, type JsonSchema } from '../providers/SchemaForm';
 import { JsonSchemaFields } from './JsonSchemaFields';
 
@@ -43,7 +43,12 @@ const OAUTH_LABEL: Record<'pending' | 'connected' | 'error', { label: string; to
   error: { label: 'Authorization failed', tone: 'bad' },
 };
 
-function requiredErrors(schema: ConnectorSettings | undefined, value: Record<string, unknown>, prefix: string, skip: boolean): Record<string, string> {
+function requiredErrors(
+  schema: ConnectorSettings | undefined,
+  value: Record<string, unknown>,
+  prefix: string,
+  skip: boolean,
+): Record<string, string> {
   const e: Record<string, string> = {};
   if (skip || !schema) return e;
   for (const key of schema.required ?? []) {
@@ -53,7 +58,13 @@ function requiredErrors(schema: ConnectorSettings | undefined, value: Record<str
   return e;
 }
 
-function validateConnection(f: { name: string; connector: string }, settings: Record<string, unknown>, secrets: Record<string, unknown>, connector: Connector | undefined, hasSecrets: boolean): Record<string, string> {
+function validateConnection(
+  f: { name: string; connector: string },
+  settings: Record<string, unknown>,
+  secrets: Record<string, unknown>,
+  connector: Connector | undefined,
+  hasSecrets: boolean,
+): Record<string, string> {
   const e: Record<string, string> = {};
   if (!f.connector) e.connector = 'Choose a connector.';
   if (!f.name.trim()) e.name = 'Give the connection a name.';
@@ -79,7 +90,9 @@ function ConnectionDrawer({
   const connector = connectors.find((c) => c.id === connectorId);
   const [name, setName] = useState(connection?.name ?? initialConnector?.label ?? '');
   const [settings, setSettings] = useState<Record<string, unknown>>(() =>
-    connection ? connection.settings : ((initialConnector?.settings ? defaultsOf(initialConnector.settings as JsonSchema) : {}) as Record<string, unknown>),
+    connection
+      ? connection.settings
+      : ((initialConnector?.settings ? defaultsOf(initialConnector.settings as JsonSchema) : {}) as Record<string, unknown>),
   );
   const [secrets, setSecrets] = useState<Record<string, unknown>>({});
   const [enabled, setEnabled] = useState(connection?.enabled ?? true);
@@ -116,7 +129,12 @@ function ConnectionDrawer({
         });
         onSaved(null);
       } else {
-        const created = await api.call('connections.create', { connector: connectorId, name: name.trim(), settings, secrets: cleanedSecrets });
+        const created = await api.call('connections.create', {
+          connector: connectorId,
+          name: name.trim(),
+          settings,
+          secrets: cleanedSecrets,
+        });
         onSaved(created.inboundPath ? { name: created.name, inboundPath: created.inboundPath } : null);
       }
     } catch (e) {
@@ -171,12 +189,7 @@ function ConnectionDrawer({
           void save();
         }}
       >
-        <Field
-          label="Connector"
-          hint={connector?.description}
-          error={errors.connector}
-          required
-        >
+        <Field label="Connector" hint={connector?.description} error={errors.connector} required>
           <Select value={connectorId} disabled={editing} onChange={(e) => changeConnector(e.target.value)}>
             {connectors.map((c) => (
               <option key={c.id} value={c.id}>
@@ -225,11 +238,25 @@ function ConnectionDrawer({
         )}
 
         {connection && (
-          <Checkbox label="Enabled" hint="Disabled connections are skipped; journey steps that use them take their error edge." checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
+          <Checkbox
+            label="Enabled"
+            hint="Disabled connections are skipped; journey steps that use them take their error edge."
+            checked={enabled}
+            onChange={(e) => setEnabled(e.target.checked)}
+          />
         )}
 
         {connector && !connection && (
-          <Alert tone="info" title={connector.inbound ? 'This connector receives webhooks' : connector.auth === 'oauth2' ? 'Sign in after saving' : 'Ready to use after saving'}>
+          <Alert
+            tone="info"
+            title={
+              connector.inbound
+                ? 'This connector receives webhooks'
+                : connector.auth === 'oauth2'
+                  ? 'Sign in after saving'
+                  : 'Ready to use after saving'
+            }
+          >
             {connector.inbound
               ? 'After you add it, copy the inbound URL and register it at the other system. The last part of the URL is a secret and is shown once.'
               : connector.auth === 'oauth2'
@@ -284,7 +311,11 @@ export function ConnectionsCard() {
   const remove = async (c: Connection) => {
     const ok = await confirm({
       title: `Delete “${c.name}”?`,
-      body: <>The connection, its stored credentials and its inbound URL (if any) are removed. Journey steps that use it take their error edge.</>,
+      body: (
+        <>
+          The connection, its stored credentials and its inbound URL (if any) are removed. Journey steps that use it take their error edge.
+        </>
+      ),
       confirmLabel: 'Delete connection',
       destructive: true,
       typeToConfirm: c.name,
@@ -310,7 +341,13 @@ export function ConnectionsCard() {
         action={
           admin ? (
             <>
-              <Button variant="ghost" size="sm" icon={<RefreshCw size={14} />} onClick={reload} loading={catalog.refreshing || list.refreshing}>
+              <Button
+                variant="ghost"
+                size="sm"
+                icon={<RefreshCw size={14} />}
+                onClick={reload}
+                loading={catalog.refreshing || list.refreshing}
+              >
                 Refresh
               </Button>
               <Button variant="primary" icon={<Plus size={16} />} disabled={!connectors.length} onClick={() => setEditing('new')}>
@@ -409,7 +446,15 @@ export function ConnectionsCard() {
                                   <MoreHorizontal size={16} />
                                 </button>
                               )}
-                              items={[{ label: 'Delete', icon: <Trash2 size={14} />, destructive: true, disabled: busy === c.id, onSelect: () => void remove(c) }]}
+                              items={[
+                                {
+                                  label: 'Delete',
+                                  icon: <Trash2 size={14} />,
+                                  destructive: true,
+                                  disabled: busy === c.id,
+                                  onSelect: () => void remove(c),
+                                },
+                              ]}
                             />
                           </div>
                         </Td>

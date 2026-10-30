@@ -8,7 +8,17 @@ import { PAGE_KINDS, type PageKind } from './defaults';
  * A hosted page as subscribers see it (#37), rendered by the server's own renderer: the published
  * brand, a draft `brand` being edited, or a form's override (`formId`). Sandboxed, no scripts.
  */
-export function HostedPreview({ brand, formId, initialPage = 'confirm', height = 560 }: { brand?: unknown; formId?: string; initialPage?: PageKind; height?: number }) {
+export function HostedPreview({
+  brand,
+  formId,
+  initialPage = 'confirm',
+  height = 560,
+}: {
+  brand?: unknown;
+  formId?: string;
+  initialPage?: PageKind;
+  height?: number;
+}) {
   const [page, setPage] = useState<PageKind>(initialPage);
   const [width, setWidth] = useState<'desktop' | 'mobile'>('desktop');
   const [html, setHtml] = useState<string | null>(null);
@@ -45,10 +55,20 @@ export function HostedPreview({ brand, formId, initialPage = 'confirm', height =
           ]}
         />
       </div>
-      {error && <Alert tone="bad" title="Can't preview this yet">{error}</Alert>}
+      {error && (
+        <Alert tone="bad" title="Can't preview this yet">
+          {error}
+        </Alert>
+      )}
       <div className="flex justify-center rounded-md border border-line bg-surface-3 p-3">
         {html ? (
-          <iframe title={`Hosted ${page} page preview`} sandbox="" srcDoc={html} className="rounded-sm bg-white shadow-1" style={{ width: width === 'mobile' ? 375 : '100%', height, border: 0 }} />
+          <iframe
+            title={`Hosted ${page} page preview`}
+            sandbox=""
+            srcDoc={html}
+            className="rounded-sm bg-white shadow-1"
+            style={{ width: width === 'mobile' ? 375 : '100%', height, border: 0 }}
+          />
         ) : (
           <Skeleton className="w-full" />
         )}

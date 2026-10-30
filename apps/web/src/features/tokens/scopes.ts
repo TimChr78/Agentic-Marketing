@@ -22,7 +22,11 @@ export const SCOPE_TEXT: Record<Scope, { label: string; does: string; peopleOnly
   'artifacts:read': { label: 'Read artifacts', does: 'read journeys, templates, segments, forms and broadcasts' },
   'artifacts:write': { label: 'Draft and edit', does: 'create and edit drafts (never live versions)' },
   'artifacts:publish': { label: 'Submit for review', does: 'submit drafts; the approval policy decides whether a person must approve' },
-  'messages:send': { label: 'Send messages', does: 'send e-mail and other messages to people (consent and unsubscribes still apply)', risky: true },
+  'messages:send': {
+    label: 'Send messages',
+    does: 'send e-mail and other messages to people (consent and unsubscribes still apply)',
+    risky: true,
+  },
   'audit:read': { label: 'Read the audit log', does: 'read who did what' },
   'profiles:read': { label: 'Read profiles', does: 'read profiles and events, without personal data' },
   'profiles:pii': { label: 'See personal data', does: 'see e-mail addresses and other personal data', risky: true },
@@ -31,7 +35,11 @@ export const SCOPE_TEXT: Record<Scope, { label: string; does: string; peopleOnly
   'artifacts:approve': { label: 'Approve', does: 'nothing: only people can approve', peopleOnly: true },
   'profiles:erase': { label: 'Erase people', does: 'nothing: only people can erase', peopleOnly: true },
   'secrets:write': { label: 'Change secrets', does: 'nothing: only people can change secrets', peopleOnly: true },
-  'workspace:admin': { label: 'Workspace settings', does: 'nothing that changes settings: only people can; it can read provider and connection lists', peopleOnly: true },
+  'workspace:admin': {
+    label: 'Workspace settings',
+    does: 'nothing that changes settings: only people can; it can read provider and connection lists',
+    peopleOnly: true,
+  },
 };
 
 export function scopeSentence(scopes: string[]): string {

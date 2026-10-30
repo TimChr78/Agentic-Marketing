@@ -2,9 +2,9 @@ import { Copy, Plus, Trash2 } from 'lucide-react';
 import { useState } from 'react';
 import { ApiError, api, errText, type Out } from '../../app/api';
 import { useCrumbs } from '../../app/page';
-import { useApi } from '../../app/useApi';
 import { useWorkspace } from '../../app/session';
-import { ROLE_MEANING, ROLE_LABEL, ROLES, type Role, lowersAdmin, roleLabel } from '../../features/settings/roles';
+import { useApi } from '../../app/useApi';
+import { lowersAdmin, ROLE_LABEL, ROLE_MEANING, ROLES, type Role, roleLabel } from '../../features/settings/roles';
 import {
   Alert,
   Button,
@@ -14,6 +14,7 @@ import {
   Field,
   FieldGroup,
   fieldErrors,
+  formatDate,
   IconButton,
   Input,
   LoadingBlock,
@@ -25,13 +26,12 @@ import {
   TableFrame,
   Tag,
   Td,
-  Th,
   THead,
-  timeAgo,
+  Th,
   Tr,
+  timeAgo,
   useConfirm,
   useToast,
-  formatDate,
 } from '../../ui';
 import { pageWidth } from '../../ui/layout';
 
@@ -67,7 +67,11 @@ export default function UsersPage() {
     isSelf(m) ? 'You cannot change your own role.' : m.role === 'owner' && !isOwner ? 'Only an owner can change another owner.' : undefined;
   const mayRemove = (m: Member) => !isSelf(m) && (m.role !== 'owner' || isOwner);
   const removeBlockReason = (m: Member) =>
-    isSelf(m) ? 'You cannot remove yourself. Ask another admin or an owner.' : m.role === 'owner' && !isOwner ? 'Only an owner can remove an owner.' : undefined;
+    isSelf(m)
+      ? 'You cannot remove yourself. Ask another admin or an owner.'
+      : m.role === 'owner' && !isOwner
+        ? 'Only an owner can remove an owner.'
+        : undefined;
 
   const members = data.data?.members ?? [];
   const invitations = data.data?.invitations ?? [];
@@ -79,8 +83,8 @@ export default function UsersPage() {
         title: `Change ${personName(m)} from ${ROLE_LABEL[m.role]} to ${ROLE_LABEL[role]}?`,
         body: (
           <>
-            They lose the access that came with the {ROLE_LABEL[m.role]} role, including settings if they had it. You can give
-            it back later.
+            They lose the access that came with the {ROLE_LABEL[m.role]} role, including settings if they had it. You can give it back
+            later.
           </>
         ),
         confirmLabel: 'Change role',
@@ -105,8 +109,8 @@ export default function UsersPage() {
       title: `Remove ${personName(m)} from the workspace?`,
       body: (
         <>
-          Their sessions and connected agents lose access immediately. Content they created stays in the workspace. You can
-          invite them again later.
+          Their sessions and connected agents lose access immediately. Content they created stays in the workspace. You can invite them
+          again later.
         </>
       ),
       confirmLabel: 'Remove person',
@@ -322,13 +326,7 @@ export default function UsersPage() {
       </div>
 
       {confirmDialog}
-      {inviting && (
-        <InviteDrawer
-          isOwner={isOwner}
-          onClose={() => setInviting(false)}
-          onInvited={() => void data.reload()}
-        />
-      )}
+      {inviting && <InviteDrawer isOwner={isOwner} onClose={() => setInviting(false)} onInvited={() => void data.reload()} />}
     </div>
   );
 }
@@ -432,12 +430,7 @@ function InviteDrawer({ isOwner, onClose, onInvited }: { isOwner: boolean; onClo
             void submit();
           }}
         >
-          <Field
-            label="E-mail address"
-            hint="They accept the invitation while signed in with this address."
-            error={errors.email}
-            required
-          >
+          <Field label="E-mail address" hint="They accept the invitation while signed in with this address." error={errors.email} required>
             <Input
               type="email"
               value={email}

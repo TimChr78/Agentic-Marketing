@@ -1,8 +1,17 @@
-import { lazy, Suspense } from 'react';
 import type { EChartsOption } from 'echarts';
+import { lazy, Suspense } from 'react';
 import { LoadingBlock } from '../ui';
 
-export type ChartColors = { fg: string; muted: string; line: string; accent: string; agent: string; good: string; bad: string; surface: string };
+export type ChartColors = {
+  fg: string;
+  muted: string;
+  line: string;
+  accent: string;
+  agent: string;
+  good: string;
+  bad: string;
+  surface: string;
+};
 
 export type ChartProps = { option: (c: ChartColors) => EChartsOption; height?: number; deps?: unknown[] };
 

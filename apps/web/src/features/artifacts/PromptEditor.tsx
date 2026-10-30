@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
 import { Plus, Trash2 } from 'lucide-react';
+import { useEffect, useState } from 'react';
 import { api } from '../../app/api';
 import { useApi } from '../../app/useApi';
 import { Button, Checkbox, Field, FieldGroup, IconButton, Input, Select, Textarea } from '../../ui';
@@ -171,7 +171,11 @@ export function PromptEditor({ content, onChange, readOnly, errors }: EditorProp
         </Field>
         <div className="grid gap-4 sm:grid-cols-3">
           <Field label="Model" hint="Default is the provider's main model; fast is its cheaper one." error={errors.model}>
-            <Select value={content.model ?? 'default'} disabled={readOnly} onChange={(e) => set({ model: e.target.value as PromptContent['model'] })}>
+            <Select
+              value={content.model ?? 'default'}
+              disabled={readOnly}
+              onChange={(e) => set({ model: e.target.value as PromptContent['model'] })}
+            >
               <option value="default">Default model</option>
               <option value="fast">Fast model</option>
             </Select>
@@ -203,7 +207,10 @@ export function PromptEditor({ content, onChange, readOnly, errors }: EditorProp
       </FieldGroup>
 
       {(kind === 'decide' || kind === 'classify') && (
-        <FieldGroup legend={kind === 'decide' ? 'Options' : 'Labels'} hint={kind === 'decide' ? 'One per choice; a journey step maps each key to an edge.' : 'One per label the model may return.'}>
+        <FieldGroup
+          legend={kind === 'decide' ? 'Options' : 'Labels'}
+          hint={kind === 'decide' ? 'One per choice; a journey step maps each key to an edge.' : 'One per label the model may return.'}
+        >
           <div className="space-y-2">
             {options.map((o, i) => (
               <div key={i} className="grid gap-2 sm:grid-cols-[minmax(140px,200px)_minmax(0,1fr)_auto] sm:items-start">
@@ -244,7 +251,11 @@ export function PromptEditor({ content, onChange, readOnly, errors }: EditorProp
             ))}
             {!options.length && <p className="text-[12px] text-muted">At least two options are needed.</p>}
             {!readOnly && options.length < (kind === 'decide' ? 6 : 20) && (
-              <Button variant="secondary" icon={<Plus size={14} />} onClick={() => set({ options: [...options, { key: '', description: '' }] })}>
+              <Button
+                variant="secondary"
+                icon={<Plus size={14} />}
+                onClick={() => set({ options: [...options, { key: '', description: '' }] })}
+              >
                 Add option
               </Button>
             )}
@@ -285,7 +296,9 @@ export function PromptEditor({ content, onChange, readOnly, errors }: EditorProp
                         max={2000}
                         value={s.maxLength}
                         readOnly={readOnly}
-                        onChange={(e) => set({ slots: slots.map((x, j) => (j === i ? { ...x, maxLength: Number(e.target.value) || 1 } : x)) })}
+                        onChange={(e) =>
+                          set({ slots: slots.map((x, j) => (j === i ? { ...x, maxLength: Number(e.target.value) || 1 } : x)) })
+                        }
                       />
                     </Field>
                     {!readOnly && (
@@ -299,7 +312,11 @@ export function PromptEditor({ content, onChange, readOnly, errors }: EditorProp
                       </div>
                     )}
                   </div>
-                  <Field label="Fallback" hint="Used when generation fails or the text does not pass the checks." error={errors[`slots.${i}.fallback`]}>
+                  <Field
+                    label="Fallback"
+                    hint="Used when generation fails or the text does not pass the checks."
+                    error={errors[`slots.${i}.fallback`]}
+                  >
                     <Textarea
                       rows={2}
                       value={s.fallback}
@@ -322,7 +339,11 @@ export function PromptEditor({ content, onChange, readOnly, errors }: EditorProp
             </div>
           </FieldGroup>
 
-          <Field label="Forbidden phrases" hint="One per line. The generated text may never contain them (claims, words)." error={errors.forbidden}>
+          <Field
+            label="Forbidden phrases"
+            hint="One per line. The generated text may never contain them (claims, words)."
+            error={errors.forbidden}
+          >
             <Textarea
               rows={4}
               value={forbiddenText}
@@ -341,7 +362,10 @@ export function PromptEditor({ content, onChange, readOnly, errors }: EditorProp
             />
           </Field>
 
-          <FieldGroup legend="Cache" hint="Reuse one generated text for everyone in the same segments, from the segment names alone (no personal data).">
+          <FieldGroup
+            legend="Cache"
+            hint="Reuse one generated text for everyone in the same segments, from the segment names alone (no personal data)."
+          >
             <Checkbox
               checked={!!content.cache}
               disabled={readOnly}
@@ -353,7 +377,9 @@ export function PromptEditor({ content, onChange, readOnly, errors }: EditorProp
               <>
                 <div>
                   <p className="mb-1 text-[12px] font-medium text-fg-2">Segments</p>
-                  <p className="text-[12px] text-muted">Choose at least one. Text is written once per combination, so people in the same segments see the same words.</p>
+                  <p className="text-[12px] text-muted">
+                    Choose at least one. Text is written once per combination, so people in the same segments see the same words.
+                  </p>
                   <div className="mt-2 space-y-1.5">
                     {segments.loading && <p className="text-[12px] text-muted">Loading segments…</p>}
                     {segments.error && <p className="text-[12px] text-bad">Couldn't load the segments: {segments.error}</p>}
@@ -365,7 +391,11 @@ export function PromptEditor({ content, onChange, readOnly, errors }: EditorProp
                         label={
                           <>
                             {a.name}{' '}
-                            {a.publishedVersion ? <span className="text-muted">· live v{a.publishedVersion}</span> : <span className="text-muted">· not live yet</span>}
+                            {a.publishedVersion ? (
+                              <span className="text-muted">· live v{a.publishedVersion}</span>
+                            ) : (
+                              <span className="text-muted">· not live yet</span>
+                            )}
                           </>
                         }
                         onChange={(e) =>
@@ -425,7 +455,9 @@ export function PromptEditor({ content, onChange, readOnly, errors }: EditorProp
           label="Set answers aside for a person to review"
           hint="Samples appear under AI reviews and do not change what the model did."
           onChange={(e) =>
-            e.target.checked ? set({ review: { ...(content.review ?? {}), sampleRate: content.review?.sampleRate ?? 0.05 } }) : remove('review')
+            e.target.checked
+              ? set({ review: { ...(content.review ?? {}), sampleRate: content.review?.sampleRate ?? 0.05 } })
+              : remove('review')
           }
         />
         {content.review && (
@@ -455,4 +487,3 @@ export function PromptEditor({ content, onChange, readOnly, errors }: EditorProp
     </div>
   );
 }
-

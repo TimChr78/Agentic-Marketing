@@ -1,4 +1,4 @@
-import { Alert, LoadingBlock, StatusPill, Table, TableFrame, Td, Th, THead, Tr } from '../../ui';
+import { Alert, LoadingBlock, StatusPill, Table, TableFrame, Td, THead, Th, Tr } from '../../ui';
 
 // Treatment against control, with the interval and the guardrail (#67). Shared by the journey
 // stats page and the campaign evaluation card so both say the same thing about a holdout.
@@ -50,7 +50,12 @@ export function HoldoutCard({
   error?: string;
   title?: string;
 }) {
-  if (error) return <Alert tone="bad" title="Couldn't load the holdout result">{error}</Alert>;
+  if (error)
+    return (
+      <Alert tone="bad" title="Couldn't load the holdout result">
+        {error}
+      </Alert>
+    );
   if (!result) return loading ? <LoadingBlock lines={4} label="Loading the holdout result" /> : null;
   const pct = (x: number) => `${Math.round(x * 1000) / 10}%`;
   const v = VERDICT[result.verdict];
@@ -98,11 +103,7 @@ export function HoldoutCard({
                   <Td align="right">{a.converted.toLocaleString()}</Td>
                   <Td align="right">{pct(a.conversionRate)}</Td>
                   <Td align="right">{pct(a.unsubscribeRate)}</Td>
-                  {currencies.length > 0 && (
-                    <Td align="right">
-                      {currencies.map((c) => money(a.revenue?.[c] ?? 0, c)).join(' · ')}
-                    </Td>
-                  )}
+                  {currencies.length > 0 && <Td align="right">{currencies.map((c) => money(a.revenue?.[c] ?? 0, c)).join(' · ')}</Td>}
                 </Tr>
               ))}
             </tbody>
@@ -115,8 +116,8 @@ export function HoldoutCard({
         {result.ci95 ? ` · 95% CI ${pct(result.ci95[0])} to ${pct(result.ci95[1])}` : ''}
       </p>
       <p className="mt-1 text-[12px] text-muted">
-        Difference of conversion rates, Newcombe's interval. Unsubscribes are the e-mail guardrail; control gets no e-mail, so its rate is expected
-        to be zero. {result.verdict !== 'not_enough_data' ? result.note : ''}
+        Difference of conversion rates, Newcombe's interval. Unsubscribes are the e-mail guardrail; control gets no e-mail, so its rate is
+        expected to be zero. {result.verdict !== 'not_enough_data' ? result.note : ''}
       </p>
     </div>
   );

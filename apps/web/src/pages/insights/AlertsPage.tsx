@@ -12,6 +12,7 @@ import {
   Drawer,
   EmptyState,
   Field,
+  formatDateTime,
   Input,
   LoadingBlock,
   PageHeader,
@@ -21,12 +22,11 @@ import {
   TableFrame,
   Tag,
   Td,
-  Th,
   THead,
+  Th,
   Tr,
   useConfirm,
   useToast,
-  formatDateTime,
 } from '../../ui';
 import { pageWidth } from '../../ui/layout';
 
@@ -106,7 +106,8 @@ function formFor(rule: Rule | null): FormState {
     enabled: rule?.enabled ?? true,
     metric: config.metric === 'complaint' ? 'complaint' : 'bounce',
     deliverabilityWindow: String(config.window ?? 'PT24H'),
-    thresholdPercent: rule?.kind === 'deliverability' ? String((Number(config.threshold ?? 0.05) * 100).toFixed(3)).replace(/\.?0+$/, '') : '5',
+    thresholdPercent:
+      rule?.kind === 'deliverability' ? String((Number(config.threshold ?? 0.05) * 100).toFixed(3)).replace(/\.?0+$/, '') : '5',
     minSent: String(config.minSent ?? 100),
     signupWindow: rule?.kind === 'signup_drop' ? String(config.window ?? 'PT24H') : 'PT24H',
     dropPercent: String(config.dropPercent ?? 50),
@@ -134,11 +135,9 @@ export default function AlertsPage() {
   const members = useApi(() => api.call('members.list', {}), [], { skip: !admin });
   const journeys = useApi(() => api.call('artifacts.list', { type: 'journey' as never, limit: 200 }), []);
   const history = useApi(() => api.call('alerts.history', { limit: 50 }), [rules.data]);
-  const ruleHistory = useApi(
-    () => api.call('alerts.history', { ruleId: historyRule?.id, limit: 200 }),
-    [historyRule?.id],
-    { skip: !historyRule },
-  );
+  const ruleHistory = useApi(() => api.call('alerts.history', { ruleId: historyRule?.id, limit: 200 }), [historyRule?.id], {
+    skip: !historyRule,
+  });
 
   const journeyName = (id: string) => journeys.data?.artifacts.find((a) => a.id === id)?.name ?? id;
   const endpointName = (id: string) => endpoints.data?.endpoints.find((e) => e.id === id)?.name ?? id;
@@ -146,9 +145,7 @@ export default function AlertsPage() {
 
   const channelsText = (rule: Rule) => {
     const names = rule.channels.flatMap((channel) =>
-      channel.type === 'webhook'
-        ? [`Webhook ${endpointName(channel.webhookId)}`]
-        : channel.userIds.map((id) => `E-mail ${memberName(id)}`),
+      channel.type === 'webhook' ? [`Webhook ${endpointName(channel.webhookId)}`] : channel.userIds.map((id) => `E-mail ${memberName(id)}`),
     );
     return names.length ? names.join(' · ') : 'No channels';
   };
@@ -180,8 +177,10 @@ export default function AlertsPage() {
     try {
       const result = await api.call('alerts.test', { id: rule.id });
       const failed = result.notifications.filter((n) => n.status === 'failed');
-      if (failed.length) toast.info(`Test sent to ${result.notifications.length - failed.length} of ${result.notifications.length} channels.`);
-      else toast.success(`Test notification sent to ${result.notifications.length} channel${result.notifications.length === 1 ? '' : 's'}.`);
+      if (failed.length)
+        toast.info(`Test sent to ${result.notifications.length - failed.length} of ${result.notifications.length} channels.`);
+      else
+        toast.success(`Test notification sent to ${result.notifications.length} channel${result.notifications.length === 1 ? '' : 's'}.`);
       reload();
     } catch (e) {
       toast.error(errText(e));
@@ -291,7 +290,9 @@ export default function AlertsPage() {
           </Alert>
         ) : (history.data?.events.length ?? 0) === 0 ? (
           <div className="rounded-lg border border-line bg-surface">
-            <EmptyState title="Nothing has fired yet">When a rule starts firing and when it recovers, the episode is recorded here.</EmptyState>
+            <EmptyState title="Nothing has fired yet">
+              When a rule starts firing and when it recovers, the episode is recorded here.
+            </EmptyState>
           </div>
         ) : (
           <TableFrame>
@@ -369,7 +370,9 @@ export default function AlertsPage() {
             {ruleHistory.data?.events.map((event: Event) => (
               <div key={event.id} className="px-5 py-3">
                 <div className="flex flex-wrap items-center gap-2 text-[13px]">
-                  <StatusPill tone={event.state === 'resolved' ? 'good' : 'bad'}>{event.state === 'resolved' ? 'Resolved' : 'Firing'}</StatusPill>
+                  <StatusPill tone={event.state === 'resolved' ? 'good' : 'bad'}>
+                    {event.state === 'resolved' ? 'Resolved' : 'Firing'}
+                  </StatusPill>
                   <span className="text-muted">
                     {formatDateTime(event.firedAt)}
                     {event.resolvedAt ? ` → ${formatDateTime(event.resolvedAt)}` : ''}
@@ -381,9 +384,7 @@ export default function AlertsPage() {
                 </p>
                 <p className="mt-0.5 text-[12px] text-muted">
                   {event.notified.length
-                    ? event.notified
-                        .map((n) => `${String(n.channel)} ${String(n.target)}: ${String(n.status)}`)
-                        .join(' · ')
+                    ? event.notified.map((n) => `${String(n.channel)} ${String(n.target)}: ${String(n.status)}`).join(' · ')
                     : 'No notification recorded.'}
                 </p>
               </div>
@@ -423,7 +424,12 @@ function AlertForm({
   const kind = form.kind;
   const config =
     kind === 'deliverability'
-      ? { metric: form.metric, window: form.deliverabilityWindow, threshold: Number(form.thresholdPercent) / 100, minSent: Number(form.minSent) }
+      ? {
+          metric: form.metric,
+          window: form.deliverabilityWindow,
+          threshold: Number(form.thresholdPercent) / 100,
+          minSent: Number(form.minSent),
+        }
       : kind === 'signup_drop'
         ? { window: form.signupWindow, dropPercent: Number(form.dropPercent), minPrevious: Number(form.minPrevious) }
         : {
@@ -484,7 +490,14 @@ function AlertForm({
             </Select>
           </Field>
           <Field label="Threshold" unit="%" hint="Fires above this rate. Default 5% bounce, 0.1% complaint.">
-            <Input type="number" min="0.001" max="100" step="0.001" value={form.thresholdPercent} onChange={(e) => set('thresholdPercent', e.target.value)} />
+            <Input
+              type="number"
+              min="0.001"
+              max="100"
+              step="0.001"
+              value={form.thresholdPercent}
+              onChange={(e) => set('thresholdPercent', e.target.value)}
+            />
           </Field>
           <Field label="Minimum sent" hint="Do not fire until at least this many people were sent in the window.">
             <Input type="number" min="1" step="1" value={form.minSent} onChange={(e) => set('minSent', e.target.value)} />
@@ -576,7 +589,12 @@ function AlertForm({
         )}
       </div>
 
-      <Checkbox label="Enabled" hint="Paused rules keep their history but are not evaluated." checked={form.enabled} onChange={(e) => set('enabled', e.target.checked)} />
+      <Checkbox
+        label="Enabled"
+        hint="Paused rules keep their history but are not evaluated."
+        checked={form.enabled}
+        onChange={(e) => set('enabled', e.target.checked)}
+      />
 
       <div className="flex justify-end gap-2 border-t border-line pt-4">
         <Button onClick={onCancel}>Cancel</Button>

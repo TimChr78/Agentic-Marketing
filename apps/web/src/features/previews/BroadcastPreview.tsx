@@ -38,9 +38,13 @@ export function BroadcastPreview({
   templateVersion?: number;
 }) {
   const { can } = useSession();
-  const reach = useApi(() => api.call('broadcasts.preview', { artifactId, version, templateVersion }), [artifactId, version, templateVersion], {
-    skip: !can('artifacts:read'),
-  });
+  const reach = useApi(
+    () => api.call('broadcasts.preview', { artifactId, version, templateVersion }),
+    [artifactId, version, templateVersion],
+    {
+      skip: !can('artifacts:read'),
+    },
+  );
   const tpl = useArtifactRef(content.template);
   const isEmail = content.template?.startsWith('eml_');
   return (
@@ -48,11 +52,21 @@ export function BroadcastPreview({
       {content.description && <p className="text-[13px] text-fg-2">{content.description}</p>}
       <div className="grid gap-3 sm:grid-cols-3">
         <Stat label="Would receive it now">
-          {reach.loading ? <Skeleton className="h-5 w-16" /> : reach.error ? <span className="text-[13px] text-bad">{reach.error}</span> : reach.data?.wouldSend.toLocaleString()}
+          {reach.loading ? (
+            <Skeleton className="h-5 w-16" />
+          ) : reach.error ? (
+            <span className="text-[13px] text-bad">{reach.error}</span>
+          ) : (
+            reach.data?.wouldSend.toLocaleString()
+          )}
         </Stat>
-        <Stat label="In the segment">{reach.loading ? <Skeleton className="h-5 w-16" /> : (reach.data?.audience.toLocaleString() ?? '—')}</Stat>
+        <Stat label="In the segment">
+          {reach.loading ? <Skeleton className="h-5 w-16" /> : (reach.data?.audience.toLocaleString() ?? '—')}
+        </Stat>
         <Stat label="Sends">
-          <span className="text-[14px]">{content.sendAt ? formatDateTime(content.sendAt, { zone: true }) : 'As soon as it is approved'}</span>
+          <span className="text-[14px]">
+            {content.sendAt ? formatDateTime(content.sendAt, { zone: true }) : 'As soon as it is approved'}
+          </span>
         </Stat>
       </div>
       {reach.data && Object.keys(reach.data.wouldSkip).length > 0 && (
@@ -64,14 +78,16 @@ export function BroadcastPreview({
               </li>
             ))}
           </ul>
-          {reach.data.checked < reach.data.audience && <p className="mt-1">Estimated from {reach.data.checked.toLocaleString()} people checked.</p>}
+          {reach.data.checked < reach.data.audience && (
+            <p className="mt-1">Estimated from {reach.data.checked.toLocaleString()} people checked.</p>
+          )}
         </Alert>
       )}
       {content.sendWindow && (
         <p className="text-[13px] text-fg-2">
           Sends between {content.sendWindow.start} and {content.sendWindow.end} in each reader’s time zone
-          {content.sendWindow.days?.length ? `, on ${content.sendWindow.days.join(', ')}` : ', every day'}. Anyone outside it waits for the next opening;
-          those whose next opening is more than {content.sendWindow.maxDelay ?? 'P1D'} after the send time are skipped.
+          {content.sendWindow.days?.length ? `, on ${content.sendWindow.days.join(', ')}` : ', every day'}. Anyone outside it waits for the
+          next opening; those whose next opening is more than {content.sendWindow.maxDelay ?? 'P1D'} after the send time are skipped.
         </p>
       )}
       {content.subjectTest && (

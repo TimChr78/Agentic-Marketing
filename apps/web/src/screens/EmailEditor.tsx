@@ -1,13 +1,13 @@
-import { useEffect, useRef, useState } from 'react';
 import grapesjs, { type Editor } from 'grapesjs';
+import { useEffect, useRef, useState } from 'react';
 import 'grapesjs/dist/css/grapes.min.css';
 import grapesjsMjml from 'grapesjs-mjml';
-import mjml2html from 'mjml-browser';
 import { Liquid } from 'liquidjs';
 import { Code2, Eye, Mail, Paintbrush, Save } from 'lucide-react';
-import { useStore } from '../mock/store';
+import mjml2html from 'mjml-browser';
 import { exec } from '../api/commands';
-import { AuthorBadge, Button, Pill, cx, inputBase, inputCls, timeAgo } from '../components/ui';
+import { AuthorBadge, Button, cx, inputBase, inputCls, Pill, timeAgo } from '../components/ui';
+import { useStore } from '../mock/store';
 
 const liquid = new Liquid({ strictVariables: false, strictFilters: false });
 type Mode = 'visual' | 'code' | 'preview';
@@ -54,8 +54,15 @@ export default function EmailEditor() {
     // Default panel buttons use Font Awesome, which the demo does not load: label them in text.
     ed.on('load', () => {
       const labels: Record<string, string> = {
-        'sw-visibility': 'Outlines', preview: 'Preview', fullscreen: 'Full screen', 'export-template': 'Code',
-        'mjml-import': 'Import', 'open-sm': 'Styles', 'open-tm': 'Settings', 'open-layers': 'Layers', 'open-blocks': 'Blocks',
+        'sw-visibility': 'Outlines',
+        preview: 'Preview',
+        fullscreen: 'Full screen',
+        'export-template': 'Code',
+        'mjml-import': 'Import',
+        'open-sm': 'Styles',
+        'open-tm': 'Settings',
+        'open-layers': 'Layers',
+        'open-blocks': 'Blocks',
       };
       ed.Panels.getPanels().forEach((panel: any) =>
         panel.buttons.forEach((b: any) => {
@@ -117,7 +124,10 @@ export default function EmailEditor() {
             <button
               key={t.id}
               onClick={() => setMode(t.id)}
-              className={cx('flex items-center gap-1.5 rounded px-2.5 py-1 text-[12px] font-medium', mode === t.id ? 'bg-accent-soft text-accent' : 'text-muted hover:text-fg')}
+              className={cx(
+                'flex items-center gap-1.5 rounded px-2.5 py-1 text-[12px] font-medium',
+                mode === t.id ? 'bg-accent-soft text-accent' : 'text-muted hover:text-fg',
+              )}
             >
               <t.icon size={13} /> {t.label}
             </button>
@@ -132,8 +142,15 @@ export default function EmailEditor() {
         <label htmlFor="subject" className="text-[12px] font-medium text-muted">
           Subject
         </label>
-        <input id="subject" className={cx(inputBase, 'min-w-0 flex-1 font-mono')} value={subject} onChange={(e) => setSubject(e.target.value)} />
-        <span className="hidden text-[11px] text-muted md:inline">Purpose: {template.purpose} · one-click unsubscribe added automatically</span>
+        <input
+          id="subject"
+          className={cx(inputBase, 'min-w-0 flex-1 font-mono')}
+          value={subject}
+          onChange={(e) => setSubject(e.target.value)}
+        />
+        <span className="hidden text-[11px] text-muted md:inline">
+          Purpose: {template.purpose} · one-click unsubscribe added automatically
+        </span>
       </div>
 
       <div className="relative min-h-0 flex-1">
@@ -178,7 +195,13 @@ export default function EmailEditor() {
               </div>
               <div className="rounded-md border border-line p-2.5 text-[12px]">
                 <div className="eyebrow mb-1">Liquid variables</div>
-                <pre className="overflow-x-auto font-mono text-[11px] text-muted">{JSON.stringify({ first_name: profile.traits.first_name, city: profile.city, preferred_category: profile.traits.preferred_category }, null, 2)}</pre>
+                <pre className="overflow-x-auto font-mono text-[11px] text-muted">
+                  {JSON.stringify(
+                    { first_name: profile.traits.first_name, city: profile.city, preferred_category: profile.traits.preferred_category },
+                    null,
+                    2,
+                  )}
+                </pre>
               </div>
             </div>
             <div className="min-w-0 flex-1 p-4">

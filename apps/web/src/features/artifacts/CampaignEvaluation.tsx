@@ -1,8 +1,8 @@
 import { api, type Out } from '../../app/api';
 import { useApi } from '../../app/useApi';
+import { Alert, EmptyState, LoadingBlock, Table, TableFrame, Td, THead, Th, Tr } from '../../ui';
 import { HoldoutCard } from '../insights/HoldoutCard';
 import { StatCard, StatGrid } from '../insights/Stats';
-import { Alert, EmptyState, LoadingBlock, Table, TableFrame, Td, Th, THead, Tr } from '../../ui';
 
 // The campaign page's Evaluation tab (#66). Everything comes from analytics.campaignSummary;
 // there are no local fixtures and no client-side attribution.
@@ -18,7 +18,12 @@ export function CampaignEvaluation({ campaignId }: { campaignId: string }) {
   const s = summary.data;
 
   if (summary.loading) return <LoadingBlock lines={8} label="Loading campaign evaluation" />;
-  if (summary.error) return <Alert tone="bad" title="Couldn't load the campaign evaluation" onRetry={summary.reload}>{summary.error}</Alert>;
+  if (summary.error)
+    return (
+      <Alert tone="bad" title="Couldn't load the campaign evaluation" onRetry={summary.reload}>
+        {summary.error}
+      </Alert>
+    );
   if (!s) return null;
 
   if (s.state === 'not_started') {
@@ -42,9 +47,17 @@ export function CampaignEvaluation({ campaignId }: { campaignId: string }) {
     <div className="max-w-[1100px] space-y-5">
       <StatGrid columns={6}>
         <StatCard label="Recipients" value={int(h.recipients)} hint="Unique people reached" />
-        <StatCard label="Delivered" value={int(h.delivered)} hint={`${rate(h.recipients ? h.delivered / h.recipients : null)} of recipients`} />
+        <StatCard
+          label="Delivered"
+          value={int(h.delivered)}
+          hint={`${rate(h.recipients ? h.delivered / h.recipients : null)} of recipients`}
+        />
         <StatCard label="Clickers" value={int(h.clickers)} hint={`${rate(h.delivered ? h.clickers / h.delivered : null)} click rate`} />
-        <StatCard label="Unsubscribers" value={int(h.unsubscribers)} hint={`${rate(h.unsubscribeRate)} unsubscribe · ${rate(h.complaintRate)} complaint`} />
+        <StatCard
+          label="Unsubscribers"
+          value={int(h.unsubscribers)}
+          hint={`${rate(h.unsubscribeRate)} unsubscribe · ${rate(h.complaintRate)} complaint`}
+        />
         <StatCard
           label="Converters"
           value={int(h.converters)}
@@ -53,7 +66,11 @@ export function CampaignEvaluation({ campaignId }: { campaignId: string }) {
         <StatCard
           label="Revenue"
           value={h.revenue.length ? h.revenue.map((r) => `${money(r.amount)} ${r.currency}`).join(' · ') : '—'}
-          hint={h.revenuePerRecipient.length ? `${h.revenuePerRecipient.map((r) => `${money(r.amount)} ${r.currency}`).join(' · ')} per recipient` : 'No attributed revenue'}
+          hint={
+            h.revenuePerRecipient.length
+              ? `${h.revenuePerRecipient.map((r) => `${money(r.amount)} ${r.currency}`).join(' · ')} per recipient`
+              : 'No attributed revenue'
+          }
         />
       </StatGrid>
 
@@ -96,7 +113,11 @@ export function CampaignEvaluation({ campaignId }: { campaignId: string }) {
         <TableFrame
           columns={7}
           isEmpty={s.members.length === 0}
-          empty={<EmptyState compact title="No sending members">Add a broadcast or journey, then publish the campaign and its members.</EmptyState>}
+          empty={
+            <EmptyState compact title="No sending members">
+              Add a broadcast or journey, then publish the campaign and its members.
+            </EmptyState>
+          }
         >
           <Table label="Campaign members">
             <THead>

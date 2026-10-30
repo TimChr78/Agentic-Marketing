@@ -1,8 +1,8 @@
-import { useEffect, useState } from 'react';
 import { Play } from 'lucide-react';
+import { useEffect, useState } from 'react';
 import { api, errText } from '../../app/api';
 import { useWorkspace } from '../../app/session';
-import { Alert, Button, JsonView, LoadingBlock, StatusPill, Table, TableFrame, Td, Th, THead, Tr } from '../../ui';
+import { Alert, Button, JsonView, LoadingBlock, StatusPill, Table, TableFrame, Td, THead, Th, Tr } from '../../ui';
 import type { Artifact } from './ArtifactDetailPage';
 
 // Test runs of a prompt: the server queues one model call per test case and a worker runs them, so
@@ -174,10 +174,13 @@ export function PromptTests({ artifact }: { artifact: Artifact }) {
       <div className="flex flex-wrap items-start gap-3">
         <div className="min-w-0 flex-1">
           <p className="text-[13px] text-fg-2">
-            Test runs call the AI provider configured for journeys, once per test case. They use tokens and every call is logged in the decision log.
+            Test runs call the AI provider configured for journeys, once per test case. They use tokens and every call is logged in the
+            decision log.
           </p>
           <p className="mt-1 text-[12px] text-muted">
-            {cases.length === 0 ? 'This prompt has no test cases yet. Add them under Content, in “Test cases (JSON)”.' : `${cases.length} test case${cases.length === 1 ? '' : 's'} in v${version}.`}{' '}
+            {cases.length === 0
+              ? 'This prompt has no test cases yet. Add them under Content, in “Test cases (JSON)”.'
+              : `${cases.length} test case${cases.length === 1 ? '' : 's'} in v${version}.`}{' '}
             A run uses the saved version; save unsaved edits first.
           </p>
         </div>
@@ -197,18 +200,24 @@ export function PromptTests({ artifact }: { artifact: Artifact }) {
       {run && (
         <>
           <p className="text-[13px]" aria-live="polite">
-            {run.status === 'done' ? 'Finished' : running ? 'Running' : 'Stopped'}: v{run.version ?? version}, {run.passed} passed, {run.failed} failed, {run.finished} of {run.total} done
+            {run.status === 'done' ? 'Finished' : running ? 'Running' : 'Stopped'}: v{run.version ?? version}, {run.passed} passed,{' '}
+            {run.failed} failed, {run.finished} of {run.total} done
             {run.status === 'running' ? (running ? '. Cases update every 1.5 seconds.' : '. Run it again to see the rest.') : '.'}
           </p>
           {hasUsage && (
             <p className="text-[12px] text-muted" aria-live="polite">
-              This run used {run.inputTokens + run.outputTokens} tokens ({run.inputTokens} in / {run.outputTokens} out) and {run.latencyMs} ms across {run.finished} answered case
+              This run used {run.inputTokens + run.outputTokens} tokens ({run.inputTokens} in / {run.outputTokens} out) and {run.latencyMs}{' '}
+              ms across {run.finished} answered case
               {run.finished === 1 ? '' : 's'}.
             </p>
           )}
           <TableFrame
             isEmpty={!run.cases.length}
-            empty={<p className="px-4 py-3 text-[13px] text-muted">No cases are queued yet. The model worker picks them up within a few seconds.</p>}
+            empty={
+              <p className="px-4 py-3 text-[13px] text-muted">
+                No cases are queued yet. The model worker picks them up within a few seconds.
+              </p>
+            }
           >
             <Table label="Prompt test results">
               <THead>
@@ -239,7 +248,9 @@ export function PromptTests({ artifact }: { artifact: Artifact }) {
                         {r.status === 'done' || r.status === 'failed' ? (
                           <JsonView value={r.answer} maxHeight={180} className="min-w-[180px]" />
                         ) : (
-                          <span className="text-[12px] text-muted">{r.status === 'running' ? 'The model is answering…' : 'Waiting for a worker…'}</span>
+                          <span className="text-[12px] text-muted">
+                            {r.status === 'running' ? 'The model is answering…' : 'Waiting for a worker…'}
+                          </span>
                         )}
                       </Td>
                       <Td className="hidden md:table-cell">{expectedText(c)}</Td>
@@ -253,13 +264,17 @@ export function PromptTests({ artifact }: { artifact: Artifact }) {
           {latest && (
             <p className="text-[12px] text-muted">
               Latest run {latest.runId.slice(0, 12)}… started {new Date(latest.startedAt).toLocaleString()}
-              {latest.finishedAt ? ` and finished ${new Date(latest.finishedAt).toLocaleString()}` : ' and is still running'}. Opening this tab resumes polling its runId.
+              {latest.finishedAt ? ` and finished ${new Date(latest.finishedAt).toLocaleString()}` : ' and is still running'}. Opening this
+              tab resumes polling its runId.
             </p>
           )}
         </>
       )}
       {!run && !running && !error && (
-        <p className="text-[12px] text-muted">A decide or classify case passes when the answer is one of the expected options; a generate case when its text has the required phrases and the length and phrase checks pass.</p>
+        <p className="text-[12px] text-muted">
+          A decide or classify case passes when the answer is one of the expected options; a generate case when its text has the required
+          phrases and the length and phrase checks pass.
+        </p>
       )}
     </div>
   );

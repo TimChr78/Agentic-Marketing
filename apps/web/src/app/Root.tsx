@@ -1,9 +1,9 @@
 import { Suspense } from 'react';
 import { Alert, Button, LoadingBlock, ToastProvider } from '../ui';
 import { Routes } from './routes';
-import { SessionProvider, useSession } from './session';
 import { Shell } from './Shell';
 import { SignIn } from './SignIn';
+import { SessionProvider, useSession } from './session';
 
 export function Root() {
   return (

@@ -1,5 +1,7 @@
-import { useState } from 'react';
 import { BellRing, MessageSquare, MoreHorizontal, Pencil, Plus, Sparkles, Trash2 } from 'lucide-react';
+import { useState } from 'react';
+import { ApiError, api, errText, type Out } from '../../app/api';
+import { useApi } from '../../app/useApi';
 import {
   Alert,
   Button,
@@ -10,6 +12,7 @@ import {
   EmptyState,
   Field,
   FieldGroup,
+  fieldErrors,
   Input,
   LoadingBlock,
   Menu,
@@ -20,16 +23,13 @@ import {
   Table,
   TableFrame,
   Tag,
-  THead,
   Td,
+  THead,
   Th,
   Tr,
-  fieldErrors,
   useConfirm,
   useToast,
 } from '../../ui';
-import { ApiError, api, errText, type Out } from '../../app/api';
-import { useApi } from '../../app/useApi';
 
 type Sms = Out<'smsProviders.list'>['providers'][number];
 type SmsAdapter = Sms['adapter'];
@@ -174,9 +174,11 @@ function validateSms(f: SmsForm, editing: boolean): Record<string, string> {
   const e: Record<string, string> = {};
   if (!f.name.trim()) e.name = 'Give the provider a name.';
   if (!f.sender.trim()) e.sender = 'Enter the number or sender ID messages come from.';
-  else if (!SENDER_RE.test(f.sender.trim())) e.sender = 'Use an international phone number such as +14155550123, or an alphanumeric sender ID.';
+  else if (!SENDER_RE.test(f.sender.trim()))
+    e.sender = 'Use an international phone number such as +14155550123, or an alphanumeric sender ID.';
   if (f.adapter === 'twilio') {
-    if (!/^AC[0-9a-f]{32}$/.test(f.accountSid.trim())) e['config.accountSid'] = 'Enter the Twilio account SID (starts with AC, then 32 hex characters).';
+    if (!/^AC[0-9a-f]{32}$/.test(f.accountSid.trim()))
+      e['config.accountSid'] = 'Enter the Twilio account SID (starts with AC, then 32 hex characters).';
     if (f.messagingServiceSid.trim() && !/^MG[0-9a-f]{32}$/.test(f.messagingServiceSid.trim()))
       e['config.messagingServiceSid'] = 'Enter a messaging service SID (starts with MG, then 32 hex characters), or leave it empty.';
     if (!/^https?:\/\//.test(f.apiBase.trim())) e['config.apiBase'] = 'Enter the API base URL, for example https://api.twilio.com.';
@@ -193,7 +195,15 @@ function validateSms(f: SmsForm, editing: boolean): Record<string, string> {
   return e;
 }
 
-function SmsDrawer({ provider, onClose, onSaved }: { provider: Sms | null; onClose: () => void; onSaved: (p: Sms | null, created?: { name: string; url: string }) => void }) {
+function SmsDrawer({
+  provider,
+  onClose,
+  onSaved,
+}: {
+  provider: Sms | null;
+  onClose: () => void;
+  onSaved: (p: Sms | null, created?: { name: string; url: string }) => void;
+}) {
   const [f, setF] = useState<SmsForm>(() => smsFormOf(provider));
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
@@ -287,7 +297,14 @@ function SmsDrawer({ provider, onClose, onSaved }: { provider: Sms | null; onClo
         <Field label="Name" hint="How this provider appears in journeys and settings." error={errors.name} required>
           <Input value={f.name} onChange={(e) => set('name', e.target.value)} autoFocus />
         </Field>
-        <Field label="Adapter" hint={f.adapter === 'log' ? 'Writes messages to the server log instead of sending them.' : 'Twilio sends messages through your account.'}>
+        <Field
+          label="Adapter"
+          hint={
+            f.adapter === 'log'
+              ? 'Writes messages to the server log instead of sending them.'
+              : 'Twilio sends messages through your account.'
+          }
+        >
           <Select
             value={f.adapter}
             disabled={editing}
@@ -318,7 +335,12 @@ function SmsDrawer({ provider, onClose, onSaved }: { provider: Sms | null; onClo
             <Field label="Cost per segment" unit={f.currency || 'USD'} error={errors.price} hint="Used to estimate journey costs." required>
               <Input inputMode="decimal" value={f.price} onChange={(e) => set('price', e.target.value)} />
             </Field>
-            <Field label="Monthly budget" unit={f.currency || 'USD'} error={errors.budget} hint="Optional. Sending stops when the budget is reached.">
+            <Field
+              label="Monthly budget"
+              unit={f.currency || 'USD'}
+              error={errors.budget}
+              hint="Optional. Sending stops when the budget is reached."
+            >
               <Input inputMode="decimal" value={f.budget} onChange={(e) => set('budget', e.target.value)} />
             </Field>
           </div>
@@ -338,17 +360,29 @@ function SmsDrawer({ provider, onClose, onSaved }: { provider: Sms | null; onClo
               <Field label="Account SID" error={errors['config.accountSid']} hint="Starts with AC, followed by 32 characters." required>
                 <Input value={f.accountSid} onChange={(e) => set('accountSid', e.target.value)} />
               </Field>
-              <Field label="Messaging service SID" error={errors['config.messagingServiceSid']} hint="Optional. Use it to let Twilio choose a sender from a pool.">
+              <Field
+                label="Messaging service SID"
+                error={errors['config.messagingServiceSid']}
+                hint="Optional. Use it to let Twilio choose a sender from a pool."
+              >
                 <Input value={f.messagingServiceSid} onChange={(e) => set('messagingServiceSid', e.target.value)} />
               </Field>
-              <Field label="API base URL" error={errors['config.apiBase']} hint="Leave the default unless you use a Twilio-compatible gateway.">
+              <Field
+                label="API base URL"
+                error={errors['config.apiBase']}
+                hint="Leave the default unless you use a Twilio-compatible gateway."
+              >
                 <Input type="url" value={f.apiBase} onChange={(e) => set('apiBase', e.target.value)} />
               </Field>
             </FieldGroup>
             <Field
               label="Auth token"
               error={errors['secrets.authToken']}
-              hint={provider?.hasCredentials ? 'Leave empty to keep the stored token.' : 'From the Twilio console. It is stored encrypted and never shown again.'}
+              hint={
+                provider?.hasCredentials
+                  ? 'Leave empty to keep the stored token.'
+                  : 'From the Twilio console. It is stored encrypted and never shown again.'
+              }
               required={!provider}
             >
               <Input type="password" autoComplete="new-password" value={f.authToken} onChange={(e) => set('authToken', e.target.value)} />
@@ -382,7 +416,11 @@ export function SmsCard() {
     setBusy(p.id);
     try {
       await api.call('smsProviders.update', { id: p.id, enabled: !p.enabled });
-      toast.success(p.enabled ? `Disabled “${p.name}”. Messages will not be sent through it.` : `Enabled “${p.name}”. Messages will be sent through it.`);
+      toast.success(
+        p.enabled
+          ? `Disabled “${p.name}”. Messages will not be sent through it.`
+          : `Enabled “${p.name}”. Messages will be sent through it.`,
+      );
       await list.reload();
     } catch (e) {
       toast.error(errText(e));
@@ -442,7 +480,8 @@ export function SmsCard() {
               </Button>
             }
           >
-            Add Twilio so journeys and broadcasts can send text messages, or a development outbox that only writes to the server log. Set the number's incoming-message webhook to the URL shown after you add a Twilio provider, so STOP and HELP replies are handled.
+            Add Twilio so journeys and broadcasts can send text messages, or a development outbox that only writes to the server log. Set
+            the number's incoming-message webhook to the URL shown after you add a Twilio provider, so STOP and HELP replies are handled.
           </EmptyState>
         ) : (
           <TableFrame columns={6}>
@@ -476,17 +515,29 @@ export function SmsCard() {
                         </div>
                       </Td>
                       <Td className="hidden md:table-cell">{p.sender}</Td>
-                      <Td className="hidden lg:table-cell">{p.useFor.length ? p.useFor.map((u) => MESSAGE_USE_LABELS[u]).join(', ') : 'Not used'}</Td>
+                      <Td className="hidden lg:table-cell">
+                        {p.useFor.length ? p.useFor.map((u) => MESSAGE_USE_LABELS[u]).join(', ') : 'Not used'}
+                      </Td>
                       <Td className="hidden md:table-cell whitespace-nowrap">
                         {p.billing.pricePerSegment} {p.billing.currency}/segment
-                        {p.billing.monthlyBudget != null && <div className="text-[11px] text-muted">Budget {p.billing.monthlyBudget} {p.billing.currency}/month</div>}
+                        {p.billing.monthlyBudget != null && (
+                          <div className="text-[11px] text-muted">
+                            Budget {p.billing.monthlyBudget} {p.billing.currency}/month
+                          </div>
+                        )}
                       </Td>
                       <Td>
                         <StatusPill tone={p.enabled ? 'good' : 'neutral'}>{p.enabled ? 'Enabled' : 'Disabled'}</StatusPill>
                       </Td>
                       <Td align="right">
                         <div className="flex items-center justify-end gap-2">
-                          <Switch checked={p.enabled} onChange={() => void toggle(p)} label={`Enable ${p.name}`} hideLabel disabled={busy === p.id} />
+                          <Switch
+                            checked={p.enabled}
+                            onChange={() => void toggle(p)}
+                            label={`Enable ${p.name}`}
+                            hideLabel
+                            disabled={busy === p.id}
+                          />
                           <Button size="sm" icon={<Pencil size={14} />} onClick={() => setEditing(p)}>
                             Edit
                           </Button>
@@ -510,7 +561,13 @@ export function SmsCard() {
           onSaved={(p, inbound) => {
             setEditing(null);
             if (inbound) setCreated(inbound);
-            toast.success(inbound ? `Added “${inbound.name}”. Copy the incoming-message URL and set it in Twilio.` : p ? `Saved “${p.name}”.` : 'SMS provider added.');
+            toast.success(
+              inbound
+                ? `Added “${inbound.name}”. Copy the incoming-message URL and set it in Twilio.`
+                : p
+                  ? `Saved “${p.name}”.`
+                  : 'SMS provider added.',
+            );
             void list.reload();
           }}
         />
@@ -604,19 +661,22 @@ function validatePush(f: PushForm, editing: boolean): Record<string, string> {
   if (f.adapter === 'webpush' && !/^(mailto:|https:\/\/)/.test(f.subject.trim()))
     e['config.subject'] = 'Enter a contact for the VAPID token, starting with mailto: or https://.';
   if (f.adapter === 'fcm') {
-    if (!/^[a-z0-9-]{4,40}$/.test(f.projectId.trim())) e['config.projectId'] = 'Enter the Firebase project ID (4–40 lowercase letters, digits or dashes).';
+    if (!/^[a-z0-9-]{4,40}$/.test(f.projectId.trim()))
+      e['config.projectId'] = 'Enter the Firebase project ID (4–40 lowercase letters, digits or dashes).';
     if (!/^https?:\/\//.test(f.apiBase.trim())) e['config.apiBase'] = 'Enter the FCM API base URL.';
     if (!/^https?:\/\//.test(f.tokenUrl.trim())) e['config.tokenUrl'] = 'Enter the OAuth token URL.';
     if (!editing || f.clientEmail.trim() || f.privateKey.trim()) {
       if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(f.clientEmail.trim())) e['secrets.clientEmail'] = 'Enter the service account email.';
-      if (!f.privateKey.includes('PRIVATE KEY')) e['secrets.privateKey'] = 'Paste the service account private key, including the BEGIN/END lines.';
+      if (!f.privateKey.includes('PRIVATE KEY'))
+        e['secrets.privateKey'] = 'Paste the service account private key, including the BEGIN/END lines.';
     }
   }
   if (f.adapter === 'apns') {
     if (!/^[A-Z0-9]{10}$/.test(f.teamId.trim())) e['config.teamId'] = 'Enter the 10-character Apple team ID.';
     if (!/^[A-Z0-9]{10}$/.test(f.keyId.trim())) e['config.keyId'] = 'Enter the 10-character key ID.';
     if (f.topic.trim().length < 3) e['config.topic'] = 'Enter the app bundle ID.';
-    if (f.apnsBase.trim() && !/^https?:\/\//.test(f.apnsBase.trim())) e['config.apiBase'] = 'Enter an Apple Push Notification service URL, or leave it empty.';
+    if (f.apnsBase.trim() && !/^https?:\/\//.test(f.apnsBase.trim()))
+      e['config.apiBase'] = 'Enter an Apple Push Notification service URL, or leave it empty.';
     if (!editing && !f.privateKey.includes('PRIVATE KEY')) e['secrets.privateKey'] = 'Paste the .p8 key, including the BEGIN/END lines.';
   }
   return e;
@@ -653,7 +713,11 @@ function PushDrawer({ provider, onClose, onSaved }: { provider: Push | null; onC
               : {};
       const secrets =
         f.adapter === 'fcm' && f.clientEmail.trim() && f.privateKey.trim()
-          ? { clientEmail: f.clientEmail.trim(), privateKey: f.privateKey, ...(f.privateKeyId.trim() ? { privateKeyId: f.privateKeyId.trim() } : {}) }
+          ? {
+              clientEmail: f.clientEmail.trim(),
+              privateKey: f.privateKey,
+              ...(f.privateKeyId.trim() ? { privateKeyId: f.privateKeyId.trim() } : {}),
+            }
           : (f.adapter === 'fcm' || f.adapter === 'apns') && f.privateKey.includes('PRIVATE KEY')
             ? { privateKey: f.privateKey }
             : undefined;
@@ -706,7 +770,12 @@ function PushDrawer({ provider, onClose, onSaved }: { provider: Push | null; onC
         <Field label="Name" hint="How this provider appears in journeys and settings." error={errors.name} required>
           <Input value={f.name} onChange={(e) => set('name', e.target.value)} autoFocus />
         </Field>
-        <Field label="Adapter" hint={f.adapter === 'log' ? 'Writes messages to the server log instead of sending them.' : 'Choose the push service your app uses.'}>
+        <Field
+          label="Adapter"
+          hint={
+            f.adapter === 'log' ? 'Writes messages to the server log instead of sending them.' : 'Choose the push service your app uses.'
+          }
+        >
           <Select
             value={f.adapter}
             onChange={(e) => {
@@ -724,7 +793,12 @@ function PushDrawer({ provider, onClose, onSaved }: { provider: Push | null; onC
         </Field>
         <UseFor value={f.useFor} onChange={(v) => set('useFor', v)} options={MESSAGE_USES} error={errors.useFor} />
         {editing && (
-          <Checkbox label="Enabled" hint="Disabled providers are skipped; push steps then do nothing." checked={f.enabled} onChange={(e) => set('enabled', e.target.checked)} />
+          <Checkbox
+            label="Enabled"
+            hint="Disabled providers are skipped; push steps then do nothing."
+            checked={f.enabled}
+            onChange={(e) => set('enabled', e.target.checked)}
+          />
         )}
 
         {f.adapter === 'webpush' && (
@@ -763,12 +837,29 @@ function PushDrawer({ provider, onClose, onSaved }: { provider: Push | null; onC
                 <Input type="url" value={f.tokenUrl} onChange={(e) => set('tokenUrl', e.target.value)} />
               </Field>
             </FieldGroup>
-            <FieldGroup legend="Service account" hint={editing ? 'Leave both fields empty to keep the stored credentials.' : 'Create a service account key in the Firebase console.'}>
+            <FieldGroup
+              legend="Service account"
+              hint={
+                editing
+                  ? 'Leave both fields empty to keep the stored credentials.'
+                  : 'Create a service account key in the Firebase console.'
+              }
+            >
               <Field label="Client email" error={errors['secrets.clientEmail']} required={!editing}>
                 <Input type="email" value={f.clientEmail} onChange={(e) => set('clientEmail', e.target.value)} />
               </Field>
-              <Field label="Private key" error={errors['secrets.privateKey']} required={!editing} hint="Paste the whole key, including the BEGIN and END lines.">
-                <Input type="password" autoComplete="new-password" value={f.privateKey} onChange={(e) => set('privateKey', e.target.value)} />
+              <Field
+                label="Private key"
+                error={errors['secrets.privateKey']}
+                required={!editing}
+                hint="Paste the whole key, including the BEGIN and END lines."
+              >
+                <Input
+                  type="password"
+                  autoComplete="new-password"
+                  value={f.privateKey}
+                  onChange={(e) => set('privateKey', e.target.value)}
+                />
               </Field>
               <Field label="Private key ID" hint="Optional. Helps identify the key in Google's audit logs.">
                 <Input value={f.privateKeyId} onChange={(e) => set('privateKeyId', e.target.value)} />
@@ -804,7 +895,11 @@ function PushDrawer({ provider, onClose, onSaved }: { provider: Push | null; onC
             <Field
               label="Private key"
               error={errors['secrets.privateKey']}
-              hint={editing ? 'Leave empty to keep the stored key. Paste a key to replace it.' : 'Paste the .p8 key, including the BEGIN and END lines.'}
+              hint={
+                editing
+                  ? 'Leave empty to keep the stored key. Paste a key to replace it.'
+                  : 'Paste the .p8 key, including the BEGIN and END lines.'
+              }
               required={!editing}
             >
               <Input type="password" autoComplete="new-password" value={f.privateKey} onChange={(e) => set('privateKey', e.target.value)} />
@@ -899,7 +994,8 @@ export function PushCard() {
               </Button>
             }
           >
-            Add web push for browsers, Firebase for Android or Apple Push Notification service for Apple apps. Until then, push steps in journeys send nothing.
+            Add web push for browsers, Firebase for Android or Apple Push Notification service for Apple apps. Until then, push steps in
+            journeys send nothing.
           </EmptyState>
         ) : (
           <TableFrame columns={5}>
@@ -926,13 +1022,21 @@ export function PushCard() {
                       {p.adapter === 'log' && <div className="mt-0.5 text-[11px] text-muted">Writes to the server log.</div>}
                     </Td>
                     <Td className="hidden md:table-cell">{pushLabel(p.adapter)}</Td>
-                    <Td className="hidden lg:table-cell">{p.useFor.length ? p.useFor.map((u) => MESSAGE_USE_LABELS[u]).join(', ') : 'Not used'}</Td>
+                    <Td className="hidden lg:table-cell">
+                      {p.useFor.length ? p.useFor.map((u) => MESSAGE_USE_LABELS[u]).join(', ') : 'Not used'}
+                    </Td>
                     <Td>
                       <StatusPill tone={p.enabled ? 'good' : 'neutral'}>{p.enabled ? 'Enabled' : 'Disabled'}</StatusPill>
                     </Td>
                     <Td align="right">
                       <div className="flex items-center justify-end gap-2">
-                        <Switch checked={p.enabled} onChange={() => void toggle(p)} label={`Enable ${p.name}`} hideLabel disabled={busy === p.id} />
+                        <Switch
+                          checked={p.enabled}
+                          onChange={() => void toggle(p)}
+                          label={`Enable ${p.name}`}
+                          hideLabel
+                          disabled={busy === p.id}
+                        />
                         <Button size="sm" icon={<Pencil size={14} />} onClick={() => setEditing(p)}>
                           Edit
                         </Button>
@@ -1084,7 +1188,13 @@ function AiDrawer({ provider, onClose, onSaved }: { provider: Ai | null; onClose
       onClose={onClose}
       width="lg"
       title={provider ? `Edit ${provider.name}` : 'Add AI provider'}
-      meta={provider ? <span className="font-mono text-[12px]">{provider.id}</span> : 'Use your own model account for journey AI steps and the copilot.'}
+      meta={
+        provider ? (
+          <span className="font-mono text-[12px]">{provider.id}</span>
+        ) : (
+          'Use your own model account for journey AI steps and the copilot.'
+        )
+      }
       footer={
         <>
           <Button variant="secondary" onClick={onClose}>
@@ -1107,20 +1217,37 @@ function AiDrawer({ provider, onClose, onSaved }: { provider: Ai | null; onClose
         <Field label="Name" hint="How this provider appears in journeys and settings." error={errors.name} required>
           <Input value={f.name} onChange={(e) => set('name', e.target.value)} autoFocus />
         </Field>
-        <Field label="API style" hint={editing ? 'The API style cannot be changed after the provider is added.' : 'Choose the API your model endpoint speaks.'}>
+        <Field
+          label="API style"
+          hint={editing ? 'The API style cannot be changed after the provider is added.' : 'Choose the API your model endpoint speaks.'}
+        >
           <Select value={f.kind} disabled={editing} onChange={(e) => changeKind(e.target.value as AiKind)}>
             <option value="anthropic-compatible">Anthropic-compatible</option>
             <option value="openai-compatible">OpenAI-compatible</option>
           </Select>
         </Field>
-        <Field label="Base URL" error={errors.baseUrl} hint="The API root, including the version path when the provider needs one." required>
+        <Field
+          label="Base URL"
+          error={errors.baseUrl}
+          hint="The API root, including the version path when the provider needs one."
+          required
+        >
           <Input type="url" value={f.baseUrl} onChange={(e) => set('baseUrl', e.target.value)} />
         </Field>
         <FieldGroup legend="Models">
-          <Field label="Default model" error={errors['models.default']} hint="The model ID your provider expects, for example claude-sonnet-5-5." required>
+          <Field
+            label="Default model"
+            error={errors['models.default']}
+            hint="The model ID your provider expects, for example claude-sonnet-5-5."
+            required
+          >
             <Input value={f.model} onChange={(e) => set('model', e.target.value)} />
           </Field>
-          <Field label="Fast model" error={errors['models.fast']} hint="Optional. Used for short tasks such as classifying intent or picking a segment.">
+          <Field
+            label="Fast model"
+            error={errors['models.fast']}
+            hint="Optional. Used for short tasks such as classifying intent or picking a segment."
+          >
             <Input value={f.fastModel} onChange={(e) => set('fastModel', e.target.value)} />
           </Field>
           <Checkbox
@@ -1145,12 +1272,21 @@ function AiDrawer({ provider, onClose, onSaved }: { provider: Ai | null; onClose
           </Field>
         </div>
         {editing && (
-          <Checkbox label="Enabled" hint="Disabled providers are skipped by AI steps and the copilot." checked={f.enabled} onChange={(e) => set('enabled', e.target.checked)} />
+          <Checkbox
+            label="Enabled"
+            hint="Disabled providers are skipped by AI steps and the copilot."
+            checked={f.enabled}
+            onChange={(e) => set('enabled', e.target.checked)}
+          />
         )}
         <Field
           label="API key"
           error={errors.apiKey}
-          hint={provider?.hasApiKey ? 'Leave empty to keep the stored key. Filling it replaces the key.' : 'Stored encrypted and never shown again.'}
+          hint={
+            provider?.hasApiKey
+              ? 'Leave empty to keep the stored key. Filling it replaces the key.'
+              : 'Stored encrypted and never shown again.'
+          }
           required={!provider}
         >
           <Input type="password" autoComplete="new-password" value={f.apiKey} onChange={(e) => set('apiKey', e.target.value)} />
@@ -1189,7 +1325,11 @@ export function AiCard() {
   const remove = async (p: Ai) => {
     const ok = await confirm({
       title: `Delete “${p.name}”?`,
-      body: <>Journeys and the copilot will fail when they try to use this provider, until another one is chosen. The stored API key is deleted.</>,
+      body: (
+        <>
+          Journeys and the copilot will fail when they try to use this provider, until another one is chosen. The stored API key is deleted.
+        </>
+      ),
       confirmLabel: 'Delete provider',
       destructive: true,
       typeToConfirm: p.name,
@@ -1237,7 +1377,8 @@ export function AiCard() {
               </Button>
             }
           >
-            Add an OpenAI- or Anthropic-compatible endpoint with your own API key to run AI steps in journeys and the copilot. Until then, AI steps take their fallback.
+            Add an OpenAI- or Anthropic-compatible endpoint with your own API key to run AI steps in journeys and the copilot. Until then,
+            AI steps take their fallback.
           </EmptyState>
         ) : (
           <TableFrame columns={5}>
@@ -1275,13 +1416,21 @@ export function AiCard() {
                       <div className="font-mono text-[12px]">{p.models.default}</div>
                       {p.models.fast && <div className="font-mono text-[11px] text-muted">Fast: {p.models.fast}</div>}
                     </Td>
-                    <Td className="hidden lg:table-cell">{p.useFor.length ? p.useFor.map((u) => AI_USE_LABELS[u]).join(', ') : 'Not used'}</Td>
+                    <Td className="hidden lg:table-cell">
+                      {p.useFor.length ? p.useFor.map((u) => AI_USE_LABELS[u]).join(', ') : 'Not used'}
+                    </Td>
                     <Td>
                       <StatusPill tone={p.enabled ? 'good' : 'neutral'}>{p.enabled ? 'Enabled' : 'Disabled'}</StatusPill>
                     </Td>
                     <Td align="right">
                       <div className="flex items-center justify-end gap-2">
-                        <Switch checked={p.enabled} onChange={() => void toggle(p)} label={`Enable ${p.name}`} hideLabel disabled={busy === p.id} />
+                        <Switch
+                          checked={p.enabled}
+                          onChange={() => void toggle(p)}
+                          label={`Enable ${p.name}`}
+                          hideLabel
+                          disabled={busy === p.id}
+                        />
                         <Button size="sm" icon={<Pencil size={14} />} onClick={() => setEditing(p)}>
                           Edit
                         </Button>

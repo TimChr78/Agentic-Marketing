@@ -8,7 +8,7 @@
     <script>
       // Theme before first paint (docs/design/DESIGN.md → Themes): the signed-in person's choice on this
       // device, else the last choice made here, else the OS preference. Kept in sync by src/app/theme.ts.
-      (function () {
+      (() => {
         try {
           var u = localStorage.getItem('am.theme.user');
           var pref = (u && localStorage.getItem('am.theme.' + u)) || localStorage.getItem('am.theme') || 'system';

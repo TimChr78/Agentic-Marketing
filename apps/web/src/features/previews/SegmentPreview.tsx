@@ -13,7 +13,13 @@ export function SegmentPreview({
 }: {
   artifactId: string;
   version?: number;
-  content: { description?: string; mode?: 'dynamic' | 'static' | 'snapshot'; condition?: unknown; sourceSegment?: string; snapshotVersion?: number };
+  content: {
+    description?: string;
+    mode?: 'dynamic' | 'static' | 'snapshot';
+    condition?: unknown;
+    sourceSegment?: string;
+    snapshotVersion?: number;
+  };
 }) {
   const { can } = useSession();
   const size = useApi(() => api.call('segments.preview', { artifactId, version }), [artifactId, version], { skip: !can('profiles:read') });

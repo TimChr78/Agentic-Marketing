@@ -56,7 +56,14 @@ function JsonField({
   };
   return (
     <Field label={humanize(name)} hint={schema.description} error={parseError ?? error} required={required}>
-      <Textarea mono rows={typeOf(schema) === 'array' ? 2 : 3} value={text} disabled={disabled} spellCheck={false} onChange={(e) => change(e.target.value)} />
+      <Textarea
+        mono
+        rows={typeOf(schema) === 'array' ? 2 : 3}
+        value={text}
+        disabled={disabled}
+        spellCheck={false}
+        onChange={(e) => change(e.target.value)}
+      />
     </Field>
   );
 }

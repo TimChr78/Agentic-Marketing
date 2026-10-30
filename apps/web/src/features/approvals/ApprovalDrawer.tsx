@@ -6,7 +6,22 @@ import { TextLink } from '../../app/links';
 import { navigate } from '../../app/router';
 import { useWorkspace } from '../../app/session';
 import { useApi } from '../../app/useApi';
-import { Alert, Button, DiffView, Drawer, Field, JsonView, LoadingBlock, Meta, StatusPill, Tabs, Textarea, formatDateTime, timeAgo, useToast } from '../../ui';
+import {
+  Alert,
+  Button,
+  DiffView,
+  Drawer,
+  Field,
+  formatDateTime,
+  JsonView,
+  LoadingBlock,
+  Meta,
+  StatusPill,
+  Tabs,
+  Textarea,
+  timeAgo,
+  useToast,
+} from '../../ui';
 import { invalidateArtifact } from '../artifactCache';
 import { BlockUsage } from '../blocks/BlockUsage';
 import { ArtifactPreview } from '../previews/ArtifactPreview';
@@ -21,7 +36,17 @@ type Tab = 'preview' | 'changes' | 'content' | 'history';
  * size, broadcast audience), then what changed against the live version, who asked and why, and
  * Approve / Reject right here. Deep link: /approvals/<id> (the reviewUrl agents get back).
  */
-export function ApprovalDrawer({ id, queue, onClose, onDecided }: { id: string; queue: string[]; onClose: () => void; onDecided: () => void }) {
+export function ApprovalDrawer({
+  id,
+  queue,
+  onClose,
+  onDecided,
+}: {
+  id: string;
+  queue: string[];
+  onClose: () => void;
+  onDecided: () => void;
+}) {
   const { can, user, workspace } = useWorkspace();
   const toast = useToast();
   const d = useApi(() => api.call('approvals.get', { approvalId: id }), [id]);
@@ -48,11 +73,16 @@ export function ApprovalDrawer({ id, queue, onClose, onDecided }: { id: string; 
   // Reviewed together with other changes (#107): deciding this one decides all of them.
   const bundle = a?.bundle ?? null;
   const bundleVersions = bundle ? Object.fromEntries(bundle.members.map((m) => [m.artifactId, m.version])) : undefined;
-  const bundledTemplate = a?.artifactType === 'broadcast' ? bundleVersions?.[String((a.content as { template?: string }).template ?? '')] : undefined;
+  const bundledTemplate =
+    a?.artifactType === 'broadcast' ? bundleVersions?.[String((a.content as { template?: string }).template ?? '')] : undefined;
   const canApprove = can('artifacts:approve');
   const ownRequest = a?.requestedBy.type === 'user' && a.requestedBy.id === user.id;
   // Approvers can test to their own address (the commands accept artifacts:approve without `to`).
-  const testable = a && (can('artifacts:write') || can('artifacts:approve')) && (a.artifactType === 'email_template' || (a.artifactType === 'broadcast' && String((a.content as { template?: string }).template ?? '').startsWith('eml_')));
+  const testable =
+    a &&
+    (can('artifacts:write') || can('artifacts:approve')) &&
+    (a.artifactType === 'email_template' ||
+      (a.artifactType === 'broadcast' && String((a.content as { template?: string }).template ?? '').startsWith('eml_')));
 
   const next = () => {
     const i = queue.indexOf(id);
@@ -73,8 +103,16 @@ export function ApprovalDrawer({ id, queue, onClose, onDecided }: { id: string; 
       if (kind === 'approve') await api.call('approvals.approve', { approvalId: a.id });
       else await api.call('approvals.reject', { approvalId: a.id, note: reason.trim() });
       for (const m of bundle?.members ?? [a]) invalidateArtifact(m.artifactId);
-      const what = bundle ? `${bundle.members.length} changes (${bundle.members.map((m) => `“${m.artifactName}”`).join(', ')})` : `“${a.artifactName}”`;
-      toast.success(kind === 'approve' ? (bundle ? `Approved ${what}. They are live.` : `Approved ${what}. Version ${a.version} is live.`) : `Rejected ${what}. The author sees your reason.`);
+      const what = bundle
+        ? `${bundle.members.length} changes (${bundle.members.map((m) => `“${m.artifactName}”`).join(', ')})`
+        : `“${a.artifactName}”`;
+      toast.success(
+        kind === 'approve'
+          ? bundle
+            ? `Approved ${what}. They are live.`
+            : `Approved ${what}. Version ${a.version} is live.`
+          : `Rejected ${what}. The author sees your reason.`,
+      );
       onDecided();
       next();
     } catch (e) {
@@ -111,20 +149,36 @@ export function ApprovalDrawer({ id, queue, onClose, onDecided }: { id: string; 
         a && (
           <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
             <span>
-              {typeLabel(a.artifactType)} · Version {a.version} · {a.publishedVersion ? `changes live v${a.publishedVersion}` : 'new, nothing live yet'}
+              {typeLabel(a.artifactType)} · Version {a.version} ·{' '}
+              {a.publishedVersion ? `changes live v${a.publishedVersion}` : 'new, nothing live yet'}
             </span>
-            {a.status !== 'pending' && <StatusPill tone={a.status === 'approved' ? 'good' : 'bad'}>{a.status === 'approved' ? 'Approved' : a.status === 'rejected' ? 'Rejected' : 'Withdrawn'}</StatusPill>}
+            {a.status !== 'pending' && (
+              <StatusPill tone={a.status === 'approved' ? 'good' : 'bad'}>
+                {a.status === 'approved' ? 'Approved' : a.status === 'rejected' ? 'Rejected' : 'Withdrawn'}
+              </StatusPill>
+            )}
           </span>
         )
       }
-      actions={a && <TextLink to={artifactPath(a.artifactType, a.artifactId)} className="mr-1 hidden items-center gap-1 text-[13px] sm:inline-flex">Open <ExternalLink size={13} aria-hidden /></TextLink>}
+      actions={
+        a && (
+          <TextLink to={artifactPath(a.artifactType, a.artifactId)} className="mr-1 hidden items-center gap-1 text-[13px] sm:inline-flex">
+            Open <ExternalLink size={13} aria-hidden />
+          </TextLink>
+        )
+      }
       footer={
         a &&
         pending && (
           <div className="w-full space-y-3">
             {actionError && <Alert tone="bad">{actionError}</Alert>}
             {rejecting && (
-              <Field label="Why are you rejecting it?" hint="The author (person or agent) sees this and can submit a fixed version." error={reasonError} required>
+              <Field
+                label="Why are you rejecting it?"
+                hint="The author (person or agent) sees this and can submit a fixed version."
+                error={reasonError}
+                required
+              >
                 <Textarea
                   rows={3}
                   value={reason}
@@ -143,7 +197,12 @@ export function ApprovalDrawer({ id, queue, onClose, onDecided }: { id: string; 
             ) : (
               <div className="flex flex-wrap items-center gap-2">
                 {testable && (
-                  <Button icon={<Send size={14} />} loading={busy === 'test'} onClick={sendTest} title="Send a [Test] copy of this version to your own address">
+                  <Button
+                    icon={<Send size={14} />}
+                    loading={busy === 'test'}
+                    onClick={sendTest}
+                    title="Send a [Test] copy of this version to your own address"
+                  >
                     Send me a test
                   </Button>
                 )}
@@ -196,7 +255,10 @@ export function ApprovalDrawer({ id, queue, onClose, onDecided }: { id: string; 
           {bundle && (
             <section aria-label="Reviewed together" className="rounded-lg border border-line px-4 py-3">
               <p className="text-[13px] text-fg-2">
-                Reviewed together: {pending ? 'approving publishes all of them, in this order, in one step; rejecting rejects all.' : 'these were decided together.'}
+                Reviewed together:{' '}
+                {pending
+                  ? 'approving publishes all of them, in this order, in one step; rejecting rejects all.'
+                  : 'these were decided together.'}
               </p>
               <ol className="mt-2 flex flex-wrap gap-2">
                 {bundle.members.map((m, i) => (
@@ -211,7 +273,10 @@ export function ApprovalDrawer({ id, queue, onClose, onDecided }: { id: string; 
                           : 'rounded-md border border-line px-2.5 py-1 text-[13px] text-fg-2 hover:bg-surface-2'
                       }
                     >
-                      {i + 1}. {m.artifactName} <span className="text-muted">· {typeLabel(m.artifactType)} v{m.version}</span>
+                      {i + 1}. {m.artifactName}{' '}
+                      <span className="text-muted">
+                        · {typeLabel(m.artifactType)} v{m.version}
+                      </span>
                     </button>
                   </li>
                 ))}
@@ -224,21 +289,39 @@ export function ApprovalDrawer({ id, queue, onClose, onDecided }: { id: string; 
               Approving publishes version {a.version}, the one shown here. The newer draft stays a draft.
             </Alert>
           )}
-          {ownRequest && pending && workspace.approvalPolicy === 'all_publishes' && <Alert tone="info">You submitted this yourself. Under four-eyes review, another person has to approve it.</Alert>}
+          {ownRequest && pending && workspace.approvalPolicy === 'all_publishes' && (
+            <Alert tone="info">You submitted this yourself. Under four-eyes review, another person has to approve it.</Alert>
+          )}
           <Tabs
             label="Review"
             value={tab}
             onChange={setTab}
             items={[
               { key: 'preview', label: 'Preview' },
-              { key: 'changes', label: a.publishedVersion ? 'Changes' : 'Content changes', shortLabel: 'Changes', count: a.diff.changes.length },
+              {
+                key: 'changes',
+                label: a.publishedVersion ? 'Changes' : 'Content changes',
+                shortLabel: 'Changes',
+                count: a.diff.changes.length,
+              },
               { key: 'content', label: 'Content' },
               { key: 'history', label: 'History' },
             ]}
           >
-            {tab === 'preview' && <ArtifactPreview type={a.artifactType} artifactId={a.artifactId} version={a.version} content={a.content} compact bundle={bundleVersions} />}
+            {tab === 'preview' && (
+              <ArtifactPreview
+                type={a.artifactType}
+                artifactId={a.artifactId}
+                version={a.version}
+                content={a.content}
+                compact
+                bundle={bundleVersions}
+              />
+            )}
             {tab === 'changes' && <DiffView changes={a.diff.changes} from={a.diff.from} to={a.diff.to} />}
-            {tab === 'content' && <JsonView value={a.content} label={`Version ${a.version} as JSON (what agents read and write)`} maxHeight={600} />}
+            {tab === 'content' && (
+              <JsonView value={a.content} label={`Version ${a.version} as JSON (what agents read and write)`} maxHeight={600} />
+            )}
             {tab === 'history' && <History a={a} />}
           </Tabs>
         </div>

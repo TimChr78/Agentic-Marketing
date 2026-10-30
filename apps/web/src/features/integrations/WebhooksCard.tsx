@@ -1,5 +1,8 @@
-import { useState } from 'react';
 import { ExternalLink, MoreHorizontal, Pencil, Plus, RefreshCw, RotateCcw, Send, Trash2 } from 'lucide-react';
+import { useState } from 'react';
+import { ApiError, api, errText, type Out } from '../../app/api';
+import { useWorkspace } from '../../app/session';
+import { useApi } from '../../app/useApi';
 import {
   Alert,
   Button,
@@ -8,6 +11,7 @@ import {
   Drawer,
   EmptyState,
   Field,
+  fieldErrors,
   Input,
   Menu,
   Modal,
@@ -16,19 +20,15 @@ import {
   Table,
   TableFrame,
   Tag,
-  THead,
   Td,
-  Th,
   Textarea,
+  THead,
+  Th,
   Tr,
-  fieldErrors,
   timeAgo,
   useConfirm,
   useToast,
 } from '../../ui';
-import { ApiError, api, errText, type Out } from '../../app/api';
-import { useApi } from '../../app/useApi';
-import { useWorkspace } from '../../app/session';
 
 type Endpoint = Out<'webhooks.list'>['endpoints'][number];
 type Delivery = Out<'deliveries.list'>['deliveries'][number];
@@ -77,7 +77,15 @@ function validateWebhook(f: WebhookForm): Record<string, string> {
   return e;
 }
 
-function WebhookDrawer({ endpoint, onClose, onSaved }: { endpoint: Endpoint | null; onClose: () => void; onSaved: (created: { name: string; secret: string } | null) => void }) {
+function WebhookDrawer({
+  endpoint,
+  onClose,
+  onSaved,
+}: {
+  endpoint: Endpoint | null;
+  onClose: () => void;
+  onSaved: (created: { name: string; secret: string } | null) => void;
+}) {
   const [f, setF] = useState<WebhookForm>(() => ({
     name: endpoint?.name ?? '',
     url: endpoint?.url ?? '',
@@ -161,7 +169,12 @@ function WebhookDrawer({ endpoint, onClose, onSaved }: { endpoint: Endpoint | nu
           hint="An http:// or https:// address on the public internet. Private and local addresses are refused."
           required
         >
-          <Input type="url" value={f.url} placeholder="https://hooks.example.com/agentic-marketing" onChange={(e) => set('url', e.target.value)} />
+          <Input
+            type="url"
+            value={f.url}
+            placeholder="https://hooks.example.com/agentic-marketing"
+            onChange={(e) => set('url', e.target.value)}
+          />
         </Field>
         <Field
           label="Events"
@@ -179,7 +192,8 @@ function WebhookDrawer({ endpoint, onClose, onSaved }: { endpoint: Endpoint | nu
         </Field>
 
         <Alert tone="info" title="Signed requests">
-          Each delivery is signed with the Standard Webhooks headers. {endpoint ? 'The signing secret stays the same.' : 'The signing secret is shown once after you add the endpoint.'}
+          Each delivery is signed with the Standard Webhooks headers.{' '}
+          {endpoint ? 'The signing secret stays the same.' : 'The signing secret is shown once after you add the endpoint.'}
         </Alert>
 
         {error && (
@@ -219,7 +233,9 @@ export function WebhooksCard() {
     setBusy(e.id);
     try {
       await api.call('webhooks.update', { id: e.id, enabled: !e.enabled });
-      toast.success(e.enabled ? `Paused “${e.name}”. Events are not sent until you enable it.` : `Enabled “${e.name}”. Events are sent again.`);
+      toast.success(
+        e.enabled ? `Paused “${e.name}”. Events are not sent until you enable it.` : `Enabled “${e.name}”. Events are sent again.`,
+      );
       await list.reload();
     } catch (err) {
       toast.error(errText(err));
@@ -244,7 +260,12 @@ export function WebhooksCard() {
   const remove = async (e: Endpoint) => {
     const ok = await confirm({
       title: `Delete “${e.name}”?`,
-      body: <>Events stop being sent to this URL and deliveries still waiting are dropped. The signing secret is deleted. Journey webhook steps that point here will fail.</>,
+      body: (
+        <>
+          Events stop being sent to this URL and deliveries still waiting are dropped. The signing secret is deleted. Journey webhook steps
+          that point here will fail.
+        </>
+      ),
       confirmLabel: 'Delete endpoint',
       destructive: true,
       typeToConfirm: e.name,
@@ -370,7 +391,13 @@ export function WebhooksCard() {
                     {admin && (
                       <Td align="right">
                         <div className="flex items-center justify-end gap-2">
-                          <Switch checked={e.enabled} onChange={() => void toggle(e)} label={`Enable ${e.name}`} hideLabel disabled={busy === e.id} />
+                          <Switch
+                            checked={e.enabled}
+                            onChange={() => void toggle(e)}
+                            label={`Enable ${e.name}`}
+                            hideLabel
+                            disabled={busy === e.id}
+                          />
                           <Button size="sm" icon={<Pencil size={14} />} onClick={() => setEditing(e)}>
                             Edit
                           </Button>
@@ -389,7 +416,15 @@ export function WebhooksCard() {
                                 <MoreHorizontal size={16} />
                               </button>
                             )}
-                            items={[{ label: 'Delete', icon: <Trash2 size={14} />, destructive: true, disabled: busy === e.id, onSelect: () => void remove(e) }]}
+                            items={[
+                              {
+                                label: 'Delete',
+                                icon: <Trash2 size={14} />,
+                                destructive: true,
+                                disabled: busy === e.id,
+                                onSelect: () => void remove(e),
+                              },
+                            ]}
                           />
                         </div>
                       </Td>
@@ -429,7 +464,9 @@ export function WebhooksCard() {
                 ) : undefined
               }
             >
-              {endpoints.length ? 'Deliveries appear here after an event is sent. Send a test to check the endpoint and its signing secret.' : 'Add an endpoint first, then send a test to see a delivery here.'}
+              {endpoints.length
+                ? 'Deliveries appear here after an event is sent. Send a test to check the endpoint and its signing secret.'
+                : 'Add an endpoint first, then send a test to see a delivery here.'}
             </EmptyState>
           }
         >
@@ -472,7 +509,13 @@ export function WebhooksCard() {
                   {admin && (
                     <Td align="right">
                       {RETRYABLE.includes(d.status) && (
-                        <Button size="sm" variant="ghost" icon={<RotateCcw size={14} />} loading={retrying === d.id} onClick={() => void retry(d)}>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          icon={<RotateCcw size={14} />}
+                          loading={retrying === d.id}
+                          onClick={() => void retry(d)}
+                        >
                           Retry
                         </Button>
                       )}
@@ -514,8 +557,8 @@ export function WebhooksCard() {
         }
       >
         <p className="mb-3">
-          Verify the <span className="font-mono text-[12px]">webhook-signature</span> header with this secret. It is shown once and cannot be recovered. If it leaks,
-          delete the endpoint and add it again to get a new one.
+          Verify the <span className="font-mono text-[12px]">webhook-signature</span> header with this secret. It is shown once and cannot
+          be recovered. If it leaks, delete the endpoint and add it again to get a new one.
         </p>
         <CodeView value={secret?.value ?? ''} label="Signing secret" maxHeight={100} />
       </Modal>

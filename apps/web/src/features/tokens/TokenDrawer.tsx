@@ -3,7 +3,23 @@ import { useEffect, useMemo, useState } from 'react';
 import { api, errText } from '../../app/api';
 import { useWorkspace } from '../../app/session';
 import { useApi } from '../../app/useApi';
-import { Alert, Button, DateTimeInput, Drawer, Field, FieldGroup, formatDateTime, Input, LoadingBlock, Meta, Mono, Select, timeAgo, useConfirm, useToast } from '../../ui';
+import {
+  Alert,
+  Button,
+  DateTimeInput,
+  Drawer,
+  Field,
+  FieldGroup,
+  formatDateTime,
+  Input,
+  LoadingBlock,
+  Meta,
+  Mono,
+  Select,
+  timeAgo,
+  useConfirm,
+  useToast,
+} from '../../ui';
 import { ScopePicker } from './ScopePicker';
 import { SCOPE_TEXT, type Scope, scopeSentence } from './scopes';
 import { TokenStatus, tokenStatus } from './TokenStatus';
@@ -20,7 +36,8 @@ const describeChange = (k: string, v: unknown): string => {
     const removed = from.filter((s) => !to.includes(s));
     return [added.length && `Added ${added.join(', ')}`, removed.length && `Removed ${removed.join(', ')}`].filter(Boolean).join('; ');
   }
-  if (k === 'expiresAt') return `Expiry ${c.from ? formatDateTime(String(c.from)) : 'never'} → ${c.to ? formatDateTime(String(c.to)) : 'never'}`;
+  if (k === 'expiresAt')
+    return `Expiry ${c.from ? formatDateTime(String(c.from)) : 'never'} → ${c.to ? formatDateTime(String(c.to)) : 'never'}`;
   return `${k} changed`;
 };
 
@@ -57,8 +74,12 @@ export function TokenDrawer({ id, onClose, onChanged }: { id: string; onClose: (
   const added = tok ? scopes.filter((s) => !tok.scopes.includes(s)) : [];
   const removed = tok ? tok.scopes.filter((s) => !scopes.includes(s)) : [];
   const newExpiry = expiryMode === 'keep' ? (tok?.expiresAt ?? null) : expiryMode === 'never' ? null : expiresAt;
-  const expiryChanged = !!tok && (tok.expiresAt ?? null) !== (newExpiry ?? null) && !(tok.expiresAt && newExpiry && new Date(tok.expiresAt).getTime() === new Date(newExpiry).getTime());
-  const expiryWidens = !!tok && expiryChanged && !!tok.expiresAt && (!newExpiry || new Date(newExpiry).getTime() > new Date(tok.expiresAt).getTime());
+  const expiryChanged =
+    !!tok &&
+    (tok.expiresAt ?? null) !== (newExpiry ?? null) &&
+    !(tok.expiresAt && newExpiry && new Date(tok.expiresAt).getTime() === new Date(newExpiry).getTime());
+  const expiryWidens =
+    !!tok && expiryChanged && !!tok.expiresAt && (!newExpiry || new Date(newExpiry).getTime() > new Date(tok.expiresAt).getTime());
   const widening = added.length > 0 || expiryWidens;
   const dirty = !!tok && (name.trim() !== tok.name || added.length > 0 || removed.length > 0 || expiryChanged);
   // Owners can grant only what their role allows; the server checks the owner's role too.
@@ -121,7 +142,13 @@ export function TokenDrawer({ id, onClose, onChanged }: { id: string; onClose: (
       onClose={onClose}
       width="lg"
       title={tok?.name ?? 'API token'}
-      meta={tok && <span className="inline-flex items-center gap-2"><Mono>{tok.tokenHint}</Mono> <TokenStatus t={tok} /></span>}
+      meta={
+        tok && (
+          <span className="inline-flex items-center gap-2">
+            <Mono>{tok.tokenHint}</Mono> <TokenStatus t={tok} />
+          </span>
+        )
+      }
       footer={
         tok && (
           <>
@@ -164,7 +191,11 @@ export function TokenDrawer({ id, onClose, onChanged }: { id: string; onClose: (
             ]}
           />
           {tokenStatus(tok) === 'active' && !editable && (
-            <Alert tone="info">{can('workspace:admin') ? 'Revoked tokens cannot be edited.' : 'Only a workspace admin can change a token’s name, scopes or expiry. You can revoke your own tokens.'}</Alert>
+            <Alert tone="info">
+              {can('workspace:admin')
+                ? 'Revoked tokens cannot be edited.'
+                : 'Only a workspace admin can change a token’s name, scopes or expiry. You can revoke your own tokens.'}
+            </Alert>
           )}
           <Field label="Name" hint="What uses it, e.g. “Hermes” or “n8n reporting”.">
             <Input value={name} onChange={(e) => setName(e.target.value)} readOnly={!editable} maxLength={120} />
@@ -199,10 +230,17 @@ export function TokenDrawer({ id, onClose, onChanged }: { id: string; onClose: (
                   <ul className="mt-2 list-disc space-y-1 pl-5 text-[13px] text-fg-2">
                     {added.map((s) => (
                       <li key={s}>
-                        <strong className="font-medium text-fg">{SCOPE_TEXT[s as Scope]?.label ?? s}</strong>: it could {SCOPE_TEXT[s as Scope]?.does ?? s}.
+                        <strong className="font-medium text-fg">{SCOPE_TEXT[s as Scope]?.label ?? s}</strong>: it could{' '}
+                        {SCOPE_TEXT[s as Scope]?.does ?? s}.
                       </li>
                     ))}
-                    {expiryWidens && <li>{newExpiry ? `It keeps working until ${formatDateTime(newExpiry, { zone: true })}.` : 'It keeps working with no end date.'}</li>}
+                    {expiryWidens && (
+                      <li>
+                        {newExpiry
+                          ? `It keeps working until ${formatDateTime(newExpiry, { zone: true })}.`
+                          : 'It keeps working with no end date.'}
+                      </li>
+                    )}
                   </ul>
                   <Field label="Your password" hint="Confirms it is you making this change." className="mt-3">
                     <Input type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} />
@@ -211,14 +249,22 @@ export function TokenDrawer({ id, onClose, onChanged }: { id: string; onClose: (
               )}
             </section>
           )}
-          {error && <Alert tone="bad" title="Not saved">{error}</Alert>}
+          {error && (
+            <Alert tone="bad" title="Not saved">
+              {error}
+            </Alert>
+          )}
           <section>
             <h3 className="mb-2 text-[13px] font-semibold">History</h3>
             {tok.history.length ? (
               <ol className="space-y-2 border-l-2 border-line pl-4 text-[13px]">
                 {tok.history.map((h, i) => (
                   <li key={i}>
-                    <p className="text-fg">{Object.entries(h.changes).map(([k, v]) => describeChange(k, v)).join('; ')}</p>
+                    <p className="text-fg">
+                      {Object.entries(h.changes)
+                        .map(([k, v]) => describeChange(k, v))
+                        .join('; ')}
+                    </p>
                     <p className="text-[12px] text-muted">
                       {h.by.name} · {formatDateTime(h.at)}
                       {h.steppedUp && ' · confirmed with password'}

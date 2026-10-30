@@ -21,9 +21,15 @@ const durationText = (d: string) => {
   const m = /^P(?:(\d+)W)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?)?$/.exec(d);
   if (!m) return d;
   const [, w, day, h, min] = m;
-  const parts = [w && `${w} week${w === '1' ? '' : 's'}`, day && `${day} day${day === '1' ? '' : 's'}`, h && `${h} hour${h === '1' ? '' : 's'}`, min && `${min} min`].filter(Boolean);
+  const parts = [
+    w && `${w} week${w === '1' ? '' : 's'}`,
+    day && `${day} day${day === '1' ? '' : 's'}`,
+    h && `${h} hour${h === '1' ? '' : 's'}`,
+    min && `${min} min`,
+  ].filter(Boolean);
   return parts.join(' ') || d;
 };
+
 export { durationText };
 
 export function ConditionView({ condition, depth = 0 }: { condition: unknown; depth?: number }) {
@@ -56,7 +62,8 @@ export function ConditionView({ condition, depth = 0 }: { condition: unknown; de
   if (typeof c.trait === 'string')
     return (
       <p className="text-[13px]">
-        Trait <Mono>{c.trait}</Mono> {opText[String(c.op)] ?? String(c.op)} {c.value !== undefined && <strong className="font-medium">{fmt(c.value)}</strong>}
+        Trait <Mono>{c.trait}</Mono> {opText[String(c.op)] ?? String(c.op)}{' '}
+        {c.value !== undefined && <strong className="font-medium">{fmt(c.value)}</strong>}
       </p>
     );
   if (typeof c.event === 'string') {
@@ -65,7 +72,15 @@ export function ConditionView({ condition, depth = 0 }: { condition: unknown; de
     return (
       <p className="text-[13px]">
         Did <strong className="font-medium">{c.event}</strong>
-        {where && Object.keys(where).length > 0 && <> where {Object.entries(where).map(([k, v]) => `${k} = ${fmt(v)}`).join(' and ')}</>}
+        {where && Object.keys(where).length > 0 && (
+          <>
+            {' '}
+            where{' '}
+            {Object.entries(where)
+              .map(([k, v]) => `${k} = ${fmt(v)}`)
+              .join(' and ')}
+          </>
+        )}
         {count?.gte !== undefined && <> at least {count.gte} times</>}
         {count?.lte !== undefined && <> at most {count.lte} times</>}
         {typeof c.within === 'string' && <> in the last {durationText(c.within)}</>}
@@ -84,8 +99,18 @@ export function ConditionView({ condition, depth = 0 }: { condition: unknown; de
         Is in segment <RefName id={c.segment} />
       </p>
     );
-  if (typeof c.session === 'string') return <p className="text-[13px]">Did <strong className="font-medium">{c.session}</strong> this session</p>;
-  if (c.page) return <p className="text-[13px]">Page matches <Mono>{JSON.stringify(c.page)}</Mono></p>;
+  if (typeof c.session === 'string')
+    return (
+      <p className="text-[13px]">
+        Did <strong className="font-medium">{c.session}</strong> this session
+      </p>
+    );
+  if (c.page)
+    return (
+      <p className="text-[13px]">
+        Page matches <Mono>{JSON.stringify(c.page)}</Mono>
+      </p>
+    );
   if (c.device) return <p className="text-[13px]">Device is {String(c.device)}</p>;
   if (c.newVisitor !== undefined) return <p className="text-[13px]">{c.newVisitor ? 'New visitor' : 'Returning visitor'}</p>;
   if (c.referrer) return <p className="text-[13px]">Referrer contains {fmt((c.referrer as Cond).contains)}</p>;

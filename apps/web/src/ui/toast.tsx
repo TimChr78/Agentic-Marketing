@@ -1,6 +1,6 @@
+import { AlertCircle, CheckCircle2, Info, X } from 'lucide-react';
 import { createContext, type ReactNode, useCallback, useContext, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { AlertCircle, CheckCircle2, Info, X } from 'lucide-react';
 import { cx } from './cx';
 
 type Tone = 'success' | 'error' | 'info';
@@ -45,10 +45,18 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       {createPortal(
         <div className="pointer-events-none fixed inset-x-0 bottom-0 z-[60] flex flex-col items-center gap-2 p-4 sm:items-end">
           <div role="status" aria-live="polite" className="contents">
-            {toasts.filter((t) => t.tone !== 'error').map((t) => <ToastView key={t.id} t={t} onClose={() => dismiss(t.id)} />)}
+            {toasts
+              .filter((t) => t.tone !== 'error')
+              .map((t) => (
+                <ToastView key={t.id} t={t} onClose={() => dismiss(t.id)} />
+              ))}
           </div>
           <div role="alert" aria-live="assertive" className="contents">
-            {toasts.filter((t) => t.tone === 'error').map((t) => <ToastView key={t.id} t={t} onClose={() => dismiss(t.id)} />)}
+            {toasts
+              .filter((t) => t.tone === 'error')
+              .map((t) => (
+                <ToastView key={t.id} t={t} onClose={() => dismiss(t.id)} />
+              ))}
           </div>
         </div>,
         document.body,
@@ -61,7 +69,16 @@ function ToastView({ t, onClose }: { t: Toast; onClose: () => void }) {
   const Icon = t.tone === 'success' ? CheckCircle2 : t.tone === 'error' ? AlertCircle : Info;
   return (
     <div className="am-rise pointer-events-auto flex w-full max-w-[420px] items-start gap-2.5 rounded-lg border border-line bg-surface px-3.5 py-2.5 text-[13px] shadow-1">
-      <Icon size={16} className={cx('mt-0.5 shrink-0', t.tone === 'success' && 'text-good', t.tone === 'error' && 'text-bad', t.tone === 'info' && 'text-accent')} aria-hidden />
+      <Icon
+        size={16}
+        className={cx(
+          'mt-0.5 shrink-0',
+          t.tone === 'success' && 'text-good',
+          t.tone === 'error' && 'text-bad',
+          t.tone === 'info' && 'text-accent',
+        )}
+        aria-hidden
+      />
       <div className="min-w-0 flex-1 break-words">{t.message}</div>
       {t.action && (
         <button

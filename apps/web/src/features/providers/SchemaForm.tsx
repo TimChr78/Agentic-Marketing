@@ -38,7 +38,9 @@ const typeOf = (s: JsonSchema): string => {
 
 /** Initial values: the schema's defaults. */
 export function defaultsOf(schema: JsonSchema | undefined): Record<string, unknown> {
-  return Object.fromEntries(Object.entries(schema?.properties ?? {}).flatMap(([k, s]) => (s.default !== undefined ? [[k, s.default]] : [])));
+  return Object.fromEntries(
+    Object.entries(schema?.properties ?? {}).flatMap(([k, s]) => (s.default !== undefined ? [[k, s.default]] : [])),
+  );
 }
 
 /** Drops empty strings so optional fields stay unset. */
@@ -82,7 +84,13 @@ export function SchemaForm({
         if (t === 'boolean')
           return (
             <div key={key}>
-              <Checkbox label={label} hint={s.description} checked={value[key] === true} disabled={disabled} onChange={(e) => set(key, e.target.checked)} />
+              <Checkbox
+                label={label}
+                hint={s.description}
+                checked={value[key] === true}
+                disabled={disabled}
+                onChange={(e) => set(key, e.target.checked)}
+              />
               {error && <p className="mt-1 text-[12px] text-bad">{error}</p>}
             </div>
           );

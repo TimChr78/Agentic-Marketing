@@ -1,15 +1,35 @@
 import { ArrowRight, Bot, Globe, Mail, ShieldCheck, Workflow } from 'lucide-react';
-import { useStore } from '../mock/store';
-import { DEMO_PERSONA } from '../mock/seed';
-import { AuthorBadge, Card, Kpi, PageHeader, Pill, dkk, timeAgo } from '../components/ui';
 import { Chart } from '../components/Chart';
+import { AuthorBadge, Card, dkk, Kpi, PageHeader, Pill, timeAgo } from '../components/ui';
+import { DEMO_PERSONA } from '../mock/seed';
+import { useStore } from '../mock/store';
 import { pageWidth } from '../ui';
 
 const tour = [
-  { icon: Globe, title: 'Browse the demo shop', text: 'Accept cookies, view three trail shoes and watch the hero change in-session.', route: 'live' as const },
-  { icon: Bot, title: 'Ask the copilot', text: '“Build a win-back journey for customers inactive 60 days”. It uses the same tools an MCP client gets.', copilot: true },
-  { icon: ShieldCheck, title: 'Review the agent’s change', text: 'Agent-authored journeys wait for a human. Diff, approve, publish.', route: 'approvals' as const },
-  { icon: Workflow, title: 'Simulate a customer', text: 'Open a journey and dry-run it for one profile with a virtual clock.', route: 'journeys' as const },
+  {
+    icon: Globe,
+    title: 'Browse the demo shop',
+    text: 'Accept cookies, view three trail shoes and watch the hero change in-session.',
+    route: 'live' as const,
+  },
+  {
+    icon: Bot,
+    title: 'Ask the copilot',
+    text: '“Build a win-back journey for customers inactive 60 days”. It uses the same tools an MCP client gets.',
+    copilot: true,
+  },
+  {
+    icon: ShieldCheck,
+    title: 'Review the agent’s change',
+    text: 'Agent-authored journeys wait for a human. Diff, approve, publish.',
+    route: 'approvals' as const,
+  },
+  {
+    icon: Workflow,
+    title: 'Simulate a customer',
+    text: 'Open a journey and dry-run it for one profile with a virtual clock.',
+    route: 'journeys' as const,
+  },
 ];
 
 /** Greet the viewer by their own clock, not a fixed afternoon (#110). */
@@ -67,8 +87,18 @@ export function Overview() {
               deps={[daily]}
               option={(c) => ({
                 grid: { left: 4, right: 4, top: 8, bottom: 4, containLabel: true },
-                xAxis: { type: 'category', data: daily.map((d) => d.day), axisLine: { lineStyle: { color: c.line } }, axisTick: { show: false }, axisLabel: { interval: 6 } },
-                yAxis: { type: 'value', splitLine: { lineStyle: { color: c.line } }, axisLabel: { formatter: (v: number) => `${v / 1000}k` } },
+                xAxis: {
+                  type: 'category',
+                  data: daily.map((d) => d.day),
+                  axisLine: { lineStyle: { color: c.line } },
+                  axisTick: { show: false },
+                  axisLabel: { interval: 6 },
+                },
+                yAxis: {
+                  type: 'value',
+                  splitLine: { lineStyle: { color: c.line } },
+                  axisLabel: { formatter: (v: number) => `${v / 1000}k` },
+                },
                 series: [
                   {
                     type: 'line',
@@ -84,11 +114,21 @@ export function Overview() {
           </div>
         </Card>
 
-        <Card title="Journeys" action={<button className="text-[12px] text-accent" onClick={() => navigate('journeys', { journeyId: null })}>All journeys</button>}>
+        <Card
+          title="Journeys"
+          action={
+            <button className="text-[12px] text-accent" onClick={() => navigate('journeys', { journeyId: null })}>
+              All journeys
+            </button>
+          }
+        >
           <ul className="divide-y divide-line">
             {journeys.map((j) => (
               <li key={j.id}>
-                <button className="flex w-full items-center gap-3 px-4 py-2.5 text-left hover:bg-surface-2" onClick={() => navigate('journeys', { journeyId: j.id })}>
+                <button
+                  className="flex w-full items-center gap-3 px-4 py-2.5 text-left hover:bg-surface-2"
+                  onClick={() => navigate('journeys', { journeyId: j.id })}
+                >
                   <Workflow size={15} className="text-muted" />
                   <span className="min-w-0 flex-1 truncate font-medium">{j.name}</span>
                   <span className="num text-[12px] text-muted">{j.metrics.active.toLocaleString('en')} active</span>
@@ -103,8 +143,15 @@ export function Overview() {
           <ul className="divide-y divide-line">
             {pending.map((a) => (
               <li key={a.id}>
-                <button className="flex w-full items-start gap-3 px-4 py-2.5 text-left hover:bg-surface-2" onClick={() => navigate('approvals')}>
-                  {a.artifactType === 'journey' ? <Workflow size={15} className="mt-0.5 text-muted" /> : <Mail size={15} className="mt-0.5 text-muted" />}
+                <button
+                  className="flex w-full items-start gap-3 px-4 py-2.5 text-left hover:bg-surface-2"
+                  onClick={() => navigate('approvals')}
+                >
+                  {a.artifactType === 'journey' ? (
+                    <Workflow size={15} className="mt-0.5 text-muted" />
+                  ) : (
+                    <Mail size={15} className="mt-0.5 text-muted" />
+                  )}
                   <span className="min-w-0 flex-1">
                     <span className="block font-medium">
                       {a.artifactName} v{a.toVersion}

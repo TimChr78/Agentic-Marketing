@@ -24,10 +24,10 @@ import {
   Tag,
   Td,
   Textarea,
-  Th,
   THead,
-  timeAgo,
+  Th,
   Tr,
+  timeAgo,
   useConfirm,
   useToast,
 } from '../../ui';
@@ -64,7 +64,8 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
     return !lead || lead === a.id || !all.some((x) => x.id === lead);
   });
   const canApprove = can('artifacts:approve');
-  const viewed = (a: Approval) => (a.bundle ? a.bundle.members.every((m) => wasViewed(user!.id, m.approvalId, m.version)) : wasViewed(user!.id, a.id, a.version));
+  const viewed = (a: Approval) =>
+    a.bundle ? a.bundle.members.every((m) => wasViewed(user!.id, m.approvalId, m.version)) : wasViewed(user!.id, a.id, a.version);
   const selectable = items.filter((a) => a.status === 'pending' && viewed(a));
   const chosen = items.filter((a) => selected.has(a.id) && viewed(a));
   const notViewed = items.filter((a) => a.status === 'pending' && !viewed(a)).length;
@@ -84,7 +85,10 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
             {chosen.flatMap((a) =>
               (a.bundle?.members ?? [a]).map((m) => (
                 <li key={'approvalId' in m ? m.approvalId : m.id}>
-                  {m.artifactName} <span className="text-muted">({typeLabel(m.artifactType)}, v{m.version})</span>
+                  {m.artifactName}{' '}
+                  <span className="text-muted">
+                    ({typeLabel(m.artifactType)}, v{m.version})
+                  </span>
                 </li>
               )),
             )}
@@ -105,7 +109,14 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
     }
     setBatching(false);
     setSelected(new Set());
-    if (failed.length) toast.error(<>Some approvals failed:<br />{failed.join('; ')}</>);
+    if (failed.length)
+      toast.error(
+        <>
+          Some approvals failed:
+          <br />
+          {failed.join('; ')}
+        </>,
+      );
     else toast.success(`Approved ${chosen.length} ${chosen.length === 1 ? 'change' : 'changes'}; they are live.`);
     reload();
   };
@@ -132,7 +143,12 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
           ) : undefined
         }
       />
-      <Tabs label="Status" items={tabs} value={status} onChange={(k) => navigate(k === 'pending' ? '/approvals' : `/approvals?status=${k}`, { replace: true })} />
+      <Tabs
+        label="Status"
+        items={tabs}
+        value={status}
+        onChange={(k) => navigate(k === 'pending' ? '/approvals' : `/approvals?status=${k}`, { replace: true })}
+      />
       {status === 'pending' && (
         <WorkspaceSettings
           proposals={proposals.data?.proposals ?? []}
@@ -166,7 +182,10 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
           <ul className="divide-y divide-line sm:hidden">
             {items.map((a) => (
               <li key={a.id}>
-                <Link to={`/approvals/${a.id}${status === 'pending' ? '' : `?status=${status}`}`} className="block px-4 py-3 hover:bg-surface-2">
+                <Link
+                  to={`/approvals/${a.id}${status === 'pending' ? '' : `?status=${status}`}`}
+                  className="block px-4 py-3 hover:bg-surface-2"
+                >
                   <div className="flex items-start justify-between gap-2">
                     <span className="font-medium text-fg">
                       {a.artifactName}
@@ -209,7 +228,11 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
             </THead>
             <tbody>
               {items.map((a) => (
-                <Tr key={a.id} onClick={() => navigate(`/approvals/${a.id}${status === 'pending' ? '' : `?status=${status}`}`)} selected={params.id === a.id}>
+                <Tr
+                  key={a.id}
+                  onClick={() => navigate(`/approvals/${a.id}${status === 'pending' ? '' : `?status=${status}`}`)}
+                  selected={params.id === a.id}
+                >
                   {canApprove && status === 'pending' && (
                     <Td className="pr-0" onClick={(e) => e.stopPropagation()}>
                       <Checkbox
@@ -227,12 +250,17 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
                     </Td>
                   )}
                   <Td>
-                    <Link to={`/approvals/${a.id}${status === 'pending' ? '' : `?status=${status}`}`} className="font-medium text-fg hover:underline" onClick={(e) => e.stopPropagation()}>
+                    <Link
+                      to={`/approvals/${a.id}${status === 'pending' ? '' : `?status=${status}`}`}
+                      className="font-medium text-fg hover:underline"
+                      onClick={(e) => e.stopPropagation()}
+                    >
                       {a.artifactName}
                     </Link>
                     <BundleNote a={a} />
                     <div className="mt-0.5 flex items-center gap-1.5 text-[12px] text-muted">
-                      {typeLabel(a.artifactType)} · v{a.version} · {a.artifactPublishedVersion ? `changes live v${a.artifactPublishedVersion}` : 'new'}
+                      {typeLabel(a.artifactType)} · v{a.version} ·{' '}
+                      {a.artifactPublishedVersion ? `changes live v${a.artifactPublishedVersion}` : 'new'}
                     </div>
                   </Td>
                   <Td>
@@ -246,7 +274,9 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
                     {a.status === 'pending' ? (
                       <ViewedPill a={a} viewed={viewed(a)} />
                     ) : (
-                      <StatusPill tone={a.status === 'approved' ? 'good' : 'bad'}>{a.status === 'approved' ? 'Approved' : 'Rejected'}</StatusPill>
+                      <StatusPill tone={a.status === 'approved' ? 'good' : 'bad'}>
+                        {a.status === 'approved' ? 'Approved' : 'Rejected'}
+                      </StatusPill>
                     )}
                   </Td>
                 </Tr>
@@ -358,7 +388,12 @@ function WorkspaceSettings({
             {canApprove ? (
               rejecting === p.id ? (
                 <div className="mt-2 space-y-2">
-                  <Field label="Why are you rejecting it?" hint="The requester sees this and can propose a different value." error={reasonError} required>
+                  <Field
+                    label="Why are you rejecting it?"
+                    hint="The requester sees this and can propose a different value."
+                    error={reasonError}
+                    required
+                  >
                     <Textarea
                       rows={2}
                       value={reason}
@@ -437,7 +472,10 @@ function BundleNote({ a }: { a: Approval }) {
   const others = a.bundle?.members.filter((m) => m.approvalId !== a.id) ?? [];
   if (!others.length) return null;
   return (
-    <span className="ml-1.5 text-[12px] font-normal text-muted" title={others.map((m) => `${m.artifactName} (${typeLabel(m.artifactType)})`).join(', ')}>
+    <span
+      className="ml-1.5 text-[12px] font-normal text-muted"
+      title={others.map((m) => `${m.artifactName} (${typeLabel(m.artifactType)})`).join(', ')}
+    >
       + {others.length} reviewed together
     </span>
   );

@@ -1,13 +1,4 @@
-import type {
-  ApprovalRequest,
-  EmailTemplate,
-  Experience,
-  Journey,
-  JourneyEdge,
-  JourneyNode,
-  Profile,
-  Segment,
-} from '../api/types';
+import type { ApprovalRequest, EmailTemplate, Experience, Journey, JourneyEdge, JourneyNode, Profile, Segment } from '../api/types';
 
 // Deterministic pseudo-random so the demo looks the same on every load.
 export function rng(seed: number) {
@@ -138,7 +129,15 @@ const welcomeNodes = [
   n('e1', 'email', 'Welcome e-mail', 260, 120, { template: 'tpl_welcome', purpose: 'onboarding' }, { entered: 4812, active: 3 }),
   n('w1', 'wait', 'Wait 2 days', 260, 240, { duration: 'P2D' }, { entered: 4790, active: 312 }),
   n('b1', 'waitEvent', 'Clicked the welcome e-mail?', 260, 360, { event: 'email_clicked', timeout: 'P2D' }, { entered: 4478, active: 201 }),
-  n('a1', 'aiGenerate', 'AI: personalise tips intro', 40, 500, { slot: 'intro', prompt: 'prm_tips@2', maxChars: 280 }, { entered: 1712, active: 0 }),
+  n(
+    'a1',
+    'aiGenerate',
+    'AI: personalise tips intro',
+    40,
+    500,
+    { slot: 'intro', prompt: 'prm_tips@2', maxChars: 280 },
+    { entered: 1712, active: 0 },
+  ),
   n('e2', 'email', 'Getting-started tips', 40, 620, { template: 'tpl_tips', purpose: 'onboarding' }, { entered: 1712, active: 0 }),
   n('e3', 'email', 'Your 10% welcome code', 480, 500, { template: 'tpl_code', purpose: 'marketing_email' }, { entered: 2565, active: 0 }),
   n('g1', 'goal', 'First order', 260, 760, { event: 'order_completed', within: 'P30D' }, { entered: 1094, active: 0 }),
@@ -160,10 +159,34 @@ const cartNodes = [
   n('b1', 'branch', 'Ordered in the meantime?', 300, 240, { condition: 'event order_completed since entry' }, { entered: 2350, active: 0 }),
   n('x1', 'exit', 'Exit: converted', 620, 360, {}, { entered: 412, active: 0 }),
   n('s1', 'split', 'A/B: incentive', 160, 360, { a: 50, b: 50, holdout: 10 }, { entered: 1938, active: 0 }),
-  n('ea', 'email', 'Reminder: 10% off', 0, 490, { template: 'tpl_cart', variant: 'A', purpose: 'marketing_email' }, { entered: 872, active: 0 }),
-  n('eb', 'email', 'Reminder: free shipping', 320, 490, { template: 'tpl_cart', variant: 'B', purpose: 'marketing_email' }, { entered: 873, active: 0 }),
+  n(
+    'ea',
+    'email',
+    'Reminder: 10% off',
+    0,
+    490,
+    { template: 'tpl_cart', variant: 'A', purpose: 'marketing_email' },
+    { entered: 872, active: 0 },
+  ),
+  n(
+    'eb',
+    'email',
+    'Reminder: free shipping',
+    320,
+    490,
+    { template: 'tpl_cart', variant: 'B', purpose: 'marketing_email' },
+    { entered: 873, active: 0 },
+  ),
   n('w2', 'wait', 'Wait 1 day', 160, 610, { duration: 'P1D' }, { entered: 1745, active: 118 }),
-  n('d1', 'aiDecide', 'AI: next best action', 160, 730, { options: 'last_chance | exit', fallback: 'exit', prompt: 'prm_nba@1' }, { entered: 1499, active: 0 }),
+  n(
+    'd1',
+    'aiDecide',
+    'AI: next best action',
+    160,
+    730,
+    { options: 'last_chance | exit', fallback: 'exit', prompt: 'prm_nba@1' },
+    { entered: 1499, active: 0 },
+  ),
   n('e4', 'email', 'Last chance', 160, 860, { template: 'tpl_cart_last', purpose: 'marketing_email' }, { entered: 655, active: 0 }),
   n('g1', 'goal', 'Order completed', 160, 980, { event: 'order_completed', within: 'P7D' }, { entered: 538, active: 0 }),
 ];
@@ -182,9 +205,7 @@ const cartEdges = [
 ];
 
 // Agent-proposed v4 of the welcome series: adds an AI subject line step and changes the delay.
-const welcomeV4Nodes = welcomeNodes.map((x) =>
-  x.id === 'w1' ? { ...x, label: 'Wait 1 day', config: { duration: 'P1D' } } : x,
-);
+const welcomeV4Nodes = welcomeNodes.map((x) => (x.id === 'w1' ? { ...x, label: 'Wait 1 day', config: { duration: 'P1D' } } : x));
 welcomeV4Nodes.splice(
   2,
   0,
@@ -202,8 +223,24 @@ export function seedJourneys(): Journey[] {
       goal: 'First order within 30 days',
       metrics: { entered: 4812, active: 516, conversion: 22.7, holdoutUplift: 6.4 },
       versions: [
-        { number: 3, state: 'published', author: { type: 'user', name: 'Tim' }, note: 'Added 10% code branch', createdAt: NOW - 21 * DAY, nodes: welcomeNodes, edges: welcomeEdges },
-        { number: 4, state: 'in_review', author: { type: 'agent', name: 'Copilot' }, note: 'Shorter delay, AI subject lines per segment', createdAt: NOW - 2 * 3600_000, nodes: welcomeV4Nodes, edges: welcomeV4Edges },
+        {
+          number: 3,
+          state: 'published',
+          author: { type: 'user', name: 'Tim' },
+          note: 'Added 10% code branch',
+          createdAt: NOW - 21 * DAY,
+          nodes: welcomeNodes,
+          edges: welcomeEdges,
+        },
+        {
+          number: 4,
+          state: 'in_review',
+          author: { type: 'agent', name: 'Copilot' },
+          note: 'Shorter delay, AI subject lines per segment',
+          createdAt: NOW - 2 * 3600_000,
+          nodes: welcomeV4Nodes,
+          edges: welcomeV4Edges,
+        },
       ],
     },
     {
@@ -214,7 +251,15 @@ export function seedJourneys(): Journey[] {
       goal: 'Order within 7 days',
       metrics: { entered: 2391, active: 159, conversion: 22.5, holdoutUplift: 9.1 },
       versions: [
-        { number: 7, state: 'published', author: { type: 'user', name: 'Tim' }, note: 'AI next best action after day 1', createdAt: NOW - 9 * DAY, nodes: cartNodes, edges: cartEdges },
+        {
+          number: 7,
+          state: 'published',
+          author: { type: 'user', name: 'Tim' },
+          note: 'AI next best action after day 1',
+          createdAt: NOW - 9 * DAY,
+          nodes: cartNodes,
+          edges: cartEdges,
+        },
       ],
     },
     {
@@ -248,9 +293,23 @@ export function seedSegments(): Segment[] {
   return [
     { id: 'seg_customers', name: 'Customers', definition: 'orders_count ≥ 1', size: 18_420, realtime: true, author: u },
     { id: 'seg_prospects', name: 'Prospects', definition: 'orders_count = 0 AND identified', size: 9_870, realtime: true, author: u },
-    { id: 'seg_trail_runners', name: 'Trail runners', definition: 'product_viewed {category: shoes} ≥ 3 within 7d', size: 3_204, realtime: true, author: u },
+    {
+      id: 'seg_trail_runners',
+      name: 'Trail runners',
+      definition: 'product_viewed {category: shoes} ≥ 3 within 7d',
+      size: 3_204,
+      realtime: true,
+      author: u,
+    },
     { id: 'seg_vip', name: 'VIP', definition: 'orders_count ≥ 4 OR ltv ≥ 5 000 DKK', size: 1_166, realtime: false, author: u },
-    { id: 'seg_lapsed_60d', name: 'Lapsed 60 days', definition: 'customer AND no order_completed within 60d', size: 4_381, realtime: false, author: u },
+    {
+      id: 'seg_lapsed_60d',
+      name: 'Lapsed 60 days',
+      definition: 'customer AND no order_completed within 60d',
+      size: 4_381,
+      realtime: false,
+      author: u,
+    },
   ];
 }
 
@@ -360,7 +419,11 @@ export function seedApprovals(): ApprovalRequest[] {
       changes: [
         { path: 'nodes.w1.label', kind: 'changed', before: 'Wait 2 days', after: 'Wait 1 day' },
         { path: 'nodes.w1.config.duration', kind: 'changed', before: 'P2D', after: 'P1D' },
-        { path: 'nodes.a0', kind: 'added', after: 'aiGenerate “AI: subject line per segment” (slot: subject, max 60 chars, prompt prm_subject@1)' },
+        {
+          path: 'nodes.a0',
+          kind: 'added',
+          after: 'aiGenerate “AI: subject line per segment” (slot: subject, max 60 chars, prompt prm_subject@1)',
+        },
         { path: 'settings.ai_fallback', kind: 'added', after: 'Use template subject if generation fails or exceeds 60 chars' },
       ],
     },
@@ -376,7 +439,12 @@ export function seedApprovals(): ApprovalRequest[] {
       createdAt: NOW - 26 * 3600_000,
       summary: 'Copy tweak for variant B and a product image block.',
       changes: [
-        { path: 'subject', kind: 'changed', before: 'You left something behind, {{ profile.first_name }}', after: '{{ profile.first_name }}, your gear is still in the cart' },
+        {
+          path: 'subject',
+          kind: 'changed',
+          before: 'You left something behind, {{ profile.first_name }}',
+          after: '{{ profile.first_name }}, your gear is still in the cart',
+        },
         { path: 'body.section[1].image', kind: 'added', after: 'mj-image {{ cart.items[0].image_url }}' },
       ],
     },

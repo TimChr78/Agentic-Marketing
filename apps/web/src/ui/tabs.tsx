@@ -55,7 +55,8 @@ export function Tabs<K extends string>({
 
   const onKey = (e: KeyboardEvent, i: number) => {
     const n = items.length;
-    const next = e.key === 'ArrowRight' ? (i + 1) % n : e.key === 'ArrowLeft' ? (i - 1 + n) % n : e.key === 'Home' ? 0 : e.key === 'End' ? n - 1 : -1;
+    const next =
+      e.key === 'ArrowRight' ? (i + 1) % n : e.key === 'ArrowLeft' ? (i - 1 + n) % n : e.key === 'Home' ? 0 : e.key === 'End' ? n - 1 : -1;
     if (next < 0) return;
     e.preventDefault();
     refs.current[next]?.focus();
@@ -64,7 +65,12 @@ export function Tabs<K extends string>({
   return (
     <div className={className}>
       <div className="relative">
-        <div ref={list} role="tablist" aria-label={label} className={cx('flex overflow-x-auto border-b border-line', compact ? 'gap-0.5' : 'gap-1')}>
+        <div
+          ref={list}
+          role="tablist"
+          aria-label={label}
+          className={cx('flex overflow-x-auto border-b border-line', compact ? 'gap-0.5' : 'gap-1')}
+        >
           {items.map((t, i) => (
             <button
               key={t.key}
@@ -93,12 +99,26 @@ export function Tabs<K extends string>({
               ) : (
                 t.label
               )}
-              {t.count !== undefined && <span className="rounded-full bg-surface-2 px-1.5 text-[11px] text-fg-2 tabular-nums">{t.count}</span>}
+              {t.count !== undefined && (
+                <span className="rounded-full bg-surface-2 px-1.5 text-[11px] text-fg-2 tabular-nums">{t.count}</span>
+              )}
             </button>
           ))}
         </div>
-        {fade.left && <span aria-hidden data-scroll-fade="left" className="pointer-events-none absolute inset-y-0 left-0 w-6 bg-gradient-to-r from-fg/10 to-transparent" />}
-        {fade.right && <span aria-hidden data-scroll-fade="right" className="pointer-events-none absolute inset-y-0 right-0 w-8 bg-gradient-to-l from-fg/10 to-transparent" />}
+        {fade.left && (
+          <span
+            aria-hidden
+            data-scroll-fade="left"
+            className="pointer-events-none absolute inset-y-0 left-0 w-6 bg-gradient-to-r from-fg/10 to-transparent"
+          />
+        )}
+        {fade.right && (
+          <span
+            aria-hidden
+            data-scroll-fade="right"
+            className="pointer-events-none absolute inset-y-0 right-0 w-8 bg-gradient-to-l from-fg/10 to-transparent"
+          />
+        )}
       </div>
       {children !== undefined && (
         <div role="tabpanel" id={`${id}-panel`} aria-labelledby={`${id}-tab-${value}`} className="pt-4">
@@ -110,7 +130,17 @@ export function Tabs<K extends string>({
 }
 
 /** Segmented control for 2–4 view options (e.g. Desktop / Mobile). */
-export function Segmented<K extends string>({ items, value, onChange, label }: { items: { key: K; label: ReactNode; icon?: ReactNode }[]; value: K; onChange: (k: K) => void; label: string }) {
+export function Segmented<K extends string>({
+  items,
+  value,
+  onChange,
+  label,
+}: {
+  items: { key: K; label: ReactNode; icon?: ReactNode }[];
+  value: K;
+  onChange: (k: K) => void;
+  label: string;
+}) {
   return (
     <div role="radiogroup" aria-label={label} className="inline-flex rounded-md border border-line-strong bg-surface-2 p-0.5">
       {items.map((t) => (

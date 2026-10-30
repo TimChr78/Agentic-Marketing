@@ -1,4 +1,22 @@
-import { Bell, Bot, Clock, GitBranch, type LucideIcon, Mail, MessageSquare, Hourglass, LogOut, Pencil, Shuffle, Sparkles, Target, Variable, Webhook, Zap, Plug } from 'lucide-react';
+import {
+  Bell,
+  Bot,
+  Clock,
+  GitBranch,
+  Hourglass,
+  LogOut,
+  type LucideIcon,
+  Mail,
+  MessageSquare,
+  Pencil,
+  Plug,
+  Shuffle,
+  Sparkles,
+  Target,
+  Variable,
+  Webhook,
+  Zap,
+} from 'lucide-react';
 import { durationText } from '../previews/ConditionView';
 
 // The journey model shared by the builder and the read-only graph: node kinds, their category
@@ -69,7 +87,25 @@ export const KINDS: Record<NodeKind, { label: string; category: Category; icon: 
   transform: { label: 'Transform', category: 'action', icon: Variable, hint: 'Compute a variable' },
   exit: { label: 'Exit', category: 'exit', icon: LogOut, hint: 'Leave the journey' },
 };
-export const PALETTE_ORDER: NodeKind[] = ['trigger', 'email', 'sms', 'push', 'wait', 'waitEvent', 'waitUntil', 'branch', 'split', 'goal', 'aiDecide', 'aiGenerate', 'webhook', 'action', 'updateProfile', 'transform', 'exit'];
+export const PALETTE_ORDER: NodeKind[] = [
+  'trigger',
+  'email',
+  'sms',
+  'push',
+  'wait',
+  'waitEvent',
+  'waitUntil',
+  'branch',
+  'split',
+  'goal',
+  'aiDecide',
+  'aiGenerate',
+  'webhook',
+  'action',
+  'updateProfile',
+  'transform',
+  'exit',
+];
 
 export const DEFAULTS: Record<NodeKind, Record<string, unknown>> = {
   trigger: { event: 'Signed Up', reentry: 'once' },
@@ -134,7 +170,12 @@ export function edgesOf(nodes: JNode[]): JEdge[] {
 /** Makes every edge explicit, so the canvas and the stored JSON agree; keeps labels. */
 export function materialize(nodes: JNode[]): JNode[] {
   const edges = edgesOf(nodes);
-  return nodes.map((n) => ({ ...n, next: edges.filter((e) => e.source === n.id).map((e) => (n.next?.[e.index]?.label ? { to: e.target, label: n.next[e.index]!.label } : { to: e.target })) }));
+  return nodes.map((n) => ({
+    ...n,
+    next: edges
+      .filter((e) => e.source === n.id)
+      .map((e) => (n.next?.[e.index]?.label ? { to: e.target, label: n.next[e.index]!.label } : { to: e.target })),
+  }));
 }
 
 export function newNodeId(nodes: JNode[]): string {
@@ -184,4 +225,3 @@ export function summary(n: JNode, names: (id: string) => string | undefined = ()
       return '';
   }
 }
-

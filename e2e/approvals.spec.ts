@@ -46,7 +46,9 @@ test.describe('approvals (#41)', () => {
     const drawer = page.getByRole('dialog', { name: 'Send Signal #44' });
     await expect(drawer).toContainText('Reviewed together');
     await expect(drawer).toContainText('reviewed together with this broadcast');
-    await expect(drawer.frameLocator('iframe[title^="E-mail preview"]').getByText('This issue and its send were approved together.')).toBeVisible();
+    await expect(
+      drawer.frameLocator('iframe[title^="E-mail preview"]').getByText('This issue and its send were approved together.'),
+    ).toBeVisible();
     await drawer.getByRole('button', { name: /Weekly Signal #44/ }).click();
     await expect(page.getByRole('dialog', { name: 'Weekly Signal #44' })).toContainText('Reviewed together');
 

@@ -21,6 +21,5 @@ test('create an alert, send a test and see the empty history (#76)', async ({ pa
   await expect(page.getByText('Nothing has fired yet')).toBeVisible();
 
   const rules = await call<{ rules: { id: string; name: string }[] }>(page.request, 'alerts.list', {});
-  for (const rule of rules.rules.filter((r) => r.name === 'Bounce watch'))
-    await call(page.request, 'alerts.delete', { id: rule.id });
+  for (const rule of rules.rules.filter((r) => r.name === 'Bounce watch')) await call(page.request, 'alerts.delete', { id: rule.id });
 });

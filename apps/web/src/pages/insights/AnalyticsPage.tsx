@@ -3,7 +3,7 @@ import { api, type Out } from '../../app/api';
 import { useCrumbs } from '../../app/page';
 import { useApi } from '../../app/useApi';
 import { Chart } from '../../components/Chart';
-import { Alert, Checkbox, EmptyState, Field, Input, LoadingBlock, PageHeader, Table, TableFrame, Td, Th, THead, Tr } from '../../ui';
+import { Alert, Checkbox, EmptyState, Field, Input, LoadingBlock, PageHeader, Table, TableFrame, Td, THead, Th, Tr } from '../../ui';
 import { pageWidth } from '../../ui/layout';
 
 type Result = Out<'analytics.query'>;

@@ -1,27 +1,16 @@
+import { BarChart3, Bot, CheckCircle2, Globe, LayoutDashboard, Mail, PlugZap, Users, Workflow, X } from 'lucide-react';
 import { lazy, Suspense, useEffect } from 'react';
-import {
-  BarChart3,
-  Bot,
-  CheckCircle2,
-  Globe,
-  LayoutDashboard,
-  Mail,
-  PlugZap,
-  Users,
-  Workflow,
-  X,
-} from 'lucide-react';
-import { routes, useStore, type Route } from './mock/store';
-import { startAmbientTraffic } from './mock/live';
 import { cx } from './components/ui';
-import { Overview } from './screens/Overview';
-import { Journeys } from './screens/Journeys';
-import { LiveSite } from './screens/LiveSite';
-import { Profiles } from './screens/Profiles';
+import { Copilot } from './copilot/Copilot';
+import { startAmbientTraffic } from './mock/live';
+import { type Route, routes, useStore } from './mock/store';
 import { Analytics } from './screens/Analytics';
 import { Approvals } from './screens/Approvals';
+import { Journeys } from './screens/Journeys';
+import { LiveSite } from './screens/LiveSite';
+import { Overview } from './screens/Overview';
+import { Profiles } from './screens/Profiles';
 import { Setup } from './screens/Setup';
-import { Copilot } from './copilot/Copilot';
 
 // GrapesJS is large; load it only when the e-mail editor opens.
 const EmailEditor = lazy(() => import('./screens/EmailEditor'));

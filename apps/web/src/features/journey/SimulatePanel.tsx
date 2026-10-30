@@ -11,7 +11,21 @@ type Result = Out<'journeys.simulate'>;
  * Simulate (#33): walk the saved draft with made-up events and answers. Nothing is sent, no
  * action or model is called. Steps light up on the canvas.
  */
-export function SimulatePanel({ artifactId, version, nodes, dirty, onPath, onSelect }: { artifactId: string; version: number; nodes: JNode[]; dirty: boolean; onPath: (ids: string[]) => void; onSelect: (id: string) => void }) {
+export function SimulatePanel({
+  artifactId,
+  version,
+  nodes,
+  dirty,
+  onPath,
+  onSelect,
+}: {
+  artifactId: string;
+  version: number;
+  nodes: JNode[];
+  dirty: boolean;
+  onPath: (ids: string[]) => void;
+  onSelect: (id: string) => void;
+}) {
   const [events, setEvents] = useState<{ event: string; after: string }[]>([]);
   const [branches, setBranches] = useState<Record<string, 'yes' | 'no'>>({});
   const [ai, setAi] = useState<Record<string, string>>({});
@@ -66,10 +80,19 @@ export function SimulatePanel({ artifactId, version, nodes, dirty, onPath, onSel
         {events.map((e, i) => (
           <div key={i} className="flex items-end gap-2">
             <Field label="Event" className="flex-1">
-              <Input compact value={e.event} placeholder="Email Opened" onChange={(x) => setEvents(events.map((y, k) => (k === i ? { ...y, event: x.target.value } : y)))} />
+              <Input
+                compact
+                value={e.event}
+                placeholder="Email Opened"
+                onChange={(x) => setEvents(events.map((y, k) => (k === i ? { ...y, event: x.target.value } : y)))}
+              />
             </Field>
             <Field label="After" className="w-[96px]">
-              <Select compact value={e.after} onChange={(x) => setEvents(events.map((y, k) => (k === i ? { ...y, after: x.target.value } : y)))}>
+              <Select
+                compact
+                value={e.after}
+                onChange={(x) => setEvents(events.map((y, k) => (k === i ? { ...y, after: x.target.value } : y)))}
+              >
                 {['PT1H', 'P1D', 'P2D', 'P3D', 'P7D', 'P14D'].map((d) => (
                   <option key={d} value={d}>
                     {durationText(d)}
@@ -77,7 +100,13 @@ export function SimulatePanel({ artifactId, version, nodes, dirty, onPath, onSel
                 ))}
               </Select>
             </Field>
-            <Button size="sm" variant="ghost" aria-label="Remove event" icon={<Trash2 size={13} />} onClick={() => setEvents(events.filter((_, k) => k !== i))} />
+            <Button
+              size="sm"
+              variant="ghost"
+              aria-label="Remove event"
+              icon={<Trash2 size={13} />}
+              onClick={() => setEvents(events.filter((_, k) => k !== i))}
+            />
           </div>
         ))}
         <Button size="sm" icon={<Plus size={13} />} onClick={() => setEvents([...events, { event: '', after: 'P1D' }])}>
@@ -87,9 +116,16 @@ export function SimulatePanel({ artifactId, version, nodes, dirty, onPath, onSel
       {entryKey?.source === 'event_property' && (
         <div className="space-y-2">
           <p className="text-[12px] font-medium text-fg-2">Entry key sample</p>
-          <p className="text-[12px] text-muted">The trigger deduplicates on “{entryKey.property}”. Try an event to see its key and whether it would be a duplicate.</p>
+          <p className="text-[12px] text-muted">
+            The trigger deduplicates on “{entryKey.property}”. Try an event to see its key and whether it would be a duplicate.
+          </p>
           <Field label="Event name">
-            <Input compact value={sampleName} placeholder={String(trigger?.config.event ?? '')} onChange={(e) => setSampleName(e.target.value)} />
+            <Input
+              compact
+              value={sampleName}
+              placeholder={String(trigger?.config.event ?? '')}
+              onChange={(e) => setSampleName(e.target.value)}
+            />
           </Field>
           <Field label="Properties (JSON)" hint="For example {&quot;order_id&quot;:&quot;A-1&quot;}.">
             <Textarea mono rows={2} value={sampleProperties} onChange={(e) => setSampleProperties(e.target.value)} />
@@ -101,7 +137,11 @@ export function SimulatePanel({ artifactId, version, nodes, dirty, onPath, onSel
           <p className="text-[12px] font-medium text-fg-2">Branch answers</p>
           {branchNodes.map((n) => (
             <Field key={n.id} label={n.label}>
-              <Select compact value={branches[n.id] ?? 'no'} onChange={(e) => setBranches({ ...branches, [n.id]: e.target.value as 'yes' | 'no' })}>
+              <Select
+                compact
+                value={branches[n.id] ?? 'no'}
+                onChange={(e) => setBranches({ ...branches, [n.id]: e.target.value as 'yes' | 'no' })}
+              >
                 <option value="yes">Yes</option>
                 <option value="no">No</option>
               </Select>
@@ -114,7 +154,11 @@ export function SimulatePanel({ artifactId, version, nodes, dirty, onPath, onSel
           <p className="text-[12px] font-medium text-fg-2">AI decisions</p>
           {aiNodes.map((n) => (
             <Field key={n.id} label={n.label}>
-              <Select compact value={ai[n.id] ?? String(n.config.fallback ?? '')} onChange={(e) => setAi({ ...ai, [n.id]: e.target.value })}>
+              <Select
+                compact
+                value={ai[n.id] ?? String(n.config.fallback ?? '')}
+                onChange={(e) => setAi({ ...ai, [n.id]: e.target.value })}
+              >
                 {((n.config.options as string[]) ?? []).map((o) => (
                   <option key={o} value={o}>
                     {o}
@@ -148,7 +192,8 @@ export function SimulatePanel({ artifactId, version, nodes, dirty, onPath, onSel
             {result.steps.map((s, i) => (
               <li key={i}>
                 <button type="button" className="text-left hover:underline" onClick={() => onSelect(s.node)}>
-                  <span className="text-muted tabular-nums">{s.after === 'PT0S' ? 'At once' : durationText(s.after)}</span> · <span className="font-medium">{s.label}</span>
+                  <span className="text-muted tabular-nums">{s.after === 'PT0S' ? 'At once' : durationText(s.after)}</span> ·{' '}
+                  <span className="font-medium">{s.label}</span>
                 </button>
                 {s.detail && <p className="text-[12px] text-muted">{s.detail}</p>}
               </li>

@@ -1,27 +1,12 @@
 import { Pencil, Plus } from 'lucide-react';
 import { useState } from 'react';
 import { api, errText } from '../../app/api';
+import { ButtonLink } from '../../app/links';
 import { useCrumbs } from '../../app/page';
 import { navigate } from '../../app/router';
-import { ButtonLink } from '../../app/links';
 import { useWorkspace } from '../../app/session';
 import { useApi } from '../../app/useApi';
-import {
-  Alert,
-  Button,
-  EmptyState,
-  Mono,
-  PageHeader,
-  StatusPill,
-  Table,
-  TableFrame,
-  Tag,
-  Td,
-  Th,
-  THead,
-  Tr,
-  useToast,
-} from '../../ui';
+import { Alert, Button, EmptyState, Mono, PageHeader, StatusPill, Table, TableFrame, Tag, Td, THead, Th, Tr, useToast } from '../../ui';
 import { pageWidth } from '../../ui/layout';
 
 const BASIS_LABEL: Record<string, string> = {
@@ -41,10 +26,7 @@ export default function PurposesPage() {
   const { can } = useWorkspace();
   const toast = useToast();
   const data = useApi(async () => {
-    const [current, list] = await Promise.all([
-      api.call('purposes.list', {}),
-      api.call('artifacts.list', { type: 'purposes', limit: 1 }),
-    ]);
+    const [current, list] = await Promise.all([api.call('purposes.list', {}), api.call('artifacts.list', { type: 'purposes', limit: 1 })]);
     return { ...current, artifact: list.artifacts[0] ?? null };
   }, []);
   // Counts are about people, not the artifact, so they are a separate read under profiles:read.
@@ -94,9 +76,7 @@ export default function PurposesPage() {
         description="The lawful reasons you may contact people, and the channels each covers. Changes go through review like other artifacts: edit the purposes artifact, submit it, and a person approves it."
         meta={
           <>
-            <StatusPill tone={source === 'published' ? 'good' : 'neutral'}>
-              {source === 'published' ? 'Published' : 'Defaults'}
-            </StatusPill>
+            <StatusPill tone={source === 'published' ? 'good' : 'neutral'}>{source === 'published' ? 'Published' : 'Defaults'}</StatusPill>
             <span>{source === 'published' ? 'These purposes are in force.' : 'The built-in defaults are in force.'}</span>
             {artifact && artifact.publishedVersion === null && <span>A draft exists and is not live yet.</span>}
           </>
@@ -115,7 +95,10 @@ export default function PurposesPage() {
       />
       {!artifact && (
         <Alert tone="info" title="No purposes artifact yet" className="mb-4">
-          The defaults below apply. {canWrite ? 'Create a purposes artifact to change a basis, its channels or double opt-in.' : 'A builder can create one to change a basis, its channels or double opt-in.'}
+          The defaults below apply.{' '}
+          {canWrite
+            ? 'Create a purposes artifact to change a basis, its channels or double opt-in.'
+            : 'A builder can create one to change a basis, its channels or double opt-in.'}
         </Alert>
       )}
       {error && (

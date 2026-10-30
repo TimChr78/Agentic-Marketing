@@ -16,7 +16,13 @@ export default defineConfig({
   timeout: 60_000,
   expect: { timeout: 10_000 },
   reporter: [['list']],
-  use: { baseURL: base, trace: 'retain-on-failure', ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 }, launchOptions: { executablePath } },
+  use: {
+    baseURL: base,
+    trace: 'retain-on-failure',
+    ...devices['Desktop Chrome'],
+    viewport: { width: 1440, height: 900 },
+    launchOptions: { executablePath },
+  },
   webServer: process.env.E2E_BASE
     ? undefined
     : {

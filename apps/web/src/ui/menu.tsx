@@ -22,7 +22,14 @@ export function Menu({
   align = 'end',
   label,
 }: {
-  trigger: (p: { ref: (el: HTMLButtonElement | null) => void; 'aria-haspopup': 'menu'; 'aria-expanded': boolean; 'aria-controls': string; onClick: () => void; onKeyDown: (e: React.KeyboardEvent) => void }) => ReactNode;
+  trigger: (p: {
+    ref: (el: HTMLButtonElement | null) => void;
+    'aria-haspopup': 'menu';
+    'aria-expanded': boolean;
+    'aria-controls': string;
+    onClick: () => void;
+    onKeyDown: (e: React.KeyboardEvent) => void;
+  }) => ReactNode;
   items: (MenuItem | 'separator')[];
   align?: 'start' | 'end';
   label?: string;
@@ -155,7 +162,17 @@ export function Menu({
 }
 
 /** A context menu opened at the pointer (or at an element for keyboard users). */
-export function ContextMenu({ at, items, onClose, label }: { at: { x: number; y: number } | null; items: (MenuItem | 'separator')[]; onClose: () => void; label?: string }) {
+export function ContextMenu({
+  at,
+  items,
+  onClose,
+  label,
+}: {
+  at: { x: number; y: number } | null;
+  items: (MenuItem | 'separator')[];
+  onClose: () => void;
+  label?: string;
+}) {
   const list = useRef<HTMLDivElement>(null);
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
@@ -190,7 +207,11 @@ export function ContextMenu({ at, items, onClose, label }: { at: { x: number; y:
       role="menu"
       aria-label={label}
       onKeyDown={onKey}
-      style={{ position: 'fixed', top: Math.min(Number.isFinite(at.y) ? at.y : window.innerHeight / 3, window.innerHeight - 220), left: Math.min(Number.isFinite(at.x) ? at.x : window.innerWidth / 3, window.innerWidth - 200) }}
+      style={{
+        position: 'fixed',
+        top: Math.min(Number.isFinite(at.y) ? at.y : window.innerHeight / 3, window.innerHeight - 220),
+        left: Math.min(Number.isFinite(at.x) ? at.x : window.innerWidth / 3, window.innerWidth - 200),
+      }}
       className="am-fade-in z-[70] min-w-[180px] rounded-lg border border-line bg-surface p-1 shadow-2"
     >
       {items.map((it, i) =>

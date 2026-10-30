@@ -63,21 +63,20 @@ export function match(pattern: string, path: string): Record<string, string> | n
   return out;
 }
 
-export const Link = forwardRef<HTMLAnchorElement, AnchorHTMLAttributes<HTMLAnchorElement> & { to: string; replace?: boolean }>(function Link(
-  { to, replace, onClick, ...p },
-  ref,
-) {
-  return (
-    <a
-      ref={ref}
-      href={to}
-      {...p}
-      onClick={(e: MouseEvent<HTMLAnchorElement>) => {
-        onClick?.(e);
-        if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || p.target) return;
-        e.preventDefault();
-        navigate(to, { replace });
-      }}
-    />
-  );
-});
+export const Link = forwardRef<HTMLAnchorElement, AnchorHTMLAttributes<HTMLAnchorElement> & { to: string; replace?: boolean }>(
+  function Link({ to, replace, onClick, ...p }, ref) {
+    return (
+      <a
+        ref={ref}
+        href={to}
+        {...p}
+        onClick={(e: MouseEvent<HTMLAnchorElement>) => {
+          onClick?.(e);
+          if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || p.target) return;
+          e.preventDefault();
+          navigate(to, { replace });
+        }}
+      />
+    );
+  },
+);

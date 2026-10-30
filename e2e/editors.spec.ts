@@ -31,7 +31,12 @@ test('create an experience with two variants in the editor and save', async ({ p
   expect(saved.version.content.placement).toBe('e2e-article-footer');
   expect(saved.version.content.variants).toHaveLength(2);
   expect(saved.version.content.variants[0]).toMatchObject({ id: 'a', name: 'Variant A' });
-  expect(saved.version.content.variants[1]).toMatchObject({ id: 'b', name: 'Variant B', weight: 60, content: { html: '<p>Second pitch for the e2e.</p>' } });
+  expect(saved.version.content.variants[1]).toMatchObject({
+    id: 'b',
+    name: 'Variant B',
+    weight: 60,
+    content: { html: '<p>Second pitch for the e2e.</p>' },
+  });
 });
 
 test('edit a purpose description and save, without renaming its key', async ({ page }) => {

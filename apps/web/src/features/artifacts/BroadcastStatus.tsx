@@ -1,9 +1,9 @@
-import { useEffect, useState } from 'react';
 import { Ban, Clock, ExternalLink, RefreshCw } from 'lucide-react';
+import { useEffect, useState } from 'react';
 import { api, errText } from '../../app/api';
 import { useWorkspace } from '../../app/session';
 import { useApi } from '../../app/useApi';
-import { Alert, Button, EmptyState, LoadingBlock, StatusPill, formatDateTime, useConfirm, useToast } from '../../ui';
+import { Alert, Button, EmptyState, formatDateTime, LoadingBlock, StatusPill, useConfirm, useToast } from '../../ui';
 import { StatCard, StatGrid } from '../insights/Stats';
 import type { Artifact } from './ArtifactDetailPage';
 
@@ -12,7 +12,14 @@ import type { Artifact } from './ArtifactDetailPage';
 // while it works.
 
 const runTone = { not_scheduled: 'neutral', scheduled: 'info', running: 'info', done: 'good', cancelled: 'warn', failed: 'bad' } as const;
-const runLabel = { not_scheduled: 'Not scheduled', scheduled: 'Scheduled', running: 'Sending', done: 'Done', cancelled: 'Cancelled', failed: 'Failed' } as const;
+const runLabel = {
+  not_scheduled: 'Not scheduled',
+  scheduled: 'Scheduled',
+  running: 'Sending',
+  done: 'Done',
+  cancelled: 'Cancelled',
+  failed: 'Failed',
+} as const;
 
 const MESSAGE_ORDER = ['sent', 'delivered', 'opened', 'clicked', 'bounced', 'complained', 'unsubscribed', 'failed'];
 
@@ -43,7 +50,8 @@ export function BroadcastStatus({ artifact }: { artifact: Artifact }) {
   if (!published)
     return (
       <EmptyState title="It sends after it is approved" icon={<Clock size={16} />}>
-        This broadcast is not live yet. Publish it, or have someone with approval rights approve it, then the sending status and results show here.
+        This broadcast is not live yet. Publish it, or have someone with approval rights approve it, then the sending status and results
+        show here.
       </EmptyState>
     );
 
@@ -88,7 +96,12 @@ export function BroadcastStatus({ artifact }: { artifact: Artifact }) {
           Refresh
         </Button>
         {archived && (
-          <a href={archived.url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-[12px] font-medium text-accent hover:underline">
+          <a
+            href={archived.url}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex items-center gap-1 text-[12px] font-medium text-accent hover:underline"
+          >
             View in the archive <ExternalLink size={12} />
           </a>
         )}
@@ -119,7 +132,12 @@ export function BroadcastStatus({ artifact }: { artifact: Artifact }) {
         />
         <StatCard label="Recipients" value={run.recipients.toLocaleString()} hint="In the segment when it was scheduled" />
         <StatCard label="Queued" value={run.queued.toLocaleString()} hint="Waiting to be sent" />
-        <StatCard label="Skipped" value={run.skipped.toLocaleString()} hint="Not eligible, no consent or gone" tone={run.skipped > 0 ? 'warn' : undefined} />
+        <StatCard
+          label="Skipped"
+          value={run.skipped.toLocaleString()}
+          hint="Not eligible, no consent or gone"
+          tone={run.skipped > 0 ? 'warn' : undefined}
+        />
         {run.windowSkipped > 0 && (
           <StatCard
             label="Outside send window"
@@ -180,8 +198,8 @@ export function BroadcastStatus({ artifact }: { artifact: Artifact }) {
             </table>
             <p className="text-[12px] text-muted">
               {test.samplePercent}% sample; decided after {test.decideAfter}
-              {test.reason ? ` — ${test.reason}.` : '.'} {test.metric === 'click' ? 'Clicks' : 'Opens'} pick the winner; ties and fewer than 20 sends in
-              a variant stay with variant A.
+              {test.reason ? ` — ${test.reason}.` : '.'} {test.metric === 'click' ? 'Clicks' : 'Opens'} pick the winner; ties and fewer than
+              20 sends in a variant stay with variant A.
             </p>
           </div>
         </div>
@@ -211,7 +229,9 @@ export function BroadcastStatus({ artifact }: { artifact: Artifact }) {
               ? 'No run yet. It starts when the broadcast is published and its send time comes.'
               : 'Counts come from the message events for this broadcast and grow as people open and click.'}
       </p>
-      {cancellable && !can('messages:send') && <p className="text-[12px] text-muted">Cancelling sending needs the messages:send permission.</p>}
+      {cancellable && !can('messages:send') && (
+        <p className="text-[12px] text-muted">Cancelling sending needs the messages:send permission.</p>
+      )}
     </div>
   );
 }

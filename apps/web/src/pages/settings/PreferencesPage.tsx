@@ -1,6 +1,6 @@
-import { setThemePref, useThemePref, type ThemePref } from '../../app/theme';
 import { useCrumbs } from '../../app/page';
 import { useWorkspace } from '../../app/session';
+import { setThemePref, type ThemePref, useThemePref } from '../../app/theme';
 import { roleLabel } from '../../features/settings/roles';
 import { Card, Meta, Mono, PageHeader, RadioCards, Tag } from '../../ui';
 import { pageWidth } from '../../ui/layout';
@@ -31,8 +31,7 @@ export default function PreferencesPage() {
               [
                 'Signed in as',
                 <span>
-                  <span className="font-medium text-fg">{user.name || 'No name'}</span>{' '}
-                  <span className="text-muted">{user.email}</span>
+                  <span className="font-medium text-fg">{user.name || 'No name'}</span> <span className="text-muted">{user.email}</span>
                 </span>,
               ],
               ['Workspace', workspace.name],
@@ -42,11 +41,7 @@ export default function PreferencesPage() {
         </Card>
       </div>
 
-      <Card
-        title="What you can do"
-        description="Your permissions in this workspace, and what each one allows."
-        className="mt-5"
-      >
+      <Card title="What you can do" description="Your permissions in this workspace, and what each one allows." className="mt-5">
         {explained.length ? (
           <div className="p-4">
             <Meta items={explained.map(({ permission, meaning }) => [<Mono>{permission}</Mono>, meaning])} />

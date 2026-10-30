@@ -1,6 +1,6 @@
-import { Field } from '../../ui';
 import { ArtifactListPage } from '../../features/artifacts/ArtifactListPage';
 import { ArtifactSelect } from '../../features/artifacts/ArtifactSelect';
+import { Field } from '../../ui';
 
 export default function FormsPage() {
   return (
@@ -14,11 +14,17 @@ export default function FormsPage() {
         label: 'New form',
         initial: {},
         fields: (s, set, errors) => (
-          <Field label="Confirmation e-mail" hint="Sent for double opt-in; it must contain {{ confirm_url }}. You can change this later." error={errors.confirmationTemplate} required>
+          <Field
+            label="Confirmation e-mail"
+            hint="Sent for double opt-in; it must contain {{ confirm_url }}. You can change this later."
+            error={errors.confirmationTemplate}
+            required
+          >
             <ArtifactSelect type="email_template" value={s.confirmationTemplate} onChange={(v) => set({ confirmationTemplate: v })} />
           </Field>
         ),
-        validate: (s): Record<string, string> => (s.confirmationTemplate ? {} : { confirmationTemplate: 'Choose the confirmation e-mail.' }),
+        validate: (s): Record<string, string> =>
+          s.confirmationTemplate ? {} : { confirmationTemplate: 'Choose the confirmation e-mail.' },
         content: (_n, s) => ({
           purposes: ['marketing_email'],
           doubleOptIn: true,

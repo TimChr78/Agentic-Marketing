@@ -85,7 +85,11 @@ export const sdk = {
   setConsent(choice: ConsentChoice) {
     useLive.setState({ consent: choice });
     sdk.track('consent_updated', { analytics: choice === 'all', personalization: choice === 'all' });
-    note('consent', choice === 'all' ? 'Consent granted: analytics + personalization' : 'Strictly necessary only: no profiling, no personalization', choice === 'all' ? 'good' : 'neutral');
+    note(
+      'consent',
+      choice === 'all' ? 'Consent granted: analytics + personalization' : 'Strictly necessary only: no profiling, no personalization',
+      choice === 'all' ? 'good' : 'neutral',
+    );
     useLive.setState({ decision: decide() });
   },
 
@@ -135,7 +139,9 @@ export const sdk = {
     let profile: Profile | undefined = store.profiles.find((p) => p.email?.toLowerCase() === email.toLowerCase());
     if (profile) {
       useStore.setState((s) => ({
-        profiles: s.profiles.map((p) => (p.id === profile!.id ? { ...p, anonymousIds: [...p.anonymousIds, live.anonymousId], lastSeen: Date.now() } : p)),
+        profiles: s.profiles.map((p) =>
+          p.id === profile!.id ? { ...p, anonymousIds: [...p.anonymousIds, live.anonymousId], lastSeen: Date.now() } : p,
+        ),
       }));
       note('identity', `Identity resolved: ${live.anonymousId} merged into existing profile ${profile.name}`, 'good');
     } else {
@@ -149,8 +155,22 @@ export const sdk = {
         traits: { first_name: firstName || email.split('@')[0], locale: 'da-DK', newsletter: true, preferred_category: 'shoes' },
         segments: ['seg_prospects', ...live.segments],
         consent: [
-          { purpose: 'marketing_email', channel: 'email', basis: 'consent', status: 'granted', source: 'Newsletter form (double opt-in pending)', at: Date.now() },
-          { purpose: 'web_personalization', channel: 'web', basis: 'consent', status: live.consent === 'all' ? 'granted' : 'denied', source: 'Cookie banner', at: Date.now() },
+          {
+            purpose: 'marketing_email',
+            channel: 'email',
+            basis: 'consent',
+            status: 'granted',
+            source: 'Newsletter form (double opt-in pending)',
+            at: Date.now(),
+          },
+          {
+            purpose: 'web_personalization',
+            channel: 'web',
+            basis: 'consent',
+            status: live.consent === 'all' ? 'granted' : 'denied',
+            source: 'Cookie banner',
+            at: Date.now(),
+          },
         ],
         lastSeen: Date.now(),
         ltv: 0,
@@ -158,7 +178,11 @@ export const sdk = {
         journeys: ['jrn_welcome'],
       };
       useStore.setState((s) => ({ profiles: [profile!, ...s.profiles] }));
-      note('identity', `New profile ${profile.name} created; anonymous history (${Object.values(live.views).reduce((a, b) => a + b, 0)} events) stitched to it`, 'good');
+      note(
+        'identity',
+        `New profile ${profile.name} created; anonymous history (${Object.values(live.views).reduce((a, b) => a + b, 0)} events) stitched to it`,
+        'good',
+      );
       note('journey', 'Entered journey “Welcome series” (trigger: signed_up)', 'good');
     }
     useLive.setState({ profileId: profile.id });
@@ -206,15 +230,16 @@ function ambientEvent(at: number) {
   const p = profiles[Math.floor(Math.random() * profiles.length)];
   const name = names[Math.floor(Math.random() * names.length)];
   pushEvent({
-      id: nid(),
-      at,
-      type: name === 'page_viewed' ? 'page' : 'track',
-      name,
-      anonymousId: p.anonymousIds[0],
-      profileId: Math.random() > 0.4 ? p.id : undefined,
-      properties: name === 'page_viewed' ? { path: pages[Math.floor(Math.random() * pages.length)] } : { category: p.traits.preferred_category },
-      status: Math.random() > 0.12 ? 'accepted' : 'dropped_no_consent',
-      latencyMs: Math.round(3 + Math.random() * 14),
+    id: nid(),
+    at,
+    type: name === 'page_viewed' ? 'page' : 'track',
+    name,
+    anonymousId: p.anonymousIds[0],
+    profileId: Math.random() > 0.4 ? p.id : undefined,
+    properties:
+      name === 'page_viewed' ? { path: pages[Math.floor(Math.random() * pages.length)] } : { category: p.traits.preferred_category },
+    status: Math.random() > 0.12 ? 'accepted' : 'dropped_no_consent',
+    latencyMs: Math.round(3 + Math.random() * 14),
   });
 }
 

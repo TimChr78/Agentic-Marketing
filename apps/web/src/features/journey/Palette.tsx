@@ -36,7 +36,10 @@ export function Palette({ onAdd, disabled }: { onAdd: (k: NodeKind) => void; dis
                       title={m.hint}
                       className="flex h-8 w-full cursor-grab items-center gap-2 rounded-md px-1.5 text-left text-[13px] text-fg-2 hover:bg-surface-2 hover:text-fg active:cursor-grabbing disabled:cursor-not-allowed disabled:opacity-50"
                     >
-                      <span className="flex size-6 shrink-0 items-center justify-center rounded" style={{ color: `var(--cat-${c.key})`, background: `color-mix(in srgb, var(--cat-${c.key}) 14%, transparent)` }}>
+                      <span
+                        className="flex size-6 shrink-0 items-center justify-center rounded"
+                        style={{ color: `var(--cat-${c.key})`, background: `color-mix(in srgb, var(--cat-${c.key}) 14%, transparent)` }}
+                      >
                         <Icon size={13} aria-hidden />
                       </span>
                       {m.label}

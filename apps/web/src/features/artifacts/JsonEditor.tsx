@@ -2,7 +2,21 @@ import { useEffect, useState } from 'react';
 import { Field, Textarea } from '../../ui';
 
 /** Content as JSON, for types without a form of their own. Parses on every change; shows the parse error. */
-export function JsonEditor({ value, onChange, readOnly, label = 'Content (JSON)', hint, rows = 22 }: { value: unknown; onChange: (v: unknown) => void; readOnly?: boolean; label?: string; hint?: string; rows?: number }) {
+export function JsonEditor({
+  value,
+  onChange,
+  readOnly,
+  label = 'Content (JSON)',
+  hint,
+  rows = 22,
+}: {
+  value: unknown;
+  onChange: (v: unknown) => void;
+  readOnly?: boolean;
+  label?: string;
+  hint?: string;
+  rows?: number;
+}) {
   const [text, setText] = useState(() => JSON.stringify(value, null, 2));
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {

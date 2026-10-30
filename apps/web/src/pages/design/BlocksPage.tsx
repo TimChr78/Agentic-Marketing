@@ -1,6 +1,6 @@
-import { Field, Select } from '../../ui';
 import { ArtifactListPage } from '../../features/artifacts/ArtifactListPage';
 import { type BlockCategory, CATEGORY_LABELS } from '../../features/blocks/model';
+import { Field, Select } from '../../ui';
 
 const STARTER = `<mj-section background-color="#ffffff" padding="24px 0">
   <mj-column>

@@ -76,7 +76,12 @@ export function TemplateEditor({ artifact, content, onChange, readOnly, errors }
           <Input value={content.subject ?? ''} readOnly={readOnly} maxLength={300} onChange={(e) => set({ subject: e.target.value })} />
         </Field>
         <Field label="Preheader" hint="The preview text inboxes show after the subject." error={errors.preheader}>
-          <Input value={content.preheader ?? ''} readOnly={readOnly} maxLength={300} onChange={(e) => set({ preheader: e.target.value || undefined })} />
+          <Input
+            value={content.preheader ?? ''}
+            readOnly={readOnly}
+            maxLength={300}
+            onChange={(e) => set({ preheader: e.target.value || undefined })}
+          />
         </Field>
         <Field label="Purpose" hint="Decides consent and the unsubscribe link." error={errors.purpose} required>
           <Select
@@ -88,7 +93,9 @@ export function TemplateEditor({ artifact, content, onChange, readOnly, errors }
               set({ purpose, topic: content.topic && keys.includes(content.topic) ? content.topic : undefined });
             }}
           >
-            {!purposes.data?.purposes.some((p) => p.key === content.purpose) && <option value={content.purpose}>{content.purpose || 'Choose…'}</option>}
+            {!purposes.data?.purposes.some((p) => p.key === content.purpose) && (
+              <option value={content.purpose}>{content.purpose || 'Choose…'}</option>
+            )}
             {purposes.data?.purposes.map((p) => (
               <option key={p.key} value={p.key}>
                 {p.name} ({p.key})
@@ -135,7 +142,8 @@ export function TemplateEditor({ artifact, content, onChange, readOnly, errors }
       </div>
       {lost.length > 0 && (
         <Alert tone="warn" title="Liquid changed in the visual editor">
-          These placeholders are gone or changed: {lost.slice(0, 4).join(', ')}. Fix them in “MJML and Liquid” before saving, or discard the changes.
+          These placeholders are gone or changed: {lost.slice(0, 4).join(', ')}. Fix them in “MJML and Liquid” before saving, or discard the
+          changes.
         </Alert>
       )}
       {errors.mjml && <Alert tone="bad">{errors.mjml}</Alert>}
@@ -151,7 +159,15 @@ export function TemplateEditor({ artifact, content, onChange, readOnly, errors }
         )
       ) : (
         <Field label="MJML with Liquid" hideLabel>
-          <Textarea ref={code} mono rows={26} spellCheck={false} readOnly={readOnly} value={content.mjml} onChange={(e) => set({ mjml: e.target.value })} />
+          <Textarea
+            ref={code}
+            mono
+            rows={26}
+            spellCheck={false}
+            readOnly={readOnly}
+            value={content.mjml}
+            onChange={(e) => set({ mjml: e.target.value })}
+          />
         </Field>
       )}
 
@@ -159,18 +175,43 @@ export function TemplateEditor({ artifact, content, onChange, readOnly, errors }
         <summary className="cursor-pointer text-[13px] font-medium">Advanced: text version, sample data, UTM</summary>
         <div className="mt-4 space-y-4">
           <Field label="Plain-text version" hint="Leave empty to generate it from the HTML." error={errors.text}>
-            <Textarea mono rows={6} value={content.text ?? ''} readOnly={readOnly} onChange={(e) => set({ text: e.target.value || undefined })} />
+            <Textarea
+              mono
+              rows={6}
+              value={content.text ?? ''}
+              readOnly={readOnly}
+              onChange={(e) => set({ text: e.target.value || undefined })}
+            />
           </Field>
-          <JsonEditor label="Sample data for previews" hint='Variables used by Preview and tests, e.g. {"profile": {"firstName": "Ada"}}.' value={content.sampleData ?? {}} onChange={(v) => set({ sampleData: v as Record<string, unknown> })} readOnly={readOnly} rows={6} />
+          <JsonEditor
+            label="Sample data for previews"
+            hint='Variables used by Preview and tests, e.g. {"profile": {"firstName": "Ada"}}.'
+            value={content.sampleData ?? {}}
+            onChange={(v) => set({ sampleData: v as Record<string, unknown> })}
+            readOnly={readOnly}
+            rows={6}
+          />
           <div className="grid gap-4 sm:grid-cols-3">
             <Field label="UTM source" hint="Default newsletter." error={errors['utm.source']}>
-              <Input value={content.utm?.source ?? ''} readOnly={readOnly} onChange={(e) => set({ utm: { ...(content.utm ?? {}), source: e.target.value || undefined } })} />
+              <Input
+                value={content.utm?.source ?? ''}
+                readOnly={readOnly}
+                onChange={(e) => set({ utm: { ...(content.utm ?? {}), source: e.target.value || undefined } })}
+              />
             </Field>
             <Field label="UTM medium" hint="Default email." error={errors['utm.medium']}>
-              <Input value={content.utm?.medium ?? ''} readOnly={readOnly} onChange={(e) => set({ utm: { ...(content.utm ?? {}), medium: e.target.value || undefined } })} />
+              <Input
+                value={content.utm?.medium ?? ''}
+                readOnly={readOnly}
+                onChange={(e) => set({ utm: { ...(content.utm ?? {}), medium: e.target.value || undefined } })}
+              />
             </Field>
             <Field label="UTM campaign" hint="e.g. signal-43." error={errors['utm.campaign']}>
-              <Input value={content.utm?.campaign ?? ''} readOnly={readOnly} onChange={(e) => set({ utm: { ...(content.utm ?? {}), campaign: e.target.value || undefined } })} />
+              <Input
+                value={content.utm?.campaign ?? ''}
+                readOnly={readOnly}
+                onChange={(e) => set({ utm: { ...(content.utm ?? {}), campaign: e.target.value || undefined } })}
+              />
             </Field>
           </div>
         </div>

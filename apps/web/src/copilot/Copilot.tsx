@@ -1,9 +1,9 @@
-import { useEffect, useRef, useState } from 'react';
 import { Bot, ChevronRight, Loader2, Send, Settings2, Wrench, X } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
 import { exec } from '../api/commands';
-import { Button, Pill, cx, inputBase, inputCls } from '../components/ui';
-import { scenarios } from './scripted';
+import { Button, cx, inputBase, inputCls, Pill } from '../components/ui';
 import { createLiveSession } from './llm';
+import { scenarios } from './scripted';
 import type { ChatItem, LiveConfig, Sink } from './types';
 
 const agent = { type: 'agent', name: 'Copilot' } as const;
@@ -70,7 +70,9 @@ export function Copilot({ onClose }: { onClose: () => void }) {
         const s = scenarios.find((x) => x.match.test(text));
         if (s) await s.run(sink);
         else
-          sink.say('In scripted mode I can do the three tasks below. Switch to live mode with your own API key to ask anything else; I will use the same tools.');
+          sink.say(
+            'In scripted mode I can do the three tasks below. Switch to live mode with your own API key to ask anything else; I will use the same tools.',
+          );
       }
     } catch (err) {
       const msg = (err as Error).message;
@@ -92,11 +94,17 @@ export function Copilot({ onClose }: { onClose: () => void }) {
         </span>
         <div className="min-w-0 flex-1">
           <div className="text-[14px] font-semibold">Copilot</div>
-          <div className="text-[11px] text-muted">Agent principal · MCP tools · {mode === 'live' ? `${cfg.provider}, ${cfg.model || 'no model'}` : 'scripted'}</div>
+          <div className="text-[11px] text-muted">
+            Agent principal · MCP tools · {mode === 'live' ? `${cfg.provider}, ${cfg.model || 'no model'}` : 'scripted'}
+          </div>
         </div>
         <div className="flex rounded-md border border-line p-0.5 text-[11px]">
           {(['scripted', 'live'] as const).map((m) => (
-            <button key={m} onClick={() => setMode(m)} className={cx('rounded px-2 py-0.5 font-medium capitalize', mode === m ? 'bg-agent-soft text-agent' : 'text-muted')}>
+            <button
+              key={m}
+              onClick={() => setMode(m)}
+              className={cx('rounded px-2 py-0.5 font-medium capitalize', mode === m ? 'bg-agent-soft text-agent' : 'text-muted')}
+            >
               {m}
             </button>
           ))}
@@ -129,19 +137,38 @@ export function Copilot({ onClose }: { onClose: () => void }) {
             </label>
             <label>
               <span className="mb-1 block text-muted">Base URL</span>
-              <input id="llm-base" className={cx(inputCls, 'font-mono')} value={cfg.baseUrl} onChange={(e) => setCfg({ ...cfg, baseUrl: e.target.value })} />
+              <input
+                id="llm-base"
+                className={cx(inputCls, 'font-mono')}
+                value={cfg.baseUrl}
+                onChange={(e) => setCfg({ ...cfg, baseUrl: e.target.value })}
+              />
             </label>
             <label>
               <span className="mb-1 block text-muted">Model</span>
-              <input id="llm-model" className={cx(inputCls, 'font-mono')} value={cfg.model} placeholder="model id" onChange={(e) => setCfg({ ...cfg, model: e.target.value })} />
+              <input
+                id="llm-model"
+                className={cx(inputCls, 'font-mono')}
+                value={cfg.model}
+                placeholder="model id"
+                onChange={(e) => setCfg({ ...cfg, model: e.target.value })}
+              />
             </label>
             <label className="col-span-2">
               <span className="mb-1 block text-muted">API key</span>
-              <input id="llm-key" type="password" autoComplete="off" className={cx(inputCls, 'font-mono')} value={cfg.apiKey} onChange={(e) => setCfg({ ...cfg, apiKey: e.target.value })} />
+              <input
+                id="llm-key"
+                type="password"
+                autoComplete="off"
+                className={cx(inputCls, 'font-mono')}
+                value={cfg.apiKey}
+                onChange={(e) => setCfg({ ...cfg, apiKey: e.target.value })}
+              />
             </label>
           </div>
           <p className="text-muted">
-            The key stays in this tab’s memory and is sent only to the base URL above. Browser calls need the provider to allow CORS; the published demo link blocks outside calls, so use live mode with <code className="font-mono">pnpm dev</code>.
+            The key stays in this tab’s memory and is sent only to the base URL above. Browser calls need the provider to allow CORS; the
+            published demo link blocks outside calls, so use live mode with <code className="font-mono">pnpm dev</code>.
           </p>
         </div>
       )}
@@ -152,7 +179,12 @@ export function Copilot({ onClose }: { onClose: () => void }) {
             <ToolCard key={it.id} item={it} />
           ) : (
             <div key={it.id} className={cx('flex', it.role === 'user' && 'justify-end')}>
-              <div className={cx('max-w-[92%] rounded-lg px-3 py-2 text-[13px] leading-relaxed', it.role === 'user' ? 'bg-accent text-accent-fg' : 'bg-surface-2')}>
+              <div
+                className={cx(
+                  'max-w-[92%] rounded-lg px-3 py-2 text-[13px] leading-relaxed',
+                  it.role === 'user' ? 'bg-accent text-accent-fg' : 'bg-surface-2',
+                )}
+              >
                 <div className="whitespace-pre-wrap">{it.text}</div>
                 {it.actions && (
                   <div className="mt-2 flex flex-wrap gap-1.5">
@@ -178,7 +210,12 @@ export function Copilot({ onClose }: { onClose: () => void }) {
       <div className="border-t border-line px-4 py-3" style={{ paddingBottom: 'calc(12px + env(safe-area-inset-bottom, 0px))' }}>
         <div className="mb-2 flex flex-wrap gap-1.5">
           {scenarios.map((s) => (
-            <button key={s.prompt} disabled={busy} onClick={() => ask(s.prompt)} className="rounded-full border border-line px-2.5 py-1 text-left text-[11px] text-muted hover:border-agent hover:text-agent disabled:opacity-50">
+            <button
+              key={s.prompt}
+              disabled={busy}
+              onClick={() => ask(s.prompt)}
+              className="rounded-full border border-line px-2.5 py-1 text-left text-[11px] text-muted hover:border-agent hover:text-agent disabled:opacity-50"
+            >
               {s.prompt}
             </button>
           ))}
@@ -190,7 +227,13 @@ export function Copilot({ onClose }: { onClose: () => void }) {
             ask(input);
           }}
         >
-          <input id="copilot-input" className={cx(inputBase, 'min-w-0 flex-1')} placeholder="Ask the copilot…" value={input} onChange={(e) => setInput(e.target.value)} />
+          <input
+            id="copilot-input"
+            className={cx(inputBase, 'min-w-0 flex-1')}
+            placeholder="Ask the copilot…"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+          />
           <Button variant="primary" disabled={busy || !input.trim()} aria-label="Send">
             <Send size={14} />
           </Button>
@@ -217,7 +260,9 @@ function ToolCard({ item }: { item: Extract<ChatItem, { role: 'tool' }> }) {
       {open && (
         <div className="space-y-1.5 border-t border-line px-2.5 py-2">
           <pre className="max-h-[160px] overflow-auto font-mono text-[11px] text-muted">{JSON.stringify(item.input, null, 2)}</pre>
-          {item.output !== undefined && <pre className="max-h-[200px] overflow-auto font-mono text-[11px]">{JSON.stringify(item.output, null, 2)}</pre>}
+          {item.output !== undefined && (
+            <pre className="max-h-[200px] overflow-auto font-mono text-[11px]">{JSON.stringify(item.output, null, 2)}</pre>
+          )}
           {item.error && <div className="text-bad">{item.error}</div>}
         </div>
       )}

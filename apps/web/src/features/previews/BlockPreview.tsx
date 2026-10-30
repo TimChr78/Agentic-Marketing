@@ -45,7 +45,12 @@ export function BlockPreview({ artifactId, version, compact }: { artifactId: str
           sandbox="allow-popups allow-popups-to-escape-sandbox"
           srcDoc={emailDoc(data.html)}
           className="rounded-sm bg-white shadow-1"
-          style={{ width: width === 'mobile' ? 375 : '100%', maxWidth: width === 'mobile' ? 375 : 720, height: compact ? 420 : 640, border: 0 }}
+          style={{
+            width: width === 'mobile' ? 375 : '100%',
+            maxWidth: width === 'mobile' ? 375 : 720,
+            height: compact ? 420 : 640,
+            border: 0,
+          }}
         />
       </div>
       <p className="text-[12px] text-muted">Rendered from version {data.version} with the block’s default parameters.</p>

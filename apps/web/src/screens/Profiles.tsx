@@ -1,9 +1,9 @@
-import { useState } from 'react';
 import { ArrowLeft, Download, Search, ShieldQuestion, Trash2 } from 'lucide-react';
-import { useStore } from '../mock/store';
+import { useState } from 'react';
 import { exec } from '../api/commands';
 import type { Profile } from '../api/types';
-import { Button, Card, PageHeader, Pill, cx, dkk, inputBase, timeAgo } from '../components/ui';
+import { Button, Card, cx, dkk, inputBase, PageHeader, Pill, timeAgo } from '../components/ui';
+import { useStore } from '../mock/store';
 import { pageWidth } from '../ui';
 
 export function Profiles() {
@@ -18,11 +18,18 @@ export function Profiles() {
       <PageHeader eyebrow="Customer data" title="Profiles">
         <div className="relative">
           <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted" />
-          <input id="profile-search" className={cx(inputBase, 'w-[260px] max-w-full pl-8')} placeholder="Name, e-mail, city or segment" value={q} onChange={(e) => setQ(e.target.value)} />
+          <input
+            id="profile-search"
+            className={cx(inputBase, 'w-[260px] max-w-full pl-8')}
+            placeholder="Name, e-mail, city or segment"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+          />
         </div>
       </PageHeader>
       <p className="-mt-2 mb-4 text-[13px] text-muted">
-        Showing {list.length} of 28 290 profiles (sample). Deterministic identity resolution stitches anonymous ids, e-mail and user ids into one profile.
+        Showing {list.length} of 28 290 profiles (sample). Deterministic identity resolution stitches anonymous ids, e-mail and user ids
+        into one profile.
       </p>
       <Card>
         <div className="overflow-x-auto">
@@ -129,12 +136,26 @@ function ProfileDetail({ profile: p, onBack }: { profile: Profile; onBack: () =>
       </PageHeader>
 
       {explain && (
-        <div className={cx('mb-4 rounded-md border px-4 py-3 text-[13px]', explain.allowed ? 'border-good/40 bg-good-soft text-good' : 'border-bad/40 bg-bad-soft text-bad')}>
-          <b>{explain.allowed ? 'Yes.' : 'No.'}</b> {explain.reason} Basis: {String(explain.basis).replace('_', ' ')}. Source: {explain.source} ({explain.recordedAt}).
+        <div
+          className={cx(
+            'mb-4 rounded-md border px-4 py-3 text-[13px]',
+            explain.allowed ? 'border-good/40 bg-good-soft text-good' : 'border-bad/40 bg-bad-soft text-bad',
+          )}
+        >
+          <b>{explain.allowed ? 'Yes.' : 'No.'}</b> {explain.reason} Basis: {String(explain.basis).replace('_', ' ')}. Source:{' '}
+          {explain.source} ({explain.recordedAt}).
         </div>
       )}
       {exported && (
-        <Card title="Data subject access export (JSON)" className="mb-4" action={<Button variant="ghost" onClick={() => setExported(null)}>Close</Button>}>
+        <Card
+          title="Data subject access export (JSON)"
+          className="mb-4"
+          action={
+            <Button variant="ghost" onClick={() => setExported(null)}>
+              Close
+            </Button>
+          }
+        >
           <pre className="max-h-[260px] overflow-auto p-4 font-mono text-[11px] text-muted">{exported}</pre>
         </Card>
       )}
@@ -186,7 +207,9 @@ function ProfileDetail({ profile: p, onBack }: { profile: Profile; onBack: () =>
                     <td className="px-4 py-2 font-mono text-[12px]">{c.purpose}</td>
                     <td className="px-4 py-2">{c.basis.replace('_', ' ')}</td>
                     <td className="px-4 py-2">
-                      <Pill tone={c.status === 'granted' ? 'good' : c.status === 'objected' || c.status === 'denied' ? 'bad' : 'neutral'}>{c.status.replace('_', ' ')}</Pill>
+                      <Pill tone={c.status === 'granted' ? 'good' : c.status === 'objected' || c.status === 'denied' ? 'bad' : 'neutral'}>
+                        {c.status.replace('_', ' ')}
+                      </Pill>
                     </td>
                     <td className="px-4 py-2 text-muted">{c.source}</td>
                     <td className="num px-4 py-2 text-right text-muted">{new Date(c.at).toLocaleDateString('en-GB')}</td>
@@ -226,7 +249,11 @@ function ProfileDetail({ profile: p, onBack }: { profile: Profile; onBack: () =>
                   <span className="min-w-0 truncate text-muted">{JSON.stringify(e.properties)}</span>
                 </li>
               ))}
-              {!mine.length && <li className="px-4 py-3 font-sans text-[12px] text-muted">No events in this session yet. Ambient traffic will show up here.</li>}
+              {!mine.length && (
+                <li className="px-4 py-3 font-sans text-[12px] text-muted">
+                  No events in this session yet. Ambient traffic will show up here.
+                </li>
+              )}
             </ul>
           </div>
         </Card>

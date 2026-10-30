@@ -6,7 +6,26 @@ import { useCrumbs } from '../../app/page';
 import { Link, navigate } from '../../app/router';
 import { useSession } from '../../app/session';
 import { useApi } from '../../app/useApi';
-import { Alert, Button, EmptyState, Field, Input, Modal, PageHeader, Select, StatePill, StatusPill, Table, TableFrame, Td, Th, THead, timeAgo, Tr, useToast } from '../../ui';
+import {
+  Alert,
+  Button,
+  EmptyState,
+  Field,
+  Input,
+  Modal,
+  PageHeader,
+  Select,
+  StatePill,
+  StatusPill,
+  Table,
+  TableFrame,
+  Td,
+  THead,
+  Th,
+  Tr,
+  timeAgo,
+  useToast,
+} from '../../ui';
 import { pageWidth } from '../../ui/layout';
 
 export type ArtifactRow = Out<'artifacts.list'>['artifacts'][number];
@@ -59,7 +78,9 @@ export function ArtifactListPage<S = Record<string, never>>({
   const rows = useMemo(
     () =>
       (list.data?.artifacts ?? []).filter(
-        (a) => (!q || a.name.toLowerCase().includes(q.toLowerCase())) && (!state || (state === 'live' ? a.publishedVersion !== null : a.latestState === state)),
+        (a) =>
+          (!q || a.name.toLowerCase().includes(q.toLowerCase())) &&
+          (!state || (state === 'live' ? a.publishedVersion !== null : a.latestState === state)),
       ),
     [list.data, q, state],
   );
@@ -89,7 +110,14 @@ export function ArtifactListPage<S = Record<string, never>>({
             <>
               <div className="relative w-full max-w-[280px]">
                 <Search size={14} className="pointer-events-none absolute top-1/2 left-2.5 -translate-y-1/2 text-muted" aria-hidden />
-                <Input compact aria-label={`Search ${title.toLowerCase()}`} placeholder="Search by name" value={q} onChange={(e) => setQ(e.target.value)} className="pl-8" />
+                <Input
+                  compact
+                  aria-label={`Search ${title.toLowerCase()}`}
+                  placeholder="Search by name"
+                  value={q}
+                  onChange={(e) => setQ(e.target.value)}
+                  className="pl-8"
+                />
               </div>
               <Select compact aria-label="State" value={state} onChange={(e) => setState(e.target.value)} className="w-auto">
                 <option value="">All states</option>
@@ -143,7 +171,11 @@ export function ArtifactListPage<S = Record<string, never>>({
             {rows.map((a) => (
               <Tr key={a.id} onClick={() => navigate(artifactPath(a.type, a.id))}>
                 <Td>
-                  <Link to={artifactPath(a.type, a.id)} className="font-medium text-fg hover:underline" onClick={(e) => e.stopPropagation()}>
+                  <Link
+                    to={artifactPath(a.type, a.id)}
+                    className="font-medium text-fg hover:underline"
+                    onClick={(e) => e.stopPropagation()}
+                  >
                     {a.name}
                   </Link>
                 </Td>
@@ -156,7 +188,11 @@ export function ArtifactListPage<S = Record<string, never>>({
                   <StatePill state={a.latestState} />
                 </Td>
                 <Td className="hidden md:table-cell">
-                  {a.publishedVersion ? <StatusPill tone="good">v{a.publishedVersion}</StatusPill> : <span className="text-muted">Not live</span>}
+                  {a.publishedVersion ? (
+                    <StatusPill tone="good">v{a.publishedVersion}</StatusPill>
+                  ) : (
+                    <span className="text-muted">Not live</span>
+                  )}
                 </Td>
                 <Td className="whitespace-nowrap">{timeAgo(a.updatedAt)}</Td>
               </Tr>

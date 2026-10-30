@@ -1,5 +1,5 @@
-import { type AnchorHTMLAttributes, type ButtonHTMLAttributes, forwardRef, type ReactNode } from 'react';
 import { Loader2 } from 'lucide-react';
+import { type AnchorHTMLAttributes, type ButtonHTMLAttributes, forwardRef, type ReactNode } from 'react';
 import { cx } from './cx';
 
 export type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'danger' | 'danger-solid';
@@ -19,7 +19,15 @@ const variants: Record<ButtonVariant, string> = {
   'danger-solid': 'bg-bad text-white hover:brightness-110 [:root[data-theme=dark]_&]:text-[#0e1013]',
 };
 
-export function buttonClass({ variant = 'secondary', size = 'md', className }: { variant?: ButtonVariant; size?: ButtonSize; className?: string } = {}) {
+export function buttonClass({
+  variant = 'secondary',
+  size = 'md',
+  className,
+}: {
+  variant?: ButtonVariant;
+  size?: ButtonSize;
+  className?: string;
+} = {}) {
   return cx(base, sizes[size], variants[variant], className);
 }
 

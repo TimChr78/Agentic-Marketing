@@ -8,11 +8,29 @@ import { edgesOf, type JNode, summary } from './model';
 import { type NodeData, nodeTypes } from './NodeView';
 
 /** A read-only journey graph, e.g. in the approval drawer. Also lists the steps as text for screen readers. */
-export function JourneyGraph({ nodes, warnings = {}, names, height = 480 }: { nodes: JNode[]; warnings?: Record<string, string[]>; names?: (id: string) => string | undefined; height?: number }) {
+export function JourneyGraph({
+  nodes,
+  warnings = {},
+  names,
+  height = 480,
+}: {
+  nodes: JNode[];
+  warnings?: Record<string, string[]>;
+  names?: (id: string) => string | undefined;
+  height?: number;
+}) {
   const theme = useResolvedTheme();
   const pos = useMemo(() => positionsOf(nodes), [nodes]);
   const flowNodes = useMemo<Node[]>(
-    () => nodes.map((n) => ({ id: n.id, type: 'step', position: pos[n.id]!, data: { node: n, summary: summary(n, names), warnings: warnings[n.id] ?? [], readOnly: true } satisfies NodeData, draggable: false, connectable: false })),
+    () =>
+      nodes.map((n) => ({
+        id: n.id,
+        type: 'step',
+        position: pos[n.id]!,
+        data: { node: n, summary: summary(n, names), warnings: warnings[n.id] ?? [], readOnly: true } satisfies NodeData,
+        draggable: false,
+        connectable: false,
+      })),
     [nodes, pos, warnings, names],
   );
   const flowEdges = useMemo<Edge[]>(
@@ -31,9 +49,26 @@ export function JourneyGraph({ nodes, warnings = {}, names, height = 480 }: { no
   );
   return (
     <div className="space-y-2">
-      <div className="overflow-hidden rounded-md border border-line bg-surface-2" style={{ height }} role="img" aria-label={`Journey graph with ${nodes.length} steps; the list below describes it`}>
+      <div
+        className="overflow-hidden rounded-md border border-line bg-surface-2"
+        style={{ height }}
+        role="img"
+        aria-label={`Journey graph with ${nodes.length} steps; the list below describes it`}
+      >
         <ReactFlowProvider>
-          <ReactFlow nodes={flowNodes} edges={flowEdges} nodeTypes={nodeTypes} fitView fitViewOptions={{ padding: 0.15 }} nodesDraggable={false} nodesConnectable={false} elementsSelectable={false} colorMode={theme} proOptions={{ hideAttribution: true }} minZoom={0.2}>
+          <ReactFlow
+            nodes={flowNodes}
+            edges={flowEdges}
+            nodeTypes={nodeTypes}
+            fitView
+            fitViewOptions={{ padding: 0.15 }}
+            nodesDraggable={false}
+            nodesConnectable={false}
+            elementsSelectable={false}
+            colorMode={theme}
+            proOptions={{ hideAttribution: true }}
+            minZoom={0.2}
+          >
             <Background gap={16} size={1} />
             <Controls showInteractive={false} />
           </ReactFlow>
@@ -48,7 +83,15 @@ export function JourneyGraph({ nodes, warnings = {}, names, height = 480 }: { no
             return (
               <li key={n.id}>
                 <span className="font-medium">{n.label}</span> <span className="text-muted">({n.kind})</span>: {summary(n, names)}
-                {out.length > 0 && <span className="text-muted"> → {out.map((e) => `${e.label ? `${e.label}: ` : ''}${nodes.find((x) => x.id === e.target)?.label ?? e.target}`).join(', ')}</span>}
+                {out.length > 0 && (
+                  <span className="text-muted">
+                    {' '}
+                    →{' '}
+                    {out
+                      .map((e) => `${e.label ? `${e.label}: ` : ''}${nodes.find((x) => x.id === e.target)?.label ?? e.target}`)
+                      .join(', ')}
+                  </span>
+                )}
               </li>
             );
           })}

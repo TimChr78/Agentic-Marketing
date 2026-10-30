@@ -44,7 +44,12 @@ export interface Mapping {
 }
 
 const find = (headers: string[], names: string[]) => {
-  const norm = headers.map((h) => h.trim().toLowerCase().replace(/[\s-]+/g, '_'));
+  const norm = headers.map((h) =>
+    h
+      .trim()
+      .toLowerCase()
+      .replace(/[\s-]+/g, '_'),
+  );
   return norm.findIndex((h) => names.includes(h));
 };
 
@@ -53,7 +58,16 @@ export function guessMapping(headers: string[]): Mapping {
   return {
     email: find(headers, ['email_address', 'email', 'e_mail', 'email_address_(required)', 'subscriber_email']),
     firstName: find(headers, ['first_name', 'firstname', 'first', 'name', 'fname']),
-    subscribedAt: find(headers, ['created_at', 'subscribed_at', 'confirmed_at', 'optin_time', 'confirm_time', 'date_added', 'signup_date', 'created']),
+    subscribedAt: find(headers, [
+      'created_at',
+      'subscribed_at',
+      'confirmed_at',
+      'optin_time',
+      'confirm_time',
+      'date_added',
+      'signup_date',
+      'created',
+    ]),
     status: find(headers, ['state', 'status', 'subscription_status']),
   };
 }
@@ -93,7 +107,11 @@ export function toImportRows(
           purpose: opts.purpose,
           status: 'granted',
           ...(when && !Number.isNaN(when.getTime()) ? { recordedAt: when.toISOString() } : {}),
-          proof: { system: opts.system, ...(status ? { status } : {}), ...(when && !Number.isNaN(when.getTime()) ? { subscribed_at: when.toISOString() } : {}) },
+          proof: {
+            system: opts.system,
+            ...(status ? { status } : {}),
+            ...(when && !Number.isNaN(when.getTime()) ? { subscribed_at: when.toISOString() } : {}),
+          },
         },
       ],
     });

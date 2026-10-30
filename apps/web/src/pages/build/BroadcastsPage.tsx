@@ -1,6 +1,6 @@
-import { Field } from '../../ui';
 import { ArtifactListPage } from '../../features/artifacts/ArtifactListPage';
 import { ArtifactSelect } from '../../features/artifacts/ArtifactSelect';
+import { Field } from '../../ui';
 
 export default function BroadcastsPage() {
   return (
@@ -23,7 +23,10 @@ export default function BroadcastsPage() {
             </Field>
           </>
         ),
-        validate: (s) => ({ ...(s.template ? {} : { template: 'Choose the e-mail to send.' }), ...(s.segment ? {} : { segment: 'Choose who gets it.' }) }),
+        validate: (s) => ({
+          ...(s.template ? {} : { template: 'Choose the e-mail to send.' }),
+          ...(s.segment ? {} : { segment: 'Choose who gets it.' }),
+        }),
         content: (_n, s) => ({ template: s.template, segment: s.segment }),
       }}
     />

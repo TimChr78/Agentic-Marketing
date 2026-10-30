@@ -13,7 +13,14 @@ export default function JourneysPage() {
         content: () => ({
           purpose: 'marketing_email',
           nodes: [
-            { id: 'n1', kind: 'trigger', label: 'Confirmed subscription', config: { event: 'Subscription Confirmed', reentry: 'once' }, next: [{ to: 'n2' }], position: { x: 0, y: 0 } },
+            {
+              id: 'n1',
+              kind: 'trigger',
+              label: 'Confirmed subscription',
+              config: { event: 'Subscription Confirmed', reentry: 'once' },
+              next: [{ to: 'n2' }],
+              position: { x: 0, y: 0 },
+            },
             { id: 'n2', kind: 'exit', label: 'Exit', config: {}, next: [], position: { x: 0, y: 200 } },
           ],
         }),
