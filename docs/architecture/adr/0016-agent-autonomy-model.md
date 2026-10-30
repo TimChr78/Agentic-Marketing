@@ -1,6 +1,6 @@
 # ADR-0016: Agent autonomy through mandates, levels and a policy engine in the command layer
 
-- Status: Proposed (2026-10-30)
+- Status: Accepted (owner decisions 2026-10-30, see the design §11)
 - Date: 2026-10-30
 - Design: [agentic-autonomy.md](../agentic-autonomy.md); plan: [wave 4](../roadmap-wave-4.md)
 - Related: #91 (autonomy modes), #64 (campaign agent), #85 (business context), #86 (routines), #102 (progressive rollout)
@@ -28,6 +28,10 @@ The product's purpose is agents running marketing loops (plan, build, send, meas
 - **A guardian** evaluates guardrails and anomalies on the metric layer and the action ledger, and downgrades or pauses agents by itself.
 - Every L2+ action carries an **intent**; every agent action is recorded in a **ledger** linked to the mandate version, its impact estimate and later its outcome.
 - The approval policy remains, and an agent without a mandate behaves as today (L1 for every class under `agent_changes`).
+- **The default is a person**: new workspaces have an L1 ceiling; enabling L2 is one choice in setup or settings. **L4 is earned** per agent and class (four weeks at L3 without a tripwire, or a shadow run).
+- **An independent model check** of intent against diff and mandate is available per mandate from the first autonomy, and on by default for agents that read external content.
+- Spend autonomy (ad budgets and bids) is excluded until its own design (#212); ad audiences and conversions follow the normal rules.
+- Agents and mandates carry an optional **brand** scope from the start, defaulting to the workspace.
 
 ## Consequences
 - Autonomy becomes something a person grants, sees, reviews and withdraws per agent, and the platform enforces it the same way for every runtime.

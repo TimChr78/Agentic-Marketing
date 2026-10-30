@@ -1,6 +1,6 @@
 # Agentic autonomy: agents that run marketing loops within borders
 
-Status: **design proposal** (2026-10-30), for review with the owner. The decision record is [ADR-0016](adr/0016-agent-autonomy-model.md) (Proposed); the phased plan is [wave 4](roadmap-wave-4.md).
+Status: **accepted design** (2026-10-30; owner decisions in §11). The decision record is [ADR-0016](adr/0016-agent-autonomy-model.md); the phased plan is [wave 4](roadmap-wave-4.md).
 
 Today an agent can do almost anything a marketer can through MCP or REST, but autonomy is one switch: the workspace approval policy (`none`, `agent_changes`, `all_publishes`) decides whether an agent's publish waits for a person. That gives two useful settings: "agents draft, people approve every change", or "agents can publish anything their scopes allow". Neither is what the product is for.
 
@@ -105,7 +105,7 @@ Each action class gets a level in the mandate:
 | L1 | **Propose** | Drafts and bundles; a person approves each publish | Today's `agent_changes`; the default for every class |
 | L2 | **Act with veto** | The action is queued and announced; it runs after a hold window (e.g. 2 h before a broadcast) unless a person vetoes. Optionally a second, independent model checks the diff against the stated intent and the mandate first (#91) | New autonomy, building trust |
 | L3 | **Act within limits** | Runs at once if within limits; reported in the digest | Routine sends to known audiences, content tweaks |
-| L4 | **Run the loop** | L3 plus the agent may create new artifacts of the class and start new experiments within its goals, without a separate grant for each | A newsletter or lifecycle agent running its programme |
+| L4 | **Run the loop** | L3 plus the agent may create new artifacts of the class and start new experiments within its goals, without a separate grant for each. **Earned:** a mandate can grant L4 for a class only after the agent has run it at L3 for at least four weeks without a tripwire, or after a shadow-mode run of the same length (§5.6) | A newsletter or lifecycle agent running its programme |
 
 Anything outside the limits of its level drops one level: an L3 send that is too large becomes an L2 hold or an L1 proposal (configurable per class), with the reason. **Nothing outside the mandate's scope is ever executed**; it can only be proposed.
 
@@ -114,7 +114,7 @@ Anything outside the limits of its level drops one level: an L3 send that is too
 A **mandate** is a new artifact type (`agent_mandate`), versioned and approved like a journey. Agents cannot create or change their own mandate (people-only). It holds:
 
 - **Purpose and goals**: what the agent is for, and the measures it is judged on (from the metric layer: e.g. `campaign.conversion_rate`, `email.click_rate`, net subscriber growth), with targets.
-- **Scope**: which segments and audiences it may address, which purposes and topics, which channels, which artifacts it may change (by type, by tag, by campaign, or specific ids), which brands (once multi-brand lands, #184).
+- **Scope**: which segments and audiences it may address, which purposes and topics, which channels, which artifacts it may change (by type, by tag, by campaign, or specific ids), and a **brand** field (optional, defaulting to the whole workspace) that is reserved from the start and becomes meaningful when multi-brand lands (#184).
 - **Levels**: one level per action class.
 - **Limits**: per send (recipients), per day and week (sends, messages, distinct people reached, changes, new artifacts), per person (messages from this agent per week, on top of the workspace frequency caps), spend, LLM tokens. Limits are counters the platform keeps, not numbers the agent reports.
 - **Guardrails (tripwires)**: metric thresholds that stop or downgrade the agent: unsubscribe rate, complaint rate, bounce rate, a goal metric falling below its holdout, spend pacing.
@@ -125,6 +125,8 @@ A **mandate** is a new artifact type (`agent_mandate`), versioned and approved l
 A mandate expires. Renewal is a person's decision, shown with the agent's record for the period: actions taken, holds vetoed, tripwires hit, goal results against holdout. That is the "review of granted autonomy" from the wave-3 plan.
 
 ### 3.5 Workspace ceilings
+
+**The default is a person.** A new workspace's ceiling is L1 for every class, so nothing changes on upgrade and every agent proposes. Granting autonomy is a decision, but an easy one: the setup flow (`am init` and the first sign-in) asks whether to allow agents to act with a veto window (L2), and Settings → Agents has one switch per ceiling.
 
 The owner sets **ceilings** in the workspace settings: maximum level per action class for any agent, maximum recipients per autonomous send, maximum autonomous messages per week, spend ceiling, whether L4 is allowed at all, and a workspace-wide **autonomy switch** (on / propose-only / off). A mandate is validated against the ceilings when it is approved, and the policy engine applies the lower of the two at run time, so lowering a ceiling takes effect at once for every agent.
 
@@ -167,7 +169,7 @@ Every agent write above `draft` carries an **intent**: what it is doing, why, wh
 
 ### 4.5 The independent check (optional)
 
-For L2 and above, a mandate can require a **second model** to review the call before it runs: given the intent, the diff, the impact and the mandate text, does the action match? A mismatch drops the action to L1. This uses the existing AI runtime and budgets, is logged with the action, and is off by default (it costs tokens and adds latency). It is a defence against a confused or manipulated agent, not a replacement for the hard limits.
+For L2 and above, a mandate can require a **second model** to review the call before it runs: given the intent, the diff, the impact and the mandate text, does the action match? A mismatch drops the action to L1. This uses the existing AI runtime and budgets, is logged with the action, and is off by default (it costs tokens and adds latency). It is a defence against a confused or manipulated agent, not a replacement for the hard limits. It is built in Phase 18 and recommended (and on by default in the mandate templates) for any agent that reads content from outside the workspace: content sources (#140), inbound replies, web pages.
 
 ## 5. Safety net
 
@@ -223,6 +225,8 @@ Autonomy is only useful if the agent sees what its actions did.
 | **The in-app copilot** | People working interactively | The person's own permissions; actions taken for a person in a conversation count as theirs unless the conversation is attached to an agent |
 | **Hosted agent runs** (new) | Self-hosters without an agent runtime; scheduled and event-driven loops | A hosted agent is an agent with a mandate like any other; its runs are scheduled or triggered, have budgets and a run history (#86) |
 
+A **thin version comes early** (Phases 19–20): scheduled, read-mostly runs for reports and the deliverability guardian on the copilot's runtime. The full runtime (event triggers, any programme, the copilot attached to an agent) follows in Phase 21.
+
 Hosted runs use the copilot's MCP-in-process client and the existing AI providers and budgets. A run is a fresh session with the mandate, the business context, the relevant learnings and a bounded summary of its previous runs.
 
 ## 8. Agent programmes (what the loops are for)
@@ -235,7 +239,7 @@ These are the loops the product should be able to run, each a set of mandate tem
 4. **Experimentation agent**: web experiences: proposes variants, allocates traffic, stops on sequential or Bayesian results, promotes.
 5. **Audience curator**: keeps segments healthy (stale members, overlaps, growth), suggests exclusions, manages sunset policies for inactive subscribers.
 6. **Deliverability guardian**: watches bounces, complaints and provider signals; throttles or pauses streams; low risk, high value, a natural first L3.
-7. **Paid media agent** (later): ad audiences and conversions, then budgets within a spend mandate.
+7. **Paid media agent**: ad audiences and conversions under the normal limits (no money moves). Budget and bid autonomy needs its own design first (#212): ad platforms run their own optimisation, results are late and noisy, and money is irreversible.
 8. **Decision models in journeys** (#192–#194): scope-B agents that decide per person inside a journey step, under the same budgets and logs as `aiDecide`.
 
 ## 9. Threats and how the design answers them
@@ -258,11 +262,11 @@ These are the loops the product should be able to run, each a set of mandate tem
 - REST and MCP stay backwards compatible: new commands, new response fields (`decision`, `reasons`), and a new required field (`intent`) only for L2+ actions, which no existing agent has.
 - The pilot's wave-3 decision (Hermes sends the weekly broadcast to the subscriber segment within a recipient cap) becomes the first mandate.
 
-## 11. Open questions for the owner
+## 11. Decisions (owner, 2026-10-30)
 
-1. **Default level ceiling** for a new workspace: L1 (safest, today's behaviour) or L2 (veto windows on by default)?
-2. **L4 at all** in the first releases, or only L0–L3 until the safety net (Phase 19) has run on the pilot for a while?
-3. **The independent check**: build it in Phase 18 (cheap with the existing AI runtime) or only on demand?
-4. **Hosted agents**: in this wave (Phase 21) or parked until a self-hoster without a runtime asks?
-5. **Spend autonomy** (ad budgets): in scope for this wave, or parked behind an e-commerce or paid-media pilot?
-6. **Multi-brand** (#184) before or after the autonomy phases? Agents across brands (#187) need it; the pilot does not yet.
+1. **The default is a person; autonomy is a decision, and an easy one.** New workspaces get an L1 ceiling for every class (agents propose, as today). Setup asks whether to allow L2 (act with a veto window), and Settings → Agents has one switch per ceiling.
+2. **L4 is built in this wave (Phase 20), and earned per agent:** at least four weeks at L3 on that class without a tripwire, or a shadow-mode run of the same length.
+3. **The independent check is built in Phase 18**, off by default and switchable per mandate; on by default in the templates of agents that read external content. It is one of the core safeguards, next to the hard limits.
+4. **Hosted agents come early in a thin version** (Phases 19–20: scheduled reports and the deliverability guardian); the full runtime stays in Phase 21.
+5. **Ad audiences and conversions only.** Agents managing ad spend is wanted later, but needs its own design first (algorithmic approach, attribution, coexisting with the platforms' bidding): #212.
+6. **Multi-brand after the autonomy phases, with the brand field reserved now:** agents and mandates get an optional brand scope in Phase 17 that defaults to the whole workspace.

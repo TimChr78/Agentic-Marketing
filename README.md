@@ -143,7 +143,7 @@ Wave 1 (Phases −1 to 5) is complete: foundations, data platform, e-mail, segme
 | 15 | Newsletter and lifecycle e-mail | Done in 0.2.8: preference centre, archive and web version, content blocks, pre-send checks, subject tests, send windows, static audiences, wait until and entry keys |
 | 16 | Measure and report | Done in 0.2.9: metric layer, campaigns, holdouts, alerts |
 
-[Wave 4](docs/architecture/roadmap-wave-4.md), agentic marketing (in design, [agentic-autonomy.md](docs/architecture/agentic-autonomy.md)): agents that run whole marketing loops within borders a person sets, enforced by the platform.
+[Wave 4](docs/architecture/roadmap-wave-4.md), agentic marketing (designed in [agentic-autonomy.md](docs/architecture/agentic-autonomy.md)): agents that run whole marketing loops within borders a person sets, enforced by the platform.
 
 | Phase | Theme | State |
 |---|---|---|
@@ -151,8 +151,8 @@ Wave 1 (Phases −1 to 5) is complete: foundations, data platform, e-mail, segme
 | 18 | Mandates and the first autonomy | Planned: mandates with levels, holds with veto windows, the pilot's autonomous weekly newsletter |
 | 19 | The safety net | Planned: the guardian, staged sends, undo, shadow mode |
 | 20 | Closed loops | Planned: full loops, goals and attribution, learnings, the campaign, newsletter and lifecycle programmes |
-| 21 | Hosted agents | Planned: agents running inside the platform for self-hosters without an agent runtime |
-| 22 | Many agents, many brands | Planned: coordination, brand scoping, progressive rollout, spend |
+| 21 | Hosted agents | Planned: the full runtime for agents inside the platform (a thin version with reports and a deliverability guardian ships in Phase 19) |
+| 22 | Many agents, many brands | Planned: coordination, brand scoping, progressive rollout, ad audiences (agent-managed spend needs its own design, #212) |
 
 ## Development
 
