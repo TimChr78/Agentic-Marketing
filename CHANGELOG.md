@@ -2,7 +2,7 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
-## [Unreleased]
+## [0.2.10] - 2026-10-30
 
 A hygiene release ([#179](https://github.com/TimChr78/Agentic-Marketing/issues/179)): bug fixes, a faster and stricter build, releases gated on CI, and documentation that matches what ships. No new features. REST and MCP stay backwards compatible. One Postgres migration runs at start-up.
 
@@ -29,12 +29,13 @@ A hygiene release ([#179](https://github.com/TimChr78/Agentic-Marketing/issues/1
 
 - README, `apps/web/README.md`, the package maps, the Compose guide, the architecture pages, the analytics page, the pilot runbook and both agent skills brought up to 0.2.9 (#160–#168). The MCP skill's tool catalog is generated from the command registry (182 commands) and a test keeps it in sync.
 
-### Upgrading
+### Upgrading from 0.2.9
 
 - **Migrations:** Postgres `0044_journey_exit_step_completed.sql` (relabels finished participants; no schema change).
 - **Configuration:** none.
 - **Breaking changes:** none. Reports that read `exited` as "finished" now see those people under `completed`.
 - **Manual steps:** if a proxy in front already sets `X-Frame-Options`, HSTS or a referrer policy, make it replace the app's header rather than add a second one.
+- **Upgrade:** download `agentic-marketing-compose-<version>.tar.gz`, replace `docker-compose.yml` with its copy, check your configuration with the new image (`AM_VERSION=<version> docker compose run --rm --no-deps -T app am doctor --env-file - < .env`), then set `AM_VERSION=<version>` in `.env` and `docker compose pull && docker compose up -d` (Helm: the chart of the same version). Then `docker compose exec app am doctor`.
 
 ## [0.2.9] - 2026-10-27
 
