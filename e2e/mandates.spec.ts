@@ -26,7 +26,7 @@ test('create a mandate for an agent and see it on the agent page (#228)', async 
   // The button prefills the agent; the editor opens on the new draft.
   await page.getByRole('button', { name: 'Create mandate' }).click();
   await expect(page).toHaveURL(/\/artifacts\/mnd_/);
-  await expect(page.getByLabel('Agent')).toHaveValue(agent!.id);
+  await expect(page.getByRole('combobox', { name: 'Agent', exact: true })).toHaveValue(agent!.id);
   await expect(page.getByLabel('Purpose')).toHaveValue(/Act for this workspace/);
 
   const artifactId = page.url().split('/').pop()!;

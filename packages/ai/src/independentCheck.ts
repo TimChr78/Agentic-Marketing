@@ -102,11 +102,15 @@ export function checkPrompt(input: IndependentCheckInput): string {
 
 /** Parses the model's text as the strict verdict; anything else throws. */
 export function parseVerdict(text: string): z.infer<typeof Verdict> {
-  const cleaned = text
-    .trim()
-    .replace(/^```(?:json)?\s*/i, '')
-    .replace(/\s*```$/, '')
-    .trim();
+  // Strip a Markdown code fence with string operations: a regex over model output can be slow on
+  // long runs of whitespace (CodeQL js/polynomial-redos).
+  let cleaned = text.trim();
+  if (cleaned.startsWith('```')) {
+    const firstBreak = cleaned.indexOf('\n');
+    cleaned = firstBreak < 0 ? cleaned.slice(3) : cleaned.slice(firstBreak + 1);
+  }
+  if (cleaned.endsWith('```')) cleaned = cleaned.slice(0, -3);
+  cleaned = cleaned.trim();
   const start = cleaned.indexOf('{');
   const end = cleaned.lastIndexOf('}');
   if (start < 0 || end <= start) throw new Error(`the model did not answer with a JSON verdict: ${text.slice(0, 200)}`);
