@@ -39,6 +39,10 @@ Set `PUBLIC_PORT` (e.g. `3001`) to add a listener that serves only `/f`, `/u`, `
 
 `PUBLIC_BIND` only chooses the host side; the container port stays `PUBLIC_PORT`. With `PUBLIC_PORT` unset the app does not listen on the container port, so the loopback-only mapping is harmless. Before upgrading, check that the host port is free: `ss -ltn | grep ':3201 '` should print nothing (3001 was the default in 0.2.4 and collides with Uptime Kuma and dashdot; 0.2.5 briefly used 3210, which collides with an admin port set to `AM_PORT=3210`).
 
+## Security headers and the proxy
+
+The app sets baseline headers on every response: `X-Content-Type-Options: nosniff`, `Referrer-Policy`, `X-Frame-Options: DENY` (and `Content-Security-Policy: frame-ancestors 'none'` on the admin UI), a `Permissions-Policy` that turns off camera, microphone and geolocation, and, when `PUBLIC_URL` starts with `https://`, `Strict-Transport-Security: max-age=31536000`. Hosted pages, the archive and assets send their own stricter policies, which the defaults do not replace. TLS belongs to the proxy or tunnel in front. If it sets any of these headers as well, make it replace the app's value rather than add a second header.
+
 ## Restarts and health
 
 Every service has `restart: unless-stopped`, so the stack comes back after a host reboot or a Docker daemon restart. NATS is health-checked through its monitoring endpoint on 8222 (the Alpine image, which has `wget`), Valkey through `valkey-cli ping`; the app waits for Postgres, ClickHouse, NATS and Valkey to be healthy before it starts.
