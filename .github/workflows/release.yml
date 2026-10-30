@@ -2,12 +2,13 @@ name: Release
 
 # Publishes a release: the container image for linux/amd64 and linux/arm64 to GitHub's registry,
 # the packaged Helm chart, the Compose bundle (scripts/release-bundle.sh) with checksums, and a
-# GitHub release with the CHANGELOG section of that version. The image is smoke-tested as a
-# self-hoster runs it before anything is pushed. 0.x
-# versions are marked as pre-releases. Two ways to start it:
+# GitHub release with the CHANGELOG section of that version. The full CI workflow (lint,
+# typecheck, audit, tests, e2e, image smoke test, chart) runs first on the same commit, and
+# nothing is published unless it passes (#170). 0.x versions are marked as pre-releases.
+# Two ways to start it:
 #   - push a version tag (v0.1.0);
-#   - run it by hand (Actions → Release → Run workflow) with the version: it releases the
-#     current main and creates the tag itself with the release.
+#   - run it by hand from main (Actions → Release → Run workflow) with the version: it releases
+#     that commit of main and creates the tag itself with the release.
 
 on:
   push:
@@ -29,13 +30,26 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # The same checks as a pull request, on the commit being released.
+  ci:
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
   release:
+    needs: ci
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v5
+      - name: A manual release runs from main
+        if: github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Run the release workflow from main, not $GITHUB_REF"
+          exit 1
+      # The commit CI just checked: the tag, or main as it was when the run started.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
-          # A manual run releases main as it is now.
-          ref: ${{ github.event_name == 'workflow_dispatch' && 'main' || github.ref }}
+          ref: ${{ github.sha }}
 
       - name: Check the version
         id: version
@@ -49,13 +63,8 @@ jobs:
             v="${GITHUB_REF_NAME#v}"
           fi
           echo "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' || { echo "::error::$v is not a version (x.y.z)"; exit 1; }
-          for f in package.json apps/server/package.json; do
-            got=$(node -p "require('./$f').version")
-            [ "$got" = "$v" ] || { echo "::error::$f has version $got, not $v"; exit 1; }
-          done
-          chart=$(grep '^appVersion:' deploy/helm/agentic-marketing/Chart.yaml | tr -d '"' | awk '{print $2}')
-          [ "$chart" = "$v" ] || { echo "::error::Chart appVersion is $chart, not $v"; exit 1; }
-          grep -q "^## \[$v\]" CHANGELOG.md || { echo "::error::CHANGELOG.md has no section for $v"; exit 1; }
+          # Every version surface (packages, chart, Compose defaults, README, CHANGELOG): #175.
+          node scripts/check-versions.mjs "$v" || { echo "::error::Version files disagree with $v (see above)"; exit 1; }
           if gh release view "v$v" >/dev/null 2>&1; then echo "::error::Release v$v exists already"; exit 1; fi
           if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] && git ls-remote --exit-code --tags origin "refs/tags/v$v" >/dev/null; then
             echo "::error::Tag v$v exists already: push it again to release it, or delete it first"; exit 1
@@ -68,15 +77,15 @@ jobs:
       - name: Build the Compose bundle
         run: scripts/release-bundle.sh "${{ steps.version.outputs.version }}" dist
 
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
         with:
           images: ghcr.io/${{ github.repository_owner }}/agentic-marketing
           tags: |
@@ -88,7 +97,7 @@ jobs:
             org.opencontainers.image.version=${{ steps.version.outputs.version }}
             org.opencontainers.image.revision=${{ steps.version.outputs.sha }}
       # The amd64 image, loaded locally and run through the same smoke test as CI, before pushing.
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           platforms: linux/amd64
@@ -97,7 +106,7 @@ jobs:
           cache-from: type=gha
       - name: Smoke-test the image
         run: SMOKE_NO_BUILD=1 scripts/smoke.sh
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           platforms: linux/amd64,linux/arm64
@@ -108,7 +117,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - uses: azure/setup-helm@v4
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
         with:
           version: v3.19.0
       - name: Package the chart

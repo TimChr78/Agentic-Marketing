@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { VERSION } from '../src/version';
-import { connectAgent, startTestServer, type User } from './harness';
+import { connectAgent, startTestServer, testPort, type User } from './harness';
 
 // Issue #120: the running version comes from one file and every surface that names a version reports it.
 
@@ -21,11 +21,10 @@ function sources(dir: string): string[] {
 }
 
 describe('the version file', () => {
-  it('matches the root package, the server package and the chart', () => {
+  it('matches every version surface: packages, chart, Compose defaults, README and CHANGELOG (#175)', async () => {
+    const { mismatches } = await import('../../../scripts/check-versions.mjs');
     expect(json('../../../package.json').version).toBe(VERSION);
-    expect(json('../package.json').version).toBe(VERSION);
-    const chart = read('../../../deploy/helm/agentic-marketing/Chart.yaml');
-    expect(/^appVersion:\s*"?([^"\n]+)"?$/m.exec(chart)?.[1]).toBe(VERSION);
+    expect(mismatches(VERSION), 'run node scripts/check-versions.mjs').toEqual([]);
   });
 
   it('has no hard-coded version left in the server source', () => {
@@ -41,7 +40,7 @@ describe('the running server', () => {
   let agent: Awaited<ReturnType<typeof connectAgent>>;
 
   beforeAll(async () => {
-    t = await startTestServer('test_version', 3321);
+    t = await startTestServer('test_version', testPort(3321));
     owner = await t.signUp(`owner-${Date.now()}@example.com`);
     await t.workspaceWith([[owner, 'owner']]);
     agent = await connectAgent(t.base, owner, ['artifacts:read']);

@@ -1,14 +1,91 @@
 name: CI
 
+# Static checks, the test suite, the admin UI in a browser, the Docker image and the Helm chart.
+# The release workflow calls this file (workflow_call) for the tagged commit, so a release runs
+# exactly the checks a pull request does.
+
 on:
   push:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+# A new push to a pull request cancels its previous run; runs on main always finish. A release
+# calls this workflow under its own group, so it never cancels or is cancelled by PR runs.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  check:
+  # What changed, so documentation-only pull requests skip the slow jobs. Pushes to main, manual
+  # runs and releases run everything. Skipped jobs count as passed for required checks.
+  changes:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+      helm: ${{ steps.filter.outputs.helm }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 0
+      - id: filter
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"; echo "helm=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          files=$(git diff --name-only "$BASE" HEAD)
+          printf '%s\n' "$files"
+          # Code is anything but Markdown, docs/ and the agent skills.
+          if printf '%s\n' "$files" | grep -Eqv '(\.md$|^docs/|^\.claude/)'; then code=true; else code=false; fi
+          if printf '%s\n' "$files" | grep -Eq '^(deploy/helm/|\.github/workflows/)'; then helm=true; else helm=false; fi
+          echo "code=$code" >> "$GITHUB_OUTPUT"; echo "helm=$helm" >> "$GITHUB_OUTPUT"
+
+  # Lint, typecheck, dependency audit and the documentation checks: fast feedback, no services.
+  static:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+      # pnpm comes from corepack, pinned by `packageManager` in package.json.
+      - run: corepack enable
+      # Spikes (with large benchmark dependencies) are not part of CI.
+      - run: pnpm install --frozen-lockfile --filter "./packages/**" --filter "./apps/**" --filter "agentic-marketing"
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: node scripts/check-versions.mjs
+      # Accepted advisories are listed in package.json (pnpm.auditConfig) with reasons in SECURITY.md.
+      - run: pnpm audit --prod --audit-level=moderate
+      # Documentation that must agree with the code: the pilot pages and the MCP tool catalog.
+      - run: pnpm exec vitest run --project docs
+
+  # The dependencies a pull request adds: known vulnerabilities and licences. Needs GitHub's
+  # dependency graph (enabled on this repository).
+  dependency-review:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48 # v4.9.0
+        with:
+          fail-on-severity: high
+
+  test:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     services:
       postgres:
         image: postgres:16
@@ -46,16 +123,15 @@ jobs:
       OPENBAO_TEST_ADDR: http://localhost:8200
       OPENBAO_TEST_TOKEN: root
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       # Service containers cannot take arguments, and NATS needs `-js` for JetStream.
       - run: docker run -d --name nats -p 4222:4222 nats:2.15.0 -js
       # OpenBao in dev mode, for the Transit key-provider test (packages/secrets).
       - run: docker run -d --name openbao -p 8200:8200 openbao/openbao:2.6.4 server -dev -dev-root-token-id=root -dev-listen-address=0.0.0.0:8200
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: 22
           package-manager-cache: false
-      # pnpm comes from corepack, pinned by `packageManager` in package.json.
       - run: corepack enable
       # Ubuntu's postgresql-client can be older than the postgres:16 service above. Backups need a
       # matching pg_dump/pg_restore, so install 16 from PGDG (the runner's codename is in VERSION_CODENAME).
@@ -69,16 +145,25 @@ jobs:
           sudo apt-get install -y --no-install-recommends postgresql-client-16
           pg_dump --version
           pg_dump --version | grep -Eq '\(PostgreSQL\) 16\.'
-      # Spikes (with large benchmark dependencies) are not part of CI.
       - run: pnpm install --frozen-lockfile --filter "./packages/**" --filter "./apps/**" --filter "agentic-marketing"
-      - run: pnpm lint
-      - run: pnpm typecheck
-      - run: pnpm test
+      - run: pnpm test:ci
+      # JUnit results for every run, so a flaky test shows up as a pattern across runs.
+      - if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: test-results
+          path: |
+            reports/junit.xml
+            reports/coverage/
+          retention-days: 30
 
   # The admin UI in a real browser against the production build and a seeded server
   # (apps/server/test/e2e/server.ts), so browser-only regressions such as #115 fail the build.
   e2e:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     services:
       postgres:
         image: postgres:16
@@ -115,20 +200,28 @@ jobs:
       CLICKHOUSE_ROW_POLICIES: required
       NATS_URL: nats://localhost:4222
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - run: docker run -d --name nats -p 4222:4222 nats:2.15.0 -js
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: 22
           package-manager-cache: false
       - run: corepack enable
       - run: pnpm install --frozen-lockfile --filter "./packages/**" --filter "./apps/**" --filter "agentic-marketing"
+      # Playwright's Chromium, cached per Playwright version; the system packages it needs are
+      # installed on every run (they are not in the cache).
+      - id: playwright
+        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}
       - run: npx playwright install --with-deps chromium
       - run: pnpm e2e
       # #60: `pnpm e2e` built the live UI, so its manifest now exists for the bundle-size check.
       - run: npx vitest run apps/web/test/bundle.test.ts
       - if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: playwright-traces
           path: test-results/
@@ -137,17 +230,23 @@ jobs:
   # The Docker image as a self-hoster runs it: docker compose up, bootstrap, sign in, a signup form
   # that sends its confirmation e-mail.
   docker-smoke:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - run: scripts/smoke.sh
 
   # The Helm chart renders and every manifest matches the Kubernetes schemas.
   helm:
+    needs: changes
+    if: needs.changes.outputs.helm == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v5
-      - uses: azure/setup-helm@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
         with:
           version: v3.19.0
       - run: helm lint deploy/helm/agentic-marketing --set secrets.existingSecret=am
