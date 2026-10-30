@@ -13,9 +13,10 @@ New decisions get the next number; superseded ADRs are kept and linked.
 | [0006](0006-email-format-and-editor.md) | MJML + Liquid as canonical email format, GrapesJS editor | Accepted (spike 2) |
 | [0007](0007-send-gateway-consent.md) | Single send gateway enforcing lawful basis | Proposed |
 | [0008](0008-segment-compatible-ingestion.md) | Segment-spec compatible ingestion with own gateway | Proposed |
-| [0009](0009-project-license.md) | Project license | Accepted |
+| [0009](0009-project-license.md) | Project license (AGPL-3.0 core) | Superseded by 0015 |
 | [0010](0010-analytics-layers.md) | Three-layer analytics | Accepted |
 | [0011](0011-email-delivery-providers.md) | Email delivery through provider adapters, not SMTP alone | Accepted |
 | [0012](0012-ai-runtime.md) | AI steps run asynchronously with fallbacks; the copilot is an in-process MCP client | Accepted |
 | [0013](0013-integrations.md) | Integrations through signed webhooks, API tokens and an own connector SDK | Accepted |
 | [0014](0014-consent-channel-precedence.md) | One rule for the current consent status, per channel and across channels | Accepted |
+| [0015](0015-mit-license.md) | MIT for the whole project | Accepted |

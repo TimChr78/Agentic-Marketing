@@ -110,12 +110,13 @@ flowchart LR
 6. **MJML as canonical email format, GrapesJS as visual editor** — [ADR-0006](adr/0006-email-format-and-editor.md)
 7. **Single send gateway enforces consent/lawful basis for every outbound message** — [ADR-0007](adr/0007-send-gateway-consent.md)
 8. **Segment-spec compatible ingestion with own gateway** — [ADR-0008](adr/0008-segment-compatible-ingestion.md)
-9. **Project license: AGPL-3.0 core, MIT SDKs (accepted)** — [ADR-0009](adr/0009-project-license.md)
+9. ~~Project license: AGPL-3.0 core, MIT SDKs~~ — [ADR-0009](adr/0009-project-license.md), superseded by decision 15
 10. **Three-layer analytics: built-in on ClickHouse, BYO BI, forward to Umami & co. (accepted)** — [ADR-0010](adr/0010-analytics-layers.md)
 11. **Email delivery through provider adapters (SMTP, SES, Postmark, Brevo), not SMTP alone** — [ADR-0011](adr/0011-email-delivery-providers.md)
 12. **AI steps run asynchronously with fallbacks; the copilot is an in-process MCP client** — [ADR-0012](adr/0012-ai-runtime.md)
 13. **Integrations through signed webhooks, API tokens and an own connector SDK** — [ADR-0013](adr/0013-integrations.md)
 14. **One rule for the current consent status, per channel and across channels** — [ADR-0014](adr/0014-consent-channel-precedence.md)
+15. **MIT for the whole project, no CLA** — [ADR-0015](adr/0015-mit-license.md)
 
 The full index, with each decision's status, is in [`adr/README.md`](adr/README.md).
 
