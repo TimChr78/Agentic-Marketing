@@ -31,10 +31,21 @@ export function EmailPreview({ artifactId, version, compact }: { artifactId: str
       <div className="rounded-md border border-line bg-surface-2 px-3 py-2.5">
         <Meta
           items={[
-            ['Subject', <span className="font-medium">{data.subject}</span>],
+            [
+              'Subject',
+              <span key="subject" className="font-medium">
+                {data.subject}
+              </span>,
+            ],
             [
               'Preheader',
-              data.preheader ? data.preheader : <span className="text-muted">None. Inboxes show the first line of the body instead.</span>,
+              data.preheader ? (
+                data.preheader
+              ) : (
+                <span key="preheader" className="text-muted">
+                  None. Inboxes show the first line of the body instead.
+                </span>
+              ),
             ],
           ]}
         />

@@ -67,10 +67,10 @@ export default function HostedPagesPage() {
           <Card title="Where they appear" padded>
             <Meta
               items={[
-                ['Confirm', <Mono>/f/confirm/…</Mono>],
-                ['Unsubscribe', <Mono>/u/…</Mono>],
-                ['Web version', <Mono>/n/w/…</Mono>],
-                ['Archive', <Mono>{'/n/<slug>/'}</Mono>],
+                ['Confirm', <Mono key="confirm">/f/confirm/…</Mono>],
+                ['Unsubscribe', <Mono key="unsubscribe">/u/…</Mono>],
+                ['Web version', <Mono key="web">/n/w/…</Mono>],
+                ['Archive', <Mono key="archive">{'/n/<slug>/'}</Mono>],
               ]}
             />
             <ul className="mt-3 list-disc space-y-1.5 pl-4 text-[13px] text-fg-2">

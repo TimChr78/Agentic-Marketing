@@ -38,6 +38,7 @@ export function Tabs<K extends string>({
     if (!el) return;
     setFade({ left: el.scrollLeft > 1, right: el.scrollLeft + el.clientWidth < el.scrollWidth - 1 });
   }, []);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: tabs changing can change the row width, so re-check the fade edges
   useEffect(() => {
     const el = list.current;
     if (!el) return;
@@ -144,6 +145,7 @@ export function Segmented<K extends string>({
   return (
     <div role="radiogroup" aria-label={label} className="inline-flex rounded-md border border-line-strong bg-surface-2 p-0.5">
       {items.map((t) => (
+        // biome-ignore lint/a11y/useSemanticElements: a segmented control implements the ARIA radio pattern; native radios would change the layout
         <button
           key={t.key}
           type="button"

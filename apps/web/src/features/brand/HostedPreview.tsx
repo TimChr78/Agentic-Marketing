@@ -24,6 +24,7 @@ export function HostedPreview({
   const [html, setHtml] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const key = JSON.stringify(brand ?? null);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: brand is keyed by its JSON form so an equal-object prop does not refetch on every render
   useEffect(() => {
     let live = true;
     const t = setTimeout(() => {

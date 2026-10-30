@@ -258,7 +258,9 @@ export const commands: CommandDef[] = [
       const edges: JourneyEdge[] = [];
       input.nodes.forEach((n, i) => {
         const next = n.next ?? (i < input.nodes.length - 1 && !['exit', 'goal'].includes(n.kind) ? [{ to: input.nodes[i + 1].id }] : []);
-        next.forEach((x) => edges.push({ id: `${n.id}-${x.to}`, source: n.id, target: x.to, label: x.label }));
+        next.forEach((x) => {
+          edges.push({ id: `${n.id}-${x.to}`, source: n.id, target: x.to, label: x.label });
+        });
       });
       const id = `jrn_${input.name
         .toLowerCase()
@@ -453,9 +455,11 @@ export const commands: CommandDef[] = [
     run: ({ templateId, subject, mjml }: { templateId: string; subject: string; mjml: string }, { principal }) => {
       let version = 0;
       S.setState((s) => ({
-        templates: s.templates.map((t) =>
-          t.id === templateId ? { ...t, subject, mjml, version: (version = t.version + 1), updatedAt: Date.now(), author: principal } : t,
-        ),
+        templates: s.templates.map((t) => {
+          if (t.id !== templateId) return t;
+          version = t.version + 1;
+          return { ...t, subject, mjml, version, updatedAt: Date.now(), author: principal };
+        }),
       }));
       return { templateId, version };
     },
@@ -583,7 +587,7 @@ let auditId = 0;
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** Run a command the way the real command layer would: authz, validation, audit log. */
-export async function exec<T = any>(name: string, input: unknown, principal: Principal = { type: 'user', name: 'Tim' }): Promise<T> {
+export async function exec<T = unknown>(name: string, input: unknown, principal: Principal = { type: 'user', name: 'Tim' }): Promise<T> {
   const def = commands.find((c) => c.name === name);
   const log = (ok: boolean, summary: string) =>
     useStore.setState((s) => ({

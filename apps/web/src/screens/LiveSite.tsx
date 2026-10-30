@@ -84,6 +84,7 @@ export function LiveSite() {
               <div className="flex flex-wrap gap-3 text-[13px]" style={{ fontFamily: 'var(--font-sans)' }}>
                 {(['all', 'shoes', 'jackets', 'tents', 'backpacks'] as const).map((c) => (
                   <button
+                    type="button"
                     key={c}
                     className={cx('capitalize', filter === c && 'font-semibold underline underline-offset-4')}
                     onClick={() => {
@@ -106,6 +107,7 @@ export function LiveSite() {
                 {hero.text}
               </p>
               <button
+                type="button"
                 className="mt-4 rounded bg-shop-bg px-4 py-2 text-[13px] font-semibold text-shop-fg"
                 style={{ fontFamily: 'var(--font-sans)' }}
                 onClick={() => setFilter(live.decision.variant === 'default' ? 'all' : (live.decision.variant as Category))}
@@ -122,6 +124,7 @@ export function LiveSite() {
                   return (
                     <div key={p.sku} className="min-w-0 rounded-md border border-shop-fg/10 bg-shop-bg">
                       <button
+                        type="button"
                         className="flex aspect-[4/3] w-full max-w-full items-center justify-center rounded-t-md bg-shop-fg/5 hover:bg-shop-fg/10"
                         onClick={() => sdk.track('product_viewed', { sku: p.sku, name: p.name, category: p.category, price: p.price })}
                         aria-label={`View ${p.name}`}
@@ -133,12 +136,14 @@ export function LiveSite() {
                         <div className="num text-[12px] opacity-70">{p.price.toLocaleString('da-DK')} kr</div>
                         <div className="mt-2 flex gap-1.5">
                           <button
+                            type="button"
                             className="rounded border border-shop-fg/20 px-2 py-1 text-[11px] hover:bg-shop-fg/5"
                             onClick={() => sdk.track('product_viewed', { sku: p.sku, name: p.name, category: p.category, price: p.price })}
                           >
                             View
                           </button>
                           <button
+                            type="button"
                             className="rounded bg-shop-accent px-2 py-1 text-[11px] font-semibold text-shop-bg"
                             onClick={() => sdk.track('product_added', { sku: p.sku, name: p.name, price: p.price })}
                           >
@@ -176,7 +181,9 @@ export function LiveSite() {
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
                   />
-                  <button className="rounded bg-shop-accent px-3 py-1 text-[12px] font-semibold text-shop-bg">Sign up</button>
+                  <button type="submit" className="rounded bg-shop-accent px-3 py-1 text-[12px] font-semibold text-shop-bg">
+                    Sign up
+                  </button>
                 </div>
                 <span className="text-[11px] opacity-60">Try anna.jensen@example.com to log in as an existing customer.</span>
               </form>
@@ -185,6 +192,7 @@ export function LiveSite() {
                 <div className="truncate text-[12px] opacity-75">{live.cart.map((c) => c.name).join(', ') || 'Empty'}</div>
                 <div className="flex gap-2">
                   <button
+                    type="button"
                     disabled={!live.cart.length}
                     className="rounded bg-shop-accent px-3 py-1 text-[12px] font-semibold text-shop-bg disabled:opacity-40"
                     onClick={() => sdk.track('order_completed', { value: live.cart.reduce((a, c) => a + c.price, 0), currency: 'DKK' })}
@@ -192,6 +200,7 @@ export function LiveSite() {
                     Check out
                   </button>
                   <button
+                    type="button"
                     disabled={!live.cart.length}
                     className="rounded border border-shop-fg/20 px-3 py-1 text-[12px] disabled:opacity-40"
                     onClick={() => sdk.abandonCart()}
@@ -214,12 +223,17 @@ export function LiveSite() {
                 </p>
                 <div className="mt-3 flex flex-wrap gap-2">
                   <button
+                    type="button"
                     className="rounded bg-shop-accent px-3 py-1.5 text-[12px] font-semibold text-shop-bg"
                     onClick={() => sdk.setConsent('all')}
                   >
                     Accept all
                   </button>
-                  <button className="rounded border border-shop-fg/25 px-3 py-1.5 text-[12px]" onClick={() => sdk.setConsent('necessary')}>
+                  <button
+                    type="button"
+                    className="rounded border border-shop-fg/25 px-3 py-1.5 text-[12px]"
+                    onClick={() => sdk.setConsent('necessary')}
+                  >
                     Strictly necessary only
                   </button>
                 </div>
@@ -267,6 +281,7 @@ export function LiveSite() {
                 <span className="text-muted">Profile </span>
                 {profile ? (
                   <button
+                    type="button"
                     className="font-semibold text-accent"
                     onClick={() => useStore.getState().navigate('profiles', { profileId: profile.id })}
                   >

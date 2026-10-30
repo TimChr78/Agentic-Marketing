@@ -92,10 +92,19 @@ export function toImportRows(
   rows.slice(1).forEach((r, i) => {
     const row = i + 1;
     const email = (r[m.email] ?? '').trim().toLowerCase();
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return skipped.push({ row, reason: 'no valid e-mail' });
-    if (seen.has(email)) return skipped.push({ row, reason: 'duplicate' });
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      skipped.push({ row, reason: 'no valid e-mail' });
+      return;
+    }
+    if (seen.has(email)) {
+      skipped.push({ row, reason: 'duplicate' });
+      return;
+    }
     const status = m.status >= 0 ? (r[m.status] ?? '').trim().toLowerCase() : '';
-    if (opts.activeOnly && m.status >= 0 && !ACTIVE.includes(status)) return skipped.push({ row, reason: `status "${status || 'empty'}"` });
+    if (opts.activeOnly && m.status >= 0 && !ACTIVE.includes(status)) {
+      skipped.push({ row, reason: `status "${status || 'empty'}"` });
+      return;
+    }
     seen.add(email);
     const when = m.subscribedAt >= 0 ? new Date((r[m.subscribedAt] ?? '').trim()) : null;
     const firstName = m.firstName >= 0 ? (r[m.firstName] ?? '').trim() : '';

@@ -83,9 +83,9 @@ function NumberField({
   placeholder?: string;
 }) {
   const [text, setText] = useState(String(value));
+  // biome-ignore lint/correctness/useExhaustiveDependencies: only follow changes from outside this field, not the local text
   useEffect(() => {
     if (Number(text) !== value) setText(Number.isFinite(value) ? String(value) : '');
-    // biome-ignore lint/correctness/useExhaustiveDependencies: only follow outside changes
   }, [value]);
   return (
     <Field label={label} unit={unit} hint={hint} error={error}>
@@ -126,6 +126,7 @@ export function PromptEditor({ content, onChange, readOnly, errors }: EditorProp
   const segments = useApi(() => api.call('artifacts.list', { type: 'segment' as never, limit: 200 }), []);
   const cacheSegments = content.cache?.segments ?? [];
   const [forbiddenText, setForbiddenText] = useState(forbidden.join('\n'));
+  // biome-ignore lint/correctness/useExhaustiveDependencies: only follow changes from outside this field, not the local text
   useEffect(() => {
     const parsed = forbiddenText
       .split('\n')
@@ -133,7 +134,6 @@ export function PromptEditor({ content, onChange, readOnly, errors }: EditorProp
       .filter(Boolean)
       .slice(0, 100);
     if (parsed.join('\n') !== forbidden.join('\n')) setForbiddenText(forbidden.join('\n'));
-    // biome-ignore lint/correctness/useExhaustiveDependencies: only follow changes from outside this field
   }, [forbidden]);
 
   const setKind = (next: PromptContent['kind']) => {
@@ -213,6 +213,7 @@ export function PromptEditor({ content, onChange, readOnly, errors }: EditorProp
         >
           <div className="space-y-2">
             {options.map((o, i) => (
+              // biome-ignore lint/suspicious/noArrayIndexKey: options are editable rows whose key field is being typed, so position is the only stable identity
               <div key={i} className="grid gap-2 sm:grid-cols-[minmax(140px,200px)_minmax(0,1fr)_auto] sm:items-start">
                 <Field
                   label="Key"
@@ -269,6 +270,7 @@ export function PromptEditor({ content, onChange, readOnly, errors }: EditorProp
             <p className="text-[12px] text-muted">At least one slot is needed.</p>
             <div className="space-y-3">
               {slots.map((s, i) => (
+                // biome-ignore lint/suspicious/noArrayIndexKey: slots are editable rows whose name field is being typed, so position is the only stable identity
                 <div key={i} className="space-y-2 rounded-md border border-line p-3">
                   <div className="grid gap-2 sm:grid-cols-[minmax(140px,200px)_minmax(0,1fr)_minmax(120px,150px)_auto] sm:items-start">
                     <Field label="Name" error={errors[`slots.${i}.name`]}>

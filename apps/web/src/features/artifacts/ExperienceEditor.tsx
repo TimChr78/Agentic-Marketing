@@ -145,9 +145,9 @@ function NumberField({
   readOnly?: boolean;
 }) {
   const [text, setText] = useState(String(value));
+  // biome-ignore lint/correctness/useExhaustiveDependencies: only follow changes from outside this field, not the local text
   useEffect(() => {
     if (Number(text) !== value) setText(Number.isFinite(value) ? String(value) : '');
-    // biome-ignore lint/correctness/useExhaustiveDependencies: only follow outside changes
   }, [value]);
   return (
     <Field label={label} unit={unit} hint={hint} error={error}>
@@ -186,8 +186,8 @@ export function ExperienceEditor({ content, onChange, readOnly, errors, warnings
       {warnings.length > 0 && (
         <Alert tone="warn" title="The schema still needs">
           <ul className="list-disc pl-4">
-            {warnings.map((w, i) => (
-              <li key={i}>{w.message}</li>
+            {warnings.map((w) => (
+              <li key={`${w.path}-${w.message}`}>{w.message}</li>
             ))}
           </ul>
         </Alert>

@@ -39,8 +39,10 @@ export function TableFrame({
       ) : loading ? (
         <div role="status" aria-label="Loading">
           {Array.from({ length: 5 }, (_, i) => (
+            // biome-ignore lint/suspicious/noArrayIndexKey: loading placeholder rows are generated, never reordered, and have no identity
             <div key={i} className="flex gap-4 border-b border-line px-4 py-3 last:border-0">
               {Array.from({ length: columns }, (_, c) => (
+                // biome-ignore lint/suspicious/noArrayIndexKey: loading placeholder cells are positional columns of a generated row
                 <Skeleton key={c} className={cx('h-3.5', c === 0 ? 'w-1/3' : 'w-1/6')} />
               ))}
             </div>

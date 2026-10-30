@@ -57,6 +57,7 @@ export function SearchPalette({ onClose }: { onClose: () => void }) {
     return [...arts.filter(hit).slice(0, 20), ...pages.filter(hit).slice(0, 8)];
   }, [q, items, can]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the active result resets on every new query, which the body does not read
   useEffect(() => setActive(0), [q]);
   const go = (r: Result | undefined) => {
     if (!r) return;
@@ -101,17 +102,19 @@ export function SearchPalette({ onClose }: { onClose: () => void }) {
             className="h-12 min-w-0 flex-1 bg-transparent text-[14px] outline-none placeholder:text-muted"
           />
         </div>
-        <ul id="search-results" role="listbox" aria-label="Results" className="max-h-[52vh] overflow-y-auto p-1.5">
-          {err && <li className="px-3 py-2 text-[13px] text-bad">{err}</li>}
-          {items === null && !err && <li className="px-3 py-2 text-[13px] text-muted">Loading…</li>}
+        <div id="search-results" role="listbox" aria-label="Results" className="max-h-[52vh] overflow-y-auto p-1.5">
+          {err && <div className="px-3 py-2 text-[13px] text-bad">{err}</div>}
+          {items === null && !err && <div className="px-3 py-2 text-[13px] text-muted">Loading…</div>}
           {items !== null && results.length === 0 && (
-            <li className="px-3 py-6 text-center text-[13px] text-muted">Nothing matches “{q}”.</li>
+            <div className="px-3 py-6 text-center text-[13px] text-muted">Nothing matches “{q}”.</div>
           )}
           {results.map((r, i) => (
-            <li
+            // biome-ignore lint/a11y/useKeyWithClickEvents: the search input handles arrow keys and Enter; options use the active-descendant pattern
+            <div
               key={r.key}
               id={`sr-${r.key}`}
               role="option"
+              tabIndex={-1}
               aria-selected={i === active}
               onMouseEnter={() => setActive(i)}
               onClick={() => go(r)}
@@ -121,9 +124,9 @@ export function SearchPalette({ onClose }: { onClose: () => void }) {
               <span className="min-w-0 flex-1 truncate text-fg">{r.label}</span>
               {r.state && <StatePill state={r.state} />}
               <Tag>{r.hint}</Tag>
-            </li>
+            </div>
           ))}
-        </ul>
+        </div>
       </div>
     </div>,
     document.body,

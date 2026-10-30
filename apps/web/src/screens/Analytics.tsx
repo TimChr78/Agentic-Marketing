@@ -70,6 +70,7 @@ export function Analytics() {
             <div className="flex gap-1">
               {funnelJourneys.map((id) => (
                 <button
+                  type="button"
                   key={id}
                   onClick={() => setJid(id)}
                   className={cx('rounded px-2 py-0.5 text-[12px]', jid === id ? 'bg-accent-soft font-semibold text-accent' : 'text-muted')}

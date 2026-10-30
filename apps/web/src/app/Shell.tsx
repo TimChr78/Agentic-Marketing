@@ -21,6 +21,7 @@ export function Shell({ children }: { children: ReactNode }) {
   const [copilotOpen, setCopilotOpen] = useState(false);
   const { can } = useSession();
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the mobile drawer closes on navigation, which the body does not read
   useEffect(() => setNavOpen(false), [path]);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -55,7 +56,7 @@ export function Shell({ children }: { children: ReactNode }) {
             <ol className="flex min-w-0 items-center gap-1 text-[13px]">
               {group && !group.path && <li className="hidden shrink-0 text-muted sm:block">{group.label}</li>}
               {crumbs.map((c, i) => (
-                <li key={i} className={cx('flex min-w-0 items-center gap-1', i < crumbs.length - 1 && 'hidden sm:flex')}>
+                <li key={c.to ?? c.label} className={cx('flex min-w-0 items-center gap-1', i < crumbs.length - 1 && 'hidden sm:flex')}>
                   {((group && !group.path) || i > 0) && (
                     <ChevronRight size={14} className={cx('shrink-0 text-muted', i === 0 && 'hidden sm:block')} aria-hidden />
                   )}

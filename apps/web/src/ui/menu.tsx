@@ -57,6 +57,7 @@ export function Menu({
   };
   const enabled = () => Array.from(list.current?.querySelectorAll<HTMLElement>('[role=menuitem]:not([aria-disabled=true])') ?? []);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: open/close helpers are recreated each render; the menu only wires listeners when it opens
   useEffect(() => {
     if (!open) return;
     const els = enabled();
@@ -71,7 +72,6 @@ export function Menu({
       document.removeEventListener('mousedown', onDoc);
       window.removeEventListener('resize', onScroll);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
   const onListKey = (e: React.KeyboardEvent) => {
@@ -129,10 +129,14 @@ export function Menu({
           >
             {items.map((it, i) =>
               it === 'separator' ? (
-                <div key={i} role="separator" className="my-1 h-px bg-line" />
+                // biome-ignore lint/suspicious/noArrayIndexKey: menu definitions are positional lists; separators have no identity
+                <hr key={i} className="my-1 h-px border-0 bg-line" />
               ) : (
                 <button
-                  key={i}
+                  key={
+                    // biome-ignore lint/suspicious/noArrayIndexKey: menu definitions are positional lists; items may repeat a label
+                    i
+                  }
                   type="button"
                   role="menuitem"
                   tabIndex={-1}
@@ -216,10 +220,14 @@ export function ContextMenu({
     >
       {items.map((it, i) =>
         it === 'separator' ? (
-          <div key={i} role="separator" className="my-1 h-px bg-line" />
+          // biome-ignore lint/suspicious/noArrayIndexKey: menu definitions are positional lists; separators have no identity
+          <hr key={i} className="my-1 h-px border-0 bg-line" />
         ) : (
           <button
-            key={i}
+            key={
+              // biome-ignore lint/suspicious/noArrayIndexKey: menu definitions are positional lists; items may repeat a label
+              i
+            }
             type="button"
             role="menuitem"
             tabIndex={-1}

@@ -257,7 +257,10 @@ export function CampaignEditor({ content, onChange, readOnly, errors }: EditorPr
           <ul className="space-y-2">
             {members.map((m, i) => (
               <li
-                key={`${m.artifactId ?? 'new'}-${i}`}
+                key={
+                  // biome-ignore lint/suspicious/noArrayIndexKey: campaign members are identified by position in the editable list; a new row has no id yet
+                  `${m.artifactId ?? 'new'}-${i}`
+                }
                 className="grid gap-2 rounded-md border border-line p-3 sm:grid-cols-[minmax(0,1fr)_200px_auto]"
               >
                 <Field label="Artifact" hideLabel error={errors[`members.${i}.artifactId`]}>

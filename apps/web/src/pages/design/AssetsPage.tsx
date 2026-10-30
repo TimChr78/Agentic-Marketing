@@ -67,6 +67,7 @@ export default function AssetsPage() {
 
   const assets = list.data?.assets ?? [];
   return (
+    // biome-ignore lint/a11y/noStaticElementInteractions: drag-and-drop is a mouse enhancement; uploading also works through the Upload button
     <div
       onDragOver={(e) => {
         if (!canWrite) return;
@@ -98,7 +99,10 @@ export default function AssetsPage() {
                 multiple
                 hidden
                 accept={ACCEPT}
-                onChange={(e) => (void upload([...(e.target.files ?? [])]), (e.target.value = ''))}
+                onChange={(e) => {
+                  void upload([...(e.target.files ?? [])]);
+                  e.target.value = '';
+                }}
               />
               <Button variant="primary" icon={<Upload size={15} />} onClick={() => input.current?.click()} loading={uploading.length > 0}>
                 Upload

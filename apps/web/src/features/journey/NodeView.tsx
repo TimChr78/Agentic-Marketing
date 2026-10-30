@@ -82,7 +82,10 @@ export const NodeView = memo(function NodeView({ data, selected }: NodeProps) {
         const label = outs > 1 && i >= (node.next?.length ?? 0) ? edgeLabel(node, i) : undefined;
         return (
           <Handle
-            key={i}
+            key={
+              // biome-ignore lint/suspicious/noArrayIndexKey: output handles are positional and their id is derived from the index
+              i
+            }
             id={`out-${i}`}
             type="source"
             position={Position.Bottom}

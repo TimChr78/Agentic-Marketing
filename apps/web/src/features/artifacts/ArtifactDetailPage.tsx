@@ -179,6 +179,7 @@ export function ArtifactDetailPage({
 
   // Autosave: a moment after the last change; retried on the next change after an error, but never
   // over someone else's newer version (412), where the person decides.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: save is recreated from draft, which is already a dependency; an artifact refetch must not restart the timer
   useEffect(() => {
     if (!autosave || !dirty || readOnly || saving || conflict) return;
     const snapshot = JSON.stringify(draft);
@@ -187,7 +188,6 @@ export function ArtifactDetailPage({
       if (!(await save({ quiet: true }))) failedDraft.current = snapshot;
     }, 1200);
     return () => clearTimeout(t);
-    // biome-ignore lint/correctness/useExhaustiveDependencies: keyed on the draft
   }, [autosave, dirty, readOnly, saving, conflict, draft]);
 
   // Ctrl/Cmd+S saves.
@@ -332,8 +332,8 @@ export function ArtifactDetailPage({
       {warnings.length > 0 && !dirty && (
         <Alert tone="warn" title="Fill these in before publishing" className="mb-4">
           <ul className="list-disc pl-4">
-            {warnings.map((w, i) => (
-              <li key={i}>{w.message}</li>
+            {warnings.map((w) => (
+              <li key={`${w.path}-${w.message}`}>{w.message}</li>
             ))}
           </ul>
         </Alert>
@@ -495,7 +495,7 @@ function PublishDialog({
     >
       <p className="mb-3">
         {direct
-          ? 'Version ' + artifact.version.number + ' goes live at once under your workspace approval policy.'
+          ? `Version ${artifact.version.number} goes live at once under your workspace approval policy.`
           : 'A person with approval rights reviews version ' +
             artifact.version.number +
             ' and approves or rejects it. Nothing changes for recipients until then.'}

@@ -184,10 +184,10 @@ function Builder({ journey, onBack }: { journey: Journey; onBack: () => void }) 
   const [simProfile, setSimProfile] = useState(profiles[2]?.id ?? '');
   const saveTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
 
+  // Only reset the working copy when the viewed version changes.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reset only when the viewed version changes, not on every version object refresh
   useEffect(() => {
     setGraph({ nodes: version.nodes, edges: version.edges });
-    // Only reset the working copy when the viewed version changes.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [versionNo]);
 
   const persist = useCallback(
@@ -205,7 +205,7 @@ function Builder({ journey, onBack }: { journey: Journey; onBack: () => void }) 
     [journey.id, versionNo, toast],
   );
 
-  const simIndex = sim ? sim.path.slice(0, sim.step + 1).map((p) => p.nodeId) : [];
+  const simIndex = useMemo(() => (sim ? sim.path.slice(0, sim.step + 1).map((p) => p.nodeId) : []), [sim]);
   const rfNodes: Node<StepData>[] = useMemo(
     () =>
       graph.nodes.map((n) => ({
@@ -220,8 +220,7 @@ function Builder({ journey, onBack }: { journey: Journey; onBack: () => void }) 
         selected: n.id === selected,
         measured: measured[n.id],
       })),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [graph.nodes, showStats, sim, selected, measured],
+    [graph.nodes, showStats, sim, selected, measured, simIndex],
   );
   const rfEdges: Edge[] = useMemo(
     () =>
@@ -238,8 +237,7 @@ function Builder({ journey, onBack }: { journey: Journey; onBack: () => void }) 
           style: hot ? { stroke: 'var(--accent)', strokeWidth: 2 } : undefined,
         };
       }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [graph.edges, sim],
+    [graph.edges, sim, simIndex],
   );
 
   const onNodesChange = useCallback(
@@ -305,7 +303,9 @@ function Builder({ journey, onBack }: { journey: Journey; onBack: () => void }) 
       },
     );
     setSim({ ...res, step: 0 });
-    res.path.forEach((_, i) => setTimeout(() => setSim((s) => (s ? { ...s, step: i } : s)), i * 850));
+    res.path.forEach((_, i) => {
+      setTimeout(() => setSim((s) => (s ? { ...s, step: i } : s)), i * 850);
+    });
   }
 
   async function publish() {
@@ -384,6 +384,7 @@ function Builder({ journey, onBack }: { journey: Journey; onBack: () => void }) 
             const m = kindMeta[k];
             return (
               <button
+                type="button"
                 key={k}
                 onClick={() => addNode(k)}
                 className={cx(
@@ -440,6 +441,7 @@ function Builder({ journey, onBack }: { journey: Journey; onBack: () => void }) 
               </div>
               <ol className="space-y-2">
                 {sim.path.slice(0, sim.step + 1).map((p, i) => (
+                  // biome-ignore lint/suspicious/noArrayIndexKey: the simulated path is an ordered sequence of steps, indexed by position
                   <li key={i} className="flash-in rounded-md border border-line p-2.5">
                     <div className="flex items-center justify-between gap-2">
                       <span className="text-[13px] font-semibold">{p.label}</span>

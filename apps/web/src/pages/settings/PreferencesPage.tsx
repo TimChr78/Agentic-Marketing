@@ -30,12 +30,12 @@ export default function PreferencesPage() {
             items={[
               [
                 'Signed in as',
-                <span>
+                <span key="signed-in">
                   <span className="font-medium text-fg">{user.name || 'No name'}</span> <span className="text-muted">{user.email}</span>
                 </span>,
               ],
               ['Workspace', workspace.name],
-              ['Role', <Tag>{roleLabel(workspace.you.role)}</Tag>],
+              ['Role', <Tag key="role">{roleLabel(workspace.you.role)}</Tag>],
             ]}
           />
         </Card>
@@ -44,7 +44,7 @@ export default function PreferencesPage() {
       <Card title="What you can do" description="Your permissions in this workspace, and what each one allows." className="mt-5">
         {explained.length ? (
           <div className="p-4">
-            <Meta items={explained.map(({ permission, meaning }) => [<Mono>{permission}</Mono>, meaning])} />
+            <Meta items={explained.map(({ permission, meaning }) => [<Mono key={permission}>{permission}</Mono>, meaning])} />
           </div>
         ) : (
           <p className="p-4 text-[13px] text-muted">No permissions are listed for this account.</p>

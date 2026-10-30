@@ -57,6 +57,7 @@ export function ApprovalDrawer({
   const [busy, setBusy] = useState<null | 'approve' | 'reject' | 'test'>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reset the dialog state whenever a different approval is opened
   useEffect(() => {
     setTab('preview');
     setRejecting(false);

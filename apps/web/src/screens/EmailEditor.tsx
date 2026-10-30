@@ -1,4 +1,4 @@
-import grapesjs, { type Editor } from 'grapesjs';
+import grapesjs, { type Editor, type Button as GjsButton, type Panel } from 'grapesjs';
 import { useEffect, useRef, useState } from 'react';
 import 'grapesjs/dist/css/grapes.min.css';
 import grapesjsMjml from 'grapesjs-mjml';
@@ -32,13 +32,14 @@ export default function EmailEditor() {
   const editor = useRef<Editor | null>(null);
 
   // Reset working copy when switching template.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reset only when the template changes, not when the same template is refetched
   useEffect(() => {
     setSource(template.mjml);
     setSubject(template.subject);
     editor.current?.setComponents(template.mjml);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [templateId]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the editor is initialised once from the initial MJML; later changes are applied imperatively
   useEffect(() => {
     if (!host.current) return;
     const ed = grapesjs.init({
@@ -64,12 +65,12 @@ export default function EmailEditor() {
         'open-layers': 'Layers',
         'open-blocks': 'Blocks',
       };
-      ed.Panels.getPanels().forEach((panel: any) =>
-        panel.buttons.forEach((b: any) => {
+      ed.Panels.getPanels().forEach((panel: Panel) => {
+        panel.buttons.forEach((b: GjsButton) => {
           const label = labels[b.id];
           if (label) b.set({ label: `<span style="font:500 11px var(--font-sans);padding:0 2px">${label}</span>`, className: '' });
-        }),
-      );
+        });
+      });
       ed.Panels.getButton('views', 'open-blocks')?.set('active', true);
     });
     editor.current = ed;
@@ -77,7 +78,6 @@ export default function EmailEditor() {
       ed.destroy();
       editor.current = null;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const profile = profiles.find((p) => p.id === profileId)!;
@@ -122,6 +122,7 @@ export default function EmailEditor() {
         <div className="flex rounded-md border border-line p-0.5">
           {tabs.map((t) => (
             <button
+              type="button"
               key={t.id}
               onClick={() => setMode(t.id)}
               className={cx(

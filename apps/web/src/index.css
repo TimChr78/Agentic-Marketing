@@ -245,9 +245,13 @@
   *,
   *::before,
   *::after {
+    /* biome-ignore lint/complexity/noImportantStyles: must override component-level animation declarations for reduced motion */
     animation-duration: 0.01ms !important;
+    /* biome-ignore lint/complexity/noImportantStyles: must override component-level animation declarations for reduced motion */
     animation-iteration-count: 1 !important;
+    /* biome-ignore lint/complexity/noImportantStyles: must override component-level transition declarations for reduced motion */
     transition-duration: 0.01ms !important;
+    /* biome-ignore lint/complexity/noImportantStyles: must override component-level scroll behaviour for reduced motion */
     scroll-behavior: auto !important;
   }
 }
@@ -332,8 +336,10 @@
 /* GrapesJS: use the app's accent instead of its pink highlight. */
 .gjs-four-color,
 .gjs-four-color-h:hover {
+  /* biome-ignore lint/complexity/noImportantStyles: GrapesJS injects its own high-specificity theme rules that this must override */
   color: #88a9f7 !important;
 }
 .gjs-selected {
+  /* biome-ignore lint/complexity/noImportantStyles: GrapesJS injects its own high-specificity selection rules that this must override */
   outline-color: #2457d6 !important;
 }

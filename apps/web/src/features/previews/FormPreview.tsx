@@ -79,7 +79,7 @@ export function FormPreview({ content, stacked }: { content: FormContent; stacke
               items={[
                 [
                   'Purposes',
-                  <span className="flex flex-wrap gap-1">
+                  <span key="purposes" className="flex flex-wrap gap-1">
                     {(content.purposes ?? []).map((p) => (
                       <Tag key={p}>{p}</Tag>
                     ))}
@@ -89,7 +89,7 @@ export function FormPreview({ content, stacked }: { content: FormContent; stacke
                   'Double opt-in',
                   content.doubleOptIn === false ? 'Off: consent counts at once' : 'On: consent counts after the person confirms',
                 ],
-                ['Confirmation e-mail', <RefName id={content.confirmationTemplate} />],
+                ['Confirmation e-mail', <RefName key="confirmation" id={content.confirmationTemplate} />],
                 ['After submit', url(content.successUrl)],
                 ['After confirming', content.confirmedUrl ? url(content.confirmedUrl) : 'The branded confirmation page'],
                 ['On error', url(content.errorUrl)],

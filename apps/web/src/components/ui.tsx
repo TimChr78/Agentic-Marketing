@@ -115,6 +115,7 @@ export function Kpi({ label, value, delta, hint }: { label: string; value: strin
 
 export function Field({ label, children, hint }: { label: string; children: ReactNode; hint?: string }) {
   return (
+    // biome-ignore lint/a11y/noLabelWithoutControl: the control is the caller's child and is associated by nesting the label around it
     <label className="block">
       <span className="mb-1 block text-[12px] font-medium text-muted">{label}</span>
       {children}

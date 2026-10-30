@@ -282,6 +282,7 @@ function AddPeopleDialog({ artifactId, onClose, onDone }: { artifactId: string; 
         {unmatched.length > 0 && (
           <ul className="max-h-40 overflow-auto rounded-md border border-line p-2 text-[12px]">
             {unmatched.map((u, i) => (
+              // biome-ignore lint/suspicious/noArrayIndexKey: unmatched entries are a read-only result list where the same value can repeat
               <li key={`${u.value}-${i}`}>
                 {u.value} — {u.reason.replace('_', ' ')}
               </li>
@@ -375,6 +376,7 @@ function ImportDialog({ artifactId, onClose, onDone }: { artifactId: string; onC
               >
                 <option value="">Choose a column…</option>
                 {headers.map((h, i) => (
+                  // biome-ignore lint/suspicious/noArrayIndexKey: CSV headers can repeat and are identified by their column position
                   <option key={`${h}-${i}`} value={h}>
                     {h || `Column ${i + 1}`}
                   </option>
@@ -443,6 +445,7 @@ function PreviewRows({ parsed, column, unmatched }: { parsed: string[][]; column
         {parsed.slice(1, 6).map((row, i) => {
           const reason = reasons.get(i + 2);
           return (
+            // biome-ignore lint/suspicious/noArrayIndexKey: preview rows are the first five file lines; their position is the line number
             <tr key={i}>
               <td className="py-1">{i + 2}</td>
               <td className="py-1 font-mono">{row[index] ?? ''}</td>

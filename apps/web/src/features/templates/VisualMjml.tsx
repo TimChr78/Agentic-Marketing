@@ -29,6 +29,7 @@ const VisualMjml = forwardRef<VisualMjmlHandle, { mjml: string; onChange: (mjml:
     },
   }));
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the editor is initialised once from the initial MJML; later changes are applied imperatively
   useEffect(() => {
     if (!host.current) return;
     const ed = grapesjs.init({

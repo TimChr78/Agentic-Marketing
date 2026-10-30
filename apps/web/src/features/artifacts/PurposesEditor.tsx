@@ -134,8 +134,8 @@ export function PurposesEditor({ content, onChange, readOnly, errors, warnings }
       {warnings.length > 0 && (
         <Alert tone="warn" title="The schema still needs">
           <ul className="list-disc pl-4">
-            {warnings.map((w, i) => (
-              <li key={i}>{w.message}</li>
+            {warnings.map((w) => (
+              <li key={`${w.path}-${w.message}`}>{w.message}</li>
             ))}
           </ul>
         </Alert>
@@ -150,6 +150,7 @@ export function PurposesEditor({ content, onChange, readOnly, errors, warnings }
         const n = i + 1;
         const locked = !keysKnown || isKeyLocked(purpose.key, inUse);
         return (
+          // biome-ignore lint/suspicious/noArrayIndexKey: purposes are edited in place and their key column is being typed, so it cannot be the React identity
           <section key={i} className="space-y-3 rounded-lg border border-line p-4" aria-label={`Purpose ${n}`}>
             <div className="flex items-center gap-2">
               <h2 className="text-[13px] font-medium text-fg">Purpose {n}</h2>
@@ -278,6 +279,7 @@ export function PurposesEditor({ content, onChange, readOnly, errors, warnings }
                 the purpose still decides whether anything may be sent.
               </p>
               {(purpose.topics ?? []).map((topic, j) => (
+                // biome-ignore lint/suspicious/noArrayIndexKey: topics are edited in place and their key column is being typed, so it cannot be the React identity
                 <div key={j} className="space-y-2 rounded-md border border-line bg-surface-2 p-3">
                   <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,0.8fr)_auto] sm:items-end">
                     <Field label={`Topic key ${j + 1}`} error={errors[`purposes.${i}.topics.${j}.key`]} required>

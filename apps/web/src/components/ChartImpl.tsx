@@ -24,6 +24,7 @@ export default function ChartImpl({ option, height = 240, deps = [] }: ChartProp
   const optionRef = useRef(option);
   optionRef.current = option;
   const theme = useTheme();
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the chart reads CSS colours, so it is rebuilt when the theme changes
   useEffect(() => {
     if (!el.current) return;
     const chart = echarts.init(el.current, undefined, { renderer: 'svg' });
@@ -40,7 +41,6 @@ export default function ChartImpl({ option, height = 240, deps = [] }: ChartProp
       ro.disconnect();
       chart.dispose();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [theme, ...deps]);
   return <div ref={el} style={{ height, width: '100%' }} />;
 }

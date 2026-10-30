@@ -234,6 +234,7 @@ export function BroadcastEditor({ content, onChange, readOnly, errors }: EditorP
           <div className="space-y-4 rounded-md border border-line p-4">
             <div className="space-y-2">
               {test.subjects.map((subject, i) => (
+                // biome-ignore lint/suspicious/noArrayIndexKey: subject lines are plain strings with no id, and their position is their identity
                 <Field key={i} label={`Subject ${String.fromCharCode(65 + i)}`} error={errors[`subjectTest.subjects.${i}`]}>
                   <div className="flex gap-2">
                     <Input

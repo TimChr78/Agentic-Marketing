@@ -44,8 +44,7 @@ export function BroadcastStatus({ artifact }: { artifact: Artifact }) {
     if (!sending) return;
     const t = setInterval(() => void status.reload(), 10_000);
     return () => clearInterval(t);
-    // biome-ignore lint/correctness/useExhaustiveDependencies: reload follows the artifact id
-  }, [sending, artifact.id]);
+  }, [sending, status.reload]);
 
   if (!published)
     return (

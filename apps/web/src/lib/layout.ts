@@ -3,11 +3,17 @@ import type { JourneyEdge, JourneyNode } from '../api/types';
 // Simple top-to-bottom layered layout (stand-in for ELK.js in the real UI).
 export function layoutGraph(nodes: JourneyNode[], edges: JourneyEdge[]): JourneyNode[] {
   const incoming = new Map<string, number>();
-  nodes.forEach((n) => incoming.set(n.id, 0));
-  edges.forEach((e) => incoming.set(e.target, (incoming.get(e.target) ?? 0) + 1));
+  nodes.forEach((n) => {
+    incoming.set(n.id, 0);
+  });
+  edges.forEach((e) => {
+    incoming.set(e.target, (incoming.get(e.target) ?? 0) + 1);
+  });
   const level = new Map<string, number>();
   const queue = nodes.filter((n) => (incoming.get(n.id) ?? 0) === 0).map((n) => n.id);
-  queue.forEach((id) => level.set(id, 0));
+  queue.forEach((id) => {
+    level.set(id, 0);
+  });
   while (queue.length) {
     const id = queue.shift()!;
     for (const e of edges.filter((x) => x.source === id)) {

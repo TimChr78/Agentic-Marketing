@@ -184,7 +184,7 @@ export function TokenDrawer({ id, onClose, onChanged }: { id: string; onClose: (
           <Meta
             items={[
               ['Owner', `${tok.owner.name || tok.owner.email}${tok.owner.email && tok.owner.name ? ` (${tok.owner.email})` : ''}`],
-              ['Status', <TokenStatus t={tok} />],
+              ['Status', <TokenStatus key="status" t={tok} />],
               ['Last used', tok.lastUsedAt ? `${timeAgo(tok.lastUsedAt)} · ${formatDateTime(tok.lastUsedAt)}` : 'Never'],
               ['Created', formatDateTime(tok.createdAt)],
               ['Expires', tok.expiresAt ? formatDateTime(tok.expiresAt, { zone: true }) : 'Never'],
@@ -258,8 +258,8 @@ export function TokenDrawer({ id, onClose, onChanged }: { id: string; onClose: (
             <h3 className="mb-2 text-[13px] font-semibold">History</h3>
             {tok.history.length ? (
               <ol className="space-y-2 border-l-2 border-line pl-4 text-[13px]">
-                {tok.history.map((h, i) => (
-                  <li key={i}>
+                {tok.history.map((h) => (
+                  <li key={`${h.at}-${h.by.name}`}>
                     <p className="text-fg">
                       {Object.entries(h.changes)
                         .map(([k, v]) => describeChange(k, v))
