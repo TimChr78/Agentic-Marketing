@@ -32,6 +32,8 @@ Alongside the phases runs a **fundamentals track** (below): open bugs, privacy f
 
 ## Phase 17: agent controls
 
+Tracked in #219 (wave epic #220): #213 agents as principals, #214 action classes, #215 ceilings, #216 policy engine, #217 guardrails, #218 ledger.
+
 Goal: one place that decides what an agent may do, measured in consequences, and a person who can see and stop every agent. No new autonomy yet: every agent still proposes as today. This phase makes the guardrails in `agents-and-mcp.md` real.
 
 - **Agents as principals** (ADR-0016): `agents.*` commands (list, get, create, update, pause, resume, revoke), a sponsor per agent, credentials (OAuth clients, API tokens) attached to an agent. On upgrade every existing token and OAuth client becomes an agent with no mandate. Removing the sponsor pauses the agent.
