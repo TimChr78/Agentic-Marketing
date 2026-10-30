@@ -157,15 +157,15 @@ sequenceDiagram
   participant ART as Artifacts
   participant H as Human approver
 
-  A->>API: journeys.createDraft / journeys.updateDraft
+  A->>API: artifacts.create / artifacts.updateDraft
   API->>ART: new draft version (author = agent principal)
-  A->>API: journeys.validate + journeys.simulate(sample profiles)
-  A->>API: journeys.requestPublish
+  A->>API: journeys.simulate (sample profiles)
+  A->>API: artifacts.requestPublish
   alt workspace approval policy = none
     API->>ART: publish
   else approval required
     ART-->>H: notification + visual diff
-    H->>API: artifacts.approve
+    H->>API: approvals.approve
     API->>ART: publish (immutable version)
   end
 ```

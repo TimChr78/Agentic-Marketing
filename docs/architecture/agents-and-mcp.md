@@ -7,12 +7,12 @@ The platform is **agent-native**: agents are first-class principals that operate
 See [ADR-0005](adr/0005-command-registry-mcp.md).
 
 ```ts
-export const createJourneyDraft = defineCommand({
-  name: 'journeys.createDraft',
-  description: 'Create a new journey draft from a graph definition.',   // used by MCP + OpenAPI docs
+export const createArtifact = defineCommand({
+  name: 'artifacts.create',
+  description: 'Create a new artifact draft from a typed definition.',   // used by MCP + OpenAPI docs
   input: JourneyDraftInput,          // zod
   output: ArtifactVersionRef,        // zod
-  permission: 'journeys:write',
+  permission: 'artifacts:write',
   effect: 'write',                   // read | write | publish | send | destructive
   handler: async (input, ctx) => { ... },
 });
@@ -32,15 +32,15 @@ The command layer is the only place that does authorization, validation, idempot
 
 - **Transport:** Streamable HTTP at `/mcp` (remote agents: Claude, ChatGPT, IDEs, n8n), plus stdio via the CLI for local development. MCP spec 2026-07-28 with SDK v2: a fresh, stateless server per request, so no MCP session store is needed; 2025-era clients are served statelessly too.
 - **Auth:** OAuth 2.1 with PKCE, served by our auth layer (`@better-auth/mcp` — see [tech-stack.md](tech-stack.md)): RFC 9728/8414 discovery, Client ID Metadata Documents and dynamic client registration, JWT access tokens bound to the `/mcp` resource. Personal access tokens for scripts. Every request acts as a **principal** (`user` or `agent`); an agent's permissions are the user's role permissions ∩ the scopes the user granted.
-- **Least privilege:** MCP clients request every scope the server advertises, so the **consent screen** is where the person chooses what the agent may do (read-only by default). Later, scope step-up: advertise read scopes up front and answer writes with an `insufficient_scope` challenge. Validated in [spike 1](../../spikes/command-registry/FINDINGS.md).
-- **Tools** (grouped, ~60–100 at maturity; MCP clients can filter by group):
-  - `profiles.*`, `events.query`, `segments.*` (create/preview/estimate size)
-  - `journeys.*` (createDraft, updateDraft, validate, simulate, requestPublish, pause, stats)
-  - `templates.*` (create from MJML, render preview, lint, sendTest)
-  - `experiences.*`, `experiments.results`
-  - `consent.explain` ("why can/can't we email this person"), `messages.explainDelivery`
-  - `artifacts.diff`, `artifacts.approve` (human principals only by default)
-  - `analytics.*` (predefined, safe queries — no raw SQL for agents in v1)
+- **Least privilege:** MCP clients request every scope the server advertises, so the **consent screen** is where the person chooses what the agent may do (read-only by default). Scope step-up ships: read scopes are advertised up front, a write without its scope answers with an `insufficient_scope` challenge, and the client asks the person to grant it. Validated in [spike 1](../../spikes/command-registry/FINDINGS.md).
+- **Tools** (grouped; MCP clients can filter by group):
+  - `profiles.*` (list, get, events, export), `segments.*` (preview, members, refresh)
+  - `artifacts.*` (create, updateDraft, diff, requestPublish) for journeys, templates, segments, experiences and every other artifact type; `journeys.*` (enroll, simulate, stats, holdoutResult, migrate)
+  - `templates.*` (preview, check, sendTest), `blocks.*` (preview, usage)
+  - `experiences.results`
+  - `consent.summary`, `consent.history`, `messages.list` (each message's delivery decision)
+  - `approvals.approve` (people only)
+  - `analytics.*` (predefined, safe queries — no raw SQL for agents in v1): `query`, `metrics.list`, `emailPerformance`, `journeyFunnel`, `campaignSummary`
 - **Resources:** journey graphs, template sources, tracking plan, attribute schema, brand kit, node-type catalogue, docs — so an agent can read the "manual" of this workspace.
 - **Prompts:** curated starters ("Build a welcome series", "Diagnose a journey's drop-off", "Create a win-back segment").
 - **Discoverability for LLMs:** node types and DSLs are published as JSON Schema resources with examples; validation errors are written to be actionable for an LLM ("node n3: `timeout` must be ISO-8601 duration, got '2 days'").
@@ -75,13 +75,15 @@ The command layer is the only place that does authorization, validation, idempot
 
 | Node | Behaviour | Safety |
 |---|---|---|
-| `ai.decide` | Chooses one of the configured next nodes given a minimized profile context, recent events and a versioned prompt. Output is a zod-validated enum + short rationale. | Fallback branch on timeout/error/invalid output; decisions logged to `decision_events` with rationale; optional sampling for human review |
-| `ai.generate` | Fills declared **content slots** of a template (subject line, intro paragraph, product blurb) within constraints (length, tone, brand guide, forbidden claims). | Output is never sent raw: lint + moderation + length checks; optional pre-approval of generated variants; caching per (slot, segment/cluster) to control cost |
-| `ai.classify` (later) | Tag inbound replies/events (intent, sentiment) | Same logging |
+| `aiDecide` | Chooses one of the configured next nodes given a minimized profile context, recent events and a versioned prompt. Output is a zod-validated enum + short rationale. | Fallback branch on timeout/error/invalid output; decisions logged to `ai_calls` with rationale; optional sampling for human review |
+| `aiGenerate` | Fills declared **content slots** of a template (subject line, intro paragraph, product blurb) within constraints (length, tone, brand guide, forbidden claims). | Output is never sent raw: lint + moderation + length checks; optional pre-approval of generated variants; per-segment caching of generated text to control cost |
+| `ai.classify` | Tag inbound replies/events (intent, sentiment) | Same logging |
 
 - **Prompts are versioned artifacts** with test cases (sample profiles + expected properties), so changing a prompt goes through the same draft → approve → publish flow.
 - **Context builder:** assembles only `ai_visible` attributes, pseudonymizes identifiers (`prf_…` instead of email), redacts PII in free text (rule-based detectors in v1; optional Microsoft Presidio sidecar later). The `ai_processing` purpose must be allowed for the profile.
 - AI steps are asynchronous journey steps, never on the web hot path.
+
+The journey nodes are `aiDecide` and `aiGenerate`. `ai.classify` is a command for text outside a journey (`ai.classification` returns the queued answer); it is documented in [development.md](../development.md).
 
 ## 6. In-app copilot
 
