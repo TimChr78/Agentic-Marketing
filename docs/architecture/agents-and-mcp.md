@@ -51,10 +51,10 @@ The command layer is the only place that does authorization, validation, idempot
 |---|---|
 | Writes produce **drafts**; publishing follows the workspace approval policy | on |
 | `send` / `publish` / `destructive` effects require an explicit scope | not granted to agents by default |
-| Audience-size threshold above which a send needs human approval | 1,000 recipients |
-| Per-agent rate limits & daily budgets (commands, sends, LLM tokens) | configurable |
+| Audience-size threshold above which a send needs human approval | **Planned** (wave 4, Phase 17); not enforced yet |
+| Per-agent rate limits & daily budgets (commands, sends, LLM tokens) | **Planned** (Phase 17). Shipped today: monthly AI budgets per provider, the delivery policy's caps |
 | PII visibility: agents see only attributes the schema marks `agent_visible`; others are masked | on |
-| Kill switch: revoke/pause an agent principal and all its pending drafts | always available |
+| Kill switch: revoke/pause an agent principal and all its pending drafts | **Planned** (Phase 17). Today: revoke a token, or remove the member (their sessions and connected agents lose access) |
 | Full audit trail: principal, tool, input hash, result, linked versions | always |
 
 ## 4. LLM gateway (bring your own keys)

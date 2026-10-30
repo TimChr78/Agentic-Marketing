@@ -25,7 +25,7 @@ Two rules are added for wave 3:
 | **14** ✅ | **Admin UI for daily use** (built in 0.2.7) | Full-width layouts, smaller bundles, server-side filters and aggregates, structured editors for experiences and purposes, live journey stats, SVG logos, small fixes | – | M | The weekly review and approval flow is comfortable on a wide screen and a phone |
 | **15** ✅ | **Newsletter and lifecycle e-mail** (built in 0.2.8) | Preference centre with topics, newsletter archive and web version, reusable content blocks, pre-send checks, subject A/B tests and send windows, static audiences, two journey building blocks | 13 | L | The pilot's issues use shared blocks, readers manage topics, and every issue has a web version |
 | **16** ✅ | **Measure and report** (built in 0.2.9) | A read-only metric layer, campaign object and evaluation, holdouts, threshold alerts | 15 | L | An agent answers "how did the last four issues and the welcome journey do" from one command, with uplift against a holdout |
-| **17** | **Agents with bounded autonomy** | Business context for agents, autonomy modes, the campaign agent | 16 | L | An agent proposes a whole campaign from a brief, and runs low-risk changes within limits a person set |
+| **17** | **Agents with bounded autonomy** → moved to [wave 4](roadmap-wave-4.md) | Expanded into six phases (17–22): agent controls, mandates, the safety net, closed loops, hosted agents, many agents | 16 | – | See wave 4 |
 | Later | | Only when a pilot needs it: see the list below | | | |
 | Parked | | Session replay, a conversational inbox, in-app messaging, feature flags, predictive models: kept open, not now; see the list below | | | |
 
@@ -138,23 +138,7 @@ Done when one `analytics.query` call answers how the last four issues and the we
 
 ## Phase 17: agents with bounded autonomy
 
-Goal: move from "agents draft, people approve every change" to "agents act within limits people set", which is what the product is for. This needs the metric layer (an agent must see results to act on them) and the approval bundles from Phase 13.
-
-It starts with a design, not code: the controls for agents get a deeper look before any autonomy is granted.
-
-- **Agent controls, designed first** (an ADR, then the build): an inventory of every control an agent is subject to today (token scopes, roles, drafts and approvals, budgets, audience thresholds, the kill switch, rate limits, audit) and the gaps, for example:
-  - limits per agent and per token, not only per workspace: send volume, recipients per send, spend, number of changes per day;
-  - what an agent may see (personal data, `agentVisible` traits) as well as what it may change;
-  - expiry and review of granted autonomy, so it lapses unless renewed;
-  - a clear record of what each agent did on its own, with undo where an action can be undone, and a "pause this agent" control next to the workspace kill switch;
-  - detecting unusual behaviour (a burst of changes, a send far larger than usual) and falling back to "propose only";
-  - how this fits the parked work: progressive rollout (#102) and in-platform routines (#86).
-- **Business context for agents** (the narrow part of #85): a versioned `business_context` artifact (audience, voice, offers, do's and don'ts) exposed as an MCP resource, so every connected agent starts from the same brief. Cross-conversation memory and a skills store are parked: external agents (Hermes, Claude) keep their own memory and skills, and the platform should not compete with them.
-- **Autonomy modes** (#91): per workspace and per artifact type, "propose only", "act within limits" (audience size, send volume, budget, artifact types) or "act and report", with the kill switch and audit as today.
-- **The campaign agent** (#64): from a goal and an approved brief, propose a campaign (segment, templates, journey or broadcasts, holdout) as one approval bundle.
-- **Scheduled routines** (#86) are parked: the pilot already runs scheduled agents outside the platform. The platform's job is to make them safe (autonomy modes, read-only tokens, the metric layer). Revisit if a self-hoster has no agent runtime of their own.
-
-Done when the agent-controls ADR is accepted, an agent turns a brief into a campaign proposal in one approval, and Hermes sends the weekly broadcast to the existing subscriber segment without a person in the loop, within limits. That is the only autonomy granted at first; more follows the ADR.
+Moved and expanded (2026-10-30): the owner asked for autonomy that can go all the way to agents running whole marketing loops within borders, not only "agents draft, people approve". Phase 17 became [wave 4](roadmap-wave-4.md), designed in [agentic-autonomy.md](agentic-autonomy.md) and [ADR-0016](adr/0016-agent-autonomy-model.md). Everything this section listed is in it: the agent-controls inventory (Phase 17), business context and autonomy modes (Phase 18), the campaign agent (Phase 20), and routines (Phase 21). Decision 4 below (Hermes sends the weekly newsletter within a recipient cap) is wave 4's first mandate.
 
 ## Later, when a pilot needs it
 

@@ -20,3 +20,4 @@ New decisions get the next number; superseded ADRs are kept and linked.
 | [0013](0013-integrations.md) | Integrations through signed webhooks, API tokens and an own connector SDK | Accepted |
 | [0014](0014-consent-channel-precedence.md) | One rule for the current consent status, per channel and across channels | Accepted |
 | [0015](0015-mit-license.md) | MIT for the whole project | Accepted |
+| [0016](0016-agent-autonomy-model.md) | Agent autonomy through mandates, levels and a policy engine | Accepted |
