@@ -69,6 +69,8 @@ Evaluation in the send gateway: `consent` basis → needs `granted`; `legitimate
 | Custom code steps (later) | Not in v1. If added: isolated runtime (separate sandboxed process / WASM) with no network by default |
 | Secrets leakage | Never returned by APIs, redacted in logs/traces, secret scanning in CI |
 
+The egress guard normalises the IPv6 forms that embed an IPv4 address (IPv4-mapped `::ffff:0:0/96`, IPv4-compatible `::/96`, NAT64 `64:ff9b::/96` and 6to4 `2002::/16`) and applies the IPv4 block list to the embedded address, both to literals and to DNS answers at connect time; the Postgres warehouse destination resolves once and pins the validated address. Outbound HTTP requests stop reading as soon as the response byte limit is crossed and use a total deadline covering connect, headers and body, so an oversized or slowly trickled response cannot keep a worker and connection open.
+
 ## 6. Operational security
 
 - Backups: Postgres (pgBackRest or WAL-G) + ClickHouse (clickhouse-backup) encrypted; restore drill documented; crypto-shredding makes erasure effective in backups.

@@ -8,6 +8,7 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 
 - **Egress guard:** IPv6 addresses that embed an IPv4 address (IPv4-mapped, IPv4-compatible, NAT64 and 6to4) are blocked when the embedded address is private, both for literal hosts and for DNS answers at connect time (#238).
 - **Outbound HTTP:** responses are aborted as soon as the byte limit is crossed and the timeout is a total deadline for the whole request in both the HTTP/1 and HTTP/2 clients, so an oversized or slowly trickled body cannot keep a request open (#234).
+- **Warehouse:** the Postgres destination resolves the host once, pins the validated address for the connection and rejects mixed public/private answers, closing the DNS-rebinding gap while TLS keeps verifying the original host name (#237).
 
 ## [0.4.0] - 2026-10-30
 
