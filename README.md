@@ -142,7 +142,17 @@ Wave 1 (Phases −1 to 5) is complete: foundations, data platform, e-mail, segme
 | 14 | Admin UI for daily use | Done in 0.2.7: pages use the window, live journey stats, structured editors, server-side list filters |
 | 15 | Newsletter and lifecycle e-mail | Done in 0.2.8: preference centre, archive and web version, content blocks, pre-send checks, subject tests, send windows, static audiences, wait until and entry keys |
 | 16 | Measure and report | Done in 0.2.9: metric layer, campaigns, holdouts, alerts |
-| 17 | Agents with bounded autonomy | Planned: a design for agent controls first, then business context, autonomy modes, the campaign agent |
+
+[Wave 4](docs/architecture/roadmap-wave-4.md), agentic marketing (in design, [agentic-autonomy.md](docs/architecture/agentic-autonomy.md)): agents that run whole marketing loops within borders a person sets, enforced by the platform.
+
+| Phase | Theme | State |
+|---|---|---|
+| 17 | Agent controls | Planned: agents as principals with a pause button, a policy engine with limits and impact estimates, the action ledger |
+| 18 | Mandates and the first autonomy | Planned: mandates with levels, holds with veto windows, the pilot's autonomous weekly newsletter |
+| 19 | The safety net | Planned: the guardian, staged sends, undo, shadow mode |
+| 20 | Closed loops | Planned: full loops, goals and attribution, learnings, the campaign, newsletter and lifecycle programmes |
+| 21 | Hosted agents | Planned: agents running inside the platform for self-hosters without an agent runtime |
+| 22 | Many agents, many brands | Planned: coordination, brand scoping, progressive rollout, spend |
 
 ## Development
 

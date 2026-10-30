@@ -1,6 +1,6 @@
 # Architecture — Agentic Marketing Platform
 
-> Status: **0.x — waves 1–3 built through Phase 16 (0.2.9), Phase 17 planned.**
+> Status: **0.x — waves 1–3 built through Phase 16 (0.2.10); wave 4 (agentic autonomy) in design.**
 > These pages describe how the platform is built and why, as it ships today. The release history is in the [CHANGELOG](../../CHANGELOG.md); how to run it is in the [README](../../README.md). Decisions are recorded as ADRs in [`adr/`](adr/); a later ADR can overturn an earlier one, and the ADRs keep their original text.
 
 ## What we are building
@@ -40,7 +40,9 @@ An open-source, self-hostable, **event-driven marketing platform built agent-fir
 | [deployment-and-scaling.md](deployment-and-scaling.md) | Self-host topology, scaling path to 10M profiles and multi-tenant SaaS |
 | [roadmap.md](roadmap.md) | Phased delivery plan for a team of one (wave 1) |
 | [roadmap-wave-2.md](roadmap-wave-2.md) | Wave 2: prioritised phases after the pilot, with every known limitation placed |
-| [roadmap-wave-3.md](roadmap-wave-3.md) | Wave 3: install and upgrade first, then pilot correctness, the newsletter, measurement and bounded agent autonomy; what is parked and why |
+| [roadmap-wave-3.md](roadmap-wave-3.md) | Wave 3: install and upgrade first, then pilot correctness, the newsletter and measurement; what is parked and why |
+| [agentic-autonomy.md](agentic-autonomy.md) | Design proposal: agents running marketing loops within borders (mandates, autonomy levels, the policy engine, the safety net) |
+| [roadmap-wave-4.md](roadmap-wave-4.md) | Wave 4: agentic marketing in six phases, from agent controls to many agents and brands, with the fundamentals track |
 | [performance-marketing.md](performance-marketing.md) | Google, Meta and Microsoft ads: conversions, audiences, spend and ROAS |
 | [email-and-sms-delivery.md](email-and-sms-delivery.md) | Sending beyond SMTP (SES, Postmark, Cloudflare Email Service) and the SMS channel |
 | [open-questions.md](open-questions.md) | Decisions still needed from the product owner |
@@ -117,6 +119,7 @@ flowchart LR
 13. **Integrations through signed webhooks, API tokens and an own connector SDK** — [ADR-0013](adr/0013-integrations.md)
 14. **One rule for the current consent status, per channel and across channels** — [ADR-0014](adr/0014-consent-channel-precedence.md)
 15. **MIT for the whole project, no CLA** — [ADR-0015](adr/0015-mit-license.md)
+16. **Agent autonomy through mandates, levels and a policy engine in the command layer (proposed)** — [ADR-0016](adr/0016-agent-autonomy-model.md)
 
 The full index, with each decision's status, is in [`adr/README.md`](adr/README.md).
 
