@@ -32,13 +32,14 @@ export default function EmailEditor() {
   const editor = useRef<Editor | null>(null);
 
   // Reset working copy when switching template.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reset only when the template changes, not when the same template is refetched
   useEffect(() => {
     setSource(template.mjml);
     setSubject(template.subject);
     editor.current?.setComponents(template.mjml);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [templateId]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the editor is initialised once from the initial MJML; later changes are applied imperatively
   useEffect(() => {
     if (!host.current) return;
     const ed = grapesjs.init({

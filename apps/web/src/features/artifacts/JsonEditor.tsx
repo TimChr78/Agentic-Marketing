@@ -19,13 +19,13 @@ export function JsonEditor({
 }) {
   const [text, setText] = useState(() => JSON.stringify(value, null, 2));
   const [error, setError] = useState<string | null>(null);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: only follow changes from outside this field, not the local text
   useEffect(() => {
     // Follow outside changes (reload, discard) unless the text already means the same value.
     try {
       if (JSON.stringify(JSON.parse(text)) === JSON.stringify(value)) return;
     } catch {}
     setText(JSON.stringify(value, null, 2));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [value]);
   return (
     <Field label={label} hint={hint ?? 'The same JSON agents read and write. Call artifacts.types for the schema.'} error={error}>

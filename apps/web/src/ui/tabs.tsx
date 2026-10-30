@@ -38,6 +38,7 @@ export function Tabs<K extends string>({
     if (!el) return;
     setFade({ left: el.scrollLeft > 1, right: el.scrollLeft + el.clientWidth < el.scrollWidth - 1 });
   }, []);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: tabs changing can change the row width, so re-check the fade edges
   useEffect(() => {
     const el = list.current;
     if (!el) return;

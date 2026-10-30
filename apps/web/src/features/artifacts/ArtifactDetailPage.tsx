@@ -187,8 +187,7 @@ export function ArtifactDetailPage({
       if (!(await save({ quiet: true }))) failedDraft.current = snapshot;
     }, 1200);
     return () => clearTimeout(t);
-    // biome-ignore lint/correctness/useExhaustiveDependencies: keyed on the draft
-  }, [autosave, dirty, readOnly, saving, conflict, draft]);
+  }, [autosave, dirty, readOnly, saving, conflict, draft, save]);
 
   // Ctrl/Cmd+S saves.
   useEffect(() => {

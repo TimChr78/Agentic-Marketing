@@ -184,10 +184,10 @@ function Builder({ journey, onBack }: { journey: Journey; onBack: () => void }) 
   const [simProfile, setSimProfile] = useState(profiles[2]?.id ?? '');
   const saveTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
 
+  // Only reset the working copy when the viewed version changes.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reset only when the viewed version changes, not on every version object refresh
   useEffect(() => {
     setGraph({ nodes: version.nodes, edges: version.edges });
-    // Only reset the working copy when the viewed version changes.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [versionNo]);
 
   const persist = useCallback(
@@ -205,7 +205,7 @@ function Builder({ journey, onBack }: { journey: Journey; onBack: () => void }) 
     [journey.id, versionNo, toast],
   );
 
-  const simIndex = sim ? sim.path.slice(0, sim.step + 1).map((p) => p.nodeId) : [];
+  const simIndex = useMemo(() => (sim ? sim.path.slice(0, sim.step + 1).map((p) => p.nodeId) : []), [sim]);
   const rfNodes: Node<StepData>[] = useMemo(
     () =>
       graph.nodes.map((n) => ({

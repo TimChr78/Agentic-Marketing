@@ -57,6 +57,7 @@ export function SearchPalette({ onClose }: { onClose: () => void }) {
     return [...arts.filter(hit).slice(0, 20), ...pages.filter(hit).slice(0, 8)];
   }, [q, items, can]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the active result resets on every new query, which the body does not read
   useEffect(() => setActive(0), [q]);
   const go = (r: Result | undefined) => {
     if (!r) return;

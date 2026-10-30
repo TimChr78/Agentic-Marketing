@@ -74,6 +74,7 @@ export default function MessagesPage() {
   const stats = useApi(() => api.call('messages.stats', { days }), [days], { skip: !can('artifacts:read') });
 
   // A filter change is a new list; pages loaded for the old one no longer belong to it.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reset paging whenever the filter key changes, which the body does not read
   useEffect(() => {
     setMore({ rows: [], cursor: null, loaded: false });
     setMoreError(null);

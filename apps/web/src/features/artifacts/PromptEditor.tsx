@@ -83,9 +83,9 @@ function NumberField({
   placeholder?: string;
 }) {
   const [text, setText] = useState(String(value));
+  // biome-ignore lint/correctness/useExhaustiveDependencies: only follow changes from outside this field, not the local text
   useEffect(() => {
     if (Number(text) !== value) setText(Number.isFinite(value) ? String(value) : '');
-    // biome-ignore lint/correctness/useExhaustiveDependencies: only follow outside changes
   }, [value]);
   return (
     <Field label={label} unit={unit} hint={hint} error={error}>
@@ -126,6 +126,7 @@ export function PromptEditor({ content, onChange, readOnly, errors }: EditorProp
   const segments = useApi(() => api.call('artifacts.list', { type: 'segment' as never, limit: 200 }), []);
   const cacheSegments = content.cache?.segments ?? [];
   const [forbiddenText, setForbiddenText] = useState(forbidden.join('\n'));
+  // biome-ignore lint/correctness/useExhaustiveDependencies: only follow changes from outside this field, not the local text
   useEffect(() => {
     const parsed = forbiddenText
       .split('\n')
@@ -133,7 +134,6 @@ export function PromptEditor({ content, onChange, readOnly, errors }: EditorProp
       .filter(Boolean)
       .slice(0, 100);
     if (parsed.join('\n') !== forbidden.join('\n')) setForbiddenText(forbidden.join('\n'));
-    // biome-ignore lint/correctness/useExhaustiveDependencies: only follow changes from outside this field
   }, [forbidden]);
 
   const setKind = (next: PromptContent['kind']) => {

@@ -21,6 +21,7 @@ export function Shell({ children }: { children: ReactNode }) {
   const [copilotOpen, setCopilotOpen] = useState(false);
   const { can } = useSession();
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the mobile drawer closes on navigation, which the body does not read
   useEffect(() => setNavOpen(false), [path]);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {

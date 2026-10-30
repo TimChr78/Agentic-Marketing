@@ -145,9 +145,9 @@ function NumberField({
   readOnly?: boolean;
 }) {
   const [text, setText] = useState(String(value));
+  // biome-ignore lint/correctness/useExhaustiveDependencies: only follow changes from outside this field, not the local text
   useEffect(() => {
     if (Number(text) !== value) setText(Number.isFinite(value) ? String(value) : '');
-    // biome-ignore lint/correctness/useExhaustiveDependencies: only follow outside changes
   }, [value]);
   return (
     <Field label={label} unit={unit} hint={hint} error={error}>

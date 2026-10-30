@@ -31,7 +31,9 @@ export function Copilot({ onClose }: { onClose: () => void }) {
   const live = useRef<ReturnType<typeof createLiveSession> | null>(null);
   const end = useRef<HTMLDivElement>(null);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: scroll to the newest message whenever the list changes, which the body does not read
   useEffect(() => end.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }), [items]);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: provider settings are the trigger to start a new conversation, not values read in the body
   useEffect(() => {
     live.current = null; // new provider settings start a new conversation
   }, [cfg.provider, cfg.baseUrl, cfg.model, cfg.apiKey]);

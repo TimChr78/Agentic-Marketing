@@ -55,5 +55,5 @@ export function useFocusTrap(
       root.removeEventListener('keydown', onKey);
       if (previous && document.contains(previous)) previous.focus({ preventScroll: true });
     };
-  }, [ref, active, onEscape]);
+  }, [ref, active, onEscape, initialFocus]);
 }

@@ -61,6 +61,7 @@ export function CopilotDrawer({ open, onClose }: { open: boolean; onClose: () =>
   const [error, setError] = useState<string | null>(null);
   const [dialog, confirm] = useConfirm();
   const end = useRef<HTMLDivElement>(null);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: scroll to the newest message whenever the list changes, which the body does not read
   useEffect(() => end.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }), [items]);
 
   const past = useApi(() => api.call('copilot.conversations', {}), [], { skip: !open });

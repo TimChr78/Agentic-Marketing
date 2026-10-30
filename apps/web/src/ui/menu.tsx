@@ -57,6 +57,7 @@ export function Menu({
   };
   const enabled = () => Array.from(list.current?.querySelectorAll<HTMLElement>('[role=menuitem]:not([aria-disabled=true])') ?? []);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: open/close helpers are recreated each render; the menu only wires listeners when it opens
   useEffect(() => {
     if (!open) return;
     const els = enabled();

@@ -154,6 +154,7 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
     return () => observer.disconnect();
   }, []);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: clear undo history when switching artifact, which the body does not read
   useEffect(() => {
     past.current = [];
     future.current = [];
