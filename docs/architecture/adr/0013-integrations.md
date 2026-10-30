@@ -46,3 +46,5 @@ Phase 5 connects the platform to other systems.
 - New connectors are small TypeScript files, but each one is ours to maintain. Breadth comes from webhooks and the generic HTTP connector before first-party code.
 - Webhook payloads exclude personal traits. A receiver that needs an e-mail address has to fetch it with a token that has `profiles:pii`, which is audited.
 - No OAuth2 connectors yet; Salesforce will need the token store and refresh worker.
+
+> **Update (0.2.9, 2026-10-30):** shipped in Phase 11. OAuth 2.0 connections (`connections.authorize`, with a sealed token store and a worker that refreshes before expiry) and the Salesforce connector (REST API, OAuth, contact/lead/task actions) are built.

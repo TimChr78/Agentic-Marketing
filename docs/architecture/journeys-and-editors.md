@@ -25,8 +25,8 @@ A journey is a **directed graph** stored as a versioned artifact (JSON). The sam
 | Triggers | event, segment entered/exited, schedule (one-off/recurring campaign), API/MCP call, date trait (birthday, renewal) |
 | Flow | wait (duration / until time / send-time window), wait for event (with timeout), branch (conditions using segment DSL), A/B/n split, random sample, exit, goal |
 | Actions | send email, show/enable web experience, webhook, update profile trait, add/remove list or tag, emit event |
-| AI | `ai.decide` (choose branch with structured output), `ai.generate` (fill content slots) — see [agents-and-mcp.md](agents-and-mcp.md) |
-| Automation (later) | HTTP request, transform (JSONata), loop over items, call integration action |
+| AI | `aiDecide` (choose branch with structured output), `aiGenerate` (fill content slots) — see [agents-and-mcp.md](agents-and-mcp.md) |
+| Automation | webhook, transform (JSONata into `vars`), action (an integration action with ok/error edges); loop over items is not built |
 
 Journey settings: re-entry rule, frequency caps, quiet hours, exit criteria, goal & conversion window, purpose (lawful basis), holdout/control group %.
 
@@ -58,7 +58,7 @@ Principles:
 - **Batched claims, one transaction:** sweepers claim due participants with `FOR UPDATE SKIP LOCKED`, advance them in memory and write states plus outbox rows in one transaction → no lost or duplicated steps (crash-tested in spike 3).
 - **Timers:** `wake_at` is indexed; the scheduler moves due participants to the queue in batches. Long waits (30 days) cost one row, not a running process.
 - **Event waits:** `(workspace_id, waiting_for_event, profile_id)` index; the trigger matcher checks incoming events against it.
-- **Version pinning:** participants stay on the version they entered with. Publishing a new version affects new entrants; a later "migrate participants" tool maps old node ids to new ones.
+- **Version pinning:** participants stay on the version they entered with. Publishing a new version affects new entrants; `journeys.migrate` moves people still on an older version onto the published one (dry run first, with an old-node to new-node mapping).
 - **Simulation:** the same interpreter runs in a dry-run mode against a sample or synthetic profile with a virtual clock — used by the UI ("preview path") and by agents (`journeys.simulate`).
 - **Throughput target:** 1k–5k steps/s on a modest Postgres; partition `journey_participants` by journey hash when needed.
 
@@ -106,4 +106,4 @@ approval_requests(workspace_id, id, version_id, requested_by, status, decided_by
 | `sends_above_threshold_require_approval` | Approve campaigns targeting > N recipients |
 
 - Approvals are commands like everything else, so they can be done in the UI, via MCP (by a human-authenticated client), or later via Slack/email links.
-- **Config-as-code (later):** export/import artifacts as YAML to a git repo for teams that want PR-based review.
+- **Config-as-code:** `config.export` / `config.import` move every artifact of a workspace as one JSON bundle, starting as a dry run and publishing in dependency order. `scripts/am-config.mjs` keeps one file per artifact in a git repository for PR-based review.

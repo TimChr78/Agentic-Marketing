@@ -99,8 +99,8 @@ Two evaluation modes from the same definition:
 
 The compiler marks which conditions are streamable; non-streamable ones fall back to frequent batch recomputation. Memberships are stored in Postgres (`segment_memberships`) and mirrored to Valkey for the decision API.
 
-## 7. Warehouse & data portability (later phase)
+## 7. Warehouse & data portability
 
-- Export: scheduled export of events/profiles to Parquet on S3, or direct sync to warehouses (Snowflake/BigQuery/Postgres).
-- Import: "warehouse-native" sources — sync traits/audiences from a warehouse table into profiles.
-- Decided: the platform is the **system of record** for profiles; warehouse sync is added later and keeps the option open to run composably on top of an existing warehouse.
+- **Export (built, Phase 10):** a scheduled export to Postgres or S3-compatible storage, as gzipped NDJSON. Datasets: profiles, identifiers, consent, segment memberships, events and message events. Commands `warehouse.create`, `warehouse.run`; details in [integrations.md](../integrations.md#warehouse-export).
+- **Import (not built):** "warehouse-native" sources — sync traits/audiences from a warehouse table into profiles.
+- Decided: the platform is the **system of record** for profiles; a warehouse runs alongside it, not in front of it.

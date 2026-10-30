@@ -1,14 +1,14 @@
 # Architecture — Agentic Marketing Platform
 
-> Status: **Draft v0.1** — architecture & technology selection, before development starts.
-> Everything here is a proposal; decisions are recorded as ADRs in [`adr/`](adr/) and can be overturned.
+> Status: **0.x — waves 1–3 built through Phase 16 (0.2.9), Phase 17 planned.**
+> These pages describe how the platform is built and why, as it ships today. The release history is in the [CHANGELOG](../../CHANGELOG.md); how to run it is in the [README](../../README.md). Decisions are recorded as ADRs in [`adr/`](adr/); a later ADR can overturn an earlier one, and the ADRs keep their original text.
 
 ## What we are building
 
 An open-source, self-hostable, **event-driven marketing platform built agent-first**:
 
 - Every capability is exposed through one command layer that powers the **REST API, the MCP server and the UI** alike — agents and humans use the same surface.
-- **Channels:** email and web personalization first, webhooks next, SMS and push later — all behind pluggable adapters.
+- **Channels:** email, webhooks, SMS and push — all behind pluggable adapters.
 - **Near real-time:** web events are ingested, resolved to a profile and can trigger journeys and in-session personalization within seconds (sub-second for the hot path).
 - **Customer data platform:** profiles, identity resolution, event store, segments, consent.
 - **Human-friendly builders:** a visual journey canvas (Salesforce Journey Builder / n8n style), a visual MJML email editor, an experience editor for web personalization.
@@ -77,7 +77,7 @@ flowchart LR
   subgraph Channels
     ESP[Email providers<br/>SES · Postmark · SMTP…]
     WH[Webhooks]
-    LATER[SMS · Push]
+    CH2[SMS · Push]
   end
 
   WEB -->|events| ING
@@ -97,7 +97,7 @@ flowchart LR
   WRK --> LLM
   SG --> ESP
   SG --> WH
-  SG -.-> LATER
+  SG --> CH2
 ```
 
 ## Headline decisions
@@ -112,5 +112,11 @@ flowchart LR
 8. **Segment-spec compatible ingestion with own gateway** — [ADR-0008](adr/0008-segment-compatible-ingestion.md)
 9. **Project license: AGPL-3.0 core, MIT SDKs (accepted)** — [ADR-0009](adr/0009-project-license.md)
 10. **Three-layer analytics: built-in on ClickHouse, BYO BI, forward to Umami & co. (accepted)** — [ADR-0010](adr/0010-analytics-layers.md)
+11. **Email delivery through provider adapters (SMTP, SES, Postmark, Brevo), not SMTP alone** — [ADR-0011](adr/0011-email-delivery-providers.md)
+12. **AI steps run asynchronously with fallbacks; the copilot is an in-process MCP client** — [ADR-0012](adr/0012-ai-runtime.md)
+13. **Integrations through signed webhooks, API tokens and an own connector SDK** — [ADR-0013](adr/0013-integrations.md)
+14. **One rule for the current consent status, per channel and across channels** — [ADR-0014](adr/0014-consent-channel-precedence.md)
+
+The full index, with each decision's status, is in [`adr/README.md`](adr/README.md).
 
 A Phase −1 interactive demo with a mocked backend lives in [`apps/web`](../../apps/web/README.md).
