@@ -4,7 +4,7 @@ import { chainKeyProviders, localKeyProvider, open, readSecret, rewrapDataKeys, 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { loadConfig } from '../src/config';
 import { keyProviderFor } from '../src/keys';
-import { startTestServer, type User } from './harness';
+import { startTestServer, testPort, type User } from './harness';
 
 // Phase 10 (wave 2), part c: operations. A workspace moves its data keys from MASTER_KEY to
 // OpenBao Transit with `cli rotate-keys` (rewrapDataKeys) and keeps reading its secrets. Against a
@@ -45,7 +45,7 @@ beforeAll(async () => {
   await fetch(`${bao.addr}/v1/sys/mounts/transit`, { method: 'POST', headers: h, body: JSON.stringify({ type: 'transit' }) });
   await fetch(`${bao.addr}/v1/transit/keys/agentic-marketing`, { method: 'POST', headers: h, body: '{}' });
 
-  t = await startTestServer('test_p10_ops', 3289);
+  t = await startTestServer('test_p10_ops', testPort(3289));
   owner = await t.signUp(`owner-${Date.now()}@example.com`);
   ws = await t.workspaceWith([[owner, 'owner']]);
 }, 60_000);

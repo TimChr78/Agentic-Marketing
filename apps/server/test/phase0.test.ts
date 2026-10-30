@@ -5,19 +5,17 @@ import { hashValue, newUuid } from '@agentic-marketing/core';
 import { migrate } from '@agentic-marketing/db';
 import { localKeyProvider, readSecret, rewrapDataKeys } from '@agentic-marketing/secrets';
 import { serve } from '@hono/node-server';
-import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createServer } from '../src/app';
 import { loadConfig } from '../src/config';
 import type { Commands } from '../src/registry';
-import { connectAgent as harnessConnectAgent } from './harness';
+import { freshDatabase, connectAgent as harnessConnectAgent, testPort } from './harness';
 
 // Phase 0 acceptance: "an MCP client and the UI can create, version and approve an artifact with
-// identical rules". Runs against a fresh database (TEST_DATABASE_URL, default am_test on localhost).
+// identical rules". Runs against a fresh database on the TEST_DATABASE_URL server.
 
-const PORT = 3299;
+const PORT = testPort(3299);
 const BASE = `http://localhost:${PORT}`;
-const TEST_DB = process.env.TEST_DATABASE_URL ?? 'postgres://am:am@localhost:5432/am_test';
 const MASTER_KEY = Buffer.alloc(32, 7).toString('base64');
 
 let srv: ReturnType<typeof createServer>;
@@ -92,25 +90,25 @@ const structured = (r: any) => r.structuredContent as any;
 const toolError = (r: any) => JSON.parse(r.content[0].text);
 
 beforeAll(async () => {
-  const url = new URL(TEST_DB);
-  const dbName = url.pathname.slice(1);
-  const maint = new pg.Client({ connectionString: Object.assign(new URL(TEST_DB), { pathname: '/postgres' }).toString() });
-  await maint.connect();
-  await maint.query(`DROP DATABASE IF EXISTS ${dbName} WITH (FORCE)`);
-  await maint.query(`CREATE DATABASE ${dbName}`);
-  await maint.end();
+  const db = await freshDatabase('am_test_phase0');
 
   const config = loadConfig({
     PORT: String(PORT),
-    DATABASE_URL: TEST_DB,
+    DATABASE_URL: db.url.toString(),
     APP_DB_ROLE: 'am_app_test',
     APP_DB_PASSWORD: 'am_app_test_password',
     AUTH_SECRET: 'test-secret-test-secret-test-secret-123',
     MASTER_KEY,
+    // /readyz checks these; use the test services wherever they run, like harness.ts.
+    ...(process.env.CLICKHOUSE_URL ? { CLICKHOUSE_URL: process.env.CLICKHOUSE_URL } : {}),
+    ...(process.env.NATS_URL ? { NATS_URL: process.env.NATS_URL } : {}),
+    ...(process.env.VALKEY_URL ? { VALKEY_URL: process.env.VALKEY_URL } : {}),
   });
   srv = createServer(config, { cimd: { fetchClientMetadataResource: fetchCimd } });
-  await migrate(srv.db.admin, { appRolePassword: config.appDbPassword, appRole: config.appDbRole });
-  await migrateAuth({ baseUrl: config.publicUrl, secret: config.authSecret, db: srv.db });
+  if (!db.migrated) {
+    await migrate(srv.db.admin, { appRolePassword: config.appDbPassword, appRole: config.appDbRole });
+    await migrateAuth({ baseUrl: config.publicUrl, secret: config.authSecret, db: srv.db });
+  }
   await new Promise<void>((resolve) => {
     http = serve({ fetch: srv.app.fetch, port: PORT }, (_i: AddressInfo) => resolve());
   });

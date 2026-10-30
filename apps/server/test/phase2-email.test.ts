@@ -1,6 +1,6 @@
 import { SMTPServer } from 'smtp-server';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { eventually, rejects, startTestServer, type User } from './harness';
+import { eventually, rejects, startTestServer, testPort, type User } from './harness';
 
 // Phase 2, e-mail: templates, providers and the send gateway, end to end through a real SMTP
 // exchange. Delivery events arrive as Postmark webhooks (the relay is "SMTP to Postmark").
@@ -21,11 +21,11 @@ const smtp = new SMTPServer({
     });
   },
 });
-const SMTP_PORT = 2527;
+const SMTP_PORT = testPort(2527);
 
 beforeAll(async () => {
   await new Promise<void>((r) => smtp.listen(SMTP_PORT, '127.0.0.1', () => r()));
-  t = await startTestServer('test_p2', 3296);
+  t = await startTestServer('test_p2', testPort(3296));
   owner = await t.signUp(`owner-${Date.now()}@example.com`);
   ws = await t.workspaceWith([[owner, 'owner']]);
 }, 60_000);
@@ -328,7 +328,8 @@ describe('retry schedule', () => {
     await t.srv.db.admin.query(`UPDATE messages SET next_attempt_at = now() - interval '1 second' WHERE id = $1`, [txn.messageId]);
     const retried = await eventually(
       async () => (await api.call('messages.list', { profileId: profileId!, limit: 10 })).messages,
-      (rows) => (rows.find((r) => r.id === txn.messageId)?.attempts ?? 0) >= 2,
+      // The worker counts the attempt when it claims the row (status `sending`); wait for the result.
+      (rows) => rows.some((r) => r.id === txn.messageId && r.attempts >= 2 && r.status !== 'sending'),
     );
     expect(retried.find((r) => r.id === txn.messageId)).toMatchObject({
       attempts: 2,

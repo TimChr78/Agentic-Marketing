@@ -2,12 +2,12 @@ import { createClient } from '@agentic-marketing/client';
 import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Commands } from '../src/registry';
-import { eventually, startTestServer, type User } from './harness';
+import { eventually, startTestServer, testPort, type User } from './harness';
 
 // Phase 14 (#55): server-side filters and aggregates for the People, Messages, Consent, AI usage
 // and Deliverability pages. The commands are additive: new optional inputs and output fields.
 
-const PORT = 3461;
+const PORT = testPort(3461);
 
 let t: Awaited<ReturnType<typeof startTestServer>>;
 let owner: User;

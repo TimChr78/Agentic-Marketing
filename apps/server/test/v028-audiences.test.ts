@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { eventually, rejects, startTestServer, type User } from './harness';
+import { eventually, rejects, startTestServer, testPort, type User } from './harness';
 
 // Phase 15 (#83): static lists and snapshots. Membership is a stored list, edited by command or
 // CSV and mirrored into segment_memberships; the refresh job leaves it alone, sends still apply
@@ -11,7 +11,7 @@ let ws = '';
 let key = '';
 
 beforeAll(async () => {
-  t = await startTestServer('test_v028_audiences', 3251);
+  t = await startTestServer('test_v028_audiences', testPort(3251));
   owner = await t.signUp(`owner-${Date.now()}@example.com`);
   ws = await t.workspaceWith([[owner, 'owner']], 'none');
   key = (await t.api(owner, ws).call('sources.create', { name: 'Backend', kind: 'server' })).key;

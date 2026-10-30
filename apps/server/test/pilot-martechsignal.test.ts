@@ -1,6 +1,6 @@
 import { outbox } from '@agentic-marketing/email';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { eventually, rejects, startTestServer, type User } from './harness';
+import { eventually, rejects, startTestServer, testPort, type User } from './harness';
 
 // Pilot (MarTechSignal): a static site on Cloudflare Pages collects newsletter signups with a
 // no-JS form and double opt-in, imports its existing subscribers with their consent, and sends a
@@ -23,7 +23,7 @@ const post = (formId: string, fields: Record<string, string>, headers: Record<st
 const mailTo = (to: string) => outbox.filter((m) => m.to === to);
 
 beforeAll(async () => {
-  t = await startTestServer('test_pilot', 3297);
+  t = await startTestServer('test_pilot', testPort(3297));
   owner = await t.signUp(`tim-${Date.now()}@example.com`);
   await t.workspaceWith([[owner, 'owner']], 'none');
   await t.api(owner).call('emailProviders.create', {

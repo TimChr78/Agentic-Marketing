@@ -3,7 +3,7 @@ import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { sha256 } from '@agentic-marketing/ads';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { eventually, startTestServer, type User } from './harness';
+import { eventually, startTestServer, testPort, type User } from './harness';
 
 // Phase 11 (wave 2), part e: connectors. Conversions to LinkedIn, TikTok and Pinterest with their
 // click ids; Salesforce (OAuth) actions and signed inbound callouts; the Shopify app: OAuth
@@ -115,7 +115,7 @@ async function connect(id: string) {
 beforeAll(async () => {
   await new Promise<void>((r) => fake.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${(fake.address() as AddressInfo).port}`;
-  t = await startTestServer('test_p11_conn', 3296);
+  t = await startTestServer('test_p11_conn', testPort(3296));
   owner = await t.signUp(`owner-${Date.now()}@example.com`);
   await t.workspaceWith([[owner, 'owner']], 'none');
   const api = t.api(owner);

@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { rejects, startTestServer, type User } from './harness';
+import { rejects, startTestServer, testPort, type User } from './harness';
 
 // Reusable e-mail blocks (#73): a versioned MJML fragment with typed parameters, included in a
 // template as {% block 'blk_…', key: value %}. The published block is inlined before MJML
@@ -29,7 +29,7 @@ const header = () => ({
 });
 
 beforeAll(async () => {
-  t = await startTestServer('test_blocks73', 3462);
+  t = await startTestServer('test_blocks73', testPort(3462));
   owner = await t.signUp(`owner-blocks-${stamp}@example.com`);
   await t.workspaceWith([[owner, 'owner']], 'none');
 });

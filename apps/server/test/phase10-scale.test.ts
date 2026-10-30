@@ -1,7 +1,7 @@
 import { contextFor, evaluate } from '@agentic-marketing/segments';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { runLoadTest, SEGMENTS } from '../src/loadtest';
-import { startTestServer } from './harness';
+import { startTestServer, testPort } from './harness';
 
 // Phase 10 (wave 2), part b: segments are evaluated in SQL over the whole workspace, checked
 // against the in-memory evaluator, and the load test runs end to end on a small population.
@@ -9,7 +9,7 @@ import { startTestServer } from './harness';
 let t: Awaited<ReturnType<typeof startTestServer>>;
 
 beforeAll(async () => {
-  t = await startTestServer('test_p10_scale', 3288);
+  t = await startTestServer('test_p10_scale', testPort(3288));
 }, 60_000);
 afterAll(() => t?.close());
 

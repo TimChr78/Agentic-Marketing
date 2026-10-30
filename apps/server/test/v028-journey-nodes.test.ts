@@ -1,6 +1,6 @@
 import { outbox } from '@agentic-marketing/email';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { eventually, startTestServer, type User } from './harness';
+import { eventually, startTestServer, testPort, type User } from './harness';
 
 // 0.2.8 (#92, #93): wait until a condition matches, and business entry keys for event triggers.
 
@@ -90,7 +90,7 @@ const waitJourney = (name: string, wait: Record<string, unknown>, purpose = 'onb
   });
 
 beforeAll(async () => {
-  t = await startTestServer('test_v028_nodes', 3314);
+  t = await startTestServer('test_v028_nodes', testPort(3314));
   owner = await t.signUp(`owner-${Date.now()}@example.com`);
   await t.workspaceWith([[owner, 'owner']], 'none');
   key = (await api().call('sources.create', { name: 'Backend', kind: 'server' })).key;

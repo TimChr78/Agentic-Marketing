@@ -1,12 +1,12 @@
 import { subjectAssignment } from '@agentic-marketing/audience';
 import { outbox } from '@agentic-marketing/email';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { eventually, startTestServer, type User } from './harness';
+import { eventually, startTestServer, testPort, type User } from './harness';
 
 // Phase 15 (#88, #70): newsletter subject A/B tests and recipient-local send windows on
 // broadcasts. Times and decisions are moved forward in the database; nothing waits for a timer.
 
-const PORT = 3460;
+const PORT = testPort(3460);
 const PEOPLE = 120;
 
 let t: Awaited<ReturnType<typeof startTestServer>>;

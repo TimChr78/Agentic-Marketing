@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { outbox } from '@agentic-marketing/email';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { connectAgent, eventually, rejects, startTestServer, type User } from './harness';
+import { connectAgent, eventually, rejects, startTestServer, testPort, type User } from './harness';
 
 // Phase 2 acceptance: "a welcome + abandoned-browse journey runs end-to-end, built either in the
 // UI or entirely via MCP". The welcome journey is built over REST (what the UI uses); the
@@ -13,7 +13,7 @@ let ws: string;
 let key: string;
 
 beforeAll(async () => {
-  t = await startTestServer('test_p2j', 3294);
+  t = await startTestServer('test_p2j', testPort(3294));
   owner = await t.signUp(`owner-${Date.now()}@example.com`);
   ws = await t.workspaceWith([[owner, 'owner']], 'none');
   const api = t.api(owner);

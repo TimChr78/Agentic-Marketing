@@ -1,12 +1,12 @@
 import { outbox } from '@agentic-marketing/email';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { eventually, rejects, startTestServer, type User } from './harness';
+import { eventually, rejects, startTestServer, testPort, type User } from './harness';
 
 // Phase 16 (#65): a thin campaign object. It groups existing artifacts, refuses ambiguous
 // attribution for sending members, and gives their e-mails a shared utm_campaign. No campaign
 // engine: the members keep sending exactly as before.
 
-const PORT = 3473;
+const PORT = testPort(3473);
 
 let t: Awaited<ReturnType<typeof startTestServer>>;
 let owner: User;

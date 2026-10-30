@@ -3,7 +3,7 @@ import type { AddressInfo } from 'node:net';
 import { gunzipSync } from 'node:zlib';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { eventually, startTestServer, type User } from './harness';
+import { eventually, startTestServer, testPort, type User } from './harness';
 
 // Phase 10 (wave 2), part c: warehouse export. A Postgres warehouse receives pseudonymous data
 // incrementally (no personal data in it), snapshots of segment memberships, and erasures; S3-
@@ -52,7 +52,8 @@ beforeAll(async () => {
   });
   await new Promise<void>((r) => s3.listen(0, '127.0.0.1', r));
 
-  t = await startTestServer('test_p10_wh', 3291);
+  // The destination is the test Postgres server, wherever TEST_DATABASE_URL puts it.
+  t = await startTestServer('test_p10_wh', testPort(3291), { EGRESS_ALLOWED_HOSTS: `127.0.0.1,${new URL(destUrl).hostname}` });
   owner = await t.signUp(`owner-${Date.now()}@example.com`);
   ws = await t.workspaceWith([[owner, 'owner']]);
   key = (await t.api(owner).call('sources.create', { name: 'Backend', kind: 'server' })).key;

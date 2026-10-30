@@ -1,6 +1,6 @@
 import { type FakeRequest, fakeLlm } from '@agentic-marketing/ai/testing';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { eventually, rejects, startTestServer, type User } from './harness';
+import { eventually, rejects, startTestServer, testPort, type User } from './harness';
 
 // Phase 11 (wave 2), part b: AI. Classifying texts (ai.classify) as a job, with the label stored
 // on the person; generated text cached per segment combination and written without personal
@@ -37,7 +37,7 @@ const aiConsent = (userId: string, yes: boolean) => ({
 
 beforeAll(async () => {
   llm = await fakeLlm(answer);
-  t = await startTestServer('test_p11_ai', 3293);
+  t = await startTestServer('test_p11_ai', testPort(3293));
   owner = await t.signUp(`owner-${Date.now()}@example.com`);
   await t.workspaceWith([[owner, 'owner']], 'none');
   const api = t.api(owner);

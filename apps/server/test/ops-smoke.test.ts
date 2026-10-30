@@ -1,11 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { run } from '../src/ops/smoke';
-import { startTestServer, type User } from './harness';
+import { startTestServer, testPort, type User } from './harness';
 
 // `am smoke` against a real server with the public listener enabled. Ports are unique to this file.
 
-const MAIN_PORT = 3410;
-const PUBLIC_PORT = 3411;
+const MAIN_PORT = testPort(3410);
+const PUBLIC_PORT = testPort(3411);
 const SITE = 'https://public.example';
 
 const pdf = Buffer.from(

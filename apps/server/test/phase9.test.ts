@@ -2,7 +2,7 @@ import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { sha256 } from '@agentic-marketing/ads';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { eventually, rejects, startTestServer, type User } from './harness';
+import { eventually, rejects, startTestServer, testPort, type User } from './harness';
 
 // Phase 9 (wave 2), part 1: conversions to Meta (Conversions API) and Google (Data Manager API)
 // for people who allowed ad_measurement, from a published conversion map, with test modes and a
@@ -53,7 +53,7 @@ const prefs = (c: Record<string, boolean>) => ({ consent: { categoryPreferences:
 beforeAll(async () => {
   await new Promise<void>((r) => platforms.listen(0, '127.0.0.1', r));
   platformUrl = `http://127.0.0.1:${(platforms.address() as AddressInfo).port}`;
-  t = await startTestServer('test_p9', 3289);
+  t = await startTestServer('test_p9', testPort(3289));
   owner = await t.signUp(`owner-${Date.now()}@example.com`);
   await t.workspaceWith([[owner, 'owner']]);
   const api = t.api(owner);

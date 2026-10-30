@@ -1,12 +1,12 @@
 import { deflateSync } from 'node:zlib';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { rejects, startTestServer, type User } from './harness';
+import { rejects, startTestServer, testPort, type User } from './harness';
 
 // Light asset library (issue #35): upload, list, usage, delete and the public /a link. Ports are
 // unique to this file; the harness starts a real server on a fresh database.
 
-const MAIN_PORT = 3403;
-const PUBLIC_PORT = 3404;
+const MAIN_PORT = testPort(3403);
+const PUBLIC_PORT = testPort(3404);
 
 type AssetContentType = 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp' | 'image/svg+xml' | 'application/pdf';
 

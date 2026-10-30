@@ -1,13 +1,13 @@
 import { outbox } from '@agentic-marketing/email';
 import { armFor, holdoutHashVersion } from '@agentic-marketing/journeys';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { eventually, rejects, startTestServer, type User } from './harness';
+import { eventually, rejects, startTestServer, testPort, type User } from './harness';
 
 // v0.2.9 (#67): campaign control groups. One deterministic arm per person for the whole campaign;
 // every sending member inherits it, control gets no message from any of them, and the result is
 // measured once for the campaign with lift, a Newcombe interval and revenue per currency.
 
-const PORT = 3481;
+const PORT = testPort(3481);
 const DB = 'test_v029_campaign_holdouts';
 
 let t: Awaited<ReturnType<typeof startTestServer>>;

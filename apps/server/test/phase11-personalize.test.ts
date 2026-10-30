@@ -2,7 +2,7 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import worker from '@agentic-marketing/edge-worker';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { eventually, rejects, startTestServer, type User } from './harness';
+import { eventually, rejects, startTestServer, testPort, type User } from './harness';
 
 // Phase 11 (wave 2), part c: personalization. Experiences, write keys and profile snapshots are
 // mirrored to Cloudflare Workers KV (a fake Cloudflare API here), where the edge worker decides
@@ -65,7 +65,7 @@ beforeAll(async () => {
   await new Promise<void>((r) => cf.listen(0, '127.0.0.1', r));
   cfBase = `http://127.0.0.1:${(cf.address() as AddressInfo).port}`;
 
-  t = await startTestServer('test_p11_pers', 3294);
+  t = await startTestServer('test_p11_pers', testPort(3294));
   owner = await t.signUp(`owner-${Date.now()}@example.com`);
   ws = await t.workspaceWith([[owner, 'owner']], 'none');
   const api = t.api(owner);

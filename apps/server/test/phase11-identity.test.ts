@@ -2,13 +2,13 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { exportJWK, generateKeyPair, SignJWT } from 'jose';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { connectAgent, startTestServer, type User } from './harness';
+import { connectAgent, startTestServer, testPort, type User } from './harness';
 
 // Phase 11 (wave 2), part a: enterprise identity. Single sign-on with an OIDC identity provider
 // (a stand-in IdP that signs real ID tokens), SCIM provisioning by an identity provider, and MCP
 // scope step-up for agents that need a permission they were not granted.
 
-const PORT = 3292;
+const PORT = testPort(3292);
 const BASE = `http://localhost:${PORT}`;
 let idp: Server;
 let idpBase = '';

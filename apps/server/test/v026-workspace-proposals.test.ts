@@ -1,7 +1,7 @@
 import { createClient } from '@agentic-marketing/client';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Commands } from '../src/registry';
-import { rejects, startTestServer, type User } from './harness';
+import { rejects, startTestServer, testPort, type User } from './harness';
 
 // Workspace setting proposals (#106): an agent cannot administer a workspace, but it can propose
 // the name and time zone. A person with workspace:admin approves or rejects the diff.
@@ -14,7 +14,7 @@ let agent: ReturnType<typeof createClient<Commands>>;
 const stamp = Date.now();
 
 beforeAll(async () => {
-  t = await startTestServer('test_workspace_proposals', 3458);
+  t = await startTestServer('test_workspace_proposals', testPort(3458));
   owner = await t.signUp(`owner-proposals-${stamp}@example.com`);
   approver = await t.signUp(`approver-proposals-${stamp}@example.com`);
   await t.workspaceWith(

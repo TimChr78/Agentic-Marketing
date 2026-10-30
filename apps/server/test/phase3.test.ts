@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { eventually, startTestServer, type User } from './harness';
+import { eventually, startTestServer, testPort, type User } from './harness';
 
 // Phase 3 acceptance: "next-page-view and same-page personalization with measured p95 < 50 ms
 // server time". A visitor's behaviour reaches the decision API through ingest (session state)
@@ -13,7 +13,7 @@ const yes = { consent: { categoryPreferences: { analytics: true, web_personaliza
 const contextualOnly = { consent: { categoryPreferences: { analytics: true, web_personalization: false } } };
 
 beforeAll(async () => {
-  t = await startTestServer('test_p3', 3293);
+  t = await startTestServer('test_p3', testPort(3293));
   owner = await t.signUp(`owner-${Date.now()}@example.com`);
   await t.workspaceWith([[owner, 'owner']], 'none');
   const api = t.api(owner);

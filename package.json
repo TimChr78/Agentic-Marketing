@@ -17,7 +17,9 @@
     "typecheck": "pnpm -r --filter './packages/*' --filter './apps/*' typecheck",
     "test": "vitest run",
     "e2e": "playwright test",
-    "e2e:dev": "playwright test"
+    "e2e:dev": "playwright test",
+    "test:ci": "vitest run --coverage --reporter=default --reporter=junit --outputFile.junit=reports/junit.xml",
+    "test:clean": "tsx apps/server/test/clean.ts"
   },
   "pnpm": {
     "overrides": {
@@ -39,6 +41,7 @@
     "@biomejs/biome": "2.5.15",
     "@playwright/test": "1.64.1",
     "@types/node": "^26.6.5",
+    "@vitest/coverage-v8": "5.0.5",
     "tsx": "4.23.15",
     "typescript": "^7.0.2",
     "vitest": "5.0.5"

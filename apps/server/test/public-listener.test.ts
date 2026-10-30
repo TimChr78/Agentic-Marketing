@@ -1,12 +1,12 @@
 import http from 'node:http';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { startTestServer } from './harness';
+import { startTestServer, testPort } from './harness';
 
 // The optional public listener has no path rule: only /f, /u, /c, /n, /hooks and the probes exist.
 // Requests are sent with node:http because fetch and most clients normalise `..` before sending.
 
-const MAIN_PORT = 3299;
-const PUBLIC_PORT = 3300;
+const MAIN_PORT = testPort(3299);
+const PUBLIC_PORT = testPort(3300);
 const SITE = 'https://public.example';
 let t: Awaited<ReturnType<typeof startTestServer>>;
 let formId = '';

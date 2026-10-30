@@ -1,7 +1,7 @@
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { rejects, startTestServer, type User } from './harness';
+import { rejects, startTestServer, testPort, type User } from './harness';
 
 // Pre-send checks (#90) through the real command: rendered with sample data, findings grouped by
 // severity, link reachability through the egress guard (loopback is allowed by the harness), and
@@ -34,7 +34,7 @@ async function createTemplate(name: string, body: string, extra: Record<string, 
 }
 
 beforeAll(async () => {
-  t = await startTestServer('test_v028_checks', 3462);
+  t = await startTestServer('test_v028_checks', testPort(3462));
   owner = await t.signUp(`owner-checks-${stamp}@example.com`);
   await t.workspaceWith([[owner, 'owner']], 'none');
   const api = t.api(owner);
