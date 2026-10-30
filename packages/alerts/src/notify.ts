@@ -131,52 +131,69 @@ async function notifyWebhook(tx: Tx, input: NotifyInput, channel: Extract<AlertC
   };
 }
 
-async function notifyEmails(tx: Tx, deps: NotifyDeps, input: NotifyInput, userIds: string[], url: string): Promise<AlertNotification[]> {
+export interface MemberEmail {
+  userId: string;
+  idempotencyKey: string;
+  subject: string;
+  text: string;
+  html: string;
+  /** The transactional purpose recorded in the message log (default onboarding). */
+  purpose?: string;
+  data?: Record<string, unknown>;
+}
+
+export interface MemberEmailResult {
+  userId: string;
+  status: 'sent' | 'failed';
+  error?: string;
+}
+
+/**
+ * Sends transactional e-mails to workspace members through the enabled transactional provider,
+ * deduplicating by idempotency key. Shared by alerts and agent notifications, which both write a
+ * short message to the log rather than reimplementing provider selection and retries.
+ */
+export async function sendMemberEmails(tx: Tx, deps: NotifyDeps, workspaceId: string, emails: MemberEmail[]): Promise<MemberEmailResult[]> {
+  const userIds = [...new Set(emails.map((e) => e.userId))];
   const people = await deps.directory.users(userIds);
-  // A person removed from the workspace after the rule was written must not keep receiving it.
+  // A person removed from the workspace must not keep receiving workspace mail.
   const stillMembers = new Set(
     (
       await tx
         .select({ userId: schema.workspaceMembers.userId })
         .from(schema.workspaceMembers)
-        .where(and(eq(schema.workspaceMembers.workspaceId, input.workspace.id), inArray(schema.workspaceMembers.userId, userIds)))
+        .where(and(eq(schema.workspaceMembers.workspaceId, workspaceId), inArray(schema.workspaceMembers.userId, userIds)))
     ).map((r) => r.userId),
   );
   const providers = await tx.select().from(schema.emailProviders).where(eq(schema.emailProviders.enabled, true));
   const provider = providers.find((p) => p.useFor.includes('transactional'));
-  const at = input.now.toISOString();
   if (!provider)
-    return userIds.map((target) => ({
-      event: input.event,
-      channel: 'email',
-      target,
-      at,
+    return emails.map((email) => ({
+      userId: email.userId,
       status: 'failed',
       error: 'no enabled transactional e-mail provider',
     }));
 
-  const content = emailContent(input, url);
-  const out: AlertNotification[] = [];
+  const out: MemberEmailResult[] = [];
   let transport: Awaited<ReturnType<typeof transportFor>> | undefined;
   try {
     transport = await transportFor(tx, provider, deps.kp, deps.email.adapterDeps);
-    for (const userId of userIds) {
-      const person = people.get(userId);
-      if (!person || !stillMembers.has(userId)) {
-        out.push({ event: input.event, channel: 'email', target: userId, at, status: 'failed', error: 'not a workspace member' });
+    for (const email of emails) {
+      const person = people.get(email.userId);
+      if (!person || !stillMembers.has(email.userId)) {
+        out.push({ userId: email.userId, status: 'failed', error: 'not a workspace member' });
         continue;
       }
-      const idempotencyKey = `alert:${input.eventId}:${input.event}:${userId}`;
       const [existing] = await tx
         .select({ id: schema.messages.id, status: schema.messages.status })
         .from(schema.messages)
-        .where(and(eq(schema.messages.workspaceId, input.workspace.id), eq(schema.messages.idempotencyKey, idempotencyKey)));
+        .where(and(eq(schema.messages.workspaceId, workspaceId), eq(schema.messages.idempotencyKey, email.idempotencyKey)));
       if (existing?.status === 'sent') {
-        out.push({ event: input.event, channel: 'email', target: userId, at, status: 'sent' });
+        out.push({ userId: email.userId, status: 'sent' });
         continue;
       }
-      // A failed alert e-mail is retried on the next evaluation; reuse its message row so the
-      // log shows one attempt history rather than a new message per retry.
+      // A failed e-mail is retried on the next run; reuse its message row so the log shows one
+      // attempt history rather than a new message per retry.
       const messageId = existing?.id ?? newId('msg');
       if (existing)
         await tx
@@ -185,13 +202,13 @@ async function notifyEmails(tx: Tx, deps: NotifyDeps, input: NotifyInput, userId
           .where(eq(schema.messages.id, messageId));
       else
         await tx.insert(schema.messages).values({
-          workspaceId: input.workspace.id,
+          workspaceId,
           id: messageId,
-          idempotencyKey,
-          purpose: 'onboarding',
+          idempotencyKey: email.idempotencyKey,
+          purpose: email.purpose ?? 'onboarding',
           providerId: provider.id,
           status: 'sending',
-          data: { alert: { ruleId: input.rule.id, event: input.event } },
+          data: email.data ?? {},
         });
       try {
         const { providerMessageId } = await transport.send({
@@ -199,9 +216,9 @@ async function notifyEmails(tx: Tx, deps: NotifyDeps, input: NotifyInput, userId
           from: { email: provider.fromEmail, name: provider.fromName || undefined },
           replyTo: provider.replyTo ?? undefined,
           to: person.email,
-          subject: content.subject,
-          html: content.html,
-          text: content.text,
+          subject: email.subject,
+          html: email.html,
+          text: email.text,
           headers: { [MESSAGE_ID_HEADER]: messageId },
           stream: 'transactional',
         });
@@ -209,27 +226,50 @@ async function notifyEmails(tx: Tx, deps: NotifyDeps, input: NotifyInput, userId
           .update(schema.messages)
           .set({ status: 'sent', providerMessageId, reason: null, updatedAt: new Date() })
           .where(eq(schema.messages.id, messageId));
-        out.push({ event: input.event, channel: 'email', target: userId, at, status: 'sent' });
+        out.push({ userId: email.userId, status: 'sent' });
       } catch (err) {
         const error = (err as Error).message.split('\n')[0];
-        logger.warn({ err, rule: input.rule.id, userId }, 'alert e-mail failed');
+        logger.warn({ err, idempotencyKey: email.idempotencyKey, userId: email.userId }, 'member e-mail failed');
         await tx
           .update(schema.messages)
           .set({ status: 'failed', reason: `provider_error: ${error}`, updatedAt: new Date() })
           .where(eq(schema.messages.id, messageId));
-        out.push({ event: input.event, channel: 'email', target: userId, at, status: 'failed', error });
+        out.push({ userId: email.userId, status: 'failed', error });
       }
     }
   } catch (err) {
     const error = (err as Error).message.split('\n')[0];
-    logger.warn({ err, rule: input.rule.id }, 'alert e-mail transport could not be created');
-    for (const userId of userIds)
-      if (!out.some((n) => n.target === userId))
-        out.push({ event: input.event, channel: 'email', target: userId, at, status: 'failed', error });
+    logger.warn({ err }, 'member e-mail transport could not be created');
+    for (const email of emails)
+      if (!out.some((n) => n.userId === email.userId && n.status === 'failed')) out.push({ userId: email.userId, status: 'failed', error });
   } finally {
     await transport?.close?.();
   }
   return out;
+}
+
+async function notifyEmails(tx: Tx, deps: NotifyDeps, input: NotifyInput, userIds: string[], url: string): Promise<AlertNotification[]> {
+  const content = emailContent(input, url);
+  const at = input.now.toISOString();
+  const results = await sendMemberEmails(
+    tx,
+    deps,
+    input.workspace.id,
+    userIds.map((userId) => ({
+      userId,
+      idempotencyKey: `alert:${input.eventId}:${input.event}:${userId}`,
+      ...content,
+      data: { alert: { ruleId: input.rule.id, event: input.event } },
+    })),
+  );
+  return results.map((r) => ({
+    event: input.event,
+    channel: 'email' as const,
+    target: r.userId,
+    at,
+    status: r.status,
+    ...(r.error ? { error: r.error } : {}),
+  }));
 }
 
 /** Sends one event to the selected channels. The caller stores the returned `notified` entries. */

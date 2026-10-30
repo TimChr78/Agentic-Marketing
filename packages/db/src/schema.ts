@@ -1161,3 +1161,14 @@ export const agentActions = pgTable(
   },
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
 );
+
+/**
+ * How far agent notifications (#226) have read the ledger, when the sponsor last received a daily
+ * digest, and which mandate expiries were already announced (artifactId:version:validUntil).
+ */
+export const agentNotificationCursor = pgTable('agent_notification_cursor', {
+  workspaceId: uuid('workspace_id').primaryKey(),
+  lastActionId: bigint('last_action_id', { mode: 'number' }).notNull().default(0),
+  lastDigestAt: ts('last_digest_at'),
+  expiryNotified: jsonb('expiry_notified').$type<Record<string, string>>().notNull().default({}),
+});
