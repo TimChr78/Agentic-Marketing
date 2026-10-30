@@ -303,7 +303,8 @@ describe('AI steps in a journey', () => {
 
     const { calls } = await api.call('ai.calls', { journeyId: ids.journey, kind: 'decide' });
     const reasons = calls.map((c) => `${c.status}: ${c.error?.split(':')[0]}`);
-    expect(reasons).toEqual(['fallback: budget', 'fallback: model_error', 'fallback: no_lawful_basis', 'done: undefined']);
+    // Different people's journeys run concurrently, so these calls have no fixed order.
+    expect(reasons.sort()).toEqual(['done: undefined', 'fallback: budget', 'fallback: model_error', 'fallback: no_lawful_basis']);
   });
 
   it('includes AI decisions in the person’s access export', async () => {

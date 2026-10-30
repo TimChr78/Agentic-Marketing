@@ -65,7 +65,7 @@ export const listAiCalls = defineCommand({
           input.before ? lt(c.createdAt, new Date(input.before)) : undefined,
         ),
       )
-      .orderBy(desc(c.createdAt))
+      .orderBy(desc(c.createdAt), desc(c.id))
       .limit(input.limit);
     return {
       calls: rows.map((r) => ({
