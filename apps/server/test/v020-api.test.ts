@@ -1,13 +1,13 @@
 import { updateWorkspace } from '@agentic-marketing/artifacts';
 import { agentPrincipal, ROLE_PERMISSIONS } from '@agentic-marketing/commands';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { connectAgent, rejects, startTestServer, type User } from './harness';
+import { connectAgent, rejects, startTestServer, testPort, type User } from './harness';
 
 // The v0.2 API contract: review-first publishing, strict/warn-first inputs, MCP output schemas,
 // date-times with offsets, workspace time zone and the workspace switcher.
 
-const PORT = 3401;
-const PORT_VARIANTS = 3402;
+const PORT = testPort(3401);
+const PORT_VARIANTS = testPort(3402);
 const BASE = `http://localhost:${PORT}`;
 
 let t: Awaited<ReturnType<typeof startTestServer>>;

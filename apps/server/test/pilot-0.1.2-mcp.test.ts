@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { connectAgent, startTestServer, type User } from './harness';
+import { connectAgent, startTestServer, testPort, type User } from './harness';
 
 // MCP guidance for agents: server instructions, the same text as a resource, and the type filter
 // that keeps artifacts.types from returning the full ~66 KB of schemas.
@@ -9,7 +9,7 @@ let owner: User;
 let agent: Awaited<ReturnType<typeof connectAgent>>;
 
 beforeAll(async () => {
-  t = await startTestServer('test_pilot_mcp', 3312);
+  t = await startTestServer('test_pilot_mcp', testPort(3312));
   owner = await t.signUp(`owner-${Date.now()}@example.com`);
   await t.workspaceWith([[owner, 'owner']], 'agent_changes');
   agent = await connectAgent(t.base, owner, ['artifacts:read', 'artifacts:write', 'artifacts:publish']);

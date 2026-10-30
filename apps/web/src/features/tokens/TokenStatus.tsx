@@ -7,5 +7,11 @@ export function tokenStatus(t: { revoked: boolean; expiresAt: string | null }) {
 }
 export function TokenStatus({ t }: { t: { revoked: boolean; expiresAt: string | null } }) {
   const s = tokenStatus(t);
-  return s === 'active' ? <StatusPill tone="good">Active</StatusPill> : s === 'expired' ? <StatusPill tone="warn">Expired</StatusPill> : <StatusPill tone="bad">Revoked</StatusPill>;
+  return s === 'active' ? (
+    <StatusPill tone="good">Active</StatusPill>
+  ) : s === 'expired' ? (
+    <StatusPill tone="warn">Expired</StatusPill>
+  ) : (
+    <StatusPill tone="bad">Revoked</StatusPill>
+  );
 }

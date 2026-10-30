@@ -11,16 +11,16 @@ import {
   Card,
   Checkbox,
   Field,
+  formatDateTime,
   Input,
   PageHeader,
   Select,
   Table,
   Td,
   Textarea,
-  Th,
   THead,
+  Th,
   Tr,
-  formatDateTime,
   useToast,
 } from '../../ui';
 import { pageWidth } from '../../ui/layout';
@@ -69,7 +69,10 @@ export default function ImportsPage() {
   );
   const preview = payload.slice(0, 5);
   const skipped = prepared?.skipped ?? [];
-  const skippedByReason = skipped.reduce<Record<string, number>>((acc, s) => ({ ...acc, [s.reason]: (acc[s.reason] ?? 0) + 1 }), {});
+  const skippedByReason = skipped.reduce<Record<string, number>>((acc, s) => {
+    acc[s.reason] = (acc[s.reason] ?? 0) + 1;
+    return acc;
+  }, {});
 
   const readFile = async (file: File | undefined) => {
     if (!file) return;
@@ -110,7 +113,10 @@ export default function ImportsPage() {
         for (const x of r.rejected) rejected.push({ email: payload[i + x.index]?.email ?? 'row', error: x.error });
       }
       setResult({ accepted, rejected });
-      if (accepted > 0) toast.success(`Imported ${accepted.toLocaleString()} ${accepted === 1 ? 'person' : 'people'}. Profiles and consent appear within seconds.`);
+      if (accepted > 0)
+        toast.success(
+          `Imported ${accepted.toLocaleString()} ${accepted === 1 ? 'person' : 'people'}. Profiles and consent appear within seconds.`,
+        );
       else toast.error('Nothing was imported. Fix the rejected rows and try again.');
     } catch (e) {
       setError(errText(e));
@@ -127,12 +133,16 @@ export default function ImportsPage() {
       />
 
       <Alert tone="info" className="mb-5">
-        Each row keeps its purpose, old system, subscription date and status as consent proof, together with this import's label and the person who ran it.
-        Only import people who agreed to receive e-mail.
+        Each row keeps its purpose, old system, subscription date and status as consent proof, together with this import's label and the
+        person who ran it. Only import people who agreed to receive e-mail.
       </Alert>
 
       <div className="space-y-5">
-        <Card title="Choose a file" description="A CSV export from Kit, Mailchimp or a similar tool. The first row must contain the column names." padded>
+        <Card
+          title="Choose a file"
+          description="A CSV export from Kit, Mailchimp or a similar tool. The first row must contain the column names."
+          padded
+        >
           <div className="space-y-4">
             <Field label="CSV file" hint="Comma, semicolon and tab separated files are read.">
               <Input
@@ -145,7 +155,13 @@ export default function ImportsPage() {
             </Field>
             <div className="border-t border-line pt-4">
               <Field label="Or paste the CSV" hint="Paste the whole export, including the header row.">
-                <Textarea value={paste} onChange={(e) => setPaste(e.target.value)} rows={4} mono placeholder="email_address,first_name,state,created_at" />
+                <Textarea
+                  value={paste}
+                  onChange={(e) => setPaste(e.target.value)}
+                  rows={4}
+                  mono
+                  placeholder="email_address,first_name,state,created_at"
+                />
               </Field>
               <Button className="mt-2" onClick={readPaste} disabled={!paste.trim()}>
                 Use pasted CSV
@@ -163,6 +179,7 @@ export default function ImportsPage() {
                     <Select value={mapping[key]} onChange={(e) => setMapping({ ...mapping, [key]: Number(e.target.value) })}>
                       <option value={-1}>(not in the file)</option>
                       {rows[0].map((h, i) => (
+                        // biome-ignore lint/suspicious/noArrayIndexKey: CSV headers can repeat and are identified by their column position
                         <option key={`${h}-${i}`} value={i}>
                           {h || `Column ${i + 1}`}
                         </option>
@@ -253,7 +270,11 @@ export default function ImportsPage() {
                               {r.consent[0]?.status ?? 'none'} · {r.consent[0]?.purpose ?? purpose}
                             </Td>
                             <Td className="hidden lg:table-cell">
-                              {r.consent[0]?.recordedAt ? formatDateTime(r.consent[0].recordedAt) : <span className="text-muted">Not in the file</span>}
+                              {r.consent[0]?.recordedAt ? (
+                                formatDateTime(r.consent[0].recordedAt)
+                              ) : (
+                                <span className="text-muted">Not in the file</span>
+                              )}
                             </Td>
                             <Td className="hidden max-w-[360px] xl:table-cell">
                               <span className="line-clamp-2 text-[12px] text-muted">
@@ -268,7 +289,9 @@ export default function ImportsPage() {
                     </Table>
                   </div>
                 ) : (
-                  <div className="p-4 text-[13px] text-muted">No rows can be imported with this mapping. Check the e-mail column and the status filter.</div>
+                  <div className="p-4 text-[13px] text-muted">
+                    No rows can be imported with this mapping. Check the e-mail column and the status filter.
+                  </div>
                 )}
               </Card>
             )}
@@ -276,7 +299,10 @@ export default function ImportsPage() {
             {error && <Alert tone="bad">{error}</Alert>}
 
             {result && (
-              <Alert tone={result.accepted > 0 ? 'good' : 'warn'} title={`Imported ${result.accepted.toLocaleString()} ${result.accepted === 1 ? 'person' : 'people'}`}>
+              <Alert
+                tone={result.accepted > 0 ? 'good' : 'warn'}
+                title={`Imported ${result.accepted.toLocaleString()} ${result.accepted === 1 ? 'person' : 'people'}`}
+              >
                 {result.rejected.length > 0 && (
                   <>
                     <p className="mt-0.5">{result.rejected.length.toLocaleString()} rejected by the server:</p>

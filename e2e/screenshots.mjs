@@ -23,7 +23,10 @@ async function api(req, name, input) {
 
 const browser = await chromium.launch({ executablePath: process.env.CHROMIUM || '/usr/bin/chromium' });
 const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 } });
-const r = await ctx.request.post(`${base}/api/auth/sign-in/email`, { data: { email, password: 'correct-horse-battery-staple' }, headers: { origin: base } });
+const r = await ctx.request.post(`${base}/api/auth/sign-in/email`, {
+  data: { email, password: 'correct-horse-battery-staple' },
+  headers: { origin: base },
+});
 if (!r.ok()) throw new Error(await r.text());
 const list = async (type) => (await api(ctx.request, 'artifacts.list', { type })).artifacts;
 const find = async (type, name) => (await list(type)).find((a) => a.name === name)?.id ?? (await list(type))[0]?.id;

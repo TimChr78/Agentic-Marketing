@@ -4,7 +4,7 @@ import { evaluate, materialize } from '@agentic-marketing/segments';
 import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { CASES, P } from '../../../packages/profiles/test/consentCases';
-import { startTestServer, type User } from './harness';
+import { startTestServer, testPort, type User } from './harness';
 
 // 0.2.1 (#103): segment consent conditions follow the shared consent rule (ADR 0014) in both
 // evaluators, the streaming one (JS) and the batch one (SQL), and a migration makes existing
@@ -16,7 +16,7 @@ let ws = '';
 const people = new Map<string, string>();
 
 beforeAll(async () => {
-  t = await startTestServer('test_v021_consent', 3298);
+  t = await startTestServer('test_v021_consent', testPort(3298));
   owner = await t.signUp(`owner-${Date.now()}@example.com`);
   ws = await t.workspaceWith([[owner, 'owner']], 'none');
   await t.srv.db.withWorkspace(ws, async (tx) => {

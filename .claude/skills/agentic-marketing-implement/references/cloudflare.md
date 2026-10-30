@@ -16,7 +16,7 @@ Two ways to publish the platform's public paths. Option A is the default and rec
 ```
 Option A (existing tunnel)
 visitor ─► https://site/…            Cloudflare Pages (unchanged)
-form post, e-mail links ─► https://am.site/{f,u,c,hooks}/…  ─► tunnel ─► app:3001   (public-only listener; other paths 404 there)
+form post, e-mail links ─► https://am.site/{f,u,c,a,n,hooks}/…  ─► tunnel ─► app:3001   (public-only listener; other paths 404 there)
 
 Option B (worker proxy)
 visitor ─► https://site/am/(f|u|c|n|v1/batch|v1/decide)… ─► _worker.js ─► https://am-edge.site (Access: service token) ─► tunnel ─► app:3000

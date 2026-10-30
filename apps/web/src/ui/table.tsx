@@ -1,4 +1,4 @@
-import type { ReactNode, ThHTMLAttributes, TdHTMLAttributes } from 'react';
+import type { ReactNode, TdHTMLAttributes, ThHTMLAttributes } from 'react';
 import { cx } from './cx';
 import { Alert, EmptyState, Skeleton } from './display';
 
@@ -39,8 +39,10 @@ export function TableFrame({
       ) : loading ? (
         <div role="status" aria-label="Loading">
           {Array.from({ length: 5 }, (_, i) => (
+            // biome-ignore lint/suspicious/noArrayIndexKey: loading placeholder rows are generated, never reordered, and have no identity
             <div key={i} className="flex gap-4 border-b border-line px-4 py-3 last:border-0">
               {Array.from({ length: columns }, (_, c) => (
+                // biome-ignore lint/suspicious/noArrayIndexKey: loading placeholder cells are positional columns of a generated row
                 <Skeleton key={c} className={cx('h-3.5', c === 0 ? 'w-1/3' : 'w-1/6')} />
               ))}
             </div>
@@ -71,13 +73,30 @@ export function Th({ className, align, ...p }: ThHTMLAttributes<HTMLTableCellEle
   return <th scope="col" {...p} className={cx('h-9 px-4 font-medium whitespace-nowrap', align === 'right' && 'text-right', className)} />;
 }
 
-export function Tr({ children, onClick, selected, className, href }: { children: ReactNode; onClick?: () => void; selected?: boolean; className?: string; href?: string }) {
+export function Tr({
+  children,
+  onClick,
+  selected,
+  className,
+  href,
+}: {
+  children: ReactNode;
+  onClick?: () => void;
+  selected?: boolean;
+  className?: string;
+  href?: string;
+}) {
   return (
     <tr
       onClick={onClick}
       aria-selected={selected || undefined}
       data-href={href}
-      className={cx('border-t border-line', (onClick || href) && 'cursor-pointer hover:bg-surface-2', selected && 'bg-surface-2', className)}
+      className={cx(
+        'border-t border-line',
+        (onClick || href) && 'cursor-pointer hover:bg-surface-2',
+        selected && 'bg-surface-2',
+        className,
+      )}
     >
       {children}
     </tr>

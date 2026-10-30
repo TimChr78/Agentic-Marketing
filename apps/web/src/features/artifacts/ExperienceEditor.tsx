@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
 import { ArrowDown, ArrowUp, Plus, Trash2 } from 'lucide-react';
+import { useEffect, useState } from 'react';
 import { Alert, Button, Field, FieldGroup, IconButton, Input, Select, Textarea } from '../../ui';
 import type { EditorProps } from './ArtifactDetailPage';
 import { ArtifactSelect } from './ArtifactSelect';
@@ -86,7 +86,11 @@ export function addVariant(variants: ExperienceVariant[] | undefined): Experienc
   return [...list, { id: letter, name: `Variant ${letter.toUpperCase()}`, weight: 50, content: { html: '' } }];
 }
 
-export function updateVariant(variants: ExperienceVariant[] | undefined, index: number, patch: Partial<ExperienceVariant>): ExperienceVariant[] {
+export function updateVariant(
+  variants: ExperienceVariant[] | undefined,
+  index: number,
+  patch: Partial<ExperienceVariant>,
+): ExperienceVariant[] {
   return (variants ?? []).map((v, i) => (i === index ? { ...v, ...patch } : v));
 }
 
@@ -141,9 +145,9 @@ function NumberField({
   readOnly?: boolean;
 }) {
   const [text, setText] = useState(String(value));
+  // biome-ignore lint/correctness/useExhaustiveDependencies: only follow changes from outside this field, not the local text
   useEffect(() => {
     if (Number(text) !== value) setText(Number.isFinite(value) ? String(value) : '');
-    // biome-ignore lint/correctness/useExhaustiveDependencies: only follow outside changes
   }, [value]);
   return (
     <Field label={label} unit={unit} hint={hint} error={error}>
@@ -182,8 +186,8 @@ export function ExperienceEditor({ content, onChange, readOnly, errors, warnings
       {warnings.length > 0 && (
         <Alert tone="warn" title="The schema still needs">
           <ul className="list-disc pl-4">
-            {warnings.map((w, i) => (
-              <li key={i}>{w.message}</li>
+            {warnings.map((w) => (
+              <li key={`${w.path}-${w.message}`}>{w.message}</li>
             ))}
           </ul>
         </Alert>
@@ -218,7 +222,13 @@ export function ExperienceEditor({ content, onChange, readOnly, errors, warnings
           />
         </div>
         <Field label="Description" hint="For the team; visitors never see it." error={errors.description}>
-          <Textarea rows={2} maxLength={1000} value={content.description ?? ''} readOnly={readOnly} onChange={(e) => set({ description: e.target.value })} />
+          <Textarea
+            rows={2}
+            maxLength={1000}
+            value={content.description ?? ''}
+            readOnly={readOnly}
+            onChange={(e) => set({ description: e.target.value })}
+          />
         </Field>
       </FieldGroup>
 
@@ -252,7 +262,10 @@ export function ExperienceEditor({ content, onChange, readOnly, errors, warnings
         )}
       </FieldGroup>
 
-      <FieldGroup legend="Who sees it" hint="Traits, segments and session conditions need web_personalization consent; page, referrer, UTM and device do not.">
+      <FieldGroup
+        legend="Who sees it"
+        hint="Traits, segments and session conditions need web_personalization consent; page, referrer, UTM and device do not."
+      >
         <Field label="Targeting" error={errors.targeting}>
           <Select
             value={targeting}
@@ -273,7 +286,11 @@ export function ExperienceEditor({ content, onChange, readOnly, errors, warnings
           </Select>
         </Field>
         {targeting === 'segment' && (
-          <Field label="Segment" hint="Members of a published segment; evaluated from the segment snapshot." error={errors['targeting.segment']}>
+          <Field
+            label="Segment"
+            hint="Members of a published segment; evaluated from the segment snapshot."
+            error={errors['targeting.segment']}
+          >
             <ArtifactSelect
               type="segment"
               value={typeof content.targeting?.segment === 'string' ? content.targeting.segment : undefined}
@@ -380,7 +397,11 @@ export function ExperienceEditor({ content, onChange, readOnly, errors, warnings
                   </Select>
                 </Field>
                 {contentKind === 'html' ? (
-                  <Field label={`HTML for variant ${n}`} hint="Scripts and event handlers are removed by the SDK." error={errors[`variants.${i}.content.html`]}>
+                  <Field
+                    label={`HTML for variant ${n}`}
+                    hint="Scripts and event handlers are removed by the SDK."
+                    error={errors[`variants.${i}.content.html`]}
+                  >
                     <Textarea
                       rows={5}
                       mono
@@ -389,7 +410,9 @@ export function ExperienceEditor({ content, onChange, readOnly, errors, warnings
                       value={variant.content?.html ?? ''}
                       readOnly={readOnly}
                       placeholder="<p>Get the Tuesday signal.</p>"
-                      onChange={(e) => set({ variants: updateVariant(variants, i, { content: { ...variant.content, html: e.target.value } }) })}
+                      onChange={(e) =>
+                        set({ variants: updateVariant(variants, i, { content: { ...variant.content, html: e.target.value } }) })
+                      }
                     />
                   </Field>
                 ) : (
@@ -397,7 +420,13 @@ export function ExperienceEditor({ content, onChange, readOnly, errors, warnings
                     label={`JSON data for variant ${n}`}
                     hint="Data for a site that renders the placement itself."
                     value={variant.content?.json ?? {}}
-                    onChange={(v) => set({ variants: updateVariant(variants, i, { content: { ...variant.content, json: (v ?? {}) as Record<string, unknown> } }) })}
+                    onChange={(v) =>
+                      set({
+                        variants: updateVariant(variants, i, {
+                          content: { ...variant.content, json: (v ?? {}) as Record<string, unknown> },
+                        }),
+                      })
+                    }
                     readOnly={readOnly}
                     rows={6}
                   />
@@ -437,7 +466,11 @@ export function ExperienceEditor({ content, onChange, readOnly, errors, warnings
 
       <FieldGroup legend="Measurement" hint="Optional: the event that counts as a conversion, and how results call a winner.">
         <div>
-          <Field label="Goal event" hint="For example Purchase or Newsletter Signup. Leave empty for no conversion goal." error={errors['goal.event']}>
+          <Field
+            label="Goal event"
+            hint="For example Purchase or Newsletter Signup. Leave empty for no conversion goal."
+            error={errors['goal.event']}
+          >
             <Input
               value={content.goal?.event ?? ''}
               readOnly={readOnly}

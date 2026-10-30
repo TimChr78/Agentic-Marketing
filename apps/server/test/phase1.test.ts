@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { eventually, rejects, startTestServer, type User } from './harness';
+import { eventually, rejects, startTestServer, testPort, type User } from './harness';
 
 // Phase 1 acceptance: "site events appear on a resolved profile within seconds; erasure verifiably
 // removes a person". Runs the api, ingest and worker roles against Postgres, ClickHouse and NATS.
@@ -10,7 +10,7 @@ let ws: string;
 const SHOP = 'https://shop.example.com';
 
 beforeAll(async () => {
-  t = await startTestServer('test_p1', 3298);
+  t = await startTestServer('test_p1', testPort(3298));
   owner = await t.signUp(`owner-${Date.now()}@example.com`);
   ws = await t.workspaceWith([[owner, 'owner']]);
 }, 60_000);

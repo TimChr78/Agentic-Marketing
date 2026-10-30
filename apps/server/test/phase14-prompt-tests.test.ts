@@ -1,6 +1,6 @@
 import { type FakeRequest, fakeLlm } from '@agentic-marketing/ai/testing';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { eventually, startTestServer, type User } from './harness';
+import { eventually, startTestServer, testPort, type User } from './harness';
 
 // Phase 14, #56: a prompt test run reports every case, including the ones still waiting, with its
 // latency and tokens; the runs list lets the Tests tab resume polling one that was left behind.
@@ -27,7 +27,7 @@ function answer(r: FakeRequest) {
 
 beforeAll(async () => {
   llm = await fakeLlm(answer);
-  t = await startTestServer('test_p14_prompt_tests', 3461);
+  t = await startTestServer('test_p14_prompt_tests', testPort(3461));
   owner = await t.signUp(`owner-${Date.now()}@example.com`);
   ws = await t.workspaceWith([[owner, 'owner']], 'none');
   const api = t.api(owner);

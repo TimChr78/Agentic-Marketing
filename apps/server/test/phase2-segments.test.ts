@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { eventually, rejects, startTestServer, type User } from './harness';
+import { eventually, rejects, startTestServer, testPort, type User } from './harness';
 
 // Phase 2, segments: the DSL evaluated in batch (preview, scheduled refresh) and streaming (an
 // event that makes someone match puts them in the segment within seconds, with an event).
@@ -10,7 +10,7 @@ let key: string;
 const ids: Record<string, string> = {};
 
 beforeAll(async () => {
-  t = await startTestServer('test_p2s', 3295);
+  t = await startTestServer('test_p2s', testPort(3295));
   owner = await t.signUp(`owner-${Date.now()}@example.com`);
   await t.workspaceWith([[owner, 'owner']]);
   key = (await t.api(owner).call('sources.create', { name: 'Backend', kind: 'server' })).key;

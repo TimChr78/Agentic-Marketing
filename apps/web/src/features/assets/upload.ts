@@ -4,7 +4,8 @@ export type Asset = Out<'assets.list'>['assets'][number];
 export const ACCEPT = 'image/png,image/jpeg,image/gif,image/webp,image/svg+xml,application/pdf';
 const TYPES = new Set(ACCEPT.split(','));
 
-export const formatBytes = (n: number) => (n >= 1_048_576 ? `${(n / 1_048_576).toFixed(1)} MB` : n >= 1024 ? `${Math.round(n / 1024)} KB` : `${n} B`);
+export const formatBytes = (n: number) =>
+  n >= 1_048_576 ? `${(n / 1_048_576).toFixed(1)} MB` : n >= 1024 ? `${Math.round(n / 1024)} KB` : `${n} B`;
 
 function toBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -19,5 +20,10 @@ function toBase64(file: File): Promise<string> {
 export async function uploadFile(file: File, altText?: string): Promise<Asset> {
   if (!TYPES.has(file.type))
     throw new Error(`${file.name} is a ${file.type || 'file of unknown type'}. Upload a PNG, JPEG, GIF, WebP, SVG or PDF.`);
-  return api.call('assets.upload', { fileName: file.name, contentType: file.type as never, dataBase64: await toBase64(file), ...(altText ? { altText } : {}) });
+  return api.call('assets.upload', {
+    fileName: file.name,
+    contentType: file.type as never,
+    dataBase64: await toBase64(file),
+    ...(altText ? { altText } : {}),
+  });
 }

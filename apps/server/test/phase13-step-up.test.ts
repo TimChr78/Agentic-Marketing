@@ -1,11 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { PASSWORD, rejects, startTestServer, type User } from './harness';
+import { PASSWORD, rejects, startTestServer, testPort, type User } from './harness';
 
 // Password step-up on token widening (#61) is rate limited like sign-in: five wrong passwords in
 // the window lock the person out for a while, even if the next password is right. A correct
 // password before the limit forgets earlier typos.
 
-const PORT = 3421;
+const PORT = testPort(3421);
 
 let t: Awaited<ReturnType<typeof startTestServer>>;
 let owner: User;

@@ -1,11 +1,11 @@
 import type { BusEvent, JourneyEvent, MessageEvent } from '@agentic-marketing/events';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { rejects, startTestServer, type User } from './harness';
+import { rejects, startTestServer, testPort, type User } from './harness';
 
 // Phase 16 (#75): the read-only metric layer. Two workspaces, events written straight into the
 // same ClickHouse tables the workers use, and the same commands an agent gets over MCP.
 
-const PORT = 3474;
+const PORT = testPort(3474);
 const TZ = 'Europe/Stockholm';
 const FROM = '2026-02-28T00:00:00.000Z';
 const TO = '2026-03-06T00:00:00.000Z';

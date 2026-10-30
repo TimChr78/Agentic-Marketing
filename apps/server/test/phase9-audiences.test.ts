@@ -2,7 +2,7 @@ import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { googleEmail, metaEmail, metaPhone, sha256 } from '@agentic-marketing/ads';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { eventually, startTestServer, type User } from './harness';
+import { eventually, startTestServer, testPort, type User } from './harness';
 
 // Phase 9 (wave 2), part 2: segments synced to Meta custom audiences and Google Customer Match
 // (consent-gated, with removals and erasure), spend import with ROAS from our own attribution,
@@ -121,7 +121,7 @@ const connect = async (id: string) => {
 beforeAll(async () => {
   await new Promise<void>((r) => platforms.listen(0, '127.0.0.1', r));
   platformUrl = `http://127.0.0.1:${(platforms.address() as AddressInfo).port}`;
-  t = await startTestServer('test_p9b', 3288);
+  t = await startTestServer('test_p9b', testPort(3288));
   owner = await t.signUp(`owner-${Date.now()}@example.com`);
   await t.workspaceWith([[owner, 'owner']]);
   const api = t.api(owner);

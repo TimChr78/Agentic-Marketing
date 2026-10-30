@@ -1,6 +1,6 @@
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { PASSWORD, rejects, startTestServer, type User } from './harness';
+import { PASSWORD, rejects, startTestServer, testPort, type User } from './harness';
 
 // Editable API tokens (#44) and the approval detail the review drawer needs (#41).
 
@@ -10,7 +10,7 @@ let viewer: User;
 let ownerName: string;
 
 beforeAll(async () => {
-  t = await startTestServer('test_tokens02', 3402);
+  t = await startTestServer('test_tokens02', testPort(3402));
   owner = await t.signUp(`owner-tokens-${Date.now()}@example.com`);
   viewer = await t.signUp(`viewer-tokens-${Date.now()}@example.com`);
   ownerName = owner.email.split('@')[0];

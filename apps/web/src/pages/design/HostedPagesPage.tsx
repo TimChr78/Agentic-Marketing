@@ -19,7 +19,11 @@ export default function HostedPagesPage() {
       <PageHeader
         title="Hosted pages"
         description="The pages subscribers see on your links address after signing up and when they unsubscribe. They use the live brand, and a form can override parts of it."
-        actions={<ButtonLink to="/design/brand" variant="primary">Edit brand</ButtonLink>}
+        actions={
+          <ButtonLink to="/design/brand" variant="primary">
+            Edit brand
+          </ButtonLink>
+        }
       />
       <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_340px]">
         <Card padded>
@@ -54,21 +58,25 @@ export default function HostedPagesPage() {
             ) : (
               <>
                 <p className="text-[13px] text-fg-2">No public archive yet. Turn it on and choose an address in the brand.</p>
-                <p className="mt-2 text-[13px]"><ButtonLink to="/design/brand">Set up the archive</ButtonLink></p>
+                <p className="mt-2 text-[13px]">
+                  <ButtonLink to="/design/brand">Set up the archive</ButtonLink>
+                </p>
               </>
             )}
           </Card>
           <Card title="Where they appear" padded>
             <Meta
               items={[
-                ['Confirm', <Mono>/f/confirm/…</Mono>],
-                ['Unsubscribe', <Mono>/u/…</Mono>],
-                ['Web version', <Mono>/n/w/…</Mono>],
-                ['Archive', <Mono>{'/n/<slug>/'}</Mono>],
+                ['Confirm', <Mono key="confirm">/f/confirm/…</Mono>],
+                ['Unsubscribe', <Mono key="unsubscribe">/u/…</Mono>],
+                ['Web version', <Mono key="web">/n/w/…</Mono>],
+                ['Archive', <Mono key="archive">{'/n/<slug>/'}</Mono>],
               ]}
             />
             <ul className="mt-3 list-disc space-y-1.5 pl-4 text-[13px] text-fg-2">
-              <li>Opening a link never confirms or unsubscribes by itself; the person presses the button, so link scanners can't act for them.</li>
+              <li>
+                Opening a link never confirms or unsubscribes by itself; the person presses the button, so link scanners can't act for them.
+              </li>
               <li>Mail clients' one-click unsubscribe (RFC 8058) still works without a page.</li>
               <li>The confirmed page shows after confirming when the form has no confirmed page of its own on your site.</li>
               <li>Expired, confirmed and unsubscribe pages link back to your site.</li>

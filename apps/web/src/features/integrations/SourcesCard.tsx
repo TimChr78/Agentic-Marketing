@@ -2,7 +2,31 @@ import { KeyRound, MoreHorizontal, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import { useState } from 'react';
 import { api, errText, type Out } from '../../app/api';
 import { useApi } from '../../app/useApi';
-import { Alert, Button, Card, CodeView, Drawer, EmptyState, Field, Input, Menu, Modal, RadioCards, Select, Switch, Table, TableFrame, Tag, Td, Th, THead, Tr, Textarea, useConfirm, useToast } from '../../ui';
+import {
+  Alert,
+  Button,
+  Card,
+  CodeView,
+  Drawer,
+  EmptyState,
+  Field,
+  Input,
+  Menu,
+  Modal,
+  RadioCards,
+  Select,
+  Switch,
+  Table,
+  TableFrame,
+  Tag,
+  Td,
+  Textarea,
+  THead,
+  Th,
+  Tr,
+  useConfirm,
+  useToast,
+} from '../../ui';
 
 type Source = Out<'sources.list'>['sources'][number];
 
@@ -17,7 +41,12 @@ export function SourcesCard() {
   const browser = sources.find((s) => s.kind === 'browser' && s.enabled);
 
   const rotate = async (s: Source) => {
-    const ok = await confirm({ title: `Replace the key of “${s.name}”?`, body: 'The current key stops working at once; update the site or server that sends events.', confirmLabel: 'Replace key', destructive: true });
+    const ok = await confirm({
+      title: `Replace the key of “${s.name}”?`,
+      body: 'The current key stops working at once; update the site or server that sends events.',
+      confirmLabel: 'Replace key',
+      destructive: true,
+    });
     if (!ok) return;
     try {
       const r = await api.call('sources.rotateKey', { id: s.id });
@@ -28,7 +57,13 @@ export function SourcesCard() {
     }
   };
   const remove = async (s: Source) => {
-    const ok = await confirm({ title: `Delete “${s.name}”?`, body: 'Events sent with its key are refused from now on. Events already collected stay.', confirmLabel: 'Delete source', destructive: true, typeToConfirm: s.name });
+    const ok = await confirm({
+      title: `Delete “${s.name}”?`,
+      body: 'Events sent with its key are refused from now on. Events already collected stay.',
+      confirmLabel: 'Delete source',
+      destructive: true,
+      typeToConfirm: s.name,
+    });
     if (!ok) return;
     try {
       await api.call('sources.delete', { id: s.id });
@@ -63,7 +98,14 @@ export function SourcesCard() {
         onRetry={list.reload}
         isEmpty={!sources.length}
         empty={
-          <EmptyState title="No sources yet" action={<Button variant="primary" icon={<Plus size={15} />} onClick={() => setEditing('new')}>Add source</Button>}>
+          <EmptyState
+            title="No sources yet"
+            action={
+              <Button variant="primary" icon={<Plus size={15} />} onClick={() => setEditing('new')}>
+                Add source
+              </Button>
+            }
+          >
             Add your website to collect page views and events with the browser SDK, consent first.
           </EmptyState>
         }
@@ -106,7 +148,12 @@ export function SourcesCard() {
                       { label: 'Delete', icon: <Trash2 />, destructive: true, onSelect: () => void remove(s) },
                     ]}
                     trigger={(t) => (
-                      <button {...t} type="button" aria-label={`More actions for ${s.name}`} className="inline-flex size-7 items-center justify-center rounded-md text-fg-2 hover:bg-surface-2">
+                      <button
+                        {...t}
+                        type="button"
+                        aria-label={`More actions for ${s.name}`}
+                        className="inline-flex size-7 items-center justify-center rounded-md text-fg-2 hover:bg-surface-2"
+                      >
                         <MoreHorizontal size={16} />
                       </button>
                     )}
@@ -141,7 +188,16 @@ analytics.page();`}
         />
       )}
       {secret && (
-        <Modal open onClose={() => setSecret(null)} title={`Key for “${secret.name}”`} footer={<Button variant="primary" onClick={() => setSecret(null)}>I've stored it</Button>}>
+        <Modal
+          open
+          onClose={() => setSecret(null)}
+          title={`Key for “${secret.name}”`}
+          footer={
+            <Button variant="primary" onClick={() => setSecret(null)}>
+              I've stored it
+            </Button>
+          }
+        >
           <p className="mb-3">Store it where the events are sent from. A server key is shown only now.</p>
           <CodeView value={secret.key} />
         </Modal>
@@ -151,7 +207,15 @@ analytics.page();`}
   );
 }
 
-function SourceDrawer({ source, onClose, onSaved }: { source: Source | null; onClose: () => void; onSaved: (created?: { name: string; key: string }) => void }) {
+function SourceDrawer({
+  source,
+  onClose,
+  onSaved,
+}: {
+  source: Source | null;
+  onClose: () => void;
+  onSaved: (created?: { name: string; key: string }) => void;
+}) {
   const toast = useToast();
   const purposes = useApi(() => api.call('purposes.list', {}), []);
   const [kind, setKind] = useState<'browser' | 'server'>(source?.kind ?? 'browser');
@@ -163,14 +227,22 @@ function SourceDrawer({ source, onClose, onSaved }: { source: Source | null; onC
   const save = async () => {
     setBusy(true);
     setError(null);
-    const allowedOrigins = origins.split(/\s+/).map((o) => o.trim()).filter(Boolean);
+    const allowedOrigins = origins
+      .split(/\s+/)
+      .map((o) => o.trim())
+      .filter(Boolean);
     try {
       if (source) {
         await api.call('sources.update', { id: source.id, name, allowedOrigins, requiredPurpose: purpose || null });
         toast.success(`Saved “${name}”.`);
         onSaved();
       } else {
-        const r = await api.call('sources.create', { name, kind, allowedOrigins: kind === 'browser' ? allowedOrigins : [], requiredPurpose: purpose || null });
+        const r = await api.call('sources.create', {
+          name,
+          kind,
+          allowedOrigins: kind === 'browser' ? allowedOrigins : [],
+          requiredPurpose: purpose || null,
+        });
         toast.success(`Added “${name}”.`);
         onSaved(kind === 'server' ? { name, key: r.key } : undefined);
       }
@@ -217,7 +289,10 @@ function SourceDrawer({ source, onClose, onSaved }: { source: Source | null; onC
             <Textarea rows={3} mono value={origins} onChange={(e) => setOrigins(e.target.value)} />
           </Field>
         )}
-        <Field label="Keep events only with consent for" hint="Visitors who have not allowed this purpose send nothing that is kept. Websites usually use analytics.">
+        <Field
+          label="Keep events only with consent for"
+          hint="Visitors who have not allowed this purpose send nothing that is kept. Websites usually use analytics."
+        >
           <Select value={purpose} onChange={(e) => setPurpose(e.target.value)}>
             <option value="">No consent check</option>
             {purposes.data?.purposes.map((p) => (
@@ -227,7 +302,11 @@ function SourceDrawer({ source, onClose, onSaved }: { source: Source | null; onC
             ))}
           </Select>
         </Field>
-        {kind === 'browser' && !purpose && <Alert tone="warn">Without a consent check, website events are kept for every visitor. Most sites need consent for analytics.</Alert>}
+        {kind === 'browser' && !purpose && (
+          <Alert tone="warn">
+            Without a consent check, website events are kept for every visitor. Most sites need consent for analytics.
+          </Alert>
+        )}
         {error && <Alert tone="bad">{error}</Alert>}
       </div>
     </Drawer>

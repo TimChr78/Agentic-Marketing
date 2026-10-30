@@ -10,6 +10,7 @@ import {
   Alert,
   EmptyState,
   Field,
+  formatDateTime,
   JsonView,
   LoadingBlock,
   Mono,
@@ -20,10 +21,9 @@ import {
   TableFrame,
   Tag,
   Td,
-  Th,
   THead,
+  Th,
   Tr,
-  formatDateTime,
   timeAgo,
 } from '../../ui';
 import { pageWidth } from '../../ui/layout';
@@ -71,7 +71,15 @@ export default function AiUsagePage() {
   const byKind = useMemo(() => {
     const map = new Map<
       string,
-      { calls: number; fallbacks: number; inputTokens: number; outputTokens: number; cost: number | null; unpriced: boolean; models: Set<string> }
+      {
+        calls: number;
+        fallbacks: number;
+        inputTokens: number;
+        outputTokens: number;
+        cost: number | null;
+        unpriced: boolean;
+        models: Set<string>;
+      }
     >();
     for (const r of usage.data?.days ?? []) {
       const row = map.get(r.kind) ?? {
@@ -132,11 +140,15 @@ export default function AiUsagePage() {
             <StatCard label="AI calls" value={totals.calls.toLocaleString()} />
             <StatCard label="Input tokens" value={totals.inputTokens.toLocaleString()} />
             <StatCard label="Output tokens" value={totals.outputTokens.toLocaleString()} />
-            <StatCard label="Fallbacks and failures" value={totals.fallbacks.toLocaleString()} tone={totals.fallbacks > 0 ? 'warn' : undefined} />
+            <StatCard
+              label="Fallbacks and failures"
+              value={totals.fallbacks.toLocaleString()}
+              tone={totals.fallbacks > 0 ? 'warn' : undefined}
+            />
           </StatGrid>
           <p className="-mt-3 mb-5 text-[12px] text-muted">
-            Last {days} days. Token counts are per call as reported by the provider. Cost is an estimate from a price table in code (USD per million
-            tokens); models without a price are left out.
+            Last {days} days. Token counts are per call as reported by the provider. Cost is an estimate from a price table in code (USD per
+            million tokens); models without a price are left out.
           </p>
 
           <div className="mb-5 overflow-hidden rounded-lg border border-line bg-surface">
@@ -198,7 +210,9 @@ export default function AiUsagePage() {
             <h2 id="log-heading" className="text-[14px] font-semibold">
               Decision log
             </h2>
-            <p className="mt-0.5 text-[12px] text-muted">The latest 200 calls with their rationale, fallback reason and what the model saw.</p>
+            <p className="mt-0.5 text-[12px] text-muted">
+              The latest 200 calls with their rationale, fallback reason and what the model saw.
+            </p>
           </div>
           <Select aria-label="Filter by kind" value={kind} onChange={(e) => setKind(e.target.value as '' | Kind)} className="w-auto">
             <option value="">All kinds</option>
@@ -355,7 +369,9 @@ export default function AiUsagePage() {
                         {timeAgo(r.createdAt)}
                       </Td>
                       <Td className="max-w-[420px]">
-                        <span className="line-clamp-2">{r.rationale ?? (typeof r.output === 'string' ? r.output : JSON.stringify(r.output))}</span>
+                        <span className="line-clamp-2">
+                          {r.rationale ?? (typeof r.output === 'string' ? r.output : JSON.stringify(r.output))}
+                        </span>
                       </Td>
                     </Tr>
                   ))}

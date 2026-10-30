@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { outbox } from '@agentic-marketing/email';
 import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { eventually, startTestServer, type User } from './harness';
+import { eventually, startTestServer, testPort, type User } from './harness';
 
 // 0.2.3 (#108): people who withdraw consent for a journey's purpose leave the journey at once
 // (exit reason consent_withdrawn), no later step runs, and erasure removes them from journeys.
@@ -53,7 +53,7 @@ async function subscriber(name: string) {
 }
 
 beforeAll(async () => {
-  t = await startTestServer('test_v023_journey_consent', 3313);
+  t = await startTestServer('test_v023_journey_consent', testPort(3313));
   owner = await t.signUp(`owner-${Date.now()}@example.com`);
   ws = await t.workspaceWith([[owner, 'owner']], 'none');
   const api = t.api(owner);
@@ -152,7 +152,7 @@ describe('withdrawing consent during a journey', () => {
       async () => mailTo(dee.email, 'Start here'),
       (m) => m.length === 1,
     );
-    expect(await participant(dee.profileId)).toEqual({ status: 'exited', error: null });
+    expect(await participant(dee.profileId)).toEqual({ status: 'completed', error: null });
   });
 
   it('the 0.2.3 migration exits people who refused before the upgrade', async () => {

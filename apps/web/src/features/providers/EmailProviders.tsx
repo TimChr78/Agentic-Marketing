@@ -2,7 +2,28 @@ import { ExternalLink, KeyRound, MoreHorizontal, Pencil, Plus, RefreshCw, Trash2
 import { useState } from 'react';
 import { ApiError, api, errText, type Out } from '../../app/api';
 import { useApi } from '../../app/useApi';
-import { Alert, Button, Card, Checkbox, CodeView, Drawer, EmptyState, Field, FieldGroup, fieldErrors, Input, LoadingBlock, Menu, Modal, Select, StatusPill, Switch, Tag, useConfirm, useToast } from '../../ui';
+import {
+  Alert,
+  Button,
+  Card,
+  Checkbox,
+  CodeView,
+  Drawer,
+  EmptyState,
+  Field,
+  FieldGroup,
+  fieldErrors,
+  Input,
+  LoadingBlock,
+  Menu,
+  Modal,
+  Select,
+  StatusPill,
+  Switch,
+  Tag,
+  useConfirm,
+  useToast,
+} from '../../ui';
 import { cleanValues, defaultsOf, type JsonSchema, SchemaForm } from './SchemaForm';
 
 type List = Out<'emailProviders.list'>;
@@ -16,7 +37,13 @@ const USE_TEXT: Record<Use, { label: string; hint: string }> = {
 };
 
 export const trackingPill = (t: Adapter['tracking']) =>
-  t === 'forced' ? <StatusPill tone="warn">Tracks every message</StatusPill> : t === 'configurable' ? <StatusPill tone="neutral">Tracking configurable</StatusPill> : <StatusPill tone="neutral">No provider tracking</StatusPill>;
+  t === 'forced' ? (
+    <StatusPill tone="warn">Tracks every message</StatusPill>
+  ) : t === 'configurable' ? (
+    <StatusPill tone="neutral">Tracking configurable</StatusPill>
+  ) : (
+    <StatusPill tone="neutral">No provider tracking</StatusPill>
+  );
 
 /** E-mail providers (#40): add, edit, enable or disable, rotate the webhook URL, delete. */
 export function EmailProviders() {
@@ -33,7 +60,9 @@ export function EmailProviders() {
     setBusy(p.id);
     try {
       await api.call('emailProviders.update', { id: p.id, enabled: !p.enabled });
-      toast.success(p.enabled ? `Disabled “${p.name}”. Messages for its uses wait until another provider takes them.` : `Enabled “${p.name}”.`);
+      toast.success(
+        p.enabled ? `Disabled “${p.name}”. Messages for its uses wait until another provider takes them.` : `Enabled “${p.name}”.`,
+      );
       await list.reload();
     } catch (e) {
       toast.error(`Couldn't change “${p.name}”: ${errText(e)}`);
@@ -61,7 +90,8 @@ export function EmailProviders() {
       title: `Delete “${p.name}”?`,
       body: (
         <>
-          Its credentials are deleted and it stops sending{p.useFor.length ? ` ${p.useFor.join(' and ')} e-mail` : ''}. Messages already sent keep their history.
+          Its credentials are deleted and it stops sending{p.useFor.length ? ` ${p.useFor.join(' and ')} e-mail` : ''}. Messages already
+          sent keep their history.
           {p.useFor.length > 0 && ' Give its uses to another provider first, or those messages wait.'}
         </>
       ),
@@ -107,7 +137,14 @@ export function EmailProviders() {
             </div>
           ))}
           {!list.data!.providers.length ? (
-            <EmptyState title="No e-mail provider yet" action={<Button variant="primary" icon={<Plus size={15} />} onClick={() => setEditing('new')}>Add provider</Button>}>
+            <EmptyState
+              title="No e-mail provider yet"
+              action={
+                <Button variant="primary" icon={<Plus size={15} />} onClick={() => setEditing('new')}>
+                  Add provider
+                </Button>
+              }
+            >
               Add one to send e-mail: Postmark, Amazon SES, Brevo, Cloudflare or any SMTP relay. Until then, nothing is sent.
             </EmptyState>
           ) : (
@@ -128,13 +165,23 @@ export function EmailProviders() {
                         {p.replyTo && ` · replies to ${p.replyTo}`}
                       </p>
                       <p className="mt-0.5 text-[12px] text-muted">
-                        {p.useFor.length ? `Sends ${p.useFor.map((u) => USE_TEXT[u].label.toLowerCase()).join(' and ')} e-mail` : 'Not used for any e-mail yet: edit it to choose what it sends'}
+                        {p.useFor.length
+                          ? `Sends ${p.useFor.map((u) => USE_TEXT[u].label.toLowerCase()).join(' and ')} e-mail`
+                          : 'Not used for any e-mail yet: edit it to choose what it sends'}
                         {!p.hasCredentials && p.adapter !== 'log' && ' · no credentials stored'}
                       </p>
-                      {p.tracking === 'forced' && p.useFor.includes('marketing') && <p className="mt-1 text-[12px] text-warn">{p.trackingNote}</p>}
+                      {p.tracking === 'forced' && p.useFor.includes('marketing') && (
+                        <p className="mt-1 text-[12px] text-warn">{p.trackingNote}</p>
+                      )}
                     </div>
                     <div className="flex items-center gap-2">
-                      <Switch checked={p.enabled} disabled={busy === p.id} onChange={() => void toggle(p)} label={p.enabled ? 'Enabled' : 'Disabled'} hideLabel />
+                      <Switch
+                        checked={p.enabled}
+                        disabled={busy === p.id}
+                        onChange={() => void toggle(p)}
+                        label={p.enabled ? 'Enabled' : 'Disabled'}
+                        hideLabel
+                      />
                       <Button size="sm" icon={<Pencil size={13} />} onClick={() => setEditing(p)}>
                         Edit
                       </Button>
@@ -146,7 +193,12 @@ export function EmailProviders() {
                           { label: 'Delete', icon: <Trash2 />, destructive: true, onSelect: () => void remove(p) },
                         ]}
                         trigger={(t) => (
-                          <button {...t} type="button" aria-label={`More actions for ${p.name}`} className="inline-flex size-7 items-center justify-center rounded-md text-fg-2 hover:bg-surface-2">
+                          <button
+                            {...t}
+                            type="button"
+                            aria-label={`More actions for ${p.name}`}
+                            className="inline-flex size-7 items-center justify-center rounded-md text-fg-2 hover:bg-surface-2"
+                          >
                             <MoreHorizontal size={16} />
                           </button>
                         )}
@@ -173,8 +225,20 @@ export function EmailProviders() {
         />
       )}
       {webhook && (
-        <Modal open onClose={() => setWebhook(null)} title={`Webhook URL for “${webhook.name}”`} footer={<Button variant="primary" onClick={() => setWebhook(null)}>I've saved it</Button>}>
-          <p className="mb-3">Register this URL for delivery, bounce and complaint events in the provider's webhook settings. It is shown only now; you can replace it later.</p>
+        <Modal
+          open
+          onClose={() => setWebhook(null)}
+          title={`Webhook URL for “${webhook.name}”`}
+          footer={
+            <Button variant="primary" onClick={() => setWebhook(null)}>
+              I've saved it
+            </Button>
+          }
+        >
+          <p className="mb-3">
+            Register this URL for delivery, bounce and complaint events in the provider's webhook settings. It is shown only now; you can
+            replace it later.
+          </p>
           <CodeView value={webhook.url} />
         </Modal>
       )}
@@ -183,7 +247,19 @@ export function EmailProviders() {
   );
 }
 
-function ProviderDrawer({ provider, adapters, others, onClose, onSaved }: { provider: Provider | null; adapters: Adapter[]; others: Provider[]; onClose: () => void; onSaved: (created?: { name: string; url: string }) => void }) {
+function ProviderDrawer({
+  provider,
+  adapters,
+  others,
+  onClose,
+  onSaved,
+}: {
+  provider: Provider | null;
+  adapters: Adapter[];
+  others: Provider[];
+  onClose: () => void;
+  onSaved: (created?: { name: string; url: string }) => void;
+}) {
   const toast = useToast();
   const [adapterId, setAdapterId] = useState<string>(provider?.adapter ?? adapters.find((a) => a.id === 'postmark')?.id ?? adapters[0]!.id);
   const adapter = adapters.find((a) => a.id === adapterId)!;
@@ -192,7 +268,9 @@ function ProviderDrawer({ provider, adapters, others, onClose, onSaved }: { prov
   const [fromName, setFromName] = useState(provider?.fromName ?? '');
   const [replyTo, setReplyTo] = useState(provider?.replyTo ?? '');
   const [useFor, setUseFor] = useState<Use[]>(provider?.useFor ?? (others.length ? [] : ['transactional', 'marketing']));
-  const [config, setConfig] = useState<Record<string, unknown>>(provider ? { ...provider.config } : defaultsOf(adapter.config as JsonSchema));
+  const [config, setConfig] = useState<Record<string, unknown>>(
+    provider ? { ...provider.config } : defaultsOf(adapter.config as JsonSchema),
+  );
   const [secrets, setSecrets] = useState<Record<string, unknown>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
@@ -230,7 +308,16 @@ function ProviderDrawer({ provider, adapters, others, onClose, onSaved }: { prov
         toast.success(`Saved “${name.trim()}”.`);
         onSaved();
       } else {
-        const r = await api.call('emailProviders.create', { name: name.trim(), adapter: adapterId as never, config: cleanValues(config), secrets: secretValues, fromEmail, fromName, ...(replyTo ? { replyTo } : {}), useFor });
+        const r = await api.call('emailProviders.create', {
+          name: name.trim(),
+          adapter: adapterId as never,
+          config: cleanValues(config),
+          secrets: secretValues,
+          fromEmail,
+          fromName,
+          ...(replyTo ? { replyTo } : {}),
+          useFor,
+        });
         toast.success(`Added “${r.name}”.`);
         onSaved({ name: r.name, url: r.webhookUrl });
       }
@@ -291,25 +378,57 @@ function ProviderDrawer({ provider, adapters, others, onClose, onSaved }: { prov
             </Select>
           </Field>
         )}
-        <Alert tone={adapter.tracking === 'forced' ? 'warn' : 'info'} title={adapter.tracking === 'forced' ? `${adapter.label} tracks every message` : 'Tracking by the provider'} action={adapter.docsUrl ? <a href={adapter.docsUrl} target="_blank" rel="noreferrer" className="inline-flex shrink-0 items-center gap-1 text-[13px] font-medium text-accent hover:underline">Docs <ExternalLink size={12} aria-hidden /></a> : undefined}>
+        <Alert
+          tone={adapter.tracking === 'forced' ? 'warn' : 'info'}
+          title={adapter.tracking === 'forced' ? `${adapter.label} tracks every message` : 'Tracking by the provider'}
+          action={
+            adapter.docsUrl ? (
+              <a
+                href={adapter.docsUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex shrink-0 items-center gap-1 text-[13px] font-medium text-accent hover:underline"
+              >
+                Docs <ExternalLink size={12} aria-hidden />
+              </a>
+            ) : undefined
+          }
+        >
           {adapter.trackingNote}
         </Alert>
 
         <Field label="Name" hint="For your team, e.g. “Postmark (newsletter)”." error={err('name')} required>
-          <Input value={name} onChange={(e) => setName(e.target.value)} onBlur={() => setBlurred((b) => ({ ...b, name: true }))} maxLength={120} />
+          <Input
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            onBlur={() => setBlurred((b) => ({ ...b, name: true }))}
+            maxLength={120}
+          />
         </Field>
 
         <FieldGroup legend="Sender">
           <div className="grid gap-4 sm:grid-cols-2">
             <Field label="From address" error={err('fromEmail')} hint="Must be on a domain verified with the provider." required>
-              <Input type="email" value={fromEmail} onChange={(e) => setFromEmail(e.target.value)} onBlur={() => setBlurred((b) => ({ ...b, fromEmail: true }))} autoComplete="off" />
+              <Input
+                type="email"
+                value={fromEmail}
+                onChange={(e) => setFromEmail(e.target.value)}
+                onBlur={() => setBlurred((b) => ({ ...b, fromEmail: true }))}
+                autoComplete="off"
+              />
             </Field>
             <Field label="From name" error={err('fromName')} hint="Shown in the inbox, e.g. your newsletter's name.">
               <Input value={fromName} onChange={(e) => setFromName(e.target.value)} maxLength={120} />
             </Field>
           </div>
           <Field label="Reply-to address" error={err('replyTo')} hint="Optional. Where replies go if not to the from address.">
-            <Input type="email" value={replyTo} onChange={(e) => setReplyTo(e.target.value)} onBlur={() => setBlurred((b) => ({ ...b, replyTo: true }))} autoComplete="off" />
+            <Input
+              type="email"
+              value={replyTo}
+              onChange={(e) => setReplyTo(e.target.value)}
+              onBlur={() => setBlurred((b) => ({ ...b, replyTo: true }))}
+              autoComplete="off"
+            />
           </Field>
         </FieldGroup>
 
@@ -333,7 +452,13 @@ function ProviderDrawer({ provider, adapters, others, onClose, onSaved }: { prov
           <SchemaForm schema={adapter.config as JsonSchema} value={config} onChange={setConfig} errors={errors} prefix="config" />
         </FieldGroup>
 
-        <FieldGroup legend={<span className="inline-flex items-center gap-1.5"><KeyRound size={13} aria-hidden /> Credentials</span>}>
+        <FieldGroup
+          legend={
+            <span className="inline-flex items-center gap-1.5">
+              <KeyRound size={13} aria-hidden /> Credentials
+            </span>
+          }
+        >
           <SchemaForm
             schema={adapter.secrets as JsonSchema}
             value={secrets}
@@ -341,10 +466,16 @@ function ProviderDrawer({ provider, adapters, others, onClose, onSaved }: { prov
             errors={errors}
             prefix="secrets"
             secret
-            keepHint={provider?.hasCredentials ? 'Leave empty to keep the stored value; filling any field replaces all credentials.' : undefined}
+            keepHint={
+              provider?.hasCredentials ? 'Leave empty to keep the stored value; filling any field replaces all credentials.' : undefined
+            }
           />
         </FieldGroup>
-        {error && <Alert tone="bad" title={provider ? 'Not saved' : 'Not added'}>{error}</Alert>}
+        {error && (
+          <Alert tone="bad" title={provider ? 'Not saved' : 'Not added'}>
+            {error}
+          </Alert>
+        )}
         <button type="submit" hidden />
       </form>
     </Drawer>

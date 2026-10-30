@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
 import { ChevronRight, Loader2, Send, Trash2, Wrench } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
 import { api, errText } from '../../app/api';
 import { useWorkspace } from '../../app/session';
 import { useApi } from '../../app/useApi';
@@ -45,7 +45,11 @@ function apply(xs: Item[], e: Event, streaming: { id: string | null }): Item[] {
 let seq = 0;
 const nid = () => `m${++seq}`;
 
-const SUGGESTIONS = ['What is in this workspace?', 'Draft a win-back segment for people who have not ordered in 90 days', 'Why did the last AI decisions take their fallback?'];
+const SUGGESTIONS = [
+  'What is in this workspace?',
+  'Draft a win-back segment for people who have not ordered in 90 days',
+  'Why did the last AI decisions take their fallback?',
+];
 
 export function CopilotDrawer({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { can } = useWorkspace();
@@ -57,6 +61,7 @@ export function CopilotDrawer({ open, onClose }: { open: boolean; onClose: () =>
   const [error, setError] = useState<string | null>(null);
   const [dialog, confirm] = useConfirm();
   const end = useRef<HTMLDivElement>(null);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: scroll to the newest message whenever the list changes, which the body does not read
   useEffect(() => end.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }), [items]);
 
   const past = useApi(() => api.call('copilot.conversations', {}), [], { skip: !open });
@@ -174,7 +179,9 @@ export function CopilotDrawer({ open, onClose }: { open: boolean; onClose: () =>
         )}
         {conversations.length > 0 && (
           <details className="border-b border-line">
-            <summary className="cursor-pointer px-5 py-2 text-[12px] font-medium text-muted hover:text-fg">Earlier conversations ({conversations.length})</summary>
+            <summary className="cursor-pointer px-5 py-2 text-[12px] font-medium text-muted hover:text-fg">
+              Earlier conversations ({conversations.length})
+            </summary>
             <ul className="max-h-[220px] divide-y divide-line overflow-y-auto">
               {conversations.map((c) => (
                 <li key={c.id} className="flex items-center gap-2 px-5 py-1.5 text-[13px]">
@@ -208,12 +215,9 @@ export function CopilotDrawer({ open, onClose }: { open: boolean; onClose: () =>
           )}
           {!items.length && !error && (
             <div className="space-y-3 text-muted">
-              <EmptyState
-                compact
-                title="Ask about the workspace or give it a task"
-                icon={<Wrench size={16} />}
-              >
-                The copilot uses the same tools an external agent gets, acting for you: it can read, draft, simulate and request publishing. It cannot send, approve, erase people or change settings, and everything it does is in the audit log.
+              <EmptyState compact title="Ask about the workspace or give it a task" icon={<Wrench size={16} />}>
+                The copilot uses the same tools an external agent gets, acting for you: it can read, draft, simulate and request publishing.
+                It cannot send, approve, erase people or change settings, and everything it does is in the audit log.
               </EmptyState>
               {can('artifacts:read') ? (
                 <div className="flex flex-wrap gap-2">
@@ -234,7 +238,11 @@ export function CopilotDrawer({ open, onClose }: { open: boolean; onClose: () =>
                 <summary className="flex cursor-pointer items-center gap-2 px-3 py-1.5 text-[12px]">
                   <Wrench size={13} className="text-muted" aria-hidden />
                   <Tag>{x.name}</Tag>
-                  {x.ok === undefined ? <Loader2 size={13} className="animate-spin text-muted" aria-label="Running" /> : !x.ok && <StatusPill tone="bad">Failed</StatusPill>}
+                  {x.ok === undefined ? (
+                    <Loader2 size={13} className="animate-spin text-muted" aria-label="Running" />
+                  ) : (
+                    !x.ok && <StatusPill tone="bad">Failed</StatusPill>
+                  )}
                   <ChevronRight size={13} className="ml-auto text-muted" aria-hidden />
                 </summary>
                 <div className="space-y-2 p-2">
@@ -277,7 +285,12 @@ export function CopilotDrawer({ open, onClose }: { open: boolean; onClose: () =>
             <p className="text-[11px] text-muted" aria-live="polite">
               {tokens > 0 ? `${tokens.toLocaleString()} tokens used in this chat` : 'Enter sends, Shift+Enter starts a new line.'}
             </p>
-            <Button variant="primary" icon={<Send size={14} />} disabled={busy || !input.trim() || !can('artifacts:read')} onClick={() => void ask(input)}>
+            <Button
+              variant="primary"
+              icon={<Send size={14} />}
+              disabled={busy || !input.trim() || !can('artifacts:read')}
+              onClick={() => void ask(input)}
+            >
               Send
             </Button>
           </div>

@@ -50,8 +50,8 @@ describe('journey interpreter', () => {
       ...env,
       branch: async () => true,
     });
-    expect(converted.state).toMatchObject({ status: 'exited', converted: true, node: 'x' });
-    expect(converted.steps.map((s) => s.type)).toEqual(['resumed', 'converted', 'step', 'exited']);
+    expect(converted.state).toMatchObject({ status: 'completed', converted: true, node: 'x' });
+    expect(converted.steps.map((s) => s.type)).toEqual(['resumed', 'converted', 'step', 'completed']);
   });
 
   it('re-running the same step yields the same effect keys (idempotent sends)', async () => {

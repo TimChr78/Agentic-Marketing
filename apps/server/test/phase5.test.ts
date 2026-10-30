@@ -4,7 +4,7 @@ import type { AddressInfo } from 'node:net';
 import { verifyWebhook } from '@agentic-marketing/integrations';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { eventually, rejects, startTestServer, type User } from './harness';
+import { eventually, rejects, startTestServer, testPort, type User } from './harness';
 
 // Phase 5 acceptance: "webhooks in/out work end-to-end; n8n can orchestrate via MCP/webhooks;
 // connector SDK documented". A local receiver plays n8n, Slack and the outside world.
@@ -43,7 +43,7 @@ const send = (batch: unknown[]) =>
 beforeAll(async () => {
   await new Promise<void>((r) => receiver.listen(0, '127.0.0.1', r));
   receiverUrl = `http://127.0.0.1:${(receiver.address() as AddressInfo).port}`;
-  t = await startTestServer('test_p5', 3296);
+  t = await startTestServer('test_p5', testPort(3296));
   owner = await t.signUp(`owner-${Date.now()}@example.com`);
   await t.workspaceWith([[owner, 'owner']], 'none');
   key = (await t.api(owner).call('sources.create', { name: 'Backend', kind: 'server' })).key;

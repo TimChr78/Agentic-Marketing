@@ -1,5 +1,5 @@
-import type { ReactNode } from 'react';
 import { AlertCircle, AlertTriangle, Bot, CheckCircle2, Info, KeyRound, RefreshCw, User } from 'lucide-react';
+import type { ReactNode } from 'react';
 import { Button } from './Button';
 import { cx } from './cx';
 
@@ -23,9 +23,25 @@ const dotClass: Record<Tone, string> = {
 };
 
 /** A status: always text plus colour, never colour alone. */
-export function StatusPill({ tone = 'neutral', children, className, dot = true }: { tone?: Tone; children: ReactNode; className?: string; dot?: boolean }) {
+export function StatusPill({
+  tone = 'neutral',
+  children,
+  className,
+  dot = true,
+}: {
+  tone?: Tone;
+  children: ReactNode;
+  className?: string;
+  dot?: boolean;
+}) {
   return (
-    <span className={cx('inline-flex h-5 shrink-0 items-center gap-1.5 rounded-full px-2 text-[11px] font-medium whitespace-nowrap', toneClass[tone], className)}>
+    <span
+      className={cx(
+        'inline-flex h-5 shrink-0 items-center gap-1.5 rounded-full px-2 text-[11px] font-medium whitespace-nowrap',
+        toneClass[tone],
+        className,
+      )}
+    >
       {dot && <span className={cx('size-1.5 rounded-full', dotClass[tone])} aria-hidden />}
       {children}
     </span>
@@ -52,16 +68,30 @@ export function StatePill({ state, className }: { state: VersionState; className
 /** A neutral label for kinds and types ("E-mail template"). */
 export function Tag({ children, className, icon }: { children: ReactNode; className?: string; icon?: ReactNode }) {
   return (
-    <span className={cx('inline-flex h-5 shrink-0 items-center gap-1 rounded-sm border border-line px-1.5 text-[11px] font-medium whitespace-nowrap text-fg-2', className)}>
+    <span
+      className={cx(
+        'inline-flex h-5 shrink-0 items-center gap-1 rounded-sm border border-line px-1.5 text-[11px] font-medium whitespace-nowrap text-fg-2',
+        className,
+      )}
+    >
       {icon}
       {children}
     </span>
   );
 }
 
-export function Badge({ children, tone = 'neutral', label }: { children: ReactNode; tone?: 'neutral' | 'accent' | 'warn'; label?: string }) {
+export function Badge({
+  children,
+  tone = 'neutral',
+  label,
+}: {
+  children: ReactNode;
+  tone?: 'neutral' | 'accent' | 'warn';
+  label?: string;
+}) {
   return (
     <span
+      role="img"
       aria-label={label}
       className={cx(
         'inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full px-1.5 text-[11px] font-semibold tabular-nums',
@@ -76,11 +106,25 @@ export function Badge({ children, tone = 'neutral', label }: { children: ReactNo
 }
 
 export function Kbd({ children }: { children: ReactNode }) {
-  return <kbd className="inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-sm border border-line-strong bg-surface px-1 font-sans text-[11px] text-muted">{children}</kbd>;
+  return (
+    <kbd className="inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-sm border border-line-strong bg-surface px-1 font-sans text-[11px] text-muted">
+      {children}
+    </kbd>
+  );
 }
 
 /** Who did something: a person, an agent (OAuth client) or an API token. Identity, not status: no colour. */
-export function Actor({ kind, name, detail, className }: { kind: 'person' | 'agent' | 'token'; name: string; detail?: string; className?: string }) {
+export function Actor({
+  kind,
+  name,
+  detail,
+  className,
+}: {
+  kind: 'person' | 'agent' | 'token';
+  name: string;
+  detail?: string;
+  className?: string;
+}) {
   const Icon = kind === 'person' ? User : kind === 'token' ? KeyRound : Bot;
   return (
     <span className={cx('inline-flex min-w-0 items-center gap-1.5 text-fg-2', className)}>
@@ -99,7 +143,19 @@ export function Actor({ kind, name, detail, className }: { kind: 'person' | 'age
   );
 }
 
-export function EmptyState({ title, children, action, icon, compact }: { title: string; children?: ReactNode; action?: ReactNode; icon?: ReactNode; compact?: boolean }) {
+export function EmptyState({
+  title,
+  children,
+  action,
+  icon,
+  compact,
+}: {
+  title: string;
+  children?: ReactNode;
+  action?: ReactNode;
+  icon?: ReactNode;
+  compact?: boolean;
+}) {
   return (
     <div className={cx('flex flex-col items-center px-6 text-center', compact ? 'py-6' : 'py-12')}>
       {icon && <div className="mb-3 text-muted">{icon}</div>}
@@ -119,6 +175,7 @@ export function LoadingBlock({ lines = 4, label = 'Loading' }: { lines?: number;
   return (
     <div className="space-y-2.5 p-4" role="status" aria-label={label}>
       {Array.from({ length: lines }, (_, i) => (
+        // biome-ignore lint/suspicious/noArrayIndexKey: loading placeholders are generated, never reordered, and have no identity
         <Skeleton key={i} className={i % 3 === 2 ? 'w-2/5' : i % 2 ? 'w-4/5' : 'w-3/5'} />
       ))}
     </div>
@@ -153,7 +210,17 @@ export function Alert({
         className,
       )}
     >
-      <Icon size={16} className={cx('mt-0.5 shrink-0', tone === 'info' && 'text-accent', tone === 'warn' && 'text-warn', tone === 'bad' && 'text-bad', tone === 'good' && 'text-good')} aria-hidden />
+      <Icon
+        size={16}
+        className={cx(
+          'mt-0.5 shrink-0',
+          tone === 'info' && 'text-accent',
+          tone === 'warn' && 'text-warn',
+          tone === 'bad' && 'text-bad',
+          tone === 'good' && 'text-good',
+        )}
+        aria-hidden
+      />
       <div className="min-w-0 flex-1 break-words text-fg">
         {title && <p className="font-medium">{title}</p>}
         {children && <div className={cx(!!title && 'mt-0.5', 'text-fg-2')}>{children}</div>}
@@ -168,9 +235,25 @@ export function Alert({
   );
 }
 
-export function Card({ children, className, title, description, action, padded }: { children: ReactNode; className?: string; title?: ReactNode; description?: ReactNode; action?: ReactNode; padded?: boolean }) {
+export function Card({
+  children,
+  className,
+  title,
+  description,
+  action,
+  padded,
+}: {
+  children: ReactNode;
+  className?: string;
+  title?: ReactNode;
+  description?: ReactNode;
+  action?: ReactNode;
+  padded?: boolean;
+}) {
   return (
-    <section className={cx('min-w-0 rounded-lg border border-line bg-surface [&>.am-frame]:rounded-t-none [&>.am-frame]:border-0', className)}>
+    <section
+      className={cx('min-w-0 rounded-lg border border-line bg-surface [&>.am-frame]:rounded-t-none [&>.am-frame]:border-0', className)}
+    >
       {(title || action) && (
         <header className="flex items-start justify-between gap-3 border-b border-line px-4 py-3">
           <div className="min-w-0">
@@ -186,7 +269,17 @@ export function Card({ children, className, title, description, action, padded }
 }
 
 /** Page header: title, one-line description, primary action top right (DESIGN.md → Layout). */
-export function PageHeader({ title, description, actions, meta }: { title: ReactNode; description?: ReactNode; actions?: ReactNode; meta?: ReactNode }) {
+export function PageHeader({
+  title,
+  description,
+  actions,
+  meta,
+}: {
+  title: ReactNode;
+  description?: ReactNode;
+  actions?: ReactNode;
+  meta?: ReactNode;
+}) {
   return (
     <div className="mb-5 flex flex-wrap items-start justify-between gap-x-4 gap-y-3">
       <div className="min-w-0">
@@ -204,6 +297,7 @@ export function Meta({ items, className }: { items: [ReactNode, ReactNode][]; cl
   return (
     <dl className={cx('grid grid-cols-[minmax(96px,max-content)_minmax(0,1fr)] gap-x-4 gap-y-1.5 text-[13px]', className)}>
       {items.map(([k, v], i) => (
+        // biome-ignore lint/suspicious/noArrayIndexKey: Meta items are a fixed label/value list; rows have no identity and never reorder
         <div key={i} className="contents">
           <dt className="text-muted">{k}</dt>
           <dd className="min-w-0 break-words text-fg">{v}</dd>

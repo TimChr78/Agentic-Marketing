@@ -13,7 +13,10 @@ export default function IntegrationsPage({ params }: { params: Record<string, st
   const { can } = useSession();
   return (
     <div className={pageWidth('default', 'space-y-5')}>
-      <PageHeader title="Integrations and API tokens" description="How agents, scripts and other tools reach this workspace, and what they may do." />
+      <PageHeader
+        title="Integrations and API tokens"
+        description="How agents, scripts and other tools reach this workspace, and what they may do."
+      />
       <TokensCard openId={params.id} />
       <ConnectAgentCard />
       {can('workspace:admin') && <SourcesCard />}

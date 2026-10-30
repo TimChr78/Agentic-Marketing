@@ -1,6 +1,6 @@
 import { releaseTokens, reserveTokens } from '@agentic-marketing/ai';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { eventually, rejects, startTestServer, type User } from './harness';
+import { eventually, rejects, startTestServer, testPort, type User } from './harness';
 
 // Phase 10 (wave 2), part a: correctness under concurrency and change. AI budgets hold with
 // parallel calls, e-mail adapters go through the egress guard, a merge wakes waiting journey
@@ -25,7 +25,7 @@ async function publish(type: string, name: string, content: unknown) {
 }
 
 beforeAll(async () => {
-  t = await startTestServer('test_p10', 3287);
+  t = await startTestServer('test_p10', testPort(3287));
   owner = await t.signUp(`owner-${Date.now()}@example.com`);
   ws = await t.workspaceWith([[owner, 'owner']]);
   key = (await t.api(owner).call('sources.create', { name: 'Backend', kind: 'server' })).key;

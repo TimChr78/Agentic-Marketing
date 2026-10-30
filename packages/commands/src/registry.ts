@@ -210,39 +210,42 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
 
       const committed: (() => Promise<void>)[] = [];
       try {
-        const result = await db.withWorkspace(
-          principal.workspaceId,
-          async (tx) => {
-            if (opts.idempotencyKey) {
-              const [hit] = await tx
-                .select()
-                .from(schema.idempotencyKeys)
-                .where(
-                  and(eq(schema.idempotencyKeys.workspaceId, principal.workspaceId), eq(schema.idempotencyKeys.key, opts.idempotencyKey)),
-                );
-              if (hit) {
-                if (hit.command !== cmd.name || hit.inputHash !== inputHash)
-                  throw new AppError('conflict', 'This idempotency key was already used for a different request. Use a new key.');
-                return hit.response as z.output<C['output']>;
+        const result = await retrySnapshotConflicts(cmd.effect === 'read', () =>
+          db.withWorkspace(
+            principal.workspaceId,
+            async (tx) => {
+              committed.length = 0;
+              if (opts.idempotencyKey) {
+                const [hit] = await tx
+                  .select()
+                  .from(schema.idempotencyKeys)
+                  .where(
+                    and(eq(schema.idempotencyKeys.workspaceId, principal.workspaceId), eq(schema.idempotencyKeys.key, opts.idempotencyKey)),
+                  );
+                if (hit) {
+                  if (hit.command !== cmd.name || hit.inputHash !== inputHash)
+                    throw new AppError('conflict', 'This idempotency key was already used for a different request. Use a new key.');
+                  return hit.response as z.output<C['output']>;
+                }
               }
-            }
-            const out = withInputWarnings(
-              cmd.output.parse(await cmd.handler(parsed.data, { principal, tx, services, afterCommit: (fn) => committed.push(fn) })),
-              unknownMessages,
-            ) as z.output<C['output']>;
-            if (opts.idempotencyKey)
-              await tx.insert(schema.idempotencyKeys).values({
-                workspaceId: principal.workspaceId,
-                key: opts.idempotencyKey,
-                command: cmd.name,
-                inputHash,
-                response: redact(out, cmd.sensitiveOutput) as object,
-              });
-            if (cmd.effect !== 'read') await appendAudit(tx, principal, opts.surface, cmd, inputHash, target);
-            return out;
-          },
-          // Reads see one consistent snapshot; writes keep read-committed so their locks see the latest rows.
-          { snapshot: cmd.effect === 'read' },
+              const out = withInputWarnings(
+                cmd.output.parse(await cmd.handler(parsed.data, { principal, tx, services, afterCommit: (fn) => committed.push(fn) })),
+                unknownMessages,
+              ) as z.output<C['output']>;
+              if (opts.idempotencyKey)
+                await tx.insert(schema.idempotencyKeys).values({
+                  workspaceId: principal.workspaceId,
+                  key: opts.idempotencyKey,
+                  command: cmd.name,
+                  inputHash,
+                  response: redact(out, cmd.sensitiveOutput) as object,
+                });
+              if (cmd.effect !== 'read') await appendAudit(tx, principal, opts.surface, cmd, inputHash, target);
+              return out;
+            },
+            // Reads see one consistent snapshot; writes keep read-committed so their locks see the latest rows.
+            { snapshot: cmd.effect === 'read' },
+          ),
         );
         // An audited read is recorded in its own transaction: the hash chain must be appended under
         // its lock with the latest entries visible, which a snapshot taken earlier would not show.
@@ -265,3 +268,26 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
 }
 
 export type Executor = ReturnType<typeof createExecutor>;
+
+/**
+ * A read runs in a repeatable-read snapshot. The few writes a read can make (a workspace's data
+ * key, created on first use) fail with a serialization error when another transaction wrote the
+ * same row after the snapshot began, and the snapshot cannot see the winner. Run the read again
+ * in a fresh snapshot, which does: twice at most.
+ */
+async function retrySnapshotConflicts<T>(isRead: boolean, run: () => Promise<T>): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await run();
+    } catch (err) {
+      if (!isRead || attempt >= 2 || !isSerializationFailure(err)) throw err;
+    }
+  }
+}
+
+/** Postgres SQLSTATE 40001, directly or as the cause of a Drizzle query error. */
+export function isSerializationFailure(err: unknown): boolean {
+  for (let e = err as { code?: unknown; cause?: unknown } | undefined, depth = 0; e && depth < 5; e = e.cause as typeof e, depth++)
+    if (e.code === '40001') return true;
+  return false;
+}

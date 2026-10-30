@@ -19,14 +19,30 @@ describe('ui components', () => {
     );
     const input = screen.getByLabelText('From address');
     expect(input.getAttribute('aria-invalid')).toBe('true');
-    const described = input.getAttribute('aria-describedby')!.split(' ').map((id) => document.getElementById(id)?.textContent);
+    const described = input
+      .getAttribute('aria-describedby')!
+      .split(' ')
+      .map((id) => document.getElementById(id)?.textContent);
     expect(described).toEqual(['Enter an address.', 'On a verified domain.']);
   });
 
   it('Tabs move with the arrow keys (WAI-ARIA)', async () => {
     function T() {
       const [v, setV] = useState<'a' | 'b' | 'c'>('a');
-      return <Tabs label="T" value={v} onChange={setV} items={[{ key: 'a', label: 'A' }, { key: 'b', label: 'B' }, { key: 'c', label: 'C' }]}>{v}</Tabs>;
+      return (
+        <Tabs
+          label="T"
+          value={v}
+          onChange={setV}
+          items={[
+            { key: 'a', label: 'A' },
+            { key: 'b', label: 'B' },
+            { key: 'c', label: 'C' },
+          ]}
+        >
+          {v}
+        </Tabs>
+      );
     }
     render(<T />);
     screen.getByRole('tab', { name: 'A' }).focus();
@@ -44,7 +60,12 @@ describe('ui components', () => {
       const [dialog, ask] = useConfirm();
       return (
         <>
-          <button type="button" onClick={async () => (answer = await ask({ title: 'Delete “Hermes”?', confirmLabel: 'Revoke token', destructive: true, typeToConfirm: 'Hermes' }))}>
+          <button
+            type="button"
+            onClick={async () =>
+              (answer = await ask({ title: 'Delete “Hermes”?', confirmLabel: 'Revoke token', destructive: true, typeToConfirm: 'Hermes' }))
+            }
+          >
             open
           </button>
           {dialog}
@@ -67,7 +88,9 @@ describe('ui components', () => {
       const [dialog, ask] = useConfirm();
       return (
         <>
-          <button type="button" onClick={async () => (answer = await ask({ title: 'Delete?', confirmLabel: 'Delete' }))}>open</button>
+          <button type="button" onClick={async () => (answer = await ask({ title: 'Delete?', confirmLabel: 'Delete' }))}>
+            open
+          </button>
           {dialog}
         </>
       );
@@ -84,7 +107,11 @@ describe('ui components', () => {
     render(
       <Menu
         label="More"
-        items={[{ label: 'Edit', onSelect: () => picked.push('edit') }, 'separator', { label: 'Delete', destructive: true, onSelect: () => picked.push('delete') }]}
+        items={[
+          { label: 'Edit', onSelect: () => picked.push('edit') },
+          'separator',
+          { label: 'Delete', destructive: true, onSelect: () => picked.push('delete') },
+        ]}
         trigger={(p) => (
           <button type="button" {...p}>
             More
@@ -101,7 +128,16 @@ describe('ui components', () => {
   });
 
   it('DiffView labels changes in words, not colour alone', () => {
-    render(<DiffView from={1} to={2} changes={[{ path: 'subject', kind: 'changed', before: 'Old', after: 'New' }, { path: 'preheader', kind: 'added', after: 'Hi' }]} />);
+    render(
+      <DiffView
+        from={1}
+        to={2}
+        changes={[
+          { path: 'subject', kind: 'changed', before: 'Old', after: 'New' },
+          { path: 'preheader', kind: 'added', after: 'Hi' },
+        ]}
+      />,
+    );
     expect(screen.getByText('Changed')).toBeTruthy();
     expect(screen.getByText('Added')).toBeTruthy();
     expect(screen.getByText(/v1 \(live\) → v2/)).toBeTruthy();

@@ -20,7 +20,9 @@ flowchart LR
 - `app` image runs migrations on start (guarded by advisory lock), serves UI, API, MCP, ingest, decide, workers, scheduler.
 - Config via env file; `cli` for admin tasks (create owner, rotate keys, backup hooks).
 
-### "Scaled" (Kubernetes / Helm, later)
+### "Scaled" (Kubernetes / Helm)
+
+The Helm chart in [`deploy/helm/agentic-marketing`](../../deploy/helm/agentic-marketing) deploys this topology and is the reference in [kubernetes.md](../deployment/kubernetes.md).
 
 ```mermaid
 flowchart LR

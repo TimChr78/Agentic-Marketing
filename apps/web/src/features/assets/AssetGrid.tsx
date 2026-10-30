@@ -38,8 +38,16 @@ export function AssetGrid({ assets, onOpen, selectedId }: { assets: Asset[]; onO
               <span className="flex flex-wrap items-center gap-1.5 text-[11px] text-muted">
                 {a.width && a.height ? `${a.width}×${a.height} · ` : ''}
                 {formatBytes(a.byteSize)}
-                {a.usageCount > 0 ? <StatusPill tone="neutral" dot={false}>Used in {a.usageCount}</StatusPill> : null}
-                {a.kind === 'image' && !a.altText && <StatusPill tone="warn" dot={false}>No alt text</StatusPill>}
+                {a.usageCount > 0 ? (
+                  <StatusPill tone="neutral" dot={false}>
+                    Used in {a.usageCount}
+                  </StatusPill>
+                ) : null}
+                {a.kind === 'image' && !a.altText && (
+                  <StatusPill tone="warn" dot={false}>
+                    No alt text
+                  </StatusPill>
+                )}
               </span>
             </span>
           </button>

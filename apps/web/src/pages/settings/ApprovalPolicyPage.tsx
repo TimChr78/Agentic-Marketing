@@ -80,7 +80,12 @@ export default function ApprovalPolicyPage() {
         <Card title="Current policy" padded>
           <Meta
             items={[
-              ['Policy', <StatusPill tone="info">{info.label}</StatusPill>],
+              [
+                'Policy',
+                <StatusPill key="policy" tone="info">
+                  {info.label}
+                </StatusPill>,
+              ],
               ['What happens', info.aftermath],
               ['Agents', info.agent],
             ]}

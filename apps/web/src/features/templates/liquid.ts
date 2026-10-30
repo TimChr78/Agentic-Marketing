@@ -2,8 +2,16 @@
 // tags; normalise on the way in and out (spike 2), and compare Liquid tokens to catch losses.
 export const expandSelfClosing = (m: string) => m.replace(/<(mj-[\w-]+)((?:\s[^>]*?)?)\s*\/>/g, '<$1$2></$1>');
 export const unescapeLiquid = (m: string) =>
-  m.replace(/\{\{[\s\S]*?\}\}|\{%[\s\S]*?%\}/g, (t) => t.replace(/&gt;/g, '>').replace(/&lt;/g, '<').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&'));
-export const liquidTokens = (s: string) => (s.match(/\{\{[\s\S]*?\}\}|\{%[\s\S]*?%\}/g) ?? []).map((t) => t.replace(/\s+/g, ' ').trim()).sort();
+  m.replace(/\{\{[\s\S]*?\}\}|\{%[\s\S]*?%\}/g, (t) =>
+    t
+      .replace(/&gt;/g, '>')
+      .replace(/&lt;/g, '<')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/&amp;/g, '&'),
+  );
+export const liquidTokens = (s: string) =>
+  (s.match(/\{\{[\s\S]*?\}\}|\{%[\s\S]*?%\}/g) ?? []).map((t) => t.replace(/\s+/g, ' ').trim()).sort();
 export function lostLiquid(before: string, after: string): string[] {
   const now = liquidTokens(after);
   const rest = [...now];

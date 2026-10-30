@@ -1,7 +1,19 @@
 {
   "$schema": "https://biomejs.dev/schemas/2.5.15/schema.json",
   "files": {
-    "includes": ["packages/**", "apps/server/**", "!**/node_modules", "!**/dist", "!**/*.sql"]
+    "includes": [
+      "packages/**",
+      "apps/**",
+      "e2e/**",
+      "scripts/**",
+      "*.ts",
+      "*.mts",
+      "!**/node_modules",
+      "!**/dist",
+      "!**/*.sql",
+      "!test-results",
+      "!playwright-report"
+    ]
   },
   "formatter": {
     "enabled": true,
@@ -14,10 +26,15 @@
       "quoteStyle": "single"
     }
   },
+  "css": {
+    "parser": {
+      "tailwindDirectives": true
+    }
+  },
   "linter": {
     "enabled": true,
     "rules": {
-      "recommended": true,
+      "preset": "recommended",
       "suspicious": {
         "noExplicitAny": "warn"
       },

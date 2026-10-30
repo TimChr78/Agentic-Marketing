@@ -25,25 +25,76 @@ const winbackMjml = `<mjml>
 async function winback(s: Sink) {
   s.say('I will size the audience first, then build the journey as a draft. Nothing is sent until it is published.');
   await pause(500);
-  const est = (await s.tool('segments.estimate', { definition: 'customer AND no order_completed within 60d' })) as { estimatedSize: number };
-  await s.tool('segments.create', { name: 'Win-back audience', definition: 'customer AND no order_completed within 60d AND marketing_email allowed', realtime: true });
+  const est = (await s.tool('segments.estimate', { definition: 'customer AND no order_completed within 60d' })) as {
+    estimatedSize: number;
+  };
+  await s.tool('segments.create', {
+    name: 'Win-back audience',
+    definition: 'customer AND no order_completed within 60d AND marketing_email allowed',
+    realtime: true,
+  });
   await s.tool('templates.list', {});
   s.say('There is no win-back template yet, so I am creating one with an AI-filled opening paragraph and a safe default.');
   await pause(400);
-  await s.tool('templates.create', { name: 'Win back', subject: 'We kept your spot on the trail, {{ profile.first_name }}', mjml: winbackMjml });
+  await s.tool('templates.create', {
+    name: 'Win back',
+    subject: 'We kept your spot on the trail, {{ profile.first_name }}',
+    mjml: winbackMjml,
+  });
   await s.tool('journeys.createDraft', {
     name: 'Win-back 60 days',
     purpose: 'marketing_email',
     goal: 'Order within 14 days',
     nodes: [
-      { id: 'n1', kind: 'trigger', label: 'Entered “Win-back audience”', config: { event: 'segment.entered', segment: 'seg_win_back_audience', reentry: 'every 180 days' } },
+      {
+        id: 'n1',
+        kind: 'trigger',
+        label: 'Entered “Win-back audience”',
+        config: { event: 'segment.entered', segment: 'seg_win_back_audience', reentry: 'every 180 days' },
+      },
       { id: 'n2', kind: 'aiGenerate', label: 'AI: personalise opener', config: { slot: 'intro', prompt: 'prm_winback@1', maxChars: 240 } },
       { id: 'n3', kind: 'email', label: 'We miss you', config: { template: 'tpl_win_back', purpose: 'marketing_email' } },
-      { id: 'n4', kind: 'waitEvent', label: 'Clicked within 4 days?', config: { event: 'email_clicked', timeout: 'P4D' }, next: [{ to: 'n5', label: 'clicked' }, { to: 'n6', label: 'timeout' }] },
-      { id: 'n5', kind: 'updateProfile', label: 'Tag as re-engaged', config: { trait: 'lifecycle_stage', value: 're_engaged' }, next: [{ to: 'n9' }] },
-      { id: 'n6', kind: 'split', label: 'A/B: comeback offer', config: { a: 50, b: 50, holdout: 10 }, next: [{ to: 'n7', label: 'A' }, { to: 'n8', label: 'B' }] },
-      { id: 'n7', kind: 'email', label: '15% comeback code', config: { template: 'tpl_win_back', variant: 'A', purpose: 'marketing_email' }, next: [{ to: 'n9' }] },
-      { id: 'n8', kind: 'email', label: 'Free gear check-up', config: { template: 'tpl_win_back', variant: 'B', purpose: 'marketing_email' }, next: [{ to: 'n9' }] },
+      {
+        id: 'n4',
+        kind: 'waitEvent',
+        label: 'Clicked within 4 days?',
+        config: { event: 'email_clicked', timeout: 'P4D' },
+        next: [
+          { to: 'n5', label: 'clicked' },
+          { to: 'n6', label: 'timeout' },
+        ],
+      },
+      {
+        id: 'n5',
+        kind: 'updateProfile',
+        label: 'Tag as re-engaged',
+        config: { trait: 'lifecycle_stage', value: 're_engaged' },
+        next: [{ to: 'n9' }],
+      },
+      {
+        id: 'n6',
+        kind: 'split',
+        label: 'A/B: comeback offer',
+        config: { a: 50, b: 50, holdout: 10 },
+        next: [
+          { to: 'n7', label: 'A' },
+          { to: 'n8', label: 'B' },
+        ],
+      },
+      {
+        id: 'n7',
+        kind: 'email',
+        label: '15% comeback code',
+        config: { template: 'tpl_win_back', variant: 'A', purpose: 'marketing_email' },
+        next: [{ to: 'n9' }],
+      },
+      {
+        id: 'n8',
+        kind: 'email',
+        label: 'Free gear check-up',
+        config: { template: 'tpl_win_back', variant: 'B', purpose: 'marketing_email' },
+        next: [{ to: 'n9' }],
+      },
       { id: 'n9', kind: 'goal', label: 'Order within 14 days', config: { event: 'order_completed', within: 'P14D' } },
     ],
   });
@@ -77,7 +128,14 @@ async function explain(s: Sink) {
 }
 
 async function performance(s: Sink) {
-  const p = (await s.tool('analytics.emailPerformance', { days: 7 })) as { sent: number; clickRate: number; unsubscribeRate: number; conversions: number; revenueDkk: number; bestDay: string };
+  const p = (await s.tool('analytics.emailPerformance', { days: 7 })) as {
+    sent: number;
+    clickRate: number;
+    unsubscribeRate: number;
+    conversions: number;
+    revenueDkk: number;
+    bestDay: string;
+  };
   const f = (await s.tool('analytics.journeyFunnel', { journeyId: 'jrn_cart' })) as { conversion: number; holdoutUplift: number };
   s.say(
     `Last 7 days: ${p.sent.toLocaleString('en')} e-mails, ${p.clickRate}% click rate, ${p.unsubscribeRate}% unsubscribes, ${p.conversions} attributed orders worth ${p.revenueDkk.toLocaleString('da-DK')} kr. Best day was ${p.bestDay}. Abandoned cart converts ${f.conversion}% with +${f.holdoutUplift} pts over the holdout, so it is your most incremental journey. Welcome clicks are slipping; I already proposed a fix as Welcome series v4.`,

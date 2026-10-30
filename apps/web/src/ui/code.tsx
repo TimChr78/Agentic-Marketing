@@ -19,14 +19,31 @@ export function CopyButton({ value, label = 'Copy' }: { value: string; label?: s
 }
 
 /** Read-only code or JSON (DESIGN.md → Code view): mono, scrollable, with a copy button. */
-export function CodeView({ value, label, maxHeight = 360, className }: { value: string; label?: string; maxHeight?: number; className?: string }) {
+export function CodeView({
+  value,
+  label,
+  maxHeight = 360,
+  className,
+}: {
+  value: string;
+  label?: string;
+  maxHeight?: number;
+  className?: string;
+}) {
   return (
     <div className={cx('relative min-w-0 rounded-md border border-line bg-surface-2', className)}>
       {label && <div className="border-b border-line px-3 py-1.5 text-[12px] font-medium text-muted">{label}</div>}
       <div className="absolute top-1 right-1">
         <CopyButton value={value} />
       </div>
-      <pre tabIndex={0} aria-label={label ?? 'Code'} className="overflow-auto px-3 py-2 pr-10 font-mono text-[12px] leading-[18px] whitespace-pre text-fg" style={{ maxHeight }}>
+      {/* biome-ignore lint/a11y/useAriaPropsSupportedByRole: pre has no role that accepts a name; the label names a scrollable code block */}
+      <pre
+        // biome-ignore lint/a11y/noNoninteractiveTabindex: a scrollable code block must be reachable with the keyboard to scroll it
+        tabIndex={0}
+        aria-label={label ?? 'Code'}
+        className="overflow-auto px-3 py-2 pr-10 font-mono text-[12px] leading-[18px] whitespace-pre text-fg"
+        style={{ maxHeight }}
+      >
         {value}
       </pre>
     </div>

@@ -1,10 +1,10 @@
-import { useMemo, useState } from 'react';
 import { Plus, RefreshCw, Trash2, Upload } from 'lucide-react';
+import { useMemo, useState } from 'react';
 import { api, errText, type Out } from '../../app/api';
 import { useSession } from '../../app/session';
 import { useApi } from '../../app/useApi';
-import { Alert, Button, Field, Modal, Select, Table, TableFrame, Td, Th, THead, Tr, timeAgo, useToast } from '../../ui';
 import { parseCsv } from '../../lib/csvImport';
+import { Alert, Button, Field, Modal, Select, Table, TableFrame, Td, THead, Th, Tr, timeAgo, useToast } from '../../ui';
 
 // A static or snapshot audience's member list (#83). Membership is data, not an artifact version:
 // adding, importing and removing take effect at once, and sends still check consent and suppression.
@@ -55,8 +55,8 @@ export function ListAudiencePanel({ artifactId, content }: { artifactId: string;
   return (
     <div className="space-y-5">
       <Alert tone="info">
-        Membership is not consent. Sends to this audience still skip people who have not consented to the purpose, who are
-        suppressed, or whom the delivery policy excludes.
+        Membership is not consent. Sends to this audience still skip people who have not consented to the purpose, who are suppressed, or
+        whom the delivery policy excludes.
       </Alert>
 
       {content.mode === 'snapshot' && (
@@ -66,12 +66,17 @@ export function ListAudiencePanel({ artifactId, content }: { artifactId: string;
             <p className="text-[12px] text-muted">
               Copied from {content.sourceSegment ?? 'a segment'}
               {content.snapshotVersion ? ` at v${content.snapshotVersion}` : ''}
-              {content.snapshotAt ? ` on ${new Date(content.snapshotAt).toLocaleString()}` : ''}. It stays fixed until it is
-              refreshed.
+              {content.snapshotAt ? ` on ${new Date(content.snapshotAt).toLocaleString()}` : ''}. It stays fixed until it is refreshed.
             </p>
           </div>
           {mayWrite && (
-            <Button size="sm" variant="secondary" icon={<RefreshCw size={14} />} loading={busy === 'snapshot'} onClick={() => void refreshSnapshot()}>
+            <Button
+              size="sm"
+              variant="secondary"
+              icon={<RefreshCw size={14} />}
+              loading={busy === 'snapshot'}
+              onClick={() => void refreshSnapshot()}
+            >
               Refresh from source
             </Button>
           )}
@@ -277,6 +282,7 @@ function AddPeopleDialog({ artifactId, onClose, onDone }: { artifactId: string; 
         {unmatched.length > 0 && (
           <ul className="max-h-40 overflow-auto rounded-md border border-line p-2 text-[12px]">
             {unmatched.map((u, i) => (
+              // biome-ignore lint/suspicious/noArrayIndexKey: unmatched entries are a read-only result list where the same value can repeat
               <li key={`${u.value}-${i}`}>
                 {u.value} — {u.reason.replace('_', ' ')}
               </li>
@@ -361,9 +367,16 @@ function ImportDialog({ artifactId, onClose, onDone }: { artifactId: string; onC
         {headers.length > 0 && (
           <div className="grid gap-3 sm:grid-cols-2">
             <Field label="Column with the identifier">
-              <Select value={column} onChange={(e) => { setColumn(e.target.value); setPreview(null); }}>
+              <Select
+                value={column}
+                onChange={(e) => {
+                  setColumn(e.target.value);
+                  setPreview(null);
+                }}
+              >
                 <option value="">Choose a column…</option>
                 {headers.map((h, i) => (
+                  // biome-ignore lint/suspicious/noArrayIndexKey: CSV headers can repeat and are identified by their column position
                   <option key={`${h}-${i}`} value={h}>
                     {h || `Column ${i + 1}`}
                   </option>
@@ -371,7 +384,13 @@ function ImportDialog({ artifactId, onClose, onDone }: { artifactId: string; onC
               </Select>
             </Field>
             <Field label="Identify people by">
-              <Select value={idType} onChange={(e) => { setIdType(e.target.value as typeof idType); setPreview(null); }}>
+              <Select
+                value={idType}
+                onChange={(e) => {
+                  setIdType(e.target.value as typeof idType);
+                  setPreview(null);
+                }}
+              >
                 <option value="email">E-mail address</option>
                 <option value="user_id">User id</option>
                 <option value="profile_id">Profile id</option>
@@ -385,9 +404,8 @@ function ImportDialog({ artifactId, onClose, onDone }: { artifactId: string; onC
         {preview && (
           <div className="space-y-3 rounded-md border border-line p-3">
             <p className="text-[13px]">
-              <strong>{preview.rows}</strong> rows: <strong>{preview.matched}</strong> matched,{' '}
-              <strong>{preview.added}</strong> would be added, <strong>{preview.existing}</strong> already on the list,{' '}
-              <strong>{preview.unmatched.length}</strong> unmatched.
+              <strong>{preview.rows}</strong> rows: <strong>{preview.matched}</strong> matched, <strong>{preview.added}</strong> would be
+              added, <strong>{preview.existing}</strong> already on the list, <strong>{preview.unmatched.length}</strong> unmatched.
             </p>
             <PreviewRows parsed={parsed} column={column} unmatched={preview.unmatched} />
             {preview.unmatched.length > 0 && (
@@ -410,15 +428,7 @@ function ImportDialog({ artifactId, onClose, onDone }: { artifactId: string; onC
 }
 
 /** The first few rows with their match outcome, so the mapping can be checked before applying. */
-function PreviewRows({
-  parsed,
-  column,
-  unmatched,
-}: {
-  parsed: string[][];
-  column: string;
-  unmatched: Unmatched[];
-}) {
+function PreviewRows({ parsed, column, unmatched }: { parsed: string[][]; column: string; unmatched: Unmatched[] }) {
   const index = parsed[0]?.findIndex((h) => h.trim().toLowerCase() === column.trim().toLowerCase()) ?? -1;
   if (index < 0) return null;
   const reasons = new Map(unmatched.map((u) => [u.row, u.reason]));
@@ -435,6 +445,7 @@ function PreviewRows({
         {parsed.slice(1, 6).map((row, i) => {
           const reason = reasons.get(i + 2);
           return (
+            // biome-ignore lint/suspicious/noArrayIndexKey: preview rows are the first five file lines; their position is the line number
             <tr key={i}>
               <td className="py-1">{i + 2}</td>
               <td className="py-1 font-mono">{row[index] ?? ''}</td>

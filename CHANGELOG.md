@@ -2,6 +2,40 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+A hygiene release ([#179](https://github.com/TimChr78/Agentic-Marketing/issues/179)): bug fixes, a faster and stricter build, releases gated on CI, and documentation that matches what ships. No new features. REST and MCP stay backwards compatible. One Postgres migration runs at start-up.
+
+### Fixed
+
+- **Journeys: finishing at an Exit step counts as completed (#169).** It was stored as `exited`, like leaving early, so `journeys.stats` and the builder showed 0 completed for any journey that ends in an Exit step. `exited` now means leaving early (consent withdrawn, dropped in a version migration), which always records a reason. Migration `0044` relabels people who finished at an Exit step before this release; their past journey events in ClickHouse keep the old type, so `journey.completed` and `journey.exited` in the metric layer count them under `exited` for dates before the upgrade.
+- **Reads no longer fail when they race to create a data key.** A read such as `profiles.find` on a workspace whose matching key did not exist yet could return a 500 ("could not serialize access") when another request created the key at the same moment; the read now runs again in a fresh snapshot.
+- **Metric layer: "the last four issues" really are the latest.** A `broadcast` breakdown without an explicit `order` was meant to list the newest issue first but sorted by broadcast id, so `limit: 4` could return older issues; a `journey_step` breakdown now follows journey order instead of node id. The metric catalogue also lists `campaign` as a source for the day, week and month breakdowns it supports.
+- **Alerts:** a malformed window (e.g. `PT25H30M`) returns a field-level validation error naming the problem instead of a bare one, and the same members in a different order are recognised as one e-mail channel.
+- **Security headers (#178).** Every response now has `X-Content-Type-Options: nosniff`, a referrer policy, `X-Frame-Options: DENY` (and `frame-ancestors 'none'` on the admin UI, so approvals cannot be clickjacked) and a `Permissions-Policy`; HSTS when `PUBLIC_URL` is HTTPS. Hosted pages, the archive and assets keep their stricter policies.
+- **Dependencies (#177).** nodemailer 10.3.1 (address-parser advisories); happy-dom 21 in test tooling. The two mjml 4 advisories without a patched 4.x are unreachable with our compile options; tests guard that, and `SECURITY.md` lists them.
+- **Admin UI:** list items that had no React key or an index key that could reuse the wrong row's state on removal or reordering (approval diffs, token history, breadcrumbs, consent ledger, draft warnings, preview metadata); ARIA fixes in the search palette and badges (#176).
+
+### Changed
+
+- **Releases run the full CI first (#170).** The release workflow calls CI on the tagged commit (lint, typecheck, audit, tests, e2e, image smoke test, chart) and publishes only if it passes; a manual release must start from main.
+- **CI (#174):** a fast static job, dependency review on pull requests, timeouts, a read-only token, superseded PR runs cancelled, docs-only PRs skip the slow jobs, test results (JUnit) and a coverage report attached to each run, actions pinned to commit SHAs, Dependabot for npm, Actions and Docker.
+- **Tests (#172, #173):** server test files run in parallel from a migrated template database; `pnpm test:ci`, `pnpm test:clean`; unit tests for the analytics, campaigns, alerts and audience packages; several timing races in tests fixed.
+- **Lint (#176):** Biome covers the whole repository, including the admin UI, e2e and scripts.
+- **Versions (#175):** `scripts/check-versions.mjs` checks all 11 places that name the release version; `@agentic-marketing/sdk-js` is marked private (it is bundled into the server, not published).
+- `SECURITY.md`: private vulnerability reporting is enabled on the repository, and accepted dependency advisories are listed with their reasons (#181).
+
+### Docs
+
+- README, `apps/web/README.md`, the package maps, the Compose guide, the architecture pages, the analytics page, the pilot runbook and both agent skills brought up to 0.2.9 (#160–#168). The MCP skill's tool catalog is generated from the command registry (182 commands) and a test keeps it in sync.
+
+### Upgrading
+
+- **Migrations:** Postgres `0044_journey_exit_step_completed.sql` (relabels finished participants; no schema change).
+- **Configuration:** none.
+- **Breaking changes:** none. Reports that read `exited` as "finished" now see those people under `completed`.
+- **Manual steps:** if a proxy in front already sets `X-Frame-Options`, HSTS or a referrer policy, make it replace the app's header rather than add a second one.
+
 ## [0.2.9] - 2026-10-27
 
 [Phase 16](docs/architecture/roadmap-wave-3.md#phase-16-measure-and-report): answer "what worked" from the platform, for people and for agents. A read-only metric layer answers questions in one call; campaigns group the work under a goal and report it; control groups measure uplift instead of assuming it; and alerts say when deliverability, signups or journeys go wrong. REST and MCP stay backwards compatible: new commands and artifact types only. Two Postgres and two ClickHouse migrations run at start-up.

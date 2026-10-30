@@ -9,7 +9,10 @@ export interface VisualMjmlHandle {
 }
 
 /** GrapesJS with the MJML plugin (ADR-0006). Loaded lazily: it is large. */
-const VisualMjml = forwardRef<VisualMjmlHandle, { mjml: string; onChange: (mjml: string) => void }>(function VisualMjml({ mjml, onChange }, ref) {
+const VisualMjml = forwardRef<VisualMjmlHandle, { mjml: string; onChange: (mjml: string) => void }>(function VisualMjml(
+  { mjml, onChange },
+  ref,
+) {
   const host = useRef<HTMLDivElement>(null);
   const editor = useRef<Editor | null>(null);
   const changeRef = useRef(onChange);
@@ -26,9 +29,18 @@ const VisualMjml = forwardRef<VisualMjmlHandle, { mjml: string; onChange: (mjml:
     },
   }));
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the editor is initialised once from the initial MJML; later changes are applied imperatively
   useEffect(() => {
     if (!host.current) return;
-    const ed = grapesjs.init({ container: host.current, height: '100%', width: 'auto', storageManager: false, fromElement: false, plugins: [grapesjsMjml], components: expandSelfClosing(mjml) });
+    const ed = grapesjs.init({
+      container: host.current,
+      height: '100%',
+      width: 'auto',
+      storageManager: false,
+      fromElement: false,
+      plugins: [grapesjsMjml],
+      components: expandSelfClosing(mjml),
+    });
     ed.on('load', () => {
       const labels: Record<string, string> = {
         'sw-visibility': 'Outlines',

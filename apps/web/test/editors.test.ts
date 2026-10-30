@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   addVariant,
+  type ExperienceVariant,
   moveVariant,
   nextVariantId,
   removeVariant,
@@ -8,22 +9,26 @@ import {
   triggerFor,
   updateVariant,
   variantWeightTotal,
-  type ExperienceVariant,
 } from '../src/features/artifacts/ExperienceEditor';
 import {
   addPurpose,
   addTopic,
   changeBasis,
   isKeyLocked,
+  type Purpose,
   removePurpose,
   removeTopic,
   topicsOf,
   updatePurpose,
   updateTopic,
-  type Purpose,
 } from '../src/features/artifacts/PurposesEditor';
 
-const variant = (id: string, weight: number): ExperienceVariant => ({ id, name: `Variant ${id}`, weight, content: { html: `<p>${id}</p>` } });
+const variant = (id: string, weight: number): ExperienceVariant => ({
+  id,
+  name: `Variant ${id}`,
+  weight,
+  content: { html: `<p>${id}</p>` },
+});
 
 const purpose = (patch: Partial<Purpose> = {}): Purpose => ({
   key: 'marketing_email',

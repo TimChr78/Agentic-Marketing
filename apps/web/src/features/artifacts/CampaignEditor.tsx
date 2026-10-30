@@ -87,13 +87,18 @@ export function CampaignEditor({ content, onChange, readOnly, errors }: EditorPr
   };
   const needsEvent = goal.kind === 'conversion' || goal.kind === 'revenue';
   const cg = content.controlGroup;
-  const setCg = (patch: Partial<CampaignControlGroup>) =>
-    set({ controlGroup: { percent: 10, minSampleSize: 200, ...cg, ...patch } });
+  const setCg = (patch: Partial<CampaignControlGroup>) => set({ controlGroup: { percent: 10, minSampleSize: 200, ...cg, ...patch } });
 
   return (
     <div className="max-w-[900px] space-y-5">
       <Field label="Description" hint="What this campaign is for. The team sees it; people never do." error={errors.description}>
-        <Textarea rows={2} maxLength={1000} value={content.description ?? ''} readOnly={readOnly} onChange={(e) => set({ description: e.target.value })} />
+        <Textarea
+          rows={2}
+          maxLength={1000}
+          value={content.description ?? ''}
+          readOnly={readOnly}
+          onChange={(e) => set({ description: e.target.value })}
+        />
       </Field>
 
       <FieldGroup legend="Goal" hint="What the campaign is judged on. Evaluation reads this; it changes nothing about sending.">
@@ -166,7 +171,11 @@ export function CampaignEditor({ content, onChange, readOnly, errors }: EditorPr
         {cg && (
           <div className="space-y-3">
             <div className="grid gap-4 sm:grid-cols-2">
-              <Field label="Share in control" hint="1–50%, assigned once per person for the campaign." error={errors['controlGroup.percent']}>
+              <Field
+                label="Share in control"
+                hint="1–50%, assigned once per person for the campaign."
+                error={errors['controlGroup.percent']}
+              >
                 <Input
                   type="number"
                   min={1}
@@ -191,8 +200,8 @@ export function CampaignEditor({ content, onChange, readOnly, errors }: EditorPr
               </Field>
             </div>
             <p className="text-[12px] text-muted">
-              Control people receive nothing from this campaign’s broadcasts or journeys, yet they are measured against the campaign goal. Read the
-              result with <span className="font-mono">campaigns.holdoutResult</span>.
+              Control people receive nothing from this campaign’s broadcasts or journeys, yet they are measured against the campaign goal.
+              Read the result with <span className="font-mono">campaigns.holdoutResult</span>.
             </p>
             <Checkbox
               label="Start a new scope if the percentage changes"
@@ -220,7 +229,9 @@ export function CampaignEditor({ content, onChange, readOnly, errors }: EditorPr
           />
         </Field>
         {content.utmCampaign && !UTM_RE.test(content.utmCampaign) && (
-          <p className="text-[12px] text-bad">Use lowercase letters, digits, _ and -, starting with a letter or digit (up to 61 characters).</p>
+          <p className="text-[12px] text-bad">
+            Use lowercase letters, digits, _ and -, starting with a letter or digit (up to 61 characters).
+          </p>
         )}
       </FieldGroup>
 
@@ -245,7 +256,13 @@ export function CampaignEditor({ content, onChange, readOnly, errors }: EditorPr
         ) : (
           <ul className="space-y-2">
             {members.map((m, i) => (
-              <li key={`${m.artifactId ?? 'new'}-${i}`} className="grid gap-2 rounded-md border border-line p-3 sm:grid-cols-[minmax(0,1fr)_200px_auto]">
+              <li
+                key={
+                  // biome-ignore lint/suspicious/noArrayIndexKey: campaign members are identified by position in the editable list; a new row has no id yet
+                  `${m.artifactId ?? 'new'}-${i}`
+                }
+                className="grid gap-2 rounded-md border border-line p-3 sm:grid-cols-[minmax(0,1fr)_200px_auto]"
+              >
                 <Field label="Artifact" hideLabel error={errors[`members.${i}.artifactId`]}>
                   <Select
                     value={m.artifactId ?? ''}
@@ -264,7 +281,11 @@ export function CampaignEditor({ content, onChange, readOnly, errors }: EditorPr
                   </Select>
                 </Field>
                 <Field label="Role" hideLabel error={errors[`members.${i}.role`]}>
-                  <Select value={m.role ?? 'primary'} disabled={readOnly} onChange={(e) => setMember(i, { role: e.target.value as MemberRole })}>
+                  <Select
+                    value={m.role ?? 'primary'}
+                    disabled={readOnly}
+                    onChange={(e) => setMember(i, { role: e.target.value as MemberRole })}
+                  >
                     {ROLES.map((r) => (
                       <option key={r.value} value={r.value}>
                         {r.label}

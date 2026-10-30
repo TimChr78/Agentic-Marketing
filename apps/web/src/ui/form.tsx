@@ -1,7 +1,8 @@
+import { ChevronDown } from 'lucide-react';
 import {
+  type AriaAttributes,
   createContext,
   forwardRef,
-  type AriaAttributes,
   type InputHTMLAttributes,
   type ReactNode,
   type SelectHTMLAttributes,
@@ -9,7 +10,6 @@ import {
   useContext,
   useId,
 } from 'react';
-import { ChevronDown } from 'lucide-react';
 import { cx } from './cx';
 
 // Form controls (DESIGN.md → Components): every control sits in a Field with a visible label,
@@ -209,7 +209,17 @@ export function Switch({
 }
 
 /** A fieldset with a legend, for grouping related fields (radio groups, credentials). */
-export function FieldGroup({ legend, hint, children, className }: { legend: ReactNode; hint?: ReactNode; children: ReactNode; className?: string }) {
+export function FieldGroup({
+  legend,
+  hint,
+  children,
+  className,
+}: {
+  legend: ReactNode;
+  hint?: ReactNode;
+  children: ReactNode;
+  className?: string;
+}) {
   return (
     <fieldset className={cx('min-w-0 space-y-3', className)}>
       <legend className="mb-1 text-[12px] font-medium text-fg-2">{legend}</legend>
@@ -244,7 +254,14 @@ export function RadioCards<T extends string>({
           )}
         >
           <span className="flex items-center gap-2 font-medium">
-            <input type="radio" name={name} value={o.value} checked={value === o.value} onChange={() => onChange(o.value)} className="accent-[var(--accent)]" />
+            <input
+              type="radio"
+              name={name}
+              value={o.value}
+              checked={value === o.value}
+              onChange={() => onChange(o.value)}
+              className="accent-[var(--accent)]"
+            />
             {o.label}
           </span>
           {o.hint && <span className="pl-5 text-[12px] text-muted">{o.hint}</span>}
@@ -265,7 +282,9 @@ export function fieldErrors(details: unknown, prefix = ''): Record<string, strin
     const n = node as { errors?: string[]; properties?: Record<string, unknown>; items?: unknown[] };
     if (n.errors?.length && path) out[path] = n.errors.join(' ');
     for (const [k, v] of Object.entries(n.properties ?? {})) walk(v, path ? `${path}.${k}` : k);
-    (n.items ?? []).forEach((v, i) => walk(v, path ? `${path}.${i}` : String(i)));
+    (n.items ?? []).forEach((v, i) => {
+      walk(v, path ? `${path}.${i}` : String(i));
+    });
   };
   walk(details, prefix);
   return out;

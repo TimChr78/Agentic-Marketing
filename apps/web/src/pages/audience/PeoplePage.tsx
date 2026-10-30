@@ -11,18 +11,18 @@ import {
   Alert,
   Button,
   EmptyState,
+  formatDateTime,
   IconButton,
   Input,
   Mono,
   PageHeader,
-  Tag,
   Table,
   TableFrame,
+  Tag,
   Td,
-  Th,
   THead,
+  Th,
   Tr,
-  formatDateTime,
   timeAgo,
   useToast,
 } from '../../ui';
@@ -143,8 +143,8 @@ export default function PeoplePage() {
               </>
             }
           >
-            People appear when your site, a form or an integration identifies them. Import an existing subscriber list, or add a signup form so new
-            people arrive with their consent.
+            People appear when your site, a form or an integration identifies them. Import an existing subscriber list, or add a signup form
+            so new people arrive with their consent.
           </EmptyState>
         }
       >

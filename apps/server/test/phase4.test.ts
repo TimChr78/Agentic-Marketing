@@ -1,7 +1,7 @@
 import { type FakeRequest, fakeLlm } from '@agentic-marketing/ai/testing';
 import { outbox } from '@agentic-marketing/email';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { eventually, rejects, startTestServer, type User } from './harness';
+import { eventually, rejects, startTestServer, testPort, type User } from './harness';
 
 // Phase 4 acceptance: "AI-chosen branches/content with full decision logs and fallbacks". A
 // scripted LLM server stands in for the providers (both wire formats); the journey, prompts and
@@ -81,7 +81,7 @@ async function copilot(u: User, message: string, conversationId?: string) {
 
 beforeAll(async () => {
   llm = await fakeLlm(answer);
-  t = await startTestServer('test_p4', 3295);
+  t = await startTestServer('test_p4', testPort(3295));
   owner = await t.signUp(`owner-${Date.now()}@example.com`);
   await t.workspaceWith([[owner, 'owner']], 'none');
   const api = t.api(owner);

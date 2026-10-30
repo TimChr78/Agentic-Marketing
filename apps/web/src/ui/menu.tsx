@@ -22,7 +22,14 @@ export function Menu({
   align = 'end',
   label,
 }: {
-  trigger: (p: { ref: (el: HTMLButtonElement | null) => void; 'aria-haspopup': 'menu'; 'aria-expanded': boolean; 'aria-controls': string; onClick: () => void; onKeyDown: (e: React.KeyboardEvent) => void }) => ReactNode;
+  trigger: (p: {
+    ref: (el: HTMLButtonElement | null) => void;
+    'aria-haspopup': 'menu';
+    'aria-expanded': boolean;
+    'aria-controls': string;
+    onClick: () => void;
+    onKeyDown: (e: React.KeyboardEvent) => void;
+  }) => ReactNode;
   items: (MenuItem | 'separator')[];
   align?: 'start' | 'end';
   label?: string;
@@ -50,6 +57,7 @@ export function Menu({
   };
   const enabled = () => Array.from(list.current?.querySelectorAll<HTMLElement>('[role=menuitem]:not([aria-disabled=true])') ?? []);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: open/close helpers are recreated each render; the menu only wires listeners when it opens
   useEffect(() => {
     if (!open) return;
     const els = enabled();
@@ -64,7 +72,6 @@ export function Menu({
       document.removeEventListener('mousedown', onDoc);
       window.removeEventListener('resize', onScroll);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
   const onListKey = (e: React.KeyboardEvent) => {
@@ -122,10 +129,14 @@ export function Menu({
           >
             {items.map((it, i) =>
               it === 'separator' ? (
-                <div key={i} role="separator" className="my-1 h-px bg-line" />
+                // biome-ignore lint/suspicious/noArrayIndexKey: menu definitions are positional lists; separators have no identity
+                <hr key={i} className="my-1 h-px border-0 bg-line" />
               ) : (
                 <button
-                  key={i}
+                  key={
+                    // biome-ignore lint/suspicious/noArrayIndexKey: menu definitions are positional lists; items may repeat a label
+                    i
+                  }
                   type="button"
                   role="menuitem"
                   tabIndex={-1}
@@ -155,7 +166,17 @@ export function Menu({
 }
 
 /** A context menu opened at the pointer (or at an element for keyboard users). */
-export function ContextMenu({ at, items, onClose, label }: { at: { x: number; y: number } | null; items: (MenuItem | 'separator')[]; onClose: () => void; label?: string }) {
+export function ContextMenu({
+  at,
+  items,
+  onClose,
+  label,
+}: {
+  at: { x: number; y: number } | null;
+  items: (MenuItem | 'separator')[];
+  onClose: () => void;
+  label?: string;
+}) {
   const list = useRef<HTMLDivElement>(null);
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
@@ -190,15 +211,23 @@ export function ContextMenu({ at, items, onClose, label }: { at: { x: number; y:
       role="menu"
       aria-label={label}
       onKeyDown={onKey}
-      style={{ position: 'fixed', top: Math.min(Number.isFinite(at.y) ? at.y : window.innerHeight / 3, window.innerHeight - 220), left: Math.min(Number.isFinite(at.x) ? at.x : window.innerWidth / 3, window.innerWidth - 200) }}
+      style={{
+        position: 'fixed',
+        top: Math.min(Number.isFinite(at.y) ? at.y : window.innerHeight / 3, window.innerHeight - 220),
+        left: Math.min(Number.isFinite(at.x) ? at.x : window.innerWidth / 3, window.innerWidth - 200),
+      }}
       className="am-fade-in z-[70] min-w-[180px] rounded-lg border border-line bg-surface p-1 shadow-2"
     >
       {items.map((it, i) =>
         it === 'separator' ? (
-          <div key={i} role="separator" className="my-1 h-px bg-line" />
+          // biome-ignore lint/suspicious/noArrayIndexKey: menu definitions are positional lists; separators have no identity
+          <hr key={i} className="my-1 h-px border-0 bg-line" />
         ) : (
           <button
-            key={i}
+            key={
+              // biome-ignore lint/suspicious/noArrayIndexKey: menu definitions are positional lists; items may repeat a label
+              i
+            }
             type="button"
             role="menuitem"
             tabIndex={-1}

@@ -39,6 +39,8 @@ const Window = z
   .string()
   .regex(/^(PT[1-9]\d*H|P[1-9]\d*D)$/, 'Use a duration between PT1H and P7D, e.g. PT24H or P7D.')
   .refine((w) => {
+    // A value the regex rejected is reported there; windowMs would throw past the schema.
+    if (!/^(PT[1-9]\d*H|P[1-9]\d*D)$/.test(w)) return true;
     const ms = windowMs(w);
     return ms >= MIN_WINDOW_MS && ms <= MAX_WINDOW_MS;
   }, 'The window must be between one hour (PT1H) and seven days (P7D).');
@@ -98,8 +100,10 @@ export type AlertConfig = DeliverabilityConfig | SignupDropConfig | JourneyError
 
 export function parseAlertConfig(kind: AlertKind, raw: unknown): AlertConfig {
   const parsed = schemas[kind].safeParse(raw ?? {});
-  if (!parsed.success)
-    throw new AppError('invalid_input', `The configuration for a ${kind} alert is not valid.`, z.treeifyError(parsed.error));
+  if (!parsed.success) {
+    const problems = parsed.error.issues.map((i) => `${i.path.join('.') || 'config'}: ${i.message}`).join('; ');
+    throw new AppError('invalid_input', `The configuration for a ${kind} alert is not valid. ${problems}`, z.treeifyError(parsed.error));
+  }
   if (kind === 'deliverability') {
     const config = parsed.data as Omit<DeliverabilityConfig, 'threshold'> & { threshold?: number };
     return { ...config, threshold: config.threshold ?? (config.metric === 'complaint' ? 0.001 : 0.05) };
@@ -136,7 +140,7 @@ export const AlertChannels = z
   .superRefine((channels, ctx) => {
     const seen = new Set<string>();
     for (const [i, channel] of channels.entries()) {
-      const id = channel.type === 'webhook' ? channel.webhookId : `email:${channel.userIds.join(',')}`;
+      const id = channel.type === 'webhook' ? channel.webhookId : `email:${[...channel.userIds].sort().join(',')}`;
       if (seen.has(id)) ctx.addIssue({ code: 'custom', path: [i], message: 'This channel is listed twice.' });
       seen.add(id);
     }

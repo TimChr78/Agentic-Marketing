@@ -1,14 +1,14 @@
 import http from 'node:http';
 import { outbox } from '@agentic-marketing/email';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { eventually, rejects, startTestServer, type User } from './harness';
+import { eventually, rejects, startTestServer, testPort, type User } from './harness';
 
 // #100: a public newsletter archive on the links host, and a signed "view in browser" page per
 // message. The archive is rendered from the template version that was sent with empty
 // personalisation; the web version is the only place a recipient's own data appears.
 
-const MAIN_PORT = 3418;
-const PUBLIC_PORT = 3419;
+const MAIN_PORT = testPort(3418);
+const PUBLIC_PORT = testPort(3419);
 const SLUG = 'signal-archive';
 const SITE = 'https://martechsignal.example';
 

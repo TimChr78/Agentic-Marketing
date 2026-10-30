@@ -20,7 +20,7 @@ async function am(args: string[], cwd: string) {
     const { stdout, stderr } = await run(process.execPath, ['--import', loader, '--', cli, ...args], {
       cwd,
       env: { PATH: process.env.PATH, HOME: process.env.HOME },
-      timeout: 30_000,
+      timeout: 60_000,
     });
     return { code: 0, stdout, stderr };
   } catch (err) {
@@ -29,7 +29,8 @@ async function am(args: string[], cwd: string) {
   }
 }
 
-describe('am without configuration', () => {
+// Each call compiles the CLI with tsx in a fresh process; next to parallel test files that is slow.
+describe('am without configuration', { timeout: 120_000 }, () => {
   let dir: string;
   beforeAll(async () => {
     dir = await mkdtemp(join(tmpdir(), 'am-cli-'));

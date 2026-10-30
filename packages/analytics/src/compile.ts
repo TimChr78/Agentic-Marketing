@@ -291,8 +291,10 @@ export function buildQuery(input: BuildInput): CompiledQuery {
 
   // A chronological order key for broadcast and journey_step needs an aggregate that is not a
   // visible column; add it to the inner query and sort on it outside.
+  // Also without an explicit order: a broadcast or journey_step breakdown defaults to it.
   const order = input.order;
-  const orderDimension = order && dimensions.includes(order.by as DimensionId) ? (order.by as DimensionId) : undefined;
+  const orderBy = order?.by ?? dimensions[0];
+  const orderDimension = orderBy && dimensions.includes(orderBy as DimensionId) ? (orderBy as DimensionId) : undefined;
   const orderSort = orderDimension ? DIMENSION_SORT[source]?.[orderDimension] : undefined;
   let sortAlias: string | undefined;
   if (orderSort) {

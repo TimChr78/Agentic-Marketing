@@ -143,11 +143,12 @@ The site's Kit list has one subscriber, the owner, so **there is no Kit import f
 6. **Newsletter.**
    - Segment `{"consent": "marketing_email"}` ("Newsletter subscribers").
    - Each week: Hermes drafts the issue template and a `broadcast` with `sendAt` Friday 09:00 Copenhagen time (e.g. `2026-10-30T09:00:00+01:00`; offsets are accepted since 0.2) over MCP, runs `broadcasts.preview` (with the template's `templateVersion`) and submits both together with `artifacts.requestPublishBundle` (0.2.6 and later; before that, two `requestPublish` rounds). The result's `reviewUrl` is one review for both; Hermes sends Tim that link. Tim opens it (on a phone if need be), sees the rendered e-mail, the segment and the number of recipients, sends himself a test if wanted, and approves. Check sending under Build → Broadcasts → Sending, or with `broadcasts.status`.
+   - Optionally add `subjectTest` to the broadcast (0.2.8): 2–4 `subjects` go to a sample (`samplePercent`, 10–50), the winner by `metric` (`click` or `open`) goes to the rest after `decideAfter` (PT1H–P2D). `broadcasts.status` shows the variants, the winner and when the rest goes out.
    - **Topics (0.2.8, #84):** when the site starts sending more than one kind of mail, add topics under `marketing_email` (for example `newsletter` and `product_news`) in Settings → Purposes, and name one on the issue's template or broadcast. The unsubscribe link keeps its one-click purpose-wide behaviour; `preferences_url` now opens a branded preference centre where readers can choose topics or unsubscribe from the purpose (the button names it, e.g. "Unsubscribe from Marketing e-mail"). A message for a refused topic is suppressed with `topic_unsubscribed`. Leave topics out if there is only one kind of mail; the purpose alone is enough.
-7. **Welcome journey.** Trigger on the `Subscription Confirmed` event: welcome e-mail → wait 3 days → a "start here" e-mail with the three most-read reviews. (A branch on e-mail clicks is not possible yet; see known limits.)
+7. **Welcome journey.** Trigger on the `Subscription Confirmed` event: welcome e-mail → wait 3 days → a "start here" e-mail with the three most-read reviews. A branch on `Email Link Clicked` works: since 0.2.0 e-mail clicks are profile events, so segments, journey branches and webhooks can use them.
 8. **Measure.** Umami keeps on-site analytics. The platform reports the newsletter (`broadcasts.status`, `messages.stats`), signups (`Form Submitted` / `Subscription Confirmed` counts) and the journey (`journeys.stats`).
 
-**Done when:** a real signup gets the confirmation and the welcome e-mail; new subscribers (and the owner) receive one Friday issue sent by a broadcast that Hermes drafted and Tim approved; and unsubscribe and bounces work end to end.
+**Done when:** a real signup gets the confirmation and the welcome e-mail; new subscribers (and the owner) receive one Friday issue sent by a broadcast that Hermes drafted and Tim approved; a subject test, if used, shows its variants and winner in `broadcasts.status`; and unsubscribe and bounces work end to end.
 
 ## Upgrading the pilot to 0.2
 
@@ -161,6 +162,6 @@ The site's Kit list has one subscriber, the owner, so **there is no Kit import f
 ## Known limits found while assessing
 
 - People who never confirm keep a profile without consent until retention removes it. The scheduler runs hourly: form-only profiles with no consent record, no other identity and no merge are removed after `RETENTION_UNCONFIRMED_DAYS` (default 30), without suppression so they can sign up again. Finished deliveries and AI calls are removed after `RETENTION_LOG_DAYS` (default 180). `profiles.erase` remains available for an immediate erasure request; it is not needed for routine cleanup.
-- Broadcasts have no A/B subject test or send-time optimisation; a broadcast goes to the segment as it is at send time.
+- Broadcasts support a subject test (`subjectTest`, 2–4 subjects on a sample, winner to the rest, 0.2.8), but no send-time optimisation (#68); a broadcast goes to the segment as it is at send time.
 - No consent banner component; phase B needs one.
-- E-mail clicks are message events, not events on the person's profile, so segments and journey branches cannot use "clicked the newsletter" yet. A small follow-up: publish an `Email Link Clicked` event to the bus from the click route.
+- E-mail clicks are profile events (`Email Link Clicked`, since 0.2.0), so segments, journey branches and webhooks can use "clicked the newsletter". Opens are counted in message reports but do not create profile events.

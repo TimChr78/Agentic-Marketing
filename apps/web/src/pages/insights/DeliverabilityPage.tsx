@@ -5,20 +5,7 @@ import { ButtonLink } from '../../app/links';
 import { useCrumbs } from '../../app/page';
 import { useSession } from '../../app/session';
 import { useApi } from '../../app/useApi';
-import {
-  Alert,
-  Button,
-  Card,
-  EmptyState,
-  Field,
-  Input,
-  LoadingBlock,
-  Mono,
-  PageHeader,
-  StatusPill,
-  Tag,
-  formatDateTime,
-} from '../../ui';
+import { Alert, Button, Card, EmptyState, Field, formatDateTime, Input, LoadingBlock, Mono, PageHeader, StatusPill, Tag } from '../../ui';
 import { pageWidth } from '../../ui/layout';
 
 type Health = Out<'deliverability.health'>;
@@ -87,7 +74,8 @@ export default function DeliverabilityPage() {
               <p className="border-t border-line px-4 py-2.5 text-[12px] text-muted">
                 Marketing messages pause at {pct(h.thresholds.complaintStop)} complaints or {pct(h.thresholds.bounceStop)} bounces, after{' '}
                 {h.thresholds.minVolume.toLocaleString()} messages.
-                {h.autoPause ? '' : ' Auto-pause is off, so these are warnings only.'} Caps and quiet hours live in the delivery policy artifact.
+                {h.autoPause ? '' : ' Auto-pause is off, so these are warnings only.'} Caps and quiet hours live in the delivery policy
+                artifact.
               </p>
             </>
           ) : null}
@@ -212,7 +200,15 @@ function DomainReportView({ report }: { report: Report }) {
             <dd>No selectors given. Add the selectors from the provider's DNS settings and check again.</dd>
           </div>
         ) : (
-          report.dkim.map((d) => <CheckRow key={d.selector} name={`DKIM · ${d.selector}`} ok={d.ok} record={d.record} advice={d.ok ? null : `Publish the DKIM record at ${d.selector}._domainkey.${report.domain}.`} />)
+          report.dkim.map((d) => (
+            <CheckRow
+              key={d.selector}
+              name={`DKIM · ${d.selector}`}
+              ok={d.ok}
+              record={d.record}
+              advice={d.ok ? null : `Publish the DKIM record at ${d.selector}._domainkey.${report.domain}.`}
+            />
+          ))
         )}
         <CheckRow
           name="DMARC"
@@ -226,7 +222,19 @@ function DomainReportView({ report }: { report: Report }) {
   );
 }
 
-function CheckRow({ name, ok, record, advice, detail }: { name: string; ok: boolean; record: string | null; advice: string | null; detail?: string }) {
+function CheckRow({
+  name,
+  ok,
+  record,
+  advice,
+  detail,
+}: {
+  name: string;
+  ok: boolean;
+  record: string | null;
+  advice: string | null;
+  detail?: string;
+}) {
   return (
     <div className="flex flex-wrap items-start gap-x-3 gap-y-1">
       <dt className="w-[92px] shrink-0 pt-0.5 font-medium">{name}</dt>

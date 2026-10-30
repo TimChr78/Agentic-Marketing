@@ -2,7 +2,7 @@ import { createClient } from '@agentic-marketing/client';
 import { outbox } from '@agentic-marketing/email';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Commands } from '../src/registry';
-import { eventually, rejects, startTestServer, type User } from './harness';
+import { eventually, rejects, startTestServer, testPort, type User } from './harness';
 
 // Approvers can test-send from the approval drawer (#53): templates.sendTest and
 // broadcasts.sendTest accept artifacts:approve when `to` is omitted, so the caller is the only
@@ -23,7 +23,7 @@ const mjml = (body: string) =>
 const mailTo = (to: string) => outbox.filter((m) => m.to === to);
 
 beforeAll(async () => {
-  t = await startTestServer('test_approver_selftest', 3405);
+  t = await startTestServer('test_approver_selftest', testPort(3405));
   owner = await t.signUp(`owner-selftest-${stamp}@example.com`);
   approver = await t.signUp(`approver-selftest-${stamp}@example.com`);
   viewer = await t.signUp(`viewer-selftest-${stamp}@example.com`);

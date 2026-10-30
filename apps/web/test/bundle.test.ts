@@ -9,7 +9,8 @@ type Chunk = { file: string; imports?: string[] };
 
 // `pnpm test` and the CI e2e step run from the repo root; a manual run from apps/web works too.
 const rootDist = join(process.cwd(), 'apps/web/dist');
-const dist = existsSync(join(rootDist, '.vite', 'manifest.json')) || !existsSync(join(process.cwd(), 'dist')) ? rootDist : join(process.cwd(), 'dist');
+const dist =
+  existsSync(join(rootDist, '.vite', 'manifest.json')) || !existsSync(join(process.cwd(), 'dist')) ? rootDist : join(process.cwd(), 'dist');
 const manifestPath = join(dist, '.vite', 'manifest.json');
 const hasBuild = existsSync(manifestPath);
 const manifest: Record<string, Chunk> = hasBuild ? JSON.parse(readFileSync(manifestPath, 'utf8')) : {};
@@ -78,7 +79,8 @@ const describeBuild = hasBuild ? describe : describe.skip;
 
 describeBuild('bundle split (#60)', () => {
   it('finds every route chunk in the build manifest', () => {
-    for (const route of ROUTES) for (const entry of route.entries) expect(manifest[entry], `${entry} is missing from the manifest`).toBeDefined();
+    for (const route of ROUTES)
+      for (const entry of route.entries) expect(manifest[entry], `${entry} is missing from the manifest`).toBeDefined();
   });
 
   for (const route of ROUTES) {

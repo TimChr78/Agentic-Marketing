@@ -49,9 +49,12 @@ const DEFAULT_TEST: SubjectTest = { subjects: ['', ''], samplePercent: 20, metri
 
 /** A broadcast: which template, to which segment, when and in whose local time, and an optional subject test. */
 export function BroadcastEditor({ content, onChange, readOnly, errors }: EditorProps<Broadcast>) {
-  const set = (p: Partial<Broadcast>) => onChange(Object.fromEntries(Object.entries({ ...content, ...p }).filter(([, v]) => v !== undefined && v !== '')) as Broadcast);
+  const set = (p: Partial<Broadcast>) =>
+    onChange(Object.fromEntries(Object.entries({ ...content, ...p }).filter(([, v]) => v !== undefined && v !== '')) as Broadcast);
   const purposes = useApi(() => api.call('purposes.list', {}), []);
-  const template = useApi(() => api.call('artifacts.get', { artifactId: content.template! }), [content.template], { skip: !content.template });
+  const template = useApi(() => api.call('artifacts.get', { artifactId: content.template! }), [content.template], {
+    skip: !content.template,
+  });
   const purpose = (template.data?.version.content as { purpose?: string } | undefined)?.purpose;
   const topics = topicsOf(purposes.data?.purposes ?? [], purpose);
   const test = content.subjectTest;
@@ -64,21 +67,42 @@ export function BroadcastEditor({ content, onChange, readOnly, errors }: EditorP
     // No days means every day; all seven is the same thing, so keep the stored value simple.
     setWindow({ days: next.length === 0 || next.length === 7 ? undefined : next });
   };
-  const setSubject = (i: number, value: string) =>
-    setTest({ subjects: (test?.subjects ?? []).map((s, j) => (j === i ? value : s)) });
+  const setSubject = (i: number, value: string) => setTest({ subjects: (test?.subjects ?? []).map((s, j) => (j === i ? value : s)) });
   const addSubject = () => setTest({ subjects: [...(test?.subjects ?? []), ''] });
   const removeSubject = (i: number) => setTest({ subjects: (test?.subjects ?? []).filter((_, j) => j !== i) });
 
   return (
     <div className="max-w-[720px] space-y-5">
       <FieldGroup legend="What and to whom">
-        <Field label="Template" error={errors.template} hint="Use one template per issue. It must be live before the broadcast can be published." required>
-          <ArtifactSelect type="email_template" value={content.template} onChange={(v) => set({ template: v, topic: undefined })} disabled={readOnly} />
+        <Field
+          label="Template"
+          error={errors.template}
+          hint="Use one template per issue. It must be live before the broadcast can be published."
+          required
+        >
+          <ArtifactSelect
+            type="email_template"
+            value={content.template}
+            onChange={(v) => set({ template: v, topic: undefined })}
+            disabled={readOnly}
+          />
         </Field>
-        <Field label="Topic (optional)" error={errors.topic} hint={purpose ? 'A finer choice under the template’s purpose; it overrides the template’s own topic.' : 'Choose a template first.'}>
-          <Select value={content.topic ?? ''} disabled={readOnly || topics.length === 0} onChange={(e) => set({ topic: e.target.value || undefined })}>
+        <Field
+          label="Topic (optional)"
+          error={errors.topic}
+          hint={
+            purpose ? 'A finer choice under the template’s purpose; it overrides the template’s own topic.' : 'Choose a template first.'
+          }
+        >
+          <Select
+            value={content.topic ?? ''}
+            disabled={readOnly || topics.length === 0}
+            onChange={(e) => set({ topic: e.target.value || undefined })}
+          >
             <option value="">{topics.length ? 'No topic' : 'No topics'}</option>
-            {content.topic && !topics.some((t) => t.key === content.topic) && <option value={content.topic}>{content.topic} (not under this purpose)</option>}
+            {content.topic && !topics.some((t) => t.key === content.topic) && (
+              <option value={content.topic}>{content.topic} (not under this purpose)</option>
+            )}
             {topics.map((t) => (
               <option key={t.key} value={t.key}>
                 {t.name} ({t.key})
@@ -86,16 +110,27 @@ export function BroadcastEditor({ content, onChange, readOnly, errors }: EditorP
             ))}
           </Select>
         </Field>
-        <Field label="Segment" error={errors.segment} hint="Everyone in it who allows the template's purpose gets it; others are skipped." required>
+        <Field
+          label="Segment"
+          error={errors.segment}
+          hint="Everyone in it who allows the template's purpose gets it; others are skipped."
+          required
+        >
           <ArtifactSelect type="segment" value={content.segment} onChange={(v) => set({ segment: v })} disabled={readOnly} />
         </Field>
       </FieldGroup>
 
       <FieldGroup legend="When">
-        <Field label="Send at" error={errors.sendAt} hint={`In ${getWorkspaceTimeZone()} (Settings → Workspace). Leave empty to send as soon as it is approved.`}>
+        <Field
+          label="Send at"
+          error={errors.sendAt}
+          hint={`In ${getWorkspaceTimeZone()} (Settings → Workspace). Leave empty to send as soon as it is approved.`}
+        >
           <DateTimeInput value={content.sendAt ?? null} onChange={(v) => set({ sendAt: v ?? undefined })} disabled={readOnly} />
         </Field>
-        {content.sendAt && new Date(content.sendAt).getTime() < Date.now() && <Alert tone="warn">This time is in the past: it would send as soon as it is published.</Alert>}
+        {content.sendAt && new Date(content.sendAt).getTime() < Date.now() && (
+          <Alert tone="warn">This time is in the past: it would send as soon as it is published.</Alert>
+        )}
         <Checkbox
           label="Only send inside a local-time window"
           hint="Each reader gets it only between these times in their own time zone; others wait for the next opening."
@@ -131,7 +166,12 @@ export function BroadcastEditor({ content, onChange, readOnly, errors }: EditorP
               error={errors['sendWindow.maxDelay']}
               hint="An ISO 8601 duration, e.g. P1D. Someone whose next window is later than the send time plus this is skipped and counted."
             >
-              <Input value={window.maxDelay ?? 'P1D'} onChange={(e) => setWindow({ maxDelay: e.target.value })} readOnly={readOnly} placeholder="P1D" />
+              <Input
+                value={window.maxDelay ?? 'P1D'}
+                onChange={(e) => setWindow({ maxDelay: e.target.value })}
+                readOnly={readOnly}
+                placeholder="P1D"
+              />
             </Field>
           </div>
         )}
@@ -149,7 +189,11 @@ export function BroadcastEditor({ content, onChange, readOnly, errors }: EditorP
         />
         {content.archive?.publish && (
           <>
-            <Field label="Issue address" hint="Optional. Default: the subject plus the send date; lowercase letters, digits and hyphens." error={errors['archive.slug']}>
+            <Field
+              label="Issue address"
+              hint="Optional. Default: the subject plus the send date; lowercase letters, digits and hyphens."
+              error={errors['archive.slug']}
+            >
               <Input
                 value={content.archive?.slug ?? ''}
                 readOnly={readOnly}
@@ -158,7 +202,11 @@ export function BroadcastEditor({ content, onChange, readOnly, errors }: EditorP
                 onChange={(e) => set({ archive: { ...(content.archive ?? {}), slug: e.target.value.toLowerCase() } })}
               />
             </Field>
-            <Field label="Summary" hint="Optional. Shown on the archive index and in RSS; default: the template preheader." error={errors['archive.summary']}>
+            <Field
+              label="Summary"
+              hint="Optional. Shown on the archive index and in RSS; default: the template preheader."
+              error={errors['archive.summary']}
+            >
               <Textarea
                 rows={2}
                 value={content.archive?.summary ?? ''}
@@ -179,11 +227,14 @@ export function BroadcastEditor({ content, onChange, readOnly, errors }: EditorP
           disabled={readOnly || !content.template?.startsWith('eml_')}
           onChange={(e) => set({ subjectTest: e.target.checked ? DEFAULT_TEST : undefined })}
         />
-        {!content.template?.startsWith('eml_') && content.template && <p className="text-[12px] text-muted">Subject tests are for e-mail broadcasts only.</p>}
+        {!content.template?.startsWith('eml_') && content.template && (
+          <p className="text-[12px] text-muted">Subject tests are for e-mail broadcasts only.</p>
+        )}
         {test && (
           <div className="space-y-4 rounded-md border border-line p-4">
             <div className="space-y-2">
               {test.subjects.map((subject, i) => (
+                // biome-ignore lint/suspicious/noArrayIndexKey: subject lines are plain strings with no id, and their position is their identity
                 <Field key={i} label={`Subject ${String.fromCharCode(65 + i)}`} error={errors[`subjectTest.subjects.${i}`]}>
                   <div className="flex gap-2">
                     <Input
@@ -218,14 +269,27 @@ export function BroadcastEditor({ content, onChange, readOnly, errors }: EditorP
                   readOnly={readOnly}
                 />
               </Field>
-              <Field label="Winner by" error={errors['subjectTest.metric']} hint="Clicks are reliable; opens are not with Apple Mail Privacy Protection.">
-                <Select value={test.metric} onChange={(e) => setTest({ metric: e.target.value as SubjectTest['metric'] })} disabled={readOnly}>
+              <Field
+                label="Winner by"
+                error={errors['subjectTest.metric']}
+                hint="Clicks are reliable; opens are not with Apple Mail Privacy Protection."
+              >
+                <Select
+                  value={test.metric}
+                  onChange={(e) => setTest({ metric: e.target.value as SubjectTest['metric'] })}
+                  disabled={readOnly}
+                >
                   <option value="click">Clicks</option>
                   <option value="open">Opens</option>
                 </Select>
               </Field>
               <Field label="Decide after" error={errors['subjectTest.decideAfter']} hint="ISO duration, PT1H–P2D, e.g. PT4H.">
-                <Input value={test.decideAfter} onChange={(e) => setTest({ decideAfter: e.target.value })} readOnly={readOnly} placeholder="PT4H" />
+                <Input
+                  value={test.decideAfter}
+                  onChange={(e) => setTest({ decideAfter: e.target.value })}
+                  readOnly={readOnly}
+                  placeholder="PT4H"
+                />
               </Field>
             </div>
           </div>
@@ -233,7 +297,13 @@ export function BroadcastEditor({ content, onChange, readOnly, errors }: EditorP
       </FieldGroup>
 
       <Field label="Description" hint="For the team; recipients never see it." error={errors.description}>
-        <Textarea rows={2} value={content.description ?? ''} onChange={(e) => set({ description: e.target.value })} readOnly={readOnly} maxLength={500} />
+        <Textarea
+          rows={2}
+          value={content.description ?? ''}
+          onChange={(e) => set({ description: e.target.value })}
+          readOnly={readOnly}
+          maxLength={500}
+        />
       </Field>
       {content.template && content.segment && (
         <p className="text-[13px] text-muted">

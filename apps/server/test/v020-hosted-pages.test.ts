@@ -1,6 +1,6 @@
 import { outbox } from '@agentic-marketing/email';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { eventually, rejects, startTestServer, type User } from './harness';
+import { eventually, rejects, startTestServer, testPort, type User } from './harness';
 
 // Branded hosted pages (#37): the double opt-in confirm and expired pages and the unsubscribe
 // pages follow the workspace's published brand, each form may override parts of it, and the
@@ -52,7 +52,7 @@ const brandContent = () => ({
 });
 
 beforeAll(async () => {
-  t = await startTestServer('test_pages02', 3404);
+  t = await startTestServer('test_pages02', testPort(3404));
   owner = await t.signUp(`pages-${Date.now()}@example.com`);
   ws = await t.workspaceWith([[owner, 'owner']], 'none');
   await api().call('emailProviders.create', {

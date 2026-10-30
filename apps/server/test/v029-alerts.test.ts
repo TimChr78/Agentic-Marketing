@@ -5,13 +5,13 @@ import { clearAnalyticsCache } from '@agentic-marketing/analytics';
 import type { BusEvent, JourneyEvent, MessageEvent } from '@agentic-marketing/events';
 import { verifyWebhook } from '@agentic-marketing/integrations';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
-import { eventually, rejects, startTestServer, type User } from './harness';
+import { eventually, rejects, startTestServer, testPort, type User } from './harness';
 
 // Phase 16 (#76, alerts part): threshold rules over the metric layer, evaluated by the scheduler
 // with an injectable clock. Two workspaces, synthetic ClickHouse events, a local webhook receiver
 // that verifies the signature, and the transactional outbox for e-mail.
 
-const PORT = 3481;
+const PORT = testPort(3481);
 const HOUR = 3_600_000;
 const T0 = Date.parse('2026-04-01T12:00:00.000Z');
 const T = (offset: number) => new Date(T0 + offset).toISOString();
@@ -406,7 +406,7 @@ describe('alert commands', () => {
           }),
         )
       ).message,
-    ).toContain('PT30M');
+    ).toMatch(/window: Use a duration between PT1H and P7D/);
 
     expect(
       (

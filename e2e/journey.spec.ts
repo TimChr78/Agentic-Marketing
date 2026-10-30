@@ -14,7 +14,10 @@ test('journey builder: add by drag, connect, delete by keyboard and context menu
 
   // Drag "Wait" from the palette onto the canvas.
   const pane = await canvas.boundingBox();
-  await page.getByRole('navigation', { name: 'Steps' }).getByRole('button', { name: 'Wait', exact: true }).dragTo(canvas, { targetPosition: { x: pane!.width - 160, y: pane!.height / 2 } });
+  await page
+    .getByRole('navigation', { name: 'Steps' })
+    .getByRole('button', { name: 'Wait', exact: true })
+    .dragTo(canvas, { targetPosition: { x: pane!.width - 160, y: pane!.height / 2 } });
   await expect(canvas.locator('.react-flow__node')).toHaveCount(3);
   const wait = canvas.locator('.react-flow__node').filter({ hasText: 'Wait' }).filter({ hasText: '1 day' });
 
@@ -54,7 +57,8 @@ test('journey builder: add by drag, connect, delete by keyboard and context menu
 
   await expect(page.getByText('All changes saved')).toBeVisible({ timeout: 15_000 });
   const saved = await call(page.request, 'artifacts.get', { artifactId: id });
-  const nodes = saved.version.content.nodes as any[];
+  const nodes = (saved as { version: { content: { nodes: { id: string; kind: string; next?: { to: string }[] }[] } } }).version.content
+    .nodes;
   expect(nodes.map((n) => n.kind).sort()).toEqual(['exit', 'trigger', 'wait']);
   const byKind = Object.fromEntries(nodes.map((n) => [n.kind, n]));
   expect(byKind.trigger.next).toEqual([{ to: byKind.wait.id }]);

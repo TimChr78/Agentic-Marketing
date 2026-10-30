@@ -1,28 +1,28 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  applyNodeChanges,
   Background,
+  type Connection,
   Controls,
+  type Edge,
   Handle,
   MarkerType,
   MiniMap,
-  Position,
-  ReactFlow,
-  ReactFlowProvider,
-  applyNodeChanges,
-  type Connection,
-  type Edge,
   type Node,
   type NodeChange,
   type NodeProps,
+  Position,
+  ReactFlow,
+  ReactFlowProvider,
 } from '@xyflow/react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import '@xyflow/react/dist/style.css';
 import { AlertTriangle, ArrowLeft, BarChart3, Play, Plus, Send, Trash2, Workflow } from 'lucide-react';
-import { useStore } from '../mock/store';
 import { exec } from '../api/commands';
 import type { Journey, JourneyEdge, JourneyNode, NodeKind } from '../api/types';
-import { AuthorBadge, Button, Card, PageHeader, Pill, cx, inputBase, inputCls, timeAgo } from '../components/ui';
-import { pageWidth } from '../ui';
+import { AuthorBadge, Button, Card, cx, inputBase, inputCls, PageHeader, Pill, timeAgo } from '../components/ui';
 import { useTheme } from '../lib/theme';
+import { useStore } from '../mock/store';
+import { pageWidth } from '../ui';
 import { configSummary, kindMeta } from './nodeKinds';
 
 export function Journeys() {
@@ -73,7 +73,9 @@ export function Journeys() {
                     <td className="px-4 py-3">
                       <div className="flex flex-wrap items-center gap-1.5">
                         v{latest.number}
-                        {latest.state !== 'published' && <Pill tone={latest.state === 'in_review' ? 'agent' : 'neutral'}>{latest.state.replace('_', ' ')}</Pill>}
+                        {latest.state !== 'published' && (
+                          <Pill tone={latest.state === 'in_review' ? 'agent' : 'neutral'}>{latest.state.replace('_', ' ')}</Pill>
+                        )}
                         <AuthorBadge author={latest.author} />
                       </div>
                     </td>
@@ -118,7 +120,12 @@ export const StepNode = memo(({ data, selected }: NodeProps<Node<StepData>>) => 
     >
       <Handle type="target" position={Position.Top} className="!bg-muted" />
       <div className="flex items-center gap-2">
-        <span className={cx('flex h-6 w-6 items-center justify-center rounded-md', meta.ai ? 'bg-agent-soft text-agent' : node.kind === 'trigger' ? 'bg-accent text-accent-fg' : 'bg-surface-2 text-muted')}>
+        <span
+          className={cx(
+            'flex h-6 w-6 items-center justify-center rounded-md',
+            meta.ai ? 'bg-agent-soft text-agent' : node.kind === 'trigger' ? 'bg-accent text-accent-fg' : 'bg-surface-2 text-muted',
+          )}
+        >
           <Icon size={14} />
         </span>
         <span className="text-[10px] font-semibold uppercase tracking-wider text-muted">{meta.label}</span>
@@ -144,7 +151,20 @@ export const StepNode = memo(({ data, selected }: NodeProps<Node<StepData>>) => 
 });
 
 export const nodeTypes = { step: StepNode };
-const palette: NodeKind[] = ['trigger', 'wait', 'waitEvent', 'branch', 'split', 'email', 'webhook', 'updateProfile', 'aiDecide', 'aiGenerate', 'goal', 'exit'];
+const palette: NodeKind[] = [
+  'trigger',
+  'wait',
+  'waitEvent',
+  'branch',
+  'split',
+  'email',
+  'webhook',
+  'updateProfile',
+  'aiDecide',
+  'aiGenerate',
+  'goal',
+  'exit',
+];
 
 function Builder({ journey, onBack }: { journey: Journey; onBack: () => void }) {
   const { profiles, approvalPolicy, toast } = useStore();
@@ -156,14 +176,18 @@ function Builder({ journey, onBack }: { journey: Journey; onBack: () => void }) 
   // React Flow (controlled) needs measured sizes fed back, or nodes stay hidden.
   const [measured, setMeasured] = useState<Record<string, { width: number; height: number }>>({});
   const [showStats, setShowStats] = useState(true);
-  const [sim, setSim] = useState<{ path: { nodeId: string; label: string; clock: string; note: string }[]; step: number; profile: string } | null>(null);
+  const [sim, setSim] = useState<{
+    path: { nodeId: string; label: string; clock: string; note: string }[];
+    step: number;
+    profile: string;
+  } | null>(null);
   const [simProfile, setSimProfile] = useState(profiles[2]?.id ?? '');
   const saveTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
 
+  // Only reset the working copy when the viewed version changes.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reset only when the viewed version changes, not on every version object refresh
   useEffect(() => {
     setGraph({ nodes: version.nodes, edges: version.edges });
-    // Only reset the working copy when the viewed version changes.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [versionNo]);
 
   const persist = useCallback(
@@ -181,19 +205,22 @@ function Builder({ journey, onBack }: { journey: Journey; onBack: () => void }) 
     [journey.id, versionNo, toast],
   );
 
-  const simIndex = sim ? sim.path.slice(0, sim.step + 1).map((p) => p.nodeId) : [];
+  const simIndex = useMemo(() => (sim ? sim.path.slice(0, sim.step + 1).map((p) => p.nodeId) : []), [sim]);
   const rfNodes: Node<StepData>[] = useMemo(
     () =>
       graph.nodes.map((n) => ({
         id: n.id,
         type: 'step',
         position: n.position,
-        data: { node: n, showStats, sim: !sim ? 'none' : sim.path[sim.step]?.nodeId === n.id ? 'current' : simIndex.includes(n.id) ? 'visited' : 'none' },
+        data: {
+          node: n,
+          showStats,
+          sim: !sim ? 'none' : sim.path[sim.step]?.nodeId === n.id ? 'current' : simIndex.includes(n.id) ? 'visited' : 'none',
+        },
         selected: n.id === selected,
         measured: measured[n.id],
       })),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [graph.nodes, showStats, sim, selected, measured],
+    [graph.nodes, showStats, sim, selected, measured, simIndex],
   );
   const rfEdges: Edge[] = useMemo(
     () =>
@@ -210,22 +237,29 @@ function Builder({ journey, onBack }: { journey: Journey; onBack: () => void }) 
           style: hot ? { stroke: 'var(--accent)', strokeWidth: 2 } : undefined,
         };
       }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [graph.edges, sim],
+    [graph.edges, sim, simIndex],
   );
 
   const onNodesChange = useCallback(
     (changes: NodeChange<Node<StepData>>[]) => {
       const dims = changes.filter((c) => c.type === 'dimensions' && c.dimensions);
       if (dims.length)
-        setMeasured((m) => ({ ...m, ...Object.fromEntries(dims.map((c) => [(c as { id: string }).id, (c as { dimensions: { width: number; height: number } }).dimensions])) }));
+        setMeasured((m) => ({
+          ...m,
+          ...Object.fromEntries(
+            dims.map((c) => [(c as { id: string }).id, (c as { dimensions: { width: number; height: number } }).dimensions]),
+          ),
+        }));
       if (dims.length === changes.length) return;
       const moved = applyNodeChanges(changes, rfNodes);
       const nodes = graph.nodes.map((n) => ({ ...n, position: moved.find((m) => m.id === n.id)?.position ?? n.position }));
       const isDragEnd = changes.some((c) => c.type === 'position' && c.dragging === false);
       const removed = changes.filter((c) => c.type === 'remove').map((c) => c.id);
       if (removed.length) {
-        persist({ nodes: nodes.filter((n) => !removed.includes(n.id)), edges: graph.edges.filter((e) => !removed.includes(e.source) && !removed.includes(e.target)) });
+        persist({
+          nodes: nodes.filter((n) => !removed.includes(n.id)),
+          edges: graph.edges.filter((e) => !removed.includes(e.source) && !removed.includes(e.target)),
+        });
       } else if (isDragEnd) persist({ nodes, edges: graph.edges });
       else setGraph({ nodes, edges: graph.edges });
     },
@@ -233,7 +267,8 @@ function Builder({ journey, onBack }: { journey: Journey; onBack: () => void }) 
   );
 
   const onConnect = useCallback(
-    (c: Connection) => persist({ nodes: graph.nodes, edges: [...graph.edges, { id: `${c.source}-${c.target}`, source: c.source, target: c.target }] }),
+    (c: Connection) =>
+      persist({ nodes: graph.nodes, edges: [...graph.edges, { id: `${c.source}-${c.target}`, source: c.source, target: c.target }] }),
     [graph, persist],
   );
 
@@ -247,7 +282,10 @@ function Builder({ journey, onBack }: { journey: Journey; onBack: () => void }) 
       config: { ...kindMeta[kind].defaults },
       position: anchor ? { x: anchor.position.x, y: anchor.position.y + 130 } : { x: 260, y: 0 },
     };
-    persist({ nodes: [...graph.nodes, node], edges: anchor ? [...graph.edges, { id: `${anchor.id}-${id}`, source: anchor.id, target: id }] : graph.edges });
+    persist({
+      nodes: [...graph.nodes, node],
+      edges: anchor ? [...graph.edges, { id: `${anchor.id}-${id}`, source: anchor.id, target: id }] : graph.edges,
+    });
     setSelected(id);
   }
 
@@ -257,16 +295,24 @@ function Builder({ journey, onBack }: { journey: Journey; onBack: () => void }) 
 
   async function runSim() {
     setSelected(null);
-    const res = await exec<{ path: { nodeId: string; label: string; clock: string; note: string }[]; profile: string }>('journeys.simulate', {
-      journeyId: journey.id,
-      profileId: simProfile,
-    });
+    const res = await exec<{ path: { nodeId: string; label: string; clock: string; note: string }[]; profile: string }>(
+      'journeys.simulate',
+      {
+        journeyId: journey.id,
+        profileId: simProfile,
+      },
+    );
     setSim({ ...res, step: 0 });
-    res.path.forEach((_, i) => setTimeout(() => setSim((s) => (s ? { ...s, step: i } : s)), i * 850));
+    res.path.forEach((_, i) => {
+      setTimeout(() => setSim((s) => (s ? { ...s, step: i } : s)), i * 850);
+    });
   }
 
   async function publish() {
-    const res = await exec<{ status: string; version?: number }>('journeys.requestPublish', { journeyId: journey.id, note: 'Edited in journey builder' });
+    const res = await exec<{ status: string; version?: number }>('journeys.requestPublish', {
+      journeyId: journey.id,
+      note: 'Edited in journey builder',
+    });
     if (res.status === 'published') toast(`Published v${res.version}`, 'good');
     else if (res.status === 'awaiting_approval') toast('Sent for approval (workspace policy)', 'agent');
     else toast('Already published', 'neutral');
@@ -283,9 +329,19 @@ function Builder({ journey, onBack }: { journey: Journey; onBack: () => void }) 
         </Button>
         <div className="mr-2 min-w-0">
           <div className="truncate text-[15px] font-semibold">{journey.name}</div>
-          <div className="text-[11px] text-muted">Goal: {journey.goal} · purpose {journey.purpose}</div>
+          <div className="text-[11px] text-muted">
+            Goal: {journey.goal} · purpose {journey.purpose}
+          </div>
         </div>
-        <select id="journey-version" className={inputBase} value={versionNo} onChange={(e) => { setSim(null); setVersionNo(Number(e.target.value)); }}>
+        <select
+          id="journey-version"
+          className={inputBase}
+          value={versionNo}
+          onChange={(e) => {
+            setSim(null);
+            setVersionNo(Number(e.target.value));
+          }}
+        >
           {journey.versions.map((v) => (
             <option key={v.number} value={v.number}>
               v{v.number} · {v.state.replace('_', ' ')} · {v.author.type === 'agent' ? '🤖 ' : ''}
@@ -299,7 +355,13 @@ function Builder({ journey, onBack }: { journey: Journey; onBack: () => void }) 
           <Button variant={showStats ? 'secondary' : 'ghost'} onClick={() => setShowStats(!showStats)}>
             <BarChart3 size={14} /> Stats
           </Button>
-          <select id="sim-profile" className={cx(inputBase, 'w-[150px]')} value={simProfile} onChange={(e) => setSimProfile(e.target.value)} aria-label="Profile to simulate">
+          <select
+            id="sim-profile"
+            className={cx(inputBase, 'w-[150px]')}
+            value={simProfile}
+            onChange={(e) => setSimProfile(e.target.value)}
+            aria-label="Profile to simulate"
+          >
             {profiles.slice(0, 12).map((p) => (
               <option key={p.id} value={p.id}>
                 {p.name}
@@ -322,9 +384,13 @@ function Builder({ journey, onBack }: { journey: Journey; onBack: () => void }) 
             const m = kindMeta[k];
             return (
               <button
+                type="button"
                 key={k}
                 onClick={() => addNode(k)}
-                className={cx('flex shrink-0 items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12px] font-medium hover:bg-surface-2', m.ai ? 'text-agent' : 'text-fg')}
+                className={cx(
+                  'flex shrink-0 items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12px] font-medium hover:bg-surface-2',
+                  m.ai ? 'text-agent' : 'text-fg',
+                )}
                 title={`Add ${m.label} after the selected step`}
               >
                 <m.icon size={14} /> {m.label}
@@ -336,23 +402,23 @@ function Builder({ journey, onBack }: { journey: Journey; onBack: () => void }) 
 
         <div className="relative min-h-[420px] flex-1">
           <div className="absolute inset-0">
-          <ReactFlow
-            nodes={rfNodes}
-            edges={rfEdges}
-            nodeTypes={nodeTypes}
-            onNodesChange={onNodesChange}
-            onConnect={onConnect}
-            onNodeClick={(_, n) => setSelected(n.id)}
-            onPaneClick={() => setSelected(null)}
-            colorMode={theme}
-            fitView
-            fitViewOptions={{ padding: 0.2 }}
-            proOptions={{ hideAttribution: true }}
-          >
-            <Background gap={20} />
-            <Controls showInteractive={false} />
-            <MiniMap pannable zoomable className="!hidden lg:!block" />
-          </ReactFlow>
+            <ReactFlow
+              nodes={rfNodes}
+              edges={rfEdges}
+              nodeTypes={nodeTypes}
+              onNodesChange={onNodesChange}
+              onConnect={onConnect}
+              onNodeClick={(_, n) => setSelected(n.id)}
+              onPaneClick={() => setSelected(null)}
+              colorMode={theme}
+              fitView
+              fitViewOptions={{ padding: 0.2 }}
+              proOptions={{ hideAttribution: true }}
+            >
+              <Background gap={20} />
+              <Controls showInteractive={false} />
+              <MiniMap pannable zoomable className="!hidden lg:!block" />
+            </ReactFlow>
           </div>
           {version.state !== 'draft' && (
             <div className="pointer-events-none absolute left-3 top-3 rounded-md border border-line bg-surface px-2.5 py-1.5 text-[11px] text-muted shadow-sm">
@@ -375,6 +441,7 @@ function Builder({ journey, onBack }: { journey: Journey; onBack: () => void }) 
               </div>
               <ol className="space-y-2">
                 {sim.path.slice(0, sim.step + 1).map((p, i) => (
+                  // biome-ignore lint/suspicious/noArrayIndexKey: the simulated path is an ordered sequence of steps, indexed by position
                   <li key={i} className="flash-in rounded-md border border-line p-2.5">
                     <div className="flex items-center justify-between gap-2">
                       <span className="text-[13px] font-semibold">{p.label}</span>
@@ -384,7 +451,9 @@ function Builder({ journey, onBack }: { journey: Journey; onBack: () => void }) 
                   </li>
                 ))}
               </ol>
-              <p className="mt-3 text-[11px] text-muted">Dry run: no messages are sent. Agents use the same simulation via journeys.simulate.</p>
+              <p className="mt-3 text-[11px] text-muted">
+                Dry run: no messages are sent. Agents use the same simulation via journeys.simulate.
+              </p>
             </div>
           ) : sel ? (
             <div className="space-y-3 p-4">
@@ -393,7 +462,10 @@ function Builder({ journey, onBack }: { journey: Journey; onBack: () => void }) 
                 <Button
                   variant="ghost"
                   onClick={() => {
-                    persist({ nodes: graph.nodes.filter((n) => n.id !== sel.id), edges: graph.edges.filter((e) => e.source !== sel.id && e.target !== sel.id) });
+                    persist({
+                      nodes: graph.nodes.filter((n) => n.id !== sel.id),
+                      edges: graph.edges.filter((e) => e.source !== sel.id && e.target !== sel.id),
+                    });
                     setSelected(null);
                   }}
                   aria-label="Delete step"
@@ -403,7 +475,12 @@ function Builder({ journey, onBack }: { journey: Journey; onBack: () => void }) 
               </div>
               <label className="block">
                 <span className="mb-1 block text-[12px] font-medium text-muted">Label</span>
-                <input id={`label-${sel.id}`} className={inputCls} value={sel.label} onChange={(e) => updateNode(sel.id, { label: e.target.value })} />
+                <input
+                  id={`label-${sel.id}`}
+                  className={inputCls}
+                  value={sel.label}
+                  onChange={(e) => updateNode(sel.id, { label: e.target.value })}
+                />
               </label>
               {Object.entries(sel.config).map(([k, v]) => (
                 <label key={k} className="block">
@@ -412,25 +489,32 @@ function Builder({ journey, onBack }: { journey: Journey; onBack: () => void }) 
                     id={`cfg-${sel.id}-${k}`}
                     className={cx(inputCls, 'font-mono')}
                     value={String(v)}
-                    onChange={(e) => updateNode(sel.id, { config: { ...sel.config, [k]: typeof v === 'number' ? Number(e.target.value) : e.target.value } })}
+                    onChange={(e) =>
+                      updateNode(sel.id, {
+                        config: { ...sel.config, [k]: typeof v === 'number' ? Number(e.target.value) : e.target.value },
+                      })
+                    }
                   />
                 </label>
               ))}
               {kindMeta[sel.kind].ai && (
                 <p className="rounded-md bg-agent-soft p-2.5 text-[12px] text-agent">
-                  AI steps run asynchronously with a fallback path, schema-validated output and a decision log. Only attributes marked “AI visible” reach the model.
+                  AI steps run asynchronously with a fallback path, schema-validated output and a decision log. Only attributes marked “AI
+                  visible” reach the model.
                 </p>
               )}
               {sel.kind === 'email' && (
                 <p className="rounded-md bg-surface-2 p-2.5 text-[12px] text-muted">
-                  The send gateway checks the lawful basis for <code className="font-mono">{String(sel.config.purpose)}</code>, suppressions and frequency caps before every send.
+                  The send gateway checks the lawful basis for <code className="font-mono">{String(sel.config.purpose)}</code>, suppressions
+                  and frequency caps before every send.
                 </p>
               )}
             </div>
           ) : (
             <div className="p-4 text-[13px] text-muted">
               <div className="eyebrow mb-2">Inspector</div>
-              Select a step to edit it, drag between handles to connect steps, or add a step from the palette. Press <kbd className="rounded border border-line px-1 font-mono text-[11px]">⌫</kbd> to delete the selected step.
+              Select a step to edit it, drag between handles to connect steps, or add a step from the palette. Press{' '}
+              <kbd className="rounded border border-line px-1 font-mono text-[11px]">⌫</kbd> to delete the selected step.
               <div className="mt-4 rounded-md border border-line p-3">
                 <div className="eyebrow mb-1">This journey</div>
                 <div className="num grid grid-cols-2 gap-2 text-[12px]">

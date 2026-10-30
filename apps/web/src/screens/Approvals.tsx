@@ -1,9 +1,9 @@
-import { useState } from 'react';
 import { Check, Mail, Workflow, X } from 'lucide-react';
-import { useStore } from '../mock/store';
+import { useState } from 'react';
 import { exec } from '../api/commands';
 import type { ApprovalPolicy } from '../api/types';
-import { AuthorBadge, Button, Card, PageHeader, Pill, cx, timeAgo } from '../components/ui';
+import { AuthorBadge, Button, Card, cx, PageHeader, Pill, timeAgo } from '../components/ui';
+import { useStore } from '../mock/store';
 import { pageWidth } from '../ui';
 
 const policies: { id: ApprovalPolicy; label: string; text: string }[] = [
@@ -20,7 +20,10 @@ export function Approvals() {
   async function decide(approve: boolean) {
     if (!open) return;
     const res = await exec<{ status: string }>(approve ? 'artifacts.approve' : 'artifacts.reject', { approvalId: open.id });
-    toast(approve ? `${open.artifactName} v${open.toVersion} published` : `Rejected; ${open.artifactName} v${open.toVersion} is a draft again`, approve ? 'good' : 'neutral');
+    toast(
+      approve ? `${open.artifactName} v${open.toVersion} published` : `Rejected; ${open.artifactName} v${open.toVersion} is a draft again`,
+      approve ? 'good' : 'neutral',
+    );
     if (res.status) setOpenId(approvals.find((a) => a.status === 'pending' && a.id !== open.id)?.id ?? null);
   }
 
@@ -32,12 +35,16 @@ export function Approvals() {
         <div className="grid gap-2 p-3 md:grid-cols-3">
           {policies.map((p) => (
             <button
+              type="button"
               key={p.id}
               onClick={() => {
                 useStore.setState({ approvalPolicy: p.id });
                 toast(`Approval policy: ${p.label}`, 'neutral');
               }}
-              className={cx('rounded-md border p-3 text-left', approvalPolicy === p.id ? 'border-accent bg-accent-soft' : 'border-line hover:bg-surface-2')}
+              className={cx(
+                'rounded-md border p-3 text-left',
+                approvalPolicy === p.id ? 'border-accent bg-accent-soft' : 'border-line hover:bg-surface-2',
+              )}
             >
               <div className={cx('text-[13px] font-semibold', approvalPolicy === p.id && 'text-accent')}>{p.label}</div>
               <div className="mt-0.5 text-[12px] text-muted">{p.text}</div>
@@ -51,11 +58,25 @@ export function Approvals() {
           <ul className="divide-y divide-line">
             {approvals.map((a) => (
               <li key={a.id}>
-                <button onClick={() => setOpenId(a.id)} className={cx('flex w-full items-start gap-3 px-4 py-3 text-left', a.id === openId ? 'bg-surface-2' : 'hover:bg-surface-2')}>
-                  {a.artifactType === 'journey' ? <Workflow size={15} className="mt-0.5 text-muted" /> : <Mail size={15} className="mt-0.5 text-muted" />}
+                <button
+                  type="button"
+                  onClick={() => setOpenId(a.id)}
+                  className={cx(
+                    'flex w-full items-start gap-3 px-4 py-3 text-left',
+                    a.id === openId ? 'bg-surface-2' : 'hover:bg-surface-2',
+                  )}
+                >
+                  {a.artifactType === 'journey' ? (
+                    <Workflow size={15} className="mt-0.5 text-muted" />
+                  ) : (
+                    <Mail size={15} className="mt-0.5 text-muted" />
+                  )}
                   <span className="min-w-0 flex-1">
                     <span className="block font-semibold">
-                      {a.artifactName} <span className="num font-normal text-muted">v{a.fromVersion ?? '–'} → v{a.toVersion}</span>
+                      {a.artifactName}{' '}
+                      <span className="num font-normal text-muted">
+                        v{a.fromVersion ?? '–'} → v{a.toVersion}
+                      </span>
                     </span>
                     <span className="mt-1 flex flex-wrap items-center gap-1.5">
                       <AuthorBadge author={a.requestedBy} />
@@ -93,14 +114,18 @@ export function Approvals() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-line">
-                  {open.changes.map((c, i) => (
-                    <tr key={i} className="align-top">
+                  {open.changes.map((c) => (
+                    <tr key={`${c.kind}-${c.path}`} className="align-top">
                       <td className="px-4 py-2">
                         <Pill tone={c.kind === 'added' ? 'good' : c.kind === 'removed' ? 'bad' : 'accent'}>{c.kind}</Pill>
                       </td>
                       <td className="px-4 py-2 font-mono text-[12px] text-muted">{c.path}</td>
-                      <td className="break-words px-4 py-2 font-mono text-[12px] [overflow-wrap:anywhere]">{c.before ? <span className="rounded bg-bad-soft px-1 text-bad line-through decoration-1">{c.before}</span> : '—'}</td>
-                      <td className="break-words px-4 py-2 font-mono text-[12px] [overflow-wrap:anywhere]">{c.after ? <span className="rounded bg-good-soft px-1 text-good">{c.after}</span> : '—'}</td>
+                      <td className="break-words px-4 py-2 font-mono text-[12px] [overflow-wrap:anywhere]">
+                        {c.before ? <span className="rounded bg-bad-soft px-1 text-bad line-through decoration-1">{c.before}</span> : '—'}
+                      </td>
+                      <td className="break-words px-4 py-2 font-mono text-[12px] [overflow-wrap:anywhere]">
+                        {c.after ? <span className="rounded bg-good-soft px-1 text-good">{c.after}</span> : '—'}
+                      </td>
                     </tr>
                   ))}
                 </tbody>

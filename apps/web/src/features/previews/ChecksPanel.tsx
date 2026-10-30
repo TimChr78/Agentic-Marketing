@@ -82,11 +82,20 @@ export function ChecksPanel({ artifactId, version }: { artifactId: string; versi
     <Card
       title="Checks"
       description={
-        problems === 0 ? 'No problems found in the rendered e-mail.' : `${summary.blocking} blocking · ${summary.warning} warnings · ${summary.info} notes`
+        problems === 0
+          ? 'No problems found in the rendered e-mail.'
+          : `${summary.blocking} blocking · ${summary.warning} warnings · ${summary.info} notes`
       }
       action={
         findings.length > 0 || !full ? (
-          <Button size="sm" variant="ghost" icon={<Link2 size={14} aria-hidden />} loading={checkingLinks} onClick={checkLinks} title="Fetch the links in this e-mail (up to 30, cached for an hour)">
+          <Button
+            size="sm"
+            variant="ghost"
+            icon={<Link2 size={14} aria-hidden />}
+            loading={checkingLinks}
+            onClick={checkLinks}
+            title="Fetch the links in this e-mail (up to 30, cached for an hour)"
+          >
             Check links
           </Button>
         ) : null
@@ -94,7 +103,11 @@ export function ChecksPanel({ artifactId, version }: { artifactId: string; versi
       padded
     >
       <div className="space-y-3">
-        {linkError && <Alert tone="warn" title="Link checking failed">{linkError}</Alert>}
+        {linkError && (
+          <Alert tone="warn" title="Link checking failed">
+            {linkError}
+          </Alert>
+        )}
         {problems === 0 && <p className="text-[13px] text-fg-2">Nothing to fix before sending.</p>}
         {groups.map((g) => (
           <section key={g.severity} aria-label={severityLabel[g.severity]}>

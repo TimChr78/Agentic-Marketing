@@ -6,7 +6,13 @@ import { addNode, connect, deleteNode, disconnect, duplicateNode } from '../src/
 
 const base = (): JNode[] => [
   { id: 'n1', kind: 'trigger', label: 'Start', config: { event: 'Signed Up' }, next: [{ to: 'n2' }] },
-  { id: 'n2', kind: 'branch', label: 'Engaged?', config: { segment: 'seg_0123456789abcdef0123456789abcdef' }, next: [{ to: 'n3' }, { to: 'n4' }] },
+  {
+    id: 'n2',
+    kind: 'branch',
+    label: 'Engaged?',
+    config: { segment: 'seg_0123456789abcdef0123456789abcdef' },
+    next: [{ to: 'n3' }, { to: 'n4' }],
+  },
   { id: 'n3', kind: 'exit', label: 'Yes exit', config: {} },
   { id: 'n4', kind: 'email', label: 'Nudge', config: { template: '' } },
 ];

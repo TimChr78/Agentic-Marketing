@@ -5,7 +5,7 @@ import type { AddressInfo } from 'node:net';
 // @ts-expect-error http_ece ships no types; it decrypts like a browser would.
 import ece from 'http_ece';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { eventually, rejects, startTestServer, type User } from './harness';
+import { eventually, rejects, startTestServer, testPort, type User } from './harness';
 
 // Phase 11 (wave 2), part d: push. Browsers subscribe with the workspace's VAPID key (web push,
 // encrypted per RFC 8291), apps register FCM and APNs tokens; one message reaches every device of
@@ -71,7 +71,7 @@ beforeAll(async () => {
   await new Promise<void>((r) => apns.listen(0, '127.0.0.1', r));
   apnsBase = `http://127.0.0.1:${(apns.address() as AddressInfo).port}`;
 
-  t = await startTestServer('test_p11_push', 3295);
+  t = await startTestServer('test_p11_push', testPort(3295));
   owner = await t.signUp(`owner-${Date.now()}@example.com`);
   await t.workspaceWith([[owner, 'owner']], 'none');
   const api = t.api(owner);

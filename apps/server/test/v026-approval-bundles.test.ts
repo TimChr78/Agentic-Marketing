@@ -1,6 +1,6 @@
 import { dependencyOrder } from '@agentic-marketing/artifacts';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { rejects, startTestServer, type User } from './harness';
+import { rejects, startTestServer, testPort, type User } from './harness';
 
 // Approval bundles (#107): the weekly newsletter is a new template plus the broadcast that sends
 // it. Until now that took two review rounds, because a broadcast may only name a published
@@ -32,7 +32,7 @@ async function issue(n: number) {
 }
 
 beforeAll(async () => {
-  t = await startTestServer('test_approval_bundles', 3457);
+  t = await startTestServer('test_approval_bundles', testPort(3457));
   owner = await t.signUp(`owner-bundles-${stamp}@example.com`);
   approver = await t.signUp(`approver-bundles-${stamp}@example.com`);
   await t.workspaceWith(

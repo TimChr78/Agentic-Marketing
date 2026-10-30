@@ -3,7 +3,7 @@ import type { AddressInfo } from 'node:net';
 import { runRetentionOnce } from '@agentic-marketing/audience';
 import { outbox } from '@agentic-marketing/email';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { eventually, rejects, startTestServer, type User } from './harness';
+import { eventually, rejects, startTestServer, testPort, type User } from './harness';
 
 // Phase 6 (wave 2): what happens to e-mails becomes customer events (segments, journeys and
 // webhooks can use clicks), links carry UTM tags, templates can be test-sent to members, and
@@ -30,7 +30,7 @@ const mjml = (body: string) =>
 beforeAll(async () => {
   await new Promise<void>((r) => receiver.listen(0, '127.0.0.1', r));
   receiverUrl = `http://127.0.0.1:${(receiver.address() as AddressInfo).port}`;
-  t = await startTestServer('test_p6', 3292);
+  t = await startTestServer('test_p6', testPort(3292));
   owner = await t.signUp(`owner-${Date.now()}@example.com`);
   await t.workspaceWith([[owner, 'owner']]);
   const api = t.api(owner);

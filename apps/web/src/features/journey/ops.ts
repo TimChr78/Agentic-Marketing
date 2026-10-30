@@ -1,5 +1,5 @@
 import { NODE_H } from './layout';
-import { DEFAULTS, type JNode, KINDS, materialize, maxEdges, newNodeId, type NodeKind } from './model';
+import { DEFAULTS, type JNode, KINDS, materialize, maxEdges, type NodeKind, newNodeId } from './model';
 
 // Graph edits on the stored JSON (#33). Edges are positional (`next[i]` is outcome i: yes/no,
 // matched/timeout, split path, AI option), so removing an outcome in the middle would silently
@@ -13,9 +13,15 @@ export interface EditResult {
 
 const clone = (nodes: JNode[]): JNode[] => materialize(nodes).map((n) => ({ ...n, next: n.next ? [...n.next] : [] }));
 
-export function addNode(nodes: JNode[], kind: NodeKind, position: { x: number; y: number }, after?: { source: string; index: number }): EditResult {
+export function addNode(
+  nodes: JNode[],
+  kind: NodeKind,
+  position: { x: number; y: number },
+  after?: { source: string; index: number },
+): EditResult {
   const out = clone(nodes);
-  if (kind === 'trigger' && out.some((n) => n.kind === 'trigger')) return { nodes, note: 'A journey has one trigger. Edit the existing one instead.' };
+  if (kind === 'trigger' && out.some((n) => n.kind === 'trigger'))
+    return { nodes, note: 'A journey has one trigger. Edit the existing one instead.' };
   const id = newNodeId(out);
   out.push({ id, kind, label: KINDS[kind].label, config: structuredClone(DEFAULTS[kind]), next: [], position });
   if (after) {
@@ -74,7 +80,13 @@ export function duplicateNode(nodes: JNode[], id: string): EditResult {
   const src = out.find((n) => n.id === id);
   if (!src || src.kind === 'trigger') return { nodes };
   const nid = newNodeId(out);
-  out.push({ ...structuredClone(src), id: nid, label: `${src.label} (copy)`, next: [], position: { x: (src.position?.x ?? 0) + 32, y: (src.position?.y ?? 0) + 32 } });
+  out.push({
+    ...structuredClone(src),
+    id: nid,
+    label: `${src.label} (copy)`,
+    next: [],
+    position: { x: (src.position?.x ?? 0) + 32, y: (src.position?.y ?? 0) + 32 },
+  });
   return { nodes: out, select: nid };
 }
 

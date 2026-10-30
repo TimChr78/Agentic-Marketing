@@ -3,7 +3,7 @@ import { api, type Out } from '../../app/api';
 import { useCrumbs } from '../../app/page';
 import { useApi } from '../../app/useApi';
 import { Chart } from '../../components/Chart';
-import { Alert, Checkbox, EmptyState, Field, Input, LoadingBlock, PageHeader, Table, TableFrame, Td, Th, THead, Tr } from '../../ui';
+import { Alert, Checkbox, EmptyState, Field, Input, LoadingBlock, PageHeader, Table, TableFrame, Td, THead, Th, Tr } from '../../ui';
 import { pageWidth } from '../../ui/layout';
 
 type Result = Out<'analytics.query'>;
@@ -209,6 +209,7 @@ export default function AnalyticsPage() {
           </THead>
           <tbody>
             {(data?.rows ?? []).map((row, i) => (
+              // biome-ignore lint/suspicious/noArrayIndexKey: analytics rows are a read-only result set of positional cells with no id
               <Tr key={i}>
                 {columns.map((c, index) => (
                   <Td key={c.name} align={c.kind === 'measure' ? 'right' : undefined}>

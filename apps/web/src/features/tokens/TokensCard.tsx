@@ -4,7 +4,29 @@ import { api, errText, type Out } from '../../app/api';
 import { navigate } from '../../app/router';
 import { useWorkspace } from '../../app/session';
 import { useApi } from '../../app/useApi';
-import { Alert, Button, Card, CodeView, Drawer, EmptyState, Field, Input, Modal, Mono, Select, Table, TableFrame, Tag, Td, Th, THead, timeAgo, Tr, formatDate, useToast } from '../../ui';
+import {
+  Alert,
+  Button,
+  Card,
+  CodeView,
+  Drawer,
+  EmptyState,
+  Field,
+  formatDate,
+  Input,
+  Modal,
+  Mono,
+  Select,
+  Table,
+  TableFrame,
+  Tag,
+  Td,
+  THead,
+  Th,
+  Tr,
+  timeAgo,
+  useToast,
+} from '../../ui';
 import { ScopePicker } from './ScopePicker';
 import type { Scope } from './scopes';
 import { TokenDrawer } from './TokenDrawer';
@@ -21,14 +43,16 @@ export function TokensCard({ openId }: { openId?: string }) {
   const [created, setCreated] = useState<{ name: string; token: string } | null>(null);
   const tokens = list.data?.tokens ?? [];
   const admin = can('workspace:admin');
-  const ignored = new Map(
-    (warnings.data?.clients ?? []).filter((c) => c.principalType === 'token').map((c) => [c.principalId, c]),
-  );
+  const ignored = new Map((warnings.data?.clients ?? []).filter((c) => c.principalType === 'token').map((c) => [c.principalId, c]));
   const open = (id: string) => navigate(`/settings/integrations/tokens/${id}`);
   return (
     <Card
       title="API tokens"
-      description={admin ? 'Everyone’s tokens in this workspace. Tokens act as agents with the scopes chosen, never more than the owner’s role.' : 'Your tokens for scripts and agents. They act as agents with the scopes you choose.'}
+      description={
+        admin
+          ? 'Everyone’s tokens in this workspace. Tokens act as agents with the scopes chosen, never more than the owner’s role.'
+          : 'Your tokens for scripts and agents. They act as agents with the scopes you choose.'
+      }
       action={
         <Button variant="primary" icon={<Plus size={15} />} onClick={() => setCreating(true)}>
           Create token
@@ -49,8 +73,16 @@ export function TokensCard({ openId }: { openId?: string }) {
         onRetry={list.reload}
         isEmpty={!tokens.length}
         empty={
-          <EmptyState title="No API tokens yet" action={<Button variant="primary" icon={<Plus size={15} />} onClick={() => setCreating(true)}>Create token</Button>}>
-            Create one for an agent such as Hermes, or for n8n and scripts: send it as <Mono>Authorization: Bearer amk_…</Mono> to <Mono>/v1/&lt;command&gt;</Mono> or <Mono>/mcp</Mono>.
+          <EmptyState
+            title="No API tokens yet"
+            action={
+              <Button variant="primary" icon={<Plus size={15} />} onClick={() => setCreating(true)}>
+                Create token
+              </Button>
+            }
+          >
+            Create one for an agent such as Hermes, or for n8n and scripts: send it as <Mono>Authorization: Bearer amk_…</Mono> to{' '}
+            <Mono>/v1/&lt;command&gt;</Mono> or <Mono>/mcp</Mono>.
           </EmptyState>
         }
       >
@@ -69,11 +101,19 @@ export function TokensCard({ openId }: { openId?: string }) {
             {tokens.map((t: Token) => (
               <Tr key={t.id} onClick={() => open(t.id)} selected={openId === t.id}>
                 <Td>
-                  <button type="button" className="font-medium text-fg hover:underline" onClick={(e) => (e.stopPropagation(), open(t.id))}>
+                  <button
+                    type="button"
+                    className="font-medium text-fg hover:underline"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      open(t.id);
+                    }}
+                  >
                     {t.name}
                   </button>
                   <div className="font-mono text-[11px] text-muted">{t.tokenHint}</div>
                   {ignored.has(t.id) && (
+                    // biome-ignore lint/a11y/useKeyWithClickEvents: only stops the row click from firing; the summary toggles natively from the keyboard
                     <details className="mt-1 text-[12px] text-muted" onClick={(e) => e.stopPropagation()}>
                       <summary className="cursor-pointer hover:text-fg">
                         Inputs the API ignored: {ignored.get(t.id)!.total} in the last {warnings.data?.sinceDays ?? 30} days (last{' '}
@@ -119,11 +159,23 @@ export function TokensCard({ openId }: { openId?: string }) {
         />
       )}
       {created && (
-        <Modal open onClose={() => setCreated(null)} title={`Token “${created.name}” created`} footer={<Button variant="primary" onClick={() => setCreated(null)}>I've stored it</Button>}>
-          <p className="mb-3">Copy it now and store it in the tool that uses it. It is shown only once; if you lose it, revoke it and create a new one.</p>
+        <Modal
+          open
+          onClose={() => setCreated(null)}
+          title={`Token “${created.name}” created`}
+          footer={
+            <Button variant="primary" onClick={() => setCreated(null)}>
+              I've stored it
+            </Button>
+          }
+        >
+          <p className="mb-3">
+            Copy it now and store it in the tool that uses it. It is shown only once; if you lose it, revoke it and create a new one.
+          </p>
           <CodeView value={created.token} />
           <p className="mt-3 text-[13px] text-muted">
-            REST: <Mono>Authorization: Bearer {created.token.slice(0, 8)}…</Mono> on <Mono>{location.origin}/v1/&lt;command&gt;</Mono>. MCP: <Mono>{location.origin}/mcp</Mono> with the same header.
+            REST: <Mono>Authorization: Bearer {created.token.slice(0, 8)}…</Mono> on <Mono>{location.origin}/v1/&lt;command&gt;</Mono>. MCP:{' '}
+            <Mono>{location.origin}/mcp</Mono> with the same header.
           </p>
         </Modal>
       )}
@@ -132,7 +184,15 @@ export function TokensCard({ openId }: { openId?: string }) {
   );
 }
 
-function CreateTokenDrawer({ allowed, onClose, onCreated }: { allowed: string[]; onClose: () => void; onCreated: (c: { name: string; token: string }) => void }) {
+function CreateTokenDrawer({
+  allowed,
+  onClose,
+  onCreated,
+}: {
+  allowed: string[];
+  onClose: () => void;
+  onCreated: (c: { name: string; token: string }) => void;
+}) {
   const toast = useToast();
   const [name, setName] = useState('');
   const [nameError, setNameError] = useState<string | null>(null);
@@ -146,7 +206,11 @@ function CreateTokenDrawer({ allowed, onClose, onCreated }: { allowed: string[];
     setBusy(true);
     setError(null);
     try {
-      const r = await api.call('apiTokens.create', { name: name.trim(), scopes: scopes as Scope[], ...(days ? { expiresInDays: Number(days) } : {}) });
+      const r = await api.call('apiTokens.create', {
+        name: name.trim(),
+        scopes: scopes as Scope[],
+        ...(days ? { expiresInDays: Number(days) } : {}),
+      });
       toast.success(`Created “${r.name}”.`);
       onCreated({ name: r.name, token: r.token });
     } catch (e) {
@@ -181,7 +245,16 @@ function CreateTokenDrawer({ allowed, onClose, onCreated }: { allowed: string[];
         }}
       >
         <Field label="Name" hint="What uses it, e.g. “Hermes” or “n8n reporting”." error={nameError} required>
-          <Input value={name} data-autofocus maxLength={120} onChange={(e) => (setName(e.target.value), setNameError(null))} onBlur={() => !name.trim() && setNameError('Name it after what uses it, e.g. “Hermes”.')} />
+          <Input
+            value={name}
+            data-autofocus
+            maxLength={120}
+            onChange={(e) => {
+              setName(e.target.value);
+              setNameError(null);
+            }}
+            onBlur={() => !name.trim() && setNameError('Name it after what uses it, e.g. “Hermes”.')}
+          />
         </Field>
         <ScopePicker value={scopes} onChange={setScopes} allowed={allowed} />
         <Field label="Expires" hint="Shorter is safer; an admin can extend it later with their password.">

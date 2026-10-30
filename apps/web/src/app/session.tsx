@@ -132,7 +132,12 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         await load();
       },
       signOut: async () => {
-        await fetch('/api/auth/sign-out', { method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json' }, body: '{}' }).catch(() => {});
+        await fetch('/api/auth/sign-out', {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'content-type': 'application/json' },
+          body: '{}',
+        }).catch(() => {});
         setWorkspaceId(null);
         setWorkspace(null);
         setUser(null);

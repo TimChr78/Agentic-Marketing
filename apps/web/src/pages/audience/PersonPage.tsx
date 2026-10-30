@@ -12,6 +12,7 @@ import {
   Button,
   EmptyState,
   Field,
+  formatDateTime,
   Input,
   LoadingBlock,
   Meta,
@@ -23,10 +24,9 @@ import {
   Tabs,
   Tag,
   Td,
-  Th,
   THead,
+  Th,
   Tr,
-  formatDateTime,
   timeAgo,
   useConfirm,
   useToast,
@@ -101,11 +101,12 @@ export default function PersonPage({ params }: { params: Record<string, string> 
       body: (
         <>
           <p>
-            This permanently removes <strong>{typed}</strong>, their merged profiles, identifiers, consent ledger and events. It cannot be undone.
+            This permanently removes <strong>{typed}</strong>, their merged profiles, identifiers, consent ledger and events. It cannot be
+            undone.
           </p>
           <p className="mt-2">
-            Hashes of their e-mail and phone stay on the suppression list so they are never contacted again. Their encryption key is destroyed, so copies
-            in backups become unreadable.
+            Hashes of their e-mail and phone stay on the suppression list so they are never contacted again. Their encryption key is
+            destroyed, so copies in backups become unreadable.
           </p>
           <Field label="Reason" hint="Kept in the erasure record." required className="mt-3">
             <Input value={reason} maxLength={500} onChange={(e) => setReason(e.target.value)} />
@@ -151,7 +152,12 @@ export default function PersonPage({ params }: { params: Record<string, string> 
   const hidden = !can('profiles:pii') && personal.some(([, v]) => v === '[hidden]');
 
   const overviewMeta: [ReactNode, ReactNode][] = [
-    ['Profile id', <Mono key="id" className="break-all">{p.id}</Mono>],
+    [
+      'Profile id',
+      <Mono key="id" className="break-all">
+        {p.id}
+      </Mono>,
+    ],
     ...personal.map(([k, v]): [ReactNode, ReactNode] => [
       <span key={`k-${k}`} className="flex items-center gap-1.5">
         {k}
@@ -160,11 +166,29 @@ export default function PersonPage({ params }: { params: Record<string, string> 
       <span key={`v-${k}`}>{valueText(v)}</span>,
     ]),
     ...Object.entries(p.traits).map(([k, v]): [ReactNode, ReactNode] => [k, valueText(v)]),
-    ['First seen', <span key="first" title={formatDateTime(p.firstSeen)}>{formatDateTime(p.firstSeen)}</span>],
-    ['Last seen', <span key="last" title={formatDateTime(p.lastSeen)}>{timeAgo(p.lastSeen)}</span>],
+    [
+      'First seen',
+      <span key="first" title={formatDateTime(p.firstSeen)}>
+        {formatDateTime(p.firstSeen)}
+      </span>,
+    ],
+    [
+      'Last seen',
+      <span key="last" title={formatDateTime(p.lastSeen)}>
+        {timeAgo(p.lastSeen)}
+      </span>,
+    ],
     [
       'Merged',
-      p.mergedFrom.length ? <span key="merged">{p.mergedFrom.length} earlier {p.mergedFrom.length === 1 ? 'profile' : 'profiles'} merged into this one</span> : <span key="merged" className="text-muted">No merged profiles</span>,
+      p.mergedFrom.length ? (
+        <span key="merged">
+          {p.mergedFrom.length} earlier {p.mergedFrom.length === 1 ? 'profile' : 'profiles'} merged into this one
+        </span>
+      ) : (
+        <span key="merged" className="text-muted">
+          No merged profiles
+        </span>
+      ),
     ],
   ];
 
@@ -196,7 +220,8 @@ export default function PersonPage({ params }: { params: Record<string, string> 
       )}
       {hidden && (
         <Alert tone="info" className="mb-4">
-          Personal data is hidden. Your role needs <Mono>profiles:pii</Mono> to see e-mail addresses and other personal traits, and to export them.
+          Personal data is hidden. Your role needs <Mono>profiles:pii</Mono> to see e-mail addresses and other personal traits, and to
+          export them.
         </Alert>
       )}
 
@@ -241,7 +266,8 @@ export default function PersonPage({ params }: { params: Record<string, string> 
             <div className="rounded-lg border border-line bg-surface p-4">
               <h2 className="mb-1 text-[14px] font-semibold">Topic preferences</h2>
               <p className="mb-3 text-[12px] text-muted">
-                Finer choices within a purpose. A topic never replaces the purpose’s consent; when the person made no choice, the topic’s default applies.
+                Finer choices within a purpose. A topic never replaces the purpose’s consent; when the person made no choice, the topic’s
+                default applies.
               </p>
               <Table label="Topic preferences">
                 <THead>
@@ -297,7 +323,11 @@ export default function PersonPage({ params }: { params: Record<string, string> 
           onRetry={events.reload}
           columns={4}
           isEmpty={eventRows.length === 0}
-          empty={<EmptyState compact title="No events yet">Events arrive from your website, integrations and journeys.</EmptyState>}
+          empty={
+            <EmptyState compact title="No events yet">
+              Events arrive from your website, integrations and journeys.
+            </EmptyState>
+          }
         >
           <Table label="Events">
             <THead>
@@ -333,7 +363,11 @@ export default function PersonPage({ params }: { params: Record<string, string> 
           onRetry={segments.reload}
           columns={2}
           isEmpty={segmentRows.length === 0}
-          empty={<EmptyState compact title="Not in any segment yet">Segments fill as the person matches their rules.</EmptyState>}
+          empty={
+            <EmptyState compact title="Not in any segment yet">
+              Segments fill as the person matches their rules.
+            </EmptyState>
+          }
         >
           <Table label="Segments">
             <THead>
@@ -367,7 +401,11 @@ export default function PersonPage({ params }: { params: Record<string, string> 
           onRetry={messages.reload}
           columns={4}
           isEmpty={messageRows.length === 0}
-          empty={<EmptyState compact title="No messages to this person">Sends from journeys and broadcasts appear here with what happened to them.</EmptyState>}
+          empty={
+            <EmptyState compact title="No messages to this person">
+              Sends from journeys and broadcasts appear here with what happened to them.
+            </EmptyState>
+          }
         >
           <Table label="Messages">
             <THead>
@@ -390,7 +428,16 @@ export default function PersonPage({ params }: { params: Record<string, string> 
                     <Td>{m.channel}</Td>
                     <Td className="hidden md:table-cell">{m.purpose.replace(/_/g, ' ')}</Td>
                     <Td className="max-w-[320px]">
-                      {m.reason ? <span className="line-clamp-2">{m.reason}</span> : last ? <span className="line-clamp-2">{last.type}{last.reason ? ` · ${last.reason}` : ''}</span> : <span className="text-muted">No delivery events yet</span>}
+                      {m.reason ? (
+                        <span className="line-clamp-2">{m.reason}</span>
+                      ) : last ? (
+                        <span className="line-clamp-2">
+                          {last.type}
+                          {last.reason ? ` · ${last.reason}` : ''}
+                        </span>
+                      ) : (
+                        <span className="text-muted">No delivery events yet</span>
+                      )}
                     </Td>
                     <Td className="whitespace-nowrap" title={formatDateTime(m.createdAt)}>
                       {timeAgo(m.createdAt)}

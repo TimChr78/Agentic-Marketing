@@ -1,11 +1,11 @@
 import { runRetentionOnce } from '@agentic-marketing/audience';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { eventually, startTestServer, type User } from './harness';
+import { eventually, startTestServer, testPort, type User } from './harness';
 
 // Evidence for rolling out STRICT_INPUTS (#124): key paths per client in Postgres, visible to the
 // client itself and to admins, with a safe-to-enable hint and the same 30-day retention.
 
-const PORT = 3420;
+const PORT = testPort(3420);
 
 let t: Awaited<ReturnType<typeof startTestServer>>;
 let owner: User;

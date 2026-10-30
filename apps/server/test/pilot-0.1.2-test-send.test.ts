@@ -1,6 +1,6 @@
 import { outbox } from '@agentic-marketing/email';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { eventually, rejects, startTestServer, type User } from './harness';
+import { eventually, rejects, startTestServer, testPort, type User } from './harness';
 
 // Pilot 0.1.2 (#46): a draft newsletter can be test-sent to the people doing the work without
 // going through purpose/consent checks, but only to workspace members or an admin's seed list,
@@ -18,7 +18,7 @@ const mjml = (body: string) =>
 const mailTo = (to: string) => outbox.filter((m) => m.to === to);
 
 beforeAll(async () => {
-  t = await startTestServer('test_pilot_testsend', 3311);
+  t = await startTestServer('test_pilot_testsend', testPort(3311));
   owner = await t.signUp(`owner-${Date.now()}@example.com`);
   marketer = await t.signUp(`marketer-${Date.now()}@example.com`);
   await t.workspaceWith([

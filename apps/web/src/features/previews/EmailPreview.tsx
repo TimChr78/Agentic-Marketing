@@ -31,8 +31,22 @@ export function EmailPreview({ artifactId, version, compact }: { artifactId: str
       <div className="rounded-md border border-line bg-surface-2 px-3 py-2.5">
         <Meta
           items={[
-            ['Subject', <span className="font-medium">{data.subject}</span>],
-            ['Preheader', data.preheader ? data.preheader : <span className="text-muted">None. Inboxes show the first line of the body instead.</span>],
+            [
+              'Subject',
+              <span key="subject" className="font-medium">
+                {data.subject}
+              </span>,
+            ],
+            [
+              'Preheader',
+              data.preheader ? (
+                data.preheader
+              ) : (
+                <span key="preheader" className="text-muted">
+                  None. Inboxes show the first line of the body instead.
+                </span>
+              ),
+            ],
           ]}
         />
       </div>
@@ -75,7 +89,12 @@ export function EmailPreview({ artifactId, version, compact }: { artifactId: str
             sandbox="allow-popups allow-popups-to-escape-sandbox"
             srcDoc={emailDoc(data.html)}
             className="rounded-sm bg-white shadow-1"
-            style={{ width: width === 'mobile' ? 375 : '100%', maxWidth: width === 'mobile' ? 375 : 720, height: compact ? 520 : 720, border: 0 }}
+            style={{
+              width: width === 'mobile' ? 375 : '100%',
+              maxWidth: width === 'mobile' ? 375 : 720,
+              height: compact ? 520 : 720,
+              border: 0,
+            }}
           />
         </div>
       ) : (

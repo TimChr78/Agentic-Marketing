@@ -1,6 +1,6 @@
+import { X } from 'lucide-react';
 import { type ReactNode, useCallback, useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { X } from 'lucide-react';
 import { Button, IconButton } from './Button';
 import { cx } from './cx';
 import { useFocusTrap } from './focus';
@@ -94,13 +94,17 @@ export function Modal({ open, onClose, title, children, footer, role = 'dialog',
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-end justify-center p-0 sm:items-center sm:p-6">
       <div className="am-fade-in absolute inset-0 bg-[var(--scrim)]" onClick={onClose} aria-hidden />
+      {/* biome-ignore lint/a11y/useAriaPropsSupportedByRole: role is dialog or alertdialog, both of which support aria-modal */}
       <div
         ref={ref}
         role={role}
         aria-modal="true"
         aria-labelledby={titleId}
         tabIndex={-1}
-        className={cx('am-rise relative flex max-h-[92vh] w-full flex-col rounded-t-xl border border-line bg-surface shadow-2 outline-none sm:rounded-xl', size === 'lg' ? 'max-w-[760px]' : 'max-w-[480px]')}
+        className={cx(
+          'am-rise relative flex max-h-[92vh] w-full flex-col rounded-t-xl border border-line bg-surface shadow-2 outline-none sm:rounded-xl',
+          size === 'lg' ? 'max-w-[760px]' : 'max-w-[480px]',
+        )}
       >
         <h2 id={titleId} className="px-5 pt-4 text-[15px] leading-[22px] font-semibold">
           {title}
@@ -152,7 +156,12 @@ export function useConfirm(): [ReactNode, (o: ConfirmOptions) => Promise<boolean
       footer={
         <>
           <Button onClick={() => close(false)}>Cancel</Button>
-          <Button variant={state?.destructive ? 'danger-solid' : 'primary'} disabled={blocked} onClick={() => close(true)} data-autofocus={!state?.typeToConfirm || undefined}>
+          <Button
+            variant={state?.destructive ? 'danger-solid' : 'primary'}
+            disabled={blocked}
+            onClick={() => close(true)}
+            data-autofocus={!state?.typeToConfirm || undefined}
+          >
             {state?.confirmLabel}
           </Button>
         </>
@@ -167,7 +176,13 @@ export function useConfirm(): [ReactNode, (o: ConfirmOptions) => Promise<boolean
             if (!blocked) close(true);
           }}
         >
-          <Field label={<>Type <strong className="font-semibold text-fg">{state.typeToConfirm}</strong> to confirm</>}>
+          <Field
+            label={
+              <>
+                Type <strong className="font-semibold text-fg">{state.typeToConfirm}</strong> to confirm
+              </>
+            }
+          >
             <Input value={typed} onChange={(e) => setTyped(e.target.value)} autoComplete="off" data-autofocus />
           </Field>
         </form>

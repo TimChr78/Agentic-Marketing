@@ -10,7 +10,12 @@ export default function ExperiencesPage() {
       emptyText="Create one for an element on your site marked with data-am-placement, such as a newsletter banner under articles."
       create={{
         label: 'New experience',
-        content: () => ({ placement: 'article-footer', description: '', variants: [{ id: 'a', name: 'Variant A', weight: 50, content: { html: '<p>Get the newsletter.</p>' } }], holdoutPercent: 0 }),
+        content: () => ({
+          placement: 'article-footer',
+          description: '',
+          variants: [{ id: 'a', name: 'Variant A', weight: 50, content: { html: '<p>Get the newsletter.</p>' } }],
+          holdoutPercent: 0,
+        }),
       }}
     />
   );

@@ -27,14 +27,30 @@ export const NodeView = memo(function NodeView({ data, selected }: NodeProps) {
     <div
       className={cx(
         'relative rounded-lg border bg-surface text-left shadow-1 transition-shadow',
-        selected ? 'border-accent ring-2 ring-accent/30' : highlight ? 'border-good ring-2 ring-good/30' : warnings.length ? 'border-warn/60' : 'border-line-strong',
+        selected
+          ? 'border-accent ring-2 ring-accent/30'
+          : highlight
+            ? 'border-good ring-2 ring-good/30'
+            : warnings.length
+              ? 'border-warn/60'
+              : 'border-line-strong',
       )}
       style={{ width: NODE_W }}
     >
       <span className="absolute inset-y-0 left-0 w-[3px] rounded-l-lg" style={{ background: color }} aria-hidden />
-      {node.kind !== 'trigger' && <Handle type="target" position={Position.Top} className="!size-2.5 !border-2 !border-surface !bg-line-strong" isConnectable={!readOnly} />}
+      {node.kind !== 'trigger' && (
+        <Handle
+          type="target"
+          position={Position.Top}
+          className="!size-2.5 !border-2 !border-surface !bg-line-strong"
+          isConnectable={!readOnly}
+        />
+      )}
       <div className="flex items-start gap-2.5 py-2.5 pr-3 pl-3.5">
-        <span className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-md" style={{ color, background: `color-mix(in srgb, ${color} 14%, transparent)` }}>
+        <span
+          className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-md"
+          style={{ color, background: `color-mix(in srgb, ${color} 14%, transparent)` }}
+        >
           <Icon size={15} aria-hidden />
         </span>
         <div className="min-w-0 flex-1">
@@ -66,7 +82,10 @@ export const NodeView = memo(function NodeView({ data, selected }: NodeProps) {
         const label = outs > 1 && i >= (node.next?.length ?? 0) ? edgeLabel(node, i) : undefined;
         return (
           <Handle
-            key={i}
+            key={
+              // biome-ignore lint/suspicious/noArrayIndexKey: output handles are positional and their id is derived from the index
+              i
+            }
             id={`out-${i}`}
             type="source"
             position={Position.Bottom}
@@ -75,7 +94,11 @@ export const NodeView = memo(function NodeView({ data, selected }: NodeProps) {
             isConnectable={!readOnly}
             title={label ? `Connect “${label}”` : 'Connect to the next step'}
           >
-            {label && <span className="pointer-events-none absolute top-2 left-1/2 -translate-x-1/2 text-[10px] whitespace-nowrap text-muted">{label}</span>}
+            {label && (
+              <span className="pointer-events-none absolute top-2 left-1/2 -translate-x-1/2 text-[10px] whitespace-nowrap text-muted">
+                {label}
+              </span>
+            )}
           </Handle>
         );
       })}

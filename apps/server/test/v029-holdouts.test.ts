@@ -1,7 +1,7 @@
 import { outbox } from '@agentic-marketing/email';
 import { armFor, holdoutHashVersion } from '@agentic-marketing/journeys';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { eventually, rejects, startTestServer, type User } from './harness';
+import { eventually, rejects, startTestServer, testPort, type User } from './harness';
 
 // v0.2.9 (#67): control groups for journeys. Assignment is deterministic and recorded once per
 // scope version; control people walk waits and goals but every channel step is skipped; results
@@ -145,7 +145,7 @@ async function createMeasurementJourney(name: string, percent: number, minSample
 }
 
 beforeAll(async () => {
-  t = await startTestServer('test_v029_holdouts', 3315);
+  t = await startTestServer('test_v029_holdouts', testPort(3315));
   owner = await t.signUp(`owner-${Date.now()}@example.com`);
   ws = await t.workspaceWith([[owner, 'owner']], 'none');
   key = (await api().call('sources.create', { name: 'Backend', kind: 'server' })).key;
@@ -249,6 +249,13 @@ describe('treatment and control (#67)', () => {
     // Both still take waits and branch to the goal when the goal event arrives.
     await fastForward(journeyId, control.profileId);
     await fastForward(journeyId, treatment.profileId);
+    // The goal only counts events that arrive while the person waits at it: wait for the scheduler
+    // to move both past the wait first, or the event can come too early and be missed.
+    for (const p of [control, treatment])
+      await eventually(
+        () => participantOf(journeyId, p.profileId),
+        (r) => r?.node === 'goal' && r.status === 'waiting',
+      );
     await send([
       { type: 'track', event: 'Holdout Goal', userId: control.userId },
       { type: 'track', event: 'Holdout Goal', userId: treatment.userId },
@@ -256,7 +263,7 @@ describe('treatment and control (#67)', () => {
     for (const p of [control, treatment]) {
       const row = await eventually(
         () => participantOf(journeyId, p.profileId),
-        (r) => r?.status === 'exited' && r.converted,
+        (r) => r?.status === 'completed' && r.converted,
       );
       expect(row?.converted).toBe(true);
     }

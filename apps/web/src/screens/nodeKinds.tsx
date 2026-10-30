@@ -7,23 +7,31 @@ import {
   GitBranch,
   Hourglass,
   LogOut,
+  type LucideIcon,
   Mail,
   MessageSquare,
   Shuffle,
   Sparkles,
   UserCog,
-  Webhook,
   Wand2,
+  Webhook,
   Zap,
-  type LucideIcon,
 } from 'lucide-react';
 import type { JourneyNode, NodeKind } from '../api/types';
 
-export const kindMeta: Record<NodeKind, { label: string; icon: LucideIcon; group: 'Trigger' | 'Flow' | 'Action' | 'AI'; ai?: boolean; defaults: JourneyNode['config'] }> = {
+export const kindMeta: Record<
+  NodeKind,
+  { label: string; icon: LucideIcon; group: 'Trigger' | 'Flow' | 'Action' | 'AI'; ai?: boolean; defaults: JourneyNode['config'] }
+> = {
   trigger: { label: 'Trigger', icon: Zap, group: 'Trigger', defaults: { event: 'signed_up', reentry: 'once' } },
   wait: { label: 'Wait', icon: Clock, group: 'Flow', defaults: { duration: 'P1D' } },
   waitEvent: { label: 'Wait for event', icon: Hourglass, group: 'Flow', defaults: { event: 'email_clicked', timeout: 'P2D' } },
-  waitUntil: { label: 'Wait until', icon: Hourglass, group: 'Flow', defaults: { condition: { trait: 'plan', op: 'eq', value: 'pro' }, timeout: 'P14D', recheck: 'PT1H' } },
+  waitUntil: {
+    label: 'Wait until',
+    icon: Hourglass,
+    group: 'Flow',
+    defaults: { condition: { trait: 'plan', op: 'eq', value: 'pro' }, timeout: 'P14D', recheck: 'PT1H' },
+  },
   branch: { label: 'Branch', icon: GitBranch, group: 'Flow', defaults: { condition: 'trait.orders_count ≥ 1' } },
   split: { label: 'A/B split', icon: Shuffle, group: 'Flow', defaults: { a: 50, b: 50, holdout: 10 } },
   goal: { label: 'Goal', icon: Flag, group: 'Flow', defaults: { event: 'order_completed', within: 'P14D' } },
@@ -33,10 +41,27 @@ export const kindMeta: Record<NodeKind, { label: string; icon: LucideIcon; group
   push: { label: 'Send push', icon: Bell, group: 'Action', defaults: { template: 'psh_sale' } },
   webhook: { label: 'Webhook', icon: Webhook, group: 'Action', defaults: { url: 'https://hooks.example.com/crm', method: 'POST' } },
   action: { label: 'Connector action', icon: Cable, group: 'Action', defaults: { connection: 'con_slack', action: 'postMessage' } },
-  transform: { label: 'Transform', icon: Braces, group: 'Flow', defaults: { set: 'total', expression: '$sum(event.properties.products.price)' } },
+  transform: {
+    label: 'Transform',
+    icon: Braces,
+    group: 'Flow',
+    defaults: { set: 'total', expression: '$sum(event.properties.products.price)' },
+  },
   updateProfile: { label: 'Update profile', icon: UserCog, group: 'Action', defaults: { trait: 'lifecycle_stage', value: 'engaged' } },
-  aiDecide: { label: 'AI decide', icon: Sparkles, group: 'AI', ai: true, defaults: { prompt: 'prm_nba@1', options: 'continue | exit', fallback: 'exit' } },
-  aiGenerate: { label: 'AI generate', icon: Wand2, group: 'AI', ai: true, defaults: { slot: 'intro', prompt: 'prm_copy@1', maxChars: 200 } },
+  aiDecide: {
+    label: 'AI decide',
+    icon: Sparkles,
+    group: 'AI',
+    ai: true,
+    defaults: { prompt: 'prm_nba@1', options: 'continue | exit', fallback: 'exit' },
+  },
+  aiGenerate: {
+    label: 'AI generate',
+    icon: Wand2,
+    group: 'AI',
+    ai: true,
+    defaults: { slot: 'intro', prompt: 'prm_copy@1', maxChars: 200 },
+  },
 };
 
 export function configSummary(n: JourneyNode) {

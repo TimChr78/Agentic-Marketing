@@ -1,7 +1,7 @@
 import { api } from '../../app/api';
 import { useApi } from '../../app/useApi';
-import { Field, Select } from '../../ui';
 import { ArtifactListPage } from '../../features/artifacts/ArtifactListPage';
+import { Field, Select } from '../../ui';
 
 type Mode = 'dynamic' | 'static' | 'snapshot';
 type CreateState = { mode: Mode; source: string };

@@ -108,10 +108,7 @@ export default function WorkspacePage() {
 
   return (
     <div className={pageWidth('reading')}>
-      <PageHeader
-        title="Workspace"
-        description="The name and time zone everyone sees, and the addresses that may receive test sends."
-      />
+      <PageHeader title="Workspace" description="The name and time zone everyone sees, and the addresses that may receive test sends." />
       <div className="space-y-5">
         <Card title="General" description="Shown throughout the admin UI and in messages where the workspace is named.">
           <form
@@ -154,10 +151,7 @@ export default function WorkspacePage() {
           </form>
         </Card>
 
-        <Card
-          title="Test sends"
-          description="Addresses outside the workspace that test sends may go to, such as a monitoring inbox."
-        >
+        <Card title="Test sends" description="Addresses outside the workspace that test sends may go to, such as a monitoring inbox.">
           <form
             className="space-y-4 p-4"
             onSubmit={(e) => {

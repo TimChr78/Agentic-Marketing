@@ -1,12 +1,12 @@
 import { ADAPTER_TRACKING } from '@agentic-marketing/artifacts';
 import { adapters } from '@agentic-marketing/email';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { startTestServer, type User } from './harness';
+import { startTestServer, testPort, type User } from './harness';
 
 // system.status is what `am smoke` uses instead of the admin-only emailProviders.list, so a narrow
 // API token can check provider coverage without learning an address, host or secret (#133).
 
-const PORT = 3412;
+const PORT = testPort(3412);
 
 let t: Awaited<ReturnType<typeof startTestServer>>;
 let owner: User;

@@ -3,7 +3,7 @@ import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { refreshConnection } from '@agentic-marketing/integrations';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { eventually, rejects, startTestServer, type User } from './harness';
+import { eventually, rejects, startTestServer, testPort, type User } from './harness';
 
 // Phase 8 (wave 2): consent everywhere. The banner's purposes, ad click ids kept only with
 // ad_measurement, bot filtering, OAuth 2.0 connections with token refresh, shared rate limits.
@@ -81,7 +81,7 @@ const clickIdsOf = async (type: 'anonymous_id' | 'email', value: string) => {
 beforeAll(async () => {
   await new Promise<void>((r) => oauthServer.listen(0, '127.0.0.1', r));
   providerUrl = `http://127.0.0.1:${(oauthServer.address() as AddressInfo).port}`;
-  t = await startTestServer('test_p8', 3290);
+  t = await startTestServer('test_p8', testPort(3290));
   owner = await t.signUp(`owner-${Date.now()}@example.com`);
   await t.workspaceWith([[owner, 'owner']]);
   browserKey = (await t.api(owner).call('sources.create', { name: 'Site', kind: 'browser', allowedOrigins: [SITE] })).key;

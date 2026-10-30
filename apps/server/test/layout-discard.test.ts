@@ -1,6 +1,6 @@
 import { hashValue } from '@agentic-marketing/core';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { rejects, startTestServer, type User } from './harness';
+import { rejects, startTestServer, testPort, type User } from './harness';
 
 // Issue #117: moving a step is layout, not journey content. A layout-only save keeps the version
 // (and the artifact's draft state) untouched; a draft can be thrown away back to the live version.
@@ -34,7 +34,7 @@ async function liveJourney(workspace = ws) {
 }
 
 beforeAll(async () => {
-  t = await startTestServer('test_layout_discard', 3319);
+  t = await startTestServer('test_layout_discard', testPort(3319));
   owner = await t.signUp(`layout-${Date.now()}@example.com`);
   approver = await t.signUp(`layout-approver-${Date.now()}@example.com`);
   ws = await t.workspaceWith([[owner, 'owner']], 'none');

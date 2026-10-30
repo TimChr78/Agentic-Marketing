@@ -28,7 +28,9 @@ export function formatDateTime(iso: string | null | undefined, opts: { seconds?:
 export function formatDate(iso: string | null | undefined): string {
   if (!iso) return '—';
   const d = new Date(iso);
-  return new Intl.DateTimeFormat(undefined, { timeZone: getWorkspaceTimeZone(), year: 'numeric', month: 'short', day: 'numeric' }).format(d);
+  return new Intl.DateTimeFormat(undefined, { timeZone: getWorkspaceTimeZone(), year: 'numeric', month: 'short', day: 'numeric' }).format(
+    d,
+  );
 }
 
 export function timeAgo(iso: string | null | undefined, now = Date.now()): string {
@@ -50,7 +52,16 @@ export function timeAgo(iso: string | null | undefined, now = Date.now()): strin
 /** The offset of `zone` at instant `utcMs`, in minutes (east positive). */
 export function zoneOffsetMinutes(zone: string, utcMs: number): number {
   const parts = Object.fromEntries(
-    new Intl.DateTimeFormat('en-US', { timeZone: zone, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    new Intl.DateTimeFormat('en-US', {
+      timeZone: zone,
+      hourCycle: 'h23',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    })
       .formatToParts(new Date(utcMs))
       .map((p) => [p.type, p.value]),
   );

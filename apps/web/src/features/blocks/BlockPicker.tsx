@@ -36,8 +36,8 @@ export function BlockPicker({ onClose, onPick }: { onClose: () => void; onPick: 
       }
     >
       <p className="mb-3 text-[13px] text-fg-2">
-        The tag goes into the MJML and expands to the block’s published version when the e-mail is rendered. Fill the placeholders before publishing;
-        a new block has to be published with the template.
+        The tag goes into the MJML and expands to the block’s published version when the e-mail is rendered. Fill the placeholders before
+        publishing; a new block has to be published with the template.
       </p>
       {error && (
         <Alert tone="bad" className="mb-3">

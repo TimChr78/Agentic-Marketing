@@ -1,6 +1,6 @@
 import { ExternalLink } from 'lucide-react';
-import { Link } from '../../app/router';
 import { artifactPath } from '../../app/artifactRoutes';
+import { Link } from '../../app/router';
 import { Alert, Card, Meta, Mono, StatusPill, Tag } from '../../ui';
 import { useArtifactRef } from '../artifactCache';
 
@@ -28,7 +28,11 @@ export function RefName({ id }: { id?: string | null }) {
       <Link to={artifactPath(artifact.type, artifact.id)} className="font-medium text-accent hover:underline">
         {artifact.name}
       </Link>
-      {artifact.publishedVersion ? <StatusPill tone="good">Live v{artifact.publishedVersion}</StatusPill> : <StatusPill tone="warn">Not published</StatusPill>}
+      {artifact.publishedVersion ? (
+        <StatusPill tone="good">Live v{artifact.publishedVersion}</StatusPill>
+      ) : (
+        <StatusPill tone="warn">Not published</StatusPill>
+      )}
     </span>
   );
 }
@@ -62,7 +66,9 @@ export function FormPreview({ content, stacked }: { content: FormContent; stacke
             ))}
             <div className="flex items-start gap-2">
               <span className="mt-0.5 size-4 shrink-0 rounded-sm border border-control" />
-              <p className="text-[13px] whitespace-pre-wrap text-fg">{content.consentText || <span className="text-bad">No consent text</span>}</p>
+              <p className="text-[13px] whitespace-pre-wrap text-fg">
+                {content.consentText || <span className="text-bad">No consent text</span>}
+              </p>
             </div>
             <div className="inline-flex h-8 items-center rounded-md bg-accent px-3 text-[13px] font-medium text-accent-fg">Subscribe</div>
           </div>
@@ -71,9 +77,19 @@ export function FormPreview({ content, stacked }: { content: FormContent; stacke
           <div className="p-4">
             <Meta
               items={[
-                ['Purposes', <span className="flex flex-wrap gap-1">{(content.purposes ?? []).map((p) => <Tag key={p}>{p}</Tag>)}</span>],
-                ['Double opt-in', content.doubleOptIn === false ? 'Off: consent counts at once' : 'On: consent counts after the person confirms'],
-                ['Confirmation e-mail', <RefName id={content.confirmationTemplate} />],
+                [
+                  'Purposes',
+                  <span key="purposes" className="flex flex-wrap gap-1">
+                    {(content.purposes ?? []).map((p) => (
+                      <Tag key={p}>{p}</Tag>
+                    ))}
+                  </span>,
+                ],
+                [
+                  'Double opt-in',
+                  content.doubleOptIn === false ? 'Off: consent counts at once' : 'On: consent counts after the person confirms',
+                ],
+                ['Confirmation e-mail', <RefName key="confirmation" id={content.confirmationTemplate} />],
                 ['After submit', url(content.successUrl)],
                 ['After confirming', content.confirmedUrl ? url(content.confirmedUrl) : 'The branded confirmation page'],
                 ['On error', url(content.errorUrl)],
@@ -85,7 +101,9 @@ export function FormPreview({ content, stacked }: { content: FormContent; stacke
           </div>
         </Card>
       </div>
-      {content.doubleOptIn !== false && !content.confirmationTemplate && <Alert tone="warn">Double opt-in is on but no confirmation e-mail is set; this form can't be published yet.</Alert>}
+      {content.doubleOptIn !== false && !content.confirmationTemplate && (
+        <Alert tone="warn">Double opt-in is on but no confirmation e-mail is set; this form can't be published yet.</Alert>
+      )}
     </div>
   );
 }

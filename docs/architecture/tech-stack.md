@@ -67,7 +67,7 @@ Selection criteria, in priority order: **(1) maintainable by one person, (2) per
 
 | Area | Choice | License | Why |
 |---|---|---|---|
-| Packaging | Single OCI image; **Docker Compose** for self-host; **Helm chart** later | — | One artifact to version |
+| Packaging | Single OCI image; **Docker Compose** for self-host; **Helm chart** [`deploy/helm/agentic-marketing`](../../deploy/helm/agentic-marketing), the reference Kubernetes deployment in [kubernetes.md](../deployment/kubernetes.md) | — | One artifact to version |
 | Reverse proxy / TLS | **Caddy** | Apache-2.0 | Automatic HTTPS |
 | Observability | **OpenTelemetry** SDK + `pino` logs; works with any OTLP backend (Grafana stack, SigNoz, etc. — external, optional) | Apache-2.0 / MIT | No backend lock-in |
 | CI | GitHub Actions; Renovate; Syft SBOM; cosign signing | — | Supply chain hygiene |

@@ -1,13 +1,13 @@
+import grapesjs, { type Editor, type Button as GjsButton, type Panel } from 'grapesjs';
 import { useEffect, useRef, useState } from 'react';
-import grapesjs, { type Editor } from 'grapesjs';
 import 'grapesjs/dist/css/grapes.min.css';
 import grapesjsMjml from 'grapesjs-mjml';
-import mjml2html from 'mjml-browser';
 import { Liquid } from 'liquidjs';
 import { Code2, Eye, Mail, Paintbrush, Save } from 'lucide-react';
-import { useStore } from '../mock/store';
+import mjml2html from 'mjml-browser';
 import { exec } from '../api/commands';
-import { AuthorBadge, Button, Pill, cx, inputBase, inputCls, timeAgo } from '../components/ui';
+import { AuthorBadge, Button, cx, inputBase, inputCls, Pill, timeAgo } from '../components/ui';
+import { useStore } from '../mock/store';
 
 const liquid = new Liquid({ strictVariables: false, strictFilters: false });
 type Mode = 'visual' | 'code' | 'preview';
@@ -32,13 +32,14 @@ export default function EmailEditor() {
   const editor = useRef<Editor | null>(null);
 
   // Reset working copy when switching template.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reset only when the template changes, not when the same template is refetched
   useEffect(() => {
     setSource(template.mjml);
     setSubject(template.subject);
     editor.current?.setComponents(template.mjml);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [templateId]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the editor is initialised once from the initial MJML; later changes are applied imperatively
   useEffect(() => {
     if (!host.current) return;
     const ed = grapesjs.init({
@@ -54,15 +55,22 @@ export default function EmailEditor() {
     // Default panel buttons use Font Awesome, which the demo does not load: label them in text.
     ed.on('load', () => {
       const labels: Record<string, string> = {
-        'sw-visibility': 'Outlines', preview: 'Preview', fullscreen: 'Full screen', 'export-template': 'Code',
-        'mjml-import': 'Import', 'open-sm': 'Styles', 'open-tm': 'Settings', 'open-layers': 'Layers', 'open-blocks': 'Blocks',
+        'sw-visibility': 'Outlines',
+        preview: 'Preview',
+        fullscreen: 'Full screen',
+        'export-template': 'Code',
+        'mjml-import': 'Import',
+        'open-sm': 'Styles',
+        'open-tm': 'Settings',
+        'open-layers': 'Layers',
+        'open-blocks': 'Blocks',
       };
-      ed.Panels.getPanels().forEach((panel: any) =>
-        panel.buttons.forEach((b: any) => {
+      ed.Panels.getPanels().forEach((panel: Panel) => {
+        panel.buttons.forEach((b: GjsButton) => {
           const label = labels[b.id];
           if (label) b.set({ label: `<span style="font:500 11px var(--font-sans);padding:0 2px">${label}</span>`, className: '' });
-        }),
-      );
+        });
+      });
       ed.Panels.getButton('views', 'open-blocks')?.set('active', true);
     });
     editor.current = ed;
@@ -70,7 +78,6 @@ export default function EmailEditor() {
       ed.destroy();
       editor.current = null;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const profile = profiles.find((p) => p.id === profileId)!;
@@ -115,9 +122,13 @@ export default function EmailEditor() {
         <div className="flex rounded-md border border-line p-0.5">
           {tabs.map((t) => (
             <button
+              type="button"
               key={t.id}
               onClick={() => setMode(t.id)}
-              className={cx('flex items-center gap-1.5 rounded px-2.5 py-1 text-[12px] font-medium', mode === t.id ? 'bg-accent-soft text-accent' : 'text-muted hover:text-fg')}
+              className={cx(
+                'flex items-center gap-1.5 rounded px-2.5 py-1 text-[12px] font-medium',
+                mode === t.id ? 'bg-accent-soft text-accent' : 'text-muted hover:text-fg',
+              )}
             >
               <t.icon size={13} /> {t.label}
             </button>
@@ -132,8 +143,15 @@ export default function EmailEditor() {
         <label htmlFor="subject" className="text-[12px] font-medium text-muted">
           Subject
         </label>
-        <input id="subject" className={cx(inputBase, 'min-w-0 flex-1 font-mono')} value={subject} onChange={(e) => setSubject(e.target.value)} />
-        <span className="hidden text-[11px] text-muted md:inline">Purpose: {template.purpose} · one-click unsubscribe added automatically</span>
+        <input
+          id="subject"
+          className={cx(inputBase, 'min-w-0 flex-1 font-mono')}
+          value={subject}
+          onChange={(e) => setSubject(e.target.value)}
+        />
+        <span className="hidden text-[11px] text-muted md:inline">
+          Purpose: {template.purpose} · one-click unsubscribe added automatically
+        </span>
       </div>
 
       <div className="relative min-h-0 flex-1">
@@ -178,7 +196,13 @@ export default function EmailEditor() {
               </div>
               <div className="rounded-md border border-line p-2.5 text-[12px]">
                 <div className="eyebrow mb-1">Liquid variables</div>
-                <pre className="overflow-x-auto font-mono text-[11px] text-muted">{JSON.stringify({ first_name: profile.traits.first_name, city: profile.city, preferred_category: profile.traits.preferred_category }, null, 2)}</pre>
+                <pre className="overflow-x-auto font-mono text-[11px] text-muted">
+                  {JSON.stringify(
+                    { first_name: profile.traits.first_name, city: profile.city, preferred_category: profile.traits.preferred_category },
+                    null,
+                    2,
+                  )}
+                </pre>
               </div>
             </div>
             <div className="min-w-0 flex-1 p-4">

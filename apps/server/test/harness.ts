@@ -2,7 +2,7 @@ import type { AddressInfo } from 'node:net';
 import { migrateAuth } from '@agentic-marketing/auth';
 import { type ApiError, createClient } from '@agentic-marketing/client';
 import { newUuid } from '@agentic-marketing/core';
-import { migrate } from '@agentic-marketing/db';
+import { createDb, migrate } from '@agentic-marketing/db';
 import { migrateClickHouse, resetClickHouse, resetNatsNamespace } from '@agentic-marketing/events';
 import { serve } from '@hono/node-server';
 import { Client, type OAuthClientProvider, StreamableHTTPClientTransport, UnauthorizedError } from '@modelcontextprotocol/client';
@@ -135,16 +135,77 @@ export async function connectAgent(BASE: string, u: User, permissions: string[],
   return { client, clientId: provider.info.client_id as string, provider };
 }
 
+/**
+ * A test file's port, moved into its worker's own block: test files run in parallel workers, and
+ * the numbers in the files repeat. Worker n adds (n - 1) * 1000; the files use 2500–3499.
+ * TEST_PORT_OFFSET moves every block, so two checkouts can run their suites at once.
+ */
+export const testPort = (port: number) =>
+  port + (Number(process.env.VITEST_POOL_ID ?? '1') - 1) * 1000 + Number(process.env.TEST_PORT_OFFSET ?? '0');
+
+/** The migrated database that test-setup.ts prepares once per run; empty outside Vitest. */
+export const TEMPLATE_DB = 'am_test_template';
+const APP_ROLE = { appRole: 'am_app_test', appRolePassword: 'am_app_test_password' };
+
+/** The admin URL of a test database on the TEST_DATABASE_URL server. */
+export function testDatabaseUrl(dbName: string) {
+  const url = new URL(process.env.TEST_DATABASE_URL ?? 'postgres://am:am@localhost:5432/am_test');
+  url.pathname = `/${dbName}`;
+  return url;
+}
+
+/**
+ * Builds the template: Postgres migrations, the app role and better-auth's tables, once per run
+ * (test-setup.ts). Each file's database is then a copy, instead of running every migration again.
+ */
+export async function prepareTemplateDatabase() {
+  const maint = new pg.Client({ connectionString: testDatabaseUrl('postgres').toString() });
+  await maint.connect();
+  try {
+    await maint.query(`DROP DATABASE IF EXISTS ${TEMPLATE_DB} WITH (FORCE)`);
+    await maint.query(`CREATE DATABASE ${TEMPLATE_DB}`);
+  } finally {
+    await maint.end();
+  }
+  const db = createDb({ adminUrl: testDatabaseUrl(TEMPLATE_DB).toString(), appUrl: testDatabaseUrl(TEMPLATE_DB).toString() });
+  try {
+    await migrate(db.admin, APP_ROLE);
+    await migrateAuth({ baseUrl: 'http://localhost', secret: 'test-secret-test-secret-test-secret-123', db });
+  } finally {
+    await db.close();
+  }
+}
+
+/**
+ * Drops and creates a test database: a copy of the migrated template when test-setup.ts made one,
+ * else empty (the e2e server, a single file run outside the server project). `migrated` says which.
+ */
+export async function freshDatabase(dbName: string): Promise<{ url: URL; migrated: boolean }> {
+  const template = process.env.AM_TEST_TEMPLATE;
+  const maint = new pg.Client({ connectionString: testDatabaseUrl('postgres').toString() });
+  await maint.connect();
+  try {
+    await maint.query(`DROP DATABASE IF EXISTS ${dbName} WITH (FORCE)`);
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await maint.query(template ? `CREATE DATABASE ${dbName} TEMPLATE ${template}` : `CREATE DATABASE ${dbName}`);
+        break;
+      } catch (e) {
+        // Two copies of the template starting at the same moment: Postgres refuses the second.
+        if (!template || attempt >= 20 || !/being accessed by other users/.test((e as Error).message)) throw e;
+        await new Promise((r) => setTimeout(r, 100 + Math.random() * 200));
+      }
+    }
+  } finally {
+    await maint.end();
+  }
+  return { url: testDatabaseUrl(dbName), migrated: Boolean(template) };
+}
+
 export async function startTestServer(name: string, port: number, env: Record<string, string> = {}) {
   const base = `http://localhost:${port}`;
-  const pgUrl = new URL(process.env.TEST_DATABASE_URL ?? 'postgres://am:am@localhost:5432/am_test');
   const dbName = `am_${name}`;
-  pgUrl.pathname = `/${dbName}`;
-  const maint = new pg.Client({ connectionString: Object.assign(new URL(pgUrl), { pathname: '/postgres' }).toString() });
-  await maint.connect();
-  await maint.query(`DROP DATABASE IF EXISTS ${dbName} WITH (FORCE)`);
-  await maint.query(`CREATE DATABASE ${dbName}`);
-  await maint.end();
+  const { url: pgUrl, migrated } = await freshDatabase(dbName);
 
   const natsUrl = process.env.NATS_URL ?? 'nats://127.0.0.1:4222';
   await resetNatsNamespace(natsUrl, dbName);
@@ -152,8 +213,8 @@ export async function startTestServer(name: string, port: number, env: Record<st
   const config = loadConfig({
     PORT: String(port),
     DATABASE_URL: pgUrl.toString(),
-    APP_DB_ROLE: 'am_app_test',
-    APP_DB_PASSWORD: 'am_app_test_password',
+    APP_DB_ROLE: APP_ROLE.appRole,
+    APP_DB_PASSWORD: APP_ROLE.appRolePassword,
     AUTH_SECRET: 'test-secret-test-secret-test-secret-123',
     MASTER_KEY: Buffer.alloc(32, 7).toString('base64'),
     CLICKHOUSE_URL: process.env.CLICKHOUSE_URL ?? 'http://localhost:8123',
@@ -169,8 +230,10 @@ export async function startTestServer(name: string, port: number, env: Record<st
   });
   const srv = createServer(config);
   await resetClickHouse(config.clickhouse.url, dbName);
-  await migrate(srv.db.admin, { appRolePassword: config.appDbPassword, appRole: config.appDbRole });
-  await migrateAuth({ baseUrl: config.publicUrl, secret: config.authSecret, db: srv.db });
+  if (!migrated) {
+    await migrate(srv.db.admin, { appRolePassword: config.appDbPassword, appRole: config.appDbRole });
+    await migrateAuth({ baseUrl: config.publicUrl, secret: config.authSecret, db: srv.db });
+  }
   await migrateClickHouse(config.clickhouse.url, config.clickhouse.database, undefined, config.clickhouse);
   let http: { close: () => void } | undefined;
   await new Promise<void>((resolve) => {

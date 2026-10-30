@@ -1,7 +1,7 @@
 import { ArtifactDetailPage } from '../../features/artifacts/ArtifactDetailPage';
 import { CampaignEditor } from '../../features/artifacts/CampaignEditor';
-import { CampaignHoldoutCard } from '../../features/campaigns/CampaignHoldoutCard';
 import { CampaignEvaluation } from '../../features/artifacts/CampaignEvaluation';
+import { CampaignHoldoutCard } from '../../features/campaigns/CampaignHoldoutCard';
 
 export default function CampaignPage({ params }: { params: Record<string, string> }) {
   return (

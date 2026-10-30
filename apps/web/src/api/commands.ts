@@ -1,16 +1,6 @@
-import type {
-  ApprovalRequest,
-  DiffItem,
-  Effect,
-  Journey,
-  JourneyEdge,
-  JourneyNode,
-  NodeKind,
-  Principal,
-  Purpose,
-} from './types';
-import { useStore } from '../mock/store';
 import { layoutGraph } from '../lib/layout';
+import { useStore } from '../mock/store';
+import type { ApprovalRequest, DiffItem, Effect, Journey, JourneyEdge, JourneyNode, NodeKind, Principal, Purpose } from './types';
 
 // Mock of the command registry (docs/architecture/adr/0005-command-registry-mcp.md).
 // Every capability is defined once; the UI calls `exec`, the copilot gets the same list as
@@ -37,7 +27,21 @@ const obj = (properties: Record<string, JsonSchema>, required: string[] = []): J
 });
 const str = (description: string, extra: JsonSchema = {}): JsonSchema => ({ type: 'string', description, ...extra });
 
-const nodeKinds: NodeKind[] = ['trigger', 'wait', 'waitEvent', 'waitUntil', 'branch', 'split', 'email', 'webhook', 'updateProfile', 'aiDecide', 'aiGenerate', 'goal', 'exit'];
+const nodeKinds: NodeKind[] = [
+  'trigger',
+  'wait',
+  'waitEvent',
+  'waitUntil',
+  'branch',
+  'split',
+  'email',
+  'webhook',
+  'updateProfile',
+  'aiDecide',
+  'aiGenerate',
+  'goal',
+  'exit',
+];
 
 function publishedVersion(j: Journey) {
   return j.versions.find((v) => v.state === 'published');
@@ -56,11 +60,17 @@ function diffVersions(before: JourneyNode[] | undefined, after: JourneyNode[]): 
       if (b.label !== n.label) out.push({ path: `nodes.${n.id}.label`, kind: 'changed', before: b.label, after: n.label });
       for (const k of new Set([...Object.keys(b.config), ...Object.keys(n.config)])) {
         if (String(b.config[k] ?? '') !== String(n.config[k] ?? ''))
-          out.push({ path: `nodes.${n.id}.config.${k}`, kind: 'changed', before: String(b.config[k] ?? '—'), after: String(n.config[k] ?? '—') });
+          out.push({
+            path: `nodes.${n.id}.config.${k}`,
+            kind: 'changed',
+            before: String(b.config[k] ?? '—'),
+            after: String(n.config[k] ?? '—'),
+          });
       }
     }
   }
-  for (const b of before) if (!after.find((x) => x.id === b.id)) out.push({ path: `nodes.${b.id}`, kind: 'removed', before: `${b.kind} “${b.label}”` });
+  for (const b of before)
+    if (!after.find((x) => x.id === b.id)) out.push({ path: `nodes.${b.id}`, kind: 'removed', before: `${b.kind} “${b.label}”` });
   return out;
 }
 
@@ -173,9 +183,15 @@ export const commands: CommandDef[] = [
     effect: 'write',
     input: obj({ name: str('Segment name'), definition: str('Segment definition'), realtime: { type: 'boolean' } }, ['name', 'definition']),
     run: ({ name, definition, realtime }: { name: string; definition: string; realtime?: boolean }, { principal }) => {
-      const id = `seg_${name.toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 24)}`;
-      const size = (commands.find((c) => c.name === 'segments.estimate')!.run({ definition }, { principal }) as { estimatedSize: number }).estimatedSize;
-      S.setState((s) => ({ segments: [...s.segments.filter((x) => x.id !== id), { id, name, definition, size, realtime: !!realtime, author: principal }] }));
+      const id = `seg_${name
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '_')
+        .slice(0, 24)}`;
+      const size = (commands.find((c) => c.name === 'segments.estimate')!.run({ definition }, { principal }) as { estimatedSize: number })
+        .estimatedSize;
+      S.setState((s) => ({
+        segments: [...s.segments.filter((x) => x.id !== id), { id, name, definition, size, realtime: !!realtime, author: principal }],
+      }));
       return { id, size };
     },
     summarize: (i, o) => `${i.name} (${o.size.toLocaleString('en')})`,
@@ -186,7 +202,13 @@ export const commands: CommandDef[] = [
     effect: 'read',
     input: obj({}),
     run: () =>
-      S.getState().journeys.map((j) => ({ id: j.id, name: j.name, status: j.status, version: publishedVersion(j)?.number ?? null, ...j.metrics })),
+      S.getState().journeys.map((j) => ({
+        id: j.id,
+        name: j.name,
+        status: j.status,
+        version: publishedVersion(j)?.number ?? null,
+        ...j.metrics,
+      })),
     summarize: (_i, o) => `${o.length} journeys`,
   },
   {
@@ -226,13 +248,24 @@ export const commands: CommandDef[] = [
       },
       { principal },
     ) => {
-      const nodes: JourneyNode[] = input.nodes.map((n) => ({ id: n.id, kind: n.kind, label: n.label, config: n.config ?? {}, position: { x: 0, y: 0 } }));
+      const nodes: JourneyNode[] = input.nodes.map((n) => ({
+        id: n.id,
+        kind: n.kind,
+        label: n.label,
+        config: n.config ?? {},
+        position: { x: 0, y: 0 },
+      }));
       const edges: JourneyEdge[] = [];
       input.nodes.forEach((n, i) => {
         const next = n.next ?? (i < input.nodes.length - 1 && !['exit', 'goal'].includes(n.kind) ? [{ to: input.nodes[i + 1].id }] : []);
-        next.forEach((x) => edges.push({ id: `${n.id}-${x.to}`, source: n.id, target: x.to, label: x.label }));
+        next.forEach((x) => {
+          edges.push({ id: `${n.id}-${x.to}`, source: n.id, target: x.to, label: x.label });
+        });
       });
-      const id = `jrn_${input.name.toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 20)}`;
+      const id = `jrn_${input.name
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '_')
+        .slice(0, 20)}`;
       const journey: Journey = {
         id,
         name: input.name,
@@ -241,7 +274,15 @@ export const commands: CommandDef[] = [
         goal: input.goal,
         metrics: { entered: 0, active: 0, conversion: 0, holdoutUplift: 0 },
         versions: [
-          { number: 1, state: 'draft', author: principal, note: 'Initial draft', createdAt: Date.now(), nodes: layoutGraph(nodes, edges), edges },
+          {
+            number: 1,
+            state: 'draft',
+            author: principal,
+            note: 'Initial draft',
+            createdAt: Date.now(),
+            nodes: layoutGraph(nodes, edges),
+            edges,
+          },
         ],
       };
       S.setState((s) => ({ journeys: [...s.journeys.filter((j) => j.id !== id), journey] }));
@@ -268,7 +309,10 @@ export const commands: CommandDef[] = [
                 ...x,
                 versions: isDraft
                   ? x.versions.map((v) => (v.number === number ? { ...v, nodes, edges } : v))
-                  : [...x.versions, { number, state: 'draft', author: principal, note: 'Edited in journey builder', createdAt: Date.now(), nodes, edges }],
+                  : [
+                      ...x.versions,
+                      { number, state: 'draft', author: principal, note: 'Edited in journey builder', createdAt: Date.now(), nodes, edges },
+                    ],
               },
         ),
       }));
@@ -286,7 +330,8 @@ export const commands: CommandDef[] = [
   },
   {
     name: 'journeys.requestPublish',
-    description: 'Publish the latest draft of a journey. Depending on the workspace approval policy this publishes directly or opens an approval request.',
+    description:
+      'Publish the latest draft of a journey. Depending on the workspace approval policy this publishes directly or opens an approval request.',
     effect: 'publish',
     input: obj({ journeyId: str('Journey id'), note: str('Change note for reviewers') }, ['journeyId', 'note']),
     run: ({ journeyId, note }: { journeyId: string; note: string }, { principal }) => {
@@ -296,7 +341,8 @@ export const commands: CommandDef[] = [
       const latest = latestVersion(j);
       if (latest.state === 'published') return { status: 'already_published', version: latest.number };
       const needsApproval =
-        st.approvalPolicy === 'all_publishes' || (st.approvalPolicy === 'agent_changes' && (principal.type === 'agent' || latest.author.type === 'agent'));
+        st.approvalPolicy === 'all_publishes' ||
+        (st.approvalPolicy === 'agent_changes' && (principal.type === 'agent' || latest.author.type === 'agent'));
       if (!needsApproval) {
         publishJourney(journeyId, latest.number);
         return { status: 'published', version: latest.number };
@@ -317,7 +363,9 @@ export const commands: CommandDef[] = [
       S.setState((s) => ({
         approvals: [req, ...s.approvals],
         journeys: s.journeys.map((x) =>
-          x.id === journeyId ? { ...x, versions: x.versions.map((v) => (v.number === latest.number ? { ...v, state: 'in_review' } : v)) } : x,
+          x.id === journeyId
+            ? { ...x, versions: x.versions.map((v) => (v.number === latest.number ? { ...v, state: 'in_review' } : v)) }
+            : x,
         ),
       }));
       return { status: 'awaiting_approval', approvalId: req.id, policy: st.approvalPolicy };
@@ -336,7 +384,9 @@ export const commands: CommandDef[] = [
       if (!req) throw new Error('Unknown approval');
       if (req.artifactType === 'journey') publishJourney(req.artifactId, req.toVersion);
       if (req.artifactType === 'template')
-        S.setState((s) => ({ templates: s.templates.map((t) => (t.id === req.artifactId ? { ...t, version: req.toVersion, updatedAt: Date.now() } : t)) }));
+        S.setState((s) => ({
+          templates: s.templates.map((t) => (t.id === req.artifactId ? { ...t, version: req.toVersion, updatedAt: Date.now() } : t)),
+        }));
       S.setState((s) => ({ approvals: s.approvals.map((a) => (a.id === approvalId ? { ...a, status: 'approved' } : a)) }));
       return { status: 'published', artifact: req.artifactName, version: req.toVersion };
     },
@@ -353,7 +403,9 @@ export const commands: CommandDef[] = [
       S.setState((s) => ({
         approvals: s.approvals.map((a) => (a.id === approvalId ? { ...a, status: 'rejected' } : a)),
         journeys: s.journeys.map((j) =>
-          j.id === req?.artifactId ? { ...j, versions: j.versions.map((v) => (v.number === req.toVersion ? { ...v, state: 'draft' } : v)) } : j,
+          j.id === req?.artifactId
+            ? { ...j, versions: j.versions.map((v) => (v.number === req.toVersion ? { ...v, state: 'draft' } : v)) }
+            : j,
         ),
       }));
       return { status: 'rejected' };
@@ -371,11 +423,21 @@ export const commands: CommandDef[] = [
     name: 'templates.create',
     description: 'Create an e-mail template draft from MJML with Liquid placeholders such as {{ profile.first_name }}.',
     effect: 'write',
-    input: obj({ name: str('Template name'), subject: str('Subject line (Liquid allowed)'), mjml: str('Full MJML document') }, ['name', 'subject', 'mjml']),
+    input: obj({ name: str('Template name'), subject: str('Subject line (Liquid allowed)'), mjml: str('Full MJML document') }, [
+      'name',
+      'subject',
+      'mjml',
+    ]),
     run: ({ name, subject, mjml }: { name: string; subject: string; mjml: string }, { principal }) => {
-      const id = `tpl_${name.toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 20)}`;
+      const id = `tpl_${name
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '_')
+        .slice(0, 20)}`;
       S.setState((s) => ({
-        templates: [...s.templates.filter((t) => t.id !== id), { id, name, subject, mjml, purpose: 'marketing_email', version: 1, updatedAt: Date.now(), author: principal }],
+        templates: [
+          ...s.templates.filter((t) => t.id !== id),
+          { id, name, subject, mjml, purpose: 'marketing_email', version: 1, updatedAt: Date.now(), author: principal },
+        ],
       }));
       return { templateId: id, version: 1 };
     },
@@ -385,11 +447,19 @@ export const commands: CommandDef[] = [
     name: 'templates.saveDraft',
     description: 'Save a new draft version of an existing e-mail template.',
     effect: 'write',
-    input: obj({ templateId: str('Template id'), subject: str('Subject line'), mjml: str('Full MJML document') }, ['templateId', 'subject', 'mjml']),
+    input: obj({ templateId: str('Template id'), subject: str('Subject line'), mjml: str('Full MJML document') }, [
+      'templateId',
+      'subject',
+      'mjml',
+    ]),
     run: ({ templateId, subject, mjml }: { templateId: string; subject: string; mjml: string }, { principal }) => {
       let version = 0;
       S.setState((s) => ({
-        templates: s.templates.map((t) => (t.id === templateId ? { ...t, subject, mjml, version: (version = t.version + 1), updatedAt: Date.now(), author: principal } : t)),
+        templates: s.templates.map((t) => {
+          if (t.id !== templateId) return t;
+          version = t.version + 1;
+          return { ...t, subject, mjml, version, updatedAt: Date.now(), author: principal };
+        }),
       }));
       return { templateId, version };
     },
@@ -397,7 +467,8 @@ export const commands: CommandDef[] = [
   },
   {
     name: 'analytics.emailPerformance',
-    description: 'E-mail performance for the last N days: sent, delivered, click rate, unsubscribe rate, attributed conversions and revenue (DKK).',
+    description:
+      'E-mail performance for the last N days: sent, delivered, click rate, unsubscribe rate, attributed conversions and revenue (DKK).',
     effect: 'read',
     input: obj({ days: { type: 'integer', minimum: 1, maximum: 30 } }, ['days']),
     run: ({ days }: { days: number }) => {
@@ -484,7 +555,9 @@ export function simulate(journeyId: string, profileId?: string) {
       case 'email': {
         const c = p.consent.find((x) => x.purpose === (current!.config.purpose ?? 'marketing_email'));
         const blocked = c?.status === 'objected' || (c?.basis === 'consent' && c.status !== 'granted');
-        note = blocked ? `Suppressed by send gateway: ${c?.status} (${c?.basis.replace('_', ' ')})` : `Rendered ${current.config.template ?? 'template'} → SMTP relay`;
+        note = blocked
+          ? `Suppressed by send gateway: ${c?.status} (${c?.basis.replace('_', ' ')})`
+          : `Rendered ${current.config.template ?? 'template'} → SMTP relay`;
         break;
       }
       case 'aiDecide':
@@ -514,11 +587,14 @@ let auditId = 0;
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** Run a command the way the real command layer would: authz, validation, audit log. */
-export async function exec<T = any>(name: string, input: unknown, principal: Principal = { type: 'user', name: 'Tim' }): Promise<T> {
+export async function exec<T = unknown>(name: string, input: unknown, principal: Principal = { type: 'user', name: 'Tim' }): Promise<T> {
   const def = commands.find((c) => c.name === name);
   const log = (ok: boolean, summary: string) =>
     useStore.setState((s) => ({
-      audit: [{ id: `a${++auditId}`, at: Date.now(), command: name, principal, effect: def?.effect ?? 'read', summary, ok }, ...s.audit].slice(0, 200),
+      audit: [
+        { id: `a${++auditId}`, at: Date.now(), command: name, principal, effect: def?.effect ?? 'read', summary, ok },
+        ...s.audit,
+      ].slice(0, 200),
     }));
   if (!def) {
     log(false, 'Unknown command');

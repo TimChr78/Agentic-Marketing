@@ -7,8 +7,13 @@ export function ConnectAgentCard() {
       <div className="space-y-3 p-4 text-[13px]">
         <CodeView value={`${location.origin}/mcp`} label="MCP server URL" />
         <p className="text-fg-2">
-          Clients that support OAuth (Claude, ChatGPT and others) sign in as you and ask which scopes to grant. Others send an API token from this page as <code className="font-mono text-[12px]">Authorization: Bearer amk_…</code>. REST works the same at{' '}
-          <code className="font-mono text-[12px]">{location.origin}/v1/&lt;command&gt;</code> (OpenAPI at <a className="text-accent hover:underline" href="/openapi.json">/openapi.json</a>).
+          Clients that support OAuth (Claude, ChatGPT and others) sign in as you and ask which scopes to grant. Others send an API token
+          from this page as <code className="font-mono text-[12px]">Authorization: Bearer amk_…</code>. REST works the same at{' '}
+          <code className="font-mono text-[12px]">{location.origin}/v1/&lt;command&gt;</code> (OpenAPI at{' '}
+          <a className="text-accent hover:underline" href="/openapi.json">
+            /openapi.json
+          </a>
+          ).
         </p>
       </div>
     </Card>

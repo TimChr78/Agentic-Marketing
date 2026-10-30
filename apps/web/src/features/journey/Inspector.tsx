@@ -9,7 +9,19 @@ import { edgeLabel, type JNode, KINDS, maxEdges } from './model';
 
 const DURATIONS = ['PT5M', 'PT30M', 'PT1H', 'PT6H', 'PT12H', 'P1D', 'P2D', 'P3D', 'P5D', 'P1W', 'P2W', 'P30D', 'P90D'];
 
-function DurationSelect({ value, onChange, disabled, label, hint }: { value: unknown; onChange: (v: string) => void; disabled?: boolean; label: string; hint?: string }) {
+function DurationSelect({
+  value,
+  onChange,
+  disabled,
+  label,
+  hint,
+}: {
+  value: unknown;
+  onChange: (v: string) => void;
+  disabled?: boolean;
+  label: string;
+  hint?: string;
+}) {
   const v = typeof value === 'string' ? value : '';
   return (
     <Field label={label} hint={hint}>
@@ -50,7 +62,8 @@ export function Inspector({
 }) {
   const meta = KINDS[node.kind];
   const c = node.config as Record<string, any>;
-  const setC = (p: Record<string, unknown>) => onChange({ ...node, config: Object.fromEntries(Object.entries({ ...c, ...p }).filter(([, v]) => v !== undefined)) });
+  const setC = (p: Record<string, unknown>) =>
+    onChange({ ...node, config: Object.fromEntries(Object.entries({ ...c, ...p }).filter(([, v]) => v !== undefined)) });
   const entryKey = (c.entryKey ?? {}) as { source?: 'message_id' | 'event_property'; property?: string; onMissing?: 'skip' | 'message_id' };
   const setEntryKey = (p: Record<string, unknown>) => setC({ entryKey: { ...entryKey, ...p } });
   const condition = (c.condition ?? {}) as Record<string, unknown>;
@@ -79,7 +92,10 @@ export function Inspector({
   return (
     <div className="space-y-5 p-4">
       <div className="flex items-center gap-2">
-        <span className="flex size-7 items-center justify-center rounded-md" style={{ color: `var(--cat-${meta.category})`, background: `color-mix(in srgb, var(--cat-${meta.category}) 14%, transparent)` }}>
+        <span
+          className="flex size-7 items-center justify-center rounded-md"
+          style={{ color: `var(--cat-${meta.category})`, background: `color-mix(in srgb, var(--cat-${meta.category}) 14%, transparent)` }}
+        >
           <meta.icon size={15} aria-hidden />
         </span>
         <div className="min-w-0">
@@ -105,7 +121,10 @@ export function Inspector({
           <Segmented
             label="Starts when"
             value={c.segment !== undefined ? 'segment' : 'event'}
-            onChange={(v) => !readOnly && setC(v === 'segment' ? { event: undefined, segment: c.segment ?? '' } : { segment: undefined, event: c.event ?? '' })}
+            onChange={(v) =>
+              !readOnly &&
+              setC(v === 'segment' ? { event: undefined, segment: c.segment ?? '' } : { segment: undefined, event: c.event ?? '' })
+            }
             items={[
               { key: 'event', label: 'An event happens' },
               { key: 'segment', label: 'Joins a segment' },
@@ -140,11 +159,23 @@ export function Inspector({
               />
               {entryKey.source === 'event_property' && (
                 <>
-                  <Field label="Property" hint="A dot path into the event's properties, e.g. order_id or order.id. It must not change later.">
-                    <Input value={entryKey.property ?? ''} readOnly={readOnly} placeholder="order_id" onChange={(e) => setEntryKey({ property: e.target.value })} />
+                  <Field
+                    label="Property"
+                    hint="A dot path into the event's properties, e.g. order_id or order.id. It must not change later."
+                  >
+                    <Input
+                      value={entryKey.property ?? ''}
+                      readOnly={readOnly}
+                      placeholder="order_id"
+                      onChange={(e) => setEntryKey({ property: e.target.value })}
+                    />
                   </Field>
                   <Field label="When it is missing" hint="Empty or longer than 200 characters counts as missing.">
-                    <Select value={entryKey.onMissing ?? 'skip'} disabled={readOnly} onChange={(e) => setEntryKey({ onMissing: e.target.value })}>
+                    <Select
+                      value={entryKey.onMissing ?? 'skip'}
+                      disabled={readOnly}
+                      onChange={(e) => setEntryKey({ onMissing: e.target.value })}
+                    >
                       <option value="skip">Skip the entry</option>
                       <option value="message_id">Use the message id</option>
                     </Select>
@@ -156,7 +187,9 @@ export function Inspector({
           <Field label="Enter again">
             <Select value={c.reentry ?? 'once'} disabled={readOnly} onChange={(e) => setC({ reentry: e.target.value })}>
               <option value="once">{entryKey.source === 'event_property' ? 'Never: once per key' : 'Never: once per person'}</option>
-              <option value="after_exit">{entryKey.source === 'event_property' ? 'After leaving, per key' : 'After leaving the journey'}</option>
+              <option value="after_exit">
+                {entryKey.source === 'event_property' ? 'After leaving, per key' : 'After leaving the journey'}
+              </option>
               <option value="always">Every time</option>
             </Select>
           </Field>
@@ -164,17 +197,30 @@ export function Inspector({
       )}
       {(node.kind === 'email' || node.kind === 'sms' || node.kind === 'push') && (
         <Field label="Template" hint="It must be live before the journey can be published.">
-          <ArtifactSelect type={`${node.kind === 'email' ? 'email' : node.kind}_template`} value={c.template || undefined} disabled={readOnly} onChange={(v) => setC({ template: v })} />
+          <ArtifactSelect
+            type={`${node.kind === 'email' ? 'email' : node.kind}_template`}
+            value={c.template || undefined}
+            disabled={readOnly}
+            onChange={(v) => setC({ template: v })}
+          />
         </Field>
       )}
-      {node.kind === 'wait' && <DurationSelect label="Wait for" value={c.duration} disabled={readOnly} onChange={(v) => setC({ duration: v })} />}
+      {node.kind === 'wait' && (
+        <DurationSelect label="Wait for" value={c.duration} disabled={readOnly} onChange={(v) => setC({ duration: v })} />
+      )}
       {(node.kind === 'waitEvent' || node.kind === 'goal') && (
         <>
           <Field label="Event name">
             <Input value={c.event ?? ''} readOnly={readOnly} onChange={(e) => setC({ event: e.target.value })} />
           </Field>
           {node.kind === 'waitEvent' ? (
-            <DurationSelect label="Give up after" hint="Then it takes the “timeout” path." value={c.timeout} disabled={readOnly} onChange={(v) => setC({ timeout: v })} />
+            <DurationSelect
+              label="Give up after"
+              hint="Then it takes the “timeout” path."
+              value={c.timeout}
+              disabled={readOnly}
+              onChange={(v) => setC({ timeout: v })}
+            />
           ) : (
             <DurationSelect label="Counts within" value={c.within} disabled={readOnly} onChange={(v) => setC({ within: v })} />
           )}
@@ -194,7 +240,12 @@ export function Inspector({
             ]}
           />
           {directSegment ? (
-            <ArtifactSelect type="segment" value={directSegment || undefined} disabled={readOnly} onChange={(v) => setC({ condition: { segment: v } })} />
+            <ArtifactSelect
+              type="segment"
+              value={directSegment || undefined}
+              disabled={readOnly}
+              onChange={(v) => setC({ condition: { segment: v } })}
+            />
           ) : (
             <JsonEditor
               label="Condition"
@@ -205,7 +256,13 @@ export function Inspector({
               rows={5}
             />
           )}
-          <DurationSelect label="Give up after" hint="At most 90 days. Then it takes the “timeout” path." value={c.timeout} disabled={readOnly} onChange={(v) => setC({ timeout: v })} />
+          <DurationSelect
+            label="Give up after"
+            hint="At most 90 days. Then it takes the “timeout” path."
+            value={c.timeout}
+            disabled={readOnly}
+            onChange={(v) => setC({ timeout: v })}
+          />
           <DurationSelect
             label="Check at least every"
             hint="The fallback check, at least 5 minutes. Events and segment changes are checked at once."
@@ -220,7 +277,14 @@ export function Inspector({
           <Segmented
             label="Yes when the person"
             value={c.segment !== undefined ? 'segment' : 'condition'}
-            onChange={(v) => !readOnly && setC(v === 'segment' ? { condition: undefined, segment: c.segment ?? '' } : { segment: undefined, condition: c.condition ?? { trait: 'city', op: 'eq', value: '' } })}
+            onChange={(v) =>
+              !readOnly &&
+              setC(
+                v === 'segment'
+                  ? { condition: undefined, segment: c.segment ?? '' }
+                  : { segment: undefined, condition: c.condition ?? { trait: 'city', op: 'eq', value: '' } },
+              )
+            }
             items={[
               { key: 'segment', label: 'Is in a segment' },
               { key: 'condition', label: 'Matches a condition' },
@@ -229,18 +293,41 @@ export function Inspector({
           {c.segment !== undefined ? (
             <ArtifactSelect type="segment" value={c.segment || undefined} disabled={readOnly} onChange={(v) => setC({ segment: v })} />
           ) : (
-            <JsonEditor label="Condition" hint="A segment condition, e.g. {&quot;trait&quot;:&quot;city&quot;,&quot;op&quot;:&quot;eq&quot;,&quot;value&quot;:&quot;Aarhus&quot;}." value={c.condition} onChange={(v) => setC({ condition: v })} readOnly={readOnly} rows={5} />
+            <JsonEditor
+              label="Condition"
+              hint="A segment condition, e.g. {&quot;trait&quot;:&quot;city&quot;,&quot;op&quot;:&quot;eq&quot;,&quot;value&quot;:&quot;Aarhus&quot;}."
+              value={c.condition}
+              onChange={(v) => setC({ condition: v })}
+              readOnly={readOnly}
+              rows={5}
+            />
           )}
         </FieldGroup>
       )}
       {node.kind === 'split' && (
         <FieldGroup legend="Weights" hint="One per path; people are split at random by these weights.">
           {((c.weights as number[]) ?? [50, 50]).map((w, i, all) => (
+            // biome-ignore lint/suspicious/noArrayIndexKey: split weights are positional path slots (A, B, ...) with no identity of their own
             <div key={i} className="flex items-end gap-2">
               <Field label={`Path ${String.fromCharCode(65 + i)}`} unit="%" className="flex-1">
-                <Input type="number" min={0} max={100} value={w} readOnly={readOnly} className="pr-8" onChange={(e) => setC({ weights: all.map((x, k) => (k === i ? Number(e.target.value) : x)) })} />
+                <Input
+                  type="number"
+                  min={0}
+                  max={100}
+                  value={w}
+                  readOnly={readOnly}
+                  className="pr-8"
+                  onChange={(e) => setC({ weights: all.map((x, k) => (k === i ? Number(e.target.value) : x)) })}
+                />
               </Field>
-              {all.length > 2 && !readOnly && <Button variant="ghost" aria-label={`Remove path ${String.fromCharCode(65 + i)}`} onClick={() => setC({ weights: all.filter((_, k) => k !== i) })} icon={<Trash2 size={14} />} />}
+              {all.length > 2 && !readOnly && (
+                <Button
+                  variant="ghost"
+                  aria-label={`Remove path ${String.fromCharCode(65 + i)}`}
+                  onClick={() => setC({ weights: all.filter((_, k) => k !== i) })}
+                  icon={<Trash2 size={14} />}
+                />
+              )}
             </div>
           ))}
           {!readOnly && ((c.weights as number[]) ?? []).length < 5 && (
@@ -269,13 +356,31 @@ export function Inspector({
       )}
       {(node.kind === 'aiDecide' || node.kind === 'aiGenerate') && (
         <>
-          <Field label="Prompt" hint={node.kind === 'aiDecide' ? 'A decide prompt; its live version is used.' : 'A generate prompt; its slots fill content.* for later e-mails.'}>
+          <Field
+            label="Prompt"
+            hint={
+              node.kind === 'aiDecide'
+                ? 'A decide prompt; its live version is used.'
+                : 'A generate prompt; its slots fill content.* for later e-mails.'
+            }
+          >
             <ArtifactSelect type="prompt" value={c.prompt || undefined} disabled={readOnly} onChange={(v) => setC({ prompt: v })} />
           </Field>
           {node.kind === 'aiDecide' && (
             <>
               <Field label="Options" hint="The prompt's option keys, one per path, comma-separated.">
-                <Input value={((c.options as string[]) ?? []).join(', ')} readOnly={readOnly} onChange={(e) => setC({ options: e.target.value.split(',').map((s) => s.trim()).filter(Boolean) })} />
+                <Input
+                  value={((c.options as string[]) ?? []).join(', ')}
+                  readOnly={readOnly}
+                  onChange={(e) =>
+                    setC({
+                      options: e.target.value
+                        .split(',')
+                        .map((s) => s.trim())
+                        .filter(Boolean),
+                    })
+                  }
+                />
               </Field>
               <Field label="Fallback" hint="Taken when the AI cannot decide (no consent, budget, timeout, error).">
                 <Select value={c.fallback ?? ''} disabled={readOnly} onChange={(e) => setC({ fallback: e.target.value })}>
@@ -288,7 +393,12 @@ export function Inspector({
               </Field>
             </>
           )}
-          <DurationSelect label="Wait for the model at most" value={c.timeout ?? 'PT5M'} disabled={readOnly} onChange={(v) => setC({ timeout: v })} />
+          <DurationSelect
+            label="Wait for the model at most"
+            value={c.timeout ?? 'PT5M'}
+            disabled={readOnly}
+            onChange={(v) => setC({ timeout: v })}
+          />
         </>
       )}
       {node.kind === 'webhook' && (
@@ -304,7 +414,13 @@ export function Inspector({
             </Select>
           </Field>
           <Field label="Payload (JSONata)" hint="Optional. Default: the profile id, non-personal traits and the trigger event.">
-            <Textarea mono rows={3} value={c.data ?? ''} readOnly={readOnly} onChange={(e) => setC({ data: e.target.value || undefined })} />
+            <Textarea
+              mono
+              rows={3}
+              value={c.data ?? ''}
+              readOnly={readOnly}
+              onChange={(e) => setC({ data: e.target.value || undefined })}
+            />
           </Field>
         </>
       )}
@@ -323,7 +439,14 @@ export function Inspector({
           <Field label="Action" hint='e.g. "postMessage" (Slack) or "request" (HTTP API).'>
             <Input value={c.action ?? ''} readOnly={readOnly} onChange={(e) => setC({ action: e.target.value })} />
           </Field>
-          <JsonEditor label="Input" hint="A JSON object for the action." value={typeof c.input === 'object' ? c.input : {}} onChange={(v) => setC({ input: v })} readOnly={readOnly} rows={4} />
+          <JsonEditor
+            label="Input"
+            hint="A JSON object for the action."
+            value={typeof c.input === 'object' ? c.input : {}}
+            onChange={(v) => setC({ input: v })}
+            readOnly={readOnly}
+            rows={4}
+          />
         </>
       )}
       {node.kind === 'transform' && (
@@ -344,7 +467,14 @@ export function Inspector({
             const current = node.next?.[i]?.to ?? '';
             const disabled = readOnly || i > (node.next?.length ?? 0);
             return (
-              <Field key={i} label={label ? `If ${label}` : 'Next step'} hint={i > (node.next?.length ?? 0) ? `Connect “${edgeLabel(node, i - 1) ?? 'the previous outcome'}” first.` : undefined}>
+              <Field
+                key={
+                  // biome-ignore lint/suspicious/noArrayIndexKey: outcome slots are positional (one per edge) and are labelled by index
+                  i
+                }
+                label={label ? `If ${label}` : 'Next step'}
+                hint={i > (node.next?.length ?? 0) ? `Connect “${edgeLabel(node, i - 1) ?? 'the previous outcome'}” first.` : undefined}
+              >
                 <Select value={current} disabled={disabled} onChange={(e) => onConnect(i, e.target.value || null)}>
                   <option value="">{current ? 'Disconnect' : 'Not connected'}</option>
                   {targets.map((t) => (

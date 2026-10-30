@@ -2,7 +2,7 @@
 
 ## 1. Send gateway
 
-All outbound communication — email, webhooks, later SMS and push — passes through **one send gateway** ([ADR-0007](adr/0007-send-gateway-consent.md)). Journeys, campaigns, transactional API calls and agents can only *request* a send; the gateway decides.
+All outbound communication — email, webhooks, SMS and push — passes through **one send gateway** ([ADR-0007](adr/0007-send-gateway-consent.md)). Journeys, campaigns, transactional API calls and agents can only *request* a send; the gateway decides.
 
 ```mermaid
 flowchart LR
@@ -72,7 +72,7 @@ POST /v1/decide
 ```
 
 - Reads profile snapshot (traits allowed for personalization, segment memberships), session state and RT counters from Valkey; evaluates experience targeting compiled to a fast in-memory predicate; sticky variant assignment via hashing `(experience, profile)`.
-- Exposures and conversions come back as events → ClickHouse → experiment analysis (frequentist + sequential testing; Bayesian later).
+- Exposures and conversions come back as events → ClickHouse → experiment analysis (frequentist, sequential and Bayesian; `experiences.results`).
 - Respects consent: without personalization consent, only non-personal (contextual: page, geo-country, device) targeting is allowed.
 
 ### 3.4 JS SDK (`sdk-js`)

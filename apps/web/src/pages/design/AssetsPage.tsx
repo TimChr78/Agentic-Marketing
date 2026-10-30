@@ -8,7 +8,26 @@ import { useSession } from '../../app/session';
 import { useApi } from '../../app/useApi';
 import { AssetGrid, AssetThumb } from '../../features/assets/AssetGrid';
 import { ACCEPT, type Asset, formatBytes, uploadFile } from '../../features/assets/upload';
-import { Alert, Button, CodeView, cx, Drawer, EmptyState, Field, formatDateTime, Input, LoadingBlock, Meta, PageHeader, Select, Skeleton, StatusPill, Textarea, useConfirm, useToast } from '../../ui';
+import {
+  Alert,
+  Button,
+  CodeView,
+  cx,
+  Drawer,
+  EmptyState,
+  Field,
+  formatDateTime,
+  Input,
+  LoadingBlock,
+  Meta,
+  PageHeader,
+  Select,
+  Skeleton,
+  StatusPill,
+  Textarea,
+  useConfirm,
+  useToast,
+} from '../../ui';
 import { pageWidth } from '../../ui/layout';
 
 /** Asset library (#35): upload, search, alt text, where each asset is used, safe delete. */
@@ -48,6 +67,7 @@ export default function AssetsPage() {
 
   const assets = list.data?.assets ?? [];
   return (
+    // biome-ignore lint/a11y/noStaticElementInteractions: drag-and-drop is a mouse enhancement; uploading also works through the Upload button
     <div
       onDragOver={(e) => {
         if (!canWrite) return;
@@ -61,7 +81,11 @@ export default function AssetsPage() {
         setDragging(false);
         void upload([...e.dataTransfer.files]);
       }}
-      className={cx(pageWidth('default'), 'min-h-[60vh] rounded-xl', dragging && 'outline-2 outline-offset-8 outline-accent outline-dashed')}
+      className={cx(
+        pageWidth('default'),
+        'min-h-[60vh] rounded-xl',
+        dragging && 'outline-2 outline-offset-8 outline-accent outline-dashed',
+      )}
     >
       <PageHeader
         title="Assets"
@@ -69,7 +93,17 @@ export default function AssetsPage() {
         actions={
           canWrite && (
             <>
-              <input ref={input} type="file" multiple hidden accept={ACCEPT} onChange={(e) => (void upload([...(e.target.files ?? [])]), (e.target.value = ''))} />
+              <input
+                ref={input}
+                type="file"
+                multiple
+                hidden
+                accept={ACCEPT}
+                onChange={(e) => {
+                  void upload([...(e.target.files ?? [])]);
+                  e.target.value = '';
+                }}
+              />
               <Button variant="primary" icon={<Upload size={15} />} onClick={() => input.current?.click()} loading={uploading.length > 0}>
                 Upload
               </Button>
@@ -80,7 +114,13 @@ export default function AssetsPage() {
       <div className="mb-4 flex flex-wrap items-center gap-2">
         <div className="relative w-full max-w-[320px]">
           <Search size={14} className="pointer-events-none absolute top-1/2 left-2.5 -translate-y-1/2 text-muted" aria-hidden />
-          <Input aria-label="Search assets" placeholder="Search by name or alt text" className="pl-8" value={q} onChange={(e) => setQ(e.target.value)} />
+          <Input
+            aria-label="Search assets"
+            placeholder="Search by name or alt text"
+            className="pl-8"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+          />
         </div>
         <Select aria-label="Kind" value={kind} onChange={(e) => setKind(e.target.value as typeof kind)} className="w-auto">
           <option value="">Images and PDFs</option>
@@ -99,7 +139,11 @@ export default function AssetsPage() {
         </Alert>
       )}
       {uploading.length > 0 && (
-        <div className="mb-3 grid grid-cols-[repeat(auto-fill,minmax(176px,1fr))] gap-3" role="status" aria-label={`Uploading ${uploading.length} files`}>
+        <div
+          className="mb-3 grid grid-cols-[repeat(auto-fill,minmax(176px,1fr))] gap-3"
+          role="status"
+          aria-label={`Uploading ${uploading.length} files`}
+        >
           {uploading.map((n) => (
             <div key={n} className="rounded-lg border border-line bg-surface p-2">
               <Skeleton className="h-[104px] w-full" />
@@ -120,19 +164,23 @@ export default function AssetsPage() {
         <div className="rounded-lg border border-dashed border-line-strong">
           <EmptyState
             title={q || kind ? 'Nothing matches' : 'No assets yet'}
-            action={!q && !kind && canWrite && <Button variant="primary" icon={<Upload size={15} />} onClick={() => input.current?.click()}>Upload</Button>}
+            action={
+              !q &&
+              !kind &&
+              canWrite && (
+                <Button variant="primary" icon={<Upload size={15} />} onClick={() => input.current?.click()}>
+                  Upload
+                </Button>
+              )
+            }
           >
-            {q || kind ? 'Clear the search or choose another kind.' : 'Upload your logo and images for e-mails here, or drop files on this page. Then pick them in the template editor and the brand settings.'}
+            {q || kind
+              ? 'Clear the search or choose another kind.'
+              : 'Upload your logo and images for e-mails here, or drop files on this page. Then pick them in the template editor and the brand settings.'}
           </EmptyState>
         </div>
       )}
-      {open && (
-        <AssetDrawer
-          id={open.id}
-          onClose={() => setOpen(null)}
-          onChanged={() => void list.reload()}
-        />
-      )}
+      {open && <AssetDrawer id={open.id} onClose={() => setOpen(null)} onChanged={() => void list.reload()} />}
     </div>
   );
 }
@@ -155,7 +203,11 @@ function AssetDrawer({ id, onClose, onChanged }: { id: string; onClose: () => vo
     setBusy(true);
     setError(null);
     try {
-      await api.call('assets.update', { id: asset.id, ...(name !== null && name !== asset.name ? { name } : {}), ...(alt !== null && alt !== asset.altText ? { altText: alt } : {}) });
+      await api.call('assets.update', {
+        id: asset.id,
+        ...(name !== null && name !== asset.name ? { name } : {}),
+        ...(alt !== null && alt !== asset.altText ? { altText: alt } : {}),
+      });
       toast.success('Saved.');
       setName(null);
       setAlt(null);
@@ -178,7 +230,11 @@ function AssetDrawer({ id, onClose, onChanged }: { id: string; onClose: () => vo
           <ul className="mt-2 list-disc pl-5">
             {asset.usage.map((u) => (
               <li key={u.artifactId}>
-                {u.artifactName} <span className="text-muted">({typeLabel(u.artifactType)}{u.versions.includes('published') ? ', live' : ''})</span>
+                {u.artifactName}{' '}
+                <span className="text-muted">
+                  ({typeLabel(u.artifactType)}
+                  {u.versions.includes('published') ? ', live' : ''})
+                </span>
               </li>
             ))}
           </ul>
@@ -226,7 +282,9 @@ function AssetDrawer({ id, onClose, onChanged }: { id: string; onClose: () => vo
         <LoadingBlock lines={8} />
       ) : a.error ? (
         <div className="p-5">
-          <Alert tone="bad" onRetry={a.reload}>{a.error}</Alert>
+          <Alert tone="bad" onRetry={a.reload}>
+            {a.error}
+          </Alert>
         </div>
       ) : asset ? (
         <div className="space-y-5 p-5">
@@ -238,8 +296,17 @@ function AssetDrawer({ id, onClose, onChanged }: { id: string; onClose: () => vo
             <Input value={name ?? asset.name} onChange={(e) => setName(e.target.value)} readOnly={!canWrite} maxLength={120} />
           </Field>
           {asset.kind === 'image' && (
-            <Field label="Alt text" hint="Read aloud by screen readers and shown when images are blocked. Describe what the image shows; leave empty only for decoration.">
-              <Textarea rows={2} value={alt ?? asset.altText} onChange={(e) => setAlt(e.target.value)} readOnly={!canWrite} maxLength={500} />
+            <Field
+              label="Alt text"
+              hint="Read aloud by screen readers and shown when images are blocked. Describe what the image shows; leave empty only for decoration."
+            >
+              <Textarea
+                rows={2}
+                value={alt ?? asset.altText}
+                onChange={(e) => setAlt(e.target.value)}
+                readOnly={!canWrite}
+                maxLength={500}
+              />
             </Field>
           )}
           {error && <Alert tone="bad">{error}</Alert>}
@@ -262,7 +329,12 @@ function AssetDrawer({ id, onClose, onChanged }: { id: string; onClose: () => vo
               <p className="text-[13px] text-muted">Not used in any template, form or brand yet.</p>
             )}
           </section>
-          <Meta items={[['Uploaded', formatDateTime(asset.createdAt)], ['File name', asset.fileName]]} />
+          <Meta
+            items={[
+              ['Uploaded', formatDateTime(asset.createdAt)],
+              ['File name', asset.fileName],
+            ]}
+          />
         </div>
       ) : null}
       {confirmDialog}

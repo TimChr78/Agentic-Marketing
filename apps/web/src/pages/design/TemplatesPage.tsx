@@ -21,7 +21,10 @@ export default function TemplatesPage() {
       description="E-mails in MJML with Liquid placeholders. Edit visually or as code; previews render exactly what is sent."
       emptyTitle="No e-mail templates yet"
       emptyText="Create one for each newsletter issue or automated e-mail. Agents can draft templates too; you review them before they go out."
-      create={{ label: 'New template', content: (name) => ({ purpose: 'marketing_email', subject: name, mjml: STARTER, sampleData: { profile: { firstName: 'Ada' } } }) }}
+      create={{
+        label: 'New template',
+        content: (name) => ({ purpose: 'marketing_email', subject: name, mjml: STARTER, sampleData: { profile: { firstName: 'Ada' } } }),
+      }}
     />
   );
 }

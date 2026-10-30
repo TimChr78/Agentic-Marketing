@@ -2,8 +2,8 @@ import { Plus, RotateCw, Trash2 } from 'lucide-react';
 import { useState } from 'react';
 import { ApiError, api, errText, type Out } from '../../app/api';
 import { useCrumbs } from '../../app/page';
-import { useApi } from '../../app/useApi';
 import { useWorkspace } from '../../app/session';
+import { useApi } from '../../app/useApi';
 import {
   Alert,
   Button,
@@ -19,10 +19,10 @@ import {
   Table,
   TableFrame,
   Td,
-  Th,
   THead,
-  timeAgo,
+  Th,
   Tr,
+  timeAgo,
   useConfirm,
   useToast,
 } from '../../ui';
@@ -38,7 +38,8 @@ const SECRET_NAME = /^[a-z0-9][a-z0-9_.-]{0,63}$/;
 function nameProblem(value: string): string | null {
   const name = value.trim();
   if (!name) return 'Give the secret a name.';
-  if (!SECRET_NAME.test(name)) return 'Use lowercase letters, digits, dots, dashes or underscores, start with a letter or digit, and keep it to 64 characters.';
+  if (!SECRET_NAME.test(name))
+    return 'Use lowercase letters, digits, dots, dashes or underscores, start with a letter or digit, and keep it to 64 characters.';
   return null;
 }
 
@@ -59,8 +60,8 @@ export default function SecretsPage() {
       title: `Delete secret “${secret.name}”?`,
       body: (
         <>
-          Anything that uses it, such as a provider, integration or agent setup, stops working until a new value is stored.
-          The value cannot be recovered.
+          Anything that uses it, such as a provider, integration or agent setup, stops working until a new value is stored. The value cannot
+          be recovered.
         </>
       ),
       confirmLabel: 'Delete secret',
@@ -91,7 +92,16 @@ export default function SecretsPage() {
         }
       />
       {error && (
-        <Alert tone="bad" title="That did not work" className="mb-4" action={<Button size="sm" variant="ghost" onClick={() => setError(null)}>Dismiss</Button>}>
+        <Alert
+          tone="bad"
+          title="That did not work"
+          className="mb-4"
+          action={
+            <Button size="sm" variant="ghost" onClick={() => setError(null)}>
+              Dismiss
+            </Button>
+          }
+        >
           {error}
         </Alert>
       )}
@@ -147,7 +157,12 @@ export default function SecretsPage() {
                 {canWrite && (
                   <Td className="text-right" onClick={(e) => e.stopPropagation()}>
                     <div className="flex justify-end gap-1">
-                      <Button size="sm" variant="ghost" icon={<RotateCw size={14} />} onClick={() => setEditing({ mode: 'rotate', secret: s })}>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        icon={<RotateCw size={14} />}
+                        onClick={() => setEditing({ mode: 'rotate', secret: s })}
+                      >
                         Rotate
                       </Button>
                       <Button size="sm" variant="danger" icon={<Trash2 size={14} />} onClick={() => void remove(s)}>
@@ -241,7 +256,11 @@ function SecretDrawer({ editing, onClose, onSaved }: { editing: Editing; onClose
       >
         <Field
           label="Name"
-          hint={rotate ? 'Secrets keep their name when you rotate them.' : 'Lowercase letters, digits, dots, dashes and underscores, starting with a letter or digit. For example, llm.anthropic.api_key.'}
+          hint={
+            rotate
+              ? 'Secrets keep their name when you rotate them.'
+              : 'Lowercase letters, digits, dots, dashes and underscores, starting with a letter or digit. For example, llm.anthropic.api_key.'
+          }
           error={errors.name}
           required={!rotate}
         >
@@ -282,7 +301,11 @@ function SecretDrawer({ editing, onClose, onSaved }: { editing: Editing; onClose
           />
         </Field>
         <Checkbox label="Show while typing" checked={show} onChange={(e) => setShow(e.target.checked)} />
-        {error && <Alert tone="bad" title="Not saved">{error}</Alert>}
+        {error && (
+          <Alert tone="bad" title="Not saved">
+            {error}
+          </Alert>
+        )}
       </form>
     </Drawer>
   );

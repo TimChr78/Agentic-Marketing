@@ -46,14 +46,16 @@ test.describe('approvals (#41)', () => {
     const drawer = page.getByRole('dialog', { name: 'Send Signal #44' });
     await expect(drawer).toContainText('Reviewed together');
     await expect(drawer).toContainText('reviewed together with this broadcast');
-    await expect(drawer.frameLocator('iframe[title^="E-mail preview"]').getByText('This issue and its send were approved together.')).toBeVisible();
+    await expect(
+      drawer.frameLocator('iframe[title^="E-mail preview"]').getByText('This issue and its send were approved together.'),
+    ).toBeVisible();
     await drawer.getByRole('button', { name: /Weekly Signal #44/ }).click();
     await expect(page.getByRole('dialog', { name: 'Weekly Signal #44' })).toContainText('Reviewed together');
 
     await page.getByRole('dialog', { name: 'Weekly Signal #44' }).getByRole('button', { name: 'Approve all 2 and publish' }).click();
     await expect(page.getByText(/Approved 2 changes/)).toBeVisible();
     const list = await call(page.request, 'approvals.list', { status: 'approved' });
-    const names = list.approvals.map((a: any) => a.artifactName);
+    const names = (list as { approvals: { artifactName: string }[] }).approvals.map((a) => a.artifactName);
     expect(names).toContain('Weekly Signal #44');
     expect(names).toContain('Send Signal #44');
   });
@@ -96,7 +98,7 @@ test.describe('approvals (#41)', () => {
     await page.getByRole('alertdialog').getByRole('button', { name: 'Approve 1' }).click();
     await expect(page.getByText(/Approved 1 change/)).toBeVisible();
     const list = await call(page.request, 'approvals.list', { status: 'approved' });
-    expect(list.approvals.map((a: any) => a.artifactName)).toContain('Engaged readers');
+    expect((list as { approvals: { artifactName: string }[] }).approvals.map((a) => a.artifactName)).toContain('Engaged readers');
   });
 
   test('a viewer sees no approve actions and no settings', async ({ page }) => {

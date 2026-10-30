@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 import type { Out } from '../../app/api';
-import { StatusPill, Table, Td, Th, THead, Tr, formatDateTime } from '../../ui';
+import { formatDateTime, StatusPill, Table, Td, THead, Th, Tr } from '../../ui';
 
 // The consent ledger is append-only: these helpers render one person's records the same way on
 // the person page and the consent page.
@@ -39,10 +39,10 @@ export function ConsentHistoryTable({ records }: { records: ConsentRecord[] }) {
         </tr>
       </THead>
       <tbody>
-        {records.map((r, i) => {
+        {records.map((r) => {
           const proof = proofText(r.proof);
           return (
-            <Tr key={`${r.recordedAt}-${r.purpose}-${r.channel}-${i}`}>
+            <Tr key={`${r.recordedAt}-${r.purpose}-${r.channel}-${r.status}`}>
               <Td className="font-medium text-fg">{label(r.purpose)}</Td>
               <Td className="hidden md:table-cell">{r.channel ? label(r.channel) : 'Any'}</Td>
               <Td>
@@ -72,11 +72,7 @@ export function ConsentSummary({ consent }: { consent: { purpose: string; status
   return (
     <span className="flex flex-wrap items-center gap-1.5">
       {granted > 0 && <StatusPill tone="good">{granted} allowed</StatusPill>}
-      {other > 0 && (
-        <StatusPill tone="warn">
-          {other} not allowed
-        </StatusPill>
-      )}
+      {other > 0 && <StatusPill tone="warn">{other} not allowed</StatusPill>}
     </span>
   );
 }

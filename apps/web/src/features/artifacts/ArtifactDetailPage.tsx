@@ -7,7 +7,23 @@ import { type Crumb, useCrumbs } from '../../app/page';
 import { addNavigationGuard } from '../../app/router';
 import { useWorkspace } from '../../app/session';
 import { useApi } from '../../app/useApi';
-import { Alert, Button, Field, fieldErrors, Input, LoadingBlock, Menu, Modal, PageHeader, StatePill, StatusPill, Tabs, Textarea, timeAgo, useToast } from '../../ui';
+import {
+  Alert,
+  Button,
+  Field,
+  fieldErrors,
+  Input,
+  LoadingBlock,
+  Menu,
+  Modal,
+  PageHeader,
+  StatePill,
+  StatusPill,
+  Tabs,
+  Textarea,
+  timeAgo,
+  useToast,
+} from '../../ui';
 import { pageWidth } from '../../ui/layout';
 import { invalidateArtifact } from '../artifactCache';
 import { withLayout } from '../journey/layout';
@@ -126,7 +142,12 @@ export function ArtifactDetailPage({
       setSaveError(null);
       setErrors({});
       try {
-        const r = await api.call('artifacts.updateDraft', { artifactId: a.id, content: draft, expectedContentHash: a.version.contentHash, ...(opts.name ? { name: opts.name } : {}) });
+        const r = await api.call('artifacts.updateDraft', {
+          artifactId: a.id,
+          content: draft,
+          expectedContentHash: a.version.contentHash,
+          ...(opts.name ? { name: opts.name } : {}),
+        });
         setWarnings(r.warnings);
         setLastSave(r.layoutOnly ? 'layout' : 'content');
         invalidateArtifact(a.id);
@@ -134,13 +155,20 @@ export function ArtifactDetailPage({
         setSavedAt(Date.now());
         if (!opts.quiet || r.version !== a.version.number) {
           if (r.layoutOnly) toast.success('Layout saved.');
-          else toast.success(r.version === a.version.number ? 'Draft saved.' : `Saved as draft v${r.version}. The live version is unchanged until it is published.`);
+          else
+            toast.success(
+              r.version === a.version.number
+                ? 'Draft saved.'
+                : `Saved as draft v${r.version}. The live version is unchanged until it is published.`,
+            );
         }
         return true;
       } catch (e) {
         if (e instanceof ApiError && e.code === 'invalid_input') setErrors(fieldErrors(e.details));
         setConflict(e instanceof ApiError && e.status === 412);
-        setSaveError(e instanceof ApiError && e.status === 412 ? `${e.message} Your changes are still here; copy them before reloading.` : errText(e));
+        setSaveError(
+          e instanceof ApiError && e.status === 412 ? `${e.message} Your changes are still here; copy them before reloading.` : errText(e),
+        );
         return false;
       } finally {
         setSaving(false);
@@ -151,6 +179,7 @@ export function ArtifactDetailPage({
 
   // Autosave: a moment after the last change; retried on the next change after an error, but never
   // over someone else's newer version (412), where the person decides.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: save is recreated from draft, which is already a dependency; an artifact refetch must not restart the timer
   useEffect(() => {
     if (!autosave || !dirty || readOnly || saving || conflict) return;
     const snapshot = JSON.stringify(draft);
@@ -159,7 +188,6 @@ export function ArtifactDetailPage({
       if (!(await save({ quiet: true }))) failedDraft.current = snapshot;
     }, 1200);
     return () => clearTimeout(t);
-    // biome-ignore lint/correctness/useExhaustiveDependencies: keyed on the draft
   }, [autosave, dirty, readOnly, saving, conflict, draft]);
 
   // Ctrl/Cmd+S saves.
@@ -185,7 +213,8 @@ export function ArtifactDetailPage({
   const latest = a.version;
   const pageEditor = editor ?? DEFAULT_EDITORS[a.type];
   const pending = pendingReq.data?.approvals[0];
-  const directPublish = workspace.approvalPolicy === 'none' || (workspace.approvalPolicy === 'agent_changes' && latest.author.type === 'user');
+  const directPublish =
+    workspace.approvalPolicy === 'none' || (workspace.approvalPolicy === 'agent_changes' && latest.author.type === 'user');
   const canPublish = can('artifacts:publish') && latest.state === 'draft' && !dirty;
 
   const discardDraft = async () => {
@@ -217,7 +246,8 @@ export function ArtifactDetailPage({
             {latest.state !== 'published' && <StatePill state={latest.state} />}
             {a.publishedVersion ? <StatusPill tone="good">Live v{a.publishedVersion}</StatusPill> : <StatusPill>Not live</StatusPill>}
             <span>
-              v{latest.number} by {latest.by?.displayName ?? (latest.author.type === 'agent' ? 'an agent' : 'a person')} · {timeAgo(latest.createdAt)}
+              v{latest.number} by {latest.by?.displayName ?? (latest.author.type === 'agent' ? 'an agent' : 'a person')} ·{' '}
+              {timeAgo(latest.createdAt)}
             </span>
           </>
         }
@@ -280,7 +310,12 @@ export function ArtifactDetailPage({
                 { label: 'Copy id', icon: <Copy />, hint: a.id.slice(0, 8), onSelect: () => void navigator.clipboard?.writeText(a.id) },
               ]}
               trigger={(p) => (
-                <button {...p} type="button" aria-label="More actions" className="inline-flex size-8 items-center justify-center rounded-md border border-line-strong bg-surface text-fg-2 hover:bg-surface-2">
+                <button
+                  {...p}
+                  type="button"
+                  aria-label="More actions"
+                  className="inline-flex size-8 items-center justify-center rounded-md border border-line-strong bg-surface text-fg-2 hover:bg-surface-2"
+                >
                   <MoreHorizontal size={16} />
                 </button>
               )}
@@ -297,8 +332,8 @@ export function ArtifactDetailPage({
       {warnings.length > 0 && !dirty && (
         <Alert tone="warn" title="Fill these in before publishing" className="mb-4">
           <ul className="list-disc pl-4">
-            {warnings.map((w, i) => (
-              <li key={i}>{w.message}</li>
+            {warnings.map((w) => (
+              <li key={`${w.path}-${w.message}`}>{w.message}</li>
             ))}
           </ul>
         </Alert>
@@ -412,7 +447,17 @@ function RejectedNote({ id }: { id: string }) {
   );
 }
 
-function PublishDialog({ artifact, direct, onClose, onDone }: { artifact: Artifact; direct: boolean; onClose: () => void; onDone: () => void }) {
+function PublishDialog({
+  artifact,
+  direct,
+  onClose,
+  onDone,
+}: {
+  artifact: Artifact;
+  direct: boolean;
+  onClose: () => void;
+  onDone: () => void;
+}) {
   const toast = useToast();
   const [note, setNote] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -450,8 +495,10 @@ function PublishDialog({ artifact, direct, onClose, onDone }: { artifact: Artifa
     >
       <p className="mb-3">
         {direct
-          ? 'Version ' + artifact.version.number + ' goes live at once under your workspace approval policy.'
-          : 'A person with approval rights reviews version ' + artifact.version.number + ' and approves or rejects it. Nothing changes for recipients until then.'}
+          ? `Version ${artifact.version.number} goes live at once under your workspace approval policy.`
+          : 'A person with approval rights reviews version ' +
+            artifact.version.number +
+            ' and approves or rejects it. Nothing changes for recipients until then.'}
       </p>
       <Field label="What changed?" hint="Shown to the reviewer and kept in the version history." error={noteError} required>
         <Textarea

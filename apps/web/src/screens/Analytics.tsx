@@ -1,8 +1,8 @@
 import { useState } from 'react';
-import { useStore } from '../mock/store';
-import { Card, Kpi, PageHeader, Pill, cx, dkk } from '../components/ui';
-import { pageWidth } from '../ui';
 import { Chart } from '../components/Chart';
+import { Card, cx, dkk, Kpi, PageHeader, Pill } from '../components/ui';
+import { useStore } from '../mock/store';
+import { pageWidth } from '../ui';
 
 const funnelJourneys = ['jrn_cart', 'jrn_welcome'] as const;
 
@@ -11,7 +11,8 @@ export function Analytics() {
   const [jid, setJid] = useState<(typeof funnelJourneys)[number]>('jrn_cart');
   const j = journeys.find((x) => x.id === jid)!;
   const steps = (j.versions.find((v) => v.state === 'published') ?? j.versions[0]).nodes.filter((n) => n.stats && n.kind !== 'wait');
-  const sum = (k: 'sent' | 'delivered' | 'clicks' | 'unsubscribes' | 'conversions' | 'revenue' | 'events') => daily.reduce((a, d) => a + d[k], 0);
+  const sum = (k: 'sent' | 'delivered' | 'clicks' | 'unsubscribes' | 'conversions' | 'revenue' | 'events') =>
+    daily.reduce((a, d) => a + d[k], 0);
 
   return (
     <div className={pageWidth('default')}>
@@ -35,7 +36,13 @@ export function Analytics() {
               deps={[daily]}
               option={(c) => ({
                 legend: { top: 0, right: 8, textStyle: { color: c.muted }, itemWidth: 12, itemHeight: 8 },
-                xAxis: { type: 'category', data: daily.map((d) => d.day), axisLine: { lineStyle: { color: c.line } }, axisTick: { show: false }, axisLabel: { interval: 5 } },
+                xAxis: {
+                  type: 'category',
+                  data: daily.map((d) => d.day),
+                  axisLine: { lineStyle: { color: c.line } },
+                  axisTick: { show: false },
+                  axisLabel: { interval: 5 },
+                },
                 yAxis: [
                   { type: 'value', splitLine: { lineStyle: { color: c.line } } },
                   { type: 'value', splitLine: { show: false }, axisLabel: { formatter: '{value}%' } },
@@ -62,7 +69,12 @@ export function Analytics() {
           action={
             <div className="flex gap-1">
               {funnelJourneys.map((id) => (
-                <button key={id} onClick={() => setJid(id)} className={cx('rounded px-2 py-0.5 text-[12px]', jid === id ? 'bg-accent-soft font-semibold text-accent' : 'text-muted')}>
+                <button
+                  type="button"
+                  key={id}
+                  onClick={() => setJid(id)}
+                  className={cx('rounded px-2 py-0.5 text-[12px]', jid === id ? 'bg-accent-soft font-semibold text-accent' : 'text-muted')}
+                >
                   {journeys.find((x) => x.id === id)?.name}
                 </button>
               ))}
@@ -76,12 +88,27 @@ export function Analytics() {
                 grid: { left: 8, right: 40, top: 8, bottom: 4, containLabel: true },
                 tooltip: { trigger: 'item', backgroundColor: c.surface, borderColor: c.line, textStyle: { color: c.fg } },
                 xAxis: { type: 'value', splitLine: { lineStyle: { color: c.line } } },
-                yAxis: { type: 'category', inverse: true, data: steps.map((s) => s.label), axisLine: { show: false }, axisTick: { show: false }, axisLabel: { color: c.fg, width: 150, overflow: 'truncate' } },
+                yAxis: {
+                  type: 'category',
+                  inverse: true,
+                  data: steps.map((s) => s.label),
+                  axisLine: { show: false },
+                  axisTick: { show: false },
+                  axisLabel: { color: c.fg, width: 150, overflow: 'truncate' },
+                },
                 series: [
                   {
                     type: 'bar',
-                    data: steps.map((s) => ({ value: s.stats!.entered, itemStyle: { color: s.kind.startsWith('ai') ? c.agent : s.kind === 'goal' ? c.good : c.accent } })),
-                    label: { show: true, position: 'right', color: c.muted, formatter: (p: { value?: unknown }) => Number(p.value).toLocaleString('en') },
+                    data: steps.map((s) => ({
+                      value: s.stats!.entered,
+                      itemStyle: { color: s.kind.startsWith('ai') ? c.agent : s.kind === 'goal' ? c.good : c.accent },
+                    })),
+                    label: {
+                      show: true,
+                      position: 'right',
+                      color: c.muted,
+                      formatter: (p: { value?: unknown }) => Number(p.value).toLocaleString('en'),
+                    },
                     barMaxWidth: 18,
                   },
                 ],
@@ -89,7 +116,8 @@ export function Analytics() {
             />
           </div>
           <div className="border-t border-line px-4 py-2.5 text-[12px] text-muted">
-            Conversion <b className="text-fg">{j.metrics.conversion}%</b> · uplift vs 10% holdout <b className="text-good">+{j.metrics.holdoutUplift} pts</b> — the incremental effect, not just attributed orders.
+            Conversion <b className="text-fg">{j.metrics.conversion}%</b> · uplift vs 10% holdout{' '}
+            <b className="text-good">+{j.metrics.holdoutUplift} pts</b> — the incremental effect, not just attributed orders.
           </div>
         </Card>
 
@@ -116,7 +144,9 @@ export function Analytics() {
               </div>
             ))}
           </div>
-          <p className="px-4 pb-3 text-[12px] text-muted">Sequential test, 95% credible interval for the difference: +0.4 to +4.4 pts. Stop rule reached in 3 more days.</p>
+          <p className="px-4 pb-3 text-[12px] text-muted">
+            Sequential test, 95% credible interval for the difference: +0.4 to +4.4 pts. Stop rule reached in 3 more days.
+          </p>
         </Card>
 
         <Card title="Web personalization">
@@ -135,7 +165,8 @@ export function Analytics() {
             ))}
           </ul>
           <div className="border-t border-line px-4 py-2.5 text-[12px] text-muted">
-            Raw web analytics are forwarded to <b className="text-fg">Umami (self-hosted)</b>; dashboards in Metabase or Grafana can read the curated ClickHouse views.
+            Raw web analytics are forwarded to <b className="text-fg">Umami (self-hosted)</b>; dashboards in Metabase or Grafana can read
+            the curated ClickHouse views.
           </div>
         </Card>
       </div>

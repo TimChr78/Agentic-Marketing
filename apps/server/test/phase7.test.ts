@@ -1,6 +1,6 @@
 import { outbox, smsOutbox } from '@agentic-marketing/email';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { eventually, rejects, startTestServer, type User } from './harness';
+import { eventually, rejects, startTestServer, testPort, type User } from './harness';
 
 // Phase 7 (wave 2): SMS as a second channel (consent, budget, STOP and HELP), and the delivery
 // policy that applies to every marketing message: frequency caps, quiet hours, health.
@@ -39,7 +39,7 @@ const form = (fields: Record<string, string>) => ({
 });
 
 beforeAll(async () => {
-  t = await startTestServer('test_p7', 3291);
+  t = await startTestServer('test_p7', testPort(3291));
   owner = await t.signUp(`owner-${Date.now()}@example.com`);
   await t.workspaceWith([[owner, 'owner']]);
   const api = t.api(owner);

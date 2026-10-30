@@ -7,22 +7,7 @@ import { useSession } from '../../app/session';
 import { useApi } from '../../app/useApi';
 import { HoldoutCard } from '../../features/insights/HoldoutCard';
 import { StatCard, StatGrid } from '../../features/insights/Stats';
-import {
-  Alert,
-  EmptyState,
-  Field,
-  LoadingBlock,
-  Mono,
-  PageHeader,
-  Select,
-  Table,
-  TableFrame,
-  Tag,
-  Td,
-  Th,
-  THead,
-  Tr,
-} from '../../ui';
+import { Alert, EmptyState, Field, LoadingBlock, Mono, PageHeader, Select, Table, TableFrame, Tag, Td, THead, Th, Tr } from '../../ui';
 import { pageWidth } from '../../ui/layout';
 
 type Node = { id: string; label?: string; kind?: string };
@@ -42,7 +27,7 @@ export default function JourneyStatsPage() {
   const artifact = useApi(() => api.call('artifacts.get', { artifactId: selected }), [selected], { skip: !selected });
   const hasControl =
     artifact.data?.version.state === 'published' &&
-    !!((artifact.data.version.content as { controlGroup?: unknown } | undefined)?.controlGroup);
+    !!(artifact.data.version.content as { controlGroup?: unknown } | undefined)?.controlGroup;
   const holdout = useApi(() => api.call('journeys.holdoutResult', { journeyId: selected }), [selected], { skip: !selected || !hasControl });
 
   const nodes = ((artifact.data?.version.content as { nodes?: Node[] } | undefined)?.nodes ?? []).filter(Boolean);
@@ -89,7 +74,13 @@ export default function JourneyStatsPage() {
           <EmptyState
             icon={<Workflow size={16} />}
             title="No journeys yet"
-            action={can('artifacts:write') && <ButtonLink to="/build/journeys" variant="primary">Create a journey</ButtonLink>}
+            action={
+              can('artifacts:write') && (
+                <ButtonLink to="/build/journeys" variant="primary">
+                  Create a journey
+                </ButtonLink>
+              )
+            }
           >
             Build a journey from a trigger to a goal, publish it, and its participants appear here.
           </EmptyState>
@@ -161,7 +152,8 @@ export default function JourneyStatsPage() {
                 </Table>
               </TableFrame>
               <p className="text-[12px] text-muted">
-                Counted from the journey's participants and step events. “Converted” is how many reached the goal, also included in completed or exited.
+                Counted from the journey's participants and step events. “Converted” is how many reached the goal, also included in
+                completed or exited.
               </p>
             </>
           ) : null}

@@ -3,12 +3,12 @@ import { type ReactNode, useEffect, useRef, useState } from 'react';
 import { CopilotDrawer } from '../features/copilot/CopilotDrawer';
 import { Badge, cx, IconButton, Kbd, Menu } from '../ui';
 import { useFocusTrap } from '../ui/focus';
+import { navFor, visibleNav } from './nav';
 import { type Crumb, CrumbsProvider } from './page';
 import { Link, navigate, useLocation } from './router';
 import { SearchPalette } from './SearchPalette';
 import { useSession } from './session';
-import { type ThemePref, setThemePref, useThemePref } from './theme';
-import { navFor, visibleNav } from './nav';
+import { setThemePref, type ThemePref, useThemePref } from './theme';
 
 // The signed-in shell (DESIGN.md → Layout): sidebar with the workspace switcher and nav, top bar
 // with breadcrumbs, search, theme and the user menu. Under 1024 px the sidebar becomes a drawer.
@@ -21,6 +21,7 @@ export function Shell({ children }: { children: ReactNode }) {
   const [copilotOpen, setCopilotOpen] = useState(false);
   const { can } = useSession();
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the mobile drawer closes on navigation, which the body does not read
   useEffect(() => setNavOpen(false), [path]);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -38,7 +39,10 @@ export function Shell({ children }: { children: ReactNode }) {
   const { group } = navFor(path);
   return (
     <div className="min-h-screen bg-bg text-fg">
-      <a href="#main" className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-[80] focus:rounded-md focus:bg-surface focus:px-3 focus:py-2 focus:shadow-2">
+      <a
+        href="#main"
+        className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-[80] focus:rounded-md focus:bg-surface focus:px-3 focus:py-2 focus:shadow-2"
+      >
         Skip to content
       </a>
       <aside className="fixed inset-y-0 left-0 z-30 hidden w-[232px] border-r border-line bg-surface lg:block">
@@ -52,8 +56,10 @@ export function Shell({ children }: { children: ReactNode }) {
             <ol className="flex min-w-0 items-center gap-1 text-[13px]">
               {group && !group.path && <li className="hidden shrink-0 text-muted sm:block">{group.label}</li>}
               {crumbs.map((c, i) => (
-                <li key={i} className={cx('flex min-w-0 items-center gap-1', i < crumbs.length - 1 && 'hidden sm:flex')}>
-                  {((group && !group.path) || i > 0) && <ChevronRight size={14} className={cx('shrink-0 text-muted', i === 0 && 'hidden sm:block')} aria-hidden />}
+                <li key={c.to ?? c.label} className={cx('flex min-w-0 items-center gap-1', i < crumbs.length - 1 && 'hidden sm:flex')}>
+                  {((group && !group.path) || i > 0) && (
+                    <ChevronRight size={14} className={cx('shrink-0 text-muted', i === 0 && 'hidden sm:block')} aria-hidden />
+                  )}
                   {c.to && i < crumbs.length - 1 ? (
                     <Link to={c.to} className="truncate text-muted hover:text-fg">
                       {c.label}
@@ -98,7 +104,13 @@ function MobileNav({ onClose }: { onClose: () => void }) {
   return (
     <div className="fixed inset-0 z-40 lg:hidden">
       <div className="am-fade-in absolute inset-0 bg-[var(--scrim)]" onClick={onClose} aria-hidden />
-      <div ref={ref} role="dialog" aria-modal="true" aria-label="Navigation" className="am-drawer-in absolute inset-y-0 left-0 w-[272px] max-w-[85vw] border-r border-line bg-surface shadow-2">
+      <div
+        ref={ref}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Navigation"
+        className="am-drawer-in absolute inset-y-0 left-0 w-[272px] max-w-[85vw] border-r border-line bg-surface shadow-2"
+      >
         <div className="absolute top-2 right-2">
           <IconButton label="Close navigation" icon={<X size={16} />} onClick={onClose} />
         </div>
@@ -208,7 +220,12 @@ function WorkspaceSwitcher() {
           },
         }))}
         trigger={(p) => (
-          <button {...p} type="button" className="flex h-10 w-full items-center gap-2.5 rounded-md px-1.5 hover:bg-surface-2" aria-label={`Workspace: ${workspace?.name}. Switch workspace`}>
+          <button
+            {...p}
+            type="button"
+            className="flex h-10 w-full items-center gap-2.5 rounded-md px-1.5 hover:bg-surface-2"
+            aria-label={`Workspace: ${workspace?.name}. Switch workspace`}
+          >
             {label}
             <ChevronDown size={14} className="shrink-0 text-muted" aria-hidden />
           </button>
@@ -237,7 +254,13 @@ export function ThemeMenu() {
         onSelect: () => setThemePref(t.key),
       }))}
       trigger={(p) => (
-        <button {...p} type="button" aria-label={`Theme: ${current.label}`} title={`Theme: ${current.label}`} className="inline-flex size-8 items-center justify-center rounded-md text-fg-2 hover:bg-surface-2 hover:text-fg [&_svg]:size-4">
+        <button
+          {...p}
+          type="button"
+          aria-label={`Theme: ${current.label}`}
+          title={`Theme: ${current.label}`}
+          className="inline-flex size-8 items-center justify-center rounded-md text-fg-2 hover:bg-surface-2 hover:text-fg [&_svg]:size-4"
+        >
           {current.icon}
         </button>
       )}
@@ -257,7 +280,15 @@ function UserMenu() {
     <Menu
       label="Account"
       items={[
-        { label: <span className="block"><span className="block font-medium">{user?.name || 'Signed in'}</span><span className="block text-[12px] text-muted">{user?.email}</span></span>, onSelect: () => navigate('/settings/preferences') },
+        {
+          label: (
+            <span className="block">
+              <span className="block font-medium">{user?.name || 'Signed in'}</span>
+              <span className="block text-[12px] text-muted">{user?.email}</span>
+            </span>
+          ),
+          onSelect: () => navigate('/settings/preferences'),
+        },
         'separator',
         { label: 'Preferences', icon: <Settings2 />, onSelect: () => navigate('/settings/preferences') },
         {
@@ -269,7 +300,12 @@ function UserMenu() {
         },
       ]}
       trigger={(p) => (
-        <button {...p} type="button" aria-label={`Account: ${user?.name || user?.email}`} className="ml-1 inline-flex size-8 items-center justify-center rounded-full bg-surface-3 text-[12px] font-semibold text-fg-2 hover:bg-line-strong">
+        <button
+          {...p}
+          type="button"
+          aria-label={`Account: ${user?.name || user?.email}`}
+          className="ml-1 inline-flex size-8 items-center justify-center rounded-full bg-surface-3 text-[12px] font-semibold text-fg-2 hover:bg-line-strong"
+        >
           {initials}
         </button>
       )}

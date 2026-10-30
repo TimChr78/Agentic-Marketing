@@ -1,6 +1,6 @@
 import { outbox } from '@agentic-marketing/email';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { eventually, startTestServer, type User } from './harness';
+import { eventually, startTestServer, testPort, type User } from './harness';
 
 // 0.2.8 (#92, #93): wait until a condition matches, and business entry keys for event triggers.
 
@@ -90,7 +90,7 @@ const waitJourney = (name: string, wait: Record<string, unknown>, purpose = 'onb
   });
 
 beforeAll(async () => {
-  t = await startTestServer('test_v028_nodes', 3314);
+  t = await startTestServer('test_v028_nodes', testPort(3314));
   owner = await t.signUp(`owner-${Date.now()}@example.com`);
   await t.workspaceWith([[owner, 'owner']], 'none');
   key = (await api().call('sources.create', { name: 'Backend', kind: 'server' })).key;
@@ -123,7 +123,7 @@ describe('waitUntil (#92)', () => {
     await send([{ type: 'track', event: 'Wait Start', userId }]);
     const row = await eventually(
       () => rowOf(journeyId, profileId),
-      (r) => r?.status === 'exited',
+      (r) => r?.status === 'completed',
     );
     expect(row?.node).toBe('done');
     expect((await traitsOf(profileId)).last_path).toBe('matched');
@@ -150,7 +150,7 @@ describe('waitUntil (#92)', () => {
     await send([{ type: 'identify', userId, traits: { plan: 'pro' } }]);
     const matched = await eventually(
       () => rowOf(journeyId, profileId),
-      (r) => r?.status === 'exited',
+      (r) => r?.status === 'completed',
     );
     expect((await traitsOf(profileId)).last_path).toBe('matched');
     expect(matched?.node).toBe('done');
@@ -175,7 +175,7 @@ describe('waitUntil (#92)', () => {
     await send([{ type: 'identify', userId, traits: { vip: true } }]);
     const matched = await eventually(
       () => rowsOf(journeyId, profileId),
-      (rows) => rows[0]?.status === 'exited',
+      (rows) => rows[0]?.status === 'completed',
       15_000,
     );
     expect(matched[0]?.node).toBe('done');
@@ -199,7 +199,7 @@ describe('waitUntil (#92)', () => {
     await expire(journeyId, profileId);
     const timedOut = await eventually(
       () => rowOf(journeyId, profileId),
-      (r) => r?.status === 'exited',
+      (r) => r?.status === 'completed',
     );
     expect(timedOut?.node).toBe('done');
     expect((await traitsOf(profileId)).last_path).toBe('timeout');
@@ -240,7 +240,7 @@ describe('waitUntil (#92)', () => {
     );
     await eventually(
       () => rowOf(journeyId, profileId),
-      (r) => r?.status === 'exited',
+      (r) => r?.status === 'completed',
     );
     await new Promise((r) => setTimeout(r, 750));
     expect(mailTo(`${userId}@example.com`)).toHaveLength(1);
@@ -461,7 +461,7 @@ describe('entry keys (#93)', () => {
     await fastForward(journeyId, profileId);
     await eventually(
       () => rowOf(journeyId, profileId),
-      (r) => r?.status === 'exited',
+      (r) => r?.status === 'completed',
     );
     await send([{ type: 'track', event: 'Order Placed', userId, properties: { order_id: 'C-1' } }]);
     const rows = await eventually(

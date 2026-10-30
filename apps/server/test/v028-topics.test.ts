@@ -4,7 +4,7 @@ import { evaluate, materialize } from '@agentic-marketing/segments';
 import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Commands } from '../src/registry';
-import { eventually, rejects, startTestServer, type User } from './harness';
+import { eventually, rejects, startTestServer, testPort, type User } from './harness';
 
 // 0.2.8 (#84): topics under purposes, topic gating in the send gateway and segment evaluators,
 // the hosted preference centre and the topic unsubscribe link.
@@ -43,7 +43,7 @@ const purposesContent = {
 };
 
 beforeAll(async () => {
-  t = await startTestServer('test_v028_topics', 3470);
+  t = await startTestServer('test_v028_topics', testPort(3470));
   owner = await t.signUp(`topics-${Date.now()}@example.com`);
   ws = await t.workspaceWith([[owner, 'owner']], 'none');
   const a = api();

@@ -29,6 +29,7 @@ import { consentPage, invitePage, loginPage } from './http/pages';
 import { rejectUnsafeRawPath } from './http/raw-path';
 import { restApi } from './http/rest';
 import { scimApi } from './http/scim';
+import { securityHeaders } from './http/security-headers';
 import { staticSite } from './http/static';
 import { createInputWarningRecorder } from './inputWarnings';
 import { keyProviderFor } from './keys';
@@ -112,6 +113,8 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
   );
 
   const app = new Hono();
+  // Baseline security headers on every response; routes with their own policy keep it (#178).
+  app.use('*', securityHeaders({ https: config.publicUrl.startsWith('https://') }));
   // Defence in depth for a proxy that forwards raw paths: never route a traversal target.
   app.use('*', rejectUnsafeRawPath);
 

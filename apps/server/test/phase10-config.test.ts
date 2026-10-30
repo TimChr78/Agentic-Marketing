@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { startTestServer, type User } from './harness';
+import { startTestServer, testPort, type User } from './harness';
 
 // Phase 10 (wave 2), part c: config as code. A staging workspace's artifacts go to a bundle and
 // into production with their ids, so references between them hold; the git script round-trips
@@ -19,7 +19,7 @@ let production = '';
 const mjml = (text: string) => `<mjml><mj-body><mj-section><mj-column><mj-text>${text}</mj-text></mj-column></mj-section></mj-body></mjml>`;
 
 beforeAll(async () => {
-  t = await startTestServer('test_p10_config', 3290);
+  t = await startTestServer('test_p10_config', testPort(3290));
   owner = await t.signUp(`owner-${Date.now()}@example.com`);
   staging = await t.workspaceWith([[owner, 'owner']]);
   production = await t.workspaceWith([[owner, 'owner']], 'agent_changes');

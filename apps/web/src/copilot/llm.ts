@@ -1,5 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
-import { commands, commandName, toolName } from '../api/commands';
+import { commandName, commands, toolName } from '../api/commands';
 import type { LiveConfig, Sink } from './types';
 
 // Live mode: a real model drives the same command registry the MCP server exposes.
@@ -39,7 +39,11 @@ async function runAnthropic(cfg: LiveConfig, prompt: string, sink: Sink, history
       return;
     }
     history.push({ role: 'assistant', content: res.content });
-    const text = res.content.filter((b): b is Anthropic.Beta.BetaTextBlock => b.type === 'text').map((b) => b.text).join('\n').trim();
+    const text = res.content
+      .filter((b): b is Anthropic.Beta.BetaTextBlock => b.type === 'text')
+      .map((b) => b.text)
+      .join('\n')
+      .trim();
     if (text) sink.say(text);
     const calls = res.content.filter((b): b is Anthropic.Beta.BetaToolUseBlock => b.type === 'tool_use');
     if (res.stop_reason !== 'tool_use' || !calls.length) return;
@@ -57,13 +61,21 @@ async function runAnthropic(cfg: LiveConfig, prompt: string, sink: Sink, history
   sink.say('I stopped after 12 steps. Ask me to continue if needed.');
 }
 
-type OaMessage = { role: string; content: string | null; tool_calls?: { id: string; type: 'function'; function: { name: string; arguments: string } }[]; tool_call_id?: string };
+type OaMessage = {
+  role: string;
+  content: string | null;
+  tool_calls?: { id: string; type: 'function'; function: { name: string; arguments: string } }[];
+  tool_call_id?: string;
+};
 
 async function runOpenAI(cfg: LiveConfig, prompt: string, sink: Sink, history: OaMessage[]) {
   const base = (cfg.baseUrl || 'https://api.openai.com/v1').replace(/\/$/, '');
   if (!history.length) history.push({ role: 'system', content: SYSTEM });
   history.push({ role: 'user', content: prompt });
-  const tools = agentTools.map((c) => ({ type: 'function', function: { name: toolName(c.name), description: c.description, parameters: c.input } }));
+  const tools = agentTools.map((c) => ({
+    type: 'function',
+    function: { name: toolName(c.name), description: c.description, parameters: c.input },
+  }));
   for (let turn = 0; turn < 12; turn++) {
     const r = await fetch(`${base}/chat/completions`, {
       method: 'POST',

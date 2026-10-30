@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { startTestServer, type User } from './harness';
+import { startTestServer, testPort, type User } from './harness';
 
 // Pilot follow-up (0.1.2): the webhook URL admins copy must use the public links origin, and a
 // lost URL can be rotated. The admin URL and the links URL deliberately differ here.
@@ -10,7 +10,7 @@ const ADMIN = 'http://localhost:3299';
 const LINKS = 'https://links.pilot.example';
 
 beforeAll(async () => {
-  t = await startTestServer('test_pilot_providers', 3299, { PUBLIC_URL: ADMIN, PUBLIC_LINKS_URL: LINKS });
+  t = await startTestServer('test_pilot_providers', testPort(3299), { PUBLIC_URL: ADMIN, PUBLIC_LINKS_URL: LINKS });
   owner = await t.signUp(`owner-${Date.now()}@example.com`);
   await t.workspaceWith([[owner, 'owner']]);
 }, 60_000);
@@ -71,7 +71,7 @@ describe('provider-side tracking warnings', () => {
   let admin: User;
 
   beforeAll(async () => {
-    off = await startTestServer('test_pilot_providers_tracking', 3300, {
+    off = await startTestServer('test_pilot_providers_tracking', testPort(3300), {
       PUBLIC_URL: 'http://localhost:3300',
       PUBLIC_LINKS_URL: LINKS,
       EMAIL_TRACK_CLICKS: 'false',

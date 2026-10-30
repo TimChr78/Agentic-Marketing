@@ -47,10 +47,24 @@ export function SignIn({ onDone }: { onDone: () => void }) {
             }}
           >
             <Field label="E-mail" id="signin-email">
-              <Input type="email" required autoComplete="username" value={email} onChange={(e) => setEmail(e.target.value)} data-autofocus autoFocus />
+              <Input
+                type="email"
+                required
+                autoComplete="username"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                data-autofocus
+                autoFocus
+              />
             </Field>
             <Field label="Password" id="signin-password">
-              <Input type="password" required autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} />
+              <Input
+                type="password"
+                required
+                autoComplete="current-password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+              />
             </Field>
             {err && <Alert tone="bad">{err}</Alert>}
             <Button type="submit" variant="primary" className="w-full" loading={busy}>

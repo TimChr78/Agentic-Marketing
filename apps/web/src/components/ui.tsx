@@ -1,5 +1,5 @@
-import type { ButtonHTMLAttributes, ReactNode } from 'react';
 import { Bot, User } from 'lucide-react';
+import type { ButtonHTMLAttributes, ReactNode } from 'react';
 import type { Principal } from '../api/types';
 
 export function cx(...c: (string | false | null | undefined)[]) {
@@ -56,7 +56,17 @@ export function AuthorBadge({ author }: { author: Principal }) {
   );
 }
 
-export function Card({ children, className, title, action }: { children: ReactNode; className?: string; title?: ReactNode; action?: ReactNode }) {
+export function Card({
+  children,
+  className,
+  title,
+  action,
+}: {
+  children: ReactNode;
+  className?: string;
+  title?: ReactNode;
+  action?: ReactNode;
+}) {
   return (
     <section className={cx('rounded-lg border border-line bg-surface min-w-0', className)}>
       {(title || action) && (
@@ -92,7 +102,11 @@ export function Kpi({ label, value, delta, hint }: { label: string; value: strin
         {value}
       </div>
       <div className="mt-1.5 flex items-center gap-2 text-[12px] text-muted">
-        {delta !== undefined && <span className={cx('num font-semibold', delta >= 0 ? 'text-good' : 'text-bad')}>{delta >= 0 ? '▲' : '▼'} {Math.abs(delta)}%</span>}
+        {delta !== undefined && (
+          <span className={cx('num font-semibold', delta >= 0 ? 'text-good' : 'text-bad')}>
+            {delta >= 0 ? '▲' : '▼'} {Math.abs(delta)}%
+          </span>
+        )}
         {hint}
       </div>
     </div>
@@ -101,6 +115,7 @@ export function Kpi({ label, value, delta, hint }: { label: string; value: strin
 
 export function Field({ label, children, hint }: { label: string; children: ReactNode; hint?: string }) {
   return (
+    // biome-ignore lint/a11y/noLabelWithoutControl: the control is the caller's child and is associated by nesting the label around it
     <label className="block">
       <span className="mb-1 block text-[12px] font-medium text-muted">{label}</span>
       {children}

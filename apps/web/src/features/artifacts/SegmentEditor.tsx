@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
 import { List, Plus, Trash2, Users } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { api, errText } from '../../app/api';
 import { useSession } from '../../app/session';
 import { useApi } from '../../app/useApi';
@@ -116,11 +116,7 @@ export function SegmentEditor({ artifact, content, onChange, readOnly, errors }:
 
   return (
     <div className="max-w-[900px] space-y-5">
-      <Field
-        label="Description"
-        hint="For the team; people in the segment never see it."
-        error={errors.description}
-      >
+      <Field label="Description" hint="For the team; people in the segment never see it." error={errors.description}>
         <Textarea
           rows={2}
           maxLength={1000}
@@ -135,14 +131,7 @@ export function SegmentEditor({ artifact, content, onChange, readOnly, errors }:
         {(errors.condition ?? errors['condition.all'] ?? errors['condition.any']) && (
           <p className="text-[12px] text-bad">{errors.condition ?? errors['condition.all'] ?? errors['condition.any']}</p>
         )}
-        <GroupEditor
-          mode={group.mode}
-          rows={group.rows}
-          onChange={emit}
-          depth={1}
-          readOnly={readOnly}
-          artifactId={artifact.id}
-        />
+        <GroupEditor mode={group.mode} rows={group.rows} onChange={emit} depth={1} readOnly={readOnly} artifactId={artifact.id} />
       </section>
 
       <EstimatedSize condition={condition} />
@@ -172,7 +161,11 @@ function GroupEditor({
   readOnly: boolean;
   artifactId: string;
 }) {
-  const setRow = (i: number, next: Condition) => onChange(mode, rows.map((r, idx) => (idx === i ? next : r)));
+  const setRow = (i: number, next: Condition) =>
+    onChange(
+      mode,
+      rows.map((r, idx) => (idx === i ? next : r)),
+    );
   const removeRow = (i: number) => onChange(mode, rows.length === 1 ? [blank('trait')] : rows.filter((_, idx) => idx !== i));
   const add = (kind: Kind) => onChange(mode, [...rows, blank(kind)]);
 
@@ -194,6 +187,7 @@ function GroupEditor({
 
       <ol className="space-y-2">
         {rows.map((row, i) => (
+          // biome-ignore lint/suspicious/noArrayIndexKey: condition rows are plain objects with no id and their position is their identity
           <li key={i}>
             <RowEditor
               condition={row}
@@ -289,9 +283,7 @@ function RowEditor({
 
       {kind === 'trait' && <TraitRow c={condition as TraitCondition} onChange={onChange} index={n} readOnly={readOnly} />}
       {kind === 'event' && <EventRow c={condition as EventCondition} onChange={onChange} index={n} readOnly={readOnly} />}
-      {kind === 'consent' && (
-        <ConsentRow c={condition as ConsentCondition} onChange={onChange} index={n} readOnly={readOnly} />
-      )}
+      {kind === 'consent' && <ConsentRow c={condition as ConsentCondition} onChange={onChange} index={n} readOnly={readOnly} />}
       {kind === 'segment' && (
         <SegmentRow c={condition as SegmentRefCondition} onChange={onChange} index={n} readOnly={readOnly} artifactId={artifactId} />
       )}
@@ -400,12 +392,7 @@ function TraitRow({
   return (
     <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_160px_minmax(0,1fr)]">
       <Field label={`Trait name, condition ${index}`} hideLabel>
-        <Input
-          value={c.trait}
-          readOnly={readOnly}
-          placeholder="loyaltyTier"
-          onChange={(e) => onChange({ ...c, trait: e.target.value })}
-        />
+        <Input value={c.trait} readOnly={readOnly} placeholder="loyaltyTier" onChange={(e) => onChange({ ...c, trait: e.target.value })} />
       </Field>
       <Field label={`Operator, condition ${index}`} hideLabel>
         <Select value={c.op} disabled={readOnly} onChange={(e) => setOp(e.target.value as Op)}>
@@ -523,7 +510,9 @@ function ConsentRow({
         aria-label={`Purpose, condition ${index}`}
         onChange={(e) => onChange({ consent: e.target.value })}
       >
-        <option value="">{purposes.loading ? 'Loading purposes…' : purposes.error ? `Couldn't load: ${purposes.error}` : 'Choose a purpose…'}</option>
+        <option value="">
+          {purposes.loading ? 'Loading purposes…' : purposes.error ? `Couldn't load: ${purposes.error}` : 'Choose a purpose…'}
+        </option>
         {known.map((p) => (
           <option key={p.key} value={p.key}>
             {p.name} ({p.key})
@@ -548,7 +537,9 @@ function SegmentRow({
   readOnly: boolean;
   artifactId: string;
 }) {
-  return <SegmentPicker value={c.segment} onChange={(segment) => onChange({ segment })} exclude={artifactId} disabled={readOnly} index={index} />;
+  return (
+    <SegmentPicker value={c.segment} onChange={(segment) => onChange({ segment })} exclude={artifactId} disabled={readOnly} index={index} />
+  );
 }
 
 /** A segment picker that leaves out the segment being edited, since it cannot refer to itself. */

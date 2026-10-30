@@ -1,8 +1,8 @@
+import { Backpack, Footprints, Lock, type LucideIcon, RotateCcw, Shirt, ShoppingCart, Tent } from 'lucide-react';
 import { useState } from 'react';
-import { Backpack, Footprints, Lock, RotateCcw, Shirt, ShoppingCart, Tent, type LucideIcon } from 'lucide-react';
+import { Button, Card, cx, PageHeader, Pill } from '../components/ui';
+import { type Decision, sdk, useLive } from '../mock/live';
 import { useStore } from '../mock/store';
-import { sdk, useLive, type Decision } from '../mock/live';
-import { Button, Card, PageHeader, Pill, cx } from '../components/ui';
 import { pageWidth } from '../ui';
 
 type Category = 'shoes' | 'jackets' | 'tents' | 'backpacks';
@@ -19,10 +19,26 @@ const products: { sku: string; name: string; price: number; category: Category }
 const icons: Record<Category, LucideIcon> = { shoes: Footprints, jackets: Shirt, tents: Tent, backpacks: Backpack };
 
 const heroCopy: Record<Decision['variant'], { title: string; text: string; cta: string }> = {
-  default: { title: 'The autumn range is in', text: 'Waterproof layers, warmer bags and grippier soles for wet Nordic trails.', cta: 'Shop the range' },
-  shoes: { title: 'Trail shoes, picked for you', text: 'Based on what you looked at today. Use TRAIL10 for 10% off running shoes until Sunday.', cta: 'See trail shoes' },
-  jackets: { title: 'Shells for sideways rain', text: 'You have been comparing jackets. These three handle a Danish November.', cta: 'Compare jackets' },
-  tents: { title: 'Ready for a night out?', text: 'Our lightest 2-person tents, with free pitching lessons in Copenhagen.', cta: 'See tents' },
+  default: {
+    title: 'The autumn range is in',
+    text: 'Waterproof layers, warmer bags and grippier soles for wet Nordic trails.',
+    cta: 'Shop the range',
+  },
+  shoes: {
+    title: 'Trail shoes, picked for you',
+    text: 'Based on what you looked at today. Use TRAIL10 for 10% off running shoes until Sunday.',
+    cta: 'See trail shoes',
+  },
+  jackets: {
+    title: 'Shells for sideways rain',
+    text: 'You have been comparing jackets. These three handle a Danish November.',
+    cta: 'Compare jackets',
+  },
+  tents: {
+    title: 'Ready for a night out?',
+    text: 'Our lightest 2-person tents, with free pitching lessons in Copenhagen.',
+    cta: 'See tents',
+  },
 };
 
 export function LiveSite() {
@@ -68,6 +84,7 @@ export function LiveSite() {
               <div className="flex flex-wrap gap-3 text-[13px]" style={{ fontFamily: 'var(--font-sans)' }}>
                 {(['all', 'shoes', 'jackets', 'tents', 'backpacks'] as const).map((c) => (
                   <button
+                    type="button"
                     key={c}
                     className={cx('capitalize', filter === c && 'font-semibold underline underline-offset-4')}
                     onClick={() => {
@@ -90,6 +107,7 @@ export function LiveSite() {
                 {hero.text}
               </p>
               <button
+                type="button"
                 className="mt-4 rounded bg-shop-bg px-4 py-2 text-[13px] font-semibold text-shop-fg"
                 style={{ fontFamily: 'var(--font-sans)' }}
                 onClick={() => setFilter(live.decision.variant === 'default' ? 'all' : (live.decision.variant as Category))}
@@ -106,6 +124,7 @@ export function LiveSite() {
                   return (
                     <div key={p.sku} className="min-w-0 rounded-md border border-shop-fg/10 bg-shop-bg">
                       <button
+                        type="button"
                         className="flex aspect-[4/3] w-full max-w-full items-center justify-center rounded-t-md bg-shop-fg/5 hover:bg-shop-fg/10"
                         onClick={() => sdk.track('product_viewed', { sku: p.sku, name: p.name, category: p.category, price: p.price })}
                         aria-label={`View ${p.name}`}
@@ -117,12 +136,14 @@ export function LiveSite() {
                         <div className="num text-[12px] opacity-70">{p.price.toLocaleString('da-DK')} kr</div>
                         <div className="mt-2 flex gap-1.5">
                           <button
+                            type="button"
                             className="rounded border border-shop-fg/20 px-2 py-1 text-[11px] hover:bg-shop-fg/5"
                             onClick={() => sdk.track('product_viewed', { sku: p.sku, name: p.name, category: p.category, price: p.price })}
                           >
                             View
                           </button>
                           <button
+                            type="button"
                             className="rounded bg-shop-accent px-2 py-1 text-[11px] font-semibold text-shop-bg"
                             onClick={() => sdk.track('product_added', { sku: p.sku, name: p.name, price: p.price })}
                           >
@@ -145,9 +166,24 @@ export function LiveSite() {
               >
                 <div className="text-[13px] font-semibold">Get trail news (and 10% off)</div>
                 <div className="flex gap-2">
-                  <input id="shop-first" className="w-1/3 min-w-0 rounded border border-shop-fg/20 bg-transparent px-2 py-1 text-[12px]" placeholder="First name" value={firstName} onChange={(e) => setFirstName(e.target.value)} />
-                  <input id="shop-email" type="email" className="min-w-0 flex-1 rounded border border-shop-fg/20 bg-transparent px-2 py-1 text-[12px]" placeholder="you@example.com" value={email} onChange={(e) => setEmail(e.target.value)} />
-                  <button className="rounded bg-shop-accent px-3 py-1 text-[12px] font-semibold text-shop-bg">Sign up</button>
+                  <input
+                    id="shop-first"
+                    className="w-1/3 min-w-0 rounded border border-shop-fg/20 bg-transparent px-2 py-1 text-[12px]"
+                    placeholder="First name"
+                    value={firstName}
+                    onChange={(e) => setFirstName(e.target.value)}
+                  />
+                  <input
+                    id="shop-email"
+                    type="email"
+                    className="min-w-0 flex-1 rounded border border-shop-fg/20 bg-transparent px-2 py-1 text-[12px]"
+                    placeholder="you@example.com"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                  />
+                  <button type="submit" className="rounded bg-shop-accent px-3 py-1 text-[12px] font-semibold text-shop-bg">
+                    Sign up
+                  </button>
                 </div>
                 <span className="text-[11px] opacity-60">Try anna.jensen@example.com to log in as an existing customer.</span>
               </form>
@@ -156,13 +192,19 @@ export function LiveSite() {
                 <div className="truncate text-[12px] opacity-75">{live.cart.map((c) => c.name).join(', ') || 'Empty'}</div>
                 <div className="flex gap-2">
                   <button
+                    type="button"
                     disabled={!live.cart.length}
                     className="rounded bg-shop-accent px-3 py-1 text-[12px] font-semibold text-shop-bg disabled:opacity-40"
                     onClick={() => sdk.track('order_completed', { value: live.cart.reduce((a, c) => a + c.price, 0), currency: 'DKK' })}
                   >
                     Check out
                   </button>
-                  <button disabled={!live.cart.length} className="rounded border border-shop-fg/20 px-3 py-1 text-[12px] disabled:opacity-40" onClick={() => sdk.abandonCart()}>
+                  <button
+                    type="button"
+                    disabled={!live.cart.length}
+                    className="rounded border border-shop-fg/20 px-3 py-1 text-[12px] disabled:opacity-40"
+                    onClick={() => sdk.abandonCart()}
+                  >
                     Leave the site
                   </button>
                 </div>
@@ -170,16 +212,28 @@ export function LiveSite() {
             </div>
 
             {live.consent === 'unset' && (
-              <div className="absolute inset-x-3 bottom-3 rounded-md border border-shop-fg/15 bg-shop-bg p-4 shadow-xl" style={{ fontFamily: 'var(--font-sans)' }}>
+              <div
+                className="absolute inset-x-3 bottom-3 rounded-md border border-shop-fg/15 bg-shop-bg p-4 shadow-xl"
+                style={{ fontFamily: 'var(--font-sans)' }}
+              >
                 <div className="text-[14px] font-semibold">Cookies on Fjeldvej</div>
                 <p className="mt-1 text-[12px] opacity-80">
-                  We use analytics and personalisation to show gear that fits what you are looking for. Strictly necessary cookies are always on.
+                  We use analytics and personalisation to show gear that fits what you are looking for. Strictly necessary cookies are
+                  always on.
                 </p>
                 <div className="mt-3 flex flex-wrap gap-2">
-                  <button className="rounded bg-shop-accent px-3 py-1.5 text-[12px] font-semibold text-shop-bg" onClick={() => sdk.setConsent('all')}>
+                  <button
+                    type="button"
+                    className="rounded bg-shop-accent px-3 py-1.5 text-[12px] font-semibold text-shop-bg"
+                    onClick={() => sdk.setConsent('all')}
+                  >
                     Accept all
                   </button>
-                  <button className="rounded border border-shop-fg/25 px-3 py-1.5 text-[12px]" onClick={() => sdk.setConsent('necessary')}>
+                  <button
+                    type="button"
+                    className="rounded border border-shop-fg/25 px-3 py-1.5 text-[12px]"
+                    onClick={() => sdk.setConsent('necessary')}
+                  >
                     Strictly necessary only
                   </button>
                 </div>
@@ -210,7 +264,14 @@ export function LiveSite() {
             </div>
           </Card>
 
-          <Card title="Visitor" action={<Pill tone={live.consent === 'all' ? 'good' : live.consent === 'necessary' ? 'warn' : 'neutral'}>consent: {live.consent}</Pill>}>
+          <Card
+            title="Visitor"
+            action={
+              <Pill tone={live.consent === 'all' ? 'good' : live.consent === 'necessary' ? 'warn' : 'neutral'}>
+                consent: {live.consent}
+              </Pill>
+            }
+          >
             <div className="grid gap-x-4 gap-y-1 px-4 py-3 text-[13px] sm:grid-cols-2">
               <div className="min-w-0">
                 <span className="text-muted">Anonymous id </span>
@@ -219,7 +280,11 @@ export function LiveSite() {
               <div className="min-w-0 truncate">
                 <span className="text-muted">Profile </span>
                 {profile ? (
-                  <button className="font-semibold text-accent" onClick={() => useStore.getState().navigate('profiles', { profileId: profile.id })}>
+                  <button
+                    type="button"
+                    className="font-semibold text-accent"
+                    onClick={() => useStore.getState().navigate('profiles', { profileId: profile.id })}
+                  >
                     {profile.name}
                   </button>
                 ) : (
@@ -239,7 +304,10 @@ export function LiveSite() {
           <Card title="Pipeline">
             <ul className="max-h-[200px] divide-y divide-line overflow-y-auto text-[12px]">
               {live.notes.map((n) => (
-                <li key={n.id} className={cx('flash-in flex gap-2 px-4 py-2', n.tone === 'good' && 'text-good', n.tone === 'bad' && 'text-bad')}>
+                <li
+                  key={n.id}
+                  className={cx('flash-in flex gap-2 px-4 py-2', n.tone === 'good' && 'text-good', n.tone === 'bad' && 'text-bad')}
+                >
                   <span className="w-[62px] shrink-0 font-semibold uppercase tracking-wide text-muted">{n.kind}</span>
                   <span className="min-w-0">{n.text}</span>
                 </li>
@@ -252,7 +320,8 @@ export function LiveSite() {
             title="Event stream"
             action={
               <label className="flex items-center gap-1.5 text-[12px] text-muted">
-                <input id="only-mine" type="checkbox" checked={onlyMine} onChange={(e) => setOnlyMine(e.target.checked)} /> This visitor only
+                <input id="only-mine" type="checkbox" checked={onlyMine} onChange={(e) => setOnlyMine(e.target.checked)} /> This visitor
+                only
               </label>
             }
           >
@@ -264,7 +333,11 @@ export function LiveSite() {
                   <span className={cx('min-w-0 flex-1 truncate', e.status !== 'accepted' && 'text-muted line-through')}>
                     {e.name} {Object.keys(e.properties).length ? JSON.stringify(e.properties) : ''}
                   </span>
-                  {e.status === 'accepted' ? <span className="num text-muted">{e.latencyMs}ms</span> : <span className="text-warn">dropped: no consent</span>}
+                  {e.status === 'accepted' ? (
+                    <span className="num text-muted">{e.latencyMs}ms</span>
+                  ) : (
+                    <span className="text-warn">dropped: no consent</span>
+                  )}
                 </li>
               ))}
               {!shown.length && <li className="px-4 py-3 text-muted">No events yet.</li>}
