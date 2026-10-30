@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { outbox } from '@agentic-marketing/email';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { connectAgent, eventually, rejects, startTestServer, type User } from './harness';
@@ -72,7 +73,7 @@ describe('welcome journey (REST, as the UI)', () => {
     journeyId = (await api.call('artifacts.create', { type: 'journey', name: 'Welcome', content: definition })).artifactId;
 
     const sim = await api.call('journeys.simulate', { artifactId: journeyId, events: [{ event: 'Order Completed', after: 'P3D' }] });
-    expect(sim).toMatchObject({ outcome: 'exited', converted: true });
+    expect(sim).toMatchObject({ outcome: 'completed', converted: true });
     expect(sim.steps.map((s) => `${s.after} ${s.node}`)).toEqual(['0m trigger', '0m welcome', '0m wait', '2d goal', '3d goal', '3d done']);
 
     const refused = await rejects(api.call('artifacts.requestPublish', { artifactId: journeyId, note: 'Go' }));
@@ -107,15 +108,26 @@ describe('welcome journey (REST, as the UI)', () => {
     await send([{ type: 'track', event: 'Order Completed', userId: 'ada', properties: { total: 899 } }]);
     const done = await eventually(
       () => api.call('journeys.stats', { artifactId: journeyId }),
-      (s) => s.now.exited === 1,
+      (s) => s.now.completed === 1,
     );
-    expect(done.now).toMatchObject({ exited: 1, converted: 1, waiting: 0, ready: 0 });
+    expect(done.now).toMatchObject({ completed: 1, exited: 0, converted: 1, waiting: 0, ready: 0 });
     expect(mailTo('ada@example.com', 'Welcome')).toHaveLength(1);
     const reached = await eventually(
       () => api.call('journeys.stats', { artifactId: journeyId }),
       (s) => (s.reached.done ?? 0) === 1,
     );
     expect(reached.reached).toMatchObject({ trigger: 1, welcome: 1, goal: 1, done: 1 });
+  });
+
+  it('the 0.2.10 migration relabels people who ended at an Exit step before the fix (#169)', async () => {
+    // Before 0.2.10 an Exit step stored `exited` with no error; an early exit always has one.
+    await t.srv.db.admin.query(`UPDATE journey_participants SET status = 'exited' WHERE journey_id = $1`, [journeyId]);
+    const migration = readFileSync(
+      new URL('../../../packages/db/migrations/0044_journey_exit_step_completed.sql', import.meta.url),
+      'utf8',
+    );
+    await t.srv.db.admin.query(migration);
+    expect((await t.api(owner).call('journeys.stats', { artifactId: journeyId })).now).toMatchObject({ completed: 1, exited: 0 });
   });
 });
 

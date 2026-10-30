@@ -152,7 +152,7 @@ describe('withdrawing consent during a journey', () => {
       async () => mailTo(dee.email, 'Start here'),
       (m) => m.length === 1,
     );
-    expect(await participant(dee.profileId)).toEqual({ status: 'exited', error: null });
+    expect(await participant(dee.profileId)).toEqual({ status: 'completed', error: null });
   });
 
   it('the 0.2.3 migration exits people who refused before the upgrade', async () => {

@@ -256,7 +256,7 @@ describe('treatment and control (#67)', () => {
     for (const p of [control, treatment]) {
       const row = await eventually(
         () => participantOf(journeyId, p.profileId),
-        (r) => r?.status === 'exited' && r.converted,
+        (r) => r?.status === 'completed' && r.converted,
       );
       expect(row?.converted).toBe(true);
     }

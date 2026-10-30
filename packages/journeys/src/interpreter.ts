@@ -308,8 +308,10 @@ export async function advance(
         if (!goTo(r?.ok ? n.ok : n.error)) return end('completed', n.id);
         break;
       }
+      // An Exit step ends the path: the person finished the journey (#169). `exited` is for
+      // leaving early: a consent withdrawal or a migration that drops the person.
       case 'exit':
-        return end('exited', n.id);
+        return end('completed', n.id);
     }
   }
   throw new Error(`loop guard: more than 100 steps at once from ${p.node}`);
