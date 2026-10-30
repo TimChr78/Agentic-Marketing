@@ -1,5 +1,9 @@
+export const MCP_BUSINESS_CONTEXT_URI = 'business-context://current';
+
 /** What an MCP client gets in `initialize` and as the `agentic-marketing://guide` resource. */
 export const MCP_INSTRUCTIONS = `Agentic Marketing is an agent-first marketing platform. You draft artifacts; depending on the workspace policy, a person reviews and publishes them.
+
+Before you draft anything, read the business context at ${MCP_BUSINESS_CONTEXT_URI} (or call workspace.businessContext): it says what the business offers and to whom, the voice to write in, the claims to avoid and the legal lines to include. Follow it in every artifact you write.
 
 Start with workspace.get (workspace, approval policy, time zone, your permissions and what each lets you do) and artifacts.types with a type, e.g. {"type":"email_template"}. Omitting type returns every schema and is large. Read the type's schema before creating content.
 

@@ -1300,6 +1300,7 @@ const businessContext = z.object({
     .max(30)
     .default([]),
 });
+export type BusinessContext = z.output<typeof businessContext>;
 
 export const artifactTypes = {
   note: { prefix: 'not', label: 'Note', description: 'Free-form note, used to exercise the artifact system.', content: note },
