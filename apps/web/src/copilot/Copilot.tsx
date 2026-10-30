@@ -101,6 +101,7 @@ export function Copilot({ onClose }: { onClose: () => void }) {
         <div className="flex rounded-md border border-line p-0.5 text-[11px]">
           {(['scripted', 'live'] as const).map((m) => (
             <button
+              type="button"
               key={m}
               onClick={() => setMode(m)}
               className={cx('rounded px-2 py-0.5 font-medium capitalize', mode === m ? 'bg-agent-soft text-agent' : 'text-muted')}
@@ -211,6 +212,7 @@ export function Copilot({ onClose }: { onClose: () => void }) {
         <div className="mb-2 flex flex-wrap gap-1.5">
           {scenarios.map((s) => (
             <button
+              type="button"
               key={s.prompt}
               disabled={busy}
               onClick={() => ask(s.prompt)}
@@ -247,7 +249,7 @@ function ToolCard({ item }: { item: Extract<ChatItem, { role: 'tool' }> }) {
   const [open, setOpen] = useState(false);
   return (
     <div className="rounded-md border border-agent/30 bg-surface text-[12px]">
-      <button className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left" onClick={() => setOpen(!open)}>
+      <button type="button" className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left" onClick={() => setOpen(!open)}>
         <ChevronRight size={13} className={cx('text-muted transition-transform', open && 'rotate-90')} />
         <Wrench size={12} className="text-agent" />
         <code className="font-mono font-medium text-agent">{item.name}</code>

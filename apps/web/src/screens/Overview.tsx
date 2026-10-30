@@ -63,6 +63,7 @@ export function Overview() {
             {tour.map((t, i) => (
               <li key={t.title}>
                 <button
+                  type="button"
                   className="flex w-full items-start gap-3 px-4 py-3.5 text-left hover:bg-surface-2"
                   onClick={() => (t.copilot ? setCopilotOpen(true) : navigate(t.route!))}
                 >
@@ -117,7 +118,7 @@ export function Overview() {
         <Card
           title="Journeys"
           action={
-            <button className="text-[12px] text-accent" onClick={() => navigate('journeys', { journeyId: null })}>
+            <button type="button" className="text-[12px] text-accent" onClick={() => navigate('journeys', { journeyId: null })}>
               All journeys
             </button>
           }
@@ -126,6 +127,7 @@ export function Overview() {
             {journeys.map((j) => (
               <li key={j.id}>
                 <button
+                  type="button"
                   className="flex w-full items-center gap-3 px-4 py-2.5 text-left hover:bg-surface-2"
                   onClick={() => navigate('journeys', { journeyId: j.id })}
                 >
@@ -144,6 +146,7 @@ export function Overview() {
             {pending.map((a) => (
               <li key={a.id}>
                 <button
+                  type="button"
                   className="flex w-full items-start gap-3 px-4 py-2.5 text-left hover:bg-surface-2"
                   onClick={() => navigate('approvals')}
                 >

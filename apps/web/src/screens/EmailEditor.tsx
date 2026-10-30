@@ -122,6 +122,7 @@ export default function EmailEditor() {
         <div className="flex rounded-md border border-line p-0.5">
           {tabs.map((t) => (
             <button
+              type="button"
               key={t.id}
               onClick={() => setMode(t.id)}
               className={cx(

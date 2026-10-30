@@ -35,6 +35,7 @@ export function Approvals() {
         <div className="grid gap-2 p-3 md:grid-cols-3">
           {policies.map((p) => (
             <button
+              type="button"
               key={p.id}
               onClick={() => {
                 useStore.setState({ approvalPolicy: p.id });
@@ -58,6 +59,7 @@ export function Approvals() {
             {approvals.map((a) => (
               <li key={a.id}>
                 <button
+                  type="button"
                   onClick={() => setOpenId(a.id)}
                   className={cx(
                     'flex w-full items-start gap-3 px-4 py-3 text-left',

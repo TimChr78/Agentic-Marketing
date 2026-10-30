@@ -101,11 +101,19 @@ export function TokensCard({ openId }: { openId?: string }) {
             {tokens.map((t: Token) => (
               <Tr key={t.id} onClick={() => open(t.id)} selected={openId === t.id}>
                 <Td>
-                  <button type="button" className="font-medium text-fg hover:underline" onClick={(e) => (e.stopPropagation(), open(t.id))}>
+                  <button
+                    type="button"
+                    className="font-medium text-fg hover:underline"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      open(t.id);
+                    }}
+                  >
                     {t.name}
                   </button>
                   <div className="font-mono text-[11px] text-muted">{t.tokenHint}</div>
                   {ignored.has(t.id) && (
+                    // biome-ignore lint/a11y/useKeyWithClickEvents: only stops the row click from firing; the summary toggles natively from the keyboard
                     <details className="mt-1 text-[12px] text-muted" onClick={(e) => e.stopPropagation()}>
                       <summary className="cursor-pointer hover:text-fg">
                         Inputs the API ignored: {ignored.get(t.id)!.total} in the last {warnings.data?.sinceDays ?? 30} days (last{' '}

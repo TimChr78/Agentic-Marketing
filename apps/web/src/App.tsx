@@ -52,6 +52,7 @@ export default function App() {
             <div className="text-[11px] text-muted lg:mt-0.5">Demo workspace: Fjeldvej Outdoor</div>
           </div>
           <button
+            type="button"
             className="rounded-md bg-agent-soft p-2 text-agent lg:hidden"
             onClick={() => setCopilotOpen(!copilotOpen)}
             aria-label="Toggle copilot"
@@ -62,6 +63,7 @@ export default function App() {
         <nav className="flex gap-1 overflow-x-auto px-3 pb-2 lg:flex-col lg:overflow-visible lg:px-3">
           {nav.map(({ route: r, label, icon: Icon }) => (
             <button
+              type="button"
               key={r}
               onClick={() => navigate(r, r === 'journeys' ? { journeyId: null } : undefined)}
               className={cx(
@@ -87,6 +89,7 @@ export default function App() {
         </div>
         <div className="mt-4 hidden px-3 pb-5 lg:block">
           <button
+            type="button"
             onClick={() => setCopilotOpen(!copilotOpen)}
             className={cx(
               'flex w-full items-center gap-2.5 rounded-md border px-2.5 py-2 text-[13px] font-semibold',
@@ -135,7 +138,7 @@ export default function App() {
             )}
           >
             {t.text}
-            <button onClick={() => dismissToast(t.id)} aria-label="Dismiss">
+            <button type="button" onClick={() => dismissToast(t.id)} aria-label="Dismiss">
               <X size={14} />
             </button>
           </div>

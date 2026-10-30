@@ -109,7 +109,7 @@ function ProfileDetail({ profile: p, onBack }: { profile: Profile; onBack: () =>
 
   return (
     <div className={pageWidth('default')}>
-      <button className="mb-3 flex items-center gap-1 text-[13px] text-muted hover:text-fg" onClick={onBack}>
+      <button type="button" className="mb-3 flex items-center gap-1 text-[13px] text-muted hover:text-fg" onClick={onBack}>
         <ArrowLeft size={14} /> Profiles
       </button>
       <PageHeader eyebrow={`${p.id} · ${p.city}, ${p.country}`} title={p.name}>

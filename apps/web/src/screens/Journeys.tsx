@@ -384,6 +384,7 @@ function Builder({ journey, onBack }: { journey: Journey; onBack: () => void }) 
             const m = kindMeta[k];
             return (
               <button
+                type="button"
                 key={k}
                 onClick={() => addNode(k)}
                 className={cx(
