@@ -179,13 +179,26 @@ Every MCP tool advertises an object `outputSchema` and returns matching `structu
 ## Checks
 
 ```bash
-pnpm lint        # Biome
+pnpm lint        # Biome, over the whole repository (packages, apps, e2e, scripts)
 pnpm typecheck
-pnpm test        # unit + integration; needs Postgres (TEST_DATABASE_URL, default postgres://am:am@localhost:5432/am_test),
-                 # ClickHouse (CLICKHOUSE_URL) and NATS (NATS_URL); test databases and streams are recreated per run
+pnpm test        # every Vitest project; needs Postgres (TEST_DATABASE_URL, default postgres://am:am@localhost:5432/am_test),
+                 # ClickHouse (CLICKHOUSE_URL), NATS (NATS_URL) and Valkey (VALKEY_URL)
+pnpm vitest run --project docs       # one project: docs, packages, web or server
+pnpm test:ci     # what CI runs: also writes reports/junit.xml and a coverage report in reports/coverage
+pnpm test:clean  # drop the test databases earlier runs left in Postgres and ClickHouse
+node scripts/check-versions.mjs      # every file that names the release version agrees (see Releasing)
+pnpm audit --prod --audit-level=moderate   # accepted advisories are listed in SECURITY.md
 ```
 
-CI (`.github/workflows/ci.yml`) runs the same three against a Postgres service container.
+Biome checks every directory unless `biome.json` excludes it; add generated output to its `files.includes` exclusions rather than leaving a new directory unchecked.
+
+The `server` project runs its files in parallel, four at a time (`TEST_WORKERS=1` runs them one by one). Each file gets its own Postgres and ClickHouse database, NATS namespace and Valkey prefix; `apps/server/test/setup.ts` migrates one template database first and every file starts from a copy of it. A file keeps its database after the run so a failure can be inspected; `pnpm test:clean` removes them. Ports come from `testPort()` in `apps/server/test/harness.ts`, which gives each worker its own block; set `TEST_PORT_OFFSET=10000` to run a second checkout's suite at the same time.
+
+CI (`.github/workflows/ci.yml`) runs lint, typecheck, the version check, the audit and the documentation tests in a `static` job, the suite in `test`, and the browser, image and chart checks in `e2e`, `docker-smoke` and `helm`. Pull requests that only change Markdown, `docs/` or `.claude/` skip the slow jobs. The release workflow calls the same file for the tagged commit.
+
+### Releasing
+
+A version bump edits every file `scripts/check-versions.mjs` lists: the root, `apps/server`, `apps/web`, `packages/sdk-js` and `packages/edge-worker` package files, the chart's `version` and `appVersion`, `AM_VERSION` in `.env.example`, its default in `docker-compose.yml` and in the README, and a `## [x.y.z]` section in CHANGELOG.md. A new migration also goes into `MIGRATION_RELEASES` in `packages/db/src/migrate.ts`. Then push a `vX.Y.Z` tag (or run the Release workflow from main); it runs CI on that commit and publishes only if it passes. Before tagging, check that private vulnerability reporting is still enabled (Settings → Security), since `SECURITY.md` points reporters to it.
 
 ### Services without Docker
 
@@ -194,7 +207,7 @@ The tests need the four services on localhost, not Docker: native packages or th
 - start it with `--custom_settings_prefixes=SQL_` (the image's default config has it): the row-policy tests set `SQL_workspace`, and without the prefix ClickHouse rejects the setting;
 - any server time zone works. Event times are stored and queried as UTC (query parameters are typed `DateTime64(3, 'UTC')`; `packages/events/test/utc-params.test.ts` enforces it).
 
-For example, ClickHouse's single binary: `clickhouse server -- --path=./data/ch/ --http_port=8123 --tcp_port=9000 --listen_host=127.0.0.1 --custom_settings_prefixes=SQL_`, Postgres 16 with `max_connections=300` (the integration tests run files in parallel), `nats-server -js` and `valkey-server --save "" --appendonly no`.
+For example, ClickHouse's single binary: `clickhouse server -- --path=./data/ch/ --http_port=8123 --tcp_port=9000 --listen_host=127.0.0.1 --custom_settings_prefixes=SQL_`, Postgres 16 (the default `max_connections=100` covers four parallel test files), `nats-server -js` and `valkey-server --save "" --appendonly no`.
 
 ## Conventions
 
