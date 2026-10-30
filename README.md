@@ -72,7 +72,7 @@ docker compose exec app am doctor   # configuration, services, sending domains
 
 In a checkout, `pnpm --silent --filter @agentic-marketing/server cli init` does the same. Never edit `docker-compose.yml`: site-specific settings go in `compose.override.yaml` (see [`compose.override.example.yaml`](compose.override.example.yaml) and [the Compose guide](docs/deployment/compose.md)), so an upgrade replaces the release file and nothing else.
 
-`AM_VERSION` (default `0.2.10`) selects the released image `ghcr.io/timchr78/agentic-marketing`. Pin a version instead of `latest` so restarts and `docker compose pull` do not silently change what runs. `AM_PORT` (default `3000`) is the published host port: the app still listens on 3000 inside the container, so keep `PUBLIC_URL` and `PUBLIC_LINKS_URL` in step with it. ClickHouse is capped at `CLICKHOUSE_MEM_LIMIT` (default `2g`), which covers the whole container (server, caches and query memory); ClickHouse's own limits such as `max_server_memory_usage` still apply inside it, and 2g is a starting point for the single-node pilot.
+`AM_VERSION` (default `0.3.0`) selects the released image `ghcr.io/timchr78/agentic-marketing`. Pin a version instead of `latest` so restarts and `docker compose pull` do not silently change what runs. `AM_PORT` (default `3000`) is the published host port: the app still listens on 3000 inside the container, so keep `PUBLIC_URL` and `PUBLIC_LINKS_URL` in step with it. ClickHouse is capped at `CLICKHOUSE_MEM_LIMIT` (default `2g`), which covers the whole container (server, caches and query memory); ClickHouse's own limits such as `max_server_memory_usage` still apply inside it, and 2g is a starting point for the single-node pilot.
 
 To build from source (development, CI or a local patch) use the overlay:
 
@@ -112,7 +112,7 @@ On Kubernetes: the Helm chart in [`deploy/helm`](deploy/helm/agentic-marketing) 
 
 ## Releases and upgrading
 
-Releases are on [GitHub](https://github.com/TimChr78/Agentic-Marketing/releases), with the image `ghcr.io/timchr78/agentic-marketing:<version>` (linux/amd64 and linux/arm64), the packaged Helm chart, the Compose bundle (`docker-compose.yml`, `.env.example`, `compose.override.example.yaml`, [`UPGRADING.md`](UPGRADING.md)) and `SHA256SUMS`; what changed is in the [changelog](CHANGELOG.md). `/healthz`, MCP `serverInfo`, OpenAPI, `workspace.get` and Settings → Workspace show the running version. The current release is **0.2.10**, a pre-release. A release is made by pushing a version tag, or by running the Release workflow (Actions → Release → Run workflow) with the version, which tags the current `main`.
+Releases are on [GitHub](https://github.com/TimChr78/Agentic-Marketing/releases), with the image `ghcr.io/timchr78/agentic-marketing:<version>` (linux/amd64 and linux/arm64), the packaged Helm chart, the Compose bundle (`docker-compose.yml`, `.env.example`, `compose.override.example.yaml`, [`UPGRADING.md`](UPGRADING.md)) and `SHA256SUMS`; what changed is in the [changelog](CHANGELOG.md). `/healthz`, MCP `serverInfo`, OpenAPI, `workspace.get` and Settings → Workspace show the running version. The current release is **0.3.0**, a pre-release. A release is made by pushing a version tag, or by running the Release workflow (Actions → Release → Run workflow) with the version, which tags the current `main`.
 
 Upgrading: follow [UPGRADING.md](UPGRADING.md), and read the release's **Upgrading from** block, which always lists migrations, configuration, breaking changes, manual steps and the one-line upgrade. Database migrations run when the server starts, and only move forward: the app takes a Postgres backup to the `backups` volume before it migrates (unless `SKIP_PRE_UPGRADE_BACKUP=true`), and `am backup` / `am restore` do it by hand ([backups](docs/deployment/backups.md)). With `SKIP_MIGRATIONS=true` (several replicas, Kubernetes) run `cli migrate` first; the Helm chart does this in a Job before each upgrade. After an upgrade, `am smoke` checks the public host the way visitors and agents see it. While the version is 0.x, commands and artifact formats may still change.
 
@@ -147,7 +147,7 @@ Wave 1 (Phases −1 to 5) is complete: foundations, data platform, e-mail, segme
 
 | Phase | Theme | State |
 |---|---|---|
-| 17 | Agent controls | Planned: agents as principals with a pause button, a policy engine with limits and impact estimates, the action ledger |
+| 17 | Agent controls | Built in 0.3.0: agents as principals with a pause button, a policy engine with limits and impact estimates, the action ledger, Settings → Agents (still open: #144, #207) |
 | 18 | Mandates and the first autonomy | Planned: mandates with levels, holds with veto windows, the pilot's autonomous weekly newsletter |
 | 19 | The safety net | Planned: the guardian, staged sends, undo, shadow mode |
 | 20 | Closed loops | Planned: full loops, goals and attribution, learnings, the campaign, newsletter and lifecycle programmes |
