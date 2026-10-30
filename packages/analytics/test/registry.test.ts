@@ -73,11 +73,8 @@ describe('metric registry', () => {
     }
   });
 
-  it.fails('lists every source a measure offers in the dimension catalogue (#173)', () => {
-    // DIMENSIONS[].sources is what METRIC_CATALOG tells clients a breakdown applies to, but the
-    // campaign measures offer day, week and month while those dimensions only name
-    // message_events, journey_events and events. A picker that filters dimensions by source would
-    // hide valid campaign breakdowns until DIMENSIONS.day/week/month also list 'campaign'.
+  it('lists every source a measure offers in the dimension catalogue (#173)', () => {
+    // The catalogue told clients day/week/month do not apply to campaign measures, which offer them.
     const missing: string[] = [];
     for (const measure of ALL_MEASURES)
       for (const dimension of measure.dimensions)

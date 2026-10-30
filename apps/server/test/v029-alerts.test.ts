@@ -406,7 +406,7 @@ describe('alert commands', () => {
           }),
         )
       ).message,
-    ).toContain('PT30M');
+    ).toMatch(/window: Use a duration between PT1H and P7D/);
 
     expect(
       (

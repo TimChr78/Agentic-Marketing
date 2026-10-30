@@ -171,11 +171,8 @@ describe('journey errors rule configuration', () => {
     }
   });
 
-  it.fails('reports a malformed window as a structured validation error (#173)', () => {
-    // Window is a regex plus a refine, and the refine calls windowMs, which throws for any string
-    // the regex would reject (P0D, PT25H30M, …). The throw escapes Zod's safeParse, so callers get
-    // the low-level "not a duration" AppError without the field path or the other field errors
-    // that safeParse would report. Validation should return issues, not throw from inside refine.
+  it('reports a malformed window as a structured validation error (#173)', () => {
+    // The refine called windowMs on values the regex had rejected, which threw past safeParse.
     expect(() => parseAlertConfig('signup_drop', { window: 'P0D' })).toThrow('The configuration for a signup_drop alert is not valid.');
     expect(() => parseAlertConfig('journey_errors', { window: 'PT25H30M' })).toThrow(
       'The configuration for a journey_errors alert is not valid.',
@@ -235,11 +232,8 @@ describe('alert channels', () => {
     ).toBe(false);
   });
 
-  it.fails('treats the same member list in a different order as the same channel (#173)', () => {
-    // Duplicate detection keys an e-mail channel by userIds.join(','), so the same people in a
-    // different order look like two channels. notifyChannels then de-duplicates the addresses, but
-    // the rule's stored channel list still contains the same audience twice and the UI shows two
-    // entries for it.
+  it('treats the same member list in a different order as the same channel (#173)', () => {
+    // E-mail channels were keyed by userIds in the given order, so a reordered list passed as a second channel.
     expect(
       AlertChannels.safeParse([
         { type: 'email', userIds: ['usr_1', 'usr_2'] },

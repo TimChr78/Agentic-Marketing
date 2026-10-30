@@ -33,19 +33,19 @@ export const DIMENSIONS: Record<DimensionId, DimensionDef> = {
     id: 'day',
     description: 'Calendar day in the workspace time zone.',
     time: true,
-    sources: ['message_events', 'journey_events', 'events'],
+    sources: ['message_events', 'journey_events', 'events', 'campaign'],
   },
   week: {
     id: 'week',
     description: 'Week starting Monday, in the workspace time zone.',
     time: true,
-    sources: ['message_events', 'journey_events', 'events'],
+    sources: ['message_events', 'journey_events', 'events', 'campaign'],
   },
   month: {
     id: 'month',
     description: 'Calendar month in the workspace time zone.',
     time: true,
-    sources: ['message_events', 'journey_events', 'events'],
+    sources: ['message_events', 'journey_events', 'events', 'campaign'],
   },
   channel: {
     id: 'channel',

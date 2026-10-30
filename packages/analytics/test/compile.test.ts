@@ -172,19 +172,16 @@ describe('query compiler', () => {
     expect(compiled.hasNonTimeDimension).toBe(true);
   });
 
-  it.fails('defaults a broadcast breakdown to the newest issue by first send (#173)', () => {
-    // compile.ts documents "Broadcast defaults to newest first, which is what people mean by the
-    // last four issues", and prefers `dir: desc` for it, but the `min(at)` sort key is only added
-    // when `input.order` is present. Without an explicit order, LIMIT 4 therefore returns the four
-    // highest bct_ ids, not the four latest sends.
+  it('defaults a broadcast breakdown to the newest issue by first send (#173)', () => {
+    // Without an explicit order the min(at) sort key was missing, so `limit: 4` returned the four
+    // highest broadcast ids instead of the four latest issues.
     const compiled = buildQuery(input({ dimensions: ['broadcast'], limit: 4 }));
     expect(compiled.sql).toContain('min(at) AS sort_key');
     expect(compiled.sql).toContain('ORDER BY sort_key DESC');
   });
 
-  it.fails('defaults a journey step breakdown to the order the journey reaches its steps (#173)', () => {
-    // DIMENSION_SORT gives journey_step `min(seq)`, but like broadcast it is only used for an
-    // explicit order.by. The default falls back to the node id, which is not journey order.
+  it('defaults a journey step breakdown to the order the journey reaches its steps (#173)', () => {
+    // Without an explicit order steps were sorted by node id, not by the order the journey reaches them.
     const compiled = buildQuery(input({ source: 'journey_events', measures: [measure('journey.entered')], dimensions: ['journey_step'] }));
     expect(compiled.sql).toContain('min(seq) AS sort_key');
     expect(compiled.sql).toContain('ORDER BY sort_key ASC');
