@@ -930,6 +930,11 @@ const Approval = z.object({
   decidedBy: z.string().nullable(),
   decisionNote: z.string().nullable(),
   createdAt: z.string(),
+  holdUntil: z
+    .string()
+    .nullable()
+    .describe('When a held agent change runs unless a person vetoes it (null: an ordinary review); a person may run or veto it before'),
+
   artifactLatestVersion: z.number().int(),
   artifactPublishedVersion: z.number().int().nullable(),
   reviewUrl: z.string().nullable().describe('Admin UI page for this approval request'),
@@ -1078,6 +1083,7 @@ const approvalOut = (ctx: CommandContext, r: ApprovalRow, a: ArtifactRow, reques
   decidedBy: r.decidedBy,
   decisionNote: r.decisionNote,
   createdAt: r.createdAt.toISOString(),
+  holdUntil: r.holdUntil?.toISOString() ?? null,
   artifactLatestVersion: a.latestVersion,
   artifactPublishedVersion: a.publishedVersion,
   reviewUrl: approvalUrl(ctx.services.publicUrl, r.id),
