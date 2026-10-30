@@ -51,7 +51,7 @@ export interface ResolveDeps {
   purposes: (tx: Tx) => Promise<Purposes>;
   /**
    * Hours after an erasure in which an event naming one of the erased identifiers is dropped
-   * instead of creating a new person (#210). 0 disables the window.
+   * instead of creating a new person (#210). With 0, only events from before the erasure are dropped.
    */
   erasureGraceHours?: number;
 }
