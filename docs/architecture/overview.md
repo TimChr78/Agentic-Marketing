@@ -68,28 +68,36 @@ Modules communicate through **typed in-process interfaces and bus events**, neve
 
 ```
 packages/
-  core/            # ids, errors, tenancy context, clock, result types
-  commands/        # command registry: defineCommand(), authz, audit, idempotency
-  schema/          # zod schemas shared by API, MCP, UI, SDK
-  artifacts/       # versioned artifacts, drafts, approvals, diffs
-  identity/        # identifiers, identity graph, merges
-  profiles/        # profile store, traits, attribute schema (with PII tags)
-  events/          # ingestion pipeline, tracking plan, bus contracts
-  segments/        # segment DSL, compiler (ClickHouse SQL), streaming evaluator
-  journeys/        # journey graph model, interpreter, node registry
-  content/         # templates (MJML + Liquid), rendering, assets
-  channels/        # send gateway, adapter SDK, email/webhook/sms/push adapters
-  personalization/ # experiences, decision engine, A/B allocation
-  consent/         # consent & lawful-basis ledger, policy evaluation, suppression
-  ai/              # LLM gateway, provider configs, AI nodes, context builder, redaction
-  integrations/    # connector SDK, source/destination connectors
-  analytics/       # reporting queries, journey/message metrics
-  privacy/         # DSR (access/erasure), retention, crypto-shredding
+  core/            # ids, errors, canonical JSON hashing, time and network helpers
+  db/              # SQL migrations and runner, Drizzle schema, owner and RLS pools
+  commands/        # command registry: defineCommand(), authz, idempotency, audit
+  artifacts/       # versioned artifacts, approvals, diffs, bundles, holdouts, hosted pages
+  secrets/         # envelope encryption, key providers, write-only secret commands
+  auth/            # Better Auth, OAuth 2.1 for MCP clients, members, SSO/SCIM, API tokens
+  telemetry/       # pino logger, optional OpenTelemetry tracing
+  events/          # NATS bus, ClickHouse event store and sink, event schemas
+  ingest/          # Segment-compatible ingest gateway, source keys, consent policy
+  hotstate/        # Valkey session and profile snapshot for the decision API
+  profiles/        # profiles, identity resolution, consent ledger, per-person encryption
+  segments/        # segment DSL, SQL compiler, streaming evaluator, static lists, snapshots, CSV
+  journeys/        # journey graph model, interpreter, entry keys, wait-until, control groups
+  audience/        # signup forms, broadcasts, hosted pages, archive, import, message events, retention
+  email/           # send gateway, e-mail/SMS/push adapters, templates, blocks, checks, delivery policy
+  campaigns/       # campaign members, shared UTM campaign, control-group helpers
+  personalize/     # experiences, decision engine, A/B allocation and results, edge decide
+  analytics/       # read-only metric layer: query catalogue, named reports, campaign summary
+  alerts/          # threshold alert rules, five-minute evaluator, notifications
+  ai/              # LLM gateway and providers, prompt tests, AI steps, copilot, context and redaction
+  ads/             # ad platform connectors and conversions, audience sync, click ids, spend import
+  integrations/    # connections, connector SDK, webhooks, OAuth, egress guard, Shopify import
+  assets/          # image and PDF asset library, SVG cleaning, PNG renditions, asset routes
+  warehouse/       # warehouse export datasets and destinations
+  client/          # typed REST client inferred from the command registry
+  edge-worker/     # the decision API as a Cloudflare Worker
+  sdk-js/          # browser SDK: tracking, consent banner, personalization and push
 apps/
   server/          # composes modules into roles (api, ingest, decide, worker, scheduler)
-  web/             # React UI (journey canvas, email editor, experience editor)
-  sdk-js/          # browser SDK (tracking + personalization, consent-aware)
-  cli/             # admin CLI (migrations, key rotation, import/export)
+  web/             # React admin UI (app shell and router, ui, features, pages) and the demo
 ```
 
 ## 4. Key data flows

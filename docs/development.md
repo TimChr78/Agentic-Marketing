@@ -4,15 +4,33 @@
 
 ```
 packages/
-  core/        ids (UUIDv7, prefixed), AppError, canonical JSON hashing
-  db/          SQL migrations, migration runner, Drizzle schema, pools (admin + RLS app role)
+  core/        ids (UUIDv7, prefixed), AppError, canonical JSON hashing, time and network helpers
+  db/          SQL migrations and runner, Drizzle schema, owner and row-level-security pools
   commands/    command registry: defineCommand, permissions/roles, executor (validate → authorize → idempotency → audit)
-  artifacts/   versioned artifacts (note, journey), approvals, diffs, workspace + audit commands
-  secrets/     envelope encryption (KEK → per-workspace data keys), write-only secret commands
-  auth/        Better Auth (people) + OAuth 2.1 for MCP clients, principal resolution
+  artifacts/   versioned artifacts (journey, email_block, email_template, sms_template, push_template, segment, experience, prompt, form, brand, broadcast, campaign, tracking_plan, purposes, conversion_map, audience_sync, delivery_policy, note), approvals, diffs, bundles, holdouts, hosted pages
+  secrets/     envelope encryption (KEK → per-workspace data keys), key providers, write-only secret commands
+  auth/        Better Auth (people), OAuth 2.1 for MCP clients, members, SSO and SCIM, API tokens
   telemetry/   pino logger, optional OpenTelemetry tracing (OTLP)
+  events/      NATS JetStream bus, ClickHouse event store and sink, event schemas
+  ingest/      Segment-compatible ingest gateway, source write keys and consent policy
+  hotstate/    Valkey session and profile snapshot for the decision API
+  profiles/    profiles, identity resolution and merges, consent ledger, per-person encryption, event worker
+  segments/    segment DSL, SQL compiler (Postgres + ClickHouse), streaming evaluator, static lists, snapshots and CSV import
+  journeys/    journey graph model, interpreter, entry keys, wait-until, control groups
+  audience/    signup forms, broadcasts, hosted pages, newsletter archive, subscriber import, message events, retention
+  email/       send gateway, provider adapters (e-mail, SMS, push), templates, blocks, rendering, checks, delivery policy
+  campaigns/   campaign members, shared UTM campaign, control-group helpers
+  personalize/ experiences, decision engine, A/B allocation and results, edge decide
+  analytics/   read-only metric layer: query catalogue, named reports, campaign summary
+  alerts/      threshold alert rules, five-minute evaluator, webhook and e-mail notifications
+  ai/          LLM gateway and providers, prompt tests, AI steps, classification, copilot, context and redaction
+  ads/         ad platform connectors and conversions, audience sync, click ids, spend import
+  integrations/ connections, connector SDK, webhooks (in/out), OAuth, egress guard, Shopify import
+  assets/      image and PDF asset library, SVG cleaning, PNG renditions, public asset routes
+  warehouse/   warehouse export datasets and destinations
   client/      typed REST client inferred from the command registry
   edge-worker/ the decision API as a Cloudflare Worker, reading Workers KV (docs/deployment/edge.md)
+  sdk-js/      browser SDK: Segment-compatible tracking, consent banner, personalization and push
 apps/
   server/      Hono app: REST (/v1/<command>, /openapi.json), MCP (/mcp), sign-in/consent, health; CLI
   web/         React admin UI (app/ shell and router, ui/ design system, features/, pages/) served at /, and the mocked demo at /demo
@@ -73,6 +91,8 @@ docker compose up -d   # the released image, as a self-hoster runs it
 docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 docker compose exec app am bootstrap --email … --workspace …
 ```
+
+In a checkout `.env.example` is already in the tree, so copying it and filling in the secrets is enough; a release install runs `am init` from the released image instead, which writes `.env` with generated secrets ([compose](deployment/compose.md)).
 
 The default file pulls `ghcr.io/timchr78/agentic-marketing:${AM_VERSION}` (pin the version in `.env`; `AM_PORT` changes the published port). The overlay builds this checkout and tags it `AM_BUILD_IMAGE` (default `agentic-marketing:local`); `scripts/smoke.sh` uses the same overlay. ClickHouse is capped at `CLICKHOUSE_MEM_LIMIT` (default 2g), which covers the whole container; ClickHouse's own `max_server_memory_usage` still applies inside it. To keep data in host directories instead of named volumes, see the README: the services run as their own users, so the directories need matching ownership and permissions.
 
