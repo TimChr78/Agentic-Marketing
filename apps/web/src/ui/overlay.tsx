@@ -94,6 +94,7 @@ export function Modal({ open, onClose, title, children, footer, role = 'dialog',
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-end justify-center p-0 sm:items-center sm:p-6">
       <div className="am-fade-in absolute inset-0 bg-[var(--scrim)]" onClick={onClose} aria-hidden />
+      {/* biome-ignore lint/a11y/useAriaPropsSupportedByRole: role is dialog or alertdialog, both of which support aria-modal */}
       <div
         ref={ref}
         role={role}

@@ -67,6 +67,7 @@ export default function AssetsPage() {
 
   const assets = list.data?.assets ?? [];
   return (
+    // biome-ignore lint/a11y/noStaticElementInteractions: drag-and-drop is a mouse enhancement; uploading also works through the Upload button
     <div
       onDragOver={(e) => {
         if (!canWrite) return;

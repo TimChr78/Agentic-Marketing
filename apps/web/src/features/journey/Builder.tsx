@@ -470,6 +470,7 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
             <Legend className="flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-fg-2" />
           </div>
         </div>
+        {/* biome-ignore lint/a11y/noStaticElementInteractions: canvas drop target; adding a step is also available from the palette buttons */}
         <div
           ref={wrapper}
           className="relative min-h-0 flex-1 bg-surface-2"

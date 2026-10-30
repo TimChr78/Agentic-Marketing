@@ -91,6 +91,7 @@ export function Badge({
 }) {
   return (
     <span
+      role="img"
       aria-label={label}
       className={cx(
         'inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full px-1.5 text-[11px] font-semibold tabular-nums',
