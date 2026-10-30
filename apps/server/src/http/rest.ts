@@ -2,12 +2,16 @@ import { type Auth, principalFromApiToken, principalFromSession } from '@agentic
 import type { Executor } from '@agentic-marketing/commands';
 import { AppError } from '@agentic-marketing/core';
 import type { Db } from '@agentic-marketing/db';
+import { bodyLimit } from '@agentic-marketing/ingest';
 import { createRoute, OpenAPIHono, z } from '@hono/zod-openapi';
-import { bodyLimit } from 'hono/body-limit';
 import { commands } from '../registry';
 import { VERSION } from '../version';
 
 const ErrorBody = z.object({ error: z.string(), message: z.string(), details: z.unknown().optional() });
+
+// Every command except assets.upload carries a document or a settings object; 1 MB bounds an
+// unauthenticated request before parsing without getting in the way of real payloads.
+const REST_MAX_BODY = 1024 * 1024;
 const errors = Object.fromEntries(
   [
     [400, 'The input does not match the schema'],
@@ -76,17 +80,23 @@ export function restApi(deps: { auth: Auth; db: Db; executor: Executor; assetMax
       // limit the command enforces on the decoded bytes (plus room for the JSON envelope).
       api.use(
         route.path,
-        bodyLimit({
-          maxSize: Math.ceil(deps.assetMaxBytes * (4 / 3)) + 16_384,
-          onError: (c) =>
-            c.json(
-              {
-                error: 'invalid_input',
-                message: `The upload body is larger than the ${assetLimitMb} MB asset limit allows. Upload a smaller file or raise ASSET_MAX_BYTES.`,
-              },
-              413,
-            ),
-        }),
+        bodyLimit(Math.ceil(deps.assetMaxBytes * (4 / 3)) + 16_384, (c) =>
+          c.json(
+            {
+              error: 'invalid_input',
+              message: `The upload body is larger than the ${assetLimitMb} MB asset limit allows. Upload a smaller file or raise ASSET_MAX_BYTES.`,
+            },
+            413,
+          ),
+        ),
+      );
+    } else {
+      // Refuse an oversized body before the executor sees it (and before authentication reads it).
+      api.use(
+        route.path,
+        bodyLimit(REST_MAX_BODY, (c) =>
+          c.json({ error: 'payload_too_large', message: `Requests are limited to ${REST_MAX_BODY / (1024 * 1024)} MB.` }, 413),
+        ),
       );
     }
     api.post(route.path, async (c) => {

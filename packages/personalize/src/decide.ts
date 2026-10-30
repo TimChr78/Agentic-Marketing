@@ -2,7 +2,7 @@ import { publishListeners } from '@agentic-marketing/artifacts';
 import type { Db } from '@agentic-marketing/db';
 import { consentOf } from '@agentic-marketing/events';
 import type { HotState } from '@agentic-marketing/hotstate';
-import { consentAllows, originAllowed, sourceLookups, writeKeyOf } from '@agentic-marketing/ingest';
+import { bodyLimit, consentAllows, originAllowed, sourceLookups, writeKeyOf } from '@agentic-marketing/ingest';
 import { logger } from '@agentic-marketing/telemetry';
 import { Hono } from 'hono';
 import { z } from 'zod';
@@ -16,6 +16,9 @@ import { type DecideContext, deviceOf } from './targeting';
 
 export const PERSONALIZATION_PURPOSE = 'web_personalization';
 const CACHE_MS = 30_000;
+// A decision request is a write key, up to 20 placement names and the page/context: far below
+// 32 KB in practice, which still allows a large context object without letting it grow unbounded.
+const DECIDE_MAX_BODY = 32 * 1024;
 
 const DecideRequest = z.object({
   writeKey: z.string().optional(),
@@ -69,59 +72,70 @@ export function decideApi(deps: { db: Db; hot: HotState }) {
     }),
   );
 
-  app.post('/v1/decide', async (c) => {
-    const started = performance.now();
-    const origin = c.req.header('origin');
-    let body: Record<string, unknown>;
-    try {
-      body = JSON.parse(await c.req.text());
-    } catch {
-      return c.json({ error: 'invalid_json', message: 'The body is not JSON.' }, 400, cors(origin));
-    }
-    const key = writeKeyOf(c, body);
-    const source = key ? await loadSource(key) : null;
-    if (!source?.enabled) return c.json({ error: 'invalid_write_key', message: 'Unknown or disabled write key.' }, 401, cors(origin));
-    if (!originAllowed(source, origin))
-      return c.json({ error: 'origin_not_allowed', message: `Origin ${origin ?? '(none)'} is not allowed.` }, 403, cors(origin));
-    const parsed = DecideRequest.safeParse(body);
-    if (!parsed.success) return c.json({ error: 'invalid_input', message: z.prettifyError(parsed.error) }, 400, cors(origin));
-    const req = parsed.data;
-    const ws = source.workspaceId;
+  app.post(
+    '/v1/decide',
+    bodyLimit(DECIDE_MAX_BODY, (c) => {
+      const origin = c.req.header('origin');
+      return c.json(
+        { error: 'payload_too_large', message: `Requests are limited to ${DECIDE_MAX_BODY / 1024} KB.` },
+        413,
+        origin ? { 'access-control-allow-origin': origin, vary: 'origin' } : {},
+      );
+    }),
+    async (c) => {
+      const started = performance.now();
+      const origin = c.req.header('origin');
+      let body: Record<string, unknown>;
+      try {
+        body = JSON.parse(await c.req.text());
+      } catch {
+        return c.json({ error: 'invalid_json', message: 'The body is not JSON.' }, 400, cors(origin));
+      }
+      const key = writeKeyOf(c, body);
+      const source = key ? await loadSource(key) : null;
+      if (!source?.enabled) return c.json({ error: 'invalid_write_key', message: 'Unknown or disabled write key.' }, 401, cors(origin));
+      if (!originAllowed(source, origin))
+        return c.json({ error: 'origin_not_allowed', message: `Origin ${origin ?? '(none)'} is not allowed.` }, 403, cors(origin));
+      const parsed = DecideRequest.safeParse(body);
+      if (!parsed.success) return c.json({ error: 'invalid_input', message: z.prettifyError(parsed.error) }, 400, cors(origin));
+      const req = parsed.data;
+      const ws = source.workspaceId;
 
-    const [list, policy] = await Promise.all([experiences(ws), loadPolicy(ws)]);
-    const wanted = list.filter((e) => req.placements.includes(e.def.placement));
-    const personalized = consentAllows({ ...source, requiredPurpose: PERSONALIZATION_PURPOSE }, policy, consentOf(req.context));
-    // Hot state is read only when it may be used, and only if some experience needs it.
-    const [snapshot, session] =
-      personalized && wanted.length
-        ? await Promise.all([
-            deps.hot.snapshot(ws, { anonymousId: req.anonymousId, userId: req.userId }).catch(() => null),
-            req.anonymousId ? deps.hot.session(ws, req.anonymousId).catch(() => null) : Promise.resolve(null),
-          ])
-        : [null, null];
-    let utmSource: string | null = null;
-    try {
-      utmSource = req.page.url ? new URL(req.page.url).searchParams.get('utm_source') : null;
-    } catch {}
-    const ctx: DecideContext = {
-      personalized,
-      snapshot,
-      session,
-      page: req.page,
-      utmSource,
-      device: deviceOf((req.context?.userAgent as string | undefined) ?? c.req.header('user-agent')),
-    };
-    const stableId = snapshot?.profileId ?? req.userId ?? req.anonymousId ?? '';
+      const [list, policy] = await Promise.all([experiences(ws), loadPolicy(ws)]);
+      const wanted = list.filter((e) => req.placements.includes(e.def.placement));
+      const personalized = consentAllows({ ...source, requiredPurpose: PERSONALIZATION_PURPOSE }, policy, consentOf(req.context));
+      // Hot state is read only when it may be used, and only if some experience needs it.
+      const [snapshot, session] =
+        personalized && wanted.length
+          ? await Promise.all([
+              deps.hot.snapshot(ws, { anonymousId: req.anonymousId, userId: req.userId }).catch(() => null),
+              req.anonymousId ? deps.hot.session(ws, req.anonymousId).catch(() => null) : Promise.resolve(null),
+            ])
+          : [null, null];
+      let utmSource: string | null = null;
+      try {
+        utmSource = req.page.url ? new URL(req.page.url).searchParams.get('utm_source') : null;
+      } catch {}
+      const ctx: DecideContext = {
+        personalized,
+        snapshot,
+        session,
+        page: req.page,
+        utmSource,
+        device: deviceOf((req.context?.userAgent as string | undefined) ?? c.req.header('user-agent')),
+      };
+      const stableId = snapshot?.profileId ?? req.userId ?? req.anonymousId ?? '';
 
-    const decisions = decideAll(wanted, req.placements, ctx, stableId, req.preview);
-    const ms = performance.now() - started;
-    if (ms > 50) logger.warn({ ms: Math.round(ms), workspace: ws }, 'slow decision');
-    return c.json({ decisions, personalized }, 200, {
-      ...cors(origin),
-      'server-timing': `decide;dur=${ms.toFixed(1)}`,
-      'cache-control': 'no-store',
-    });
-  });
+      const decisions = decideAll(wanted, req.placements, ctx, stableId, req.preview);
+      const ms = performance.now() - started;
+      if (ms > 50) logger.warn({ ms: Math.round(ms), workspace: ws }, 'slow decision');
+      return c.json({ decisions, personalized }, 200, {
+        ...cors(origin),
+        'server-timing': `decide;dur=${ms.toFixed(1)}`,
+        'cache-control': 'no-store',
+      });
+    },
+  );
 
   return app;
 }

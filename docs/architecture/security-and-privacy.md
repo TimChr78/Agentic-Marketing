@@ -69,6 +69,8 @@ Evaluation in the send gateway: `consent` basis → needs `granted`; `legitimate
 | Custom code steps (later) | Not in v1. If added: isolated runtime (separate sandboxed process / WASM) with no network by default |
 | Secrets leakage | Never returned by APIs, redacted in logs/traces, secret scanning in CI |
 
+**Request body limits.** Public and API POST bodies are bounded before they are parsed or buffered, counting encoded bytes rather than JavaScript string length. A trustworthy `Content-Length` is checked first; a chunked body without one is counted as it streams and refused as soon as it crosses the limit, so an oversized request never sits in memory in full. The ingest gateway allows 500 KB per batch, inbound webhooks 1 MB (checked before the secret URL is authenticated), public forms 64 KB, the decision API 32 KB, preference-centre and SMS webhook POSTs 64 KB, REST commands 1 MB (`assets.upload` keeps its larger `ASSET_MAX_BYTES`-derived limit) and the MCP endpoint 1 MB. All answer `413 Payload Too Large`.
+
 ## 6. Operational security
 
 - Backups: Postgres (pgBackRest or WAL-G) + ClickHouse (clickhouse-backup) encrypted; restore drill documented; crypto-shredding makes erasure effective in backups.

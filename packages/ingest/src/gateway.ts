@@ -6,6 +6,7 @@ import type { HotState } from '@agentic-marketing/hotstate';
 import { logger } from '@agentic-marketing/telemetry';
 import { type Context, Hono } from 'hono';
 import { z } from 'zod';
+import { bodyLimit } from './body-limit';
 import { defaultPolicy, processEvent, type SourceInfo, type WorkspacePolicy } from './policy';
 import { keyHash } from './sources';
 
@@ -13,6 +14,7 @@ import { keyHash } from './sources';
 // plus the short paths analytics.js uses (/v1/b, /v1/t, …). It authenticates the source, runs
 // the policy per event, publishes to the bus and answers once the bus has the events.
 
+// One batch or event: 500 KB across the request; checked in bytes before the body is parsed.
 const MAX_BODY = 500 * 1024;
 const MAX_EVENT = 32 * 1024;
 const CACHE_MS = 30_000;
@@ -210,78 +212,89 @@ export function ingestApi(deps: IngestDeps) {
     });
   });
 
-  app.post('/v1/:kind{[a-z]+}', async (c) => {
-    const kind = paths[c.req.param('kind')];
-    if (!kind) return c.notFound();
-    const origin = c.req.header('origin');
-    const cors: Record<string, string> = origin ? { 'access-control-allow-origin': origin, vary: 'origin' } : {};
-    const fail = (status: 400 | 401 | 403 | 413 | 429, error: string, message: string) =>
-      c.json({ success: false, error, message }, status, cors);
+  app.post(
+    '/v1/:kind{[a-z]+}',
+    // Bounds the body before it is buffered or parsed; 500 KB is the batch limit, counted in bytes.
+    bodyLimit(MAX_BODY, (c) => {
+      const origin = c.req.header('origin');
+      return c.json(
+        { success: false, error: 'too_large', message: `Requests are limited to ${MAX_BODY / 1024} KB; send smaller batches.` },
+        413,
+        origin ? { 'access-control-allow-origin': origin, vary: 'origin' } : {},
+      );
+    }),
+    async (c) => {
+      const kind = paths[c.req.param('kind')];
+      if (!kind) return c.notFound();
+      const origin = c.req.header('origin');
+      const cors: Record<string, string> = origin ? { 'access-control-allow-origin': origin, vary: 'origin' } : {};
+      const fail = (status: 400 | 401 | 403 | 413 | 429, error: string, message: string) =>
+        c.json({ success: false, error, message }, status, cors);
 
-    // sendBeacon posts text/plain, so parse the body ourselves whatever the content type says.
-    const raw = await c.req.text();
-    if (raw.length > MAX_BODY) return fail(413, 'too_large', `Requests are limited to ${MAX_BODY / 1024} KB; send smaller batches.`);
-    let body: Record<string, unknown>;
-    try {
-      body = JSON.parse(raw);
-    } catch {
-      return fail(400, 'invalid_json', 'The body is not JSON.');
-    }
+      // sendBeacon posts text/plain, so parse the body ourselves whatever the content type says.
+      const raw = await c.req.text();
+      let body: Record<string, unknown>;
+      try {
+        body = JSON.parse(raw);
+      } catch {
+        return fail(400, 'invalid_json', 'The body is not JSON.');
+      }
 
-    const key = writeKeyOf(c, body);
-    const source = key ? await loadSource(key) : null;
-    if (!source?.enabled) return fail(401, 'invalid_write_key', 'Unknown or disabled write key.');
-    if (
-      source.kind === 'browser' &&
-      !source.allowedOrigins.includes('*') &&
-      !(origin && source.allowedOrigins.includes(origin.toLowerCase()))
-    )
-      return fail(403, 'origin_not_allowed', `Origin ${origin ?? '(none)'} is not allowed for this source.`);
+      const key = writeKeyOf(c, body);
+      const source = key ? await loadSource(key) : null;
+      if (!source?.enabled) return fail(401, 'invalid_write_key', 'Unknown or disabled write key.');
+      if (
+        source.kind === 'browser' &&
+        !source.allowedOrigins.includes('*') &&
+        !(origin && source.allowedOrigins.includes(origin.toLowerCase()))
+      )
+        return fail(403, 'origin_not_allowed', `Origin ${origin ?? '(none)'} is not allowed for this source.`);
 
-    const items = kind === 'batch' ? (Array.isArray(body.batch) ? body.batch : null) : [{ ...body, type: kind }];
-    if (!items?.length) return fail(400, 'invalid_batch', 'A batch needs a non-empty "batch" array.');
-    const rate = deps.ratePerSource ?? 1000;
-    const ok = deps.hot
-      ? await deps.hot.take(`src:${source.id}`, items.length, rate, rate * 5).catch(() => allow(source.id, items.length))
-      : allow(source.id, items.length);
-    if (!ok) return fail(429, 'rate_limited', 'Too many events for this source; retry with backoff.');
+      const items = kind === 'batch' ? (Array.isArray(body.batch) ? body.batch : null) : [{ ...body, type: kind }];
+      if (!items?.length) return fail(400, 'invalid_batch', 'A batch needs a non-empty "batch" array.');
+      const rate = deps.ratePerSource ?? 1000;
+      const ok = deps.hot
+        ? await deps.hot.take(`src:${source.id}`, items.length, rate, rate * 5).catch(() => allow(source.id, items.length))
+        : allow(source.id, items.length);
+      if (!ok) return fail(429, 'rate_limited', 'Too many events for this source; retry with backoff.');
 
-    if (source.kind === 'browser' && isBot(c.req.header('user-agent')))
-      return c.json({ success: true, accepted: 0, duplicates: 0, dropped: items.length }, 200, cors);
-    const policy = await loadPolicy(source.workspaceId);
-    const ip =
-      source.kind === 'browser'
-        ? resolveClientIp({
-            header: (name) => c.req.header(name),
-            remoteAddress: remoteAddressFromEnv(c.env),
-            headerNames,
-            trustedProxyCidrs: deps.trustedProxyCidrs,
-          })
-        : undefined;
-    const { accepted, rejected, warnings, dropped } = acceptItems(items, source, policy, {
-      ip,
-      context: (body.context as Record<string, unknown> | undefined) ?? {},
-    });
+      if (source.kind === 'browser' && isBot(c.req.header('user-agent')))
+        return c.json({ success: true, accepted: 0, duplicates: 0, dropped: items.length }, 200, cors);
+      const policy = await loadPolicy(source.workspaceId);
+      const ip =
+        source.kind === 'browser'
+          ? resolveClientIp({
+              header: (name) => c.req.header(name),
+              remoteAddress: remoteAddressFromEnv(c.env),
+              headerNames,
+              trustedProxyCidrs: deps.trustedProxyCidrs,
+            })
+          : undefined;
+      const { accepted, rejected, warnings, dropped } = acceptItems(items, source, policy, {
+        ip,
+        context: (body.context as Record<string, unknown> | undefined) ?? {},
+      });
 
-    if (!accepted.length && rejected.length) return c.json({ success: false, error: 'invalid_events', rejected }, 400, cors);
-    const { duplicates } = accepted.length ? await deps.bus.publish(accepted) : { duplicates: 0 };
-    // Session state is best effort: the events are safely on the bus already.
-    if (accepted.length && deps.hot)
-      await deps.hot.recordSessions(accepted).catch((err) => logger.warn({ err }, 'session state not updated'));
-    if (rejected.length) logger.warn({ source: source.id, rejected: rejected.length }, 'ingest rejected events');
-    return c.json(
-      {
-        success: true,
-        accepted: accepted.length,
-        duplicates,
-        dropped,
-        ...(rejected.length ? { rejected } : {}),
-        ...(warnings.length ? { warnings } : {}),
-      },
-      200,
-      cors,
-    );
-  });
+      if (!accepted.length && rejected.length) return c.json({ success: false, error: 'invalid_events', rejected }, 400, cors);
+      const { duplicates } = accepted.length ? await deps.bus.publish(accepted) : { duplicates: 0 };
+      // Session state is best effort: the events are safely on the bus already.
+      if (accepted.length && deps.hot)
+        await deps.hot.recordSessions(accepted).catch((err) => logger.warn({ err }, 'session state not updated'));
+      if (rejected.length) logger.warn({ source: source.id, rejected: rejected.length }, 'ingest rejected events');
+      return c.json(
+        {
+          success: true,
+          accepted: accepted.length,
+          duplicates,
+          dropped,
+          ...(rejected.length ? { rejected } : {}),
+          ...(warnings.length ? { warnings } : {}),
+        },
+        200,
+        cors,
+      );
+    },
+  );
 
   return app;
 }
