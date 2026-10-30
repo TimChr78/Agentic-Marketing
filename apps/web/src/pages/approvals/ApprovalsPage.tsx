@@ -7,6 +7,8 @@ import { Link, navigate, useLocation } from '../../app/router';
 import { useSession } from '../../app/session';
 import { useApi } from '../../app/useApi';
 import { ApprovalDrawer } from '../../features/approvals/ApprovalDrawer';
+import { HoldBadge, HoldCountdown } from '../../features/approvals/HoldBadge';
+import { useNow } from '../../features/approvals/holds';
 import { RequesterView } from '../../features/approvals/requester';
 import { useViewedTick, wasViewed } from '../../features/approvals/viewed';
 import {
@@ -54,6 +56,7 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
   const [confirmDialog, confirm] = useConfirm();
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [batching, setBatching] = useState(false);
+  const now = useNow();
   useViewedTick();
 
   const all = list.data?.approvals ?? [];
@@ -199,6 +202,12 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
                     <span>{timeAgo(a.createdAt)}</span>
                   </div>
                   {a.note && <p className="mt-1.5 line-clamp-2 text-[13px] text-fg-2">{a.note}</p>}
+                  {a.holdUntil && (
+                    <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                      <HoldBadge />
+                      <HoldCountdown holdUntil={a.holdUntil} now={now} />
+                    </div>
+                  )}
                 </Link>
               </li>
             ))}
@@ -269,7 +278,17 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
                   <Td className="hidden max-w-[320px] lg:table-cell">
                     <span className="line-clamp-2">{a.note}</span>
                   </Td>
-                  <Td className="whitespace-nowrap">{timeAgo(a.createdAt)}</Td>
+                  <Td className="whitespace-nowrap">
+                    <div>{timeAgo(a.createdAt)}</div>
+                    {a.holdUntil && (
+                      <div className="mt-1 space-y-1">
+                        <HoldBadge />
+                        <div>
+                          <HoldCountdown holdUntil={a.holdUntil} now={now} />
+                        </div>
+                      </div>
+                    )}
+                  </Td>
                   <Td>
                     {a.status === 'pending' ? (
                       <ViewedPill a={a} viewed={viewed(a)} />

@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { api, errText } from '../../app/api';
+import { artifactPath } from '../../app/artifactRoutes';
 import { useCrumbs } from '../../app/page';
+import { Link } from '../../app/router';
 import { useApi } from '../../app/useApi';
 import { AgentControls } from '../../features/agents/AgentControls';
 import { AgentStatusPill, DecisionBadge } from '../../features/agents/AgentStatus';
@@ -12,6 +14,7 @@ import {
   DECISION,
   impactText,
 } from '../../features/agents/labels';
+import { MandateCard } from '../../features/agents/MandateCard';
 import {
   Alert,
   Button,
@@ -78,6 +81,8 @@ export default function AgentPage({ params }: { params: Record<string, string> }
           {a.statusReason ? `“${a.statusReason}”` : 'No reason given.'} This cannot be undone; its history stays readable.
         </Alert>
       )}
+
+      <MandateCard agent={a} />
 
       <Card title="Credentials" description="Each one acts as this agent; pausing or revoking the agent stops all of them at once.">
         {a.credentials.length === 0 ? (
@@ -207,6 +212,18 @@ function Activity({ agentId }: { agentId: string }) {
                 </Td>
                 <Td>
                   <Mono>{action.command}</Mono>
+                  {action.mandateVersion !== null && action.mandateId && (
+                    <div className="mt-0.5 text-[11px] text-muted">
+                      <Link to={artifactPath('agent_mandate', action.mandateId)} className="hover:underline">
+                        Mandate v{action.mandateVersion}
+                      </Link>
+                    </div>
+                  )}
+                  {action.intent && (
+                    <div className="mt-0.5 max-w-[320px] line-clamp-2 text-[12px] text-muted" title={action.intent}>
+                      {action.intent}
+                    </div>
+                  )}
                   <div className="mt-0.5 text-[11px] text-muted md:hidden">
                     {ACTION_CLASS_LABEL[action.actionClass] ?? action.actionClass}
                   </div>
