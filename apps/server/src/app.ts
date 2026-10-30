@@ -273,5 +273,6 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
     publicUrl: config.publicUrl,
     linksUrl: config.linksUrl,
     retention: config.retention,
+    erasureGraceHours: config.erasureGraceHours,
   };
 }

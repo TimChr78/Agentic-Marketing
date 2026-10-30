@@ -45,6 +45,8 @@ Evaluation in the send gateway: `consent` basis → needs `granted`; `legitimate
 - **Secrets** (ESP keys, LLM keys, OAuth tokens, webhook secrets): encrypted with workspace DEK, write-only via API, key rotation command in CLI.
 - BYOK/customer-managed KEK for SaaS: later phase, already enabled by the key provider interface.
 
+**Erasure tombstones (#210).** An erasure keeps one tombstone per identifier of the person: an HMAC-SHA256 hash keyed with the workspace's matching data key, never the raw user id, e-mail address or phone number. For `ERASURE_GRACE_HOURS` (24 by default, configurable; `0` disables the window) after the erasure, an event that names only erased identifiers and happened before that window is dropped by the resolver instead of creating a new profile, so events already on the bus, SDK retries, offline queues or late provider webhooks cannot recreate the person. After the window, new activity is treated as a new person, and the hourly retention job deletes tombstones once the window plus seven days has passed.
+
 ## 4. Identity, authentication & authorization
 
 - **Auth:** Better Auth (MIT) — email/password + passkeys + TOTP MFA in v1; organizations/workspaces; OIDC/SAML SSO and SCIM in a later phase.

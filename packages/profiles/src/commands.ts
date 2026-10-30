@@ -752,8 +752,25 @@ export const eraseProfile = defineCommand({
     const ws = ctx.principal.workspaceId;
     const p = await canonical(ctx, input.profileId);
     const family = await mergedFamily(ctx.tx, ws, p.id);
-    const counts = await removeProfiles(ctx.tx, ws, family, ctx.services, { suppress: true });
     const erasureId = newId('era');
+    // Tombstones first, in the same transaction, while the identifiers still exist: keyed hashes
+    // (never raw values) let the resolver drop events that were queued or arrive late (#210).
+    const erased = await ctx.tx
+      .select()
+      .from(schema.identifiers)
+      .where(and(eq(schema.identifiers.workspaceId, ws), inArray(schema.identifiers.profileId, family)));
+    if (erased.length) {
+      const crypto = personCrypto(ctx.tx, ws, ctx.services.keyProvider);
+      const hashes = [...new Set(await Promise.all(erased.map((i) => crypto.tombstoneHash(i.type, i.value))))];
+      await ctx.tx
+        .insert(schema.erasureTombstones)
+        .values(hashes.map((identHash) => ({ workspaceId: ws, identHash, erasedAt: sql`now()`, erasureId })))
+        .onConflictDoUpdate({
+          target: [schema.erasureTombstones.workspaceId, schema.erasureTombstones.identHash],
+          set: { erasedAt: sql`now()`, erasureId },
+        });
+    }
+    const counts = await removeProfiles(ctx.tx, ws, family, ctx.services, { suppress: true });
     await ctx.tx
       .insert(schema.erasures)
       .values({ workspaceId: ws, id: erasureId, profileIds: family, requestedBy: ctx.principal.userId, reason: input.reason, counts });

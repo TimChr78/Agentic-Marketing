@@ -379,6 +379,21 @@ export const erasures = pgTable(
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
 );
 
+/**
+ * Keyed hashes of an erased person's identifiers (#210): an event naming one of them inside the
+ * grace window after the erasure is dropped instead of creating a new profile. Never raw values.
+ */
+export const erasureTombstones = pgTable(
+  'erasure_tombstones',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    identHash: text('ident_hash').notNull(),
+    erasedAt: ts('erased_at').notNull(),
+    erasureId: text('erasure_id').notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.identHash] })],
+);
+
 export const emailProviders = pgTable(
   'email_providers',
   {

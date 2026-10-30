@@ -12,7 +12,7 @@ export type AfterResolve = (workspaceId: string, resolved: ResolvedEvent[]) => P
  * applied in order. A batch is applied per workspace in one transaction.
  */
 export function runProfileWorkers(
-  deps: { bus: EventBus; db: Db; kp: KeyProvider; consumerPrefix?: string; after?: AfterResolve[] },
+  deps: { bus: EventBus; db: Db; kp: KeyProvider; consumerPrefix?: string; after?: AfterResolve[]; erasureGraceHours?: number },
   signal: AbortSignal,
 ) {
   const purposes = async (tx: Parameters<typeof publishedSingleton>[0]) =>
@@ -24,7 +24,9 @@ export function runProfileWorkers(
         const byWorkspace = new Map<string, BusEvent[]>();
         for (const e of events) byWorkspace.set(e.workspaceId, [...(byWorkspace.get(e.workspaceId) ?? []), e]);
         for (const [ws, list] of byWorkspace) {
-          const resolved = await deps.db.withWorkspace(ws, (tx) => applyEvents(tx, ws, list, { kp: deps.kp, purposes }));
+          const resolved = await deps.db.withWorkspace(ws, (tx) =>
+            applyEvents(tx, ws, list, { kp: deps.kp, purposes, erasureGraceHours: deps.erasureGraceHours }),
+          );
           // Hooks run after the commit, so they see the updated profiles. A failing hook makes
           // the batch re-deliver; applying it again is a no-op, so hooks must be idempotent too.
           for (const hook of deps.after ?? []) await hook(ws, resolved);

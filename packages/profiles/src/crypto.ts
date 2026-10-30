@@ -1,5 +1,5 @@
 import { createHmac } from 'node:crypto';
-import { schema, type Tx } from '@agentic-marketing/db';
+import { type IdentifierType, schema, type Tx } from '@agentic-marketing/db';
 import { activeDataKey, dataKeyById, type KeyProvider, newDataKey, open, seal } from '@agentic-marketing/secrets';
 import { and, eq, inArray } from 'drizzle-orm';
 
@@ -37,6 +37,20 @@ export function personCrypto(tx: Tx, workspaceId: string, kp: KeyProvider) {
       const norm = type === 'email' ? normalizeEmail(value) : normalizePhone(value);
       return createHmac('sha256', await matching)
         .update(`${type}:${norm}`)
+        .digest('hex');
+    },
+
+    /**
+     * The keyed hash a tombstone keeps for an identifier (#210), never the value itself. E-mail and
+     * phone identifiers are already stored as their match hash (`identifiers.value`), so they are
+     * used as-is; other types are HMAC'd here with the same matching key, so the tombstone hash
+     * equals the hash the resolver compares against for the same identifier.
+     */
+    async tombstoneHash(type: IdentifierType, value: string) {
+      if (type === 'email' || type === 'phone') return value;
+      matching ??= activeDataKey(tx, workspaceId, kp, 'matching').then((k) => k.key);
+      return createHmac('sha256', await matching)
+        .update(`${type}:${value}`)
         .digest('hex');
     },
 

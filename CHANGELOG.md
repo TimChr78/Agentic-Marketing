@@ -4,6 +4,10 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 
 ## [Unreleased]
 
+### Fixed
+
+- **Erased people are no longer recreated by their own queued or late events (#210).** `profiles.erase` now keeps one keyed-hash tombstone per identifier (HMAC with the workspace's matching key, never the raw user id, e-mail or phone). For `ERASURE_GRACE_HOURS` (24 by default, configurable) after an erasure, an event that names only erased identifiers and happened before that window is dropped instead of creating a new profile, covering events already on the bus, SDK retries, offline queues and late provider webhooks. After the window, new activity creates a new person as before; the hourly retention job removes tombstones once the window plus seven days has passed. Migration `0046` adds the table.
+
 ### Changed
 
 - **Release provenance (#182).** A release now publishes SLSA build provenance attestations for the image and for the release files (Compose bundle, Helm chart, `SHA256SUMS`), and the image carries an SBOM; [Operations](../deployment/operations.md#verifying-a-release) shows how to check them with `gh attestation verify`.
