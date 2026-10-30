@@ -320,24 +320,40 @@ export function buildCampaignQuery(input: CampaignBuildInput): CompiledQuery {
   const measureSql: string[] = [];
   const outputs: Output[] = dimensions.map((d) => ({ kind: 'dimension', dimension: d, alias: alias('dim', d) }));
   if (revenue) outputs.push({ kind: 'dimension', dimension: 'currency', alias: currencyAlias });
+  const baseSelect = (id: string): string => {
+    const target = alias('measure', id);
+    if (id === 'campaign.recipients') return `r.base_campaign_recipients AS ${target}`;
+    if (id === 'campaign.converters') return `ifNull(c.base_campaign_converters, 0) AS ${target}`;
+    if (id === 'campaign.revenue') return `c.base_campaign_revenue AS ${target}`;
+    throw new Error(`${id} is not a campaign measure`);
+  };
+  const selected = new Set<string>();
   for (const m of input.measures) {
     const target = alias('measure', m.id);
-    if (m.id === 'campaign.recipients') measureSql.push(`r.base_campaign_recipients AS ${target}`);
-    else if (m.id === 'campaign.converters') measureSql.push(`ifNull(c.base_campaign_converters, 0) AS ${target}`);
-    else if (m.id === 'campaign.revenue') measureSql.push(`c.base_campaign_revenue AS ${target}`);
-    else if (m.id === 'campaign.conversion_rate')
+    if (m.id === 'campaign.conversion_rate')
       measureSql.push(
         `if(r.base_campaign_recipients = 0, NULL, ifNull(c.base_campaign_converters, 0) / r.base_campaign_recipients) AS ${target}`,
       );
     else if (m.id === 'campaign.revenue_per_recipient')
       measureSql.push(`if(r.base_campaign_recipients = 0, NULL, c.base_campaign_revenue / r.base_campaign_recipients) AS ${target}`);
-    else throw new Error(`${m.id} is not a campaign measure`);
+    else measureSql.push(baseSelect(m.id));
+    selected.add(m.id);
     outputs.push({
       kind: 'measure',
       measure: m,
       alias: target,
       ...(m.kind === 'ratio' ? { numeratorAlias: alias('measure', m.numerator), denominatorAlias: alias('measure', m.denominator) } : {}),
     });
+  }
+  // A ratio's numeratorAlias/denominatorAlias must name a selected column even when the caller did
+  // not request that base measure; buildQuery always selects the bases its ratios name.
+  for (const m of input.measures) {
+    if (m.kind !== 'ratio') continue;
+    for (const id of [m.numerator, m.denominator]) {
+      if (selected.has(id)) continue;
+      measureSql.push(baseSelect(id));
+      selected.add(id);
+    }
   }
 
   const joinKeys = dimensions.map((d) => `r.${alias('dim', d)} = c.${alias('dim', d)}`);

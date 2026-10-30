@@ -103,6 +103,7 @@ export const importConfig = defineCommand({
   output: z.object({ dryRun: z.boolean(), changes: z.array(Change) }),
   permission: 'artifacts:write',
   effect: 'write',
+  actionClass: 'settings',
   handler: async (input, ctx) => {
     if (input.publish && !input.dryRun && !ctx.principal.permissions.has('artifacts:publish'))
       throw new AppError(

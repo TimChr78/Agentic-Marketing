@@ -374,6 +374,7 @@ export const runAudienceSync = defineCommand({
   output: z.object({ results: z.array(SyncOut) }),
   permission: 'messages:send',
   effect: 'write',
+  actionClass: 'audience.publish',
   target: (i) => i.artifactId,
   handler: async (input, ctx) => {
     const s = (await publishedSyncs(ctx.tx)).find((x) => x.id === input.artifactId);

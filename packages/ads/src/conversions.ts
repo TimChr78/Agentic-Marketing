@@ -278,6 +278,7 @@ export const testAdConnection = defineCommand({
   output: z.object({ ok: z.boolean(), statusCode: z.number().nullable(), response: z.unknown(), error: z.string().nullable() }),
   permission: 'workspace:admin',
   effect: 'write',
+  actionClass: 'draft',
   target: (i) => i.connection,
   handler: async (input, ctx) => {
     const [row] = await ctx.tx.select().from(schema.connections).where(eq(schema.connections.id, input.connection));

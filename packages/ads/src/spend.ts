@@ -237,6 +237,7 @@ export const importSpendCommand = defineCommand({
   output: z.object({ rows: z.number(), since: z.string(), until: z.string() }),
   permission: 'artifacts:write',
   effect: 'write',
+  actionClass: 'data.write',
   target: (i) => i.connection,
   handler: async (input, ctx) => {
     if (!ctx.services.db) throw new AppError('conflict', 'Spend import needs the database service.');

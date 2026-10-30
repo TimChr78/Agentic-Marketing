@@ -17,14 +17,18 @@ export interface RetentionDeps {
   hot?: HotState;
   unconfirmedDays: number;
   logDays: number;
+  /** Hours after an erasure that identifiers stay blocked (#210); tombstones live this plus 7 days. */
+  erasureGraceHours?: number;
 }
 
 /** Evidence for STRICT_INPUTS is only useful for a recent rollout window (#124). */
 const INPUT_WARNING_DAYS = 30;
+/** Tombstones outlive the grace window by this much, so a clock or replay near it is still covered. */
+const TOMBSTONE_EXTRA_DAYS = 7;
 
 export async function runRetentionOnce(
   deps: RetentionDeps,
-): Promise<{ profiles: number; deliveries: number; aiCalls: number; inputWarnings: number }> {
+): Promise<{ profiles: number; deliveries: number; aiCalls: number; inputWarnings: number; erasureTombstones: number }> {
   const { rows } = await deps.db.admin.query<{ workspace_id: string; id: string }>(
     `SELECT p.workspace_id, p.id FROM profiles p
      WHERE p.merged_into IS NULL AND p.first_seen < now() - make_interval(days => $1)
@@ -57,9 +61,20 @@ export async function runRetentionOnce(
   const inputWarnings = await deps.db.admin.query(`DELETE FROM input_warnings WHERE last_seen < now() - make_interval(days => $1)`, [
     INPUT_WARNING_DAYS,
   ]);
-  if (profiles || deliveries.rowCount || aiCalls.rowCount || inputWarnings.rowCount)
+  // Tombstones only need to outlast the window in which they drop events (#210).
+  const erasureTombstones = await deps.db.admin.query(
+    `DELETE FROM erasure_tombstones WHERE erased_at < now() - make_interval(hours => $1)`,
+    [(deps.erasureGraceHours ?? 24) + TOMBSTONE_EXTRA_DAYS * 24],
+  );
+  if (profiles || deliveries.rowCount || aiCalls.rowCount || inputWarnings.rowCount || erasureTombstones.rowCount)
     logger.info(
-      { profiles, deliveries: deliveries.rowCount, aiCalls: aiCalls.rowCount, inputWarnings: inputWarnings.rowCount },
+      {
+        profiles,
+        deliveries: deliveries.rowCount,
+        aiCalls: aiCalls.rowCount,
+        inputWarnings: inputWarnings.rowCount,
+        erasureTombstones: erasureTombstones.rowCount,
+      },
       'retention removed old data',
     );
   return {
@@ -67,6 +82,7 @@ export async function runRetentionOnce(
     deliveries: deliveries.rowCount ?? 0,
     aiCalls: aiCalls.rowCount ?? 0,
     inputWarnings: inputWarnings.rowCount ?? 0,
+    erasureTombstones: erasureTombstones.rowCount ?? 0,
   };
 }
 

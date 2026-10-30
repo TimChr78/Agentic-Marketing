@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs';
 import { assetRoutes } from '@agentic-marketing/assets';
-import { archiveRoutes, formsApi, withEmailProfileEvents, withResolvedEventProfiles } from '@agentic-marketing/audience';
+import { archiveRoutes, broadcastImpact, formsApi, withEmailProfileEvents, withResolvedEventProfiles } from '@agentic-marketing/audience';
 import {
   type AuthConfig,
   acceptInvitation,
@@ -17,6 +17,7 @@ import { clickHouseStore, lazyNatsBus } from '@agentic-marketing/events';
 import { valkeyHotState } from '@agentic-marketing/hotstate';
 import { ingestApi } from '@agentic-marketing/ingest';
 import { egressFetch, egressHttp2, inboundApi, oauthRoutes, safeRequest } from '@agentic-marketing/integrations';
+import { journeyImpact } from '@agentic-marketing/journeys';
 import { decideApi, edgeMirror } from '@agentic-marketing/personalize';
 import { refreshPeople } from '@agentic-marketing/segments';
 import { logger } from '@agentic-marketing/telemetry';
@@ -96,6 +97,11 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
       db,
       serverVersion: VERSION,
       strictInputs: config.strictInputs,
+      // Reach of publishing, for the agent policy engine (ADR-0016).
+      artifactImpact: {
+        broadcast: (tx, id, version) => broadcastImpact(tx, id, version),
+        journey: (tx, id) => journeyImpact(tx, id),
+      },
       stepUpLimiter: {
         lockedUntil: (userId) => hot.failureLock(`stepup:${userId}`),
         recordFailure: (userId) =>
@@ -267,5 +273,6 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
     publicUrl: config.publicUrl,
     linksUrl: config.linksUrl,
     retention: config.retention,
+    erasureGraceHours: config.erasureGraceHours,
   };
 }

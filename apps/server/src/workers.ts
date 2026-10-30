@@ -42,7 +42,7 @@ export function startScheduler(
       signal,
     ),
     runBroadcasts({ db: srv.db, kp: srv.keyProvider, events: srv.events }, signal, opts.broadcastTickMs),
-    runRetention({ db: srv.db, events: srv.events, hot: srv.hot, ...srv.retention }, signal),
+    runRetention({ db: srv.db, events: srv.events, hot: srv.hot, ...srv.retention, erasureGraceHours: srv.erasureGraceHours }, signal),
     runTokenRefresher({ db: srv.db, kp: srv.keyProvider, egress: srv.egress }, signal),
     runAudienceSyncs({ db: srv.db, kp: srv.keyProvider, egress: srv.egress }, signal),
     runSpendImport({ db: srv.db, events: srv.events, kp: srv.keyProvider, egress: srv.egress }, signal),
@@ -96,6 +96,7 @@ export function startWorkers(
         bus: srv.bus,
         db: srv.db,
         kp: srv.keyProvider,
+        erasureGraceHours: srv.erasureGraceHours,
         after: [
           // Consent first: segments and journeys that react to a signup need it recorded.
           consentHook({ db: srv.db, kp: srv.keyProvider, events: srv.events, links: srv.email.links, linksUrl: srv.linksUrl }),

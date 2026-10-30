@@ -36,6 +36,8 @@ export interface Principal {
   role: Role;
   /** Effective permissions: the role's permissions, intersected with granted scopes for agents. */
   permissions: ReadonlySet<Permission>;
+  /** The agent this principal acts as (ADR-0016); set for API tokens and OAuth clients. */
+  agent?: { id: string; name: string; status: 'active' | 'paused' | 'revoked'; statusReason: string | null };
 }
 
 export function userPrincipal(userId: string, workspaceId: string, role: Role): Principal {

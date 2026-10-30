@@ -249,6 +249,8 @@ export const enrollProfiles = defineCommand({
   output: z.object({ entered: z.number().int(), skipped: z.number().int() }),
   permission: 'messages:send',
   effect: 'write',
+  actionClass: 'journey.live',
+  impact: async (input) => ({ people: new Set(input.profileIds).size, summary: `enrol ${new Set(input.profileIds).size} people` }),
   target: (i) => i.artifactId,
   handler: async (input, ctx) => {
     const [a] = await ctx.tx.select().from(schema.artifacts).where(eq(schema.artifacts.id, input.artifactId));
@@ -629,6 +631,7 @@ export const migrateJourney = defineCommand({
   }),
   permission: 'artifacts:publish',
   effect: 'publish',
+  actionClass: 'journey.live',
   target: (i) => i.artifactId,
   handler: async (input, ctx) => {
     const [a] = await ctx.tx.select().from(schema.artifacts).where(eq(schema.artifacts.id, input.artifactId));
@@ -703,5 +706,17 @@ export const migrateJourney = defineCommand({
     return { ...out, moved: out.moved + out.restarted, byNode: [...byNode.values()] };
   },
 });
+
+/**
+ * Reach of publishing a journey version, for the agent policy engine (ADR-0016): the people
+ * currently in the journey, whom the new version will move on.
+ */
+export async function journeyImpact(tx: Tx, artifactId: string) {
+  const [{ n }] = await tx
+    .select({ n: sql<number>`count(*)::int` })
+    .from(schema.journeyParticipants)
+    .where(and(eq(schema.journeyParticipants.journeyId, artifactId), inArray(schema.journeyParticipants.status, ['ready', 'waiting'])));
+  return { people: n, summary: `${n.toLocaleString('en-US')} people currently in the journey` };
+}
 
 export const journeyCommands = [journeyStats, journeyHoldoutResult, enrollProfiles, simulateJourney, migrateJourney] as const;

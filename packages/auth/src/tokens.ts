@@ -12,6 +12,7 @@ import { AppError, newId, sha256 } from '@agentic-marketing/core';
 import { type Db, type Role, schema } from '@agentic-marketing/db';
 import { and, desc, eq, isNull } from 'drizzle-orm';
 import { z } from 'zod';
+import { agentForCredential } from './agents';
 
 // API tokens for scripts and automation tools (n8n, Activepieces, cron jobs) that cannot do an
 // OAuth flow. A token acts as an agent for the person who made it: their current role's
@@ -394,13 +395,14 @@ export async function principalFromApiToken(db: Db, token: string): Promise<Prin
     workspace_id: string;
     id: string;
     user_id: string;
+    name: string;
     scopes: string[];
     expires_at: Date | null;
     revoked_at: Date | null;
     last_used_at: Date | null;
     role: Role | null;
   }>(
-    `SELECT t.workspace_id, t.id, t.user_id, t.scopes, t.expires_at, t.revoked_at, t.last_used_at, m.role
+    `SELECT t.workspace_id, t.id, t.user_id, t.name, t.scopes, t.expires_at, t.revoked_at, t.last_used_at, m.role
      FROM api_tokens t LEFT JOIN workspace_members m ON m.workspace_id = t.workspace_id AND m.user_id = t.user_id
      WHERE t.token_hash = $1`,
     [apiTokenHash(token)],
@@ -409,5 +411,6 @@ export async function principalFromApiToken(db: Db, token: string): Promise<Prin
   if (!t?.role || t.revoked_at || (t.expires_at && t.expires_at < new Date())) return null;
   if (!t.last_used_at || Date.now() - t.last_used_at.getTime() > 60_000)
     await db.admin.query('UPDATE api_tokens SET last_used_at = now() WHERE workspace_id = $1 AND id = $2', [t.workspace_id, t.id]);
-  return agentPrincipal(t.user_id, `token:${t.id}`, t.workspace_id, t.role, t.scopes);
+  const agent = await agentForCredential(db, t.workspace_id, 'api_token', t.id, t.user_id, async () => t.name);
+  return { ...agentPrincipal(t.user_id, `token:${t.id}`, t.workspace_id, t.role, t.scopes), agent };
 }

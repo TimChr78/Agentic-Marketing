@@ -245,6 +245,7 @@ export const runConnectionAction = defineCommand({
   output: z.object({ result: z.unknown() }),
   permission: 'messages:send',
   effect: 'write',
+  actionClass: 'data.write',
   target: (i) => i.id,
   handler: async (input, ctx) => {
     const [row] = await ctx.tx.select().from(schema.connections).where(eq(schema.connections.id, input.id));

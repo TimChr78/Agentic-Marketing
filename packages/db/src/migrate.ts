@@ -73,6 +73,8 @@ const MIGRATION_RELEASES: Record<string, string> = {
   '0039_journey_wait_until_entry_keys.sql': '0.2.8',
   '0043_alerts.sql': '0.2.9',
   '0044_journey_exit_step_completed.sql': '0.2.10',
+  '0045_agents.sql': '0.3.0',
+  '0046_erasure_tombstones.sql': '0.3.0',
 };
 
 export function releaseForMigrationHead(head: string | null): string | null {

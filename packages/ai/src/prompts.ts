@@ -271,6 +271,7 @@ export const testPrompt = defineCommand({
   output: z.object({ runId: z.string(), version: z.number(), queued: z.number() }),
   permission: 'artifacts:write',
   effect: 'write',
+  actionClass: 'draft',
   target: (i) => i.artifactId,
   handler: async (input, ctx) => {
     const [a] = await ctx.tx.select().from(schema.artifacts).where(eq(schema.artifacts.id, input.artifactId));

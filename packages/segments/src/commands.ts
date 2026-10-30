@@ -184,6 +184,7 @@ export const refreshSegmentCommand = defineCommand({
   output: z.object({ members: z.number().int(), entered: z.number().int(), exited: z.number().int() }),
   permission: 'artifacts:publish',
   effect: 'write',
+  actionClass: 'audience.publish',
   target: (i) => i.artifactId,
   handler: async (input, ctx) => {
     const all = await publishedSegments(ctx.tx);

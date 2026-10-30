@@ -81,6 +81,9 @@ export const ENV_SINCE: Record<string, string> = {
   STEP_UP_LOCKOUT_SECONDS: '0.2.6',
   STEP_UP_MAX_FAILURES: '0.2.6',
   STEP_UP_WINDOW_SECONDS: '0.2.6',
+
+  // 0.3.0 (issue #210)
+  ERASURE_GRACE_HOURS: '0.3.0',
 };
 
 /**

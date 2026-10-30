@@ -2,6 +2,35 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+The start of [wave 4](docs/architecture/roadmap-wave-4.md), agentic marketing: [Phase 17](docs/architecture/roadmap-wave-4.md#phase-17-agent-controls), agent controls ([ADR-0016](docs/architecture/adr/0016-agent-autonomy-model.md)). Agents become principals a person can see, limit and stop, and every agent write passes one policy decision. No new autonomy yet: agents still propose as before, under the workspace approval policy, with new limits on top.
+
+### Added
+
+- **Agents (#213).** Every API token and connected MCP client acts as an agent, created on first use with the person who created or connected it as sponsor. `agents.list`, `agents.get`, `agents.update`, `agents.pause`, `agents.resume`, `agents.revoke`; Settings → Agents in the admin UI. Pausing refuses every credential of the agent from the next request (with the reason) and holds its pending approvals until it is resumed.
+- **Autonomy settings (#215).** `workspace.autonomy` / `workspace.setAutonomy`: an autonomy switch (on, propose only, off), an audience threshold (1,000 by default), per-agent limits per 24 hours (500 changes, 1,000 direct messages), and the highest level a mandate may grant per kind of action (default 1: a person decides; mandates arrive in Phase 18). A top-bar badge shows when agents are set to propose only or off.
+- **The policy engine (#214, #216, #217).** Every agent write is classified by what it changes (draft, publish content, audience, broadcast send, direct send, live journey, experience, data, settings, destructive), its impact is estimated (broadcast recipients, people in a journey, enrolments, direct sends), and it is allowed, sent to a person ("ask") or refused, with reasons. A publish that goes to a person reports why in `heldBecause` and in the approval note; an action that cannot wait for a person is refused with the way out. The audience threshold and the per-agent limits apply whatever the approval policy, including `none`.
+- **The action ledger (#218).** Every agent write is recorded with its decision, reasons, impact estimate and result: `agents.activity`, and the agent's page in the admin UI.
+
+### Fixed
+
+- **Erased people are no longer recreated by their own queued or late events (#210).** `profiles.erase` now keeps one keyed-hash tombstone per identifier (HMAC with the workspace's matching key, never the raw user id, e-mail or phone). For `ERASURE_GRACE_HOURS` (24 by default, configurable) after an erasure, an event that names only erased identifiers and happened before that window is dropped instead of creating a new profile, covering events already on the bus, SDK retries, offline queues and late provider webhooks. After the window, new activity creates a new person as before; the hourly retention job removes tombstones once the window plus seven days has passed. Migration `0046` adds the table.
+
+- **Analytics:** campaign ratio measures now always select the base columns they name, like the other measures (#209).
+
+### Changed
+
+- **Release provenance (#182).** A release now publishes SLSA build provenance attestations for the image and for the release files (Compose bundle, Helm chart, `SHA256SUMS`), and the image carries an SBOM; [Operations](docs/deployment/operations.md#verifying-a-release) shows how to check them with `gh attestation verify`.
+
+### Upgrading from 0.2.10
+
+- **Migrations:** Postgres `0045_agents.sql` (agents, their credentials, the action ledger, workspace autonomy settings) and `0046_erasure_tombstones.sql`.
+- **Configuration:** `ERASURE_GRACE_HOURS` (optional, default 24).
+- **Breaking changes:** none for people. Agents work as before under the defaults, with two new limits: an agent action reaching more than 1,000 people now waits for a person even under approval policy `none`, and an agent is limited to 500 changes and 1,000 direct messages per 24 hours. Change them in Settings → Agents.
+- **Manual steps:** none. Existing tokens and MCP clients appear under Settings → Agents after their next request.
+- **Upgrade:** download `agentic-marketing-compose-<version>.tar.gz`, replace `docker-compose.yml` with its copy, check your configuration with the new image (`AM_VERSION=<version> docker compose run --rm --no-deps -T app am doctor --env-file - < .env`), then set `AM_VERSION=<version>` in `.env` and `docker compose pull && docker compose up -d` (Helm: the chart of the same version). Then `docker compose exec app am doctor`.
+
 ## [0.2.10] - 2026-10-30
 
 A hygiene release ([#179](https://github.com/TimChr78/Agentic-Marketing/issues/179)): bug fixes, a faster and stricter build, releases gated on CI, and documentation that matches what ships. No new features. REST and MCP stay backwards compatible. One Postgres migration runs at start-up.

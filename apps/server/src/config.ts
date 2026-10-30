@@ -161,6 +161,13 @@ const Env = z.object({
     .min(1)
     .default(180)
     .describe('Days finished webhook and action deliveries and AI call logs are kept'),
+  ERASURE_GRACE_HOURS: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(24 * 30)
+    .default(24)
+    .describe('Hours after an erasure in which events naming the erased identifiers are dropped instead of creating a new person'),
   STEP_UP_MAX_FAILURES: z.coerce
     .number()
     .int()
@@ -313,6 +320,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
         .filter(Boolean),
     },
     retention: { unconfirmedDays: e.RETENTION_UNCONFIRMED_DAYS, logDays: e.RETENTION_LOG_DAYS },
+    erasureGraceHours: e.ERASURE_GRACE_HOURS,
     stepUp: {
       maxFailures: e.STEP_UP_MAX_FAILURES,
       windowSeconds: e.STEP_UP_WINDOW_SECONDS,

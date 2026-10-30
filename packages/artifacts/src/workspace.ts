@@ -366,6 +366,7 @@ export const proposeWorkspaceUpdate = defineCommand({
   }),
   permission: 'artifacts:write',
   effect: 'write',
+  actionClass: 'draft',
   handler: async (input, ctx) => {
     if (input.name === undefined && input.timeZone === undefined)
       throw new AppError('invalid_input', 'Give a new name, timeZone, or both; nothing would change.');

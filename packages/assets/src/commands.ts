@@ -249,6 +249,7 @@ export const uploadAsset = defineCommand({
   output: Asset,
   permission: 'artifacts:write',
   effect: 'write',
+  actionClass: 'content.publish',
   sensitive: ['dataBase64'],
   target: (input) => input.fileName,
   handler: async (input, ctx) => {
@@ -409,6 +410,7 @@ export const updateAsset = defineCommand({
   output: Asset,
   permission: 'artifacts:write',
   effect: 'write',
+  actionClass: 'content.publish',
   target: (input) => input.id,
   handler: async (input, ctx) => {
     const { publicUrl } = ctx.services.assets;
@@ -440,6 +442,7 @@ export const deleteAsset = defineCommand({
   output: z.object({ deleted: z.boolean() }),
   permission: 'artifacts:write',
   effect: 'destructive',
+  actionClass: 'destructive',
   target: (input) => input.id,
   handler: async (input, ctx) => {
     if (input.force && ctx.principal.type === 'agent') {

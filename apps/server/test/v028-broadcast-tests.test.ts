@@ -297,7 +297,10 @@ describe('subject A/B test', () => {
       20_000,
     );
     expect(done.test?.winner).toBe('A');
-    expect(done.test?.reason).toContain('tie');
+    // The split is random: a variant can end up under the 20-send minimum, which also picks A,
+    // with its own reason. Assert the reason that matches the actual split.
+    const fewest = Math.min(...(done.test?.variants.map((v) => v.sent) ?? [0]));
+    expect(done.test?.reason).toContain(fewest >= 20 ? 'tie' : 'fewer than 20 sends');
   }, 60_000);
 
   it('picks A when a variant has fewer than 20 sends, even with more clicks', async () => {

@@ -43,9 +43,17 @@ const hasProfileData = (e: BusEvent) =>
 /** Events the platform publishes about existing people (packages/segments uses the same id). */
 const SYSTEM_SOURCE = 'system';
 
+/** Default window after an erasure in which its identifiers are blocked (#210). */
+const DEFAULT_ERASURE_GRACE_HOURS = 24;
+
 export interface ResolveDeps {
   kp: KeyProvider;
   purposes: (tx: Tx) => Promise<Purposes>;
+  /**
+   * Hours after an erasure in which an event naming one of the erased identifiers is dropped
+   * instead of creating a new person (#210). With 0, only events from before the erasure are dropped.
+   */
+  erasureGraceHours?: number;
 }
 
 export interface ResolvedEvent {
@@ -60,6 +68,8 @@ export interface ResolvedEvent {
 export async function applyEvents(tx: Tx, workspaceId: string, events: BusEvent[], deps: ResolveDeps): Promise<ResolvedEvent[]> {
   const crypto = personCrypto(tx, workspaceId, deps.kp);
   const resolved: ResolvedEvent[] = [];
+  const graceHours = deps.erasureGraceHours ?? DEFAULT_ERASURE_GRACE_HOURS;
+  let tombstoned = 0;
   let purposes: Purposes | undefined;
   for (const e of events) {
     const ids = await identsOf(e, crypto);
@@ -72,6 +82,12 @@ export async function applyEvents(tx: Tx, workspaceId: string, events: BusEvent[
     // The platform's own events (segment entered/exited) describe someone who exists. One still in
     // flight when that person was erased must not create a new profile from their ids.
     if (e.sourceId === SYSTEM_SOURCE && !known.length) continue;
+    // An event naming only erased identifiers, from before the erasure plus the grace window, was
+    // queued or arrived late: drop it rather than build a new person from the old ids (#210).
+    if (!known.length && (await erasedBefore(tx, workspaceId, ids, e.timestamp, graceHours, crypto))) {
+      tombstoned++;
+      continue;
+    }
     if (!hasProfileData(e) && known.length === ids.length && profilesKnown.size === 1) {
       await touch(tx, workspaceId, [...profilesKnown][0], ids, e.timestamp);
       resolved.push({ event: e, profileId: [...profilesKnown][0] });
@@ -89,6 +105,11 @@ export async function applyEvents(tx: Tx, workspaceId: string, events: BusEvent[
     }
     resolved.push({ event: e, profileId });
   }
+  if (tombstoned)
+    logger.info(
+      { workspaceId, events: tombstoned },
+      'dropped events within the erasure grace window: their identifiers belong to an erased person',
+    );
   return resolved;
 }
 
@@ -114,6 +135,32 @@ async function lookup(tx: Tx, workspaceId: string, ids: Ident[]) {
       sql`, `,
     )})`);
   return res.rows.map((r) => ({ type: r.type, value: r.value, profileId: r.profile_id }));
+}
+
+/**
+ * Whether an event happened before an erasure of one of its identifiers plus the grace window
+ * (#210). Tombstones hold keyed hashes only; the same hashing is used here as for identifier
+ * lookup. A later erasure wins, so an identifier erased twice is blocked until its newest window
+ * has passed.
+ */
+async function erasedBefore(
+  tx: Tx,
+  workspaceId: string,
+  ids: Ident[],
+  at: string,
+  graceHours: number,
+  crypto: PersonCrypto,
+): Promise<boolean> {
+  const hashes = [...new Set(await Promise.all(ids.map((i) => crypto.tombstoneHash(i.type, i.value))))];
+  const res = await tx.execute<{ erased_at: Date | string }>(sql`
+    SELECT erased_at FROM erasure_tombstones
+    WHERE workspace_id = ${workspaceId} AND ident_hash IN (${sql.join(
+      hashes.map((h) => sql`${h}`),
+      sql`, `,
+    )})`);
+  if (!res.rows.length) return false;
+  const erasedAt = Math.max(...res.rows.map((r) => new Date(r.erased_at).getTime()));
+  return Date.parse(at) < erasedAt + graceHours * 3_600_000;
 }
 
 async function touch(tx: Tx, workspaceId: string, profileId: string, ids: Ident[], at: string) {

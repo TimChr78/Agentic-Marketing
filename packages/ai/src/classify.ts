@@ -34,6 +34,7 @@ export const classify = defineCommand({
   output: z.object({ callId: z.string(), status: z.literal('pending') }),
   permission: 'profiles:write',
   effect: 'write',
+  actionClass: 'draft',
   target: (i) => i.artifactId,
   handler: async (input, ctx) => {
     const p = await promptVersion(ctx.tx, input.artifactId);

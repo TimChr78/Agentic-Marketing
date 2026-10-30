@@ -45,6 +45,8 @@ Evaluation in the send gateway: `consent` basis → needs `granted`; `legitimate
 - **Secrets** (ESP keys, LLM keys, OAuth tokens, webhook secrets): encrypted with workspace DEK, write-only via API, key rotation command in CLI.
 - BYOK/customer-managed KEK for SaaS: later phase, already enabled by the key provider interface.
 
+**Erasure tombstones (#210).** An erasure keeps one tombstone per identifier of the person: an HMAC-SHA256 hash keyed with the workspace's matching data key, never the raw user id, e-mail address or phone number. For `ERASURE_GRACE_HOURS` (24 by default, configurable; with `0` only events from before the erasure are dropped) after the erasure, an event that names only erased identifiers and happened before that window is dropped by the resolver instead of creating a new profile, so events already on the bus, SDK retries, offline queues or late provider webhooks cannot recreate the person. After the window, new activity is treated as a new person, and the hourly retention job deletes tombstones once the window plus seven days has passed.
+
 ## 4. Identity, authentication & authorization
 
 - **Auth:** Better Auth (MIT) — email/password + passkeys + TOTP MFA in v1; organizations/workspaces; OIDC/SAML SSO and SCIM in a later phase.
@@ -60,7 +62,7 @@ Evaluation in the send gateway: `consent` basis → needs `granted`; `legitimate
 | SSRF via webhooks / HTTP nodes / connector URLs | Egress proxy or resolver guard blocking private/link-local/metadata ranges; per-workspace allow-lists |
 | Template injection | LiquidJS sandbox (no filesystem, no code), output escaping by default, render time & loop limits |
 | Prompt injection via profile/event data reaching LLMs | Data is passed as clearly delimited data, LLM outputs are schema-validated and can only choose among configured options; AI nodes cannot call platform tools in v1 |
-| Malicious MCP/agent behaviour | Scopes, drafts + approvals, AI budgets, the send gateway, audit; per-agent limits, audience thresholds and a per-agent kill switch are planned in wave 4 Phase 17 ([agentic-autonomy.md](agentic-autonomy.md)) |
+| Malicious MCP/agent behaviour | Scopes, drafts + approvals, the policy engine (audience threshold, per-agent limits, the autonomy switch), pausing an agent, AI budgets, the send gateway, the action ledger and audit ([agentic-autonomy.md](agentic-autonomy.md)) |
 | Abuse of public write keys | Origin allow-list, rate limits, schema validation, payload size limits, bot filtering |
 | XSS in editors/experiences | CSP, sanitization of experience HTML (DOMPurify), editors in sandboxed iframes where possible |
 | Supply chain | Lockfile, Renovate, `pnpm audit`/OSV scanning, SBOM (Syft), signed images (cosign), minimal base images |

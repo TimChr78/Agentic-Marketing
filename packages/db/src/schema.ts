@@ -24,6 +24,8 @@ export const workspaces = pgTable('workspaces', {
   timeZone: text('time_zone').notNull().default('UTC'),
   /** Addresses (besides members) that admins allow test e-mails to. */
   seedList: text('seed_list').array().notNull().default([]),
+  /** Autonomy ceilings and switch for agents (ADR-0016); empty means the defaults. */
+  autonomy: jsonb('autonomy').$type<Record<string, unknown>>().notNull().default({}),
   createdAt: ts('created_at').notNull().defaultNow(),
 });
 
@@ -375,6 +377,21 @@ export const erasures = pgTable(
     at: ts('at').notNull().defaultNow(),
   },
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
+/**
+ * Keyed hashes of an erased person's identifiers (#210): an event naming one of them inside the
+ * grace window after the erasure is dropped instead of creating a new profile. Never raw values.
+ */
+export const erasureTombstones = pgTable(
+  'erasure_tombstones',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    identHash: text('ident_hash').notNull(),
+    erasedAt: ts('erased_at').notNull(),
+    erasureId: text('erasure_id').notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.identHash] })],
 );
 
 export const emailProviders = pgTable(
@@ -1081,3 +1098,61 @@ export const edgeTargets = pgTable('edge_targets', {
   createdAt: ts('created_at').notNull().defaultNow(),
   updatedAt: ts('updated_at').notNull().defaultNow(),
 });
+
+export type AgentStatus = 'active' | 'paused' | 'revoked';
+export type AgentCredentialKind = 'api_token' | 'oauth_client';
+export type PolicyDecision = 'allow' | 'ask' | 'deny';
+
+/** Agents as first-class principals (ADR-0016): a sponsor, a status and the credentials they act with. */
+export const agents = pgTable(
+  'agents',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    name: text('name').notNull(),
+    description: text('description').notNull().default(''),
+    sponsorUserId: text('sponsor_user_id').notNull(),
+    status: text('status').$type<AgentStatus>().notNull().default('active'),
+    statusReason: text('status_reason'),
+    statusChangedBy: text('status_changed_by'),
+    statusChangedAt: ts('status_changed_at'),
+    /** Reserved for multi-brand (#184): null means the whole workspace. */
+    brand: text('brand'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
+export const agentCredentials = pgTable(
+  'agent_credentials',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    kind: text('kind').$type<AgentCredentialKind>().notNull(),
+    credentialId: text('credential_id').notNull(),
+    agentId: text('agent_id').notNull(),
+    createdAt: ts('created_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.kind, t.credentialId] })],
+);
+
+/** The agent action ledger: every agent write with its policy decision (#218). */
+export const agentActions = pgTable(
+  'agent_actions',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: bigserial('id', { mode: 'number' }).notNull(),
+    agentId: text('agent_id').notNull(),
+    command: text('command').notNull(),
+    actionClass: text('action_class').notNull(),
+    decision: text('decision').$type<PolicyDecision>().notNull(),
+    reasons: jsonb('reasons').$type<string[]>().notNull().default([]),
+    impact: jsonb('impact').$type<Record<string, unknown>>().notNull().default({}),
+    ok: boolean('ok').notNull(),
+    error: text('error'),
+    target: text('target'),
+    surface: text('surface').notNull(),
+    at: ts('at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);

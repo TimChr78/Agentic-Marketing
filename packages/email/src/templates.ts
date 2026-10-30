@@ -115,6 +115,7 @@ export const sendTestEmail = defineCommand({
   // still needs artifacts:write.
   selfService: { permission: 'artifacts:approve', allows: (input) => input.to === undefined },
   effect: 'write',
+  actionClass: 'draft',
   target: (i) => i.artifactId,
   handler: async (input, ctx) => {
     const [artifact] = await ctx.tx
