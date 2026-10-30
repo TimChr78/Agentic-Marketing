@@ -92,6 +92,8 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 docker compose exec app am bootstrap --email … --workspace …
 ```
 
+In a checkout `.env.example` is already in the tree, so copying it and filling in the secrets is enough; a release install runs `am init` from the released image instead, which writes `.env` with generated secrets ([compose](deployment/compose.md)).
+
 The default file pulls `ghcr.io/timchr78/agentic-marketing:${AM_VERSION}` (pin the version in `.env`; `AM_PORT` changes the published port). The overlay builds this checkout and tags it `AM_BUILD_IMAGE` (default `agentic-marketing:local`); `scripts/smoke.sh` uses the same overlay. ClickHouse is capped at `CLICKHOUSE_MEM_LIMIT` (default 2g), which covers the whole container; ClickHouse's own `max_server_memory_usage` still applies inside it. To keep data in host directories instead of named volumes, see the README: the services run as their own users, so the directories need matching ownership and permissions.
 
 `am` runs the server CLI without pnpm's banner. The command prompts for the password without echo; for scripts use `docker compose exec -e AM_BOOTSTRAP_PASSWORD app am bootstrap …` (or pipe one line with `docker compose exec -T`). `am reset-password --email …` (with `AM_RESET_PASSWORD`) sets a new password. `--password` is deprecated.
