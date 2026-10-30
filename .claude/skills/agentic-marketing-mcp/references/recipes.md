@@ -11,6 +11,7 @@ Each step is one tool call: `tool {input}`. Replace `…` ids with real ones fro
 - Promoting changes from staging
 - Campaign with a control group
 - Weekly issue from reusable blocks
+- Send the weekly issue under a mandate
 - Topics, preference centre and the archive
 - Subject test and a recipient-local send window
 - Static and CSV audiences
@@ -132,6 +133,20 @@ Nothing is deleted by an import. In git, `scripts/am-config.mjs pull|push` does 
 4. Run `templates.check {"artifactId":"eml_…"}` and fix the blocking findings. `blocks.usage {"artifactId":"blk_…"}` shows which templates use the block.
 5. Draft the broadcast that references the template and segment, then submit the new block, template and broadcast together:
    `artifacts.requestPublishBundle {"artifactIds":["blk_…","eml_…","bct_…"],"note":"Signal #44 for Friday"}`. A template can be published only with the published version of its blocks.
+
+## Send the weekly issue under a mandate
+
+Your mandate may let this one send run without a person (level 3 for `send.broadcast`), inside a scope and limits. Work through the result instead of assuming it.
+
+1. **Check your limits first.** `workspace.autonomy {}` gives the switch (`on`, `propose_only`, `off`), the audience threshold and the ceiling per class; `agents.get {}` (no id) gives your status and `last24h.changes`/`denied`. If you are `paused`, stop and ask the sponsor. If the switch is `off`, read only; if it is `propose_only`, everything you publish waits for a person.
+2. **Draft the issue.** Build or copy the template for this issue, then the broadcast to the mandated segment. `broadcasts.preview {"artifactId":"bct_…"}` gives `wouldSend`; compare it with your previous send: a `recipientGrowth` of 1.2 means this send may reach at most 1.2× that. If it is larger, split it over two sends or ask a person.
+3. **Submit both together.** `artifacts.requestPublishBundle {"artifactIds":["eml_…","bct_…"],"note":"Signal #46 to the Newsletter segment: 4,812 expected recipients (last issue 4,610); goal click rate 6%."}`. The `note` is stored as the action's intent; say what it is, why, and what you expect.
+4. **Read the outcome.**
+   - `status: "published"` — it is live. Confirm with `artifacts.get {"artifactId":"bct_…"}` (`publishedVersion`) and later `broadcasts.status {"artifactId":"bct_…"}`.
+   - `status: "on_hold"` with `runsAt` — it runs at that time unless a person vetoes it (a limit, working hours or level 2 held it). Do not resubmit; `heldBecause` says why.
+   - `status: "in_review"` with `heldBecause` — a person decides at `reviewUrl`; send the link on with a one-line summary.
+   - `403` with `details.reasons` — refused before it ran (scope, limit, level 0, propose-only or switch off). Change the plan to fit the reason, or ask a person; retrying does not help.
+5. **Report afterwards.** `analytics.emailPerformance {"from":"…","to":"…","by":"broadcast"}` gives sent, delivered, clicks and unsubscribes. If your mandate's guardrails were breached, the next send is capped at propose, with the reason in `heldBecause`.
 
 ## Topics, preference centre and the archive
 

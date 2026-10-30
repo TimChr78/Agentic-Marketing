@@ -13,7 +13,7 @@ import { createAiProvider, deleteAiProvider, listAiProviders, updateAiProvider }
 
 const Call = z.object({
   id: z.string(),
-  kind: z.enum(['decide', 'generate', 'copilot', 'test', 'classify']),
+  kind: z.enum(['decide', 'generate', 'copilot', 'test', 'classify', 'check']),
   status: z.enum(['pending', 'running', 'done', 'fallback', 'failed']),
   model: z.string().nullable(),
   promptId: z.string().nullable(),
@@ -44,7 +44,7 @@ export const listAiCalls = defineCommand({
     journeyId: z.string().optional(),
     promptId: z.string().optional(),
     profileId: z.string().optional(),
-    kind: z.enum(['decide', 'generate', 'copilot', 'test', 'classify']).optional(),
+    kind: z.enum(['decide', 'generate', 'copilot', 'test', 'classify', 'check']).optional(),
     limit: z.number().int().min(1).max(200).default(50),
     before: isoDateTime('before').optional(),
   }),

@@ -75,6 +75,9 @@ const MIGRATION_RELEASES: Record<string, string> = {
   '0044_journey_exit_step_completed.sql': '0.2.10',
   '0045_agents.sql': '0.3.0',
   '0046_erasure_tombstones.sql': '0.3.0',
+  '0047_mandates.sql': '0.4.0',
+  '0048_ai_call_kind_check.sql': '0.4.0',
+  '0049_agent_notifications.sql': '0.4.0',
 };
 
 export function releaseForMigrationHead(head: string | null): string | null {

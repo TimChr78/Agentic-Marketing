@@ -11,6 +11,8 @@ import { runProfileWorkers } from '@agentic-marketing/profiles';
 import { runSegmentScheduler, segmentHook } from '@agentic-marketing/segments';
 import { logger } from '@agentic-marketing/telemetry';
 import { runWarehouseExports } from '@agentic-marketing/warehouse';
+import { runHolds } from './agents/holds';
+import { runAgentNotifications } from './agents/notifications';
 import type { createServer } from './app';
 
 /** Periodic jobs of the scheduler role. */
@@ -24,10 +26,12 @@ export function startScheduler(
     warehouseLagMs?: number;
     edgeTickMs?: number;
     alertTickMs?: number;
+    holdTickMs?: number;
+    agentNotifyTickMs?: number;
   } = {},
 ): Promise<void>[] {
   logger.info(
-    'scheduler role: segment recomputation, broadcasts, retention, OAuth token refresh, audience sync, ad spend import, warehouse exports, edge sync, threshold alerts',
+    'scheduler role: segment recomputation, broadcasts, retention, OAuth token refresh, audience sync, ad spend import, warehouse exports, edge sync, threshold alerts, held agent changes, agent notifications',
   );
   return [
     runSegmentScheduler(
@@ -69,6 +73,12 @@ export function startScheduler(
       },
       signal,
       { tickMs: opts.alertTickMs },
+    ),
+    runHolds({ db: srv.db, services: srv.services }, signal, opts.holdTickMs),
+    runAgentNotifications(
+      { db: srv.db, kp: srv.keyProvider, email: srv.email, directory: srv.directory, publicUrl: srv.publicUrl },
+      signal,
+      { tickMs: opts.agentNotifyTickMs },
     ),
   ];
 }

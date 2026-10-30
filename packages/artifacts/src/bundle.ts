@@ -85,7 +85,7 @@ const Change = z.object({
   type: z.string(),
   name: z.string(),
   action: z.enum(['create', 'update', 'unchanged']),
-  publish: z.enum(['published', 'in_review', 'failed', 'skipped']).optional(),
+  publish: z.enum(['published', 'in_review', 'on_hold', 'failed', 'skipped']).optional(),
   problem: z.string().optional(),
 });
 
@@ -127,6 +127,8 @@ export const importConfig = defineCommand({
     const changes: z.infer<typeof Change>[] = [];
     const toPublish: { id: string; type: ArtifactType; change: z.infer<typeof Change> }[] = [];
     for (const item of input.bundle.artifacts) {
+      if (ctx.principal.type === 'agent' && 'peopleOnly' in artifactTypes[item.type])
+        throw new AppError('forbidden', `${item.id} is a ${item.type}: only people can import it.`);
       const content = validateContent(item.type, item.content, 'draft');
       // A workspace has one of each singleton type, whatever its id.
       const current = byId.get(item.id) ?? ('singleton' in artifactTypes[item.type] ? singletons.get(item.type) : undefined);

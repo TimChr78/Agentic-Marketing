@@ -124,6 +124,8 @@ export const approvalRequests = pgTable(
     decisionNote: text('decision_note'),
     /** Requests reviewed and published together (#107); null for a single request. */
     bundleId: text('bundle_id'),
+    /** A held agent change (level 2, ADR-0016) runs at this time unless a person rejects it first. */
+    holdUntil: ts('hold_until'),
     createdAt: ts('created_at').notNull().defaultNow(),
   },
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
@@ -683,7 +685,7 @@ export const aiProviders = pgTable(
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
 );
 
-export type AiCallKind = 'decide' | 'generate' | 'copilot' | 'test' | 'classify';
+export type AiCallKind = 'decide' | 'generate' | 'copilot' | 'test' | 'classify' | 'check';
 
 export const aiTokenReservations = pgTable(
   'ai_token_reservations',
@@ -1101,7 +1103,7 @@ export const edgeTargets = pgTable('edge_targets', {
 
 export type AgentStatus = 'active' | 'paused' | 'revoked';
 export type AgentCredentialKind = 'api_token' | 'oauth_client';
-export type PolicyDecision = 'allow' | 'ask' | 'deny';
+export type PolicyDecision = 'allow' | 'hold' | 'ask' | 'deny';
 
 /** Agents as first-class principals (ADR-0016): a sponsor, a status and the credentials they act with. */
 export const agents = pgTable(
@@ -1152,7 +1154,21 @@ export const agentActions = pgTable(
     error: text('error'),
     target: text('target'),
     surface: text('surface').notNull(),
+    mandateId: text('mandate_id'),
+    mandateVersion: integer('mandate_version'),
+    intent: text('intent'),
     at: ts('at').notNull().defaultNow(),
   },
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
 );
+
+/**
+ * How far agent notifications (#226) have read the ledger, when the sponsor last received a daily
+ * digest, and which mandate expiries were already announced (artifactId:version:validUntil).
+ */
+export const agentNotificationCursor = pgTable('agent_notification_cursor', {
+  workspaceId: uuid('workspace_id').primaryKey(),
+  lastActionId: bigint('last_action_id', { mode: 'number' }).notNull().default(0),
+  lastDigestAt: ts('last_digest_at'),
+  expiryNotified: jsonb('expiry_notified').$type<Record<string, string>>().notNull().default({}),
+});

@@ -25,6 +25,8 @@ import {
 import { invalidateArtifact } from '../artifactCache';
 import { BlockUsage } from '../blocks/BlockUsage';
 import { ArtifactPreview } from '../previews/ArtifactPreview';
+import { HoldBadge } from './HoldBadge';
+import { holdCountdownText, useNow } from './holds';
 import { RequesterView } from './requester';
 import { markViewed } from './viewed';
 
@@ -56,6 +58,7 @@ export function ApprovalDrawer({
   const [reasonError, setReasonError] = useState<string | null>(null);
   const [busy, setBusy] = useState<null | 'approve' | 'reject' | 'test'>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const now = useNow();
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: reset the dialog state whenever a different approval is opened
   useEffect(() => {
@@ -71,6 +74,7 @@ export function ApprovalDrawer({
 
   const a = d.data;
   const pending = a?.status === 'pending';
+  const held = !!a?.holdUntil && pending;
   // Reviewed together with other changes (#107): deciding this one decides all of them.
   const bundle = a?.bundle ?? null;
   const bundleVersions = bundle ? Object.fromEntries(bundle.members.map((m) => [m.artifactId, m.version])) : undefined;
@@ -110,9 +114,9 @@ export function ApprovalDrawer({
       toast.success(
         kind === 'approve'
           ? bundle
-            ? `Approved ${what}. They are live.`
-            : `Approved ${what}. Version ${a.version} is live.`
-          : `Rejected ${what}. The author sees your reason.`,
+            ? `${held ? 'Ran' : 'Approved'} ${what}. They are live.`
+            : `${held ? 'Ran' : 'Approved'} ${what}. Version ${a.version} is live.`
+          : `${held ? 'Vetoed' : 'Rejected'} ${what}. The author sees your reason.`,
       );
       onDecided();
       next();
@@ -153,6 +157,7 @@ export function ApprovalDrawer({
               {typeLabel(a.artifactType)} · Version {a.version} ·{' '}
               {a.publishedVersion ? `changes live v${a.publishedVersion}` : 'new, nothing live yet'}
             </span>
+            {held && <HoldBadge />}
             {a.status !== 'pending' && (
               <StatusPill tone={a.status === 'approved' ? 'good' : 'bad'}>
                 {a.status === 'approved' ? 'Approved' : a.status === 'rejected' ? 'Rejected' : 'Withdrawn'}
@@ -175,8 +180,12 @@ export function ApprovalDrawer({
             {actionError && <Alert tone="bad">{actionError}</Alert>}
             {rejecting && (
               <Field
-                label="Why are you rejecting it?"
-                hint="The author (person or agent) sees this and can submit a fixed version."
+                label={held ? 'Why are you vetoing it?' : 'Why are you rejecting it?'}
+                hint={
+                  held
+                    ? 'The agent’s mandate is told why its held change was vetoed; it can propose a corrected version.'
+                    : 'The author (person or agent) sees this and can submit a fixed version.'
+                }
                 error={reasonError}
                 required
               >
@@ -214,16 +223,26 @@ export function ApprovalDrawer({
                         Cancel
                       </Button>
                       <Button variant="danger" icon={<X size={14} />} loading={busy === 'reject'} onClick={() => decide('reject')}>
-                        {bundle ? `Reject all ${bundle.members.length} with reason` : 'Reject with reason'}
+                        {bundle
+                          ? `${held ? 'Veto' : 'Reject'} all ${bundle.members.length} with reason`
+                          : held
+                            ? 'Veto with reason'
+                            : 'Reject with reason'}
                       </Button>
                     </>
                   ) : (
                     <>
                       <Button variant="danger" icon={<X size={14} />} onClick={() => setRejecting(true)}>
-                        {bundle ? 'Reject all' : 'Reject'}
+                        {held ? (bundle ? 'Veto all' : 'Veto') : bundle ? 'Reject all' : 'Reject'}
                       </Button>
                       <Button variant="primary" icon={<Check size={14} />} loading={busy === 'approve'} onClick={() => decide('approve')}>
-                        {bundle ? `Approve all ${bundle.members.length} and publish` : 'Approve and publish'}
+                        {held
+                          ? bundle
+                            ? `Run all ${bundle.members.length} now`
+                            : 'Run now'
+                          : bundle
+                            ? `Approve all ${bundle.members.length} and publish`
+                            : 'Approve and publish'}
                       </Button>
                     </>
                   )}
@@ -252,6 +271,15 @@ export function ApprovalDrawer({
               </span>
             </div>
             {a.note && <p className="mt-2 text-[14px] leading-[22px] whitespace-pre-wrap text-fg">{a.note}</p>}
+            {held && a.holdUntil && (
+              <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md border border-warn/40 bg-warn-soft px-3 py-2">
+                <HoldBadge />
+                <span className="text-[13px] text-fg">{holdCountdownText(a.holdUntil, now)}</span>
+                <span className="text-[12px] text-muted">
+                  · runs {formatDateTime(a.holdUntil, { zone: true })}. Run it now, or veto it and say why.
+                </span>
+              </div>
+            )}
           </section>
           {bundle && (
             <section aria-label="Reviewed together" className="rounded-lg border border-line px-4 py-3">

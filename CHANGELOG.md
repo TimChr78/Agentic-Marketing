@@ -2,6 +2,29 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+[Phase 18](docs/architecture/roadmap-wave-4.md#phase-18-mandates-and-the-first-autonomy) of wave 4: mandates and the first autonomy. A person can now grant an agent bounded autonomy for a purpose and a period, and the platform enforces it: within its mandate an agent can publish and send by itself (level 3), or act after a veto window (level 2), and everything outside goes to a person. The default stays a person: nothing changes until an owner raises a workspace ceiling and publishes a mandate. Works for any agent that speaks MCP or the REST API ([docs/agents.md](docs/agents.md)).
+
+### Added
+
+- **Mandates (#223).** A new `agent_mandate` artifact: the agent, a purpose and goals, a scope (audiences, purposes, topics, channels, artifact types or ids, a reserved brand), a level per kind of action (0 observe, 1 propose, 2 act with veto, 3 act within limits; 4 arrives later), limits (recipients per send, growth over the previous send, sends, changes and messages per 24 hours), guardrails on the agent's own sends (unsubscribe, complaint and bounce rates), working hours and blackout dates, a hold window, escalation people, an independent check, and an end date (at most a year). Only people can create, change, publish or import a mandate; publishing checks the agent, the workspace ceilings and that it is the agent's only active mandate.
+- **Autonomy levels (#224).** With a mandate, the policy engine uses the lower of the mandate's level and the workspace ceiling, and lowers it further for anything outside the scope (to propose), the workspace threshold and limits (to propose), a mandate limit (one level down), a guardrail breach on the agent's recent sends (to propose), and sends outside working hours (to a hold). Settings, destructive changes, consent, purposes, delivery caps, tracking and mandates always need a person. At level 3 a publish runs without the approval policy. The ledger records the mandate version and the agent's intent (its review note).
+- **Holds (#225).** A level-2 publish answers `on_hold` with `runsAt`: it publishes when the veto window ends, after re-checking that the agent is active, the workspace lets agents act and the mandate still applies; otherwise it becomes an ordinary approval with the reason. The approvals inbox shows held changes with a countdown, Run now and Veto.
+- **The independent check (#231).** A mandate can ask a second model, through the workspace's AI providers and budget, whether an autonomous or held action matches the agent's intent and stays within the mandate; input from outside the workspace is treated as untrusted. A mismatch, a missing provider, an exhausted budget or an unreadable answer sends the action to a person. Logged as AI call kind `check`.
+- **Notifications (#226).** The sponsor and the mandate's escalation people get one e-mail per agent per run for held, escalated and refused actions, a daily digest per sponsor, and a notice three days before a mandate expires.
+- **Business context (#227).** A `business_context` artifact (what the business offers, to whom, the voice, claims to avoid, legal lines), readable as `workspace.businessContext` and the MCP resource `business-context://current`; the agent instructions tell agents to read it first.
+- **Admin UI (#228).** A structured mandate editor with the ceilings shown per level, the mandate on the agent page with its expiry, intents and mandate versions in the agent activity, and holds in the approvals inbox.
+- **Any agent runtime (#229).** [docs/agents.md](docs/agents.md): connecting any MCP client or REST client, the limits, mandates and levels, what an agent sees when held or refused, and mandate templates by role (newsletter agent, deliverability guardian, reporting agent, campaign drafter). The MCP skill explains working under a mandate.
+
+### Upgrading from 0.3.0
+
+- **Migrations:** Postgres `0047_mandates.sql` (the `hold` decision, mandate and intent in the ledger, hold deadlines on approvals), `0048_ai_call_kind_check.sql` (AI call kind `check`), `0049_agent_notifications.sql` (notification and digest state).
+- **Configuration:** none.
+- **Breaking changes:** none. Agents without a mandate behave as in 0.3.0. `artifacts.requestPublish` and `artifacts.requestPublishBundle` can now answer `status: on_hold` with `runsAt`, and `agents.activity` can show the decision `hold`; clients that switch on `status` should accept the new value.
+- **Manual steps:** none. To let an agent act on its own, raise the workspace ceiling for that kind of action (Settings → Agents) and publish a mandate for it (see the templates in docs/agents.md).
+- **Upgrade:** download `agentic-marketing-compose-<version>.tar.gz`, replace `docker-compose.yml` with its copy, check your configuration with the new image (`AM_VERSION=<version> docker compose run --rm --no-deps -T app am doctor --env-file - < .env`), then set `AM_VERSION=<version>` in `.env` and `docker compose pull && docker compose up -d` (Helm: the chart of the same version). Then `docker compose exec app am doctor`.
+
 ## [0.3.0] - 2026-10-30
 
 The start of [wave 4](docs/architecture/roadmap-wave-4.md), agentic marketing: [Phase 17](docs/architecture/roadmap-wave-4.md#phase-17-agent-controls), agent controls ([ADR-0016](docs/architecture/adr/0016-agent-autonomy-model.md)). Agents become principals a person can see, limit and stop, and every agent write passes one policy decision. No new autonomy yet: agents still propose as before, under the workspace approval policy, with new limits on top.

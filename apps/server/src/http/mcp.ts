@@ -1,3 +1,4 @@
+import { getBusinessContext } from '@agentic-marketing/artifacts';
 import { type Auth, principalFromAccessToken, principalFromApiToken } from '@agentic-marketing/auth';
 import { type CommandDef, type Executor, type Principal, ROLE_PERMISSIONS } from '@agentic-marketing/commands';
 import { AppError } from '@agentic-marketing/core';
@@ -7,7 +8,7 @@ import { type AuthInfo, createMcpHandler, McpServer, type StandardSchemaWithJSON
 import { z } from 'zod';
 import { commands } from '../registry';
 import { VERSION } from '../version';
-import { MCP_GUIDE_URI, MCP_INSTRUCTIONS } from './mcpInstructions';
+import { MCP_BUSINESS_CONTEXT_URI, MCP_GUIDE_URI, MCP_INSTRUCTIONS } from './mcpInstructions';
 
 // MCP surface (spec 2026-07-28, SDK v2): a stateless server per request for the authenticated
 // principal. Each command the principal may run becomes a tool; humans-only commands are not
@@ -98,6 +99,23 @@ export function mcpServerFor(
     },
     async (uri) => ({ contents: [{ uri: uri.href, text: MCP_INSTRUCTIONS, mimeType: 'text/markdown' }] }),
   );
+  // The published brief every agent starts from (#227). The command enforces artifacts:read, so
+  // only offer the resource to a principal that may read it.
+  if (principal.permissions.has('artifacts:read')) {
+    server.registerResource(
+      'business-context',
+      MCP_BUSINESS_CONTEXT_URI,
+      {
+        title: 'Business context',
+        description: 'The published brief: what the business offers and to whom, the voice, claims to avoid and legal lines.',
+        mimeType: 'application/json',
+      },
+      async (uri) => {
+        const out = await executor.execute(getBusinessContext, {}, principal, { surface: 'mcp' });
+        return { contents: [{ uri: uri.href, text: JSON.stringify(out), mimeType: 'application/json' }] };
+      },
+    );
+  }
   for (const cmd of commands) {
     if (cmd.humansOnly || !cmd.permission) continue;
     const toolName = mcpToolName(cmd.name, style);

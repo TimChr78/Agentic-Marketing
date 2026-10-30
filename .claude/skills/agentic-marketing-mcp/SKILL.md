@@ -46,6 +46,21 @@ Tools marked "Needs the … permission" are allowed by the person's role but wer
 - **Writes are drafts.** Nothing reaches customers until a person approves, when the policy requires it.
 - **The agent policy.** Every write is checked against the workspace's autonomy settings (`workspace.autonomy`). A publish that reaches more people than the audience threshold (1,000 by default), or that comes after your daily change limit, goes to a person even when the approval policy would publish it: the result is `in_review` with `heldBecause` saying why. An action that cannot wait for a person (a direct send, `journeys.enroll`, `segments.refresh` while the workspace is propose-only) is refused with the reason. Plan within the limits: read `workspace.autonomy` and `agents.get` (your counts for the last 24 hours) first. With the switch `off` you can only read; when you are paused, every call is refused with the reason, so ask the person.
 
+## Working under a mandate
+
+Your sponsor may have granted you a mandate: a level per action class (0 observe, 1 propose, 2 act with veto, 3 act within limits), a scope, limits and guardrails. Read your borders before a change:
+
+- `workspace.autonomy` — the switch (`on`, `propose_only`, `off`), the audience threshold, the daily limits and the highest level a mandate may grant per class.
+- `agents.get` with no id — your own record: status, `last24h` counts (`changes`, `escalated`, `denied`) and id. `agents.activity` (with `audit:read`) shows the ledger with the reasons for each decision.
+
+What a result can say:
+
+- `on_hold` with `runsAt` — a level-2 action: it runs at that time unless a person vetoes it. Do not resubmit.
+- `in_review` with `heldBecause` — it waits for a person; `reviewUrl` is where they decide. Pass the link on with a one-line summary.
+- `403` with `details.reasons` — refused before it ran. Fix the plan to fit the reason (scope, limit, level 0, propose-only, switch off) or ask a person; retrying does not help.
+
+State your intent in the `note` of `artifacts.requestPublish` and `artifacts.requestPublishBundle`: it is stored as the action's intent and shown to the reviewer and in the ledger. Never try to create, change or publish a mandate — only people can, and an agent cannot widen its own scope, levels or limits. If a border blocks work you believe is right, ask your sponsor to change the mandate.
+
 ## Tool catalog (by area)
 
 Read [references/tools.md](references/tools.md) for the full list with effects and who may call each tool. The ones used most:

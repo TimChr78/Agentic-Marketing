@@ -5,6 +5,7 @@ import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { diffJson } from './diff';
 import { noteWithPolicy, publishImpact } from './impact';
+import { holdWindowMs } from './mandates';
 import {
   ARTIFACT_TYPES,
   type ArtifactType,
@@ -274,6 +275,17 @@ export const listTypes = defineCommand({
   }),
 });
 
+/** Types only people may write, whatever an agent's scopes (agent mandates, ADR-0016). */
+function refuseAgentsFor(ctx: CommandContext, type: string) {
+  if (ctx.principal.type !== 'agent') return;
+  const def = artifactTypes[type as ArtifactType] as { peopleOnly?: boolean; label: string } | undefined;
+  if (def?.peopleOnly)
+    throw new AppError(
+      'forbidden',
+      `Only people can create, change or publish ${def.label.toLowerCase()}s; agents cannot set their own borders.`,
+    );
+}
+
 export const createArtifact = defineCommand({
   name: 'artifacts.create',
   title: 'Create artifact draft',
@@ -295,6 +307,7 @@ export const createArtifact = defineCommand({
   effect: 'write',
   actionClass: 'draft',
   handler: async (input, ctx) => {
+    refuseAgentsFor(ctx, input.type);
     const content = validateContent(input.type, input.content, 'draft');
     const warnings = contentWarnings(input.type, content);
     const id = newId(artifactTypes[input.type].prefix);
@@ -396,6 +409,7 @@ export const updateDraft = defineCommand({
   target: (i) => i.artifactId,
   handler: async (input, ctx) => {
     const a = await loadArtifact(ctx, input.artifactId);
+    refuseAgentsFor(ctx, a.type);
     const content = validateContent(a.type as ArtifactType, input.content, 'draft');
     const warnings = contentWarnings(a.type as ArtifactType, content);
     const latest = await loadVersion(ctx, a.id, a.latestVersion);
@@ -637,6 +651,7 @@ export const discardDraft = defineCommand({
   target: (i) => i.artifactId,
   handler: async (input, ctx) => {
     const a = await loadArtifact(ctx, input.artifactId);
+    refuseAgentsFor(ctx, a.type);
     if (!a.publishedVersion) throw new AppError('conflict', 'This artifact has no live version, so there is nothing to go back to.');
     const ws = ctx.principal.workspaceId;
     const versions = await ctx.tx
@@ -670,6 +685,12 @@ export const discardDraft = defineCommand({
   },
 });
 
+/** When a held agent change (level 2) runs unless vetoed, or null when it is not held. */
+function holdFor(ctx: CommandContext): Date | null {
+  if (ctx.policy?.decision !== 'hold') return null;
+  return new Date(Date.now() + holdWindowMs(ctx.policy.mandate?.holdWindow ?? 'PT2H'));
+}
+
 export const requestPublish = defineCommand({
   name: 'artifacts.requestPublish',
   title: 'Submit for review (or publish)',
@@ -677,8 +698,11 @@ export const requestPublish = defineCommand({
     "Submits the latest draft for review under the workspace approval policy; publishes directly only when the policy allows it (policy `none`, or `agent_changes` for a person's own edits). A person then approves or rejects it in the admin UI. Check the result with approvals.list or artifacts.get.",
   input: z.object({ artifactId: ArtifactId, note: z.string().min(1).max(1000).describe('What changed and why, for the reviewer') }),
   output: z.object({
-    status: z.enum(['published', 'in_review']),
+    status: z
+      .enum(['published', 'in_review', 'on_hold'])
+      .describe('on_hold: an agent change that runs at runsAt unless a person vetoes it'),
     version: z.number().int(),
+    runsAt: z.string().nullable().optional().describe('For on_hold: when it runs unless a person rejects it'),
     approvalId: z.string().nullable(),
     policy: z.string(),
     reviewUrl: z.string().nullable().describe('Admin UI page where a person approves this; null when it was published directly'),
@@ -701,6 +725,7 @@ export const requestPublish = defineCommand({
   target: (i) => i.artifactId,
   handler: async (input, ctx) => {
     const a = await loadArtifact(ctx, input.artifactId);
+    refuseAgentsFor(ctx, a.type);
     const v = await loadVersion(ctx, a.id, a.latestVersion);
     if (v.state !== 'draft')
       throw new AppError(
@@ -716,7 +741,11 @@ export const requestPublish = defineCommand({
       w.policy === 'all_publishes' ||
       (w.policy === 'agent_changes' && (ctx.principal.type === 'agent' || v.authorType === 'agent')) ||
       ctx.policy?.decision === 'ask';
-    if (!needsApproval) {
+    // A mandate decides for its agent (ADR-0016): level 3 publishes without the approval policy,
+    // level 2 waits for a veto window.
+    const hold = holdFor(ctx);
+    const autonomous = ctx.policy?.decision === 'allow' && ctx.policy.autonomous === true;
+    if (autonomous || (!needsApproval && !hold)) {
       await publishVersion(ctx, a.id, v.number);
       return {
         status: 'published' as const,
@@ -739,18 +768,22 @@ export const requestPublish = defineCommand({
       requestedById: ctx.principal.userId,
       requestedByClient: ctx.principal.clientId ?? null,
       note: noteWithPolicy(input.note, ctx),
+      holdUntil: hold,
     });
     const reviewUrl = approvalUrl(ctx.services.publicUrl, approvalId);
     return {
-      ...(ctx.policy?.decision === 'ask' ? { heldBecause: ctx.policy.reasons } : {}),
-      status: 'in_review' as const,
+      ...(ctx.policy?.decision === 'ask' || hold ? { heldBecause: ctx.policy?.reasons ?? [] } : {}),
+      status: hold ? ('on_hold' as const) : ('in_review' as const),
+      runsAt: hold?.toISOString() ?? null,
       version: v.number,
       approvalId,
       policy: w.policy,
       reviewUrl,
-      next: reviewUrl
-        ? `A person must approve this in the admin UI: ${reviewUrl}. Check the result with approvals.list or artifacts.get.`
-        : 'A person must approve this in the admin UI. Check the result with approvals.list or artifacts.get.',
+      next: hold
+        ? `Held: it publishes at ${hold.toISOString()} unless a person rejects it${reviewUrl ? ` (${reviewUrl})` : ''}. Check the result with artifacts.get.`
+        : reviewUrl
+          ? `A person must approve this in the admin UI: ${reviewUrl}. Check the result with approvals.list or artifacts.get.`
+          : 'A person must approve this in the admin UI. Check the result with approvals.list or artifacts.get.',
     };
   },
 });
@@ -765,8 +798,9 @@ export const requestPublishBundle = defineCommand({
     note: z.string().min(1).max(1000).describe('What changed and why, for the reviewer'),
   }),
   output: z.object({
-    status: z.enum(['published', 'in_review']),
+    status: z.enum(['published', 'in_review', 'on_hold']).describe('on_hold: agent changes that run at runsAt unless a person vetoes them'),
     bundleId: z.string().nullable(),
+    runsAt: z.string().nullable().optional().describe('For on_hold: when they run unless a person rejects them'),
     members: z
       .array(
         z.object({
@@ -806,6 +840,7 @@ export const requestPublishBundle = defineCommand({
     const members = [];
     for (const id of ids) {
       const a = await loadArtifact(ctx, id);
+      refuseAgentsFor(ctx, a.type);
       const v = await loadVersion(ctx, a.id, a.latestVersion);
       if (v.state !== 'draft')
         throw new AppError(
@@ -824,9 +859,11 @@ export const requestPublishBundle = defineCommand({
       w.policy === 'all_publishes' ||
       (w.policy === 'agent_changes' && (ctx.principal.type === 'agent' || ordered.some((m) => m.authorType === 'agent'))) ||
       ctx.policy?.decision === 'ask';
+    const hold = holdFor(ctx);
+    const autonomous = ctx.policy?.decision === 'allow' && ctx.policy.autonomous === true;
     const out = (approvalIds: (string | null)[]) =>
       ordered.map((m, i) => ({ artifactId: m.id, name: m.name, type: m.type, version: m.version, approvalId: approvalIds[i] }));
-    if (!needsApproval) {
+    if (autonomous || (!needsApproval && !hold)) {
       for (const m of ordered) await publishVersion(ctx, m.id, m.version);
       return {
         status: 'published' as const,
@@ -852,18 +889,22 @@ export const requestPublishBundle = defineCommand({
         requestedByClient: ctx.principal.clientId ?? null,
         note: noteWithPolicy(input.note, ctx),
         bundleId,
+        holdUntil: hold,
       });
     }
     // The last member is the one the others exist for (the broadcast, the form): open on it.
     const reviewUrl = approvalUrl(ctx.services.publicUrl, approvalIds.at(-1)!);
     return {
-      ...(ctx.policy?.decision === 'ask' ? { heldBecause: ctx.policy.reasons } : {}),
-      status: 'in_review' as const,
+      ...(ctx.policy?.decision === 'ask' || hold ? { heldBecause: ctx.policy?.reasons ?? [] } : {}),
+      status: hold ? ('on_hold' as const) : ('in_review' as const),
+      runsAt: hold?.toISOString() ?? null,
       bundleId,
       members: out(approvalIds),
       policy: w.policy,
       reviewUrl,
-      next: `A person reviews all ${ordered.length} together${reviewUrl ? ` in the admin UI: ${reviewUrl}` : ' in the admin UI'}; approving publishes them in this order. Check the result with approvals.list or artifacts.get.`,
+      next: hold
+        ? `Held: all ${ordered.length} publish together at ${hold.toISOString()} unless a person rejects them${reviewUrl ? ` (${reviewUrl})` : ''}. Check the result with artifacts.get.`
+        : `A person reviews all ${ordered.length} together${reviewUrl ? ` in the admin UI: ${reviewUrl}` : ' in the admin UI'}; approving publishes them in this order. Check the result with approvals.list or artifacts.get.`,
     };
   },
 });
@@ -889,6 +930,11 @@ const Approval = z.object({
   decidedBy: z.string().nullable(),
   decisionNote: z.string().nullable(),
   createdAt: z.string(),
+  holdUntil: z
+    .string()
+    .nullable()
+    .describe('When a held agent change runs unless a person vetoes it (null: an ordinary review); a person may run or veto it before'),
+
   artifactLatestVersion: z.number().int(),
   artifactPublishedVersion: z.number().int().nullable(),
   reviewUrl: z.string().nullable().describe('Admin UI page for this approval request'),
@@ -1037,6 +1083,7 @@ const approvalOut = (ctx: CommandContext, r: ApprovalRow, a: ArtifactRow, reques
   decidedBy: r.decidedBy,
   decisionNote: r.decisionNote,
   createdAt: r.createdAt.toISOString(),
+  holdUntil: r.holdUntil?.toISOString() ?? null,
   artifactLatestVersion: a.latestVersion,
   artifactPublishedVersion: a.publishedVersion,
   reviewUrl: approvalUrl(ctx.services.publicUrl, r.id),
@@ -1253,23 +1300,72 @@ export const approve = defineCommand({
  * agent act through a person while it is stopped. Rejecting stays possible.
  */
 async function refuseIfAgentStopped(ctx: CommandContext, r: { requestedByType: string; requestedByClient: string | null }) {
-  if (r.requestedByType !== 'agent' || !r.requestedByClient) return;
+  const agent = await requestingAgent(ctx, r);
+  if (agent && agent.status !== 'active')
+    throw new AppError(
+      'conflict',
+      `This change was requested by the agent “${agent.name}”, which is ${agent.status}. Resume the agent to approve it, or reject it.`,
+    );
+}
+
+/** The agent behind an approval request's credential, if an agent requested it. */
+async function requestingAgent(ctx: CommandContext, r: { requestedByType: string; requestedByClient: string | null }) {
+  if (r.requestedByType !== 'agent' || !r.requestedByClient) return null;
   const [kind, credentialId] = r.requestedByClient.startsWith('token:')
     ? (['api_token', r.requestedByClient.slice('token:'.length)] as const)
     : (['oauth_client', r.requestedByClient] as const);
   const [agent] = await ctx.tx
-    .select({ name: schema.agents.name, status: schema.agents.status })
+    .select({ id: schema.agents.id, name: schema.agents.name, status: schema.agents.status })
     .from(schema.agentCredentials)
     .innerJoin(
       schema.agents,
       and(eq(schema.agents.workspaceId, schema.agentCredentials.workspaceId), eq(schema.agents.id, schema.agentCredentials.agentId)),
     )
     .where(and(eq(schema.agentCredentials.kind, kind), eq(schema.agentCredentials.credentialId, credentialId)));
-  if (agent && agent.status !== 'active')
-    throw new AppError(
-      'conflict',
-      `This change was requested by the agent “${agent.name}”, which is ${agent.status}. Resume the agent to approve it, or reject it.`,
-    );
+  return agent ?? null;
+}
+
+/**
+ * Runs a held agent change whose veto window has ended (ADR-0016, #225). Re-checks at that moment
+ * that the agent is active, the workspace lets agents act and its mandate still applies; if not,
+ * the hold becomes an ordinary approval with the reason. Returns what happened.
+ */
+export async function runHeldChange(
+  ctx: CommandContext,
+  approvalId: string,
+  stillAllowed: (agentId: string) => Promise<string | null>,
+): Promise<{ status: 'published' | 'needs_person' | 'not_due'; reason?: string }> {
+  const r = await decide(ctx, approvalId);
+  if (!r.holdUntil || r.holdUntil > new Date()) return { status: 'not_due' };
+  const members = await bundleMembers(ctx, r);
+  const agent = await requestingAgent(ctx, r);
+  let problem: string | null = null;
+  if (!agent) problem = 'the agent that requested it is no longer known';
+  else if (agent.status !== 'active') problem = `the agent “${agent.name}” is ${agent.status}`;
+  else problem = await stillAllowed(agent.id);
+  const ids = members.map((m) => m.id);
+  const scope = and(eq(schema.approvalRequests.workspaceId, ctx.principal.workspaceId), inArray(schema.approvalRequests.id, ids));
+  if (problem) {
+    await ctx.tx
+      .update(schema.approvalRequests)
+      .set({
+        holdUntil: null,
+        note: sql`${schema.approvalRequests.note} || ${`\n\nNot run after its veto window: ${problem}. A person decides.`}`,
+      })
+      .where(scope);
+    return { status: 'needs_person', reason: problem };
+  }
+  for (const m of members) await publishVersion(ctx, m.artifactId, m.version);
+  await ctx.tx
+    .update(schema.approvalRequests)
+    .set({
+      status: 'approved',
+      decidedBy: 'policy:hold',
+      decidedAt: new Date(),
+      decisionNote: 'Ran after its veto window ended without a veto.',
+    })
+    .where(scope);
+  return { status: 'published' };
 }
 
 export const reject = defineCommand({
@@ -1321,10 +1417,9 @@ export const artifactCommands = [
 ] as const;
 
 /** Content of the published version of a workspace's singleton artifact (tracking plan, purposes), if any. */
-export async function publishedSingleton<T extends 'tracking_plan' | 'purposes' | 'delivery_policy' | 'conversion_map' | 'brand'>(
-  tx: CommandContext['tx'],
-  type: T,
-): Promise<z.output<(typeof artifactTypes)[T]['content']> | null> {
+export async function publishedSingleton<
+  T extends 'tracking_plan' | 'purposes' | 'delivery_policy' | 'conversion_map' | 'brand' | 'business_context',
+>(tx: CommandContext['tx'], type: T): Promise<z.output<(typeof artifactTypes)[T]['content']> | null> {
   const [row] = await tx
     .select({ content: schema.artifactVersions.content })
     .from(schema.artifacts)

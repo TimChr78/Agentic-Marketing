@@ -16,9 +16,10 @@ export const AGENT_STATUS: Record<AgentStatus, { label: string; tone: Tone }> = 
   revoked: { label: 'Revoked', tone: 'bad' },
 };
 
-/** The badge for one policy decision: allow ran, ask waited for a person, deny was refused. */
+/** The badge for one policy decision: allow ran, hold waited for a veto window, ask waited for a person, deny was refused. */
 export const DECISION: Record<AgentDecision, { label: string; tone: Tone }> = {
   allow: { label: 'Allowed', tone: 'good' },
+  hold: { label: 'Held for a veto', tone: 'warn' },
   ask: { label: 'Waited for a person', tone: 'warn' },
   deny: { label: 'Refused', tone: 'bad' },
 };
@@ -64,6 +65,22 @@ export const ACTION_CLASS_LABEL: Record<string, string> = {
 
 /** The classes shown in the ceilings table, in the order the design lists them. */
 export const CEILING_CLASSES = Object.keys(ACTION_CLASS_LABEL);
+
+/** The action classes a mandate sets a level for (reading is never granted; #223). */
+export const MANDATE_CLASSES = [
+  'draft',
+  'content.publish',
+  'audience.publish',
+  'send.broadcast',
+  'send.direct',
+  'journey.live',
+  'experience.live',
+  'spend',
+  'data.write',
+  'settings',
+  'destructive',
+] as const;
+export type MandateClass = (typeof MANDATE_CLASSES)[number];
 
 /** Level 0–4 in words (design §3.3). */
 export const AUTONOMY_LEVEL = ['Observe', 'Propose', 'Act with veto', 'Act within limits', 'Run the loop'] as const;
