@@ -14,6 +14,11 @@ updates:
     # The spikes are throwaway benchmarks, not part of CI or the image.
     exclude-paths:
       - spikes/**
+    ignore:
+      # mjml 5 renders asynchronously and changes the HTML; it needs its own change with a visual
+      # check (see SECURITY.md for the two mjml 4 advisories and why they are unreachable).
+      - dependency-name: mjml
+        update-types: [version-update:semver-major]
   - package-ecosystem: github-actions
     directory: /
     schedule:
