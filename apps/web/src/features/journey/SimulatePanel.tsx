@@ -78,6 +78,7 @@ export function SimulatePanel({
       <div className="space-y-2">
         <p className="text-[12px] font-medium text-fg-2">Events the person does</p>
         {events.map((e, i) => (
+          // biome-ignore lint/suspicious/noArrayIndexKey: simulated events are plain rows with no id and their position is their identity
           <div key={i} className="flex items-end gap-2">
             <Field label="Event" className="flex-1">
               <Input
@@ -190,6 +191,7 @@ export function SimulatePanel({
           )}
           <ol className="space-y-1 border-l-2 border-line pl-3 text-[13px]">
             {result.steps.map((s, i) => (
+              // biome-ignore lint/suspicious/noArrayIndexKey: the simulated path is an ordered sequence; a node can appear more than once
               <li key={i}>
                 <button type="button" className="text-left hover:underline" onClick={() => onSelect(s.node)}>
                   <span className="text-muted tabular-nums">{s.after === 'PT0S' ? 'At once' : durationText(s.after)}</span> ·{' '}

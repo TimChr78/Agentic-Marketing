@@ -114,8 +114,8 @@ export function Approvals() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-line">
-                  {open.changes.map((c, i) => (
-                    <tr key={i} className="align-top">
+                  {open.changes.map((c) => (
+                    <tr key={`${c.kind}-${c.path}`} className="align-top">
                       <td className="px-4 py-2">
                         <Pill tone={c.kind === 'added' ? 'good' : c.kind === 'removed' ? 'bad' : 'accent'}>{c.kind}</Pill>
                       </td>

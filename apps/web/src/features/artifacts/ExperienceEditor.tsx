@@ -186,8 +186,8 @@ export function ExperienceEditor({ content, onChange, readOnly, errors, warnings
       {warnings.length > 0 && (
         <Alert tone="warn" title="The schema still needs">
           <ul className="list-disc pl-4">
-            {warnings.map((w, i) => (
-              <li key={i}>{w.message}</li>
+            {warnings.map((w) => (
+              <li key={`${w.path}-${w.message}`}>{w.message}</li>
             ))}
           </ul>
         </Alert>

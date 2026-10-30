@@ -174,6 +174,7 @@ export function LoadingBlock({ lines = 4, label = 'Loading' }: { lines?: number;
   return (
     <div className="space-y-2.5 p-4" role="status" aria-label={label}>
       {Array.from({ length: lines }, (_, i) => (
+        // biome-ignore lint/suspicious/noArrayIndexKey: loading placeholders are generated, never reordered, and have no identity
         <Skeleton key={i} className={i % 3 === 2 ? 'w-2/5' : i % 2 ? 'w-4/5' : 'w-3/5'} />
       ))}
     </div>
@@ -295,6 +296,7 @@ export function Meta({ items, className }: { items: [ReactNode, ReactNode][]; cl
   return (
     <dl className={cx('grid grid-cols-[minmax(96px,max-content)_minmax(0,1fr)] gap-x-4 gap-y-1.5 text-[13px]', className)}>
       {items.map(([k, v], i) => (
+        // biome-ignore lint/suspicious/noArrayIndexKey: Meta items are a fixed label/value list; rows have no identity and never reorder
         <div key={i} className="contents">
           <dt className="text-muted">{k}</dt>
           <dd className="min-w-0 break-words text-fg">{v}</dd>

@@ -187,6 +187,7 @@ function GroupEditor({
 
       <ol className="space-y-2">
         {rows.map((row, i) => (
+          // biome-ignore lint/suspicious/noArrayIndexKey: condition rows are plain objects with no id and their position is their identity
           <li key={i}>
             <RowEditor
               condition={row}

@@ -332,8 +332,8 @@ export function ArtifactDetailPage({
       {warnings.length > 0 && !dirty && (
         <Alert tone="warn" title="Fill these in before publishing" className="mb-4">
           <ul className="list-disc pl-4">
-            {warnings.map((w, i) => (
-              <li key={i}>{w.message}</li>
+            {warnings.map((w) => (
+              <li key={`${w.path}-${w.message}`}>{w.message}</li>
             ))}
           </ul>
         </Alert>

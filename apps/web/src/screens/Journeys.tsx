@@ -441,6 +441,7 @@ function Builder({ journey, onBack }: { journey: Journey; onBack: () => void }) 
               </div>
               <ol className="space-y-2">
                 {sim.path.slice(0, sim.step + 1).map((p, i) => (
+                  // biome-ignore lint/suspicious/noArrayIndexKey: the simulated path is an ordered sequence of steps, indexed by position
                   <li key={i} className="flash-in rounded-md border border-line p-2.5">
                     <div className="flex items-center justify-between gap-2">
                       <span className="text-[13px] font-semibold">{p.label}</span>

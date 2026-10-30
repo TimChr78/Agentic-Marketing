@@ -74,7 +74,10 @@ export function BlockEditor({ content, onChange, readOnly, errors }: EditorProps
           <div className="space-y-3">
             {content.params.map((param, i) => (
               <div
-                key={i}
+                key={
+                  // biome-ignore lint/suspicious/noArrayIndexKey: block parameters are plain objects with no id and their position is their identity while editing
+                  i
+                }
                 className="grid items-end gap-2 rounded-md border border-line bg-surface-2 p-3 sm:grid-cols-[120px_minmax(0,1fr)_130px_120px_minmax(0,1fr)_auto]"
               >
                 <Field label="Key" hint="block.<key>" error={errors[`params.${i}.key`]}>

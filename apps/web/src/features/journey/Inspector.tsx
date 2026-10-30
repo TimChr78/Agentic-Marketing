@@ -307,6 +307,7 @@ export function Inspector({
       {node.kind === 'split' && (
         <FieldGroup legend="Weights" hint="One per path; people are split at random by these weights.">
           {((c.weights as number[]) ?? [50, 50]).map((w, i, all) => (
+            // biome-ignore lint/suspicious/noArrayIndexKey: split weights are positional path slots (A, B, ...) with no identity of their own
             <div key={i} className="flex items-end gap-2">
               <Field label={`Path ${String.fromCharCode(65 + i)}`} unit="%" className="flex-1">
                 <Input
@@ -467,7 +468,10 @@ export function Inspector({
             const disabled = readOnly || i > (node.next?.length ?? 0);
             return (
               <Field
-                key={i}
+                key={
+                  // biome-ignore lint/suspicious/noArrayIndexKey: outcome slots are positional (one per edge) and are labelled by index
+                  i
+                }
                 label={label ? `If ${label}` : 'Next step'}
                 hint={i > (node.next?.length ?? 0) ? `Connect “${edgeLabel(node, i - 1) ?? 'the previous outcome'}” first.` : undefined}
               >

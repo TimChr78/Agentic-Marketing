@@ -209,6 +209,7 @@ export default function AnalyticsPage() {
           </THead>
           <tbody>
             {(data?.rows ?? []).map((row, i) => (
+              // biome-ignore lint/suspicious/noArrayIndexKey: analytics rows are a read-only result set of positional cells with no id
               <Tr key={i}>
                 {columns.map((c, index) => (
                   <Td key={c.name} align={c.kind === 'measure' ? 'right' : undefined}>

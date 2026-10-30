@@ -129,10 +129,14 @@ export function Menu({
           >
             {items.map((it, i) =>
               it === 'separator' ? (
-                <div key={i} role="separator" className="my-1 h-px bg-line" />
+                // biome-ignore lint/suspicious/noArrayIndexKey: menu definitions are positional lists; separators have no identity
+                <hr key={i} className="my-1 h-px border-0 bg-line" />
               ) : (
                 <button
-                  key={i}
+                  key={
+                    // biome-ignore lint/suspicious/noArrayIndexKey: menu definitions are positional lists; items may repeat a label
+                    i
+                  }
                   type="button"
                   role="menuitem"
                   tabIndex={-1}
@@ -216,10 +220,14 @@ export function ContextMenu({
     >
       {items.map((it, i) =>
         it === 'separator' ? (
-          <div key={i} role="separator" className="my-1 h-px bg-line" />
+          // biome-ignore lint/suspicious/noArrayIndexKey: menu definitions are positional lists; separators have no identity
+          <hr key={i} className="my-1 h-px border-0 bg-line" />
         ) : (
           <button
-            key={i}
+            key={
+              // biome-ignore lint/suspicious/noArrayIndexKey: menu definitions are positional lists; items may repeat a label
+              i
+            }
             type="button"
             role="menuitem"
             tabIndex={-1}

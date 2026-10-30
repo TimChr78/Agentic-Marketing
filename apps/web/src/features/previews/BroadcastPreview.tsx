@@ -97,6 +97,7 @@ export function BroadcastPreview({
         >
           <div className="space-y-1.5 p-4">
             {content.subjectTest.subjects.map((subject, i) => (
+              // biome-ignore lint/suspicious/noArrayIndexKey: subject lines are plain strings with no id; position is their identity
               <div key={i} className="flex gap-2 text-[13px]">
                 <span className="w-4 shrink-0 text-muted">{String.fromCharCode(65 + i)}</span>
                 <span className="min-w-0 break-words text-fg-2">{subject || <span className="text-muted">(empty)</span>}</span>
@@ -109,8 +110,8 @@ export function BroadcastPreview({
         <div className="p-4">
           <Meta
             items={[
-              ['Template', <RefName id={content.template} />],
-              ['Segment', <RefName id={content.segment} />],
+              ['Template', <RefName key="template" id={content.template} />],
+              ['Segment', <RefName key="segment" id={content.segment} />],
               ['Time zone', `Shown in ${getWorkspaceTimeZone()}`],
             ]}
           />

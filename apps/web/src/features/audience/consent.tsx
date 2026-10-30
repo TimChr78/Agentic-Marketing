@@ -39,10 +39,10 @@ export function ConsentHistoryTable({ records }: { records: ConsentRecord[] }) {
         </tr>
       </THead>
       <tbody>
-        {records.map((r, i) => {
+        {records.map((r) => {
           const proof = proofText(r.proof);
           return (
-            <Tr key={`${r.recordedAt}-${r.purpose}-${r.channel}-${i}`}>
+            <Tr key={`${r.recordedAt}-${r.purpose}-${r.channel}-${r.status}`}>
               <Td className="font-medium text-fg">{label(r.purpose)}</Td>
               <Td className="hidden md:table-cell">{r.channel ? label(r.channel) : 'Any'}</Td>
               <Td>

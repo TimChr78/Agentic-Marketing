@@ -213,6 +213,7 @@ export function PromptEditor({ content, onChange, readOnly, errors }: EditorProp
         >
           <div className="space-y-2">
             {options.map((o, i) => (
+              // biome-ignore lint/suspicious/noArrayIndexKey: options are editable rows whose key field is being typed, so position is the only stable identity
               <div key={i} className="grid gap-2 sm:grid-cols-[minmax(140px,200px)_minmax(0,1fr)_auto] sm:items-start">
                 <Field
                   label="Key"
@@ -269,6 +270,7 @@ export function PromptEditor({ content, onChange, readOnly, errors }: EditorProp
             <p className="text-[12px] text-muted">At least one slot is needed.</p>
             <div className="space-y-3">
               {slots.map((s, i) => (
+                // biome-ignore lint/suspicious/noArrayIndexKey: slots are editable rows whose name field is being typed, so position is the only stable identity
                 <div key={i} className="space-y-2 rounded-md border border-line p-3">
                   <div className="grid gap-2 sm:grid-cols-[minmax(140px,200px)_minmax(0,1fr)_minmax(120px,150px)_auto] sm:items-start">
                     <Field label="Name" error={errors[`slots.${i}.name`]}>

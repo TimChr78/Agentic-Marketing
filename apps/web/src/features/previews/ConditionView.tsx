@@ -42,6 +42,7 @@ export function ConditionView({ condition, depth = 0 }: { condition: unknown; de
         <p className="text-[12px] font-medium text-muted">{word}</p>
         <ul className="mt-1.5 space-y-1.5 border-l-2 border-line pl-3">
           {list.map((x, i) => (
+            // biome-ignore lint/suspicious/noArrayIndexKey: previewed conditions are plain nested objects with no id; position is their identity
             <li key={i}>
               <ConditionView condition={x} depth={depth + 1} />
             </li>

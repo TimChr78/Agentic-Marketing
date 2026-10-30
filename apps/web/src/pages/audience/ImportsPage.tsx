@@ -176,6 +176,7 @@ export default function ImportsPage() {
                     <Select value={mapping[key]} onChange={(e) => setMapping({ ...mapping, [key]: Number(e.target.value) })}>
                       <option value={-1}>(not in the file)</option>
                       {rows[0].map((h, i) => (
+                        // biome-ignore lint/suspicious/noArrayIndexKey: CSV headers can repeat and are identified by their column position
                         <option key={`${h}-${i}`} value={i}>
                           {h || `Column ${i + 1}`}
                         </option>
