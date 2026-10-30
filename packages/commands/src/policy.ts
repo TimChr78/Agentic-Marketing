@@ -219,10 +219,11 @@ function scopeViolations(impact: Impact, scope: MandateView['scope']): string[] 
   outside('Purpose', t.purposes, scope.purposes, true);
   outside('Topic', t.topics, scope.topics, true);
   outside('Channel', t.channels, scope.channels, false);
+  // Both lists restrict when set: a matching type does not excuse an id outside the list (#232).
   for (const a of t.artifacts ?? []) {
     if (scope.artifactTypes.length && !scope.artifactTypes.includes(a.type))
       out.push(`Changing a ${a.type} is outside this agent’s mandate.`);
-    else if (scope.artifacts.length && !scope.artifacts.includes(a.id)) out.push(`${a.id} is outside this agent’s mandate.`);
+    if (scope.artifacts.length && !scope.artifacts.includes(a.id)) out.push(`${a.id} is outside this agent’s mandate.`);
   }
   return out;
 }
@@ -244,6 +245,8 @@ function decideWithMandate(
     if (level > max) level = max;
     reasons.push(reason);
   };
+  // A mandate limit lowers the level by one, but never below propose: at level 1 the action already
+  // waits for a person, who sees the reason. Observe (0) is only ever granted, not reached (#246).
   const dropOne = (reason: string) => {
     level = Math.max(Math.min(level, 1), level - 1);
     reasons.push(reason);

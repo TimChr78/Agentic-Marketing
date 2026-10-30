@@ -1,4 +1,4 @@
-import { defineCommand } from '@agentic-marketing/commands';
+import { agentPolicy, defineCommand, PolicyDeniedError, recordAgentAction } from '@agentic-marketing/commands';
 import { AppError, hashValue } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
 import { and, eq, inArray } from 'drizzle-orm';
@@ -127,7 +127,14 @@ export const importConfig = defineCommand({
     const changes: z.infer<typeof Change>[] = [];
     const toPublish: { id: string; type: ArtifactType; change: z.infer<typeof Change> }[] = [];
     for (const item of input.bundle.artifacts) {
-      if (ctx.principal.type === 'agent' && 'peopleOnly' in artifactTypes[item.type])
+      // An unknown type (a typo, a bundle from a newer release) is invalid input, not a crash (#247).
+      const def = artifactTypes[item.type as ArtifactType] as { peopleOnly?: boolean } | undefined;
+      if (!def)
+        throw new AppError(
+          'invalid_input',
+          `${item.id} has the type "${item.type}", which this server does not know. Call artifacts.types for the list.`,
+        );
+      if (ctx.principal.type === 'agent' && def.peopleOnly)
         throw new AppError('forbidden', `${item.id} is a ${item.type}: only people can import it.`);
       const content = validateContent(item.type, item.content, 'draft');
       // A workspace has one of each singleton type, whatever its id.
@@ -154,19 +161,43 @@ export const importConfig = defineCommand({
       } else await updateDraft.handler({ artifactId: id, content, name: item.name, note: input.note }, ctx);
       if (input.publish) toPublish.push({ id, type: item.type, change });
     }
+    // An agent's publishes are decided one by one, exactly as artifacts.requestPublish would decide
+    // them (its class, its reach, the threshold, the mandate), and each is recorded in the ledger
+    // (#239). The import's own decision (class settings) only covers creating the drafts.
+    const publishOne = async (artifactId: string) => {
+      const agent = ctx.principal.agent;
+      if (!agent) return requestPublish.handler({ artifactId, note: input.note }, ctx);
+      const request = { artifactId, note: input.note };
+      const impact = await requestPublish.impact!(request, ctx);
+      const policy = await agentPolicy(ctx.tx, ctx.services, ctx.principal, {
+        command: requestPublish.name,
+        actionClass: impact.actionClass ?? 'content.publish',
+        impact,
+        approvable: true,
+        input: request,
+      });
+      if (policy.decision === 'deny') {
+        await recordAgentAction(ctx.tx, agent.id, requestPublish, policy, 'internal', artifactId, policy.reasons.join(' '), input.note);
+        throw new PolicyDeniedError(policy);
+      }
+      const out = await requestPublish.handler(request, { ...ctx, policy });
+      await recordAgentAction(ctx.tx, agent.id, requestPublish, policy, 'internal', artifactId, null, input.note);
+      return out;
+    };
     // Publish in dependency order; what fails for want of another artifact is retried in a later pass.
     let pending = toPublish.sort((x, y) => ORDER.indexOf(x.type) - ORDER.indexOf(y.type));
     for (let pass = 0; pending.length && pass < 5; pass++) {
       const failed: typeof pending = [];
       for (const p of pending)
         try {
-          p.change.publish = (await requestPublish.handler({ artifactId: p.id, note: input.note }, ctx)).status;
+          p.change.publish = (await publishOne(p.id)).status;
           p.change.problem = undefined;
         } catch (err) {
           if (!(err instanceof AppError)) throw err;
           p.change.publish = 'failed';
           p.change.problem = err.message;
-          failed.push(p);
+          // A refusal by the agent policy is final; other failures may need another artifact first.
+          if (!(err instanceof PolicyDeniedError)) failed.push(p);
         }
       if (failed.length === pending.length) break;
       pending = failed;

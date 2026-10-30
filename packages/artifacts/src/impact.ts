@@ -65,6 +65,8 @@ export async function publishImpact(
 
 /** The approval note, with why the policy engine sent the change to a person. */
 export function noteWithPolicy(note: string, ctx: Pick<CommandContext, 'policy'>): string {
-  if (ctx.policy?.decision !== 'ask') return note;
-  return `${note}\n\nNeeds a person: ${ctx.policy.reasons.join(' ')}`.slice(0, 2000);
+  if (ctx.policy?.decision === 'ask') return `${note}\n\nNeeds a person: ${ctx.policy.reasons.join(' ')}`.slice(0, 2000);
+  if (ctx.policy?.decision === 'hold')
+    return `${note}\n\nHeld for a veto window by the agent's mandate: ${ctx.policy.reasons.join(' ')}`.slice(0, 2000);
+  return note;
 }

@@ -168,3 +168,50 @@ describe('the policy engine with a mandate (#224)', () => {
     expect(out.decision).toBe('deny');
   });
 });
+
+describe('audit fixes (#232, #246)', () => {
+  const view = (over: Partial<MandateView> = {}): MandateView => ({
+    id: 'mnd_1',
+    version: 1,
+    levels: { 'content.publish': 3 },
+    scope: { segments: [], purposes: [], topics: [], channels: ['email'], artifactTypes: ['broadcast'], artifacts: ['bct_allowed'] },
+    limits: {},
+    holdWindow: 'PT2H',
+    independentCheck: false,
+    guardrails: { window: 'P7D', minSent: 100 },
+    purpose: 'x',
+    ...over,
+  });
+  const settings = autonomySettings({ maxLevel: { 'content.publish': 3, 'send.broadcast': 3 } });
+  const publish = (artifacts: { id: string; type: string }[], over: Partial<MandateView> = {}) =>
+    decide(base({ settings, mandate: view(over), impact: { touches: { artifacts } } }));
+
+  it('enforces the artifact id list even when the type is allowed (#232)', () => {
+    expect(publish([{ id: 'bct_other', type: 'broadcast' }]).decision).toBe('ask');
+    expect(publish([{ id: 'bct_allowed', type: 'broadcast' }]).decision).toBe('allow');
+    expect(publish([{ id: 'bct_allowed', type: 'journey' }]).decision).toBe('ask');
+    // Each list alone restricts only its own dimension.
+    expect(publish([{ id: 'bct_any', type: 'broadcast' }], { scope: { ...view().scope, artifacts: [] } }).decision).toBe('allow');
+    expect(publish([{ id: 'bct_allowed', type: 'journey' }], { scope: { ...view().scope, artifactTypes: [] } }).decision).toBe('allow');
+  });
+
+  it('a mandate limit lowers 3 to a hold and 2 to propose, and never below propose (#246)', () => {
+    const at = (level: number) =>
+      decide(
+        base({
+          actionClass: 'send.broadcast',
+          settings,
+          mandate: view({
+            levels: { 'send.broadcast': level },
+            limits: { recipientsPerSend: 10 },
+            scope: { ...view().scope, artifactTypes: [], artifacts: [] },
+          }),
+          impact: { people: 50, touches: { channels: ['email'] } },
+        }),
+      );
+    expect(at(3)).toMatchObject({ decision: 'hold', level: 2 });
+    expect(at(2)).toMatchObject({ decision: 'ask', level: 1 });
+    expect(at(1)).toMatchObject({ decision: 'ask', level: 1 });
+    expect(at(1).reasons.join(' ')).toContain('the mandate allows 10 per send');
+  });
+});

@@ -279,33 +279,14 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
               policy = undefined;
               // ADR-0016: every agent write passes the policy engine before the handler runs.
               if (agent && cmd.effect !== 'read') {
-                const base = { principal, tx, services };
-                const impact = cmd.impact ? await cmd.impact(parsed.data, base) : {};
-                const [ws] = await tx.select({ autonomy: schema.workspaces.autonomy }).from(schema.workspaces);
-                const actionClass = impact.actionClass ?? actionClassOf(cmd);
-                const mandate = actionClass === 'read' ? null : ((await services.activeMandate?.(tx, agent.id)) ?? null);
-                const guardrailBreach =
-                  mandate && REACH_CLASSES.includes(actionClass) && services.mandateGuardrails
-                    ? await services.mandateGuardrails(tx, principal.workspaceId, agent.id, mandate.view)
-                    : null;
-                policy = decide({
+                const impact = cmd.impact ? await cmd.impact(parsed.data, { principal, tx, services }) : {};
+                policy = await agentPolicy(tx, services, principal, {
                   command: cmd.name,
-                  actionClass,
+                  actionClass: impact.actionClass ?? actionClassOf(cmd),
                   impact,
-                  settings: autonomySettings(ws?.autonomy),
-                  counters: await agentCounters(tx, agent.id),
                   approvable: cmd.approvable === true,
-                  ...(mandate ? { mandate: mandate.view, outsideHours: mandate.outsideHours, guardrailBreach } : {}),
+                  input: parsed.data,
                 });
-                if (mandate && policy.mandate?.independentCheck && (policy.decision === 'allow' || policy.decision === 'hold'))
-                  policy = await withIndependentCheck(tx, services, policy, {
-                    principal,
-                    command: cmd.name,
-                    input: parsed.data,
-                    intent: intentOf(parsed.data),
-                    mandate: mandate.view,
-                    approvable: cmd.approvable === true,
-                  });
                 if (policy.decision === 'deny') throw new PolicyDeniedError(policy);
               }
               if (opts.idempotencyKey) {
@@ -382,11 +363,56 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
 
 export type Executor = ReturnType<typeof createExecutor>;
 
+/**
+ * The policy decision for one agent write (ADR-0016): the workspace settings, the agent's active
+ * mandate, its guardrails and counters, then the independent check. Used by the executor for
+ * every command and by commands that publish on an agent's behalf (config.import, #239).
+ *
+ * Holds a per-agent transaction lock first, so two concurrent requests from the same agent
+ * cannot both read counters below a limit and both run (#240): the second waits until the
+ * first has committed its ledger row.
+ */
+export async function agentPolicy(
+  tx: Tx,
+  services: Services,
+  principal: Principal,
+  req: { command: string; actionClass: ActionClass; impact: Impact; approvable: boolean; input: unknown },
+): Promise<PolicyOutcome> {
+  const agent = principal.agent;
+  if (!agent) throw new Error('agentPolicy needs an agent principal');
+  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`agent-policy:${principal.workspaceId}:${agent.id}`}, 0))`);
+  const [ws] = await tx.select({ autonomy: schema.workspaces.autonomy }).from(schema.workspaces);
+  const mandate = req.actionClass === 'read' ? null : ((await services.activeMandate?.(tx, agent.id)) ?? null);
+  const guardrailBreach =
+    mandate && REACH_CLASSES.includes(req.actionClass) && services.mandateGuardrails
+      ? await services.mandateGuardrails(tx, principal.workspaceId, agent.id, mandate.view)
+      : null;
+  let policy = decide({
+    command: req.command,
+    actionClass: req.actionClass,
+    impact: req.impact,
+    settings: autonomySettings(ws?.autonomy),
+    counters: await agentCounters(tx, agent.id),
+    approvable: req.approvable,
+    ...(mandate ? { mandate: mandate.view, outsideHours: mandate.outsideHours, guardrailBreach } : {}),
+  });
+  if (mandate && policy.mandate?.independentCheck && (policy.decision === 'allow' || policy.decision === 'hold'))
+    policy = await withIndependentCheck(tx, services, policy, {
+      principal,
+      command: req.command,
+      input: req.input,
+      intent: intentOf(req.input),
+      mandate: mandate.view,
+      approvable: req.approvable,
+    });
+  return policy;
+}
+
 /** One agent write in the ledger (#218), with the decision that allowed, escalated or refused it. */
-async function recordAgentAction(
+export async function recordAgentAction(
   tx: Tx,
   agentId: string,
-  cmd: AnyCommand,
+  cmd: Pick<AnyCommand, 'name'>,
   policy: PolicyOutcome,
   surface: Surface,
   target: string | undefined,

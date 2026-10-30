@@ -111,7 +111,12 @@ const Agent = z.object({
   statusChangedAt: z.string().nullable(),
   brand: z.string().nullable().describe('Reserved for multi-brand: null means the whole workspace'),
   credentials: z.array(Credential),
-  last24h: z.object({ changes: z.number().int(), denied: z.number().int(), escalated: z.number().int() }),
+  last24h: z.object({
+    changes: z.number().int(),
+    denied: z.number().int(),
+    escalated: z.number().int().describe('Sent to a person (ask)'),
+    held: z.number().int().describe('Held for a veto window (level 2)'),
+  }),
   createdAt: z.string(),
 });
 type Agent = z.infer<typeof Agent>;
@@ -132,6 +137,7 @@ async function loadAgents(ctx: CommandContext, ids?: string[]): Promise<Agent[]>
       changes: sql<number>`count(*) FILTER (WHERE ${schema.agentActions.decision} = 'allow' AND ${schema.agentActions.ok} AND ${schema.agentActions.actionClass} <> 'draft')::int`,
       denied: sql<number>`count(*) FILTER (WHERE ${schema.agentActions.decision} = 'deny')::int`,
       escalated: sql<number>`count(*) FILTER (WHERE ${schema.agentActions.decision} = 'ask')::int`,
+      held: sql<number>`count(*) FILTER (WHERE ${schema.agentActions.decision} = 'hold')::int`,
     })
     .from(schema.agentActions)
     .where(and(inArray(schema.agentActions.agentId, agentIds), sql`${schema.agentActions.at} > now() - interval '24 hours'`))
@@ -152,7 +158,7 @@ async function loadAgents(ctx: CommandContext, ids?: string[]): Promise<Agent[]>
       credentials: creds
         .filter((x) => x.agentId === r.id)
         .map((x) => ({ kind: x.kind, id: x.credentialId, since: x.createdAt.toISOString() })),
-      last24h: { changes: c?.changes ?? 0, denied: c?.denied ?? 0, escalated: c?.escalated ?? 0 },
+      last24h: { changes: c?.changes ?? 0, denied: c?.denied ?? 0, escalated: c?.escalated ?? 0, held: c?.held ?? 0 },
       createdAt: r.createdAt.toISOString(),
     };
   });
