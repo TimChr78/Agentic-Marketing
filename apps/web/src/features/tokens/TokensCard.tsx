@@ -249,7 +249,10 @@ function CreateTokenDrawer({
             value={name}
             data-autofocus
             maxLength={120}
-            onChange={(e) => (setName(e.target.value), setNameError(null))}
+            onChange={(e) => {
+              setName(e.target.value);
+              setNameError(null);
+            }}
             onBlur={() => !name.trim() && setNameError('Name it after what uses it, e.g. “Hermes”.')}
           />
         </Field>

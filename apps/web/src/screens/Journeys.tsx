@@ -220,8 +220,7 @@ function Builder({ journey, onBack }: { journey: Journey; onBack: () => void }) 
         selected: n.id === selected,
         measured: measured[n.id],
       })),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [graph.nodes, showStats, sim, selected, measured],
+    [graph.nodes, showStats, sim, selected, measured, simIndex],
   );
   const rfEdges: Edge[] = useMemo(
     () =>
@@ -238,8 +237,7 @@ function Builder({ journey, onBack }: { journey: Journey; onBack: () => void }) 
           style: hot ? { stroke: 'var(--accent)', strokeWidth: 2 } : undefined,
         };
       }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [graph.edges, sim],
+    [graph.edges, sim, simIndex],
   );
 
   const onNodesChange = useCallback(
@@ -305,7 +303,9 @@ function Builder({ journey, onBack }: { journey: Journey; onBack: () => void }) 
       },
     );
     setSim({ ...res, step: 0 });
-    res.path.forEach((_, i) => setTimeout(() => setSim((s) => (s ? { ...s, step: i } : s)), i * 850));
+    res.path.forEach((_, i) => {
+      setTimeout(() => setSim((s) => (s ? { ...s, step: i } : s)), i * 850);
+    });
   }
 
   async function publish() {

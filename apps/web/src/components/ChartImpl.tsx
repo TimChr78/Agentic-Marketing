@@ -41,7 +41,6 @@ export default function ChartImpl({ option, height = 240, deps = [] }: ChartProp
       ro.disconnect();
       chart.dispose();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [theme, ...deps]);
   return <div ref={el} style={{ height, width: '100%' }} />;
 }

@@ -99,7 +99,10 @@ export default function AssetsPage() {
                 multiple
                 hidden
                 accept={ACCEPT}
-                onChange={(e) => (void upload([...(e.target.files ?? [])]), (e.target.value = ''))}
+                onChange={(e) => {
+                  void upload([...(e.target.files ?? [])]);
+                  e.target.value = '';
+                }}
               />
               <Button variant="primary" icon={<Upload size={15} />} onClick={() => input.current?.click()} loading={uploading.length > 0}>
                 Upload

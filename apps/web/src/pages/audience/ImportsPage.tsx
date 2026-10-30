@@ -69,7 +69,10 @@ export default function ImportsPage() {
   );
   const preview = payload.slice(0, 5);
   const skipped = prepared?.skipped ?? [];
-  const skippedByReason = skipped.reduce<Record<string, number>>((acc, s) => ({ ...acc, [s.reason]: (acc[s.reason] ?? 0) + 1 }), {});
+  const skippedByReason = skipped.reduce<Record<string, number>>((acc, s) => {
+    acc[s.reason] = (acc[s.reason] ?? 0) + 1;
+    return acc;
+  }, {});
 
   const readFile = async (file: File | undefined) => {
     if (!file) return;

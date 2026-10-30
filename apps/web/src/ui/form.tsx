@@ -282,7 +282,9 @@ export function fieldErrors(details: unknown, prefix = ''): Record<string, strin
     const n = node as { errors?: string[]; properties?: Record<string, unknown>; items?: unknown[] };
     if (n.errors?.length && path) out[path] = n.errors.join(' ');
     for (const [k, v] of Object.entries(n.properties ?? {})) walk(v, path ? `${path}.${k}` : k);
-    (n.items ?? []).forEach((v, i) => walk(v, path ? `${path}.${i}` : String(i)));
+    (n.items ?? []).forEach((v, i) => {
+      walk(v, path ? `${path}.${i}` : String(i));
+    });
   };
   walk(details, prefix);
   return out;

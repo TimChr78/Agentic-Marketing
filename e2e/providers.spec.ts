@@ -43,5 +43,5 @@ test('add, edit, disable and delete an e-mail provider (#40)', async ({ page }) 
   await confirm.getByRole('button', { name: 'Delete provider' }).click();
   await expect(page.getByText('Deleted “Postmark (newsletter)”.')).toBeVisible();
   const list = await call(page.request, 'emailProviders.list', {});
-  expect(list.providers.map((p: any) => p.name)).not.toContain('Postmark (newsletter)');
+  expect((list as { providers: { name: string }[] }).providers.map((p) => p.name)).not.toContain('Postmark (newsletter)');
 });

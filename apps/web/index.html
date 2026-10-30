@@ -9,12 +9,17 @@
       // Theme before first paint (docs/design/DESIGN.md → Themes): the signed-in person's choice on this
       // device, else the last choice made here, else the OS preference. Kept in sync by src/app/theme.ts.
       (() => {
+        var u;
+        var pref;
+        var dark;
         try {
-          var u = localStorage.getItem('am.theme.user');
-          var pref = (u && localStorage.getItem('am.theme.' + u)) || localStorage.getItem('am.theme') || 'system';
-          var dark = pref === 'dark' || (pref === 'system' && matchMedia('(prefers-color-scheme: dark)').matches);
+          u = localStorage.getItem('am.theme.user');
+          pref = (u && localStorage.getItem(`am.theme.${u}`)) || localStorage.getItem('am.theme') || 'system';
+          dark = pref === 'dark' || (pref === 'system' && matchMedia('(prefers-color-scheme: dark)').matches);
           document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
-        } catch (e) {}
+        } catch {
+          // Storage can be unavailable (private mode, blocked cookies); fall back to the default theme.
+        }
       })();
     </script>
   </head>

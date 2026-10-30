@@ -99,7 +99,7 @@ function ProfileDetail({ profile: p, onBack }: { profile: Profile; onBack: () =>
   const mine = events.filter((e) => e.profileId === p.id || p.anonymousIds.includes(e.anonymousId)).slice(0, 12);
 
   async function canEmail() {
-    setExplain(await exec('consent.explain', { profileId: p.id, purpose: 'marketing_email' }));
+    setExplain(await exec<Record<string, string>>('consent.explain', { profileId: p.id, purpose: 'marketing_email' }));
   }
   function erase() {
     useStore.setState((s) => ({ profiles: s.profiles.filter((x) => x.id !== p.id) }));

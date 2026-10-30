@@ -5,7 +5,10 @@ import { edgesOf, type JNode, KINDS, maxEdges } from './model';
 
 export function localWarnings(nodes: JNode[]): Record<string, string[]> {
   const out: Record<string, string[]> = {};
-  const add = (id: string, m: string) => (out[id] ??= []).push(m);
+  const add = (id: string, m: string) => {
+    out[id] ??= [];
+    out[id].push(m);
+  };
   const edges = edgesOf(nodes);
   const ids = new Set(nodes.map((n) => n.id));
   const trigger = nodes.find((n) => n.kind === 'trigger');
@@ -72,6 +75,11 @@ export function localWarnings(nodes: JNode[]): Record<string, string[]> {
 
 export function mergeWarnings(a: Record<string, string[]>, server: { nodeId: string | null; message: string }[]) {
   const out: Record<string, string[]> = Object.fromEntries(Object.entries(a).map(([k, v]) => [k, [...v]]));
-  for (const w of server) if (w.nodeId && !out[w.nodeId]?.some((m) => m === w.message)) (out[w.nodeId] ??= []).push(w.message);
+  for (const w of server) {
+    if (w.nodeId && !out[w.nodeId]?.some((m) => m === w.message)) {
+      out[w.nodeId] ??= [];
+      out[w.nodeId].push(w.message);
+    }
+  }
   return out;
 }

@@ -494,7 +494,7 @@ function PublishDialog({
     >
       <p className="mb-3">
         {direct
-          ? 'Version ' + artifact.version.number + ' goes live at once under your workspace approval policy.'
+          ? `Version ${artifact.version.number} goes live at once under your workspace approval policy.`
           : 'A person with approval rights reviews version ' +
             artifact.version.number +
             ' and approves or rejects it. Nothing changes for recipients until then.'}

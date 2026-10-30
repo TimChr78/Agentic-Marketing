@@ -72,7 +72,6 @@ export function Menu({
       document.removeEventListener('mousedown', onDoc);
       window.removeEventListener('resize', onScroll);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
   const onListKey = (e: React.KeyboardEvent) => {

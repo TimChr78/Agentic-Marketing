@@ -273,7 +273,14 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
   };
 
   const nodeMenu = (n: JNode): (MenuItem | 'separator')[] => [
-    { label: 'Edit settings', icon: <Settings2 />, onSelect: () => (setSel({ kind: 'node', id: n.id }), setPanel('inspect')) },
+    {
+      label: 'Edit settings',
+      icon: <Settings2 />,
+      onSelect: () => {
+        setSel({ kind: 'node', id: n.id });
+        setPanel('inspect');
+      },
+    },
     ...(readOnly
       ? []
       : ([
@@ -290,7 +297,10 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
             icon: <Trash2 />,
             hint: 'Del',
             destructive: true,
-            onSelect: () => (commit(deleteNode(nodes, n.id)), setSel(null)),
+            onSelect: () => {
+              commit(deleteNode(nodes, n.id));
+              setSel(null);
+            },
           },
         ] as (MenuItem | 'separator')[])),
   ];
@@ -331,7 +341,10 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
               icon: <Trash2 />,
               hint: 'Del',
               destructive: true,
-              onSelect: () => (commit(disconnect(nodes, source!, Number(index))), setSel(null)),
+              onSelect: () => {
+                commit(disconnect(nodes, source!, Number(index)));
+                setSel(null);
+              },
             },
           ],
         });
@@ -560,7 +573,10 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
                         icon: <Trash2 />,
                         hint: 'Del',
                         destructive: true,
-                        onSelect: () => (commit(disconnect(nodes, source!, Number(index))), setSel(null)),
+                        onSelect: () => {
+                          commit(disconnect(nodes, source!, Number(index)));
+                          setSel(null);
+                        },
                       },
                     ],
                   });
@@ -615,7 +631,10 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
                   onConnect={(i, target) =>
                     commit(target ? connect(nodes, selectedNode.id, i, target) : disconnect(nodes, selectedNode.id, i))
                   }
-                  onDelete={() => (commit(deleteNode(nodes, selectedNode.id)), setSel(null))}
+                  onDelete={() => {
+                    commit(deleteNode(nodes, selectedNode.id));
+                    setSel(null);
+                  }}
                   onDuplicate={() => commit(duplicateNode(nodes, selectedNode.id))}
                 />
               ) : (
@@ -625,9 +644,11 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
               <CheckList
                 nodes={nodes}
                 warnings={warnings}
-                onSelect={(id) => (
-                  setSel({ kind: 'node', id }), setPanel('inspect'), rf.fitView({ nodes: [{ id }], duration: 250, maxZoom: 1.2 })
-                )}
+                onSelect={(id) => {
+                  setSel({ kind: 'node', id });
+                  setPanel('inspect');
+                  rf.fitView({ nodes: [{ id }], duration: 250, maxZoom: 1.2 });
+                }}
               />
             )}
             {panel === 'simulate' && (
