@@ -179,6 +179,7 @@ export function ArtifactDetailPage({
 
   // Autosave: a moment after the last change; retried on the next change after an error, but never
   // over someone else's newer version (412), where the person decides.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: save is recreated from draft, which is already a dependency; an artifact refetch must not restart the timer
   useEffect(() => {
     if (!autosave || !dirty || readOnly || saving || conflict) return;
     const snapshot = JSON.stringify(draft);
@@ -187,7 +188,7 @@ export function ArtifactDetailPage({
       if (!(await save({ quiet: true }))) failedDraft.current = snapshot;
     }, 1200);
     return () => clearTimeout(t);
-  }, [autosave, dirty, readOnly, saving, conflict, draft, save]);
+  }, [autosave, dirty, readOnly, saving, conflict, draft]);
 
   // Ctrl/Cmd+S saves.
   useEffect(() => {
