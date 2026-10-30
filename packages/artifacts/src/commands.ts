@@ -1411,10 +1411,9 @@ export const artifactCommands = [
 ] as const;
 
 /** Content of the published version of a workspace's singleton artifact (tracking plan, purposes), if any. */
-export async function publishedSingleton<T extends 'tracking_plan' | 'purposes' | 'delivery_policy' | 'conversion_map' | 'brand'>(
-  tx: CommandContext['tx'],
-  type: T,
-): Promise<z.output<(typeof artifactTypes)[T]['content']> | null> {
+export async function publishedSingleton<
+  T extends 'tracking_plan' | 'purposes' | 'delivery_policy' | 'conversion_map' | 'brand' | 'business_context',
+>(tx: CommandContext['tx'], type: T): Promise<z.output<(typeof artifactTypes)[T]['content']> | null> {
   const [row] = await tx
     .select({ content: schema.artifactVersions.content })
     .from(schema.artifacts)

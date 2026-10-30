@@ -1,9 +1,10 @@
 import { type CommandContext, defineCommand, type Permission } from '@agentic-marketing/commands';
 import { AppError, canonicalJson, newId, sha256 } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
-import { and, desc, eq, gte, inArray, lt, or, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, isNotNull, lt, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { Requester, resolveActors } from './commands';
+import { artifactTypes } from './types';
 
 const Policy = z.enum(['none', 'agent_changes', 'all_publishes']);
 
@@ -84,6 +85,59 @@ export const getWorkspace = defineCommand({
         permission,
         meaning: explainPermission(permission, w.approvalPolicy, p.type),
       })),
+    };
+  },
+});
+
+/** The published brief every agent starts from (#227, narrow #85). */
+export const getBusinessContext = defineCommand({
+  name: 'workspace.businessContext',
+  title: 'Business context',
+  description:
+    'The published business context every agent should read before drafting: what the business offers and to whom, the voice, the claims to avoid and the legal lines. Returns null content and a hint when none is published. One per workspace; the MCP resource business-context://current serves the same JSON.',
+  input: z.object({}),
+  output: z.object({
+    content: artifactTypes.business_context.content
+      .nullable()
+      .describe('The published brief, or null when the workspace has not published one'),
+    version: z.number().int().nullable().describe('Published version number, or null when none is published'),
+    updatedAt: z.string().nullable().describe('When the published version was created, or null when none is published'),
+    hint: z.string().nullable().describe('How to create one when none is published; null otherwise'),
+  }),
+  permission: 'artifacts:read',
+  effect: 'read',
+  actionClass: 'read',
+  handler: async (_input, ctx) => {
+    const [row] = await ctx.tx
+      .select({
+        content: schema.artifactVersions.content,
+        version: schema.artifacts.publishedVersion,
+        updatedAt: schema.artifactVersions.createdAt,
+      })
+      .from(schema.artifacts)
+      .innerJoin(
+        schema.artifactVersions,
+        and(
+          eq(schema.artifactVersions.workspaceId, schema.artifacts.workspaceId),
+          eq(schema.artifactVersions.artifactId, schema.artifacts.id),
+          eq(schema.artifactVersions.number, schema.artifacts.publishedVersion),
+        ),
+      )
+      .where(and(eq(schema.artifacts.type, 'business_context'), isNotNull(schema.artifacts.publishedVersion)))
+      .orderBy(desc(schema.artifacts.updatedAt))
+      .limit(1);
+    if (!row || row.version === null)
+      return {
+        content: null,
+        version: null,
+        updatedAt: null,
+        hint: 'No business context is published yet. Create one with artifacts.create {type: "business_context", name: "Business context", content: {summary, audience, offer, voice, avoid, legal, links}} and publish it with artifacts.requestPublish; until then, ask people for the offer, audience and voice.',
+      };
+    return {
+      content: artifactTypes.business_context.content.parse(row.content),
+      version: row.version,
+      updatedAt: row.updatedAt.toISOString(),
+      hint: null,
     };
   },
 });
@@ -674,6 +728,7 @@ export const verifyAudit = defineCommand({
 
 export const workspaceCommands = [
   getWorkspace,
+  getBusinessContext,
   getStatus,
   inputWarnings,
   updateWorkspace,
