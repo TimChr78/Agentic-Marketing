@@ -13,7 +13,7 @@ It runs as one Docker image (a TypeScript modular monolith) next to Postgres, Cl
 - **Collect events:** Segment-compatible ingest (`/v1/batch`), a browser SDK, per-source consent rules, a tracking plan, bot filtering.
 - **Consent banner:** in the SDK, CSP-safe, with texts from your purposes and Google Consent Mode v2 signals. Ad click ids (`gclid`, `fbclid`, `msclkid`…) are kept only with `ad_measurement` consent.
 - **Know people:** identity resolution and merges, profiles with traits and events, a consent ledger per purpose, export and erasure (DSR).
-- **Segments:** conditions on traits, events, consent and other segments, recomputed continuously, with enter and exit events. Whole-segment refreshes run as SQL in Postgres and ClickHouse, load-tested to a million profiles.
+- **Segments:** conditions on traits, events, consent and other segments, recomputed continuously, with enter and exit events. Whole-segment refreshes run as SQL in Postgres and ClickHouse, load-tested to a million profiles. A segment can also be a static list (added by hand, by id or e-mail, or imported from CSV) or a snapshot of another segment.
 - **E-mail:**
   - MJML and Liquid templates with preview, test sends and UTM tagging;
   - a send gateway that checks lawful basis, consent, objections and suppressions;
@@ -28,8 +28,10 @@ It runs as one Docker image (a TypeScript modular monolith) next to Postgres, Cl
   - frequency caps;
   - quiet hours in each person's time zone;
   - an automatic pause when bounce or complaint rates pass the limits.
-- **Newsletter:** signup forms with double opt-in (works without JavaScript, optional Cloudflare Turnstile), subscriber import with consent proof (from Kit, Mailchimp…), broadcasts to a segment.
-- **Journeys:** a visual builder and an engine with waits, branches, e-mail, SMS, push, webhooks, connector actions and AI steps (decide, generate) with fallbacks; people can be moved onto a new version.
+- **Newsletter:** signup forms with double opt-in (works without JavaScript, optional Cloudflare Turnstile), subscriber import with consent proof (from Kit, Mailchimp…), broadcasts to a segment. Issues are built from reusable e-mail blocks and checked before they go out; readers choose topics on a preference centre; every issue has a signed web version and can go into a public archive with RSS; subject tests pick the winning subject line; send windows hold each message until the reader's local window opens.
+- **Campaigns:** groups broadcasts, journeys, templates, experiences, forms and segments under one goal and a shared UTM campaign, with an attribution window, per-member results and a campaign report. Journeys and campaigns can hold out a control group and report the measured uplift.
+- **Measurement and alerts:** a read-only metric layer (`analytics.query`, named reports, Insights → Analytics) answers questions over a fixed catalogue of measures and dimensions, with no SQL or table names as input. Threshold alerts watch deliverability, signup drops and journey errors, and notify a signed webhook or workspace members by e-mail.
+- **Journeys:** a visual builder and an engine with waits, branches, e-mail, SMS, push, webhooks, connector actions and AI steps (decide, generate) with fallbacks; a wait-until step holds a person until a segment condition matches, an event trigger can enter people once per business key, and people can be moved onto a new version.
 - **Web personalization:** experiences and A/B tests served by a decision API (or at the edge, by a Cloudflare Worker), with an anti-flicker snippet, consent-aware targeting, a visual composer, preview links and sequential or Bayesian results.
 - **AI:** your own providers (Anthropic, OpenAI, Ollama…), metering and budgets that hold under concurrency, prompt artifacts with test runs, redaction, a decision log with sampled human reviews, text classification, generated text cached per segment, and an in-app copilot over MCP that streams its answers and keeps conversations.
 - **Performance marketing:**
@@ -131,15 +133,15 @@ Wave 1 (Phases −1 to 5) is complete: foundations, data platform, e-mail, segme
 | 10 | Scale and operations | Done: correctness (AI budget reservations, prompt test jobs, merge-safe journeys, journey version migration, instant experience updates), scale (segments evaluated in SQL, ClickHouse row policies, a load test to 1M profiles), operations (Helm chart, OpenBao and AWS KMS keys, warehouse export, config as code) |
 | 11 | Enterprise and ecosystem | Part a done (single sign-on with OIDC and SAML, SCIM provisioning, MCP scope step-up). Part b done (AI: classify, text per segment, review samples, a streaming copilot with stored conversations). Part c done (sequential and Bayesian experiment statistics, edge decide on Cloudflare Workers, a visual composer and preview links). Part d done (push: web push, FCM, APNs). Part e done (Salesforce, the Shopify app with customer import, conversions to LinkedIn, TikTok and Pinterest) |
 
-[Wave 3](docs/architecture/roadmap-wave-3.md), planned from the open issues:
+[Wave 3](docs/architecture/roadmap-wave-3.md), from the open issues:
 
 | Phase | Theme | State |
 |---|---|---|
-| 12 | Install and upgrade | Next: Compose bundle per release, compose defaults, `am init` / `doctor` / `smoke`, backups and restore, the running version everywhere |
-| 13 | Pilot correctness | Planned: consent exits from journeys, approval bundles, fast confirmation retries, layout-only journey edits |
-| 14 | Admin UI for daily use | Planned |
-| 15 | Newsletter and lifecycle e-mail | Planned: preference centre, archive and web version, content blocks, pre-send checks |
-| 16 | Measure and report | Planned: metric layer, campaigns, holdouts, alerts |
+| 12 | Install and upgrade | Done in 0.2.4–0.2.5: Compose bundle per release, compose defaults, `am init` / `doctor` / `smoke`, backups and restore, the running version everywhere |
+| 13 | Pilot correctness | Done in 0.2.6: consent exits from journeys, approval bundles, fast confirmation retries, layout-only journey edits |
+| 14 | Admin UI for daily use | Done in 0.2.7: pages use the window, live journey stats, structured editors, server-side list filters |
+| 15 | Newsletter and lifecycle e-mail | Done in 0.2.8: preference centre, archive and web version, content blocks, pre-send checks, subject tests, send windows, static audiences, wait until and entry keys |
+| 16 | Measure and report | Done in 0.2.9: metric layer, campaigns, holdouts, alerts |
 | 17 | Agents with bounded autonomy | Planned: a design for agent controls first, then business context, autonomy modes, the campaign agent |
 
 ## Development
