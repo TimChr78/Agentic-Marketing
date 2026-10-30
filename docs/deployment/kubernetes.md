@@ -27,11 +27,38 @@ kubectl create secret generic am-secrets \
 helm install am deploy/helm/agentic-marketing \
   --set secrets.existingSecret=am-secrets \
   --set config.PUBLIC_URL=https://marketing.example.com \
+  --set config.CLIENT_IP_HEADER=x-forwarded-for \
+  --set config.TRUSTED_PROXY_CIDRS=10.244.0.0/16 \
   --set config.CLICKHOUSE_URL=http://am:…@clickhouse:8123 \
   --set ingress.enabled=true --set ingress.host=marketing.example.com
 ```
 
 The chart uses the released image, `ghcr.io/timchr78/agentic-marketing:<appVersion>`; the packaged chart is also attached to each [GitHub release](https://github.com/TimChr78/Agentic-Marketing/releases). For your own build, push it to your registry and set `image.repository` and `image.tag`.
+
+## Client IP behind the Ingress
+
+The server rate-limits sign-in and public endpoints per client IP. Behind the Ingress the socket peer is the ingress controller, and the client IP arrives in a forwarding header. Set `config.TRUSTED_PROXY_CIDRS` to the ranges the app sees as its peer; the chart refuses to render with `ingress.enabled=true` and an empty list, because an empty list would trust a forwarding header from any client.
+
+`resolveClientIp` walks a multi-value header such as `x-forwarded-for` from right to left, skipping addresses inside `TRUSTED_PROXY_CIDRS`, and returns the first address outside them. An appending proxy (nginx's default `proxy_add_x_forwarded_for`) leaves a client-supplied prefix in place, so the rightmost untrusted address is the real client. A single-value header that the controller overwrites (`cf-connecting-ip`, `x-real-ip`) is used as-is.
+
+Find the ranges:
+
+```bash
+# Where the controller runs, and the addresses it connects from.
+kubectl get pods -n ingress-nginx -l app.kubernetes.io/component=controller -o wide
+# On a cluster where that output shows node IPs (hostNetwork), list the node network instead.
+kubectl get nodes -o wide
+```
+
+With ingress-nginx and most in-cluster controllers, the app sees the controller pod's IP, so use the cluster pod network (for example `10.244.0.0/16`, or `--cluster-cidr` from your CNI). A controller with `hostNetwork: true`, or a cloud load balancer that connects from its own subnet, reaches the app from the node or load-balancer range: use that CIDR instead. Include the loopback ranges only if something in the pod calls the app directly. Do not use `0.0.0.0/0`: it trusts every peer again.
+
+```yaml
+config:
+  CLIENT_IP_HEADER: x-forwarded-for   # the header your controller sets; an ordered list if it sets several
+  TRUSTED_PROXY_CIDRS: 10.244.0.0/16  # the ingress controller pod (or node/load-balancer) range
+```
+
+Check the result with `am doctor` in a pod: the `trusted-proxy-cidrs` row must be `ok`, not the empty-list warning.
 
 Then create the first workspace with `cli bootstrap` (the chart's notes print the command). `DATABASE_URL` is an owner of the database: migrations create the `am_app` role that the application itself uses under row-level security.
 
