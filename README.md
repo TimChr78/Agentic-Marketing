@@ -72,7 +72,7 @@ docker compose exec app am doctor   # configuration, services, sending domains
 
 In a checkout, `pnpm --silent --filter @agentic-marketing/server cli init` does the same. Never edit `docker-compose.yml`: site-specific settings go in `compose.override.yaml` (see [`compose.override.example.yaml`](compose.override.example.yaml) and [the Compose guide](docs/deployment/compose.md)), so an upgrade replaces the release file and nothing else.
 
-`AM_VERSION` (default `0.3.0`) selects the released image `ghcr.io/timchr78/agentic-marketing`. Pin a version instead of `latest` so restarts and `docker compose pull` do not silently change what runs. `AM_PORT` (default `3000`) is the published host port: the app still listens on 3000 inside the container, so keep `PUBLIC_URL` and `PUBLIC_LINKS_URL` in step with it. ClickHouse is capped at `CLICKHOUSE_MEM_LIMIT` (default `2g`), which covers the whole container (server, caches and query memory); ClickHouse's own limits such as `max_server_memory_usage` still apply inside it, and 2g is a starting point for the single-node pilot.
+`AM_VERSION` (default `0.4.0`) selects the released image `ghcr.io/timchr78/agentic-marketing`. Pin a version instead of `latest` so restarts and `docker compose pull` do not silently change what runs. `AM_PORT` (default `3000`) is the published host port: the app still listens on 3000 inside the container, so keep `PUBLIC_URL` and `PUBLIC_LINKS_URL` in step with it. ClickHouse is capped at `CLICKHOUSE_MEM_LIMIT` (default `2g`), which covers the whole container (server, caches and query memory); ClickHouse's own limits such as `max_server_memory_usage` still apply inside it, and 2g is a starting point for the single-node pilot.
 
 To build from source (development, CI or a local patch) use the overlay:
 
@@ -149,7 +149,7 @@ Wave 1 (Phases −1 to 5) is complete: foundations, data platform, e-mail, segme
 | Phase | Theme | State |
 |---|---|---|
 | 17 | Agent controls | Built in 0.3.0: agents as principals with a pause button, a policy engine with limits and impact estimates, the action ledger, Settings → Agents (still open: #144, #207) |
-| 18 | Mandates and the first autonomy | Planned: mandates with levels, holds with veto windows, the pilot's autonomous weekly newsletter |
+| 18 | Mandates and the first autonomy | Built in 0.4.0: mandates with levels 0–3, holds with veto windows, the independent check, notifications, business context ([docs/agents.md](docs/agents.md)); next: the pilot's autonomous weekly newsletter |
 | 19 | The safety net | Planned: the guardian, staged sends, undo, shadow mode |
 | 20 | Closed loops | Planned: full loops, goals and attribution, learnings, the campaign, newsletter and lifecycle programmes |
 | 21 | Hosted agents | Planned: the full runtime for agents inside the platform (a thin version with reports and a deliverability guardian ships in Phase 19) |
