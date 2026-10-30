@@ -3,6 +3,7 @@ import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import { SpanStatusCode, trace } from '@opentelemetry/api';
 import { and, desc, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
+import { type ActionClass, type AgentCounters, autonomySettings, decide, type Impact, type PolicyOutcome } from './policy';
 import type { Permission, Principal } from './principal';
 import { findUnknownInputKeys, type UnknownInputKey, unknownKeyMessages } from './unknownKeys';
 
@@ -43,6 +44,8 @@ export interface CommandContext {
   services: Services;
   /** Runs `fn` once the command's transaction has committed (e.g. to invalidate caches); errors are logged, not thrown. */
   afterCommit?: (fn: () => Promise<void>) => void;
+  /** The policy engine's decision for an agent write (ADR-0016). "ask" means the change must wait for a person. */
+  policy?: PolicyOutcome;
 }
 
 export interface CommandDef<I extends z.ZodType = z.ZodType, O extends z.ZodType = z.ZodType, N extends string = string> {
@@ -64,6 +67,15 @@ export interface CommandDef<I extends z.ZodType = z.ZodType, O extends z.ZodType
   effect: Effect;
   /** Agents may never run it, whatever their scopes (approving, managing members…). */
   humansOnly?: boolean;
+  /**
+   * What the command changes in the world (ADR-0016, design §3.2). Required for every write an agent
+   * may run (a registry test checks it); people-only commands default from `effect`.
+   */
+  actionClass?: ActionClass;
+  /** Estimates what one call would do (people reached, class by artifact type), before it runs. */
+  impact?: (input: z.output<I>, ctx: CommandContext) => Promise<Impact>;
+  /** The command can wait for an approval when the policy engine says "ask" (it reads ctx.policy). */
+  approvable?: boolean;
   /** Top-level input fields that must never be hashed into the audit log or idempotency store (secret values). */
   sensitive?: readonly string[];
   /** Top-level output fields shown once (e.g. an invitation token): an idempotent replay returns them redacted. */
@@ -77,6 +89,21 @@ export interface CommandDef<I extends z.ZodType = z.ZodType, O extends z.ZodType
 
 export function defineCommand<N extends string, I extends z.ZodType, O extends z.ZodType>(def: CommandDef<I, O, N>) {
   return def;
+}
+
+/** A command's class: declared, or derived from its effect for people-only commands. */
+export function actionClassOf(cmd: Pick<AnyCommand, 'actionClass' | 'effect'>): ActionClass {
+  if (cmd.actionClass) return cmd.actionClass;
+  if (cmd.effect === 'read') return 'read';
+  if (cmd.effect === 'destructive') return 'destructive';
+  return 'settings';
+}
+
+/** The policy engine's refusal, with its reasons for the caller. */
+export class PolicyDeniedError extends AppError {
+  constructor(readonly outcome: PolicyOutcome) {
+    super('forbidden', outcome.reasons.join(' '), { decision: 'deny', actionClass: outcome.actionClass, reasons: outcome.reasons });
+  }
 }
 
 // biome-ignore lint/suspicious/noExplicitAny: heterogeneous command lists
@@ -208,13 +235,41 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
           );
       }
 
+      const agent = principal.type === 'agent' ? principal.agent : undefined;
+      if (agent && agent.status !== 'active')
+        return fail(
+          new AppError(
+            'forbidden',
+            `This agent (${agent.name}) is ${agent.status}${agent.statusReason ? `: ${agent.statusReason}` : ''}. ${
+              agent.status === 'paused' ? 'A person can resume it in Settings → Agents.' : 'Its credentials no longer work.'
+            }`,
+          ),
+        );
+
       const committed: (() => Promise<void>)[] = [];
+      let policy: PolicyOutcome | undefined;
       try {
         const result = await retrySnapshotConflicts(cmd.effect === 'read', () =>
           db.withWorkspace(
             principal.workspaceId,
             async (tx) => {
               committed.length = 0;
+              policy = undefined;
+              // ADR-0016: every agent write passes the policy engine before the handler runs.
+              if (agent && cmd.effect !== 'read') {
+                const base = { principal, tx, services };
+                const impact = cmd.impact ? await cmd.impact(parsed.data, base) : {};
+                const [ws] = await tx.select({ autonomy: schema.workspaces.autonomy }).from(schema.workspaces);
+                policy = decide({
+                  command: cmd.name,
+                  actionClass: impact.actionClass ?? actionClassOf(cmd),
+                  impact,
+                  settings: autonomySettings(ws?.autonomy),
+                  counters: await agentCounters(tx, agent.id),
+                  approvable: cmd.approvable === true,
+                });
+                if (policy.decision === 'deny') throw new PolicyDeniedError(policy);
+              }
               if (opts.idempotencyKey) {
                 const [hit] = await tx
                   .select()
@@ -229,7 +284,9 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
                 }
               }
               const out = withInputWarnings(
-                cmd.output.parse(await cmd.handler(parsed.data, { principal, tx, services, afterCommit: (fn) => committed.push(fn) })),
+                cmd.output.parse(
+                  await cmd.handler(parsed.data, { principal, tx, services, policy, afterCommit: (fn) => committed.push(fn) }),
+                ),
                 unknownMessages,
               ) as z.output<C['output']>;
               if (opts.idempotencyKey)
@@ -241,6 +298,7 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
                   response: redact(out, cmd.sensitiveOutput) as object,
                 });
               if (cmd.effect !== 'read') await appendAudit(tx, principal, opts.surface, cmd, inputHash, target);
+              if (agent && policy) await recordAgentAction(tx, agent.id, cmd, policy, opts.surface, target, null);
               return out;
             },
             // Reads see one consistent snapshot; writes keep read-committed so their locks see the latest rows.
@@ -255,6 +313,14 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
         span.end();
         return result;
       } catch (err) {
+        // The transaction rolled back: keep the agent's attempt (a refusal or a failed write) in the ledger.
+        const outcome = policy;
+        if (agent && outcome)
+          await db
+            .withWorkspace(principal.workspaceId, (tx) =>
+              recordAgentAction(tx, agent.id, cmd, outcome, opts.surface, target, err instanceof Error ? err.message : String(err)),
+            )
+            .catch((e) => span.recordException(e as Error));
         if (err instanceof AppError) return fail(err);
         span.recordException(err as Error);
         span.setStatus({ code: SpanStatusCode.ERROR });
@@ -268,6 +334,50 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
 }
 
 export type Executor = ReturnType<typeof createExecutor>;
+
+/** One agent write in the ledger (#218), with the decision that allowed, escalated or refused it. */
+async function recordAgentAction(
+  tx: Tx,
+  agentId: string,
+  cmd: AnyCommand,
+  policy: PolicyOutcome,
+  surface: Surface,
+  target: string | undefined,
+  error: string | null,
+) {
+  await tx.insert(schema.agentActions).values({
+    workspaceId: sql`nullif(current_setting('app.workspace_id', true), '')::uuid`,
+    agentId,
+    command: cmd.name,
+    actionClass: policy.actionClass,
+    decision: policy.decision,
+    reasons: policy.reasons,
+    impact: policy.impact as Record<string, unknown>,
+    ok: error === null,
+    error: error?.slice(0, 1000) ?? null,
+    target: target ?? null,
+    surface,
+  });
+}
+
+/** What an agent did in the last 24 hours: changes it made itself, and messages it sent directly. */
+export async function agentCounters(tx: Tx, agentId: string): Promise<AgentCounters> {
+  const [row] = await tx
+    .select({
+      changes: sql<number>`count(*) FILTER (WHERE ${schema.agentActions.actionClass} <> 'draft')::int`,
+      messages: sql<number>`coalesce(sum((${schema.agentActions.impact}->>'people')::int) FILTER (WHERE ${schema.agentActions.actionClass} = 'send.direct'), 0)::int`,
+    })
+    .from(schema.agentActions)
+    .where(
+      and(
+        eq(schema.agentActions.agentId, agentId),
+        eq(schema.agentActions.decision, 'allow'),
+        eq(schema.agentActions.ok, true),
+        sql`${schema.agentActions.at} > now() - interval '24 hours'`,
+      ),
+    );
+  return { changes: row?.changes ?? 0, messages: row?.messages ?? 0 };
+}
 
 /**
  * A read runs in a repeatable-read snapshot. The few writes a read can make (a workspace's data

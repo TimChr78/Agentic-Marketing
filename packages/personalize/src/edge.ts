@@ -155,6 +155,7 @@ export const edgeSync = defineCommand({
   output: Status,
   permission: 'workspace:admin',
   effect: 'write',
+  actionClass: 'experience.live',
   handler: async (input, ctx) => {
     const done = await ctx.tx
       .update(schema.edgeTargets)

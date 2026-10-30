@@ -218,6 +218,23 @@ async function definition(tx: Tx, id: string, version?: number) {
   return { artifact: a, version: number, def: artifactTypes.broadcast.content.parse(v.content) as BroadcastDefinition };
 }
 
+/**
+ * Reach of publishing a broadcast version, for the agent policy engine (ADR-0016): the size of its
+ * segment now. An upper bound: consent, suppression, topics and frequency caps remove some.
+ */
+export async function broadcastImpact(tx: Tx, artifactId: string, version: number) {
+  const { def } = await definition(tx, artifactId, version);
+  const [{ n }] = await tx
+    .select({ n: sql<number>`count(*)::int` })
+    .from(schema.segmentMemberships)
+    .where(eq(schema.segmentMemberships.segmentId, def.segment));
+  return {
+    people: n,
+    reversible: false,
+    summary: `broadcast to ${def.segment}: ${n.toLocaleString('en-US')} people before consent and suppression`,
+  };
+}
+
 /** The template's purpose and topic: of its published version, or of `version` (a template reviewed in the same bundle, #107). */
 async function purposeOf(tx: Tx, templateId: string, version?: number) {
   const [row] = await tx
@@ -430,6 +447,7 @@ export const sendTestBroadcast = defineCommand({
   // Same self-service rule as templates.sendTest: an approver may only test to their own address.
   selfService: { permission: 'artifacts:approve', allows: (input) => input.to === undefined },
   effect: 'write',
+  actionClass: 'draft',
   target: (i) => i.artifactId,
   handler: async (input, ctx) => {
     const [artifact] = await ctx.tx
@@ -648,6 +666,7 @@ export const cancelBroadcast = defineCommand({
   output: z.object({ status: z.literal('cancelled'), queued: z.number() }),
   permission: 'messages:send',
   effect: 'write',
+  actionClass: 'draft',
   target: (i) => i.artifactId,
   handler: async (input, ctx) => {
     const { artifact, version, def } = await definition(ctx.tx, input.artifactId);

@@ -4,6 +4,7 @@ import { schema, type VersionState } from '@agentic-marketing/db';
 import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { diffJson } from './diff';
+import { noteWithPolicy, publishImpact } from './impact';
 import {
   ARTIFACT_TYPES,
   type ArtifactType,
@@ -292,6 +293,7 @@ export const createArtifact = defineCommand({
   }),
   permission: 'artifacts:write',
   effect: 'write',
+  actionClass: 'draft',
   handler: async (input, ctx) => {
     const content = validateContent(input.type, input.content, 'draft');
     const warnings = contentWarnings(input.type, content);
@@ -390,6 +392,7 @@ export const updateDraft = defineCommand({
   }),
   permission: 'artifacts:write',
   effect: 'write',
+  actionClass: 'draft',
   target: (i) => i.artifactId,
   handler: async (input, ctx) => {
     const a = await loadArtifact(ctx, input.artifactId);
@@ -630,6 +633,7 @@ export const discardDraft = defineCommand({
   }),
   permission: 'artifacts:write',
   effect: 'write',
+  actionClass: 'draft',
   target: (i) => i.artifactId,
   handler: async (input, ctx) => {
     const a = await loadArtifact(ctx, input.artifactId);
@@ -679,9 +683,21 @@ export const requestPublish = defineCommand({
     policy: z.string(),
     reviewUrl: z.string().nullable().describe('Admin UI page where a person approves this; null when it was published directly'),
     next: z.string().describe('What happens next, and how to check the result'),
+    heldBecause: z
+      .array(z.string())
+      .optional()
+      .describe(
+        'Why the agent policy sent this to a person even though the approval policy would not have (audience threshold, limits, propose-only)',
+      ),
   }),
   permission: 'artifacts:publish',
   effect: 'publish',
+  actionClass: 'content.publish',
+  approvable: true,
+  impact: async (input, ctx) => {
+    const a = await loadArtifact(ctx, input.artifactId);
+    return publishImpact(ctx, [{ id: a.id, type: a.type, version: a.latestVersion }]);
+  },
   target: (i) => i.artifactId,
   handler: async (input, ctx) => {
     const a = await loadArtifact(ctx, input.artifactId);
@@ -697,7 +713,9 @@ export const requestPublish = defineCommand({
       .from(schema.workspaces)
       .where(eq(schema.workspaces.id, ctx.principal.workspaceId));
     const needsApproval =
-      w.policy === 'all_publishes' || (w.policy === 'agent_changes' && (ctx.principal.type === 'agent' || v.authorType === 'agent'));
+      w.policy === 'all_publishes' ||
+      (w.policy === 'agent_changes' && (ctx.principal.type === 'agent' || v.authorType === 'agent')) ||
+      ctx.policy?.decision === 'ask';
     if (!needsApproval) {
       await publishVersion(ctx, a.id, v.number);
       return {
@@ -720,10 +738,11 @@ export const requestPublish = defineCommand({
       requestedByType: ctx.principal.type,
       requestedById: ctx.principal.userId,
       requestedByClient: ctx.principal.clientId ?? null,
-      note: input.note,
+      note: noteWithPolicy(input.note, ctx),
     });
     const reviewUrl = approvalUrl(ctx.services.publicUrl, approvalId);
     return {
+      ...(ctx.policy?.decision === 'ask' ? { heldBecause: ctx.policy.reasons } : {}),
       status: 'in_review' as const,
       version: v.number,
       approvalId,
@@ -762,9 +781,23 @@ export const requestPublishBundle = defineCommand({
     policy: z.string(),
     reviewUrl: z.string().nullable().describe('Admin UI page where a person reviews the whole bundle; null when it was published directly'),
     next: z.string(),
+    heldBecause: z
+      .array(z.string())
+      .optional()
+      .describe('Why the agent policy sent this to a person (audience threshold, limits, propose-only)'),
   }),
   permission: 'artifacts:publish',
   effect: 'publish',
+  actionClass: 'content.publish',
+  approvable: true,
+  impact: async (input, ctx) => {
+    const members = [];
+    for (const id of new Set(input.artifactIds)) {
+      const a = await loadArtifact(ctx, id);
+      members.push({ id: a.id, type: a.type, version: a.latestVersion });
+    }
+    return publishImpact(ctx, members);
+  },
   target: (i) => i.artifactIds.join(','),
   handler: async (input, ctx) => {
     const ids = [...new Set(input.artifactIds)];
@@ -789,7 +822,8 @@ export const requestPublishBundle = defineCommand({
       .where(eq(schema.workspaces.id, ctx.principal.workspaceId));
     const needsApproval =
       w.policy === 'all_publishes' ||
-      (w.policy === 'agent_changes' && (ctx.principal.type === 'agent' || ordered.some((m) => m.authorType === 'agent')));
+      (w.policy === 'agent_changes' && (ctx.principal.type === 'agent' || ordered.some((m) => m.authorType === 'agent'))) ||
+      ctx.policy?.decision === 'ask';
     const out = (approvalIds: (string | null)[]) =>
       ordered.map((m, i) => ({ artifactId: m.id, name: m.name, type: m.type, version: m.version, approvalId: approvalIds[i] }));
     if (!needsApproval) {
@@ -816,13 +850,14 @@ export const requestPublishBundle = defineCommand({
         requestedByType: ctx.principal.type,
         requestedById: ctx.principal.userId,
         requestedByClient: ctx.principal.clientId ?? null,
-        note: input.note,
+        note: noteWithPolicy(input.note, ctx),
         bundleId,
       });
     }
     // The last member is the one the others exist for (the broadcast, the form): open on it.
     const reviewUrl = approvalUrl(ctx.services.publicUrl, approvalIds.at(-1)!);
     return {
+      ...(ctx.policy?.decision === 'ask' ? { heldBecause: ctx.policy.reasons } : {}),
       status: 'in_review' as const,
       bundleId,
       members: out(approvalIds),
@@ -1189,6 +1224,7 @@ export const approve = defineCommand({
   target: (i) => i.approvalId,
   handler: async (input, ctx) => {
     const r = await decide(ctx, input.approvalId);
+    await refuseIfAgentStopped(ctx, r);
     const members = await bundleMembers(ctx, r);
     for (const m of members) await publishVersion(ctx, m.artifactId, m.version);
     await ctx.tx
@@ -1211,6 +1247,30 @@ export const approve = defineCommand({
     };
   },
 });
+
+/**
+ * A paused or revoked agent's pending changes wait (ADR-0016, #213): approving them would let the
+ * agent act through a person while it is stopped. Rejecting stays possible.
+ */
+async function refuseIfAgentStopped(ctx: CommandContext, r: { requestedByType: string; requestedByClient: string | null }) {
+  if (r.requestedByType !== 'agent' || !r.requestedByClient) return;
+  const [kind, credentialId] = r.requestedByClient.startsWith('token:')
+    ? (['api_token', r.requestedByClient.slice('token:'.length)] as const)
+    : (['oauth_client', r.requestedByClient] as const);
+  const [agent] = await ctx.tx
+    .select({ name: schema.agents.name, status: schema.agents.status })
+    .from(schema.agentCredentials)
+    .innerJoin(
+      schema.agents,
+      and(eq(schema.agents.workspaceId, schema.agentCredentials.workspaceId), eq(schema.agents.id, schema.agentCredentials.agentId)),
+    )
+    .where(and(eq(schema.agentCredentials.kind, kind), eq(schema.agentCredentials.credentialId, credentialId)));
+  if (agent && agent.status !== 'active')
+    throw new AppError(
+      'conflict',
+      `This change was requested by the agent “${agent.name}”, which is ${agent.status}. Resume the agent to approve it, or reject it.`,
+    );
+}
 
 export const reject = defineCommand({
   name: 'approvals.reject',

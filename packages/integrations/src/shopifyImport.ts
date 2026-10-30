@@ -26,6 +26,7 @@ export const importShopifyCustomers = defineCommand({
   output: z.object({ imported: z.number().int(), consentRecords: z.number().int(), cursor: z.string().nullable(), done: z.boolean() }),
   permission: 'workspace:admin',
   effect: 'write',
+  actionClass: 'data.write',
   target: (i) => i.connection,
   handler: async (input, ctx) => {
     const [row] = await ctx.tx.select().from(schema.connections).where(eq(schema.connections.id, input.connection));

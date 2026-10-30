@@ -1,6 +1,8 @@
 export * from './migrate';
 export * from './pool';
 export type {
+  AgentCredentialKind,
+  AgentStatus,
   AiCallKind,
   AiCallStatus,
   AiUse,
@@ -16,6 +18,7 @@ export type {
   InputWarningPrincipal,
   MessageStatus,
   ParticipantStatus,
+  PolicyDecision,
   Role,
   TopicPreferenceSource,
   TopicStatus,

@@ -163,6 +163,7 @@ export const runExportNow = defineCommand({
   output: z.object({ requested: z.boolean() }),
   permission: 'workspace:admin',
   effect: 'write',
+  actionClass: 'data.write',
   target: (i) => i.id,
   handler: async (input, ctx) => {
     await load(ctx, input.id);

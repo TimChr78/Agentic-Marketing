@@ -10,7 +10,7 @@ import { defineConfig } from 'vitest/config';
 //             setup.ts migrates a template database once and each file copies it.
 // TEST_WORKERS sets the server project's worker count (default 4; 1 runs the files one at a time).
 const serverWorkers = Number(process.env.TEST_WORKERS ?? 4);
-const docs = ['apps/server/test/docs-consistency.test.ts', 'apps/server/test/mcp-tools-doc.test.ts'];
+const docs = ['apps/server/test/docs-consistency.test.ts', 'apps/server/test/mcp-tools-doc.test.ts', 'apps/server/test/action-classes.test.ts'];
 
 export default defineConfig({
   test: {

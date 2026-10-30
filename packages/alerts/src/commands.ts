@@ -185,6 +185,7 @@ export const createAlert = defineCommand({
   output: z.object({ rule: Rule }),
   permission: 'workspace:admin',
   effect: 'write',
+  actionClass: 'settings',
   handler: async (input, ctx) => {
     const workspaceId = ctx.principal.workspaceId;
     const config = parseAlertConfig(input.kind, input.config);
@@ -221,6 +222,7 @@ export const updateAlert = defineCommand({
   output: z.object({ rule: Rule }),
   permission: 'workspace:admin',
   effect: 'write',
+  actionClass: 'settings',
   target: (i) => i.id,
   handler: async (input, ctx) => {
     const existing = await loadRule(ctx.tx, input.id);
@@ -256,6 +258,7 @@ export const deleteAlert = defineCommand({
   output: z.object({ deleted: z.literal(true) }),
   permission: 'workspace:admin',
   effect: 'destructive',
+  actionClass: 'destructive',
   target: (i) => i.id,
   handler: async (input, ctx) => {
     const rows = await ctx.tx.delete(schema.alertRules).where(eq(schema.alertRules.id, input.id)).returning({ id: schema.alertRules.id });
@@ -273,6 +276,7 @@ export const testAlert = defineCommand({
   output: z.object({ notifications: z.array(z.record(z.string(), z.unknown())) }),
   permission: 'workspace:admin',
   effect: 'write',
+  actionClass: 'draft',
   target: (i) => i.id,
   handler: async (input, ctx) => {
     const rule = await loadRule(ctx.tx, input.id);

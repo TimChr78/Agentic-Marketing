@@ -36,6 +36,8 @@ export const sendPush = defineCommand({
   output: z.object({ messageId: z.string(), status: Status, reason: z.string().nullable(), duplicate: z.boolean() }),
   permission: 'messages:send',
   effect: 'write',
+  actionClass: 'send.direct',
+  impact: async () => ({ people: 1, reversible: false }),
   target: (i) => i.profileId,
   handler: async (input, ctx) => requestPush(ctx.tx, ctx.principal.workspaceId, ctx.services.keyProvider, ctx.services.events, input),
 });

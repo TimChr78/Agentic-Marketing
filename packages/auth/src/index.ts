@@ -7,6 +7,7 @@ import { type BetterAuthOptions, betterAuth } from 'better-auth';
 import { getMigrations } from 'better-auth/db/migration';
 import { jwt } from 'better-auth/plugins';
 import type { JWTPayload } from 'jose';
+import { agentForCredential, oauthClientName } from './agents';
 import { type SsoConfig, ssoGuard, ssoPlugin } from './sso';
 
 export interface AuthConfig {
@@ -121,8 +122,11 @@ export async function principalFromAccessToken(db: Db, claims: JWTPayload): Prom
   const scopes = String(claims.scope ?? '')
     .split(' ')
     .filter(Boolean);
-  return agentPrincipal(claims.sub, String(claims.azp ?? claims.client_id ?? 'unknown-client'), m.workspace_id, m.role, scopes);
+  const clientId = String(claims.azp ?? claims.client_id ?? 'unknown-client');
+  const agent = await agentForCredential(db, m.workspace_id, 'oauth_client', clientId, claims.sub, () => oauthClientName(db, clientId));
+  return { ...agentPrincipal(claims.sub, clientId, m.workspace_id, m.role, scopes), agent };
 }
+export * from './agents';
 export * from './members';
 export * from './scim';
 export * from './sso';

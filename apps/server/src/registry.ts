@@ -5,7 +5,7 @@ import { analyticsCommands } from '@agentic-marketing/analytics';
 import { artifactCommands, configCommands, workspaceCommands } from '@agentic-marketing/artifacts';
 import { assetCommands } from '@agentic-marketing/assets';
 import { audienceCommands } from '@agentic-marketing/audience';
-import { listSsoProviders, memberCommands, scimCommands, tokenCommands } from '@agentic-marketing/auth';
+import { agentCommands, listSsoProviders, memberCommands, scimCommands, tokenCommands } from '@agentic-marketing/auth';
 import { campaignCommands } from '@agentic-marketing/campaigns';
 import type { AnyCommand } from '@agentic-marketing/commands';
 import {
@@ -48,6 +48,7 @@ export const commands = [
   ...scimCommands,
   listSsoProviders,
   ...tokenCommands,
+  ...agentCommands,
   ...sourceCommands,
   ...profileCommands,
   ...segmentCommands,

@@ -566,6 +566,7 @@ export const archiveCampaign = defineCommand({
   output: z.object({ campaignId: z.string(), archived: z.literal(true), memberIds: z.array(z.string()) }),
   permission: 'artifacts:write',
   effect: 'write',
+  actionClass: 'content.publish',
   target: (i) => i.campaignId,
   handler: async (input, ctx) => {
     const [a] = await ctx.tx

@@ -164,6 +164,7 @@ export const testWebhook = defineCommand({
   output: z.object({ deliveryId: z.string() }),
   permission: 'workspace:admin',
   effect: 'write',
+  actionClass: 'draft',
   target: (i) => i.id,
   handler: async (input, ctx) => {
     const [e] = await ctx.tx.select().from(schema.webhookEndpoints).where(eq(schema.webhookEndpoints.id, input.id));
@@ -247,6 +248,7 @@ export const retryDelivery = defineCommand({
   output: z.object({ queued: z.literal(true) }),
   permission: 'workspace:admin',
   effect: 'write',
+  actionClass: 'data.write',
   target: (i) => i.id,
   handler: async (input, ctx) => {
     const res = await ctx.tx

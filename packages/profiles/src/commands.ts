@@ -386,6 +386,7 @@ export const recordConsentCommand = defineCommand({
   output: z.object({ recorded: z.boolean(), allowed: z.boolean().describe('Whether the purpose is now allowed for this person') }),
   permission: 'profiles:write',
   effect: 'write',
+  actionClass: 'data.write',
   target: (i) => i.profileId,
   handler: async (input, ctx) => {
     if (ctx.principal.type === 'agent' && input.status === 'granted')
@@ -526,6 +527,7 @@ export const setTopicPreference = defineCommand({
   }),
   permission: 'profiles:write',
   effect: 'write',
+  actionClass: 'data.write',
   target: (i) => i.profileId,
   handler: async (input, ctx) => {
     if (ctx.principal.type === 'agent' && input.status === 'subscribed')
