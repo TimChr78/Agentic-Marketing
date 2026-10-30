@@ -5,7 +5,7 @@
 | # | Question | Decision | Recorded in |
 |---|---|---|---|
 | 1 | Build fresh vs. fork Dittofeed | **Build fresh**, Dittofeed as reference | [ADR-0001](adr/0001-build-vs-fork.md) |
-| 2 | Project license | **AGPL-3.0 core, MIT SDKs, CLA** | [ADR-0009](adr/0009-project-license.md) |
+| 2 | Project license | **MIT for the whole project, no CLA** (was AGPL-3.0 core; superseded) | [ADR-0015](adr/0015-mit-license.md) |
 | 3 | System of record | **Own profile store**, warehouse sync later | [data-platform.md](data-platform.md) §7 |
 | 6 | Email tracking defaults | **Click tracking on, open pixel off**, configurable | [channels-and-personalization.md](channels-and-personalization.md) §2 |
 | 7 | First-party integrations | **Not a v1 priority**; Shopify and Salesforce first when built | [roadmap.md](roadmap.md) Phase 5 |

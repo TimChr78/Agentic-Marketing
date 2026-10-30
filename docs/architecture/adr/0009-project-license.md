@@ -1,6 +1,6 @@
 # ADR-0009: Project license
 
-- Status: Accepted (owner decision 2026-10-21)
+- Status: Superseded by [ADR-0015](0015-mit-license.md) (2026-10-30). Release 0.1.0 already shipped under MIT; this decision was not applied.
 - Date: 2026-10-21
 
 ## Context
