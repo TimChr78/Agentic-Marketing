@@ -56,11 +56,64 @@ function allowList(policy: EgressPolicy) {
 
 const family = (a: string) => (isIP(a) === 6 ? 'ipv6' : 'ipv4');
 
+/** The eight 16-bit words of an IPv6 address, with a dotted IPv4 tail folded in. */
+function ipv6Words(address: string): number[] | null {
+  const a = address.split('%')[0].toLowerCase();
+  if (isIP(a) !== 6) return null;
+  const [left = '', right = ''] = a.split('::');
+  const words = (part: string) => {
+    if (!part) return [];
+    const out: number[] = [];
+    for (const word of part.split(':')) {
+      if (word.includes('.')) {
+        const octets = word.split('.').map(Number);
+        if (octets.length !== 4 || octets.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return null;
+        out.push((octets[0]! << 8) | octets[1]!, (octets[2]! << 8) | octets[3]!);
+      } else {
+        const n = Number.parseInt(word, 16);
+        if (!Number.isInteger(n) || n < 0 || n > 0xffff) return null;
+        out.push(n);
+      }
+    }
+    return out;
+  };
+  const l = words(left);
+  const r = words(right);
+  if (!l || !r) return null;
+  const missing = 8 - l.length - r.length;
+  if (missing < 0) return null;
+  return [...l, ...Array<number>(missing).fill(0), ...r];
+}
+
+const ipv4 = (hi: number, lo: number) => `${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`;
+
+/**
+ * The IPv4 address an IPv6 form embeds, or null. IPv4-mapped (`::ffff:0:0/96`), IPv4-compatible
+ * (`::/96`), NAT64 (`64:ff9b::/96`) and 6to4 (`2002::/16`, the address in bits 16-48) all carry
+ * an IPv4 address that must be checked against the IPv4 block list.
+ */
+function embeddedIpv4(address: string): string | null {
+  const w = ipv6Words(address);
+  if (!w) return null;
+  const zero = (from: number, to: number) => w.slice(from, to).every((n) => n === 0);
+  if (zero(0, 5) && w[5] === 0xffff) return ipv4(w[6]!, w[7]!);
+  if (zero(0, 6)) return ipv4(w[6]!, w[7]!);
+  if (w[0] === 0x64 && w[1] === 0xff9b && zero(2, 6)) return ipv4(w[6]!, w[7]!);
+  if (w[0] === 0x2002) return ipv4(w[1]!, w[2]!);
+  return null;
+}
+
 /** Whether an address is private (and not explicitly allowed). */
 export function isBlockedAddress(address: string, policy: EgressPolicy): boolean {
-  const a = address.replace(/^::ffff:/, '');
+  const a = address.trim().replace(/^\[|\]$/g, '');
   const { nets } = allowList(policy);
   if (nets.check(a, family(a))) return false;
+  const embedded = isIP(a) === 6 ? embeddedIpv4(a) : null;
+  if (embedded !== null) {
+    // An allow-listed IPv4 range also covers its mapped/NAT64/6to4 forms.
+    if (nets.check(embedded, 'ipv4')) return false;
+    return blocked.check(embedded, 'ipv4');
+  }
   return blocked.check(a, family(a));
 }
 

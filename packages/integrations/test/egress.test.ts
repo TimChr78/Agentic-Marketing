@@ -112,6 +112,51 @@ describe('egress guard', () => {
   });
 });
 
+// #238: an IPv6 address can embed an IPv4 address in several forms; the IPv4 block list must
+// apply to the embedded address, at the URL check and at the connect-time DNS check.
+describe('IPv4 addresses embedded in IPv6', () => {
+  const blockedLiterals = [
+    'http://[::ffff:127.0.0.1]/', // IPv4-mapped, dotted (normalised by URL to hex)
+    'http://[::ffff:7f00:1]/', // IPv4-mapped, hex
+    'http://[::ffff:169.254.169.254]/', // cloud metadata, mapped
+    'http://[::7f00:1]/', // IPv4-compatible
+    'http://[64:ff9b::7f00:1]/', // NAT64
+    'http://[64:ff9b::a9fe:a9fe]/', // NAT64 of cloud metadata
+    'http://[2002:7f00:1::]/', // 6to4, embedded address in bits 16-48
+    'http://[2002:a9fe:a9fe::1]/', // 6to4 of cloud metadata
+  ];
+
+  it('blocks IPv4-mapped, compatible, NAT64 and 6to4 literals in URLs', () => {
+    for (const url of blockedLiterals) expect(checkUrl(url, none), url).toContain('private address');
+  });
+
+  it('blocks those literal hosts before a request reaches the network', async () => {
+    const srv = createServer((_req, res) => res.end('internal-secret'));
+    await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+    const port = (srv.address() as AddressInfo).port;
+    try {
+      await expect(safeRequest(`http://127.0.0.1:${port}/`, {}, none)).rejects.toThrow(/private address/);
+      await expect(safeRequest(`http://[::ffff:127.0.0.1]:${port}/`, {}, none)).rejects.toThrow(/private address/);
+      await expect(safeRequest(`http://[::ffff:7f00:1]:${port}/`, {}, none)).rejects.toThrow(/private address/);
+    } finally {
+      srv.close();
+    }
+  });
+
+  it('blocks an address returned by DNS at connect time in every embedded form', async () => {
+    for (const address of ['::ffff:7f00:1', '::ffff:127.0.0.1', '::7f00:1', '64:ff9b::7f00:1', '2002:7f00:1::'])
+      await expect(lookupOf(resolving([{ address, family: 6 }]), { all: true }), address).rejects.toThrow(/private address/);
+  });
+
+  it('still allows these forms when the embedded address is public', async () => {
+    for (const address of ['::ffff:93.184.216.34', '::ffff:5db8:d822', '::5db8:d822', '64:ff9b::5db8:d822', '2002:5db8:d822::'])
+      await expect(lookupOf(resolving([{ address, family: 6 }]), { all: true }), address).resolves.toEqual({
+        address: [{ address, family: 6 }],
+      });
+    expect(checkUrl('http://[::ffff:93.184.216.34]/', none)).toBeNull();
+  });
+});
+
 describe('signing', () => {
   it('signs and verifies Standard Webhooks', () => {
     const secret = newWebhookSecret();
