@@ -274,6 +274,14 @@ export const listTypes = defineCommand({
   }),
 });
 
+
+/** Types only people may write, whatever an agent's scopes (agent mandates, ADR-0016). */
+function refuseAgentsFor(ctx: CommandContext, type: string) {
+  if (ctx.principal.type !== 'agent') return;
+  const def = artifactTypes[type as ArtifactType] as { peopleOnly?: boolean; label: string } | undefined;
+  if (def?.peopleOnly) throw new AppError('forbidden', `Only people can create, change or publish ${def.label.toLowerCase()}s; agents cannot set their own borders.`);
+}
+
 export const createArtifact = defineCommand({
   name: 'artifacts.create',
   title: 'Create artifact draft',
@@ -295,6 +303,7 @@ export const createArtifact = defineCommand({
   effect: 'write',
   actionClass: 'draft',
   handler: async (input, ctx) => {
+    refuseAgentsFor(ctx, input.type);
     const content = validateContent(input.type, input.content, 'draft');
     const warnings = contentWarnings(input.type, content);
     const id = newId(artifactTypes[input.type].prefix);
@@ -396,6 +405,7 @@ export const updateDraft = defineCommand({
   target: (i) => i.artifactId,
   handler: async (input, ctx) => {
     const a = await loadArtifact(ctx, input.artifactId);
+    refuseAgentsFor(ctx, a.type);
     const content = validateContent(a.type as ArtifactType, input.content, 'draft');
     const warnings = contentWarnings(a.type as ArtifactType, content);
     const latest = await loadVersion(ctx, a.id, a.latestVersion);
@@ -637,6 +647,7 @@ export const discardDraft = defineCommand({
   target: (i) => i.artifactId,
   handler: async (input, ctx) => {
     const a = await loadArtifact(ctx, input.artifactId);
+    refuseAgentsFor(ctx, a.type);
     if (!a.publishedVersion) throw new AppError('conflict', 'This artifact has no live version, so there is nothing to go back to.');
     const ws = ctx.principal.workspaceId;
     const versions = await ctx.tx
@@ -701,6 +712,7 @@ export const requestPublish = defineCommand({
   target: (i) => i.artifactId,
   handler: async (input, ctx) => {
     const a = await loadArtifact(ctx, input.artifactId);
+    refuseAgentsFor(ctx, a.type);
     const v = await loadVersion(ctx, a.id, a.latestVersion);
     if (v.state !== 'draft')
       throw new AppError(
@@ -806,6 +818,7 @@ export const requestPublishBundle = defineCommand({
     const members = [];
     for (const id of ids) {
       const a = await loadArtifact(ctx, id);
+      refuseAgentsFor(ctx, a.type);
       const v = await loadVersion(ctx, a.id, a.latestVersion);
       if (v.state !== 'draft')
         throw new AppError(
@@ -1253,23 +1266,64 @@ export const approve = defineCommand({
  * agent act through a person while it is stopped. Rejecting stays possible.
  */
 async function refuseIfAgentStopped(ctx: CommandContext, r: { requestedByType: string; requestedByClient: string | null }) {
-  if (r.requestedByType !== 'agent' || !r.requestedByClient) return;
+  const agent = await requestingAgent(ctx, r);
+  if (agent && agent.status !== 'active')
+    throw new AppError(
+      'conflict',
+      `This change was requested by the agent “${agent.name}”, which is ${agent.status}. Resume the agent to approve it, or reject it.`,
+    );
+}
+
+/** The agent behind an approval request's credential, if an agent requested it. */
+async function requestingAgent(ctx: CommandContext, r: { requestedByType: string; requestedByClient: string | null }) {
+  if (r.requestedByType !== 'agent' || !r.requestedByClient) return null;
   const [kind, credentialId] = r.requestedByClient.startsWith('token:')
     ? (['api_token', r.requestedByClient.slice('token:'.length)] as const)
     : (['oauth_client', r.requestedByClient] as const);
   const [agent] = await ctx.tx
-    .select({ name: schema.agents.name, status: schema.agents.status })
+    .select({ id: schema.agents.id, name: schema.agents.name, status: schema.agents.status })
     .from(schema.agentCredentials)
     .innerJoin(
       schema.agents,
       and(eq(schema.agents.workspaceId, schema.agentCredentials.workspaceId), eq(schema.agents.id, schema.agentCredentials.agentId)),
     )
     .where(and(eq(schema.agentCredentials.kind, kind), eq(schema.agentCredentials.credentialId, credentialId)));
-  if (agent && agent.status !== 'active')
-    throw new AppError(
-      'conflict',
-      `This change was requested by the agent “${agent.name}”, which is ${agent.status}. Resume the agent to approve it, or reject it.`,
-    );
+  return agent ?? null;
+}
+
+/**
+ * Runs a held agent change whose veto window has ended (ADR-0016, #225). Re-checks at that moment
+ * that the agent is active, the workspace lets agents act and its mandate still applies; if not,
+ * the hold becomes an ordinary approval with the reason. Returns what happened.
+ */
+export async function runHeldChange(
+  ctx: CommandContext,
+  approvalId: string,
+  stillAllowed: (agentId: string) => Promise<string | null>,
+): Promise<{ status: 'published' | 'needs_person' | 'not_due'; reason?: string }> {
+  const r = await decide(ctx, approvalId);
+  if (!r.holdUntil || r.holdUntil > new Date()) return { status: 'not_due' };
+  const members = await bundleMembers(ctx, r);
+  const agent = await requestingAgent(ctx, r);
+  let problem: string | null = null;
+  if (!agent) problem = 'the agent that requested it is no longer known';
+  else if (agent.status !== 'active') problem = `the agent “${agent.name}” is ${agent.status}`;
+  else problem = await stillAllowed(agent.id);
+  const ids = members.map((m) => m.id);
+  const scope = and(eq(schema.approvalRequests.workspaceId, ctx.principal.workspaceId), inArray(schema.approvalRequests.id, ids));
+  if (problem) {
+    await ctx.tx
+      .update(schema.approvalRequests)
+      .set({ holdUntil: null, note: sql`${schema.approvalRequests.note} || ${`\n\nNot run after its veto window: ${problem}. A person decides.`}` })
+      .where(scope);
+    return { status: 'needs_person', reason: problem };
+  }
+  for (const m of members) await publishVersion(ctx, m.artifactId, m.version);
+  await ctx.tx
+    .update(schema.approvalRequests)
+    .set({ status: 'approved', decidedBy: 'policy:hold', decidedAt: new Date(), decisionNote: 'Ran after its veto window ended without a veto.' })
+    .where(scope);
+  return { status: 'published' };
 }
 
 export const reject = defineCommand({

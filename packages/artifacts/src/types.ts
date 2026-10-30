@@ -1187,6 +1187,107 @@ export type EmailBlock = z.output<typeof emailBlock>;
 export type EmailBlockParam = z.output<typeof BlockParam>;
 export type Purposes = z.output<typeof purposes>['purposes'];
 
+// Agent mandates (ADR-0016, #223): the borders a person grants one agent. A level per action
+// class (0 observe … 4 run the loop; capped by the workspace ceilings), what the agent may touch,
+// limits on top of the workspace's, guardrails on its own sends, and a validity period.
+const MandateLevel = z.number().int().min(0).max(4);
+const MANDATE_CLASSES = [
+  'draft',
+  'content.publish',
+  'audience.publish',
+  'send.broadcast',
+  'send.direct',
+  'journey.live',
+  'experience.live',
+  'spend',
+  'data.write',
+  'settings',
+  'destructive',
+] as const;
+const agentMandate = z.object({
+  agent: z.string().regex(/^agt_[0-9a-f]{32}$/, 'An agent id, e.g. from agents.list').describe('The agent this mandate is for'),
+  purpose: z.string().min(1).max(1000).describe('What the agent is for, in a sentence or two; shown on holds and in the independent check'),
+  goals: z
+    .array(
+      z.object({
+        measure: z.string().min(1).describe('A metric-layer measure, e.g. email.click_rate'),
+        target: z.number().optional(),
+        direction: z.enum(['up', 'down']).default('up'),
+      }),
+    )
+    .max(10)
+    .default([]),
+  scope: z
+    .object({
+      segments: z.array(z.string().regex(/^seg_[0-9a-f]{32}$/)).max(50).default([]).describe('Audiences the agent may send to; empty: none'),
+      purposes: z.array(z.string()).max(20).default([]).describe('Purposes its messages may use; empty: any the segment allows'),
+      topics: z.array(z.string()).max(20).default([]).describe('Topics its messages may use; empty: any'),
+      channels: z.array(z.enum(['email', 'sms', 'push'])).default(['email']),
+      artifactTypes: z.array(z.string()).max(30).default([]).describe('Artifact types it may publish; empty: any within the levels'),
+      artifacts: z.array(z.string()).max(100).default([]).describe('Specific artifacts it may change; empty: any of the allowed types'),
+      brand: z.string().nullable().default(null).describe('Reserved for multi-brand; null: the whole workspace'),
+    })
+    .default({ segments: [], purposes: [], topics: [], channels: ['email'], artifactTypes: [], artifacts: [], brand: null }),
+  levels: z
+    .partialRecord(z.enum(MANDATE_CLASSES), MandateLevel)
+    .default({})
+    .describe('Level per action class: 0 observe, 1 propose, 2 act with veto, 3 act within limits, 4 run the loop. Missing: 1'),
+  limits: z
+    .object({
+      recipientsPerSend: z.number().int().min(0).optional().describe('Most people one send may reach'),
+      recipientGrowth: z
+        .number()
+        .min(1)
+        .max(10)
+        .optional()
+        .describe('A send may reach at most this many times the agent’s previous send, e.g. 1.2'),
+      sendsPerDay: z.number().int().min(0).optional(),
+      changesPerDay: z.number().int().min(0).optional(),
+      messagesPerDay: z.number().int().min(0).optional(),
+    })
+    .default({}),
+  guardrails: z
+    .object({
+      unsubscribeRate: z.number().min(0).max(1).optional().describe('e.g. 0.005 for 0.5%'),
+      complaintRate: z.number().min(0).max(1).optional(),
+      bounceRate: z.number().min(0).max(1).optional(),
+      window: z.enum(['P7D', 'P14D', 'P30D']).default('P7D'),
+      minSent: z.number().int().min(0).default(100).describe('Rates are judged only once the agent’s sends reached this many people'),
+    })
+    .default({ window: 'P7D', minSent: 100 }),
+  validUntil: isoDateTime('validUntil').describe('The mandate stops applying after this (renew by publishing a new version)'),
+  workingHours: z
+    .object({
+      start: Clock,
+      end: Clock,
+      days: z.array(z.enum(['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'])).optional(),
+    })
+    .optional()
+    .describe('Irreversible actions (sends) outside these hours, in the workspace time zone, are held instead'),
+  blackoutDates: z.array(z.string().regex(/^\d{4}-\d{2}-\d{2}$/)).max(60).default([]),
+  holdWindow: z
+    .enum(['PT30M', 'PT1H', 'PT2H', 'PT4H', 'PT12H', 'PT24H'])
+    .default('PT2H')
+    .describe('How long a level-2 action waits for a veto before it runs'),
+  escalation: z
+    .object({ userIds: z.array(z.string()).max(20).default([]) })
+    .default({ userIds: [] })
+    .describe('Who besides the sponsor is told about holds, refusals and guardrail hits'),
+  independentCheck: z.boolean().default(false).describe('A second model checks intent, diff and mandate before level-2+ actions'),
+});
+export type AgentMandate = z.output<typeof agentMandate>;
+
+// The brief every agent reads (narrow #85): what the business offers, to whom, in which voice.
+const businessContext = z.object({
+  summary: z.string().min(1).max(4000).describe('What the business does and for whom'),
+  audience: z.string().max(4000).default(''),
+  offer: z.string().max(4000).default(''),
+  voice: z.string().max(4000).default('').describe('Tone and style; words to use and avoid'),
+  avoid: z.array(z.string().max(500)).max(50).default([]).describe('Claims and topics never to use'),
+  legal: z.string().max(4000).default('').describe('Disclaimers and lines that must appear'),
+  links: z.array(z.object({ label: z.string().max(120), url: z.string().url() })).max(30).default([]),
+});
+
 export const artifactTypes = {
   note: { prefix: 'not', label: 'Note', description: 'Free-form note, used to exercise the artifact system.', content: note },
   journey: {
@@ -1309,6 +1410,22 @@ export const artifactTypes = {
     description:
       'Frequency caps, quiet hours and the bounce and complaint thresholds that pause marketing messages. One per workspace; defaults apply until one is published.',
     content: deliveryPolicy,
+    singleton: true,
+  },
+  agent_mandate: {
+    prefix: 'mnd',
+    label: 'Agent mandate',
+    description:
+      'The borders a person grants one agent (ADR-0016): a level per kind of action (0 observe, 1 propose, 2 act with veto, 3 act within limits), the audiences, purposes, topics and artifacts it may touch, limits, guardrails on its own sends and an end date. Only people create, change or approve mandates; the workspace ceilings cap every level.',
+    content: agentMandate,
+    peopleOnly: true,
+  },
+  business_context: {
+    prefix: 'bcx',
+    label: 'Business context',
+    description:
+      'The brief every agent starts from: what the business offers and to whom, the voice, claims to avoid and legal lines. One per workspace; agents read it as the MCP resource business-context://current.',
+    content: businessContext,
     singleton: true,
   },
 } as const;
