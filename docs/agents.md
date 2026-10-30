@@ -103,7 +103,7 @@ Only people can create, change or publish a mandate. An agent that tries gets `4
 | 3 | **Act within limits** | Runs at once when it is inside the scope and limits; recorded in the activity ledger. |
 | 4 | **Run the loop** | Level 3 plus creating new artifacts of the class within its goals. **Later release**; a mandate that grants it is refused for now. |
 
-A class that is not listed in `levels` counts as 1. Two classes can never be made autonomous, whatever the mandate says: `settings` and `destructive` always need a person, as do changes to purposes, the delivery policy, the tracking plan, a conversion map and the mandate itself. Above the mandate's scope or limits, an action drops one level: an L3 send becomes an L2 hold (or an L1 proposal), with the reason.
+A class that is not listed in `levels` counts as 1. Two classes can never be made autonomous, whatever the mandate says: `settings` and `destructive` always need a person, as do changes to purposes, the delivery policy, the tracking plan, a conversion map and the mandate itself. Above one of the mandate's limits an action drops one level: an L3 send becomes an L2 hold, an L2 action a proposal, with the reason. Anything outside the mandate's scope (another audience, purpose, topic, channel or artifact type) is only ever proposed.
 
 ### Scope, limits and guardrails
 
