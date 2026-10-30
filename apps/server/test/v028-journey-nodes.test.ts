@@ -70,12 +70,17 @@ async function createJourney(name: string, content: Record<string, unknown>) {
   return a.artifactId;
 }
 
-/** A journey that marks which waitUntil outcome it took in the profile's `last_path` trait. */
+/**
+ * A journey that marks which waitUntil outcome it took in the profile's `last_path` trait. Each
+ * starts on its own event (`startEvent(name)`): with a shared one, a person would also enter the
+ * other tests' journeys, and their outcome would write the same trait.
+ */
+const startEvent = (name: string) => `Wait Start: ${name}`;
 const waitJourney = (name: string, wait: Record<string, unknown>, purpose = 'onboarding') =>
   createJourney(name, {
     purpose,
     nodes: [
-      { id: 'trigger', kind: 'trigger', label: 'Start', config: { event: 'Wait Start', reentry: 'once' } },
+      { id: 'trigger', kind: 'trigger', label: 'Start', config: { event: startEvent(name), reentry: 'once' } },
       { id: 'wait', kind: 'waitUntil', label: 'Wait for it', config: wait, next: [{ to: 'matched' }, { to: 'timeout' }] },
       { id: 'matched', kind: 'updateProfile', label: 'Matched', config: { trait: 'last_path', value: 'matched' }, next: [{ to: 'done' }] },
       {
@@ -120,7 +125,7 @@ describe('waitUntil (#92)', () => {
       recheck: 'PT1H',
     });
     const profileId = await profileIdOf(userId);
-    await send([{ type: 'track', event: 'Wait Start', userId }]);
+    await send([{ type: 'track', event: startEvent('Wait now'), userId }]);
     const row = await eventually(
       () => rowOf(journeyId, profileId),
       (r) => r?.status === 'completed',
@@ -139,7 +144,7 @@ describe('waitUntil (#92)', () => {
       recheck: 'PT1H',
     });
     const profileId = await profileIdOf(userId);
-    await send([{ type: 'track', event: 'Wait Start', userId }]);
+    await send([{ type: 'track', event: startEvent('Wait identify'), userId }]);
     const waiting = await eventually(
       () => rowOf(journeyId, profileId),
       (r) => r?.status === 'waiting',
@@ -167,7 +172,7 @@ describe('waitUntil (#92)', () => {
     await send([{ type: 'identify', userId, traits: { email: `${userId}@example.com`, vip: false } }]);
     const journeyId = await waitJourney('Wait segment', { condition: { segment: segment.artifactId }, timeout: 'P14D', recheck: 'PT1H' });
     const profileId = await profileIdOf(userId);
-    await send([{ type: 'track', event: 'Wait Start', userId }]);
+    await send([{ type: 'track', event: startEvent('Wait segment'), userId }]);
     await eventually(
       () => rowOf(journeyId, profileId),
       (r) => r?.status === 'waiting',
@@ -191,7 +196,7 @@ describe('waitUntil (#92)', () => {
       recheck: 'PT5M',
     });
     const profileId = await profileIdOf(userId);
-    await send([{ type: 'track', event: 'Wait Start', userId }]);
+    await send([{ type: 'track', event: startEvent('Wait timeout'), userId }]);
     await eventually(
       () => rowOf(journeyId, profileId),
       (r) => r?.status === 'waiting',
@@ -212,7 +217,7 @@ describe('waitUntil (#92)', () => {
     const journeyId = await createJourney('Wait two events', {
       purpose: 'onboarding',
       nodes: [
-        { id: 'trigger', kind: 'trigger', label: 'Start', config: { event: 'Wait Start', reentry: 'once' } },
+        { id: 'trigger', kind: 'trigger', label: 'Start', config: { event: startEvent('Wait two events'), reentry: 'once' } },
         {
           id: 'wait',
           kind: 'waitUntil',
@@ -225,7 +230,7 @@ describe('waitUntil (#92)', () => {
       ],
     });
     const profileId = await profileIdOf(userId);
-    await send([{ type: 'track', event: 'Wait Start', userId }]);
+    await send([{ type: 'track', event: startEvent('Wait two events'), userId }]);
     await eventually(
       () => rowOf(journeyId, profileId),
       (r) => r?.status === 'waiting',
@@ -258,7 +263,7 @@ describe('waitUntil (#92)', () => {
       { condition: { trait: 'plan', op: 'eq', value: 'pro' }, timeout: 'P14D', recheck: 'PT1H' },
       'marketing_email',
     );
-    await send([{ type: 'track', event: 'Wait Start', userId }]);
+    await send([{ type: 'track', event: startEvent('Wait exit'), userId }]);
     await eventually(
       () => rowOf(journeyId, profileId),
       (r) => r?.status === 'waiting',
