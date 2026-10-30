@@ -149,9 +149,10 @@ describe('warehouse export', () => {
     const third = await exported(exportId, second.lastRunAt);
     expect(third.lastCounts.erasures).toBe(1);
     for (const table of ['am_profiles', 'am_identifiers', 'am_consent', 'am_events'])
-      expect((await dest.query(`SELECT count(*)::int AS n FROM agentic_marketing.${table} WHERE workspace_id = $1`, [ws])).rows[0].n).toBe(
-        0,
-      );
+      expect(
+        (await dest.query(`SELECT count(*)::int AS n FROM agentic_marketing.${table} WHERE workspace_id = $1`, [ws])).rows[0].n,
+        table,
+      ).toBe(0);
     expect(
       (await dest.query('SELECT profile_ids FROM agentic_marketing.am_erasures WHERE workspace_id = $1', [ws])).rows[0].profile_ids,
     ).toContain(profileId);

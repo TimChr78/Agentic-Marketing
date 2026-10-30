@@ -40,6 +40,9 @@ async function identsOf(e: BusEvent, crypto: PersonCrypto): Promise<Ident[]> {
 const hasProfileData = (e: BusEvent) =>
   Object.keys(e.traits).length > 0 || Object.keys(e.piiTraits).length > 0 || e.name === CONSENT_EVENT || e.type === 'alias';
 
+/** Events the platform publishes about existing people (packages/segments uses the same id). */
+const SYSTEM_SOURCE = 'system';
+
 export interface ResolveDeps {
   kp: KeyProvider;
   purposes: (tx: Tx) => Promise<Purposes>;
@@ -66,6 +69,9 @@ export async function applyEvents(tx: Tx, workspaceId: string, events: BusEvent[
     // Fast path, most events: known identifiers of one profile, nothing to change but last seen.
     const known = await lookup(tx, workspaceId, ids);
     const profilesKnown = new Set(known.map((k) => k.profileId));
+    // The platform's own events (segment entered/exited) describe someone who exists. One still in
+    // flight when that person was erased must not create a new profile from their ids.
+    if (e.sourceId === SYSTEM_SOURCE && !known.length) continue;
     if (!hasProfileData(e) && known.length === ids.length && profilesKnown.size === 1) {
       await touch(tx, workspaceId, [...profilesKnown][0], ids, e.timestamp);
       resolved.push({ event: e, profileId: [...profilesKnown][0] });
