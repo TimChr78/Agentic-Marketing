@@ -2,6 +2,13 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+### Fixed
+
+- **Client IP behind an appending proxy (#241).** When the socket peer is a trusted proxy, a multi-value forwarding header such as `x-forwarded-for` is now walked from right to left, skipping addresses inside `TRUSTED_PROXY_CIDRS`, and the first untrusted address is used. A client can no longer prepend a spoofed address that nginx's default `proxy_add_x_forwarded_for` leaves in the leftmost position. Single-value headers (`cf-connecting-ip`, `x-real-ip`) behave as before, an untrusted peer still falls back to its socket address, and an all-trusted header still uses its leftmost address.
+- **The Helm chart no longer trusts client-supplied forwarding headers by default (#236).** With `ingress.enabled=true`, the chart refuses to render while `config.TRUSTED_PROXY_CIDRS` is empty instead of accepting a client-chosen `X-Forwarded-For`. The [Kubernetes guide](docs/deployment/kubernetes.md#client-ip-behind-the-ingress) shows how to find the ingress controller's pod or node ranges and set them; CI renders the Ingress with a trusted range.
+
 ## [0.4.0] - 2026-10-30
 
 [Phase 18](docs/architecture/roadmap-wave-4.md#phase-18-mandates-and-the-first-autonomy) of wave 4: mandates and the first autonomy. A person can now grant an agent bounded autonomy for a purpose and a period, and the platform enforces it: within its mandate an agent can publish and send by itself (level 3), or act after a veto window (level 2), and everything outside goes to a person. The default stays a person: nothing changes until an owner raises a workspace ceiling and publishes a mandate. Works for any agent that speaks MCP or the REST API ([docs/agents.md](docs/agents.md)).
