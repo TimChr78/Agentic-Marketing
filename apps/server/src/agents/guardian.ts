@@ -164,10 +164,11 @@ async function findings(tx: Tx, deps: GuardianDeps, workspaceId: string, agentId
   if (open.has('anomaly')) {
     const actions = await recent('anomaly');
     const changes = actions.filter((a) => a.ok && (a.decision === 'allow' || a.decision === 'hold') && a.actionClass !== 'draft');
+    // A burst is mostly reversible changes (content, audiences), so every class waits for a person (#284).
     if (changes.length >= GUARDIAN.burstPerHour)
       out.push({
         kind: 'anomaly',
-        action: 'hold',
+        action: 'cap',
         reason: `This agent made ${fmt(changes.length)} changes in the last hour, far more than usual.`,
         evidence: { changes: changes.length },
       });

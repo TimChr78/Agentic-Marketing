@@ -196,7 +196,7 @@ A scheduler job (every five minutes) watches every active agent with a mandate, 
 |---|---|---|
 | Guardrails | The mandate's unsubscribe, complaint or bounce rate on the agent's own sends is over its limit (the same check as before each send, run continuously because rates arrive after a send). | Cap: every change waits for a person. |
 | Anomaly: send size | A send reaches more than 3× the median of the agent's previous sends (after at least 3). | Hold: sends and other irreversible actions are held for a veto window at most. |
-| Anomaly: burst | 30 or more changes in an hour. | Hold. |
+| Anomaly: burst | 30 or more changes in an hour. | Cap: every change waits for a person. |
 | Rising errors | 5 or more failed actions in an hour, at least half of its actions. | Cap. |
 | Probing | 10 or more refusals in an hour. | Pause the agent. |
 | Loop | The same artifact changed 6 or more times in an hour. | Pause the agent. |

@@ -192,11 +192,21 @@ describe('broadcasts', () => {
       (r) => r.run.status === 'scheduled',
     );
     expect(scheduled.run.status).toBe('scheduled');
+    // As if it were a staged send waiting on its canary (#287).
+    await t.srv.db.admin.query(
+      `INSERT INTO broadcast_stages (workspace_id, broadcast_id, stage, canary_percent)
+       SELECT workspace_id, broadcast_id, 'canary_waiting', 10 FROM broadcast_runs WHERE broadcast_id = $1`,
+      [bcast.body.artifactId],
+    );
 
     const undone = await api.call('agents.undo', { actionId: action.id });
     expect(undone.result).toContain('Cancelled the scheduled send');
     const status = await api.call('broadcasts.status', { artifactId: bcast.body.artifactId });
     expect(status.run.status).toBe('cancelled');
+    const { rows: stages } = await t.srv.db.admin.query('SELECT stage, stop_reason FROM broadcast_stages WHERE broadcast_id = $1', [
+      bcast.body.artifactId,
+    ]);
+    expect(stages[0]).toMatchObject({ stage: 'stopped', stop_reason: expect.stringContaining('Undone') });
     // It was the first publish: undo takes it out of service again too.
     expect((await api.call('artifacts.get', { artifactId: bcast.body.artifactId })).publishedVersion).toBeNull();
   });

@@ -1,7 +1,7 @@
 import { registerUndoHandler } from '@agentic-marketing/commands';
 import { AppError } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 
 // Reversing an agent's broadcast publish (ADR-0016 §5.4, #255): a scheduled send is cancelled
 // before it goes out, a running one stops after the current batch. What was already sent cannot
@@ -21,6 +21,17 @@ registerUndoHandler(async (ctx, undo) => {
       .update(schema.broadcastRuns)
       .set({ status: 'cancelled', finishedAt: new Date(), leaseUntil: null })
       .where(eq(schema.broadcastRuns.broadcastId, undo.broadcastId));
+    // A staged send stops too, like broadcasts.cancel, so its status does not stay active (#287).
+    await ctx.tx
+      .update(schema.broadcastStages)
+      .set({ stage: 'stopped', stopReason: 'Undone: the agent’s publish was reversed.', stoppedAt: new Date() })
+      .where(
+        and(
+          eq(schema.broadcastStages.workspaceId, ctx.principal.workspaceId),
+          eq(schema.broadcastStages.broadcastId, undo.broadcastId),
+          inArray(schema.broadcastStages.stage, ['canary_sending', 'canary_waiting', 'checking', 'sending_rest']),
+        ),
+      );
     return run.status === 'running'
       ? `Stopped the rest of broadcast ${undo.broadcastId}; messages already sent cannot be recalled.`
       : `Cancelled the scheduled send of broadcast ${undo.broadcastId}.`;

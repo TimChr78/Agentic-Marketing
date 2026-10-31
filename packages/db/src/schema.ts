@@ -1188,7 +1188,7 @@ export const agentCredentials = pgTable(
  * runs; `none` says plainly why it cannot be undone (a message that was already sent).
  */
 export type AgentUndo =
-  | { kind: 'republish'; artifactId: string; previousVersion: number | null }
+  | { kind: 'republish'; artifactId: string; previousVersion: number | null; publishedVersion?: number }
   | { kind: 'cancel_send'; broadcastId: string }
   | { kind: 'group'; items: AgentUndo[] }
   | { kind: 'none'; reason: string };

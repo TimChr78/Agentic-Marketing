@@ -2,6 +2,18 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+### Fixed
+
+- **A paused or revoked agent stops at its next command (#275).** The executor re-reads the agent's status in every command's transaction, so a hosted run (or any principal resolved earlier) cannot keep acting after a person pauses or revokes it.
+- **Undo never discards newer work (#281).** The ledger records the version the agent published; `agents.undo` refuses, with the reason, when a newer version went live since (or the artifact is no longer live), instead of republishing an older version or taking down a person's work.
+- **Undoing a staged broadcast stops its stage (#287).** Like `broadcasts.cancel`, the stage becomes `stopped` with the reason, so the status no longer shows an active canary.
+- **The independent check reviews the version that is published (#283).** `artifacts.requestPublish` and `requestPublishBundle` lock the artifacts before the policy decision, so a draft cannot change between the check and the publish.
+- **A burst of changes caps every class (#284).** The guardian's burst response sends every change to a person instead of only holding sends, which left reversible changes unlimited.
+- **Held changes that do not run are announced (#282).** When a recheck sends a held change to a person, or it first has to wait for working hours, a ledger entry (`artifacts.heldRecheck`) is recorded and the sponsor is told; it is not counted against the agent's limits.
+- **The shadow report uses the approval each action created (#286).** The ledger records the approval id, so two actions on the same artifact can no longer be matched to the same decision. Shadow entries recorded before 0.5.2 show as unreviewed.
+
 ## [0.5.1] - 2026-10-31
 
 ### Fixed
