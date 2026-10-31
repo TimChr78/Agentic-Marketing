@@ -52,7 +52,15 @@ async function primeCursor(ws: string) {
 
 /** A fresh workspace with one agent, its sponsor and (optionally) an escalation target. */
 async function setup(
-  opts: { level: number; escalation?: boolean; validUntil?: string; provider?: boolean; prime?: boolean } = { level: 1 },
+  opts: {
+    level: number;
+    escalation?: boolean;
+    /** An escalation target who is not a member: the send to them fails while the sponsor still gets mail. */
+    escalationUserId?: string;
+    validUntil?: string;
+    provider?: boolean;
+    prime?: boolean;
+  } = { level: 1 },
 ): Promise<Setup> {
   const n = ++unique;
   const owner = await t.signUp(`owner-agent-notifications-${n}-${Date.now()}@example.com`);
@@ -82,7 +90,7 @@ async function setup(
       purpose: 'Test how a person is told about an agent’s actions',
       validUntil: opts.validUntil ?? inDays(30),
       levels: { 'content.publish': opts.level },
-      escalation: { userIds: viewer ? [viewer.id] : [] },
+      escalation: { userIds: opts.escalationUserId ? [opts.escalationUserId] : viewer ? [viewer.id] : [] },
     } as never,
   });
   expect((await api.call('artifacts.requestPublish', { artifactId: mandate.artifactId, note: 'grant' })).status).toBe('published');
@@ -104,17 +112,44 @@ const latestActionId = async (ws: string) =>
   Number((await t.srv.db.admin.query<{ id: string }>('SELECT max(id) AS id FROM agent_actions WHERE workspace_id = $1', [ws])).rows[0].id);
 
 /** An agent drafts a note and submits it, exercising content.publish through the policy engine. */
-async function publishNote(s: Setup, title: string) {
-  const created = await agentCall(s.token, 'artifacts.create', {
+async function publishNoteWith(token: string, title: string) {
+  const created = await agentCall(token, 'artifacts.create', {
     type: 'note',
     name: title,
     content: { title, body: 'A note from the agent under test.' },
   });
   expect(created.status).toBe(200);
-  return agentCall(s.token, 'artifacts.requestPublish', {
+  return agentCall(token, 'artifacts.requestPublish', {
     artifactId: created.body.artifactId,
     note: `${title}: what the agent intends to do`,
   });
+}
+
+const publishNote = (s: Setup, title: string) => publishNoteWith(s.token, title);
+
+/** A second agent in the same workspace, on its own token and mandate. */
+async function addAgent(s: Setup, opts: { name: string; level?: number; escalationUserId?: string } = { name: 'Second agent' }) {
+  const token = (
+    await s.api.call('apiTokens.create', {
+      name: opts.name,
+      scopes: ['artifacts:read', 'artifacts:write', 'artifacts:publish'],
+    })
+  ).token as string;
+  const agentId = (await agentCall(token, 'agents.get')).body.id as string;
+  await s.api.call('agents.update', { id: agentId, name: opts.name });
+  const mandate = await s.api.call('artifacts.create', {
+    type: 'agent_mandate',
+    name: `${opts.name} mandate`,
+    content: {
+      agent: agentId,
+      purpose: 'Test notifications for a second agent in one workspace',
+      validUntil: inDays(30),
+      levels: { 'content.publish': opts.level ?? 3 },
+      escalation: { userIds: opts.escalationUserId ? [opts.escalationUserId] : [] },
+    } as never,
+  });
+  expect((await s.api.call('artifacts.requestPublish', { artifactId: mandate.artifactId, note: 'grant' })).status).toBe('published');
+  return { token, agentId };
 }
 
 const emailRows = async (ws: string, prefix: string) =>
@@ -295,4 +330,48 @@ describe('agent notifications (#226)', () => {
     expect(outbox.filter((m) => m.to === s.owner.email && m.subject.startsWith('Held:'))).toHaveLength(1);
     expect(await emailRows(s.ws, 'agent-event:')).toHaveLength(1);
   }, 30_000);
+
+  it('interleaved agents deliver each action once when one agent cannot be reached (#276)', async () => {
+    const s = await setup({ level: 2 });
+    await s.api.call('agents.update', { id: s.agentId, name: 'Interleaved X' });
+    const outsider = await t.signUp(`outsider-interleaved-${Date.now()}@example.com`);
+    const y = await addAgent(s, { name: 'Interleaved Y', level: 2, escalationUserId: outsider.id });
+
+    expect((await publishNote(s, 'Interleaved X one')).body.status).toBe('on_hold');
+    expect((await publishNoteWith(y.token, 'Interleaved Y one')).body.status).toBe('on_hold');
+    expect((await publishNote(s, 'Interleaved X two')).body.status).toBe('on_hold');
+
+    const xMails = () =>
+      outbox.filter((m) => m.to === s.owner.email && m.subject.includes('Interleaved X') && !m.subject.startsWith('Daily agent digest'));
+    const first = await run();
+    expect(first.events).toBeGreaterThanOrEqual(2);
+    // X's two actions are one batch, each listed exactly once.
+    expect(xMails()).toHaveLength(1);
+    expect(xMails()[0].text.match(/Interleaved X one/g)).toHaveLength(1);
+    expect(xMails()[0].text.match(/Interleaved X two/g)).toHaveLength(1);
+
+    // Y's batch stays pending for the outsider. The retry sees the same X actions, but delivery is
+    // recorded per action and recipient, so X's sponsor gets nothing more.
+    await run();
+    expect(xMails()).toHaveLength(1);
+  }, 40_000);
+
+  it('a new action after a failure does not re-send what the sponsor already received (#276)', async () => {
+    const outsider = await t.signUp(`outsider-new-action-${Date.now()}@example.com`);
+    const s = await setup({ level: 2, escalationUserId: outsider.id });
+    expect((await publishNote(s, 'Before the failure')).body.status).toBe('on_hold');
+
+    const sponsorEvents = () => outbox.filter((m) => m.to === s.owner.email && !m.subject.startsWith('Daily agent digest'));
+    await run();
+    expect(sponsorEvents()).toHaveLength(1); // sponsor delivered, outsider still pending
+    expect(sponsorEvents()[0].text).toContain('Before the failure');
+
+    // The new action changes the batch, but the first action was already delivered to the sponsor.
+    expect((await publishNote(s, 'After the failure')).body.status).toBe('on_hold');
+    await run();
+    expect(sponsorEvents()).toHaveLength(2);
+    expect(sponsorEvents().filter((m) => m.text.includes('Before the failure'))).toHaveLength(1);
+    expect(sponsorEvents().filter((m) => m.text.includes('After the failure'))).toHaveLength(1);
+  }, 40_000);
+
 });

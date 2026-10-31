@@ -2,6 +2,12 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+### Fixed
+
+- **Sponsor notifications are delivered per action, not per batch (#276).** A retry now records which actions each recipient already received, so an interleaved agent or a new action before the retry no longer changes the batch into a new idempotency key and re-sends actions someone already got. The cursor advances only past actions delivered to every recipient. Migration `0055_agent_notification_deliveries.sql`.
+
 ## [0.5.1] - 2026-10-31
 
 ### Fixed
