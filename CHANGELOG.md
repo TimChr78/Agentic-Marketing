@@ -2,7 +2,7 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
-## [Unreleased]
+## [0.5.0] - 2026-10-31
 
 ### Added
 
@@ -19,6 +19,14 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 ### Fixed
 
 - **Restores no longer resurrect erased people (#144).** `am restore` reads `erasures` and `erasure_tombstones` from the live database before replacing it and replays them afterwards: profiles and identifiers of erased people are deleted again (with their profile keys, consent, messages and journey/segment membership), suppression hashes are restored and the tombstones re-inserted. Replay is idempotent and skips workspaces the snapshot no longer has; if the log cannot be read, the restore stops. The restore reports the snapshot time, and the backup retention rule (`BACKUP_KEEP_DAYS`, the maximum age of a restore point and therefore the window in which a snapshot can predate an erasure) is documented in [Backups and restore](docs/deployment/backups.md) and [Security & privacy](docs/architecture/security-and-privacy.md).
+
+### Upgrading from 0.4.1
+
+- **Migrations:** `0050_guardian_shadow.sql` (agent guard, guardian episodes, shadow decisions in the ledger), `0051_staged_sends.sql` (broadcast stages, `stopped` broadcast runs), `0052_hosted_agents.sql` (hosted agents and their runs, the `hosted` credential kind), `0053_agent_undo.sql` (reversals in the ledger). All additive; they run on start.
+- **Configuration:** optional `METRICS_TOKEN` (at least 16 characters) turns on `GET /metrics`; without it nothing new is exposed. Helm: put it in the chart's secret.
+- **Breaking changes:** none.
+- **Manual steps:** none. Mandates keep working as before; shadow mode, learning rules and staged sends are opt-in, and the guardian only acts on agents with an active mandate.
+- **Upgrade:** download `agentic-marketing-compose-<version>.tar.gz`, replace `docker-compose.yml` with its copy, check your configuration with the new image (`AM_VERSION=<version> docker compose run --rm --no-deps -T app am doctor --env-file - < .env`), then set `AM_VERSION=<version>` in `.env` and `docker compose pull && docker compose up -d` (Helm: the chart of the same version). Then `docker compose exec app am doctor`.
 
 ## [0.4.1] - 2026-10-31
 
