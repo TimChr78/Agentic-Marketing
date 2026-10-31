@@ -13,6 +13,7 @@ import { schema, type Tx } from '@agentic-marketing/db';
 import type {} from '@agentic-marketing/events';
 import { and, eq, gte, inArray, isNotNull, lte, max } from 'drizzle-orm';
 import { z } from 'zod';
+import { campaignFromBrief, planCampaign } from './brief';
 
 // Campaigns (#65) stay thin: a published campaign version groups existing artifacts under one goal
 // and one UTM campaign. Membership is read from those published versions rather than from a join
@@ -199,7 +200,10 @@ publishValidators.set('campaign', async (content, tx, artifact) => {
 });
 
 // artifacts.get shows what a campaign refers to, and bundles publish members before the campaign.
-referenceExtractors.set('campaign', (content) => ((content as CampaignDefinition).members ?? []).map((m) => m.artifactId));
+referenceExtractors.set('campaign', (content) => {
+  const campaign = content as CampaignDefinition;
+  return [...(campaign.members ?? []).map((m) => m.artifactId), ...(campaign.briefId ? [campaign.briefId] : [])];
+});
 
 export const campaignsOf = defineCommand({
   name: 'campaigns.of',
@@ -600,4 +604,11 @@ async function latestMemberIds(tx: Tx, campaignId: string): Promise<string[]> {
   return row ? (artifactTypes.campaign.content.parse(row.content) as CampaignDefinition).members.map((m) => m.artifactId) : [];
 }
 
-export const campaignCommands = [campaignsOf, campaignMembers, campaignHoldoutResult, archiveCampaign] as const;
+export const campaignCommands = [
+  campaignsOf,
+  campaignMembers,
+  campaignHoldoutResult,
+  archiveCampaign,
+  planCampaign,
+  campaignFromBrief,
+] as const;

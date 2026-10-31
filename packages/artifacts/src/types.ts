@@ -1159,6 +1159,12 @@ const CampaignMemberRef = z
 const campaign = z
   .object({
     description: z.string().max(1000).optional().describe('What this campaign is for, in plain words'),
+    briefId: z
+      .string()
+      .regex(/^cpb_[0-9a-f]{32}$/, 'A campaign brief id (cpb_…)')
+      .optional()
+      .describe('The approved campaign brief this campaign was built from'),
+    briefVersion: z.number().int().min(1).optional().describe('The published version of that brief'),
     goal: z
       .object({
         kind: z
@@ -1212,6 +1218,12 @@ const campaign = z
     }
     if (c.startsAt && c.endsAt && c.endsAt <= c.startsAt)
       ctx.addIssue({ code: 'custom', path: ['endsAt'], message: 'endsAt must be after startsAt' });
+    if ((c.briefId === undefined) !== (c.briefVersion === undefined))
+      ctx.addIssue({
+        code: 'custom',
+        path: ['briefVersion'],
+        message: 'briefId and briefVersion belong together: name the approved brief and the version it was built from',
+      });
   });
 
 export type FormDefinition = z.output<typeof form>;
@@ -1441,6 +1453,123 @@ const contentBrief = z.object({
 });
 export type ContentBrief = z.output<typeof contentBrief>;
 
+// Campaign briefs (#64, the campaign agent of Phase 20): the contract an agent drafts and a person
+// approves before any campaign artifact is written. It is deliberately small and typed so
+// campaigns.plan can map it to artifact skeletons without a model call; the agent fills the prose.
+const campaignBriefChannel = z.object({
+  channel: z.enum(['email', 'sms', 'push']),
+  purpose: Key.optional().describe('Purpose key for this channel; default marketing_email, marketing_sms or marketing_push'),
+});
+
+const campaignBrief = z
+  .object({
+    objective: z.string().trim().min(1).max(2000).describe('What the campaign is for, in plain words'),
+    goal: z.object({
+      measure: z
+        .string()
+        .trim()
+        .min(1)
+        .max(200)
+        .describe('A metric-layer measure the campaign intends to move, e.g. "email.click_rate" or "campaign.conversion_rate"'),
+      kind: z.enum(['conversion', 'revenue', 'engagement', 'signups', 'custom']).default('conversion'),
+      event: z
+        .string()
+        .trim()
+        .min(1)
+        .max(200)
+        .optional()
+        .describe('The event that counts as the goal, e.g. "Order Completed"; required for conversion and revenue, and for any holdout'),
+      target: z.number().min(0).max(1_000_000_000).describe('What success looks like: a count, a rate percentage or revenue'),
+      direction: z.enum(['up', 'down']).default('up'),
+      attributionDays: z.number().int().min(1).max(30).default(7).describe('How long after a send a conversion still counts'),
+    }),
+    audience: z.object({
+      description: z.string().trim().min(1).max(2000).describe('Who the campaign is for, in plain words'),
+      segmentIds: z
+        .array(SegmentRef)
+        .max(10)
+        .default([])
+        .describe('Existing published segments; empty: the plan creates one from the channel purpose'),
+      entryEvent: z
+        .string()
+        .trim()
+        .min(1)
+        .max(200)
+        .optional()
+        .describe('Enter when this event happens; default: enter the audience segment'),
+    }),
+    message: z.object({
+      key: z.string().trim().min(1).max(2000).describe('The key message or angle; the plan uses it as the template subject and body seed'),
+      tone: z.string().max(200).default(''),
+      language: z.string().max(50).default(''),
+    }),
+    offer: z
+      .object({
+        description: z.string().trim().min(1).max(1000),
+        source: z
+          .string()
+          .trim()
+          .min(1)
+          .max(500)
+          .describe('Where the offer comes from, e.g. a voucher pool id; the plan never invents one'),
+      })
+      .optional()
+      .describe('The offer or voucher, if any. No artifact is created for it: vouchers stay in their own system'),
+    channels: z.array(campaignBriefChannel).min(1).max(3),
+    schedule: z.object({
+      mode: z
+        .enum(['once', 'journey'])
+        .default('once')
+        .describe('once: a broadcast per channel at sendAt; journey: a journey with the wait between channel steps'),
+      sendAt: isoDateTime('sendAt')
+        .optional()
+        .describe('When a one-off starts; required for once and must be in the future when the brief is published'),
+      waitBetweenSteps: Iso.default('P2D').describe('The wait between channel steps in a journey'),
+    }),
+    guardrails: z
+      .object({
+        unsubscribeRate: z.number().min(0).max(1).optional(),
+        complaintRate: z.number().min(0).max(1).optional(),
+        maxRecipients: z.number().int().min(1).max(1_000_000_000).optional(),
+      })
+      .default({})
+      .describe('The limits this campaign must stay inside; the plan carries them as notes, the mandate and delivery policy enforce them'),
+    successCriteria: z.array(z.string().trim().min(1).max(500)).min(1).max(20),
+    holdout: z
+      .object({
+        percent: z.number().int().min(1).max(50).describe('Share of entrants held out from every channel, in percent'),
+        minSampleSize: z.number().int().min(1).default(200).describe('Both arms need at least this many people before a verdict'),
+      })
+      .optional()
+      .describe('Holdout intent: a deterministic control group on the campaign, measured once for all its members'),
+    assumptions: z
+      .array(z.string().max(500))
+      .max(50)
+      .default([])
+      .describe('What the agent assumed; a person can correct these before approving'),
+    warnings: z.array(z.string().max(500)).max(50).default([]).describe('Known gaps, e.g. missing data or an unresolved segment'),
+  })
+  .superRefine((b, ctx) => {
+    if (b.schedule.mode === 'once' && !b.schedule.sendAt)
+      ctx.addIssue({ code: 'custom', path: ['schedule', 'sendAt'], message: 'A one-off campaign needs sendAt' });
+    if ((b.goal.kind === 'conversion' || b.goal.kind === 'revenue') && !b.goal.event)
+      ctx.addIssue({
+        code: 'custom',
+        path: ['goal', 'event'],
+        message: 'A conversion or revenue goal needs the event that counts as the conversion',
+      });
+    if (b.holdout && !b.goal.event)
+      ctx.addIssue({
+        code: 'custom',
+        path: ['goal', 'event'],
+        message: 'A holdout needs goal.event, the event that counts, so uplift can be measured',
+      });
+    const channels = new Set(b.channels.map((c) => c.channel));
+    if (channels.size !== b.channels.length) ctx.addIssue({ code: 'custom', path: ['channels'], message: 'Name each channel once' });
+  });
+
+export type CampaignBrief = z.output<typeof campaignBrief>;
+
 export const artifactTypes = {
   note: { prefix: 'not', label: 'Note', description: 'Free-form note, used to exercise the artifact system.', content: note },
   journey: {
@@ -1523,7 +1652,7 @@ export const artifactTypes = {
     prefix: 'cmp',
     label: 'Campaign',
     description:
-      'A thin grouping of existing broadcasts, journeys, templates, experiences, forms and segments under one goal and one UTM campaign, so results can be reported per campaign. This is not an ad platform campaign (those live under ads.* and keep their own ids); link the two later by id. Members are references, never copies: editing or archiving a campaign does not change or delete them. A broadcast or journey that sends can belong to only one published campaign, so attribution is unambiguous; templates, segments and experiences may be shared. Shared UTM campaign: when a broadcast or journey in a published campaign with utmCampaign sends an e-mail, its utm_campaign is the campaign’s value unless the template sets its own utm.campaign, which wins. Only templates with utm settings tag their links; the campaign never turns tagging on. controlGroup {percent, minSampleSize?} keeps a deterministic share of everyone who is about to receive from any sending member out of every message from all of them, and it is measured once for the whole campaign with campaigns.holdoutResult; members inherit the campaign’s assignment and a journey member cannot define its own. A changed percentage after people were assigned needs controlGroup.reset: true. Look up membership with campaigns.of and campaigns.members. Publish the campaign with its new members in one review using artifacts.requestPublishBundle.',
+      'A thin grouping of existing broadcasts, journeys, templates, experiences, forms and segments under one goal and one UTM campaign, so results can be reported per campaign. An optional briefId and briefVersion record the approved campaign_brief it was built from. This is not an ad platform campaign (those live under ads.* and keep their own ids); link the two later by id. Members are references, never copies: editing or archiving a campaign does not change or delete them. A broadcast or journey that sends can belong to only one published campaign, so attribution is unambiguous; templates, segments and experiences may be shared. Shared UTM campaign: when a broadcast or journey in a published campaign with utmCampaign sends an e-mail, its utm_campaign is the campaign’s value unless the template sets its own utm.campaign, which wins. Only templates with utm settings tag their links; the campaign never turns tagging on. controlGroup {percent, minSampleSize?} keeps a deterministic share of everyone who is about to receive from any sending member out of every message from all of them, and it is measured once for the whole campaign with campaigns.holdoutResult; members inherit the campaign’s assignment and a journey member cannot define its own. A changed percentage after people were assigned needs controlGroup.reset: true. Look up membership with campaigns.of and campaigns.members. Publish the campaign with its new members in one review using artifacts.requestPublishBundle.',
     content: campaign,
   },
   tracking_plan: {
@@ -1580,6 +1709,13 @@ export const artifactTypes = {
       'The brief every agent starts from: what the business offers and to whom, the voice, claims to avoid and legal lines. One per workspace; agents read it as the MCP resource business-context://current.',
     content: businessContext,
     singleton: true,
+  },
+  campaign_brief: {
+    prefix: 'cpb',
+    label: 'Campaign brief',
+    description:
+      'The contract for one campaign (#64): objective, a measurable goal on a metric-layer measure, audience with segment references, message, optional offer, channels, schedule, guardrails, success criteria and holdout intent, plus the assumptions and warnings the agent records. Versioned and approved like any artifact: agents draft it, a person approves the published version, and the campaign agent then calls campaigns.plan and campaigns.fromBrief to build the draft bundle. campaigns.plan is deterministic: it maps these fields to artifact skeletons and says in its notes where a field needs a person or the agent to fill it.',
+    content: campaignBrief,
   },
   content_brief: {
     prefix: 'brf',
