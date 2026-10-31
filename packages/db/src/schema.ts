@@ -1138,6 +1138,16 @@ export const agentCredentials = pgTable(
   (t) => [primaryKey({ columns: [t.workspaceId, t.kind, t.credentialId] })],
 );
 
+/**
+ * How to reverse an agent action (ADR-0016 §5.4, #255). Recorded in the ledger when the action
+ * runs; `none` says plainly why it cannot be undone (a message that was already sent).
+ */
+export type AgentUndo =
+  | { kind: 'republish'; artifactId: string; previousVersion: number | null }
+  | { kind: 'cancel_send'; broadcastId: string }
+  | { kind: 'group'; items: AgentUndo[] }
+  | { kind: 'none'; reason: string };
+
 /** The agent action ledger: every agent write with its policy decision (#218). */
 export const agentActions = pgTable(
   'agent_actions',
@@ -1157,6 +1167,11 @@ export const agentActions = pgTable(
     mandateId: text('mandate_id'),
     mandateVersion: integer('mandate_version'),
     intent: text('intent'),
+    /** How to reverse it (#255); null when there is nothing to reverse (or the action was refused). */
+    undo: jsonb('undo').$type<AgentUndo | null>(),
+    undoneAt: ts('undone_at'),
+    undoneBy: text('undone_by'),
+    undoResult: text('undo_result'),
     at: ts('at').notNull().defaultNow(),
   },
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],

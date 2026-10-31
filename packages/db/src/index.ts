@@ -3,6 +3,7 @@ export * from './pool';
 export type {
   AgentCredentialKind,
   AgentStatus,
+  AgentUndo,
   AiCallKind,
   AiCallStatus,
   AiUse,
