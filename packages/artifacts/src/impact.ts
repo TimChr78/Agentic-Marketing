@@ -45,7 +45,12 @@ export async function publishImpact(
   for (const m of members) {
     const cls = publishClass(m.type);
     if (RANK.indexOf(cls) > RANK.indexOf(actionClass)) actionClass = cls;
+    // Every publish touches the artifact itself. A segment is also exactly the audience it names:
+    // a mandate scopes audiences by segment id, so it touches its own id (no estimator needed).
+    // An experience reports only this artifact, because the scope's channels are delivery
+    // channels (email, sms, push) and there is no experience channel to check.
     touches.artifacts.push({ id: m.id, type: m.type });
+    if (m.type === 'segment') touches.segments.push(m.id);
     const estimate = await ctx.services.artifactImpact?.[m.type]?.(ctx.tx, m.id, m.version);
     if (estimate?.people !== undefined) people = Math.max(people ?? 0, estimate.people);
     if (estimate?.summary) summaries.push(estimate.summary);

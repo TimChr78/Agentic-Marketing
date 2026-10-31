@@ -2,6 +2,12 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+### Fixed
+
+- **Mandate scope covers every way to reach people (#264).** A mandate's segments, purposes, topics and channels are now checked for direct sends, journeys and audience publishes, not only broadcasts. `messages.sendEmail` reports the published template's purpose and topic and the e-mail channel; `journeys.enroll` and publishing a journey report the journey's purpose, the channels of its e-mail, SMS and push steps, and its entry and condition segments (plus its step templates' topics); publishing a segment reports its own audience, publishing an `audience_sync` its segment, and an experience touches only its own artifact because the scope's channels are delivery channels. A mandate limited to `marketing_email` on the `email` channel can therefore no longer send an `onboarding` e-mail, enrol people in a journey with SMS steps, or publish a journey for another audience.
+
 ## [0.5.0] - 2026-10-31
 
 ### Added

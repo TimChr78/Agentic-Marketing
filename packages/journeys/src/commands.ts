@@ -19,20 +19,13 @@ import { matchesCondition } from './conditions';
 import { duplicateEntryKey, resolveEntryKey } from './entry';
 import { compile, unsupported } from './graph';
 import { assignHoldout, computeJourneyHoldout, holdoutDetail, holdoutHashVersion } from './holdout';
+import { conditionSegments, journeyTouches } from './impact';
 import { advance, type ParticipantState } from './interpreter';
 
 const JourneyId = z.string().regex(/^jrn_[0-9a-f]{32}$/);
 
 /** Extra publish checks other packages add (e.g. that connections and their actions exist). */
 export const journeyChecks: ((def: JourneyDefinition, tx: Tx) => Promise<string[]>)[] = [];
-
-/** Segment ids inside a condition tree, so publishing checks that they are live. */
-function conditionSegments(condition: unknown): string[] {
-  if (!condition || typeof condition !== 'object') return [];
-  const c = condition as Record<string, unknown>;
-  if (typeof c.segment === 'string') return [c.segment];
-  return [c.all, c.any, c.not].flatMap((part) => (Array.isArray(part) ? part.flatMap(conditionSegments) : conditionSegments(part)));
-}
 
 /** Journeys can be published only with runnable nodes and published templates and segments. */
 publishValidators.set('journey', async (content, tx, artifact) => {
@@ -250,7 +243,11 @@ export const enrollProfiles = defineCommand({
   permission: 'messages:send',
   effect: 'write',
   actionClass: 'journey.live',
-  impact: async (input) => ({ people: new Set(input.profileIds).size, summary: `enrol ${new Set(input.profileIds).size} people` }),
+  impact: async (input, ctx) => {
+    const people = new Set(input.profileIds).size;
+    const touches = await journeyTouches(ctx.tx, input.artifactId);
+    return { people, summary: `enrol ${people} people`, ...(touches ? { touches } : {}) };
+  },
   target: (i) => i.artifactId,
   handler: async (input, ctx) => {
     const [a] = await ctx.tx.select().from(schema.artifacts).where(eq(schema.artifacts.id, input.artifactId));
@@ -706,17 +703,5 @@ export const migrateJourney = defineCommand({
     return { ...out, moved: out.moved + out.restarted, byNode: [...byNode.values()] };
   },
 });
-
-/**
- * Reach of publishing a journey version, for the agent policy engine (ADR-0016): the people
- * currently in the journey, whom the new version will move on.
- */
-export async function journeyImpact(tx: Tx, artifactId: string) {
-  const [{ n }] = await tx
-    .select({ n: sql<number>`count(*)::int` })
-    .from(schema.journeyParticipants)
-    .where(and(eq(schema.journeyParticipants.journeyId, artifactId), inArray(schema.journeyParticipants.status, ['ready', 'waiting'])));
-  return { people: n, summary: `${n.toLocaleString('en-US')} people currently in the journey` };
-}
 
 export const journeyCommands = [journeyStats, journeyHoldoutResult, enrollProfiles, simulateJourney, migrateJourney] as const;

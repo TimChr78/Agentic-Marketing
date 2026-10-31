@@ -1,6 +1,6 @@
 import { defineCommand } from '@agentic-marketing/commands';
 import { AppError, isoDateTime } from '@agentic-marketing/core';
-import { schema } from '@agentic-marketing/db';
+import { schema, type Tx } from '@agentic-marketing/db';
 import { and, desc, eq, gte, lte, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { requestEmail } from './gateway';
@@ -26,6 +26,34 @@ function decodeCursor(cursor: string) {
 
 const encodeCursor = (at: string, id: string) => `m1.${Buffer.from(JSON.stringify({ at, id })).toString('base64url')}`;
 
+/**
+ * What a direct send touches, for the agent policy engine (ADR-0016 §3.4, #264): the purpose and
+ * optional topic of the template's published version, and the e-mail channel. Without a published
+ * template there is nothing to scope; the gateway refuses the send with `not_published`.
+ */
+async function sendTouches(tx: Tx, templateId: string) {
+  const [row] = await tx
+    .select({
+      purpose: sql<string | null>`${schema.artifactVersions.content} ->> 'purpose'`,
+      topic: sql<string | null>`${schema.artifactVersions.content} ->> 'topic'`,
+    })
+    .from(schema.artifacts)
+    .innerJoin(
+      schema.artifactVersions,
+      and(
+        eq(schema.artifactVersions.workspaceId, schema.artifacts.workspaceId),
+        eq(schema.artifactVersions.artifactId, schema.artifacts.id),
+        eq(schema.artifactVersions.number, schema.artifacts.publishedVersion),
+      ),
+    )
+    .where(eq(schema.artifacts.id, templateId));
+  return {
+    ...(row?.purpose ? { purposes: [row.purpose] } : {}),
+    ...(row?.topic ? { topics: [row.topic] } : {}),
+    channels: ['email'],
+  };
+}
+
 export const sendEmail = defineCommand({
   name: 'messages.sendEmail',
   title: 'Send an e-mail to a person',
@@ -41,7 +69,7 @@ export const sendEmail = defineCommand({
   permission: 'messages:send',
   effect: 'write',
   actionClass: 'send.direct',
-  impact: async () => ({ people: 1, reversible: false }),
+  impact: async (input, ctx) => ({ people: 1, reversible: false, touches: await sendTouches(ctx.tx, input.templateId) }),
   target: (i) => i.profileId,
   handler: async (input, ctx) => requestEmail(ctx.tx, ctx.principal.workspaceId, ctx.services.keyProvider, ctx.services.events, input),
 });
