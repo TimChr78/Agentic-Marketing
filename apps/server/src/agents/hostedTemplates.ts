@@ -6,7 +6,7 @@ import type { Permission } from '@agentic-marketing/commands';
 // approval and mandate path — it never gets settings autonomy.
 
 export interface HostedAgentTemplate {
-  key: 'weekly_report' | 'deliverability_guardian' | 'lifecycle_optimiser';
+  key: 'weekly_report' | 'deliverability_guardian' | 'lifecycle_optimiser' | 'newsletter_editor';
   name: string;
   description: string;
   instructions: string;
@@ -47,6 +47,17 @@ const LIFECYCLE_OPTIMISER = `You are the lifecycle optimiser. You improve live j
 
 Answer with: what you changed (with each publish's status: published, on_hold or in_review), what is still running and how many people it needs, and what you learned. Never invent numbers; if a call fails, say which.`;
 
+const NEWSLETTER_EDITOR = `You are the newsletter editor. You prepare and, within your mandate, send this week's issue (#316).
+
+1. Read your borders and what is known: agents.get, workspace.autonomy, learnings.list (e.g. which subject lines win for this audience), and the business context resource if you have it.
+2. Pick the material: content.items.list for the week's best-scored articles (with their score explanations), then content.selections.create with a name like "Issue <date>" and the articles per section. Never invent articles or links: use only items from the library.
+3. Pick the topic: content.topics.list with status approved; use the brief linked to the top topic (artifacts.get) as the thesis and angle of the issue. If there is none, propose one with content.topics.create and say so.
+4. Draft the issue: copy last week's template (artifacts.get, then artifacts.create type email_template) and fill it from the selection and the brief; run templates.check and fix blocking findings. Draft the broadcast to your mandated segment with a subjectTest of two subject lines (your mandate's learning rules require a test or a holdout) and a stagedSend.
+5. Submit the template and broadcast together with artifacts.requestPublishBundle and a note that says what the issue is, the expected recipients (broadcasts.preview) and the goal. The answer is published, on_hold (do not resubmit) or in_review (a person decides).
+6. After last week's issue: agents.report for the past 7 days, and when its subject test has a winner (broadcasts.status), record a learning with learnings.add and evidence {kind: "subject_test", id: <broadcast id>}.
+
+Answer with: the issue (subject lines, sections, article count), the publish status, last week's results and any learning recorded. Never invent numbers; if a call fails, say which.`;
+
 export const HOSTED_AGENT_TEMPLATES: HostedAgentTemplate[] = [
   {
     key: 'weekly_report',
@@ -79,6 +90,17 @@ export const HOSTED_AGENT_TEMPLATES: HostedAgentTemplate[] = [
     scopes: ['artifacts:read', 'audit:read', 'artifacts:write', 'artifacts:publish'],
     maxTokensPerRun: 40_000,
     maxToolCallsPerRun: 40,
+  },
+  {
+    key: 'newsletter_editor',
+    name: 'Newsletter editor',
+    description:
+      'Every Monday at 09:00: picks the week’s articles and an approved topic, drafts the issue with a subject test and submits it under the mandate, and records what last week’s test taught.',
+    instructions: NEWSLETTER_EDITOR,
+    schedule: 'weekly:mon:09:00',
+    scopes: ['artifacts:read', 'audit:read', 'artifacts:write', 'artifacts:publish'],
+    maxTokensPerRun: 60_000,
+    maxToolCallsPerRun: 50,
   },
 ];
 

@@ -356,6 +356,7 @@ The pilot: one segment, one topic, one weekly broadcast at level 3, everything e
     "destructive": 1
   },
   "limits": { "recipientGrowth": 1.2 },
+  "learning": { "broadcastHoldout": true },
   "guardrails": { "unsubscribeRate": 0.005, "complaintRate": 0.001, "window": "P7D", "minSent": 100 },
   "validUntil": "2026-11-27T07:00:00Z",
   "workingHours": { "start": "07:00", "end": "11:00", "days": ["tue"] },
@@ -365,6 +366,8 @@ The pilot: one segment, one topic, one weekly broadcast at level 3, everything e
   "independentCheck": false
 }
 ```
+
+As a **programme** (#316) the agent works from the article library (content sources and selections) and the topic backlog (approved briefs), sends each issue with a subject test (the `learning` rule requires a test or a holdout) and a staged send, and records what the test taught as a learning. The hosted-agent template **Newsletter editor** runs the loop every Monday; the recipe is in the MCP skill (`references/recipes.md`).
 
 A bundle is judged by its riskiest member. Publishing this issue's template and broadcast together (`artifacts.requestPublishBundle`) counts as `send.broadcast` at level 3; the template on its own is still `content.publish` level 1 and waits for a person.
 

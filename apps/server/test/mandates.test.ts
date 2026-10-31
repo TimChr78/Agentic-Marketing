@@ -635,4 +635,33 @@ describe('audit fixes (#260, #262, #263, #267, #268)', () => {
     // The agent can read its own report.
     expect((await a.as('agents.report')).body.agentId).toBe(a.id);
   });
+
+  it('the newsletter editor loop fits its mandate: topic, brief draft, tested issue, learning (#316)', async () => {
+    const a = await freshAgent({
+      scope: scope(),
+      levels: { 'send.broadcast': 3, 'content.publish': 3 },
+      learning: { broadcastHoldout: true },
+    });
+    // Topic and brief: the agent proposes the topic and drafts its brief (a person approves it).
+    const topicId = (await a.as('content.topics.create', { title: `Agents in email ${n}`, angle: 'What changes when agents send' })).body
+      .topic.id as string;
+    const brief = (await a.as('content.topics.toBrief', { topicId })).body;
+    expect(brief).toMatchObject({ topicId, status: 'brief', artifactId: expect.stringMatching(/^brf_/) });
+    // The issue: a subject test satisfies the mandate's learning rule, so it runs at level 3.
+    const tested = await a.as('artifacts.create', {
+      type: 'broadcast',
+      name: `Issue ${Date.now()}`,
+      content: { template: templateId, segment: news, subjectTest: { subjects: ['A', 'B'], samplePercent: 50, decideAfter: 'PT4H' } },
+    });
+    expect(
+      (await a.as('artifacts.requestPublish', { artifactId: tested.body.artifactId, note: 'Issue with a subject test' })).body.status,
+    ).toBe('published');
+    // What it learned, with the broadcast as evidence.
+    const learned = await a.as('learnings.add', {
+      statement: 'Short subject lines win for the newsletter segment',
+      scope: { channel: 'email' },
+      evidence: [{ kind: 'subject_test', id: tested.body.artifactId, summary: 'B beat A', numbers: { lift: 0.02 } }],
+    });
+    expect(learned.status).toBe(200);
+  });
 });

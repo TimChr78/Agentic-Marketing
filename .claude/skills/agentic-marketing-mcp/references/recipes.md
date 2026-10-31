@@ -18,6 +18,7 @@ Each step is one tool call: `tool {input}`. Replace `…` ids with real ones fro
 - Journey waits and business entry keys
 - Reporting the week
 - Lifecycle optimiser: promote a journey variant against a holdout
+- Newsletter editor: the weekly loop
 
 ## Weekly newsletter
 
@@ -229,3 +230,16 @@ A programme for an agent that improves live journeys within its mandate (`journe
 6. **Report.** `agents.report {}` shows your actions and the journeys you published against their control groups.
 
 A publish answers `published`, `on_hold` (a limit or working hours held it; do not resubmit) or `in_review` (a person decides). At level 4 for `journey.live` you may also create new journeys within your scope without a separate grant.
+
+## Newsletter editor: the weekly loop
+
+The pilot's programme (#316): from the article library and the topic backlog to a sent issue, a report and a learning, within the mandate (the **Newsletter agent** template in docs/agents.md, with `learning.broadcastHoldout`).
+
+1. **Borders and what is known.** `agents.get {}`, `workspace.autonomy {}`, `learnings.list {}` (e.g. "subject lines with a number win here"), and the `business-context://current` resource.
+2. **Material.** `content.items.list {"minScore":…}` gives the week's articles with score explanations; `content.selections.create {"name":"Issue 2026-11-10","sections":[…]}` records which ones the issue uses. Only use library items: never invent articles or links.
+3. **Topic.** `content.topics.list {"status":"approved"}`; the topic's brief (`artifacts.get {"artifactId":"brf_…"}`) gives the thesis, angle and the "Monday test". No approved topic: propose one (`content.topics.create`, then `content.topics.toBrief`) and say so; a person approves the brief.
+4. **Draft.** Template-per-issue (copy last week's), filled from the selection and the brief; `templates.check`; then the broadcast to the mandated segment with `subjectTest` (two subjects) and `stagedSend` (a canary first).
+5. **Submit.** `artifacts.requestPublishBundle {"artifactIds":["eml_…","bct_…"],"note":"Signal #47: 5 articles, thesis …; 4,900 expected (last 4,812); goal click rate 6%"}` → `published`, `on_hold` (do not resubmit) or `in_review`.
+6. **Learn.** After the send, `broadcasts.status` shows the subject-test winner; `learnings.add` with `{"kind":"subject_test","id":"bct_…"}` evidence. `agents.report {}` gives the week's outcomes against the mandate's goals.
+
+The hosted-agent template **Newsletter editor** runs this every Monday; an external agent (Hermes) can follow the same steps over MCP.

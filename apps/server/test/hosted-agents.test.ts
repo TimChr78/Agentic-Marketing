@@ -166,7 +166,12 @@ describe('hosted agents (#258)', () => {
   it('creates the weekly-report template with its schedule, scopes and budgets, and runs it when due', async () => {
     await onlyDue(weekly.agentId);
     const template = hostedAgentTemplate('weekly_report')!;
-    expect(HOSTED_AGENT_TEMPLATES.map((x) => x.key)).toEqual(['weekly_report', 'deliverability_guardian', 'lifecycle_optimiser']);
+    expect(HOSTED_AGENT_TEMPLATES.map((x) => x.key)).toEqual([
+      'weekly_report',
+      'deliverability_guardian',
+      'lifecycle_optimiser',
+      'newsletter_editor',
+    ]);
     const view = await weekly.api.call('agents.hostedRuns', { agentId: weekly.agentId });
     expect(view.hosted).toMatchObject({
       name: 'Weekly report',
