@@ -19,6 +19,8 @@ Each step is one tool call: `tool {input}`. Replace `…` ids with real ones fro
 - Reporting the week
 - Lifecycle optimiser: promote a journey variant against a holdout
 - Newsletter editor: the weekly loop
+- Experimentation agent: web experiences
+- Audience curator: sizes, overlaps and sunset policies
 
 ## Weekly newsletter
 
@@ -243,3 +245,21 @@ The pilot's programme (#316): from the article library and the topic backlog to 
 6. **Learn.** After the send, `broadcasts.status` shows the subject-test winner; `learnings.add` with `{"kind":"subject_test","id":"bct_…"}` evidence. `agents.report {}` gives the week's outcomes against the mandate's goals.
 
 The hosted-agent template **Newsletter editor** runs this every Monday; an external agent (Hermes) can follow the same steps over MCP.
+
+## Experimentation agent: web experiences
+
+A programme (#314) for an agent that runs web experiments within its mandate (`experience.live`, the experiences in its scope, a `learning.experienceHoldoutPercent` rule).
+
+1. **Results.** `experiences.results {"artifactId":"exp_…"}` gives exposures, conversions and rates per variant against the control, with lift, fixed-horizon and sequential p-values, a 95% interval and Bayesian probabilities, plus a `recommendation` that follows the experience's analysis method. Do not stop a `fixed` test before its planned sample.
+2. **Decide.** A clear winner: promote it (`artifacts.updateDraft` with the winner as the only variant, keeping `holdoutPercent`), then `artifacts.requestPublish` with the numbers in the note. A clear loser: remove it the same way. Otherwise leave it running.
+3. **Next experiment.** One element at a time, with a holdout; the learning rules send an experience without one to a person.
+4. **Learn.** `learnings.add` with `{"kind":"experience","id":"exp_…"}` evidence.
+
+## Audience curator: sizes, overlaps and sunset policies
+
+A programme (#315) for an agent that keeps audiences healthy. Read-mostly: changes are drafts a person (or a mandate granting `audience.publish`) decides on.
+
+1. **Sizes.** `segments.refresh {"artifactId":"seg_…"}` for each segment in scope; compare with last week (`agents.report {}` and your previous run).
+2. **Inactivity.** Preview a segment of members with no `email_opened`/`email_clicked` event within, e.g., `P180D` (`segments.preview`), to size a sunset policy.
+3. **Propose.** Draft the inactive segment and a re-engagement journey or an exclusion (`artifacts.create`), submit with `artifacts.requestPublish`. Never delete profiles and never change consent.
+4. **Report** sizes, overlaps and proposals without personal data.

@@ -6,6 +6,7 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 
 ### Added
 
+- **Experimentation agent and audience curator programmes (#314, #315).** Mandate templates, MCP recipes and hosted-agent templates: one concludes web experiments with `experiences.results` (promote, remove, learn), the other checks segment sizes and overlaps and proposes sunset policies as drafts.
 - **Newsletter editor programme (#316).** The pilot's loop as a programme: the article library and selections (#140) and the approved briefs of the topic backlog (#141) feed a weekly issue sent with a subject test and a staged send under the mandate, followed by a report and a learning from the test. The Newsletter agent mandate template gains the `broadcastHoldout` learning rule; a hosted-agent template and an MCP recipe run the loop.
 - **Lifecycle optimiser programme (#313).** A mandate template (docs/agents.md), an MCP recipe and a hosted-agent template that read each journey split against its holdout with `journeys.splitResult`, promote winners and retire losers by publishing a new journey version within the mandate, propose the next variant and record learnings.
 - **Results per arm of a journey split (#313).** `journeys.splitResult` reports, for a split node, how many people took each arm, their goal conversions and unsubscribes, and each arm against the first with lift, a 95% interval and a verdict that needs the minimum sample in both arms. It is what the lifecycle optimiser promotes or retires a variant on.

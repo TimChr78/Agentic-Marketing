@@ -400,6 +400,42 @@ A programme (#313): the agent reads each journey's splits with `journeys.splitRe
 }
 ```
 
+### Experimentation agent
+
+A programme (#314) for web experiences: it follows `experiences.results` and each experience's analysis method, promotes clear winners and removes clear losers by publishing a new version, proposes one new experiment at a time and records learnings. Grant `experience.live` for the experiences in its scope and require a holdout:
+
+```json
+{
+  "agent": "agt_4f8c2d1e6b9a4c7d8e0f1a2b3c4d5e6f",
+  "purpose": "Run and conclude web experiments on the pricing and signup placements.",
+  "scope": { "segments": [], "purposes": [], "topics": [], "channels": [], "artifactTypes": ["experience"], "artifacts": ["exp_0123456789abcdef0123456789abcdef"], "brand": null },
+  "levels": { "experience.live": 3 },
+  "learning": { "experienceHoldoutPercent": 10 },
+  "limits": { "changesPerDay": 5 },
+  "validUntil": "2026-11-27T07:00:00Z",
+  "holdWindow": "PT2H",
+  "escalation": { "userIds": [] },
+  "independentCheck": true
+}
+```
+
+### Audience curator
+
+A programme (#315): it checks segment sizes and overlaps, sizes inactive members and proposes sunset policies (an inactive segment plus a re-engagement journey or an exclusion) as drafts. Keep `audience.publish` at level 1 at first so a person decides each change; it never deletes profiles or changes consent.
+
+```json
+{
+  "agent": "agt_4f8c2d1e6b9a4c7d8e0f1a2b3c4d5e6f",
+  "purpose": "Keep the marketing segments healthy and propose sunset policies for inactive subscribers.",
+  "scope": { "segments": ["seg_0123456789abcdef0123456789abcdef"], "purposes": ["marketing_email"], "topics": [], "channels": ["email"], "artifactTypes": ["segment", "journey"], "artifacts": [], "brand": null },
+  "levels": { "audience.publish": 1, "journey.live": 1 },
+  "validUntil": "2026-11-27T07:00:00Z",
+  "holdWindow": "PT2H",
+  "escalation": { "userIds": [] },
+  "independentCheck": false
+}
+```
+
 ### Deliverability guardian
 
 Watches bounces, complaints and provider signals; it never sends. Its levels are 0 (observe) except `data.write` at 1: a write is refused with the reason unless it can wait for a person's approval. The hosted deliverability guardian (above) proposes a pause and a person still pauses the stream in the UI or with a command.

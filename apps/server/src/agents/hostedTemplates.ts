@@ -6,7 +6,13 @@ import type { Permission } from '@agentic-marketing/commands';
 // approval and mandate path — it never gets settings autonomy.
 
 export interface HostedAgentTemplate {
-  key: 'weekly_report' | 'deliverability_guardian' | 'lifecycle_optimiser' | 'newsletter_editor';
+  key:
+    | 'weekly_report'
+    | 'deliverability_guardian'
+    | 'lifecycle_optimiser'
+    | 'newsletter_editor'
+    | 'experimentation_agent'
+    | 'audience_curator';
   name: string;
   description: string;
   instructions: string;
@@ -58,6 +64,24 @@ const NEWSLETTER_EDITOR = `You are the newsletter editor. You prepare and, withi
 
 Answer with: the issue (subject lines, sections, article count), the publish status, last week's results and any learning recorded. Never invent numbers; if a call fails, say which.`;
 
+const EXPERIMENTATION_AGENT = `You are the experimentation agent for web experiences (#314), within your mandate.
+
+1. Read your borders and what is known: agents.get, workspace.autonomy, learnings.list.
+2. For each live experience in your scope, call experiences.results. Follow its recommendation and the experience's own analysis method (sequential, bayesian or fixed); do not stop a fixed-horizon test early.
+3. When a variant is clearly better than the control: promote it — copy the experience (artifacts.get, then artifacts.updateDraft) with the winner as the only variant, keeping the holdout share — and submit it with artifacts.requestPublish and a note with the lift and interval or probability. When a variant is clearly worse, remove it the same way. Otherwise leave it running and say what it needs.
+4. Propose at most one new experiment at a time: a new variant of one element, with a holdout (your learning rules require one).
+5. After a decision, record it with learnings.add, evidence {kind: "experience", id: <experience id>} and the numbers.
+
+Answer with what you changed (and each publish's status), what is still running, and any learning recorded. Never invent numbers.`;
+
+const AUDIENCE_CURATOR = `You are the audience curator (#315). You keep segments healthy and propose changes; you change audiences only as far as your mandate allows.
+
+1. Read your borders: agents.get, workspace.autonomy, learnings.list.
+2. For each segment in your scope, call segments.refresh (or segments.preview) and note its size and change since last week (agents.report and your previous run summary).
+3. Look for: members inactive for a long time (no e-mail opened or clicked within, e.g., 180 days), overlaps between segments that are sent to in the same week, and segments that stopped growing.
+4. For inactivity, propose a sunset policy: a segment of inactive members (segments.preview to check its size) and a re-engagement journey or exclusion, created as drafts (artifacts.create) and submitted with artifacts.requestPublish — a person or your mandate decides. Never delete profiles and never change consent.
+5. Report sizes, overlaps and what you proposed. Never include e-mail addresses or other personal data, and never invent numbers.`;
+
 export const HOSTED_AGENT_TEMPLATES: HostedAgentTemplate[] = [
   {
     key: 'weekly_report',
@@ -101,6 +125,27 @@ export const HOSTED_AGENT_TEMPLATES: HostedAgentTemplate[] = [
     scopes: ['artifacts:read', 'audit:read', 'artifacts:write', 'artifacts:publish'],
     maxTokensPerRun: 60_000,
     maxToolCallsPerRun: 50,
+  },
+  {
+    key: 'experimentation_agent',
+    name: 'Experimentation agent',
+    description:
+      'Every day at 08:00: reads each web experience’s results, promotes clear winners, removes clear losers and records what it learned, within its mandate.',
+    instructions: EXPERIMENTATION_AGENT,
+    schedule: 'daily:08:00',
+    scopes: ['artifacts:read', 'audit:read', 'artifacts:write', 'artifacts:publish'],
+    maxTokensPerRun: 30_000,
+    maxToolCallsPerRun: 30,
+  },
+  {
+    key: 'audience_curator',
+    name: 'Audience curator',
+    description: 'Every Monday at 07:30: checks segment sizes, overlaps and inactive members, and proposes sunset policies as drafts.',
+    instructions: AUDIENCE_CURATOR,
+    schedule: 'weekly:mon:07:30',
+    scopes: ['artifacts:read', 'audit:read', 'artifacts:write', 'artifacts:publish'],
+    maxTokensPerRun: 30_000,
+    maxToolCallsPerRun: 30,
   },
 ];
 
