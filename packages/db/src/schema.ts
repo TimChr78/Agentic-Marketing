@@ -3,6 +3,7 @@ import {
   bigserial,
   boolean,
   customType,
+  date,
   doublePrecision,
   integer,
   jsonb,
@@ -1374,6 +1375,59 @@ export const learnings = pgTable(
     retractedAt: ts('retracted_at'),
     retractReason: text('retract_reason'),
     createdAt: ts('created_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
+export type ContentTopicStatus = 'idea' | 'scored' | 'brief' | 'approved' | 'drafting' | 'published' | 'archived';
+
+/**
+ * Why a topic surfaced (#141). `content_item` ids are plain strings on purpose: the content library
+ * (#140) owns its own table, and the backlog must merge without depending on it.
+ */
+export type ContentTopicSignal = {
+  kind: 'content_item' | 'community' | 'manual' | 'past_post';
+  id?: string;
+  title?: string;
+  url?: string;
+  relevance?: 'high' | 'medium' | 'low';
+  comments?: number;
+  /** Points this signal adds to the topic's score. */
+  weight?: number;
+};
+
+/**
+ * The editorial backlog (#141): one row per topic, workspace-scoped. Briefs are artifacts, not rows
+ * here; a topic only names its brief and (once published) the canonical URL.
+ */
+export const contentTopics = pgTable(
+  'content_topics',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    title: text('title').notNull(),
+    angle: text('angle').notNull().default(''),
+    audience: text('audience').notNull().default(''),
+    readerRole: text('reader_role').notNull().default(''),
+    keyword: text('keyword'),
+    tags: text('tags').array().notNull().default([]),
+    status: text('status').$type<ContentTopicStatus>().notNull().default('idea'),
+    score: integer('score').notNull().default(0),
+    signals: jsonb('signals').$type<ContentTopicSignal[]>().notNull().default([]),
+    ownerId: text('owner_id'),
+    ownerName: text('owner_name'),
+    targetDate: date('target_date'),
+    canonicalUrl: text('canonical_url'),
+    campaignId: text('campaign_id'),
+    broadcastId: text('broadcast_id'),
+    dedupeKey: text('dedupe_key').notNull(),
+    similarTopicIds: text('similar_topic_ids').array().notNull().default([]),
+    briefArtifactId: text('brief_artifact_id'),
+    createdByType: text('created_by_type').$type<'user' | 'agent'>().notNull(),
+    createdById: text('created_by_id').notNull(),
+    agentId: text('agent_id'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
   },
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
 );

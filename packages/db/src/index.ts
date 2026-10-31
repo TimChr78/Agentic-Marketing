@@ -17,6 +17,8 @@ export type {
   ClickIdType,
   ConsentSource,
   ConsentStatus,
+  ContentTopicSignal,
+  ContentTopicStatus,
   DeliveryStatus,
   HostedAgentRunStatus,
   IdentifierType,
