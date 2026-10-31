@@ -2,6 +2,13 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+### Fixed
+
+- **Event workers no longer stall silently (#307).** The 0.5.4 retry for failed fetches now tells errors apart: a missed heartbeat or timeout is retried with a growing pause, a consumer that no longer exists is created again, and an authorization error or 20 failures in a row stop the worker, so the process restarts instead of retrying forever while no events are processed.
+- **Deliberate holdouts are not canary failures (#306).** A staged send's canary leaves out people a campaign control group holds out and readers a send window skipped, so a staged broadcast in a campaign with a control group, or with a send window, no longer stops without a single failed send.
+
 ## [0.5.4] - 2026-10-31
 
 ### Fixed

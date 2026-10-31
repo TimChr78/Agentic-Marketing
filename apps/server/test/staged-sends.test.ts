@@ -467,6 +467,27 @@ describe('staged send', () => {
     expect((await messagesOf(id)).length).toBe(canary.length);
   }, 60_000);
 
+  it('does not count control-group holdouts or send-window skips as failures (#306)', async () => {
+    const { id, canary } = await heldCanary(20, 5);
+    const half = Math.ceil(canary.length / 2);
+    const heldOut = canary.slice(0, half);
+    // Holdouts of a campaign control group and readers a send window left out are deliberate.
+    for (const [i, m] of heldOut.entries())
+      await t.srv.db.admin.query(`UPDATE messages SET status = 'suppressed', reason = $2 WHERE id = $1`, [
+        m.id,
+        i % 2 ? 'holdout_control: campaign cmp_x holds this person out' : 'outside_send_window: the next opening is beyond maxDelay',
+      ]);
+    await t.srv.db.admin.query(`UPDATE messages SET status = 'sent' WHERE id = ANY($1)`, [canary.slice(half).map((m) => m.id)]);
+    await checkNow(id);
+    const after = await eventually(
+      () => status(id),
+      (s) => s.stage?.stage === 'sending_rest' || s.stage?.stage === 'done' || s.stage?.stage === 'stopped',
+      30_000,
+    );
+    expect(after.stage?.stage).not.toBe('stopped');
+    expect(after.stage?.stopReason ?? '').not.toContain('suppressed');
+  }, 60_000);
+
   it('proceeds without a check when the canary is smaller than minCanary', async () => {
     const id = await broadcast({
       template,
