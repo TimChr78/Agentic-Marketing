@@ -2,7 +2,7 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
-## [Unreleased]
+## [0.5.1] - 2026-10-31
 
 ### Fixed
 
@@ -15,6 +15,14 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 - **The independent check sees what is published (#261).** For `artifacts.requestPublish` and `artifacts.requestPublishBundle` (and the publishes `config.import` makes) the model now gets each artifact's type, name, the version content being published and a structural diff against the version that is live, instead of only ids and the agent's note; for `messages.sendEmail` it gets the template's name, purpose, subject and MJML/text. Secrets and personal data are scrubbed, and the content goes in its own `<published-content>` block, described as untrusted, capped at 20,000 characters.
 - **Mandate guardrails judge direct sends (#265).** A direct send (`messages.sendEmail`, `send.direct`) now records the message it created on the agent ledger, and the guardrail check counts the broadcasts and direct messages an agent sent in the window before computing its unsubscribe, complaint and bounce rates. A direct send that drives one of those rates above the mandate's guardrail now refuses the agent's next send with the reason instead of passing unnoticed. Journey sends are left to the journey's own holdout and alerts.
 - **Agent notifications no longer replay history or drop failures (#266).** The notification cursor starts at the newest action when it is first created, so a workspace upgraded from a version before the feature is not e-mailed its historical holds and refusals (the daily digest waits a day too). The cursor now advances only past actions whose notification reached every recipient: a failed send, such as one sent before a transactional provider exists, stays pending and is retried with the same idempotency key, so the sponsor is told exactly once when it succeeds.
+
+### Upgrading from 0.5.0
+
+- **Migrations:** none.
+- **Configuration:** none.
+- **Breaking changes:** none. Agents under a mandate are held to it more strictly: held changes are decided again when their window ends, direct sends, journeys and segments are checked against the mandate's scope, and direct sends count in its guardrails.
+- **Manual steps:** none.
+- **Upgrade:** download `agentic-marketing-compose-<version>.tar.gz`, replace `docker-compose.yml` with its copy, check your configuration with the new image (`AM_VERSION=<version> docker compose run --rm --no-deps -T app am doctor --env-file - < .env`), then set `AM_VERSION=<version>` in `.env` and `docker compose pull && docker compose up -d` (Helm: the chart of the same version). Then `docker compose exec app am doctor`.
 
 ## [0.5.0] - 2026-10-31
 
