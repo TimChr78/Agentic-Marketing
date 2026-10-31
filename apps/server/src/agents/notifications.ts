@@ -251,8 +251,7 @@ async function notifyEvents(
           firstFailedActionId = firstFailedActionId === null ? action.id : Math.min(firstFailedActionId, action.id);
       }
     }
-    if (deliveries.length)
-      await tx.insert(schema.agentNotificationDeliveries).values(deliveries).onConflictDoNothing();
+    if (deliveries.length) await tx.insert(schema.agentNotificationDeliveries).values(deliveries).onConflictDoNothing();
     sent += results.filter((r) => r.status === 'sent').length;
   }
   return { sent, firstFailedActionId };
@@ -363,20 +362,43 @@ async function notifyDigest(
   const bySponsor = new Map<string, AgentDigest[]>();
   for (const d of digests) bySponsor.set(d.agent.sponsorUserId, [...(bySponsor.get(d.agent.sponsorUserId) ?? []), d]);
   const day = now.toISOString().slice(0, 10);
+  const dayKey = (sponsor: string) => `agent-digest:${workspaceId}:${sponsor}:${day}`;
+  // A sponsor whose digest already went out today is skipped on a retry after another sponsor
+  // failed. The per-day idempotency key's sent message row is the record of that delivery (#277).
+  const delivered = new Set(
+    (
+      await tx
+        .select({ idempotencyKey: schema.messages.idempotencyKey })
+        .from(schema.messages)
+        .where(
+          and(
+            eq(schema.messages.workspaceId, workspaceId),
+            inArray(schema.messages.idempotencyKey, [...bySponsor.keys()].map(dayKey)),
+            eq(schema.messages.status, 'sent'),
+          ),
+        )
+    ).map((row) => row.idempotencyKey),
+  );
   let sent = 0;
+  let complete = true;
   for (const [sponsor, own] of bySponsor) {
+    const key = dayKey(sponsor);
+    if (delivered.has(key)) continue;
     const content = digestEmail(deps.publicUrl, own);
     const results = await sendMemberEmails(tx, deps, workspaceId, [
       {
         userId: sponsor,
-        idempotencyKey: `agent-digest:${workspaceId}:${sponsor}:${day}`,
+        idempotencyKey: key,
         ...content,
         data: { digest: own.map((d) => ({ agentId: d.agent.id, counts: d.counts })) },
       },
     ]);
-    sent += results.filter((r) => r.status === 'sent').length;
+    // A failure keeps lastDigestAt where it is, so the next sweep retries this sponsor with the
+    // same key; the successful sponsors above are skipped by their sent message rows.
+    if (results.every((r) => r.status === 'sent')) sent++;
+    else complete = false;
   }
-  return { sent, at: sent ? now : null };
+  return { sent, at: complete ? now : null };
 }
 
 async function notifyExpiry(

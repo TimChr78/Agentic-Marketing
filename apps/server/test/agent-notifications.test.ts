@@ -374,4 +374,46 @@ describe('agent notifications (#226)', () => {
     expect(sponsorEvents().filter((m) => m.text.includes('After the failure'))).toHaveLength(1);
   }, 40_000);
 
+  it('a digest that fails for one sponsor is retried without re-sending the other (#277)', async () => {
+    const s = await setup({ level: 3 });
+    const second = await addAgent(s, { name: 'Second digest agent', level: 3 });
+    // The second agent's sponsor is not a member yet: the send fails while the first sponsor's works.
+    const outsider = await t.signUp(`outsider-digest-${Date.now()}@example.com`);
+    await t.srv.db.admin.query('UPDATE agents SET sponsor_user_id = $2 WHERE workspace_id = $1 AND id = $3', [
+      s.ws,
+      outsider.id,
+      second.agentId,
+    ]);
+    expect((await publishNote(s, 'Digest for the owner')).body.status).toBe('published');
+    expect((await publishNoteWith(second.token, 'Digest for the outsider')).body.status).toBe('published');
+
+    const ownerDigests = () => outbox.filter((m) => m.to === s.owner.email && m.subject.startsWith('Daily agent digest'));
+    const outsiderDigests = () => outbox.filter((m) => m.to === outsider.email && m.subject.startsWith('Daily agent digest'));
+
+    const t0 = new Date();
+    const first = await run(t0);
+    expect(first.digests).toBe(1); // only the owner's digest went out
+    expect(ownerDigests()).toHaveLength(1);
+    expect(outsiderDigests()).toHaveLength(0);
+
+    // The outsider joins the workspace. The next sweep retries only that sponsor's digest; the
+    // owner's already-sent message row keeps it from being sent a second time.
+    await t.srv.db.admin.query('INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, $3)', [
+      s.ws,
+      outsider.id,
+      'viewer',
+    ]);
+    const retry = await run(new Date(t0.getTime() + 5 * 60_000));
+    expect(retry.digests).toBe(1);
+    expect(ownerDigests()).toHaveLength(1);
+    expect(outsiderDigests()).toHaveLength(1);
+    expect(outsiderDigests()[0].text).toContain('Digest for the outsider');
+    const rows = await emailRows(s.ws, 'agent-digest:');
+    expect(rows.filter((r) => r.status === 'sent')).toHaveLength(2);
+
+    // The day is complete now, so the sweep after that is silent.
+    expect((await run(new Date(t0.getTime() + 10 * 60_000))).digests).toBe(0);
+    expect(ownerDigests()).toHaveLength(1);
+    expect(outsiderDigests()).toHaveLength(1);
+  }, 40_000);
 });
