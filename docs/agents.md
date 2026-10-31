@@ -169,7 +169,7 @@ A level-2 action becomes a **hold**: a scheduled execution with a deadline (`run
 
 ### The independent check
 
-Set `independentCheck: true` to have a second model review each level-2+ action before it runs: given the intent, the diff, the impact and the mandate, does it match? A mismatch, an error or a missing AI provider sends the action to a person (it fails closed). It is off by default and costs tokens; turn it on for any agent that reads content from outside the workspace.
+Set `independentCheck: true` to have a second model review each level-2+ action before it runs: given the intent, the impact, the mandate and what the action would make live, does it match? For a publish that is the version's content (secrets scrubbed, capped at 20,000 characters) and its diff against the version that is live now; for a direct send it is the template's purpose, subject, MJML and text. A mismatch, an error or a missing AI provider sends the action to a person (it fails closed). It is off by default and costs tokens; turn it on for any agent that reads content from outside the workspace.
 
 ### Learning rules
 

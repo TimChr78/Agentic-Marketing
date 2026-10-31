@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs';
 import { audienceSyncImpact } from '@agentic-marketing/ads';
 import { independentCheck } from '@agentic-marketing/ai';
-import { activeMandate } from '@agentic-marketing/artifacts';
+import { activeMandate, checkSubjectOf } from '@agentic-marketing/artifacts';
 import { assetRoutes } from '@agentic-marketing/assets';
 import { archiveRoutes, broadcastImpact, formsApi, withEmailProfileEvents, withResolvedEventProfiles } from '@agentic-marketing/audience';
 import {
@@ -118,7 +118,18 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
     activeMandate: (tx, agentId) => activeMandate(tx, agentId),
     mandateGuardrails: (tx, workspaceId, agentId, mandate) => mandateGuardrailBreach({ tx, events, workspaceId }, agentId, mandate),
     // A second model check before an autonomous or held action (ADR-0016 §4.5, #231).
-    independentCheck: (tx, input) => independentCheck(tx, input.principal.workspaceId, input, { db, kp: keyProvider }),
+    // The check also sees what is published (#261): the version content and its diff, or the
+    // template a direct send uses, loaded here so packages/commands stays generic.
+    independentCheck: async (tx, input) =>
+      independentCheck(
+        tx,
+        input.principal.workspaceId,
+        {
+          ...input,
+          subject: await checkSubjectOf(tx, input.principal.workspaceId, input.command, input.input),
+        },
+        { db, kp: keyProvider },
+      ),
   };
   const executor = createExecutor(db, services, {
     strictInputs: config.strictInputs,
