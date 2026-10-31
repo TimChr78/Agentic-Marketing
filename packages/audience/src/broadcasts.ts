@@ -1042,6 +1042,35 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
           complaintRate: rate(counts.complained),
           unsubscribeRate: rate(counts.unsubscribed),
         };
+        // A canary is only evidence if it actually delivered (#295). Rows that failed or were
+        // suppressed still count toward the size decision but can never produce the events the
+        // thresholds read, so a canary that could not send must stop the run like a breach
+        // instead of releasing the rest. A row the table already marks sent is delivery whose
+        // event has not landed yet, so it counts as sent rather than failing a healthy canary.
+        const failedCanary = canaryRows.filter((m) => m.status === 'failed').length;
+        const suppressedCanary = canaryRows.filter((m) => m.status === 'suppressed').length;
+        const dbSent = canaryRows.filter((m) => ['sent', 'delivered', 'bounced', 'complained'].includes(m.status)).length;
+        const delivered = Math.max(counts.sent, dbSent);
+        const tooFewSends = !skippedForSize && delivered < def.stagedSend.minCanary;
+        const mostlyUndeliverable =
+          !skippedForSize && failedCanary + suppressedCanary > 0 && (failedCanary + suppressedCanary) * 2 > canaryRows.length;
+        if (tooFewSends || mostlyUndeliverable) {
+          const undelivered = [failedCanary ? `${failedCanary} failed` : '', suppressedCanary ? `${suppressedCanary} suppressed` : '']
+            .filter(Boolean)
+            .join(' and ');
+          const reason =
+            `Canary stopped the send: ${undelivered} of ${canaryRows.length} canary messages, leaving ${delivered} successful sends` +
+            (delivered < def.stagedSend.minCanary ? `, fewer than the ${def.stagedSend.minCanary} needed to judge.` : '.');
+          await tx
+            .update(schema.broadcastStages)
+            .set({ stage: 'stopped', checkedAt: now, checkSkipped: false, ...counts, ...rates, stopReason: reason, stoppedAt: now })
+            .where(eq(schema.broadcastStages.broadcastId, broadcastId));
+          await tx
+            .update(schema.broadcastRuns)
+            .set({ status: 'stopped', finishedAt: now, leaseUntil: null })
+            .where(eq(schema.broadcastRuns.broadcastId, broadcastId));
+          return { more: false, holdout: holdoutEvents };
+        }
         const breaches = skippedForSize ? [] : canaryBreaches(def.stagedSend, counts, rates);
         if (breaches.length) {
           const reason = `Canary stopped the send: ${breaches.join('; ')}.`;
