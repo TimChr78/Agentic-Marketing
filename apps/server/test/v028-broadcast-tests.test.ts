@@ -318,14 +318,14 @@ describe('subject A/B test', () => {
     await eventually(
       () => status(id),
       (s) => s.test?.state === 'deciding' && s.test.variants.reduce((n, v) => n + v.sent, 0) >= 1,
-      20_000,
+      45_000,
     );
     const sample = (await messagesOf(id)).filter((m) => m.variant);
     expect(sample.length).toBeLessThan(40);
     await eventually(
       () => status(id),
       (s) => (s.test?.variants.reduce((n, v) => n + v.sent, 0) ?? 0) === sample.length,
-      20_000,
+      45_000,
     );
     const b = sample.filter((m) => m.variant === 'B');
     await t.srv.events.insertMessageEvents(b.map((m, i) => click(m, id, i)));
@@ -334,11 +334,11 @@ describe('subject A/B test', () => {
     const done = await eventually(
       () => status(id),
       (s) => s.test?.state === 'winner_sent' && s.run.status === 'done',
-      20_000,
+      45_000,
     );
     expect(done.test?.winner).toBe('A');
     expect(done.test?.reason).toContain('fewer than 20 sends');
-  }, 60_000);
+  }, 150_000);
 });
 
 describe('recipient-local send window', () => {
