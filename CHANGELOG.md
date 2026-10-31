@@ -8,6 +8,7 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 
 - **A canary that could not deliver stops the send at any size (#300).** A staged send's canary is waited for until it has gone out and is stopped when half or more of it failed or was suppressed, also when it is smaller than `minCanary`; only the "too few sends to judge the rates" skip still depends on its size.
 - **Agent actions from before 0.5.2 are no longer offered for undo (#301).** `agents.activity` reports them as not undoable, so the agent page shows no Undo button for what `agents.undo` would refuse.
+- **An event worker survives a failed fetch.** A pull from NATS JetStream that fails, e.g. with "heartbeats missed" while the host is busy, is logged and retried instead of stopping the ClickHouse sink or a profile worker (which only came back with a restart). Unacknowledged events are re-delivered as before.
 
 ### Upgrading from 0.5.3
 
