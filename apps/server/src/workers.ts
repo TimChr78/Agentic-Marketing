@@ -6,7 +6,7 @@ import { runContentFetches } from '@agentic-marketing/content';
 import { runDeliveryWorker } from '@agentic-marketing/email';
 import { runSink } from '@agentic-marketing/events';
 import { type DeliveryDeps, runDeliveries, runTokenRefresher, webhookHook } from '@agentic-marketing/integrations';
-import { journeyHook, runSweeper } from '@agentic-marketing/journeys';
+import { journeyHook, runEnrollmentJobs, runSweeper } from '@agentic-marketing/journeys';
 import { refreshSnapshots, runEdgeSync, snapshotHook } from '@agentic-marketing/personalize';
 import { runProfileWorkers } from '@agentic-marketing/profiles';
 import { runSegmentScheduler, segmentHook } from '@agentic-marketing/segments';
@@ -36,10 +36,11 @@ export function startScheduler(
     hostedAgentTickMs?: number;
     guardianTickMs?: number;
     contentTickMs?: number;
+    enrollmentTickMs?: number;
   } = {},
 ): Promise<void>[] {
   logger.info(
-    'scheduler role: segment recomputation, broadcasts, retention, OAuth token refresh, audience sync, ad spend import, warehouse exports, edge sync, threshold alerts, held agent changes, agent notifications, agent events, hosted agents, content sources',
+    'scheduler role: segment recomputation, broadcasts, retention, OAuth token refresh, audience sync, ad spend import, warehouse exports, edge sync, threshold alerts, held agent changes, agent notifications, agent events, hosted agents, content sources, segment enrollment jobs',
   );
   return [
     runSegmentScheduler(
@@ -95,6 +96,7 @@ export function startScheduler(
     ),
     runAgentEvents({ db: srv.db }, signal, { tickMs: opts.agentEventTickMs }),
     runContentFetches({ db: srv.db, egress: srv.egress }, signal, { tickMs: opts.contentTickMs }),
+    runEnrollmentJobs({ db: srv.db, kp: srv.keyProvider, events: srv.events }, signal, { tickMs: opts.enrollmentTickMs }),
     runHostedAgents(
       {
         db: srv.db,

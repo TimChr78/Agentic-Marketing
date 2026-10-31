@@ -646,6 +646,44 @@ export const journeyEntrySkips = pgTable(
   (t) => [primaryKey({ columns: [t.workspaceId, t.journeyId] })],
 );
 
+export type EnrollmentJobStatus = 'queued' | 'running' | 'done' | 'failed' | 'cancelled';
+/**
+ * A chunked, resumable enrollment of a segment into a journey (#148). The scheduler scans one
+ * chunk per tick from `cursor` (the last profile id it looked at) and commits the participants
+ * with the cursor, so a crash resumes without enrolling anyone twice.
+ */
+export const enrollmentJobs = pgTable(
+  'enrollment_jobs',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    journeyId: text('journey_id').notNull(),
+    segmentId: text('segment_id').notNull(),
+    status: text('status').$type<EnrollmentJobStatus>().notNull().default('queued'),
+    /** How many members the job may try; null means the whole segment. */
+    limit: integer('limit'),
+    /** The last profile id scanned, not the last one enrolled. */
+    cursor: text('cursor'),
+    /** People in the segment when the job was requested, capped by `limit` (the impact estimate). */
+    people: integer('people').notNull().default(0),
+    entered: integer('entered').notNull().default(0),
+    skipped: integer('skipped').notNull().default(0),
+    failed: integer('failed').notNull().default(0),
+    /** Why people were skipped: a reason code (reentry, no_lawful_basis, suppressed…) → people. */
+    skipReasons: jsonb('skip_reasons').$type<Record<string, number>>().notNull().default({}),
+    requestedByType: text('requested_by_type').$type<'user' | 'agent'>().notNull(),
+    requestedById: text('requested_by_id').notNull(),
+    reason: text('reason').notNull(),
+    idempotencyKey: text('idempotency_key'),
+    error: text('error'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    startedAt: ts('started_at'),
+    finishedAt: ts('finished_at'),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
 /**
  * A person's arm in a holdout scope (#67). The row is the source of truth: it survives re-entry,
  * restarts and profile merges, and gives measurement a stable population per scope version.

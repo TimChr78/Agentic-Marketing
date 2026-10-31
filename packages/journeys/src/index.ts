@@ -1,5 +1,6 @@
 export * from './commands';
 export * from './conditions';
+export * from './enrollment';
 export * from './entry';
 export * from './graph';
 export * from './holdout';

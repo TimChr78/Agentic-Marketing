@@ -264,6 +264,8 @@ export async function startTestServer(name: string, port: number, env: Record<st
       hostedAgentTickMs: 86_400_000,
       // Content source tests fetch on demand and drive the sweep with a fixed clock.
       contentTickMs: 86_400_000,
+      // Bulk enrollment tests drive the job directly with runEnrollmentJobsOnce.
+      enrollmentTickMs: 86_400_000,
       guardianTickMs: 86_400_000,
       holdTickMs: 300,
     }),
