@@ -11,6 +11,7 @@ import { schema } from '@agentic-marketing/db';
 import { profileForMessage } from '@agentic-marketing/profiles';
 import { and, desc, eq } from 'drizzle-orm';
 import { z } from 'zod';
+import { directSendLedger, sendTouches } from '../sendTouches';
 import { topicProblems } from '../topicValidation';
 import { MAX_PAYLOAD } from './crypto';
 import { devicesOf, requestPush } from './gateway';
@@ -37,8 +38,11 @@ export const sendPush = defineCommand({
   permission: 'messages:send',
   effect: 'write',
   actionClass: 'send.direct',
-  impact: async () => ({ people: 1, reversible: false }),
+  impact: async (input, ctx) => ({ people: 1, reversible: false, touches: await sendTouches(ctx.tx, input.templateId, 'push') }),
   target: (i) => i.profileId,
+  // The ledger keeps the message it created, so mandate guardrails can find the agent's direct
+  // sends in the metric layer (#265).
+  ledgerImpact: directSendLedger,
   handler: async (input, ctx) => requestPush(ctx.tx, ctx.principal.workspaceId, ctx.services.keyProvider, ctx.services.events, input),
 });
 
