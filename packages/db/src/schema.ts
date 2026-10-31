@@ -3,6 +3,7 @@ import {
   bigserial,
   boolean,
   customType,
+  date,
   doublePrecision,
   integer,
   jsonb,
@@ -1436,4 +1437,127 @@ export const agentEvents = pgTable(
     primaryKey({ columns: [t.workspaceId, t.id] }),
     uniqueIndex('agent_events_subscription_key').on(t.workspaceId, t.subscriptionId, t.eventKey),
   ],
+);
+
+// Content sources (#140): the workspace's RSS/Atom/JSON feeds, the normalised articles they
+// produced, and versioned selections of those articles for an issue or brief.
+
+export type ContentSourceKind = 'rss' | 'atom' | 'json';
+export type ContentSourceCategory = 'platform' | 'publication' | 'vendor' | 'community' | 'open source' | 'thought leader' | 'other';
+export type ContentItemStatus = 'new' | 'selected' | 'ignored' | 'used';
+export type ContentSelectionStatus = 'draft' | 'approved';
+export type ContentAuthorType = 'user' | 'agent';
+
+/** One part of an item's relevance score, so a person can see why it ranked. */
+export type ContentScoreComponent = {
+  kind: 'keyword' | 'authority' | 'recency' | 'section' | 'category';
+  label: string;
+  points: number;
+  detail: string;
+};
+
+/** The score a fetch calculated, stored with the item (issue #140: explainable and deterministic). */
+export type ContentScoreExplanation = {
+  policyVersion: string;
+  total: number;
+  matchedKeywords: string[];
+  section: string;
+  components: ContentScoreComponent[];
+  /** A one-line human summary, e.g. "score 41: 2 high keywords, authority 4, published 6 h ago". */
+  summary: string;
+};
+
+/** A selected item as it looked when the selection was saved: pruning the library keeps history. */
+export type ContentSelectionItem = {
+  itemId: string;
+  sourceId: string;
+  sourceName: string;
+  title: string;
+  url: string;
+  excerpt: string;
+  author: string | null;
+  publishedAt: string | null;
+  score: number;
+  section: string;
+};
+
+export type ContentSelectionSection = {
+  name: string;
+  note: string | null;
+  items: ContentSelectionItem[];
+};
+
+export const contentSources = pgTable(
+  'content_sources',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    kind: text('kind').$type<ContentSourceKind>().notNull(),
+    url: text('url').notNull(),
+    name: text('name').notNull(),
+    category: text('category').$type<ContentSourceCategory>().notNull().default('other'),
+    authority: integer('authority').notNull().default(3),
+    language: text('language').notNull().default('en'),
+    enabled: boolean('enabled').notNull().default(true),
+    fetchIntervalMinutes: integer('fetch_interval_minutes').notNull().default(360),
+    lastFetchAt: ts('last_fetch_at'),
+    etag: text('etag'),
+    lastModified: text('last_modified'),
+    lastError: text('last_error'),
+    consecutiveFailures: integer('consecutive_failures').notNull().default(0),
+    createdByType: text('created_by_type').$type<ContentAuthorType>().notNull(),
+    createdById: text('created_by_id').notNull(),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] }), uniqueIndex('content_sources_url').on(t.workspaceId, t.url)],
+);
+
+export const contentItems = pgTable(
+  'content_items',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    sourceId: text('source_id').notNull(),
+    canonicalUrl: text('canonical_url').notNull(),
+    title: text('title').notNull(),
+    excerpt: text('excerpt').notNull(),
+    author: text('author'),
+    publishedAt: ts('published_at'),
+    fetchedAt: ts('fetched_at').notNull(),
+    lastSeenAt: ts('last_seen_at').notNull(),
+    dedupeKey: text('dedupe_key').notNull(),
+    titleKey: text('title_key').notNull(),
+    language: text('language').notNull().default('en'),
+    section: text('section').notNull(),
+    status: text('status').$type<ContentItemStatus>().notNull().default('new'),
+    relevanceScore: integer('relevance_score').notNull().default(0),
+    scoreExplanation: jsonb('score_explanation')
+      .$type<ContentScoreExplanation>()
+      .notNull()
+      .default({} as ContentScoreExplanation),
+    policyVersion: text('policy_version').notNull(),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] }), uniqueIndex('content_items_dedupe').on(t.workspaceId, t.dedupeKey)],
+);
+
+export const contentSelections = pgTable(
+  'content_selections',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    name: text('name').notNull(),
+    issueDate: date('issue_date', { mode: 'string' }).notNull(),
+    version: integer('version').notNull().default(1),
+    status: text('status').$type<ContentSelectionStatus>().notNull().default('draft'),
+    sections: jsonb('sections').$type<ContentSelectionSection[]>().notNull().default([]),
+    policyVersion: text('policy_version').notNull(),
+    createdByType: text('created_by_type').$type<ContentAuthorType>().notNull(),
+    createdById: text('created_by_id').notNull(),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] }), uniqueIndex('content_selections_version').on(t.workspaceId, t.name, t.version)],
 );

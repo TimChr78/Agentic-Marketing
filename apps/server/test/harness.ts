@@ -262,6 +262,8 @@ export async function startTestServer(name: string, port: number, env: Record<st
       agentEventTickMs: 86_400_000,
       // Hosted agent tests drive the sweep directly with a fixed clock too.
       hostedAgentTickMs: 86_400_000,
+      // Content source tests fetch on demand and drive the sweep with a fixed clock.
+      contentTickMs: 86_400_000,
       guardianTickMs: 86_400_000,
       holdTickMs: 300,
     }),
