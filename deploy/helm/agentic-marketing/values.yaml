@@ -50,7 +50,8 @@ config:
 
 # Secret settings: DATABASE_URL, APP_DB_PASSWORD, AUTH_SECRET, and MASTER_KEY or the OpenBao /
 # AWS KMS credentials. Prefer an existing Secret (sealed-secrets, External Secrets, Vault agent…);
-# `values` creates one from here, for trying things out.
+# `values` creates one from here, for trying things out. Add METRICS_TOKEN here (not under config)
+# to enable GET /metrics; without it the endpoint answers 404.
 secrets:
   existingSecret: ""
   values: {}
@@ -58,6 +59,7 @@ secrets:
   #   APP_DB_PASSWORD: …
   #   AUTH_SECRET: …
   #   MASTER_KEY: …
+  #   METRICS_TOKEN: …   # openssl rand -hex 24; scrape /metrics with Bearer $METRICS_TOKEN
 
 # Extra environment for every role, e.g. a token file mounted by an OpenBao agent.
 extraEnv: []

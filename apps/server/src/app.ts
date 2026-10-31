@@ -29,6 +29,7 @@ import { mandateGuardrailBreach } from './agents/guardrails';
 import type { Config } from './config';
 import { copilotApi } from './http/copilot';
 import { MCP_MAX_BODY, mcpEndpoint } from './http/mcp';
+import { metricsHandler } from './http/metrics';
 import { consentPage, invitePage, loginPage } from './http/pages';
 import { rejectUnsafeRawPath } from './http/raw-path';
 import { restApi } from './http/rest';
@@ -37,6 +38,7 @@ import { securityHeaders } from './http/security-headers';
 import { staticSite } from './http/static';
 import { createInputWarningRecorder } from './inputWarnings';
 import { keyProviderFor } from './keys';
+import { createMetricsRegistry, routeGroup, statusClass } from './metrics';
 import { COMMIT, VERSION } from './version';
 
 /** `overrides` exist for tests, e.g. a stub transport for Client ID Metadata Documents. */
@@ -66,6 +68,7 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
   // Snapshot writes also queue for the edge (Workers KV) where a workspace turned it on.
   const hot = edgeMirror(valkeyHotState(config.valkey), db);
   const inputWarnings = createInputWarningRecorder(db);
+  const metrics = createMetricsRegistry();
   const email = {
     publicUrl: config.linksUrl,
     links: linkSigner(config.authSecret),
@@ -121,9 +124,30 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
       logger.warn({ command, unknownKeys: unknown.map((u) => u.path) }, 'command input has unknown keys');
       inputWarnings.record(command, unknown, principal);
     },
+    // Counted for `/metrics`; the command package stays independent of any metrics library.
+    onCommand: (event) => metrics.recordCommand(event),
   });
 
   const app = new Hono();
+  // Prometheus counters and durations for every request except the scrape itself (#147). The labels
+  // are the route group and status class, so the series count is fixed whatever clients request.
+  app.use('*', async (c, next) => {
+    if (c.req.path === '/metrics') return next();
+    const started = performance.now();
+    try {
+      await next();
+    } catch (err) {
+      // AppErrors still get their real class: the error handler turns them into a response, but
+      // only after this middleware's stack has unwound.
+      metrics.recordHttp(
+        routeGroup(c.req.path),
+        err instanceof AppError ? statusClass(err.status) : '5xx',
+        (performance.now() - started) / 1000,
+      );
+      throw err;
+    }
+    metrics.recordHttp(routeGroup(c.req.path), statusClass(c.res.status), (performance.now() - started) / 1000);
+  });
   // Baseline security headers on every response; routes with their own policy keep it (#178).
   app.use('*', securityHeaders({ https: config.publicUrl.startsWith('https://') }));
   // Defence in depth for a proxy that forwards raw paths: never route a traversal target.
@@ -167,6 +191,9 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
       return c.json({ ok: false, ...build }, 503);
     }
   });
+  // Prometheus text exposition on the main listener only, and only once METRICS_TOKEN is set (#147).
+  // The public-only listener never forwards it (see http/public-only.ts).
+  app.get('/metrics', metricsHandler({ token: config.metricsToken, registry: metrics, db, events, hot, natsUrl: config.nats.url }));
 
   app.on(['GET', 'POST'], '/api/auth/*', (c) => auth.handler(withClientIp(c)));
 

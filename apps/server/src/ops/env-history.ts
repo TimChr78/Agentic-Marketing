@@ -84,6 +84,9 @@ export const ENV_SINCE: Record<string, string> = {
 
   // 0.3.0 (issue #210)
   ERASURE_GRACE_HOURS: '0.3.0',
+
+  // 0.5.0 (issue #147)
+  METRICS_TOKEN: '0.5.0',
 };
 
 /**

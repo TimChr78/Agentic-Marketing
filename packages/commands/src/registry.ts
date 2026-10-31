@@ -141,6 +141,12 @@ export interface ExecutorOptions {
   strictInputs?: boolean;
   /** Called with the unknown keys a non-strict executor ignored, e.g. to log and persist them. */
   onUnknownKeys?: (command: string, unknown: UnknownInputKey[], principal: Principal) => void;
+  /**
+   * Called once after every command execution, with its outcome, so a host can count and time
+   * commands (e.g. the server's `/metrics`). Purely a callback: this package depends on no
+   * metrics library, and a throwing callback never changes the command's result.
+   */
+  onCommand?: (event: { command: string; effect: Effect; outcome: 'ok' | 'error'; durationMs: number }) => void;
 }
 
 const tracer = trace.getTracer('@agentic-marketing/commands');
@@ -219,12 +225,22 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
       const input = rawInput ?? {};
       const inputHash = hashValue(redact(input, cmd.sensitive));
       let target: string | undefined;
+      const startedAt = Date.now();
+      // Metrics or logging hooks are observers: they must never fail a command or mask its error.
+      const report = (outcome: 'ok' | 'error') => {
+        try {
+          options.onCommand?.({ command: cmd.name, effect: cmd.effect, outcome, durationMs: Date.now() - startedAt });
+        } catch {
+          // Ignored on purpose.
+        }
+      };
       const unknown = findUnknownInputKeys(cmd.input, input);
       const unknownMessages = unknownKeyMessages(cmd.name, unknown);
 
       const fail = async (err: AppError): Promise<never> => {
         // The main transaction rolled back; record the failed attempt in its own.
         await db.withWorkspace(principal.workspaceId, (tx) => appendAudit(tx, principal, opts.surface, cmd, inputHash, target, err));
+        report('error');
         span.setStatus({ code: SpanStatusCode.ERROR, message: err.code });
         span.end();
         throw err;
@@ -329,6 +345,7 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
         if (cmd.effect === 'read' && cmd.auditReads)
           await db.withWorkspace(principal.workspaceId, (tx) => appendAudit(tx, principal, opts.surface, cmd, inputHash, target));
         for (const fn of committed) await fn().catch((err) => span.recordException(err as Error));
+        report('ok');
         span.end();
         return result;
       } catch (err) {
@@ -350,6 +367,7 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
             )
             .catch((e) => span.recordException(e as Error));
         if (err instanceof AppError) return fail(err);
+        report('error');
         span.recordException(err as Error);
         span.setStatus({ code: SpanStatusCode.ERROR });
         span.end();

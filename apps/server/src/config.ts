@@ -190,6 +190,13 @@ const Env = z.object({
     .string()
     .optional()
     .describe('Comma-separated extra origins allowed to call auth endpoints, and identity providers on private addresses'),
+  METRICS_TOKEN: z
+    .string()
+    .min(16, 'METRICS_TOKEN must be at least 16 characters (e.g. `openssl rand -hex 24`)')
+    .optional()
+    .describe(
+      'Bearer token for GET /metrics on the main listener; unset disables the endpoint, which then answers 404. Never served on PUBLIC_PORT',
+    ),
   SSO_DOMAIN_VERIFICATION: z
     .enum(['true', 'false'])
     .default('true')
@@ -327,6 +334,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
       lockoutSeconds: e.STEP_UP_LOCKOUT_SECONDS,
     },
     trustedOrigins: e.TRUSTED_ORIGINS?.split(',').map((o) => o.trim()) ?? [],
+    metricsToken: e.METRICS_TOKEN,
     sso: { domainVerification: e.SSO_DOMAIN_VERIFICATION === 'true' },
   };
 }
