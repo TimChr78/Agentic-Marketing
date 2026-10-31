@@ -53,8 +53,12 @@ export function bodyLimit(maxSize: number, onTooLarge: (c: Context) => Response 
   }) as MiddlewareHandler;
 }
 
-/** How much more of a refused body is read and dropped, so a well-behaved caller can see the 413. */
-const MAX_DISCARD_BYTES = 1024 * 1024;
+/**
+ * How much more of a refused body is read and dropped. Ordinary HTTP clients finish sending before
+ * they read the answer, so cutting the connection early loses them the 413; 16 MB covers any
+ * honest oversized request, and an endless upload is still cut off there.
+ */
+const MAX_DISCARD_BYTES = 16 * 1024 * 1024;
 
 /**
  * Read and drop what is left, so a caller that finishes sending can read the 413; past
