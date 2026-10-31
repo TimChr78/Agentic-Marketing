@@ -1332,3 +1332,47 @@ export const agentNotificationDeliveries = pgTable(
   },
   (t) => [primaryKey({ columns: [t.workspaceId, t.actionId, t.userId] })],
 );
+
+/**
+ * A conclusion with its evidence (#311, agentic-autonomy §6): what a person or an agent learned
+ * from subject tests, journey or campaign holdouts and experiences. Agents read the active ones as
+ * the MCP resource learnings://current; a person can retract one with a reason.
+ */
+export type LearningStatus = 'active' | 'retracted';
+export type LearningScope = {
+  /** Audience segment ids the learning applies to. */
+  segmentIds?: string[];
+  /** Channel, e.g. "email". */
+  channel?: string;
+  /** Topic under a purpose. */
+  topic?: string;
+  /** Purpose key. */
+  purpose?: string;
+};
+export type LearningEvidence = {
+  kind: 'subject_test' | 'journey_holdout' | 'campaign_holdout' | 'experience';
+  /** The broadcast, journey, campaign or experience the result came from. */
+  id: string;
+  summary: string;
+  /** The measured numbers, e.g. { wins: 3, tests: 4, liftPts: 2.1 }. */
+  numbers: Record<string, number>;
+};
+export const learnings = pgTable(
+  'learnings',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    statement: text('statement').notNull(),
+    scope: jsonb('scope').$type<LearningScope>().notNull().default({}),
+    evidence: jsonb('evidence').$type<LearningEvidence[]>().notNull().default([]),
+    authorType: text('author_type').$type<'user' | 'agent'>().notNull(),
+    authorId: text('author_id').notNull(),
+    agentId: text('agent_id'),
+    status: text('status').$type<LearningStatus>().notNull().default('active'),
+    retractedBy: text('retracted_by'),
+    retractedAt: ts('retracted_at'),
+    retractReason: text('retract_reason'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);

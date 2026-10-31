@@ -188,6 +188,16 @@ Set `shadow: true` (or a list of action classes, e.g. `["send.broadcast"]`) to t
 
 A high agreement rate with no `too_bold` changes over a few weeks is the evidence for raising the ceiling and publishing the mandate without `shadow`. Drafts are never recorded in shadow.
 
+## Learnings
+
+A **learning** is a conclusion with its evidence, not a memory dump: "subject lines with a number win for this audience: 3 of 4 tests, +2.1 pts". Each one has a statement, an optional scope (audience segment ids, channel, topic and purpose), the experiments behind it and its author. People and agents write them; agents read the active ones before they draft, and only people can retract one.
+
+- `learnings.list` reads them, newest first, filtered by `status` (`active` by default, `retracted` or `all`), `segmentId`, `channel`, `topic` and `purpose`.
+- `learnings.add` records one. Evidence is required, and every item names its kind (`subject_test`, `journey_holdout`, `campaign_holdout` or `experience`), the id of the broadcast, journey, campaign or experience it came from, a one-line summary and the measured numbers. An agent's evidence must reference something that exists in the workspace, so a guessed or remembered id is refused. Adding is `draft`-level: it never needs autonomy.
+- `learnings.retract` is people-only and needs a `reason`. The row stays in the record with `status: "retracted"`, who retracted it and when, and it is no longer served as current.
+
+Agents read the active learnings as the MCP resource `learnings://current` (the same JSON as `learnings.list` with the default filters). The server's agent instructions tell them to check it before drafting and to record what a result taught them. When a result no longer holds, retract the learning instead of adding a contradicting one without evidence.
+
 ## The guardian
 
 A scheduler job (every five minutes) watches every active agent with a mandate, without a person, and acts by itself when something looks wrong:

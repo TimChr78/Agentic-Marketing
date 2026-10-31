@@ -5,6 +5,7 @@ export * from './diff';
 export * from './holdout';
 export * from './hostedPages';
 export * from './impact';
+export * from './learnings';
 export * from './mandates';
 export * from './types';
 export * from './undo';

@@ -2,6 +2,12 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+### Added
+
+- **Learnings (#311).** A small, inspectable store of conclusions with their evidence, e.g. "subject lines with a number win for this audience: 3 of 4 tests, +2.1 pts". Each learning has a statement, an optional scope (audience segment ids, channel, topic, purpose), the experiment or holdout behind it and its author. `learnings.add` is available to people and agents (an agent's evidence must reference a real broadcast, journey, campaign or experience), `learnings.list` filters by status and scope, and `learnings.retract` lets a person withdraw one with a reason. Agents read the active ones as the MCP resource `learnings://current`, like `business-context://current`.
+
 ## [0.5.5] - 2026-10-31
 
 ### Fixed
