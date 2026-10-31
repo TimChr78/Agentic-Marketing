@@ -2,6 +2,16 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+### Added
+
+- **Workspace portability (#151).** `config.export` takes `includeSettings` and adds the non-secret workspace settings to the bundle: name, display time zone, approval policy, test-send seed list and agent autonomy ceilings. `config.drift` compares a bundle with the workspace and reports what would be created, updated, unchanged or conflicting without writing. A bundle with settings imports them for a person with `workspace:admin` and applies them before publishing, so `config.import` into an empty workspace clones the artifacts, their references and the settings; `scripts/am-config.mjs` gains `--settings` and `drift`. Provider credentials, API tokens, secrets, agents and people are never exported, and settings with unknown credential-shaped keys are refused.
+
+### Fixed
+
+- **Restores no longer resurrect erased people (#144).** `am restore` reads `erasures` and `erasure_tombstones` from the live database before replacing it and replays them afterwards: profiles and identifiers of erased people are deleted again (with their profile keys, consent, messages and journey/segment membership), suppression hashes are restored and the tombstones re-inserted. Replay is idempotent and skips workspaces the snapshot no longer has; if the log cannot be read, the restore stops. The restore reports the snapshot time, and the backup retention rule (`BACKUP_KEEP_DAYS`, the maximum age of a restore point and therefore the window in which a snapshot can predate an erasure) is documented in [Backups and restore](docs/deployment/backups.md) and [Security & privacy](docs/architecture/security-and-privacy.md).
+
 ## [0.4.1] - 2026-10-31
 
 ### Fixed
