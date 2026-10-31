@@ -901,7 +901,7 @@ export const deliveries = pgTable(
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
 );
 
-export type BroadcastStatus = 'scheduled' | 'running' | 'done' | 'cancelled' | 'failed';
+export type BroadcastStatus = 'scheduled' | 'running' | 'done' | 'cancelled' | 'failed' | 'stopped';
 export const broadcastRuns = pgTable(
   'broadcast_runs',
   {
@@ -946,6 +946,48 @@ export const broadcastTests = pgTable(
     winner: text('winner'),
     reason: text('reason'),
     decidedAt: ts('decided_at'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.broadcastId] })],
+);
+
+export type BroadcastStageName = 'canary_sending' | 'canary_waiting' | 'checking' | 'sending_rest' | 'stopped' | 'done';
+
+/**
+ * A staged send on a broadcast (#254): the canary share goes first, after `checkAt` its bounce,
+ * complaint and unsubscribe rates are judged, and only then does the rest go out. The row is the
+ * durable state machine: the run's cursor and this row change in one transaction, so a crash
+ * resumes at the same stage. Canary counts are kept apart from the run's totals so the check can
+ * be explained long after the rest went out.
+ */
+export const broadcastStages = pgTable(
+  'broadcast_stages',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    broadcastId: text('broadcast_id').notNull(),
+    stage: text('stage').$type<BroadcastStageName>().notNull().default('canary_sending'),
+    canaryPercent: integer('canary_percent').notNull(),
+    /** When the wait is over and the canary is judged: the first canary send plus the wait. */
+    checkAt: ts('check_at'),
+    checkedAt: ts('checked_at'),
+    /** True when the canary was smaller than minCanary: too little to judge, so the rest went out. */
+    checkSkipped: boolean('check_skipped').notNull().default(false),
+    canaryRecipients: integer('canary_recipients').notNull().default(0),
+    canaryQueued: integer('canary_queued').notNull().default(0),
+    canarySkipped: integer('canary_skipped').notNull().default(0),
+    /** Base counts from the canary's message events at check time. */
+    sent: integer('sent').notNull().default(0),
+    bounced: integer('bounced').notNull().default(0),
+    complained: integer('complained').notNull().default(0),
+    unsubscribed: integer('unsubscribed').notNull().default(0),
+    bounceRate: doublePrecision('bounce_rate'),
+    complaintRate: doublePrecision('complaint_rate'),
+    unsubscribeRate: doublePrecision('unsubscribe_rate'),
+    stopReason: text('stop_reason'),
+    stoppedAt: ts('stopped_at'),
+    /** When a person sent the rest after a stop. */
+    resumedAt: ts('resumed_at'),
+    completedAt: ts('completed_at'),
     createdAt: ts('created_at').notNull().defaultNow(),
   },
   (t) => [primaryKey({ columns: [t.workspaceId, t.broadcastId] })],
