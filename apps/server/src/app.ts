@@ -1,4 +1,5 @@
 import { existsSync } from 'node:fs';
+import { audienceSyncImpact } from '@agentic-marketing/ads';
 import { independentCheck } from '@agentic-marketing/ai';
 import { activeMandate } from '@agentic-marketing/artifacts';
 import { assetRoutes } from '@agentic-marketing/assets';
@@ -104,7 +105,8 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
     // Reach of publishing, for the agent policy engine (ADR-0016).
     artifactImpact: {
       broadcast: (tx, id, version) => broadcastImpact(tx, id, version),
-      journey: (tx, id) => journeyImpact(tx, id),
+      journey: (tx, id, version) => journeyImpact(tx, id, version),
+      audience_sync: (tx, id, version) => audienceSyncImpact(tx, id, version),
     },
     stepUpLimiter: {
       lockedUntil: (userId) => hot.failureLock(`stepup:${userId}`),
