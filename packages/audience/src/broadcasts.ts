@@ -612,6 +612,14 @@ function canaryBreaches(
 }
 
 /** The canary share's message rows, recomputed from the deterministic assignment. */
+/**
+ * People the send deliberately left out: a campaign control group's holdouts and readers skipped
+ * by a send window. They are not delivery attempts, so the canary's size, failure share and rates
+ * leave them out; counting them as suppressed stopped healthy staged sends (#306).
+ */
+const intentionallyNotSent = (m: { status: string; reason: string | null }) =>
+  m.status === 'suppressed' && !!m.reason && (m.reason.startsWith('holdout_control') || m.reason.startsWith('outside_send_window'));
+
 async function canaryMessagesOf(
   tx: Tx,
   broadcastId: string,
@@ -622,12 +630,13 @@ async function canaryMessagesOf(
       id: schema.messages.id,
       profileId: schema.messages.profileId,
       status: schema.messages.status,
+      reason: schema.messages.reason,
       notBefore: schema.messages.notBefore,
     })
     .from(schema.messages)
     .where(eq(schema.messages.journeyId, broadcastId));
   return rows.flatMap((r) =>
-    r.profileId && canaryAssignment(r.profileId, broadcastId, canaryPercent)
+    r.profileId && canaryAssignment(r.profileId, broadcastId, canaryPercent) && !intentionallyNotSent(r)
       ? [{ id: r.id, status: r.status, notBefore: r.notBefore }]
       : [],
   );
