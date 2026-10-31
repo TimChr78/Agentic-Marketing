@@ -2,6 +2,12 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+### Added
+
+- **Undo for agent actions (#255).** The agent ledger (`agent_actions`) now records how to reverse what an agent published: the version it replaced, or that it was a first publish; for a broadcast, also its scheduled send. `agents.undo` runs the reversal in one transaction — a person only, with `artifacts:publish` — republishing the previous version through the normal publish path (checks, listeners and audit apply), cancelling a broadcast that has not gone out, and marking the ledger entry undone with who did it and the result. A first publish is taken out of service again. A send that already happened cannot be recalled; the ledger says so. `agents.activity` shows whether an action is undoable, and the agent page has an **Undo** button with a note. Held changes record their reversal when the veto window ends and they actually publish. Postgres `0053_agent_undo.sql` adds the `undo`, `undone_at`, `undone_by` and `undo_result` columns; the ledger stays append-only for the app, which may only write the three undone columns.
+
 ## [0.4.1] - 2026-10-31
 
 ### Fixed
