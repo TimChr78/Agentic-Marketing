@@ -248,6 +248,41 @@ A paused agent answers `403` with `This agent (<name>) is paused: <reason>. A pe
 
 `agents.get` with no id gives the agent its own status and `last24h` counts; `agents.activity` (needs `audit:read`) shows every write with its decision, reasons, intent and impact. `workspace.autonomy` gives the switch, threshold, daily limits and ceilings.
 
+## Events
+
+A loop should react instead of polling. An agent subscribes to the event types its loop cares about, and the scheduler (every five minutes) derives each event from what the platform already records and delivers it.
+
+| Event | Emitted when | Subject ids |
+|---|---|---|
+| `hold.ran` | A held change's veto window ended without a veto (the hold runner published it). | `approvalId`, `artifactId`, `version` |
+| `hold.vetoed` | A person rejected a held change before its window ended. | `approvalId`, `artifactId`, `version` |
+| `hold.needs_person` | A held change could not run at recheck (the mandate changed, working hours, the guardian) and now waits for a person. | `actionId`, `command`, `actionClass`, `target` |
+| `approval.decided` | A person approved, rejected or withdrew an agent's request. | `approvalId`, `artifactId`, `version`, `decision` |
+| `guardian.episode` | The guardian capped, held or paused the agent. | `episodeId`, `kind`, `action`, `suspendedHolds` |
+| `guardrail.breach` | The guardian found the mandate's unsubscribe, complaint or bounce guardrail over its limit. | `episodeId`, `kind`, `action`, `suspendedHolds` |
+| `experiment.significant` | A subject test's winner was decided (a tie or too little data is not significant). | `broadcastId`, `winner`, `metric` |
+| `alert.fired` | A threshold alert opened a firing episode. | `alertId`, `ruleId`, `value`, `threshold`, `window` |
+
+Journey and campaign holdout verdicts are computed on demand by `journeys.holdoutResult` and `campaigns.holdoutResult` rather than stored, so they are not events; an agent reads them with those commands. A subject test's verdict is stored by the broadcast runner, so it is emitted.
+
+Each event carries its type, a time, a short summary and subject ids — never personal data (no addresses, traits or profile ids).
+
+```json
+// agents.subscribe (an agent subscribes itself; a person passes agentId)
+{ "eventTypes": ["hold.vetoed", "approval.decided"], "webhookId": "whk_…" }
+```
+
+- **`agents.subscribe`** — event types, an optional `filter` on subject ids (e.g. `{"artifactId": "bc_…"}`) and an optional `webhookId`. Without a webhook the events are recorded for `agents.events`.
+- **`agents.unsubscribe`** — delete a subscription by id; recorded events stay readable, new ones stop.
+- **`agents.subscriptions`** — an agent's subscriptions (a person may list one agent's or the workspace's).
+- **`agents.events`** — the polling fallback: events for the agent since a cursor (`after`), oldest first, returning the next `cursor`. Pass the last id back next time.
+
+An agent can only manage its own subscriptions; a person can subscribe any agent in the workspace. Subscription writes are low-risk (`draft`), so an agent can set them up without a person even under propose-only.
+
+**Delivery.** A subscription with a `webhookId` gets each event as a Standard Webhooks signed `POST` (`type: "agent.event"`, signature headers `webhook-id`, `webhook-timestamp`, `webhook-signature`) through the same worker as customer webhooks: retried with backoff and dead-lettered if it keeps failing; `deliveries.list` shows the outcome. The payload holds the event's id, type, time, summary and subject only.
+
+**MCP notifications.** The MCP server is stateless (one server per request, spec 2026-07-28), so it has no connected client to push a server-initiated notification to. MCP clients use `agents.events` with the `cursor` from the previous call; the same subscription decides what appears there.
+
 ## Troubleshooting
 
 | What you see | What it means | What to do |

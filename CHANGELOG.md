@@ -2,6 +2,12 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+### Added
+
+- **Agents subscribe to events instead of polling (#312).** `agents.subscribe` gives an agent the event types its loop reacts to — a hold that ran, was vetoed or now needs a person (`hold.ran`, `hold.vetoed`, `hold.needs_person`), an approval decided, a guardian episode or guardrail breach, an experiment reaching a significant verdict, and an alert firing — with an optional filter on subject ids and an optional outbound webhook. A subscription with a webhook gets each event as a signed, retried Standard Webhooks `POST` through the existing delivery worker; every event is also recorded and read with `agents.events` since a cursor, which is the fallback for MCP clients (the MCP server is stateless and cannot push notifications). `agents.unsubscribe` and `agents.subscriptions` manage them; an agent can only manage its own, a person any agent. Events carry ids, a type, a time and a short summary, never personal data. Migration `0057_agent_subscriptions.sql` adds the subscriptions, the per-workspace source cursor and the event log.
+
 ## [0.5.5] - 2026-10-31
 
 ### Fixed
