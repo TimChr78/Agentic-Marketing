@@ -1,6 +1,6 @@
 import { clearAnalyticsCache } from '@agentic-marketing/analytics';
 import { getAgent } from '@agentic-marketing/auth';
-import { agentPrincipal } from '@agentic-marketing/commands';
+import { agentPolicy, agentPrincipal } from '@agentic-marketing/commands';
 import { newId } from '@agentic-marketing/core';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { runHoldsOnce } from '../src/agents/holds';
@@ -514,5 +514,59 @@ describe('audit fixes (#260, #262, #263, #267, #268)', () => {
     await t.api(owner).call('approvals.approve', { approvalId: second.body.approvalId });
     const report = await t.api(owner).call('agents.shadowReport', { agentId: a.id });
     expect(report.summary).toMatchObject({ total: 2, agree: 1, tooBold: 1 });
+  });
+
+  it('an undo record from before 0.5.2 is refused rather than guessed (#291)', async () => {
+    const a = await freshAgent({ scope: scope(), levels: { 'content.publish': 3 } });
+    const note = (await a.as('artifacts.create', { type: 'note', name: 'Legacy undo', content: { title: 'v1', body: 'one' } })).body
+      .artifactId;
+    expect((await a.as('artifacts.requestPublish', { artifactId: note, note: 'first' })).body.status).toBe('published');
+    const { actions } = await t.api(owner).call('agents.activity', { agentId: a.id, limit: 1 });
+    // As 0.5.0/0.5.1 recorded it: no publishedVersion.
+    await t.srv.db.admin.query(`UPDATE agent_actions SET undo = undo - 'publishedVersion' WHERE id = $1`, [actions[0].id]);
+    await expect(t.api(owner).call('agents.undo', { actionId: actions[0].id })).rejects.toMatchObject({
+      message: expect.stringContaining('recorded before undo knew which version'),
+    });
+    expect((await t.api(owner).call('artifacts.get', { artifactId: note })).publishedVersion).toBe(1);
+  });
+
+  it('every policy decision sees a pause, including those inside one long command (#292)', async () => {
+    const a = await freshAgent({ scope: scope(), levels: { 'content.publish': 3 } });
+    const principal = {
+      ...agentPrincipal(owner.id, 'hosted:import', ws, 'owner', ['artifacts:read', 'artifacts:write', 'artifacts:publish']),
+      agent: { id: a.id, name: 'Importer', status: 'active' as const, statusReason: null },
+    };
+    await t.api(owner).call('agents.pause', { id: a.id, reason: 'Mid-import' });
+    await expect(
+      t.srv.db.withWorkspace(ws, (tx) =>
+        agentPolicy(tx, t.srv.services, principal, {
+          command: 'artifacts.requestPublish',
+          actionClass: 'content.publish',
+          impact: {},
+          approvable: true,
+          input: {},
+        }),
+      ),
+    ).rejects.toMatchObject({ message: expect.stringContaining('is paused: Mid-import') });
+  });
+
+  it('config.import records the approvals it creates, so the shadow report sees them (#293)', async () => {
+    const a = await freshAgent({ scope: scope(), levels: { 'content.publish': 3 }, shadow: true });
+    const id = newId('not');
+    const out = await a.as('config.import', {
+      bundle: {
+        format: 'agentic-marketing/artifacts@1',
+        artifacts: [{ id, type: 'note', name: 'Shadow import', content: { title: 'Imported', body: 'From a bundle.' } }],
+      },
+      dryRun: false,
+      publish: true,
+      note: 'Import',
+    });
+    expect(out.body.changes[0]).toMatchObject({ id, publish: 'in_review' });
+    const { approvals } = await t.api(owner).call('approvals.list', {});
+    const approval = approvals.find((x) => x.artifactId === id);
+    await t.api(owner).call('approvals.approve', { approvalId: approval!.id });
+    const report = await t.api(owner).call('agents.shadowReport', { agentId: a.id });
+    expect(report.summary).toMatchObject({ total: 1, agree: 1 });
   });
 });

@@ -19,6 +19,8 @@ export interface FakeRequest {
   toolResults: string[];
   /** Whether a JSON answer was requested (structured output). */
   json: boolean;
+  /** The output cap the caller sent, if any (openai `max_completion_tokens`, anthropic `max_tokens`). */
+  maxOutputTokens?: number;
 }
 
 export type FakeReply =
@@ -44,6 +46,8 @@ interface WireRequest {
   tools?: { name?: string; function?: { name: string } }[];
   response_format?: unknown;
   output_config?: unknown;
+  max_tokens?: number;
+  max_completion_tokens?: number;
   stream?: boolean;
 }
 
@@ -78,6 +82,7 @@ function normalise(api: FakeRequest['api'], body: WireRequest, apiKey: string): 
     tools: (body.tools ?? []).map((t) => t.function?.name ?? t.name ?? ''),
     toolResults,
     json: !!(body.response_format || body.output_config),
+    maxOutputTokens: body.max_tokens ?? body.max_completion_tokens,
   };
 }
 
