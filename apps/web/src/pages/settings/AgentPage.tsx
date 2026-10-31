@@ -17,6 +17,7 @@ import {
   impactText,
 } from '../../features/agents/labels';
 import { MandateCard } from '../../features/agents/MandateCard';
+import { ReportCard } from '../../features/agents/ReportCard';
 import { ShadowCard } from '../../features/agents/ShadowCard';
 import {
   Alert,
@@ -94,6 +95,8 @@ export default function AgentPage({ params }: { params: Record<string, string> }
       <MandateCard agent={a} />
 
       <ShadowCard agentId={a.id} />
+
+      <ReportCard agentId={a.id} />
 
       <HostedAgentCard agentId={a.id} onChanged={() => void agent.reload()} />
 

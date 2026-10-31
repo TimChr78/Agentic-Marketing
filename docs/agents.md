@@ -190,6 +190,10 @@ Set `shadow: true` (or a list of action classes, e.g. `["send.broadcast"]`) to t
 
 A high agreement rate with no `too_bold` changes over a few weeks is the evidence for raising the ceiling and publishing the mandate without `shadow`. Drafts are never recorded in shadow.
 
+## Reports
+
+`agents.report` (and the **Last 30 days** card on the agent page) shows what an agent did and what it led to in a period (default the last 30 days, `from`/`to` for any other): its actions by class and decision (ran, held, sent to a person, refused, failed), undos and guardian episodes, the outcome of the broadcasts it published and the direct messages it sent (sent, opens, clicks, unsubscribes, complaints, bounces), the journeys it published against their control groups, and its mandate's `goals` measured on its own broadcasts (value, and whether the target was met). An agent can read its own report by omitting `agentId`. Use it to review an agent and when you renew its mandate.
+
 ## The guardian
 
 A scheduler job (every five minutes) watches every active agent with a mandate, without a person, and acts by itself when something looks wrong:

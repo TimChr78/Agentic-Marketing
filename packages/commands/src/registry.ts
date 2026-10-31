@@ -47,8 +47,33 @@ export interface Services {
     tx: Tx,
     input: { principal: Principal; command: string; input: unknown; intent: string | null; policy: PolicyOutcome; mandate: MandateView },
   ) => Promise<{ ok: boolean; reason: string }>;
+  /** What an agent's actions led to in a period (#310); registered by the server (metric layer, holdouts). */
+  agentOutcomes?: (
+    tx: Tx,
+    workspaceId: string,
+    agentId: string,
+    range: { from: Date; to: Date },
+    goals: { measure: string; target?: number; direction: 'up' | 'down' }[],
+  ) => Promise<AgentOutcomes>;
   /** Why an agent's recent sends breach its mandate's guardrails, or null; registered by the server (metric layer). */
   mandateGuardrails?: (tx: Tx, workspaceId: string, agentId: string, mandate: MandateView) => Promise<string | null>;
+}
+
+/** Outcomes of an agent's actions (#310): its sends, its journeys against holdouts, its goals. */
+export interface AgentOutcomes {
+  broadcasts: EmailOutcome | null;
+  direct: EmailOutcome | null;
+  journeys: { id: string; verdict: string | null; note: string }[];
+  goals: { measure: string; target?: number; direction: 'up' | 'down'; value: number | null; met: boolean | null; note: string | null }[];
+}
+export interface EmailOutcome {
+  count: number;
+  sent: number;
+  opened: number;
+  clicked: number;
+  unsubscribed: number;
+  complained: number;
+  bounced: number;
 }
 
 /** A failure counter shared by all processes, e.g. Valkey. Times are absolute so callers can explain the wait. */

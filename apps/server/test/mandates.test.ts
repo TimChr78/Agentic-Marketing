@@ -615,4 +615,24 @@ describe('audit fixes (#260, #262, #263, #267, #268)', () => {
     const [action] = (await t.api(owner).call('agents.activity', { agentId: a.id, limit: 1 })).actions;
     expect(action).toMatchObject({ undoable: false, undoBlockedBy: expect.stringContaining('v2 was published since') });
   });
+
+  it('agents.report shows its actions, the outcome of its broadcasts and its goals (#310)', async () => {
+    const a = await freshAgent({
+      scope: scope(),
+      levels: { 'send.broadcast': 3 },
+      goals: [{ measure: 'email.sent', target: 1, direction: 'up' }],
+    });
+    const id = await a.draft();
+    expect((await a.as('artifacts.requestPublish', { artifactId: id, note: 'report me' })).body.status).toBe('published');
+    const report = await eventually(
+      () => t.api(owner).call('agents.report', { agentId: a.id }),
+      (r) => (r.outcomes?.broadcasts?.sent ?? 0) >= 3,
+      30_000,
+    );
+    expect(report.actions['send.broadcast']).toMatchObject({ allow: 1 });
+    expect(report.outcomes?.broadcasts).toMatchObject({ count: 1, sent: 3 });
+    expect(report.outcomes?.goals[0]).toMatchObject({ measure: 'email.sent', target: 1, met: true });
+    // The agent can read its own report.
+    expect((await a.as('agents.report')).body.agentId).toBe(a.id);
+  });
 });

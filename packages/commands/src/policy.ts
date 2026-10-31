@@ -127,6 +127,8 @@ export interface MandateView {
   independentCheck: boolean;
   guardrails: { unsubscribeRate?: number; complaintRate?: number; bounceRate?: number; window: string; minSent: number };
   purpose: string;
+  /** Goals on metric-layer measures, reported by agents.report (#310). */
+  goals?: { measure: string; target?: number; direction: 'up' | 'down' }[];
   /** Learning rules (#257): holdouts the agent's journeys, broadcasts and experiences must have. */
   learning?: { journeyControlPercent?: number; broadcastHoldout?: boolean; experienceHoldoutPercent?: number };
   /**

@@ -96,6 +96,7 @@ export async function activeMandate(tx: Tx, agentId: string, now = new Date()): 
         guardrails: m.guardrails,
         purpose: m.purpose,
         learning: m.learning,
+        goals: m.goals,
         shadow: m.shadow as MandateView['shadow'],
       },
     };
