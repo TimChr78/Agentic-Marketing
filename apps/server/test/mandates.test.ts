@@ -524,6 +524,9 @@ describe('audit fixes (#260, #262, #263, #267, #268)', () => {
     const { actions } = await t.api(owner).call('agents.activity', { agentId: a.id, limit: 1 });
     // As 0.5.0/0.5.1 recorded it: no publishedVersion.
     await t.srv.db.admin.query(`UPDATE agent_actions SET undo = undo - 'publishedVersion' WHERE id = $1`, [actions[0].id]);
+    // Not advertised as undoable either (#301).
+    const listed = (await t.api(owner).call('agents.activity', { agentId: a.id, limit: 1 })).actions[0];
+    expect(listed.undoable).toBe(false);
     await expect(t.api(owner).call('agents.undo', { actionId: actions[0].id })).rejects.toMatchObject({
       message: expect.stringContaining('recorded before undo knew which version'),
     });

@@ -409,6 +409,64 @@ describe('staged send', () => {
     expect((await messagesOf(id)).length).toBe(PEOPLE);
   }, 90_000);
 
+  /** A staged send whose canary stays queued behind a closed send window, so tests can set its outcome. */
+  const heldCanary = async (canaryPercent: number, minCanary: number) => {
+    const now = new Date();
+    const clock = (minutes: number) => `${String(Math.floor(minutes / 60) % 24).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`;
+    const id = await broadcast({
+      template,
+      segment,
+      sendAt: now.toISOString(),
+      sendWindow: {
+        start: clock(now.getUTCHours() * 60 + now.getUTCMinutes() + 60),
+        end: clock(now.getUTCHours() * 60 + now.getUTCMinutes() + 180),
+        maxDelay: 'P1D',
+      },
+      stagedSend: { canaryPercent, wait: 'PT2H', minCanary },
+    });
+    await eventually(
+      () => status(id),
+      (s) => s.stage?.stage === 'canary_waiting' && s.stage.canary.queued >= 1,
+      20_000,
+    );
+    return { id, canary: await canaryMessages(id, canaryPercent) };
+  };
+
+  it('stops when a canary smaller than minCanary could not deliver (#300)', async () => {
+    const { id, canary } = await heldCanary(5, 50);
+    expect(canary.length).toBeLessThan(50);
+    await t.srv.db.admin.query(`UPDATE messages SET status = 'failed' WHERE workspace_id = $1 AND journey_id = $2 AND status = 'queued'`, [
+      ws,
+      id,
+    ]);
+    await checkNow(id);
+    const stopped = await eventually(
+      () => status(id),
+      (s) => s.stage?.stage === 'stopped',
+      30_000,
+    );
+    expect(stopped.run.status).toBe('stopped');
+    expect(stopped.stage?.stopReason).toContain(`${canary.length} failed`);
+    expect((await messagesOf(id)).length).toBe(canary.length);
+  }, 60_000);
+
+  it('stops when half the canary could not be delivered (#300)', async () => {
+    const { id, canary } = await heldCanary(20, 5);
+    const half = Math.ceil(canary.length / 2);
+    const failed = canary.slice(0, half).map((m) => m.id);
+    const sent = canary.slice(half).map((m) => m.id);
+    await t.srv.db.admin.query(`UPDATE messages SET status = 'failed' WHERE id = ANY($1)`, [failed]);
+    await t.srv.db.admin.query(`UPDATE messages SET status = 'sent' WHERE id = ANY($1)`, [sent]);
+    await checkNow(id);
+    const stopped = await eventually(
+      () => status(id),
+      (s) => s.stage?.stage === 'stopped',
+      30_000,
+    );
+    expect(stopped.stage?.stopReason).toContain(`${half} failed of ${canary.length}`);
+    expect((await messagesOf(id)).length).toBe(canary.length);
+  }, 60_000);
+
   it('proceeds without a check when the canary is smaller than minCanary', async () => {
     const id = await broadcast({
       template,
@@ -419,6 +477,12 @@ describe('staged send', () => {
       () => status(id),
       (s) => s.stage?.stage === 'canary_waiting' && s.stage.canary.queued >= 1,
       20_000,
+    );
+    // A small canary is still waited for until it has gone out (#300).
+    await eventually(
+      async () => (await canaryMessages(id, 5)).filter((m) => m.status === 'queued' || m.status === 'sending').length,
+      (n) => n === 0,
+      30_000,
     );
     await checkNow(id);
     const done = await eventually(
