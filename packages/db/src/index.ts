@@ -3,6 +3,7 @@ export * from './migrate';
 export * from './pool';
 export type {
   AgentCredentialKind,
+  AgentGuardState,
   AgentStatus,
   AiCallKind,
   AiCallStatus,

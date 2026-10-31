@@ -400,6 +400,7 @@ export async function agentPolicy(
   if (!agent) throw new Error('agentPolicy needs an agent principal');
   await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`agent-policy:${principal.workspaceId}:${agent.id}`}, 0))`);
   const [ws] = await tx.select({ autonomy: schema.workspaces.autonomy }).from(schema.workspaces);
+  const [row] = await tx.select({ guard: schema.agents.guard }).from(schema.agents).where(eq(schema.agents.id, agent.id));
   const mandate = req.actionClass === 'read' ? null : ((await services.activeMandate?.(tx, agent.id)) ?? null);
   const guardrailBreach =
     mandate && REACH_CLASSES.includes(req.actionClass) && services.mandateGuardrails
@@ -412,6 +413,7 @@ export async function agentPolicy(
     settings: autonomySettings(ws?.autonomy),
     counters: await agentCounters(tx, agent.id),
     approvable: req.approvable,
+    guard: row?.guard ?? null,
     ...(mandate ? { mandate: mandate.view, outsideHours: mandate.outsideHours, guardrailBreach } : {}),
   });
   if (mandate && policy.mandate?.independentCheck && (policy.decision === 'allow' || policy.decision === 'hold'))
@@ -449,8 +451,9 @@ export async function recordAgentAction(
     error: error?.slice(0, 1000) ?? null,
     target: target ?? null,
     surface,
-    mandateId: policy.mandate?.id ?? null,
-    mandateVersion: policy.mandate?.version ?? null,
+    mandateId: policy.mandate?.id ?? policy.shadow?.mandateId ?? null,
+    mandateVersion: policy.mandate?.version ?? policy.shadow?.mandateVersion ?? null,
+    shadow: policy.shadow ?? null,
     intent: intent?.slice(0, 2000) ?? null,
   });
 }

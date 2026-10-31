@@ -1335,6 +1335,12 @@ const agentMandate = z.object({
     .default({ userIds: [] })
     .describe('Who besides the sponsor is told about holds, refusals and guardrail hits'),
   independentCheck: z.boolean().default(false).describe('A second model checks intent, diff and mandate before level-2+ actions'),
+  shadow: z
+    .union([z.boolean(), z.array(z.enum(MANDATE_CLASSES)).max(MANDATE_CLASSES.length)])
+    .default(false)
+    .describe(
+      'Shadow mode: true, or a list of action classes. Their levels are only recorded (what the agent would have done, see agents.shadowReport); a person decides as without a mandate. Levels in shadow may exceed the workspace ceiling.',
+    ),
 });
 export type AgentMandate = z.output<typeof agentMandate>;
 

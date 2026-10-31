@@ -1309,11 +1309,16 @@ async function refuseIfAgentStopped(ctx: CommandContext, r: { requestedByType: s
 }
 
 /** The agent behind an approval request's credential, if an agent requested it. */
+/** The agent credential behind an approval's `requested_by_client`: `token:<id>`, `hosted:<agent id>` or an OAuth client id. */
+export function agentCredentialOf(client: string): readonly ['api_token' | 'oauth_client' | 'hosted', string] {
+  if (client.startsWith('token:')) return ['api_token', client.slice('token:'.length)] as const;
+  if (client.startsWith('hosted:')) return ['hosted', client.slice('hosted:'.length)] as const;
+  return ['oauth_client', client] as const;
+}
+
 async function requestingAgent(ctx: CommandContext, r: { requestedByType: string; requestedByClient: string | null }) {
   if (r.requestedByType !== 'agent' || !r.requestedByClient) return null;
-  const [kind, credentialId] = r.requestedByClient.startsWith('token:')
-    ? (['api_token', r.requestedByClient.slice('token:'.length)] as const)
-    : (['oauth_client', r.requestedByClient] as const);
+  const [kind, credentialId] = agentCredentialOf(r.requestedByClient);
   const [agent] = await ctx.tx
     .select({ id: schema.agents.id, name: schema.agents.name, status: schema.agents.status })
     .from(schema.agentCredentials)

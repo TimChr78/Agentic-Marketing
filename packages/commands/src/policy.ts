@@ -121,6 +121,30 @@ export interface MandateView {
   independentCheck: boolean;
   guardrails: { unsubscribeRate?: number; complaintRate?: number; bounceRate?: number; window: string; minSent: number };
   purpose: string;
+  /**
+   * Shadow mode (#256): for these classes (or all, when true) the mandate's decision is only
+   * recorded; the action is decided as if there were no mandate, so a person decides as before.
+   */
+  shadow?: boolean | ActionClass[];
+}
+
+/**
+ * The guardian's cap on an agent (#253): its levels are capped at `cap` for every class, and at
+ * `irreversibleCap` for actions that cannot be undone, until a person clears it.
+ */
+export interface AgentGuard {
+  cap: number;
+  irreversibleCap?: number;
+  reason: string;
+}
+
+/** What the mandate would have decided in shadow mode (#256). */
+export interface ShadowOutcome {
+  decision: PolicyDecision;
+  level?: number;
+  reasons: string[];
+  mandateId: string;
+  mandateVersion: number;
 }
 
 /** Classes whose actions cannot be undone once they ran: working hours apply to them. */
@@ -142,6 +166,8 @@ export interface PolicyInput {
   guardrailBreach?: string | null;
   /** Whether now is outside the mandate's working hours or on a blackout date. */
   outsideHours?: string | null;
+  /** The guardian's cap on this agent, if it has acted and no person has cleared it yet (#253). */
+  guard?: AgentGuard | null;
 }
 
 export interface PolicyOutcome {
@@ -154,6 +180,13 @@ export interface PolicyOutcome {
   /** Allowed by a mandate (level 3+): the change runs without the approval policy (ADR-0016). */
   autonomous?: boolean;
   mandate?: { id: string; version: number; holdWindow: string; independentCheck: boolean };
+  /** Shadow mode: what the mandate would have decided; the decision above is the one that applied. */
+  shadow?: ShadowOutcome;
+}
+
+/** Whether a mandate runs this action class in shadow mode. */
+export function inShadow(mandate: Pick<MandateView, 'shadow'>, actionClass: ActionClass): boolean {
+  return mandate.shadow === true || (Array.isArray(mandate.shadow) && mandate.shadow.includes(actionClass));
 }
 
 const fmt = (n: number) => n.toLocaleString('en-US');
@@ -177,12 +210,18 @@ export function decide(input: PolicyInput): PolicyOutcome {
     return out('deny', [
       'Agents are switched off in this workspace: they can only read. A person can switch them on in Settings → Agents.',
     ]);
+  if (mandate && inShadow(mandate, actionClass))
+    return actionClass === 'draft' ? decide({ ...input, mandate: undefined }) : decideInShadow(input, mandate);
   if (mandate && (mandate.levels.draft ?? 1) === 0 && actionClass === 'draft')
     return out('deny', ['This agent’s mandate is observe-only (level 0): it may read but not draft.'], { level: 0 });
   if (actionClass === 'draft') return out('allow', []);
   if (mandate) return decideWithMandate(input, mandate, out);
 
   const ask: string[] = [];
+  // Without a mandate there is no veto window: any guardian cap below 3 sends the change to a person.
+  const guard = input.guard;
+  if (guard && (guard.cap < 3 || (guard.irreversibleCap !== undefined && guard.irreversibleCap < 3 && IRREVERSIBLE.includes(actionClass))))
+    ask.push(guard.reason);
   if (settings.switch === 'propose_only')
     ask.push('This workspace is set to propose-only: every agent change beyond a draft needs a person.');
   if (counters.changes >= settings.limits.changesPerDay)
@@ -288,6 +327,12 @@ function decideWithMandate(
     dropOne(`This agent sent ${fmt(counters.messages)} messages in the last 24 hours; the mandate allows ${fmt(l.messagesPerDay)}.`);
 
   if (input.guardrailBreach) capAt(1, input.guardrailBreach);
+  const guard = input.guard;
+  if (guard) {
+    const max =
+      guard.irreversibleCap !== undefined && IRREVERSIBLE.includes(actionClass) ? Math.min(guard.cap, guard.irreversibleCap) : guard.cap;
+    if (max < 4) capAt(max, guard.reason);
+  }
   if (input.outsideHours && IRREVERSIBLE.includes(actionClass)) capAt(2, input.outsideHours);
 
   if (level <= 0) return out('deny', [...reasons, `The mandate gives this agent level 0 (observe) for ${actionClass}.`], { level });
@@ -304,4 +349,33 @@ function decideWithMandate(
     });
   }
   return out('allow', reasons, { level, autonomous: true });
+}
+
+/**
+ * Shadow mode (#256): the mandate's decision, with its levels as granted (the workspace ceiling is
+ * what a person raises once the shadow record supports it), is returned as `shadow`; the decision
+ * that applies is the one without a mandate.
+ */
+function decideInShadow(input: PolicyInput, mandate: MandateView): PolicyOutcome {
+  const { actionClass, settings } = input;
+  const granted = mandate.levels[actionClass] ?? 1;
+  const would = decideWithMandate(
+    {
+      ...input,
+      settings: { ...settings, maxLevel: { ...settings.maxLevel, [actionClass]: Math.max(settings.maxLevel[actionClass] ?? 1, granted) } },
+    },
+    mandate,
+    (decision, reasons, extra = {}) => ({ decision, actionClass, reasons, impact: input.impact, ...extra }),
+  );
+  const actual = decide({ ...input, mandate: undefined, outsideHours: undefined, guardrailBreach: undefined });
+  return {
+    ...actual,
+    shadow: {
+      decision: would.decision,
+      ...(would.level !== undefined ? { level: would.level } : {}),
+      reasons: would.reasons,
+      mandateId: mandate.id,
+      mandateVersion: mandate.version,
+    },
+  };
 }

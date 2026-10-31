@@ -8,7 +8,7 @@ import {
 } from '@agentic-marketing/commands';
 import { AppError, newId } from '@agentic-marketing/core';
 import { type AgentCredentialKind, type AgentStatus, type Db, schema } from '@agentic-marketing/db';
-import { and, desc, eq, gte, inArray, lt, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lt, sql } from 'drizzle-orm';
 import { z } from 'zod';
 
 // Agents as first-class principals (ADR-0016, #213). An API token or an OAuth client acts as an
@@ -111,6 +111,16 @@ const Agent = z.object({
   statusChangedAt: z.string().nullable(),
   brand: z.string().nullable().describe('Reserved for multi-brand: null means the whole workspace'),
   credentials: z.array(Credential),
+  guard: z
+    .object({
+      cap: z.number().int(),
+      irreversibleCap: z.number().int().optional(),
+      reason: z.string(),
+      since: z.string(),
+      episodeIds: z.array(z.string()),
+    })
+    .nullable()
+    .describe('The guardian’s cap on this agent until a person clears it (agents.clearGuard); null when it has not acted'),
   last24h: z.object({
     changes: z.number().int(),
     denied: z.number().int(),
@@ -158,6 +168,7 @@ async function loadAgents(ctx: CommandContext, ids?: string[]): Promise<Agent[]>
       credentials: creds
         .filter((x) => x.agentId === r.id)
         .map((x) => ({ kind: x.kind, id: x.credentialId, since: x.createdAt.toISOString() })),
+      guard: r.guard ?? null,
       last24h: { changes: c?.changes ?? 0, denied: c?.denied ?? 0, escalated: c?.escalated ?? 0, held: c?.held ?? 0 },
       createdAt: r.createdAt.toISOString(),
     };
@@ -280,6 +291,16 @@ const Action = z.object({
   mandateId: z.string().nullable().describe('The mandate that decided, if any'),
   mandateVersion: z.number().int().nullable(),
   intent: z.string().nullable().describe('What the agent said it was doing'),
+  shadow: z
+    .object({
+      decision: z.enum(['allow', 'hold', 'ask', 'deny']),
+      level: z.number().int().optional(),
+      reasons: z.array(z.string()),
+      mandateId: z.string(),
+      mandateVersion: z.number().int(),
+    })
+    .nullable()
+    .describe('Shadow mode: what the mandate would have decided; `decision` is what applied'),
   reasons: z.array(z.string()),
   impact: z.record(z.string(), z.unknown()),
   ok: z.boolean(),
@@ -326,6 +347,198 @@ export const agentActivity = defineCommand({
       actions: page.map((r) => ({ ...r, at: r.at.toISOString(), impact: r.impact ?? {} })),
       next: rows.length > input.limit ? (page.at(-1)?.id ?? null) : null,
     };
+  },
+});
+
+// --- The guardian (#253) -----------------------------------------------------------------------
+
+const Episode = z.object({
+  id: z.string(),
+  kind: z.enum(['guardrail', 'anomaly', 'probing', 'loop', 'errors']),
+  action: z
+    .enum(['cap', 'hold', 'pause'])
+    .describe('cap: every change waits for a person; hold: irreversible actions are held; pause: the agent was paused'),
+  reason: z.string(),
+  evidence: z.record(z.string(), z.unknown()),
+  suspendedHolds: z.number().int().describe('Pending holds of the agent that became ordinary approvals'),
+  at: z.string(),
+  clearedAt: z.string().nullable(),
+  clearedBy: z.string().nullable(),
+  clearedNote: z.string().nullable(),
+});
+
+const episodeOut = (e: typeof schema.guardianEvents.$inferSelect) => ({
+  ...e,
+  at: e.at.toISOString(),
+  clearedAt: e.clearedAt?.toISOString() ?? null,
+});
+
+export const agentGuardian = defineCommand({
+  name: 'agents.guardian',
+  title: 'Guardian episodes',
+  description:
+    'What the guardian did to an agent: each episode (a guardrail breach, an anomaly such as a send far larger than usual or a burst of changes, probing = many refusals, a loop = the same target changed again and again, rising errors) with its evidence and action, and the cap still in force. Newest first.',
+  input: z.object({
+    agentId: AGENT_ID,
+    open: z.boolean().default(false).describe('Only episodes no person has cleared yet'),
+    limit: z.number().int().min(1).max(200).default(50),
+  }),
+  output: z.object({ guard: Agent.shape.guard, episodes: z.array(Episode) }),
+  permission: 'audit:read',
+  effect: 'read',
+  target: (i) => i.agentId,
+  handler: async (input, ctx) => {
+    const [a] = await ctx.tx.select({ guard: schema.agents.guard }).from(schema.agents).where(eq(schema.agents.id, input.agentId));
+    if (!a) throw new AppError('not_found', `Agent ${input.agentId} not found.`);
+    const g = schema.guardianEvents;
+    const rows = await ctx.tx
+      .select()
+      .from(g)
+      .where(and(eq(g.agentId, input.agentId), input.open ? isNull(g.clearedAt) : undefined))
+      .orderBy(desc(g.at))
+      .limit(input.limit);
+    return { guard: a.guard ?? null, episodes: rows.map(episodeOut) };
+  },
+});
+
+export const clearGuard = defineCommand({
+  name: 'agents.clearGuard',
+  title: 'Clear the guardian',
+  description:
+    'Lift the guardian’s cap on an agent after reviewing its episodes: every open episode is marked cleared with your note and the agent’s mandate applies again. A paused agent stays paused until agents.resume; held changes the guardian suspended stay with a person.',
+  input: z.object({ agentId: AGENT_ID, note: z.string().min(1).max(1000).describe('What you checked and why it is safe to continue') }),
+  output: z.object({ cleared: z.number().int(), agent: Agent }),
+  permission: 'workspace:admin',
+  effect: 'write',
+  humansOnly: true,
+  target: (i) => i.agentId,
+  handler: async (input, ctx) => {
+    const [a] = await ctx.tx.select({ id: schema.agents.id }).from(schema.agents).where(eq(schema.agents.id, input.agentId));
+    if (!a) throw new AppError('not_found', `Agent ${input.agentId} not found.`);
+    const now = new Date();
+    const cleared = await ctx.tx
+      .update(schema.guardianEvents)
+      .set({ clearedAt: now, clearedBy: ctx.principal.userId, clearedNote: input.note })
+      .where(and(eq(schema.guardianEvents.agentId, input.agentId), isNull(schema.guardianEvents.clearedAt)))
+      .returning({ id: schema.guardianEvents.id });
+    await ctx.tx.update(schema.agents).set({ guard: null, updatedAt: now }).where(eq(schema.agents.id, input.agentId));
+    return { cleared: cleared.length, agent: (await loadAgents(ctx, [input.agentId]))[0] };
+  },
+});
+
+// --- Shadow mode (#256) -------------------------------------------------------------------------
+
+const Agreement = z.enum(['agree', 'too_bold', 'too_cautious', 'pending', 'unreviewed']);
+const TALLY = { agree: 'agree', too_bold: 'tooBold', too_cautious: 'tooCautious', pending: 'pending', unreviewed: 'unreviewed' } as const;
+
+export const shadowReport = defineCommand({
+  name: 'agents.shadowReport',
+  title: 'Shadow mode report',
+  description:
+    'For a mandate in shadow mode: what the agent would have done (its mandate’s decision) next to what people did with the same changes. agree: the mandate would have let it run and a person approved, or would have asked and a person rejected; too_bold: it would have run (or been held) but a person rejected it; too_cautious: it would have asked but a person approved; pending: no decision yet; unreviewed: no person reviewed it (the approval policy let it run). Use it to decide whether to grant the level for real.',
+  input: z.object({
+    agentId: AGENT_ID,
+    since: z.string().datetime().optional().describe('Default: 30 days ago'),
+    limit: z.number().int().min(1).max(500).default(200),
+  }),
+  output: z.object({
+    summary: z.object({
+      total: z.number().int(),
+      agree: z.number().int(),
+      tooBold: z.number().int(),
+      tooCautious: z.number().int(),
+      pending: z.number().int(),
+      unreviewed: z.number().int(),
+      agreementRate: z.number().nullable().describe('agree ÷ (agree + too_bold + too_cautious); null without reviewed changes'),
+    }),
+    byClass: z.record(
+      z.string(),
+      z.object({ total: z.number().int(), agree: z.number().int(), tooBold: z.number().int(), tooCautious: z.number().int() }),
+    ),
+    actions: z.array(
+      z.object({
+        id: z.number().int(),
+        at: z.string(),
+        command: z.string(),
+        actionClass: z.string(),
+        target: z.string().nullable(),
+        wouldHave: z.enum(['allow', 'hold', 'ask', 'deny']),
+        wouldHaveLevel: z.number().int().nullable(),
+        decision: z.enum(['allow', 'hold', 'ask', 'deny']),
+        review: z.enum(['approved', 'rejected', 'withdrawn', 'pending', 'none']),
+        agreement: Agreement,
+      }),
+    ),
+  }),
+  permission: 'audit:read',
+  effect: 'read',
+  target: (i) => i.agentId,
+  handler: async (input, ctx) => {
+    const t = schema.agentActions;
+    const since = input.since ? new Date(input.since) : new Date(Date.now() - 30 * 86_400_000);
+    const rows = await ctx.tx
+      .select()
+      .from(t)
+      .where(and(eq(t.agentId, input.agentId), isNotNull(t.shadow), gte(t.at, since)))
+      .orderBy(desc(t.id))
+      .limit(input.limit);
+    const summary = { total: 0, agree: 0, tooBold: 0, tooCautious: 0, pending: 0, unreviewed: 0 };
+    const byClass: Record<string, { total: number; agree: number; tooBold: number; tooCautious: number }> = {};
+    const actions = [];
+    for (const r of rows) {
+      const shadow = r.shadow!;
+      // The approval this action created: the first request for its target(s) at or after it.
+      let review: 'approved' | 'rejected' | 'withdrawn' | 'pending' | 'none' = 'none';
+      // Without a mandate the engine allows and the approval policy may still send it to a person.
+      if (r.decision !== 'deny' && r.target) {
+        const [ap] = await ctx.tx
+          .select({ status: schema.approvalRequests.status })
+          .from(schema.approvalRequests)
+          .where(
+            and(
+              inArray(schema.approvalRequests.artifactId, r.target.split(',')),
+              gte(schema.approvalRequests.createdAt, new Date(r.at.getTime() - 5_000)),
+            ),
+          )
+          .orderBy(asc(schema.approvalRequests.createdAt))
+          .limit(1);
+        if (ap) review = ap.status;
+      }
+      const wouldRun = shadow.decision === 'allow' || shadow.decision === 'hold';
+      const agreement: z.infer<typeof Agreement> =
+        review === 'none'
+          ? 'unreviewed'
+          : review === 'pending'
+            ? 'pending'
+            : review === 'approved'
+              ? wouldRun
+                ? 'agree'
+                : 'too_cautious'
+              : wouldRun
+                ? 'too_bold'
+                : 'agree';
+      const key = TALLY[agreement];
+      summary.total++;
+      summary[key]++;
+      const c = byClass[r.actionClass] ?? { total: 0, agree: 0, tooBold: 0, tooCautious: 0 };
+      byClass[r.actionClass] = c;
+      c.total++;
+      if (key === 'agree' || key === 'tooBold' || key === 'tooCautious') c[key]++;
+      actions.push({
+        id: r.id,
+        at: r.at.toISOString(),
+        command: r.command,
+        actionClass: r.actionClass,
+        target: r.target,
+        wouldHave: shadow.decision,
+        wouldHaveLevel: shadow.level ?? null,
+        decision: r.decision,
+        review,
+        agreement,
+      });
+    }
+    const reviewed = summary.agree + summary.tooBold + summary.tooCautious;
+    return { summary: { ...summary, agreementRate: reviewed ? summary.agree / reviewed : null }, byClass, actions };
   },
 });
 
@@ -381,6 +594,9 @@ export const agentCommands = [
   resumeAgent,
   revokeAgent,
   agentActivity,
+  agentGuardian,
+  clearGuard,
+  shadowReport,
   getAutonomy,
   setAutonomy,
 ];

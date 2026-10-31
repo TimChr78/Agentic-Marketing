@@ -167,6 +167,34 @@ A level-2 action becomes a **hold**: a scheduled execution with a deadline (`run
 
 Set `independentCheck: true` to have a second model review each level-2+ action before it runs: given the intent, the diff, the impact and the mandate, does it match? A mismatch, an error or a missing AI provider sends the action to a person (it fails closed). It is off by default and costs tokens; turn it on for any agent that reads content from outside the workspace.
 
+### Shadow mode
+
+Set `shadow: true` (or a list of action classes, e.g. `["send.broadcast"]`) to try a mandate before trusting it. For those classes the policy engine works out what the mandate would decide, at the levels it grants even above the workspace ceiling, and records it in the ledger as `shadow`; the action itself is decided as if there were no mandate, so the approval policy and the people reviewing work exactly as before. `agents.shadowReport` (and the **Shadow mode** card on the agent page) compares the two over the last 30 days:
+
+| Result | Meaning |
+|---|---|
+| `agree` | It would have run and a person approved, or it would have asked and a person rejected. |
+| `too_bold` | It would have run (or been held), but a person rejected the change. |
+| `too_cautious` | It would have asked, but a person approved. |
+| `pending` / `unreviewed` | No decision yet / the approval policy let it run without a person. |
+
+A high agreement rate with no `too_bold` changes over a few weeks is the evidence for raising the ceiling and publishing the mandate without `shadow`. Drafts are never recorded in shadow.
+
+## The guardian
+
+A scheduler job (every five minutes) watches every active agent with a mandate, without a person, and acts by itself when something looks wrong:
+
+| Check | Triggers when | Action |
+|---|---|---|
+| Guardrails | The mandate's unsubscribe, complaint or bounce rate on the agent's own sends is over its limit (the same check as before each send, run continuously because rates arrive after a send). | Cap: every change waits for a person. |
+| Anomaly: send size | A send reaches more than 3× the median of the agent's previous sends (after at least 3). | Hold: sends and other irreversible actions are held for a veto window at most. |
+| Anomaly: burst | 30 or more changes in an hour. | Hold. |
+| Rising errors | 5 or more failed actions in an hour, at least half of its actions. | Cap. |
+| Probing | 10 or more refusals in an hour. | Pause the agent. |
+| Loop | The same artifact changed 6 or more times in an hour. | Pause the agent. |
+
+Each time it acts the guardian records an **episode** with its evidence, turns the agent's pending holds into ordinary approvals (nothing it asked for runs by itself any more), and e-mails the sponsor and the mandate's escalation targets. The cap stays on the agent, on top of its mandate and the workspace ceilings, until a person reviews the episodes and clears it on the agent page or with `agents.clearGuard` (a note is required); a paused agent is resumed separately with `agents.resume`. `agents.guardian` lists the episodes and the cap in force. Each kind fires once until it is cleared, and after clearing only new activity counts.
+
 ### Expiry and renewal
 
 `validUntil` is required, must be in the future and may be at most a year away; 30 days is a good default. After it passes the mandate stops applying and the agent falls back to the approval policy. Renewal is a person's decision: update the same mandate artifact with a new version (`artifacts.updateDraft`) and publish it, with the agent's activity and results in front of you. An agent can have only one active mandate; a second one is refused until the first is archived or expires.

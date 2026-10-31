@@ -260,6 +260,7 @@ export async function startTestServer(name: string, port: number, env: Record<st
       agentNotifyTickMs: 86_400_000,
       // Hosted agent tests drive the sweep directly with a fixed clock too.
       hostedAgentTickMs: 86_400_000,
+      guardianTickMs: 86_400_000,
       holdTickMs: 300,
     }),
   ];

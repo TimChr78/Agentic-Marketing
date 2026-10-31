@@ -1163,6 +1163,8 @@ export const agents = pgTable(
     statusChangedAt: ts('status_changed_at'),
     /** Reserved for multi-brand (#184): null means the whole workspace. */
     brand: text('brand'),
+    /** The guardian's cap on the agent until a person clears it (#253); null when it has not acted. */
+    guard: jsonb('guard').$type<AgentGuardState>(),
     createdAt: ts('created_at').notNull().defaultNow(),
     updatedAt: ts('updated_at').notNull().defaultNow(),
   },
@@ -1200,7 +1202,44 @@ export const agentActions = pgTable(
     mandateId: text('mandate_id'),
     mandateVersion: integer('mandate_version'),
     intent: text('intent'),
+    /** Shadow mode (#256): what the mandate would have decided; `decision` is what applied. */
+    shadow: jsonb('shadow').$type<{
+      decision: PolicyDecision;
+      level?: number;
+      reasons: string[];
+      mandateId: string;
+      mandateVersion: number;
+    }>(),
     at: ts('at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
+/** The guardian's cap on an agent (#253): levels capped at `cap`, irreversible classes at `irreversibleCap`. */
+export interface AgentGuardState {
+  cap: number;
+  irreversibleCap?: number;
+  reason: string;
+  since: string;
+  episodeIds: string[];
+}
+
+/** One time the guardian acted on an agent, with its evidence, until a person clears it (#253). */
+export const guardianEvents = pgTable(
+  'guardian_events',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    agentId: text('agent_id').notNull(),
+    kind: text('kind').$type<'guardrail' | 'anomaly' | 'probing' | 'loop' | 'errors'>().notNull(),
+    action: text('action').$type<'cap' | 'hold' | 'pause'>().notNull(),
+    reason: text('reason').notNull(),
+    evidence: jsonb('evidence').$type<Record<string, unknown>>().notNull().default({}),
+    suspendedHolds: integer('suspended_holds').notNull().default(0),
+    at: ts('at').notNull().defaultNow(),
+    clearedAt: ts('cleared_at'),
+    clearedBy: text('cleared_by'),
+    clearedNote: text('cleared_note'),
   },
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
 );

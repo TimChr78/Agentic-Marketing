@@ -6,6 +6,7 @@ import { Link } from '../../app/router';
 import { useApi } from '../../app/useApi';
 import { AgentControls } from '../../features/agents/AgentControls';
 import { AgentStatusPill, DecisionBadge } from '../../features/agents/AgentStatus';
+import { GuardianCard } from '../../features/agents/GuardianCard';
 import { HostedAgentCard } from '../../features/agents/HostedAgentCard';
 import {
   ACTION_CLASS_LABEL,
@@ -16,6 +17,7 @@ import {
   impactText,
 } from '../../features/agents/labels';
 import { MandateCard } from '../../features/agents/MandateCard';
+import { ShadowCard } from '../../features/agents/ShadowCard';
 import {
   Alert,
   Button,
@@ -83,7 +85,11 @@ export default function AgentPage({ params }: { params: Record<string, string> }
         </Alert>
       )}
 
+      <GuardianCard agent={a} onChanged={() => void agent.reload()} />
+
       <MandateCard agent={a} />
+
+      <ShadowCard agentId={a.id} />
 
       <HostedAgentCard agentId={a.id} onChanged={() => void agent.reload()} />
 
@@ -234,6 +240,11 @@ function Activity({ agentId }: { agentId: string }) {
                 <Td className="hidden md:table-cell">{ACTION_CLASS_LABEL[action.actionClass] ?? action.actionClass}</Td>
                 <Td>
                   <DecisionBadge decision={action.decision} />
+                  {action.shadow && (
+                    <div className="mt-1 text-[11px] whitespace-nowrap text-muted" title={action.shadow.reasons.join(' ')}>
+                      Shadow: {DECISION[action.shadow.decision].label.toLowerCase()}
+                    </div>
+                  )}
                 </Td>
                 <Td className="min-w-[220px] max-w-[380px]">
                   {action.reasons.length === 0 ? (
