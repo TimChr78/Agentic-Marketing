@@ -46,6 +46,9 @@ import { z } from 'zod';
 const BroadcastId = z.string().regex(/^bct_[0-9a-f]{32}$/);
 const BATCH = 200;
 const LEASE_MS = 120_000;
+// When some canary messages are only waiting for the delivery worker (nothing defers them), the
+// check looks again shortly instead of judging a partial canary (#285).
+const CANARY_RETRY_MS = 60_000;
 // A variant needs this many sends before its rate means anything; below it the test has no winner.
 const MIN_VARIANT_SENDS = 20;
 
@@ -608,13 +611,26 @@ function canaryBreaches(
   return breaches;
 }
 
-/** The message ids of the canary share, recomputed from the deterministic assignment. */
-async function canaryMessageIds(tx: Tx, broadcastId: string, canaryPercent: number): Promise<string[]> {
+/** The canary share's message rows, recomputed from the deterministic assignment. */
+async function canaryMessagesOf(
+  tx: Tx,
+  broadcastId: string,
+  canaryPercent: number,
+): Promise<{ id: string; status: (typeof schema.messages.$inferSelect)['status']; notBefore: Date | null }[]> {
   const rows = await tx
-    .select({ id: schema.messages.id, profileId: schema.messages.profileId })
+    .select({
+      id: schema.messages.id,
+      profileId: schema.messages.profileId,
+      status: schema.messages.status,
+      notBefore: schema.messages.notBefore,
+    })
     .from(schema.messages)
     .where(eq(schema.messages.journeyId, broadcastId));
-  return rows.flatMap((r) => (r.profileId && canaryAssignment(r.profileId, broadcastId, canaryPercent) ? [r.id] : []));
+  return rows.flatMap((r) =>
+    r.profileId && canaryAssignment(r.profileId, broadcastId, canaryPercent)
+      ? [{ id: r.id, status: r.status, notBefore: r.notBefore }]
+      : [],
+  );
 }
 
 const Run = z.object({
@@ -983,7 +999,34 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
       if (stage.stage === 'checking') {
         // Rates from base counts of the canary's message events, like the mandate guardrails:
         // a ratio measure hides small groups, and this is an internal decision about our own send.
-        const canaryIds = await canaryMessageIds(tx, broadcastId, stage.canaryPercent);
+        const canaryRows = await canaryMessagesOf(tx, broadcastId, stage.canaryPercent);
+        const canaryIds = canaryRows.map((m) => m.id);
+        // Skip for size only when the canary itself is small: a canary that is merely still
+        // going out must never turn into "send the rest without a check" (#285).
+        const skippedForSize = canaryRows.length < def.stagedSend.minCanary;
+        // A send window can hold part of the canary until a later opening. Checking now would
+        // judge a partial canary, so the check waits until every canary message is terminal:
+        // after the latest opening plus the wait, or shortly when only delivery is pending.
+        const inFlight = canaryRows.filter((m) => m.status === 'queued' || m.status === 'sending');
+        if (!skippedForSize && inFlight.length) {
+          const latestNotBefore = inFlight.reduce<Date | null>(
+            (latest, m) => (m.notBefore && (!latest || m.notBefore.getTime() > latest.getTime()) ? m.notBefore : latest),
+            null,
+          );
+          const postponed =
+            latestNotBefore && latestNotBefore.getTime() > now.getTime()
+              ? new Date(latestNotBefore.getTime() + durationSeconds(def.stagedSend.wait ?? 'PT2H') * 1000)
+              : new Date(now.getTime() + CANARY_RETRY_MS);
+          await tx
+            .update(schema.broadcastStages)
+            .set({ stage: 'canary_waiting', checkAt: postponed })
+            .where(eq(schema.broadcastStages.broadcastId, broadcastId));
+          await tx
+            .update(schema.broadcastRuns)
+            .set({ status: 'running', leaseUntil: postponed })
+            .where(eq(schema.broadcastRuns.broadcastId, broadcastId));
+          return { more: false, holdout: holdoutEvents };
+        }
         const stats = canaryIds.length
           ? await deps.events.messageStats(ws, { since: run.createdAt, journeyId: broadcastId, messageIds: canaryIds })
           : {};
@@ -999,8 +1042,6 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
           complaintRate: rate(counts.complained),
           unsubscribeRate: rate(counts.unsubscribed),
         };
-        // Too small to judge: the check is skipped (and recorded) rather than stopping on noise.
-        const skippedForSize = counts.sent < def.stagedSend.minCanary;
         const breaches = skippedForSize ? [] : canaryBreaches(def.stagedSend, counts, rates);
         if (breaches.length) {
           const reason = `Canary stopped the send: ${breaches.join('; ')}.`;
@@ -1088,7 +1129,7 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
     let skipped = 0;
     let windowSkipped = 0;
     let sampleStartsAt: Date | null = null;
-    let canaryStartsAt: Date | null = null;
+    let canaryLatestStart: Date | null = null;
     for (const m of members) {
       if (canaryPass && stage && !canaryAssignment(m.profileId, broadcastId, stage.canaryPercent)) continue;
       if (test?.state === 'sampling' && !subjectAssignment(m.profileId, broadcastId, test.samplePercent, test.subjects.length)) continue;
@@ -1157,7 +1198,9 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
       }
       if (canaryPass && d.status === 'queued' && !windowSkip) {
         const at = notBefore ?? now;
-        if (!canaryStartsAt || at < canaryStartsAt) canaryStartsAt = at;
+        // The canary's wait starts with its last message: a send window can hold some recipients
+        // much later than the first, and the check must not run before they are out (#285).
+        if (!canaryLatestStart || at > canaryLatestStart) canaryLatestStart = at;
       }
       if (windowSkip && d.status === 'queued') {
         // The gateway queues only eligible people; a window skip is a separate refusal.
@@ -1189,7 +1232,7 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
     const canaryEnds = canaryPass && finished;
     let checkAt: Date | null = null;
     if (canaryEnds) {
-      checkAt = new Date((canaryStartsAt ?? now).getTime() + durationSeconds(def.stagedSend?.wait ?? 'PT2H') * 1000);
+      checkAt = new Date((canaryLatestStart ?? now).getTime() + durationSeconds(def.stagedSend?.wait ?? 'PT2H') * 1000);
       await tx
         .update(schema.broadcastStages)
         .set({

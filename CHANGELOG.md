@@ -7,6 +7,7 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 ### Fixed
 
 - **A restore keeps push subscriptions of erased people deleted (#280).** The erasure replay (`am restore`, #144) now deletes the person's `push_subscriptions` by their anonymous id and user id before the profiles go, as `profiles.erase` does, so a restored workspace cannot still push to a browser or app registered before the erasure. Rows in a snapshot that predates push notifications are left alone.
+- **A staged send checks the whole canary, however a send window spreads it (#285).** The wait now starts at the latest canary send instead of the earliest, and a check that comes due while canary messages are still queued or held for a later opening is postponed (the stage and the run lease move) rather than judging a partial canary. `minCanary` skips the check only when the canary itself has fewer recipients, never because a delayed canary has not gone out yet.
 
 ## [0.5.1] - 2026-10-31
 

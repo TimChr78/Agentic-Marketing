@@ -59,17 +59,20 @@ const messagesOf = async (artifactId: string): Promise<MessageRow[]> =>
 const canaryMessages = async (artifactId: string, canaryPercent: number) =>
   (await messagesOf(artifactId)).filter((m) => canaryAssignment(m.profile_id, artifactId, canaryPercent));
 
-/** Let the canary's sent events reach ClickHouse before the check runs. */
+/** Let the canary's sent events reach ClickHouse before the check runs, and wait until none is in flight. */
 const waitForCanarySent = async (artifactId: string, canaryPercent: number, atLeast: number) =>
   eventually(
     async () => {
       // The check counts sends from the message events in ClickHouse, which can lag the messages table.
-      const ids = (await canaryMessages(artifactId, canaryPercent)).map((m) => m.id);
-      if (ids.length < atLeast) return 0;
+      const canary = await canaryMessages(artifactId, canaryPercent);
+      if (canary.length < atLeast) return 0;
+      // A deferred canary message that is still queued makes the check wait (it is not judged on a
+      // partial canary), so the canary must really be out before a forced check runs.
+      if (canary.some((m) => m.status === 'queued' || m.status === 'sending')) return 0;
       const stats = await t.srv.events.messageStats(ws, {
         since: new Date(Date.now() - 3_600_000),
         journeyId: artifactId,
-        messageIds: ids,
+        messageIds: canary.map((m) => m.id),
       });
       return stats.sent ?? 0;
     },
@@ -122,7 +125,8 @@ beforeAll(async () => {
   const people = Array.from({ length: PEOPLE }, (_, i) => ({
     type: 'identify',
     userId: `u${i}`,
-    traits: { email: `p${i}@example.com`, firstName: `P${i}` },
+    // Two far-apart zones so a send window defers the canary at different openings (#285).
+    traits: { email: `p${i}@example.com`, firstName: `P${i}`, timezone: i % 2 ? 'UTC' : 'Pacific/Auckland' },
   }));
   expect((await ingest(people)).status).toBe(200);
 
@@ -266,6 +270,71 @@ describe('staged send', () => {
     expect(all.length).toBe(PEOPLE);
     expect(all.every((m) => m.profile_id)).toBe(true);
   }, 60_000);
+
+  it('waits for a canary deferred by a send window, then checks the full canary', async () => {
+    // A window that is closed now in both zones, opening an hour later in UTC and about half a
+    // day later in Auckland: the canary spans different openings, so the check must use the
+    // latest one and still wait for every canary message to have gone out (#285).
+    const now = new Date();
+    const clock = (minutes: number) => `${String(Math.floor(minutes / 60) % 24).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`;
+    const start = clock(now.getUTCHours() * 60 + now.getUTCMinutes() + 60);
+    const end = clock(now.getUTCHours() * 60 + now.getUTCMinutes() + 180);
+    const id = await broadcast({
+      template,
+      segment,
+      sendAt: now.toISOString(),
+      sendWindow: { start, end, maxDelay: 'P1D' },
+      stagedSend: { canaryPercent: 20, wait: 'PT2H', minCanary: 5 },
+    });
+    await eventually(
+      () => status(id),
+      (s) => s.stage?.stage === 'canary_waiting' && s.stage.canary.queued >= 1,
+      20_000,
+    );
+    const canary = await canaryMessages(id, 20);
+    expect(canary.length).toBeGreaterThanOrEqual(5);
+    expect(canary.every((m) => m.status === 'queued' && m.not_before)).toBe(true);
+    const stage = (await status(id)).stage;
+    const starts = canary.map((m) => new Date(m.not_before!).getTime());
+    const earliestStart = Math.min(...starts);
+    const latestStart = Math.max(...starts);
+    // The zones defer to different openings, and the check is after the latest one, not the first.
+    expect(latestStart).toBeGreaterThan(earliestStart);
+    expect(new Date(stage?.checkAt ?? 0).getTime()).toBeGreaterThanOrEqual(latestStart + 2 * 3_600_000);
+
+    // The wait is over, but the canary has not gone out: the check is postponed, not run.
+    await checkNow(id);
+    const parkedAt = await eventually(
+      async () => {
+        const s = await status(id);
+        return s.stage?.stage === 'canary_waiting' && s.stage.checkAt && new Date(s.stage.checkAt).getTime() > Date.now()
+          ? new Date(s.stage.checkAt).getTime()
+          : 0;
+      },
+      (at) => at > 0,
+      20_000,
+    );
+    expect(parkedAt).toBeGreaterThan(latestStart);
+    expect((await status(id)).stage?.checkedAt).toBeNull();
+    expect((await messagesOf(id)).length).toBe(canary.length);
+    expect((await messagesOf(id)).every((m) => m.status === 'queued')).toBe(true);
+
+    // The windows open: every canary message goes out, then the check sees the whole canary.
+    await t.srv.db.admin.query(
+      `UPDATE messages SET not_before = now() - interval '1 minute' WHERE workspace_id = $1 AND journey_id = $2 AND status = 'queued'`,
+      [ws, id],
+    );
+    await waitForCanarySent(id, 20, canary.length);
+    await checkNow(id);
+    const done = await eventually(
+      () => status(id),
+      (s) => s.run.status === 'done' && s.stage?.stage === 'done',
+      30_000,
+    );
+    expect(done.stage?.checkSkipped).toBe(false);
+    expect(done.stage?.sent).toBe(canary.length);
+    expect((await messagesOf(id)).length).toBe(PEOPLE);
+  }, 90_000);
 
   it('proceeds without a check when the canary is smaller than minCanary', async () => {
     const id = await broadcast({
