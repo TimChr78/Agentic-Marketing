@@ -31,6 +31,7 @@ export const NAV: NavGroup[] = [
       { path: '/build/segments', label: 'Segments', needs: ['artifacts:read'] },
       { path: '/build/experiences', label: 'Experiences', needs: ['artifacts:read'] },
       { path: '/build/prompts', label: 'AI prompts', needs: ['artifacts:read'] },
+      { path: '/build/topics', label: 'Topics', needs: ['artifacts:read'] },
     ],
   },
   {

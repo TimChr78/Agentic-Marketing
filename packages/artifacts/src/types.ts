@@ -1384,6 +1384,63 @@ const businessContext = z.object({
 });
 export type BusinessContext = z.output<typeof businessContext>;
 
+// Editorial briefs (#141): the contract for a writer or agent, approved through the normal artifact
+// flow. The thesis is the argument, not a summary; the Monday test is what a marketing ops person
+// does differently after reading it. Sources cite content-item ids as plain strings so the content
+// library (#140) can land without this schema depending on it.
+const contentBriefSource = z.object({
+  kind: z
+    .enum(['content_item', 'url', 'manual'])
+    .describe('content_item: an item in the content library; url: a canonical public source; manual: a person’s note'),
+  id: z.string().max(200).optional().describe('Content item id (a plain string; the content library owns the table)'),
+  title: z.string().max(500).optional(),
+  url: z.string().url().max(2000).optional().describe('Canonical URL; never invent one'),
+  note: z.string().max(1000).optional().describe('Why this source matters to the argument'),
+});
+const contentBrief = z.object({
+  topicId: z
+    .string()
+    .regex(/^ctp_[0-9a-f]{32}$/, 'A content topic id (ctp_…)')
+    .describe('The backlog topic this brief belongs to'),
+  title: z.string().min(1).max(200),
+  thesis: z.string().max(4000).default('').describe('The argument the piece makes, not a summary'),
+  audience: z.string().max(2000).default('').describe('Who it is for, in plain words'),
+  readerRole: z.string().max(200).default('').describe('The reader’s role, e.g. "marketing ops lead"'),
+  angle: z.string().max(2000).default('').describe('The specific angle that makes it worth reading now'),
+  whyNow: z.string().max(2000).default('').describe('Why this matters at this moment'),
+  outline: z
+    .array(
+      z.object({
+        heading: z.string().min(1).max(200),
+        points: z.array(z.string().max(500)).max(20).default([]),
+      }),
+    )
+    .max(30)
+    .default([]),
+  keyPoints: z.array(z.string().max(500)).max(30).default([]),
+  sources: z.array(contentBriefSource).max(50).default([]),
+  noSourcesReason: z
+    .string()
+    .max(1000)
+    .optional()
+    .describe('Required at publish when sources is empty, e.g. "opinion piece; the argument is the point"'),
+  doNots: z
+    .array(z.string().max(500))
+    .max(50)
+    .default([])
+    .describe('Do nots: claims, words and framings to avoid, e.g. "no invented statistics"'),
+  risks: z.array(z.string().max(500)).max(50).default([]).describe('Claims that need a source before publishing'),
+  mondayTest: z.string().max(2000).default('').describe('What a marketing ops person does differently on Monday after reading it'),
+  successMeasure: z.string().max(2000).default('').describe('How success is measured, e.g. "signups from the post"'),
+  voice: z.string().max(2000).default('').describe('Voice and style notes'),
+  cta: z.string().max(1000).default('').describe('Call to action'),
+  internalLinks: z.array(z.string().max(2000)).max(30).default([]),
+  keyword: z.string().max(200).default('').describe('Primary keyword / intent'),
+  intent: z.string().max(200).default('').describe('Search intent, e.g. "how-to", "comparison"'),
+  wordCount: z.number().int().min(0).max(20_000).optional(),
+});
+export type ContentBrief = z.output<typeof contentBrief>;
+
 export const artifactTypes = {
   note: { prefix: 'not', label: 'Note', description: 'Free-form note, used to exercise the artifact system.', content: note },
   journey: {
@@ -1523,6 +1580,13 @@ export const artifactTypes = {
       'The brief every agent starts from: what the business offers and to whom, the voice, claims to avoid and legal lines. One per workspace; agents read it as the MCP resource business-context://current.',
     content: businessContext,
     singleton: true,
+  },
+  content_brief: {
+    prefix: 'brf',
+    label: 'Content brief',
+    description:
+      'An editorial brief for one backlog topic: the thesis (the argument, not a summary), audience, angle, sources with citations, outline, do nots, the Monday test and success measure. A versioned artifact like any other, so people approve it and agents can draft it; publishing it moves its topic to approved.',
+    content: contentBrief,
   },
 } as const;
 

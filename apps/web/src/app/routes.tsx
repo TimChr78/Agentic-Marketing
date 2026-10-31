@@ -28,6 +28,7 @@ const ROUTES: { path: string; page: Page; needs?: string[] }[] = [
   { path: '/build/experiences/:id', page: p(() => import('../pages/build/ExperiencePage')), needs: ['artifacts:read'] },
   { path: '/build/prompts', page: p(() => import('../pages/build/PromptsPage')), needs: ['artifacts:read'] },
   { path: '/build/prompts/:id', page: p(() => import('../pages/build/PromptPage')), needs: ['artifacts:read'] },
+  { path: '/build/topics', page: p(() => import('../pages/build/TopicsPage')), needs: ['artifacts:read'] },
 
   { path: '/design/templates', page: p(() => import('../pages/design/TemplatesPage')), needs: ['artifacts:read'] },
   { path: '/design/templates/:id', page: p(() => import('../pages/design/TemplatePage')), needs: ['artifacts:read'] },

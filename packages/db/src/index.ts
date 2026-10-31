@@ -26,6 +26,9 @@ export type {
   ContentSelectionStatus,
   ContentSourceCategory,
   ContentSourceKind,
+
+  ContentTopicSignal,
+  ContentTopicStatus,
   DeliveryStatus,
   HostedAgentRunStatus,
   IdentifierType,

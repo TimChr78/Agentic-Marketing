@@ -7,6 +7,7 @@ export * from './hostedPages';
 export * from './impact';
 export * from './learnings';
 export * from './mandates';
+export * from './topics';
 export * from './types';
 export * from './undo';
 export * from './workspace';
