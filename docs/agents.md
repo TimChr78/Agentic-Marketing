@@ -194,6 +194,16 @@ A high agreement rate with no `too_bold` changes over a few weeks is the evidenc
 
 `agents.report` (and the **Last 30 days** card on the agent page) shows what an agent did and what it led to in a period (default the last 30 days, `from`/`to` for any other): its actions by class and decision (ran, held, sent to a person, refused, failed), undos and guardian episodes, the outcome of the broadcasts it published and the direct messages it sent (sent, opens, clicks, unsubscribes, complaints, bounces), the journeys it published against their control groups, and its mandate's `goals` measured on its own broadcasts (value, and whether the target was met). An agent can read its own report by omitting `agentId`. Use it to review an agent and when you renew its mandate.
 
+## Learnings
+
+A **learning** is a conclusion with its evidence, not a memory dump: "subject lines with a number win for this audience: 3 of 4 tests, +2.1 pts". Each one has a statement, an optional scope (audience segment ids, channel, topic and purpose), the experiments behind it and its author. People and agents write them; agents read the active ones before they draft, and only people can retract one.
+
+- `learnings.list` reads them, newest first, filtered by `status` (`active` by default, `retracted` or `all`), `segmentId`, `channel`, `topic` and `purpose`.
+- `learnings.add` records one. Evidence is required, and every item names its kind (`subject_test`, `journey_holdout`, `campaign_holdout` or `experience`), the id of the broadcast, journey, campaign or experience it came from, a one-line summary and the measured numbers. An agent's evidence must reference something that exists in the workspace, so a guessed or remembered id is refused. Adding is `draft`-level: it never needs autonomy.
+- `learnings.retract` is people-only and needs a `reason`. The row stays in the record with `status: "retracted"`, who retracted it and when, and it is no longer served as current.
+
+Agents read the active learnings as the MCP resource `learnings://current` (the same JSON as `learnings.list` with the default filters). The server's agent instructions tell them to check it before drafting and to record what a result taught them. When a result no longer holds, retract the learning instead of adding a contradicting one without evidence.
+
 ## The guardian
 
 A scheduler job (every five minutes) watches every active agent with a mandate, without a person, and acts by itself when something looks wrong:
