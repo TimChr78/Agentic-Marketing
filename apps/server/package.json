@@ -21,6 +21,7 @@
     "@agentic-marketing/campaigns": "workspace:*",
     "@agentic-marketing/client": "workspace:*",
     "@agentic-marketing/commands": "workspace:*",
+    "@agentic-marketing/content": "workspace:*",
     "@agentic-marketing/core": "workspace:*",
     "@agentic-marketing/db": "workspace:*",
     "@agentic-marketing/email": "workspace:*",

@@ -86,6 +86,7 @@ const MIGRATION_RELEASES: Record<string, string> = {
   '0055_agent_notification_deliveries.sql': '0.5.2',
   '0056_learnings.sql': '0.6.0',
   '0057_agent_subscriptions.sql': '0.6.0',
+  '0058_content_sources.sql': '0.6.0',
 };
 
 export function releaseForMigrationHead(head: string | null): string | null {

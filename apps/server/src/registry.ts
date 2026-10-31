@@ -16,6 +16,7 @@ import {
 } from '@agentic-marketing/auth';
 import { campaignCommands } from '@agentic-marketing/campaigns';
 import type { AnyCommand } from '@agentic-marketing/commands';
+import { contentCommands } from '@agentic-marketing/content';
 import {
   blockCommands,
   deliverabilityCommands,
@@ -72,6 +73,7 @@ export const commands = [
   ...audienceCommands,
   ...campaignCommands,
   ...connectionCommands,
+  ...contentCommands,
   importShopifyCustomers,
   ...adCommands,
   ...adAudienceCommands,
