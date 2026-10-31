@@ -62,9 +62,19 @@ const canaryMessages = async (artifactId: string, canaryPercent: number) =>
 /** Let the canary's sent events reach ClickHouse before the check runs. */
 const waitForCanarySent = async (artifactId: string, canaryPercent: number, atLeast: number) =>
   eventually(
-    async () => (await canaryMessages(artifactId, canaryPercent)).filter((m) => ['sent', 'delivered', 'bounced'].includes(m.status)).length,
+    async () => {
+      // The check counts sends from the message events in ClickHouse, which can lag the messages table.
+      const ids = (await canaryMessages(artifactId, canaryPercent)).map((m) => m.id);
+      if (ids.length < atLeast) return 0;
+      const stats = await t.srv.events.messageStats(ws, {
+        since: new Date(Date.now() - 3_600_000),
+        journeyId: artifactId,
+        messageIds: ids,
+      });
+      return stats.sent ?? 0;
+    },
     (n) => n >= atLeast,
-    20_000,
+    30_000,
   );
 
 /** Move the check and the run's wake time into the past, as a clock would after the wait. */
