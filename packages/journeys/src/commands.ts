@@ -1,4 +1,5 @@
 import {
+  analyseHoldout,
   artifactTypes,
   DEFAULT_PURPOSES,
   type JourneyDefinition,
@@ -224,6 +225,110 @@ export const journeyHoldoutResult = defineCommand({
       ...(input.from ? { from: input.from } : {}),
       ...(input.to ? { to: input.to } : {}),
     }),
+});
+
+const ArmOut = z.object({
+  arm: z.number().int().describe('0-based: arm 0 is the split’s first edge (variant 1)'),
+  weight: z.number(),
+  entered: z.number().int().describe('Participants who took this arm'),
+  converted: z.number().int(),
+  unsubscribed: z.number().int(),
+  conversionRate: z.number(),
+  unsubscribeRate: z.number(),
+});
+
+export const journeySplitResult = defineCommand({
+  name: 'journeys.splitResult',
+  title: 'Results per arm of a journey split',
+  description:
+    "For a split node in a published journey: how many people took each arm, their goal conversions and e-mail unsubscribes, and each arm compared with the first (variant 1) — absolute and relative lift, Newcombe's 95% interval and a verdict that needs the minimum sample in both arms and an interval excluding zero. The lifecycle optimiser uses it to promote or retire a variant (#313).",
+  input: z.object({
+    journeyId: JourneyId,
+    node: z.string().min(1).describe('The split node id'),
+    from: isoDateTime('from').optional(),
+    to: isoDateTime('to').optional(),
+    minSampleSize: z.number().int().min(1).default(200).describe('Both arms of a comparison need at least this many people'),
+  }),
+  output: z.object({
+    journeyId: z.string(),
+    node: z.string(),
+    arms: z.array(ArmOut),
+    comparisons: z.array(
+      z.object({
+        arm: z.number().int(),
+        versus: z.literal(0),
+        absoluteLift: z.number(),
+        relativeLift: z.number().nullable(),
+        ci95: z.tuple([z.number(), z.number()]).nullable(),
+        minSampleSizeMet: z.boolean(),
+        verdict: z.enum(['not_enough_data', 'no_clear_difference', 'treatment_better', 'treatment_worse']),
+      }),
+    ),
+    note: z.string(),
+  }),
+  permission: 'artifacts:read',
+  effect: 'read',
+  target: (i) => i.journeyId,
+  handler: async (input, ctx) => {
+    const [a] = await ctx.tx
+      .select({ publishedVersion: schema.artifacts.publishedVersion, type: schema.artifacts.type })
+      .from(schema.artifacts)
+      .where(eq(schema.artifacts.id, input.journeyId));
+    if (a?.type !== 'journey') throw new AppError('not_found', `No journey ${input.journeyId}.`);
+    if (!a.publishedVersion) throw new AppError('not_found', `Journey ${input.journeyId} has no published version.`);
+    const [v] = await ctx.tx
+      .select({ content: schema.artifactVersions.content })
+      .from(schema.artifactVersions)
+      .where(and(eq(schema.artifactVersions.artifactId, input.journeyId), eq(schema.artifactVersions.number, a.publishedVersion)));
+    const def = artifactTypes.journey.content.parse(v?.content);
+    const split = def.nodes.find((n) => n.id === input.node);
+    if (split?.kind !== 'split') throw new AppError('invalid_input', `Node ${input.node} is not a split in the published journey.`);
+    const weights = (split.config as { weights?: number[] }).weights ?? [];
+    const range = { ...(input.from ? { from: new Date(input.from) } : {}), ...(input.to ? { to: new Date(input.to) } : {}) };
+    const ws = ctx.principal.workspaceId;
+    const taken = await ctx.services.events.journeySplitArms(ws, { journeyId: input.journeyId, node: input.node, ...range });
+    // Goal conversions and unsubscribes per person, as journeys.holdoutResult counts them.
+    const outcomes = await ctx.services.events.journeyHoldoutOutcomes(ws, { journeyId: input.journeyId, ...range });
+    const converted = new Set(outcomes.converted);
+    const unsubscribed = new Set(outcomes.unsubscribed);
+    const counts = weights.map(() => ({ entered: 0, converted: 0, unsubscribed: 0 }));
+    for (const t of taken) {
+      const c = counts[t.arm];
+      if (!c) continue;
+      c.entered++;
+      if (converted.has(t.profileId)) c.converted++;
+      if (unsubscribed.has(t.profileId)) c.unsubscribed++;
+    }
+    const rate = (n: number, of: number) => (of ? n / of : 0);
+    const arms = counts.map((c, i) => ({
+      arm: i,
+      weight: weights[i],
+      ...c,
+      conversionRate: rate(c.converted, c.entered),
+      unsubscribeRate: rate(c.unsubscribed, c.entered),
+    }));
+    const comparisons = counts.slice(1).map((c, i) => {
+      const r = analyseHoldout(counts[0], c, input.minSampleSize);
+      return {
+        arm: i + 1,
+        versus: 0 as const,
+        absoluteLift: r.absoluteLift,
+        relativeLift: r.relativeLift,
+        ci95: r.ci95,
+        minSampleSizeMet: r.minSampleSizeMet,
+        verdict: r.verdict,
+      };
+    });
+    const better = comparisons.filter((c) => c.verdict === 'treatment_better').map((c) => `arm ${c.arm}`);
+    const note = !taken.length
+      ? 'Nobody has reached this split yet.'
+      : better.length
+        ? `${better.join(', ')} converts better than arm 0 with a 95% interval above zero.`
+        : comparisons.every((c) => c.verdict === 'not_enough_data')
+          ? `Not enough people yet: each arm needs ${input.minSampleSize}.`
+          : 'No arm is clearly better than arm 0 yet.';
+    return { journeyId: input.journeyId, node: input.node, arms, comparisons, note };
+  },
 });
 
 export const enrollProfiles = defineCommand({
@@ -704,4 +809,11 @@ export const migrateJourney = defineCommand({
   },
 });
 
-export const journeyCommands = [journeyStats, journeyHoldoutResult, enrollProfiles, simulateJourney, migrateJourney] as const;
+export const journeyCommands = [
+  journeyStats,
+  journeyHoldoutResult,
+  journeySplitResult,
+  enrollProfiles,
+  simulateJourney,
+  migrateJourney,
+] as const;

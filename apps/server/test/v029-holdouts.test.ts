@@ -501,3 +501,61 @@ describe('erasure (#67)', () => {
     expect((await t.srv.db.admin.query(`SELECT 1 FROM profiles WHERE id = $1`, [profileId])).rowCount).toBe(0);
   });
 });
+
+describe('journeys.splitResult (#313)', () => {
+  it('reports each arm of a split and compares it with the first', async () => {
+    const a = await api().call('artifacts.create', {
+      type: 'journey',
+      name: 'Split measured',
+      content: {
+        purpose: 'onboarding',
+        nodes: [
+          { id: 'trigger', kind: 'trigger', label: 'Start', config: { event: 'Split Start', reentry: 'once' }, next: [{ to: 'split' }] },
+          { id: 'split', kind: 'split', label: 'A/B', config: { weights: [50, 50] }, next: [{ to: 'a' }, { to: 'b' }] },
+          { id: 'a', kind: 'wait', label: 'A', config: { duration: 'P1D' }, next: [{ to: 'done' }] },
+          { id: 'b', kind: 'wait', label: 'B', config: { duration: 'P2D' }, next: [{ to: 'done' }] },
+          { id: 'done', kind: 'exit', label: 'Done', config: {} },
+        ],
+      } as never,
+    });
+    await api().call('artifacts.requestPublish', { artifactId: a.artifactId, note: 'test' });
+    const journeyId = a.artifactId;
+    const at = new Date().toISOString();
+    const people = Array.from({ length: 400 }, (_, i) => ({ participantId: 5000 + i, profileId: `prf_split_${i}`, arm: i < 200 ? 1 : 2 }));
+    const base = { workspaceId: ws, journeyId, version: 1, seq: 1, at };
+    await t.srv.events.insertJourneyEvents(
+      people.map((p) => ({
+        ...base,
+        participantId: p.participantId,
+        profileId: p.profileId,
+        node: 'split',
+        type: 'step' as const,
+        detail: `variant ${p.arm}`,
+      })),
+    );
+    // 20 of arm 0 convert, 60 of arm 1.
+    const converted = [...people.slice(0, 20), ...people.slice(200, 260)];
+    await t.srv.events.insertJourneyEvents(
+      converted.map((p) => ({
+        ...base,
+        participantId: p.participantId,
+        profileId: p.profileId,
+        node: 'done',
+        type: 'converted' as const,
+        detail: 'Split Goal',
+      })),
+    );
+
+    const r = await eventually(
+      () => api().call('journeys.splitResult', { journeyId, node: 'split', minSampleSize: 100 }),
+      (x) => x.arms.reduce((n, arm) => n + arm.entered, 0) === 400,
+    );
+    expect(r.arms).toMatchObject([
+      { arm: 0, weight: 50, entered: 200, converted: 20 },
+      { arm: 1, weight: 50, entered: 200, converted: 60 },
+    ]);
+    expect(r.comparisons[0]).toMatchObject({ arm: 1, versus: 0, verdict: 'treatment_better', minSampleSizeMet: true });
+    expect(r.note).toContain('arm 1 converts better');
+    expect((await rejects(api().call('journeys.splitResult', { journeyId, node: 'a' }))).message).toContain('not a split');
+  });
+});
