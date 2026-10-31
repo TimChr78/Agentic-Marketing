@@ -99,7 +99,7 @@ Both are ordinary hosted agents; edit anything after creating them.
 
 **Weekly report** — `weekly:mon:07:00`, scopes `artifacts:read` and `audit:read`, 30,000 tokens and 25 tool calls per run. It summarises last week's broadcasts, journeys and campaigns with `analytics.query`, `analytics.campaignSummary` and `journeys.stats`, states the data window and recommends at most three next steps. Read-only: it reports, it does not change anything.
 
-**Deliverability guardian** — `hourly`, scopes `artifacts:read`, `audit:read` and `artifacts:write`, 15,000 tokens and 15 tool calls per run. It reads the 24-hour and 7-day bounce and complaint rates, compares them with the workspace's delivery policy, and when a limit is crossed drafts a note that proposes pausing the marketing stream and calls `artifacts.requestPublish`. That proposal goes through the normal approval and mandate path (a proposal, a hold or a refusal), so the guardian never changes settings or pauses a stream by itself.
+**Deliverability guardian** — `hourly`, scopes `artifacts:read`, `audit:read`, `artifacts:write` and `artifacts:publish`, 15,000 tokens and 15 tool calls per run. It reads the 24-hour and 7-day bounce and complaint rates, compares them with the workspace's delivery policy, and when a limit is crossed drafts a note that proposes pausing the marketing stream and calls `artifacts.requestPublish`. That proposal goes through the normal approval and mandate path (a proposal, a hold or a refusal), so the guardian never changes settings or pauses a stream by itself.
 
 ```json
 {

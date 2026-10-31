@@ -51,7 +51,8 @@ export const HOSTED_AGENT_TEMPLATES: HostedAgentTemplate[] = [
     description: 'Every hour: checks bounce and complaint rates and proposes a pause of the marketing stream when over the limits.',
     instructions: DELIVERABILITY_GUARDIAN,
     schedule: 'hourly',
-    scopes: ['artifacts:read', 'audit:read', 'artifacts:write'],
+    // Read, draft and submit the proposal; the mandate or approval policy decides what happens to it.
+    scopes: ['artifacts:read', 'audit:read', 'artifacts:write', 'artifacts:publish'],
     maxTokensPerRun: 15_000,
     maxToolCallsPerRun: 15,
   },
