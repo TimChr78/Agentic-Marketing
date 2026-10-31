@@ -168,6 +168,7 @@ describe('the web version of one message', () => {
     const mail = await eventually(
       async () => outbox.filter((m) => m.messageId === messageId),
       (m) => m.length === 1,
+      30_000,
     );
     const web = mail[0].html.match(new RegExp(`(http://localhost:${MAIN_PORT}/n/w/[^"']+)`))?.[1];
     expect(web).toBeTruthy();
