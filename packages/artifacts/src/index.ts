@@ -1,4 +1,5 @@
 export * from './bundle';
+export * from './checkSubject';
 export * from './commands';
 export * from './diff';
 export * from './holdout';

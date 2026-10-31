@@ -256,7 +256,13 @@ describe('subject A/B test', () => {
 
     const bMails = outbox.filter((m) => m.subject === 'Challenger subject');
     const aMails = outbox.filter((m) => m.subject === 'Control subject');
-    const restSent = rest.filter((m) => m.status === 'sent' || m.status === 'delivered').length;
+    // A message reaches the outbox a moment before its status is marked sent: wait for the two to agree.
+    const sentIds = new Set(rest.map((m) => m.id));
+    const restSent = await eventually(
+      async () => (await messagesOf(winnerId)).filter((m) => sentIds.has(m.id) && (m.status === 'sent' || m.status === 'delivered')).length,
+      (n) => n === bMails.length - b.length,
+      15_000,
+    );
     expect(bMails.length).toBe(b.length + restSent);
     expect(aMails.length).toBe(sampleMessages.length - b.length);
     expect(mailTo(withdrawnEmail)).toHaveLength(0);

@@ -42,19 +42,30 @@ interface Setup {
 
 let unique = 0;
 
+/**
+ * The cursor of a workspace that already ran the job before any agent action: the feature exists,
+ * so later actions are announced. Without it, the first run starts at the current head (#266).
+ */
+async function primeCursor(ws: string) {
+  await t.srv.db.admin.query('INSERT INTO agent_notification_cursor (workspace_id, last_action_id) VALUES ($1, 0)', [ws]);
+}
+
 /** A fresh workspace with one agent, its sponsor and (optionally) an escalation target. */
-async function setup(opts: { level: number; escalation?: boolean; validUntil?: string } = { level: 1 }): Promise<Setup> {
+async function setup(
+  opts: { level: number; escalation?: boolean; validUntil?: string; provider?: boolean; prime?: boolean } = { level: 1 },
+): Promise<Setup> {
   const n = ++unique;
   const owner = await t.signUp(`owner-agent-notifications-${n}-${Date.now()}@example.com`);
   const viewer = opts.escalation ? await t.signUp(`escalation-agent-notifications-${n}-${Date.now()}@example.com`) : undefined;
   const ws = await t.workspaceWith([[owner, 'owner'], ...(viewer ? ([[viewer, 'viewer']] as [User, string][]) : [])], 'none');
   const api = t.api(owner, ws);
-  await api.call('emailProviders.create', {
-    name: 'Outbox',
-    adapter: 'log',
-    fromEmail: 'agents@example.com',
-    useFor: ['transactional'],
-  });
+  if (opts.provider !== false)
+    await api.call('emailProviders.create', {
+      name: 'Outbox',
+      adapter: 'log',
+      fromEmail: 'agents@example.com',
+      useFor: ['transactional'],
+    });
   await api.call('workspace.setAutonomy', { maxLevel: { 'content.publish': 3 } });
   const token = (
     await api.call('apiTokens.create', {
@@ -75,8 +86,22 @@ async function setup(opts: { level: number; escalation?: boolean; validUntil?: s
     } as never,
   });
   expect((await api.call('artifacts.requestPublish', { artifactId: mandate.artifactId, note: 'grant' })).status).toBe('published');
+  if (opts.prime !== false) await primeCursor(ws);
   return { owner, viewer, ws, token, agentId, api };
 }
+
+const cursorOf = async (ws: string) =>
+  Number(
+    (
+      await t.srv.db.admin.query<{ last_action_id: string }>(
+        'SELECT last_action_id FROM agent_notification_cursor WHERE workspace_id = $1',
+        [ws],
+      )
+    ).rows[0].last_action_id,
+  );
+
+const latestActionId = async (ws: string) =>
+  Number((await t.srv.db.admin.query<{ id: string }>('SELECT max(id) AS id FROM agent_actions WHERE workspace_id = $1', [ws])).rows[0].id);
 
 /** An agent drafts a note and submits it, exercising content.publish through the policy engine. */
 async function publishNote(s: Setup, title: string) {
@@ -217,5 +242,57 @@ describe('agent notifications (#226)', () => {
     expect((await run()).expiries).toBe(0);
     expect(await emailRows(s.ws, 'agent-expiry:')).toHaveLength(1);
     expect(outbox.filter((m) => m.to === s.owner.email && m.subject.startsWith('Mandate for'))).toHaveLength(1);
+  }, 30_000);
+
+  it('a workspace upgraded with an existing ledger is not replayed', async () => {
+    // The first run creates the cursor at the current head: everything already in the ledger
+    // predates the feature and must stay silent.
+    const s = await setup({ level: 2, prime: false });
+    const held = await publishNote(s, 'Before notifications existed');
+    expect(held.body.status).toBe('on_hold');
+    const head = await latestActionId(s.ws);
+
+    const first = await run();
+    expect(first.events).toBe(0);
+    expect(outbox.filter((m) => m.to === s.owner.email)).toHaveLength(0);
+    expect(await emailRows(s.ws, 'agent-event:')).toHaveLength(0);
+    expect(await cursorOf(s.ws)).toBe(head);
+
+    // The held action is still visible to a person in the agent activity; it is just not e-mailed.
+    const { actions } = await s.api.call('agents.activity', { agentId: s.agentId, limit: 5 });
+    expect(actions.some((a: { decision: string }) => a.decision === 'hold')).toBe(true);
+  }, 30_000);
+
+  it('a failed notification is retried once a provider exists', async () => {
+    // No transactional provider: the send fails, so the cursor stops before the action instead of
+    // swallowing it. The retry reuses the same idempotency key, so the sponsor gets exactly one mail.
+    const s = await setup({ level: 2, provider: false, prime: true });
+    const held = await publishNote(s, 'Needs a provider');
+    expect(held.body.status).toBe('on_hold');
+    const actionId = await latestActionId(s.ws);
+
+    const failed = await run();
+    expect(failed.events).toBe(0);
+    expect(await cursorOf(s.ws)).toBeLessThan(actionId);
+    expect(await emailRows(s.ws, 'agent-event:')).toHaveLength(0);
+
+    await s.api.call('emailProviders.create', {
+      name: 'Outbox',
+      adapter: 'log',
+      fromEmail: 'agents@example.com',
+      useFor: ['transactional'],
+    });
+    const retried = await run();
+    expect(retried.events).toBe(1);
+    expect(outbox.filter((m) => m.to === s.owner.email && m.subject.startsWith('Held:'))).toHaveLength(1);
+    const rows = await emailRows(s.ws, 'agent-event:');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe('sent');
+    expect(await cursorOf(s.ws)).toBeGreaterThanOrEqual(actionId);
+
+    // The action was announced exactly once: a later sweep neither advances past a failure nor re-sends.
+    expect((await run()).events).toBe(0);
+    expect(outbox.filter((m) => m.to === s.owner.email && m.subject.startsWith('Held:'))).toHaveLength(1);
+    expect(await emailRows(s.ws, 'agent-event:')).toHaveLength(1);
   }, 30_000);
 });

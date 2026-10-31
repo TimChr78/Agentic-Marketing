@@ -1,5 +1,5 @@
 import { type AudienceSync, DEFAULT_PURPOSES, publishedSingleton, publishValidators } from '@agentic-marketing/artifacts';
-import { defineCommand } from '@agentic-marketing/commands';
+import { defineCommand, type Impact } from '@agentic-marketing/commands';
 import { AppError } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import { accessTokenOf, connectionSecrets, type EgressPolicy, safeRequest } from '@agentic-marketing/integrations';
@@ -43,6 +43,19 @@ publishValidators.set('audience_sync', async (content, tx: Tx) => {
   }
   return problems;
 });
+
+/**
+ * What publishing an audience sync touches, for the agent policy engine (#264): the segment whose
+ * members leave the workspace (hashed) for an ad platform, so a mandate scopes it by audience.
+ */
+export async function audienceSyncImpact(tx: Tx, artifactId: string, version: number): Promise<Impact> {
+  const [v] = await tx
+    .select({ content: schema.artifactVersions.content })
+    .from(schema.artifactVersions)
+    .where(and(eq(schema.artifactVersions.artifactId, artifactId), eq(schema.artifactVersions.number, version)));
+  const segment = (v?.content as { segment?: unknown } | undefined)?.segment;
+  return { touches: { segments: typeof segment === 'string' ? [segment] : [] } };
+}
 
 const hashesFor = (
   platform: Platform,

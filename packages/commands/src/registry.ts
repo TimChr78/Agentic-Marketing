@@ -112,6 +112,12 @@ export interface CommandDef<I extends z.ZodType = z.ZodType, O extends z.ZodType
   auditReads?: boolean;
   /** What the command acts on, for the audit log (e.g. an artifact id). */
   target?: (input: z.output<I>) => string | undefined;
+  /**
+   * Facts about what the handler created, merged into the agent ledger's impact (#265). The
+   * ledger is written after the handler so it can link the action to the rows it produced, e.g.
+   * the message a direct send created, which guardrails need to find the agent's own sends.
+   */
+  ledgerImpact?: (output: z.output<O>) => Record<string, unknown> | undefined;
   handler: (input: z.output<I>, ctx: CommandContext) => Promise<z.input<O>>;
 }
 
@@ -331,6 +337,12 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
                 ),
                 unknownMessages,
               ) as z.output<C['output']>;
+              // The handler ran: let it link the ledger row to what it created (e.g. a message id),
+              // while the policy decision itself stays the one made before the change.
+              if (agent && policy && cmd.ledgerImpact) {
+                const extra = cmd.ledgerImpact(out);
+                if (extra) policy = { ...policy, impact: { ...policy.impact, ...extra } };
+              }
               if (opts.idempotencyKey)
                 await tx.insert(schema.idempotencyKeys).values({
                   workspaceId: principal.workspaceId,
@@ -424,7 +436,13 @@ export async function agentPolicy(
     guard: row?.guard ?? null,
     ...(mandate ? { mandate: mandate.view, outsideHours: mandate.outsideHours, guardrailBreach } : {}),
   });
-  if (mandate && policy.mandate?.independentCheck && (policy.decision === 'allow' || policy.decision === 'hold'))
+  // Only what the mandate lets run by itself (level 2+) is checked; drafts and proposals are not (#260).
+  if (
+    mandate &&
+    policy.mandate?.independentCheck &&
+    (policy.level ?? 0) >= 2 &&
+    (policy.decision === 'allow' || policy.decision === 'hold')
+  )
     policy = await withIndependentCheck(tx, services, policy, {
       principal,
       command: req.command,
@@ -500,36 +518,35 @@ function intentOf(input: unknown): string | null {
   return null;
 }
 
-/** What an agent did in the last 24 hours: changes it made itself, and messages it sent directly. */
-export async function agentCounters(tx: Tx, agentId: string): Promise<AgentCounters> {
+/**
+ * What an agent did in the last 24 hours: changes it made, messages it sent directly and sends it
+ * ran (#267). A change counts when it ran (`allow`, including a held change once it ran) or while
+ * it is held and still due to run; a vetoed or reassigned hold does not. `excludeId` leaves out
+ * the held action being decided again when its window ends.
+ */
+export async function agentCounters(tx: Tx, agentId: string, opts: { excludeId?: number } = {}): Promise<AgentCounters> {
+  const a = schema.agentActions;
+  const pendingHold = sql`(${a.decision} = 'hold' AND EXISTS (
+    SELECT 1 FROM approval_requests ar
+    WHERE ar.status = 'pending' AND ar.hold_until IS NOT NULL
+      AND ar.artifact_id = ANY(string_to_array(${a.target}, ','))))`;
+  const counted = sql`(${a.decision} = 'allow' OR ${pendingHold})`;
+  const excluded = opts.excludeId !== undefined ? sql`${a.id} <> ${opts.excludeId}` : undefined;
+  // The previous send is the last one that ran: a vetoed send must not raise the growth baseline.
   const [prev] = await tx
-    .select({ people: sql<number | null>`(${schema.agentActions.impact}->>'people')::int` })
-    .from(schema.agentActions)
-    .where(
-      and(
-        eq(schema.agentActions.agentId, agentId),
-        eq(schema.agentActions.actionClass, 'send.broadcast'),
-        sql`${schema.agentActions.decision} IN ('allow', 'hold')`,
-        eq(schema.agentActions.ok, true),
-      ),
-    )
-    .orderBy(desc(schema.agentActions.id))
+    .select({ people: sql<number | null>`(${a.impact}->>'people')::int` })
+    .from(a)
+    .where(and(eq(a.agentId, agentId), eq(a.actionClass, 'send.broadcast'), eq(a.decision, 'allow'), eq(a.ok, true)))
+    .orderBy(desc(a.id))
     .limit(1);
   const [row] = await tx
     .select({
-      changes: sql<number>`count(*) FILTER (WHERE ${schema.agentActions.actionClass} <> 'draft')::int`,
-      messages: sql<number>`coalesce(sum((${schema.agentActions.impact}->>'people')::int) FILTER (WHERE ${schema.agentActions.actionClass} = 'send.direct'), 0)::int`,
-      sends: sql<number>`count(*) FILTER (WHERE ${schema.agentActions.actionClass} = 'send.broadcast')::int`,
+      changes: sql<number>`count(*) FILTER (WHERE ${a.actionClass} <> 'draft')::int`,
+      messages: sql<number>`coalesce(sum((${a.impact}->>'people')::int) FILTER (WHERE ${a.actionClass} = 'send.direct'), 0)::int`,
+      sends: sql<number>`count(*) FILTER (WHERE ${a.actionClass} = 'send.broadcast')::int`,
     })
-    .from(schema.agentActions)
-    .where(
-      and(
-        eq(schema.agentActions.agentId, agentId),
-        sql`${schema.agentActions.decision} IN ('allow', 'hold')`,
-        eq(schema.agentActions.ok, true),
-        sql`${schema.agentActions.at} > now() - interval '24 hours'`,
-      ),
-    );
+    .from(a)
+    .where(and(eq(a.agentId, agentId), counted, eq(a.ok, true), sql`${a.at} > now() - interval '24 hours'`, excluded));
   return { changes: row?.changes ?? 0, messages: row?.messages ?? 0, sends: row?.sends ?? 0, previousSendPeople: prev?.people ?? null };
 }
 

@@ -2,6 +2,20 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+### Fixed
+
+- **Held changes are decided again when their veto window ends (#262).** The current mandate, the agent's counters, its guardrails and any guardian cap decide, not the terms when it was held: a stricter mandate version sends it to a person, and outside working hours it waits (it is checked again every 15 minutes) instead of running.
+- **A veto cannot lose the race with the hold runner (#263).** Approving, rejecting and running a held change lock the approval (and its bundle) first, so whoever locks first decides; a hold runs at most once even with several schedulers.
+- **Agent limits count what ran (#267).** Daily changes, sends and messages count actions that ran and holds still due to run; a vetoed hold no longer uses up a limit or raises the recipient-growth baseline, which is the last send that ran. A held bundle that runs is one ledger entry.
+- **The independent check runs only for level-2+ actions (#260).** Drafts are no longer sent to the model, so an agent with `independentCheck` and no AI provider can still draft.
+- **A mandated agent can use config.import (#268).** The import is classified as a draft; each publish in it is decided by the mandate per artifact, and bundle settings stay a person's.
+- **Mandate scope covers every way to reach people (#264).** A mandate's segments, purposes, topics and channels are now checked for direct sends, journeys and audience publishes, not only broadcasts. `messages.sendEmail` reports the published template's purpose and topic and the e-mail channel; `journeys.enroll` and publishing a journey report the journey's purpose, the channels of its e-mail, SMS and push steps, and its entry and condition segments (plus its step templates' topics); publishing a segment reports its own audience, publishing an `audience_sync` its segment, and an experience touches only its own artifact because the scope's channels are delivery channels. A mandate limited to `marketing_email` on the `email` channel can therefore no longer send an `onboarding` e-mail, enrol people in a journey with SMS steps, or publish a journey for another audience.
+- **The independent check sees what is published (#261).** For `artifacts.requestPublish` and `artifacts.requestPublishBundle` (and the publishes `config.import` makes) the model now gets each artifact's type, name, the version content being published and a structural diff against the version that is live, instead of only ids and the agent's note; for `messages.sendEmail` it gets the template's name, purpose, subject and MJML/text. Secrets and personal data are scrubbed, and the content goes in its own `<published-content>` block, described as untrusted, capped at 20,000 characters.
+- **Mandate guardrails judge direct sends (#265).** A direct send (`messages.sendEmail`, `send.direct`) now records the message it created on the agent ledger, and the guardrail check counts the broadcasts and direct messages an agent sent in the window before computing its unsubscribe, complaint and bounce rates. A direct send that drives one of those rates above the mandate's guardrail now refuses the agent's next send with the reason instead of passing unnoticed. Journey sends are left to the journey's own holdout and alerts.
+- **Agent notifications no longer replay history or drop failures (#266).** The notification cursor starts at the newest action when it is first created, so a workspace upgraded from a version before the feature is not e-mailed its historical holds and refusals (the daily digest waits a day too). The cursor now advances only past actions whose notification reached every recipient: a failed send, such as one sent before a transactional provider exists, stays pending and is retried with the same idempotency key, so the sponsor is told exactly once when it succeeds.
+
 ## [0.5.0] - 2026-10-31
 
 ### Added
