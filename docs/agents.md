@@ -66,6 +66,55 @@ Two environment variables adapt the MCP surface to clients that are picky about 
 
 An agent appears the first time a credential acts, with the person who created or connected it as sponsor. Give it a name and a description right away, then attach a mandate if it should do more than propose.
 
+## Hosted agents
+
+A **hosted agent** is an agent the platform runs itself on a schedule, for self-hosters who have no agent runtime to connect. It is an agent like any other: it has a sponsor, a status, a mandate and a ledger, and every tool call passes the same executor, permissions and policy engine. The only difference is who starts the run.
+
+Create one in **Settings → Agents → New hosted agent** (or with `agents.createHosted`). You give it:
+
+- **Instructions** — the prompt for each run: what to look at, what to report, what to propose.
+- **A schedule** — one of three forms, read in the workspace's time zone (`workspace.get` shows it):
+  - `hourly` — every hour, at minute 0.
+  - `daily:07:00` — every day at 07:00.
+  - `weekly:mon:07:00` — every Monday at 07:00. Days are `mon`, `tue`, `wed`, `thu`, `fri`, `sat`, `sun`; times are 24-hour `HH:MM`.
+- **Scopes** — the permissions a run may use. They are intersected with the sponsor's role, so a hosted agent never has more than the person accountable for it. A tool outside them is not offered, and a call made anyway is refused by the executor.
+- **Budgets per run** — a token budget and a tool-call budget. The run stops when either is used up and records a partial summary; a tool call past the tool-call budget never reaches the command layer.
+- **A model** (optional) — an AI provider id; without one the workspace's copilot provider is used.
+
+Each run is a **fresh session** on the copilot's in-process MCP client, acting as the agent principal (the sponsor's role ∩ the scopes). There is no carry-over except the instructions; the mandate applies exactly as it does to an external agent, so a write outside its levels waits for a person or is refused, and the decision lands in the agent's activity ledger.
+
+Runs never overlap: a durable claim on the hosted agent is taken before the model is called, and a second sweep records a skipped run instead of starting another. A failed run counts; **three consecutive failures disable the agent** and tell the sponsor by e-mail. The sponsor also receives every run's summary by e-mail.
+
+| Command | Who | What |
+|---|---|---|
+| `agents.createHosted` | people only (`workspace:admin`) | Create the agent, its schedule, scopes and budgets |
+| `agents.updateHosted` | people only (`workspace:admin`) | Change instructions, schedule, scopes, budgets or enabled |
+| `agents.runHostedNow` | people only (`workspace:admin`) | Start a run at the scheduler's next tick, without changing the schedule |
+| `agents.deleteHosted` | people only (`workspace:admin`) | Delete it and its run history; the ledger stays |
+| `agents.hostedRuns` | `artifacts:read` | The hosted agent and its runs (status, summary, tool calls, tokens, error) |
+
+### Starter templates
+
+Both are ordinary hosted agents; edit anything after creating them.
+
+**Weekly report** — `weekly:mon:07:00`, scopes `artifacts:read` and `audit:read`, 30,000 tokens and 25 tool calls per run. It summarises last week's broadcasts, journeys and campaigns with `analytics.query`, `analytics.campaignSummary` and `journeys.stats`, states the data window and recommends at most three next steps. Read-only: it reports, it does not change anything.
+
+**Deliverability guardian** — `hourly`, scopes `artifacts:read`, `audit:read`, `artifacts:write` and `artifacts:publish`, 15,000 tokens and 15 tool calls per run. It reads the 24-hour and 7-day bounce and complaint rates, compares them with the workspace's delivery policy, and when a limit is crossed drafts a note that proposes pausing the marketing stream and calls `artifacts.requestPublish`. That proposal goes through the normal approval and mandate path (a proposal, a hold or a refusal), so the guardian never changes settings or pauses a stream by itself.
+
+```json
+{
+  "name": "Weekly report",
+  "schedule": "weekly:mon:07:00",
+  "scopes": ["artifacts:read", "audit:read"],
+  "maxTokensPerRun": 30000,
+  "maxToolCallsPerRun": 25
+}
+```
+
+## Undo
+
+Where an agent's action can be reversed, the ledger stores how: the published version it replaced (or, for a first publish, that there was none), and for a broadcast its scheduled send. `agents.undo` with the `actionId` from `agents.activity` runs the reversal in one transaction and marks the entry undone with who did it and the result. It is a **person** command (agents get `403`) and needs `artifacts:publish`: the previous version goes live through the same publish checks and audit as any publish, a broadcast that has not gone out is cancelled, and the first publish of an artifact is taken out of service again. An action is undone at most once. A broadcast whose messages were already sent cannot be recalled; the ledger says so and the command explains it. Journeys and experiences have no pause of their own yet, so undoing their first publish takes the artifact out of service: it stops entering people and stops serving, while participants already in a journey keep going. The agent page in the admin UI shows an **Undo** button on every reversible entry, with a note that is kept in the ledger.
+
 ## The workspace's limits
 
 The workspace's limits apply to every agent, with or without a mandate. Read them with `workspace.autonomy`; a person (owner or admin) changes them with `workspace.setAutonomy` or **Settings → Agents → Autonomy**.
@@ -121,6 +170,38 @@ A level-2 action becomes a **hold**: a scheduled execution with a deadline (`run
 ### The independent check
 
 Set `independentCheck: true` to have a second model review each level-2+ action before it runs: given the intent, the diff, the impact and the mandate, does it match? A mismatch, an error or a missing AI provider sends the action to a person (it fails closed). It is off by default and costs tokens; turn it on for any agent that reads content from outside the workspace.
+
+### Learning rules
+
+`learning` keeps what an agent publishes measurable. `journeyControlPercent` requires its journeys to hold out at least that share of entrants (`controlGroup.percent`, or the control group of the campaign the journey belongs to); `broadcastHoldout: true` requires its broadcasts to have a holdout (their campaign's control group) or a subject test; `experienceHoldoutPercent` requires its experiences to hold out at least that share of visitors (`holdoutPercent`). A change without the required holdout is not refused: it goes to a person, with the reason, whatever the level. A member published in one bundle with its campaign counts the campaign's control group.
+
+### Shadow mode
+
+Set `shadow: true` (or a list of action classes, e.g. `["send.broadcast"]`) to try a mandate before trusting it. For those classes the policy engine works out what the mandate would decide, at the levels it grants even above the workspace ceiling, and records it in the ledger as `shadow`; the action itself is decided as if there were no mandate, so the approval policy and the people reviewing work exactly as before. `agents.shadowReport` (and the **Shadow mode** card on the agent page) compares the two over the last 30 days:
+
+| Result | Meaning |
+|---|---|
+| `agree` | It would have run and a person approved, or it would have asked and a person rejected. |
+| `too_bold` | It would have run (or been held), but a person rejected the change. |
+| `too_cautious` | It would have asked, but a person approved. |
+| `pending` / `unreviewed` | No decision yet / the approval policy let it run without a person. |
+
+A high agreement rate with no `too_bold` changes over a few weeks is the evidence for raising the ceiling and publishing the mandate without `shadow`. Drafts are never recorded in shadow.
+
+## The guardian
+
+A scheduler job (every five minutes) watches every active agent with a mandate, without a person, and acts by itself when something looks wrong:
+
+| Check | Triggers when | Action |
+|---|---|---|
+| Guardrails | The mandate's unsubscribe, complaint or bounce rate on the agent's own sends is over its limit (the same check as before each send, run continuously because rates arrive after a send). | Cap: every change waits for a person. |
+| Anomaly: send size | A send reaches more than 3× the median of the agent's previous sends (after at least 3). | Hold: sends and other irreversible actions are held for a veto window at most. |
+| Anomaly: burst | 30 or more changes in an hour. | Hold. |
+| Rising errors | 5 or more failed actions in an hour, at least half of its actions. | Cap. |
+| Probing | 10 or more refusals in an hour. | Pause the agent. |
+| Loop | The same artifact changed 6 or more times in an hour. | Pause the agent. |
+
+Each time it acts the guardian records an **episode** with its evidence, turns the agent's pending holds into ordinary approvals (nothing it asked for runs by itself any more), and e-mails the sponsor and the mandate's escalation targets. The cap stays on the agent, on top of its mandate and the workspace ceilings, until a person reviews the episodes and clears it on the agent page or with `agents.clearGuard` (a note is required); a paused agent is resumed separately with `agents.resume`. `agents.guardian` lists the episodes and the cap in force. Each kind fires once until it is cleared, and after clearing only new activity counts.
 
 ### Expiry and renewal
 
@@ -238,7 +319,7 @@ A bundle is judged by its riskiest member. Publishing this issue's template and 
 
 ### Deliverability guardian
 
-Watches bounces, complaints and provider signals; it never sends. Its levels are 0 (observe) except `data.write` at 1: a write is refused with the reason unless it can wait for a person's approval. Pausing a stream autonomously arrives with hosted agents; today a person pauses it in the UI or with a command.
+Watches bounces, complaints and provider signals; it never sends. Its levels are 0 (observe) except `data.write` at 1: a write is refused with the reason unless it can wait for a person's approval. The hosted deliverability guardian (above) proposes a pause and a person still pauses the stream in the UI or with a command.
 
 ```json
 {

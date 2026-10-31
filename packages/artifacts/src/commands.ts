@@ -1,6 +1,6 @@
-import { type CommandContext, defineCommand } from '@agentic-marketing/commands';
+import { type ActionClass, type CommandContext, defineCommand, type Impact, recordAgentAction } from '@agentic-marketing/commands';
 import { AppError, canonicalJson, hashValue, newId } from '@agentic-marketing/core';
-import { schema, type VersionState } from '@agentic-marketing/db';
+import { type AgentUndo, schema, type VersionState } from '@agentic-marketing/db';
 import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { diffJson } from './diff';
@@ -196,6 +196,61 @@ async function publishVersion(ctx: CommandContext, artifactId: string, number: n
     .where(and(eq(schema.artifacts.workspaceId, ctx.principal.workspaceId), eq(schema.artifacts.id, artifactId)));
   const artifact = { id: artifactId, type: a.type, workspaceId: ctx.principal.workspaceId };
   for (const l of publishListeners) ctx.afterCommit ? ctx.afterCommit(() => l(ctx, artifact)) : await l(ctx, artifact);
+}
+
+/** Publishes a version through the same checks and listeners as any other publish (agents.undo). */
+export async function publishArtifactVersion(ctx: CommandContext, artifactId: string, number: number) {
+  await publishVersion(ctx, artifactId, number);
+}
+
+/**
+ * Takes the live version out of service again, for undoing a first publish: the version becomes
+ * a draft and nothing of it is live (journeys stop entering people, experiences stop serving).
+ * Returns the version that was unpublished, or null when nothing was live.
+ */
+export async function unpublishArtifactVersion(ctx: CommandContext, artifactId: string): Promise<number | null> {
+  const a = await loadArtifact(ctx, artifactId);
+  if (a.publishedVersion === null) return null;
+  const number = a.publishedVersion;
+  await setVersionState(ctx, artifactId, number, 'draft');
+  await ctx.tx
+    .update(schema.artifacts)
+    .set({ publishedVersion: null, updatedAt: new Date() })
+    .where(and(eq(schema.artifacts.workspaceId, ctx.principal.workspaceId), eq(schema.artifacts.id, artifactId)));
+  const artifact = { id: artifactId, type: a.type, workspaceId: ctx.principal.workspaceId };
+  for (const l of publishListeners) ctx.afterCommit ? ctx.afterCommit(() => l(ctx, artifact)) : await l(ctx, artifact);
+  return number;
+}
+
+/**
+ * How to reverse publishing this artifact (ADR-0016 §5.4, #255): republish the version that was
+ * live before, or unpublish a first publish. A broadcast also cancels its scheduled send; once it
+ * has gone out, the ledger says plainly that messages cannot be recalled.
+ */
+export async function publishUndo(
+  ctx: Pick<CommandContext, 'tx' | 'principal'>,
+  member: { id: string; type: string },
+  previousVersion: number | null,
+): Promise<AgentUndo> {
+  const republish: AgentUndo = { kind: 'republish', artifactId: member.id, previousVersion };
+  if (member.type !== 'broadcast') return republish;
+  const [run] = await ctx.tx
+    .select({ status: schema.broadcastRuns.status })
+    .from(schema.broadcastRuns)
+    .where(and(eq(schema.broadcastRuns.workspaceId, ctx.principal.workspaceId), eq(schema.broadcastRuns.broadcastId, member.id)));
+  if (run?.status === 'done') return { kind: 'none', reason: 'Messages already sent cannot be recalled.' };
+  return { kind: 'group', items: [republish, { kind: 'cancel_send', broadcastId: member.id }] };
+}
+
+/** The reversal of publishing several artifacts together: one group, or a plain reversal for one. */
+export async function publishUndoGroup(
+  ctx: Pick<CommandContext, 'tx' | 'principal'>,
+  members: { id: string; type: string; previousVersion: number | null }[],
+): Promise<AgentUndo> {
+  const items: AgentUndo[] = [];
+  for (const m of members) items.push(await publishUndo(ctx, m, m.previousVersion));
+  if (items.some((item) => item.kind === 'none')) return items.find((item) => item.kind === 'none')!;
+  return items.length === 1 ? items[0] : { kind: 'group', items };
 }
 
 /**
@@ -747,6 +802,7 @@ export const requestPublish = defineCommand({
     const autonomous = ctx.policy?.decision === 'allow' && ctx.policy.autonomous === true;
     if (autonomous || (!needsApproval && !hold)) {
       await publishVersion(ctx, a.id, v.number);
+      ctx.undo?.set(await publishUndo(ctx, a, a.publishedVersion));
       return {
         status: 'published' as const,
         version: v.number,
@@ -847,7 +903,15 @@ export const requestPublishBundle = defineCommand({
           'conflict',
           `The latest version of “${a.name}” (v${v.number}) is ${v.state.replace('_', ' ')}, not a draft. Edit it first to create a new draft.`,
         );
-      members.push({ id: a.id, name: a.name, type: a.type, version: v.number, content: v.content, authorType: v.authorType });
+      members.push({
+        id: a.id,
+        name: a.name,
+        type: a.type,
+        version: v.number,
+        content: v.content,
+        authorType: v.authorType,
+        previousVersion: a.publishedVersion,
+      });
     }
     const ordered = dependencyOrder(members);
     await checkBundlePublishable(ctx, ordered);
@@ -865,6 +929,12 @@ export const requestPublishBundle = defineCommand({
       ordered.map((m, i) => ({ artifactId: m.id, name: m.name, type: m.type, version: m.version, approvalId: approvalIds[i] }));
     if (autonomous || (!needsApproval && !hold)) {
       for (const m of ordered) await publishVersion(ctx, m.id, m.version);
+      ctx.undo?.set(
+        await publishUndoGroup(
+          ctx,
+          ordered.map((m) => ({ id: m.id, type: m.type, previousVersion: m.previousVersion })),
+        ),
+      );
       return {
         status: 'published' as const,
         bundleId: null,
@@ -1309,11 +1379,16 @@ async function refuseIfAgentStopped(ctx: CommandContext, r: { requestedByType: s
 }
 
 /** The agent behind an approval request's credential, if an agent requested it. */
+/** The agent credential behind an approval's `requested_by_client`: `token:<id>`, `hosted:<agent id>` or an OAuth client id. */
+export function agentCredentialOf(client: string): readonly ['api_token' | 'oauth_client' | 'hosted', string] {
+  if (client.startsWith('token:')) return ['api_token', client.slice('token:'.length)] as const;
+  if (client.startsWith('hosted:')) return ['hosted', client.slice('hosted:'.length)] as const;
+  return ['oauth_client', client] as const;
+}
+
 async function requestingAgent(ctx: CommandContext, r: { requestedByType: string; requestedByClient: string | null }) {
   if (r.requestedByType !== 'agent' || !r.requestedByClient) return null;
-  const [kind, credentialId] = r.requestedByClient.startsWith('token:')
-    ? (['api_token', r.requestedByClient.slice('token:'.length)] as const)
-    : (['oauth_client', r.requestedByClient] as const);
+  const [kind, credentialId] = agentCredentialOf(r.requestedByClient);
   const [agent] = await ctx.tx
     .select({ id: schema.agents.id, name: schema.agents.name, status: schema.agents.status })
     .from(schema.agentCredentials)
@@ -1323,6 +1398,57 @@ async function requestingAgent(ctx: CommandContext, r: { requestedByType: string
     )
     .where(and(eq(schema.agentCredentials.kind, kind), eq(schema.agentCredentials.credentialId, credentialId)));
   return agent ?? null;
+}
+
+/**
+ * The ledger row for a held change that ran (ADR-0016 §5.4): the hold row keeps the decision, this
+ * one records what it actually did and how to reverse it, so `agents.undo` can offer the reversal.
+ */
+async function recordHeldExecution(
+  ctx: CommandContext,
+  agentId: string,
+  artifact: { id: string; type: string },
+  previousVersion: number | null,
+) {
+  const [held] = await ctx.tx
+    .select({
+      mandateId: schema.agentActions.mandateId,
+      mandateVersion: schema.agentActions.mandateVersion,
+      impact: schema.agentActions.impact,
+      intent: schema.agentActions.intent,
+      actionClass: schema.agentActions.actionClass,
+    })
+    .from(schema.agentActions)
+    .where(
+      and(
+        eq(schema.agentActions.workspaceId, ctx.principal.workspaceId),
+        eq(schema.agentActions.agentId, agentId),
+        eq(schema.agentActions.decision, 'hold'),
+        sql`${schema.agentActions.command} IN ('artifacts.requestPublish', 'artifacts.requestPublishBundle')`,
+        sql`(${schema.agentActions.target} = ${artifact.id} OR ${schema.agentActions.target} LIKE ${`${artifact.id},%`} OR ${schema.agentActions.target} LIKE ${`%,${artifact.id}`} OR ${schema.agentActions.target} LIKE ${`%,${artifact.id},%`})`,
+      ),
+    )
+    .orderBy(desc(schema.agentActions.id))
+    .limit(1);
+  await recordAgentAction(
+    ctx.tx,
+    agentId,
+    { name: 'artifacts.requestPublish' },
+    {
+      decision: 'allow',
+      actionClass: (held?.actionClass as ActionClass | undefined) ?? 'content.publish',
+      reasons: ['Ran after its veto window ended without a veto.'],
+      impact: (held?.impact ?? {}) as Impact,
+      ...(held?.mandateId
+        ? { mandate: { id: held.mandateId, version: held.mandateVersion ?? 0, holdWindow: 'PT2H', independentCheck: false } }
+        : {}),
+    },
+    'internal',
+    artifact.id,
+    null,
+    held?.intent ?? null,
+    await publishUndo(ctx, artifact, previousVersion),
+  );
 }
 
 /**
@@ -1355,7 +1481,13 @@ export async function runHeldChange(
       .where(scope);
     return { status: 'needs_person', reason: problem };
   }
-  for (const m of members) await publishVersion(ctx, m.artifactId, m.version);
+  for (const m of members) {
+    const artifact = await loadArtifact(ctx, m.artifactId);
+    const previousVersion = artifact.publishedVersion;
+    await publishVersion(ctx, m.artifactId, m.version);
+    // The hold row records the decision; this row records what it did, so agents.undo can reverse it.
+    if (agent) await recordHeldExecution(ctx, agent.id, artifact, previousVersion);
+  }
   await ctx.tx
     .update(schema.approvalRequests)
     .set({

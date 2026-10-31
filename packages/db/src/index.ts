@@ -1,8 +1,11 @@
+export * from './erasures';
 export * from './migrate';
 export * from './pool';
 export type {
   AgentCredentialKind,
+  AgentGuardState,
   AgentStatus,
+  AgentUndo,
   AiCallKind,
   AiCallStatus,
   AiUse,
@@ -14,6 +17,7 @@ export type {
   ConsentSource,
   ConsentStatus,
   DeliveryStatus,
+  HostedAgentRunStatus,
   IdentifierType,
   InputWarningPrincipal,
   MessageStatus,

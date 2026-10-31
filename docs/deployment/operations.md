@@ -93,8 +93,135 @@ These run only when the configuration itself is valid. Each network operation gi
 | `valkey` | `PING` against `VALKEY_URL` returns `PONG`. | Start Valkey and check the URL and password. |
 | `dns.<domain>` | Each enabled provider's from-domain has an SPF TXT record (`v=spf1`) and an effective DMARC policy. A DMARC record at `_dmarc.<domain>` is used directly; otherwise the check walks up to the organizational domain (stopping before a single label, and treating `co.uk`, `com.au`, `co.nz`, `org.uk` and `ac.uk` as suffixes) and reports that the policy is inherited. Missing records anywhere, or an effective `p=none`, warn. | Publish the records at your DNS provider. DKIM selectors depend on the e-mail provider; enable DKIM there. |
 | `egress.<adapter>` | The API host of each enabled provider adapter answers HTTP, or an SMTP relay accepts a TCP connection. Unreachable is a failure. | Allow outbound HTTPS or SMTP from the host and check the provider's configuration. The `log` adapter is skipped. |
+| `queue.messages` | Counts messages in `queued` or `sending` and reports the age of the oldest. Warns when the oldest has waited more than 15 minutes; an empty queue passes. | A queue that does not drain means the worker role is not running or is stuck: check `ROLE=worker` and the worker logs. |
+| `queue.journeys` | Counts journey participants whose next step is due and reports the age of the oldest. Warns above 15 minutes. | Journey steps run in the worker role; check its logs for the journey sweeper. |
+| `queue.broadcasts` | Counts broadcast runs past their send time that the scheduler has not finished, and how long the oldest is overdue. Warns above 10 minutes. | Broadcasts run in the scheduler role; keep it at one replica and check its logs. |
+| `queue.warehouse` | Reports enabled warehouse exports that are due or were requested (informational; a large warehouse export is expected to be "due" while it runs). | Check the export's schedule and last error in the admin UI. |
+| `deliveries` | Counts webhook and action deliveries that ended `dead` in the last 24 hours and, in the message, the dead share of the last hour. Any dead delivery warns. | A dead delivery stopped after its retries: check the endpoint URL, its response and `EGRESS_ALLOWED_HOSTS`. |
+
+The queue and delivery rows are computed from the same tables the workers claim work from, with one aggregate query and the same three-second ceiling as the other live checks. On a fresh install whose schema is not migrated yet they are one `info` row instead.
+
+ClickHouse insert lag is deliberately not a row: the events table's `received_at` is the ingest time, so an idle install would look permanently "lagging". The `clickhouse` row proves reachability, and `am_dependency_up{name="clickhouse"}` does the same for monitoring.
 
 DNS and egress checks only see enabled e-mail providers. With no providers configured they pass without network traffic.
+
+## Monitoring
+
+The server exposes `GET /metrics` on the **main** listener (`PORT`, default 3000) in the Prometheus text format. It is never served on the public-only listener (`PUBLIC_PORT`), and it is **off by default**: without `METRICS_TOKEN` the route answers `404` like any unknown path, so an upgrade that sets nothing exposes nothing new.
+
+```bash
+openssl rand -hex 24          # the token; put it in .env (or a Kubernetes Secret)
+curl -fsS -H "Authorization: Bearer $METRICS_TOKEN" http://localhost:3000/metrics
+```
+
+The endpoint accepts only the `Authorization: Bearer …` header: a missing or wrong token gets `401` (no `?token=` query form, so the secret stays out of proxy access logs). Each scrape runs the dependency checks and one aggregate query against Postgres, every one of them limited to 3 seconds.
+
+### Scrape configuration
+
+```yaml
+# prometheus.yml
+scrape_configs:
+  - job_name: agentic-marketing
+    scrape_interval: 30s
+    metrics_path: /metrics
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/am-metrics-token   # the METRICS_TOKEN value, mode 0600
+    static_configs:
+      - targets: ["app:3000"]   # the compose service; on Kubernetes, the api Service on port 80
+```
+
+In Docker Compose, a Prometheus container on the same project network reaches the app as `app:3000`. In Kubernetes, scrape the `api` Service (`http`, port 80) and keep the token in a Secret (`secrets.existingSecret` or `secrets.values.METRICS_TOKEN`); the worker and scheduler roles are not scraped individually because the queue gauges are global. Never point a scrape at `PUBLIC_PORT`.
+
+### Metrics
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `am_process_uptime_seconds` | gauge | | Seconds since the process started. |
+| `am_process_start_time_seconds` | gauge | | Unix time the process started; use it for `time() - am_process_start_time_seconds`. |
+| `am_process_resident_memory_bytes` | gauge | | Resident set size. |
+| `am_process_heap_used_bytes` | gauge | | JavaScript heap in use. |
+| `am_process_event_loop_lag_seconds` | gauge | | Mean event-loop delay since the previous scrape (10 ms resolution). |
+| `am_http_requests_total` | counter | `route`, `status` | HTTP requests by route group (`auth`, `v1`, `mcp`, `pages`, `public`, `ui`, `well-known`, `healthz`, `readyz`) and status class (`2xx`…`5xx`). |
+| `am_http_request_duration_seconds` | histogram | `route`, `status` | Request duration, same groups; buckets from 5 ms to 10 s. |
+| `am_commands_total` | counter | `command`, `effect`, `outcome` | Command executions; `outcome` is `ok` or `error` and covers REST, MCP and SCIM because they all run through one executor. |
+| `am_queue_messages_pending` | gauge | | Messages in `queued` or `sending`. |
+| `am_queue_messages_oldest_seconds` | gauge | | Age of the oldest unsent message: how far the delivery queue is behind. |
+| `am_journey_participants_due` | gauge | | Journey participants whose next step is due now. |
+| `am_journey_participants_oldest_due_seconds` | gauge | | Age of the oldest due, unprocessed journey step. |
+| `am_broadcast_runs_due` | gauge | | Broadcast runs past their send time that the scheduler has not finished. |
+| `am_warehouse_exports_due` | gauge | | Enabled warehouse exports that are due or were asked to run. |
+| `am_deliveries_dead_24h` | gauge | | Webhook/action deliveries that ended `dead` in the last 24 hours. |
+| `am_agent_decisions_last_hour` | gauge | `decision` | Agent ledger decisions (`allow`, `hold`, `ask`, `deny`) in the last hour. |
+| `am_dependency_up` | gauge | `name` | `1` when Postgres, ClickHouse, NATS or Valkey answered on this scrape, else `0`. |
+
+No label carries a workspace, person, address or command input, and every label has a fixed or registry-bounded set of values, so cardinality cannot grow with traffic. `/metrics` is not counted in its own request metrics.
+
+The queue gauges come from the same queries the workers use to claim work, computed on scrape. If Postgres is unreachable or its schema is not migrated yet, those series are simply absent and the rest of the exposition is still returned. ClickHouse insert lag is not exposed: `received_at` is the ingest time, so an idle install would look "lagging"; `am_dependency_up{name="clickhouse"}` reports reachability instead, and `am_commands_total` plus the `/readyz` probe cover the rest.
+
+### Example alert rules
+
+```yaml
+# am-alerts.yml
+groups:
+  - name: agentic-marketing
+    rules:
+      - alert: AgenticMarketingDown
+        expr: up{job="agentic-marketing"} == 0
+        for: 5m
+        labels: { severity: page }
+        annotations: { summary: "Agentic Marketing is not answering scrapes" }
+      - alert: AgenticMarketingDependencyDown
+        expr: am_dependency_up == 0
+        for: 2m
+        labels: { severity: page }
+        annotations: { summary: "{{ $labels.name }} is unreachable from Agentic Marketing" }
+      - alert: AgenticMarketingDeliveryQueueBehind
+        expr: am_queue_messages_oldest_seconds > 900
+        for: 10m
+        labels: { severity: page }
+        annotations: { summary: "Oldest unsent message is {{ $value }}s old" }
+      - alert: AgenticMarketingJourneyQueueBehind
+        expr: am_journey_participants_oldest_due_seconds > 900
+        for: 10m
+        labels: { severity: ticket }
+      - alert: AgenticMarketingDeadLetters
+        expr: am_deliveries_dead_24h > 0
+        for: 5m
+        labels: { severity: ticket }
+        annotations: { summary: "Webhook/action deliveries are dead-lettering" }
+      - alert: AgenticMarketingCommandErrors
+        expr: sum by (command) (rate(am_commands_total{outcome="error"}[5m])) > 0.2
+        for: 10m
+        labels: { severity: ticket }
+      - alert: AgenticMarketingEventLoopLag
+        expr: am_process_event_loop_lag_seconds > 0.5
+        for: 10m
+        labels: { severity: ticket }
+```
+
+`am doctor` reports the same queue backlog and dead-letter values when run by hand; see the [live checks](#live-checks) above.
+
+## Backups, retention and erasures
+
+`am backup` writes a Postgres dump (and ClickHouse with `--clickhouse`); `am restore` replaces the
+live data. The full procedure, names and manifest are in [Backups and restore](backups.md).
+
+- **Retention.** `BACKUP_KEEP_DAYS` (default 14 for the scheduler) is the maximum age of a restore
+  point, and therefore the longest a restored snapshot can predate an erasure. Give a remote
+  lifecycle the same or a shorter window, and keep taking backups: the newest snapshot is what a
+  restore uses.
+- **Erasures are replayed.** `am restore` reads `erasures` and `erasure_tombstones` from the live
+  database before replacing it and re-applies them afterwards: the erased profiles and identifiers
+  are deleted again, suppression hashes are restored and the keyed tombstones are re-inserted. A
+  person erased after the snapshot does not come back. Replay is idempotent; if the erasure log
+  cannot be read, the restore stops instead of risking a resurrection.
+- **ClickHouse.** `--clickhouse` reloads the event export as taken. Event rows of a replayed person
+  keep their pseudonymous ids and non-personal properties, but the profile key that sealed their
+  personal data is deleted by the replay, so that data stays unreadable. Take a `--clickhouse`
+  backup after erasures when the DSR procedure requires removing event rows too.
+- **Keep `.env` apart.** Backups do not include `MASTER_KEY`; without it the restored secrets and
+  personal data cannot be decrypted.
 
 ## Verifying a release
 

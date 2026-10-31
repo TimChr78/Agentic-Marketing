@@ -1,4 +1,4 @@
-import { Ban, Clock, ExternalLink, RefreshCw } from 'lucide-react';
+import { Ban, Clock, ExternalLink, Play, RefreshCw } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { api, errText } from '../../app/api';
 import { useWorkspace } from '../../app/session';
@@ -11,7 +11,15 @@ import type { Artifact } from './ArtifactDetailPage';
 // skipped and what became of the e-mails. Sending is a run on the server, so the panel refreshes
 // while it works.
 
-const runTone = { not_scheduled: 'neutral', scheduled: 'info', running: 'info', done: 'good', cancelled: 'warn', failed: 'bad' } as const;
+const runTone = {
+  not_scheduled: 'neutral',
+  scheduled: 'info',
+  running: 'info',
+  done: 'good',
+  cancelled: 'warn',
+  failed: 'bad',
+  stopped: 'warn',
+} as const;
 const runLabel = {
   not_scheduled: 'Not scheduled',
   scheduled: 'Scheduled',
@@ -19,6 +27,24 @@ const runLabel = {
   done: 'Done',
   cancelled: 'Cancelled',
   failed: 'Failed',
+  stopped: 'Stopped',
+} as const;
+
+const stageLabel = {
+  canary_sending: 'Sending canary',
+  canary_waiting: 'Waiting on canary',
+  checking: 'Checking canary',
+  sending_rest: 'Sending the rest',
+  stopped: 'Stopped at the canary check',
+  done: 'Done',
+} as const;
+const stageTone = {
+  canary_sending: 'info',
+  canary_waiting: 'info',
+  checking: 'info',
+  sending_rest: 'info',
+  stopped: 'warn',
+  done: 'good',
 } as const;
 
 const MESSAGE_ORDER = ['sent', 'delivered', 'opened', 'clicked', 'bounced', 'complained', 'unsubscribed', 'failed'];
@@ -32,6 +58,7 @@ export function BroadcastStatus({ artifact }: { artifact: Artifact }) {
   const toast = useToast();
   const [dialog, confirm] = useConfirm();
   const [cancelError, setCancelError] = useState<string | null>(null);
+  const [continueError, setContinueError] = useState<string | null>(null);
   const published = artifact.publishedVersion !== null;
   const status = useApi(() => api.call('broadcasts.status', { artifactId: artifact.id }), [artifact.id], { skip: !published });
   const archive = useApi(() => api.call('archive.issues', {}), [artifact.id], { skip: !published });
@@ -65,6 +92,7 @@ export function BroadcastStatus({ artifact }: { artifact: Artifact }) {
   const messages = status.data.messages;
   const keys = [...MESSAGE_ORDER.filter((k) => k in messages), ...Object.keys(messages).filter((k) => !MESSAGE_ORDER.includes(k))];
   const test = status.data.test;
+  const stage = status.data.stage;
 
   const cancel = async () => {
     const ok = await confirm({
@@ -82,6 +110,24 @@ export function BroadcastStatus({ artifact }: { artifact: Artifact }) {
       void status.reload();
     } catch (e) {
       setCancelError(errText(e));
+    }
+  };
+
+  const sendRest = async () => {
+    const ok = await confirm({
+      title: `Send the rest of “${artifact.name}”?`,
+      body: `${stage?.stopReason ?? 'The canary check stopped this send.'} Everyone who has not had it yet will get it now. This cannot be undone.`,
+      confirmLabel: 'Send the rest',
+      destructive: true,
+    });
+    if (!ok) return;
+    setContinueError(null);
+    try {
+      await api.call('broadcasts.continue', { artifactId: artifact.id });
+      toast.success('Sending the rest of the audience.');
+      void status.reload();
+    } catch (e) {
+      setContinueError(errText(e));
     }
   };
 
@@ -204,6 +250,91 @@ export function BroadcastStatus({ artifact }: { artifact: Artifact }) {
         </div>
       )}
 
+      {stage && (
+        <div className="rounded-md border border-line bg-surface">
+          <div className="flex flex-wrap items-center gap-2 border-b border-line px-4 py-3">
+            <span className="text-[13px] font-semibold text-fg">Staged send</span>
+            <StatusPill tone={stageTone[stage.stage]}>{stageLabel[stage.stage]}</StatusPill>
+            <span className="text-[12px] text-muted">
+              {stage.canaryPercent}% canary, wait {stage.wait}
+            </span>
+            <span className="ml-auto text-[12px] text-muted">
+              {stage.checkAt
+                ? stage.stage === 'canary_waiting'
+                  ? `Checks ${formatDateTime(stage.checkAt, { zone: true })}`
+                  : stage.checkedAt
+                    ? `Checked ${formatDateTime(stage.checkedAt, { zone: true })}`
+                    : ''
+                : ''}
+            </span>
+          </div>
+          <div className="space-y-2 p-4">
+            <table className="w-full text-[13px]">
+              <thead>
+                <tr className="text-left text-[12px] text-muted">
+                  <th className="pb-1 font-medium">Canary</th>
+                  <th className="pb-1 text-right font-medium">Sent</th>
+                  <th className="pb-1 text-right font-medium">Bounced</th>
+                  <th className="pb-1 text-right font-medium">Complained</th>
+                  <th className="pb-1 text-right font-medium">Unsubscribed</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td className="py-1 pr-3">
+                    {stage.canary.queued.toLocaleString()} queued of {stage.canary.recipients.toLocaleString()} reached
+                    {stage.canary.skipped > 0 ? `, ${stage.canary.skipped.toLocaleString()} skipped` : ''}
+                  </td>
+                  <td className="py-1 text-right tabular-nums">{stage.sent.toLocaleString()}</td>
+                  <td className="py-1 text-right tabular-nums">{stage.bounced.toLocaleString()}</td>
+                  <td className="py-1 text-right tabular-nums">{stage.complained.toLocaleString()}</td>
+                  <td className="py-1 text-right tabular-nums">{stage.unsubscribed.toLocaleString()}</td>
+                </tr>
+                <tr className="text-[12px] text-muted">
+                  <td className="py-1 pr-3">Against the thresholds</td>
+                  <td className="py-1 text-right" />
+                  <td className="py-1 text-right tabular-nums">
+                    {pct(stage.bounceRate)} / {pct(stage.thresholds.bounceRate)}
+                  </td>
+                  <td className="py-1 text-right tabular-nums">
+                    {pct(stage.complaintRate)} / {pct(stage.thresholds.complaintRate)}
+                  </td>
+                  <td className="py-1 text-right tabular-nums">
+                    {pct(stage.unsubscribeRate)} / {pct(stage.thresholds.unsubscribeRate)}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+            {stage.checkSkipped && (
+              <p className="text-[12px] text-muted">
+                The canary had fewer than {stage.thresholds.minCanary.toLocaleString()} sends, so its rates were too small to judge and the
+                rest went out without a check.
+              </p>
+            )}
+            {stage.stopReason && (
+              <p className="text-[12px] text-fg">
+                {stage.stopReason}
+                {stage.resumedAt ? ` The rest was sent after a person looked, ${formatDateTime(stage.resumedAt, { zone: true })}.` : ''}
+              </p>
+            )}
+            {stage.stage === 'stopped' && run.status === 'stopped' && can('artifacts:publish') && (
+              <Button size="sm" icon={<Play size={14} />} onClick={() => void sendRest()}>
+                Send the rest
+              </Button>
+            )}
+            {stage.stage === 'stopped' && run.status === 'stopped' && !can('artifacts:publish') && (
+              <p className="text-[12px] text-muted">Sending the rest needs the artifacts:publish permission.</p>
+            )}
+          </div>
+        </div>
+      )}
+
+      {continueError && (
+        <Alert tone="bad" title="The rest was not sent">
+          {continueError}
+        </Alert>
+      )}
+
       <dl className="grid grid-cols-[minmax(96px,max-content)_minmax(0,1fr)] gap-x-4 gap-y-1.5 text-[13px]">
         {run.startedAt && (
           <>
@@ -226,7 +357,9 @@ export function BroadcastStatus({ artifact }: { artifact: Artifact }) {
             ? 'Scheduled. You can cancel it until sending starts.'
             : run.status === 'not_scheduled'
               ? 'No run yet. It starts when the broadcast is published and its send time comes.'
-              : 'Counts come from the message events for this broadcast and grow as people open and click.'}
+              : run.status === 'stopped'
+                ? 'The canary check stopped the rest. A person with the artifacts:publish permission can send the rest after looking at the rates.'
+                : 'Counts come from the message events for this broadcast and grow as people open and click.'}
       </p>
       {cancellable && !can('messages:send') && (
         <p className="text-[12px] text-muted">Cancelling sending needs the messages:send permission.</p>

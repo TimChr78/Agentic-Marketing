@@ -238,7 +238,11 @@ describe('conversions to LinkedIn, TikTok and Pinterest', () => {
         },
       ],
     });
-    expect((await api.call('ads.conversions', {})).conversions.filter((c) => c.status === 'done')).toHaveLength(3);
+    // The platforms answered; each delivery is marked done just after its response.
+    await eventually(
+      async () => (await api.call('ads.conversions', {})).conversions.filter((c) => c.status === 'done').length,
+      (n) => n === 3,
+    );
   });
 
   it('tests TikTok and Pinterest in their test modes', async () => {

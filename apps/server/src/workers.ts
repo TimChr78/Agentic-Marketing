@@ -11,7 +11,9 @@ import { runProfileWorkers } from '@agentic-marketing/profiles';
 import { runSegmentScheduler, segmentHook } from '@agentic-marketing/segments';
 import { logger } from '@agentic-marketing/telemetry';
 import { runWarehouseExports } from '@agentic-marketing/warehouse';
+import { runGuardian } from './agents/guardian';
 import { runHolds } from './agents/holds';
+import { runHostedAgents } from './agents/hosted';
 import { runAgentNotifications } from './agents/notifications';
 import type { createServer } from './app';
 
@@ -28,10 +30,12 @@ export function startScheduler(
     alertTickMs?: number;
     holdTickMs?: number;
     agentNotifyTickMs?: number;
+    hostedAgentTickMs?: number;
+    guardianTickMs?: number;
   } = {},
 ): Promise<void>[] {
   logger.info(
-    'scheduler role: segment recomputation, broadcasts, retention, OAuth token refresh, audience sync, ad spend import, warehouse exports, edge sync, threshold alerts, held agent changes, agent notifications',
+    'scheduler role: segment recomputation, broadcasts, retention, OAuth token refresh, audience sync, ad spend import, warehouse exports, edge sync, threshold alerts, held agent changes, agent notifications, hosted agents',
   );
   return [
     runSegmentScheduler(
@@ -75,10 +79,27 @@ export function startScheduler(
       { tickMs: opts.alertTickMs },
     ),
     runHolds({ db: srv.db, services: srv.services }, signal, opts.holdTickMs),
+    runGuardian(
+      { db: srv.db, services: srv.services, kp: srv.keyProvider, email: srv.email, directory: srv.directory, publicUrl: srv.publicUrl },
+      signal,
+      { tickMs: opts.guardianTickMs },
+    ),
     runAgentNotifications(
       { db: srv.db, kp: srv.keyProvider, email: srv.email, directory: srv.directory, publicUrl: srv.publicUrl },
       signal,
       { tickMs: opts.agentNotifyTickMs },
+    ),
+    runHostedAgents(
+      {
+        db: srv.db,
+        executor: srv.executor,
+        kp: srv.keyProvider,
+        email: srv.email,
+        directory: srv.directory,
+        publicUrl: srv.publicUrl,
+      },
+      signal,
+      { tickMs: opts.hostedAgentTickMs },
     ),
   ];
 }

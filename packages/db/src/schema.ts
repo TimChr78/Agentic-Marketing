@@ -901,7 +901,7 @@ export const deliveries = pgTable(
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
 );
 
-export type BroadcastStatus = 'scheduled' | 'running' | 'done' | 'cancelled' | 'failed';
+export type BroadcastStatus = 'scheduled' | 'running' | 'done' | 'cancelled' | 'failed' | 'stopped';
 export const broadcastRuns = pgTable(
   'broadcast_runs',
   {
@@ -946,6 +946,48 @@ export const broadcastTests = pgTable(
     winner: text('winner'),
     reason: text('reason'),
     decidedAt: ts('decided_at'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.broadcastId] })],
+);
+
+export type BroadcastStageName = 'canary_sending' | 'canary_waiting' | 'checking' | 'sending_rest' | 'stopped' | 'done';
+
+/**
+ * A staged send on a broadcast (#254): the canary share goes first, after `checkAt` its bounce,
+ * complaint and unsubscribe rates are judged, and only then does the rest go out. The row is the
+ * durable state machine: the run's cursor and this row change in one transaction, so a crash
+ * resumes at the same stage. Canary counts are kept apart from the run's totals so the check can
+ * be explained long after the rest went out.
+ */
+export const broadcastStages = pgTable(
+  'broadcast_stages',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    broadcastId: text('broadcast_id').notNull(),
+    stage: text('stage').$type<BroadcastStageName>().notNull().default('canary_sending'),
+    canaryPercent: integer('canary_percent').notNull(),
+    /** When the wait is over and the canary is judged: the first canary send plus the wait. */
+    checkAt: ts('check_at'),
+    checkedAt: ts('checked_at'),
+    /** True when the canary was smaller than minCanary: too little to judge, so the rest went out. */
+    checkSkipped: boolean('check_skipped').notNull().default(false),
+    canaryRecipients: integer('canary_recipients').notNull().default(0),
+    canaryQueued: integer('canary_queued').notNull().default(0),
+    canarySkipped: integer('canary_skipped').notNull().default(0),
+    /** Base counts from the canary's message events at check time. */
+    sent: integer('sent').notNull().default(0),
+    bounced: integer('bounced').notNull().default(0),
+    complained: integer('complained').notNull().default(0),
+    unsubscribed: integer('unsubscribed').notNull().default(0),
+    bounceRate: doublePrecision('bounce_rate'),
+    complaintRate: doublePrecision('complaint_rate'),
+    unsubscribeRate: doublePrecision('unsubscribe_rate'),
+    stopReason: text('stop_reason'),
+    stoppedAt: ts('stopped_at'),
+    /** When a person sent the rest after a stop. */
+    resumedAt: ts('resumed_at'),
+    completedAt: ts('completed_at'),
     createdAt: ts('created_at').notNull().defaultNow(),
   },
   (t) => [primaryKey({ columns: [t.workspaceId, t.broadcastId] })],
@@ -1102,7 +1144,8 @@ export const edgeTargets = pgTable('edge_targets', {
 });
 
 export type AgentStatus = 'active' | 'paused' | 'revoked';
-export type AgentCredentialKind = 'api_token' | 'oauth_client';
+export type AgentCredentialKind = 'api_token' | 'oauth_client' | 'hosted';
+export type HostedAgentRunStatus = 'ok' | 'failed' | 'skipped';
 export type PolicyDecision = 'allow' | 'hold' | 'ask' | 'deny';
 
 /** Agents as first-class principals (ADR-0016): a sponsor, a status and the credentials they act with. */
@@ -1120,6 +1163,8 @@ export const agents = pgTable(
     statusChangedAt: ts('status_changed_at'),
     /** Reserved for multi-brand (#184): null means the whole workspace. */
     brand: text('brand'),
+    /** The guardian's cap on the agent until a person clears it (#253); null when it has not acted. */
+    guard: jsonb('guard').$type<AgentGuardState>(),
     createdAt: ts('created_at').notNull().defaultNow(),
     updatedAt: ts('updated_at').notNull().defaultNow(),
   },
@@ -1137,6 +1182,16 @@ export const agentCredentials = pgTable(
   },
   (t) => [primaryKey({ columns: [t.workspaceId, t.kind, t.credentialId] })],
 );
+
+/**
+ * How to reverse an agent action (ADR-0016 §5.4, #255). Recorded in the ledger when the action
+ * runs; `none` says plainly why it cannot be undone (a message that was already sent).
+ */
+export type AgentUndo =
+  | { kind: 'republish'; artifactId: string; previousVersion: number | null }
+  | { kind: 'cancel_send'; broadcastId: string }
+  | { kind: 'group'; items: AgentUndo[] }
+  | { kind: 'none'; reason: string };
 
 /** The agent action ledger: every agent write with its policy decision (#218). */
 export const agentActions = pgTable(
@@ -1157,7 +1212,96 @@ export const agentActions = pgTable(
     mandateId: text('mandate_id'),
     mandateVersion: integer('mandate_version'),
     intent: text('intent'),
+    /** Shadow mode (#256): what the mandate would have decided; `decision` is what applied. */
+    shadow: jsonb('shadow').$type<{
+      decision: PolicyDecision;
+      level?: number;
+      reasons: string[];
+      mandateId: string;
+      mandateVersion: number;
+    }>(),
+    /** How to reverse it (#255); null when there is nothing to reverse (or the action was refused). */
+    undo: jsonb('undo').$type<AgentUndo | null>(),
+    undoneAt: ts('undone_at'),
+    undoneBy: text('undone_by'),
+    undoResult: text('undo_result'),
     at: ts('at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
+/** The guardian's cap on an agent (#253): levels capped at `cap`, irreversible classes at `irreversibleCap`. */
+export interface AgentGuardState {
+  cap: number;
+  irreversibleCap?: number;
+  reason: string;
+  since: string;
+  episodeIds: string[];
+}
+
+/** One time the guardian acted on an agent, with its evidence, until a person clears it (#253). */
+export const guardianEvents = pgTable(
+  'guardian_events',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    agentId: text('agent_id').notNull(),
+    kind: text('kind').$type<'guardrail' | 'anomaly' | 'probing' | 'loop' | 'errors'>().notNull(),
+    action: text('action').$type<'cap' | 'hold' | 'pause'>().notNull(),
+    reason: text('reason').notNull(),
+    evidence: jsonb('evidence').$type<Record<string, unknown>>().notNull().default({}),
+    suspendedHolds: integer('suspended_holds').notNull().default(0),
+    at: ts('at').notNull().defaultNow(),
+    clearedAt: ts('cleared_at'),
+    clearedBy: text('cleared_by'),
+    clearedNote: text('cleared_note'),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
+/**
+ * A hosted agent (#258, #86): an agent the platform runs itself on a schedule, under the agent's
+ * mandate like any other. The schedule is `hourly`, `daily:HH:MM` or `weekly:mon:07:00`, read in
+ * the workspace's time zone; `nextRunAt` is the absolute next start.
+ */
+export const hostedAgents = pgTable(
+  'hosted_agents',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    agentId: text('agent_id').notNull(),
+    instructions: text('instructions').notNull(),
+    schedule: text('schedule').notNull(),
+    scopes: text('scopes').array().$type<string[]>().notNull().default([]),
+    enabled: boolean('enabled').notNull().default(true),
+    maxTokensPerRun: integer('max_tokens_per_run').notNull().default(20_000),
+    maxToolCallsPerRun: integer('max_tool_calls_per_run').notNull().default(20),
+    /** An optional AI provider id; null uses the workspace's copilot provider. */
+    modelProviderId: text('model_provider_id'),
+    consecutiveFailures: integer('consecutive_failures').notNull().default(0),
+    lastRunAt: ts('last_run_at'),
+    nextRunAt: ts('next_run_at'),
+    runningRunId: text('running_run_id'),
+    runningStartedAt: ts('running_started_at'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.agentId] })],
+);
+
+/** One hosted agent run: a fresh copilot session, its budgets, its summary and its outcome. */
+export const hostedAgentRuns = pgTable(
+  'hosted_agent_runs',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    agentId: text('agent_id').notNull(),
+    startedAt: ts('started_at').notNull(),
+    finishedAt: ts('finished_at'),
+    status: text('status').$type<HostedAgentRunStatus>().notNull(),
+    summary: text('summary').notNull().default(''),
+    toolCalls: integer('tool_calls').notNull().default(0),
+    tokens: integer('tokens').notNull().default(0),
+    error: text('error'),
   },
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
 );

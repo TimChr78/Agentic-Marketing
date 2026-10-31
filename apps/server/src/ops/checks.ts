@@ -60,6 +60,20 @@ async function withTimeout<T>(work: Promise<T>, what: string): Promise<T> {
 
 const PLACEHOLDERS = new Set(['change-me', 'change-me-too', 'changeme', 'placeholder', 'secret']);
 
+/** Pending work older than this means nothing is draining the queue (#147). */
+const QUEUE_LAG_WARN_SECONDS = 15 * 60;
+const BROADCAST_LAG_WARN_SECONDS = 10 * 60;
+
+/** A short human duration for a check message: 45 s, 12 min, 2 h 10 min. */
+function duration(seconds: number): string {
+  const total = Math.max(0, Math.round(seconds));
+  if (total < 60) return `${total} s`;
+  if (total < 3600) return `${Math.round(total / 60)} min`;
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.round((total % 3600) / 60);
+  return minutes ? `${hours} h ${minutes} min` : `${hours} h`;
+}
+
 function isPlaceholder(value: string) {
   return PLACEHOLDERS.has(value.toLowerCase());
 }
@@ -577,6 +591,147 @@ export async function checkValkey(config: Config): Promise<Check> {
   }
 }
 
+/**
+ * Operational health the platform can answer from its own tables (#147): how far each queue is
+ * behind and whether webhook/action deliveries are dead-lettering. Cheap aggregate queries, no
+ * workspace or personal data, and every one gives up after the usual check timeout.
+ */
+export async function operationalHealthChecks(db: Db): Promise<Check[]> {
+  let row:
+    | {
+        messages_pending: string;
+        messages_oldest_seconds: string;
+        journey_due: string;
+        journey_oldest_due_seconds: string;
+        broadcast_due: string;
+        broadcast_oldest_seconds: string;
+        warehouse_due: string;
+        deliveries_dead_24h: string;
+        deliveries_dead_hour: string;
+        deliveries_finished_hour: string;
+      }
+    | undefined;
+  try {
+    const result = await withTimeout(
+      db.admin.query<NonNullable<typeof row>>(
+        `SELECT
+           (SELECT count(*) FROM messages WHERE status IN ('queued', 'sending')) AS messages_pending,
+           (SELECT COALESCE(max(EXTRACT(EPOCH FROM now() - created_at)), 0) FROM messages
+              WHERE status IN ('queued', 'sending')) AS messages_oldest_seconds,
+           (SELECT count(*) FROM journey_participants
+              WHERE status IN ('ready', 'waiting') AND due_at <= now()) AS journey_due,
+           (SELECT COALESCE(max(EXTRACT(EPOCH FROM now() - due_at)), 0) FROM journey_participants
+              WHERE status IN ('ready', 'waiting') AND due_at <= now()) AS journey_oldest_due_seconds,
+           (SELECT count(*) FROM broadcast_runs
+              WHERE send_at <= now()
+                AND (status = 'scheduled' OR (status = 'running' AND (lease_until IS NULL OR lease_until < now())))) AS broadcast_due,
+           (SELECT COALESCE(max(EXTRACT(EPOCH FROM now() - send_at)), 0) FROM broadcast_runs
+              WHERE send_at <= now()
+                AND (status = 'scheduled' OR (status = 'running' AND (lease_until IS NULL OR lease_until < now())))) AS broadcast_oldest_seconds,
+           (SELECT count(*) FROM warehouse_exports
+              WHERE enabled AND (run_requested OR last_run_at IS NULL OR last_run_at < now() - every_minutes * interval '1 minute'))
+             AS warehouse_due,
+           (SELECT count(*) FROM deliveries
+              WHERE status = 'dead' AND finished_at > now() - interval '24 hours') AS deliveries_dead_24h,
+           (SELECT count(*) FROM deliveries
+              WHERE status = 'dead' AND finished_at > now() - interval '1 hour') AS deliveries_dead_hour,
+           (SELECT count(*) FROM deliveries WHERE finished_at > now() - interval '1 hour') AS deliveries_finished_hour`,
+      ),
+      'queue health',
+    );
+    row = result.rows[0];
+  } catch (err) {
+    // A fresh install has no tables yet; that is not an operational failure.
+    if ((err as { code?: string }).code === '42P01')
+      return [{ id: 'queues', status: 'info', message: 'queue and delivery checks skipped until the schema is migrated' }];
+    return [
+      {
+        id: 'queues',
+        status: 'warn',
+        message: `queue and delivery checks could not run: ${messageOf(err)}`,
+        hint: 'Check the database user and schema, then run `am doctor` again.',
+      },
+    ];
+  }
+  if (!row) return [];
+
+  const checks: Check[] = [];
+  const pending = Number(row.messages_pending);
+  const messagesOldest = Number(row.messages_oldest_seconds);
+  checks.push(
+    pending === 0
+      ? { id: 'queue.messages', status: 'ok', message: 'no messages are waiting to be sent' }
+      : messagesOldest > QUEUE_LAG_WARN_SECONDS
+        ? {
+            id: 'queue.messages',
+            status: 'warn',
+            message: `${pending} message(s) waiting to be sent; the oldest has waited ${duration(messagesOldest)}`,
+            hint: 'A queue that does not drain means the worker role is not running or is stuck: check ROLE=worker and `docker compose logs worker` (or the worker pods).',
+          }
+        : {
+            id: 'queue.messages',
+            status: 'ok',
+            message: `${pending} message(s) waiting to be sent; the oldest has waited ${duration(messagesOldest)}`,
+          },
+  );
+
+  const journeyDue = Number(row.journey_due);
+  const journeyOldest = Number(row.journey_oldest_due_seconds);
+  checks.push(
+    journeyDue === 0
+      ? { id: 'queue.journeys', status: 'ok', message: 'no journey step is due' }
+      : journeyOldest > QUEUE_LAG_WARN_SECONDS
+        ? {
+            id: 'queue.journeys',
+            status: 'warn',
+            message: `${journeyDue} journey step(s) due; the oldest has waited ${duration(journeyOldest)}`,
+            hint: 'Journey steps run in the worker role: check that ROLE includes worker and that `docker compose logs worker` shows the journey sweeper running.',
+          }
+        : {
+            id: 'queue.journeys',
+            status: 'ok',
+            message: `${journeyDue} journey step(s) due; the oldest has waited ${duration(journeyOldest)}`,
+          },
+  );
+
+  const broadcastDue = Number(row.broadcast_due);
+  const broadcastOldest = Number(row.broadcast_oldest_seconds);
+  checks.push(
+    broadcastDue === 0
+      ? { id: 'queue.broadcasts', status: 'ok', message: 'no broadcast is waiting to be sent' }
+      : broadcastOldest > BROADCAST_LAG_WARN_SECONDS
+        ? {
+            id: 'queue.broadcasts',
+            status: 'warn',
+            message: `${broadcastDue} broadcast run(s) past their send time; the oldest by ${duration(broadcastOldest)}`,
+            hint: 'Broadcasts run in the scheduler role (keep it at one replica): check that ROLE includes scheduler and its logs.',
+          }
+        : { id: 'queue.broadcasts', status: 'ok', message: `${broadcastDue} broadcast run(s) being sent` },
+  );
+
+  const warehouseDue = Number(row.warehouse_due);
+  checks.push({
+    id: 'queue.warehouse',
+    status: 'ok',
+    message: warehouseDue ? `${warehouseDue} warehouse export(s) due or requested` : 'no warehouse export is due',
+  });
+
+  const dead24h = Number(row.deliveries_dead_24h);
+  const deadHour = Number(row.deliveries_dead_hour);
+  const finishedHour = Number(row.deliveries_finished_hour);
+  checks.push(
+    dead24h === 0
+      ? { id: 'deliveries', status: 'ok', message: 'no webhook or action delivery ended dead in the last 24 hours' }
+      : {
+          id: 'deliveries',
+          status: 'warn',
+          message: `${dead24h} webhook/action delivery(ies) ended dead in the last 24 hours (${deadHour} of ${finishedHour} finished in the last hour)`,
+          hint: 'A dead delivery stopped after its retries: check the endpoint URL, its response and the egress allow list (EGRESS_ALLOWED_HOSTS).',
+        },
+  );
+  return checks;
+}
+
 async function readProviders(db: Db): Promise<ProviderRow[] | null> {
   try {
     const { rows } = await withTimeout(
@@ -795,6 +950,8 @@ export async function liveChecks(config: Config): Promise<Check[]> {
     checks.push(await checkClickHouse(config));
     checks.push(await checkNats(config));
     checks.push(await checkValkey(config));
+
+    if (postgres.reachable) checks.push(...(await operationalHealthChecks(db)));
 
     if (postgres.reachable) {
       const providers = await readProviders(db);

@@ -132,14 +132,27 @@ The settings, secrets and input schemas show up in `connectors.list` (UI and MCP
 
 `config.export` returns every artifact of a workspace (published versions, or the latest drafts with `includeDrafts`) as one JSON bundle; `config.import` applies a bundle to a workspace. Artifact ids travel with the bundle (they are unique per workspace), so references between artifacts hold, e.g. from staging to production. An import creates missing artifacts, puts changed content in a new draft and leaves equal ones alone. It starts as a dry run; `publish: true` publishes in dependency order through the approval policy (an API token counts as an agent). Nothing is ever deleted.
 
-For git, `scripts/am-config.mjs` keeps one file per artifact:
+With `includeSettings: true` the bundle also carries the workspace's **non-secret settings**: its name, display time zone, approval policy, test-send seed list and agent autonomy ceilings. `config.drift` compares a bundle with the current workspace and lists what would be created, updated, unchanged or conflicting, without writing anything. A bundle with settings imports them only for a person with `workspace:admin` (agents cannot change workspace settings), and it applies them before publishing, so a clone publishes under the copied approval policy.
+
+Secrets never travel: provider credentials, API tokens, stored secret values, agents and people are not part of a bundle, and settings containing extra credential-shaped keys are refused rather than silently accepted. Keep those in `.env`, the encrypted secret store and `profiles.import`/`members.*`.
+
+For git, `scripts/am-config.mjs` keeps one file per artifact plus an optional `_settings.json`:
 
 ```bash
 export AM_URL=https://marketing.example.com AM_TOKEN=amk_…   # token scopes: artifacts:read, artifacts:write (+ artifacts:publish)
 scripts/am-config.mjs pull config/                    # config/<type>/<name>.<id>.json
+scripts/am-config.mjs pull config/ --settings         # also config/_settings.json (non-secret)
 scripts/am-config.mjs push config/                    # dry run: what would change
 scripts/am-config.mjs push config/ --apply --publish  # e.g. from CI after a merge
+scripts/am-config.mjs drift config/                   # exit 1 on conflicts; writes nothing
 ```
+
+Cloning a workspace (for example staging → a new production workspace):
+
+1. In staging, export with settings: `config.export { "includeSettings": true }` (or `am-config.mjs pull config/ --settings`).
+2. Create an empty workspace and make yourself its owner. Providers, API tokens, members and agents are configured there separately; they are not cloned.
+3. In the new workspace, run `config.drift` with the bundle and review it, then `config.import { bundle, dryRun: false, publish: true }`. The artifacts keep their ids, so references survive; the settings are applied and the import publishes through the copied approval policy.
+4. `config.drift` again: everything should be `unchanged`. Keep the bundle (or the `config/` directory) in git and run `drift` in CI to see changes before they are pushed.
 
 ## Warehouse export
 

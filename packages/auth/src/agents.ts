@@ -4,11 +4,13 @@ import {
   autonomySettings,
   type CommandContext,
   defineCommand,
+  isUndoable,
   type Principal,
+  runUndo,
 } from '@agentic-marketing/commands';
 import { AppError, newId } from '@agentic-marketing/core';
-import { type AgentCredentialKind, type AgentStatus, type Db, schema } from '@agentic-marketing/db';
-import { and, desc, eq, gte, inArray, lt, sql } from 'drizzle-orm';
+import { type AgentCredentialKind, type AgentStatus, type AgentUndo, type Db, schema, type Tx } from '@agentic-marketing/db';
+import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lt, sql } from 'drizzle-orm';
 import { z } from 'zod';
 
 // Agents as first-class principals (ADR-0016, #213). An API token or an OAuth client acts as an
@@ -100,7 +102,7 @@ export async function oauthClientName(db: Db, clientId: string): Promise<string>
 
 // --- Commands -----------------------------------------------------------------------------------
 
-const Credential = z.object({ kind: z.enum(['api_token', 'oauth_client']), id: z.string(), since: z.string() });
+const Credential = z.object({ kind: z.enum(['api_token', 'oauth_client', 'hosted']), id: z.string(), since: z.string() });
 const Agent = z.object({
   id: z.string(),
   name: z.string(),
@@ -111,6 +113,16 @@ const Agent = z.object({
   statusChangedAt: z.string().nullable(),
   brand: z.string().nullable().describe('Reserved for multi-brand: null means the whole workspace'),
   credentials: z.array(Credential),
+  guard: z
+    .object({
+      cap: z.number().int(),
+      irreversibleCap: z.number().int().optional(),
+      reason: z.string(),
+      since: z.string(),
+      episodeIds: z.array(z.string()),
+    })
+    .nullable()
+    .describe('The guardian’s cap on this agent until a person clears it (agents.clearGuard); null when it has not acted'),
   last24h: z.object({
     changes: z.number().int(),
     denied: z.number().int(),
@@ -158,6 +170,7 @@ async function loadAgents(ctx: CommandContext, ids?: string[]): Promise<Agent[]>
       credentials: creds
         .filter((x) => x.agentId === r.id)
         .map((x) => ({ kind: x.kind, id: x.credentialId, since: x.createdAt.toISOString() })),
+      guard: r.guard ?? null,
       last24h: { changes: c?.changes ?? 0, denied: c?.denied ?? 0, escalated: c?.escalated ?? 0, held: c?.held ?? 0 },
       createdAt: r.createdAt.toISOString(),
     };
@@ -280,6 +293,16 @@ const Action = z.object({
   mandateId: z.string().nullable().describe('The mandate that decided, if any'),
   mandateVersion: z.number().int().nullable(),
   intent: z.string().nullable().describe('What the agent said it was doing'),
+  shadow: z
+    .object({
+      decision: z.enum(['allow', 'hold', 'ask', 'deny']),
+      level: z.number().int().optional(),
+      reasons: z.array(z.string()),
+      mandateId: z.string(),
+      mandateVersion: z.number().int(),
+    })
+    .nullable()
+    .describe('Shadow mode: what the mandate would have decided; `decision` is what applied'),
   reasons: z.array(z.string()),
   impact: z.record(z.string(), z.unknown()),
   ok: z.boolean(),
@@ -287,6 +310,11 @@ const Action = z.object({
   target: z.string().nullable(),
   surface: z.string(),
   at: z.string(),
+  undo: z.unknown().nullable().describe('How to reverse it, when the action published something (null when there is nothing to undo)'),
+  undoable: z.boolean().describe('Whether agents.undo can reverse this action now'),
+  undoneAt: z.string().nullable(),
+  undoneBy: z.string().nullable(),
+  undoResult: z.string().nullable().describe('What the undo did'),
 });
 
 export const agentActivity = defineCommand({
@@ -323,10 +351,262 @@ export const agentActivity = defineCommand({
       .limit(input.limit + 1);
     const page = rows.slice(0, input.limit);
     return {
-      actions: page.map((r) => ({ ...r, at: r.at.toISOString(), impact: r.impact ?? {} })),
+      actions: page.map((r) => ({
+        ...r,
+        at: r.at.toISOString(),
+        impact: r.impact ?? {},
+        undoable: isUndoable(r),
+        undoneAt: r.undoneAt?.toISOString() ?? null,
+      })),
       next: rows.length > input.limit ? (page.at(-1)?.id ?? null) : null,
     };
   },
+});
+
+// --- The guardian (#253) -----------------------------------------------------------------------
+
+const Episode = z.object({
+  id: z.string(),
+  kind: z.enum(['guardrail', 'anomaly', 'probing', 'loop', 'errors']),
+  action: z
+    .enum(['cap', 'hold', 'pause'])
+    .describe('cap: every change waits for a person; hold: irreversible actions are held; pause: the agent was paused'),
+  reason: z.string(),
+  evidence: z.record(z.string(), z.unknown()),
+  suspendedHolds: z.number().int().describe('Pending holds of the agent that became ordinary approvals'),
+  at: z.string(),
+  clearedAt: z.string().nullable(),
+  clearedBy: z.string().nullable(),
+  clearedNote: z.string().nullable(),
+});
+
+const episodeOut = (e: typeof schema.guardianEvents.$inferSelect) => ({
+  ...e,
+  at: e.at.toISOString(),
+  clearedAt: e.clearedAt?.toISOString() ?? null,
+});
+
+export const agentGuardian = defineCommand({
+  name: 'agents.guardian',
+  title: 'Guardian episodes',
+  description:
+    'What the guardian did to an agent: each episode (a guardrail breach, an anomaly such as a send far larger than usual or a burst of changes, probing = many refusals, a loop = the same target changed again and again, rising errors) with its evidence and action, and the cap still in force. Newest first.',
+  input: z.object({
+    agentId: AGENT_ID,
+    open: z.boolean().default(false).describe('Only episodes no person has cleared yet'),
+    limit: z.number().int().min(1).max(200).default(50),
+  }),
+  output: z.object({ guard: Agent.shape.guard, episodes: z.array(Episode) }),
+  permission: 'audit:read',
+  effect: 'read',
+  target: (i) => i.agentId,
+  handler: async (input, ctx) => {
+    const [a] = await ctx.tx.select({ guard: schema.agents.guard }).from(schema.agents).where(eq(schema.agents.id, input.agentId));
+    if (!a) throw new AppError('not_found', `Agent ${input.agentId} not found.`);
+    const g = schema.guardianEvents;
+    const rows = await ctx.tx
+      .select()
+      .from(g)
+      .where(and(eq(g.agentId, input.agentId), input.open ? isNull(g.clearedAt) : undefined))
+      .orderBy(desc(g.at))
+      .limit(input.limit);
+    return { guard: a.guard ?? null, episodes: rows.map(episodeOut) };
+  },
+});
+
+export const clearGuard = defineCommand({
+  name: 'agents.clearGuard',
+  title: 'Clear the guardian',
+  description:
+    'Lift the guardian’s cap on an agent after reviewing its episodes: every open episode is marked cleared with your note and the agent’s mandate applies again. A paused agent stays paused until agents.resume; held changes the guardian suspended stay with a person.',
+  input: z.object({ agentId: AGENT_ID, note: z.string().min(1).max(1000).describe('What you checked and why it is safe to continue') }),
+  output: z.object({ cleared: z.number().int(), agent: Agent }),
+  permission: 'workspace:admin',
+  effect: 'write',
+  humansOnly: true,
+  target: (i) => i.agentId,
+  handler: async (input, ctx) => {
+    const [a] = await ctx.tx.select({ id: schema.agents.id }).from(schema.agents).where(eq(schema.agents.id, input.agentId));
+    if (!a) throw new AppError('not_found', `Agent ${input.agentId} not found.`);
+    const now = new Date();
+    const cleared = await ctx.tx
+      .update(schema.guardianEvents)
+      .set({ clearedAt: now, clearedBy: ctx.principal.userId, clearedNote: input.note })
+      .where(and(eq(schema.guardianEvents.agentId, input.agentId), isNull(schema.guardianEvents.clearedAt)))
+      .returning({ id: schema.guardianEvents.id });
+    await ctx.tx.update(schema.agents).set({ guard: null, updatedAt: now }).where(eq(schema.agents.id, input.agentId));
+    return { cleared: cleared.length, agent: (await loadAgents(ctx, [input.agentId]))[0] };
+  },
+});
+
+// --- Shadow mode (#256) -------------------------------------------------------------------------
+
+const Agreement = z.enum(['agree', 'too_bold', 'too_cautious', 'pending', 'unreviewed']);
+const TALLY = { agree: 'agree', too_bold: 'tooBold', too_cautious: 'tooCautious', pending: 'pending', unreviewed: 'unreviewed' } as const;
+
+export const shadowReport = defineCommand({
+  name: 'agents.shadowReport',
+  title: 'Shadow mode report',
+  description:
+    'For a mandate in shadow mode: what the agent would have done (its mandate’s decision) next to what people did with the same changes. agree: the mandate would have let it run and a person approved, or would have asked and a person rejected; too_bold: it would have run (or been held) but a person rejected it; too_cautious: it would have asked but a person approved; pending: no decision yet; unreviewed: no person reviewed it (the approval policy let it run). Use it to decide whether to grant the level for real.',
+  input: z.object({
+    agentId: AGENT_ID,
+    since: z.string().datetime().optional().describe('Default: 30 days ago'),
+    limit: z.number().int().min(1).max(500).default(200),
+  }),
+  output: z.object({
+    summary: z.object({
+      total: z.number().int(),
+      agree: z.number().int(),
+      tooBold: z.number().int(),
+      tooCautious: z.number().int(),
+      pending: z.number().int(),
+      unreviewed: z.number().int(),
+      agreementRate: z.number().nullable().describe('agree ÷ (agree + too_bold + too_cautious); null without reviewed changes'),
+    }),
+    byClass: z.record(
+      z.string(),
+      z.object({ total: z.number().int(), agree: z.number().int(), tooBold: z.number().int(), tooCautious: z.number().int() }),
+    ),
+    actions: z.array(
+      z.object({
+        id: z.number().int(),
+        at: z.string(),
+        command: z.string(),
+        actionClass: z.string(),
+        target: z.string().nullable(),
+        wouldHave: z.enum(['allow', 'hold', 'ask', 'deny']),
+        wouldHaveLevel: z.number().int().nullable(),
+        decision: z.enum(['allow', 'hold', 'ask', 'deny']),
+        review: z.enum(['approved', 'rejected', 'withdrawn', 'pending', 'none']),
+        agreement: Agreement,
+      }),
+    ),
+  }),
+  permission: 'audit:read',
+  effect: 'read',
+  target: (i) => i.agentId,
+  handler: async (input, ctx) => {
+    const t = schema.agentActions;
+    const since = input.since ? new Date(input.since) : new Date(Date.now() - 30 * 86_400_000);
+    const rows = await ctx.tx
+      .select()
+      .from(t)
+      .where(and(eq(t.agentId, input.agentId), isNotNull(t.shadow), gte(t.at, since)))
+      .orderBy(desc(t.id))
+      .limit(input.limit);
+    const summary = { total: 0, agree: 0, tooBold: 0, tooCautious: 0, pending: 0, unreviewed: 0 };
+    const byClass: Record<string, { total: number; agree: number; tooBold: number; tooCautious: number }> = {};
+    const actions = [];
+    for (const r of rows) {
+      const shadow = r.shadow!;
+      // The approval this action created: the first request for its target(s) at or after it.
+      let review: 'approved' | 'rejected' | 'withdrawn' | 'pending' | 'none' = 'none';
+      // Without a mandate the engine allows and the approval policy may still send it to a person.
+      if (r.decision !== 'deny' && r.target) {
+        const [ap] = await ctx.tx
+          .select({ status: schema.approvalRequests.status })
+          .from(schema.approvalRequests)
+          .where(
+            and(
+              inArray(schema.approvalRequests.artifactId, r.target.split(',')),
+              gte(schema.approvalRequests.createdAt, new Date(r.at.getTime() - 5_000)),
+            ),
+          )
+          .orderBy(asc(schema.approvalRequests.createdAt))
+          .limit(1);
+        if (ap) review = ap.status;
+      }
+      const wouldRun = shadow.decision === 'allow' || shadow.decision === 'hold';
+      const agreement: z.infer<typeof Agreement> =
+        review === 'none'
+          ? 'unreviewed'
+          : review === 'pending'
+            ? 'pending'
+            : review === 'approved'
+              ? wouldRun
+                ? 'agree'
+                : 'too_cautious'
+              : wouldRun
+                ? 'too_bold'
+                : 'agree';
+      const key = TALLY[agreement];
+      summary.total++;
+      summary[key]++;
+      const c = byClass[r.actionClass] ?? { total: 0, agree: 0, tooBold: 0, tooCautious: 0 };
+      byClass[r.actionClass] = c;
+      c.total++;
+      if (key === 'agree' || key === 'tooBold' || key === 'tooCautious') c[key]++;
+      actions.push({
+        id: r.id,
+        at: r.at.toISOString(),
+        command: r.command,
+        actionClass: r.actionClass,
+        target: r.target,
+        wouldHave: shadow.decision,
+        wouldHaveLevel: shadow.level ?? null,
+        decision: r.decision,
+        review,
+        agreement,
+      });
+    }
+    const reviewed = summary.agree + summary.tooBold + summary.tooCautious;
+    return { summary: { ...summary, agreementRate: reviewed ? summary.agree / reviewed : null }, byClass, actions };
+  },
+});
+
+// --- Undo (#255) --------------------------------------------------------------------------------
+
+/**
+ * Reverses one agent action in the caller's transaction (ADR-0016 §5.4), returns what happened and
+ * marks the ledger row undone. `by` names the person (or later the guardian) who did it. Exported
+ * so the guardian can roll back an agent's action the same way a person does.
+ */
+export async function undoAgentAction(tx: Tx, ctx: CommandContext, actionId: number, by: string, note?: string) {
+  const [action] = await tx.select().from(schema.agentActions).where(eq(schema.agentActions.id, actionId)).for('update');
+  if (!action) throw new AppError('not_found', `Agent action ${actionId} was not found in this workspace.`);
+  if (action.undoneAt)
+    throw new AppError(
+      'conflict',
+      `This action was already undone on ${action.undoneAt.toISOString()}${action.undoneBy ? ` by ${action.undoneBy}` : ''}. It cannot be undone twice.`,
+    );
+  if (!action.ok || action.decision === 'deny')
+    throw new AppError('conflict', `${action.command} did not happen, so there is nothing to undo.`);
+  if (action.decision === 'ask' || action.decision === 'hold')
+    throw new AppError(
+      'conflict',
+      `${action.command} waited for a person and never ran by itself, so there is nothing to undo. Use approvals.reject to withdraw it.`,
+    );
+  const undo = action.undo as AgentUndo | null;
+  if (!undo) throw new AppError('conflict', `${action.command} changed nothing that can be undone.`);
+  if (undo.kind === 'none') throw new AppError('conflict', undo.reason);
+  const steps = await runUndo({ ...ctx, tx }, undo);
+  const result = [steps.join(' '), note ? `Note: ${note}` : ''].filter(Boolean).join(' ').slice(0, 2000);
+  const undoneAt = new Date();
+  await tx.update(schema.agentActions).set({ undoneAt, undoneBy: by, undoResult: result }).where(eq(schema.agentActions.id, actionId));
+  return { actionId, undoneAt: undoneAt.toISOString(), result, steps };
+}
+
+export const undoAgent = defineCommand({
+  name: 'agents.undo',
+  title: 'Undo an agent action',
+  description:
+    'Reverse something an agent did: republish the version it replaced (or unpublish what it first published), and cancel a broadcast that has not gone out yet. Only people can undo. A message that was already sent cannot be recalled; the ledger says so, and this command explains it.',
+  input: z.object({
+    actionId: z.number().int().describe('The ledger entry, from agents.activity'),
+    note: z.string().max(1000).optional().describe('Why it is being undone, kept with the ledger entry'),
+  }),
+  output: z.object({
+    actionId: z.number().int(),
+    undoneAt: z.string(),
+    result: z.string().describe('What the undo did, in words'),
+    steps: z.array(z.string()),
+  }),
+  permission: 'artifacts:publish',
+  effect: 'publish',
+  humansOnly: true,
+  target: (i) => `agent_action:${i.actionId}`,
+  handler: async (input, ctx) => undoAgentAction(ctx.tx, ctx, input.actionId, ctx.principal.userId, input.note),
 });
 
 // --- Autonomy settings (#215) -------------------------------------------------------------------
@@ -381,6 +661,10 @@ export const agentCommands = [
   resumeAgent,
   revokeAgent,
   agentActivity,
+  agentGuardian,
+  clearGuard,
+  shadowReport,
+  undoAgent,
   getAutonomy,
   setAutonomy,
 ];

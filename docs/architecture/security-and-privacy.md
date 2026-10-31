@@ -13,7 +13,7 @@
 | Data minimization (Art. 5) | Tracking plan with allowed properties; attribute schema with PII classes; IP truncation; drop-unknown option |
 | Storage limitation | Retention per data class: ClickHouse TTL, Postgres retention jobs, profile inactivity expiry |
 | Right of access / portability (Art. 15, 20) | DSR command: export profile, identifiers, consent history, events, messages as JSON/CSV |
-| Right to erasure (Art. 17) | DSR erasure: delete profile rows, **crypto-shred** per-profile key, ClickHouse delete by identifiers, suppression-hash kept to prevent re-contact (documented exception) |
+| Right to erasure (Art. 17) | DSR erasure: delete profile rows, **crypto-shred** per-profile key, ClickHouse delete by identifiers, suppression-hash kept to prevent re-contact (documented exception); restores replay erasures recorded after the snapshot so an erased person does not come back |
 | Records of processing (Art. 30) | Purposes, sub-processors (ESPs, LLM providers), data categories configurable and exportable |
 | Security of processing (Art. 32) | Encryption at rest/in transit, RBAC, audit log, see below |
 | Automated decision-making (Art. 22) | AI decisions limited to marketing content/timing; logged with rationale; `ai_processing` purpose can be disabled per profile/workspace |
@@ -47,6 +47,8 @@ Evaluation in the send gateway: `consent` basis → needs `granted`; `legitimate
 
 **Erasure tombstones (#210).** An erasure keeps one tombstone per identifier of the person: an HMAC-SHA256 hash keyed with the workspace's matching data key, never the raw user id, e-mail address or phone number. For `ERASURE_GRACE_HOURS` (24 by default, configurable; with `0` only events from before the erasure are dropped) after the erasure, an event that names only erased identifiers and happened before that window is dropped by the resolver instead of creating a new profile, so events already on the bus, SDK retries, offline queues or late provider webhooks cannot recreate the person. After the window, new activity is treated as a new person, and the hourly retention job deletes tombstones once the window plus seven days has passed.
 
+**Erasure-safe restores (#144).** Crypto-shredding cannot scrub a backup taken before the erasure: that snapshot still holds the profile key and the encrypted personal data. `am restore` therefore reads the `erasures` and `erasure_tombstones` rows from the live database before replacing it and replays them after the Postgres load. For each erasure it deletes the profiles and identifiers again (with profile keys, consent records, messages, journey participations and segment memberships), restores the e-mail and phone suppression hashes, and re-inserts the erasure row and its keyed tombstones. Replay is idempotent and tolerates profiles the snapshot no longer has. `BACKUP_KEEP_DAYS` (14 by default) is the documented maximum age of a restore point, and therefore the window in which a snapshot can predate an erasure; a remote lifecycle must not outlive it. A restore whose erasure log cannot be read stops rather than proceed. `--clickhouse` reloads event rows as exported; the per-profile key is still destroyed by the replay, so sealed personal data stays unreadable, but a DSR that must remove event rows needs a ClickHouse snapshot taken after the erasure.
+
 ## 4. Identity, authentication & authorization
 
 - **Auth:** Better Auth (MIT) — email/password + passkeys + TOTP MFA in v1; organizations/workspaces; OIDC/SAML SSO and SCIM in a later phase.
@@ -75,7 +77,7 @@ The egress guard normalises the IPv6 forms that embed an IPv4 address (IPv4-mapp
 
 ## 6. Operational security
 
-- Backups: Postgres (pgBackRest or WAL-G) + ClickHouse (clickhouse-backup) encrypted; restore drill documented; crypto-shredding makes erasure effective in backups.
+- Backups: Postgres (pgBackRest or WAL-G) + ClickHouse (clickhouse-backup) encrypted; restore drill documented; crypto-shredding makes erasure effective in backups. Restores replay erasures recorded after the snapshot, and `BACKUP_KEEP_DAYS` bounds how far back a restore point can be.
 - Security headers, CSRF protection for cookie sessions, session revocation.
 - Vulnerability disclosure policy (`SECURITY.md`) from the first public release.
 - Target compliance frameworks for a future SaaS: SOC 2 / ISO 27001 — the audit log, RBAC, encryption and change management (artifact approvals) are designed to support them.

@@ -1,5 +1,6 @@
 import type { ActionClass, CommandContext, Impact } from '@agentic-marketing/commands';
-import type { Tx } from '@agentic-marketing/db';
+import { schema, type Tx } from '@agentic-marketing/db';
+import { and, eq, isNotNull, sql } from 'drizzle-orm';
 
 // What publishing an artifact changes in the world (ADR-0016, design §3.2 and §4.2), for the
 // policy engine. The class follows the artifact type; packages that know an artifact's reach
@@ -50,6 +51,7 @@ export async function publishImpact(
     if (estimate?.summary) summaries.push(estimate.summary);
     for (const k of ['segments', 'purposes', 'topics', 'channels'] as const) touches[k].push(...(estimate?.touches?.[k] ?? []));
   }
+  const learning = await learningOf(ctx.tx, members);
   const needsPerson = members.some((m) => NEEDS_PERSON.includes(m.type))
     ? 'Consent, purposes, delivery caps and tracking settings always need a person, whatever the mandate.'
     : undefined;
@@ -60,7 +62,71 @@ export async function publishImpact(
     ...(summaries.length ? { summary: summaries.join('; ') } : {}),
     touches,
     ...(needsPerson ? { needsPerson } : {}),
+    ...(learning.length ? { learning } : {}),
   };
+}
+
+const MEASURED = ['journey', 'broadcast', 'experience'];
+
+/** The content fields the learning rules read, from journeys, broadcasts, experiences and campaigns. */
+interface HoldoutFields {
+  controlGroup?: { percent?: number };
+  subjectTest?: unknown;
+  holdoutPercent?: number;
+  members?: { artifactId: string }[];
+}
+
+/**
+ * The holdouts of the journeys, broadcasts and experiences being published (#257): a journey's own
+ * control group or its campaign's, a broadcast's campaign control group or subject test, an
+ * experience's holdout. A member published together with its campaign counts the bundled campaign.
+ */
+async function learningOf(tx: Tx, members: { id: string; type: string; version: number }[]): Promise<NonNullable<Impact['learning']>> {
+  const measured = members.filter((m) => MEASURED.includes(m.type));
+  if (!measured.length) return [];
+  const contentOf = async (m: { id: string; version: number }) => {
+    const [v] = await tx
+      .select({ content: schema.artifactVersions.content })
+      .from(schema.artifactVersions)
+      .where(and(eq(schema.artifactVersions.artifactId, m.id), eq(schema.artifactVersions.number, m.version)));
+    return (v?.content ?? {}) as HoldoutFields;
+  };
+  // Campaign control groups: published campaigns, and campaigns in this same bundle.
+  const campaignControl = new Map<string, number>();
+  const ids = measured.map((m) => m.id);
+  const published = await tx
+    .select({ content: schema.artifactVersions.content })
+    .from(schema.artifacts)
+    .innerJoin(
+      schema.artifactVersions,
+      and(
+        eq(schema.artifactVersions.workspaceId, schema.artifacts.workspaceId),
+        eq(schema.artifactVersions.artifactId, schema.artifacts.id),
+        eq(schema.artifactVersions.number, schema.artifacts.publishedVersion),
+      ),
+    )
+    .where(
+      and(
+        eq(schema.artifacts.type, 'campaign'),
+        eq(schema.artifacts.archived, false),
+        isNotNull(schema.artifacts.publishedVersion),
+        sql`${schema.artifactVersions.content} ? 'controlGroup'`,
+      ),
+    );
+  const bundled = await Promise.all(members.filter((m) => m.type === 'campaign').map(contentOf));
+  for (const c of [...published.map((p) => p.content as HoldoutFields), ...bundled])
+    for (const m of c.members ?? [])
+      if (ids.includes(m.artifactId) && c.controlGroup?.percent)
+        campaignControl.set(m.artifactId, Math.max(campaignControl.get(m.artifactId) ?? 0, c.controlGroup.percent));
+  const out: NonNullable<Impact['learning']> = [];
+  for (const m of measured) {
+    const c = await contentOf(m);
+    const fromCampaign = campaignControl.get(m.id) ?? 0;
+    if (m.type === 'journey') out.push({ id: m.id, type: m.type, controlPercent: Math.max(c.controlGroup?.percent ?? 0, fromCampaign) });
+    if (m.type === 'broadcast') out.push({ id: m.id, type: m.type, controlPercent: fromCampaign, subjectTest: !!c.subjectTest });
+    if (m.type === 'experience') out.push({ id: m.id, type: m.type, controlPercent: c.holdoutPercent ?? 0 });
+  }
+  return out;
 }
 
 /** The approval note, with why the policy engine sent the change to a person. */

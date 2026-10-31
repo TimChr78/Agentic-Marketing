@@ -6,4 +6,5 @@ export * from './hostedPages';
 export * from './impact';
 export * from './mandates';
 export * from './types';
+export * from './undo';
 export * from './workspace';

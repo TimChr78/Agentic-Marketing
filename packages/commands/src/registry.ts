@@ -1,5 +1,5 @@
 import { AppError, canonicalJson, hashValue, sha256 } from '@agentic-marketing/core';
-import { type Db, schema, type Tx } from '@agentic-marketing/db';
+import { type AgentUndo, type Db, schema, type Tx } from '@agentic-marketing/db';
 import { SpanStatusCode, trace } from '@opentelemetry/api';
 import { and, desc, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
@@ -14,6 +14,7 @@ import {
   REACH_CLASSES,
 } from './policy';
 import type { Permission, Principal } from './principal';
+import { createUndoCollector, type UndoCollector } from './undo';
 import { findUnknownInputKeys, type UnknownInputKey, unknownKeyMessages } from './unknownKeys';
 
 // The command registry (ADR-0005): every capability is a command. REST, MCP and the typed UI
@@ -68,6 +69,11 @@ export interface CommandContext {
   afterCommit?: (fn: () => Promise<void>) => void;
   /** The policy engine's decision for an agent write (ADR-0016). "ask" means the change must wait for a person. */
   policy?: PolicyOutcome;
+  /**
+   * How to reverse what this handler does (ADR-0016 §5.4). Set it where the change goes live; the
+   * executor records it in the agent ledger. Only agent writes keep it.
+   */
+  undo?: UndoCollector;
 }
 
 export interface CommandDef<I extends z.ZodType = z.ZodType, O extends z.ZodType = z.ZodType, N extends string = string> {
@@ -141,6 +147,12 @@ export interface ExecutorOptions {
   strictInputs?: boolean;
   /** Called with the unknown keys a non-strict executor ignored, e.g. to log and persist them. */
   onUnknownKeys?: (command: string, unknown: UnknownInputKey[], principal: Principal) => void;
+  /**
+   * Called once after every command execution, with its outcome, so a host can count and time
+   * commands (e.g. the server's `/metrics`). Purely a callback: this package depends on no
+   * metrics library, and a throwing callback never changes the command's result.
+   */
+  onCommand?: (event: { command: string; effect: Effect; outcome: 'ok' | 'error'; durationMs: number }) => void;
 }
 
 const tracer = trace.getTracer('@agentic-marketing/commands');
@@ -219,12 +231,22 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
       const input = rawInput ?? {};
       const inputHash = hashValue(redact(input, cmd.sensitive));
       let target: string | undefined;
+      const startedAt = Date.now();
+      // Metrics or logging hooks are observers: they must never fail a command or mask its error.
+      const report = (outcome: 'ok' | 'error') => {
+        try {
+          options.onCommand?.({ command: cmd.name, effect: cmd.effect, outcome, durationMs: Date.now() - startedAt });
+        } catch {
+          // Ignored on purpose.
+        }
+      };
       const unknown = findUnknownInputKeys(cmd.input, input);
       const unknownMessages = unknownKeyMessages(cmd.name, unknown);
 
       const fail = async (err: AppError): Promise<never> => {
         // The main transaction rolled back; record the failed attempt in its own.
         await db.withWorkspace(principal.workspaceId, (tx) => appendAudit(tx, principal, opts.surface, cmd, inputHash, target, err));
+        report('error');
         span.setStatus({ code: SpanStatusCode.ERROR, message: err.code });
         span.end();
         throw err;
@@ -302,9 +324,10 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
                   return hit.response as z.output<C['output']>;
                 }
               }
+              const undo = createUndoCollector();
               const out = withInputWarnings(
                 cmd.output.parse(
-                  await cmd.handler(parsed.data, { principal, tx, services, policy, afterCommit: (fn) => committed.push(fn) }),
+                  await cmd.handler(parsed.data, { principal, tx, services, policy, undo, afterCommit: (fn) => committed.push(fn) }),
                 ),
                 unknownMessages,
               ) as z.output<C['output']>;
@@ -317,7 +340,8 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
                   response: redact(out, cmd.sensitiveOutput) as object,
                 });
               if (cmd.effect !== 'read') await appendAudit(tx, principal, opts.surface, cmd, inputHash, target);
-              if (agent && policy) await recordAgentAction(tx, agent.id, cmd, policy, opts.surface, target, null, intentOf(parsed.data));
+              if (agent && policy)
+                await recordAgentAction(tx, agent.id, cmd, policy, opts.surface, target, null, intentOf(parsed.data), undo.get());
               return out;
             },
             // Reads see one consistent snapshot; writes keep read-committed so their locks see the latest rows.
@@ -329,6 +353,7 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
         if (cmd.effect === 'read' && cmd.auditReads)
           await db.withWorkspace(principal.workspaceId, (tx) => appendAudit(tx, principal, opts.surface, cmd, inputHash, target));
         for (const fn of committed) await fn().catch((err) => span.recordException(err as Error));
+        report('ok');
         span.end();
         return result;
       } catch (err) {
@@ -350,6 +375,7 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
             )
             .catch((e) => span.recordException(e as Error));
         if (err instanceof AppError) return fail(err);
+        report('error');
         span.recordException(err as Error);
         span.setStatus({ code: SpanStatusCode.ERROR });
         span.end();
@@ -382,6 +408,7 @@ export async function agentPolicy(
   if (!agent) throw new Error('agentPolicy needs an agent principal');
   await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`agent-policy:${principal.workspaceId}:${agent.id}`}, 0))`);
   const [ws] = await tx.select({ autonomy: schema.workspaces.autonomy }).from(schema.workspaces);
+  const [row] = await tx.select({ guard: schema.agents.guard }).from(schema.agents).where(eq(schema.agents.id, agent.id));
   const mandate = req.actionClass === 'read' ? null : ((await services.activeMandate?.(tx, agent.id)) ?? null);
   const guardrailBreach =
     mandate && REACH_CLASSES.includes(req.actionClass) && services.mandateGuardrails
@@ -394,6 +421,7 @@ export async function agentPolicy(
     settings: autonomySettings(ws?.autonomy),
     counters: await agentCounters(tx, agent.id),
     approvable: req.approvable,
+    guard: row?.guard ?? null,
     ...(mandate ? { mandate: mandate.view, outsideHours: mandate.outsideHours, guardrailBreach } : {}),
   });
   if (mandate && policy.mandate?.independentCheck && (policy.decision === 'allow' || policy.decision === 'hold'))
@@ -418,6 +446,7 @@ export async function recordAgentAction(
   target: string | undefined,
   error: string | null,
   intent: string | null,
+  undo?: AgentUndo | null,
 ) {
   await tx.insert(schema.agentActions).values({
     workspaceId: sql`nullif(current_setting('app.workspace_id', true), '')::uuid`,
@@ -431,9 +460,11 @@ export async function recordAgentAction(
     error: error?.slice(0, 1000) ?? null,
     target: target ?? null,
     surface,
-    mandateId: policy.mandate?.id ?? null,
-    mandateVersion: policy.mandate?.version ?? null,
+    mandateId: policy.mandate?.id ?? policy.shadow?.mandateId ?? null,
+    mandateVersion: policy.mandate?.version ?? policy.shadow?.mandateVersion ?? null,
+    shadow: policy.shadow ?? null,
     intent: intent?.slice(0, 2000) ?? null,
+    undo: undo ?? null,
   });
 }
 

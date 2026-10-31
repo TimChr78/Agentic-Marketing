@@ -258,6 +258,9 @@ export async function startTestServer(name: string, port: number, env: Record<st
       alertTickMs: 86_400_000,
       // Agent notification tests drive the job directly with a fixed clock; keep the loop away.
       agentNotifyTickMs: 86_400_000,
+      // Hosted agent tests drive the sweep directly with a fixed clock too.
+      hostedAgentTickMs: 86_400_000,
+      guardianTickMs: 86_400_000,
       holdTickMs: 300,
     }),
   ];

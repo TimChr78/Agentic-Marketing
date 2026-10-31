@@ -1051,6 +1051,42 @@ const subjectTest = z
     return m >= 60 && m <= 2_880;
   }, 'decideAfter must be between PT1H and P2D');
 
+// Staged sends (#254): a canary share first, a check after a wait, then the rest. The rates are
+// shares of the canary's sends, so they are comparable to the deliverability alerts.
+const stagedSend = z
+  .object({
+    canaryPercent: z.number().int().min(5).max(50).default(10).describe('Share of the audience that gets the canary send'),
+    wait: BroadcastDuration.default('PT2H').describe('How long the canary runs before it is checked, PT30M–PT24H'),
+    maxBounceRate: z
+      .number()
+      .min(0)
+      .max(1)
+      .default(0.05)
+      .describe('Stop the rest when the canary’s bounce rate (bounced ÷ sent) is above this share, e.g. 0.05 for 5%'),
+    maxComplaintRate: z
+      .number()
+      .min(0)
+      .max(1)
+      .default(0.003)
+      .describe('Stop the rest when the canary’s complaint rate is above this share, e.g. 0.003 for 0.3%'),
+    maxUnsubscribeRate: z
+      .number()
+      .min(0)
+      .max(1)
+      .default(0.02)
+      .describe('Stop the rest when the canary’s unsubscribe rate is above this share, e.g. 0.02 for 2%'),
+    minCanary: z
+      .number()
+      .int()
+      .min(1)
+      .default(50)
+      .describe('Below this many canary sends the rates are too small to judge and the rest goes out without a check'),
+  })
+  .refine((t) => {
+    const m = Minutes(t.wait);
+    return m >= 30 && m <= 1_440;
+  }, 'wait must be between PT30M and PT24H');
+
 const sendWindow = z.object({
   start: Clock.describe('Window opens, HH:MM in each reader’s time zone'),
   end: Clock.describe('Window closes, HH:MM in each reader’s time zone; may cross midnight'),
@@ -1063,38 +1099,52 @@ const sendWindow = z.object({
   maxDelay: BroadcastDuration.default('P1D').describe('How long a held message may wait for its window; later openings are skipped'),
 });
 
-const broadcast = z.object({
-  template: z
-    .string()
-    .regex(/^(eml|sms|psh)_[0-9a-f]{32}$/, 'An e-mail, SMS or push template id (eml_…, sms_… or psh_…)')
-    .describe(
-      'An e-mail, SMS or push template id (eml_…, sms_… or psh_…). For a newsletter, use one template per issue (copy the previous issue as a starting point): broadcasts carry no per-send data, so a shared layout cannot be filled per issue. The template must be published first, or be submitted together with the broadcast (artifacts.requestPublishBundle).',
-    ),
-  segment: z.string().regex(/^seg_[0-9a-f]{32}$/, 'A segment id (seg_…)'),
-  topic: TopicKey.optional().describe("Optional topic under the template's purpose; overrides the template's own topic when set"),
-  sendAt: isoDateTime('sendAt').optional().describe('When to start sending; default: as soon as it is published'),
-  subjectTest: subjectTest
-    .optional()
-    .describe(
-      'E-mail subject A/B test: send 2–4 subjects to a deterministic sample of the audience, then after decideAfter send the winning subject to the rest. Variant A is subjects[0]; the remainder are B, C, D. Results are in broadcasts.status and the message records its variant.',
-    ),
-  sendWindow: sendWindow
-    .optional()
-    .describe(
-      'Recipient-local send window: hold each message until start–end in the reader’s time zone (profile trait "timezone", else the workspace delivery policy’s time zone), on the listed days. A window later than sendAt + maxDelay is skipped with reason outside_send_window.',
-    ),
-  description: z.string().max(500).optional(),
-  archive: z
-    .object({
-      publish: z.boolean().default(false).describe('Publish this sent issue to the workspace archive'),
-      slug: ArchiveSlug.optional().describe('Issue address under /n/<archive slug>/; default: the subject plus the send date'),
-      summary: z.string().max(500).optional().describe('Archive index and feed summary; default: the template preheader'),
-    })
-    .optional()
-    .describe(
-      'Optional newsletter archive entry (#100): publish this issue once it has been sent. The issue is rendered from the template version that was sent, with empty personalisation, so never put a person’s data in a template. Set publish false in a later published version to remove a published issue.',
-    ),
-});
+const broadcast = z
+  .object({
+    template: z
+      .string()
+      .regex(/^(eml|sms|psh)_[0-9a-f]{32}$/, 'An e-mail, SMS or push template id (eml_…, sms_… or psh_…)')
+      .describe(
+        'An e-mail, SMS or push template id (eml_…, sms_… or psh_…). For a newsletter, use one template per issue (copy the previous issue as a starting point): broadcasts carry no per-send data, so a shared layout cannot be filled per issue. The template must be published first, or be submitted together with the broadcast (artifacts.requestPublishBundle).',
+      ),
+    segment: z.string().regex(/^seg_[0-9a-f]{32}$/, 'A segment id (seg_…)'),
+    topic: TopicKey.optional().describe("Optional topic under the template's purpose; overrides the template's own topic when set"),
+    sendAt: isoDateTime('sendAt').optional().describe('When to start sending; default: as soon as it is published'),
+    subjectTest: subjectTest
+      .optional()
+      .describe(
+        'E-mail subject A/B test: send 2–4 subjects to a deterministic sample of the audience, then after decideAfter send the winning subject to the rest. Variant A is subjects[0]; the remainder are B, C, D. Results are in broadcasts.status and the message records its variant.',
+      ),
+    stagedSend: stagedSend
+      .optional()
+      .describe(
+        'Staged send: send a deterministic canary share of the audience first, wait, then check the canary’s bounce, complaint and unsubscribe rates against the thresholds. Above a threshold the run stops and sends no one else; broadcasts.continue sends the rest after a person has looked. Not combinable with subjectTest. The stage and canary rates are in broadcasts.status.',
+      ),
+    sendWindow: sendWindow
+      .optional()
+      .describe(
+        'Recipient-local send window: hold each message until start–end in the reader’s time zone (profile trait "timezone", else the workspace delivery policy’s time zone), on the listed days. A window later than sendAt + maxDelay is skipped with reason outside_send_window.',
+      ),
+    description: z.string().max(500).optional(),
+    archive: z
+      .object({
+        publish: z.boolean().default(false).describe('Publish this sent issue to the workspace archive'),
+        slug: ArchiveSlug.optional().describe('Issue address under /n/<archive slug>/; default: the subject plus the send date'),
+        summary: z.string().max(500).optional().describe('Archive index and feed summary; default: the template preheader'),
+      })
+      .optional()
+      .describe(
+        'Optional newsletter archive entry (#100): publish this issue once it has been sent. The issue is rendered from the template version that was sent, with empty personalisation, so never put a person’s data in a template. Set publish false in a later published version to remove a published issue.',
+      ),
+  })
+  .superRefine((b, ctx) => {
+    if (b.stagedSend && b.subjectTest)
+      ctx.addIssue({
+        code: 'custom',
+        path: ['stagedSend'],
+        message: 'A staged send cannot be combined with a subject test: sample the audience one way, not both',
+      });
+  });
 
 // Campaigns (#65): a thin parent for a launch or a newsletter series. It groups existing artifacts
 // under one goal and one UTM campaign so results can be reported per campaign; it does not run
@@ -1177,6 +1227,7 @@ export const DEFAULT_DELIVERY_POLICY: DeliveryPolicy = deliveryPolicy.parse({});
 export type BroadcastDefinition = z.output<typeof broadcast>;
 export type CampaignDefinition = z.output<typeof campaign>;
 export type SubjectTestDefinition = NonNullable<BroadcastDefinition['subjectTest']>;
+export type StagedSendDefinition = NonNullable<BroadcastDefinition['stagedSend']>;
 export type SendWindowDefinition = NonNullable<BroadcastDefinition['sendWindow']>;
 export type TrackingPlan = z.output<typeof trackingPlan>;
 export type PromptDefinition = z.output<typeof prompt>;
@@ -1284,6 +1335,37 @@ const agentMandate = z.object({
     .default({ userIds: [] })
     .describe('Who besides the sponsor is told about holds, refusals and guardrail hits'),
   independentCheck: z.boolean().default(false).describe('A second model checks intent, diff and mandate before level-2+ actions'),
+  learning: z
+    .object({
+      journeyControlPercent: z
+        .number()
+        .int()
+        .min(1)
+        .max(50)
+        .optional()
+        .describe('Journeys it publishes need controlGroup.percent of at least this'),
+      broadcastHoldout: z
+        .boolean()
+        .optional()
+        .describe('Broadcasts it publishes need a holdout (a campaign control group) or a subject test'),
+      experienceHoldoutPercent: z
+        .number()
+        .int()
+        .min(1)
+        .max(50)
+        .optional()
+        .describe('Experiences it publishes need holdoutPercent of at least this'),
+    })
+    .default({})
+    .describe(
+      'Learning rules: what the agent publishes must stay measurable. A change without the holdout goes to a person with the reason',
+    ),
+  shadow: z
+    .union([z.boolean(), z.array(z.enum(MANDATE_CLASSES)).max(MANDATE_CLASSES.length)])
+    .default(false)
+    .describe(
+      'Shadow mode: true, or a list of action classes. Their levels are only recorded (what the agent would have done, see agents.shadowReport); a person decides as without a mandate. Levels in shadow may exceed the workspace ceiling.',
+    ),
 });
 export type AgentMandate = z.output<typeof agentMandate>;
 

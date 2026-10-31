@@ -95,6 +95,8 @@ export async function activeMandate(tx: Tx, agentId: string, now = new Date()): 
         independentCheck: m.independentCheck,
         guardrails: m.guardrails,
         purpose: m.purpose,
+        learning: m.learning,
+        shadow: m.shadow as MandateView['shadow'],
       },
     };
   }
@@ -112,6 +114,11 @@ publishValidators.set('agent_mandate', async (content, tx: Tx, artifact) => {
   const [w] = await tx.select({ autonomy: schema.workspaces.autonomy }).from(schema.workspaces);
   const settings = autonomySettings(w?.autonomy);
   for (const [cls, level] of Object.entries(m.levels)) {
+    // A class in shadow only records what the agent would do, so it may be above the ceiling (#256).
+    if (m.shadow === true || (Array.isArray(m.shadow) && m.shadow.includes(cls as (typeof m.shadow)[number]))) {
+      if (level === 4) problems.push(`levels.${cls} is 4 (run the loop), which arrives in a later release`);
+      continue;
+    }
     const ceiling = settings.maxLevel[cls as ActionClass] ?? 1;
     if ((level ?? 0) > ceiling)
       problems.push(`levels.${cls} is ${level}, above the workspace ceiling of ${ceiling} (raise it in Settings → Agents first)`);

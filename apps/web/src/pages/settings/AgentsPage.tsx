@@ -1,16 +1,18 @@
-import { Bot } from 'lucide-react';
+import { Bot, Plus } from 'lucide-react';
+import { useState } from 'react';
 import { api } from '../../app/api';
 import { ButtonLink } from '../../app/links';
 import { useCrumbs } from '../../app/page';
-import { Link } from '../../app/router';
+import { Link, navigate } from '../../app/router';
 import { useWorkspace } from '../../app/session';
 import { useApi } from '../../app/useApi';
 import { AgentControls } from '../../features/agents/AgentControls';
 import { AgentStatusPill } from '../../features/agents/AgentStatus';
 import { AutonomyCard } from '../../features/agents/AutonomyCard';
 import { useAutonomy } from '../../features/agents/AutonomyProvider';
+import { HostedAgentDialog } from '../../features/agents/HostedAgentDialog';
 import { type Agent, credentialKinds } from '../../features/agents/labels';
-import { Alert, Card, EmptyState, LoadingBlock, PageHeader, Table, TableFrame, Td, THead, Th, Tr, useToast } from '../../ui';
+import { Alert, Button, Card, EmptyState, LoadingBlock, PageHeader, Table, TableFrame, Td, THead, Th, Tr, useToast } from '../../ui';
 import { pageWidth } from '../../ui/layout';
 
 /** Settings → Agents (#213, #215): who acts for this workspace, how to stop them, and the ceilings. */
@@ -20,6 +22,7 @@ export default function AgentsPage() {
   const toast = useToast();
   const agents = useApi(() => api.call('agents.list', {}), []);
   const autonomy = useAutonomy();
+  const [creating, setCreating] = useState(false);
   const rows = agents.data?.agents ?? [];
   const admin = can('workspace:admin');
 
@@ -27,8 +30,25 @@ export default function AgentsPage() {
     <div className={pageWidth('default', 'space-y-5')}>
       <PageHeader
         title="Agents"
-        description="Every API token and connected MCP client acts as an agent, with a person accountable for it. Pause or revoke one to stop it at once; its sponsor and its history stay."
+        description="Every API token, connected MCP client and hosted run acts as an agent, with a person accountable for it. Pause or revoke one to stop it at once; its sponsor and its history stay."
+        actions={
+          admin && (
+            <Button variant="primary" icon={<Plus size={14} />} onClick={() => setCreating(true)}>
+              New hosted agent
+            </Button>
+          )
+        }
       />
+
+      {creating && (
+        <HostedAgentDialog
+          onClose={() => setCreating(false)}
+          onSaved={(agentId) => {
+            void agents.reload();
+            navigate(`/settings/agents/${agentId}`);
+          }}
+        />
+      )}
 
       <TableFrame
         loading={agents.loading}
@@ -46,8 +66,8 @@ export default function AgentsPage() {
               </ButtonLink>
             }
           >
-            An agent appears the first time a token or MCP client acts in this workspace. Create a token for an agent such as Hermes, or
-            connect one over MCP.
+            An agent appears the first time a token or MCP client acts in this workspace. Create a token for an agent such as Hermes,
+            connect one over MCP, or let the platform run one for you with New hosted agent.
           </EmptyState>
         }
       >

@@ -9,6 +9,21 @@ export type AgentStatus = Agent['status'];
 export type AgentAction = Out<'agents.activity'>['actions'][number];
 export type AgentDecision = AgentAction['decision'];
 export type Autonomy = Out<'workspace.autonomy'>;
+/** A hosted agent (#258); null from agents.hostedRuns for an agent the platform does not run. */
+export type HostedAgentView = NonNullable<Out<'agents.hostedRuns'>['hosted']>;
+export type HostedAgentRun = Out<'agents.hostedRuns'>['runs'][number];
+
+/** The permissions the hosted agent editor offers, in the words people use. */
+export const HOSTED_SCOPES = [
+  { key: 'artifacts:read', label: 'Read artifacts and analytics' },
+  { key: 'artifacts:write', label: 'Draft and edit artifacts' },
+  { key: 'artifacts:publish', label: 'Submit changes for publishing' },
+  { key: 'messages:send', label: 'Send messages' },
+  { key: 'audit:read', label: 'Read the audit log' },
+  { key: 'profiles:read', label: 'Read profiles' },
+  { key: 'secrets:read', label: 'Use stored secrets' },
+] as const;
+export type HostedScope = (typeof HOSTED_SCOPES)[number]['key'];
 
 export const AGENT_STATUS: Record<AgentStatus, { label: string; tone: Tone }> = {
   active: { label: 'Active', tone: 'good' },
@@ -29,6 +44,7 @@ export const decisionBadge = (decision: AgentDecision) => DECISION[decision];
 export const CREDENTIAL_KIND: Record<Agent['credentials'][number]['kind'], string> = {
   api_token: 'API token',
   oauth_client: 'MCP client',
+  hosted: 'Hosted run',
 };
 
 /** Kinds with counts: "1 API token, 2 MCP clients". Empty when the agent has no credential (unlikely). */

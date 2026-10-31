@@ -23,12 +23,22 @@ interface SendWindow {
   maxDelay?: string;
 }
 
+interface StagedSend {
+  canaryPercent: number;
+  wait: string;
+  maxBounceRate: number;
+  maxComplaintRate: number;
+  maxUnsubscribeRate: number;
+  minCanary: number;
+}
+
 interface Broadcast {
   template?: string;
   topic?: string;
   segment?: string;
   sendAt?: string;
   subjectTest?: SubjectTest;
+  stagedSend?: StagedSend;
   sendWindow?: SendWindow;
   description?: string;
   archive?: { publish?: boolean; slug?: string; summary?: string };
@@ -46,6 +56,14 @@ const DAYS: { key: Weekday; label: string }[] = [
 
 const DEFAULT_WINDOW: SendWindow = { start: '09:00', end: '17:00', maxDelay: 'P1D' };
 const DEFAULT_TEST: SubjectTest = { subjects: ['', ''], samplePercent: 20, metric: 'click', decideAfter: 'PT4H' };
+const DEFAULT_STAGED: StagedSend = {
+  canaryPercent: 10,
+  wait: 'PT2H',
+  maxBounceRate: 0.05,
+  maxComplaintRate: 0.003,
+  maxUnsubscribeRate: 0.02,
+  minCanary: 50,
+};
 
 /** A broadcast: which template, to which segment, when and in whose local time, and an optional subject test. */
 export function BroadcastEditor({ content, onChange, readOnly, errors }: EditorProps<Broadcast>) {
@@ -59,6 +77,8 @@ export function BroadcastEditor({ content, onChange, readOnly, errors }: EditorP
   const topics = topicsOf(purposes.data?.purposes ?? [], purpose);
   const test = content.subjectTest;
   const setTest = (p: Partial<SubjectTest>) => set({ subjectTest: { ...(test ?? DEFAULT_TEST), ...p } });
+  const staged = content.stagedSend;
+  const setStaged = (p: Partial<StagedSend>) => set({ stagedSend: { ...(staged ?? DEFAULT_STAGED), ...p } });
   const window = content.sendWindow;
   const setWindow = (p: Partial<SendWindow>) => set({ sendWindow: { ...(window ?? DEFAULT_WINDOW), ...p } });
   const toggleDay = (day: Weekday) => {
@@ -224,9 +244,10 @@ export function BroadcastEditor({ content, onChange, readOnly, errors }: EditorP
           label="Test subject lines on a sample"
           hint="Send each subject to part of the audience, then the winner to everyone else. The message records its variant for reporting."
           checked={!!test}
-          disabled={readOnly || !content.template?.startsWith('eml_')}
+          disabled={readOnly || !content.template?.startsWith('eml_') || !!staged}
           onChange={(e) => set({ subjectTest: e.target.checked ? DEFAULT_TEST : undefined })}
         />
+        {staged && !test && <p className="text-[12px] text-muted">Not available with a staged send: sample the audience one way.</p>}
         {!content.template?.startsWith('eml_') && content.template && (
           <p className="text-[12px] text-muted">Subject tests are for e-mail broadcasts only.</p>
         )}
@@ -292,6 +313,87 @@ export function BroadcastEditor({ content, onChange, readOnly, errors }: EditorP
                 />
               </Field>
             </div>
+          </div>
+        )}
+      </FieldGroup>
+
+      <FieldGroup
+        legend="Staged send"
+        hint="Send a canary share first, wait, then check the canary’s deliverability before the rest goes out. A person has to send the rest after a stop."
+      >
+        <Checkbox
+          label="Send a canary share first"
+          hint="The canary is a deterministic share of the audience. Its bounce, complaint and unsubscribe rates decide whether the rest goes out."
+          checked={!!staged}
+          disabled={readOnly || !!test}
+          onChange={(e) => set({ stagedSend: e.target.checked ? DEFAULT_STAGED : undefined })}
+        />
+        {test && !staged && <p className="text-[12px] text-muted">Not available with a subject test: sample the audience one way.</p>}
+        {staged && (
+          <div className="space-y-4 rounded-md border border-line p-4">
+            <div className="grid gap-3 sm:grid-cols-2">
+              <Field label="Canary share" unit="%" error={errors['stagedSend.canaryPercent']} hint="5–50% of the audience.">
+                <Input
+                  type="number"
+                  min={5}
+                  max={50}
+                  value={staged.canaryPercent}
+                  onChange={(e) => setStaged({ canaryPercent: Number(e.target.value) })}
+                  readOnly={readOnly}
+                />
+              </Field>
+              <Field label="Wait" error={errors['stagedSend.wait']} hint="ISO duration, PT30M–PT24H, e.g. PT2H.">
+                <Input value={staged.wait} onChange={(e) => setStaged({ wait: e.target.value })} readOnly={readOnly} placeholder="PT2H" />
+              </Field>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-3">
+              <Field label="Max bounce" unit="%" error={errors['stagedSend.maxBounceRate']} hint="Stop above this share.">
+                <Input
+                  type="number"
+                  min={0}
+                  max={100}
+                  step={0.1}
+                  value={Math.round(staged.maxBounceRate * 10_000) / 100}
+                  onChange={(e) => setStaged({ maxBounceRate: Number(e.target.value) / 100 })}
+                  readOnly={readOnly}
+                />
+              </Field>
+              <Field label="Max complaints" unit="%" error={errors['stagedSend.maxComplaintRate']} hint="Stop above this share.">
+                <Input
+                  type="number"
+                  min={0}
+                  max={100}
+                  step={0.01}
+                  value={Math.round(staged.maxComplaintRate * 10_000) / 100}
+                  onChange={(e) => setStaged({ maxComplaintRate: Number(e.target.value) / 100 })}
+                  readOnly={readOnly}
+                />
+              </Field>
+              <Field label="Max unsubscribes" unit="%" error={errors['stagedSend.maxUnsubscribeRate']} hint="Stop above this share.">
+                <Input
+                  type="number"
+                  min={0}
+                  max={100}
+                  step={0.1}
+                  value={Math.round(staged.maxUnsubscribeRate * 10_000) / 100}
+                  onChange={(e) => setStaged({ maxUnsubscribeRate: Number(e.target.value) / 100 })}
+                  readOnly={readOnly}
+                />
+              </Field>
+            </div>
+            <Field
+              label="Smallest canary to judge"
+              error={errors['stagedSend.minCanary']}
+              hint="Below this many canary sends the rates are too small to judge and the rest goes out without a check."
+            >
+              <Input
+                type="number"
+                min={1}
+                value={staged.minCanary}
+                onChange={(e) => setStaged({ minCanary: Number(e.target.value) })}
+                readOnly={readOnly}
+              />
+            </Field>
           </div>
         )}
       </FieldGroup>
