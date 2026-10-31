@@ -11,6 +11,7 @@ import { runProfileWorkers } from '@agentic-marketing/profiles';
 import { runSegmentScheduler, segmentHook } from '@agentic-marketing/segments';
 import { logger } from '@agentic-marketing/telemetry';
 import { runWarehouseExports } from '@agentic-marketing/warehouse';
+import { runAgentEvents } from './agents/events';
 import { runGuardian } from './agents/guardian';
 import { runHolds } from './agents/holds';
 import { runHostedAgents } from './agents/hosted';
@@ -30,12 +31,13 @@ export function startScheduler(
     alertTickMs?: number;
     holdTickMs?: number;
     agentNotifyTickMs?: number;
+    agentEventTickMs?: number;
     hostedAgentTickMs?: number;
     guardianTickMs?: number;
   } = {},
 ): Promise<void>[] {
   logger.info(
-    'scheduler role: segment recomputation, broadcasts, retention, OAuth token refresh, audience sync, ad spend import, warehouse exports, edge sync, threshold alerts, held agent changes, agent notifications, hosted agents',
+    'scheduler role: segment recomputation, broadcasts, retention, OAuth token refresh, audience sync, ad spend import, warehouse exports, edge sync, threshold alerts, held agent changes, agent notifications, agent events, hosted agents',
   );
   return [
     runSegmentScheduler(
@@ -89,6 +91,7 @@ export function startScheduler(
       signal,
       { tickMs: opts.agentNotifyTickMs },
     ),
+    runAgentEvents({ db: srv.db }, signal, { tickMs: opts.agentEventTickMs }),
     runHostedAgents(
       {
         db: srv.db,

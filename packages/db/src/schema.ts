@@ -10,6 +10,7 @@ import {
   primaryKey,
   text,
   timestamp,
+  uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
 
@@ -1375,4 +1376,64 @@ export const learnings = pgTable(
     createdAt: ts('created_at').notNull().defaultNow(),
   },
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
+export type AgentEventType =
+  | 'hold.ran'
+  | 'hold.vetoed'
+  | 'hold.needs_person'
+  | 'approval.decided'
+  | 'guardian.episode'
+  | 'guardrail.breach'
+  | 'experiment.significant'
+  | 'alert.fired';
+
+/**
+ * An agent's event subscription (#312): which event types it wants, an optional filter on the
+ * event's subject ids, and an optional outbound webhook to deliver them to. Without a webhook the
+ * events are recorded for `agents.events`, the polling fallback.
+ */
+export const agentSubscriptions = pgTable(
+  'agent_subscriptions',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    agentId: text('agent_id').notNull(),
+    eventTypes: text('event_types').array().$type<AgentEventType[]>().notNull(),
+    filter: jsonb('filter').$type<Record<string, string | string[]>>().notNull().default({}),
+    webhookId: text('webhook_id'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
+/** How far each event source has been read for agent subscriptions (#312). */
+export const agentEventCursor = pgTable('agent_event_cursor', {
+  workspaceId: uuid('workspace_id').primaryKey(),
+  lastActionId: bigint('last_action_id', { mode: 'number' }).notNull().default(0),
+  lastApprovalAt: ts('last_approval_at'),
+  lastGuardianAt: ts('last_guardian_at'),
+  lastAlertAt: ts('last_alert_at'),
+  lastExperimentAt: ts('last_experiment_at'),
+});
+
+/** One delivered event per subscription: what `agents.events` pages through and what keeps a re-derived event silent. */
+export const agentEvents = pgTable(
+  'agent_events',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: bigserial('id', { mode: 'number' }).notNull(),
+    agentId: text('agent_id').notNull(),
+    subscriptionId: text('subscription_id').notNull(),
+    type: text('type').$type<AgentEventType>().notNull(),
+    eventKey: text('event_key').notNull(),
+    summary: text('summary').notNull(),
+    subject: jsonb('subject').$type<Record<string, unknown>>().notNull().default({}),
+    at: ts('at').notNull(),
+    createdAt: ts('created_at').notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.id] }),
+    uniqueIndex('agent_events_subscription_key').on(t.workspaceId, t.subscriptionId, t.eventKey),
+  ],
 );

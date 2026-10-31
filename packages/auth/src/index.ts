@@ -126,6 +126,7 @@ export async function principalFromAccessToken(db: Db, claims: JWTPayload): Prom
   const agent = await agentForCredential(db, m.workspace_id, 'oauth_client', clientId, claims.sub, () => oauthClientName(db, clientId));
   return { ...agentPrincipal(claims.sub, clientId, m.workspace_id, m.role, scopes), agent };
 }
+export * from './agentEvents';
 export * from './agents';
 export * from './hostedAgents';
 export * from './hostedSchedule';
