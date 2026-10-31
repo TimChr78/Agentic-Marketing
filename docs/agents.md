@@ -487,14 +487,16 @@ Reads and reports; it can draft a note or a suggested change but publishes nothi
 }
 ```
 
-### Campaign drafter
+### Campaign agent
 
-Builds campaign bundles — a segment, a template, a broadcast or journey and a campaign — and proposes them: every publishing class is level 1, so each publish is a person's decision. Spend, data writes, settings and destructive actions are level 0.
+A programme (#64): the agent turns a goal into a typed `campaign_brief`, a person approves the published brief, and the agent builds the draft bundle (segment if needed, templates, broadcasts or a journey, campaign and holdout) with `campaigns.plan` and `campaigns.fromBrief`. It proposes; every publishing class is level 1, so each publish is a person's decision. Spend, data writes, settings and destructive actions are level 0.
+
+The loop: goal → brief → approval → plan → drafts → bundle → evaluate → learn. The brief is the contract; an agent may draft and edit it, but only a person publishes it. `campaigns.plan` is deterministic and writes nothing: it maps the brief to artifact skeletons and says in `notes` where a deterministic mapping is not meaningful. `campaigns.fromBrief` creates the drafts with resolved references and never publishes. Read the result with `campaigns.holdoutResult` or `analytics.campaignSummary`, then record what it taught with `learnings.add`.
 
 ```json
 {
   "agent": "agt_c0ffee1234567890abcdef1234567890",
-  "purpose": "Turn a brief into a campaign bundle (audience, content, broadcast or journey, campaign and holdout) and propose it.",
+  "purpose": "Turn a goal into an approved campaign brief, build the draft campaign bundle (audience, content, broadcast or journey, campaign and holdout), and evaluate it against the goal.",
   "goals": [
     { "measure": "campaign.conversion_rate", "target": 2, "direction": "up" }
   ],
@@ -503,7 +505,7 @@ Builds campaign bundles — a segment, a template, a broadcast or journey and a 
     "purposes": ["marketing_email"],
     "topics": [],
     "channels": ["email"],
-    "artifactTypes": ["email_template", "segment", "broadcast", "journey", "campaign"],
+    "artifactTypes": ["campaign_brief", "email_template", "sms_template", "push_template", "segment", "broadcast", "journey", "campaign"],
     "artifacts": [],
     "brand": null
   },
@@ -530,4 +532,4 @@ Builds campaign bundles — a segment, a template, a broadcast or journey and a 
 }
 ```
 
-Republish a template with a person's approval, not with the campaign drafter: at level 1 every `artifacts.requestPublish` it makes is a proposal, and `artifacts.requestPublishBundle` keeps a bundle under one review.
+Republish a template with a person's approval, not with the campaign agent: at level 1 every `artifacts.requestPublish` it makes is a proposal, and `artifacts.requestPublishBundle` keeps a bundle under one review. The recipe is in the MCP skill (`references/recipes.md`).

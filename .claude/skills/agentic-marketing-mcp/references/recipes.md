@@ -116,6 +116,36 @@ Nothing is deleted by an import. In git, `scripts/am-config.mjs pull|push` does 
 4. Read the result after sending: `campaigns.holdoutResult {"campaignId":"cmp_…"}` returns control and treatment `entered`, `converted`, `conversionRate`, `revenue`, `absoluteLift`, `relativeLift`, `ci95`, `minSampleSizeMet` and a `verdict`. Report `not_enough_data` as such, never as "no effect".
 5. `campaigns.archive {"campaignId":"cmp_…"}` stops treating it as live without changing its members; it no longer answers `campaigns.of` or supplies its shared UTM campaign.
 
+## Campaign agent: goal to approved brief to draft bundle
+
+The campaign programme (#64): an agent turns a goal into a typed brief, a person approves it, and the agent builds the draft bundle. It never publishes the brief itself and never publishes the campaign; a person decides both.
+
+1. **Know the borders and the ground.** `agents.get {}`, `workspace.autonomy {}`, `learnings.list {}` and the `business-context://current` resource. Check the segment you intend to use: `segments.preview {"artifactId":"seg_…"}`.
+2. **Draft the brief** as a versioned `campaign_brief` artifact. Every field is typed, and `assumptions`/`warnings` are where gaps go; do not invent a voucher, a segment count or an offer.
+   ```json
+   artifacts.create {"type":"campaign_brief","name":"Win-back November","content":{
+     "objective":"Win back one-time buyers who stopped opening the newsletter",
+     "goal":{"measure":"campaign.conversion_rate","kind":"conversion","event":"Order Completed","target":2,"direction":"up","attributionDays":14},
+     "audience":{"description":"One-time buyers from the last 12 months who allow marketing e-mail","segmentIds":["seg_…"]},
+     "message":{"key":"Your next order is 15% off","tone":"warm","language":"en"},
+     "offer":{"description":"15% off the next order","source":"voucher pool vip-2026"},
+     "channels":[{"channel":"email"}],
+     "schedule":{"mode":"once","sendAt":"2026-11-20T09:00:00Z"},
+     "guardrails":{"unsubscribeRate":0.005},
+     "successCriteria":["2% of the treatment arm orders within 14 days"],
+     "holdout":{"percent":10,"minSampleSize":200},
+     "assumptions":["The audience allows marketing e-mail"]}}
+   ```
+   The brief is refused at approval if it names an unpublished segment, a one-off send in the past, or a holdout without `goal.event`.
+3. **Submit it for approval.** `artifacts.requestPublish {"artifactId":"cpb_…","note":"Win-back brief: 10% holdout, 2% conversion goal"}` → `in_review`. Only a person can approve; the agent cannot approve its own brief. If a required input is missing or ambiguous, ask a small number of clarifying questions or put the assumption in the brief instead of guessing.
+4. **Plan from the approved version.** `campaigns.plan {"briefId":"cpb_…"}` reads the *published* brief and returns `drafts` (segment if needed, one template per channel, a broadcast per channel or a journey, and the campaign with the holdout), `goal`, `holdout`, `notes` and `warnings`. It writes nothing. Where a deterministic mapping is not meaningful — the offer, guardrails, tone, the final copy — `notes` says so.
+5. **Build the drafts.** `campaigns.fromBrief {"briefId":"cpb_…"}` creates every draft with references resolved (templates before the broadcast/journey, everything before the campaign) and returns the ids. It refuses an unapproved brief and never publishes. Fill the copy with `artifacts.updateDraft`; check `broadcasts.preview`, `journeys.simulate` and `campaigns.members`.
+6. **Submit the bundle.** `artifacts.requestPublishBundle {"artifactIds":["eml_…","bct_…","cmp_…"],"note":"Win-back campaign: template, broadcast, campaign with 10% holdout"}` → `published`, `on_hold` (do not resubmit) or `in_review`. A person reviews the whole bundle in one step; approving publishes in dependency order.
+7. **Evaluate against the goal.** `campaigns.holdoutResult {"campaignId":"cmp_…"}` gives control and treatment entered/converted, lift, its 95% interval and a verdict; `analytics.campaignSummary {"campaignId":"cmp_…"}` adds the per-member funnel. Report `not_enough_data` as such, never as "no effect".
+8. **Learn.** When the result teaches something durable, `learnings.add {"statement":"Win-back with a 15% offer lifts repeat orders here","scope":{"channel":"email"},"evidence":[{"kind":"campaign_holdout","id":"cmp_…","summary":"+0.8 pts conversion","numbers":{"lift":0.008,"n":2410}}]}`.
+
+A brief may name several segments (the plan combines them with `all`) or none (the plan creates a consent-based segment and warns that the wording must be resolved). A one-off campaign becomes one broadcast per channel at `sendAt`; a journey schedule becomes a journey with the brief's wait between channel steps.
+
 ## Weekly issue from reusable blocks
 
 1. Draft the repeated part as an e-mail block (an MJML fragment with typed parameters):
