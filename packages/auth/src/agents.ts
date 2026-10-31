@@ -10,7 +10,7 @@ import {
 } from '@agentic-marketing/commands';
 import { AppError, newId } from '@agentic-marketing/core';
 import { type AgentCredentialKind, type AgentStatus, type AgentUndo, type Db, schema, type Tx } from '@agentic-marketing/db';
-import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lt, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, isNotNull, isNull, lt, sql } from 'drizzle-orm';
 import { z } from 'zod';
 
 // Agents as first-class principals (ADR-0016, #213). An API token or an OAuth client acts as an
@@ -502,19 +502,13 @@ export const shadowReport = defineCommand({
       const shadow = r.shadow!;
       // The approval this action created: the first request for its target(s) at or after it.
       let review: 'approved' | 'rejected' | 'withdrawn' | 'pending' | 'none' = 'none';
-      // Without a mandate the engine allows and the approval policy may still send it to a person.
-      if (r.decision !== 'deny' && r.target) {
+      // The approval the action itself created, recorded with it (#286); none means nobody reviewed it.
+      const approvalId = typeof r.impact?.approvalId === 'string' ? r.impact.approvalId : null;
+      if (approvalId) {
         const [ap] = await ctx.tx
           .select({ status: schema.approvalRequests.status })
           .from(schema.approvalRequests)
-          .where(
-            and(
-              inArray(schema.approvalRequests.artifactId, r.target.split(',')),
-              gte(schema.approvalRequests.createdAt, new Date(r.at.getTime() - 5_000)),
-            ),
-          )
-          .orderBy(asc(schema.approvalRequests.createdAt))
-          .limit(1);
+          .where(eq(schema.approvalRequests.id, approvalId));
         if (ap) review = ap.status;
       }
       const wouldRun = shadow.decision === 'allow' || shadow.decision === 'hold';

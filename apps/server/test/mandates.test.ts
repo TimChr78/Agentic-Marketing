@@ -1,4 +1,6 @@
 import { clearAnalyticsCache } from '@agentic-marketing/analytics';
+import { getAgent } from '@agentic-marketing/auth';
+import { agentPrincipal } from '@agentic-marketing/commands';
 import { newId } from '@agentic-marketing/core';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { runHoldsOnce } from '../src/agents/holds';
@@ -458,5 +460,59 @@ describe('audit fixes (#260, #262, #263, #267, #268)', () => {
     const out = await a.as('config.import', { bundle, dryRun: false, publish: true, note: 'Import' });
     expect(out.status).toBe(200);
     expect(out.body.changes[0]).toMatchObject({ id, publish: 'published' });
+  });
+
+  it('a paused agent is stopped at its next command, even with a principal resolved before (#275)', async () => {
+    const a = await freshAgent({ scope: scope(), levels: { 'content.publish': 3 } });
+    // A principal resolved while the agent was active, as a hosted run holds for its whole run.
+    const stale = {
+      ...agentPrincipal(owner.id, 'hosted:stale', ws, 'owner', ['artifacts:read', 'artifacts:write']),
+      agent: { id: a.id, name: 'Stale', status: 'active' as const, statusReason: null },
+    };
+    expect(await t.srv.executor.execute(getAgent, { id: a.id }, stale, { surface: 'mcp' })).toMatchObject({ id: a.id });
+    await t.api(owner).call('agents.pause', { id: a.id, reason: 'Stop now' });
+    await expect(t.srv.executor.execute(getAgent, { id: a.id }, stale, { surface: 'mcp' })).rejects.toMatchObject({
+      message: expect.stringContaining('is paused: Stop now'),
+    });
+  });
+
+  it('undo refuses when newer work went live after the action (#281)', async () => {
+    const a = await freshAgent({ scope: scope(), levels: { 'content.publish': 3 } });
+    const note = (await a.as('artifacts.create', { type: 'note', name: 'Undo me', content: { title: 'v1', body: 'one' } })).body.artifactId;
+    expect((await a.as('artifacts.requestPublish', { artifactId: note, note: 'first' })).body.status).toBe('published');
+    const { actions } = await t.api(owner).call('agents.activity', { agentId: a.id, limit: 1 });
+    // A person publishes v2 after the agent's first publish.
+    await t.api(owner).call('artifacts.updateDraft', { artifactId: note, content: { title: 'v2', body: 'two' } as never });
+    await t.api(owner).call('artifacts.requestPublish', { artifactId: note, note: 'person' });
+    await expect(t.api(owner).call('agents.undo', { actionId: actions[0].id })).rejects.toMatchObject({
+      message: expect.stringContaining('v2 was published after this action'),
+    });
+    expect((await t.api(owner).call('artifacts.get', { artifactId: note })).publishedVersion).toBe(2);
+  });
+
+  it('a held change that needs a person after its window is recorded for the sponsor (#282)', async () => {
+    const a = await freshAgent({ scope: scope(), levels: { 'send.broadcast': 2 } });
+    const held = await a.as('artifacts.requestPublish', { artifactId: await a.draft(), note: 'held' });
+    await grant({ agent: a.id, scope: scope(), levels: { 'send.broadcast': 1 } }, a.mandate);
+    await due(held.body.approvalId);
+    const entry = await eventually(
+      async () => (await t.api(owner).call('agents.activity', { agentId: a.id, limit: 1 })).actions[0],
+      (x) => x.command === 'artifacts.heldRecheck',
+    );
+    expect(entry).toMatchObject({ decision: 'ask' });
+    expect(entry.reasons[0]).toContain('A person decides');
+  });
+
+  it('the shadow report counts the approval each action created, not a neighbour’s (#286)', async () => {
+    const a = await freshAgent({ scope: scope(), levels: { 'content.publish': 3 }, shadow: true });
+    const note = (await a.as('artifacts.create', { type: 'note', name: 'Shadowed', content: { title: 'a', body: 'a' } })).body.artifactId;
+    const first = await a.as('artifacts.requestPublish', { artifactId: note, note: 'one' });
+    expect(first.body.status).toBe('in_review');
+    await t.api(owner).call('approvals.reject', { approvalId: first.body.approvalId, note: 'No' });
+    await a.as('artifacts.updateDraft', { artifactId: note, content: { title: 'b', body: 'b' } });
+    const second = await a.as('artifacts.requestPublish', { artifactId: note, note: 'two' });
+    await t.api(owner).call('approvals.approve', { approvalId: second.body.approvalId });
+    const report = await t.api(owner).call('agents.shadowReport', { agentId: a.id });
+    expect(report.summary).toMatchObject({ total: 2, agree: 1, tooBold: 1 });
   });
 });

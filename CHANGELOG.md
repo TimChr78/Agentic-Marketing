@@ -2,6 +2,25 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+### Fixed
+
+- **A paused or revoked agent stops at its next command (#275).** The executor re-reads the agent's status in every command's transaction, so a hosted run (or any principal resolved earlier) cannot keep acting after a person pauses or revokes it.
+- **Undo never discards newer work (#281).** The ledger records the version the agent published; `agents.undo` refuses, with the reason, when a newer version went live since (or the artifact is no longer live), instead of republishing an older version or taking down a person's work.
+- **Undoing a staged broadcast stops its stage (#287).** Like `broadcasts.cancel`, the stage becomes `stopped` with the reason, so the status no longer shows an active canary.
+- **The independent check reviews the version that is published (#283).** `artifacts.requestPublish` and `requestPublishBundle` lock the artifacts before the policy decision, so a draft cannot change between the check and the publish.
+- **A burst of changes caps every class (#284).** The guardian's burst response sends every change to a person instead of only holding sends, which left reversible changes unlimited.
+- **Held changes that do not run are announced (#282).** When a recheck sends a held change to a person, or it first has to wait for working hours, a ledger entry (`artifacts.heldRecheck`) is recorded and the sponsor is told; it is not counted against the agent's limits.
+- **The shadow report uses the approval each action created (#286).** The ledger records the approval id, so two actions on the same artifact can no longer be matched to the same decision. Shadow entries recorded before 0.5.2 show as unreviewed.
+- **A restore keeps push subscriptions of erased people deleted (#280).** The erasure replay (`am restore`, #144) now deletes the person's `push_subscriptions` by their anonymous id and user id before the profiles go, as `profiles.erase` does, so a restored workspace cannot still push to a browser or app registered before the erasure. Rows in a snapshot that predates push notifications are left alone.
+- **A staged send checks the whole canary, however a send window spreads it (#285).** The wait now starts at the latest canary send instead of the earliest, and a check that comes due while canary messages are still queued or held for a later opening is postponed (the stage and the run lease move) rather than judging a partial canary. `minCanary` skips the check only when the canary itself has fewer recipients, never because a delayed canary has not gone out yet.
+- **Hosted agent runs count against the monthly AI budget (#274).** A run now reserves its whole `maxTokensPerRun` allowance before the model is called, so a run the budget cannot cover is refused before any call instead of starting under an arbitrary 100k reservation. Each finished run, whether it succeeded or failed, writes one `ai_calls` row with the provider, the model and the tokens it used, so `usedThisMonth`, `aiProviders.list` and the monthly budget account for hosted agents. Migration `0054_ai_call_kind_hosted.sql` adds the `hosted` AI-call kind.
+- **Sponsor notifications are delivered per action, not per batch (#276).** A retry now records which actions each recipient already received, so an interleaved agent or a new action before the retry no longer changes the batch into a new idempotency key and re-sends actions someone already got. The cursor advances only past actions delivered to every recipient. Migration `0055_agent_notification_deliveries.sql`.
+- **A failed daily digest for one sponsor no longer skips that sponsor for a day (#277).** The digest is tracked per sponsor through its per-day idempotency key's sent message row: a sponsor whose e-mail failed is retried on the next sweep, while the sponsors that already received the digest are not sent it again, and the daily timestamp advances only once every sponsor has it.
+- **SMS and push direct sends are covered by the mandate's scope (#278).** `messages.sendSms` and `messages.sendPush` now report the published template's purpose and topic and their channel (`sms`, `push`), so a mandate limited to `channels: ['email']` refuses them instead of letting them through. They also record the message they created on the agent ledger, like `messages.sendEmail`, and the independent check now sees the SMS body and the push title, body and link, not just their ids.
+- **Suppressed and failed direct sends no longer use up the daily message limit (#279).** A direct send records `people: 0` on its ledger row when the gateway answered `suppressed` or `failed` (no consent, a suppressed address, a missing or unpublished template, a delivery-policy refusal), so the agent's message counter counts only messages that went out and a blocked send does not consume `messagesPerDay`.
+
 ## [0.5.1] - 2026-10-31
 
 ### Fixed

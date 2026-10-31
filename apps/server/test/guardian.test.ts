@@ -198,6 +198,19 @@ describe('the guardian (#253)', () => {
     expect((await s.api.call('agents.get', { id: s.agentId })).status).toBe('active');
   });
 
+  it('a burst of reversible changes caps every class, not only sends (#284)', async () => {
+    const s = await setup();
+    await ledger(
+      s,
+      Array.from({ length: GUARDIAN.burstPerHour }, (_, i) => ({ target: `not_burst_${i}` })),
+    );
+    await runGuardianOnce(deps());
+    const { guard, episodes } = await s.api.call('agents.guardian', { agentId: s.agentId });
+    expect(episodes.find((e) => e.kind === 'anomaly')).toMatchObject({ action: 'cap' });
+    expect(guard).toMatchObject({ cap: 1 });
+    expect((await publishNote(s, 'After a burst')).body.status).toBe('in_review');
+  });
+
   it('caps an agent whose actions keep failing', async () => {
     const s = await setup();
     await ledger(

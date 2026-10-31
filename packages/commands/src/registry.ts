@@ -305,6 +305,21 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
             async (tx) => {
               committed.length = 0;
               policy = undefined;
+              // The agent was resolved when the request (or a hosted run) began; a pause or revoke
+              // committed since then stops this command too (#275).
+              if (agent) {
+                const [current] = await tx
+                  .select({ status: schema.agents.status, statusReason: schema.agents.statusReason })
+                  .from(schema.agents)
+                  .where(eq(schema.agents.id, agent.id));
+                if (current && current.status !== 'active')
+                  throw new AppError(
+                    'forbidden',
+                    `This agent (${agent.name}) is ${current.status}${current.statusReason ? `: ${current.statusReason}` : ''}. ${
+                      current.status === 'paused' ? 'A person can resume it in Settings → Agents.' : 'Its credentials no longer work.'
+                    }`,
+                  );
+              }
               // ADR-0016: every agent write passes the policy engine before the handler runs.
               if (agent && cmd.effect !== 'read') {
                 const impact = cmd.impact ? await cmd.impact(parsed.data, { principal, tx, services }) : {};
@@ -530,7 +545,8 @@ export async function agentCounters(tx: Tx, agentId: string, opts: { excludeId?:
     SELECT 1 FROM approval_requests ar
     WHERE ar.status = 'pending' AND ar.hold_until IS NOT NULL
       AND ar.artifact_id = ANY(string_to_array(${a.target}, ','))))`;
-  const counted = sql`(${a.decision} = 'allow' OR ${pendingHold})`;
+  // A held change's recheck entry (artifacts.heldRecheck, #282) only announces; the hold itself counts.
+  const counted = sql`(${a.decision} = 'allow' OR ${pendingHold}) AND ${a.command} <> 'artifacts.heldRecheck'`;
   const excluded = opts.excludeId !== undefined ? sql`${a.id} <> ${opts.excludeId}` : undefined;
   // The previous send is the last one that ran: a vetoed send must not raise the growth baseline.
   const [prev] = await tx

@@ -82,6 +82,8 @@ const MIGRATION_RELEASES: Record<string, string> = {
   '0051_staged_sends.sql': '0.5.0',
   '0052_hosted_agents.sql': '0.5.0',
   '0053_agent_undo.sql': '0.5.0',
+  '0054_ai_call_kind_hosted.sql': '0.5.2',
+  '0055_agent_notification_deliveries.sql': '0.5.2',
 };
 
 export function releaseForMigrationHead(head: string | null): string | null {

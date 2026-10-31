@@ -1,4 +1,4 @@
-import { AiUnavailable, modelFor, releaseTokens, reserveTokens } from '@agentic-marketing/ai';
+import { AiUnavailable, modelFor, recordAiCall, releaseTokens, reserveTokens } from '@agentic-marketing/ai';
 import { type Auth, principalFromSession } from '@agentic-marketing/auth';
 import { agentPrincipal, type Executor, type Permission, ROLE_PERMISSIONS } from '@agentic-marketing/commands';
 import { AppError, newId } from '@agentic-marketing/core';
@@ -219,24 +219,18 @@ export function copilotApi(deps: { auth: Auth; db: Db; executor: Executor; kp: K
               });
             })
             .catch((err) => logger.error({ err }, 'copilot turn not stored'));
-          await deps.db
-            .withWorkspace(ws, (tx) =>
-              tx.insert(schema.aiCalls).values({
-                workspaceId: ws,
-                id: newId('aic'),
-                kind: 'copilot',
-                status: error ? 'failed' : 'done',
-                providerId: model.providerId,
-                model: model.modelId,
-                input: { tools: used },
-                error,
-                ...usage,
-                latencyMs: Date.now() - started,
-                principalId: user.userId,
-                finishedAt: new Date(),
-              }),
-            )
-            .catch((err) => logger.error({ err }, 'copilot call not logged'));
+          await recordAiCall(deps.db, ws, {
+            kind: 'copilot',
+            status: error ? 'failed' : 'done',
+            providerId: model.providerId,
+            model: model.modelId,
+            input: { tools: used },
+            error,
+            ...usage,
+            latencyMs: Date.now() - started,
+            principalId: user.userId,
+            finishedAt: new Date(),
+          }).catch((err) => logger.error({ err }, 'copilot call not logged'));
           await releaseTokens(deps.db, ws, reservation).catch(() => {});
           controller.close();
         }

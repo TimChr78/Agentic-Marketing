@@ -166,6 +166,8 @@ interface EventNotifications {
   firstFailedActionId: number | null;
 }
 
+const deliveryKey = (actionId: number, userId: string) => `${actionId}:${userId}`;
+
 async function notifyEvents(
   deps: AgentNotificationDeps,
   tx: Tx,
@@ -179,6 +181,22 @@ async function notifyEvents(
     if (action.decision !== 'hold' && action.decision !== 'ask' && action.decision !== 'deny') continue;
     byAgent.set(action.agentId, [...(byAgent.get(action.agentId) ?? []), action]);
   }
+  if (!byAgent.size) return { sent: 0, firstFailedActionId: null };
+  const actionIds = [...byAgent.values()].flatMap((rows) => rows.map((row) => row.id));
+  const delivered = new Set(
+    (
+      await tx
+        .select({ actionId: schema.agentNotificationDeliveries.actionId, userId: schema.agentNotificationDeliveries.userId })
+        .from(schema.agentNotificationDeliveries)
+        .where(
+          and(
+            eq(schema.agentNotificationDeliveries.workspaceId, workspaceId),
+            inArray(schema.agentNotificationDeliveries.actionId, actionIds),
+          ),
+        )
+    ).map((row) => deliveryKey(row.actionId, row.userId)),
+  );
+
   let sent = 0;
   let firstFailedActionId: number | null = null;
   for (const [agentId, rows] of byAgent) {
@@ -197,24 +215,44 @@ async function notifyEvents(
             : null;
       lines.push({ action, approval });
     }
-    const batchKey = `${rows[0].id}-${rows.at(-1)!.id}`;
-    const content = eventEmail(deps, agent, lines);
-    const results = await sendMemberEmails(
-      tx,
-      deps,
-      workspaceId,
-      recipients.map((userId) => ({
+
+    // A recipient only hears about actions they have not received yet. The batch may shrink between
+    // sweeps (a failure, a new action), and recording each delivered action keeps that retry from
+    // re-sending what a different batch already covered for this recipient (#276).
+    const pending = new Map<string, ActionRow[]>();
+    for (const userId of recipients) {
+      const rowsForUser = rows.filter((action) => !delivered.has(deliveryKey(action.id, userId)));
+      if (rowsForUser.length) pending.set(userId, rowsForUser);
+    }
+    if (!pending.size) continue;
+
+    const emails = [...pending].map(([userId, rowsForUser]) => {
+      const ids = new Set(rowsForUser.map((action) => action.id));
+      const content = eventEmail(
+        deps,
+        agent,
+        lines.filter((line) => ids.has(line.action.id)),
+      );
+      return {
         userId,
-        idempotencyKey: `agent-event:${workspaceId}:${agentId}:${batchKey}:${userId}`,
+        idempotencyKey: `agent-event:${workspaceId}:${agentId}:${rowsForUser.map((action) => action.id).join('-')}:${userId}`,
         ...content,
-        data: { agent: { id: agent.id, name: agent.name }, actions: rows.map(actionKey) },
-      })),
-    );
+        data: { agent: { id: agent.id, name: agent.name }, actions: rowsForUser.map(actionKey) },
+      };
+    });
+    const results = await sendMemberEmails(tx, deps, workspaceId, emails);
+    const deliveries: { workspaceId: string; actionId: number; userId: string }[] = [];
+    for (const result of results) {
+      const rowsForUser = pending.get(result.userId) ?? [];
+      if (result.status === 'sent') {
+        for (const action of rowsForUser) deliveries.push({ workspaceId, actionId: action.id, userId: result.userId });
+      } else {
+        for (const action of rowsForUser)
+          firstFailedActionId = firstFailedActionId === null ? action.id : Math.min(firstFailedActionId, action.id);
+      }
+    }
+    if (deliveries.length) await tx.insert(schema.agentNotificationDeliveries).values(deliveries).onConflictDoNothing();
     sent += results.filter((r) => r.status === 'sent').length;
-    // A recipient that could not be reached keeps the whole batch pending: the next sweep retries
-    // it, and the idempotency key above makes it reuse the message row instead of sending twice.
-    if (results.some((r) => r.status === 'failed'))
-      firstFailedActionId = firstFailedActionId === null ? rows[0].id : Math.min(firstFailedActionId, rows[0].id);
   }
   return { sent, firstFailedActionId };
 }
@@ -324,20 +362,43 @@ async function notifyDigest(
   const bySponsor = new Map<string, AgentDigest[]>();
   for (const d of digests) bySponsor.set(d.agent.sponsorUserId, [...(bySponsor.get(d.agent.sponsorUserId) ?? []), d]);
   const day = now.toISOString().slice(0, 10);
+  const dayKey = (sponsor: string) => `agent-digest:${workspaceId}:${sponsor}:${day}`;
+  // A sponsor whose digest already went out today is skipped on a retry after another sponsor
+  // failed. The per-day idempotency key's sent message row is the record of that delivery (#277).
+  const delivered = new Set(
+    (
+      await tx
+        .select({ idempotencyKey: schema.messages.idempotencyKey })
+        .from(schema.messages)
+        .where(
+          and(
+            eq(schema.messages.workspaceId, workspaceId),
+            inArray(schema.messages.idempotencyKey, [...bySponsor.keys()].map(dayKey)),
+            eq(schema.messages.status, 'sent'),
+          ),
+        )
+    ).map((row) => row.idempotencyKey),
+  );
   let sent = 0;
+  let complete = true;
   for (const [sponsor, own] of bySponsor) {
+    const key = dayKey(sponsor);
+    if (delivered.has(key)) continue;
     const content = digestEmail(deps.publicUrl, own);
     const results = await sendMemberEmails(tx, deps, workspaceId, [
       {
         userId: sponsor,
-        idempotencyKey: `agent-digest:${workspaceId}:${sponsor}:${day}`,
+        idempotencyKey: key,
         ...content,
         data: { digest: own.map((d) => ({ agentId: d.agent.id, counts: d.counts })) },
       },
     ]);
-    sent += results.filter((r) => r.status === 'sent').length;
+    // A failure keeps lastDigestAt where it is, so the next sweep retries this sponsor with the
+    // same key; the successful sponsors above are skipped by their sent message rows.
+    if (results.every((r) => r.status === 'sent')) sent++;
+    else complete = false;
   }
-  return { sent, at: sent ? now : null };
+  return { sent, at: complete ? now : null };
 }
 
 async function notifyExpiry(

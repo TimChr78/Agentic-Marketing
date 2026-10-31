@@ -198,6 +198,16 @@ async function publishVersion(ctx: CommandContext, artifactId: string, number: n
   for (const l of publishListeners) ctx.afterCommit ? ctx.afterCommit(() => l(ctx, artifact)) : await l(ctx, artifact);
 }
 
+/** Locks artifact rows (in id order) so their latest version cannot change until the transaction ends. */
+async function lockArtifacts(ctx: CommandContext, ids: string[]) {
+  await ctx.tx
+    .select({ id: schema.artifacts.id })
+    .from(schema.artifacts)
+    .where(and(eq(schema.artifacts.workspaceId, ctx.principal.workspaceId), inArray(schema.artifacts.id, ids)))
+    .orderBy(asc(schema.artifacts.id))
+    .for('update');
+}
+
 /** Publishes a version through the same checks and listeners as any other publish (agents.undo). */
 export async function publishArtifactVersion(ctx: CommandContext, artifactId: string, number: number) {
   await publishVersion(ctx, artifactId, number);
@@ -231,8 +241,10 @@ export async function publishUndo(
   ctx: Pick<CommandContext, 'tx' | 'principal'>,
   member: { id: string; type: string },
   previousVersion: number | null,
+  publishedVersion: number,
 ): Promise<AgentUndo> {
-  const republish: AgentUndo = { kind: 'republish', artifactId: member.id, previousVersion };
+  // The version the agent published is kept, so an undo can tell when newer work went live (#281).
+  const republish: AgentUndo = { kind: 'republish', artifactId: member.id, previousVersion, publishedVersion };
   if (member.type !== 'broadcast') return republish;
   const [run] = await ctx.tx
     .select({ status: schema.broadcastRuns.status })
@@ -245,10 +257,10 @@ export async function publishUndo(
 /** The reversal of publishing several artifacts together: one group, or a plain reversal for one. */
 export async function publishUndoGroup(
   ctx: Pick<CommandContext, 'tx' | 'principal'>,
-  members: { id: string; type: string; previousVersion: number | null }[],
+  members: { id: string; type: string; previousVersion: number | null; version: number }[],
 ): Promise<AgentUndo> {
   const items: AgentUndo[] = [];
-  for (const m of members) items.push(await publishUndo(ctx, m, m.previousVersion));
+  for (const m of members) items.push(await publishUndo(ctx, m, m.previousVersion, m.version));
   if (items.some((item) => item.kind === 'none')) return items.find((item) => item.kind === 'none')!;
   return items.length === 1 ? items[0] : { kind: 'group', items };
 }
@@ -774,9 +786,13 @@ export const requestPublish = defineCommand({
   actionClass: 'content.publish',
   approvable: true,
   impact: async (input, ctx) => {
+    // Locked until the handler publishes: the independent check reviews the version that goes live (#283).
+    await lockArtifacts(ctx, [input.artifactId]);
     const a = await loadArtifact(ctx, input.artifactId);
     return publishImpact(ctx, [{ id: a.id, type: a.type, version: a.latestVersion }]);
   },
+  // The approval this action created, so the shadow report attributes a person's decision to it (#286).
+  ledgerImpact: (out) => (out.approvalId ? { approvalId: out.approvalId } : undefined),
   target: (i) => i.artifactId,
   handler: async (input, ctx) => {
     const a = await loadArtifact(ctx, input.artifactId);
@@ -802,7 +818,7 @@ export const requestPublish = defineCommand({
     const autonomous = ctx.policy?.decision === 'allow' && ctx.policy.autonomous === true;
     if (autonomous || (!needsApproval && !hold)) {
       await publishVersion(ctx, a.id, v.number);
-      ctx.undo?.set(await publishUndo(ctx, a, a.publishedVersion));
+      ctx.undo?.set(await publishUndo(ctx, a, a.publishedVersion, v.number));
       return {
         status: 'published' as const,
         version: v.number,
@@ -881,12 +897,17 @@ export const requestPublishBundle = defineCommand({
   actionClass: 'content.publish',
   approvable: true,
   impact: async (input, ctx) => {
+    await lockArtifacts(ctx, [...new Set(input.artifactIds)]);
     const members = [];
     for (const id of new Set(input.artifactIds)) {
       const a = await loadArtifact(ctx, id);
       members.push({ id: a.id, type: a.type, version: a.latestVersion });
     }
     return publishImpact(ctx, members);
+  },
+  ledgerImpact: (out) => {
+    const ids = out.members.map((m) => m.approvalId).filter((id): id is string => !!id);
+    return ids.length ? { approvalId: ids[0], bundleId: out.bundleId } : undefined;
   },
   target: (i) => i.artifactIds.join(','),
   handler: async (input, ctx) => {
@@ -932,7 +953,7 @@ export const requestPublishBundle = defineCommand({
       ctx.undo?.set(
         await publishUndoGroup(
           ctx,
-          ordered.map((m) => ({ id: m.id, type: m.type, previousVersion: m.previousVersion })),
+          ordered.map((m) => ({ id: m.id, type: m.type, previousVersion: m.previousVersion, version: m.version })),
         ),
       );
       return {
@@ -1426,11 +1447,47 @@ async function requestingAgent(ctx: CommandContext, r: { requestedByType: string
  * The ledger row for a held change that ran (ADR-0016 §5.4): the hold row keeps the decision, this
  * one records what it actually did and how to reverse it, so `agents.undo` can offer the reversal.
  */
+/** The note and ledger reason when a held change waits for the mandate's working hours. */
+const WAIT_MARK = 'Waiting for the mandate’s working hours';
+
+/**
+ * A held change that did not run when its window ended (#282): a ledger entry the notifier
+ * announces. Recorded as `artifacts.heldRecheck`, which the counters leave out (the hold itself
+ * is counted), so a waiting change is not counted twice.
+ */
+async function recordHeldTransition(
+  ctx: CommandContext,
+  agentId: string,
+  held: HeldAction | null,
+  members: { artifactId: string }[],
+  decision: 'ask' | 'hold',
+  reason: string,
+) {
+  await recordAgentAction(
+    ctx.tx,
+    agentId,
+    { name: HELD_RECHECK },
+    {
+      decision,
+      actionClass: held?.actionClass ?? 'content.publish',
+      reasons: [reason],
+      impact: held?.impact ?? {},
+      ...(held?.mandateId
+        ? { mandate: { id: held.mandateId, version: held.mandateVersion ?? 0, holdWindow: 'PT2H', independentCheck: false } }
+        : {}),
+    },
+    'internal',
+    members.map((m) => m.artifactId).join(','),
+    null,
+    held?.intent ?? null,
+  );
+}
+
 async function recordHeldExecution(
   ctx: CommandContext,
   agentId: string,
   held: HeldAction | null,
-  published: { id: string; type: string; previousVersion: number | null }[],
+  published: { id: string; type: string; previousVersion: number | null; version: number }[],
 ) {
   await recordAgentAction(
     ctx.tx,
@@ -1469,6 +1526,9 @@ export interface HeldAction {
 }
 
 /** Whether a held change may run now: yes, not yet (e.g. outside working hours), or only with a person. */
+/** The ledger command of a held change's recheck (#282); counters skip it. */
+export const HELD_RECHECK = 'artifacts.heldRecheck';
+
 export type HeldCheck = { run: true } | { wait: string } | { person: string };
 
 /** How long a held change outside working hours waits before it is checked again. */
@@ -1519,9 +1579,14 @@ export async function runHeldChange(
     const verdict = await check(agent.id, held);
     if ('person' in verdict) problem = verdict.person;
     else if ('wait' in verdict) {
+      const firstWait = !r.note.includes(WAIT_MARK);
+      const runsAt = new Date(Date.now() + HOLD_RECHECK_MS);
       await ctx.tx
         .update(schema.approvalRequests)
-        .set({ holdUntil: new Date(Date.now() + HOLD_RECHECK_MS) })
+        .set({
+          holdUntil: runsAt,
+          ...(firstWait ? { note: sql`${schema.approvalRequests.note} || ${`\n\n${WAIT_MARK}: ${verdict.wait}`}` } : {}),
+        })
         .where(
           and(
             eq(schema.approvalRequests.workspaceId, ctx.principal.workspaceId),
@@ -1531,6 +1596,8 @@ export async function runHeldChange(
             ),
           ),
         );
+      // Announced once, when it first has to wait (#282); later rechecks only move the time.
+      if (firstWait) await recordHeldTransition(ctx, agent.id, held, members, 'hold', `${WAIT_MARK}: ${verdict.wait}`);
       return { status: 'waiting', reason: verdict.wait };
     }
   }
@@ -1544,12 +1611,15 @@ export async function runHeldChange(
         note: sql`${schema.approvalRequests.note} || ${`\n\nNot run after its veto window: ${problem}. A person decides.`}`,
       })
       .where(scope);
+    // The sponsor was told it would run; tell them it did not and that a person decides now (#282).
+    if (agent)
+      await recordHeldTransition(ctx, agent.id, held, members, 'ask', `Not run after its veto window: ${problem}. A person decides.`);
     return { status: 'needs_person', reason: problem };
   }
-  const published: { id: string; type: string; previousVersion: number | null }[] = [];
+  const published: { id: string; type: string; previousVersion: number | null; version: number }[] = [];
   for (const m of members) {
     const artifact = await loadArtifact(ctx, m.artifactId);
-    published.push({ id: artifact.id, type: artifact.type, previousVersion: artifact.publishedVersion });
+    published.push({ id: artifact.id, type: artifact.type, previousVersion: artifact.publishedVersion, version: m.version });
     await publishVersion(ctx, m.artifactId, m.version);
   }
   // The hold row records the decision; this one row records what ran, for the counters and agents.undo.
