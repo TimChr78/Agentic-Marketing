@@ -1008,7 +1008,8 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
         // judge a partial canary, so the check waits until every canary message is terminal:
         // after the latest opening plus the wait, or shortly when only delivery is pending.
         const inFlight = canaryRows.filter((m) => m.status === 'queued' || m.status === 'sending');
-        if (!skippedForSize && inFlight.length) {
+        // A small canary waits too: its outcome is still evidence of whether the send works (#300).
+        if (inFlight.length) {
           const latestNotBefore = inFlight.reduce<Date | null>(
             (latest, m) => (m.notBefore && (!latest || m.notBefore.getTime() > latest.getTime()) ? m.notBefore : latest),
             null,
@@ -1051,9 +1052,11 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
         const suppressedCanary = canaryRows.filter((m) => m.status === 'suppressed').length;
         const dbSent = canaryRows.filter((m) => ['sent', 'delivered', 'bounced', 'complained'].includes(m.status)).length;
         const delivered = Math.max(counts.sent, dbSent);
+        // Only "too few to judge the rates" depends on the canary's size; a canary of any size
+        // where half or more could not be delivered stops the run (#300).
+        const undeliverable = failedCanary + suppressedCanary;
         const tooFewSends = !skippedForSize && delivered < def.stagedSend.minCanary;
-        const mostlyUndeliverable =
-          !skippedForSize && failedCanary + suppressedCanary > 0 && (failedCanary + suppressedCanary) * 2 > canaryRows.length;
+        const mostlyUndeliverable = undeliverable > 0 && undeliverable * 2 >= canaryRows.length;
         if (tooFewSends || mostlyUndeliverable) {
           const undelivered = [failedCanary ? `${failedCanary} failed` : '', suppressedCanary ? `${suppressedCanary} suppressed` : '']
             .filter(Boolean)

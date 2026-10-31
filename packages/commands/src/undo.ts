@@ -18,10 +18,17 @@ export function registerUndoHandler(handler: UndoHandler): void {
   undoHandlers.push(handler);
 }
 
-/** Whether an action can be undone now: it happened, it was not undone yet, and its reversal is known. */
+/** A republish recorded before 0.5.2 does not say which version the agent published (#291, #301). */
+const isLegacy = (undo: AgentUndo): boolean =>
+  undo.kind === 'republish' ? undo.publishedVersion === undefined : undo.kind === 'group' && undo.items.some(isLegacy);
+
+/**
+ * Whether an action can be undone now: it happened, it was not undone yet, its reversal is known,
+ * and it is not a pre-0.5.2 record that `agents.undo` would refuse (#301).
+ */
 export function isUndoable(action: { ok: boolean; decision: string; undo: AgentUndo | null; undoneAt: Date | null }): boolean {
   if (!action.ok || action.decision === 'deny' || action.undoneAt !== null || !action.undo) return false;
-  if (action.undo.kind === 'none') return false;
+  if (action.undo.kind === 'none' || isLegacy(action.undo)) return false;
   return action.undo.kind !== 'group' || action.undo.items.some((item) => item.kind !== 'none');
 }
 
