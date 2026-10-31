@@ -2,6 +2,12 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+### Added
+
+- **Hosted agents (#258, #86).** The platform can run an agent itself on a schedule. A hosted agent is an agent like any other — sponsor, status, mandate and ledger — with instructions, a schedule (`hourly`, `daily:HH:MM` or `weekly:day:HH:MM`, read in the workspace time zone), scopes (the sponsor's role ∩ the list), per-run token and tool-call budgets and an optional model provider. Each run is a fresh copilot session on the in-process MCP client as the agent principal, so every tool call passes the executor and the policy engine under the agent's mandate. Runs never overlap; each one stores its summary, tool calls, tokens and error, is e-mailed to the sponsor, and three consecutive failures disable the agent and notify the sponsor. Commands: `agents.createHosted`, `agents.updateHosted`, `agents.deleteHosted`, `agents.runHostedNow` (people only) and `agents.hostedRuns` (`artifacts:read`). **Settings → Agents → New hosted agent** prefills two templates: the read-only **weekly report** (Mondays 07:00) and the **deliverability guardian** (hourly), which proposes a pause through the normal approval and mandate path. Migration `0050_hosted_agents.sql`; the agent credential kind `hosted` marks the principal. See [docs/agents.md](docs/agents.md#hosted-agents).
+
 ## [0.4.1] - 2026-10-31
 
 ### Fixed

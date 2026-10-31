@@ -66,6 +66,51 @@ Two environment variables adapt the MCP surface to clients that are picky about 
 
 An agent appears the first time a credential acts, with the person who created or connected it as sponsor. Give it a name and a description right away, then attach a mandate if it should do more than propose.
 
+## Hosted agents
+
+A **hosted agent** is an agent the platform runs itself on a schedule, for self-hosters who have no agent runtime to connect. It is an agent like any other: it has a sponsor, a status, a mandate and a ledger, and every tool call passes the same executor, permissions and policy engine. The only difference is who starts the run.
+
+Create one in **Settings → Agents → New hosted agent** (or with `agents.createHosted`). You give it:
+
+- **Instructions** — the prompt for each run: what to look at, what to report, what to propose.
+- **A schedule** — one of three forms, read in the workspace's time zone (`workspace.get` shows it):
+  - `hourly` — every hour, at minute 0.
+  - `daily:07:00` — every day at 07:00.
+  - `weekly:mon:07:00` — every Monday at 07:00. Days are `mon`, `tue`, `wed`, `thu`, `fri`, `sat`, `sun`; times are 24-hour `HH:MM`.
+- **Scopes** — the permissions a run may use. They are intersected with the sponsor's role, so a hosted agent never has more than the person accountable for it. A tool outside them is not offered, and a call made anyway is refused by the executor.
+- **Budgets per run** — a token budget and a tool-call budget. The run stops when either is used up and records a partial summary; a tool call past the tool-call budget never reaches the command layer.
+- **A model** (optional) — an AI provider id; without one the workspace's copilot provider is used.
+
+Each run is a **fresh session** on the copilot's in-process MCP client, acting as the agent principal (the sponsor's role ∩ the scopes). There is no carry-over except the instructions; the mandate applies exactly as it does to an external agent, so a write outside its levels waits for a person or is refused, and the decision lands in the agent's activity ledger.
+
+Runs never overlap: a durable claim on the hosted agent is taken before the model is called, and a second sweep records a skipped run instead of starting another. A failed run counts; **three consecutive failures disable the agent** and tell the sponsor by e-mail. The sponsor also receives every run's summary by e-mail.
+
+| Command | Who | What |
+|---|---|---|
+| `agents.createHosted` | people only (`workspace:admin`) | Create the agent, its schedule, scopes and budgets |
+| `agents.updateHosted` | people only (`workspace:admin`) | Change instructions, schedule, scopes, budgets or enabled |
+| `agents.runHostedNow` | people only (`workspace:admin`) | Start a run at the scheduler's next tick, without changing the schedule |
+| `agents.deleteHosted` | people only (`workspace:admin`) | Delete it and its run history; the ledger stays |
+| `agents.hostedRuns` | `artifacts:read` | The hosted agent and its runs (status, summary, tool calls, tokens, error) |
+
+### Starter templates
+
+Both are ordinary hosted agents; edit anything after creating them.
+
+**Weekly report** — `weekly:mon:07:00`, scopes `artifacts:read` and `audit:read`, 30,000 tokens and 25 tool calls per run. It summarises last week's broadcasts, journeys and campaigns with `analytics.query`, `analytics.campaignSummary` and `journeys.stats`, states the data window and recommends at most three next steps. Read-only: it reports, it does not change anything.
+
+**Deliverability guardian** — `hourly`, scopes `artifacts:read`, `audit:read` and `artifacts:write`, 15,000 tokens and 15 tool calls per run. It reads the 24-hour and 7-day bounce and complaint rates, compares them with the workspace's delivery policy, and when a limit is crossed drafts a note that proposes pausing the marketing stream and calls `artifacts.requestPublish`. That proposal goes through the normal approval and mandate path (a proposal, a hold or a refusal), so the guardian never changes settings or pauses a stream by itself.
+
+```json
+{
+  "name": "Weekly report",
+  "schedule": "weekly:mon:07:00",
+  "scopes": ["artifacts:read", "audit:read"],
+  "maxTokensPerRun": 30000,
+  "maxToolCallsPerRun": 25
+}
+```
+
 ## The workspace's limits
 
 The workspace's limits apply to every agent, with or without a mandate. Read them with `workspace.autonomy`; a person (owner or admin) changes them with `workspace.setAutonomy` or **Settings → Agents → Autonomy**.
@@ -238,7 +283,7 @@ A bundle is judged by its riskiest member. Publishing this issue's template and 
 
 ### Deliverability guardian
 
-Watches bounces, complaints and provider signals; it never sends. Its levels are 0 (observe) except `data.write` at 1: a write is refused with the reason unless it can wait for a person's approval. Pausing a stream autonomously arrives with hosted agents; today a person pauses it in the UI or with a command.
+Watches bounces, complaints and provider signals; it never sends. Its levels are 0 (observe) except `data.write` at 1: a write is refused with the reason unless it can wait for a person's approval. The hosted deliverability guardian (above) proposes a pause and a person still pauses the stream in the UI or with a command.
 
 ```json
 {
