@@ -155,7 +155,7 @@ export interface ShadowOutcome {
 }
 
 /** Classes whose actions cannot be undone once they ran: working hours apply to them. */
-const IRREVERSIBLE: readonly ActionClass[] = ['send.broadcast', 'send.direct', 'spend', 'destructive'];
+export const IRREVERSIBLE: readonly ActionClass[] = ['send.broadcast', 'send.direct', 'spend', 'destructive'];
 /** Classes a mandate can never make autonomous (design §3.2, the fixed rule). */
 const ALWAYS_A_PERSON: readonly ActionClass[] = ['destructive', 'settings'];
 

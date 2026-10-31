@@ -1,5 +1,7 @@
 import { clearAnalyticsCache } from '@agentic-marketing/analytics';
+import { newId } from '@agentic-marketing/core';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { runHoldsOnce } from '../src/agents/holds';
 import { connectAgent, eventually, startTestServer, testPort, type User } from './harness';
 
 // Wave 4, Phase 18 (ADR-0016): mandates (#223), autonomy levels with scope, limits, guardrails and
@@ -316,5 +318,145 @@ describe('learning rules (#257)', () => {
     });
     const out = await call('artifacts.requestPublish', { artifactId: tested.body.artifactId, note: 'with a subject test' });
     expect(out.body.status).toBe('published');
+  });
+});
+
+describe('audit fixes (#260, #262, #263, #267, #268)', () => {
+  let n = 0;
+  /** A fresh agent with its own mandate, so earlier sends do not count against its limits. */
+  async function freshAgent(content: Record<string, unknown>) {
+    const api = t.api(owner);
+    const tok = (
+      await api.call('apiTokens.create', {
+        name: `Audit agent ${++n}`,
+        scopes: ['artifacts:read', 'artifacts:write', 'artifacts:publish', 'audit:read'],
+      })
+    ).token;
+    const as = async (name: string, body: unknown = {}) => {
+      const res = await fetch(`${t.base}/v1/${name}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${tok}` },
+        body: JSON.stringify(body),
+      });
+      return { status: res.status, body: (await res.json()) as any };
+    };
+    const id = (await as('agents.get')).body.id as string;
+    const m = await api.call('artifacts.create', {
+      type: 'agent_mandate',
+      name: `Audit mandate ${n}`,
+      content: { agent: id, purpose: 'Send the weekly newsletter', validUntil: inDays(30), ...content } as never,
+    });
+    expect((await api.call('artifacts.requestPublish', { artifactId: m.artifactId, note: 'grant' })).status).toBe('published');
+    const draft = async () =>
+      (
+        await as('artifacts.create', {
+          type: 'broadcast',
+          name: `Audit ${Date.now()}-${Math.random()}`,
+          content: { template: templateId, segment: news },
+        })
+      ).body.artifactId as string;
+    return { as, id, mandate: m.artifactId as string, draft };
+  }
+  const scope = () => ({ ...newsletterScope, segments: [news] });
+  const due = (approvalId: string) =>
+    t.srv.db.admin.query(`UPDATE approval_requests SET hold_until = now() - interval '1 second' WHERE id = $1`, [approvalId]);
+  const approval = async (approvalId: string) =>
+    (await t.srv.db.admin.query('SELECT status, hold_until, note FROM approval_requests WHERE id = $1', [approvalId])).rows[0];
+
+  it('drafts skip the independent check; what runs by itself is checked and fails closed (#260)', async () => {
+    const a = await freshAgent({ scope: scope(), levels: { 'send.broadcast': 3 }, independentCheck: true });
+    const id = await a.draft();
+    expect(id).toMatch(/^bct_/);
+    const out = await a.as('artifacts.requestPublish', { artifactId: id, note: 'checked' });
+    expect(out.body.status).toBe('in_review');
+  });
+
+  it('a held send is decided again: a stricter mandate sends it to a person (#262)', async () => {
+    const a = await freshAgent({ scope: scope(), levels: { 'send.broadcast': 2 } });
+    const id = await a.draft();
+    const held = await a.as('artifacts.requestPublish', { artifactId: id, note: 'held' });
+    expect(held.body.status).toBe('on_hold');
+    await grant({ agent: a.id, scope: scope(), levels: { 'send.broadcast': 1 } }, a.mandate);
+    await due(held.body.approvalId);
+    const row = await eventually(
+      () => approval(held.body.approvalId),
+      (r) => r.hold_until === null,
+    );
+    expect(row.status).toBe('pending');
+    expect(row.note).toContain('the mandate no longer allows it');
+    expect((await t.api(owner).call('artifacts.get', { artifactId: id })).publishedVersion).toBeNull();
+  });
+
+  it('a held send outside working hours waits for the next opening (#262)', async () => {
+    const hh = (h: number) => `${String((new Date().getUTCHours() + h) % 24).padStart(2, '0')}:00`;
+    const a = await freshAgent({ scope: scope(), levels: { 'send.broadcast': 3 }, workingHours: { start: hh(3), end: hh(4) } });
+    const id = await a.draft();
+    const held = await a.as('artifacts.requestPublish', { artifactId: id, note: 'after hours' });
+    expect(held.body.status).toBe('on_hold');
+    await due(held.body.approvalId);
+    const row = await eventually(
+      () => approval(held.body.approvalId),
+      (r) => r.hold_until !== null && new Date(r.hold_until) > new Date(),
+    );
+    expect(row.status).toBe('pending');
+    expect((await t.api(owner).call('artifacts.get', { artifactId: id })).publishedVersion).toBeNull();
+  });
+
+  it('two runners publish a due hold once; a veto racing the runner either wins or is refused (#263)', async () => {
+    const a = await freshAgent({ scope: scope(), levels: { 'send.broadcast': 2 } });
+    const id = await a.draft();
+    const held = await a.as('artifacts.requestPublish', { artifactId: id, note: 'race' });
+    await due(held.body.approvalId);
+    const deps = { db: t.srv.db, services: t.srv.services };
+    await Promise.all([runHoldsOnce(deps), runHoldsOnce(deps), runHoldsOnce(deps)]);
+    await eventually(
+      () => approval(held.body.approvalId),
+      (r) => r.status === 'approved',
+    );
+    const { rows } = await t.srv.db.admin.query(
+      `SELECT count(*)::int AS n FROM agent_actions WHERE agent_id = $1 AND decision = 'allow' AND target = $2`,
+      [a.id, id],
+    );
+    expect(rows[0].n).toBe(1);
+
+    const id2 = await a.draft();
+    const held2 = await a.as('artifacts.requestPublish', { artifactId: id2, note: 'race 2' });
+    await due(held2.body.approvalId);
+    const [veto] = await Promise.allSettled([
+      t.api(owner).call('approvals.reject', { approvalId: held2.body.approvalId, note: 'No' }),
+      runHoldsOnce(deps),
+    ]);
+    const final = await eventually(
+      () => approval(held2.body.approvalId),
+      (r) => r.status !== 'pending',
+    );
+    const published = (await t.api(owner).call('artifacts.get', { artifactId: id2 })).publishedVersion !== null;
+    expect(final.status === 'rejected').toBe(!published);
+    expect(veto.status === 'fulfilled').toBe(final.status === 'rejected');
+  });
+
+  it('limits count holds while they are due and forget vetoed ones (#267)', async () => {
+    const a = await freshAgent({ scope: scope(), levels: { 'send.broadcast': 2 }, limits: { sendsPerDay: 1 } });
+    const first = await a.as('artifacts.requestPublish', { artifactId: await a.draft(), note: 'one' });
+    expect(first.body.status).toBe('on_hold');
+    // The pending hold counts: a second send passes the daily limit and drops to a person.
+    expect((await a.as('artifacts.requestPublish', { artifactId: await a.draft(), note: 'two' })).body.status).toBe('in_review');
+    await t.api(owner).call('approvals.reject', { approvalId: first.body.approvalId, note: 'Vetoed' });
+    // Vetoed, it never ran: the limit is free again.
+    expect((await a.as('artifacts.requestPublish', { artifactId: await a.draft(), note: 'three' })).body.status).toBe('on_hold');
+  });
+
+  it('a mandated agent imports a bundle; each publish is decided by its mandate (#268)', async () => {
+    const a = await freshAgent({ scope: scope(), levels: { 'content.publish': 3 } });
+    const id = newId('not');
+    const bundle = {
+      format: 'agentic-marketing/artifacts@1',
+      artifacts: [{ id, type: 'note', name: 'Imported note', content: { title: 'Imported', body: 'From a bundle.' } }],
+    };
+    const dry = await a.as('config.import', { bundle });
+    expect(dry.status).toBe(200);
+    const out = await a.as('config.import', { bundle, dryRun: false, publish: true, note: 'Import' });
+    expect(out.status).toBe(200);
+    expect(out.body.changes[0]).toMatchObject({ id, publish: 'published' });
   });
 });

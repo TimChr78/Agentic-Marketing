@@ -319,7 +319,9 @@ export const importConfig = defineCommand({
   output: z.object({ dryRun: z.boolean(), changes: z.array(Change), settings: z.array(SettingChange) }),
   permission: 'artifacts:write',
   effect: 'write',
-  actionClass: 'settings',
+  // The import itself writes drafts; each publish in it is decided per artifact by the policy
+  // engine (its class, impact and the mandate), and bundle settings are refused to agents (#268).
+  actionClass: 'draft',
   handler: async (input, ctx) => {
     if (input.publish && !input.dryRun && !ctx.principal.permissions.has('artifacts:publish'))
       throw new AppError(

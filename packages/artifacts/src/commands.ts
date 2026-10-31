@@ -1,7 +1,7 @@
 import { type ActionClass, type CommandContext, defineCommand, type Impact, recordAgentAction } from '@agentic-marketing/commands';
 import { AppError, canonicalJson, hashValue, newId } from '@agentic-marketing/core';
 import { type AgentUndo, schema, type VersionState } from '@agentic-marketing/db';
-import { and, desc, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { diffJson } from './diff';
 import { noteWithPolicy, publishImpact } from './impact';
@@ -1280,11 +1280,33 @@ export const getApproval = defineCommand({
   },
 });
 
-async function decide(ctx: CommandContext, approvalId: string) {
-  const [r] = await ctx.tx
-    .select()
+/**
+ * Reads an approval request with its bundle's rows locked (in id order, so two deciders never
+ * deadlock). A person's approval or veto and the hold runner both go through here, so whoever
+ * locks first decides and the other sees the result (#263).
+ */
+async function lockApproval(ctx: CommandContext, approvalId: string) {
+  const where = and(eq(schema.approvalRequests.workspaceId, ctx.principal.workspaceId), eq(schema.approvalRequests.id, approvalId));
+  const [first] = await ctx.tx.select({ bundleId: schema.approvalRequests.bundleId }).from(schema.approvalRequests).where(where);
+  if (!first) return null;
+  await ctx.tx
+    .select({ id: schema.approvalRequests.id })
     .from(schema.approvalRequests)
-    .where(and(eq(schema.approvalRequests.workspaceId, ctx.principal.workspaceId), eq(schema.approvalRequests.id, approvalId)));
+    .where(
+      and(
+        eq(schema.approvalRequests.workspaceId, ctx.principal.workspaceId),
+        first.bundleId ? eq(schema.approvalRequests.bundleId, first.bundleId) : eq(schema.approvalRequests.id, approvalId),
+      ),
+    )
+    .orderBy(asc(schema.approvalRequests.id))
+    .for('update');
+  // Read again after the lock: a decision committed while we waited is visible now.
+  const [r] = await ctx.tx.select().from(schema.approvalRequests).where(where);
+  return r ?? null;
+}
+
+async function decide(ctx: CommandContext, approvalId: string) {
+  const r = await lockApproval(ctx, approvalId);
   if (!r) throw new AppError('not_found', `Approval request ${approvalId} does not exist.`);
   if (r.status !== 'pending') throw new AppError('conflict', `This request was already ${r.status}.`);
   const [w] = await ctx.tx
@@ -1407,11 +1429,56 @@ async function requestingAgent(ctx: CommandContext, r: { requestedByType: string
 async function recordHeldExecution(
   ctx: CommandContext,
   agentId: string,
-  artifact: { id: string; type: string },
-  previousVersion: number | null,
+  held: HeldAction | null,
+  published: { id: string; type: string; previousVersion: number | null }[],
 ) {
+  await recordAgentAction(
+    ctx.tx,
+    agentId,
+    { name: 'artifacts.requestPublish' },
+    {
+      decision: 'allow',
+      actionClass: held?.actionClass ?? 'content.publish',
+      reasons: ['Ran after its veto window ended without a veto.'],
+      impact: held?.impact ?? {},
+      ...(held?.mandateId
+        ? { mandate: { id: held.mandateId, version: held.mandateVersion ?? 0, holdWindow: 'PT2H', independentCheck: false } }
+        : {}),
+    },
+    'internal',
+    published.map((p) => p.id).join(','),
+    null,
+    held?.intent ?? null,
+    await publishUndoGroup(ctx, published),
+  );
+}
+
+/**
+ * Runs a held agent change whose veto window has ended (ADR-0016, #225). Re-checks at that moment
+ * that the agent is active, the workspace lets agents act and its mandate still applies; if not,
+ * the hold becomes an ordinary approval with the reason. Returns what happened.
+ */
+/** What the policy engine recorded when it held a change: its class, impact and mandate. */
+export interface HeldAction {
+  id: number;
+  actionClass: ActionClass;
+  impact: Impact;
+  mandateId: string | null;
+  mandateVersion: number | null;
+  intent: string | null;
+}
+
+/** Whether a held change may run now: yes, not yet (e.g. outside working hours), or only with a person. */
+export type HeldCheck = { run: true } | { wait: string } | { person: string };
+
+/** How long a held change outside working hours waits before it is checked again. */
+const HOLD_RECHECK_MS = 15 * 60_000;
+
+/** The agent's ledger entry that held this artifact: the newest `hold` of a publish that names it. */
+async function heldActionFor(ctx: CommandContext, agentId: string, artifactId: string): Promise<HeldAction | null> {
   const [held] = await ctx.tx
     .select({
+      id: schema.agentActions.id,
       mandateId: schema.agentActions.mandateId,
       mandateVersion: schema.agentActions.mandateVersion,
       impact: schema.agentActions.impact,
@@ -1424,51 +1491,49 @@ async function recordHeldExecution(
         eq(schema.agentActions.workspaceId, ctx.principal.workspaceId),
         eq(schema.agentActions.agentId, agentId),
         eq(schema.agentActions.decision, 'hold'),
-        sql`${schema.agentActions.command} IN ('artifacts.requestPublish', 'artifacts.requestPublishBundle')`,
-        sql`(${schema.agentActions.target} = ${artifact.id} OR ${schema.agentActions.target} LIKE ${`${artifact.id},%`} OR ${schema.agentActions.target} LIKE ${`%,${artifact.id}`} OR ${schema.agentActions.target} LIKE ${`%,${artifact.id},%`})`,
+        sql`${schema.agentActions.command} IN ('artifacts.requestPublish', 'artifacts.requestPublishBundle', 'config.import')`,
+        sql`${artifactId} = ANY(string_to_array(${schema.agentActions.target}, ','))`,
       ),
     )
     .orderBy(desc(schema.agentActions.id))
     .limit(1);
-  await recordAgentAction(
-    ctx.tx,
-    agentId,
-    { name: 'artifacts.requestPublish' },
-    {
-      decision: 'allow',
-      actionClass: (held?.actionClass as ActionClass | undefined) ?? 'content.publish',
-      reasons: ['Ran after its veto window ended without a veto.'],
-      impact: (held?.impact ?? {}) as Impact,
-      ...(held?.mandateId
-        ? { mandate: { id: held.mandateId, version: held.mandateVersion ?? 0, holdWindow: 'PT2H', independentCheck: false } }
-        : {}),
-    },
-    'internal',
-    artifact.id,
-    null,
-    held?.intent ?? null,
-    await publishUndo(ctx, artifact, previousVersion),
-  );
+  return held ? { ...held, actionClass: held.actionClass as ActionClass, impact: (held.impact ?? {}) as Impact } : null;
 }
 
-/**
- * Runs a held agent change whose veto window has ended (ADR-0016, #225). Re-checks at that moment
- * that the agent is active, the workspace lets agents act and its mandate still applies; if not,
- * the hold becomes an ordinary approval with the reason. Returns what happened.
- */
 export async function runHeldChange(
   ctx: CommandContext,
   approvalId: string,
-  stillAllowed: (agentId: string) => Promise<string | null>,
-): Promise<{ status: 'published' | 'needs_person' | 'not_due'; reason?: string }> {
-  const r = await decide(ctx, approvalId);
-  if (!r.holdUntil || r.holdUntil > new Date()) return { status: 'not_due' };
+  check: (agentId: string, held: HeldAction | null) => Promise<HeldCheck>,
+): Promise<{ status: 'published' | 'needs_person' | 'not_due' | 'waiting'; reason?: string }> {
+  // Locked: a veto or an early approval that commits first wins, and a second runner sees it (#263).
+  const r = await lockApproval(ctx, approvalId);
+  if (r?.status !== 'pending' || !r.holdUntil || r.holdUntil > new Date()) return { status: 'not_due' };
   const members = await bundleMembers(ctx, r);
   const agent = await requestingAgent(ctx, r);
+  const held = agent ? await heldActionFor(ctx, agent.id, r.artifactId) : null;
   let problem: string | null = null;
   if (!agent) problem = 'the agent that requested it is no longer known';
   else if (agent.status !== 'active') problem = `the agent “${agent.name}” is ${agent.status}`;
-  else problem = await stillAllowed(agent.id);
+  else {
+    // The mandate, counters and guardrails are decided again now, not as they were when held (#262).
+    const verdict = await check(agent.id, held);
+    if ('person' in verdict) problem = verdict.person;
+    else if ('wait' in verdict) {
+      await ctx.tx
+        .update(schema.approvalRequests)
+        .set({ holdUntil: new Date(Date.now() + HOLD_RECHECK_MS) })
+        .where(
+          and(
+            eq(schema.approvalRequests.workspaceId, ctx.principal.workspaceId),
+            inArray(
+              schema.approvalRequests.id,
+              members.map((m) => m.id),
+            ),
+          ),
+        );
+      return { status: 'waiting', reason: verdict.wait };
+    }
+  }
   const ids = members.map((m) => m.id);
   const scope = and(eq(schema.approvalRequests.workspaceId, ctx.principal.workspaceId), inArray(schema.approvalRequests.id, ids));
   if (problem) {
@@ -1481,13 +1546,14 @@ export async function runHeldChange(
       .where(scope);
     return { status: 'needs_person', reason: problem };
   }
+  const published: { id: string; type: string; previousVersion: number | null }[] = [];
   for (const m of members) {
     const artifact = await loadArtifact(ctx, m.artifactId);
-    const previousVersion = artifact.publishedVersion;
+    published.push({ id: artifact.id, type: artifact.type, previousVersion: artifact.publishedVersion });
     await publishVersion(ctx, m.artifactId, m.version);
-    // The hold row records the decision; this row records what it did, so agents.undo can reverse it.
-    if (agent) await recordHeldExecution(ctx, agent.id, artifact, previousVersion);
   }
+  // The hold row records the decision; this one row records what ran, for the counters and agents.undo.
+  if (agent) await recordHeldExecution(ctx, agent.id, held, published);
   await ctx.tx
     .update(schema.approvalRequests)
     .set({
