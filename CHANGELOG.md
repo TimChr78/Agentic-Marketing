@@ -2,6 +2,12 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+### Fixed
+
+- **A hosted agent run cannot exceed its token allowance by a whole step (#296).** `maxTokensPerRun` is now a hard limit: before each model step the allowance still left is known, that step's `maxOutputTokens` is capped to it (a 100-token run can no longer ask for the old 200-token minimum), and no step starts when too little is left for a useful answer. A step's input tokens cannot be capped, so a run can still go over its allowance by the input of its last step — not by a whole further step. The tokens of the steps that finished are also recorded in `ai_calls` (and in the month's usage) when a later step throws, instead of 0.
+
 ## [0.5.2] - 2026-10-31
 
 ### Fixed

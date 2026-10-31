@@ -26,12 +26,16 @@ let blockReachedPromise: Promise<void> = Promise.resolve();
 let blockReleasePromise: Promise<void> = Promise.resolve();
 
 function answer(r: FakeRequest) {
+  if (r.messages.some((m) => m.text.includes('[stepfail]'))) {
+    if (r.toolResults.length === 0) return { toolCalls: [{ name: 'agents__get', input: {} }] };
+    return { status: 500, error: 'the model failed after the first step' };
+  }
   if (r.user.includes('[fail]')) return { status: 500, error: 'the model is unavailable' };
   if (r.user.includes('[overlap]')) {
     blockReached?.();
     return blockReleasePromise.then(() => ({ text: 'Overlapping run finished.' }));
   }
-  if (r.user.includes('[budget]')) return { toolCalls: [{ name: 'agents__get', input: {} }] };
+  if (r.messages.some((m) => m.text.includes('[budget]'))) return { toolCalls: [{ name: 'agents__get', input: {} }] };
   if (r.user.includes('[scope]')) {
     if (r.toolResults.length === 0)
       return {
@@ -42,6 +46,11 @@ function answer(r: FakeRequest) {
   if (r.toolResults.length === 0) return { toolCalls: [{ name: 'agents__get', input: {} }] };
   return { text: 'Last week: 1 broadcast, 2 live journeys, all within the limits.' };
 }
+
+/** Tokens the fake model reports for one step: 100 in, 20 out. */
+const STEP_INPUT = 100;
+const STEP_OUTPUT = 20;
+const STEP_TOKENS = STEP_INPUT + STEP_OUTPUT;
 
 const deps = () => ({
   db: t.srv.db,
@@ -114,8 +123,10 @@ async function setup(
 let weekly: Setup;
 let scope: Setup;
 let budget: Setup;
+let shrinking: Setup;
 let tooBigBudget: Setup;
 let failing: Setup;
+let stepFailed: Setup;
 let overlapping: Setup;
 
 beforeAll(async () => {
@@ -129,12 +140,16 @@ beforeAll(async () => {
   });
   scope = await setup('[scope] Try a write outside the granted scopes.', { scopes: ['artifacts:read'] });
   budget = await setup('[budget] Keep reading until the budget stops you.', { maxTokensPerRun: 100, maxToolCallsPerRun: 5 });
+  // Two steps of 120 tokens fit and a third does not: the second step's output is capped at the
+  // 130 tokens left, and after it only 10 remain.
+  shrinking = await setup('[budget] Keep reading until the budget stops you.', { maxTokensPerRun: 250, maxToolCallsPerRun: 5 });
   // The full run allowance is 200k, the month only has 100k left: the run must not start.
   tooBigBudget = await setup('[too-big] This run cannot be covered by the budget.', {
     maxTokensPerRun: 200_000,
     monthlyTokenBudget: 100_000,
   });
   failing = await setup('[fail] This run always fails.');
+  stepFailed = await setup('[stepfail] This run fails after its first step.', { maxTokensPerRun: 20_000 });
   overlapping = await setup('[overlap] A slow run.');
 }, 120_000);
 
@@ -220,12 +235,45 @@ describe('hosted agents (#258)', () => {
     const before = llm.requests.length;
     const summary = await runAt(DUE());
     expect(summary.ok).toBe(1);
-    // One model step used more than the 100-token budget, so the loop stopped there.
+    // The one step is capped at the 100-token budget (no 200-token floor above it), and after it
+    // the run has nothing left, so the loop stopped there.
     expect(llm.requests.length - before).toBe(1);
+    expect(llm.requests.at(-1)?.maxOutputTokens).toBe(100);
     const runs = await budget.api.call('agents.hostedRuns', { agentId: budget.agentId });
     expect(runs.runs[0]).toMatchObject({ status: 'ok', toolCalls: 1 });
-    expect(runs.runs[0]!.tokens).toBeGreaterThanOrEqual(100);
+    // A step's input cannot be capped, only its output: the run overshoots the budget by at most
+    // the input tokens of its last step.
+    expect(runs.runs[0]!.tokens).toBeGreaterThan(100);
+    expect(runs.runs[0]!.tokens).toBeLessThanOrEqual(100 + STEP_INPUT);
     expect(runs.runs[0]!.summary).toContain('budget');
+  }, 60_000);
+
+  it('caps each step at the tokens still left, and starts no step that cannot fit', async () => {
+    await onlyDue(shrinking.agentId);
+    const before = llm.requests.length;
+    const summary = await runAt(DUE());
+    expect(summary.ok).toBe(1);
+    // Two steps of 120 tokens each: the first gets the 250-token allowance, the second the 130
+    // still left. After them only 10 tokens remain, below the floor for another step.
+    expect(llm.requests.length - before).toBe(2);
+    expect(llm.requests.slice(before).map((r) => r.maxOutputTokens)).toEqual([250, 250 - STEP_TOKENS]);
+    const runs = await shrinking.api.call('agents.hostedRuns', { agentId: shrinking.agentId });
+    expect(runs.runs[0]).toMatchObject({ status: 'ok', toolCalls: 2, tokens: 2 * STEP_TOKENS });
+    expect(runs.runs[0]!.tokens).toBeLessThanOrEqual(250 + STEP_INPUT);
+  }, 60_000);
+
+  it('records the tokens of the steps that ran when a later step fails', async () => {
+    await onlyDue(stepFailed.agentId);
+    const summary = await runAt(DUE());
+    expect(summary).toMatchObject({ due: 1, ok: 0, failed: 1 });
+    const runs = await stepFailed.api.call('agents.hostedRuns', { agentId: stepFailed.agentId });
+    expect(runs.runs[0]).toMatchObject({ status: 'failed', tokens: STEP_TOKENS });
+    // The usage of the step that did run is in ai_calls and in the month's usage, not lost.
+    const calls = await stepFailed.api.call('ai.calls', { kind: 'hosted' });
+    expect(calls.calls).toHaveLength(1);
+    expect(calls.calls[0]).toMatchObject({ status: 'failed', inputTokens: STEP_INPUT, outputTokens: STEP_OUTPUT });
+    const providers = await stepFailed.api.call('aiProviders.list', {});
+    expect(providers.providers[0]!.usedThisMonth).toBe(STEP_TOKENS);
   }, 60_000);
 
   it('refuses a run whose full token allowance does not fit the monthly budget, before calling the model', async () => {
