@@ -1316,3 +1316,19 @@ export const agentNotificationCursor = pgTable('agent_notification_cursor', {
   lastDigestAt: ts('last_digest_at'),
   expiryNotified: jsonb('expiry_notified').$type<Record<string, string>>().notNull().default({}),
 });
+
+/**
+ * One row per agent action and recipient that already received its notification (#276). The batch
+ * an e-mail contains can change between sweeps, so this is what makes a retry send only what that
+ * recipient has not seen instead of re-sending a new batch.
+ */
+export const agentNotificationDeliveries = pgTable(
+  'agent_notification_deliveries',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    actionId: bigint('action_id', { mode: 'number' }).notNull(),
+    userId: text('user_id').notNull(),
+    deliveredAt: ts('delivered_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.actionId, t.userId] })],
+);
