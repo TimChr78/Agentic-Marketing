@@ -12,6 +12,7 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 - **A retry with the same idempotency key does not use the daily message limit again (#294).** A direct send whose key was already used counts as nobody, both in the policy decision and in the ledger.
 - **The AI usage page filters independent checks and hosted runs (#297).**
 - **A canary that could not send stops the staged send (#295).** The canary check needs successful sends, not just canary message rows: once nothing is in flight and the canary has too few successful sends to judge — because its messages failed or were suppressed — the stage and the run become `stopped`, the stop reason says how many canary messages failed or were suppressed, and nobody else is sent until a person runs `broadcasts.continue`. A canary that is genuinely smaller than `minCanary` still skips the check.
+- **A hosted agent run cannot exceed its token allowance by a whole step (#296).** `maxTokensPerRun` is now a hard limit: before each model step the allowance still left is known, that step's `maxOutputTokens` is capped to it (a 100-token run can no longer ask for the old 200-token minimum), and no step starts when too little is left for a useful answer. A step's input tokens cannot be capped, so a run can still go over its allowance by the input of its last step — not by a whole further step. The tokens of the steps that finished are also recorded in `ai_calls` (and in the month's usage) when a later step throws, instead of 0.
 
 ## [0.5.2] - 2026-10-31
 

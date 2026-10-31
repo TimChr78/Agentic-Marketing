@@ -23,6 +23,8 @@ const MAX_CONSECUTIVE_FAILURES = 3;
 const MAX_STEPS = 12;
 const STALE_CLAIM_MINUTES = 60;
 const MAX_OUTPUT_TOKENS = 2000;
+/** A step starts only when the run's remaining allowance can give its output at least this much. */
+const MIN_STEP_TOKENS = 100;
 
 const SYSTEM = `You are a hosted agent of an agent-first marketing platform. The platform started this run on a schedule; you work through tools that are the platform's commands, acting as the agent and under its mandate.
 - Your permissions are the scopes granted to you, never more than your sponsor's role. A tool that says it needs a permission you were not granted is refused; do not retry it.
@@ -102,10 +104,17 @@ interface TurnResult {
   text: string;
   toolCalls: number;
   tokens: number;
-  inputTokens: number;
-  outputTokens: number;
   stoppedAtBudget: boolean;
 }
+
+/** Tokens used so far, kept outside the turn so a run that throws still records them. */
+interface TurnUsage {
+  inputTokens: number;
+  outputTokens: number;
+}
+
+const tokensOf = (steps: { usage: { inputTokens?: number; outputTokens?: number } }[]) =>
+  steps.reduce((n, s) => n + (s.usage.inputTokens ?? 0) + (s.usage.outputTokens ?? 0), 0);
 
 /** One fresh model session on the copilot's in-process MCP client, under the agent principal. */
 async function runHostedTurn(opts: {
@@ -117,6 +126,8 @@ async function runHostedTurn(opts: {
   now: Date;
   maxTokens: number;
   maxToolCalls: number;
+  /** Accumulated by the steps that finish; the caller records it even if the turn throws. */
+  usage: TurnUsage;
 }): Promise<TurnResult> {
   const server = mcpServerFor(opts.principal, opts.executor, { stepUp: true, textContent: 'json' });
   const client = new Client({ name: 'hosted-agent', version: VERSION });
@@ -148,32 +159,46 @@ async function runHostedTurn(opts: {
       'Your instructions:',
       opts.instructions,
       '',
-      `Budgets for this run: at most ${opts.maxToolCalls} tool calls and about ${opts.maxTokens} tokens. Stop and summarise what you found when either is used up.`,
+      `Budgets for this run: at most ${opts.maxToolCalls} tool calls and at most ${opts.maxTokens} tokens. Stop and summarise what you found when either is used up.`,
     ].join('\n');
     const result = await generateText({
       model: opts.model.model,
       system: SYSTEM,
       prompt,
       tools: toolset,
+      // maxTokensPerRun is a hard limit, not a check after the fact. The reservation covers the
+      // whole allowance, so a step may only produce the output the allowance still has room for:
+      // prepareStep caps maxOutputTokens at what is left, and the loop stops when too little is
+      // left for a useful step. A step's input tokens cannot be capped, so a run can exceed the
+      // allowance by at most the input of its last step.
       stopWhen: [
         isStepCount(MAX_STEPS),
-        ({ steps }) => steps.reduce((n, s) => n + (s.usage.inputTokens ?? 0) + (s.usage.outputTokens ?? 0), 0) >= opts.maxTokens,
+        ({ steps }) => opts.maxTokens - tokensOf(steps) < MIN_STEP_TOKENS,
         ({ steps }) => steps.reduce((n, s) => n + s.toolCalls.length, 0) >= opts.maxToolCalls,
       ],
-      maxOutputTokens: Math.min(MAX_OUTPUT_TOKENS, Math.max(200, opts.maxTokens)),
+      prepareStep: ({ steps }) => ({
+        maxOutputTokens: Math.max(1, Math.min(MAX_OUTPUT_TOKENS, opts.maxTokens - tokensOf(steps))),
+      }),
+      maxOutputTokens: Math.max(1, Math.min(MAX_OUTPUT_TOKENS, opts.maxTokens)),
       maxRetries: 1,
       timeout: 120_000,
+      // A step's usage is known as soon as it finishes; a later step or the loop can still throw,
+      // and the caller records what was used rather than zero.
+      onStepEnd: (step) => {
+        opts.usage.inputTokens += step.usage.inputTokens ?? 0;
+        opts.usage.outputTokens += step.usage.outputTokens ?? 0;
+      },
     });
     const inputTokens = result.totalUsage.inputTokens ?? 0;
     const outputTokens = result.totalUsage.outputTokens ?? 0;
     const tokens = inputTokens + outputTokens;
+    opts.usage.inputTokens = inputTokens;
+    opts.usage.outputTokens = outputTokens;
     return {
       text: result.text.trim(),
       toolCalls,
       tokens,
-      inputTokens,
-      outputTokens,
-      stoppedAtBudget: tokens >= opts.maxTokens || toolCalls >= opts.maxToolCalls,
+      stoppedAtBudget: tokens >= opts.maxTokens - MIN_STEP_TOKENS || toolCalls >= opts.maxToolCalls,
     };
   } finally {
     await client.close().catch(() => {});
@@ -399,8 +424,7 @@ async function runOne(deps: HostedAgentDeps, workspaceId: string, agentId: strin
   };
 
   const attemptStarted = Date.now();
-  let inputTokens = 0;
-  let outputTokens = 0;
+  const usage: TurnUsage = { inputTokens: 0, outputTokens: 0 };
   let error: string | null = null;
 
   try {
@@ -413,9 +437,8 @@ async function runOne(deps: HostedAgentDeps, workspaceId: string, agentId: strin
       now,
       maxTokens: loaded.hosted.maxTokensPerRun,
       maxToolCalls: loaded.hosted.maxToolCallsPerRun,
+      usage,
     });
-    inputTokens = turn.inputTokens;
-    outputTokens = turn.outputTokens;
     const summary =
       turn.text ||
       (turn.stoppedAtBudget
@@ -439,13 +462,15 @@ async function runOne(deps: HostedAgentDeps, workspaceId: string, agentId: strin
       status: 'failed',
       summary: '',
       toolCalls: 0,
-      tokens: 0,
+      // The provider already billed the steps that finished before the failure.
+      tokens: usage.inputTokens + usage.outputTokens,
       error,
     });
     return disabled ? ('disabled' as const) : ('failed' as const);
   } finally {
     // One ai_calls row per run, written while the reservation still covers it, so the provider's
-    // monthly usage never dips between the model call and its record.
+    // monthly usage never dips between the model call and its record. The `usage` accumulator is
+    // filled by onStepEnd, so a run that throws after a step still records that step's tokens.
     await recordAiCall(deps.db, workspaceId, {
       kind: 'hosted',
       status: error ? 'failed' : 'done',
@@ -453,8 +478,8 @@ async function runOne(deps: HostedAgentDeps, workspaceId: string, agentId: strin
       model: model.modelId,
       input: { hostedAgentId: loaded.agent.id, runId },
       error,
-      inputTokens,
-      outputTokens,
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
       latencyMs: Date.now() - attemptStarted,
       principalId: loaded.agent.sponsorUserId,
       finishedAt: new Date(),
