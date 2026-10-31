@@ -31,7 +31,8 @@ export async function run(args: string[]): Promise<number> {
   }
 
   console.error('Restore replaces the current Postgres database (and ClickHouse tables with --clickhouse).');
-  console.error('Stop the app first: docker compose stop app');
+  console.error('Erasures recorded in the live database are replayed afterwards, so people erased since the');
+  console.error('backup stay erased. Stop the app first: docker compose stop app');
   if (!values.yes) {
     if (!process.stdin.isTTY) {
       console.error('Refusing without --yes: there is no terminal to confirm on.');
@@ -59,7 +60,7 @@ export async function run(args: string[]): Promise<number> {
     const dataVersion = manifest.format === 1 ? manifest.version : (manifest.fromVersion ?? 'unknown');
     console.log(
       `restored ${manifest.version} from ${resolveUserPath(backupDir)} ` +
-        `(data version ${dataVersion}, migration head ${manifest.migrationHead ?? 'none'})`,
+        `(snapshot ${manifest.createdAt}, data version ${dataVersion}, migration head ${manifest.migrationHead ?? 'none'})`,
     );
     return 0;
   } catch (err) {
