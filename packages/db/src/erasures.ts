@@ -126,6 +126,23 @@ async function eraseFamily(client: pg.Client, workspaceId: string, profileIds: s
     params,
   );
   await client.query('DELETE FROM messages WHERE workspace_id = $1 AND profile_id = ANY($2)', params);
+  // Their browsers and apps stop getting notifications. `push_subscriptions` has no foreign key
+  // to profiles (#280), so deleting the profile would leave these rows behind; `profiles.erase`
+  // removes them by the anonymous id and user id of the family. The identifiers still exist here,
+  // just before the profile delete cascades them away. A snapshot older than the push feature has
+  // no table, and then there is nothing to remove.
+  if (await hasTable(client, 'push_subscriptions'))
+    await client.query(
+      `DELETE FROM push_subscriptions
+       WHERE workspace_id = $1
+         AND (anonymous_id IN (
+                SELECT value FROM identifiers
+                WHERE workspace_id = $1 AND profile_id = ANY($2) AND type = 'anonymous_id')
+           OR user_id IN (
+                SELECT value FROM identifiers
+                WHERE workspace_id = $1 AND profile_id = ANY($2) AND type = 'user_id'))`,
+      params,
+    );
   await client.query('DELETE FROM journey_participants WHERE workspace_id = $1 AND profile_id = ANY($2)', params);
   await client.query('DELETE FROM segment_memberships WHERE workspace_id = $1 AND profile_id = ANY($2)', params);
   await client.query('DELETE FROM consent_records WHERE workspace_id = $1 AND profile_id = ANY($2)', params);
