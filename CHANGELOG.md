@@ -2,7 +2,7 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
-## [Unreleased]
+## [0.5.2] - 2026-10-31
 
 ### Fixed
 
@@ -20,6 +20,14 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 - **A failed daily digest for one sponsor no longer skips that sponsor for a day (#277).** The digest is tracked per sponsor through its per-day idempotency key's sent message row: a sponsor whose e-mail failed is retried on the next sweep, while the sponsors that already received the digest are not sent it again, and the daily timestamp advances only once every sponsor has it.
 - **SMS and push direct sends are covered by the mandate's scope (#278).** `messages.sendSms` and `messages.sendPush` now report the published template's purpose and topic and their channel (`sms`, `push`), so a mandate limited to `channels: ['email']` refuses them instead of letting them through. They also record the message they created on the agent ledger, like `messages.sendEmail`, and the independent check now sees the SMS body and the push title, body and link, not just their ids.
 - **Suppressed and failed direct sends no longer use up the daily message limit (#279).** A direct send records `people: 0` on its ledger row when the gateway answered `suppressed` or `failed` (no consent, a suppressed address, a missing or unpublished template, a delivery-policy refusal), so the agent's message counter counts only messages that went out and a blocked send does not consume `messagesPerDay`.
+
+### Upgrading from 0.5.1
+
+- **Migrations:** `0054_ai_call_kind_hosted.sql` (hosted runs are recorded as AI calls) and `0055_agent_notification_deliveries.sql` (sponsor notifications are tracked per action and recipient). Both additive; they run on start.
+- **Configuration:** none.
+- **Breaking changes:** none. Agents under a mandate are held to it more strictly: SMS and push sends are checked against its scope, a pause stops a hosted run mid-run, and `agents.undo` refuses when newer work went live.
+- **Manual steps:** none. Shadow-report entries recorded before this release show as unreviewed.
+- **Upgrade:** download `agentic-marketing-compose-<version>.tar.gz`, replace `docker-compose.yml` with its copy, check your configuration with the new image (`AM_VERSION=<version> docker compose run --rm --no-deps -T app am doctor --env-file - < .env`), then set `AM_VERSION=<version>` in `.env` and `docker compose pull && docker compose up -d` (Helm: the chart of the same version). Then `docker compose exec app am doctor`.
 
 ## [0.5.1] - 2026-10-31
 
