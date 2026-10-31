@@ -1,4 +1,4 @@
-import { AiUnavailable, languageModel, modelFor, releaseTokens, reserveTokens } from '@agentic-marketing/ai';
+import { AiUnavailable, languageModel, modelFor, recordAiCall, releaseTokens, reserveTokens } from '@agentic-marketing/ai';
 import type { NotifyDeps } from '@agentic-marketing/alerts';
 import { sendMemberEmails } from '@agentic-marketing/alerts';
 import { nextHostedRunAt } from '@agentic-marketing/auth';
@@ -368,7 +368,9 @@ async function runOne(deps: HostedAgentDeps, workspaceId: string, agentId: strin
 
   let reservation: string | undefined;
   try {
-    reservation = await reserveTokens(deps.db, workspaceId, model.providerId, Math.min(loaded.hosted.maxTokensPerRun, 100_000));
+    // The run may use its whole allowance, so the reservation covers all of it: a budget that
+    // cannot hold the run refuses it before any model call.
+    reservation = await reserveTokens(deps.db, workspaceId, model.providerId, loaded.hosted.maxTokensPerRun);
   } catch (err) {
     const error =
       err instanceof AiUnavailable
@@ -396,6 +398,11 @@ async function runOne(deps: HostedAgentDeps, workspaceId: string, agentId: strin
     },
   };
 
+  const attemptStarted = Date.now();
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let error: string | null = null;
+
   try {
     const turn = await runHostedTurn({
       executor: deps.executor,
@@ -407,6 +414,8 @@ async function runOne(deps: HostedAgentDeps, workspaceId: string, agentId: strin
       maxTokens: loaded.hosted.maxTokensPerRun,
       maxToolCalls: loaded.hosted.maxToolCallsPerRun,
     });
+    inputTokens = turn.inputTokens;
+    outputTokens = turn.outputTokens;
     const summary =
       turn.text ||
       (turn.stoppedAtBudget
@@ -423,7 +432,7 @@ async function runOne(deps: HostedAgentDeps, workspaceId: string, agentId: strin
     });
     return disabled ? ('disabled' as const) : ('ok' as const);
   } catch (err) {
-    const error = (err as Error).message.slice(0, 2000);
+    error = (err as Error).message.slice(0, 2000);
     const { disabled } = await finishRun(deps, loaded, {
       id: runId,
       startedAt,
@@ -435,6 +444,21 @@ async function runOne(deps: HostedAgentDeps, workspaceId: string, agentId: strin
     });
     return disabled ? ('disabled' as const) : ('failed' as const);
   } finally {
+    // One ai_calls row per run, written while the reservation still covers it, so the provider's
+    // monthly usage never dips between the model call and its record.
+    await recordAiCall(deps.db, workspaceId, {
+      kind: 'hosted',
+      status: error ? 'failed' : 'done',
+      providerId: model.providerId,
+      model: model.modelId,
+      input: { hostedAgentId: loaded.agent.id, runId },
+      error,
+      inputTokens,
+      outputTokens,
+      latencyMs: Date.now() - attemptStarted,
+      principalId: loaded.agent.sponsorUserId,
+      finishedAt: new Date(),
+    }).catch((err) => logger.error({ err, workspaceId, agentId }, 'hosted agent AI call not recorded'));
     if (reservation) await releaseTokens(deps.db, workspaceId, reservation).catch(() => {});
   }
 }

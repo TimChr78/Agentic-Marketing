@@ -77,6 +77,7 @@ async function setup(
     scopes?: ('artifacts:read' | 'audit:read' | 'artifacts:write')[];
     maxTokensPerRun?: number;
     maxToolCallsPerRun?: number;
+    monthlyTokenBudget?: number | null;
     name?: string;
   } = {},
 ): Promise<Setup> {
@@ -97,6 +98,7 @@ async function setup(
     models: { default: 'claude-sonnet-test' },
     apiKey: 'sk-test-0123456789',
     useFor: ['copilot'],
+    monthlyTokenBudget: opts.monthlyTokenBudget ?? null,
   });
   const hosted = await api.call('agents.createHosted', {
     name: opts.name ?? `Hosted ${n}`,
@@ -112,6 +114,7 @@ async function setup(
 let weekly: Setup;
 let scope: Setup;
 let budget: Setup;
+let tooBigBudget: Setup;
 let failing: Setup;
 let overlapping: Setup;
 
@@ -126,6 +129,11 @@ beforeAll(async () => {
   });
   scope = await setup('[scope] Try a write outside the granted scopes.', { scopes: ['artifacts:read'] });
   budget = await setup('[budget] Keep reading until the budget stops you.', { maxTokensPerRun: 100, maxToolCallsPerRun: 5 });
+  // The full run allowance is 200k, the month only has 100k left: the run must not start.
+  tooBigBudget = await setup('[too-big] This run cannot be covered by the budget.', {
+    maxTokensPerRun: 200_000,
+    monthlyTokenBudget: 100_000,
+  });
   failing = await setup('[fail] This run always fails.');
   overlapping = await setup('[overlap] A slow run.');
 }, 120_000);
@@ -159,6 +167,7 @@ describe('hosted agents (#258)', () => {
 
     // The run is due; the fake model reads agents.get through the in-process MCP client, then answers.
     const before = llm.requests.length;
+    const usageBefore = (await weekly.api.call('aiProviders.list', {})).providers[0]!.usedThisMonth;
     const summary = await runAt(DUE());
     expect(summary).toMatchObject({ due: 1, ok: 1, failed: 0, skipped: 0 });
     expect(llm.requests.length - before).toBe(2);
@@ -175,6 +184,15 @@ describe('hosted agents (#258)', () => {
     expect(runs.runs[0]!.summary).toContain('Last week');
     expect(runs.hosted?.consecutiveFailures).toBe(0);
     expect(runs.hosted?.lastRunAt).toBeTruthy();
+
+    // The run is one recorded AI call, and the tokens are the provider's usage for the month.
+    const usage = (await weekly.api.call('aiProviders.list', {})).providers[0]!.usedThisMonth;
+    expect(usage).toBeGreaterThan(usageBefore);
+    expect(usage).toBe(runs.runs[0]!.tokens);
+    const calls = await weekly.api.call('ai.calls', { kind: 'hosted' });
+    expect(calls.calls).toHaveLength(1);
+    expect(calls.calls[0]).toMatchObject({ kind: 'hosted', status: 'done', model: 'claude-sonnet-test' });
+    expect(calls.calls[0]!.inputTokens + calls.calls[0]!.outputTokens).toBe(runs.runs[0]!.tokens);
 
     // The sponsor gets the summary by e-mail, once.
     const mails = outbox.filter((m) => m.to === weekly.owner.email && m.subject.startsWith('Hosted agent report'));
@@ -208,6 +226,20 @@ describe('hosted agents (#258)', () => {
     expect(runs.runs[0]).toMatchObject({ status: 'ok', toolCalls: 1 });
     expect(runs.runs[0]!.tokens).toBeGreaterThanOrEqual(100);
     expect(runs.runs[0]!.summary).toContain('budget');
+  }, 60_000);
+
+  it('refuses a run whose full token allowance does not fit the monthly budget, before calling the model', async () => {
+    await onlyDue(tooBigBudget.agentId);
+    const before = llm.requests.length;
+    const summary = await runAt(DUE());
+    expect(summary).toMatchObject({ due: 1, ok: 0, failed: 1, skipped: 0 });
+    // The model was never called: the run allowance (200k) cannot be reserved from a 100k budget.
+    expect(llm.requests.length).toBe(before);
+    const runs = await tooBigBudget.api.call('agents.hostedRuns', { agentId: tooBigBudget.agentId });
+    expect(runs.runs[0]).toMatchObject({ status: 'failed', toolCalls: 0, tokens: 0 });
+    expect(runs.runs[0]!.error).toContain('budget');
+    const providers = await tooBigBudget.api.call('aiProviders.list', {});
+    expect(providers.providers[0]!.usedThisMonth).toBe(0);
   }, 60_000);
 
   it('disables the agent after three consecutive failures and tells the sponsor', async () => {

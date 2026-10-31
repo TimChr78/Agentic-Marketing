@@ -13,7 +13,7 @@ import { createAiProvider, deleteAiProvider, listAiProviders, updateAiProvider }
 
 const Call = z.object({
   id: z.string(),
-  kind: z.enum(['decide', 'generate', 'copilot', 'test', 'classify', 'check']),
+  kind: z.enum(['decide', 'generate', 'copilot', 'test', 'classify', 'check', 'hosted']),
   status: z.enum(['pending', 'running', 'done', 'fallback', 'failed']),
   model: z.string().nullable(),
   promptId: z.string().nullable(),
@@ -39,12 +39,12 @@ export const listAiCalls = defineCommand({
   name: 'ai.calls',
   title: 'AI decision log',
   description:
-    'Recent AI calls, newest first: journey decisions and generated texts with their rationale, fallbacks with the reason, prompt tests and copilot turns. Filter by journey, prompt, profile or kind.',
+    'Recent AI calls, newest first: journey decisions and generated texts with their rationale, fallbacks with the reason, prompt tests, copilot turns and hosted agent runs. Filter by journey, prompt, profile or kind.',
   input: z.object({
     journeyId: z.string().optional(),
     promptId: z.string().optional(),
     profileId: z.string().optional(),
-    kind: z.enum(['decide', 'generate', 'copilot', 'test', 'classify', 'check']).optional(),
+    kind: z.enum(['decide', 'generate', 'copilot', 'test', 'classify', 'check', 'hosted']).optional(),
     limit: z.number().int().min(1).max(200).default(50),
     before: isoDateTime('before').optional(),
   }),

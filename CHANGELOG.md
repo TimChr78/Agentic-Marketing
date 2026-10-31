@@ -2,6 +2,12 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+### Fixed
+
+- **Hosted agent runs count against the monthly AI budget (#274).** A run now reserves its whole `maxTokensPerRun` allowance before the model is called, so a run the budget cannot cover is refused before any call instead of starting under an arbitrary 100k reservation. Each finished run, whether it succeeded or failed, writes one `ai_calls` row with the provider, the model and the tokens it used, so `usedThisMonth`, `aiProviders.list` and the monthly budget account for hosted agents. Migration `0054_ai_call_kind_hosted.sql` adds the `hosted` AI-call kind.
+
 ## [0.5.1] - 2026-10-31
 
 ### Fixed
