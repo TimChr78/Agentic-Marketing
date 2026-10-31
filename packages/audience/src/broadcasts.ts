@@ -67,6 +67,16 @@ export function subjectAssignment(profileId: string, broadcastId: string, sample
   return h % 100 < samplePercent ? String.fromCharCode(65 + (h % variants)) : null;
 }
 
+/**
+ * Whether a person is in a broadcast's canary share (#254). The salt differs from
+ * `subjectAssignment`, so a staged send samples a different share than a subject test would, and
+ * recomputing after a crash or a resume always puts the same people in the canary.
+ */
+export function canaryAssignment(profileId: string, broadcastId: string, canaryPercent: number): boolean {
+  const h = createHash('sha256').update(`canary:${profileId}:${broadcastId}`).digest().readUInt32BE(0);
+  return h % 100 < canaryPercent;
+}
+
 const WEEKDAYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'] as const;
 const minutesOf = (hhmm: string) => Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3));
 
@@ -578,8 +588,37 @@ function pickWinner(metric: 'click' | 'open', variants: VariantResult[]): { winn
   return { winner: ranked[0].variant, reason: `${ranked[0].variant} won on ${metric}: ${value(ranked[0])} vs ${value(ranked[1])}` };
 }
 
+/** Percent text for a stop reason, e.g. 0.0525 -> "5.25%". */
+const pctText = (fraction: number) => `${(fraction * 100).toFixed(2).replace(/\.?0+$/, '')}%`;
+
+/** The canary's thresholds that its rates are over, with the counts that produced them. */
+function canaryBreaches(
+  def: { maxBounceRate: number; maxComplaintRate: number; maxUnsubscribeRate: number },
+  counts: { sent: number; bounced: number; complained: number; unsubscribed: number },
+  rates: { bounceRate: number; complaintRate: number; unsubscribeRate: number },
+): string[] {
+  const breaches: string[] = [];
+  const check = (label: string, n: number, rate: number, limit: number) => {
+    if (rate > limit)
+      breaches.push(`${label} rate ${pctText(rate)} is above the ${pctText(limit)} limit (${n} of ${counts.sent} canary sends)`);
+  };
+  check('bounce', counts.bounced, rates.bounceRate, def.maxBounceRate);
+  check('complaint', counts.complained, rates.complaintRate, def.maxComplaintRate);
+  check('unsubscribe', counts.unsubscribed, rates.unsubscribeRate, def.maxUnsubscribeRate);
+  return breaches;
+}
+
+/** The message ids of the canary share, recomputed from the deterministic assignment. */
+async function canaryMessageIds(tx: Tx, broadcastId: string, canaryPercent: number): Promise<string[]> {
+  const rows = await tx
+    .select({ id: schema.messages.id, profileId: schema.messages.profileId })
+    .from(schema.messages)
+    .where(eq(schema.messages.journeyId, broadcastId));
+  return rows.flatMap((r) => (r.profileId && canaryAssignment(r.profileId, broadcastId, canaryPercent) ? [r.id] : []));
+}
+
 const Run = z.object({
-  status: z.enum(['not_scheduled', 'scheduled', 'running', 'done', 'cancelled', 'failed']),
+  status: z.enum(['not_scheduled', 'scheduled', 'running', 'done', 'cancelled', 'failed', 'stopped']),
   version: z.number().nullable(),
   sendAt: z.string().nullable(),
   recipients: z.number(),
@@ -615,13 +654,44 @@ const Test = z.object({
   ),
 });
 
+const Stage = z.object({
+  stage: z.enum(['canary_sending', 'canary_waiting', 'checking', 'sending_rest', 'stopped', 'done']),
+  canaryPercent: z.number(),
+  wait: z.string(),
+  checkAt: z.string().nullable().describe('When the canary is judged; the rest waits until then'),
+  checkedAt: z.string().nullable(),
+  checkSkipped: z.boolean().describe('Too few canary sends to judge, so the rest went out without a check'),
+  canary: z.object({
+    recipients: z.number(),
+    queued: z.number(),
+    skipped: z.number(),
+  }),
+  sent: z.number(),
+  bounced: z.number(),
+  complained: z.number(),
+  unsubscribed: z.number(),
+  bounceRate: z.number().nullable().describe('Percent of the canary’s sent messages that bounced'),
+  complaintRate: z.number().nullable(),
+  unsubscribeRate: z.number().nullable(),
+  thresholds: z.object({
+    bounceRate: z.number().describe('Percent'),
+    complaintRate: z.number().describe('Percent'),
+    unsubscribeRate: z.number().describe('Percent'),
+    minCanary: z.number(),
+  }),
+  stopReason: z.string().nullable(),
+  stoppedAt: z.string().nullable(),
+  resumedAt: z.string().nullable().describe('When a person sent the rest after a stop'),
+  completedAt: z.string().nullable(),
+});
+
 export const broadcastStatus = defineCommand({
   name: 'broadcasts.status',
   title: 'Broadcast status and results',
   description:
-    'Where a broadcast is (scheduled, running, done, cancelled) with how many people it reached and skipped, and what became of the e-mails: sent, delivered, bounced, complained, clicked, unsubscribed. A subject test reports its state, the variants with counts and rates, the winner and when the rest goes out.',
+    'Where a broadcast is (scheduled, running, done, cancelled, stopped) with how many people it reached and skipped, and what became of the e-mails: sent, delivered, bounced, complained, clicked, unsubscribed. A subject test reports its state, the variants with counts and rates, the winner and when the rest goes out. A staged send reports its stage, the canary’s counts and rates against the thresholds, and why it stopped.',
   input: z.object({ artifactId: BroadcastId }),
-  output: z.object({ run: Run, messages: z.record(z.string(), z.number()), test: Test.nullable() }),
+  output: z.object({ run: Run, messages: z.record(z.string(), z.number()), test: Test.nullable(), stage: Stage.nullable() }),
   permission: 'artifacts:read',
   effect: 'read',
   target: (i) => i.artifactId,
@@ -629,6 +699,7 @@ export const broadcastStatus = defineCommand({
     const [r] = await ctx.tx.select().from(schema.broadcastRuns).where(eq(schema.broadcastRuns.broadcastId, input.artifactId));
     const { def } = await definition(ctx.tx, input.artifactId, r?.version);
     const [t] = await ctx.tx.select().from(schema.broadcastTests).where(eq(schema.broadcastTests.broadcastId, input.artifactId));
+    const [s] = await ctx.tx.select().from(schema.broadcastStages).where(eq(schema.broadcastStages.broadcastId, input.artifactId));
     const messages = r
       ? await ctx.services.events.messageStats(ctx.principal.workspaceId, { since: r.createdAt, journeyId: input.artifactId })
       : {};
@@ -653,6 +724,36 @@ export const broadcastStatus = defineCommand({
         })),
       };
     }
+    let stage: z.output<typeof Stage> | null = null;
+    if (s && def.stagedSend) {
+      const percent = (fraction: number | null) => (fraction === null ? null : Math.round(fraction * 10_000) / 100);
+      stage = {
+        stage: s.stage,
+        canaryPercent: s.canaryPercent,
+        wait: def.stagedSend.wait,
+        checkAt: s.checkAt?.toISOString() ?? null,
+        checkedAt: s.checkedAt?.toISOString() ?? null,
+        checkSkipped: s.checkSkipped,
+        canary: { recipients: s.canaryRecipients, queued: s.canaryQueued, skipped: s.canarySkipped },
+        sent: s.sent,
+        bounced: s.bounced,
+        complained: s.complained,
+        unsubscribed: s.unsubscribed,
+        bounceRate: percent(s.bounceRate),
+        complaintRate: percent(s.complaintRate),
+        unsubscribeRate: percent(s.unsubscribeRate),
+        thresholds: {
+          bounceRate: Math.round(def.stagedSend.maxBounceRate * 10_000) / 100,
+          complaintRate: Math.round(def.stagedSend.maxComplaintRate * 10_000) / 100,
+          unsubscribeRate: Math.round(def.stagedSend.maxUnsubscribeRate * 10_000) / 100,
+          minCanary: def.stagedSend.minCanary,
+        },
+        stopReason: s.stopReason,
+        stoppedAt: s.stoppedAt?.toISOString() ?? null,
+        resumedAt: s.resumedAt?.toISOString() ?? null,
+        completedAt: s.completedAt?.toISOString() ?? null,
+      };
+    }
     return {
       run: {
         status: r?.status ?? 'not_scheduled',
@@ -668,6 +769,7 @@ export const broadcastStatus = defineCommand({
       },
       messages,
       test,
+      stage,
     };
   },
 });
@@ -695,7 +797,18 @@ export const cancelBroadcast = defineCommand({
         .update(schema.broadcastRuns)
         .set({ status: 'cancelled', finishedAt: new Date(), leaseUntil: null })
         .where(eq(schema.broadcastRuns.broadcastId, input.artifactId));
-    else
+    // A waiting canary is stopped too: the stage says why, and broadcasts.continue will not resume it.
+    if (r) {
+      await ctx.tx
+        .update(schema.broadcastStages)
+        .set({ stage: 'stopped', stopReason: 'Cancelled before the rest was sent.', stoppedAt: new Date() })
+        .where(
+          and(
+            eq(schema.broadcastStages.broadcastId, input.artifactId),
+            inArray(schema.broadcastStages.stage, ['canary_sending', 'canary_waiting', 'checking', 'sending_rest']),
+          ),
+        );
+    } else
       await ctx.tx.insert(schema.broadcastRuns).values({
         workspaceId: ctx.principal.workspaceId,
         broadcastId: artifact.id,
@@ -708,7 +821,47 @@ export const cancelBroadcast = defineCommand({
   },
 });
 
-export const broadcastCommands = [previewBroadcast, sendTestBroadcast, broadcastStatus, cancelBroadcast] as const;
+export const continueBroadcast = defineCommand({
+  name: 'broadcasts.continue',
+  title: 'Send the rest of a stopped staged broadcast',
+  description:
+    'After a staged send stopped on its canary check, send the rest of the audience. People already sent to are not sent to again. A person must run this: the canary stop exists so someone looks at the rates first.',
+  input: z.object({ artifactId: BroadcastId }),
+  output: z.object({ status: z.literal('sending_rest') }),
+  permission: 'artifacts:publish',
+  effect: 'write',
+  actionClass: 'send.broadcast',
+  humansOnly: true,
+  target: (i) => i.artifactId,
+  handler: async (input, ctx) => {
+    const [r] = await ctx.tx
+      .select()
+      .from(schema.broadcastRuns)
+      .where(eq(schema.broadcastRuns.broadcastId, input.artifactId))
+      .for('update');
+    if (!r) throw new AppError('not_found', `No broadcast run for ${input.artifactId}.`);
+    if (r.status !== 'stopped') throw new AppError('conflict', `The broadcast is ${r.status}, not stopped after a canary check.`);
+    const [s] = await ctx.tx
+      .select()
+      .from(schema.broadcastStages)
+      .where(eq(schema.broadcastStages.broadcastId, input.artifactId))
+      .for('update');
+    if (s?.stage !== 'stopped') throw new AppError('conflict', 'This broadcast has no stopped staged send to continue.');
+    const now = new Date();
+    await ctx.tx
+      .update(schema.broadcastStages)
+      .set({ stage: 'sending_rest', resumedAt: now })
+      .where(eq(schema.broadcastStages.broadcastId, input.artifactId));
+    // The rest starts from the top; the run is due at once and the next scheduler tick sends it.
+    await ctx.tx
+      .update(schema.broadcastRuns)
+      .set({ status: 'running', cursor: '', leaseUntil: null, finishedAt: null })
+      .where(eq(schema.broadcastRuns.broadcastId, input.artifactId));
+    return { status: 'sending_rest' as const };
+  },
+});
+
+export const broadcastCommands = [previewBroadcast, sendTestBroadcast, broadcastStatus, cancelBroadcast, continueBroadcast] as const;
 
 export interface BroadcastDeps {
   db: Db;
@@ -751,6 +904,17 @@ async function schedule(db: Db) {
             state: 'sampling',
           })
           .onConflictDoNothing();
+      // A staged send's stage row follows its run for the same reason: status shows the plan.
+      if (inserted.length && def.stagedSend)
+        await tx
+          .insert(schema.broadcastStages)
+          .values({
+            workspaceId: r.workspace_id,
+            broadcastId: r.id,
+            stage: 'canary_sending',
+            canaryPercent: def.stagedSend.canaryPercent,
+          })
+          .onConflictDoNothing();
     });
   }
 }
@@ -790,6 +954,79 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
 
     const now = new Date();
     let cursor = run.cursor;
+
+    // A staged send (#254) works through its stages before anything else: canary, wait, check,
+    // then the rest. The stage row and the run's cursor change in this transaction, so a crash
+    // resumes at the same point.
+    let [stage] = await tx.select().from(schema.broadcastStages).where(eq(schema.broadcastStages.broadcastId, broadcastId));
+    if (!stage && def.stagedSend) {
+      [stage] = await tx
+        .insert(schema.broadcastStages)
+        .values({ workspaceId: ws, broadcastId, stage: 'canary_sending', canaryPercent: def.stagedSend.canaryPercent })
+        .onConflictDoNothing()
+        .returning();
+      if (!stage) [stage] = await tx.select().from(schema.broadcastStages).where(eq(schema.broadcastStages.broadcastId, broadcastId));
+    }
+    if (def.stagedSend && stage) {
+      if (stage.stage === 'canary_waiting') {
+        if (stage.checkAt && stage.checkAt.getTime() > now.getTime()) {
+          // Parking the lease on checkAt is what wakes the run after the wait.
+          await tx
+            .update(schema.broadcastRuns)
+            .set({ status: 'running', leaseUntil: stage.checkAt })
+            .where(eq(schema.broadcastRuns.broadcastId, broadcastId));
+          return { more: false, holdout: holdoutEvents };
+        }
+        await tx.update(schema.broadcastStages).set({ stage: 'checking' }).where(eq(schema.broadcastStages.broadcastId, broadcastId));
+        stage = { ...stage, stage: 'checking' };
+      }
+      if (stage.stage === 'checking') {
+        // Rates from base counts of the canary's message events, like the mandate guardrails:
+        // a ratio measure hides small groups, and this is an internal decision about our own send.
+        const canaryIds = await canaryMessageIds(tx, broadcastId, stage.canaryPercent);
+        const stats = canaryIds.length
+          ? await deps.events.messageStats(ws, { since: run.createdAt, journeyId: broadcastId, messageIds: canaryIds })
+          : {};
+        const counts = {
+          sent: stats.sent ?? 0,
+          bounced: stats.bounced ?? 0,
+          complained: stats.complained ?? 0,
+          unsubscribed: stats.unsubscribed ?? 0,
+        };
+        const rate = (n: number) => (counts.sent ? n / counts.sent : 0);
+        const rates = {
+          bounceRate: rate(counts.bounced),
+          complaintRate: rate(counts.complained),
+          unsubscribeRate: rate(counts.unsubscribed),
+        };
+        // Too small to judge: the check is skipped (and recorded) rather than stopping on noise.
+        const skippedForSize = counts.sent < def.stagedSend.minCanary;
+        const breaches = skippedForSize ? [] : canaryBreaches(def.stagedSend, counts, rates);
+        if (breaches.length) {
+          const reason = `Canary stopped the send: ${breaches.join('; ')}.`;
+          await tx
+            .update(schema.broadcastStages)
+            .set({ stage: 'stopped', checkedAt: now, checkSkipped: false, ...counts, ...rates, stopReason: reason, stoppedAt: now })
+            .where(eq(schema.broadcastStages.broadcastId, broadcastId));
+          await tx
+            .update(schema.broadcastRuns)
+            .set({ status: 'stopped', finishedAt: now, leaseUntil: null })
+            .where(eq(schema.broadcastRuns.broadcastId, broadcastId));
+          return { more: false, holdout: holdoutEvents };
+        }
+        await tx
+          .update(schema.broadcastStages)
+          .set({ stage: 'sending_rest', checkedAt: now, checkSkipped: skippedForSize, ...counts, ...rates })
+          .where(eq(schema.broadcastStages.broadcastId, broadcastId));
+        // The rest starts from the top and the audience is rebuilt now.
+        await tx.update(schema.broadcastRuns).set({ cursor: '' }).where(eq(schema.broadcastRuns.broadcastId, broadcastId));
+        stage = { ...stage, stage: 'sending_rest', checkedAt: now, checkSkipped: skippedForSize, ...counts, ...rates };
+        cursor = '';
+      }
+    }
+    const canaryPass = stage?.stage === 'canary_sending';
+    const restPass = stage?.stage === 'sending_rest';
+
     // The sample has run: judge it and let the rest of the audience follow in this same pass.
     if (test?.state === 'deciding' && (!test.decideAt || test.decideAt.getTime() <= now.getTime())) {
       const variants = await variantResults(tx, deps.events, ws, broadcastId, test.subjects);
@@ -823,7 +1060,7 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
     // In the rest pass, everyone the sample already touched is left alone; the retry-safe
     // idempotency key would prevent a second message, but skipping them keeps the counts honest.
     const already = new Set(
-      test?.state === 'winner_sent' && ids.length
+      (test?.state === 'winner_sent' || restPass) && ids.length
         ? (
             await tx
               .select({ profileId: schema.messages.profileId })
@@ -851,9 +1088,12 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
     let skipped = 0;
     let windowSkipped = 0;
     let sampleStartsAt: Date | null = null;
+    let canaryStartsAt: Date | null = null;
     for (const m of members) {
+      if (canaryPass && stage && !canaryAssignment(m.profileId, broadcastId, stage.canaryPercent)) continue;
       if (test?.state === 'sampling' && !subjectAssignment(m.profileId, broadcastId, test.samplePercent, test.subjects.length)) continue;
       if (test?.state === 'winner_sent' && already.has(m.profileId)) continue;
+      if (restPass && already.has(m.profileId)) continue;
       const variant =
         test?.state === 'sampling'
           ? (subjectAssignment(m.profileId, broadcastId, test.samplePercent, test.subjects.length) ?? undefined)
@@ -915,6 +1155,10 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
         const at = notBefore ?? now;
         if (!sampleStartsAt || at < sampleStartsAt) sampleStartsAt = at;
       }
+      if (canaryPass && d.status === 'queued' && !windowSkip) {
+        const at = notBefore ?? now;
+        if (!canaryStartsAt || at < canaryStartsAt) canaryStartsAt = at;
+      }
       if (windowSkip && d.status === 'queued') {
         // The gateway queues only eligible people; a window skip is a separate refusal.
         await tx
@@ -941,30 +1185,57 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
 
     const finished = members.length < BATCH;
     const sampling = test?.state === 'sampling';
+    // The canary pass ending is not the run ending: it waits for its check, then the rest starts.
+    const canaryEnds = canaryPass && finished;
+    let checkAt: Date | null = null;
+    if (canaryEnds) {
+      checkAt = new Date((canaryStartsAt ?? now).getTime() + durationSeconds(def.stagedSend?.wait ?? 'PT2H') * 1000);
+      await tx
+        .update(schema.broadcastStages)
+        .set({
+          stage: 'canary_waiting',
+          checkAt,
+          canaryRecipients: run.recipients + recipients,
+          canaryQueued: run.queued + queued,
+          canarySkipped: run.skipped + skipped,
+        })
+        .where(eq(schema.broadcastStages.broadcastId, broadcastId));
+    }
+    const restDone = restPass && finished;
+    if (restDone)
+      await tx
+        .update(schema.broadcastStages)
+        .set({ stage: 'done', completedAt: now })
+        .where(eq(schema.broadcastStages.broadcastId, broadcastId));
+    const done = finished && !sampling && !canaryEnds;
     const last = members.at(-1)?.profileId ?? run.cursor;
     await tx
       .update(schema.broadcastRuns)
       .set({
-        status: finished && !sampling ? 'done' : 'running',
-        // A finished sample starts the rest from the top: the audience is rebuilt then.
-        cursor: sampling && finished ? '' : last,
+        status: done ? 'done' : 'running',
+        // A finished sample or canary starts the rest from the top: the audience is rebuilt then.
+        cursor: (sampling && finished) || canaryEnds ? '' : last,
         recipients: run.recipients + recipients,
         queued: run.queued + queued,
         skipped: run.skipped + skipped,
         windowSkipped: run.windowSkipped + windowSkipped,
         startedAt: run.startedAt ?? now,
-        finishedAt: finished && !sampling ? now : null,
-        leaseUntil: sampling
-          ? (test?.decideAt ?? new Date(now.getTime() + LEASE_MS))
-          : finished
-            ? null
-            : new Date(now.getTime() + LEASE_MS),
+        finishedAt: done ? now : null,
+        leaseUntil: canaryEnds
+          ? checkAt
+          : sampling
+            ? (test?.decideAt ?? new Date(now.getTime() + LEASE_MS))
+            : done
+              ? null
+              : new Date(now.getTime() + LEASE_MS),
       })
       .where(eq(schema.broadcastRuns.broadcastId, broadcastId));
     if (sampling && finished) {
       await tx.update(schema.broadcastTests).set({ state: 'deciding' }).where(eq(schema.broadcastTests.broadcastId, broadcastId));
       return { more: false, holdout: holdoutEvents };
     }
+    // The canary waiting is a pause, not a finish: the lease wakes the run at checkAt.
+    if (canaryEnds) return { more: false, holdout: holdoutEvents };
     return { more: !finished, holdout: holdoutEvents };
   });
   // ClickHouse is outside the transaction, as for journeys: an assignment that committed still
