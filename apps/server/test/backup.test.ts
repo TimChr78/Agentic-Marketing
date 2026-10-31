@@ -355,8 +355,20 @@ describe.skipIf(!pgToolsReady)('restore replays erasures (#144)', () => {
     await pool.query(
       `INSERT INTO identifiers (workspace_id, type, value, profile_id) VALUES
          ($1, 'user_id', 'erased-person', $2),
+         ($1, 'anonymous_id', 'erased-anon', $2),
          ($1, 'email', $3, $2)`,
       [workspaceId, profileId, emailHash],
+    );
+    // A browser registration and an app registration for the same person (#280): neither has a
+    // foreign key to profiles, so only an explicit deletion removes them.
+    await pool.query(`INSERT INTO data_keys (workspace_id, id, kek_id, wrapped_key) VALUES ($1, 'dk_erase_test', 'kek_test', '\\x00')`, [
+      workspaceId,
+    ]);
+    await pool.query(
+      `INSERT INTO push_subscriptions (workspace_id, id, kind, anonymous_id, user_id, token_hash, secrets, secrets_key_id) VALUES
+         ($1, 'psh_erased_user', 'web', NULL, 'erased-person', $2, '\\x00', 'dk_erase_test'),
+         ($1, 'psh_erased_anon', 'web', 'erased-anon', NULL, $3, '\\x00', 'dk_erase_test')`,
+      [workspaceId, 'c'.repeat(64), 'd'.repeat(64)],
     );
 
     backupDir = await mkdtemp(join(tmpdir(), 'am-backup-erasure-'));
@@ -367,11 +379,12 @@ describe.skipIf(!pgToolsReady)('restore replays erasures (#144)', () => {
 
     // Erase the person after the snapshot, exactly as profiles.erase leaves the live database:
     // their rows are gone and the erasure log has the profile id and the keyed tombstones.
+    await pool.query('DELETE FROM push_subscriptions WHERE workspace_id = $1', [workspaceId]);
     await pool.query('DELETE FROM identifiers WHERE workspace_id = $1 AND profile_id = $2', [workspaceId, profileId]);
     await pool.query('DELETE FROM profiles WHERE workspace_id = $1 AND id = $2', [workspaceId, profileId]);
     await pool.query(
       `INSERT INTO erasures (workspace_id, id, profile_ids, requested_by, reason, counts)
-       VALUES ($1, $2, $3, 'user_tester', 'Erasure request by e-mail on 2026-10-31', '{"profiles":1,"identifiers":2,"consentRecords":0}')`,
+       VALUES ($1, $2, $3, 'user_tester', 'Erasure request by e-mail on 2026-10-31', '{"profiles":1,"identifiers":3,"consentRecords":0}')`,
       [workspaceId, erasureId, [profileId]],
     );
     await pool.query(
@@ -402,6 +415,9 @@ describe.skipIf(!pgToolsReady)('restore replays erasures (#144)', () => {
     expect(
       (await pool.query('SELECT 1 FROM profile_keys WHERE workspace_id = $1 AND profile_id = $2', [workspaceId, profileId])).rowCount,
     ).toBe(0);
+    // Their browser and app registrations stay gone: push_subscriptions has no foreign key to
+    // profiles, so the restore replay has to delete them itself (#280).
+    expect((await pool.query('SELECT 1 FROM push_subscriptions WHERE workspace_id = $1', [workspaceId])).rowCount).toBe(0);
     // The e-mail suppression hash comes back, so the person is never contacted again.
     const suppress = await pool.query<{ value_hash: string; reason: string }>(
       'SELECT value_hash, reason FROM suppressions WHERE workspace_id = $1',
