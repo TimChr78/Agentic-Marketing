@@ -2,6 +2,12 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+### Fixed
+
+- **The independent check sees what is published (#261).** For `artifacts.requestPublish` and `artifacts.requestPublishBundle` (and the publishes `config.import` makes) the model now gets each artifact's type, name, the version content being published and a structural diff against the version that is live, instead of only ids and the agent's note; for `messages.sendEmail` it gets the template's name, purpose, subject and MJML/text. Secrets and personal data are scrubbed, and the content goes in its own `<published-content>` block, described as untrusted, capped at 20,000 characters.
+
 ## [0.5.0] - 2026-10-31
 
 ### Added

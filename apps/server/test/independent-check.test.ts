@@ -145,6 +145,56 @@ describe('the independent model check (#231)', () => {
     expect(out.body.heldBecause.join(' ')).toContain('giveaway that is outside the mandate’s purpose');
   });
 
+  it('gives the model the content and the diff of a level-3 publish (#261)', async () => {
+    const before = llm.requests.length;
+    await call('artifacts.updateDraft', {
+      artifactId: templateId,
+      content: {
+        purpose: 'marketing_email',
+        subject: 'Signal 43: this week',
+        mjml: mjml.replace('Hej', 'Hej from the newsroom'),
+      },
+    });
+    const out = await call('artifacts.requestPublish', {
+      artifactId: templateId,
+      note: 'Refresh the weekly issue with this week’s story',
+    });
+    expect(out.body.status).toBe('published');
+
+    const req = llm.requests.slice(before).find((r) => r.system.includes('independent reviewer') && r.user.includes('<published-content>'));
+    expect(req).toBeDefined();
+    // The content being published, not just the id and the note.
+    expect(req!.user).toContain('Hej from the newsroom');
+    expect(req!.user).toContain('Signal 43: this week');
+    // And the structural diff against the version that is live now.
+    expect(req!.user).toContain('"kind":"changed"');
+    expect(req!.user).toContain('"path":"mjml"');
+  });
+
+  it('sends the change to a person when the note matches but the content does not (#261)', async () => {
+    // A person writes the draft; only the agent's publish is under review here.
+    await t.api(owner).call('artifacts.updateDraft', {
+      artifactId: templateId,
+      content: {
+        purpose: 'marketing_email',
+        subject: 'A gift for you',
+        mjml: mjml.replace('Hej', 'free tents for everyone who joins this week'),
+      },
+    });
+    // The note says exactly what the mandate allows; only the content is outside it.
+    const out = await call('artifacts.requestPublish', {
+      artifactId: templateId,
+      note: 'Send this week’s issue to the newsletter readers',
+    });
+    expect(out.body.status).toBe('in_review');
+    expect(out.body.heldBecause.join(' ')).toContain('Independent check');
+    expect(out.body.heldBecause.join(' ')).toContain('giveaway that is outside the mandate’s purpose');
+
+    const req = llm.requests.at(-1)!;
+    expect(req.user).toContain('free tents for everyone who joins this week');
+    expect(req.user).toContain('<published-content>');
+  });
+
   it('fails closed when no AI provider is set up', async () => {
     // Draft while the provider still exists; then remove it and publish, as an operator might.
     const id = await draftBroadcast();
