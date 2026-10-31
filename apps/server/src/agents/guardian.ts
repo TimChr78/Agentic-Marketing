@@ -110,7 +110,7 @@ async function findings(tx: Tx, deps: GuardianDeps, workspaceId: string, agentId
             .where(
               and(
                 eq(schema.agentActions.agentId, agentId),
-                eq(schema.agentActions.actionClass, 'send.broadcast'),
+                sql`${schema.agentActions.actionClass} IN ('send.broadcast', 'send.direct')`,
                 sql`${schema.agentActions.decision} IN ('allow', 'hold')`,
                 sql`${schema.agentActions.at} > ${cleared}`,
               ),

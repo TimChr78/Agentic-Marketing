@@ -71,6 +71,9 @@ export const sendEmail = defineCommand({
   actionClass: 'send.direct',
   impact: async (input, ctx) => ({ people: 1, reversible: false, touches: await sendTouches(ctx.tx, input.templateId) }),
   target: (i) => i.profileId,
+  // The ledger keeps the message it created, so mandate guardrails can find the agent's direct
+  // sends in the metric layer (#265).
+  ledgerImpact: (out) => ({ messageId: out.messageId }),
   handler: async (input, ctx) => requestEmail(ctx.tx, ctx.principal.workspaceId, ctx.services.keyProvider, ctx.services.events, input),
 });
 

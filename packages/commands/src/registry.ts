@@ -112,6 +112,12 @@ export interface CommandDef<I extends z.ZodType = z.ZodType, O extends z.ZodType
   auditReads?: boolean;
   /** What the command acts on, for the audit log (e.g. an artifact id). */
   target?: (input: z.output<I>) => string | undefined;
+  /**
+   * Facts about what the handler created, merged into the agent ledger's impact (#265). The
+   * ledger is written after the handler so it can link the action to the rows it produced, e.g.
+   * the message a direct send created, which guardrails need to find the agent's own sends.
+   */
+  ledgerImpact?: (output: z.output<O>) => Record<string, unknown> | undefined;
   handler: (input: z.output<I>, ctx: CommandContext) => Promise<z.input<O>>;
 }
 
@@ -331,6 +337,12 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
                 ),
                 unknownMessages,
               ) as z.output<C['output']>;
+              // The handler ran: let it link the ledger row to what it created (e.g. a message id),
+              // while the policy decision itself stays the one made before the change.
+              if (agent && policy && cmd.ledgerImpact) {
+                const extra = cmd.ledgerImpact(out);
+                if (extra) policy = { ...policy, impact: { ...policy.impact, ...extra } };
+              }
               if (opts.idempotencyKey)
                 await tx.insert(schema.idempotencyKeys).values({
                   workspaceId: principal.workspaceId,

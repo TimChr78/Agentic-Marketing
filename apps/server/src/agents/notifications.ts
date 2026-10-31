@@ -40,7 +40,7 @@ const approvalUrl = (publicUrl: string, approvalId: string) => `${baseUrl(public
 const actionKey = (action: typeof schema.agentActions.$inferSelect) => `${action.id}:${action.command}`;
 
 function impactLine(impact: Record<string, unknown>): string {
-  const skip = new Set(['actionClass', 'reversible', 'needsPerson', 'touches', 'summary']);
+  const skip = new Set(['actionClass', 'reversible', 'needsPerson', 'touches', 'summary', 'messageId']);
   const parts = Object.entries(impact)
     .filter(([key, value]) => !skip.has(key) && value !== undefined && value !== null)
     .map(([key, value]) => `${key}: ${typeof value === 'object' ? JSON.stringify(value) : String(value)}`);
@@ -159,7 +159,20 @@ function eventEmail(deps: AgentNotificationDeps, agent: AgentRow, lines: EventLi
   return { subject, text: text.join('\n'), html };
 }
 
-async function notifyEvents(deps: AgentNotificationDeps, tx: Tx, workspaceId: string, actions: ActionRow[], now: Date): Promise<number> {
+interface EventNotifications {
+  /** E-mails delivered, one per recipient. */
+  sent: number;
+  /** The lowest action id whose notification could not be delivered to every recipient, or null. */
+  firstFailedActionId: number | null;
+}
+
+async function notifyEvents(
+  deps: AgentNotificationDeps,
+  tx: Tx,
+  workspaceId: string,
+  actions: ActionRow[],
+  now: Date,
+): Promise<EventNotifications> {
   const byAgent = new Map<string, ActionRow[]>();
   for (const action of actions) {
     if (action.actionClass === 'draft') continue;
@@ -167,6 +180,7 @@ async function notifyEvents(deps: AgentNotificationDeps, tx: Tx, workspaceId: st
     byAgent.set(action.agentId, [...(byAgent.get(action.agentId) ?? []), action]);
   }
   let sent = 0;
+  let firstFailedActionId: number | null = null;
   for (const [agentId, rows] of byAgent) {
     const [agent] = await tx.select().from(schema.agents).where(eq(schema.agents.id, agentId));
     if (!agent) continue;
@@ -197,8 +211,12 @@ async function notifyEvents(deps: AgentNotificationDeps, tx: Tx, workspaceId: st
       })),
     );
     sent += results.filter((r) => r.status === 'sent').length;
+    // A recipient that could not be reached keeps the whole batch pending: the next sweep retries
+    // it, and the idempotency key above makes it reuse the message row instead of sending twice.
+    if (results.some((r) => r.status === 'failed'))
+      firstFailedActionId = firstFailedActionId === null ? rows[0].id : Math.min(firstFailedActionId, rows[0].id);
   }
-  return sent;
+  return { sent, firstFailedActionId };
 }
 
 interface AgentDigest {
@@ -394,13 +412,29 @@ async function notifyExpiry(
 }
 
 async function notifyWorkspace(deps: AgentNotificationDeps, workspaceId: string, now: Date): Promise<AgentNotificationSummary> {
-  return deps.db.withWorkspace(workspaceId, async (tx) => {
-    await tx.insert(schema.agentNotificationCursor).values({ workspaceId }).onConflictDoNothing();
-    const [cursor] = await tx
+  const plan = await deps.db.withWorkspace(workspaceId, async (tx) => {
+    let [cursor] = await tx
       .select()
       .from(schema.agentNotificationCursor)
       .where(eq(schema.agentNotificationCursor.workspaceId, workspaceId));
-    if (!cursor) return emptySummary();
+    if (!cursor) {
+      // The first run starts at the head of the ledger: a workspace upgraded from a version before
+      // the feature must not replay its historical holds, refusals and asks (#266).
+      const [head] = await tx
+        .select({ id: schema.agentActions.id })
+        .from(schema.agentActions)
+        .where(eq(schema.agentActions.workspaceId, workspaceId))
+        .orderBy(desc(schema.agentActions.id))
+        .limit(1);
+      // The digest waits a day too, so the first sweep after an upgrade does not summarise the
+      // historical window it just declined to announce.
+      await tx
+        .insert(schema.agentNotificationCursor)
+        .values({ workspaceId, lastActionId: head?.id ?? 0, lastDigestAt: now })
+        .onConflictDoNothing();
+      [cursor] = await tx.select().from(schema.agentNotificationCursor).where(eq(schema.agentNotificationCursor.workspaceId, workspaceId));
+    }
+    if (!cursor) return null;
 
     const actions = await tx
       .select()
@@ -408,23 +442,35 @@ async function notifyWorkspace(deps: AgentNotificationDeps, workspaceId: string,
       .where(and(eq(schema.agentActions.workspaceId, workspaceId), gt(schema.agentActions.id, cursor.lastActionId)))
       .orderBy(asc(schema.agentActions.id))
       .limit(MAX_ACTIONS_PER_RUN);
-    const lastActionId = actions.at(-1)?.id ?? cursor.lastActionId;
+    return { cursor, actions };
+  });
+  if (!plan) return emptySummary();
 
-    const events = await notifyEvents(deps, tx, workspaceId, actions, now);
-    const digest = await notifyDigest(deps, tx, workspaceId, cursor, now);
-    const expiry = await notifyExpiry(deps, tx, workspaceId, cursor, now);
+  // Each send commits before the cursor bookkeeping below, so an error after an e-mail went out
+  // cannot roll its message row back: the next sweep finds the row by its idempotency key, sees
+  // "sent" and does not send again. A failed send is kept pending by the cursor rule below.
+  const events = await deps.db.withWorkspace(workspaceId, (tx) => notifyEvents(deps, tx, workspaceId, plan.actions, now));
+  const digest = await deps.db.withWorkspace(workspaceId, (tx) => notifyDigest(deps, tx, workspaceId, plan.cursor, now));
+  const expiry = await deps.db.withWorkspace(workspaceId, (tx) => notifyExpiry(deps, tx, workspaceId, plan.cursor, now));
 
-    await tx
+  // Advance only past actions whose notification reached every recipient. The first failure stops
+  // the cursor before its action, so the next sweep retries it (with the same idempotency key)
+  // instead of silently dropping it.
+  const successful = events.firstFailedActionId === null ? plan.actions : plan.actions.filter((a) => a.id < events.firstFailedActionId!);
+  const lastActionId = successful.reduce((max, a) => Math.max(max, a.id), plan.cursor.lastActionId);
+
+  await deps.db.withWorkspace(workspaceId, (tx) =>
+    tx
       .update(schema.agentNotificationCursor)
       .set({
         lastActionId,
-        lastDigestAt: digest.at ?? cursor.lastDigestAt,
+        lastDigestAt: digest.at ?? plan.cursor.lastDigestAt,
         expiryNotified: expiry.notified,
       })
-      .where(eq(schema.agentNotificationCursor.workspaceId, workspaceId));
+      .where(eq(schema.agentNotificationCursor.workspaceId, workspaceId)),
+  );
 
-    return { events, digests: digest.sent, expiries: expiry.sent };
-  });
+  return { events: events.sent, digests: digest.sent, expiries: expiry.sent };
 }
 
 /** One sweep over every workspace with an agent. The scheduler calls this; tests pass a clock. */
