@@ -134,6 +134,20 @@ describe('a suppressed direct send does not use up the daily message limit (#279
   });
 });
 
+describe('a retry with the same idempotency key does not use the daily limit again (#294)', () => {
+  it('the second call returns the same message and is allowed at the limit', async () => {
+    // One message already counted above; with this one the agent is at its limit of two.
+    await grant({ scope: { purposes, topics: [], channels: ['email'] }, limits: { messagesPerDay: 2 } });
+    const first = await call('messages.sendEmail', { profileId: ada, templateId: newsletter, idempotencyKey: 'retry-294' });
+    expect(first.status).toBe(200);
+    expect(first.body.duplicate).toBe(false);
+    const retry = await call('messages.sendEmail', { profileId: ada, templateId: newsletter, idempotencyKey: 'retry-294' });
+    expect(retry.status).toBe(200);
+    expect(retry.body).toMatchObject({ messageId: first.body.messageId, duplicate: true });
+    expect((await lastAction()).impact).toMatchObject({ people: 0, messageId: first.body.messageId });
+  });
+});
+
 describe('mandate scope covers SMS and push direct sends (#278)', () => {
   beforeAll(async () => {
     await grant({ scope: { purposes, topics: [], channels: ['email'] } });

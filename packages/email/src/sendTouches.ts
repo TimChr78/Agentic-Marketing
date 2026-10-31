@@ -39,6 +39,26 @@ export async function sendTouches(tx: Tx, templateId: string, channel: DirectSen
  * it created, and whether the message reached anyone. A suppressed or failed gateway result
  * (`status`) did not go out, so it must not count towards the agent's daily message limit.
  */
-export function directSendLedger(out: { messageId: string; status: string }) {
-  return { messageId: out.messageId, people: out.status === 'suppressed' || out.status === 'failed' ? 0 : 1 };
+export function directSendLedger(out: { messageId: string; status: string; duplicate?: boolean }) {
+  // A retry with the same idempotency key returns the earlier message and sends nothing (#294).
+  const sent = !out.duplicate && out.status !== 'suppressed' && out.status !== 'failed';
+  return { messageId: out.messageId, people: sent ? 1 : 0 };
+}
+
+/**
+ * The impact of a direct send before it runs: one person, or none when the idempotency key was
+ * already used, since the gateway then returns the earlier message without sending again (#294).
+ * The policy engine decides before the handler, so a retry must not be judged as a new message.
+ */
+export async function directSendImpact(tx: Tx, input: { templateId: string; idempotencyKey?: string }, channel: DirectSendChannel) {
+  const retry = input.idempotencyKey
+    ? (
+        await tx
+          .select({ id: schema.messages.id })
+          .from(schema.messages)
+          .where(eq(schema.messages.idempotencyKey, input.idempotencyKey))
+          .limit(1)
+      ).length > 0
+    : false;
+  return { people: retry ? 0 : 1, reversible: false, touches: await sendTouches(tx, input.templateId, channel) };
 }

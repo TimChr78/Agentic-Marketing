@@ -17,7 +17,14 @@ registerUndoHandler(async (ctx, undo) => {
     .from(schema.artifacts)
     .where(and(eq(schema.artifacts.workspaceId, ctx.principal.workspaceId), eq(schema.artifacts.id, undo.artifactId)))
     .for('update');
-  if (undo.publishedVersion !== undefined && live?.publishedVersion !== undo.publishedVersion)
+  // Records from before 0.5.2 do not say which version the agent published, so whether newer work
+  // went live since cannot be told: those are reversed by hand (#291).
+  if (undo.publishedVersion === undefined)
+    throw new AppError(
+      'conflict',
+      `This action was recorded before undo knew which version the agent published, so it cannot tell whether newer work went live since. Reverse ${undo.artifactId} by hand: republish the version you want from its history.`,
+    );
+  if (live?.publishedVersion !== undo.publishedVersion)
     throw new AppError(
       'conflict',
       live?.publishedVersion == null

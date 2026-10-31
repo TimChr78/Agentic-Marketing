@@ -435,7 +435,19 @@ export async function agentPolicy(
   if (!agent) throw new Error('agentPolicy needs an agent principal');
   await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`agent-policy:${principal.workspaceId}:${agent.id}`}, 0))`);
   const [ws] = await tx.select({ autonomy: schema.workspaces.autonomy }).from(schema.workspaces);
-  const [row] = await tx.select({ guard: schema.agents.guard }).from(schema.agents).where(eq(schema.agents.id, agent.id));
+  const [row] = await tx
+    .select({ guard: schema.agents.guard, status: schema.agents.status, statusReason: schema.agents.statusReason })
+    .from(schema.agents)
+    .where(eq(schema.agents.id, agent.id));
+  // Every decision sees the agent's current status, including the publishes inside one long
+  // command such as config.import: a pause stops the rest (#292).
+  if (row && row.status !== 'active')
+    throw new AppError(
+      'forbidden',
+      `This agent (${agent.name}) is ${row.status}${row.statusReason ? `: ${row.statusReason}` : ''}. ${
+        row.status === 'paused' ? 'A person can resume it in Settings → Agents.' : 'Its credentials no longer work.'
+      }`,
+    );
   const mandate = req.actionClass === 'read' ? null : ((await services.activeMandate?.(tx, agent.id)) ?? null);
   const guardrailBreach =
     mandate && REACH_CLASSES.includes(req.actionClass) && services.mandateGuardrails

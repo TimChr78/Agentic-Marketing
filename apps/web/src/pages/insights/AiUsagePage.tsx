@@ -31,7 +31,7 @@ import { pageWidth } from '../../ui/layout';
 type Call = Out<'ai.calls'>['calls'][number];
 type Kind = Call['kind'];
 
-const kinds: Kind[] = ['decide', 'generate', 'copilot', 'test', 'classify'];
+const kinds: Kind[] = ['decide', 'generate', 'copilot', 'test', 'classify', 'check', 'hosted'];
 const callTone = { pending: 'neutral', running: 'neutral', done: 'good', fallback: 'warn', failed: 'bad' } as const;
 
 function outcome(c: Call): string {
@@ -235,7 +235,7 @@ export default function AiUsagePage() {
               title={kind ? `No “${kind}” calls yet` : 'No AI calls yet'}
               action={can('artifacts:read') && <ButtonLink to="/build/prompts">Go to AI prompts</ButtonLink>}
             >
-              Decisions from journey AI steps, prompt tests and copilot turns appear here.
+              Decisions from journey AI steps, prompt tests, copilot turns, independent checks and hosted agent runs appear here.
             </EmptyState>
           }
         >

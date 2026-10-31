@@ -2,6 +2,16 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+### Fixed
+
+- **Undo refuses agent actions recorded before 0.5.2 (#291).** Their undo records do not say which version the agent published, so `agents.undo` cannot tell whether newer work went live since; it now asks a person to reverse them by hand instead of skipping the check.
+- **A pause stops a config.import in progress (#292).** Every policy decision re-reads the agent's status, including the publishes inside one import, so the rest of the bundle is refused after a pause.
+- **config.import approvals reach the shadow report (#293).** Its publishes record the approval they create, like `artifacts.requestPublish`.
+- **A retry with the same idempotency key does not use the daily message limit again (#294).** A direct send whose key was already used counts as nobody, both in the policy decision and in the ledger.
+- **The AI usage page filters independent checks and hosted runs (#297).**
+
 ## [0.5.2] - 2026-10-31
 
 ### Fixed

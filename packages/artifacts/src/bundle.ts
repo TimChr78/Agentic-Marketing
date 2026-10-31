@@ -418,7 +418,20 @@ export const importConfig = defineCommand({
       // Each publish sets its own reversal; a held step leaves the collector empty.
       ctx.undo?.set(null);
       const out = await requestPublish.handler(request, { ...ctx, policy });
-      await recordAgentAction(ctx.tx, agent.id, requestPublish, policy, 'internal', artifactId, null, input.note, ctx.undo?.get() ?? null);
+      // The same facts the executor adds after requestPublish, e.g. the approval it created (#293).
+      const extra = requestPublish.ledgerImpact?.(out);
+      const recorded = extra ? { ...policy, impact: { ...policy.impact, ...extra } } : policy;
+      await recordAgentAction(
+        ctx.tx,
+        agent.id,
+        requestPublish,
+        recorded,
+        'internal',
+        artifactId,
+        null,
+        input.note,
+        ctx.undo?.get() ?? null,
+      );
       return out;
     };
     // Publish in dependency order; what fails for want of another artifact is retried in a later pass.
