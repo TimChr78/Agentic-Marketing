@@ -298,3 +298,56 @@ describe('shadow mode (#256)', () => {
     });
   });
 });
+
+describe('learning rules (#257)', () => {
+  const view = (learning: MandateView['learning']): MandateView => ({
+    id: 'mnd_l',
+    version: 1,
+    levels: { 'journey.live': 3, 'send.broadcast': 3, 'experience.live': 3 },
+    scope: { segments: [], purposes: [], topics: [], channels: ['email'], artifactTypes: [], artifacts: [] },
+    limits: {},
+    holdWindow: 'PT2H',
+    independentCheck: false,
+    guardrails: { window: 'P7D', minSent: 100 },
+    purpose: 'x',
+    learning,
+  });
+  const settings = autonomySettings({ maxLevel: { 'journey.live': 3, 'send.broadcast': 3, 'experience.live': 3 } });
+  const run = (
+    actionClass: 'journey.live' | 'send.broadcast' | 'experience.live',
+    learning: NonNullable<PolicyInput['impact']['learning']>,
+  ) =>
+    decide(
+      base({
+        settings,
+        actionClass,
+        mandate: view({ journeyControlPercent: 10, broadcastHoldout: true, experienceHoldoutPercent: 5 }),
+        impact: { people: 10, learning },
+      }),
+    );
+
+  it('a journey needs its control group', () => {
+    expect(run('journey.live', [{ id: 'jny_1', type: 'journey', controlPercent: 5 }])).toMatchObject({ decision: 'ask', level: 1 });
+    expect(run('journey.live', [{ id: 'jny_1', type: 'journey', controlPercent: 10 }]).decision).toBe('allow');
+  });
+
+  it('a broadcast needs a holdout or a subject test', () => {
+    expect(run('send.broadcast', [{ id: 'bct_1', type: 'broadcast', controlPercent: 0 }]).reasons[0]).toContain('neither a holdout');
+    expect(run('send.broadcast', [{ id: 'bct_1', type: 'broadcast', controlPercent: 0, subjectTest: true }]).decision).toBe('allow');
+    expect(run('send.broadcast', [{ id: 'bct_1', type: 'broadcast', controlPercent: 10 }]).decision).toBe('allow');
+  });
+
+  it('an experience needs its holdout; without rules nothing is required', () => {
+    expect(run('experience.live', [{ id: 'exp_1', type: 'experience', controlPercent: 0 }]).decision).toBe('ask');
+    expect(
+      decide(
+        base({
+          settings,
+          actionClass: 'journey.live',
+          mandate: view({}),
+          impact: { people: 10, learning: [{ id: 'j', type: 'journey', controlPercent: 0 }] },
+        }),
+      ).decision,
+    ).toBe('allow');
+  });
+});

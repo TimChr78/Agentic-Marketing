@@ -50,6 +50,11 @@ export interface Impact {
   };
   /** Never autonomous whatever the mandate: consent, purposes, delivery caps, credentials (design §3.2). */
   needsPerson?: string;
+  /**
+   * The holdouts of what is published (#257): per journey, broadcast or experience, the share held
+   * out (its own control group, or its campaign's) and whether a broadcast tests subject lines.
+   */
+  learning?: { id: string; type: string; controlPercent: number; subjectTest?: boolean }[];
 }
 
 export const AutonomySwitch = z.enum(['on', 'propose_only', 'off']);
@@ -121,6 +126,8 @@ export interface MandateView {
   independentCheck: boolean;
   guardrails: { unsubscribeRate?: number; complaintRate?: number; bounceRate?: number; window: string; minSent: number };
   purpose: string;
+  /** Learning rules (#257): holdouts the agent's journeys, broadcasts and experiences must have. */
+  learning?: { journeyControlPercent?: number; broadcastHoldout?: boolean; experienceHoldoutPercent?: number };
   /**
    * Shadow mode (#256): for these classes (or all, when true) the mandate's decision is only
    * recorded; the action is decided as if there were no mandate, so a person decides as before.
@@ -267,6 +274,25 @@ function scopeViolations(impact: Impact, scope: MandateView['scope']): string[] 
   return out;
 }
 
+/** What the mandate's learning rules require and the published change lacks (#257). */
+function learningGaps(impact: Impact, rules: MandateView['learning']): string[] {
+  if (!rules) return [];
+  const out: string[] = [];
+  for (const l of impact.learning ?? []) {
+    if (l.type === 'journey' && rules.journeyControlPercent && l.controlPercent < rules.journeyControlPercent)
+      out.push(
+        `Journey ${l.id} holds out ${l.controlPercent}% of entrants; the mandate requires a control group of at least ${rules.journeyControlPercent}% (controlGroup.percent).`,
+      );
+    if (l.type === 'broadcast' && rules.broadcastHoldout && l.controlPercent === 0 && !l.subjectTest)
+      out.push(`Broadcast ${l.id} has neither a holdout (its campaign’s control group) nor a subject test; the mandate requires one.`);
+    if (l.type === 'experience' && rules.experienceHoldoutPercent && l.controlPercent < rules.experienceHoldoutPercent)
+      out.push(
+        `Experience ${l.id} holds out ${l.controlPercent}% of visitors; the mandate requires at least ${rules.experienceHoldoutPercent}% (holdoutPercent).`,
+      );
+  }
+  return out;
+}
+
 function decideWithMandate(
   input: PolicyInput,
   mandate: MandateView,
@@ -296,6 +322,7 @@ function decideWithMandate(
   if (ALWAYS_A_PERSON.includes(actionClass)) capAt(1, `A ${actionClass} change always needs a person, whatever the mandate.`);
   if (impact.needsPerson) capAt(1, impact.needsPerson);
   for (const v of scopeViolations(impact, mandate.scope)) capAt(1, v);
+  for (const v of learningGaps(impact, mandate.learning)) capAt(1, v);
 
   const people = impact.people ?? 0;
   if (REACH_CLASSES.includes(actionClass) && people > settings.audienceThreshold)

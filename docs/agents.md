@@ -167,6 +167,10 @@ A level-2 action becomes a **hold**: a scheduled execution with a deadline (`run
 
 Set `independentCheck: true` to have a second model review each level-2+ action before it runs: given the intent, the diff, the impact and the mandate, does it match? A mismatch, an error or a missing AI provider sends the action to a person (it fails closed). It is off by default and costs tokens; turn it on for any agent that reads content from outside the workspace.
 
+### Learning rules
+
+`learning` keeps what an agent publishes measurable. `journeyControlPercent` requires its journeys to hold out at least that share of entrants (`controlGroup.percent`, or the control group of the campaign the journey belongs to); `broadcastHoldout: true` requires its broadcasts to have a holdout (their campaign's control group) or a subject test; `experienceHoldoutPercent` requires its experiences to hold out at least that share of visitors (`holdoutPercent`). A change without the required holdout is not refused: it goes to a person, with the reason, whatever the level. A member published in one bundle with its campaign counts the campaign's control group.
+
 ### Shadow mode
 
 Set `shadow: true` (or a list of action classes, e.g. `["send.broadcast"]`) to try a mandate before trusting it. For those classes the policy engine works out what the mandate would decide, at the levels it grants even above the workspace ceiling, and records it in the ledger as `shadow`; the action itself is decided as if there were no mandate, so the approval policy and the people reviewing work exactly as before. `agents.shadowReport` (and the **Shadow mode** card on the agent page) compares the two over the last 30 days:

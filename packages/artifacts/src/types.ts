@@ -1335,6 +1335,31 @@ const agentMandate = z.object({
     .default({ userIds: [] })
     .describe('Who besides the sponsor is told about holds, refusals and guardrail hits'),
   independentCheck: z.boolean().default(false).describe('A second model checks intent, diff and mandate before level-2+ actions'),
+  learning: z
+    .object({
+      journeyControlPercent: z
+        .number()
+        .int()
+        .min(1)
+        .max(50)
+        .optional()
+        .describe('Journeys it publishes need controlGroup.percent of at least this'),
+      broadcastHoldout: z
+        .boolean()
+        .optional()
+        .describe('Broadcasts it publishes need a holdout (a campaign control group) or a subject test'),
+      experienceHoldoutPercent: z
+        .number()
+        .int()
+        .min(1)
+        .max(50)
+        .optional()
+        .describe('Experiences it publishes need holdoutPercent of at least this'),
+    })
+    .default({})
+    .describe(
+      'Learning rules: what the agent publishes must stay measurable. A change without the holdout goes to a person with the reason',
+    ),
   shadow: z
     .union([z.boolean(), z.array(z.enum(MANDATE_CLASSES)).max(MANDATE_CLASSES.length)])
     .default(false)

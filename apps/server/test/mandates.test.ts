@@ -289,3 +289,32 @@ describe('any agent runtime (#229)', () => {
     expect(out.structuredContent.status).toBe('published');
   });
 });
+
+describe('learning rules (#257)', () => {
+  it('a broadcast without a holdout or subject test goes to a person; with a subject test it runs', async () => {
+    await grant(
+      {
+        scope: { ...newsletterScope, segments: [news] },
+        levels: { 'send.broadcast': 3, 'content.publish': 3 },
+        learning: { broadcastHoldout: true },
+      },
+      mandateId,
+    );
+    const plain = await call('artifacts.requestPublish', { artifactId: await draftBroadcast(news), note: 'no holdout' });
+    expect(plain.body.status).toBe('in_review');
+    const { actions } = await t.api(owner).call('agents.activity', { agentId, limit: 1 });
+    expect(actions[0].reasons.join(' ')).toContain('neither a holdout');
+
+    const tested = await call('artifacts.create', {
+      type: 'broadcast',
+      name: `Tested ${Date.now()}`,
+      content: {
+        template: templateId,
+        segment: news,
+        subjectTest: { subjects: ['A', 'B'], samplePercent: 50, decideAfter: 'PT4H' },
+      },
+    });
+    const out = await call('artifacts.requestPublish', { artifactId: tested.body.artifactId, note: 'with a subject test' });
+    expect(out.body.status).toBe('published');
+  });
+});
