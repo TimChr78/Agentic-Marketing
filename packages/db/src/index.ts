@@ -14,6 +14,7 @@ export type {
   ConsentSource,
   ConsentStatus,
   DeliveryStatus,
+  HostedAgentRunStatus,
   IdentifierType,
   InputWarningPrincipal,
   MessageStatus,
