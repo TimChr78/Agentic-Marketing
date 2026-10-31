@@ -108,6 +108,38 @@ after a successful backup. It only removes directories that contain a `manifest.
 backups use a hidden temporary name until they are complete. Both the current names and the
 0.2.4 `am-<version>-<stamp>` names match.
 
+## Retention and erased people
+
+`BACKUP_KEEP_DAYS` (the scheduler defaults to 14) is the maximum age of a snapshot that can still
+be restored, and therefore the window in which a restored snapshot can predate an erasure. If you
+copy backups to object storage, give the remote lifecycle the same or a shorter window; a copy that
+outlives the local retention silently widens the window. Taking no backup for longer than the
+retention period also widens it: the newest snapshot is then older than `BACKUP_KEEP_DAYS` suggests.
+
+`am restore` closes the gap for erasures recorded in the live database:
+
+1. Before replacing Postgres it reads every row of `erasures` and `erasure_tombstones` from the
+   current database. If the log cannot be read, the restore stops rather than risk resurrecting
+   someone.
+2. After `pg_restore` it re-applies each erasure: profiles and identifiers the erasure names are
+   deleted again (with their profile keys, consent records, messages, journey participations and
+   segment memberships), e-mail and phone suppression hashes are put back, and the erasure row and
+   its keyed tombstones are re-inserted. Replay is idempotent, so restoring twice is safe, and
+   entries for workspaces the snapshot no longer contains are skipped.
+3. It then restores ClickHouse, if asked, and reports how many profiles and tombstones were replayed.
+
+A person erased after the snapshot therefore stays erased: no profile, no identifiers, no profile
+key, no consent, and the tombstones that stop late events from recreating them. Only keyed hashes
+are replayed; no plaintext personal data is copied.
+
+The replay covers Postgres. `am restore --clickhouse` inserts the event export as it was at snapshot
+time, so event rows of a replayed person can still be present with their pseudonymous ids and
+non-personal properties; the per-profile key that sealed their personal data is deleted again, so
+that data stays unreadable. If the erasure procedure must also remove event rows, restore
+ClickHouse from a backup taken after the erasure, or re-take the `--clickhouse` backup after applying
+erasures. `am doctor`/`am smoke` and the erasure retention job keep operating on the restored data.
+
+
 ## Listing backups
 
 ```bash
@@ -199,6 +231,9 @@ contents but does not create them.
 
 `am restore`:
 
+- reports the snapshot time in its final line (`snapshot <createdAt>`);
+- reads `erasures` and `erasure_tombstones` from the live database before touching it, and replays
+  them after loading Postgres (see [Retention and erased people](#retention-and-erased-people));
 - checks every file's size and SHA-256 before touching the database — and for `--clickhouse`, every
   ClickHouse file before the first `TRUNCATE`;
 - refuses a manifest whose migration head is newer than this build knows, with a message to upgrade
@@ -225,7 +260,8 @@ Postgres and ClickHouse are separate systems: the command restores Postgres firs
 second. If the ClickHouse step fails (for example, a table was not created yet), the Postgres data
 is already back; fix the table and run the same restore again.
 
-Restore is deliberately not a merge: rows written after the backup are gone. Verify before
+Restore is deliberately not a merge: rows written after the backup are gone. Erasures recorded in
+the live database since the snapshot are the one exception, because they are replayed. Verify before
 starting traffic, and keep a copy of the current volume until you are satisfied.
 
 ## Testing a restore

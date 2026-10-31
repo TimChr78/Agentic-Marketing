@@ -6,7 +6,15 @@ import { chmod, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'no
 import { join, resolve, sep } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
-import { ensureAppRoleInDatabase, lastServerVersion, latestMigration, listWorkspaceIds, migrationHead } from '@agentic-marketing/db';
+import {
+  ensureAppRoleInDatabase,
+  lastServerVersion,
+  latestMigration,
+  listWorkspaceIds,
+  migrationHead,
+  readErasureLog,
+  replayErasures,
+} from '@agentic-marketing/db';
 
 // Backup and restore without loading the full server configuration: an operator must be able to
 // run them with only DATABASE_URL (and CLICKHOUSE_URL for events), even when other secrets are
@@ -683,8 +691,24 @@ export async function restoreBackup(opts: RestoreBackupOptions): Promise<AnyBack
   });
   if (!role.exists) throw new Error(`Postgres role ${role.role} does not exist; set APP_DB_PASSWORD so the restore can create it`);
 
+  // Read the erasure log from the live database before it is replaced. A snapshot taken before an
+  // erasure still contains that person and their key; replaying the log afterwards removes them
+  // again (#144). This is also why a restore must not proceed when the log cannot be read.
+  log(`reading erasures recorded in the live database (snapshot from ${manifest.createdAt})`);
+  const erasureLog = await readErasureLog(databaseUrl);
+
   log('restoring Postgres (this replaces the current database)');
   await restorePostgres(databaseUrl, manifestPath(dir, manifest.postgres.file));
+
+  if (erasureLog.erasures.length || erasureLog.tombstones.length) {
+    log(`replaying ${erasureLog.erasures.length} erasure(s) and ${erasureLog.tombstones.length} tombstone(s) recorded after the snapshot`);
+    const replayed = await replayErasures(databaseUrl, erasureLog, { log });
+    log(
+      `erasures replayed: ${replayed.profiles} profile(s) removed from the restored snapshot, ` +
+        `${replayed.tombstones} tombstone(s) restored` +
+        (replayed.skipped ? `, ${replayed.skipped} entr(ies) skipped for workspaces the snapshot does not have` : ''),
+    );
+  } else log('no erasures to replay; the snapshot has nothing to resurrect');
 
   if (opts.clickhouse && manifest.clickhouse) {
     log('restoring ClickHouse');

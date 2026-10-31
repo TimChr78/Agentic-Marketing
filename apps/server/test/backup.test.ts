@@ -315,6 +315,114 @@ describe.skipIf(!pgToolsReady)('backup and restore', () => {
   }, 60_000);
 });
 
+describe.skipIf(!pgToolsReady)('restore replays erasures (#144)', () => {
+  const suffix = randomUUID().replace(/-/g, '').slice(0, 10);
+  const dbName = `am_backup_erasure_${suffix}`;
+  const role = `am_app_er_${suffix}`;
+  const password = 'backup_test_password';
+  const base = new URL(process.env.TEST_DATABASE_URL ?? 'postgres://am:am@localhost:5432/am_test');
+  const dbUrl = new URL(base);
+  dbUrl.pathname = `/${dbName}`;
+  const maintenanceUrl = new URL(base);
+  maintenanceUrl.pathname = '/postgres';
+  const workspaceId = randomUUID();
+  const profileId = 'prf_erased0000000000000000000000000';
+  const erasureId = 'era_restore000000000000000000000';
+  const userHash = 'a'.repeat(64);
+  const emailHash = 'b'.repeat(64);
+
+  let pool: pg.Pool;
+  let backupDir: string;
+  let backupPath: string;
+
+  const env = {
+    DATABASE_URL: dbUrl.toString(),
+    APP_DB_ROLE: role,
+    APP_DB_PASSWORD: password,
+  };
+
+  beforeAll(async () => {
+    const maintenance = new pg.Client({ connectionString: maintenanceUrl.toString() });
+    await maintenance.connect();
+    await maintenance.query(`DROP DATABASE IF EXISTS ${dbName} WITH (FORCE)`);
+    await maintenance.query(`CREATE DATABASE ${dbName}`);
+    await maintenance.end();
+
+    pool = new pg.Pool({ connectionString: dbUrl.toString() });
+    await migrate(pool, { appRolePassword: password, appRole: role });
+    await pool.query("INSERT INTO workspaces (id, name, approval_policy) VALUES ($1, 'Erased person', 'none')", [workspaceId]);
+    await pool.query("INSERT INTO profiles (workspace_id, id, traits) VALUES ($1, $2, '{}')", [workspaceId, profileId]);
+    await pool.query(
+      `INSERT INTO identifiers (workspace_id, type, value, profile_id) VALUES
+         ($1, 'user_id', 'erased-person', $2),
+         ($1, 'email', $3, $2)`,
+      [workspaceId, profileId, emailHash],
+    );
+
+    backupDir = await mkdtemp(join(tmpdir(), 'am-backup-erasure-'));
+    expect(await withEnv(env, () => backupRun(['--to', backupDir]))).toBe(0);
+    const entry = (await readdir(backupDir)).find((name) => name.startsWith('am-'));
+    if (!entry) throw new Error('backup did not create an am-* directory');
+    backupPath = join(backupDir, entry);
+
+    // Erase the person after the snapshot, exactly as profiles.erase leaves the live database:
+    // their rows are gone and the erasure log has the profile id and the keyed tombstones.
+    await pool.query('DELETE FROM identifiers WHERE workspace_id = $1 AND profile_id = $2', [workspaceId, profileId]);
+    await pool.query('DELETE FROM profiles WHERE workspace_id = $1 AND id = $2', [workspaceId, profileId]);
+    await pool.query(
+      `INSERT INTO erasures (workspace_id, id, profile_ids, requested_by, reason, counts)
+       VALUES ($1, $2, $3, 'user_tester', 'Erasure request by e-mail on 2026-10-31', '{"profiles":1,"identifiers":2,"consentRecords":0}')`,
+      [workspaceId, erasureId, [profileId]],
+    );
+    await pool.query(
+      `INSERT INTO erasure_tombstones (workspace_id, ident_hash, erased_at, erasure_id)
+       VALUES ($1, $2, now(), $3), ($1, $4, now(), $3)`,
+      [workspaceId, userHash, erasureId, emailHash],
+    );
+  }, 120_000);
+
+  afterAll(async () => {
+    await pool?.end();
+    const maintenance = new pg.Client({ connectionString: maintenanceUrl.toString() });
+    await maintenance.connect();
+    await maintenance.query(`DROP DATABASE IF EXISTS ${dbName} WITH (FORCE)`);
+    await maintenance.query(`DROP ROLE IF EXISTS ${role}`);
+    await maintenance.end();
+    if (backupDir) await rm(backupDir, { recursive: true, force: true });
+  }, 120_000);
+
+  it('does not resurrect a person erased after the backup', async () => {
+    // The snapshot still contains the profile, their identifiers and their profile key.
+    expect(await withEnv(env, () => restoreRun([backupPath, '--yes']))).toBe(0);
+
+    expect((await pool.query('SELECT 1 FROM profiles WHERE workspace_id = $1 AND id = $2', [workspaceId, profileId])).rowCount).toBe(0);
+    expect(
+      (await pool.query('SELECT 1 FROM identifiers WHERE workspace_id = $1 AND profile_id = $2', [workspaceId, profileId])).rowCount,
+    ).toBe(0);
+    expect(
+      (await pool.query('SELECT 1 FROM profile_keys WHERE workspace_id = $1 AND profile_id = $2', [workspaceId, profileId])).rowCount,
+    ).toBe(0);
+    // The e-mail suppression hash comes back, so the person is never contacted again.
+    const suppress = await pool.query<{ value_hash: string; reason: string }>(
+      'SELECT value_hash, reason FROM suppressions WHERE workspace_id = $1',
+      [workspaceId],
+    );
+    expect(suppress.rows).toEqual([{ value_hash: emailHash, reason: 'erased' }]);
+    // The erasure record and both tombstones survive the restore.
+    expect((await pool.query('SELECT 1 FROM erasures WHERE workspace_id = $1 AND id = $2', [workspaceId, erasureId])).rowCount).toBe(1);
+    const tombstones = await pool.query<{ ident_hash: string }>(
+      'SELECT ident_hash FROM erasure_tombstones WHERE workspace_id = $1 ORDER BY ident_hash',
+      [workspaceId],
+    );
+    expect(tombstones.rows.map((row) => row.ident_hash)).toEqual([userHash, emailHash].sort());
+
+    // Replaying the same log again (or restoring twice) changes nothing.
+    expect(await withEnv(env, () => restoreRun([backupPath, '--yes']))).toBe(0);
+    expect((await pool.query('SELECT 1 FROM profiles WHERE workspace_id = $1 AND id = $2', [workspaceId, profileId])).rowCount).toBe(0);
+    expect((await pool.query('SELECT 1 FROM erasure_tombstones WHERE workspace_id = $1', [workspaceId])).rowCount).toBe(2);
+  }, 180_000);
+});
+
 describe.skipIf(!pgToolsReady || !chUp)('ClickHouse backup under row policies (#129)', () => {
   const suffix = randomUUID().replace(/-/g, '').slice(0, 10);
   const dbName = `am_backup_ch_${suffix}`;

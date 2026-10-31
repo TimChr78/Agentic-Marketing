@@ -202,6 +202,27 @@ groups:
 
 `am doctor` reports the same queue backlog and dead-letter values when run by hand; see the [live checks](#live-checks) above.
 
+## Backups, retention and erasures
+
+`am backup` writes a Postgres dump (and ClickHouse with `--clickhouse`); `am restore` replaces the
+live data. The full procedure, names and manifest are in [Backups and restore](backups.md).
+
+- **Retention.** `BACKUP_KEEP_DAYS` (default 14 for the scheduler) is the maximum age of a restore
+  point, and therefore the longest a restored snapshot can predate an erasure. Give a remote
+  lifecycle the same or a shorter window, and keep taking backups: the newest snapshot is what a
+  restore uses.
+- **Erasures are replayed.** `am restore` reads `erasures` and `erasure_tombstones` from the live
+  database before replacing it and re-applies them afterwards: the erased profiles and identifiers
+  are deleted again, suppression hashes are restored and the keyed tombstones are re-inserted. A
+  person erased after the snapshot does not come back. Replay is idempotent; if the erasure log
+  cannot be read, the restore stops instead of risking a resurrection.
+- **ClickHouse.** `--clickhouse` reloads the event export as taken. Event rows of a replayed person
+  keep their pseudonymous ids and non-personal properties, but the profile key that sealed their
+  personal data is deleted by the replay, so that data stays unreadable. Take a `--clickhouse`
+  backup after erasures when the DSR procedure requires removing event rows too.
+- **Keep `.env` apart.** Backups do not include `MASTER_KEY`; without it the restored secrets and
+  personal data cannot be decrypted.
+
 ## Verifying a release
 
 Every release carries SLSA build provenance from the release workflow (GitHub Actions). The image's provenance and its SBOM (one per platform) are attestations in the registry, next to the image; the Compose bundle, the Helm chart and `SHA256SUMS` carry their own, keyed by their sha256.
