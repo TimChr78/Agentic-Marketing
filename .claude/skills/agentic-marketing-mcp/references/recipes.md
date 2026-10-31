@@ -17,6 +17,7 @@ Each step is one tool call: `tool {input}`. Replace `…` ids with real ones fro
 - Static and CSV audiences
 - Journey waits and business entry keys
 - Reporting the week
+- Lifecycle optimiser: promote a journey variant against a holdout
 
 ## Weekly newsletter
 
@@ -212,3 +213,19 @@ artifacts.create {"type":"journey","name":"Trial follow-up","content":{"purpose"
 - `segments.preview {"artifactId":"seg_…"}` for today's subscriber count and `ai.usage {"days":7}` for AI calls.
 
 Breakdowns other than a time dimension hide groups smaller than k=5; read `meta.suppressed` and do not add up per-day ratios by hand. Report numbers with their denominators and compare them with last week, not with assumptions.
+
+## Lifecycle optimiser: promote a journey variant against a holdout
+
+A programme for an agent that improves live journeys within its mandate (`journey.live` at level 3, a `learning.journeyControlPercent` rule, the journeys in its scope). Run it weekly.
+
+1. **Know your borders.** `agents.get {}` and `workspace.autonomy {}`; `learnings.list {}` for what is already known about this audience.
+2. **Does the journey work?** `journeys.holdoutResult {"journeyId":"jny_…"}` compares everyone in the journey with its control group. Fix or pause a journey that is `treatment_worse` before optimising it.
+3. **Read each split.** `journeys.splitResult {"journeyId":"jny_…","node":"split"}` gives each arm's entries, conversions and unsubscribes and each arm against arm 0 with a verdict.
+   - `treatment_better`: promote the arm. `artifacts.get`, then `artifacts.updateDraft` with that arm's weight at 100 and the others at 0, then `artifacts.requestPublish {"artifactId":"jny_…","note":"Promote arm 1: +2.0 pts conversion (95% CI 0.4–3.6), n=812/806"}`.
+   - `treatment_worse`: retire the arm the same way (weight 0).
+   - `not_enough_data` / `no_clear_difference`: leave it; report how many people each arm still needs (`minSampleSize`).
+4. **Propose the next variant.** One change at a time (a subject, a delay, a step), as a split with a small share such as weights `[80, 20]`. Keep the journey's `controlGroup`; the learning rules send a journey without one to a person.
+5. **Record the learning.** `learnings.add {"statement":"…","scope":{"channel":"email"},"evidence":[{"kind":"journey_holdout","id":"jny_…","summary":"arm 1 +2.0 pts","numbers":{"lift":0.02,"n":1618}}]}`.
+6. **Report.** `agents.report {}` shows your actions and the journeys you published against their control groups.
+
+A publish answers `published`, `on_hold` (a limit or working hours held it; do not resubmit) or `in_review` (a person decides). At level 4 for `journey.live` you may also create new journeys within your scope without a separate grant.

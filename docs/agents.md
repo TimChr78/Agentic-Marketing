@@ -368,6 +368,35 @@ The pilot: one segment, one topic, one weekly broadcast at level 3, everything e
 
 A bundle is judged by its riskiest member. Publishing this issue's template and broadcast together (`artifacts.requestPublishBundle`) counts as `send.broadcast` at level 3; the template on its own is still `content.publish` level 1 and waits for a person.
 
+### Lifecycle optimiser
+
+A programme (#313): the agent reads each journey's splits with `journeys.splitResult`, promotes winning arms and retires losing ones by publishing a new journey version, proposes the next variant, and records learnings. Its journeys must keep a control group (`learning`), it may only touch the journeys in its scope, and a journey publish is at most level 3 (level 4, earned, would let it create new journeys too). The hosted-agent template **Lifecycle optimiser** runs it weekly; the recipe is in the MCP skill (`references/recipes.md`).
+
+```json
+{
+  "agent": "agt_4f8c2d1e6b9a4c7d8e0f1a2b3c4d5e6f",
+  "purpose": "Improve the onboarding journeys with variants against their control groups, promote winners and retire losers.",
+  "goals": [{ "measure": "journey.goal_reached", "target": 100, "direction": "up" }],
+  "scope": {
+    "segments": ["seg_0123456789abcdef0123456789abcdef"],
+    "purposes": ["onboarding"],
+    "topics": [],
+    "channels": ["email"],
+    "artifactTypes": ["journey", "email_template"],
+    "artifacts": ["jny_0123456789abcdef0123456789abcdef"],
+    "brand": null
+  },
+  "levels": { "content.publish": 3, "journey.live": 3 },
+  "limits": { "changesPerDay": 10 },
+  "learning": { "journeyControlPercent": 10 },
+  "guardrails": { "unsubscribeRate": 0.005, "complaintRate": 0.001, "window": "P7D", "minSent": 200 },
+  "validUntil": "2026-11-27T07:00:00Z",
+  "holdWindow": "PT4H",
+  "escalation": { "userIds": [] },
+  "independentCheck": true
+}
+```
+
 ### Deliverability guardian
 
 Watches bounces, complaints and provider signals; it never sends. Its levels are 0 (observe) except `data.write` at 1: a write is refused with the reason unless it can wait for a person's approval. The hosted deliverability guardian (above) proposes a pause and a person still pauses the stream in the UI or with a command.
