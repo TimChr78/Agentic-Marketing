@@ -11,6 +11,7 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 - **config.import approvals reach the shadow report (#293).** Its publishes record the approval they create, like `artifacts.requestPublish`.
 - **A retry with the same idempotency key does not use the daily message limit again (#294).** A direct send whose key was already used counts as nobody, both in the policy decision and in the ledger.
 - **The AI usage page filters independent checks and hosted runs (#297).**
+- **A canary that could not send stops the staged send (#295).** The canary check needs successful sends, not just canary message rows: once nothing is in flight and the canary has too few successful sends to judge — because its messages failed or were suppressed — the stage and the run become `stopped`, the stop reason says how many canary messages failed or were suppressed, and nobody else is sent until a person runs `broadcasts.continue`. A canary that is genuinely smaller than `minCanary` still skips the check.
 
 ## [0.5.2] - 2026-10-31
 

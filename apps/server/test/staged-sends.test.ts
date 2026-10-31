@@ -271,6 +271,79 @@ describe('staged send', () => {
     expect(all.every((m) => m.profile_id)).toBe(true);
   }, 60_000);
 
+  it('stops when every canary message failed, and a person can still send the rest', async () => {
+    // A closed send window keeps the canary queued, so its rows can be marked failed before any
+    // of them goes out — a provider outage that never delivered a canary must not look clean.
+    const now = new Date();
+    const clock = (minutes: number) => `${String(Math.floor(minutes / 60) % 24).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`;
+    const start = clock(now.getUTCHours() * 60 + now.getUTCMinutes() + 60);
+    const end = clock(now.getUTCHours() * 60 + now.getUTCMinutes() + 180);
+    const id = await broadcast({
+      template,
+      segment,
+      sendAt: now.toISOString(),
+      sendWindow: { start, end, maxDelay: 'P1D' },
+      stagedSend: { canaryPercent: 20, wait: 'PT2H', minCanary: 5 },
+    });
+    await eventually(
+      () => status(id),
+      (s) => s.stage?.stage === 'canary_waiting' && s.stage.canary.queued >= 1,
+      20_000,
+    );
+    const canary = await canaryMessages(id, 20);
+    expect(canary.length).toBeGreaterThanOrEqual(5);
+    expect(canary.every((m) => m.status === 'queued')).toBe(true);
+
+    // The provider failed every canary message: all rows are terminal, nothing is in flight, and
+    // no canary send produced evidence. That is the strongest stop signal there is (#295).
+    await t.srv.db.admin.query(
+      `UPDATE messages SET status = 'failed', reason = 'provider outage' WHERE workspace_id = $1 AND journey_id = $2 AND status = 'queued'`,
+      [ws, id],
+    );
+    await checkNow(id);
+
+    const stopped = await eventually(
+      () => status(id),
+      (s) => s.run.status === 'stopped' && s.stage?.stage === 'stopped',
+      30_000,
+    );
+    expect(stopped.stage?.checkSkipped).toBe(false);
+    expect(stopped.stage?.sent).toBe(0);
+    expect(stopped.stage?.stopReason).toMatch(/canary stopped the send/i);
+    expect(stopped.stage?.stopReason).toContain(`${canary.length} failed`);
+    expect(stopped.stage?.stopReason).toContain(`${canary.length} canary messages`);
+    expect(stopped.stage?.checkedAt).not.toBeNull();
+
+    // Nothing more goes out until a person looks at it.
+    await new Promise((r) => setTimeout(r, 1_000));
+    expect((await messagesOf(id)).length).toBe(canary.length);
+    expect((await status(id)).stage?.stage).toBe('stopped');
+
+    // A person can still release the rest after seeing the failure.
+    expect(await api().call('broadcasts.continue', { artifactId: id })).toMatchObject({ status: 'sending_rest' });
+    const resumed = await eventually(
+      () => status(id),
+      (s) => !!s.stage?.resumedAt && s.stage?.stage === 'done' && s.run.status === 'done',
+      30_000,
+    );
+    expect(resumed.stage?.stage).toBe('done');
+    expect(resumed.run.status).toBe('done');
+    expect(resumed.stage?.stopReason).toContain('failed');
+    expect((await messagesOf(id)).length).toBe(PEOPLE);
+
+    // The rest really goes out once its window opens.
+    await t.srv.db.admin.query(
+      `UPDATE messages SET not_before = now() - interval '1 minute' WHERE workspace_id = $1 AND journey_id = $2 AND status = 'queued'`,
+      [ws, id],
+    );
+    const sentRest = await eventually(
+      async () => (await messagesOf(id)).filter((m) => m.status === 'sent').length,
+      (n) => n === PEOPLE - canary.length,
+      30_000,
+    );
+    expect(sentRest).toBe(PEOPLE - canary.length);
+  }, 90_000);
+
   it('waits for a canary deferred by a send window, then checks the full canary', async () => {
     // A window that is closed now in both zones, opening an hour later in UTC and about half a
     // day later in Auckland: the canary spans different openings, so the check must use the
