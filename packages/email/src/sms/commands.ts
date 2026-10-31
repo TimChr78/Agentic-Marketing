@@ -5,7 +5,7 @@ import { schema } from '@agentic-marketing/db';
 import { and, desc, eq } from 'drizzle-orm';
 import { z } from 'zod';
 import { isMarketing } from '../policy';
-import { sendTouches } from '../sendTouches';
+import { directSendLedger, sendTouches } from '../sendTouches';
 import { topicProblems } from '../topicValidation';
 import { requestSms } from './gateway';
 import { billingOf } from './providers';
@@ -35,7 +35,7 @@ export const sendSms = defineCommand({
   target: (i) => i.profileId,
   // The ledger keeps the message it created, so mandate guardrails can find the agent's direct
   // sends in the metric layer (#265).
-  ledgerImpact: (out) => ({ messageId: out.messageId }),
+  ledgerImpact: directSendLedger,
   handler: async (input, ctx) => requestSms(ctx.tx, ctx.principal.workspaceId, ctx.services.keyProvider, ctx.services.events, input),
 });
 

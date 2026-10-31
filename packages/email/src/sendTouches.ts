@@ -33,3 +33,12 @@ export async function sendTouches(tx: Tx, templateId: string, channel: DirectSen
     channels: [channel],
   };
 }
+
+/**
+ * The facts a direct send adds to its ledger row after the handler ran (#265, #279): the message
+ * it created, and whether the message reached anyone. A suppressed or failed gateway result
+ * (`status`) did not go out, so it must not count towards the agent's daily message limit.
+ */
+export function directSendLedger(out: { messageId: string; status: string }) {
+  return { messageId: out.messageId, people: out.status === 'suppressed' || out.status === 'failed' ? 0 : 1 };
+}

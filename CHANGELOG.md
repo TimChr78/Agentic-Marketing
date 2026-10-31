@@ -14,6 +14,7 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 - **Held changes that do not run are announced (#282).** When a recheck sends a held change to a person, or it first has to wait for working hours, a ledger entry (`artifacts.heldRecheck`) is recorded and the sponsor is told; it is not counted against the agent's limits.
 - **The shadow report uses the approval each action created (#286).** The ledger records the approval id, so two actions on the same artifact can no longer be matched to the same decision. Shadow entries recorded before 0.5.2 show as unreviewed.
 - **SMS and push direct sends are covered by the mandate's scope (#278).** `messages.sendSms` and `messages.sendPush` now report the published template's purpose and topic and their channel (`sms`, `push`), so a mandate limited to `channels: ['email']` refuses them instead of letting them through. They also record the message they created on the agent ledger, like `messages.sendEmail`, and the independent check now sees the SMS body and the push title, body and link, not just their ids.
+- **Suppressed and failed direct sends no longer use up the daily message limit (#279).** A direct send records `people: 0` on its ledger row when the gateway answered `suppressed` or `failed` (no consent, a suppressed address, a missing or unpublished template, a delivery-policy refusal), so the agent's message counter counts only messages that went out and a blocked send does not consume `messagesPerDay`.
 
 ## [0.5.1] - 2026-10-31
 

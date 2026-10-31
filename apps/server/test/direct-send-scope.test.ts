@@ -5,15 +5,21 @@ import { eventually, startTestServer, testPort, type User } from './harness';
 // #278: a mandate's scope covers every way to reach people, SMS and push included. A direct
 // `messages.sendSms`/`messages.sendPush` reports the template's purpose/topic and its channel, so
 // `channels: ['email']` refuses them, and the ledger links the message each one created.
+// #279: the daily message count is what went out, not what the gateway refused: a suppressed
+// direct send records `people: 0`, so it does not use up the agent's limit.
 
 let t: Awaited<ReturnType<typeof startTestServer>>;
 let owner: User;
 let token = '';
 let agentId = '';
+let newsletter = '';
 let sms = '';
 let push = '';
 let ada = '';
+let bo = '';
 
+const mjml =
+  '<mjml><mj-body><mj-section><mj-column><mj-text>Hej</mj-text><mj-text><a href="{{ unsubscribe_url | raw }}">Unsubscribe</a></mj-text></mj-column></mj-section></mj-body></mjml>';
 const inDays = (d: number) => new Date(Date.now() + d * 86_400_000).toISOString();
 const purposes = ['marketing_email', 'marketing_sms', 'marketing_push'];
 
@@ -31,6 +37,7 @@ beforeAll(async () => {
     expect((await api.call('artifacts.requestPublish', { artifactId: created.artifactId, note: 'setup' })).status).toBe('published');
     return created.artifactId as string;
   };
+  newsletter = await template('email_template', 'Newsletter', { purpose: 'marketing_email', subject: 'This week', mjml });
   sms = await template('sms_template', 'Signal text', { purpose: 'marketing_sms', body: 'Hej {{ profile.firstName }}, news this week' });
   push = await template('push_template', 'Signal notification', {
     purpose: 'marketing_push',
@@ -47,14 +54,19 @@ beforeAll(async () => {
         traits: { phone: '+4512345678', firstName: 'Ada' },
         consent: purposes.map((purpose) => ({ purpose, status: 'granted' as const })),
       },
+      // No consent: a direct send to this person is suppressed by the gateway.
+      { email: 'bo@example.com', userId: 'bo', traits: { phone: '+4587654321', firstName: 'Bo' } },
     ],
   });
-  ada = (
-    await eventually(
-      () => api.call('profiles.find', { type: 'user_id', value: 'ada' }),
-      (r) => !!r.profileId,
-    )
-  ).profileId as string;
+  const find = async (userId: string) =>
+    (
+      await eventually(
+        () => api.call('profiles.find', { type: 'user_id', value: userId }),
+        (r) => !!r.profileId,
+      )
+    ).profileId as string;
+  ada = await find('ada');
+  bo = await find('bo');
 
   // One device, so a push send has somewhere to go; the log adapter sends nothing.
   const { key } = await api.call('sources.create', { name: 'App backend', kind: 'server' });
@@ -97,6 +109,30 @@ async function grant(content: Record<string, unknown>) {
 
 const lastAction = async (decision: 'allow' | 'ask' | 'deny' | 'hold' = 'allow') =>
   (await t.api(owner).call('agents.activity', { agentId, decision, actionClass: 'send.direct', limit: 1 })).actions[0];
+
+describe('a suppressed direct send does not use up the daily message limit (#279)', () => {
+  beforeAll(async () => {
+    await grant({ scope: { purposes, topics: [], channels: ['email'] }, limits: { messagesPerDay: 1 } });
+  });
+
+  it('counts only the message that went out', async () => {
+    const suppressed = await call('messages.sendEmail', { profileId: bo, templateId: newsletter });
+    expect(suppressed.status).toBe(200);
+    expect(suppressed.body).toMatchObject({ status: 'suppressed', reason: expect.stringContaining('no_lawful_basis') });
+
+    // The ledger keeps the message id, but records that it reached nobody.
+    const blocked = await lastAction();
+    expect(blocked).toMatchObject({ command: 'messages.sendEmail', decision: 'allow' });
+    expect(blocked.impact.messageId).toMatch(/^msg_/);
+    expect(blocked.impact.people).toBe(0);
+
+    // One message a day: the refused send did not use it up.
+    const real = await call('messages.sendEmail', { profileId: ada, templateId: newsletter });
+    expect(real.status).toBe(200);
+    expect(real.body.status).not.toBe('suppressed');
+    expect((await lastAction()).impact).toMatchObject({ people: 1, messageId: expect.stringMatching(/^msg_/) });
+  });
+});
 
 describe('mandate scope covers SMS and push direct sends (#278)', () => {
   beforeAll(async () => {
