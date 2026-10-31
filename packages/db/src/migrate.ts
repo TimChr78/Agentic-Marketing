@@ -81,6 +81,7 @@ const MIGRATION_RELEASES: Record<string, string> = {
   '0050_guardian_shadow.sql': '0.5.0',
   '0051_staged_sends.sql': '0.5.0',
   '0052_hosted_agents.sql': '0.5.0',
+  '0053_agent_undo.sql': '0.5.0',
 };
 
 export function releaseForMigrationHead(head: string | null): string | null {

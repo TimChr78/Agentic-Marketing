@@ -111,6 +111,10 @@ Both are ordinary hosted agents; edit anything after creating them.
 }
 ```
 
+## Undo
+
+Where an agent's action can be reversed, the ledger stores how: the published version it replaced (or, for a first publish, that there was none), and for a broadcast its scheduled send. `agents.undo` with the `actionId` from `agents.activity` runs the reversal in one transaction and marks the entry undone with who did it and the result. It is a **person** command (agents get `403`) and needs `artifacts:publish`: the previous version goes live through the same publish checks and audit as any publish, a broadcast that has not gone out is cancelled, and the first publish of an artifact is taken out of service again. An action is undone at most once. A broadcast whose messages were already sent cannot be recalled; the ledger says so and the command explains it. Journeys and experiences have no pause of their own yet, so undoing their first publish takes the artifact out of service: it stops entering people and stops serving, while participants already in a journey keep going. The agent page in the admin UI shows an **Undo** button on every reversible entry, with a note that is kept in the ledger.
+
 ## The workspace's limits
 
 The workspace's limits apply to every agent, with or without a mandate. Read them with `workspace.autonomy`; a person (owner or admin) changes them with `workspace.setAutonomy` or **Settings → Agents → Autonomy**.

@@ -4,10 +4,12 @@ import {
   autonomySettings,
   type CommandContext,
   defineCommand,
+  isUndoable,
   type Principal,
+  runUndo,
 } from '@agentic-marketing/commands';
 import { AppError, newId } from '@agentic-marketing/core';
-import { type AgentCredentialKind, type AgentStatus, type Db, schema } from '@agentic-marketing/db';
+import { type AgentCredentialKind, type AgentStatus, type AgentUndo, type Db, schema, type Tx } from '@agentic-marketing/db';
 import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lt, sql } from 'drizzle-orm';
 import { z } from 'zod';
 
@@ -308,6 +310,11 @@ const Action = z.object({
   target: z.string().nullable(),
   surface: z.string(),
   at: z.string(),
+  undo: z.unknown().nullable().describe('How to reverse it, when the action published something (null when there is nothing to undo)'),
+  undoable: z.boolean().describe('Whether agents.undo can reverse this action now'),
+  undoneAt: z.string().nullable(),
+  undoneBy: z.string().nullable(),
+  undoResult: z.string().nullable().describe('What the undo did'),
 });
 
 export const agentActivity = defineCommand({
@@ -344,7 +351,13 @@ export const agentActivity = defineCommand({
       .limit(input.limit + 1);
     const page = rows.slice(0, input.limit);
     return {
-      actions: page.map((r) => ({ ...r, at: r.at.toISOString(), impact: r.impact ?? {} })),
+      actions: page.map((r) => ({
+        ...r,
+        at: r.at.toISOString(),
+        impact: r.impact ?? {},
+        undoable: isUndoable(r),
+        undoneAt: r.undoneAt?.toISOString() ?? null,
+      })),
       next: rows.length > input.limit ? (page.at(-1)?.id ?? null) : null,
     };
   },
@@ -542,6 +555,60 @@ export const shadowReport = defineCommand({
   },
 });
 
+// --- Undo (#255) --------------------------------------------------------------------------------
+
+/**
+ * Reverses one agent action in the caller's transaction (ADR-0016 §5.4), returns what happened and
+ * marks the ledger row undone. `by` names the person (or later the guardian) who did it. Exported
+ * so the guardian can roll back an agent's action the same way a person does.
+ */
+export async function undoAgentAction(tx: Tx, ctx: CommandContext, actionId: number, by: string, note?: string) {
+  const [action] = await tx.select().from(schema.agentActions).where(eq(schema.agentActions.id, actionId)).for('update');
+  if (!action) throw new AppError('not_found', `Agent action ${actionId} was not found in this workspace.`);
+  if (action.undoneAt)
+    throw new AppError(
+      'conflict',
+      `This action was already undone on ${action.undoneAt.toISOString()}${action.undoneBy ? ` by ${action.undoneBy}` : ''}. It cannot be undone twice.`,
+    );
+  if (!action.ok || action.decision === 'deny')
+    throw new AppError('conflict', `${action.command} did not happen, so there is nothing to undo.`);
+  if (action.decision === 'ask' || action.decision === 'hold')
+    throw new AppError(
+      'conflict',
+      `${action.command} waited for a person and never ran by itself, so there is nothing to undo. Use approvals.reject to withdraw it.`,
+    );
+  const undo = action.undo as AgentUndo | null;
+  if (!undo) throw new AppError('conflict', `${action.command} changed nothing that can be undone.`);
+  if (undo.kind === 'none') throw new AppError('conflict', undo.reason);
+  const steps = await runUndo({ ...ctx, tx }, undo);
+  const result = [steps.join(' '), note ? `Note: ${note}` : ''].filter(Boolean).join(' ').slice(0, 2000);
+  const undoneAt = new Date();
+  await tx.update(schema.agentActions).set({ undoneAt, undoneBy: by, undoResult: result }).where(eq(schema.agentActions.id, actionId));
+  return { actionId, undoneAt: undoneAt.toISOString(), result, steps };
+}
+
+export const undoAgent = defineCommand({
+  name: 'agents.undo',
+  title: 'Undo an agent action',
+  description:
+    'Reverse something an agent did: republish the version it replaced (or unpublish what it first published), and cancel a broadcast that has not gone out yet. Only people can undo. A message that was already sent cannot be recalled; the ledger says so, and this command explains it.',
+  input: z.object({
+    actionId: z.number().int().describe('The ledger entry, from agents.activity'),
+    note: z.string().max(1000).optional().describe('Why it is being undone, kept with the ledger entry'),
+  }),
+  output: z.object({
+    actionId: z.number().int(),
+    undoneAt: z.string(),
+    result: z.string().describe('What the undo did, in words'),
+    steps: z.array(z.string()),
+  }),
+  permission: 'artifacts:publish',
+  effect: 'publish',
+  humansOnly: true,
+  target: (i) => `agent_action:${i.actionId}`,
+  handler: async (input, ctx) => undoAgentAction(ctx.tx, ctx, input.actionId, ctx.principal.userId, input.note),
+});
+
 // --- Autonomy settings (#215) -------------------------------------------------------------------
 
 export const getAutonomy = defineCommand({
@@ -597,6 +664,7 @@ export const agentCommands = [
   agentGuardian,
   clearGuard,
   shadowReport,
+  undoAgent,
   getAutonomy,
   setAutonomy,
 ];

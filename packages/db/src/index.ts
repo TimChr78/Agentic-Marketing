@@ -5,6 +5,7 @@ export type {
   AgentCredentialKind,
   AgentGuardState,
   AgentStatus,
+  AgentUndo,
   AiCallKind,
   AiCallStatus,
   AiUse,

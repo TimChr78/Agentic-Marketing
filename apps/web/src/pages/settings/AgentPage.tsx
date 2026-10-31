@@ -23,9 +23,11 @@ import {
   Button,
   Card,
   EmptyState,
+  Field,
   formatDate,
   formatDateTime,
   LoadingBlock,
+  Modal,
   Mono,
   PageHeader,
   Select,
@@ -34,10 +36,12 @@ import {
   TableFrame,
   Tag,
   Td,
+  Textarea,
   THead,
   Th,
   Tr,
   timeAgo,
+  useToast,
 } from '../../ui';
 import { pageWidth } from '../../ui/layout';
 
@@ -124,6 +128,7 @@ function Activity({ agentId }: { agentId: string }) {
   });
   const [loadingMore, setLoadingMore] = useState(false);
   const [moreError, setMoreError] = useState<string | null>(null);
+  const [undoing, setUndoing] = useState<AgentAction | null>(null);
 
   const list = useApi(
     () =>
@@ -191,7 +196,7 @@ function Activity({ agentId }: { agentId: string }) {
         loading={list.loading}
         error={list.error}
         onRetry={list.reload}
-        columns={7}
+        columns={8}
         isEmpty={actions.length === 0}
         empty={
           <EmptyState compact title={filtered ? 'Nothing matches' : 'No activity yet'}>
@@ -211,6 +216,7 @@ function Activity({ agentId }: { agentId: string }) {
               <Th>Why</Th>
               <Th className="hidden lg:table-cell">Impact</Th>
               <Th>Result</Th>
+              <Th>Undo</Th>
             </tr>
           </THead>
           <tbody>
@@ -269,6 +275,18 @@ function Activity({ agentId }: { agentId: string }) {
                     </>
                   )}
                 </Td>
+                <Td>
+                  {action.undoneAt ? (
+                    <div className="max-w-[240px] text-[12px]">
+                      <StatusPill tone="warn">Undone</StatusPill>
+                      {action.undoResult && <div className="mt-1 break-words text-muted">{action.undoResult}</div>}
+                    </div>
+                  ) : action.undoable ? (
+                    <Button onClick={() => setUndoing(action)}>Undo</Button>
+                  ) : (
+                    <span className="text-[12px] text-muted">—</span>
+                  )}
+                </Td>
               </Tr>
             ))}
           </tbody>
@@ -291,6 +309,82 @@ function Activity({ agentId }: { agentId: string }) {
           </span>
         </div>
       )}
+      {undoing && (
+        <UndoDialog
+          action={undoing}
+          onClose={() => setUndoing(null)}
+          onUndone={() => {
+            setUndoing(null);
+            setMore({ rows: [], next: null, loaded: false });
+            void list.reload();
+          }}
+        />
+      )}
     </Card>
+  );
+}
+
+/** Undo one agent action (#255): a short confirmation with a note, kept in the ledger. */
+function UndoDialog({ action, onClose, onUndone }: { action: AgentAction; onClose: () => void; onUndone: () => void }) {
+  const toast = useToast();
+  const [note, setNote] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const submit = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const trimmed = note.trim();
+      const out = await api.call('agents.undo', { actionId: action.id, ...(trimmed ? { note: trimmed } : {}) });
+      toast.success(out.result);
+      onUndone();
+    } catch (e) {
+      setError(errText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal
+      open
+      onClose={onClose}
+      title={`Undo ${action.command}?`}
+      footer={
+        <>
+          <Button onClick={onClose}>Cancel</Button>
+          <Button variant="primary" loading={busy} onClick={() => void submit()}>
+            Undo
+          </Button>
+        </>
+      }
+    >
+      <p>
+        This reverses what the agent did: the version that was live before goes back live, and a broadcast that has not gone out is
+        cancelled. A message that was already sent cannot be recalled.
+      </p>
+      {action.intent && <p className="mt-2 text-muted">The agent said: “{action.intent}”</p>}
+      <form
+        className="mt-4 space-y-3"
+        onSubmit={(e) => {
+          e.preventDefault();
+          void submit();
+        }}
+      >
+        <Field label="Note (optional)" hint="Why you are undoing it; kept with the ledger entry.">
+          <Textarea
+            rows={3}
+            maxLength={1000}
+            value={note}
+            data-autofocus
+            onChange={(e) => setNote(e.target.value)}
+            placeholder="e.g. Wrong segment"
+          />
+        </Field>
+        {error && <Alert tone="bad">{error}</Alert>}
+        <button type="submit" hidden />
+      </form>
+    </Modal>
   );
 }
