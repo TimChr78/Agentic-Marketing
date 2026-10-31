@@ -2,18 +2,21 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
-## [Unreleased]
+## [0.5.4] - 2026-10-31
 
 ### Fixed
 
 - **A canary that could not deliver stops the send at any size (#300).** A staged send's canary is waited for until it has gone out and is stopped when half or more of it failed or was suppressed, also when it is smaller than `minCanary`; only the "too few sends to judge the rates" skip still depends on its size.
 - **Agent actions from before 0.5.2 are no longer offered for undo (#301).** `agents.activity` reports them as not undoable, so the agent page shows no Undo button for what `agents.undo` would refuse.
-
-## [Unreleased]
-
-### Fixed
-
 - **An event worker survives a failed fetch.** A pull from NATS JetStream that fails, e.g. with "heartbeats missed" while the host is busy, is logged and retried instead of stopping the ClickHouse sink or a profile worker (which only came back with a restart). Unacknowledged events are re-delivered as before.
+
+### Upgrading from 0.5.3
+
+- **Migrations:** none.
+- **Configuration:** none.
+- **Breaking changes:** none. A staged send whose canary is mostly undeliverable now stops at any canary size.
+- **Manual steps:** none.
+- **Upgrade:** download `agentic-marketing-compose-<version>.tar.gz`, replace `docker-compose.yml` with its copy, check your configuration with the new image (`AM_VERSION=<version> docker compose run --rm --no-deps -T app am doctor --env-file - < .env`), then set `AM_VERSION=<version>` in `.env` and `docker compose pull && docker compose up -d` (Helm: the chart of the same version). Then `docker compose exec app am doctor`.
 
 ## [0.5.3] - 2026-10-31
 
