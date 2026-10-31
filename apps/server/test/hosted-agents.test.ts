@@ -171,6 +171,8 @@ describe('hosted agents (#258)', () => {
       'deliverability_guardian',
       'lifecycle_optimiser',
       'newsletter_editor',
+      'experimentation_agent',
+      'audience_curator',
     ]);
     const view = await weekly.api.call('agents.hostedRuns', { agentId: weekly.agentId });
     expect(view.hosted).toMatchObject({
