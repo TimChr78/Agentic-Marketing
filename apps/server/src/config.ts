@@ -55,7 +55,7 @@ const Env = z.object({
     .string()
     .default('x-forwarded-for')
     .describe(
-      'Headers carrying the client IP, in trust order and comma-separated, e.g. cf-connecting-ip,x-forwarded-for for public traffic through a Cloudflare Tunnel plus LAN/VPN sign-ins; the first address of the first valid header is used',
+      'Headers carrying the client IP, in trust order and comma-separated, e.g. cf-connecting-ip,x-forwarded-for for public traffic through a Cloudflare Tunnel plus LAN/VPN sign-ins; the first header present is used, and a multi-value header is read right to left past trusted proxies',
     ),
   TRUSTED_PROXY_CIDRS: z
     .string()

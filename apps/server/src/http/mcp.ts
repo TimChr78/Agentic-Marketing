@@ -19,6 +19,10 @@ import { MCP_BUSINESS_CONTEXT_URI, MCP_GUIDE_URI, MCP_INSTRUCTIONS } from './mcp
 export type McpTextContent = 'json' | 'summary';
 export type McpToolNameStyle = 'dotted' | 'underscore';
 
+// JSON-RPC calls carry tool arguments and a short prompt; 1 MB is far above any real call and
+// bounds the endpoint before the OAuth/API-token handling reads the request.
+export const MCP_MAX_BODY = 1024 * 1024;
+
 /** Tool names are command names by default; some clients only accept letters, digits and underscores. */
 export function mcpToolName(commandName: string, style: McpToolNameStyle): string {
   return style === 'underscore' ? commandName.replaceAll('.', '_') : commandName;

@@ -45,10 +45,14 @@ export function outsideWorkingHours(
   if (m.blackoutDates.includes(local.date)) return `${local.date} is a blackout date in the agent’s mandate.`;
   const w = m.workingHours;
   if (!w) return null;
-  if (w.days?.length && !w.days.includes(local.day as (typeof DAYS)[number]))
-    return `The mandate allows sends on ${w.days.join(', ')} only (${timeZone}).`;
-  const inside = w.start <= w.end ? local.time >= w.start && local.time < w.end : local.time >= w.start || local.time < w.end;
-  return inside ? null : `It is ${local.time} in ${timeZone}; the mandate allows sends between ${w.start} and ${w.end}.`;
+  const overnight = w.start > w.end;
+  const inside = overnight ? local.time >= w.start || local.time < w.end : local.time >= w.start && local.time < w.end;
+  if (!inside) return `It is ${local.time} in ${timeZone}; the mandate allows sends between ${w.start} and ${w.end}.`;
+  // The part of an overnight window after midnight belongs to the day it started (#233).
+  const windowDay = overnight && local.time < w.end ? DAYS[(DAYS.indexOf(local.day as (typeof DAYS)[number]) + 6) % 7] : local.day;
+  if (w.days?.length && !w.days.includes(windowDay as (typeof DAYS)[number]))
+    return `The mandate allows sends in windows starting on ${w.days.join(', ')} only (${timeZone}).`;
+  return null;
 }
 
 /** The agent's mandate that applies now: published, not archived, for this agent, not expired. */

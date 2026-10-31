@@ -1,4 +1,6 @@
+import type { LookupAddress } from 'node:dns';
 import { lookup } from 'node:dns/promises';
+import { isIP, Socket } from 'node:net';
 import { gzipSync } from 'node:zlib';
 import type { WarehouseDataset } from '@agentic-marketing/db';
 import { type EgressPolicy, egressFetch, isBlockedAddress } from '@agentic-marketing/integrations';
@@ -40,11 +42,60 @@ export const s3Secrets = z.object({ accessKeyId: z.string().min(1), secretAccess
 
 const table = (d: WarehouseDataset) => `am_${d}`;
 
-async function checkHost(host: string, egress: EgressPolicy) {
-  if (egress.allowedHosts.map((h) => h.toLowerCase()).includes(host.toLowerCase())) return;
-  const addresses = await lookup(host, { all: true });
-  if (addresses.some((a) => isBlockedAddress(a.address, egress)))
-    throw new Error(`${host} is a private address; allow it with EGRESS_ALLOWED_HOSTS`);
+export type DestinationLookup = (host: string) => Promise<LookupAddress[]>;
+
+const resolveHost: DestinationLookup = (host) => lookup(host, { all: true });
+
+export interface PostgresDeps {
+  /** Resolve the destination host. Tests substitute a resolver that changes its answer. */
+  lookup?: DestinationLookup;
+  /** Create the pg client. Tests substitute a fake to inspect the connection config. */
+  createClient?: (config: pg.ClientConfig) => pg.Client;
+}
+
+const explicitlyAllowed = (host: string, egress: EgressPolicy) =>
+  egress.allowedHosts.map((h) => h.trim().toLowerCase()).includes(host.toLowerCase());
+
+/**
+ * Resolve the destination once and check every answer, so a mixed public/private answer cannot
+ * slip through. The validated address is returned and pinned for the connection; resolving again
+ * in pg would let a rebinding answer reach a private address.
+ */
+async function resolveDestination(host: string, egress: EgressPolicy, resolve: DestinationLookup): Promise<LookupAddress> {
+  const literal = isIP(host);
+  const addresses = literal ? [{ address: host, family: literal }] : await resolve(host);
+  if (!addresses.length) throw new Error(`${host} did not resolve`);
+  if (!explicitlyAllowed(host, egress)) {
+    const bad = addresses.find((a) => isBlockedAddress(a.address, egress));
+    if (bad) throw new Error(`${host} resolves to private address ${bad.address}; allow it with EGRESS_ALLOWED_HOSTS`);
+  }
+  return addresses[0]!;
+}
+
+/**
+ * A pg `stream` that dials the address that passed the egress check. pg asks for the host name
+ * from the connection string; ignoring it here is the point. TLS still verifies the original host
+ * name because pg passes that name, not the pinned address, to `tls.connect`.
+ */
+class PinnedSocket extends Socket {
+  readonly #address: string;
+
+  constructor(address: string) {
+    super();
+    this.#address = address;
+  }
+
+  override connect(...args: unknown[]): this {
+    // pg calls `connect(port, host)`; the port and name have already been parsed and checked.
+    const port = typeof args[0] === 'number' ? args[0] : undefined;
+    if (port === undefined) throw new Error('pinned postgres socket expects a TCP port');
+    const family = isIP(this.#address);
+    return super.connect({ port, host: this.#address, ...(family ? { family: family as 4 | 6 } : {}) }) as this;
+  }
+}
+
+export function pinnedStream(address: string): () => Socket {
+  return () => new PinnedSocket(address);
 }
 
 export async function postgresDestination(
@@ -52,10 +103,15 @@ export async function postgresDestination(
   config: z.output<typeof postgresConfig>,
   secrets: z.output<typeof postgresSecrets>,
   egress: EgressPolicy,
+  deps: PostgresDeps = {},
 ): Promise<Destination> {
   const url = new URL(secrets.url);
-  await checkHost(url.hostname, egress);
-  const client = new pg.Client({ connectionString: secrets.url });
+  const host = url.hostname.replace(/^\[|\]$/g, '');
+  const answer = await resolveDestination(host, egress, deps.lookup ?? resolveHost);
+  const client = (deps.createClient ?? ((c: pg.ClientConfig) => new pg.Client(c)))({
+    connectionString: secrets.url,
+    stream: pinnedStream(answer.address),
+  });
   await client.connect();
   const schemaName = `"${config.schema}"`;
   await client.query(`CREATE SCHEMA IF NOT EXISTS ${schemaName}`);

@@ -252,5 +252,6 @@ jobs:
       - run: helm lint deploy/helm/agentic-marketing --set secrets.existingSecret=am
       - run: |
           helm template am deploy/helm/agentic-marketing --set secrets.existingSecret=am \
-            --set ingress.enabled=true --set roles.ingest.autoscaling.enabled=true > rendered.yaml
+            --set ingress.enabled=true --set config.TRUSTED_PROXY_CIDRS=10.244.0.0/16 \
+            --set roles.ingest.autoscaling.enabled=true > rendered.yaml
           go run github.com/yannh/kubeconform/cmd/kubeconform@v0.7.0 -strict -summary -kubernetes-version 1.33.0 rendered.yaml

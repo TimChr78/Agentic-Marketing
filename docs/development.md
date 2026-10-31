@@ -80,7 +80,7 @@ CLIENT_IP_HEADER=cf-connecting-ip,x-forwarded-for
 TRUSTED_PROXY_CIDRS=127.0.0.1/32,::1/128,10.0.0.0/8
 ```
 
-`CLIENT_IP_HEADER` is an ordered, comma-separated list; the first valid address of the first header present is used. With `TRUSTED_PROXY_CIDRS` set, headers are ignored unless the socket address is in one of those ranges (bare IPs and CIDR ranges, IPv4 or IPv6), so a client cannot spoof its rate-limit bucket. Admin LAN traffic has no forwarding header and falls back to the socket address. Empty `TRUSTED_PROXY_CIDRS` trusts the headers from any source, which preserves the previous behavior; set it to your tunnel/proxy and loopback ranges in production.
+`CLIENT_IP_HEADER` is an ordered, comma-separated list: the first header present is used. With `TRUSTED_PROXY_CIDRS` set, headers are ignored unless the socket address is in one of those ranges (bare IPs and CIDR ranges, IPv4 or IPv6). A multi-value header such as `x-forwarded-for` is then read from right to left, skipping addresses inside those ranges, and the first untrusted address is the client: an appending proxy leaves a client-supplied value on the left of the header, so only the right-hand side is trustworthy. A single-value header that the proxy overwrites (`cf-connecting-ip`, `x-real-ip`) is used unchanged. Admin LAN traffic has no forwarding header and falls back to the socket address. Empty `TRUSTED_PROXY_CIDRS` trusts the headers from any source, which preserves the previous behavior; set it to your tunnel/proxy and loopback ranges in production.
 
 ### Docker Compose
 

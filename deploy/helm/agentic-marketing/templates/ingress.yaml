@@ -1,4 +1,7 @@
 {{- if .Values.ingress.enabled }}
+{{- if not (trim (toString .Values.config.TRUSTED_PROXY_CIDRS)) }}
+{{- fail "config.TRUSTED_PROXY_CIDRS is empty while ingress.enabled is true. The Ingress forwards client-supplied headers, so an empty proxy list lets any client choose its rate-limit IP. Set config.TRUSTED_PROXY_CIDRS to the ranges the app sees as its peer (the ingress controller pod or node network, e.g. 10.244.0.0/16), and keep config.CLIENT_IP_HEADER as the header your controller sets. See docs/deployment/kubernetes.md#client-ip-behind-the-ingress." }}
+{{- end }}
 {{- $api := printf "%s-api" (include "am.fullname" .) }}
 {{- $ingest := printf "%s-ingest" (include "am.fullname" .) }}
 apiVersion: networking.k8s.io/v1

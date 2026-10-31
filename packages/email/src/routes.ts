@@ -11,6 +11,7 @@ import {
 } from '@agentic-marketing/artifacts';
 import { type Db, schema } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
+import { bodyLimit } from '@agentic-marketing/ingest';
 import { effectiveTopicStatus, findTopic, recordTopicPreference, topicChoicesOf } from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
@@ -26,6 +27,11 @@ import { smsRoutes } from './sms/routes';
 // Public endpoints that e-mails and providers reach: delivery webhooks, one-click unsubscribe
 // (RFC 8058) and click redirects. None of them needs a session; each is authenticated by a
 // secret in its URL (webhooks) or a signed token (links).
+
+// A preference centre post is a list of topic checkboxes; 64 KB is far more than any real form.
+const PREFERENCES_MAX_BODY = 64 * 1024;
+
+const PREFERENCES_TOO_LARGE = (c: Context) => c.json({ error: 'payload_too_large' }, 413);
 
 export interface EmailRouteDeps {
   db: Db;
@@ -184,7 +190,7 @@ export function emailRoutes(deps: EmailRouteDeps) {
     const leavePurposeName = (await purposesOf(link.w)).find((p) => p.key === link.u)?.name;
     return hosted(c, renderPreferencesPage(resolveBrand(brand), { action: '', purposes, leavePurposeName }), 200);
   });
-  app.post('/u/p/:token', async (c) => {
+  app.post('/u/p/:token', bodyLimit(PREFERENCES_MAX_BODY, PREFERENCES_TOO_LARGE), async (c) => {
     const token = c.req.param('token');
     const link = preferenceToken(token);
     if (!link || !(await profileExists(link.w, link.p))) return hosted(c, await hostedPage('expired', null, invalidLink), 404);
@@ -247,7 +253,7 @@ export function emailRoutes(deps: EmailRouteDeps) {
       200,
     );
   });
-  app.post('/u/t/:token', async (c) => {
+  app.post('/u/t/:token', bodyLimit(PREFERENCES_MAX_BODY, PREFERENCES_TOO_LARGE), async (c) => {
     const token = c.req.param('token');
     const link = topicToken(token);
     if (!link || !(await profileExists(link.w, link.p))) return hosted(c, await hostedPage('expired', null, invalidLink), 404);

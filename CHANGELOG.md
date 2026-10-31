@@ -2,6 +2,37 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+### Fixed
+
+- **Mandate scope (#232).** When a mandate lists both artifact types and artifact ids, both restrict: an allowed type no longer lets a different artifact of that type through.
+- **Overnight working hours (#233).** The part of an overnight window after midnight (e.g. Monday 22:00–02:00 at Tuesday 01:00) now counts to the day the window started, in the workspace time zone.
+- **config.import by an agent (#239).** Each artifact it publishes is decided like `artifacts.requestPublish` (its class, reach, the audience threshold and the mandate) and recorded in the agent ledger, instead of riding on the import's own decision; an above-threshold broadcast no longer publishes directly under approval policy `none`.
+- **Concurrent agent requests (#240).** The policy decision takes a per-agent lock before reading the counters, so parallel requests cannot all pass a daily limit.
+- **Agent counters and held changes (#244, #245).** `agents.list`/`agents.get` count held actions (`last24h.held`), and a held change's approval note says why it was held.
+- **Unknown types in config.import (#247).** A bundle with an artifact type the server does not know is invalid input instead of a server error.
+- A mandate limit lowers the level by one but never below propose, which is now documented (#246).
+- **Client IP behind an appending proxy (#241).** When the socket peer is a trusted proxy, a multi-value forwarding header such as `x-forwarded-for` is now walked from right to left, skipping addresses inside `TRUSTED_PROXY_CIDRS`, and the first untrusted address is used. A client can no longer prepend a spoofed address that nginx's default `proxy_add_x_forwarded_for` leaves in the leftmost position. Single-value headers (`cf-connecting-ip`, `x-real-ip`) behave as before, an untrusted peer still falls back to its socket address, and an all-trusted header still uses its leftmost address.
+- **The Helm chart no longer trusts client-supplied forwarding headers by default (#236).** With `ingress.enabled=true`, the chart refuses to render while `config.TRUSTED_PROXY_CIDRS` is empty instead of accepting a client-chosen `X-Forwarded-For`. The [Kubernetes guide](docs/deployment/kubernetes.md#client-ip-behind-the-ingress) shows how to find the ingress controller's pod or node ranges and set them; CI renders the Ingress with a trusted range.
+- **Egress guard:** IPv6 addresses that embed an IPv4 address (IPv4-mapped, IPv4-compatible, NAT64 and 6to4) are blocked when the embedded address is private, both for literal hosts and for DNS answers at connect time (#238).
+- **Outbound HTTP:** responses are aborted as soon as the byte limit is crossed and the timeout is a total deadline for the whole request in both the HTTP/1 and HTTP/2 clients, so an oversized or slowly trickled body cannot keep a request open (#234).
+- **Warehouse:** the Postgres destination resolves the host once, pins the validated address for the connection and rejects mixed public/private answers, closing the DNS-rebinding gap while TLS keeps verifying the original host name (#237).
+- **Public ingest and inbound webhooks refuse oversized bodies before buffering them (#235).** Both handlers now enforce their size check on the request stream, before `c.req.text()`; the inbound webhook does so before authenticating its secret URL. The limit is compared against encoded bytes, not JavaScript string length, so multibyte bodies can no longer slip past a 500 KB check at 1 MB. A chunked body without `Content-Length` is counted as it arrives and answered with 413 once it crosses the limit instead of being buffered in full.
+- **Unauthenticated form, decision, preference, SMS and REST/MCP requests have request-size limits (#242).** Reusable streaming middleware now bounds `POST /f/:id` (64 KB), `POST /v1/decide` (32 KB), `POST /u/p/:token` and `/u/t/:token` (64 KB), the SMS inbound webhook (64 KB), every REST command (1 MB, except `assets.upload` with its existing larger limit) and the MCP endpoint (1 MB). Oversized requests get 413 before parsing or authentication, including bodies sent chunked without `Content-Length`.
+
+### Security
+
+- Two advisories in `mjml-cli`'s dependencies (`glob`, `minimatch`) are accepted with reasons in SECURITY.md: the server never loads mjml's command-line tool, and the mjml 5 upgrade (#205) removes them.
+
+### Upgrading from 0.4.0
+
+- **Migrations:** none.
+- **Configuration:** none for Docker Compose.
+- **Breaking changes:** Helm only: with `ingress.enabled=true` the chart no longer renders until `config.TRUSTED_PROXY_CIDRS` is set to the ingress controller's ranges (see the Kubernetes guide). Before, every client could choose its own address for the rate limits.
+- **Manual steps:** Helm users with an Ingress set `config.TRUSTED_PROXY_CIDRS` before upgrading.
+- **Upgrade:** download `agentic-marketing-compose-<version>.tar.gz`, replace `docker-compose.yml` with its copy, check your configuration with the new image (`AM_VERSION=<version> docker compose run --rm --no-deps -T app am doctor --env-file - < .env`), then set `AM_VERSION=<version>` in `.env` and `docker compose pull && docker compose up -d` (Helm: the chart of the same version). Then `docker compose exec app am doctor`.
+
 ## [0.4.0] - 2026-10-30
 
 [Phase 18](docs/architecture/roadmap-wave-4.md#phase-18-mandates-and-the-first-autonomy) of wave 4: mandates and the first autonomy. A person can now grant an agent bounded autonomy for a purpose and a period, and the platform enforces it: within its mandate an agent can publish and send by itself (level 3), or act after a veto window (level 2), and everything outside goes to a person. The default stays a person: nothing changes until an owner raises a workspace ceiling and publishes a mandate. Works for any agent that speaks MCP or the REST API ([docs/agents.md](docs/agents.md)).

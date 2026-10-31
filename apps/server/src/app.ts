@@ -17,7 +17,7 @@ import { createDb } from '@agentic-marketing/db';
 import { emailRoutes, linkSigner, pushRoutes } from '@agentic-marketing/email';
 import { clickHouseStore, lazyNatsBus } from '@agentic-marketing/events';
 import { valkeyHotState } from '@agentic-marketing/hotstate';
-import { ingestApi } from '@agentic-marketing/ingest';
+import { bodyLimit, ingestApi } from '@agentic-marketing/ingest';
 import { egressFetch, egressHttp2, inboundApi, oauthRoutes, safeRequest } from '@agentic-marketing/integrations';
 import { journeyImpact } from '@agentic-marketing/journeys';
 import { decideApi, edgeMirror } from '@agentic-marketing/personalize';
@@ -28,7 +28,7 @@ import { Hono } from 'hono';
 import { mandateGuardrailBreach } from './agents/guardrails';
 import type { Config } from './config';
 import { copilotApi } from './http/copilot';
-import { mcpEndpoint } from './http/mcp';
+import { MCP_MAX_BODY, mcpEndpoint } from './http/mcp';
 import { consentPage, invitePage, loginPage } from './http/pages';
 import { rejectUnsafeRawPath } from './http/raw-path';
 import { restApi } from './http/rest';
@@ -250,7 +250,13 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
       textContent: config.mcpTextContent,
       toolNameStyle: config.mcpToolNameStyle,
     });
-    app.all('/mcp', (c) => mcp(c.req.raw));
+    app.all(
+      '/mcp',
+      bodyLimit(MCP_MAX_BODY, (c) =>
+        c.json({ error: 'payload_too_large', message: `MCP requests are limited to ${MCP_MAX_BODY / (1024 * 1024)} MB.` }, 413),
+      ),
+      (c) => mcp(c.req.raw),
+    );
   }
   if (config.roles.has('api')) app.route('/', copilotApi({ auth, db, executor, kp: keyProvider }));
   if (config.roles.has('api')) app.route('/', scimApi({ auth, db, executor, publicUrl: config.publicUrl }));

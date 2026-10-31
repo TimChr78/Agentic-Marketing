@@ -31,7 +31,10 @@ config:
   PUBLIC_URL: https://marketing.example.com
   PUBLIC_LINKS_URL: ""
   CLIENT_IP_HEADER: x-forwarded-for   # ordered list for public + LAN ingress, e.g. cf-connecting-ip,x-forwarded-for
-  TRUSTED_PROXY_CIDRS: ""             # proxy/loopback ranges allowed to set forwarding headers; empty = trust all
+  TRUSTED_PROXY_CIDRS: ""             # ranges allowed to set forwarding headers. Required with ingress.enabled: true
+                                      # (the chart refuses to render otherwise). Use the ranges the app sees as its
+                                      # peer: the ingress controller's pod network (e.g. 10.244.0.0/16) or node
+                                      # network when it uses hostNetwork. See docs/deployment/kubernetes.md.
   CLICKHOUSE_URL: http://clickhouse:8123
   CLICKHOUSE_DATABASE: am
   CLICKHOUSE_ROW_POLICIES: required

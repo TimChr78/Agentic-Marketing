@@ -17,7 +17,7 @@ import { remoteAddressFromEnv, resolveClientIp } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import type { LinkSigner } from '@agentic-marketing/email';
 import type { EventBus } from '@agentic-marketing/events';
-import { acceptItems, sourceLookups } from '@agentic-marketing/ingest';
+import { acceptItems, bodyLimit, sourceLookups } from '@agentic-marketing/ingest';
 import { type EgressPolicy, safeRequest } from '@agentic-marketing/integrations';
 import { type KeyProvider, readSecret } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
@@ -33,6 +33,10 @@ import { z } from 'zod';
 export const SUBMITTED = 'Form Submitted';
 export const CONFIRMED = 'Subscription Confirmed';
 export const DOI_DAYS = 7;
+
+// A form submission is a few hundred bytes of fields; 64 KB leaves room for long custom answers
+// and hidden consent/click-id fields while bounding an unauthenticated POST.
+const FORMS_MAX_BODY = 64 * 1024;
 
 /** The signed payload of a confirmation link. */
 export interface DoiToken {
@@ -201,79 +205,90 @@ export function formsApi(deps: FormsDeps) {
     }),
   );
 
-  app.post('/f/:id', async (c) => {
-    const isJson = (c.req.header('content-type') ?? '').includes('application/json');
-    const origin = c.req.header('origin');
-    const cors: Record<string, string> = origin ? { 'access-control-allow-origin': origin, vary: 'origin' } : {};
-    const form = await formOf(c.req.param('id'));
-    const done = (ok: boolean, error?: string, status: 400 | 403 | 404 | 429 = 400) => {
-      if (isJson || !form)
-        return c.json(ok ? { ok: true, doubleOptIn: form?.def.doubleOptIn ?? false } : { ok: false, error }, ok ? 200 : status, cors);
-      const target = ok ? form.def.successUrl : (form.def.errorUrl ?? form.def.successUrl);
-      return c.redirect(ok ? target : `${target}${target.includes('?') ? '&' : '?'}error=${encodeURIComponent(error ?? 'invalid')}`, 303);
-    };
-    if (!form) return c.json({ ok: false, error: 'unknown_form' }, 404, cors);
-    if (origin && form.def.allowedOrigins.length && !form.def.allowedOrigins.includes(origin.toLowerCase()))
-      return done(false, 'origin_not_allowed', 403);
+  app.post(
+    '/f/:id',
+    bodyLimit(FORMS_MAX_BODY, (c) => {
+      const origin = c.req.header('origin');
+      return c.json(
+        { ok: false, error: 'payload_too_large' },
+        413,
+        origin ? { 'access-control-allow-origin': origin, vary: 'origin' } : {},
+      );
+    }),
+    async (c) => {
+      const isJson = (c.req.header('content-type') ?? '').includes('application/json');
+      const origin = c.req.header('origin');
+      const cors: Record<string, string> = origin ? { 'access-control-allow-origin': origin, vary: 'origin' } : {};
+      const form = await formOf(c.req.param('id'));
+      const done = (ok: boolean, error?: string, status: 400 | 403 | 404 | 429 = 400) => {
+        if (isJson || !form)
+          return c.json(ok ? { ok: true, doubleOptIn: form?.def.doubleOptIn ?? false } : { ok: false, error }, ok ? 200 : status, cors);
+        const target = ok ? form.def.successUrl : (form.def.errorUrl ?? form.def.successUrl);
+        return c.redirect(ok ? target : `${target}${target.includes('?') ? '&' : '?'}error=${encodeURIComponent(error ?? 'invalid')}`, 303);
+      };
+      if (!form) return c.json({ ok: false, error: 'unknown_form' }, 404, cors);
+      if (origin && form.def.allowedOrigins.length && !form.def.allowedOrigins.includes(origin.toLowerCase()))
+        return done(false, 'origin_not_allowed', 403);
 
-    const raw = (isJson ? await c.req.json().catch(() => ({})) : await c.req.parseBody()) as Record<string, unknown>;
-    const str = (k: string) => (typeof raw[k] === 'string' ? (raw[k] as string).trim() : '');
-    // Bots fill every field; people never see this one. Pretend success so they learn nothing.
-    if (str('am_hp')) return done(true);
-    const ip = ipOf(c);
-    if (!allow(`${form.ws}:${c.req.param('id')}:${ip ?? 'unknown'}`)) return done(false, 'rate_limited', 429);
-    const email = z.email().max(320).safeParse(str('email'));
-    if (!email.success) return done(false, 'invalid_email');
-    if (form.def.turnstile) {
-      const secret = await deps.db.withWorkspace(form.ws, (tx) => readSecret(tx, form.ws, 'turnstile.secret_key', deps.kp));
-      const ok = await verifyTurnstile(str('cf-turnstile-response'), secret, ip, deps.egress).catch(() => false);
-      if (!ok) return done(false, 'challenge_failed', 403);
-    }
+      const raw = (isJson ? await c.req.json().catch(() => ({})) : await c.req.parseBody()) as Record<string, unknown>;
+      const str = (k: string) => (typeof raw[k] === 'string' ? (raw[k] as string).trim() : '');
+      // Bots fill every field; people never see this one. Pretend success so they learn nothing.
+      if (str('am_hp')) return done(true);
+      const ip = ipOf(c);
+      if (!allow(`${form.ws}:${c.req.param('id')}:${ip ?? 'unknown'}`)) return done(false, 'rate_limited', 429);
+      const email = z.email().max(320).safeParse(str('email'));
+      if (!email.success) return done(false, 'invalid_email');
+      if (form.def.turnstile) {
+        const secret = await deps.db.withWorkspace(form.ws, (tx) => readSecret(tx, form.ws, 'turnstile.secret_key', deps.kp));
+        const ok = await verifyTurnstile(str('cf-turnstile-response'), secret, ip, deps.egress).catch(() => false);
+        if (!ok) return done(false, 'challenge_failed', 403);
+      }
 
-    const traits: Record<string, unknown> = { email: email.data.toLowerCase() };
-    for (const t of form.def.traits) if (str(t)) traits[t] = str(t).slice(0, 200);
-    const anon = /^[A-Za-z0-9:_-]{8,100}$/.test(str('anonymousId')) ? str('anonymousId') : `form:${randomUUID()}`;
-    const submittedAt = new Date().toISOString();
-    // Ad click ids from hidden fields (sites without the SDK), and the visitor's choices from the
-    // site's consent banner (am_consent="analytics,ad_measurement"); the click ids are kept only
-    // when ad_measurement is among them.
-    const clickIds = clickIdsFrom(raw);
-    const allowedPurposes = str('am_consent')
-      .split(',')
-      .map((p) => p.trim())
-      .filter((p) => /^[a-z][a-z0-9_]{0,63}$/.test(p));
-    const context = {
-      ...(Object.keys(clickIds).length ? { clickIds } : {}),
-      ...(allowedPurposes.length ? { consent: { categoryPreferences: Object.fromEntries(allowedPurposes.map((p) => [p, true])) } } : {}),
-    };
-    const items = [
-      { type: 'identify', anonymousId: anon, traits, timestamp: submittedAt },
-      {
-        type: 'track',
-        event: SUBMITTED,
-        anonymousId: anon,
-        timestamp: submittedAt,
-        context,
-        properties: {
-          form_id: c.req.param('id'),
-          form_version: form.version,
-          purposes: form.def.purposes,
-          double_opt_in: form.def.doubleOptIn,
-          consent_text: consentTextHash(form.def.consentText),
-          page: str('page').slice(0, 500) || c.req.header('referer')?.slice(0, 500) || '',
+      const traits: Record<string, unknown> = { email: email.data.toLowerCase() };
+      for (const t of form.def.traits) if (str(t)) traits[t] = str(t).slice(0, 200);
+      const anon = /^[A-Za-z0-9:_-]{8,100}$/.test(str('anonymousId')) ? str('anonymousId') : `form:${randomUUID()}`;
+      const submittedAt = new Date().toISOString();
+      // Ad click ids from hidden fields (sites without the SDK), and the visitor's choices from the
+      // site's consent banner (am_consent="analytics,ad_measurement"); the click ids are kept only
+      // when ad_measurement is among them.
+      const clickIds = clickIdsFrom(raw);
+      const allowedPurposes = str('am_consent')
+        .split(',')
+        .map((p) => p.trim())
+        .filter((p) => /^[a-z][a-z0-9_]{0,63}$/.test(p));
+      const context = {
+        ...(Object.keys(clickIds).length ? { clickIds } : {}),
+        ...(allowedPurposes.length ? { consent: { categoryPreferences: Object.fromEntries(allowedPurposes.map((p) => [p, true])) } } : {}),
+      };
+      const items = [
+        { type: 'identify', anonymousId: anon, traits, timestamp: submittedAt },
+        {
+          type: 'track',
+          event: SUBMITTED,
+          anonymousId: anon,
+          timestamp: submittedAt,
+          context,
+          properties: {
+            form_id: c.req.param('id'),
+            form_version: form.version,
+            purposes: form.def.purposes,
+            double_opt_in: form.def.doubleOptIn,
+            consent_text: consentTextHash(form.def.consentText),
+            page: str('page').slice(0, 500) || c.req.header('referer')?.slice(0, 500) || '',
+          },
         },
-      },
-    ];
-    // The form is the source: the consent hook only trusts these events from frm_ sources.
-    const source = { id: c.req.param('id'), workspaceId: form.ws, kind: 'server' as const, requiredPurpose: null };
-    const { accepted, rejected } = acceptItems(items, source, await loadPolicy(form.ws));
-    if (rejected.length) {
-      logger.warn({ form: c.req.param('id'), rejected }, 'form submission rejected');
-      return done(false, 'invalid');
-    }
-    await deps.bus.publish(accepted);
-    return done(true);
-  });
+      ];
+      // The form is the source: the consent hook only trusts these events from frm_ sources.
+      const source = { id: c.req.param('id'), workspaceId: form.ws, kind: 'server' as const, requiredPurpose: null };
+      const { accepted, rejected } = acceptItems(items, source, await loadPolicy(form.ws));
+      if (rejected.length) {
+        logger.warn({ form: c.req.param('id'), rejected }, 'form submission rejected');
+        return done(false, 'invalid');
+      }
+      await deps.bus.publish(accepted);
+      return done(true);
+    },
+  );
 
   // Confirmation: the link opens a page with a button, so mail scanners that follow links do not
   // confirm on the person's behalf. The POST records the confirmation as an event.

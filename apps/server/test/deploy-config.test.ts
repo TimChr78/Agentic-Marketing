@@ -7,7 +7,21 @@ import { describe, expect, it } from 'vitest';
 const root = fileURLToPath(new URL('../../../', import.meta.url));
 const read = (name: string) => readFile(join(root, name), 'utf8');
 
-const [compose, composeOverride, composeDoc, buildOverlay, envExample, smoke, readme, dockerfile, dockerignore, ci] = await Promise.all([
+const [
+  compose,
+  composeOverride,
+  composeDoc,
+  buildOverlay,
+  envExample,
+  smoke,
+  readme,
+  dockerfile,
+  dockerignore,
+  ci,
+  helmValues,
+  helmIngress,
+  kubeDoc,
+] = await Promise.all([
   read('docker-compose.yml'),
   read('compose.override.example.yaml'),
   read('docs/deployment/compose.md'),
@@ -18,6 +32,9 @@ const [compose, composeOverride, composeDoc, buildOverlay, envExample, smoke, re
   read('Dockerfile'),
   read('.dockerignore'),
   read('.github/workflows/ci.yml'),
+  read('deploy/helm/agentic-marketing/values.yaml'),
+  read('deploy/helm/agentic-marketing/templates/ingress.yaml'),
+  read('docs/deployment/kubernetes.md'),
 ]);
 
 /** The lines of one service, up to the next two-space service key. */
@@ -189,6 +206,27 @@ describe('CI Node version', () => {
     const workflow = /node-version:\s*["']?(\d+)/.exec(ci)?.[1];
     expect(image).toBeTruthy();
     expect(workflow).toBe(image);
+  });
+});
+
+describe('Helm chart client IP trust', () => {
+  it('refuses to render an Ingress without trusted proxy ranges', () => {
+    expect(helmValues).toMatch(/^\s*TRUSTED_PROXY_CIDRS:\s*""/m);
+    expect(helmIngress).toMatch(/if \.Values\.ingress\.enabled/);
+    expect(helmIngress).toContain('fail');
+    expect(helmIngress).toContain('config.TRUSTED_PROXY_CIDRS');
+    expect(helmIngress).toContain('docs/deployment/kubernetes.md#client-ip-behind-the-ingress');
+  });
+
+  it('renders the Ingress in CI with a trusted proxy range', () => {
+    expect(ci).toMatch(/helm template[\s\S]{0,400}--set ingress\.enabled=true[\s\S]{0,200}--set config\.TRUSTED_PROXY_CIDRS=\S+/);
+  });
+
+  it('documents how to find the ingress controller ranges', () => {
+    expect(kubeDoc).toContain('## Client IP behind the Ingress');
+    expect(kubeDoc).toContain('TRUSTED_PROXY_CIDRS');
+    expect(kubeDoc).toMatch(/kubectl get pods[\s\S]{0,200}-o wide/);
+    expect(kubeDoc).toMatch(/right to left/i);
   });
 });
 

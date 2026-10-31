@@ -81,24 +81,44 @@ function proxyList(cidrs: string[]): BlockList {
 }
 
 /**
- * The client IP for rate limits: the first valid forwarded header when the request came through a
- * trusted proxy (or when no proxy list is configured, for backward compatibility), else the socket
- * address. Never returns a value that is not an IP address.
+ * The client IP for rate limits. When the request came through a trusted proxy, walk each
+ * forwarding header from right to left and return the first address outside the trusted proxy
+ * ranges: that is the client as seen by the outermost trusted proxy. A proxy that appends to an
+ * existing header (nginx's default `proxy_add_x_forwarded_for`) leaves client-supplied values on
+ * the left, so the leftmost address is not trustworthy. If every address is trusted, use the
+ * leftmost. With no proxy list configured (backward compatibility) the leftmost value is used; when
+ * the socket peer is not a trusted proxy the header is ignored. Never returns a value that is not
+ * an IP address.
  */
 export function resolveClientIp(req: ClientIpRequest): string | undefined {
   const remote = normalizeIp(req.remoteAddress);
   const trusted = req.trustedProxyCidrs ?? [];
+  const list = trusted.length ? proxyList(trusted) : undefined;
   const family = remote ? isIP(remote) : 0;
-  const proxyTrusted = trusted.length === 0 || (remote !== undefined && proxyList(trusted).check(remote, family === 6 ? 'ipv6' : 'ipv4'));
+  const proxyTrusted = !list || (remote !== undefined && list.check(remote, family === 6 ? 'ipv6' : 'ipv4'));
 
-  if (proxyTrusted) {
-    for (const name of req.headerNames) {
-      const value = req.header(name);
-      if (!value) continue;
-      const first = value.split(',')[0]?.trim();
-      const ip = normalizeIp(first);
-      if (ip) return ip;
+  if (!proxyTrusted) return remote;
+
+  const isTrusted = (ip: string): boolean => {
+    if (!list) return false;
+    const ipFamily = isIP(ip);
+    return list.check(ip, ipFamily === 6 ? 'ipv6' : 'ipv4');
+  };
+
+  for (const name of req.headerNames) {
+    const value = req.header(name);
+    if (!value) continue;
+    const addresses = value
+      .split(',')
+      .map((entry) => normalizeIp(entry))
+      .filter((entry): entry is string => entry !== undefined);
+    if (addresses.length === 0) continue;
+    if (!list) return addresses[0];
+    for (let index = addresses.length - 1; index >= 0; index -= 1) {
+      const ip = addresses[index];
+      if (!isTrusted(ip)) return ip;
     }
+    return addresses[0];
   }
   return remote;
 }

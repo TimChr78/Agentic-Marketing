@@ -27,6 +27,30 @@ describe('resolveClientIp', () => {
     expect(resolve({ 'cf-connecting-ip': '203.0.113.7' }, '10.0.0.5', ['10.0.0.0/8'])).toBe('203.0.113.7');
   });
 
+  // #241: an appending proxy such as nginx's default `proxy_add_x_forwarded_for` leaves a
+  // client-supplied prefix in place, so only the right-hand side of the header is trustworthy.
+  it('uses the real client behind an appending proxy, not a prepended spoofed value (#241)', () => {
+    expect(resolve({ 'x-forwarded-for': '1.2.3.4, 203.0.113.9' }, '172.18.0.5', ['172.18.0.0/16'])).toBe('203.0.113.9');
+  });
+
+  it('walks several trusted hops from right to left and returns the first untrusted address', () => {
+    expect(resolve({ 'x-forwarded-for': '1.2.3.4, 203.0.113.9, 10.0.0.2, 10.0.0.3' }, '10.0.0.5', ['10.0.0.0/8'])).toBe('203.0.113.9');
+  });
+
+  it('returns the leftmost address when every forwarded address is a trusted proxy', () => {
+    expect(resolve({ 'x-forwarded-for': '10.0.0.1, 10.0.0.2' }, '10.0.0.5', ['10.0.0.0/8'])).toBe('10.0.0.1');
+  });
+
+  it('walks IPv6 hops and returns an untrusted IPv6 client', () => {
+    expect(
+      resolve({ 'x-forwarded-for': '2001:db8:dead::1, 2001:db8:1::5, 2001:db8:ffff::1' }, '2001:db8:ffff::1', ['2001:db8:ffff::/48']),
+    ).toBe('2001:db8:1::5');
+  });
+
+  it('skips malformed header entries while walking from the right', () => {
+    expect(resolve({ 'x-forwarded-for': 'garbage, 203.0.113.9, 172.18.0.5' }, '172.18.0.5', ['172.18.0.0/16'])).toBe('203.0.113.9');
+  });
+
   it('handles an IPv4-mapped remote address against an IPv4 proxy range', () => {
     expect(resolve({ 'cf-connecting-ip': '198.51.100.9' }, '::ffff:10.0.0.5', ['10.0.0.0/8'])).toBe('198.51.100.9');
     expect(resolve({}, '::ffff:10.0.0.5', ['10.0.0.0/8'])).toBe('10.0.0.5');
