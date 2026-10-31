@@ -2,7 +2,7 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
-## [Unreleased]
+## [0.5.3] - 2026-10-31
 
 ### Fixed
 
@@ -13,6 +13,14 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 - **The AI usage page filters independent checks and hosted runs (#297).**
 - **A canary that could not send stops the staged send (#295).** The canary check needs successful sends, not just canary message rows: once nothing is in flight and the canary has too few successful sends to judge — because its messages failed or were suppressed — the stage and the run become `stopped`, the stop reason says how many canary messages failed or were suppressed, and nobody else is sent until a person runs `broadcasts.continue`. A canary that is genuinely smaller than `minCanary` still skips the check.
 - **A hosted agent run cannot exceed its token allowance by a whole step (#296).** `maxTokensPerRun` is now a hard limit: before each model step the allowance still left is known, that step's `maxOutputTokens` is capped to it (a 100-token run can no longer ask for the old 200-token minimum), and no step starts when too little is left for a useful answer. A step's input tokens cannot be capped, so a run can still go over its allowance by the input of its last step — not by a whole further step. The tokens of the steps that finished are also recorded in `ai_calls` (and in the month's usage) when a later step throws, instead of 0.
+
+### Upgrading from 0.5.2
+
+- **Migrations:** none.
+- **Configuration:** none.
+- **Breaking changes:** none. `agents.undo` now refuses agent actions recorded before 0.5.2 and asks a person to reverse them by hand; a staged send whose canary could not deliver now stops instead of sending the rest.
+- **Manual steps:** none.
+- **Upgrade:** download `agentic-marketing-compose-<version>.tar.gz`, replace `docker-compose.yml` with its copy, check your configuration with the new image (`AM_VERSION=<version> docker compose run --rm --no-deps -T app am doctor --env-file - < .env`), then set `AM_VERSION=<version>` in `.env` and `docker compose pull && docker compose up -d` (Helm: the chart of the same version). Then `docker compose exec app am doctor`.
 
 ## [0.5.2] - 2026-10-31
 
