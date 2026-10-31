@@ -1,0 +1,169 @@
+{
+  "format": "agentic-marketing/recipe@1",
+  "id": "welcome-doi",
+  "version": 1,
+  "title": "Welcome journey with double opt-in",
+  "description": "A signup form whose consent counts only after the person clicks the confirmation link, followed by a welcome e-mail and a short follow-up. The set every list starts with.",
+  "parameters": [
+    {
+      "key": "siteName",
+      "label": "Site name",
+      "description": "Shown in the e-mails and the consent text.",
+      "type": "string",
+      "required": true,
+      "default": "Your site",
+      "minLength": 1,
+      "maxLength": 120
+    },
+    {
+      "key": "siteUrl",
+      "label": "Site URL",
+      "description": "Where the signup form sends people after submitting and confirming. No trailing slash.",
+      "type": "url",
+      "required": true,
+      "default": "https://example.com",
+      "pattern": "^https?://[^/\\s]+$"
+    },
+    {
+      "key": "purpose",
+      "label": "Purpose",
+      "description": "The purpose key the list and messages use; it must include the e-mail channel.",
+      "type": "string",
+      "required": true,
+      "default": "marketing_email",
+      "pattern": "^[a-z][a-z0-9_]{0,63}$"
+    },
+    {
+      "key": "welcomeDelay",
+      "label": "Delay before the follow-up",
+      "description": "An ISO 8601 duration such as P3D.",
+      "type": "duration",
+      "required": true,
+      "default": "P3D"
+    }
+  ],
+  "prerequisites": [
+    {
+      "kind": "email_provider",
+      "useFor": "marketing",
+      "description": "An enabled e-mail provider for marketing mail"
+    },
+    {
+      "kind": "purpose",
+      "purpose": "{{param.purpose}}",
+      "channel": "email",
+      "description": "A configured purpose with the e-mail channel"
+    }
+  ],
+  "artifacts": [
+    {
+      "key": "confirmTemplate",
+      "type": "email_template",
+      "name": "Confirm your subscription",
+      "note": "Double opt-in confirmation; it uses {{ confirm_url }} and a service purpose.",
+      "content": {
+        "purpose": "onboarding",
+        "subject": "Confirm your subscription to {{param.siteName}}",
+        "preheader": "One click and you are in.",
+        "sampleData": { "profile": { "firstName": "Ada" } },
+        "mjml": "<mjml><mj-head><mj-attributes><mj-all font-family=\"Helvetica, Arial, sans-serif\" /></mj-attributes></mj-head><mj-body><mj-section><mj-column><mj-text>Hi {{ profile.firstName | default: \"there\" }},</mj-text><mj-text>Please confirm that you want to hear from {{param.siteName}}.</mj-text><mj-button href=\"{{ confirm_url | raw }}\" background-color=\"#1d4ed8\" color=\"#ffffff\">Yes, subscribe me</mj-button><mj-text font-size=\"12px\" color=\"#6b7280\">If you did not sign up, you can ignore this e-mail.</mj-text></mj-column></mj-section></mj-body></mjml>"
+      }
+    },
+    {
+      "key": "welcomeEmail",
+      "type": "email_template",
+      "name": "Welcome",
+      "note": "The first message after the person confirms.",
+      "content": {
+        "purpose": "{{param.purpose}}",
+        "subject": "Welcome to {{param.siteName}}",
+        "preheader": "Thanks for confirming. Here is how to get the most from us.",
+        "sampleData": { "profile": { "firstName": "Ada" } },
+        "mjml": "<mjml><mj-head><mj-attributes><mj-all font-family=\"Helvetica, Arial, sans-serif\" /></mj-attributes></mj-head><mj-body><mj-section><mj-column><mj-text>Hi {{ profile.firstName | default: \"there\" }},</mj-text><mj-text>Welcome to {{param.siteName}}. You are on the list, and we are glad you are here.</mj-text><mj-text>Every issue is short: what changed, why it matters and what to do about it.</mj-text></mj-column></mj-section><mj-section><mj-column><mj-text font-size=\"12px\" color=\"#6b7280\">You get this because you confirmed your subscription. <a href=\"{{ preferences_url | raw }}\">Manage preferences</a> or <a href=\"{{ unsubscribe_url | raw }}\">unsubscribe</a>.</mj-text></mj-column></mj-section></mj-body></mjml>"
+      }
+    },
+    {
+      "key": "followUpEmail",
+      "type": "email_template",
+      "name": "Start here",
+      "note": "A short follow-up after the welcome message.",
+      "content": {
+        "purpose": "{{param.purpose}}",
+        "subject": "Start here: the three things worth reading",
+        "preheader": "A short list to make the next issue useful.",
+        "sampleData": { "profile": { "firstName": "Ada" } },
+        "mjml": "<mjml><mj-head><mj-attributes><mj-all font-family=\"Helvetica, Arial, sans-serif\" /></mj-attributes></mj-head><mj-body><mj-section><mj-column><mj-text>Hi {{ profile.firstName | default: \"there\" }},</mj-text><mj-text>If you only read three things from {{param.siteName}}, start with these:</mj-text><mj-text>1. The guide that explains the basics.<br />2. The teardown that shows it in practice.<br />3. The checklist you can use this week.</mj-text><mj-text>Reply if you want us to cover something specific.</mj-text></mj-column></mj-section><mj-section><mj-column><mj-text font-size=\"12px\" color=\"#6b7280\">You get this because you confirmed your subscription. <a href=\"{{ preferences_url | raw }}\">Manage preferences</a> or <a href=\"{{ unsubscribe_url | raw }}\">unsubscribe</a>.</mj-text></mj-column></mj-section></mj-body></mjml>"
+      }
+    },
+    {
+      "key": "subscribers",
+      "type": "segment",
+      "name": "Newsletter subscribers",
+      "content": {
+        "description": "People who allowed the purpose, including new signups.",
+        "mode": "dynamic",
+        "condition": { "consent": "{{param.purpose}}" }
+      }
+    },
+    {
+      "key": "signupForm",
+      "type": "form",
+      "name": "Newsletter signup",
+      "note": "Double opt-in form; publish it together with the confirmation e-mail.",
+      "content": {
+        "purposes": ["{{param.purpose}}"],
+        "doubleOptIn": true,
+        "confirmationTemplate": "{{ref.confirmTemplate}}",
+        "consentText": "Send me the newsletter from {{param.siteName}}. I can unsubscribe at any time.",
+        "traits": ["firstName"],
+        "successUrl": "{{param.siteUrl}}/subscribe/check-your-inbox/",
+        "confirmedUrl": "{{param.siteUrl}}/subscribe/welcome/",
+        "errorUrl": "{{param.siteUrl}}/subscribe/oops/",
+        "allowedOrigins": ["{{param.siteUrl}}"]
+      }
+    },
+    {
+      "key": "welcomeJourney",
+      "type": "journey",
+      "name": "Welcome",
+      "content": {
+        "purpose": "{{param.purpose}}",
+        "nodes": [
+          {
+            "id": "start",
+            "kind": "trigger",
+            "label": "Subscription confirmed",
+            "config": { "event": "Subscription Confirmed", "reentry": "once" }
+          },
+          {
+            "id": "welcome",
+            "kind": "email",
+            "label": "Welcome",
+            "config": { "template": "{{ref.welcomeEmail}}" }
+          },
+          {
+            "id": "wait",
+            "kind": "wait",
+            "label": "Wait {{param.welcomeDelay}}",
+            "config": { "duration": "{{param.welcomeDelay}}" }
+          },
+          {
+            "id": "follow_up",
+            "kind": "email",
+            "label": "Start here",
+            "config": { "template": "{{ref.followUpEmail}}" }
+          },
+          { "id": "done", "kind": "exit", "label": "Done", "config": {} }
+        ]
+      }
+    }
+  ],
+  "docs": "## What this installs\n\nA public signup form with double opt-in, the confirmation e-mail it sends, two marketing e-mails, a subscriber segment and a journey that starts when a person confirms.\n\n## Before publishing\n\n1. Publish the confirmation e-mail first: the form needs a published template whose purpose does not itself need consent (`onboarding`).\n2. Publish the segment, the two marketing e-mails and the journey. The journey sends only to people whose consent for the purpose is in force.\n3. Put the form on your site: after publishing, post to `<links URL>/f/<form id>`.\n\n## How consent works\n\nSubmitting the form records a pending consent; the double opt-in click confirms it. The journey triggers on `Subscription Confirmed`, not on the form submission, so nobody is mailed before they confirm.",
+  "checklist": [
+    "Check the site name, site URL and the redirect URLs on the signup form.",
+    "Proofread the three e-mails; the confirmation e-mail must keep {{ confirm_url }}.",
+    "Keep the unsubscribe and preference links in both marketing e-mails.",
+    "Publish the confirmation e-mail, then the segment, templates, journey and form; submit them together with artifacts.requestPublishBundle when one review is easier.",
+    "Send a test to yourself before the form goes on the site."
+  ]
+}

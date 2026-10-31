@@ -92,6 +92,7 @@ Read [references/tools.md](references/tools.md) for the full list with effects a
 ## Recipes
 
 Worked examples with full payloads are in [references/recipes.md](references/recipes.md):
+- installing a starter recipe as drafts (`recipes.list/get/preview/install`: welcome and double opt-in, lead-magnet drip, weekly newsletter, win-back; see [docs/recipes.md](../../../docs/recipes.md));
 - the weekly newsletter (template + broadcast, scheduled for Friday);
 - a segment of engaged readers;
 - a welcome journey after double opt-in;

@@ -108,6 +108,7 @@ On Kubernetes: the Helm chart in [`deploy/helm`](deploy/helm/agentic-marketing) 
 - [Architecture](docs/architecture/README.md) and its [ADRs](docs/architecture/adr/).
 - [Integrations](docs/integrations.md): webhooks, connectors, n8n, config as code, warehouse export.
 - [Content sources](docs/content-sources.md): RSS/Atom/JSON feeds, the scored article library, dedupe and versioned selections.
+- [Recipes](docs/recipes.md): installable welcome/DOI, lead-magnet drip, newsletter and win-back loops, the recipe format, and the draft-only install path.
 - [Pilot: MartechSignal](docs/pilots/martechsignal.md): replacing Kit on a static Cloudflare Pages site.
 - Agent skills in [`.claude/skills/`](.claude/skills/):
   - `agentic-marketing-implement`: rolling the stack out on a website;

@@ -3,6 +3,7 @@
 Each step is one tool call: `tool {input}`. Replace `…` ids with real ones from earlier calls. Under the approval policy "agent changes need a person", `artifacts.requestPublish` creates an approval request. Anything that references an artifact (a broadcast's template, a journey's templates) can be published only after that artifact is, so get the dependencies approved first.
 
 ## Contents
+- Install a starter recipe
 - Weekly newsletter
 - Segments for the newsletter
 - Welcome journey after double opt-in
@@ -19,6 +20,21 @@ Each step is one tool call: `tool {input}`. Replace `…` ids with real ones fro
 - Reporting the week
 - Lifecycle optimiser: promote a journey variant against a holdout
 - Newsletter editor: the weekly loop
+
+## Install a starter recipe
+
+The server ships welcome/DOI, lead-magnet drip, weekly newsletter and win-back recipes; `docs/recipes.md` has the format. An install creates version 1 drafts only, so it is a safe first step.
+
+1. Read the gallery and one recipe:
+   `recipes.list {}`, then `recipes.get {"recipeId":"welcome-doi"}` for its parameters, prerequisites, docs and checklist.
+2. Check it with the person's values before writing:
+   `recipes.preview {"recipeId":"welcome-doi","params":{"siteName":"Fjeldalen","siteUrl":"https://fjeldalen.example"}}` returns each prerequisite (`ok`, `message`) and the resolved artifacts, with preview ids that show how references resolve. No rows are written.
+3. If a prerequisite is missing, fix it or say which one. The usual one is an e-mail provider: a person adds it in Settings → Providers with `useFor: ["marketing"]` (`emailProviders.create` is people-only). A purpose with the e-mail channel is the other; the default `marketing_email` is enough in a fresh workspace.
+4. Install the drafts:
+   `recipes.install {"recipeId":"welcome-doi","params":{…}}` returns the new ids, the parameters, the prerequisites and `next`. It never publishes.
+5. Review and submit what should go live: `templates.preview`, `journeys.simulate`, `broadcasts.preview` as appropriate, then `artifacts.requestPublishBundle` with the drafts that belong together. Under "agent changes need a person" the result is `in_review`; pass the `reviewUrl` on with a one-line summary.
+
+Installing again creates another set of drafts; it never overwrites. To move to a newer recipe version, preview it, install it, compare the new drafts with the live artifacts and publish only what you intend.
 
 ## Weekly newsletter
 
