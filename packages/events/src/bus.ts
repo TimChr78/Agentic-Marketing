@@ -38,6 +38,9 @@ export interface EventBus {
   close(): Promise<void>;
 }
 
+/** Pause before fetching again after a failed pull. */
+const FETCH_RETRY_MS = 1_000;
+
 /** `namespace` names the stream and its subjects, so several installs (or test runs) can share a NATS server. */
 /**
  * The event bus on NATS JetStream. Events carry personal traits until the profile workers seal
@@ -98,10 +101,21 @@ export async function natsBus(opts: { url: string; namespace?: string; retention
         const started = Date.now();
         // Always fetch at least once (the fetch itself waits up to a second for messages), then keep
         // filling the batch while there is time left.
-        do {
-          const batch = await consumer.fetch({ max_messages: (o.maxBatch ?? 1000) - msgs.length, expires: 1000 });
-          for await (const m of batch) msgs.push(m);
-        } while (msgs.length < (o.maxBatch ?? 1000) && Date.now() - started < (o.maxWaitMs ?? 1000) && !signal.aborted);
+        try {
+          do {
+            const batch = await consumer.fetch({ max_messages: (o.maxBatch ?? 1000) - msgs.length, expires: 1000 });
+            for await (const m of batch) msgs.push(m);
+          } while (msgs.length < (o.maxBatch ?? 1000) && Date.now() - started < (o.maxWaitMs ?? 1000) && !signal.aborted);
+        } catch (err) {
+          // A pull can fail without the server being gone, e.g. "heartbeats missed" while the host
+          // is busy. Keep consuming: what was fetched is handled below, anything not acked is
+          // re-delivered, so a transient error never stops the worker.
+          logger.warn({ err, consumer: o.name, fetched: msgs.length }, 'event fetch failed; retrying');
+          if (!msgs.length) {
+            await new Promise((r) => setTimeout(r, FETCH_RETRY_MS));
+            continue;
+          }
+        }
         if (!msgs.length) continue;
         try {
           await handler(msgs.map((m) => JSON.parse(dec.decode(m.data)) as BusEvent));
