@@ -564,8 +564,8 @@ describe('audit fixes (#260, #262, #263, #267, #268)', () => {
     });
     expect(out.body.changes[0]).toMatchObject({ id, publish: 'in_review' });
     const { approvals } = await t.api(owner).call('approvals.list', {});
-    const approval = approvals.find((x: { artifactId: string }) => x.artifactId === id);
-    await t.api(owner).call('approvals.approve', { approvalId: approval.id });
+    const approval = approvals.find((x) => x.artifactId === id);
+    await t.api(owner).call('approvals.approve', { approvalId: approval!.id });
     const report = await t.api(owner).call('agents.shadowReport', { agentId: a.id });
     expect(report.summary).toMatchObject({ total: 1, agree: 1 });
   });
