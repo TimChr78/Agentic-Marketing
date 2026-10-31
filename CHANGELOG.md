@@ -2,6 +2,12 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+### Added
+
+- **Staged sends (#254).** A broadcast can send a deterministic canary share first (5–50%, default 10%), wait (PT30M–PT24H, default PT2H), and then check the canary’s bounce, complaint and unsubscribe rates against thresholds (defaults 5%, 0.3% and 2%) computed from the base counts of its message events. Above a threshold the run stops with the reason and the rest is not sent; `broadcasts.continue` (people only, `artifacts:publish`) sends the rest after someone has looked. Below `minCanary` sends the check is skipped for size. `broadcasts.status` reports the stage, the canary counts and rates, and the stop reason; the broadcast editor has a “Staged send” section and the status a “Send the rest” button. A staged send cannot be combined with a subject test. Migration 0050.
+
 ## [0.4.1] - 2026-10-31
 
 ### Fixed
