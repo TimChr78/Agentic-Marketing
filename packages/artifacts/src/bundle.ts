@@ -180,8 +180,10 @@ export const importConfig = defineCommand({
         await recordAgentAction(ctx.tx, agent.id, requestPublish, policy, 'internal', artifactId, policy.reasons.join(' '), input.note);
         throw new PolicyDeniedError(policy);
       }
+      // Each publish sets its own reversal; a held step leaves the collector empty.
+      ctx.undo?.set(null);
       const out = await requestPublish.handler(request, { ...ctx, policy });
-      await recordAgentAction(ctx.tx, agent.id, requestPublish, policy, 'internal', artifactId, null, input.note);
+      await recordAgentAction(ctx.tx, agent.id, requestPublish, policy, 'internal', artifactId, null, input.note, ctx.undo?.get() ?? null);
       return out;
     };
     // Publish in dependency order; what fails for want of another artifact is retried in a later pass.
@@ -203,6 +205,8 @@ export const importConfig = defineCommand({
       pending = failed;
     }
     for (const c of changes) if (input.publish && !input.dryRun && c.action === 'unchanged') c.publish = 'skipped';
+    // The nested publishes recorded their own reversals; the import itself is not undoable as a whole.
+    ctx.undo?.set(null);
     return { dryRun: input.dryRun, changes };
   },
 });
