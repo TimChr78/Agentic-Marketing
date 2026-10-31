@@ -20,9 +20,14 @@ export interface PublishedTemplate {
   name: string;
   version: number;
   purpose: unknown;
-  subject: unknown;
-  mjml: unknown;
-  text: unknown;
+  /** E-mail templates: the subject, the MJML source and its plain text. */
+  subject?: unknown;
+  mjml?: unknown;
+  text?: unknown;
+  /** SMS and push templates (#278): the body, and for push the title and link. */
+  title?: unknown;
+  body?: unknown;
+  url?: unknown;
 }
 
 /** The subject of a check: what the action publishes, in the shape the prompt shows. */
@@ -71,20 +76,17 @@ async function publishedArtifact(tx: Tx, workspaceId: string, artifactId: string
 }
 
 /** The template a direct send uses: what the gateway will render, not just its id. */
-async function publishedTemplate(tx: Tx, workspaceId: string, templateId: string): Promise<PublishedTemplate | null> {
+async function publishedTemplate(tx: Tx, workspaceId: string, templateId: string, type: string): Promise<PublishedTemplate | null> {
   const a = await loadArtifact(tx, workspaceId, templateId);
   if (!a) return null;
-  if (a.type !== 'email_template' || !a.publishedVersion) return null;
+  if (a.type !== type || !a.publishedVersion) return null;
   const content = (await contentAt(tx, workspaceId, a.id, a.publishedVersion)) as Record<string, unknown> | null;
-  return {
-    type: a.type,
-    name: a.name,
-    version: a.publishedVersion,
-    purpose: content?.purpose ?? null,
-    subject: content?.subject ?? null,
-    mjml: content?.mjml ?? null,
-    text: content?.text ?? null,
-  };
+  const base = { type: a.type, name: a.name, version: a.publishedVersion, purpose: content?.purpose ?? null };
+  // Each channel's template carries different copy: an e-mail has a subject and MJML, a text has a
+  // body, a notification has a title, body and link.
+  if (a.type === 'sms_template') return { ...base, body: content?.body ?? null };
+  if (a.type === 'push_template') return { ...base, title: content?.title ?? null, body: content?.body ?? null, url: content?.url ?? null };
+  return { ...base, subject: content?.subject ?? null, mjml: content?.mjml ?? null, text: content?.text ?? null };
 }
 
 /**
@@ -109,9 +111,15 @@ export async function checkSubjectOf(tx: Tx, workspaceId: string, command: strin
     }
     return artifacts.length ? { artifacts } : null;
   }
-  if (command === 'messages.sendEmail') {
-    if (typeof fields.templateId !== 'string') return null;
-    const template = await publishedTemplate(tx, workspaceId, fields.templateId);
+  const direct: Record<string, { type: string; field: string }> = {
+    'messages.sendEmail': { type: 'email_template', field: 'templateId' },
+    'messages.sendSms': { type: 'sms_template', field: 'templateId' },
+    'messages.sendPush': { type: 'push_template', field: 'templateId' },
+  };
+  if (direct[command]) {
+    const templateId = fields[direct[command].field];
+    if (typeof templateId !== 'string') return null;
+    const template = await publishedTemplate(tx, workspaceId, templateId, direct[command].type);
     return template ? { template } : null;
   }
   return null;
