@@ -2,6 +2,16 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+### Added
+
+- **Level 4, run the loop (#309).** A mandate may grant level 4 for a class when the workspace allows loops and the agent has earned it: 28 days of the class at level 3 without a guardian episode, or 28 days in shadow mode without a would-have-run decision people rejected. Publishing a mandate that grants level 4 without that record is refused with what is missing. At level 4 a new artifact of an allowed type is not held to the mandate's artifact list, so the agent can create within its programme; everything else (audiences, purposes, channels, limits, guardrails, learning rules, the guardian) still applies. A class in shadow mode may record level 4 at any time.
+
+### Fixed
+
+- **Undo is offered only when it would work (#305).** `agents.activity` checks each recorded reversal against the current state and reports `undoable: false` with `undoBlockedBy` when newer work went live, the artifact is no longer live, or the send already went out; the agent page shows that reason instead of an Undo button.
+
 ## [0.5.5] - 2026-10-31
 
 ### Fixed

@@ -283,6 +283,8 @@ function Activity({ agentId }: { agentId: string }) {
                     </div>
                   ) : action.undoable ? (
                     <Button onClick={() => setUndoing(action)}>Undo</Button>
+                  ) : action.undoBlockedBy ? (
+                    <span className="block max-w-[200px] text-[12px] text-muted">{action.undoBlockedBy}</span>
                   ) : (
                     <span className="text-[12px] text-muted">—</span>
                   )}

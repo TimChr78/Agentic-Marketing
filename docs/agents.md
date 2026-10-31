@@ -126,7 +126,7 @@ The workspace's limits apply to every agent, with or without a mandate. Read the
 | `limits.changesPerDay` | `500` | Changes beyond drafts, per agent per 24 hours. |
 | `limits.messagesPerDay` | `1000` | Messages an agent may send itself per 24 hours. |
 | `maxLevel` | `1` for every class | The highest autonomy level a mandate may grant per action class. Missing classes are 1. |
-| `allowLoops` | `false` | Whether any mandate may grant level 4. Level 4 itself arrives in a later release; publishing a mandate with level 4 is refused today. |
+| `allowLoops` | `false` | Whether any mandate may grant level 4 (run the loop). Level 4 must also be earned per agent and class; see Autonomy levels. |
 
 At run time the engine uses the **lower** of the mandate's level and the workspace ceiling. Raising a ceiling takes effect for existing mandates; lowering one takes effect at once.
 
@@ -150,7 +150,9 @@ Only people can create, change or publish a mandate. An agent that tries gets `4
 | 1 | **Propose** | Drafts and publish requests; a person approves each publish. This is the default, and the ceiling of a new workspace. |
 | 2 | **Act with veto** | The action is queued and announced, and runs after the hold window unless a person vetoes it. |
 | 3 | **Act within limits** | Runs at once when it is inside the scope and limits; recorded in the activity ledger. |
-| 4 | **Run the loop** | Level 3 plus creating new artifacts of the class within its goals. **Later release**; a mandate that grants it is refused for now. |
+| 4 | **Run the loop** | Level 3 plus creating new artifacts of the class: a new artifact of an allowed type is not held to the mandate's `scope.artifacts` list. Audiences, purposes, topics, channels, limits, guardrails, learning rules and the guardian still apply. **Earned**, see below. |
+
+**Earning level 4.** A mandate may grant level 4 for a class only when the workspace allows it (`allowLoops` and a ceiling of 4) and the agent has earned it: it ran that class at level 3 (autonomously, decided by its mandate) for at least 28 days with no guardian episode in that time and no guardian cap in force, or its mandate recorded the class in shadow mode for 28 days without a would-have-run decision that a person rejected. Publishing a mandate that grants level 4 without that record is refused with what is missing. A class in shadow may record level 4 at any time; that is how the record is built. A guardian cap lowers level 4 like any other level.
 
 A class that is not listed in `levels` counts as 1. Two classes can never be made autonomous, whatever the mandate says: `settings` and `destructive` always need a person, as do changes to purposes, the delivery policy, the tracking plan, a conversion map and the mandate itself. Above one of the mandate's limits an action drops one level: an L3 send becomes an L2 hold, an L2 action a proposal, with the reason. Anything outside the mandate's scope (another audience, purpose, topic, channel or artifact type) is only ever proposed.
 

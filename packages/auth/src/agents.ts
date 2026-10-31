@@ -7,6 +7,7 @@ import {
   isUndoable,
   type Principal,
   runUndo,
+  undoBlocker,
 } from '@agentic-marketing/commands';
 import { AppError, newId } from '@agentic-marketing/core';
 import { type AgentCredentialKind, type AgentStatus, type AgentUndo, type Db, schema, type Tx } from '@agentic-marketing/db';
@@ -312,6 +313,10 @@ const Action = z.object({
   at: z.string(),
   undo: z.unknown().nullable().describe('How to reverse it, when the action published something (null when there is nothing to undo)'),
   undoable: z.boolean().describe('Whether agents.undo can reverse this action now'),
+  undoBlockedBy: z
+    .string()
+    .nullable()
+    .describe('Why an action that recorded a reversal cannot be undone now (newer work went live, or the send went out)'),
   undoneAt: z.string().nullable(),
   undoneBy: z.string().nullable(),
   undoResult: z.string().nullable().describe('What the undo did'),
@@ -350,14 +355,22 @@ export const agentActivity = defineCommand({
       .orderBy(desc(t.id))
       .limit(input.limit + 1);
     const page = rows.slice(0, input.limit);
-    return {
-      actions: page.map((r) => ({
+    // What the ledger offers is checked against the current state, as agents.undo would (#305).
+    const actions = [];
+    for (const r of page) {
+      const recorded = isUndoable(r);
+      const blocker = recorded && r.undo ? await undoBlocker(ctx.tx, r.undo as AgentUndo) : null;
+      actions.push({
         ...r,
         at: r.at.toISOString(),
         impact: r.impact ?? {},
-        undoable: isUndoable(r),
+        undoable: recorded && !blocker,
+        undoBlockedBy: blocker,
         undoneAt: r.undoneAt?.toISOString() ?? null,
-      })),
+      });
+    }
+    return {
+      actions,
       next: rows.length > input.limit ? (page.at(-1)?.id ?? null) : null,
     };
   },

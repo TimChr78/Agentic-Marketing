@@ -572,4 +572,47 @@ describe('audit fixes (#260, #262, #263, #267, #268)', () => {
     const report = await t.api(owner).call('agents.shadowReport', { agentId: a.id });
     expect(report.summary).toMatchObject({ total: 1, agree: 1 });
   });
+
+  it('level 4 is earned: refused without a record, granted after 28 days at level 3, then creates (#309)', async () => {
+    const api = t.api(owner);
+    await api.call('workspace.setAutonomy', { allowLoops: true, maxLevel: { 'content.publish': 4 } });
+    const content = (level: number) => ({
+      scope: { ...scope(), artifactTypes: ['note'], artifacts: [newId('not')] },
+      levels: { 'content.publish': level },
+    });
+    const a = await freshAgent(content(3));
+    const l4 = await api.call('artifacts.updateDraft', {
+      artifactId: a.mandate,
+      content: { agent: a.id, purpose: 'Send the weekly newsletter', validUntil: inDays(30), ...content(4) } as never,
+    });
+    await expect(api.call('artifacts.requestPublish', { artifactId: l4.artifactId, note: 'grant L4' })).rejects.toMatchObject({
+      message: expect.stringContaining('is earned'),
+    });
+
+    // Four weeks of the class at level 3, decided by its mandate, without a guardian episode.
+    await t.srv.db.admin.query(
+      `INSERT INTO agent_actions (workspace_id, agent_id, command, action_class, decision, ok, surface, mandate_id, mandate_version, at)
+       VALUES ($1, $2, 'artifacts.requestPublish', 'content.publish', 'allow', true, 'rest', $3, 1, now() - interval '30 days')`,
+      [ws, a.id, a.mandate],
+    );
+    expect((await api.call('artifacts.requestPublish', { artifactId: l4.artifactId, note: 'grant L4' })).status).toBe('published');
+
+    // A new note is not in scope.artifacts, but level 4 may create it.
+    const note = (await a.as('artifacts.create', { type: 'note', name: 'New at L4', content: { title: 'n', body: 'n' } })).body.artifactId;
+    expect((await a.as('artifacts.requestPublish', { artifactId: note, note: 'a new note' })).body.status).toBe('published');
+    // Changing it again is an existing artifact outside the list: a person decides.
+    await a.as('artifacts.updateDraft', { artifactId: note, content: { title: 'n2', body: 'n2' } });
+    expect((await a.as('artifacts.requestPublish', { artifactId: note, note: 'again' })).body.status).toBe('in_review');
+  });
+
+  it('activity explains why an undo is no longer offered (#305)', async () => {
+    const a = await freshAgent({ scope: scope(), levels: { 'content.publish': 3 } });
+    const note = (await a.as('artifacts.create', { type: 'note', name: 'Superseded', content: { title: 'v1', body: 'one' } })).body
+      .artifactId;
+    await a.as('artifacts.requestPublish', { artifactId: note, note: 'first' });
+    await t.api(owner).call('artifacts.updateDraft', { artifactId: note, content: { title: 'v2', body: 'two' } as never });
+    await t.api(owner).call('artifacts.requestPublish', { artifactId: note, note: 'person' });
+    const [action] = (await t.api(owner).call('agents.activity', { agentId: a.id, limit: 1 })).actions;
+    expect(action).toMatchObject({ undoable: false, undoBlockedBy: expect.stringContaining('v2 was published since') });
+  });
 });

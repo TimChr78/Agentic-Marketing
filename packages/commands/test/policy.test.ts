@@ -351,3 +351,35 @@ describe('learning rules (#257)', () => {
     ).toBe('allow');
   });
 });
+
+describe('level 4, run the loop (#309)', () => {
+  const view = (level: number): MandateView => ({
+    id: 'mnd_l4',
+    version: 1,
+    levels: { 'content.publish': level },
+    scope: { segments: [], purposes: [], topics: [], channels: ['email'], artifactTypes: ['note'], artifacts: ['not_known'] },
+    limits: {},
+    holdWindow: 'PT2H',
+    independentCheck: false,
+    guardrails: { window: 'P7D', minSent: 100 },
+    purpose: 'x',
+  });
+  const loops = autonomySettings({ allowLoops: true, maxLevel: { 'content.publish': 4 } });
+  const publish = (level: number, artifact: { id: string; type: string; created?: boolean }, settings = loops) =>
+    decide(base({ settings, mandate: view(level), impact: { touches: { artifacts: [artifact] } } }));
+
+  it('creates new artifacts of an allowed type without a grant for each', () => {
+    expect(publish(4, { id: 'not_new', type: 'note', created: true })).toMatchObject({ decision: 'allow', level: 4, autonomous: true });
+  });
+
+  it('still keeps changes to existing artifacts and other types to the scope', () => {
+    expect(publish(4, { id: 'not_other', type: 'note', created: false }).decision).toBe('ask');
+    expect(publish(4, { id: 'jny_new', type: 'journey', created: true }).decision).toBe('ask');
+  });
+
+  it('level 3 does not create outside the list, and without allowLoops level 4 is level 3', () => {
+    expect(publish(3, { id: 'not_new', type: 'note', created: true }).decision).toBe('ask');
+    const noLoops = autonomySettings({ allowLoops: false, maxLevel: { 'content.publish': 4 } });
+    expect(publish(4, { id: 'not_new', type: 'note', created: true }, noLoops)).toMatchObject({ decision: 'ask', level: 1 });
+  });
+});
