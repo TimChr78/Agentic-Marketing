@@ -2,6 +2,13 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+### Added
+
+- **Prometheus metrics (#147).** `GET /metrics` on the main listener exposes process (uptime, memory, event-loop lag), HTTP request counts and duration by route group and status class, command executions by command/effect/outcome, queue backlog (pending messages and their age, due journey participants, due broadcast runs, warehouse exports, dead deliveries), agent ledger decisions over the last hour, and dependency health for Postgres, ClickHouse, NATS and Valkey. Labelled only with bounded values: no workspace, person or address ever appears. The endpoint is off unless `METRICS_TOKEN` is set (it then answers `404`), needs `Authorization: Bearer $METRICS_TOKEN`, and is never served on the public-only listener. `docs/deployment/operations.md#monitoring` has a scrape configuration and example alert rules.
+- **`am doctor` operational checks (#147).** New live rows report a delivery queue that has not drained (oldest pending message over 15 minutes), overdue journey steps and broadcast runs, due warehouse exports, and webhook/action deliveries that ended `dead` in the last 24 hours, with the dead share of the last hour.
+
 ## [0.4.1] - 2026-10-31
 
 ### Fixed
