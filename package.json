@@ -33,7 +33,9 @@
       "ignoreGhsas": [
         "GHSA-pfq8-rq6v-vf5m",
         "GHSA-45h5-66jx-r2wf",
-        "GHSA-w5hq-g745-h8pq"
+        "GHSA-w5hq-g745-h8pq",
+        "GHSA-g3hv-75wg-m249",
+        "GHSA-3g3m-2fjr-6pw4"
       ]
     }
   },

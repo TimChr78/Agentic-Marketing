@@ -21,6 +21,10 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 - **Public ingest and inbound webhooks refuse oversized bodies before buffering them (#235).** Both handlers now enforce their size check on the request stream, before `c.req.text()`; the inbound webhook does so before authenticating its secret URL. The limit is compared against encoded bytes, not JavaScript string length, so multibyte bodies can no longer slip past a 500 KB check at 1 MB. A chunked body without `Content-Length` is counted as it arrives and answered with 413 once it crosses the limit instead of being buffered in full.
 - **Unauthenticated form, decision, preference, SMS and REST/MCP requests have request-size limits (#242).** Reusable streaming middleware now bounds `POST /f/:id` (64 KB), `POST /v1/decide` (32 KB), `POST /u/p/:token` and `/u/t/:token` (64 KB), the SMS inbound webhook (64 KB), every REST command (1 MB, except `assets.upload` with its existing larger limit) and the MCP endpoint (1 MB). Oversized requests get 413 before parsing or authentication, including bodies sent chunked without `Content-Length`.
 
+### Security
+
+- Two advisories in `mjml-cli`'s dependencies (`glob`, `minimatch`) are accepted with reasons in SECURITY.md: the server never loads mjml's command-line tool, and the mjml 5 upgrade (#205) removes them.
+
 ### Upgrading from 0.4.0
 
 - **Migrations:** none.
