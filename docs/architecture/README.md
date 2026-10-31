@@ -42,6 +42,7 @@ An open-source, self-hostable, **event-driven marketing platform built agent-fir
 | [roadmap-wave-2.md](roadmap-wave-2.md) | Wave 2: prioritised phases after the pilot, with every known limitation placed |
 | [roadmap-wave-3.md](roadmap-wave-3.md) | Wave 3: install and upgrade first, then pilot correctness, the newsletter and measurement; what is parked and why |
 | [agentic-autonomy.md](agentic-autonomy.md) | Design: agents running marketing loops within borders (mandates, autonomy levels, the policy engine, the safety net) |
+| [../recipes.md](../recipes.md) | Installable recipes: the format, the four initial loops, `recipes.*` and the draft-only install path |
 | [roadmap-wave-4.md](roadmap-wave-4.md) | Wave 4: agentic marketing in six phases, from agent controls to many agents and brands, with the fundamentals track |
 | [performance-marketing.md](performance-marketing.md) | Google, Meta and Microsoft ads: conversions, audiences, spend and ROAS |
 | [email-and-sms-delivery.md](email-and-sms-delivery.md) | Sending beyond SMTP (SES, Postmark, Cloudflare Email Service) and the SMS channel |

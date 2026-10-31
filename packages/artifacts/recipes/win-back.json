@@ -1,0 +1,145 @@
+{
+  "format": "agentic-marketing/recipe@1",
+  "id": "win-back",
+  "version": 1,
+  "title": "Win-back journey",
+  "description": "A segment of customers who used to buy but have not ordered in 90 days, and a two-message journey that asks what changed and offers a way back.",
+  "parameters": [
+    {
+      "key": "siteName",
+      "label": "Site name",
+      "description": "Shown in the e-mails.",
+      "type": "string",
+      "required": true,
+      "default": "Your site",
+      "minLength": 1,
+      "maxLength": 120
+    },
+    {
+      "key": "purpose",
+      "label": "Purpose",
+      "description": "The purpose key for the win-back messages; it must include the e-mail channel.",
+      "type": "string",
+      "required": true,
+      "default": "marketing_email",
+      "pattern": "^[a-z][a-z0-9_]{0,63}$"
+    },
+    {
+      "key": "offerCode",
+      "label": "Offer code",
+      "description": "A short code the second e-mail can mention, e.g. COMEBACK10. Use an empty string for no offer.",
+      "type": "string",
+      "default": "COMEBACK10",
+      "maxLength": 40
+    },
+    {
+      "key": "waitDays",
+      "label": "Wait between messages",
+      "description": "An ISO 8601 duration such as P5D.",
+      "type": "duration",
+      "required": true,
+      "default": "P5D"
+    }
+  ],
+  "prerequisites": [
+    {
+      "kind": "email_provider",
+      "useFor": "marketing",
+      "description": "An enabled e-mail provider for marketing mail"
+    },
+    {
+      "kind": "purpose",
+      "purpose": "{{param.purpose}}",
+      "channel": "email",
+      "description": "A configured purpose with the e-mail channel"
+    }
+  ],
+  "artifacts": [
+    {
+      "key": "lapsedCustomers",
+      "type": "segment",
+      "name": "Lapsed customers",
+      "content": {
+        "description": "People who allowed marketing, ordered in the last year, but not in the last 90 days.",
+        "mode": "dynamic",
+        "condition": {
+          "all": [
+            { "consent": "{{param.purpose}}" },
+            { "event": "Order Completed", "within": "P365D" },
+            { "not": { "event": "Order Completed", "within": "P90D" } }
+          ]
+        }
+      }
+    },
+    {
+      "key": "checkInEmail",
+      "type": "email_template",
+      "name": "Did something change?",
+      "note": "The first win-back message: ask, do not sell.",
+      "content": {
+        "purpose": "{{param.purpose}}",
+        "subject": "Did something change?",
+        "preheader": "A quick question, and no hard feelings either way.",
+        "sampleData": { "profile": { "firstName": "Ada" } },
+        "mjml": "<mjml><mj-head><mj-attributes><mj-all font-family=\"Helvetica, Arial, sans-serif\" /></mj-attributes></mj-head><mj-body><mj-section><mj-column><mj-text>Hi {{ profile.firstName | default: \"there\" }},</mj-text><mj-text>It has been a while since your last order from {{param.siteName}}. Did something change: the product, the price, or what you needed?</mj-text><mj-text>Reply with one line and I will make sure it reaches the right person. If you would rather not hear from us again, the unsubscribe link below is enough.</mj-text></mj-column></mj-section><mj-section><mj-column><mj-text font-size=\"12px\" color=\"#6b7280\">You get this because you bought from {{param.siteName}} and allowed marketing e-mail. <a href=\"{{ preferences_url | raw }}\">Manage preferences</a> or <a href=\"{{ unsubscribe_url | raw }}\">unsubscribe</a>.</mj-text></mj-column></mj-section></mj-body></mjml>"
+      }
+    },
+    {
+      "key": "comeBackEmail",
+      "type": "email_template",
+      "name": "A way back",
+      "note": "The second win-back message: a low-pressure offer.",
+      "content": {
+        "purpose": "{{param.purpose}}",
+        "subject": "A way back, if you want it",
+        "preheader": "A small offer and a clear exit.",
+        "sampleData": { "profile": { "firstName": "Ada" } },
+        "mjml": "<mjml><mj-head><mj-attributes><mj-all font-family=\"Helvetica, Arial, sans-serif\" /></mj-attributes></mj-head><mj-body><mj-section><mj-column><mj-text>Hi {{ profile.firstName | default: \"there\" }},</mj-text><mj-text>No pressure: if you have been meaning to come back, this is a good week. Use the code <strong>{{param.offerCode}}</strong> at checkout.</mj-text><mj-text>If not, that is useful to know too. The unsubscribe link is below and it takes one click.</mj-text><mj-button href=\"{{ web_url | raw }}\" background-color=\"#1d4ed8\" color=\"#ffffff\">Visit {{param.siteName}}</mj-button></mj-column></mj-section><mj-section><mj-column><mj-text font-size=\"12px\" color=\"#6b7280\">You get this because you bought from {{param.siteName}} and allowed marketing e-mail. <a href=\"{{ preferences_url | raw }}\">Manage preferences</a> or <a href=\"{{ unsubscribe_url | raw }}\">unsubscribe</a>.</mj-text></mj-column></mj-section></mj-body></mjml>"
+      }
+    },
+    {
+      "key": "winBackJourney",
+      "type": "journey",
+      "name": "Win-back",
+      "content": {
+        "purpose": "{{param.purpose}}",
+        "nodes": [
+          {
+            "id": "start",
+            "kind": "trigger",
+            "label": "Entered lapsed customers",
+            "config": { "segment": "{{ref.lapsedCustomers}}", "reentry": "after_exit" }
+          },
+          {
+            "id": "check_in",
+            "kind": "email",
+            "label": "Did something change?",
+            "config": { "template": "{{ref.checkInEmail}}" }
+          },
+          {
+            "id": "wait",
+            "kind": "wait",
+            "label": "Wait {{param.waitDays}}",
+            "config": { "duration": "{{param.waitDays}}" }
+          },
+          {
+            "id": "come_back",
+            "kind": "email",
+            "label": "A way back",
+            "config": { "template": "{{ref.comeBackEmail}}" }
+          },
+          { "id": "done", "kind": "exit", "label": "Done", "config": {} }
+        ]
+      }
+    }
+  ],
+  "docs": "## Who enters\n\nA dynamic segment: consent for the purpose, an `Order Completed` event in the last year, and none in the last 90 days. Membership is evaluated when the segment recomputes, and the journey trigger enters people when they join it.\n\n## Before publishing\n\n- Publish the segment first; the journey trigger needs a published segment.\n- Publish both templates, then the journey (or submit all four together).\n- `reentry: after_exit` lets a person come back if they leave the segment and lapse again; `once` would mail them only ever once.\n\n## Tuning\n\nThe 90-day and 365-day windows are in the segment condition; change them there, not in the journey. The default waits five days between the two messages.",
+  "checklist": [
+    "Confirm the conversion event name (`Order Completed`) your site sends.",
+    "Check the 90-day and 365-day windows with your sales cycle.",
+    "Replace or remove the offer code; an empty code still mentions the code in the second e-mail, so edit that line if there is no offer.",
+    "Keep the unsubscribe and preference links in both e-mails.",
+    "Publish the segment first, then the templates and the journey, or submit them together.",
+    "Check the audience count with segments.preview before publishing the journey."
+  ]
+}

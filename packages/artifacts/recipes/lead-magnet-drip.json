@@ -1,0 +1,138 @@
+{
+  "format": "agentic-marketing/recipe@1",
+  "id": "lead-magnet-drip",
+  "version": 1,
+  "title": "Lead-magnet drip",
+  "description": "Four e-mails over eight days after someone downloads a lead magnet: deliver, teach, prove and invite. One journey, four templates, no manual scheduling.",
+  "parameters": [
+    {
+      "key": "siteName",
+      "label": "Site name",
+      "description": "Shown in the e-mails.",
+      "type": "string",
+      "required": true,
+      "default": "Your site",
+      "minLength": 1,
+      "maxLength": 120
+    },
+    {
+      "key": "magnetName",
+      "label": "Lead magnet",
+      "description": "What the person downloaded, e.g. \"the onboarding checklist\".",
+      "type": "string",
+      "required": true,
+      "default": "the guide",
+      "minLength": 1,
+      "maxLength": 120
+    },
+    {
+      "key": "purpose",
+      "label": "Purpose",
+      "description": "The purpose key for the drip; it must include the e-mail channel.",
+      "type": "string",
+      "required": true,
+      "default": "marketing_email",
+      "pattern": "^[a-z][a-z0-9_]{0,63}$"
+    },
+    {
+      "key": "magnetUrl",
+      "label": "Lead-magnet URL",
+      "description": "Where the first e-mail points for the download.",
+      "type": "url",
+      "required": true,
+      "default": "https://example.com/guide"
+    },
+    {
+      "key": "siteUrl",
+      "label": "Site URL",
+      "description": "Where the invitation points, e.g. a booking page.",
+      "type": "url",
+      "required": true,
+      "default": "https://example.com"
+    },
+    {
+      "key": "delay",
+      "label": "Pause between e-mails",
+      "description": "An ISO 8601 duration such as P2D; the last wait doubles it so the four e-mails span eight days.",
+      "type": "duration",
+      "required": true,
+      "default": "P2D"
+    }
+  ],
+  "prerequisites": [
+    {
+      "kind": "email_provider",
+      "useFor": "marketing",
+      "description": "An enabled e-mail provider for marketing mail"
+    },
+    {
+      "kind": "purpose",
+      "purpose": "{{param.purpose}}",
+      "channel": "email",
+      "description": "A configured purpose with the e-mail channel"
+    }
+  ],
+  "artifacts": [
+    {
+      "key": "deliverEmail",
+      "type": "email_template",
+      "name": "Your lead magnet",
+      "note": "Sent immediately after the download.",
+      "content": {
+        "purpose": "{{param.purpose}}",
+        "subject": "Here is {{param.magnetName}}",
+        "preheader": "The download, plus what arrives over the next week.",
+        "sampleData": { "profile": { "firstName": "Ada" } },
+        "mjml": "<mjml><mj-head><mj-attributes><mj-all font-family=\"Helvetica, Arial, sans-serif\" /></mj-attributes></mj-head><mj-body><mj-section><mj-column><mj-text>Hi {{ profile.firstName | default: \"there\" }},</mj-text><mj-text>Thanks for asking for {{param.magnetName}}. You can download it here:</mj-text><mj-button href=\"{{param.magnetUrl}}\" background-color=\"#1d4ed8\" color=\"#ffffff\">Download {{param.magnetName}}</mj-button><mj-text>Over the next week I will send three short notes: how to use it, one example, and an invitation to go further.</mj-text></mj-column></mj-section><mj-section><mj-column><mj-text font-size=\"12px\" color=\"#6b7280\">You get this because you downloaded {{param.magnetName}} from {{param.siteName}}. <a href=\"{{ preferences_url | raw }}\">Manage preferences</a> or <a href=\"{{ unsubscribe_url | raw }}\">unsubscribe</a>.</mj-text></mj-column></mj-section></mj-body></mjml>"
+      }
+    },
+    {
+      "key": "teachEmail",
+      "type": "email_template",
+      "name": "How to use it",
+      "note": "The first follow-up: one concrete way to use the lead magnet.",
+      "content": {
+        "purpose": "{{param.purpose}}",
+        "subject": "One way to use {{param.magnetName}} this week",
+        "preheader": "A small exercise, not a big project.",
+        "sampleData": { "profile": { "firstName": "Ada" } },
+        "mjml": "<mjml><mj-head><mj-attributes><mj-all font-family=\"Helvetica, Arial, sans-serif\" /></mj-attributes></mj-head><mj-body><mj-section><mj-column><mj-text>Hi {{ profile.firstName | default: \"there\" }},</mj-text><mj-text>The fastest way to get value from {{param.magnetName}} is to use one part of it this week, not all of it.</mj-text><mj-text>Pick the item that made you wince. Write down why. Change only that one thing before Friday.</mj-text><mj-text>That is the whole exercise.</mj-text></mj-column></mj-section><mj-section><mj-column><mj-text font-size=\"12px\" color=\"#6b7280\"><a href=\"{{ preferences_url | raw }}\">Manage preferences</a> or <a href=\"{{ unsubscribe_url | raw }}\">unsubscribe</a>.</mj-text></mj-column></mj-section></mj-body></mjml>"
+      }
+    },
+    {
+      "key": "proveEmail",
+      "type": "email_template",
+      "name": "An example",
+      "note": "The second follow-up: proof that the approach works.",
+      "content": {
+        "purpose": "{{param.purpose}}",
+        "subject": "What this looks like in practice",
+        "preheader": "A before-and-after from a real workspace.",
+        "sampleData": { "profile": { "firstName": "Ada" } },
+        "mjml": "<mjml><mj-head><mj-attributes><mj-all font-family=\"Helvetica, Arial, sans-serif\" /></mj-attributes></mj-head><mj-body><mj-section><mj-column><mj-text>Hi {{ profile.firstName | default: \"there\" }},</mj-text><mj-text>Here is what {{param.magnetName}} looks like when a team uses it.</mj-text><mj-text>Before: the same message went to everyone, once, with no follow-up.<br />After: one welcome, one useful follow-up and a clear unsubscribe. Less sending, more replies.</mj-text><mj-text>If you want the longer version, reply and I will send it.</mj-text></mj-column></mj-section><mj-section><mj-column><mj-text font-size=\"12px\" color=\"#6b7280\"><a href=\"{{ preferences_url | raw }}\">Manage preferences</a> or <a href=\"{{ unsubscribe_url | raw }}\">unsubscribe</a>.</mj-text></mj-column></mj-section></mj-body></mjml>"
+      }
+    },
+    {
+      "key": "inviteEmail",
+      "type": "email_template",
+      "name": "An invitation",
+      "note": "The last follow-up: a low-pressure next step.",
+      "content": {
+        "purpose": "{{param.purpose}}",
+        "subject": "Want to go one step further?",
+        "preheader": "A short call, or nothing at all.",
+        "sampleData": { "profile": { "firstName": "Ada" } },
+        "mjml": "<mjml><mj-head><mj-attributes><mj-all font-family=\"Helvetica, Arial, sans-serif\" /></mj-attributes></mj-head><mj-body><mj-section><mj-column><mj-text>Hi {{ profile.firstName | default: \"there\" }},</mj-text><mj-text>If {{param.magnetName}} was useful, the next step is a short conversation about your setup. No pitch: bring one question and we will work through it.</mj-text><mj-button href=\"{{param.siteUrl}}\" background-color=\"#1d4ed8\" color=\"#ffffff\">Book a time</mj-button><mj-text>If now is not the moment, stay on the list. The next note will be just as short.</mj-text></mj-column></mj-section><mj-section><mj-column><mj-text font-size=\"12px\" color=\"#6b7280\">You get this because you downloaded {{param.magnetName}}. <a href=\"{{ preferences_url | raw }}\">Manage preferences</a> or <a href=\"{{ unsubscribe_url | raw }}\">unsubscribe</a>.</mj-text></mj-column></mj-section></mj-body></mjml>"
+      }
+    }
+  ],
+  "docs": "## The loop\n\n`Lead Magnet Downloaded` → deliver (day 0) → wait → teach (day 2) → wait → prove (day 4) → wait twice the delay → invite (day 8).\n\nThe waits use the `delay` parameter, so the eight-day span is four messages at 0, 2, 4 and 8 days by default.\n\n## Before publishing\n\n- The journey needs its four templates published first; submit them together with `artifacts.requestPublishBundle`.\n- The trigger is an event, not a segment: your site or form sends `Lead Magnet Downloaded` with the person's id.\n- Re-entry is `once`: a person who downloads another magnet later does not restart the drip unless you change the trigger.",
+  "checklist": [
+    "Confirm the event name your site sends when someone downloads the magnet.",
+    "Replace the placeholder download URL and the booking link in the first and last e-mails.",
+    "Check the delays; the default is 0, 2, 4 and 8 days.",
+    "Keep the unsubscribe and preference links in every e-mail.",
+    "Publish the four templates and then the journey, or submit them together for one review.",
+    "Send the first e-mail to yourself and click the download link."
+  ]
+}
