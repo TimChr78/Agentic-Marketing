@@ -685,7 +685,7 @@ export const aiProviders = pgTable(
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
 );
 
-export type AiCallKind = 'decide' | 'generate' | 'copilot' | 'test' | 'classify' | 'check';
+export type AiCallKind = 'decide' | 'generate' | 'copilot' | 'test' | 'classify' | 'check' | 'hosted';
 
 export const aiTokenReservations = pgTable(
   'ai_token_reservations',
