@@ -6,6 +6,7 @@ import { Link } from '../../app/router';
 import { useApi } from '../../app/useApi';
 import { AgentControls } from '../../features/agents/AgentControls';
 import { AgentStatusPill, DecisionBadge } from '../../features/agents/AgentStatus';
+import { HostedAgentCard } from '../../features/agents/HostedAgentCard';
 import {
   ACTION_CLASS_LABEL,
   type AgentAction,
@@ -83,6 +84,8 @@ export default function AgentPage({ params }: { params: Record<string, string> }
       )}
 
       <MandateCard agent={a} />
+
+      <HostedAgentCard agentId={a.id} onChanged={() => void agent.reload()} />
 
       <Card title="Credentials" description="Each one acts as this agent; pausing or revoking the agent stops all of them at once.">
         {a.credentials.length === 0 ? (

@@ -1144,7 +1144,8 @@ export const edgeTargets = pgTable('edge_targets', {
 });
 
 export type AgentStatus = 'active' | 'paused' | 'revoked';
-export type AgentCredentialKind = 'api_token' | 'oauth_client';
+export type AgentCredentialKind = 'api_token' | 'oauth_client' | 'hosted';
+export type HostedAgentRunStatus = 'ok' | 'failed' | 'skipped';
 export type PolicyDecision = 'allow' | 'hold' | 'ask' | 'deny';
 
 /** Agents as first-class principals (ADR-0016): a sponsor, a status and the credentials they act with. */
@@ -1200,6 +1201,53 @@ export const agentActions = pgTable(
     mandateVersion: integer('mandate_version'),
     intent: text('intent'),
     at: ts('at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
+/**
+ * A hosted agent (#258, #86): an agent the platform runs itself on a schedule, under the agent's
+ * mandate like any other. The schedule is `hourly`, `daily:HH:MM` or `weekly:mon:07:00`, read in
+ * the workspace's time zone; `nextRunAt` is the absolute next start.
+ */
+export const hostedAgents = pgTable(
+  'hosted_agents',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    agentId: text('agent_id').notNull(),
+    instructions: text('instructions').notNull(),
+    schedule: text('schedule').notNull(),
+    scopes: text('scopes').array().$type<string[]>().notNull().default([]),
+    enabled: boolean('enabled').notNull().default(true),
+    maxTokensPerRun: integer('max_tokens_per_run').notNull().default(20_000),
+    maxToolCallsPerRun: integer('max_tool_calls_per_run').notNull().default(20),
+    /** An optional AI provider id; null uses the workspace's copilot provider. */
+    modelProviderId: text('model_provider_id'),
+    consecutiveFailures: integer('consecutive_failures').notNull().default(0),
+    lastRunAt: ts('last_run_at'),
+    nextRunAt: ts('next_run_at'),
+    runningRunId: text('running_run_id'),
+    runningStartedAt: ts('running_started_at'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.agentId] })],
+);
+
+/** One hosted agent run: a fresh copilot session, its budgets, its summary and its outcome. */
+export const hostedAgentRuns = pgTable(
+  'hosted_agent_runs',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    agentId: text('agent_id').notNull(),
+    startedAt: ts('started_at').notNull(),
+    finishedAt: ts('finished_at'),
+    status: text('status').$type<HostedAgentRunStatus>().notNull(),
+    summary: text('summary').notNull().default(''),
+    toolCalls: integer('tool_calls').notNull().default(0),
+    tokens: integer('tokens').notNull().default(0),
+    error: text('error'),
   },
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
 );

@@ -127,6 +127,8 @@ export async function principalFromAccessToken(db: Db, claims: JWTPayload): Prom
   return { ...agentPrincipal(claims.sub, clientId, m.workspace_id, m.role, scopes), agent };
 }
 export * from './agents';
+export * from './hostedAgents';
+export * from './hostedSchedule';
 export * from './members';
 export * from './scim';
 export * from './sso';
