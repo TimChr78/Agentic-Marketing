@@ -2,6 +2,12 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+### Fixed
+
+- **Relative feed links are resolved before they are rejected (#326).** RSS, Atom and JSON Feed items with relative links such as `/post/1` or `post/2` are resolved against the feed URL (and an Atom `xml:base` when present) and kept, instead of being dropped as non-absolute. `javascript:`, `data:` and other non-http(s) links are still refused, and absolute links are unchanged.
+
 ## [0.6.0] - 2026-11-01
 
 ### Added

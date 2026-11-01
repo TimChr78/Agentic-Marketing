@@ -67,6 +67,34 @@ function clean(value: string): string {
   return value.replace(/\s+/g, ' ').trim();
 }
 
+/**
+ * Resolve a link against its base (the feed URL or an `xml:base`) and canonicalise it.
+ * Returns null when the link is empty, cannot be parsed, or is not http(s) —
+ * so `javascript:`, `data:` and similar schemes are still rejected (#326).
+ */
+function httpLink(raw: string, base: string): string | null {
+  const value = clean(raw);
+  if (!value) return null;
+  try {
+    const url = new URL(value, base);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+  } catch {
+    return null;
+  }
+  return canonicalUrl(value, base);
+}
+
+/** A base URL from an `xml:base` attribute, resolved against the enclosing base. */
+function baseOf(value: string | undefined, fallback: string): string {
+  const raw = clean(value ?? '');
+  if (!raw) return fallback;
+  try {
+    return new URL(raw, fallback).toString();
+  } catch {
+    return fallback;
+  }
+}
+
 /** Visible text of an HTML fragment, with entities decoded and tags removed. */
 function plainText(value: string): string {
   if (!value) return '';
@@ -110,13 +138,15 @@ function parseRss(root: XmlNode, feedUrl: string): ParsedFeed {
   const itemNodes = channel ? directAll(channel, 'item') : directAll(root, 'item');
   if (!channel && !itemNodes.length) throw new Error('not an RSS feed: no channel or items');
   const items: ParsedFeedItem[] = [];
+  const rootBase = baseOf(attr(root, 'xml:base'), feedUrl);
+  const channelBase = channel ? baseOf(attr(channel, 'xml:base'), rootBase) : rootBase;
   for (const node of itemNodes) {
     const title = clean(textOf(direct(node, 'title')));
-    const link = clean(textOf(direct(node, 'link'))) || clean(textOf(direct(node, 'guid')));
-    if (!title || !/^https?:\/\//i.test(link)) continue;
+    const url = httpLink(textOf(direct(node, 'link')) || textOf(direct(node, 'guid')), baseOf(attr(node, 'xml:base'), channelBase));
+    if (!title || !url) continue;
     items.push({
       title,
-      url: canonicalUrl(link, feedUrl),
+      url,
       // `content:encoded` is deliberately not read: never store the full article.
       excerpt: excerptOf(textOf(direct(node, 'description')) || textOf(direct(node, 'encoded')) || textOf(direct(node, 'summary'))),
       author: clean(textOf(direct(node, 'author')) || textOf(direct(node, 'creator')) || textOf(direct(node, 'name'))) || null,
@@ -130,18 +160,20 @@ function parseRss(root: XmlNode, feedUrl: string): ParsedFeed {
 function parseAtom(root: XmlNode, feedUrl: string): ParsedFeed {
   const entries = directAll(root, 'entry');
   const items: ParsedFeedItem[] = [];
+  const rootBase = baseOf(attr(root, 'xml:base'), feedUrl);
   for (const entry of entries) {
+    const base = baseOf(attr(entry, 'xml:base'), rootBase);
     const title = clean(textOf(direct(entry, 'title')));
     const links = directAll(entry, 'link');
     const alternate = links.find((l) => (attr(l, 'rel') ?? 'alternate').toLowerCase() === 'alternate') ?? links[0];
     const href = alternate ? clean(attr(alternate, 'href') ?? '') : '';
     const fallback = clean(textOf(direct(entry, 'id')));
-    const link = /^https?:\/\//i.test(href) ? href : fallback;
-    if (!title || !/^https?:\/\//i.test(link)) continue;
+    const link = httpLink(href, base) ?? httpLink(fallback, base);
+    if (!title || !link) continue;
     const authorNode = direct(entry, 'author');
     items.push({
       title,
-      url: canonicalUrl(link, feedUrl),
+      url: link,
       excerpt: excerptOf(textOf(direct(entry, 'summary')) || textOf(direct(entry, 'content'))),
       author: clean(authorNode ? textOf(direct(authorNode, 'name')) || textOf(authorNode) : '') || null,
       publishedAt: toDate(textOf(direct(entry, 'published')) || textOf(direct(entry, 'updated'))),
@@ -178,12 +210,12 @@ function parseJsonFeed(body: string, feedUrl: string): ParsedFeed {
   const items: ParsedFeedItem[] = [];
   for (const item of feed.items) {
     const title = clean(item.title ?? '');
-    const link = clean(item.url ?? item.external_url ?? item.id ?? '');
-    if (!title || !/^https?:\/\//i.test(link)) continue;
+    const url = httpLink(item.url ?? item.external_url ?? item.id ?? '', feedUrl);
+    if (!title || !url) continue;
     const author = clean(item.author?.name ?? item.authors?.[0]?.name ?? '') || null;
     items.push({
       title,
-      url: canonicalUrl(link, feedUrl),
+      url,
       excerpt: excerptOf(item.summary ?? item.content_text ?? item.content_html ?? ''),
       author,
       publishedAt: toDate(item.date_published ?? item.date_modified),
