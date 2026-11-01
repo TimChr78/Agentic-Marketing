@@ -20,6 +20,7 @@ let journeyId = '';
 let resumeJourneyId = '';
 let token = '';
 let agentId = '';
+let templateId = '';
 
 const api = () => t.api(owner);
 
@@ -63,12 +64,12 @@ async function runUntilSettled(jobId: string, maxRuns = 12) {
   return api().call('journeys.enrollmentJob', { jobId });
 }
 
-const journeyContent = (reentry: 'once' | 'always', templateId: string): JourneyDefinition => ({
+const journeyContent = (reentry: 'once' | 'always', templateId: string, wait = 'P30D'): JourneyDefinition => ({
   purpose: 'marketing_email',
   nodes: [
     { id: 'trigger', kind: 'trigger', label: 'Bulk entry', config: { event: 'Bulk Entry', reentry } },
     // Nothing sends during the test: the first step after entry is a long wait.
-    { id: 'wait', kind: 'wait', label: 'Wait', config: { duration: 'P30D' } },
+    { id: 'wait', kind: 'wait', label: 'Wait', config: { duration: wait } },
     { id: 'mail', kind: 'email', label: 'Welcome', config: { template: templateId } },
     { id: 'done', kind: 'exit', label: 'Done', config: {} },
   ],
@@ -86,7 +87,8 @@ beforeAll(async () => {
     name: 'Bulk welcome',
     content: { purpose: 'marketing_email', subject: 'Welcome', mjml },
   });
-  await client.call('artifacts.requestPublish', { artifactId: template.artifactId, note: 'setup' });
+  templateId = template.artifactId as string;
+  await client.call('artifacts.requestPublish', { artifactId: templateId, note: 'setup' });
 
   await client.call('profiles.import', {
     label: 'Bulk enrollment fixture',
@@ -226,5 +228,79 @@ describe('bulk enrollment by segment (#148)', () => {
     );
     expect(duplicates.rows[0]?.n).toBe(0);
     expect(await countParticipants(resumeJourneyId)).toBe(PEOPLE - WITHOUT_CONSENT);
+  }, 240_000);
+
+  // #324: the job pins the published journey and segment versions when it starts, so a republish
+  // mid-flight cannot split its participants across versions.
+  it('stops when the journey is republished mid-job and keeps every participant on the pinned version', async () => {
+    const created = await api().call('artifacts.create', {
+      type: 'journey',
+      name: 'Pinned journey',
+      content: journeyContent('always', templateId),
+    });
+    const pinnedJourneyId = created.artifactId as string;
+    await api().call('artifacts.requestPublish', { artifactId: pinnedJourneyId, note: 'setup' });
+
+    const job = await api().call('journeys.enrollSegment', { artifactId: pinnedJourneyId, segmentId, reason: 'pin the journey version' });
+    expect(job).toMatchObject({ status: 'queued', people: PEOPLE });
+    expect(await api().call('journeys.enrollmentJob', { jobId: job.jobId })).toMatchObject({ journeyVersion: 1, segmentVersion: 1 });
+
+    await runEnrollmentJobsOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events });
+    const first = await api().call('journeys.enrollmentJob', { jobId: job.jobId });
+    expect(first).toMatchObject({ status: 'running', journeyVersion: 1, segmentVersion: 1 });
+    expect(first.entered).toBeGreaterThan(0);
+
+    // Publish v2 while the job is mid-flight.
+    await api().call('artifacts.updateDraft', {
+      artifactId: pinnedJourneyId,
+      content: journeyContent('always', templateId, 'P31D'),
+      note: 'a new wait',
+    });
+    const published = await api().call('artifacts.requestPublish', { artifactId: pinnedJourneyId, note: 'v2' });
+    expect(published).toMatchObject({ status: 'published', version: 2 });
+
+    await runEnrollmentJobsOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events });
+    const stopped = await api().call('journeys.enrollmentJob', { jobId: job.jobId });
+    expect(stopped.status).toBe('failed');
+    expect(stopped.finishedAt).not.toBeNull();
+    expect(stopped.journeyVersion).toBe(1);
+    expect(stopped.error).toContain('The journey was republished (v1 → v2) during the enrollment');
+    expect(stopped.error).toContain('start a new job');
+
+    const versions = await t.srv.db.admin.query<{ version: number }>(
+      'SELECT DISTINCT version FROM journey_participants WHERE workspace_id = $1 AND journey_id = $2 ORDER BY version',
+      [ws, pinnedJourneyId],
+    );
+    expect(versions.rows.map((r) => r.version)).toEqual([1]);
+    expect(await countParticipants(pinnedJourneyId)).toBe(first.entered);
+  }, 240_000);
+
+  it('stops when the segment is archived mid-job', async () => {
+    const created = await api().call('artifacts.create', {
+      type: 'journey',
+      name: 'Pinned segment journey',
+      content: journeyContent('always', templateId),
+    });
+    const archivedJourneyId = created.artifactId as string;
+    await api().call('artifacts.requestPublish', { artifactId: archivedJourneyId, note: 'setup' });
+
+    const job = await api().call('journeys.enrollSegment', { artifactId: archivedJourneyId, segmentId, reason: 'pin the segment version' });
+    await runEnrollmentJobsOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events });
+    const first = await api().call('journeys.enrollmentJob', { jobId: job.jobId });
+    expect(first).toMatchObject({ status: 'running', journeyVersion: 1, segmentVersion: 1 });
+    expect(first.entered).toBeGreaterThan(0);
+
+    // Archive the segment mid-flight; the job must not keep reading its memberships.
+    await t.srv.db.admin.query('UPDATE artifacts SET archived = true WHERE workspace_id = $1 AND id = $2', [ws, segmentId]);
+    try {
+      await runEnrollmentJobsOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events });
+      const stopped = await api().call('journeys.enrollmentJob', { jobId: job.jobId });
+      expect(stopped.status).toBe('failed');
+      expect(stopped.segmentVersion).toBe(1);
+      expect(stopped.error).toContain('The segment was archived during the enrollment');
+      expect(await countParticipants(archivedJourneyId)).toBe(first.entered);
+    } finally {
+      await t.srv.db.admin.query('UPDATE artifacts SET archived = false WHERE workspace_id = $1 AND id = $2', [ws, segmentId]);
+    }
   }, 240_000);
 });

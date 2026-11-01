@@ -2,6 +2,12 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+### Fixed
+
+- **Bulk enrollment now pins the journey and segment versions (#324).** `journeys.enrollSegment` records the published journey version and segment version on the job (migration `0061_enrollment_job_versions.sql`), and every participant enters the pinned journey version. Before each chunk the scheduler checks both artifacts and stops the job as `failed` with a clear reason when the journey or segment was republished, archived or unpublished mid-flight — for example “The journey was republished (v1 → v2) during the enrollment; start a new job to enroll the rest into v2.” — instead of splitting participants across versions or continuing with an archived segment. `journeys.enrollmentJob` reports `journeyVersion`, `segmentVersion` and the stop reason. Jobs created before this change pin on their next chunk.
+
 ## [0.6.0] - 2026-11-01
 
 ### Added

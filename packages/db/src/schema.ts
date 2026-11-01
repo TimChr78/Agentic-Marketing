@@ -659,6 +659,10 @@ export const enrollmentJobs = pgTable(
     id: text('id').notNull(),
     journeyId: text('journey_id').notNull(),
     segmentId: text('segment_id').notNull(),
+    /** The journey's published version when the job started; null on jobs from before #324 until their next chunk. */
+    journeyVersion: integer('journey_version'),
+    /** The segment's published version when the job started; null on jobs from before #324 until their next chunk. */
+    segmentVersion: integer('segment_version'),
     status: text('status').$type<EnrollmentJobStatus>().notNull().default('queued'),
     /** How many members the job may try; null means the whole segment. */
     limit: integer('limit'),
