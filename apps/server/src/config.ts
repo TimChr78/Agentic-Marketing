@@ -17,6 +17,12 @@ const Env = z.object({
     .string()
     .optional()
     .describe('Where `am backup` and the pre-upgrade backup write; default: /backups when writable, else ./backups'),
+  BACKUP_VERIFY_MAX_AGE_DAYS: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .default(30)
+    .describe('`am backup --health` fails when the last successful `am backup --verify` is older than this'),
   STRICT_INPUTS: z
     .enum(['true', 'false'])
     .default('false')
@@ -277,6 +283,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     skipMigrations: e.SKIP_MIGRATIONS === 'true',
     skipPreUpgradeBackup: e.SKIP_PRE_UPGRADE_BACKUP === 'true',
     backupDir: e.BACKUP_DIR,
+    backupVerifyMaxAgeDays: e.BACKUP_VERIFY_MAX_AGE_DAYS,
     strictInputs: e.STRICT_INPUTS === 'true',
     mcpTextContent: e.MCP_TEXT_CONTENT,
     mcpToolNameStyle: e.MCP_TOOL_NAME_STYLE,

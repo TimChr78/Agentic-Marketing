@@ -1,6 +1,9 @@
 import { Suspense } from 'react';
 import { AutonomyProvider } from '../features/agents/AutonomyProvider';
 import { Alert, Button, LoadingBlock, ToastProvider } from '../ui';
+import { ForgotPassword } from './ForgotPassword';
+import { ResetPassword } from './ResetPassword';
+import { useLocation } from './router';
 import { Routes } from './routes';
 import { Shell } from './Shell';
 import { SignIn } from './SignIn';
@@ -18,6 +21,11 @@ export function Root() {
 
 function Gate() {
   const { status, refresh, signOut, user } = useSession();
+  const { path, search } = useLocation();
+  // Signed-out screens that stand on their own (#191). They work whether or not a session exists,
+  // so a reset link opened in a signed-in browser still changes the password.
+  if (path === '/forgot-password') return <ForgotPassword />;
+  if (path === '/reset-password') return <ResetPassword token={search.get('token')} />;
   if (status === 'loading')
     return (
       <div className="mx-auto max-w-[480px] pt-[20vh]">

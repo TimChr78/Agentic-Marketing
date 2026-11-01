@@ -16,7 +16,15 @@ export const listConversations = defineCommand({
   description: 'Your copilot conversations in this workspace, most recent first.',
   input: z.object({ limit: z.number().int().min(1).max(100).default(30) }),
   output: z.object({
-    conversations: z.array(z.object({ id: z.string(), title: z.string(), turns: z.number().int(), updatedAt: z.string() })),
+    conversations: z.array(
+      z.object({
+        id: z.string(),
+        title: z.string(),
+        turns: z.number().int(),
+        updatedAt: z.string(),
+        agentId: z.string().nullable().describe('The agent the conversation acts as; null: the person'),
+      }),
+    ),
   }),
   permission: 'artifacts:read',
   effect: 'read',
@@ -28,6 +36,7 @@ export const listConversations = defineCommand({
         id: c.id,
         title: c.title,
         updatedAt: c.updatedAt,
+        agentId: c.agentId,
         turns: sql<number>`(SELECT count(*)::int FROM copilot_turns t WHERE t.conversation_id = ${c.id})`,
       })
       .from(c)

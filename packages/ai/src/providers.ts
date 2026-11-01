@@ -18,8 +18,8 @@ type ProviderRow = typeof schema.aiProviders.$inferSelect;
 // The SDK's compatibility warnings would end up in the logs for every call.
 (globalThis as { AI_SDK_LOG_WARNINGS?: boolean }).AI_SDK_LOG_WARNINGS = false;
 
-const Kind = z.enum(['openai-compatible', 'anthropic-compatible']);
-const Use = z.enum(['journeys', 'copilot']);
+const Kind = z.enum(['openai-compatible', 'anthropic-compatible', 'decision']);
+const Use = z.enum(['journeys', 'copilot', 'decisions']);
 const Models = z.object({
   default: z.string().min(1).max(200).describe('Model id for most calls, e.g. "claude-sonnet-5-5" or "gpt-5.2"'),
   fast: z.string().min(1).max(200).optional().describe('A cheaper, faster model for prompts that ask for it'),
@@ -33,6 +33,7 @@ const Provider = z.object({
   baseUrl: z.string(),
   models: Models,
   structuredOutputs: z.boolean(),
+  allowPersonalData: z.boolean().describe('Decision providers only: the provider is covered by a no-retention agreement'),
   useFor: z.array(Use),
   monthlyTokenBudget: z.number().nullable(),
   region: z.string(),
@@ -93,6 +94,7 @@ const providerOut = async (tx: Tx, r: ProviderRow) => ({
   baseUrl: r.baseUrl,
   models: r.models,
   structuredOutputs: r.structuredOutputs,
+  allowPersonalData: r.allowPersonalData,
   useFor: r.useFor,
   monthlyTokenBudget: r.monthlyTokenBudget,
   region: r.region,
@@ -187,7 +189,17 @@ const Settings = {
     .boolean()
     .default(true)
     .describe('OpenAI-compatible only: whether the server supports JSON-schema response formats (turn off for older local servers)'),
-  useFor: z.array(Use).max(2).default([]).describe('journeys: AI steps and prompt tests; copilot: the in-app assistant'),
+  allowPersonalData: z
+    .boolean()
+    .default(false)
+    .describe(
+      'Decision providers only, people only: allow personal data in states. Set it only when the provider is covered by a no-retention agreement; JEV through CommandCode has none.',
+    ),
+  useFor: z
+    .array(Use)
+    .max(3)
+    .default([])
+    .describe('journeys: AI steps and prompt tests; copilot: the in-app assistant; decisions: the decision provider'),
   monthlyTokenBudget: z.number().int().min(0).nullable().default(null).describe('Calls stop (and steps take their fallback) once reached'),
   region: z.string().max(120).default('').describe('Where the provider processes data, for the records of processing'),
 };
@@ -195,7 +207,8 @@ const Settings = {
 export const createAiProvider = defineCommand({
   name: 'aiProviders.create',
   title: 'Add an AI provider',
-  description: 'Add an OpenAI- or Anthropic-compatible LLM provider with your own API key.',
+  description:
+    'Add an OpenAI- or Anthropic-compatible LLM provider, or a decision provider (TypeSafe JEV/System One), with your own API key.',
   input: z.object({ ...Settings, apiKey: z.string().min(1).max(4000) }),
   output: Provider,
   permission: 'workspace:admin',
@@ -229,7 +242,11 @@ export const updateAiProvider = defineCommand({
     baseUrl: Settings.baseUrl.optional(),
     models: Models.optional(),
     structuredOutputs: z.boolean().optional(),
-    useFor: z.array(Use).max(2).optional(),
+    allowPersonalData: z
+      .boolean()
+      .optional()
+      .describe('Decision providers only, people only: allow personal data in states (no-retention agreement required)'),
+    useFor: z.array(Use).max(3).optional(),
     monthlyTokenBudget: z.number().int().min(0).nullable().optional(),
     region: z.string().max(120).optional(),
     enabled: z.boolean().optional(),

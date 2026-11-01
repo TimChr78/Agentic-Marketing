@@ -54,17 +54,17 @@ describe('shipped recipes', () => {
     }
   });
 
-  it('resolves with defaults to drafts that pass publish-time content validation', () => {
+  it('resolves with defaults to drafts that pass publish-time content validation', async () => {
     for (const recipe of shippedRecipes()) {
       const params = resolveParameters(recipe, {});
-      const artifacts = resolveRecipe(recipe, params);
+      const artifacts = await resolveRecipe(recipe, params);
       expect(artifacts).toHaveLength(recipe.artifacts.length);
       expect(new Set(artifacts.map((a) => a.id)).size).toBe(artifacts.length);
       const ids = new Set(artifacts.map((a) => a.id));
       for (const artifact of artifacts) {
         // The same check artifacts.create runs for drafts, then the stricter publish schema.
-        expect(() => validateContent(artifact.type, artifact.content, 'draft'), `${recipe.id}/${artifact.key}`).not.toThrow();
-        expect(() => validateContent(artifact.type, artifact.content, 'publish'), `${recipe.id}/${artifact.key}`).not.toThrow();
+        await expect(validateContent(artifact.type, artifact.content, 'draft'), `${recipe.id}/${artifact.key}`).resolves.toBeTruthy();
+        await expect(validateContent(artifact.type, artifact.content, 'publish'), `${recipe.id}/${artifact.key}`).resolves.toBeTruthy();
         // No placeholder may leak into stored content.
         const serialized = JSON.stringify(artifact.content);
         expect(serialized, `${recipe.id}/${artifact.key}`).not.toMatch(/\{\{\s*(param|ref)\./);
@@ -77,13 +77,13 @@ describe('shipped recipes', () => {
     }
   });
 
-  it('drops an optional whole-string placeholder instead of writing an empty date', () => {
+  it('drops an optional whole-string placeholder instead of writing an empty date', async () => {
     const recipe = shippedRecipes().find((r) => r.id === 'weekly-newsletter');
     expect(recipe).toBeDefined();
     if (!recipe) return;
-    const without = resolveRecipe(recipe, resolveParameters(recipe, {})).find((a) => a.key === 'newsletterBroadcast');
+    const without = (await resolveRecipe(recipe, resolveParameters(recipe, {}))).find((a) => a.key === 'newsletterBroadcast');
     expect(without?.content.sendAt).toBeUndefined();
-    const withDate = resolveRecipe(recipe, resolveParameters(recipe, { sendAt: '2026-11-06T07:00:00Z' })).find(
+    const withDate = (await resolveRecipe(recipe, resolveParameters(recipe, { sendAt: '2026-11-06T07:00:00Z' }))).find(
       (a) => a.key === 'newsletterBroadcast',
     );
     expect(withDate?.content.sendAt).toBe('2026-11-06T07:00:00Z');

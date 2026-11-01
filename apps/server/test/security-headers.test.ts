@@ -59,6 +59,15 @@ describe('security headers', () => {
     expect(res.headers.get('x-content-type-options')).toBe('nosniff');
   });
 
+  it('the reset page sends no referrer, because its URL carries a token (#191)', async () => {
+    for (const path of ['/reset-password?token=secret-token', '/reset-password/anything']) {
+      const res = await fetch(`${t.base}${path}`);
+      expect(res.headers.get('referrer-policy')).toBe('no-referrer');
+    }
+    // Every other page keeps the baseline policy.
+    baseline(await fetch(`${t.base}/approvals`));
+  });
+
   it('adds HSTS only behind an HTTPS public URL, and keeps one set upstream', async () => {
     const app = (https: boolean) => {
       const a = new Hono();

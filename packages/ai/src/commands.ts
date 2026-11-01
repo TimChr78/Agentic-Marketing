@@ -7,13 +7,14 @@ import { classifyCommands } from './classify';
 import { copilotCommands } from './copilot';
 import { listTestRuns, testPrompt, testRunResults } from './prompts';
 import { createAiProvider, deleteAiProvider, listAiProviders, updateAiProvider } from './providers';
+import { calibration, profileScores, score } from './score';
 
 // The decision log and usage: every AI call (journey steps, prompt tests, copilot turns) with
 // what the model saw, what it answered, why a fallback was taken, tokens and latency.
 
 const Call = z.object({
   id: z.string(),
-  kind: z.enum(['decide', 'generate', 'copilot', 'test', 'classify', 'check', 'hosted']),
+  kind: z.enum(['decide', 'generate', 'copilot', 'test', 'classify', 'check', 'hosted', 'score']),
   status: z.enum(['pending', 'running', 'done', 'fallback', 'failed']),
   model: z.string().nullable(),
   promptId: z.string().nullable(),
@@ -44,7 +45,7 @@ export const listAiCalls = defineCommand({
     journeyId: z.string().optional(),
     promptId: z.string().optional(),
     profileId: z.string().optional(),
-    kind: z.enum(['decide', 'generate', 'copilot', 'test', 'classify', 'check', 'hosted']).optional(),
+    kind: z.enum(['decide', 'generate', 'copilot', 'test', 'classify', 'check', 'hosted', 'score']).optional(),
     limit: z.number().int().min(1).max(200).default(50),
     before: isoDateTime('before').optional(),
   }),
@@ -162,6 +163,9 @@ export const aiCommands = [
   listTestRuns,
   listAiCalls,
   aiUsage,
+  score,
+  profileScores,
+  calibration,
   ...classifyCommands,
   ...copilotCommands,
 ] as const;

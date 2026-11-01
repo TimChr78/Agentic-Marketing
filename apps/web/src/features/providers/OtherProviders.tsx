@@ -53,6 +53,7 @@ const PUSH_ADAPTERS: { id: PushAdapter; label: string }[] = [
 const KIND_LABELS: Record<AiKind, string> = {
   'anthropic-compatible': 'Anthropic-compatible',
   'openai-compatible': 'OpenAI-compatible',
+  decision: 'Decision model (System One / JEV)',
 };
 const MESSAGE_USES: { id: MessageUse; label: string }[] = [
   { id: 'transactional', label: 'Transactional messages' },
@@ -61,9 +62,10 @@ const MESSAGE_USES: { id: MessageUse; label: string }[] = [
 const AI_USES: { id: AiUse; label: string }[] = [
   { id: 'journeys', label: 'Journeys' },
   { id: 'copilot', label: 'Copilot' },
+  { id: 'decisions', label: 'Decision models (scores)' },
 ];
 const MESSAGE_USE_LABELS: Record<MessageUse, string> = { transactional: 'Transactional', marketing: 'Marketing' };
-const AI_USE_LABELS: Record<AiUse, string> = { journeys: 'Journeys', copilot: 'Copilot' };
+const AI_USE_LABELS: Record<AiUse, string> = { journeys: 'Journeys', copilot: 'Copilot', decisions: 'Decision models' };
 
 const smsLabel = (id: SmsAdapter) => SMS_ADAPTERS.find((a) => a.id === id)?.label ?? id;
 const pushLabel = (id: PushAdapter) => PUSH_ADAPTERS.find((a) => a.id === id)?.label ?? id;
@@ -1077,6 +1079,7 @@ type AiForm = {
   model: string;
   fastModel: string;
   structuredOutputs: boolean;
+  allowPersonalData: boolean;
   useFor: AiUse[];
   budget: string;
   region: string;
@@ -1092,6 +1095,7 @@ function aiFormOf(p: Ai | null): AiForm {
     model: p?.models.default ?? '',
     fastModel: p?.models.fast ?? '',
     structuredOutputs: p?.structuredOutputs ?? true,
+    allowPersonalData: p?.allowPersonalData ?? false,
     useFor: p?.useFor ?? [],
     budget: p?.monthlyTokenBudget === null || p?.monthlyTokenBudget === undefined ? '' : String(p.monthlyTokenBudget),
     region: p?.region ?? '',
@@ -1125,14 +1129,28 @@ function AiDrawer({ provider, onClose, onSaved }: { provider: Ai | null; onClose
   const changeKind = (kind: AiKind) => {
     setF((cur) => {
       const preset = kind === 'anthropic-compatible';
-      const knownName = ['', 'Anthropic', 'OpenAI'].includes(cur.name);
-      const knownUrl = ['', 'https://api.anthropic.com/v1', 'https://api.openai.com/v1'].includes(cur.baseUrl);
+      const decision = kind === 'decision';
+      const knownName = ['', 'Anthropic', 'OpenAI', 'TypeSafe JEV'].includes(cur.name);
+      const knownUrl = [
+        '',
+        'https://api.anthropic.com/v1',
+        'https://api.openai.com/v1',
+        'https://api.commandcode.ai/provider/v1',
+        'https://api.typesafe.ai/v1',
+      ].includes(cur.baseUrl);
       return {
         ...cur,
         kind,
-        name: knownName ? (preset ? 'Anthropic' : 'OpenAI') : cur.name,
-        baseUrl: knownUrl ? (preset ? 'https://api.anthropic.com/v1' : 'https://api.openai.com/v1') : cur.baseUrl,
-        model: cur.model || (preset ? 'claude-sonnet-5-5' : ''),
+        name: knownName ? (decision ? 'TypeSafe JEV' : preset ? 'Anthropic' : 'OpenAI') : cur.name,
+        baseUrl: knownUrl
+          ? decision
+            ? 'https://api.commandcode.ai/provider/v1'
+            : preset
+              ? 'https://api.anthropic.com/v1'
+              : 'https://api.openai.com/v1'
+          : cur.baseUrl,
+        model: cur.model || (decision ? 'typesafe/jev' : preset ? 'claude-sonnet-5-5' : ''),
+        useFor: decision && !cur.useFor.includes('decisions') ? [...cur.useFor, 'decisions' as AiUse] : cur.useFor,
       };
     });
   };
@@ -1151,6 +1169,7 @@ function AiDrawer({ provider, onClose, onSaved }: { provider: Ai | null; onClose
         baseUrl: f.baseUrl.trim(),
         models,
         structuredOutputs: f.structuredOutputs,
+        allowPersonalData: f.kind === 'decision' ? f.allowPersonalData : false,
         useFor: f.useFor,
         monthlyTokenBudget: f.budget.trim() ? Number(f.budget) : null,
         region: f.region.trim(),
@@ -1163,6 +1182,7 @@ function AiDrawer({ provider, onClose, onSaved }: { provider: Ai | null; onClose
           baseUrl: input.baseUrl,
           models: input.models,
           structuredOutputs: input.structuredOutputs,
+          allowPersonalData: input.allowPersonalData,
           useFor: input.useFor,
           monthlyTokenBudget: input.monthlyTokenBudget,
           region: input.region,
@@ -1224,6 +1244,7 @@ function AiDrawer({ provider, onClose, onSaved }: { provider: Ai | null; onClose
           <Select value={f.kind} disabled={editing} onChange={(e) => changeKind(e.target.value as AiKind)}>
             <option value="anthropic-compatible">Anthropic-compatible</option>
             <option value="openai-compatible">OpenAI-compatible</option>
+            <option value="decision">Decision model (TypeSafe System One / JEV)</option>
           </Select>
         </Field>
         <Field
@@ -1257,6 +1278,14 @@ function AiDrawer({ provider, onClose, onSaved }: { provider: Ai | null; onClose
             onChange={(e) => set('structuredOutputs', e.target.checked)}
           />
         </FieldGroup>
+        {f.kind === 'decision' && (
+          <Checkbox
+            label="Allow personal data"
+            hint="Only when the provider is covered by a no-retention agreement. JEV through CommandCode has none; leave this off and scores use segment ids, event counts and non-personal traits."
+            checked={f.allowPersonalData}
+            onChange={(e) => set('allowPersonalData', e.target.checked)}
+          />
+        )}
         <UseFor value={f.useFor} onChange={(v) => set('useFor', v)} options={AI_USES} error={errors.useFor} />
         <div className="grid gap-4 sm:grid-cols-2">
           <Field

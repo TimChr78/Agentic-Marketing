@@ -7,6 +7,7 @@ import {
   resolveBackupDir,
   resolveUserPath,
   runScheduledBackups,
+  verifyBackup,
 } from './backup-lib';
 
 const USAGE = [
@@ -14,6 +15,7 @@ const USAGE = [
   '       am backup --schedule [--clickhouse]',
   '       am backup --list [--dir DIR]',
   '       am backup --health [--dir DIR]',
+  '       am backup --verify [BACKUP-DIR] [--dir DIR]',
 ].join('\n');
 
 const humanBytes = (bytes: number) => {
@@ -69,6 +71,7 @@ export async function run(args: string[]): Promise<number> {
     schedule: { type: 'boolean' as const },
     list: { type: 'boolean' as const },
     health: { type: 'boolean' as const },
+    verify: { type: 'boolean' as const },
     help: { type: 'boolean' as const, short: 'h' },
   };
   let values: {
@@ -79,10 +82,12 @@ export async function run(args: string[]): Promise<number> {
     schedule?: boolean;
     list?: boolean;
     health?: boolean;
+    verify?: boolean;
     help?: boolean;
   };
+  let positionals: string[];
   try {
-    ({ values } = parseArgs({ args, options }));
+    ({ values, positionals } = parseArgs({ args, options, allowPositionals: true }));
   } catch (err) {
     console.error(`${(err as Error).message}\n${USAGE}`);
     return 2;
@@ -91,6 +96,31 @@ export async function run(args: string[]): Promise<number> {
   if (values.help) {
     console.log(USAGE);
     return 0;
+  }
+  if (values.verify) {
+    if (values.to || values.schedule || values.list || values.health || values.clickhouse || values['keep-days'] !== undefined) {
+      console.error(`--verify only accepts a backup directory (positional or --dir)\n${USAGE}`);
+      return 2;
+    }
+    if (positionals.length > 1 || (positionals[0] && values.dir)) {
+      console.error(`name one backup directory, either positionally or with --dir\n${USAGE}`);
+      return 2;
+    }
+    const target = positionals[0] ?? values.dir ?? resolveBackupDir();
+    try {
+      const result = await verifyBackup({ dir: target, log: (message) => console.log(message) });
+      console.log(
+        `verify ok: ${result.dir} (snapshot ${result.manifest.createdAt}, verified ${result.verifiedAt}); no database was touched`,
+      );
+      return 0;
+    } catch (err) {
+      console.error(`verify failed: ${(err as Error).message}`);
+      return 1;
+    }
+  }
+  if (positionals.length) {
+    console.error(`unexpected argument ${positionals[0]}\n${USAGE}`);
+    return 2;
   }
   if (values.list || values.health) {
     if (values.to || values.schedule || values.clickhouse || values['keep-days'] !== undefined) {
@@ -104,7 +134,7 @@ export async function run(args: string[]): Promise<number> {
     return health.ok ? 0 : 1;
   }
   if (values.dir) {
-    console.error(`--dir is only used with --list or --health; use --to for a backup\n${USAGE}`);
+    console.error(`--dir is only used with --list, --health or --verify; use --to for a backup\n${USAGE}`);
     return 2;
   }
   if (values.schedule) {

@@ -121,15 +121,12 @@ export async function renderBlockFragment(block: BlockDefinition, params: Record
   return (await engine.parseAndRender(block.mjml, scope)) as string;
 }
 
-/** Same as renderBlockFragment, for the synchronous save-time validator. */
-export function renderBlockFragmentSync(block: BlockDefinition, params: Record<string, unknown>, vars: RenderVars = {}): string {
-  const scope = { ...vars, block: blockScope(block, params), [IN_BLOCK]: true };
-  return engine.parseAndRenderSync(block.mjml, scope) as string;
-}
-
-/** MJML → HTML with our asset URL fix; shared by templates and block previews. */
-export function compileMjml(mjml: string): { html: string; warnings: string[] } {
-  const out = mjml2html(mjml, { validationLevel: 'soft', ignoreIncludes: true, minify: false });
+/**
+ * MJML → HTML with our asset URL fix; shared by templates and block previews. Async since mjml 5,
+ * which validates and renders in a promise.
+ */
+export async function compileMjml(mjml: string): Promise<{ html: string; warnings: string[] }> {
+  const out = await mjml2html(mjml, { validationLevel: 'soft', ignoreIncludes: true, minify: false });
   return { html: pngRenditionUrls(out.html), warnings: out.errors.map((e) => `mjml line ${e.line}: ${e.message}`) };
 }
 
@@ -164,7 +161,25 @@ export function pngRenditionUrls(value: string): string {
 }
 
 /** Problems that make a template unusable, for saving: Liquid that does not parse, MJML that does not compile. */
-export function validateTemplate(t: EmailTemplate): string[] {
+/**
+ * The text without Liquid tags (`{% … %}`), in one linear scan: a lazy regex over user MJML
+ * backtracks badly on input with many unclosed `{%` (CodeQL js/polynomial-redos).
+ */
+export function stripLiquidTags(src: string): string {
+  let out = '';
+  let i = 0;
+  while (i < src.length) {
+    const open = src.indexOf('{%', i);
+    if (open < 0) break;
+    const close = src.indexOf('%}', open + 2);
+    if (close < 0) break;
+    out += src.slice(i, open);
+    i = close + 2;
+  }
+  return out + src.slice(i);
+}
+
+export async function validateTemplate(t: EmailTemplate): Promise<string[]> {
   const problems: string[] = [];
   for (const [field, src] of [
     ['subject', t.subject],
@@ -182,7 +197,11 @@ export function validateTemplate(t: EmailTemplate): string[] {
   if (!problems.length) {
     try {
       // Compile with Liquid stripped, so MJML structure errors surface independently of data.
-      const r = mjml2html(t.mjml.replace(/\{%[\s\S]*?%\}/g, ''), { validationLevel: 'soft', ignoreIncludes: true, keepComments: false });
+      const r = await mjml2html(stripLiquidTags(t.mjml), {
+        validationLevel: 'soft',
+        ignoreIncludes: true,
+        keepComments: false,
+      });
       for (const e of r.errors.slice(0, 10)) problems.push(`mjml line ${e.line}: ${e.message}`);
     } catch (e) {
       problems.push(`mjml: ${(e as Error).message.split('\n')[0]}`);
@@ -229,7 +248,7 @@ export async function renderTemplate(t: EmailTemplate, vars: RenderVars, options
           m === '<mj-head>' ? `${m}<mj-preview>${preheader}</mj-preview>` : `<mj-head><mj-preview>${preheader}</mj-preview></mj-head>${m}`,
         )
       : mjmlSrc;
-  const out = compileMjml(withPreview);
+  const out = await compileMjml(withPreview);
   const text = t.text
     ? await engine.parseAndRender(t.text, scope)
     : convert(out.html, {

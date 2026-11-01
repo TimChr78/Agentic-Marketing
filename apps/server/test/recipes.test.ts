@@ -149,10 +149,10 @@ describe('recipe install', () => {
       for (const artifact of install.artifacts) {
         const got = await api.call('artifacts.get', { artifactId: artifact.artifactId });
         expect(got.version.state, `${summary.id}/${artifact.key}`).toBe('draft');
-        expect(
-          () => validateContent(artifact.type as ArtifactType, got.version.content, 'publish'),
+        await expect(
+          validateContent(artifact.type as ArtifactType, got.version.content, 'publish'),
           `${summary.id}/${artifact.key}`,
-        ).not.toThrow();
+        ).resolves.toBeTruthy();
       }
     }
   });

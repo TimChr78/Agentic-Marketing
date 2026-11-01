@@ -170,6 +170,8 @@ export const auditLog = pgTable('audit_log', {
   error: text('error'),
   prevHash: text('prev_hash'),
   hash: text('hash').notNull(),
+  /** The client IP when the entry did not come from a command (password reset, #191). */
+  ip: text('ip'),
 });
 
 export const idempotencyKeys = pgTable(
@@ -707,17 +709,20 @@ export const holdoutAssignments = pgTable(
   (t) => [primaryKey({ columns: [t.workspaceId, t.scopeType, t.scopeId, t.hashVersion, t.profileId] })],
 );
 
-export type AiUse = 'journeys' | 'copilot';
+export type AiUse = 'journeys' | 'copilot' | 'decisions';
+export type AiProviderKind = 'openai-compatible' | 'anthropic-compatible' | 'decision';
 export const aiProviders = pgTable(
   'ai_providers',
   {
     workspaceId: uuid('workspace_id').notNull(),
     id: text('id').notNull(),
     name: text('name').notNull(),
-    kind: text('kind').$type<'openai-compatible' | 'anthropic-compatible'>().notNull(),
+    kind: text('kind').$type<AiProviderKind>().notNull(),
     baseUrl: text('base_url').notNull(),
     models: jsonb('models').$type<{ default: string; fast?: string }>().notNull(),
     structuredOutputs: boolean('structured_outputs').notNull().default(true),
+    /** Decision providers only: whether states may contain personal data (needs a no-retention agreement). */
+    allowPersonalData: boolean('allow_personal_data').notNull().default(false),
     useFor: text('use_for').array().$type<AiUse[]>().notNull().default([]),
     monthlyTokenBudget: bigint('monthly_token_budget', { mode: 'number' }),
     region: text('region').notNull().default(''),
@@ -730,7 +735,7 @@ export const aiProviders = pgTable(
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
 );
 
-export type AiCallKind = 'decide' | 'generate' | 'copilot' | 'test' | 'classify' | 'check' | 'hosted';
+export type AiCallKind = 'decide' | 'generate' | 'copilot' | 'test' | 'classify' | 'check' | 'hosted' | 'score';
 
 export const aiTokenReservations = pgTable(
   'ai_token_reservations',
@@ -783,6 +788,29 @@ export const aiCalls = pgTable(
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
 );
 
+/**
+ * A named score from a decision model, one row per person and key (the newest value). Segments
+ * and journeys read it until `expires_at`; the value is the predicted probability (noul, choice)
+ * or the score normalised to 0–1, so calibration can treat it as one.
+ */
+export const profileScores = pgTable(
+  'profile_scores',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    profileId: text('profile_id').notNull(),
+    key: text('key').notNull(),
+    value: doublePrecision('value').notNull(),
+    confidence: doublePrecision('confidence'),
+    probabilities: jsonb('probabilities').$type<Record<string, number>>().notNull().default({}),
+    model: text('model').notNull(),
+    modelVersion: text('model_version').notNull(),
+    callId: text('call_id'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    expiresAt: ts('expires_at').notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.profileId, t.key] })],
+);
+
 export const aiTextCache = pgTable(
   'ai_text_cache',
   {
@@ -804,6 +832,8 @@ export const copilotConversations = pgTable(
     id: text('id').notNull(),
     userId: text('user_id').notNull(),
     title: text('title').notNull(),
+    /** The agent this conversation acts as (#339); null: it acts for the person. */
+    agentId: text('agent_id'),
     createdAt: ts('created_at').notNull().defaultNow(),
     updatedAt: ts('updated_at').notNull().defaultNow(),
   },
@@ -1189,7 +1219,7 @@ export const edgeTargets = pgTable('edge_targets', {
 });
 
 export type AgentStatus = 'active' | 'paused' | 'revoked';
-export type AgentCredentialKind = 'api_token' | 'oauth_client' | 'hosted';
+export type AgentCredentialKind = 'api_token' | 'oauth_client' | 'hosted' | 'copilot';
 export type HostedAgentRunStatus = 'ok' | 'failed' | 'skipped';
 export type PolicyDecision = 'allow' | 'hold' | 'ask' | 'deny';
 
@@ -1329,6 +1359,15 @@ export const hostedAgents = pgTable(
     nextRunAt: ts('next_run_at'),
     runningRunId: text('running_run_id'),
     runningStartedAt: ts('running_started_at'),
+    /** Event types that start a run (#338), recorded through the agent subscription below. */
+    triggers: text('triggers').array().$type<AgentEventType[]>().notNull().default([]),
+    /** Skill artifact ids whose published versions are put into each run's context (#340). */
+    skills: text('skills').array().$type<string[]>().notNull().default([]),
+    triggerFilter: jsonb('trigger_filter').$type<Record<string, string | string[]>>().notNull().default({}),
+    triggerSubscriptionId: text('trigger_subscription_id'),
+    lastEventId: bigint('last_event_id', { mode: 'number' }).notNull().default(0),
+    eventMinGapMinutes: integer('event_min_gap_minutes').notNull().default(30),
+    eventRunsPerDay: integer('event_runs_per_day').notNull().default(6),
     createdAt: ts('created_at').notNull().defaultNow(),
     updatedAt: ts('updated_at').notNull().defaultNow(),
   },
@@ -1349,6 +1388,31 @@ export const hostedAgentRuns = pgTable(
     toolCalls: integer('tool_calls').notNull().default(0),
     tokens: integer('tokens').notNull().default(0),
     error: text('error'),
+    /** What started the run: its schedule (or Run now), or an event (#338). */
+    trigger: text('trigger').$type<'schedule' | 'event'>().notNull().default('schedule'),
+    eventIds: jsonb('event_ids').$type<number[]>().notNull().default([]),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
+/**
+ * A hosted agent's own working notes (#340): bounded (at most 50 notes and 10,000 characters per
+ * agent, each note at most 1,000) and inspectable. A run or a person writes one; people edit and
+ * delete them, and the agent may delete its own. Notes are not evidence-backed conclusions — those
+ * are learnings (#311) — and they must not hold personal data.
+ */
+export const hostedAgentMemory = pgTable(
+  'hosted_agent_memory',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    agentId: text('agent_id').notNull(),
+    text: text('text').notNull(),
+    /** The run that wrote it, or the person; exactly one is set. */
+    createdByRunId: text('created_by_run_id'),
+    createdByUserId: text('created_by_user_id'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
   },
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
 );

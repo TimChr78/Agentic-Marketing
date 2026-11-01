@@ -219,6 +219,7 @@ async function suspendHolds(tx: Tx, agentId: string, reason: string): Promise<nu
         SELECT 1 FROM agent_credentials c WHERE c.agent_id = ${agentId} AND (
           (c.kind = 'api_token' AND ar.requested_by_client = 'token:' || c.credential_id)
           OR (c.kind = 'hosted' AND ar.requested_by_client = 'hosted:' || c.credential_id)
+          OR (c.kind = 'copilot' AND ar.requested_by_client = 'copilot:' || c.credential_id)
           OR (c.kind = 'oauth_client' AND ar.requested_by_client = c.credential_id)))
     RETURNING ar.id`);
   return rows.rows.length;

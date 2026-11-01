@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { lastServerVersion, latestMigration, migrate, recordServerVersion, releaseForMigrationHead } from '@agentic-marketing/db';
 import { migrateClickHouse } from '@agentic-marketing/events';
+import { localKeyProvider, open, seal } from '@agentic-marketing/secrets';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { run as backupRun } from '../src/ops/backup';
@@ -18,9 +19,12 @@ import {
   nextCronRun,
   parseCron,
   readScheduleStatus,
+  readVerifyStatus,
   restoreBackup,
   restoreClickHouse,
+  verifyBackup,
   writeScheduleStatus,
+  writeVerifyStatus,
 } from '../src/ops/backup-lib';
 import { run as restoreRun } from '../src/ops/restore';
 
@@ -108,14 +112,30 @@ describe('scheduler health', () => {
       const status = { lastRunAt: new Date().toISOString(), lastOk: true, nextRunAt: '2026-10-27T03:30:00.000Z' };
       await writeScheduleStatus(dir, status);
       expect(await readScheduleStatus(dir)).toEqual(status);
+      // A heartbeat alone is not enough: nothing has checked that a backup can be read (#145).
+      const unverified = await backupHealth({ dir });
+      expect(unverified.ok).toBe(false);
+      expect(unverified.reason).toMatch(/no successful backup verification/);
+
+      await writeVerifyStatus(dir, { verifiedAt: new Date().toISOString(), backup: 'am-manual-test' });
+      expect((await readVerifyStatus(dir))?.backup).toBe('am-manual-test');
       expect((await backupHealth({ dir })).ok).toBe(true);
       expect(await backupHealth({ dir, now: new Date(Date.now() + 3 * 60_000) })).toMatchObject({ ok: false });
+
+      const staleVerify = new Date(Date.now() - 40 * 86_400_000).toISOString();
+      await writeVerifyStatus(dir, { verifiedAt: staleVerify, backup: 'am-manual-test' });
+      const stale = await backupHealth({ dir });
+      expect(stale.ok).toBe(false);
+      expect(stale.reason).toMatch(/last successful backup verification .* older/);
+      expect(await backupHealth({ dir, env: { BACKUP_VERIFY_MAX_AGE_DAYS: '3650' } })).toMatchObject({ ok: true });
+      await writeVerifyStatus(dir, { verifiedAt: new Date().toISOString(), backup: 'am-manual-test' });
 
       await writeScheduleStatus(dir, { ...status, lastOk: false, lastError: 'pg_dump failed' });
       const failed = await backupHealth({ dir });
       expect(failed.ok).toBe(false);
       expect(failed.reason).toMatch(/pg_dump failed/);
       expect((await stat(join(dir, '.schedule-status.json'))).mode & 0o777).toBe(0o600);
+      expect((await stat(join(dir, '.verify-status.json'))).mode & 0o777).toBe(0o600);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -246,6 +266,27 @@ describe.skipIf(!pgToolsReady)('backup and restore', () => {
     expect(listings[0]).toMatchObject({ kind: 'manual', dataVersion: '0.2.4', clickhouse: 'no' });
     expect(listings[0].bytes).toBeGreaterThan(0);
   });
+
+  it('verifies a good backup without touching a database (#145)', async () => {
+    const result = await verifyBackup({ dir: backupPath, env: process.env, log: () => {} });
+    expect(result.manifest.postgres.file).toBe('postgres.dump');
+    const status = await readVerifyStatus(backupDir);
+    expect(status?.backup).toBe(backupPath.split('/').pop());
+    expect(status?.verifiedAt).toBeTruthy();
+    expect((await stat(join(backupDir, '.verify-status.json'))).mode & 0o777).toBe(0o600);
+  }, 60_000);
+
+  it('fails verification on a tampered file with the file and both hashes (#145)', async () => {
+    const bad = join(backupDir, 'bad-verify');
+    await cp(backupPath, bad, { recursive: true });
+    const dump = await readFile(join(bad, 'postgres.dump'));
+    dump[dump.length - 1] ^= 0xff;
+    await writeFile(join(bad, 'postgres.dump'), dump);
+    const error = await verifyBackup({ dir: bad, env: process.env, log: () => {} }).catch((err: Error) => err);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(/postgres\.dump does not match its sha256 \(expected [0-9a-f]{64}, got [0-9a-f]{64}\)/);
+    await rm(bad, { recursive: true, force: true });
+  }, 60_000);
 
   it('restores the deleted Postgres row', async () => {
     expect(await withEnv(env, () => restoreRun([backupPath, '--yes']))).toBe(0);
@@ -437,6 +478,133 @@ describe.skipIf(!pgToolsReady)('restore replays erasures (#144)', () => {
     expect((await pool.query('SELECT 1 FROM profiles WHERE workspace_id = $1 AND id = $2', [workspaceId, profileId])).rowCount).toBe(0);
     expect((await pool.query('SELECT 1 FROM erasure_tombstones WHERE workspace_id = $1', [workspaceId])).rowCount).toBe(2);
   }, 180_000);
+});
+
+describe.skipIf(!pgToolsReady)('restore verifies the master key (#143)', () => {
+  const suffix = randomUUID().replace(/-/g, '').slice(0, 10);
+  const dbName = `am_backup_key_${suffix}`;
+  const role = `am_app_key_${suffix}`;
+  const password = 'backup_test_password';
+  const base = new URL(process.env.TEST_DATABASE_URL ?? 'postgres://am:am@localhost:5432/am_test');
+  const dbUrl = new URL(base);
+  dbUrl.pathname = `/${dbName}`;
+  const maintenanceUrl = new URL(base);
+  maintenanceUrl.pathname = '/postgres';
+  const workspaceId = randomUUID();
+  const dataKey = Buffer.alloc(32, 3);
+  const secretValue = 'provider-api-key-that-must-survive';
+  // A and B are the KEKs before and after a rotation; neither is key material for this repository.
+  const keyA = Buffer.alloc(32, 7).toString('base64');
+  const keyB = Buffer.alloc(32, 9).toString('base64');
+  const providerA = localKeyProvider(keyA);
+  const providerBWithPrevious = localKeyProvider(keyB, [keyA]);
+
+  let pool: pg.Pool;
+  let backupDir: string;
+  let backupPath: string;
+  let manifest: BackupManifest;
+
+  const env = {
+    DATABASE_URL: dbUrl.toString(),
+    APP_DB_ROLE: role,
+    APP_DB_PASSWORD: password,
+    KEY_PROVIDER: 'local',
+    MASTER_KEY: keyA,
+  };
+
+  beforeAll(async () => {
+    const maintenance = new pg.Client({ connectionString: maintenanceUrl.toString() });
+    await maintenance.connect();
+    await maintenance.query(`DROP DATABASE IF EXISTS ${dbName} WITH (FORCE)`);
+    await maintenance.query(`CREATE DATABASE ${dbName}`);
+    await maintenance.end();
+
+    pool = new pg.Pool({ connectionString: dbUrl.toString() });
+    await migrate(pool, { appRolePassword: password, appRole: role });
+    await pool.query("INSERT INTO workspaces (id, name) VALUES ($1, 'Key check')", [workspaceId]);
+    const wrapped = await providerA.wrap(dataKey);
+    await pool.query(
+      "INSERT INTO data_keys (workspace_id, id, kek_id, wrapped_key, purpose) VALUES ($1, 'dk_key_check', $2, $3, 'secrets')",
+      [workspaceId, providerA.id, wrapped],
+    );
+    const sealed = seal(dataKey, Buffer.from(secretValue, 'utf8'));
+    await pool.query(
+      `INSERT INTO secrets (workspace_id, name, data_key_id, iv, ciphertext, auth_tag, updated_by)
+       VALUES ($1, 'llm.provider.api_key', 'dk_key_check', $2, $3, $4, 'user_tester')`,
+      [workspaceId, sealed.iv, sealed.ciphertext, sealed.authTag],
+    );
+    // A row in an existing table records whether a refused restore touched the database: an extra
+    // table created after the backup would survive pg_restore --clean (it is not in the dump).
+    await pool.query('CREATE TABLE key_marker (note text NOT NULL)');
+    await pool.query("INSERT INTO key_marker VALUES ('before')");
+
+    backupDir = await mkdtemp(join(tmpdir(), 'am-backup-key-'));
+    expect(await withEnv(env, () => backupRun(['--to', backupDir]))).toBe(0);
+    const entry = (await readdir(backupDir)).find((name) => name.startsWith('am-'));
+    if (!entry) throw new Error('backup did not create an am-* directory');
+    backupPath = join(backupDir, entry);
+    manifest = JSON.parse(await readFile(join(backupPath, 'manifest.json'), 'utf8')) as BackupManifest;
+    await pool.query("UPDATE key_marker SET note = 'live'");
+  }, 120_000);
+
+  afterAll(async () => {
+    await pool?.end();
+    const maintenance = new pg.Client({ connectionString: maintenanceUrl.toString() });
+    await maintenance.connect();
+    await maintenance.query(`DROP DATABASE IF EXISTS ${dbName} WITH (FORCE)`);
+    await maintenance.query(`DROP ROLE IF EXISTS ${role}`);
+    await maintenance.end();
+    if (backupDir) await rm(backupDir, { recursive: true, force: true });
+  }, 120_000);
+
+  it('records a key reference and a sealed key check, never the key', async () => {
+    expect(manifest.key?.reference).toBe(providerA.id);
+    expect(manifest.key?.check?.kekId).toBe(providerA.id);
+    expect(manifest.key?.check?.wrapped).toMatch(/^[A-Za-z0-9+/]+=*$/);
+    const text = await readFile(join(backupPath, 'manifest.json'), 'utf8');
+    expect(text).not.toContain(keyA);
+    expect(text).not.toContain(secretValue);
+  });
+
+  it('refuses a wrong key before touching the database, naming MASTER_KEY_PREVIOUS', async () => {
+    expect(await withEnv({ ...env, MASTER_KEY: keyB }, () => restoreRun([backupPath, '--yes']))).toBe(1);
+    await expect(restoreBackup({ dir: backupPath, env: { ...process.env, ...env, MASTER_KEY: keyB }, log: () => {} })).rejects.toThrow(
+      /MASTER_KEY_PREVIOUS/,
+    );
+    // The marker row written after the snapshot is still there: pg_restore never ran.
+    const { rows } = await pool.query<{ note: string }>('SELECT note FROM key_marker');
+    expect(rows).toEqual([{ note: 'live' }]);
+    expect((await pool.query('SELECT 1 FROM data_keys WHERE workspace_id = $1', [workspaceId])).rowCount).toBe(1);
+  }, 60_000);
+
+  it('restores an old backup with the old key in MASTER_KEY_PREVIOUS and can read its secret', async () => {
+    expect(await withEnv({ ...env, MASTER_KEY: keyB, MASTER_KEY_PREVIOUS: keyA }, () => restoreRun([backupPath, '--yes']))).toBe(0);
+    expect((await pool.query<{ note: string }>('SELECT note FROM key_marker')).rows).toEqual([{ note: 'before' }]);
+    const key = await pool.query<{ kek_id: string; wrapped_key: Buffer }>(
+      'SELECT kek_id, wrapped_key FROM data_keys WHERE workspace_id = $1',
+      [workspaceId],
+    );
+    expect(key.rows).toHaveLength(1);
+    const unwrapped = await providerBWithPrevious.unwrap(key.rows[0].wrapped_key, key.rows[0].kek_id);
+    expect(unwrapped).toEqual(dataKey);
+    const secret = await pool.query<{ iv: Buffer; ciphertext: Buffer; auth_tag: Buffer }>(
+      "SELECT iv, ciphertext, auth_tag FROM secrets WHERE workspace_id = $1 AND name = 'llm.provider.api_key'",
+      [workspaceId],
+    );
+    expect(
+      open(unwrapped, { iv: secret.rows[0].iv, authTag: secret.rows[0].auth_tag, ciphertext: secret.rows[0].ciphertext }).toString(),
+    ).toBe(secretValue);
+  }, 120_000);
+
+  it('restores with the current key alone', async () => {
+    expect(await withEnv(env, () => restoreRun([backupPath, '--yes']))).toBe(0);
+    expect((await pool.query<{ note: string }>('SELECT note FROM key_marker')).rows).toEqual([{ note: 'before' }]);
+  }, 120_000);
+
+  it('allows a deliberate wrong key only with --skip-key-check', async () => {
+    expect(await withEnv({ ...env, MASTER_KEY: keyB }, () => restoreRun([backupPath, '--yes', '--skip-key-check']))).toBe(0);
+    expect((await pool.query<{ note: string }>('SELECT note FROM key_marker')).rows).toEqual([{ note: 'before' }]);
+  }, 120_000);
 });
 
 describe.skipIf(!pgToolsReady || !chUp)('ClickHouse backup under row policies (#129)', () => {

@@ -50,6 +50,7 @@ function matchesFilter(filter: Record<string, string | string[]>, subject: Recor
 function credentialKey(client: string): string {
   if (client.startsWith('token:')) return `api_token:${client.slice('token:'.length)}`;
   if (client.startsWith('hosted:')) return `hosted:${client.slice('hosted:'.length)}`;
+  if (client.startsWith('copilot:')) return `copilot:${client.slice('copilot:'.length)}`;
   return `oauth_client:${client}`;
 }
 

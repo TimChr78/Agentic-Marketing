@@ -372,3 +372,111 @@ describe('hosted agents (#258)', () => {
     ).rejects.toMatchObject({ status: 403 });
   }, 30_000);
 });
+
+describe('event-triggered hosted runs (#338)', () => {
+  /** An agent event on the hosted agent's trigger subscription, as the events sweep records it. */
+  async function event(s: Setup, summary: string, at = new Date()) {
+    const { rows } = await t.srv.db.admin.query<{ trigger_subscription_id: string }>(
+      'SELECT trigger_subscription_id FROM hosted_agents WHERE agent_id = $1',
+      [s.agentId],
+    );
+    await t.srv.db.admin.query(
+      `INSERT INTO agent_events (workspace_id, agent_id, subscription_id, type, event_key, summary, subject, at)
+       VALUES ($1, $2, $3, 'guardrail.breach', $4, $5, '{"episodeId":"gde_x"}', $6)`,
+      [s.ws, s.agentId, rows[0].trigger_subscription_id, `k-${Math.random()}`, summary, at],
+    );
+  }
+  const runs = async (s: Setup) => (await s.api.call('agents.hostedRuns', { agentId: s.agentId })).runs;
+
+  it('runs when a subscribed event arrives, with the event in its prompt, within the gap and daily cap', async () => {
+    const s = await setup('Check deliverability now.', { name: 'Event guardian' });
+    // Out of the scheduled sweep; only events start it.
+    await t.srv.db.admin.query(`UPDATE hosted_agents SET next_run_at = '2999-01-01'`);
+    const view = await s.api.call('agents.updateHosted', {
+      agentId: s.agentId,
+      triggers: ['guardrail.breach'],
+      eventMinGapMinutes: 30,
+      eventRunsPerDay: 2,
+    });
+    expect(view).toMatchObject({ triggers: ['guardrail.breach'], eventMinGapMinutes: 30, eventRunsPerDay: 2 });
+
+    // No event yet: nothing runs.
+    await runAt(new Date());
+    expect(await runs(s)).toHaveLength(0);
+
+    await event(s, 'Unsubscribe rate 3%, above the mandate guardrail of 1%.');
+    const before = llm.requests.length;
+    await runAt(new Date());
+    const first = await runs(s);
+    expect(first).toHaveLength(1);
+    expect(first[0]).toMatchObject({ status: 'ok', trigger: 'event' });
+    expect(first[0].eventIds).toHaveLength(1);
+    expect(llm.requests.slice(before).some((r) => r.user.includes('guardrail.breach') && r.user.includes('Unsubscribe rate 3%'))).toBe(
+      true,
+    );
+
+    // A second event inside the 30-minute gap waits; after the gap it runs.
+    await event(s, 'Complaint rate 0.4%.');
+    await runAt(new Date());
+    expect(await runs(s)).toHaveLength(1);
+    await runAt(new Date(Date.now() + 31 * 60_000));
+    expect(await runs(s)).toHaveLength(2);
+
+    // The daily cap of 2 event runs holds back a third.
+    await event(s, 'Bounce rate 6%.');
+    await runAt(new Date(Date.now() + 70 * 60_000));
+    expect(await runs(s)).toHaveLength(2);
+
+    // Without triggers the subscription is removed and events stop runs.
+    await s.api.call('agents.updateHosted', { agentId: s.agentId, triggers: [] });
+    const { rows } = await t.srv.db.admin.query('SELECT trigger_subscription_id FROM hosted_agents WHERE agent_id = $1', [s.agentId]);
+    expect(rows[0].trigger_subscription_id).toBeNull();
+  });
+
+  it('a failed event run keeps its events for a retry; a paused agent runs none and skips stale events on resume (#342, #344)', async () => {
+    const s = await setup('Check now. [fail]', { name: 'Flaky guardian' });
+    await t.srv.db.admin.query(`UPDATE hosted_agents SET next_run_at = '2999-01-01'`);
+    await s.api.call('agents.updateHosted', {
+      agentId: s.agentId,
+      triggers: ['guardrail.breach'],
+      eventMinGapMinutes: 30,
+      eventRunsPerDay: 5,
+    });
+    await event(s, 'Unsubscribe rate 3%.');
+    await runAt(new Date());
+    const failed = await runs(s);
+    expect(failed).toHaveLength(1);
+    expect(failed[0]).toMatchObject({ status: 'failed', trigger: 'event' });
+    // The event was not consumed: after the gap it is retried with the same event.
+    await runAt(new Date(Date.now() + 31 * 60_000));
+    const retried = await runs(s);
+    expect(retried).toHaveLength(2);
+    expect(retried[0].eventIds).toEqual(failed[0].eventIds);
+    // Inside the gap, nothing is selected and no skipped run is written (#343).
+    await runAt(new Date(Date.now() + 40 * 60_000));
+    expect(await runs(s)).toHaveLength(2);
+
+    // Paused: no run and no skipped row per tick, however many sweeps (#344).
+    const p = await setup('Check now.', { name: 'Paused guardian' });
+    await t.srv.db.admin.query(`UPDATE hosted_agents SET next_run_at = '2999-01-01'`);
+    await p.api.call('agents.updateHosted', { agentId: p.agentId, triggers: ['guardrail.breach'] });
+    await p.api.call('agents.pause', { id: p.agentId, reason: 'Holiday' });
+    await event(p, 'Complaint rate 0.4%.', new Date(Date.now() - 2 * 86_400_000));
+    await runAt(new Date());
+    await runAt(new Date());
+    expect(await runs(p)).toHaveLength(0);
+    // Resumed: the two-day-old event is marked read without a run.
+    await p.api.call('agents.resume', { id: p.agentId });
+    await runAt(new Date());
+    expect(await runs(p)).toHaveLength(0);
+    const { rows } = await t.srv.db.admin.query<{ last_event_id: string }>('SELECT last_event_id FROM hosted_agents WHERE agent_id = $1', [
+      p.agentId,
+    ]);
+    expect(Number(rows[0].last_event_id)).toBeGreaterThan(0);
+  });
+
+  it('templates that react to events say which (#338)', () => {
+    expect(hostedAgentTemplate('deliverability_guardian')!.triggers).toEqual(['guardrail.breach', 'alert.fired']);
+    expect(hostedAgentTemplate('weekly_report')!.triggers).toEqual([]);
+  });
+});

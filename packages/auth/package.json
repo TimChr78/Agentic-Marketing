@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit -p ."
   },
   "dependencies": {
+    "@agentic-marketing/ai": "workspace:*",
     "@agentic-marketing/commands": "workspace:*",
     "@agentic-marketing/core": "workspace:*",
     "@agentic-marketing/db": "workspace:*",

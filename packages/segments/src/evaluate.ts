@@ -10,7 +10,7 @@ import { AppError } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
 import type { BusEvent, EventStore } from '@agentic-marketing/events';
 import { currentConsent, effectiveTopicStatus, findTopic, purposeAllowed } from '@agentic-marketing/profiles';
-import { and, eq, inArray, isNull, type SQL, sql } from 'drizzle-orm';
+import { and, eq, gte, inArray, isNull, lte, type SQL, sql } from 'drizzle-orm';
 
 // Segment evaluation as set algebra over profile ids. The same code serves batch recomputation
 // (scope: everyone) and streaming (scope: the people an event just touched). Traits are read
@@ -81,6 +81,7 @@ export async function evaluate(cond: SegmentCondition, ctx: EvalContext): Promis
   if ('event' in cond) return eventSet(cond, ctx);
   if ('consent' in cond) return consentSet(cond.consent, ctx);
   if ('topic' in cond) return topicSet(cond.topic, ctx);
+  if ('score' in cond) return scoreSet(cond.score, ctx);
   return segmentSet(cond.segment, ctx);
 }
 
@@ -242,6 +243,32 @@ async function topicSet(topic: string, ctx: EvalContext): Promise<Set<string>> {
   return new Set([...all].filter((id) => effectiveTopicStatus(byProfile.get(id) ?? [], found.topic) === 'subscribed'));
 }
 
+/** Unexpired decision-model scores (#194); the value is the predicted probability. */
+async function scoreSet(c: Extract<SegmentCondition, { score: unknown }>['score'], ctx: EvalContext): Promise<Set<string>> {
+  const rows = await ctx.tx
+    .select({ id: schema.profiles.id })
+    .from(schema.profileScores)
+    .innerJoin(
+      schema.profiles,
+      and(
+        eq(schema.profiles.workspaceId, schema.profileScores.workspaceId),
+        eq(schema.profiles.id, schema.profileScores.profileId),
+        isNull(schema.profiles.mergedInto),
+      ),
+    )
+    .where(
+      and(
+        eq(schema.profileScores.workspaceId, ctx.workspaceId),
+        eq(schema.profileScores.key, c.key),
+        sql`${schema.profileScores.expiresAt} > now()`,
+        c.gte !== undefined ? gte(schema.profileScores.value, c.gte) : undefined,
+        c.lte !== undefined ? lte(schema.profileScores.value, c.lte) : undefined,
+        ctx.scope ? inArray(schema.profiles.id, ctx.scope.length ? ctx.scope : ['-']) : undefined,
+      ),
+    );
+  return new Set(rows.map((r) => r.id));
+}
+
 async function segmentSet(id: string, ctx: EvalContext): Promise<Set<string>> {
   const stack = ctx._stack ?? [];
   if (stack.includes(id)) throw new AppError('invalid_input', `Segments refer to each other in a loop: ${[...stack, id].join(' → ')}`);
@@ -285,8 +312,10 @@ export function relevant(cond: SegmentCondition, e: BusEvent): boolean {
   if ('not' in cond) return relevant(cond.not, e);
   if ('event' in cond) return cond.event === e.name;
   if ('segment' in cond) return true;
-  // Topic choices change from the preference centre or commands, never from an event.
+  // Topic choices and scores change from commands, never from an event (a score refresh
+  // recomputes segments on its schedule).
   if ('topic' in cond) return false;
+  if ('score' in cond) return false;
   // Form confirmations (frm_) and imports (imp_) carry no consent field; the consent hook records theirs.
   if ('consent' in cond && /^(frm|imp)_/.test(e.sourceId)) return true;
   return Object.keys(e.traits).length > 0 || Object.keys(e.consent).length > 0 || e.type === 'identify';

@@ -1,3 +1,4 @@
+export * from './data-keys';
 export * from './erasures';
 export * from './migrate';
 export * from './pool';
@@ -9,6 +10,7 @@ export type {
   AgentUndo,
   AiCallKind,
   AiCallStatus,
+  AiProviderKind,
   AiUse,
   AlertChannel,
   AlertKind,

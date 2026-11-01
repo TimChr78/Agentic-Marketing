@@ -11,6 +11,7 @@ import {
   createAuth,
   invitationWorkspace,
   isMcpResourceUrlAllowed,
+  RESET_PASSWORD_TTL_SECONDS,
 } from '@agentic-marketing/auth';
 import { createExecutor, type Services, userPrincipal } from '@agentic-marketing/commands';
 import { AppError, newUuid, RESOLVED_CLIENT_IP_HEADER, remoteAddressFromEnv, resolveClientIp } from '@agentic-marketing/core';
@@ -33,6 +34,7 @@ import { copilotApi } from './http/copilot';
 import { MCP_MAX_BODY, mcpEndpoint } from './http/mcp';
 import { metricsHandler } from './http/metrics';
 import { consentPage, invitePage, loginPage } from './http/pages';
+import { deliverResetLink, passwordResetRoutes } from './http/password-reset';
 import { rejectUnsafeRawPath } from './http/raw-path';
 import { restApi } from './http/rest';
 import { scimApi } from './http/scim';
@@ -60,6 +62,19 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
     trustedOrigins: config.trustedOrigins,
     clientIpHeaders: [RESOLVED_CLIENT_IP_HEADER],
     sso: config.sso,
+    // Self-service password reset (#191): Better Auth makes and consumes the token; the host
+    // delivers it through the person's transactional provider and audits the outcome.
+    passwordReset: {
+      ttlSeconds: RESET_PASSWORD_TTL_SECONDS,
+      send: async ({ user, token, request }) => {
+        const ip = request?.headers.get(RESOLVED_CLIENT_IP_HEADER) ?? 'unknown';
+        await deliverResetLink(
+          { db, mail: { db, kp: keyProvider, email, directory, publicUrl: config.publicUrl }, ttlSeconds: RESET_PASSWORD_TTL_SECONDS, ip },
+          user,
+          token,
+        );
+      },
+    },
     ...overrides,
   });
   const keyProvider = keyProviderFor(config);
@@ -165,7 +180,8 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
     metrics.recordHttp(routeGroup(c.req.path), statusClass(c.res.status), (performance.now() - started) / 1000);
   });
   // Baseline security headers on every response; routes with their own policy keep it (#178).
-  app.use('*', securityHeaders({ https: config.publicUrl.startsWith('https://') }));
+  // The reset page carries its token in the query string, so it tells browsers to send no referrer.
+  app.use('*', securityHeaders({ https: config.publicUrl.startsWith('https://'), noReferrerPaths: ['/reset-password'] }));
   // Defence in depth for a proxy that forwards raw paths: never route a traversal target.
   app.use('*', rejectUnsafeRawPath);
 
@@ -211,6 +227,16 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
   // The public-only listener never forwards it (see http/public-only.ts).
   app.get('/metrics', metricsHandler({ token: config.metricsToken, registry: metrics, db, events, hot, natsUrl: config.nats.url }));
 
+  // Self-service password reset (#191): rate limited and audited before Better Auth sees it.
+  passwordResetRoutes(app, {
+    auth,
+    db,
+    hot,
+    publicUrl: config.publicUrl,
+    clientIpHeaders: config.clientIpHeaders,
+    trustedProxyCidrs: config.trustedProxyCidrs,
+    mail: { db, kp: keyProvider, email, directory, publicUrl: config.publicUrl },
+  });
   app.on(['GET', 'POST'], '/api/auth/*', (c) => auth.handler(withClientIp(c)));
 
   // OAuth discovery at the root, where MCP clients look (RFC 8414 path insertion included). The MCP

@@ -14,7 +14,11 @@ import type { MiddlewareHandler } from 'hono';
 /** One year: long enough to matter, the usual minimum for HSTS preload lists. */
 export const HSTS_MAX_AGE = 31_536_000;
 
-export function securityHeaders(opts: { https: boolean }): MiddlewareHandler {
+export function securityHeaders(opts: {
+  https: boolean;
+  /** Paths whose responses must not leak their URL (e.g. a reset token) to any referrer. */
+  noReferrerPaths?: string[];
+}): MiddlewareHandler {
   const defaults: [string, string][] = [
     ['X-Content-Type-Options', 'nosniff'],
     ['Referrer-Policy', 'strict-origin-when-cross-origin'],
@@ -32,6 +36,10 @@ export function securityHeaders(opts: { https: boolean }): MiddlewareHandler {
     }
     const headers = c.res.headers;
     for (const [name, value] of defaults) if (!headers.has(name)) headers.set(name, value);
+    // A page that carries a secret in its query string (the password reset link, #191) tells every
+    // browser not to send it on, so a same-origin asset request cannot put the token in a Referer.
+    const path = c.req.path;
+    if (opts.noReferrerPaths?.some((p) => path === p || path.startsWith(`${p}/`))) headers.set('Referrer-Policy', 'no-referrer');
     // A page without its own policy may not be framed either (the SPA shell). Only frame-ancestors:
     // a script/style policy for the admin UI is a separate change.
     if (!headers.has('Content-Security-Policy') && headers.get('Content-Type')?.startsWith('text/html'))

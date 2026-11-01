@@ -108,7 +108,7 @@ export function contentWarnings(type: ArtifactType, content: unknown): DraftWarn
   return parsed.error.issues.map((issue) => describeIssue(issue, content));
 }
 
-export function validateContent(type: ArtifactType, content: unknown, mode: 'draft' | 'publish' = 'publish') {
+export async function validateContent(type: ArtifactType, content: unknown, mode: 'draft' | 'publish' = 'publish') {
   const schema = (mode === 'draft' ? draftContentSchemas.get(type) : undefined) ?? artifactTypes[type].content;
   const parsed = (schema as z.ZodType).safeParse(content);
   if (!parsed.success) {
@@ -119,7 +119,7 @@ export function validateContent(type: ArtifactType, content: unknown, mode: 'dra
       z.treeifyError(parsed.error),
     );
   }
-  const problems = contentValidators.get(type)?.(parsed.data) ?? [];
+  const problems = (await contentValidators.get(type)?.(parsed.data)) ?? [];
   if (problems.length) throw new AppError('invalid_input', `The content is not a valid ${type}: ${problems.join('; ')}`, { problems });
   return parsed.data as Record<string, unknown>;
 }
@@ -387,7 +387,7 @@ export const createArtifact = defineCommand({
   actionClass: 'draft',
   handler: async (input, ctx) => {
     refuseAgentsFor(ctx, input.type);
-    const content = validateContent(input.type, input.content, 'draft');
+    const content = await validateContent(input.type, input.content, 'draft');
     const warnings = contentWarnings(input.type, content);
     const id = newId(artifactTypes[input.type].prefix);
     const ws = ctx.principal.workspaceId;
@@ -489,7 +489,7 @@ export const updateDraft = defineCommand({
   handler: async (input, ctx) => {
     const a = await loadArtifact(ctx, input.artifactId);
     refuseAgentsFor(ctx, a.type);
-    const content = validateContent(a.type as ArtifactType, input.content, 'draft');
+    const content = await validateContent(a.type as ArtifactType, input.content, 'draft');
     const warnings = contentWarnings(a.type as ArtifactType, content);
     const latest = await loadVersion(ctx, a.id, a.latestVersion);
     if (input.expectedContentHash && input.expectedContentHash !== latest.contentHash)
@@ -1435,9 +1435,10 @@ async function refuseIfAgentStopped(ctx: CommandContext, r: { requestedByType: s
 
 /** The agent behind an approval request's credential, if an agent requested it. */
 /** The agent credential behind an approval's `requested_by_client`: `token:<id>`, `hosted:<agent id>` or an OAuth client id. */
-export function agentCredentialOf(client: string): readonly ['api_token' | 'oauth_client' | 'hosted', string] {
+export function agentCredentialOf(client: string): readonly ['api_token' | 'oauth_client' | 'hosted' | 'copilot', string] {
   if (client.startsWith('token:')) return ['api_token', client.slice('token:'.length)] as const;
   if (client.startsWith('hosted:')) return ['hosted', client.slice('hosted:'.length)] as const;
+  if (client.startsWith('copilot:')) return ['copilot', client.slice('copilot:'.length)] as const;
   return ['oauth_client', client] as const;
 }
 

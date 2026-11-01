@@ -34,11 +34,55 @@ export function redactText(s: string): string {
   return out;
 }
 
+/** Which kinds of personal data the same detectors find in free text, e.g. ["[email]"] (hosted memory notes, #340). */
+export function personalDataInText(s: string): string[] {
+  const found = new Set<string>();
+  for (const [re, label] of detectors) {
+    re.lastIndex = 0;
+    if (re.test(s)) found.add(label);
+    re.lastIndex = 0;
+  }
+  return [...found];
+}
+
 export function redact<T>(v: T, depth = 0): T {
   if (typeof v === 'string') return redactText(v) as T;
   if (depth > 5 || v === null || typeof v !== 'object') return v;
   if (Array.isArray(v)) return v.slice(0, 50).map((x) => redact(x, depth + 1)) as T;
   return Object.fromEntries(Object.entries(v as Record<string, unknown>).map(([k, x]) => [k, redact(x, depth + 1)])) as T;
+}
+
+/** Keys whose name alone marks personal data, even when the value does not match a detector. */
+const PERSONAL_KEY =
+  /^(e-?mail|phone|mobile|msisdn|first_?name|last_?name|full_?name|name|address|street|postcode|zip|ssn|iban|card(_?number)?)$/i;
+
+/**
+ * The kind of personal data in a value ("email", "phone", …), or null. Uses the same detectors
+ * as `redact`, so a decision provider without a no-retention agreement can refuse a state
+ * instead of sending it (#194).
+ */
+export function personalDataIn(v: unknown, depth = 0): string | null {
+  if (typeof v === 'string') {
+    for (const [re, label] of detectors) {
+      re.lastIndex = 0;
+      if (re.test(v)) return label.replace(/[[\]]/g, '');
+    }
+    return null;
+  }
+  if (depth > 8 || v === null || typeof v !== 'object') return null;
+  if (Array.isArray(v)) {
+    for (const x of v) {
+      const found = personalDataIn(x, depth + 1);
+      if (found) return found;
+    }
+    return null;
+  }
+  for (const [k, x] of Object.entries(v as Record<string, unknown>)) {
+    if (PERSONAL_KEY.test(k)) return 'identifier';
+    const found = personalDataIn(x, depth + 1);
+    if (found) return found;
+  }
+  return null;
 }
 
 /** Whether the person's data may be processed by AI (the ai_processing purpose and its basis). */

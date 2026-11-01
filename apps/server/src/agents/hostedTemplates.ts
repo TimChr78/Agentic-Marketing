@@ -1,4 +1,5 @@
 import type { Permission } from '@agentic-marketing/commands';
+import type { AgentEventType } from '@agentic-marketing/db';
 
 // Starter hosted agents (#258, #86), exported for the admin UI, the tests and the docs. Each one
 // is a normal hosted agent: a schedule, instructions, scopes and budgets. The weekly report is
@@ -19,6 +20,8 @@ export interface HostedAgentTemplate {
   /** hourly, daily:HH:MM or weekly:day:HH:MM, in the workspace time zone. */
   schedule: string;
   scopes: Permission[];
+  /** Agent event types that also start a run (#338); empty: the schedule only. */
+  triggers: AgentEventType[];
   maxTokensPerRun: number;
   maxToolCallsPerRun: number;
 }
@@ -90,6 +93,7 @@ export const HOSTED_AGENT_TEMPLATES: HostedAgentTemplate[] = [
     instructions: WEEKLY_REPORT,
     schedule: 'weekly:mon:07:00',
     scopes: ['artifacts:read', 'audit:read'],
+    triggers: [],
     maxTokensPerRun: 30_000,
     maxToolCallsPerRun: 25,
   },
@@ -101,6 +105,7 @@ export const HOSTED_AGENT_TEMPLATES: HostedAgentTemplate[] = [
     schedule: 'hourly',
     // Read, draft and submit the proposal; the mandate or approval policy decides what happens to it.
     scopes: ['artifacts:read', 'audit:read', 'artifacts:write', 'artifacts:publish'],
+    triggers: ['guardrail.breach', 'alert.fired'],
     maxTokensPerRun: 15_000,
     maxToolCallsPerRun: 15,
   },
@@ -112,6 +117,7 @@ export const HOSTED_AGENT_TEMPLATES: HostedAgentTemplate[] = [
     instructions: LIFECYCLE_OPTIMISER,
     schedule: 'weekly:mon:08:00',
     scopes: ['artifacts:read', 'audit:read', 'artifacts:write', 'artifacts:publish'],
+    triggers: ['experiment.significant'],
     maxTokensPerRun: 40_000,
     maxToolCallsPerRun: 40,
   },
@@ -123,6 +129,7 @@ export const HOSTED_AGENT_TEMPLATES: HostedAgentTemplate[] = [
     instructions: NEWSLETTER_EDITOR,
     schedule: 'weekly:mon:09:00',
     scopes: ['artifacts:read', 'audit:read', 'artifacts:write', 'artifacts:publish'],
+    triggers: [],
     maxTokensPerRun: 60_000,
     maxToolCallsPerRun: 50,
   },
@@ -134,6 +141,7 @@ export const HOSTED_AGENT_TEMPLATES: HostedAgentTemplate[] = [
     instructions: EXPERIMENTATION_AGENT,
     schedule: 'daily:08:00',
     scopes: ['artifacts:read', 'audit:read', 'artifacts:write', 'artifacts:publish'],
+    triggers: ['experiment.significant'],
     maxTokensPerRun: 30_000,
     maxToolCallsPerRun: 30,
   },
@@ -144,6 +152,7 @@ export const HOSTED_AGENT_TEMPLATES: HostedAgentTemplate[] = [
     instructions: AUDIENCE_CURATOR,
     schedule: 'weekly:mon:07:30',
     scopes: ['artifacts:read', 'audit:read', 'artifacts:write', 'artifacts:publish'],
+    triggers: [],
     maxTokensPerRun: 30_000,
     maxToolCallsPerRun: 30,
   },
