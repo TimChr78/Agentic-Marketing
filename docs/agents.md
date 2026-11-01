@@ -93,6 +93,12 @@ Runs never overlap: a durable claim on the hosted agent is taken before the mode
 | `agents.deleteHosted` | people only (`workspace:admin`) | Delete it and its run history; the ledger stays |
 | `agents.hostedRuns` | `artifacts:read` | The hosted agent and its runs (status, summary, tool calls, tokens, error) |
 
+### Event-triggered runs
+
+Besides its schedule, a hosted agent can run when something happens (#338). Give it `triggers`, the agent event types that start a run (the same types as `agents.subscribe`: `hold.ran`, `hold.vetoed`, `hold.needs_person`, `approval.decided`, `guardian.episode`, `guardrail.breach`, `experiment.significant`, `alert.fired`), and optionally a `triggerFilter` on the event's subject ids. The platform records matching events for the agent and starts a run with the events in its prompt (the newest 20; older unread ones are marked read with them).
+
+Event runs are bounded on top of the per-run budgets: at most one run at a time (as for scheduled runs), at least `eventMinGapMinutes` between two event runs (default 30) and at most `eventRunsPerDay` in 24 hours (default 6). Events that arrive in the gap, or over the cap, start the next event run once it is allowed. `agents.hostedRuns` shows each run's `trigger` (`schedule` or `event`) and the events it handled. Set `triggers` to `[]` to go back to the schedule only. The deliverability guardian template also runs on `guardrail.breach` and `alert.fired`; the lifecycle optimiser and experimentation agent on `experiment.significant`.
+
 ### Starter templates
 
 Six ordinary hosted agents; edit anything after creating them.

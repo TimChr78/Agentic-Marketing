@@ -21,6 +21,7 @@ function templateState(template: HostedAgentTemplate) {
     scopes: template.scopes.filter(isScope),
     maxTokensPerRun: template.maxTokensPerRun,
     maxToolCallsPerRun: template.maxToolCallsPerRun,
+    triggers: template.triggers,
   };
 }
 
@@ -46,6 +47,7 @@ export function HostedAgentDialog({
         scopes: agent.scopes.filter(isScope),
         maxTokensPerRun: agent.budgets.maxTokensPerRun,
         maxToolCallsPerRun: agent.budgets.maxToolCallsPerRun,
+        triggers: agent.triggers,
       }
     : templateState(first);
   const [name, setName] = useState(initial.name);
@@ -55,6 +57,8 @@ export function HostedAgentDialog({
   const [scopes, setScopes] = useState<HostedScope[]>(initial.scopes);
   const [maxTokensPerRun, setMaxTokens] = useState(String(initial.maxTokensPerRun));
   const [maxToolCallsPerRun, setMaxToolCalls] = useState(String(initial.maxToolCallsPerRun));
+  // Event triggers (#338) come from the template; agents.updateHosted changes them over the API.
+  const [triggers, setTriggers] = useState(initial.triggers);
   const [modelProviderId, setModelProviderId] = useState(agent?.modelProviderId ?? '');
   const [enabled, setEnabled] = useState(agent?.enabled ?? true);
   const [error, setError] = useState<string | null>(null);
@@ -69,6 +73,7 @@ export function HostedAgentDialog({
     setScopes(next.scopes);
     setMaxTokens(String(next.maxTokensPerRun));
     setMaxToolCalls(String(next.maxToolCallsPerRun));
+    setTriggers(next.triggers);
   };
 
   const toggleScope = (key: HostedScope, on: boolean) =>
@@ -90,6 +95,7 @@ export function HostedAgentDialog({
           scopes,
           maxTokensPerRun: Number(maxTokensPerRun),
           maxToolCallsPerRun: Number(maxToolCallsPerRun),
+          triggers,
           ...(modelProviderId ? { modelProviderId } : {}),
         });
         toast.success(`Created “${created.name}”. It runs ${created.scheduleText.toLowerCase()} (${created.timeZone}).`);
@@ -196,6 +202,11 @@ export function HostedAgentDialog({
           <Field label="Tool calls per run" hint="A call past this budget never reaches the command layer." required>
             <Input type="number" min={1} max={100} value={maxToolCallsPerRun} onChange={(e) => setMaxToolCalls(e.target.value)} />
           </Field>
+          {triggers.length > 0 && (
+            <p className="text-[12px] text-muted">
+              Also runs when these events happen: {triggers.join(', ')} (at most 6 event runs a day, 30 minutes apart).
+            </p>
+          )}
         </div>
 
         <Field label="Model" hint="Leave empty to use the workspace’s copilot provider.">

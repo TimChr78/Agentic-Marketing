@@ -1329,6 +1329,13 @@ export const hostedAgents = pgTable(
     nextRunAt: ts('next_run_at'),
     runningRunId: text('running_run_id'),
     runningStartedAt: ts('running_started_at'),
+    /** Event types that start a run (#338), recorded through the agent subscription below. */
+    triggers: text('triggers').array().$type<AgentEventType[]>().notNull().default([]),
+    triggerFilter: jsonb('trigger_filter').$type<Record<string, string | string[]>>().notNull().default({}),
+    triggerSubscriptionId: text('trigger_subscription_id'),
+    lastEventId: bigint('last_event_id', { mode: 'number' }).notNull().default(0),
+    eventMinGapMinutes: integer('event_min_gap_minutes').notNull().default(30),
+    eventRunsPerDay: integer('event_runs_per_day').notNull().default(6),
     createdAt: ts('created_at').notNull().defaultNow(),
     updatedAt: ts('updated_at').notNull().defaultNow(),
   },
@@ -1349,6 +1356,9 @@ export const hostedAgentRuns = pgTable(
     toolCalls: integer('tool_calls').notNull().default(0),
     tokens: integer('tokens').notNull().default(0),
     error: text('error'),
+    /** What started the run: its schedule (or Run now), or an event (#338). */
+    trigger: text('trigger').$type<'schedule' | 'event'>().notNull().default('schedule'),
+    eventIds: jsonb('event_ids').$type<number[]>().notNull().default([]),
   },
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
 );

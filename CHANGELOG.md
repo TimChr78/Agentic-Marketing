@@ -2,6 +2,12 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+### Added
+
+- **Event-triggered hosted runs (#338).** A hosted agent can run when agent events happen (guardrail breaches, guardian episodes, holds, approvals, experiment verdicts, alerts), not only on its schedule. Its `triggers` become an agent subscription; a run starts with the events in its prompt, at most one at a time, at least `eventMinGapMinutes` apart and at most `eventRunsPerDay` a day, on top of the run budgets. Runs record their trigger and events. The deliverability guardian, lifecycle optimiser and experimentation agent templates react to their events. Migration `0063_hosted_triggers.sql`.
+
 ## [0.6.1] - 2026-11-01
 
 ### Fixed

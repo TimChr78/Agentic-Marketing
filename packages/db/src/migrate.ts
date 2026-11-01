@@ -91,6 +91,7 @@ const MIGRATION_RELEASES: Record<string, string> = {
   '0060_enrollment_jobs.sql': '0.6.0',
   '0061_enrollment_job_versions.sql': '0.6.1',
   '0062_agent_action_level.sql': '0.6.1',
+  '0063_hosted_triggers.sql': '0.7.0',
 };
 
 export function releaseForMigrationHead(head: string | null): string | null {

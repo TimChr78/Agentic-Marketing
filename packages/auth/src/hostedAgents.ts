@@ -3,6 +3,7 @@ import { AppError, newId } from '@agentic-marketing/core';
 import { type Role, schema } from '@agentic-marketing/db';
 import { and, desc, eq, lt } from 'drizzle-orm';
 import { z } from 'zod';
+import { AGENT_EVENT_TYPES } from './agentEvents';
 import { describeHostedSchedule, isValidHostedSchedule, nextHostedRunAt } from './hostedSchedule';
 
 // Hosted agents (#258, #86): an agent the platform runs itself on a schedule, under the agent's
@@ -22,6 +23,19 @@ const Budgets = z.object({
   maxToolCallsPerRun: z.number().int().min(1).max(100).default(20),
 });
 
+/** Events that start a run (#338), on top of the schedule; limits keep event runs bounded. */
+const Triggers = z.object({
+  triggers: z
+    .array(z.enum(AGENT_EVENT_TYPES))
+    .max(AGENT_EVENT_TYPES.length)
+    .describe('Agent event types that start a run, e.g. guardrail.breach or experiment.significant; empty: schedule only'),
+  triggerFilter: z
+    .record(z.string(), z.union([z.string(), z.array(z.string())]))
+    .describe('Only events whose subject matches, e.g. {"journeyId":"jrn_…"}, like agents.subscribe'),
+  eventMinGapMinutes: z.number().int().min(5).max(1440).describe('Minimum time between two event runs'),
+  eventRunsPerDay: z.number().int().min(1).max(48).describe('Most event runs in 24 hours'),
+});
+
 const HostedAgent = z.object({
   agentId: z.string(),
   name: z.string(),
@@ -34,6 +48,7 @@ const HostedAgent = z.object({
   scopes: z.array(z.string()),
   enabled: z.boolean(),
   budgets: z.object({ maxTokensPerRun: z.number().int(), maxToolCallsPerRun: z.number().int() }),
+  ...Triggers.shape,
   modelProviderId: z.string().nullable(),
   consecutiveFailures: z.number().int(),
   lastRunAt: z.string().nullable(),
@@ -54,6 +69,8 @@ const HostedRun = z.object({
   toolCalls: z.number().int(),
   tokens: z.number().int(),
   error: z.string().nullable(),
+  trigger: z.enum(['schedule', 'event']).describe('What started the run'),
+  eventIds: z.array(z.number().int()).describe('The agent events an event run handled (agents.events)'),
 });
 async function loadHostedAgent(ctx: CommandContext, agentId: string): Promise<HostedAgent | null> {
   const { tx } = ctx;
@@ -80,6 +97,10 @@ async function loadHostedAgent(ctx: CommandContext, agentId: string): Promise<Ho
     scopes: row.hosted.scopes,
     enabled: row.hosted.enabled,
     budgets: { maxTokensPerRun: row.hosted.maxTokensPerRun, maxToolCallsPerRun: row.hosted.maxToolCallsPerRun },
+    triggers: row.hosted.triggers,
+    triggerFilter: row.hosted.triggerFilter,
+    eventMinGapMinutes: row.hosted.eventMinGapMinutes,
+    eventRunsPerDay: row.hosted.eventRunsPerDay,
     modelProviderId: row.hosted.modelProviderId,
     consecutiveFailures: row.hosted.consecutiveFailures,
     lastRunAt: row.hosted.lastRunAt?.toISOString() ?? null,
@@ -88,6 +109,35 @@ async function loadHostedAgent(ctx: CommandContext, agentId: string): Promise<Ho
     createdAt: row.hosted.createdAt.toISOString(),
     updatedAt: row.hosted.updatedAt.toISOString(),
   };
+}
+
+/**
+ * Keeps the agent subscription that records a hosted agent's trigger events (#312, #338) in step
+ * with its triggers: created or updated when it has some, removed when it has none.
+ */
+async function syncTriggerSubscription(
+  ctx: CommandContext,
+  agentId: string,
+  current: string | null,
+  triggers: string[],
+  filter: Record<string, string | string[]>,
+): Promise<string | null> {
+  if (!triggers.length) {
+    if (current) await ctx.tx.delete(schema.agentSubscriptions).where(eq(schema.agentSubscriptions.id, current));
+    return null;
+  }
+  const eventTypes = triggers as (typeof AGENT_EVENT_TYPES)[number][];
+  if (current) {
+    const updated = await ctx.tx
+      .update(schema.agentSubscriptions)
+      .set({ eventTypes, filter })
+      .where(eq(schema.agentSubscriptions.id, current))
+      .returning({ id: schema.agentSubscriptions.id });
+    if (updated.length) return current;
+  }
+  const id = newId('sub');
+  await ctx.tx.insert(schema.agentSubscriptions).values({ workspaceId: ctx.principal.workspaceId, id, agentId, eventTypes, filter });
+  return id;
 }
 
 function assertEditorScopes(role: Role, scopes: string[]) {
@@ -124,6 +174,10 @@ export const createHostedAgent = defineCommand({
     schedule: Schedule,
     scopes: z.array(z.enum(PERMISSIONS)).min(1).max(13).describe('Permissions for the run, never more than your role'),
     ...Budgets.shape,
+    triggers: Triggers.shape.triggers.default([]),
+    triggerFilter: Triggers.shape.triggerFilter.default({}),
+    eventMinGapMinutes: Triggers.shape.eventMinGapMinutes.default(30),
+    eventRunsPerDay: Triggers.shape.eventRunsPerDay.default(6),
     modelProviderId: ProviderId.optional().describe('An AI provider to use instead of the copilot provider'),
     enabled: z.boolean().default(true),
   }),
@@ -162,6 +216,11 @@ export const createHostedAgent = defineCommand({
       maxToolCallsPerRun: input.maxToolCallsPerRun,
       modelProviderId: input.modelProviderId ?? null,
       nextRunAt: input.enabled ? nextHostedRunAt(input.schedule, timeZone, now) : null,
+      triggers: [...new Set(input.triggers)],
+      triggerFilter: input.triggerFilter,
+      eventMinGapMinutes: input.eventMinGapMinutes,
+      eventRunsPerDay: input.eventRunsPerDay,
+      triggerSubscriptionId: await syncTriggerSubscription(ctx, agentId, null, [...new Set(input.triggers)], input.triggerFilter),
       updatedAt: now,
     });
     const out = await loadHostedAgent(ctx, agentId);
@@ -186,6 +245,10 @@ export const updateHostedAgent = defineCommand({
     maxToolCallsPerRun: z.number().int().min(1).max(100).optional(),
     modelProviderId: ProviderId.nullable().optional(),
     enabled: z.boolean().optional(),
+    triggers: Triggers.shape.triggers.optional(),
+    triggerFilter: Triggers.shape.triggerFilter.optional(),
+    eventMinGapMinutes: Triggers.shape.eventMinGapMinutes.optional(),
+    eventRunsPerDay: Triggers.shape.eventRunsPerDay.optional(),
   }),
   output: HostedAgent,
   permission: 'workspace:admin',
@@ -226,6 +289,22 @@ export const updateHostedAgent = defineCommand({
         ...(input.maxTokensPerRun !== undefined ? { maxTokensPerRun: input.maxTokensPerRun } : {}),
         ...(input.maxToolCallsPerRun !== undefined ? { maxToolCallsPerRun: input.maxToolCallsPerRun } : {}),
         ...(input.modelProviderId !== undefined ? { modelProviderId: input.modelProviderId } : {}),
+        ...(input.eventMinGapMinutes !== undefined ? { eventMinGapMinutes: input.eventMinGapMinutes } : {}),
+        ...(input.eventRunsPerDay !== undefined ? { eventRunsPerDay: input.eventRunsPerDay } : {}),
+        ...(input.triggers !== undefined || input.triggerFilter !== undefined
+          ? await (async () => {
+              const triggers = [...new Set(input.triggers ?? current.hosted.triggers)];
+              const triggerFilter = input.triggerFilter ?? current.hosted.triggerFilter;
+              const triggerSubscriptionId = await syncTriggerSubscription(
+                ctx,
+                input.agentId,
+                current.hosted.triggerSubscriptionId,
+                triggers,
+                triggerFilter,
+              );
+              return { triggers, triggerFilter, triggerSubscriptionId };
+            })()
+          : {}),
         schedule,
         enabled,
         ...(scheduleChanged && !enabled ? { nextRunAt: null } : {}),
@@ -340,6 +419,8 @@ export const hostedAgentRuns = defineCommand({
         toolCalls: r.toolCalls,
         tokens: r.tokens,
         error: r.error,
+        trigger: r.trigger,
+        eventIds: r.eventIds,
       })),
       next: rows.length > input.limit ? (page.at(-1)?.startedAt.toISOString() ?? null) : null,
     };
