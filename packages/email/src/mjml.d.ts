@@ -1,4 +1,5 @@
-// The synchronous MJML 4 API we use (the repo's @types/mjml-core describe MJML 5).
+// The async MJML 5 API we use. mjml ships no types of its own, and @types/mjml is still 4.x, whose
+// synchronous signature would hide the missing `await` in our callers.
 declare module 'mjml' {
   interface MjmlError {
     line: number;
@@ -11,5 +12,5 @@ declare module 'mjml' {
     keepComments?: boolean;
     minify?: boolean;
   }
-  export default function mjml2html(input: string, options?: MjmlOptions): { html: string; errors: MjmlError[] };
+  export default function mjml2html(input: string, options?: MjmlOptions): Promise<{ html: string; errors: MjmlError[] }>;
 }

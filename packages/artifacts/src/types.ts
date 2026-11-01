@@ -1852,9 +1852,10 @@ draftContentSchemas.set('journey', journeyDraft);
 
 /**
  * Checks beyond the schema that need heavy libraries (e.g. compiling MJML). Packages register
- * them; artifact commands run them on every save so agents get the errors right away.
+ * them; artifact commands run them on every save so agents get the errors right away. A validator
+ * is async where the check is (mjml 5 renders in a promise).
  */
-export type ContentValidator = (content: unknown) => string[];
+export type ContentValidator = (content: unknown) => string[] | Promise<string[]>;
 /**
  * A registry with one entry per artifact type. Packages register their checks at import time; a
  * second registration for the same type would silently replace the first (it happened: e-mail

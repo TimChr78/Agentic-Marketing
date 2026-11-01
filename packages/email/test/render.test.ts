@@ -63,36 +63,40 @@ describe('template rendering', () => {
 
   it('refuses includes and reports broken templates when saving', async () => {
     await expect(renderTemplate({ ...welcome, mjml: '{% include "/etc/passwd" %}' }, {})).rejects.toThrow();
-    expect(validateTemplate({ ...welcome, subject: 'Hi {{ profile.name ' })[0]).toMatch(/^subject: Liquid error/);
-    expect(validateTemplate({ ...welcome, mjml: '<mjml><mj-body><mj-column><mj-text>x</mj-text></mj-column></mj-body></mjml>' })).toEqual([
-      expect.stringMatching(/mjml line \d+: .*mj-column/),
-      expect.stringContaining('unsubscribe link'),
-    ]);
-    expect(validateTemplate(welcome)).toEqual([]);
-    expect(validateTemplate({ ...welcome, purpose: 'onboarding', mjml: welcome.mjml.replace('unsubscribe_url', 'x') })).toEqual([]);
+    expect((await validateTemplate({ ...welcome, subject: 'Hi {{ profile.name ' }))[0]).toMatch(/^subject: Liquid error/);
+    await expect(
+      validateTemplate({ ...welcome, mjml: '<mjml><mj-body><mj-column><mj-text>x</mj-text></mj-column></mj-body></mjml>' }),
+    ).resolves.toEqual([expect.stringMatching(/mjml line \d+: .*mj-column/), expect.stringContaining('unsubscribe link')]);
+    await expect(validateTemplate(welcome)).resolves.toEqual([]);
+    await expect(
+      validateTemplate({ ...welcome, purpose: 'onboarding', mjml: welcome.mjml.replace('unsubscribe_url', 'x') }),
+    ).resolves.toEqual([]);
   });
 });
 
-// #177: mjml 4 ships the mj-include traversal (GHSA-45h5-66jx-r2wf) and html-minifier's ReDoS
-// (GHSA-pfq8-rq6v-vf5m) without a patched 4.x. Both are unreachable while we compile with
-// `ignoreIncludes: true` and `minify: false`; these tests fail if that changes.
-describe('mjml advisories stay unreachable', () => {
+// mjml once shipped an mj-include traversal (GHSA-45h5-66jx-r2wf) and html-minifier's ReDoS
+// (GHSA-pfq8-rq6v-vf5m); mjml 5 fixed both. Includes stay disabled anyway: a template is user
+// content, so it must never read a file. These tests fail if that changes.
+describe('mjml rendering stays sandboxed', () => {
   const secret = fileURLToPath(new URL('./fixtures/include-secret.mjml', import.meta.url));
 
-  it('does not follow mj-include, by absolute or relative path', () => {
+  it('does not follow mj-include, by absolute or relative path', async () => {
     for (const path of [secret, '../test/fixtures/include-secret.mjml']) {
-      const { html } = compileMjml(`<mjml><mj-body><mj-include path="${path}" /></mj-body></mjml>`);
+      const { html } = await compileMjml(`<mjml><mj-body><mj-include path="${path}" /></mj-body></mjml>`);
       expect(html).not.toContain('INCLUDED-SECRET');
     }
-    const problems = validateTemplate({ ...welcome, mjml: welcome.mjml.replace('<mj-body>', `<mj-body><mj-include path="${secret}" />`) });
+    const problems = await validateTemplate({
+      ...welcome,
+      mjml: welcome.mjml.replace('<mj-body>', `<mj-body><mj-include path="${secret}" />`),
+    });
     expect(problems.join('\n')).not.toContain('INCLUDED-SECRET');
   });
 
-  it('compiles a large input with many attributes quickly (no minifier pass)', () => {
+  it('compiles a large input with many attributes quickly (no minifier pass)', async () => {
     const attrs = Array.from({ length: 200 }, (_, i) => `data-a${i}="${'x'.repeat(50)}"`).join(' ');
     const rows = Array.from({ length: 200 }, () => `<mj-text><p ${attrs}>hej</p></mj-text>`).join('');
     const started = Date.now();
-    compileMjml(`<mjml><mj-body><mj-section><mj-column>${rows}</mj-column></mj-section></mj-body></mjml>`);
+    await compileMjml(`<mjml><mj-body><mj-section><mj-column>${rows}</mj-column></mj-section></mj-body></mjml>`);
     expect(Date.now() - started).toBeLessThan(10_000);
   });
 });

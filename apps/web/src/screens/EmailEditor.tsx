@@ -14,7 +14,8 @@ type Mode = 'visual' | 'code' | 'preview';
 
 async function render(mjml: string, vars: Record<string, unknown>) {
   const filled = await liquid.parseAndRender(mjml, vars);
-  const out = await Promise.resolve(mjml2html(filled, { validationLevel: 'soft' }));
+  // mjml-browser 5 renders in a promise, like the server's mjml.
+  const out = await mjml2html(filled, { validationLevel: 'soft' });
   return out.html;
 }
 

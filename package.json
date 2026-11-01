@@ -27,16 +27,13 @@
       "@better-auth/oauth-provider": "1.7.7",
       "@better-auth/core": "1.7.7",
       "better-auth": "1.7.7",
-      "happy-dom": "^21.0.4"
+      "glob": "14.0.2",
+      "happy-dom": "^21.0.4",
+      "minimatch": "11.0.1",
+      "mjml-browser": "5.4.1"
     },
     "auditConfig": {
-      "ignoreGhsas": [
-        "GHSA-pfq8-rq6v-vf5m",
-        "GHSA-45h5-66jx-r2wf",
-        "GHSA-w5hq-g745-h8pq",
-        "GHSA-g3hv-75wg-m249",
-        "GHSA-3g3m-2fjr-6pw4"
-      ]
+      "ignoreGhsas": ["GHSA-w5hq-g745-h8pq"]
     }
   },
   "devDependencies": {

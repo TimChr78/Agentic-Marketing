@@ -22,10 +22,8 @@ CI runs `pnpm audit --prod --audit-level=moderate`, and Dependabot opens weekly 
 
 | Advisory | Package | Why it is accepted |
 |---|---|---|
-| [GHSA-pfq8-rq6v-vf5m](https://github.com/advisories/GHSA-pfq8-rq6v-vf5m) (ReDoS) | `html-minifier`, via `mjml-core` 4 | No patched version exists. The minifier only runs with `minify: true`; `packages/email/src/render.ts` always compiles with `minify: false`. |
-| [GHSA-45h5-66jx-r2wf](https://github.com/advisories/GHSA-45h5-66jx-r2wf) (`mj-include` traversal) | `mjml` 4.18 | Fixed only in mjml 5, whose async API and different HTML output need their own release. Every compile passes `ignoreIncludes: true`. |
-| [GHSA-g3hv-75wg-m249](https://github.com/advisories/GHSA-g3hv-75wg-m249) | `minimatch` 9, via `mjml-cli` | Only in mjml's command-line tool, which the server never loads (`mjml`'s library entry does not require it); the fix is minimatch 11, which `mjml-cli` 4 does not accept. Goes away with mjml 5 (#205). |
-| [GHSA-3g3m-2fjr-6pw4](https://github.com/advisories/GHSA-3g3m-2fjr-6pw4) | `glob` 10, via `mjml-cli` | Same: CLI only, never loaded by the server; the fix is glob 14. Goes away with mjml 5 (#205). |
 | [GHSA-w5hq-g745-h8pq](https://github.com/advisories/GHSA-w5hq-g745-h8pq) | `uuid` < 11.1.1 | Only in `spikes/email-editor`, which is not installed in CI or the image. |
 
-`packages/email/test/render.test.ts` fails if either mjml mitigation is removed. When a fix ships, upgrade and remove the entry.
+mjml 5, now used for every compile, fixed the `mj-include` traversal ([GHSA-45h5-66jx-r2wf](https://github.com/advisories/GHSA-45h5-66jx-r2wf)) and no longer uses `html-minifier`, whose ReDoS ([GHSA-pfq8-rq6v-vf5m](https://github.com/advisories/GHSA-pfq8-rq6v-vf5m)) had no patch. The `mjml` package still depends on `mjml-cli`, whose ranges for `minimatch` ([GHSA-g3hv-75wg-m249](https://github.com/advisories/GHSA-g3hv-75wg-m249)) and `glob` ([GHSA-3g3m-2fjr-6pw4](https://github.com/advisories/GHSA-3g3m-2fjr-6pw4)) stop short of the patched releases; `pnpm.overrides` in `package.json` pins `minimatch` 11.0.1 and `glob` 14.0.2 for every package that asks for them, so no exception is needed. The server never loads the command-line tool: `mjml`'s library entry does not require it, and this repository only imports the library.
+
+Every compile still passes `ignoreIncludes: true`, because a template is user content that must never read a file; `packages/email/test/render.test.ts` fails if that changes. When a fix ships, upgrade and remove the entry.

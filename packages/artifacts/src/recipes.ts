@@ -339,19 +339,20 @@ export interface ResolvedRecipeArtifact {
  * parameters filled in. Validation is the same draft validation artifacts.create applies, so a
  * resolved recipe is safe to write.
  */
-export function resolveRecipe(
+export async function resolveRecipe(
   recipe: RecipeDefinition,
   params: RecipeValues,
   idFor: (type: RecipeArtifact['type']) => string = (type) => newId(artifactTypes[type].prefix),
-) {
+): Promise<ResolvedRecipeArtifact[]> {
   const refs: Record<string, string> = {};
   for (const a of recipe.artifacts) refs[a.key] = idFor(a.type);
-  return recipe.artifacts.map((a): ResolvedRecipeArtifact => {
+  const artifacts: ResolvedRecipeArtifact[] = [];
+  for (const a of recipe.artifacts) {
     const name = substituteString(a.name, params, refs);
     if (name === OMIT) throw new AppError('invalid_input', `The name of "${a.key}" must not be only an optional placeholder.`);
     const content = substitute(a.content, params, refs) as Record<string, unknown>;
-    validateContent(a.type, content, 'draft');
-    return {
+    await validateContent(a.type, content, 'draft');
+    artifacts.push({
       key: a.key,
       id: refs[a.key]!,
       type: a.type,
@@ -359,8 +360,9 @@ export function resolveRecipe(
       note: a.note ?? `Installed from recipe ${recipe.id} v${recipe.version}`,
       content,
       warnings: contentWarnings(a.type, content),
-    };
-  });
+    });
+  }
+  return artifacts;
 }
 
 export const PrerequisiteResult = z.object({
@@ -507,7 +509,7 @@ export const previewRecipe = defineCommand({
     const recipe = recipeById(input.recipeId);
     const params = resolveParameters(recipe, input.params);
     const prerequisites = await checkPrerequisites(ctx.tx, recipe, params);
-    const artifacts = resolveRecipe(recipe, params);
+    const artifacts = await resolveRecipe(recipe, params);
     return {
       recipe: { id: recipe.id, version: recipe.version, title: recipe.title },
       params,
@@ -556,7 +558,7 @@ export const installRecipe = defineCommand({
       throw new AppError('invalid_input', `Cannot install "${recipe.title}" yet: ${failed.map((p) => p.message).join(' ')}`, {
         prerequisites: failed,
       });
-    const artifacts = resolveRecipe(recipe, params);
+    const artifacts = await resolveRecipe(recipe, params);
     const ws = ctx.principal.workspaceId;
     for (const a of artifacts) {
       const def = artifactTypes[a.type] as { singleton?: boolean; peopleOnly?: boolean };

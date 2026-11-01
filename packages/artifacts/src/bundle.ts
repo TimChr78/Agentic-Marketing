@@ -247,7 +247,7 @@ export const driftConfig = defineCommand({
     );
     const drift: z.infer<typeof Drift>[] = [];
     for (const item of input.bundle.artifacts) {
-      const content = validateContent(item.type, item.content, 'draft');
+      const content = await validateContent(item.type, item.content, 'draft');
       const current = byId.get(item.id) ?? ('singleton' in artifactTypes[item.type] ? singletons.get(item.type) : undefined);
       if (current && current.a.type !== item.type) {
         drift.push({
@@ -362,7 +362,7 @@ export const importConfig = defineCommand({
         );
       if (ctx.principal.type === 'agent' && def.peopleOnly)
         throw new AppError('forbidden', `${item.id} is a ${item.type}: only people can import it.`);
-      const content = validateContent(item.type, item.content, 'draft');
+      const content = await validateContent(item.type, item.content, 'draft');
       // A workspace has one of each singleton type, whatever its id.
       const current = byId.get(item.id) ?? ('singleton' in artifactTypes[item.type] ? singletons.get(item.type) : undefined);
       if (current && current.a.type !== item.type)

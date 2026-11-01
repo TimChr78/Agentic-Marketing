@@ -12,14 +12,7 @@ import { schema, type Tx } from '@agentic-marketing/db';
 import { and, desc, eq, inArray, isNotNull, or } from 'drizzle-orm';
 import { z } from 'zod';
 import { blockIdsIn, usesBlockTag, wrapMjmlFragment } from './blockTags';
-import {
-  type BlockDefinition,
-  type BlockResolver,
-  compileMjml,
-  type RenderVars,
-  renderBlockFragment,
-  renderBlockFragmentSync,
-} from './render';
+import { type BlockDefinition, type BlockResolver, compileMjml, type RenderVars, renderBlockFragment } from './render';
 
 // Reusable e-mail blocks (#73). A block is a versioned MJML fragment; a template inlines the
 // block's published version with {% block 'blk_…', key: value %}. Rendering resolves the block
@@ -40,19 +33,19 @@ export function sampleBlockParams(block: Pick<EmailBlock, 'params'>): Record<str
 }
 
 /** Checks that run on every save, so a broken fragment or a nested block is caught immediately. */
-export function validateBlockContent(block: EmailBlock): string[] {
+export async function validateBlockContent(block: EmailBlock): Promise<string[]> {
   const problems: string[] = [];
   if (usesBlockTag(block.mjml)) problems.push('A block cannot use another block in v1; keep the shared part in the template');
   if (/<\/?mjml[\s>]/i.test(block.mjml)) problems.push('A block is an MJML fragment, not a whole <mjml> document');
   if (problems.length) return problems;
   let mjml: string;
   try {
-    mjml = renderBlockFragmentSync({ id: 'block', mjml: block.mjml, params: block.params }, sampleBlockParams(block));
+    mjml = await renderBlockFragment({ id: 'block', mjml: block.mjml, params: block.params }, sampleBlockParams(block));
   } catch (e) {
     return [`Liquid error: ${(e as Error).message.split('\n')[0]}`];
   }
   try {
-    const out = compileMjml(wrapMjmlFragment(mjml));
+    const out = await compileMjml(wrapMjmlFragment(mjml));
     problems.push(...out.warnings.slice(0, 10));
   } catch (e) {
     problems.push(`mjml: ${(e as Error).message.split('\n')[0]}`);
@@ -148,7 +141,7 @@ export const previewBlock = defineCommand({
         params,
         (input.data ?? {}) as RenderVars,
       );
-      const out = compileMjml(wrapMjmlFragment(mjml));
+      const out = await compileMjml(wrapMjmlFragment(mjml));
       return { version: v.number, html: out.html, warnings: out.warnings };
     } catch (e) {
       throw new AppError('invalid_input', `The block could not be rendered: ${(e as Error).message.split('\n')[0]}`);
