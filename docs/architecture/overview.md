@@ -1,5 +1,7 @@
 # System overview
 
+> Status: describes **0.6.1**. Waves 1–3 are built through Phase 16; wave 4 has shipped Phases 17–20 (0.3.0–0.6.0, fixes through 0.6.1) and still has Phases 21–22 planned. See [roadmap.md](roadmap.md) for the wave 1 plan, [roadmap-wave-4.md](roadmap-wave-4.md) for the current wave, and [agentic-autonomy.md](agentic-autonomy.md) for what agents may do today.
+
 ## 1. System context
 
 ```mermaid
@@ -73,15 +75,16 @@ packages/
   commands/        # command registry: defineCommand(), authz, idempotency, audit
   artifacts/       # versioned artifacts, approvals, diffs, bundles, holdouts, hosted pages
   secrets/         # envelope encryption, key providers, write-only secret commands
-  auth/            # Better Auth, OAuth 2.1 for MCP clients, members, SSO/SCIM, API tokens
-  telemetry/       # pino logger, optional OpenTelemetry tracing
+  auth/            # Better Auth, OAuth 2.1 for MCP clients, members, SSO/SCIM, API tokens, agents and hosted runs
+  telemetry/       # pino logger, optional OpenTelemetry tracing, Prometheus metrics
   events/          # NATS bus, ClickHouse event store and sink, event schemas
   ingest/          # Segment-compatible ingest gateway, source keys, consent policy
   hotstate/        # Valkey session and profile snapshot for the decision API
   profiles/        # profiles, identity resolution, consent ledger, per-person encryption
   segments/        # segment DSL, SQL compiler, streaming evaluator, static lists, snapshots, CSV
-  journeys/        # journey graph model, interpreter, entry keys, wait-until, control groups
+  journeys/        # journey graph model, interpreter, entry keys, wait-until, control groups, bulk enrollment
   audience/        # signup forms, broadcasts, hosted pages, archive, import, message events, retention
+  content/         # content sources, article library, topic backlog, content briefs
   email/           # send gateway, e-mail/SMS/push adapters, templates, blocks, checks, delivery policy
   campaigns/       # campaign members, shared UTM campaign, control-group helpers
   personalize/     # experiences, decision engine, A/B allocation and results, edge decide
@@ -185,4 +188,4 @@ sequenceDiagram
 - **Idempotency:** every command and every side effect accepts an idempotency key; the send gateway deduplicates on `(participant, node, attempt-group)`.
 - **Outbox:** state changes that must emit bus events write to an outbox table in the same transaction; a relay publishes to NATS. No dual writes.
 - **Time:** all timestamps UTC; per-profile timezone trait used for send-time and quiet hours.
-- **Observability:** OpenTelemetry traces/metrics/logs from every role; trace context propagated through bus messages and queue jobs.
+- **Observability:** OpenTelemetry traces/metrics/logs from every role; trace context propagated through bus messages and queue jobs. `GET /metrics` exposes Prometheus metrics when `METRICS_TOKEN` is set (0.5.0), and `am doctor` checks the queue and delivery health — see [deployment-and-scaling.md](deployment-and-scaling.md#5-operations--health).

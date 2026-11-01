@@ -31,4 +31,8 @@ Phase 4 puts models inside the product: journeys choose branches and write text 
 - Prompt tests run inside the command's transaction (up to 50 cases). This is acceptable at homelab scale; a job queue can take over later.
 - Caching generated text per segment, sampling decisions for human review and `ai.classify` are not built yet.
 
+## Update (0.6.1)
+
+`ai.classify` did ship, as a command outside a journey (`ai.classify` returns a call id, `ai.classification` the label) rather than a journey node. Sampling decisions for human review also shipped (`ai.reviews`, `ai.review`). Caching generated text per segment is still not built.
+
 > **Update (0.2.9, 2026-10-30):** all three shipped. Generated text is cached per segment when a prompt sets `cache` (the cache key is the person's segments); decisions can be sampled for human review (`ai.reviews`, `ai.review`); and `ai.classify` / `ai.classification` label a text outside a journey. See [development.md](../../development.md).

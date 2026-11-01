@@ -71,7 +71,7 @@ ORDER BY (workspace_id, name, anonymous_id, received_at, event_id)
 TTL received_at + INTERVAL 25 MONTH;   -- configurable retention
 ```
 
-Plus tables for `message_events` (sent/delivered/bounced/opened/clicked/unsubscribed), `journey_events` (entered/step/exited/goal), `decision_events` (personalization & AI decisions with explanation) — these power analytics and give agents an explainable history.
+Plus tables for `message_events` (sent/delivered/bounced/opened/clicked/unsubscribed), `journey_events` (entered/step/exited/goal) and `decision_events` (personalization & AI decisions with explanation) — these power analytics and give agents an explainable history. Journey split results (`journeys.splitResult`, 0.6.0) are computed on demand from `journey_events`, not stored as another table.
 
 At 10M profiles × ~50 events/profile/month ≈ 500M rows/month, which a single ClickHouse node handles well; clustering is a later step (see [deployment-and-scaling.md](deployment-and-scaling.md)).
 
@@ -97,7 +97,7 @@ Two evaluation modes from the same definition:
 | **Batch** | Historic conditions, large audiences, campaign sends, previews | Compiled to ClickHouse SQL (+ Postgres for traits); scheduled or on demand |
 | **Streaming** | Real-time entry/exit that triggers journeys and personalization | Workers keep per-profile condition state (windowed counters in Valkey, persisted checkpoints in Postgres) and evaluate on each relevant event; emit `segment.entered/exited` |
 
-The compiler marks which conditions are streamable; non-streamable ones fall back to frequent batch recomputation. Memberships are stored in Postgres (`segment_memberships`) and mirrored to Valkey for the decision API.
+The compiler marks which conditions are streamable; non-streamable ones fall back to frequent batch recomputation. Memberships are stored in Postgres (`segment_memberships`) and mirrored to Valkey for the decision API. Memberships are also the input to bulk journey enrollment (`journeys.enrollSegment`, 0.6.0): the scheduler scans them in chunks of 500, runs a resumable job pinned to the journey and segment versions, and leaves the normal event and segment-entry triggers to handle ongoing entry.
 
 ## 7. Warehouse & data portability
 

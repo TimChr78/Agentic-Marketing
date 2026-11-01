@@ -1,6 +1,6 @@
 # ADR-0008: Segment-spec compatible ingestion with own gateway
 
-- Status: Proposed
+- Status: Accepted (built; the ingest gateway follows it since Phase 1)
 - Date: 2026-10-21
 
 ## Context

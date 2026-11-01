@@ -22,3 +22,7 @@ Built and tested end to end in [`spikes/command-registry`](../../../spikes/comma
 - MCP uses SDK v2 / spec 2026-07-28 with a stateless per-request server.
 - Agent least privilege is decided on the consent screen (clients request all advertised scopes); scope step-up is planned.
 - Tenant isolation is enforced by Postgres RLS through a dedicated non-bypass database role.
+
+## Update (0.6.1)
+
+Scope step-up shipped after the spike: a write without its scope answers with an `insufficient_scope` challenge and a capable client asks the person to grant it. Commands also declare an `actionClass` (0.3.0), which the agent policy engine uses alongside `effect`; the handler receives the policy decision and reasons. The rest of the decision stands.

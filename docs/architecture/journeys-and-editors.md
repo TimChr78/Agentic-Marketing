@@ -60,6 +60,7 @@ Principles:
 - **Event waits:** `(workspace_id, waiting_for_event, profile_id)` index; the trigger matcher checks incoming events against it.
 - **Version pinning:** participants stay on the version they entered with. Publishing a new version affects new entrants; `journeys.migrate` moves people still on an older version onto the published one (dry run first, with an old-node to new-node mapping).
 - **Simulation:** the same interpreter runs in a dry-run mode against a sample or synthetic profile with a virtual clock — used by the UI ("preview path") and by agents (`journeys.simulate`).
+- **Split and holdout results:** `journeys.splitResult` (0.6.0) reports, for a split node, the people in each arm, their goal conversions and unsubscribes, and each arm against the first with lift, a 95% interval and a verdict that needs the minimum sample in both arms. `journeys.holdoutResult` does the same for a journey's control group. Both are computed on demand from journey events, not stored.
 - **Throughput target:** 1k–5k steps/s on a modest Postgres; partition `journey_participants` by journey hash when needed.
 
 ### Bulk enrollment by segment (#148)
