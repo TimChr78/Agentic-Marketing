@@ -1,3 +1,4 @@
+export * from './data-keys';
 export * from './erasures';
 export * from './migrate';
 export * from './pool';

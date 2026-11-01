@@ -87,6 +87,9 @@ export const ENV_SINCE: Record<string, string> = {
 
   // 0.5.0 (issue #147)
   METRICS_TOKEN: '0.5.0',
+
+  // 0.7.0 (issue #145)
+  BACKUP_VERIFY_MAX_AGE_DAYS: '0.7.0',
 };
 
 /**
