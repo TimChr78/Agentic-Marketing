@@ -211,6 +211,80 @@ function encodeStream(api: FakeRequest['api'], model: string, reply: Exclude<Fak
   ].join('');
 }
 
+export interface FakeSystemOneRequest {
+  model: string;
+  apiKey: string;
+  state: unknown;
+  questions: Record<string, { type: string; instructions: string; criteria?: unknown }>;
+}
+
+/** A decision answer as the request's key names it, or an error status. */
+export type FakeSystemOneReply =
+  | { answers: Record<string, Record<string, unknown>>; model?: string; inputTokens?: number; outputTokens?: number }
+  | { status: number; error: string };
+
+/**
+ * A scripted System One server for tests: the same POST …/systemone shape as TypeSafe and
+ * CommandCode, so the decision adapter is exercised without a real model. The base URL is
+ * `${url}/v1` (or `${url}/provider/v1`).
+ */
+export async function fakeSystemOne(handler: (r: FakeSystemOneRequest) => FakeSystemOneReply | Promise<FakeSystemOneReply>) {
+  const requests: FakeSystemOneRequest[] = [];
+  const server = createServer((req, res) => {
+    let raw = '';
+    req.on('data', (c) => (raw += c));
+    req.on('end', async () => {
+      res.setHeader('content-type', 'application/json');
+      if (!req.url?.endsWith('/systemone')) {
+        res.statusCode = 404;
+        res.end('{}');
+        return;
+      }
+      let body: { model?: unknown; state?: unknown; questions?: unknown };
+      try {
+        body = JSON.parse(raw) as typeof body;
+      } catch {
+        res.statusCode = 400;
+        res.end(JSON.stringify({ detail: 'invalid JSON' }));
+        return;
+      }
+      const r: FakeSystemOneRequest = {
+        model: String(body.model ?? ''),
+        apiKey: String(req.headers.authorization ?? '').replace(/^Bearer /, ''),
+        state: body.state,
+        questions: (body.questions ?? {}) as FakeSystemOneRequest['questions'],
+      };
+      requests.push(r);
+      try {
+        const reply = await handler(r);
+        if ('status' in reply) {
+          res.statusCode = reply.status;
+          res.end(JSON.stringify({ detail: reply.error }));
+          return;
+        }
+        res.end(
+          JSON.stringify({
+            model: reply.model ?? 'jev-test-1.0.0',
+            answers: reply.answers,
+            usage: { input_tokens: reply.inputTokens ?? 120, output_tokens: reply.outputTokens ?? 12 },
+          }),
+        );
+      } catch (err) {
+        res.statusCode = 500;
+        res.end(JSON.stringify({ detail: (err as Error).message }));
+      }
+    });
+  });
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  return {
+    url,
+    baseUrl: `${url}/v1`,
+    requests,
+    close: () => new Promise<void>((r) => server.close(() => r())),
+  };
+}
+
 export async function fakeLlm(handler: (r: FakeRequest) => FakeReply | Promise<FakeReply>) {
   const requests: FakeRequest[] = [];
   const server = createServer((req, res) => {
