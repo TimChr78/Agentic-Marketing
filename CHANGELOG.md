@@ -2,6 +2,12 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+### Added
+
+- **Decision models (TypeSafe JEV/System One, #194, epic #192).** A third AI provider kind, `decision`, calls TypeSafe's System One API through CommandCode (`https://api.commandcode.ai/provider/v1`) or TypeSafe directly (`https://api.typesafe.ai/v1`) with a state and up to 100 typed questions (`noul`, `choice`, `score`); answers are probabilities and confidence, never text. `ai.score` meters the call through the existing reservation and `ai_calls` path (kind `score`), and can store the first answer as a named score for a person in `profile_scores` with a TTL. `profiles.scores` reads it; a segment condition `{ "score": { "key", "gte" } }` and a journey `decision` node (two edges: threshold, fallback) use it. `journeys.simulate` shows the probability, and `ai.calibration` reports a reliability table and the Brier score against a later event. Personal data is refused by default: `allowPersonalData` is false and settable only by a person under a no-retention agreement, and the state builder sends only segment ids, event counts, agent-visible non-personal traits and context. `ai.calls` keeps a state hash, never the raw state. See [docs/decision-models.md](docs/decision-models.md). Migration `0064_decision_models.sql`.
+
 ## [0.6.1] - 2026-11-01
 
 ### Fixed

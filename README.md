@@ -114,6 +114,7 @@ On Kubernetes: the Helm chart in [`deploy/helm`](deploy/helm/agentic-marketing) 
 - [Operations](docs/deployment/operations.md) (`am init`, `am doctor`), [backups and restore](docs/deployment/backups.md) and [post-upgrade checks](docs/deployment/smoke.md) (`am smoke`).
 - [Edge decisions](docs/deployment/edge.md): the decision API on Cloudflare Workers.
 - [Push notifications](docs/push.md): browsers, Android and Apple apps.
+- [Decision models](docs/decision-models.md): TypeSafe JEV/System One scores, the decision journey node, the no-personal-data default and calibration.
 - [Single sign-on, SCIM and agent permissions](docs/identity.md).
 - [Architecture](docs/architecture/README.md) and its [ADRs](docs/architecture/adr/).
 - [Integrations](docs/integrations.md): webhooks, connectors, n8n, config as code, warehouse export.
