@@ -1,4 +1,4 @@
-import type { SegmentCondition } from '@agentic-marketing/artifacts';
+import type { DecisionQuestion, SegmentCondition } from '@agentic-marketing/artifacts';
 import { type JourneyDefinition, journeyNodeConfigs } from '@agentic-marketing/artifacts';
 import { durationSeconds } from '@agentic-marketing/segments';
 import type { z } from 'zod';
@@ -28,6 +28,18 @@ export type Node =
   | { id: string; label: string; kind: 'updateProfile'; trait: string; value: string | number | boolean | null; next: string | null }
   | { id: string; label: string; kind: 'aiDecide'; prompt: string; options: string[]; fallback: string; ms: number; edges: string[] }
   | { id: string; label: string; kind: 'aiGenerate'; prompt: string; ms: number; next: string | null }
+  | {
+      id: string;
+      label: string;
+      kind: 'decision';
+      question: DecisionQuestion;
+      threshold: number;
+      answer?: string;
+      scoreKey?: string;
+      ms: number;
+      matched: string | null;
+      fallback: string | null;
+    }
   | { id: string; label: string; kind: 'webhook'; endpoint: string; data?: string; next: string | null }
   | {
       id: string;
@@ -149,6 +161,21 @@ export function compile(def: JourneyDefinition): Graph {
       case 'aiGenerate': {
         const c = journeyNodeConfigs.aiGenerate.parse(n.config);
         nodes.set(n.id, { ...base, kind: 'aiGenerate', prompt: c.prompt, ms: durationSeconds(c.timeout) * 1000, next: edge(0) });
+        break;
+      }
+      case 'decision': {
+        const c = journeyNodeConfigs.decision.parse(n.config);
+        nodes.set(n.id, {
+          ...base,
+          kind: 'decision',
+          question: c.question,
+          threshold: c.threshold,
+          ...(c.answer ? { answer: c.answer } : {}),
+          ...(c.scoreKey ? { scoreKey: c.scoreKey } : {}),
+          ms: durationSeconds(c.timeout) * 1000,
+          matched: n.next?.[0]?.to ?? null,
+          fallback: n.next?.[1]?.to ?? null,
+        });
         break;
       }
       case 'webhook': {

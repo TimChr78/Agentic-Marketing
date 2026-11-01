@@ -27,6 +27,7 @@ const nodeKinds = [
   'updateProfile',
   'aiDecide',
   'aiGenerate',
+  'decision',
   'goal',
   'exit',
 ] as const;
@@ -65,6 +66,62 @@ function secondsIn(iso: string): number {
     total += Number(n) * units[unit];
   return total;
 }
+
+/**
+ * A typed question for a decision model (TypeSafe System One / JEV, #194). `noul` answers a
+ * yes/no with a probability, `choice` picks one of its criteria with a probability for each, and
+ * `score` places the state on an ordered scale. The key names the answer; the model never sees it.
+ */
+const DecisionKey = z
+  .string()
+  .regex(/^[a-z][a-z0-9_]{0,63}$/)
+  .describe('Answer key; the response uses it, the model does not see it');
+
+export const decisionQuestion = z.discriminatedUnion('type', [
+  z.object({
+    key: DecisionKey,
+    type: z.literal('noul'),
+    instructions: z.string().min(1).max(2000).describe('The yes/no question, e.g. "Is this person likely to convert?"'),
+    criteria: z
+      .object({ true: z.string().max(1000), false: z.string().max(1000) })
+      .partial()
+      .optional()
+      .describe('Optional descriptions of what yes and no mean'),
+  }),
+  z.object({
+    key: DecisionKey,
+    type: z.literal('choice'),
+    instructions: z.string().min(1).max(2000),
+    criteria: z
+      .record(z.string().min(1).max(100), z.string().max(1000))
+      .refine((c) => Object.keys(c).length >= 2 && Object.keys(c).length <= 255, 'A choice needs 2–255 labels')
+      .describe('Label → description; the response returns the chosen label and a probability for each'),
+  }),
+  z.object({
+    key: DecisionKey,
+    type: z.literal('score'),
+    instructions: z.string().min(1).max(2000),
+    criteria: z
+      .array(z.string().min(1).max(1000))
+      .min(2)
+      .max(10)
+      .describe('Ordered levels, low to high; the score is a position from 0 to levels-1'),
+  }),
+]);
+export type DecisionQuestion = z.output<typeof decisionQuestion>;
+
+/** 1–100 questions in one call, each with a unique key (the provider limit from #194). */
+export const decisionQuestions = z
+  .array(decisionQuestion)
+  .min(1)
+  .max(100)
+  .superRefine((questions, ctx) => {
+    const seen = new Set<string>();
+    questions.forEach((q, i) => {
+      if (seen.has(q.key)) ctx.addIssue({ code: 'custom', path: [i, 'key'], message: `Duplicate question key "${q.key}"` });
+      seen.add(q.key);
+    });
+  });
 
 /** Settings per node kind (validated on save). Kinds without one cannot be published yet. */
 export const journeyNodeConfigs = {
@@ -167,6 +224,35 @@ export const journeyNodeConfigs = {
     prompt: PromptRef.describe("A generate prompt (prm_…); its slots fill `content.<slot>` for later e-mails, or the slot's fallback text"),
     timeout: Iso.default('PT5M'),
   }),
+  decision: z
+    .object({
+      question: z
+        .lazy(() => decisionQuestion)
+        .describe('One typed question for a decision provider; the probability or normalised score is compared with the threshold'),
+      threshold: z.number().min(0).max(1).describe('At or above takes the first edge; below or no answer takes the fallback edge'),
+      answer: z
+        .string()
+        .min(1)
+        .max(100)
+        .optional()
+        .describe('For a choice question: the label whose probability is compared with the threshold'),
+      scoreKey: z
+        .string()
+        .regex(/^[a-z][a-z0-9_]{0,63}$/)
+        .optional()
+        .describe('Store the score for the person under this key (default: the question key)'),
+      timeout: Iso.default('PT5M').describe('How long the step may wait for the decision model before taking the fallback edge'),
+    })
+    .superRefine((c, ctx) => {
+      if (c.question.type === 'choice') {
+        if (!c.answer)
+          ctx.addIssue({ code: 'custom', path: ['answer'], message: 'A choice decision needs `answer`: the label to compare' });
+        else if (!(c.answer in c.question.criteria))
+          ctx.addIssue({ code: 'custom', path: ['answer'], message: `"${c.answer}" is not one of the question's criteria` });
+      } else if (c.answer) {
+        ctx.addIssue({ code: 'custom', path: ['answer'], message: '`answer` is only for choice questions' });
+      }
+    }),
   exit: z.object({}),
 } as const;
 
@@ -210,6 +296,12 @@ function checkJourneyStructure(nodes: z.output<typeof journeyNode>[], ctx: z.Ref
       ctx.addIssue({ code: 'custom', path: ['nodes', index, 'next'], message: `Branch "${n.id}" needs two edges: [yes, no]` });
     if (n.kind === 'action' && edges > 2)
       ctx.addIssue({ code: 'custom', path: ['nodes', index, 'next'], message: `Action "${n.id}" has at most two edges: [ok, error]` });
+    if (n.kind === 'decision' && edges !== 2)
+      ctx.addIssue({
+        code: 'custom',
+        path: ['nodes', index, 'next'],
+        message: `Decision "${n.id}" needs two edges: [at-or-above the threshold, fallback]`,
+      });
     if ((n.kind === 'waitEvent' || n.kind === 'waitUntil' || n.kind === 'goal') && edges > 2)
       ctx.addIssue({ code: 'custom', path: ['nodes', index, 'next'], message: `"${n.id}" has at most two edges: [matched, timeout]` });
   });
@@ -584,6 +676,7 @@ export type SegmentCondition =
   | { event: string; where?: Record<string, string | number | boolean>; count?: { gte?: number; lte?: number }; within?: string }
   | { consent: string }
   | { topic: string }
+  | { score: { key: string; gte?: number; lte?: number } }
   | { segment: string };
 export const segmentCondition: z.ZodType<SegmentCondition> = z.lazy(() =>
   z.union([
@@ -622,6 +715,21 @@ export const segmentCondition: z.ZodType<SegmentCondition> = z.lazy(() =>
           .string()
           .regex(/^[a-z][a-z0-9_]{1,40}$/)
           .describe('Topic the person currently subscribes to, using its default when they have no choice'),
+      })
+      .strict(),
+    z
+      .object({
+        score: z
+          .object({
+            key: z
+              .string()
+              .regex(/^[a-z][a-z0-9_]{0,63}$/)
+              .describe('A stored decision-model score, e.g. "conversion_propensity"'),
+            gte: z.number().min(0).max(1).optional().describe('Match when the score is at least this'),
+            lte: z.number().min(0).max(1).optional().describe('Match when the score is at most this'),
+          })
+          .strict()
+          .refine((c) => c.gte !== undefined || c.lte !== undefined, 'Set gte, lte or both'),
       })
       .strict(),
     z

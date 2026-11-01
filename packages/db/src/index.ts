@@ -10,6 +10,7 @@ export type {
   AgentUndo,
   AiCallKind,
   AiCallStatus,
+  AiProviderKind,
   AiUse,
   AlertChannel,
   AlertKind,

@@ -661,7 +661,11 @@ export const simulateJourney = defineCommand({
     ai: z
       .record(z.string(), z.string())
       .default({})
-      .describe('Options AI decision nodes take, by node id (default: their fallback). The simulation never calls a model.'),
+      .describe('Options aiDecide nodes take, by node id (default: their fallback). The simulation never calls a model.'),
+    scores: z
+      .record(z.string(), z.number().min(0).max(1))
+      .default({})
+      .describe('Probabilities decision nodes take, by node id (default: no answer, so the fallback edge).'),
     maxDays: z.number().int().min(1).max(365).default(90),
   }),
   output: z.object({
@@ -762,8 +766,12 @@ export const simulateJourney = defineCommand({
       const out = await advance(graph, state, new Date(clock), {
         key: `simulation:${input.profileId ?? 'anyone'}`,
         result: (node) => (input.actions[node] === 'error' ? { ok: false, error: 'given in the simulation' } : { ok: true }),
-        ai: (node) =>
-          input.ai[node] ? { option: input.ai[node], rationale: 'given in the simulation' } : { fallback: 'not called in a simulation' },
+        ai: (node) => {
+          if (input.scores[node] !== undefined) return { probability: input.scores[node] };
+          return input.ai[node]
+            ? { option: input.ai[node], rationale: 'given in the simulation' }
+            : { fallback: 'not called in a simulation' };
+        },
         branch: async (n) => {
           if (!input.profileId) return input.branches[n.id] === 'yes';
           if (n.segment) {
@@ -872,7 +880,11 @@ export const simulateJourney = defineCommand({
           s.type === 'step' ||
           s.type === 'converted' ||
           (s.type === 'resumed' &&
-            (node.kind === 'aiDecide' || node.kind === 'aiGenerate' || node.kind === 'action' || node.kind === 'waitUntil'))
+            (node.kind === 'aiDecide' ||
+              node.kind === 'aiGenerate' ||
+              node.kind === 'decision' ||
+              node.kind === 'action' ||
+              node.kind === 'waitUntil'))
         )
           steps.push({ after: fmt(clock), node: s.node, label: node.label, kind: node.kind, detail });
       }
@@ -880,7 +892,7 @@ export const simulateJourney = defineCommand({
       if (state.status !== 'waiting') break;
       // AI and action steps answer right away in a simulation.
       const at = graph.nodes.get(state.node)!;
-      if (at.kind === 'aiDecide' || at.kind === 'aiGenerate' || at.kind === 'action') {
+      if (at.kind === 'aiDecide' || at.kind === 'aiGenerate' || at.kind === 'decision' || at.kind === 'action') {
         state = { ...state, waitingEvent: null };
         continue;
       }

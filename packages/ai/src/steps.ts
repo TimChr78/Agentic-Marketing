@@ -1,10 +1,11 @@
-import { type PromptDefinition, publishedSingleton } from '@agentic-marketing/artifacts';
+import { type DecisionQuestion, decisionQuestions, type PromptDefinition, publishedSingleton } from '@agentic-marketing/artifacts';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { aiAllowed, personContext } from './context';
+import { DecisionError, decisionCall, decisionProvider, nonPersonalState, stateHash, storeProfileScore } from './decision';
 import { promptVersion, runClassify, runPrompt, runTestCase } from './prompts';
 import { AiUnavailable, estimateTokens, modelFor, type ReadyModel, releaseTokens, reserveTokens } from './providers';
 
@@ -98,24 +99,29 @@ async function prepare(tx: Tx, c: CallRow, deps: AiStepDeps): Promise<Prepared |
 async function finish(
   db: Db,
   c: CallRow,
-  prep: Prepared | null,
+  prep: (Pick<Prepared, 'person'> & Partial<Pick<Prepared, 'def' | 'version' | 'model'>>) | null,
   out: {
     status: 'done' | 'fallback' | 'failed';
     option?: string;
     rationale?: string;
     slots?: Record<string, string>;
+    /** A decision step's routing probability (0–1). */
+    probability?: number;
     output?: unknown;
     error?: string;
     inputTokens?: number;
     outputTokens?: number;
     latencyMs?: number;
     cached?: boolean;
+    providerId?: string;
+    model?: string;
   },
 ) {
   await db.withWorkspace(c.workspaceId, async (tx) => {
     const outcome = {
       seq: c.seq,
       ...(out.option ? { option: out.option, rationale: out.rationale ?? '' } : {}),
+      ...(out.probability !== undefined ? { probability: out.probability } : {}),
       ...(out.status !== 'done' ? { fallback: out.error ?? 'failed' } : {}),
     };
     // On a fallback the journey fills the slots with the prompt's fallback texts itself.
@@ -136,8 +142,8 @@ async function finish(
         status: late ? 'fallback' : out.status,
         leaseUntil: null,
         promptVersion: prep?.version ?? null,
-        providerId: prep?.model?.providerId ?? null,
-        model: prep?.model?.modelId ?? null,
+        providerId: prep?.model?.providerId ?? out.providerId ?? null,
+        model: prep?.model?.modelId ?? out.model ?? null,
         input: { ...c.input, ...(prep?.person ? { person: prep.person } : {}) },
         output: out.output ?? null,
         rationale: out.rationale ?? null,
@@ -343,6 +349,82 @@ async function handleClassify(db: Db, c: CallRow, deps: AiStepDeps) {
   }
 }
 
+/**
+ * One journey decision step: ask the decision provider its typed question about the person's
+ * non-personal state, wake the participant with the probability, and store the score.
+ */
+async function handleScore(db: Db, c: CallRow, deps: AiStepDeps) {
+  const raw = c.input as {
+    questions?: unknown;
+    answer?: unknown;
+    scoreKey?: unknown;
+    ttlHours?: unknown;
+    trigger?: { name?: unknown } | null;
+  };
+  const parsed = decisionQuestions.safeParse(raw.questions);
+  if (!parsed.success) {
+    const problem = parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ');
+    return finish(db, c, null, { status: 'fallback', error: `invalid_questions: ${problem}` });
+  }
+  const questions = parsed.data as DecisionQuestion[];
+  const scoreKey = typeof raw.scoreKey === 'string' ? raw.scoreKey : questions[0].key;
+  const ready = await db.withWorkspace(c.workspaceId, async (tx) => {
+    if (c.profileId) {
+      const consent = await aiAllowed(tx, c.workspaceId, c.profileId);
+      if (!consent.ok) return { error: consent.reason ?? 'no_lawful_basis' };
+    }
+    try {
+      const provider = await decisionProvider(tx, deps.kp);
+      if (!c.profileId) return { error: 'no_profile: a decision step needs a person' };
+      const triggerName = typeof raw.trigger?.name === 'string' ? raw.trigger.name : undefined;
+      const state = await nonPersonalState(tx, c.workspaceId, deps.events, c.profileId, triggerName ? { trigger: triggerName } : undefined);
+      if (!state) return { error: 'no_profile: the person does not exist (or was erased)' };
+      return { provider, state };
+    } catch (err) {
+      if (err instanceof AiUnavailable || err instanceof DecisionError) return { error: `${err.message}` };
+      throw err;
+    }
+  });
+  if ('error' in ready) return finish(db, c, null, { status: 'fallback', error: ready.error });
+  let result: Awaited<ReturnType<typeof decisionCall>>;
+  try {
+    result = await decisionCall(db, c.workspaceId, ready.provider, ready.state, questions);
+  } catch (err) {
+    return finish(db, c, { person: ready.state }, { status: 'fallback', error: `model_error: ${(err as Error).message}` });
+  }
+  const first = result.answers[0];
+  // Record the state hash, never the raw state, in the call row beside the question and threshold.
+  const call = { ...c, input: { ...c.input, stateHash: stateHash(ready.state) } };
+  // A choice routes on the probability of the configured label, not on whichever label won.
+  const answer = typeof raw.answer === 'string' ? raw.answer : undefined;
+  const probability = first?.type === 'choice' && answer ? (first.probabilities[answer] ?? 0) : first?.probability;
+  await finish(
+    db,
+    call,
+    { person: ready.state },
+    {
+      status: 'done',
+      probability,
+      output: { answers: result.answers },
+      inputTokens: result.inputTokens,
+      outputTokens: result.outputTokens,
+      latencyMs: result.latencyMs,
+      providerId: ready.provider.providerId,
+      model: result.modelVersion,
+    },
+  );
+  if (c.profileId && first)
+    await storeProfileScore(db, c.workspaceId, {
+      profileId: c.profileId,
+      key: scoreKey,
+      answer: first,
+      model: ready.provider.model,
+      modelVersion: result.modelVersion,
+      callId: c.id,
+      ttlHours: typeof raw.ttlHours === 'number' ? raw.ttlHours : 168,
+    }).catch((err) => logger.error({ err, call: c.id }, 'storing the decision score failed'));
+}
+
 /** Claims due AI steps across workspaces and answers them, a few at a time. Returns how many it handled. */
 export async function answerSteps(db: Db, deps: AiStepDeps, opts: { batch?: number } = {}): Promise<number> {
   const { rows } = await db.admin.query<{ workspace_id: string }>(
@@ -378,7 +460,9 @@ export async function answerSteps(db: Db, deps: AiStepDeps, opts: { batch?: numb
             ? handleTest(db, c, deps)
             : c.kind === 'classify'
               ? handleClassify(db, c, deps)
-              : handle(db, c, deps)
+              : c.kind === 'score'
+                ? handleScore(db, c, deps)
+                : handle(db, c, deps)
         ).catch((err) => logger.error({ err, call: c.id }, 'AI step failed')),
       ),
     );

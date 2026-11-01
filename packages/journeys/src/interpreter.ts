@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import type { DecisionQuestion } from '@agentic-marketing/artifacts';
 import type { Graph } from './graph';
 
 // The interpreter: from a participant's current node, run immediate nodes until the participant
@@ -24,7 +25,18 @@ export type Effect =
   | { kind: 'push'; node: string; seq: number; template: string }
   | { kind: 'updateProfile'; node: string; seq: number; trait: string; value: string | number | boolean | null }
   /** Ask the AI worker for a decision or text; the participant waits until it answers or the step times out. */
-  | { kind: 'ai'; node: string; seq: number; task: 'decide' | 'generate'; prompt: string }
+  | {
+      kind: 'ai';
+      node: string;
+      seq: number;
+      task: 'decide' | 'generate' | 'score';
+      prompt: string;
+      /** A decision step's typed question and threshold. */
+      questions?: DecisionQuestion[];
+      threshold?: number;
+      answer?: string;
+      scoreKey?: string;
+    }
   | { kind: 'webhook'; node: string; seq: number; endpoint: string; data?: string }
   | { kind: 'transform'; node: string; seq: number; set: string; expression: string }
   /** Run a connector action; the participant waits for its result or the timeout. */
@@ -36,6 +48,8 @@ export type Effect =
 export interface AiOutcome {
   option?: string;
   rationale?: string;
+  /** A decision step's routing probability in 0–1. */
+  probability?: number;
   /** Set when no model answered: no consent, no provider, budget, error or invalid answer. */
   fallback?: string;
 }
@@ -273,6 +287,46 @@ export async function advance(
           ? `fallback ${chosen} (${why})`
           : `AI chose ${chosen}${r?.rationale ? `: ${r.rationale}` : ''}`;
         if (!goTo(n.edges[n.options.indexOf(chosen)] ?? null)) return end('completed', n.id);
+        break;
+      }
+      case 'decision': {
+        if (!resuming) {
+          effects.push({
+            kind: 'ai',
+            node: n.id,
+            seq,
+            task: 'score',
+            prompt: '',
+            questions: [n.question],
+            threshold: n.threshold,
+            ...(n.answer ? { answer: n.answer } : {}),
+            ...(n.scoreKey ? { scoreKey: n.scoreKey } : {}),
+          });
+          steps.push({ node: n.id, seq, type: 'waiting', detail: 'for the decision model' });
+          return {
+            state: {
+              node,
+              status: 'waiting',
+              seq,
+              dueAt: new Date(now.getTime() + n.ms),
+              waitingEvent: null,
+              waitingUntil: null,
+              matched: false,
+              converted,
+            },
+            effects,
+            steps,
+          };
+        }
+        resuming = false;
+        const r = env.ai?.(n.id);
+        const why = r ? r.fallback : 'timed out';
+        const probability = r?.probability;
+        const above = why === undefined && typeof probability === 'number' && probability >= n.threshold;
+        steps[steps.length - 1].detail = why
+          ? `fallback (${why})`
+          : `probability ${probability?.toFixed(3)} ${above ? '≥' : '<'} ${n.threshold}`;
+        if (!goTo(above ? n.matched : n.fallback)) return end('completed', n.id);
         break;
       }
       case 'webhook':
