@@ -54,8 +54,10 @@ claude.ai Artifact. The demo is also a lazy chunk at `/demo` in the production b
 src/
   app/        shell, router, navigation, session, theme, search palette and the typed API client
   ui/         design system: buttons, fields, drawers, modals, toasts, tables, tabs, menus, code and diff views
-  features/   larger parts: approvals, previews, journey builder, providers, tokens, assets, brand, campaigns
+  features/   larger parts: agents, approvals, previews, the journey builder, artifacts, assets, brand, campaigns,
+              topics and content, templates and blocks, providers, tokens, integrations, insights, settings, copilot
   pages/      one file per route, grouped by area (approvals, build, design, audience, insights, settings, artifacts)
+  lib/        small shared helpers (layout, theme, CSV import)
   mock/       in-memory backend for the demo
   copilot/    scripted and live LLM loop for the demo
   screens/    demo screens
@@ -73,7 +75,7 @@ accessibility); calls made while building it are in
 ```bash
 pnpm vitest run --project web                     # unit and component tests (jsdom)
 pnpm e2e                                          # Playwright: builds the UI, starts the seeded server, runs e2e/*.spec.ts
-E2E_BASE=http://localhost:5173 pnpm e2e           # against a running dev UI and seeded server instead
+E2E_BASE=http://localhost:5173 pnpm e2e:dev       # against a running dev UI and seeded server instead
 CHROMIUM=/usr/bin/chromium pnpm e2e               # use a system Chromium instead of Playwright's download
 node e2e/screenshots.mjs docs/design/screenshots  # screenshots of every screen, light and dark, 1440 and 768 px
 ```
