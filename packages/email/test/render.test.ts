@@ -1,6 +1,6 @@
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { compileMjml, renderTemplate, validateTemplate } from '../src/render';
+import { compileMjml, renderTemplate, stripLiquidTags, validateTemplate } from '../src/render';
 
 const welcome = {
   purpose: 'marketing_email',
@@ -98,5 +98,18 @@ describe('mjml rendering stays sandboxed', () => {
     const started = Date.now();
     await compileMjml(`<mjml><mj-body><mj-section><mj-column>${rows}</mj-column></mj-section></mj-body></mjml>`);
     expect(Date.now() - started).toBeLessThan(10_000);
+  });
+});
+
+describe('stripLiquidTags', () => {
+  it('removes Liquid tags like the regex it replaces, in linear time', () => {
+    expect(stripLiquidTags('<p>{% if a %}x{% endif %}</p>')).toBe('<p>x</p>');
+    expect(stripLiquidTags('{% open without close')).toBe('{% open without close');
+    expect(stripLiquidTags('a {{ b }} c')).toBe('a {{ b }} c');
+    // Many unclosed tags no longer take polynomial time.
+    const hostile = '{{%'.repeat(50_000);
+    const started = Date.now();
+    expect(stripLiquidTags(hostile)).toBe(hostile);
+    expect(Date.now() - started).toBeLessThan(500);
   });
 });

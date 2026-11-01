@@ -161,6 +161,24 @@ export function pngRenditionUrls(value: string): string {
 }
 
 /** Problems that make a template unusable, for saving: Liquid that does not parse, MJML that does not compile. */
+/**
+ * The text without Liquid tags (`{% … %}`), in one linear scan: a lazy regex over user MJML
+ * backtracks badly on input with many unclosed `{%` (CodeQL js/polynomial-redos).
+ */
+export function stripLiquidTags(src: string): string {
+  let out = '';
+  let i = 0;
+  while (i < src.length) {
+    const open = src.indexOf('{%', i);
+    if (open < 0) break;
+    const close = src.indexOf('%}', open + 2);
+    if (close < 0) break;
+    out += src.slice(i, open);
+    i = close + 2;
+  }
+  return out + src.slice(i);
+}
+
 export async function validateTemplate(t: EmailTemplate): Promise<string[]> {
   const problems: string[] = [];
   for (const [field, src] of [
@@ -179,7 +197,7 @@ export async function validateTemplate(t: EmailTemplate): Promise<string[]> {
   if (!problems.length) {
     try {
       // Compile with Liquid stripped, so MJML structure errors surface independently of data.
-      const r = await mjml2html(t.mjml.replace(/\{%[\s\S]*?%\}/g, ''), {
+      const r = await mjml2html(stripLiquidTags(t.mjml), {
         validationLevel: 'soft',
         ignoreIncludes: true,
         keepComments: false,

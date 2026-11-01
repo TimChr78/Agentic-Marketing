@@ -162,3 +162,14 @@ describe('the personal-data guard', () => {
     expect(personalDataIn({ traits: { plan: 'pro' }, segments: ['seg_1'], eventCounts: { page: 3 } })).toBeNull();
   });
 });
+
+describe('systemOneUrl', () => {
+  it('appends /systemone once and trims any number of trailing slashes quickly', () => {
+    expect(systemOneUrl('https://api.commandcode.ai/provider/v1')).toBe('https://api.commandcode.ai/provider/v1/systemone');
+    expect(systemOneUrl('https://api.typesafe.ai/v1///')).toBe('https://api.typesafe.ai/v1/systemone');
+    expect(systemOneUrl('https://api.typesafe.ai/v1/systemone/')).toBe('https://api.typesafe.ai/v1/systemone');
+    const started = Date.now();
+    systemOneUrl(`https://x${'/'.repeat(100_000)}a`);
+    expect(Date.now() - started).toBeLessThan(500);
+  });
+});

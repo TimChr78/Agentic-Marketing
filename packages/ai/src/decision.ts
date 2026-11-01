@@ -78,8 +78,11 @@ export const MAX_STATE_AND_QUESTION_TOKENS = 32_000;
 const tokensOf = (v: unknown) => Math.ceil(JSON.stringify(v ?? '').length / 4);
 
 export function systemOneUrl(baseUrl: string): string {
-  const trimmed = baseUrl.replace(/\/+$/, '');
-  return /\/systemone$/.test(trimmed) ? trimmed : `${trimmed}/systemone`;
+  // A loop, not a regex: the base URL is user input and `/\/+$/` backtracks on many slashes.
+  let end = baseUrl.length;
+  while (end > 0 && baseUrl[end - 1] === '/') end--;
+  const trimmed = baseUrl.slice(0, end);
+  return trimmed.endsWith('/systemone') ? trimmed : `${trimmed}/systemone`;
 }
 
 /** Refuses a request the provider would reject, before it is metered or sent. */
