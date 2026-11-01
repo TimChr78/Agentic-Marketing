@@ -92,6 +92,7 @@ const MIGRATION_RELEASES: Record<string, string> = {
   '0061_enrollment_job_versions.sql': '0.6.1',
   '0062_agent_action_level.sql': '0.6.1',
   '0063_hosted_triggers.sql': '0.7.0',
+  '0065_hosted_memory.sql': '0.7.0',
   '0066_password_reset.sql': '0.7.0',
 };
 

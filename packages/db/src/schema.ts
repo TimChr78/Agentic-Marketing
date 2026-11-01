@@ -1333,6 +1333,8 @@ export const hostedAgents = pgTable(
     runningStartedAt: ts('running_started_at'),
     /** Event types that start a run (#338), recorded through the agent subscription below. */
     triggers: text('triggers').array().$type<AgentEventType[]>().notNull().default([]),
+    /** Skill artifact ids whose published versions are put into each run's context (#340). */
+    skills: text('skills').array().$type<string[]>().notNull().default([]),
     triggerFilter: jsonb('trigger_filter').$type<Record<string, string | string[]>>().notNull().default({}),
     triggerSubscriptionId: text('trigger_subscription_id'),
     lastEventId: bigint('last_event_id', { mode: 'number' }).notNull().default(0),
@@ -1361,6 +1363,28 @@ export const hostedAgentRuns = pgTable(
     /** What started the run: its schedule (or Run now), or an event (#338). */
     trigger: text('trigger').$type<'schedule' | 'event'>().notNull().default('schedule'),
     eventIds: jsonb('event_ids').$type<number[]>().notNull().default([]),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
+/**
+ * A hosted agent's own working notes (#340): bounded (at most 50 notes and 10,000 characters per
+ * agent, each note at most 1,000) and inspectable. A run or a person writes one; people edit and
+ * delete them, and the agent may delete its own. Notes are not evidence-backed conclusions — those
+ * are learnings (#311) — and they must not hold personal data.
+ */
+export const hostedAgentMemory = pgTable(
+  'hosted_agent_memory',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    agentId: text('agent_id').notNull(),
+    text: text('text').notNull(),
+    /** The run that wrote it, or the person; exactly one is set. */
+    createdByRunId: text('created_by_run_id'),
+    createdByUserId: text('created_by_user_id'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
   },
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
 );

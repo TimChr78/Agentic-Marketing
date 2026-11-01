@@ -34,6 +34,17 @@ export function redactText(s: string): string {
   return out;
 }
 
+/** Which kinds of personal data the same detectors find in free text, e.g. ["[email]"]. */
+export function personalDataIn(s: string): string[] {
+  const found = new Set<string>();
+  for (const [re, label] of detectors) {
+    re.lastIndex = 0;
+    if (re.test(s)) found.add(label);
+    re.lastIndex = 0;
+  }
+  return [...found];
+}
+
 export function redact<T>(v: T, depth = 0): T {
   if (typeof v === 'string') return redactText(v) as T;
   if (depth > 5 || v === null || typeof v !== 'object') return v;

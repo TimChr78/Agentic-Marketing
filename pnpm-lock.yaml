@@ -506,6 +506,9 @@ importers:
 
   packages/auth:
     dependencies:
+      '@agentic-marketing/ai':
+        specifier: workspace:*
+        version: link:../ai
       '@agentic-marketing/commands':
         specifier: workspace:*
         version: link:../commands

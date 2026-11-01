@@ -37,6 +37,7 @@ export function HostedAgentDialog({
 }) {
   const toast = useToast();
   const providers = useApi(() => api.call('aiProviders.list', {}), []);
+  const skillArts = useApi(() => api.call('artifacts.list', { type: 'skill', limit: 200 }), []);
   const first = HOSTED_AGENT_TEMPLATES[0]!;
   const initial = agent
     ? {
@@ -59,6 +60,7 @@ export function HostedAgentDialog({
   const [maxToolCallsPerRun, setMaxToolCalls] = useState(String(initial.maxToolCallsPerRun));
   // Event triggers (#338) come from the template; agents.updateHosted changes them over the API.
   const [triggers, setTriggers] = useState(initial.triggers);
+  const [skills, setSkills] = useState<string[]>(agent?.skills ?? []);
   const [modelProviderId, setModelProviderId] = useState(agent?.modelProviderId ?? '');
   const [enabled, setEnabled] = useState(agent?.enabled ?? true);
   const [error, setError] = useState<string | null>(null);
@@ -78,6 +80,8 @@ export function HostedAgentDialog({
 
   const toggleScope = (key: HostedScope, on: boolean) =>
     setScopes((current) => (on ? [...new Set([...current, key])] : current.filter((s) => s !== key)));
+  const toggleSkill = (id: string, on: boolean) =>
+    setSkills((current) => (on ? [...new Set([...current, id])] : current.filter((s) => s !== id)));
 
   const submit = async () => {
     if (!name.trim()) return setError('Give the agent a name.');
@@ -96,6 +100,7 @@ export function HostedAgentDialog({
           maxTokensPerRun: Number(maxTokensPerRun),
           maxToolCallsPerRun: Number(maxToolCallsPerRun),
           triggers,
+          skills,
           ...(modelProviderId ? { modelProviderId } : {}),
         });
         toast.success(`Created “${created.name}”. It runs ${created.scheduleText.toLowerCase()} (${created.timeZone}).`);
@@ -112,6 +117,7 @@ export function HostedAgentDialog({
           maxToolCallsPerRun: Number(maxToolCallsPerRun),
           modelProviderId: modelProviderId || null,
           enabled,
+          skills,
         });
         toast.success(`Saved “${updated.name}”.`);
         onSaved(updated.agentId);
@@ -193,6 +199,27 @@ export function HostedAgentDialog({
               />
             ))}
           </div>
+        </FieldGroup>
+
+        <FieldGroup
+          legend="Skills"
+          hint="Reusable instruction blocks for this agent. Only a skill’s published version is put into a run; a draft is listed here but ignored until a person publishes it."
+        >
+          {(skillArts.data?.artifacts ?? []).length === 0 ? (
+            <p className="text-[12px] text-muted">No skills yet. Create one under Artifacts → Skill to reuse know-how across agents.</p>
+          ) : (
+            <div className="grid gap-2 sm:grid-cols-2">
+              {(skillArts.data?.artifacts ?? []).map((skill) => (
+                <Checkbox
+                  key={skill.id}
+                  label={skill.name}
+                  hint={skill.publishedVersion === null ? 'Draft; not used until published' : `Published v${skill.publishedVersion}`}
+                  checked={skills.includes(skill.id)}
+                  onChange={(e) => toggleSkill(skill.id, e.target.checked)}
+                />
+              ))}
+            </div>
+          )}
         </FieldGroup>
 
         <div className="grid gap-4 sm:grid-cols-2">
