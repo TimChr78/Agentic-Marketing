@@ -66,6 +66,10 @@ Two environment variables adapt the MCP surface to clients that are picky about 
 
 An agent appears the first time a credential acts, with the person who created or connected it as sponsor. Give it a name and a description right away, then attach a mandate if it should do more than propose.
 
+## The copilot as an agent
+
+A copilot conversation normally acts for you. Its sponsor, or an admin, can start a conversation **as an agent** instead (#339): choose the agent under **Act as** when you open a new chat (or pass `agentId` to `POST /api/copilot`). The conversation then acts as that agent: its permissions are the sponsor's role ∩ the copilot's scopes, every change goes through the policy engine under the agent's mandate, is recorded in the agent's activity, counts against its limits and can be held, sent to a person or refused like any agent action. The model is told which agent it is, its mandate and the workspace's active learnings. The agent gets a `copilot` credential, so pausing or revoking it stops its conversations too. Use it to work with an agent interactively, for example to draft the week's issue as the newsletter agent before letting it run on its own.
+
 ## Hosted agents
 
 A **hosted agent** is an agent the platform runs itself on a schedule, for self-hosters who have no agent runtime to connect. It is an agent like any other: it has a sponsor, a status, a mandate and a ledger, and every tool call passes the same executor, permissions and policy engine. The only difference is who starts the run.

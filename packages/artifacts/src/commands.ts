@@ -1435,9 +1435,10 @@ async function refuseIfAgentStopped(ctx: CommandContext, r: { requestedByType: s
 
 /** The agent behind an approval request's credential, if an agent requested it. */
 /** The agent credential behind an approval's `requested_by_client`: `token:<id>`, `hosted:<agent id>` or an OAuth client id. */
-export function agentCredentialOf(client: string): readonly ['api_token' | 'oauth_client' | 'hosted', string] {
+export function agentCredentialOf(client: string): readonly ['api_token' | 'oauth_client' | 'hosted' | 'copilot', string] {
   if (client.startsWith('token:')) return ['api_token', client.slice('token:'.length)] as const;
   if (client.startsWith('hosted:')) return ['hosted', client.slice('hosted:'.length)] as const;
+  if (client.startsWith('copilot:')) return ['copilot', client.slice('copilot:'.length)] as const;
   return ['oauth_client', client] as const;
 }
 

@@ -806,6 +806,8 @@ export const copilotConversations = pgTable(
     id: text('id').notNull(),
     userId: text('user_id').notNull(),
     title: text('title').notNull(),
+    /** The agent this conversation acts as (#339); null: it acts for the person. */
+    agentId: text('agent_id'),
     createdAt: ts('created_at').notNull().defaultNow(),
     updatedAt: ts('updated_at').notNull().defaultNow(),
   },
@@ -1191,7 +1193,7 @@ export const edgeTargets = pgTable('edge_targets', {
 });
 
 export type AgentStatus = 'active' | 'paused' | 'revoked';
-export type AgentCredentialKind = 'api_token' | 'oauth_client' | 'hosted';
+export type AgentCredentialKind = 'api_token' | 'oauth_client' | 'hosted' | 'copilot';
 export type HostedAgentRunStatus = 'ok' | 'failed' | 'skipped';
 export type PolicyDecision = 'allow' | 'hold' | 'ask' | 'deny';
 

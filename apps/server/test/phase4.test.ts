@@ -65,11 +65,11 @@ const consent = (userId: string, ai: boolean) => ({
   context: { consent: { categoryPreferences: { marketing_email: true, ai_processing: ai } } },
 });
 
-async function copilot(u: User, message: string, conversationId?: string) {
+async function copilot(u: User, message: string, conversationId?: string, agentId?: string) {
   const res = await fetch(`${t.base}/api/copilot`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', cookie: u.cookie },
-    body: JSON.stringify({ message, conversationId }),
+    body: JSON.stringify({ message, conversationId, agentId }),
   });
   if (!res.ok) return { status: res.status, body: await res.json(), events: [] as Record<string, any>[] };
   const events = (await res.text())
@@ -393,5 +393,51 @@ describe('copilot', () => {
       ['artifacts.create'],
       ['artifacts.list'],
     ]);
+  });
+
+  it('can act as an agent under its mandate, for the agent’s sponsor or an admin (#339)', async () => {
+    const api = t.api(owner);
+    const token = (await api.call('apiTokens.create', { name: 'Copilot agent', scopes: ['artifacts:read', 'artifacts:write'] })).token;
+    const agentId = (
+      await (
+        await fetch(`${t.base}/v1/agents.get`, {
+          method: 'POST',
+          headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+          body: '{}',
+        })
+      ).json()
+    ).id as string;
+
+    const r = await copilot(owner, 'Make a note about the agent launch', undefined, agentId);
+    expect(r.status).toBe(200);
+    const noteId = r.events.find((e) => e.type === 'toolResult')!.output.artifactId;
+    expect(noteId).toMatch(/^not_/);
+    // The model was told who it acts as.
+    expect(llm.requests.at(-1)!.system).toContain(`you act as the agent`);
+    // The write is the agent's: in its activity, audited under its copilot credential.
+    const { actions } = await api.call('agents.activity', { agentId, limit: 5 });
+    expect(actions.find((a) => a.command === 'artifacts.create')).toBeTruthy();
+    const audit = await api.call('audit.list', { limit: 10 });
+    expect(audit.entries.find((e) => e.command === 'artifacts.create' && e.clientId?.startsWith('copilot:'))).toMatchObject({
+      clientId: `copilot:${agentId}`,
+    });
+    const conversationId = r.events.at(-1)!.conversationId;
+    expect((await api.call('copilot.conversations', {})).conversations.find((c) => c.id === conversationId)).toMatchObject({ agentId });
+    expect((await api.call('agents.get', { id: agentId })).credentials.map((c) => c.kind)).toContain('copilot');
+
+    // Someone who is neither the sponsor nor an admin cannot talk as it.
+    const colleague = await t.signUp(`colleague-agent-${Date.now()}@example.com`);
+    const { rows } = await t.srv.db.admin.query('SELECT workspace_id FROM workspace_members WHERE user_id = $1', [owner.id]);
+    await t.srv.db.admin.query(`INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'marketer')`, [
+      rows[0].workspace_id,
+      colleague.id,
+    ]);
+    expect((await copilot(colleague, 'hi', undefined, agentId)).status).toBe(403);
+
+    // A paused agent cannot be talked as.
+    await api.call('agents.pause', { id: agentId, reason: 'Review' });
+    const paused = await copilot(owner, 'hi', undefined, agentId);
+    expect(paused.status).toBe(403);
+    expect(paused.body.message).toContain('paused');
   });
 });

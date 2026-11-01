@@ -103,7 +103,7 @@ export async function oauthClientName(db: Db, clientId: string): Promise<string>
 
 // --- Commands -----------------------------------------------------------------------------------
 
-const Credential = z.object({ kind: z.enum(['api_token', 'oauth_client', 'hosted']), id: z.string(), since: z.string() });
+const Credential = z.object({ kind: z.enum(['api_token', 'oauth_client', 'hosted', 'copilot']), id: z.string(), since: z.string() });
 const Agent = z.object({
   id: z.string(),
   name: z.string(),

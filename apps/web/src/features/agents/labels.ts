@@ -45,6 +45,7 @@ export const CREDENTIAL_KIND: Record<Agent['credentials'][number]['kind'], strin
   api_token: 'API token',
   oauth_client: 'MCP client',
   hosted: 'Hosted run',
+  copilot: 'Copilot conversation',
 };
 
 /** Kinds with counts: "1 API token, 2 MCP clients". Empty when the agent has no credential (unlikely). */

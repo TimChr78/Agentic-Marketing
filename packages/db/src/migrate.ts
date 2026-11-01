@@ -93,6 +93,7 @@ const MIGRATION_RELEASES: Record<string, string> = {
   '0062_agent_action_level.sql': '0.6.1',
   '0063_hosted_triggers.sql': '0.7.0',
   '0066_password_reset.sql': '0.7.0',
+  '0067_copilot_agents.sql': '0.7.0',
 };
 
 export function releaseForMigrationHead(head: string | null): string | null {

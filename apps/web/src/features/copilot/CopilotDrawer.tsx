@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { api, errText } from '../../app/api';
 import { useWorkspace } from '../../app/session';
 import { useApi } from '../../app/useApi';
-import { Alert, Button, Drawer, EmptyState, IconButton, JsonView, StatusPill, Tag, Textarea, timeAgo, useConfirm } from '../../ui';
+import { Alert, Button, Drawer, EmptyState, IconButton, JsonView, Select, StatusPill, Tag, Textarea, timeAgo, useConfirm } from '../../ui';
 
 // The copilot talks to the real API: the server runs the conversation with the workspace's
 // copilot provider, as an MCP client with an agent principal. Text streams in as the model
@@ -52,19 +52,26 @@ const SUGGESTIONS = [
 ];
 
 export function CopilotDrawer({ open, onClose }: { open: boolean; onClose: () => void }) {
-  const { can } = useWorkspace();
+  const { can, user } = useWorkspace();
   const [items, setItems] = useState<Item[]>([]);
   const [conversationId, setConversationId] = useState<string | undefined>();
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [tokens, setTokens] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  // The agent a new conversation acts as (#339); an existing conversation keeps its own.
+  const [asAgent, setAsAgent] = useState('');
+  const [conversationAgent, setConversationAgent] = useState<string | null>(null);
   const [dialog, confirm] = useConfirm();
   const end = useRef<HTMLDivElement>(null);
   // biome-ignore lint/correctness/useExhaustiveDependencies: scroll to the newest message whenever the list changes, which the body does not read
   useEffect(() => end.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }), [items]);
 
   const past = useApi(() => api.call('copilot.conversations', {}), [], { skip: !open });
+  // Agents this person may talk as: ones they sponsor, or any active agent for an admin.
+  const agents = useApi(() => api.call('agents.list', {}), [], { skip: !open });
+  const actable = (agents.data?.agents ?? []).filter((a) => a.status === 'active' && (a.sponsor.id === user.id || can('workspace:admin')));
+  const agentName = (id: string | null) => (id ? (agents.data?.agents.find((a) => a.id === id)?.name ?? id) : null);
   const loadPast = () => void past.reload();
 
   async function openConversation(id: string) {
@@ -75,6 +82,7 @@ export function CopilotDrawer({ open, onClose }: { open: boolean; onClose: () =>
       const streaming = { id: null as string | null };
       setItems((c.events as Event[]).reduce<Item[]>((xs, e) => apply(xs, e, streaming), []));
       setConversationId(c.id);
+      setConversationAgent(past.data?.conversations.find((x) => x.id === id)?.agentId ?? null);
     } catch (e) {
       setError(errText(e));
     }
@@ -88,8 +96,10 @@ export function CopilotDrawer({ open, onClose }: { open: boolean; onClose: () =>
     setItems((xs) => [...xs, { id: nid(), role: 'user', text }]);
     const streaming = { id: null as string | null };
     const on = (e: Event) => {
-      if (e.type === 'conversation') setConversationId(e.id);
-      else if (e.type === 'done') {
+      if (e.type === 'conversation') {
+        setConversationId(e.id);
+        if (!conversationId) setConversationAgent(asAgent || null);
+      } else if (e.type === 'done') {
         setTokens((t) => t + e.usage.inputTokens + e.usage.outputTokens);
         loadPast();
       } else setItems((xs) => apply(xs, e, streaming));
@@ -99,7 +109,7 @@ export function CopilotDrawer({ open, onClose }: { open: boolean; onClose: () =>
         method: 'POST',
         credentials: 'include',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ message: text, conversationId }),
+        body: JSON.stringify({ message: text, conversationId, ...(!conversationId && asAgent ? { agentId: asAgent } : {}) }),
       });
       if (!res.ok || !res.body) {
         const body = await res.json().catch(() => ({}));
@@ -160,6 +170,7 @@ export function CopilotDrawer({ open, onClose }: { open: boolean; onClose: () =>
             onClick={() => {
               setItems([]);
               setConversationId(undefined);
+              setConversationAgent(null);
               setError(null);
             }}
           >
@@ -267,6 +278,23 @@ export function CopilotDrawer({ open, onClose }: { open: boolean; onClose: () =>
           <div ref={end} />
         </div>
         <div className="space-y-2 border-t border-line px-5 py-3">
+          {conversationId
+            ? conversationAgent && (
+                <p className="text-[12px] text-muted">
+                  Acting as the agent <strong>{agentName(conversationAgent)}</strong>: changes follow its mandate and appear in its
+                  activity.
+                </p>
+              )
+            : actable.length > 0 && (
+                <Select compact className="w-auto" aria-label="Act as" value={asAgent} onChange={(e) => setAsAgent(e.target.value)}>
+                  <option value="">Act as me</option>
+                  {actable.map((a) => (
+                    <option key={a.id} value={a.id}>
+                      Act as {a.name}
+                    </option>
+                  ))}
+                </Select>
+              )}
           <Textarea
             rows={2}
             value={input}
