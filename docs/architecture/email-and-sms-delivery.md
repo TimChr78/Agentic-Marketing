@@ -111,6 +111,6 @@ SMS is a second **channel**, not a replacement for e-mail. It shares the gateway
 - **Journey node** `sms` and broadcast support (`channel: sms`).
 - **Costs:** price per segment and an optional monthly budget per provider. `smsTemplates.preview` estimates the cost; a text that would exceed the budget is not sent (`budget: …`).
 
-## Push (later, wave 2 Phase 11)
+## Push (built in wave 2, Phase 11)
 
-Web push (VAPID, service worker in the SDK) first; mobile push (FCM and APNs) when a customer needs it.
+Push is a channel like e-mail and SMS: push templates (`psh_…`) with a purpose, the same send gateway, and push nodes in journeys and broadcasts. Three providers ship: web push (VAPID, with the SDK's service worker), Firebase Cloud Messaging (`fcm`) and Apple Push Notification service (`apns`). Setup, device registration and what is not built yet are in [docs/push.md](../push.md).
