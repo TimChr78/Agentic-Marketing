@@ -185,6 +185,17 @@ async function checkPublishable(ctx: CommandContext, type: string, content: unkn
 /** Called after an artifact version is published (once committed), e.g. to drop caches of its type. */
 export const publishListeners: ((ctx: CommandContext, artifact: { id: string; type: string; workspaceId: string }) => Promise<void>)[] = [];
 
+/**
+ * Called inside the publishing transaction, after the version is live, e.g. to move an editorial
+ * topic to approved (#141). Because it runs in the same transaction, the change lands with the
+ * publish or not at all; a bundle's dry run rolls it back with the rest.
+ */
+export const publishHooks: ((
+  ctx: CommandContext,
+  artifact: { id: string; type: string; workspaceId: string },
+  version: number,
+) => Promise<void>)[] = [];
+
 async function publishVersion(ctx: CommandContext, artifactId: string, number: number) {
   const a = await loadArtifact(ctx, artifactId);
   await checkPublishable(ctx, a.type, (await loadVersion(ctx, artifactId, number)).content, artifactId);
@@ -195,6 +206,7 @@ async function publishVersion(ctx: CommandContext, artifactId: string, number: n
     .set({ publishedVersion: number, updatedAt: new Date() })
     .where(and(eq(schema.artifacts.workspaceId, ctx.principal.workspaceId), eq(schema.artifacts.id, artifactId)));
   const artifact = { id: artifactId, type: a.type, workspaceId: ctx.principal.workspaceId };
+  for (const h of publishHooks) await h(ctx, artifact, number);
   for (const l of publishListeners) ctx.afterCommit ? ctx.afterCommit(() => l(ctx, artifact)) : await l(ctx, artifact);
 }
 

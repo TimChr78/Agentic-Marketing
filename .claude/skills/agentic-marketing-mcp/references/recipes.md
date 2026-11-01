@@ -3,6 +3,7 @@
 Each step is one tool call: `tool {input}`. Replace `…` ids with real ones from earlier calls. Under the approval policy "agent changes need a person", `artifacts.requestPublish` creates an approval request. Anything that references an artifact (a broadcast's template, a journey's templates) can be published only after that artifact is, so get the dependencies approved first.
 
 ## Contents
+- Install a starter recipe
 - Weekly newsletter
 - Segments for the newsletter
 - Welcome journey after double opt-in
@@ -10,6 +11,7 @@ Each step is one tool call: `tool {input}`. Replace `…` ids with real ones fro
 - AI-chosen branch with a tested prompt
 - Promoting changes from staging
 - Campaign with a control group
+- Campaign agent: goal to approved brief to draft bundle
 - Weekly issue from reusable blocks
 - Send the weekly issue under a mandate
 - Topics, preference centre and the archive
@@ -17,6 +19,25 @@ Each step is one tool call: `tool {input}`. Replace `…` ids with real ones fro
 - Static and CSV audiences
 - Journey waits and business entry keys
 - Reporting the week
+- Lifecycle optimiser: promote a journey variant against a holdout
+- Newsletter editor: the weekly loop
+- Experimentation agent: web experiences
+- Audience curator: sizes, overlaps and sunset policies
+
+## Install a starter recipe
+
+The server ships welcome/DOI, lead-magnet drip, weekly newsletter and win-back recipes; `docs/recipes.md` has the format. An install creates version 1 drafts only, so it is a safe first step.
+
+1. Read the gallery and one recipe:
+   `recipes.list {}`, then `recipes.get {"recipeId":"welcome-doi"}` for its parameters, prerequisites, docs and checklist.
+2. Check it with the person's values before writing:
+   `recipes.preview {"recipeId":"welcome-doi","params":{"siteName":"Fjeldalen","siteUrl":"https://fjeldalen.example"}}` returns each prerequisite (`ok`, `message`) and the resolved artifacts, with preview ids that show how references resolve. No rows are written.
+3. If a prerequisite is missing, fix it or say which one. The usual one is an e-mail provider: a person adds it in Settings → Providers with `useFor: ["marketing"]` (`emailProviders.create` is people-only). A purpose with the e-mail channel is the other; the default `marketing_email` is enough in a fresh workspace.
+4. Install the drafts:
+   `recipes.install {"recipeId":"welcome-doi","params":{…}}` returns the new ids, the parameters, the prerequisites and `next`. It never publishes.
+5. Review and submit what should go live: `templates.preview`, `journeys.simulate`, `broadcasts.preview` as appropriate, then `artifacts.requestPublishBundle` with the drafts that belong together. Under "agent changes need a person" the result is `in_review`; pass the `reviewUrl` on with a one-line summary.
+
+Installing again creates another set of drafts; it never overwrites. To move to a newer recipe version, preview it, install it, compare the new drafts with the live artifacts and publish only what you intend.
 
 ## Weekly newsletter
 
@@ -113,6 +134,36 @@ Nothing is deleted by an import. In git, `scripts/am-config.mjs pull|push` does 
 3. Check membership: `campaigns.of {"artifactId":"bct_…"}` lists the published campaigns a member belongs to; `campaigns.members {"campaignId":"cmp_…"}` shows its members and their last send.
 4. Read the result after sending: `campaigns.holdoutResult {"campaignId":"cmp_…"}` returns control and treatment `entered`, `converted`, `conversionRate`, `revenue`, `absoluteLift`, `relativeLift`, `ci95`, `minSampleSizeMet` and a `verdict`. Report `not_enough_data` as such, never as "no effect".
 5. `campaigns.archive {"campaignId":"cmp_…"}` stops treating it as live without changing its members; it no longer answers `campaigns.of` or supplies its shared UTM campaign.
+
+## Campaign agent: goal to approved brief to draft bundle
+
+The campaign programme (#64): an agent turns a goal into a typed brief, a person approves it, and the agent builds the draft bundle. It never publishes the brief itself and never publishes the campaign; a person decides both.
+
+1. **Know the borders and the ground.** `agents.get {}`, `workspace.autonomy {}`, `learnings.list {}` and the `business-context://current` resource. Check the segment you intend to use: `segments.preview {"artifactId":"seg_…"}`.
+2. **Draft the brief** as a versioned `campaign_brief` artifact. Every field is typed, and `assumptions`/`warnings` are where gaps go; do not invent a voucher, a segment count or an offer.
+   ```json
+   artifacts.create {"type":"campaign_brief","name":"Win-back November","content":{
+     "objective":"Win back one-time buyers who stopped opening the newsletter",
+     "goal":{"measure":"campaign.conversion_rate","kind":"conversion","event":"Order Completed","target":2,"direction":"up","attributionDays":14},
+     "audience":{"description":"One-time buyers from the last 12 months who allow marketing e-mail","segmentIds":["seg_…"]},
+     "message":{"key":"Your next order is 15% off","tone":"warm","language":"en"},
+     "offer":{"description":"15% off the next order","source":"voucher pool vip-2026"},
+     "channels":[{"channel":"email"}],
+     "schedule":{"mode":"once","sendAt":"2026-11-20T09:00:00Z"},
+     "guardrails":{"unsubscribeRate":0.005},
+     "successCriteria":["2% of the treatment arm orders within 14 days"],
+     "holdout":{"percent":10,"minSampleSize":200},
+     "assumptions":["The audience allows marketing e-mail"]}}
+   ```
+   The brief is refused at approval if it names an unpublished segment, a one-off send in the past, or a holdout without `goal.event`.
+3. **Submit it for approval.** `artifacts.requestPublish {"artifactId":"cpb_…","note":"Win-back brief: 10% holdout, 2% conversion goal"}` → `in_review`. Only a person can approve; the agent cannot approve its own brief. If a required input is missing or ambiguous, ask a small number of clarifying questions or put the assumption in the brief instead of guessing.
+4. **Plan from the approved version.** `campaigns.plan {"briefId":"cpb_…"}` reads the *published* brief and returns `drafts` (segment if needed, one template per channel, a broadcast per channel or a journey, and the campaign with the holdout), `goal`, `holdout`, `notes` and `warnings`. It writes nothing. Where a deterministic mapping is not meaningful — the offer, guardrails, tone, the final copy — `notes` says so.
+5. **Build the drafts.** `campaigns.fromBrief {"briefId":"cpb_…"}` creates every draft with references resolved (templates before the broadcast/journey, everything before the campaign) and returns the ids. It refuses an unapproved brief and never publishes. Fill the copy with `artifacts.updateDraft`; check `broadcasts.preview`, `journeys.simulate` and `campaigns.members`.
+6. **Submit the bundle.** `artifacts.requestPublishBundle {"artifactIds":["eml_…","bct_…","cmp_…"],"note":"Win-back campaign: template, broadcast, campaign with 10% holdout"}` → `published`, `on_hold` (do not resubmit) or `in_review`. A person reviews the whole bundle in one step; approving publishes in dependency order.
+7. **Evaluate against the goal.** `campaigns.holdoutResult {"campaignId":"cmp_…"}` gives control and treatment entered/converted, lift, its 95% interval and a verdict; `analytics.campaignSummary {"campaignId":"cmp_…"}` adds the per-member funnel. Report `not_enough_data` as such, never as "no effect".
+8. **Learn.** When the result teaches something durable, `learnings.add {"statement":"Win-back with a 15% offer lifts repeat orders here","scope":{"channel":"email"},"evidence":[{"kind":"campaign_holdout","id":"cmp_…","summary":"+0.8 pts conversion","numbers":{"lift":0.008,"n":2410}}]}`.
+
+A brief may name several segments (the plan combines them with `all`) or none (the plan creates a consent-based segment and warns that the wording must be resolved). A one-off campaign becomes one broadcast per channel at `sendAt`; a journey schedule becomes a journey with the brief's wait between channel steps.
 
 ## Weekly issue from reusable blocks
 
@@ -212,3 +263,50 @@ artifacts.create {"type":"journey","name":"Trial follow-up","content":{"purpose"
 - `segments.preview {"artifactId":"seg_…"}` for today's subscriber count and `ai.usage {"days":7}` for AI calls.
 
 Breakdowns other than a time dimension hide groups smaller than k=5; read `meta.suppressed` and do not add up per-day ratios by hand. Report numbers with their denominators and compare them with last week, not with assumptions.
+
+## Lifecycle optimiser: promote a journey variant against a holdout
+
+A programme for an agent that improves live journeys within its mandate (`journey.live` at level 3, a `learning.journeyControlPercent` rule, the journeys in its scope). Run it weekly.
+
+1. **Know your borders.** `agents.get {}` and `workspace.autonomy {}`; `learnings.list {}` for what is already known about this audience.
+2. **Does the journey work?** `journeys.holdoutResult {"journeyId":"jny_…"}` compares everyone in the journey with its control group. Fix or pause a journey that is `treatment_worse` before optimising it.
+3. **Read each split.** `journeys.splitResult {"journeyId":"jny_…","node":"split"}` gives each arm's entries, conversions and unsubscribes and each arm against arm 0 with a verdict.
+   - `treatment_better`: promote the arm. `artifacts.get`, then `artifacts.updateDraft` with that arm's weight at 100 and the others at 0, then `artifacts.requestPublish {"artifactId":"jny_…","note":"Promote arm 1: +2.0 pts conversion (95% CI 0.4–3.6), n=812/806"}`.
+   - `treatment_worse`: retire the arm the same way (weight 0).
+   - `not_enough_data` / `no_clear_difference`: leave it; report how many people each arm still needs (`minSampleSize`).
+4. **Propose the next variant.** One change at a time (a subject, a delay, a step), as a split with a small share such as weights `[80, 20]`. Keep the journey's `controlGroup`; the learning rules send a journey without one to a person.
+5. **Record the learning.** `learnings.add {"statement":"…","scope":{"channel":"email"},"evidence":[{"kind":"journey_holdout","id":"jny_…","summary":"arm 1 +2.0 pts","numbers":{"lift":0.02,"n":1618}}]}`.
+6. **Report.** `agents.report {}` shows your actions and the journeys you published against their control groups.
+
+A publish answers `published`, `on_hold` (a limit or working hours held it; do not resubmit) or `in_review` (a person decides). At level 4 for `journey.live` you may also create new journeys within your scope without a separate grant.
+
+## Newsletter editor: the weekly loop
+
+The pilot's programme (#316): from the article library and the topic backlog to a sent issue, a report and a learning, within the mandate (the **Newsletter agent** template in docs/agents.md, with `learning.broadcastHoldout`).
+
+1. **Borders and what is known.** `agents.get {}`, `workspace.autonomy {}`, `learnings.list {}` (e.g. "subject lines with a number win here"), and the `business-context://current` resource.
+2. **Material.** `content.items.list {"minScore":…}` gives the week's articles with score explanations; `content.selections.create {"name":"Issue 2026-11-10","sections":[…]}` records which ones the issue uses. Only use library items: never invent articles or links.
+3. **Topic.** `content.topics.list {"status":"approved"}`; the topic's brief (`artifacts.get {"artifactId":"brf_…"}`) gives the thesis, angle and the "Monday test". No approved topic: propose one (`content.topics.create`, then `content.topics.toBrief`) and say so; a person approves the brief.
+4. **Draft.** Template-per-issue (copy last week's), filled from the selection and the brief; `templates.check`; then the broadcast to the mandated segment with `subjectTest` (two subjects) and `stagedSend` (a canary first).
+5. **Submit.** `artifacts.requestPublishBundle {"artifactIds":["eml_…","bct_…"],"note":"Signal #47: 5 articles, thesis …; 4,900 expected (last 4,812); goal click rate 6%"}` → `published`, `on_hold` (do not resubmit) or `in_review`.
+6. **Learn.** After the send, `broadcasts.status` shows the subject-test winner; `learnings.add` with `{"kind":"subject_test","id":"bct_…"}` evidence. `agents.report {}` gives the week's outcomes against the mandate's goals.
+
+The hosted-agent template **Newsletter editor** runs this every Monday; an external agent (Hermes) can follow the same steps over MCP.
+
+## Experimentation agent: web experiences
+
+A programme (#314) for an agent that runs web experiments within its mandate (`experience.live`, the experiences in its scope, a `learning.experienceHoldoutPercent` rule).
+
+1. **Results.** `experiences.results {"artifactId":"exp_…"}` gives exposures, conversions and rates per variant against the control, with lift, fixed-horizon and sequential p-values, a 95% interval and Bayesian probabilities, plus a `recommendation` that follows the experience's analysis method. Do not stop a `fixed` test before its planned sample.
+2. **Decide.** A clear winner: promote it (`artifacts.updateDraft` with the winner as the only variant, keeping `holdoutPercent`), then `artifacts.requestPublish` with the numbers in the note. A clear loser: remove it the same way. Otherwise leave it running.
+3. **Next experiment.** One element at a time, with a holdout; the learning rules send an experience without one to a person.
+4. **Learn.** `learnings.add` with `{"kind":"experience","id":"exp_…"}` evidence.
+
+## Audience curator: sizes, overlaps and sunset policies
+
+A programme (#315) for an agent that keeps audiences healthy. Read-mostly: changes are drafts a person (or a mandate granting `audience.publish`) decides on.
+
+1. **Sizes.** `segments.refresh {"artifactId":"seg_…"}` for each segment in scope; compare with last week (`agents.report {}` and your previous run).
+2. **Inactivity.** Preview a segment of members with no `email_opened`/`email_clicked` event within, e.g., `P180D` (`segments.preview`), to size a sunset policy.
+3. **Propose.** Draft the inactive segment and a re-engagement journey or an exclusion (`artifacts.create`), submit with `artifacts.requestPublish`. Never delete profiles and never change consent.
+4. **Report** sizes, overlaps and proposals without personal data.

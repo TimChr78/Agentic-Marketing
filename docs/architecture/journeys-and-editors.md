@@ -62,6 +62,16 @@ Principles:
 - **Simulation:** the same interpreter runs in a dry-run mode against a sample or synthetic profile with a virtual clock — used by the UI ("preview path") and by agents (`journeys.simulate`).
 - **Throughput target:** 1k–5k steps/s on a modest Postgres; partition `journey_participants` by journey hash when needed.
 
+### Bulk enrollment by segment (#148)
+
+`journeys.enroll` takes at most 1,000 profile ids per call, which makes a migrated list awkward: a client has to page ids and keep state. `journeys.enrollSegment {artifactId, segmentId, limit?, reason, idempotencyKey?}` enrolls a published segment instead and returns a job id. It is the deliberate backfill path; event and segment-entry triggers keep handling ongoing entry.
+
+- **The job.** `enrollment_jobs` (migration `0060_enrollment_jobs.sql`) records the journey, segment, status (`queued`, `running`, `done`, `failed`, `cancelled`), the optional `limit`, the cursor (the last profile id scanned), entered/skipped/failed counts and a skip-reason summary (`reentry`, `no_profile`, `no_lawful_basis`, `suppressed`, `no_address`, …). `journeys.enrollmentJob` and `journeys.enrollmentJobs` show it; `journeys.cancelEnrollment` stops a queued or running job. People already enrolled stay in the journey.
+- **Chunks and resume.** The scheduler scans the segment's memberships in chunks of 500, ordered by profile id, and commits each chunk's participants and its cursor in one transaction. A crash loses at most the chunk in flight; the next tick resumes after the cursor. Entry keys are deterministic (`bulk:<job>:<profile>`), so a retried chunk cannot enroll the same person twice.
+- **Per-person gates.** Before someone enters, the same rules as `journeys.enroll` apply: the trigger's re-entry rule (`once`, `after_exit`, `always`), an existing (non-merged) profile, and consent plus suppression for the journey's first channel (e-mail, then SMS, then push) under the journey's purpose. Consent withdrawn before their chunk is processed means they are skipped, not enrolled and exited later.
+- **Who may run it.** The impact is the segment's people capped by `limit`, with the journey's touches plus the segment, so the policy engine and a mandate's scope see the audience. Above the workspace's audience threshold an agent is refused with the reason (the command is not approvable, like `journeys.enroll`); a person can run it. The job keeps who requested it and the reason, and the agent ledger records the decision.
+- **The count.** The job's `people` is the audience estimate at request time (the segment capped by `limit`). A dynamic segment enrolls its current memberships, so run `segments.refresh` (or wait for the scheduler) after changing its rule or publishing it.
+
 ## 3. Journey canvas (UI)
 
 - **React Flow (xyflow, MIT)** for the canvas: drag-and-drop nodes, auto layout (ELK.js, EPL-2.0 — or dagre, MIT), mini map, zoom.

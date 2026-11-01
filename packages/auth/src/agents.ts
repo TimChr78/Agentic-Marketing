@@ -7,6 +7,7 @@ import {
   isUndoable,
   type Principal,
   runUndo,
+  undoBlocker,
 } from '@agentic-marketing/commands';
 import { AppError, newId } from '@agentic-marketing/core';
 import { type AgentCredentialKind, type AgentStatus, type AgentUndo, type Db, schema, type Tx } from '@agentic-marketing/db';
@@ -312,6 +313,10 @@ const Action = z.object({
   at: z.string(),
   undo: z.unknown().nullable().describe('How to reverse it, when the action published something (null when there is nothing to undo)'),
   undoable: z.boolean().describe('Whether agents.undo can reverse this action now'),
+  undoBlockedBy: z
+    .string()
+    .nullable()
+    .describe('Why an action that recorded a reversal cannot be undone now (newer work went live, or the send went out)'),
   undoneAt: z.string().nullable(),
   undoneBy: z.string().nullable(),
   undoResult: z.string().nullable().describe('What the undo did'),
@@ -350,14 +355,22 @@ export const agentActivity = defineCommand({
       .orderBy(desc(t.id))
       .limit(input.limit + 1);
     const page = rows.slice(0, input.limit);
-    return {
-      actions: page.map((r) => ({
+    // What the ledger offers is checked against the current state, as agents.undo would (#305).
+    const actions = [];
+    for (const r of page) {
+      const recorded = isUndoable(r);
+      const blocker = recorded && r.undo ? await undoBlocker(ctx.tx, r.undo as AgentUndo) : null;
+      actions.push({
         ...r,
         at: r.at.toISOString(),
         impact: r.impact ?? {},
-        undoable: isUndoable(r),
+        undoable: recorded && !blocker,
+        undoBlockedBy: blocker,
         undoneAt: r.undoneAt?.toISOString() ?? null,
-      })),
+      });
+    }
+    return {
+      actions,
       next: rows.length > input.limit ? (page.at(-1)?.id ?? null) : null,
     };
   },
@@ -603,6 +616,119 @@ export const undoAgent = defineCommand({
   handler: async (input, ctx) => undoAgentAction(ctx.tx, ctx, input.actionId, ctx.principal.userId, input.note),
 });
 
+// --- Reports (#310) ------------------------------------------------------------------------------
+
+const EmailOutcome = z
+  .object({
+    count: z.number().int().describe('Broadcasts published, or direct messages sent'),
+    sent: z.number(),
+    opened: z.number(),
+    clicked: z.number(),
+    unsubscribed: z.number(),
+    complained: z.number(),
+    bounced: z.number(),
+  })
+  .nullable();
+
+export const agentReport = defineCommand({
+  name: 'agents.report',
+  title: 'Agent report',
+  description:
+    'What an agent did and what it led to in a period (default: the last 30 days): its actions by class and decision, undos and guardian episodes, the outcomes of the broadcasts it published and the messages it sent, the journeys it published against their control groups, and its mandate goals measured on its own broadcasts. Use it to review an agent and at mandate renewal.',
+  input: z.object({
+    agentId: AGENT_ID.optional().describe('Omit to report on the calling agent'),
+    from: z.string().datetime().optional(),
+    to: z.string().datetime().optional(),
+  }),
+  output: z.object({
+    agentId: z.string(),
+    from: z.string(),
+    to: z.string(),
+    actions: z.record(
+      z.string(),
+      z.object({
+        allow: z.number().int(),
+        hold: z.number().int(),
+        ask: z.number().int(),
+        deny: z.number().int(),
+        failed: z.number().int(),
+      }),
+    ),
+    undone: z.number().int(),
+    guardian: z.record(z.string(), z.number().int()).describe('Guardian episodes by kind'),
+    outcomes: z
+      .object({
+        broadcasts: EmailOutcome,
+        direct: EmailOutcome,
+        journeys: z.array(z.object({ id: z.string(), verdict: z.string().nullable(), note: z.string() })),
+        goals: z.array(
+          z.object({
+            measure: z.string(),
+            target: z.number().optional(),
+            direction: z.enum(['up', 'down']),
+            value: z.number().nullable(),
+            met: z.boolean().nullable(),
+            note: z.string().nullable(),
+          }),
+        ),
+      })
+      .nullable()
+      .describe('Null when the server has no metric layer for reports'),
+  }),
+  permission: 'audit:read',
+  effect: 'read',
+  target: (i) => i.agentId,
+  handler: async (input, ctx) => {
+    const agentId = input.agentId ?? ctx.principal.agent?.id;
+    if (!agentId) throw new AppError('invalid_input', 'Pass the agent id; only an agent can omit it to report on itself.');
+    const [agent] = await ctx.tx.select({ id: schema.agents.id }).from(schema.agents).where(eq(schema.agents.id, agentId));
+    if (!agent) throw new AppError('not_found', `Agent ${agentId} not found.`);
+    const to = input.to ? new Date(input.to) : new Date();
+    const from = input.from ? new Date(input.from) : new Date(to.getTime() - 30 * 86_400_000);
+    if (from >= to) throw new AppError('invalid_input', '`from` must be before `to`.');
+    const t = schema.agentActions;
+    const rows = await ctx.tx
+      .select({
+        actionClass: t.actionClass,
+        decision: t.decision,
+        failed: sql<number>`count(*) FILTER (WHERE NOT ${t.ok})::int`,
+        n: sql<number>`count(*) FILTER (WHERE ${t.ok})::int`,
+        undone: sql<number>`count(*) FILTER (WHERE ${t.undoneAt} IS NOT NULL)::int`,
+      })
+      .from(t)
+      .where(and(eq(t.agentId, agentId), gte(t.at, from), lt(t.at, to), sql`${t.command} <> 'artifacts.heldRecheck'`))
+      .groupBy(t.actionClass, t.decision);
+    const actions: Record<string, { allow: number; hold: number; ask: number; deny: number; failed: number }> = {};
+    let undone = 0;
+    for (const r of rows) {
+      const c = actions[r.actionClass] ?? { allow: 0, hold: 0, ask: 0, deny: 0, failed: 0 };
+      actions[r.actionClass] = c;
+      c[r.decision as 'allow' | 'hold' | 'ask' | 'deny'] += r.n;
+      c.failed += r.failed;
+      undone += r.undone;
+    }
+    const episodes = await ctx.tx
+      .select({ kind: schema.guardianEvents.kind, n: sql<number>`count(*)::int` })
+      .from(schema.guardianEvents)
+      .where(and(eq(schema.guardianEvents.agentId, agentId), gte(schema.guardianEvents.at, from), lt(schema.guardianEvents.at, to)))
+      .groupBy(schema.guardianEvents.kind);
+    const mandate = await ctx.services.activeMandate?.(ctx.tx, agentId);
+    const goals = mandate?.view.goals ?? [];
+    const outcomes = ctx.services.agentOutcomes
+      ? await ctx.services.agentOutcomes(ctx.tx, ctx.principal.workspaceId, agentId, { from, to }, goals)
+      : null;
+    return {
+      agentId,
+      from: from.toISOString(),
+      to: to.toISOString(),
+      actions,
+      undone,
+      guardian: Object.fromEntries(episodes.map((e) => [e.kind, e.n])),
+      outcomes,
+    };
+  },
+});
+
 // --- Autonomy settings (#215) -------------------------------------------------------------------
 
 export const getAutonomy = defineCommand({
@@ -658,6 +784,7 @@ export const agentCommands = [
   agentGuardian,
   clearGuard,
   shadowReport,
+  agentReport,
   undoAgent,
   getAutonomy,
   setAutonomy,

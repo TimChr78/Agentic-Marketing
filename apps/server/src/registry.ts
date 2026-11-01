@@ -2,12 +2,28 @@ import { adAudienceCommands, adCommands, spendCommands } from '@agentic-marketin
 import { aiCommands } from '@agentic-marketing/ai';
 import { alertsCommands } from '@agentic-marketing/alerts';
 import { analyticsCommands } from '@agentic-marketing/analytics';
-import { artifactCommands, configCommands, workspaceCommands } from '@agentic-marketing/artifacts';
+import {
+  artifactCommands,
+  configCommands,
+  contentTopicCommands,
+  learningsCommands,
+  recipeCommands,
+  workspaceCommands,
+} from '@agentic-marketing/artifacts';
 import { assetCommands } from '@agentic-marketing/assets';
 import { audienceCommands } from '@agentic-marketing/audience';
-import { agentCommands, hostedAgentCommands, listSsoProviders, memberCommands, scimCommands, tokenCommands } from '@agentic-marketing/auth';
+import {
+  agentCommands,
+  agentEventCommands,
+  hostedAgentCommands,
+  listSsoProviders,
+  memberCommands,
+  scimCommands,
+  tokenCommands,
+} from '@agentic-marketing/auth';
 import { campaignCommands } from '@agentic-marketing/campaigns';
 import type { AnyCommand } from '@agentic-marketing/commands';
+import { contentCommands } from '@agentic-marketing/content';
 import {
   blockCommands,
   deliverabilityCommands,
@@ -31,6 +47,9 @@ import { warehouseCommands } from '@agentic-marketing/warehouse';
 /** Every command the server exposes. REST routes, OpenAPI, MCP tools and the UI client derive from this list. */
 export const commands = [
   ...artifactCommands,
+  ...recipeCommands,
+  ...contentTopicCommands,
+  ...learningsCommands,
   ...assetCommands,
   ...configCommands,
   ...warehouseCommands,
@@ -49,6 +68,7 @@ export const commands = [
   listSsoProviders,
   ...tokenCommands,
   ...agentCommands,
+  ...agentEventCommands,
   ...hostedAgentCommands,
   ...sourceCommands,
   ...profileCommands,
@@ -62,6 +82,7 @@ export const commands = [
   ...audienceCommands,
   ...campaignCommands,
   ...connectionCommands,
+  ...contentCommands,
   importShopifyCustomers,
   ...adCommands,
   ...adAudienceCommands,

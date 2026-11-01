@@ -27,6 +27,7 @@ import { logger } from '@agentic-marketing/telemetry';
 import { oauthProviderAuthServerMetadata, oauthProviderOpenIdConfigMetadata } from '@better-auth/oauth-provider';
 import { Hono } from 'hono';
 import { mandateGuardrailBreach } from './agents/guardrails';
+import { agentOutcomes } from './agents/report';
 import type { Config } from './config';
 import { copilotApi } from './http/copilot';
 import { MCP_MAX_BODY, mcpEndpoint } from './http/mcp';
@@ -117,6 +118,8 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
     // The agent's active mandate and its guardrails on its own sends (ADR-0016, #224).
     activeMandate: (tx, agentId) => activeMandate(tx, agentId),
     mandateGuardrails: (tx, workspaceId, agentId, mandate) => mandateGuardrailBreach({ tx, events, workspaceId }, agentId, mandate),
+    // What an agent's actions led to, for agents.report (#310).
+    agentOutcomes: (tx, workspaceId, agentId, range, goals) => agentOutcomes({ tx, events, workspaceId }, agentId, range, goals),
     // A second model check before an autonomous or held action (ADR-0016 §4.5, #231).
     // The check also sees what is published (#261): the version content and its diff, or the
     // template a direct send uses, loaded here so packages/commands stays generic.

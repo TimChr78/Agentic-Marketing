@@ -126,7 +126,7 @@ The workspace's limits apply to every agent, with or without a mandate. Read the
 | `limits.changesPerDay` | `500` | Changes beyond drafts, per agent per 24 hours. |
 | `limits.messagesPerDay` | `1000` | Messages an agent may send itself per 24 hours. |
 | `maxLevel` | `1` for every class | The highest autonomy level a mandate may grant per action class. Missing classes are 1. |
-| `allowLoops` | `false` | Whether any mandate may grant level 4. Level 4 itself arrives in a later release; publishing a mandate with level 4 is refused today. |
+| `allowLoops` | `false` | Whether any mandate may grant level 4 (run the loop). Level 4 must also be earned per agent and class; see Autonomy levels. |
 
 At run time the engine uses the **lower** of the mandate's level and the workspace ceiling. Raising a ceiling takes effect for existing mandates; lowering one takes effect at once.
 
@@ -150,7 +150,9 @@ Only people can create, change or publish a mandate. An agent that tries gets `4
 | 1 | **Propose** | Drafts and publish requests; a person approves each publish. This is the default, and the ceiling of a new workspace. |
 | 2 | **Act with veto** | The action is queued and announced, and runs after the hold window unless a person vetoes it. |
 | 3 | **Act within limits** | Runs at once when it is inside the scope and limits; recorded in the activity ledger. |
-| 4 | **Run the loop** | Level 3 plus creating new artifacts of the class within its goals. **Later release**; a mandate that grants it is refused for now. |
+| 4 | **Run the loop** | Level 3 plus creating new artifacts of the class: a new artifact of an allowed type is not held to the mandate's `scope.artifacts` list. Audiences, purposes, topics, channels, limits, guardrails, learning rules and the guardian still apply. **Earned**, see below. |
+
+**Earning level 4.** A mandate may grant level 4 for a class only when the workspace allows it (`allowLoops` and a ceiling of 4) and the agent has earned it: it ran that class at level 3 (autonomously, decided by its mandate) for at least 28 days with no guardian episode in that time and no guardian cap in force, or its mandate recorded the class in shadow mode for 28 days without a would-have-run decision that a person rejected. Publishing a mandate that grants level 4 without that record is refused with what is missing. A class in shadow may record level 4 at any time; that is how the record is built. A guardian cap lowers level 4 like any other level.
 
 A class that is not listed in `levels` counts as 1. Two classes can never be made autonomous, whatever the mandate says: `settings` and `destructive` always need a person, as do changes to purposes, the delivery policy, the tracking plan, a conversion map and the mandate itself. Above one of the mandate's limits an action drops one level: an L3 send becomes an L2 hold, an L2 action a proposal, with the reason. Anything outside the mandate's scope (another audience, purpose, topic, channel or artifact type) is only ever proposed.
 
@@ -187,6 +189,20 @@ Set `shadow: true` (or a list of action classes, e.g. `["send.broadcast"]`) to t
 | `pending` / `unreviewed` | No decision yet / the approval policy let it run without a person. |
 
 A high agreement rate with no `too_bold` changes over a few weeks is the evidence for raising the ceiling and publishing the mandate without `shadow`. Drafts are never recorded in shadow.
+
+## Reports
+
+`agents.report` (and the **Last 30 days** card on the agent page) shows what an agent did and what it led to in a period (default the last 30 days, `from`/`to` for any other): its actions by class and decision (ran, held, sent to a person, refused, failed), undos and guardian episodes, the outcome of the broadcasts it published and the direct messages it sent (sent, opens, clicks, unsubscribes, complaints, bounces), the journeys it published against their control groups, and its mandate's `goals` measured on its own broadcasts (value, and whether the target was met). An agent can read its own report by omitting `agentId`. Use it to review an agent and when you renew its mandate.
+
+## Learnings
+
+A **learning** is a conclusion with its evidence, not a memory dump: "subject lines with a number win for this audience: 3 of 4 tests, +2.1 pts". Each one has a statement, an optional scope (audience segment ids, channel, topic and purpose), the experiments behind it and its author. People and agents write them; agents read the active ones before they draft, and only people can retract one.
+
+- `learnings.list` reads them, newest first, filtered by `status` (`active` by default, `retracted` or `all`), `segmentId`, `channel`, `topic` and `purpose`.
+- `learnings.add` records one. Evidence is required, and every item names its kind (`subject_test`, `journey_holdout`, `campaign_holdout` or `experience`), the id of the broadcast, journey, campaign or experience it came from, a one-line summary and the measured numbers. An agent's evidence must reference something that exists in the workspace, so a guessed or remembered id is refused. Adding is `draft`-level: it never needs autonomy.
+- `learnings.retract` is people-only and needs a `reason`. The row stays in the record with `status: "retracted"`, who retracted it and when, and it is no longer served as current.
+
+Agents read the active learnings as the MCP resource `learnings://current` (the same JSON as `learnings.list` with the default filters). The server's agent instructions tell them to check it before drafting and to record what a result taught them. When a result no longer holds, retract the learning instead of adding a contradicting one without evidence.
 
 ## The guardian
 
@@ -248,6 +264,41 @@ A paused agent answers `403` with `This agent (<name>) is paused: <reason>. A pe
 
 `agents.get` with no id gives the agent its own status and `last24h` counts; `agents.activity` (needs `audit:read`) shows every write with its decision, reasons, intent and impact. `workspace.autonomy` gives the switch, threshold, daily limits and ceilings.
 
+## Events
+
+A loop should react instead of polling. An agent subscribes to the event types its loop cares about, and the scheduler (every five minutes) derives each event from what the platform already records and delivers it.
+
+| Event | Emitted when | Subject ids |
+|---|---|---|
+| `hold.ran` | A held change's veto window ended without a veto (the hold runner published it). | `approvalId`, `artifactId`, `version` |
+| `hold.vetoed` | A person rejected a held change before its window ended. | `approvalId`, `artifactId`, `version` |
+| `hold.needs_person` | A held change could not run at recheck (the mandate changed, working hours, the guardian) and now waits for a person. | `actionId`, `command`, `actionClass`, `target` |
+| `approval.decided` | A person approved, rejected or withdrew an agent's request. | `approvalId`, `artifactId`, `version`, `decision` |
+| `guardian.episode` | The guardian capped, held or paused the agent. | `episodeId`, `kind`, `action`, `suspendedHolds` |
+| `guardrail.breach` | The guardian found the mandate's unsubscribe, complaint or bounce guardrail over its limit. | `episodeId`, `kind`, `action`, `suspendedHolds` |
+| `experiment.significant` | A subject test's winner was decided (a tie or too little data is not significant). | `broadcastId`, `winner`, `metric` |
+| `alert.fired` | A threshold alert opened a firing episode. | `alertId`, `ruleId`, `value`, `threshold`, `window` |
+
+Journey and campaign holdout verdicts are computed on demand by `journeys.holdoutResult` and `campaigns.holdoutResult` rather than stored, so they are not events; an agent reads them with those commands. A subject test's verdict is stored by the broadcast runner, so it is emitted.
+
+Each event carries its type, a time, a short summary and subject ids — never personal data (no addresses, traits or profile ids).
+
+```json
+// agents.subscribe (an agent subscribes itself; a person passes agentId)
+{ "eventTypes": ["hold.vetoed", "approval.decided"], "webhookId": "whk_…" }
+```
+
+- **`agents.subscribe`** — event types, an optional `filter` on subject ids (e.g. `{"artifactId": "bc_…"}`) and an optional `webhookId`. Without a webhook the events are recorded for `agents.events`.
+- **`agents.unsubscribe`** — delete a subscription by id; recorded events stay readable, new ones stop.
+- **`agents.subscriptions`** — an agent's subscriptions (a person may list one agent's or the workspace's).
+- **`agents.events`** — the polling fallback: events for the agent since a cursor (`after`), oldest first, returning the next `cursor`. Pass the last id back next time.
+
+An agent can only manage its own subscriptions; a person can subscribe any agent in the workspace. Subscription writes are low-risk (`draft`), so an agent can set them up without a person even under propose-only.
+
+**Delivery.** A subscription with a `webhookId` gets each event as a Standard Webhooks signed `POST` (`type: "agent.event"`, signature headers `webhook-id`, `webhook-timestamp`, `webhook-signature`) through the same worker as customer webhooks: retried with backoff and dead-lettered if it keeps failing; `deliveries.list` shows the outcome. The payload holds the event's id, type, time, summary and subject only.
+
+**MCP notifications.** The MCP server is stateless (one server per request, spec 2026-07-28), so it has no connected client to push a server-initiated notification to. MCP clients use `agents.events` with the `cursor` from the previous call; the same subscription decides what appears there.
+
 ## Troubleshooting
 
 | What you see | What it means | What to do |
@@ -305,6 +356,7 @@ The pilot: one segment, one topic, one weekly broadcast at level 3, everything e
     "destructive": 1
   },
   "limits": { "recipientGrowth": 1.2 },
+  "learning": { "broadcastHoldout": true },
   "guardrails": { "unsubscribeRate": 0.005, "complaintRate": 0.001, "window": "P7D", "minSent": 100 },
   "validUntil": "2026-11-27T07:00:00Z",
   "workingHours": { "start": "07:00", "end": "11:00", "days": ["tue"] },
@@ -315,7 +367,74 @@ The pilot: one segment, one topic, one weekly broadcast at level 3, everything e
 }
 ```
 
+As a **programme** (#316) the agent works from the article library (content sources and selections) and the topic backlog (approved briefs), sends each issue with a subject test (the `learning` rule requires a test or a holdout) and a staged send, and records what the test taught as a learning. The hosted-agent template **Newsletter editor** runs the loop every Monday; the recipe is in the MCP skill (`references/recipes.md`).
+
 A bundle is judged by its riskiest member. Publishing this issue's template and broadcast together (`artifacts.requestPublishBundle`) counts as `send.broadcast` at level 3; the template on its own is still `content.publish` level 1 and waits for a person.
+
+### Lifecycle optimiser
+
+A programme (#313): the agent reads each journey's splits with `journeys.splitResult`, promotes winning arms and retires losing ones by publishing a new journey version, proposes the next variant, and records learnings. Its journeys must keep a control group (`learning`), it may only touch the journeys in its scope, and a journey publish is at most level 3 (level 4, earned, would let it create new journeys too). The hosted-agent template **Lifecycle optimiser** runs it weekly; the recipe is in the MCP skill (`references/recipes.md`).
+
+```json
+{
+  "agent": "agt_4f8c2d1e6b9a4c7d8e0f1a2b3c4d5e6f",
+  "purpose": "Improve the onboarding journeys with variants against their control groups, promote winners and retire losers.",
+  "goals": [{ "measure": "journey.goal_reached", "target": 100, "direction": "up" }],
+  "scope": {
+    "segments": ["seg_0123456789abcdef0123456789abcdef"],
+    "purposes": ["onboarding"],
+    "topics": [],
+    "channels": ["email"],
+    "artifactTypes": ["journey", "email_template"],
+    "artifacts": ["jny_0123456789abcdef0123456789abcdef"],
+    "brand": null
+  },
+  "levels": { "content.publish": 3, "journey.live": 3 },
+  "limits": { "changesPerDay": 10 },
+  "learning": { "journeyControlPercent": 10 },
+  "guardrails": { "unsubscribeRate": 0.005, "complaintRate": 0.001, "window": "P7D", "minSent": 200 },
+  "validUntil": "2026-11-27T07:00:00Z",
+  "holdWindow": "PT4H",
+  "escalation": { "userIds": [] },
+  "independentCheck": true
+}
+```
+
+### Experimentation agent
+
+A programme (#314) for web experiences: it follows `experiences.results` and each experience's analysis method, promotes clear winners and removes clear losers by publishing a new version, proposes one new experiment at a time and records learnings. Grant `experience.live` for the experiences in its scope and require a holdout:
+
+```json
+{
+  "agent": "agt_4f8c2d1e6b9a4c7d8e0f1a2b3c4d5e6f",
+  "purpose": "Run and conclude web experiments on the pricing and signup placements.",
+  "scope": { "segments": [], "purposes": [], "topics": [], "channels": [], "artifactTypes": ["experience"], "artifacts": ["exp_0123456789abcdef0123456789abcdef"], "brand": null },
+  "levels": { "experience.live": 3 },
+  "learning": { "experienceHoldoutPercent": 10 },
+  "limits": { "changesPerDay": 5 },
+  "validUntil": "2026-11-27T07:00:00Z",
+  "holdWindow": "PT2H",
+  "escalation": { "userIds": [] },
+  "independentCheck": true
+}
+```
+
+### Audience curator
+
+A programme (#315): it checks segment sizes and overlaps, sizes inactive members and proposes sunset policies (an inactive segment plus a re-engagement journey or an exclusion) as drafts. Keep `audience.publish` at level 1 at first so a person decides each change; it never deletes profiles or changes consent.
+
+```json
+{
+  "agent": "agt_4f8c2d1e6b9a4c7d8e0f1a2b3c4d5e6f",
+  "purpose": "Keep the marketing segments healthy and propose sunset policies for inactive subscribers.",
+  "scope": { "segments": ["seg_0123456789abcdef0123456789abcdef"], "purposes": ["marketing_email"], "topics": [], "channels": ["email"], "artifactTypes": ["segment", "journey"], "artifacts": [], "brand": null },
+  "levels": { "audience.publish": 1, "journey.live": 1 },
+  "validUntil": "2026-11-27T07:00:00Z",
+  "holdWindow": "PT2H",
+  "escalation": { "userIds": [] },
+  "independentCheck": false
+}
+```
 
 ### Deliverability guardian
 
@@ -404,14 +523,16 @@ Reads and reports; it can draft a note or a suggested change but publishes nothi
 }
 ```
 
-### Campaign drafter
+### Campaign agent
 
-Builds campaign bundles — a segment, a template, a broadcast or journey and a campaign — and proposes them: every publishing class is level 1, so each publish is a person's decision. Spend, data writes, settings and destructive actions are level 0.
+A programme (#64): the agent turns a goal into a typed `campaign_brief`, a person approves the published brief, and the agent builds the draft bundle (segment if needed, templates, broadcasts or a journey, campaign and holdout) with `campaigns.plan` and `campaigns.fromBrief`. It proposes; every publishing class is level 1, so each publish is a person's decision. Spend, data writes, settings and destructive actions are level 0.
+
+The loop: goal → brief → approval → plan → drafts → bundle → evaluate → learn. The brief is the contract; an agent may draft and edit it, but only a person publishes it. `campaigns.plan` is deterministic and writes nothing: it maps the brief to artifact skeletons and says in `notes` where a deterministic mapping is not meaningful. `campaigns.fromBrief` creates the drafts with resolved references and never publishes. Read the result with `campaigns.holdoutResult` or `analytics.campaignSummary`, then record what it taught with `learnings.add`.
 
 ```json
 {
   "agent": "agt_c0ffee1234567890abcdef1234567890",
-  "purpose": "Turn a brief into a campaign bundle (audience, content, broadcast or journey, campaign and holdout) and propose it.",
+  "purpose": "Turn a goal into an approved campaign brief, build the draft campaign bundle (audience, content, broadcast or journey, campaign and holdout), and evaluate it against the goal.",
   "goals": [
     { "measure": "campaign.conversion_rate", "target": 2, "direction": "up" }
   ],
@@ -420,7 +541,7 @@ Builds campaign bundles — a segment, a template, a broadcast or journey and a 
     "purposes": ["marketing_email"],
     "topics": [],
     "channels": ["email"],
-    "artifactTypes": ["email_template", "segment", "broadcast", "journey", "campaign"],
+    "artifactTypes": ["campaign_brief", "email_template", "sms_template", "push_template", "segment", "broadcast", "journey", "campaign"],
     "artifacts": [],
     "brand": null
   },
@@ -447,4 +568,4 @@ Builds campaign bundles — a segment, a template, a broadcast or journey and a 
 }
 ```
 
-Republish a template with a person's approval, not with the campaign drafter: at level 1 every `artifacts.requestPublish` it makes is a proposal, and `artifacts.requestPublishBundle` keeps a bundle under one review.
+Republish a template with a person's approval, not with the campaign agent: at level 1 every `artifacts.requestPublish` it makes is a proposal, and `artifacts.requestPublishBundle` keeps a bundle under one review. The recipe is in the MCP skill (`references/recipes.md`).

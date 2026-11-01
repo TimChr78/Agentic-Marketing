@@ -1,0 +1,124 @@
+{
+  "format": "agentic-marketing/recipe@1",
+  "id": "weekly-newsletter",
+  "version": 1,
+  "title": "Weekly newsletter",
+  "description": "A newsletter template, a subscriber segment and a broadcast that sends the issue to them. Submit the template and the broadcast together so a person reviews the issue once.",
+  "parameters": [
+    {
+      "key": "siteName",
+      "label": "Site name",
+      "description": "Shown in the e-mail and its footer.",
+      "type": "string",
+      "required": true,
+      "default": "Your site",
+      "minLength": 1,
+      "maxLength": 120
+    },
+    {
+      "key": "issueTitle",
+      "label": "Issue title",
+      "description": "The main heading of this issue.",
+      "type": "string",
+      "required": true,
+      "default": "This week",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    {
+      "key": "subject",
+      "label": "Subject line",
+      "description": "The inbox subject; Liquid variables such as profile.firstName are allowed.",
+      "type": "string",
+      "required": true,
+      "default": "This week: what changed and what to do about it",
+      "minLength": 1,
+      "maxLength": 300
+    },
+    {
+      "key": "purpose",
+      "label": "Purpose",
+      "description": "The purpose key for the newsletter; it must include the e-mail channel.",
+      "type": "string",
+      "required": true,
+      "default": "marketing_email",
+      "pattern": "^[a-z][a-z0-9_]{0,63}$"
+    },
+    {
+      "key": "segmentName",
+      "label": "Segment name",
+      "description": "The audience segment the broadcast sends to.",
+      "type": "string",
+      "required": true,
+      "default": "Newsletter subscribers",
+      "minLength": 1,
+      "maxLength": 120
+    },
+    {
+      "key": "sendAt",
+      "label": "Send time",
+      "description": "Optional ISO 8601 date-time with an offset, e.g. 2026-11-06T07:00:00Z. Leave empty to send as soon as the broadcast is published.",
+      "type": "datetime"
+    }
+  ],
+  "prerequisites": [
+    {
+      "kind": "email_provider",
+      "useFor": "marketing",
+      "description": "An enabled e-mail provider for marketing mail"
+    },
+    {
+      "kind": "purpose",
+      "purpose": "{{param.purpose}}",
+      "channel": "email",
+      "description": "A configured purpose with the e-mail channel"
+    }
+  ],
+  "artifacts": [
+    {
+      "key": "subscribers",
+      "type": "segment",
+      "name": "{{param.segmentName}}",
+      "content": {
+        "description": "People who allowed the newsletter purpose.",
+        "mode": "dynamic",
+        "condition": { "consent": "{{param.purpose}}" }
+      }
+    },
+    {
+      "key": "newsletterTemplate",
+      "type": "email_template",
+      "name": "{{param.issueTitle}}",
+      "note": "This issue's template; copy it next week rather than editing a sent one.",
+      "content": {
+        "purpose": "{{param.purpose}}",
+        "subject": "{{param.subject}}",
+        "preheader": "The week in marketing technology, in one short read.",
+        "sampleData": { "profile": { "firstName": "Ada" } },
+        "utm": { "source": "newsletter", "medium": "email", "campaign": "weekly-newsletter" },
+        "mjml": "<mjml><mj-head><mj-attributes><mj-all font-family=\"Helvetica, Arial, sans-serif\" /></mj-attributes></mj-head><mj-body><mj-section><mj-column><mj-text font-size=\"12px\" color=\"#6b7280\">{{param.siteName}} · weekly</mj-text><mj-text font-size=\"22px\" font-weight=\"bold\">{{param.issueTitle}}</mj-text><mj-text>Hi {{ profile.firstName | default: \"there\" }},</mj-text><mj-text>This week: one thing worth knowing, one thing worth trying and one question worth asking.</mj-text><mj-text><strong>Worth knowing.</strong> Replace this paragraph with the week's main item.</mj-text><mj-text><strong>Worth trying.</strong> Replace this paragraph with one concrete step a reader can take.</mj-text><mj-text><strong>Worth asking.</strong> Reply with the question you want answered next.</mj-text><mj-button href=\"{{ web_url | raw }}\" background-color=\"#1d4ed8\" color=\"#ffffff\">Read this issue in the browser</mj-button></mj-column></mj-section><mj-section><mj-column><mj-text font-size=\"12px\" color=\"#6b7280\">You get this because you subscribed to {{param.siteName}}. <a href=\"{{ preferences_url | raw }}\">Manage preferences</a> or <a href=\"{{ unsubscribe_url | raw }}\">unsubscribe</a>.</mj-text></mj-column></mj-section></mj-body></mjml>"
+      }
+    },
+    {
+      "key": "newsletterBroadcast",
+      "type": "broadcast",
+      "name": "{{param.issueTitle}}",
+      "note": "One-off send of this issue to the subscriber segment.",
+      "content": {
+        "template": "{{ref.newsletterTemplate}}",
+        "segment": "{{ref.subscribers}}",
+        "sendAt": "{{param.sendAt}}",
+        "description": "Weekly newsletter: {{param.issueTitle}}"
+      }
+    }
+  ],
+  "docs": "## What this installs\n\nA dynamic subscriber segment (consent for the purpose), this issue's e-mail template and the broadcast that sends it.\n\n## Before publishing\n\n1. Edit the three paragraphs in the template with this week's content.\n2. Set `sendAt` if the issue should go at a fixed time; without it the broadcast sends as soon as it is published.\n3. Submit the template and the broadcast together with `artifacts.requestPublishBundle`, so a person reviews the issue once; the broadcast can only publish after its template and segment are published.\n4. Check the audience with `broadcasts.preview` before the send.\n\n## Next week\n\nCopy this issue's template as the starting point for the next one; a sent broadcast is a record and should not be reused.",
+  "checklist": [
+    "Replace the three content paragraphs in the template.",
+    "Check the subject and preheader; the subject may use Liquid variables.",
+    "Set the send time, or confirm that sending on publish is intended.",
+    "Check the segment name and the purpose; membership is not consent, so the send still checks consent and suppression.",
+    "Run broadcasts.preview for the audience and skipped counts.",
+    "Submit the template and broadcast together (artifacts.requestPublishBundle); a person approves the issue."
+  ]
+}

@@ -72,6 +72,9 @@ importers:
       '@agentic-marketing/commands':
         specifier: workspace:*
         version: link:../../packages/commands
+      '@agentic-marketing/content':
+        specifier: workspace:*
+        version: link:../../packages/content
       '@agentic-marketing/core':
         specifier: workspace:*
         version: link:../../packages/core
@@ -593,6 +596,33 @@ importers:
       drizzle-orm:
         specifier: 0.45.4
         version: 0.45.4(@opentelemetry/api@1.10.0)(@types/pg@8.23.1)(kysely@0.29.7)(pg@8.23.1)
+      zod:
+        specifier: 4.6.7
+        version: 4.6.7
+
+  packages/content:
+    dependencies:
+      '@agentic-marketing/commands':
+        specifier: workspace:*
+        version: link:../commands
+      '@agentic-marketing/core':
+        specifier: workspace:*
+        version: link:../core
+      '@agentic-marketing/db':
+        specifier: workspace:*
+        version: link:../db
+      '@agentic-marketing/integrations':
+        specifier: workspace:*
+        version: link:../integrations
+      '@agentic-marketing/telemetry':
+        specifier: workspace:*
+        version: link:../telemetry
+      drizzle-orm:
+        specifier: 0.45.4
+        version: 0.45.4(@opentelemetry/api@1.10.0)(@types/pg@8.23.1)(kysely@0.29.7)(pg@8.23.1)
+      htmlparser2:
+        specifier: 9.1.0
+        version: 9.1.0
       zod:
         specifier: 4.6.7
         version: 4.6.7

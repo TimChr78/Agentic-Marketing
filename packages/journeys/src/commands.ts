@@ -1,4 +1,5 @@
 import {
+  analyseHoldout,
   artifactTypes,
   DEFAULT_PURPOSES,
   type JourneyDefinition,
@@ -7,7 +8,7 @@ import {
 } from '@agentic-marketing/artifacts';
 import { campaignWithControlForMember } from '@agentic-marketing/campaigns';
 import { defineCommand } from '@agentic-marketing/commands';
-import { AppError, isoDateTime, newUuid } from '@agentic-marketing/core';
+import { AppError, isoDateTime, newId, newUuid } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
 import { checkPushRecipient, checkRecipient, checkSmsRecipient } from '@agentic-marketing/email';
 import type { JourneyEvent } from '@agentic-marketing/events';
@@ -16,6 +17,7 @@ import { contextFor, durationSeconds, evaluate, publishedSegments } from '@agent
 import { and, desc, eq, inArray, isNotNull, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { matchesCondition } from './conditions';
+import { countSegmentMembers, enrollmentJobOut, enrollmentJobOutput, enrollmentJobStatus } from './enrollment';
 import { duplicateEntryKey, resolveEntryKey } from './entry';
 import { compile, unsupported } from './graph';
 import { assignHoldout, computeJourneyHoldout, holdoutDetail, holdoutHashVersion } from './holdout';
@@ -23,6 +25,8 @@ import { conditionSegments, journeyTouches } from './impact';
 import { advance, type ParticipantState } from './interpreter';
 
 const JourneyId = z.string().regex(/^jrn_[0-9a-f]{32}$/);
+const SegmentId = z.string().regex(/^seg_[0-9a-f]{32}$/);
+const EnrollmentJobId = z.string().regex(/^job_[0-9a-f]{32}$/);
 
 /** Extra publish checks other packages add (e.g. that connections and their actions exist). */
 export const journeyChecks: ((def: JourneyDefinition, tx: Tx) => Promise<string[]>)[] = [];
@@ -226,6 +230,110 @@ export const journeyHoldoutResult = defineCommand({
     }),
 });
 
+const ArmOut = z.object({
+  arm: z.number().int().describe('0-based: arm 0 is the split’s first edge (variant 1)'),
+  weight: z.number(),
+  entered: z.number().int().describe('Participants who took this arm'),
+  converted: z.number().int(),
+  unsubscribed: z.number().int(),
+  conversionRate: z.number(),
+  unsubscribeRate: z.number(),
+});
+
+export const journeySplitResult = defineCommand({
+  name: 'journeys.splitResult',
+  title: 'Results per arm of a journey split',
+  description:
+    "For a split node in a published journey: how many people took each arm, their goal conversions and e-mail unsubscribes, and each arm compared with the first (variant 1) — absolute and relative lift, Newcombe's 95% interval and a verdict that needs the minimum sample in both arms and an interval excluding zero. The lifecycle optimiser uses it to promote or retire a variant (#313).",
+  input: z.object({
+    journeyId: JourneyId,
+    node: z.string().min(1).describe('The split node id'),
+    from: isoDateTime('from').optional(),
+    to: isoDateTime('to').optional(),
+    minSampleSize: z.number().int().min(1).default(200).describe('Both arms of a comparison need at least this many people'),
+  }),
+  output: z.object({
+    journeyId: z.string(),
+    node: z.string(),
+    arms: z.array(ArmOut),
+    comparisons: z.array(
+      z.object({
+        arm: z.number().int(),
+        versus: z.literal(0),
+        absoluteLift: z.number(),
+        relativeLift: z.number().nullable(),
+        ci95: z.tuple([z.number(), z.number()]).nullable(),
+        minSampleSizeMet: z.boolean(),
+        verdict: z.enum(['not_enough_data', 'no_clear_difference', 'treatment_better', 'treatment_worse']),
+      }),
+    ),
+    note: z.string(),
+  }),
+  permission: 'artifacts:read',
+  effect: 'read',
+  target: (i) => i.journeyId,
+  handler: async (input, ctx) => {
+    const [a] = await ctx.tx
+      .select({ publishedVersion: schema.artifacts.publishedVersion, type: schema.artifacts.type })
+      .from(schema.artifacts)
+      .where(eq(schema.artifacts.id, input.journeyId));
+    if (a?.type !== 'journey') throw new AppError('not_found', `No journey ${input.journeyId}.`);
+    if (!a.publishedVersion) throw new AppError('not_found', `Journey ${input.journeyId} has no published version.`);
+    const [v] = await ctx.tx
+      .select({ content: schema.artifactVersions.content })
+      .from(schema.artifactVersions)
+      .where(and(eq(schema.artifactVersions.artifactId, input.journeyId), eq(schema.artifactVersions.number, a.publishedVersion)));
+    const def = artifactTypes.journey.content.parse(v?.content);
+    const split = def.nodes.find((n) => n.id === input.node);
+    if (split?.kind !== 'split') throw new AppError('invalid_input', `Node ${input.node} is not a split in the published journey.`);
+    const weights = (split.config as { weights?: number[] }).weights ?? [];
+    const range = { ...(input.from ? { from: new Date(input.from) } : {}), ...(input.to ? { to: new Date(input.to) } : {}) };
+    const ws = ctx.principal.workspaceId;
+    const taken = await ctx.services.events.journeySplitArms(ws, { journeyId: input.journeyId, node: input.node, ...range });
+    // Goal conversions and unsubscribes per person, as journeys.holdoutResult counts them.
+    const outcomes = await ctx.services.events.journeyHoldoutOutcomes(ws, { journeyId: input.journeyId, ...range });
+    const converted = new Set(outcomes.converted);
+    const unsubscribed = new Set(outcomes.unsubscribed);
+    const counts = weights.map(() => ({ entered: 0, converted: 0, unsubscribed: 0 }));
+    for (const t of taken) {
+      const c = counts[t.arm];
+      if (!c) continue;
+      c.entered++;
+      if (converted.has(t.profileId)) c.converted++;
+      if (unsubscribed.has(t.profileId)) c.unsubscribed++;
+    }
+    const rate = (n: number, of: number) => (of ? n / of : 0);
+    const arms = counts.map((c, i) => ({
+      arm: i,
+      weight: weights[i],
+      ...c,
+      conversionRate: rate(c.converted, c.entered),
+      unsubscribeRate: rate(c.unsubscribed, c.entered),
+    }));
+    const comparisons = counts.slice(1).map((c, i) => {
+      const r = analyseHoldout(counts[0], c, input.minSampleSize);
+      return {
+        arm: i + 1,
+        versus: 0 as const,
+        absoluteLift: r.absoluteLift,
+        relativeLift: r.relativeLift,
+        ci95: r.ci95,
+        minSampleSizeMet: r.minSampleSizeMet,
+        verdict: r.verdict,
+      };
+    });
+    const better = comparisons.filter((c) => c.verdict === 'treatment_better').map((c) => `arm ${c.arm}`);
+    const note = !taken.length
+      ? 'Nobody has reached this split yet.'
+      : better.length
+        ? `${better.join(', ')} converts better than arm 0 with a 95% interval above zero.`
+        : comparisons.every((c) => c.verdict === 'not_enough_data')
+          ? `Not enough people yet: each arm needs ${input.minSampleSize}.`
+          : 'No arm is clearly better than arm 0 yet.';
+    return { journeyId: input.journeyId, node: input.node, arms, comparisons, note };
+  },
+});
+
 export const enrollProfiles = defineCommand({
   name: 'journeys.enroll',
   title: 'Put people into a journey',
@@ -325,6 +433,194 @@ export const enrollProfiles = defineCommand({
     }
     if (holdout.length) ctx.afterCommit?.(() => ctx.services.events.insertJourneyEvents(holdout).catch(() => {}));
     return { entered, skipped: input.profileIds.length - entered };
+  },
+});
+
+/**
+ * Bulk enrollment (#148): a segment backfill that runs in chunks in the scheduler, with a visible
+ * job and a resumable cursor. The impact is the segment's people capped by `limit`, so the audience
+ * threshold and a mandate's scope decide for agents exactly as they do for journeys.enroll; over the
+ * threshold the call is refused (not approvable) and says why.
+ */
+export const enrollSegment = defineCommand({
+  name: 'journeys.enrollSegment',
+  title: 'Enroll a segment into a journey',
+  description:
+    'Enroll the current members of a published segment into a published journey, in chunks of 500, and return a job id. Re-entry rules, consent and suppression are checked for each person; people who cannot enter are counted with a reason. The job is resumable and the same idempotency key returns the same job. Use limit to cap how many members it tries.',
+  input: z.object({
+    artifactId: JourneyId,
+    segmentId: SegmentId,
+    limit: z.number().int().min(1).max(100_000).optional().describe('Try at most this many members; default: the whole segment'),
+    reason: z.string().min(1).max(200).describe('Why this backfill runs; kept on the job and in the audit log'),
+    idempotencyKey: z.string().min(1).max(200).optional().describe('The same key returns the same job instead of starting another'),
+  }),
+  output: z.object({
+    jobId: z.string(),
+    status: enrollmentJobStatus,
+    people: z.number().int().describe('People the job may enroll (the segment, capped by limit)'),
+    duplicate: z.boolean().describe('True when an idempotency key returned an existing job'),
+  }),
+  permission: 'messages:send',
+  effect: 'write',
+  actionClass: 'journey.live',
+  impact: async (input, ctx) => {
+    const touches = await journeyTouches(ctx.tx, input.artifactId);
+    const people = await countSegmentMembers(ctx.tx, input.segmentId, input.limit);
+    return {
+      people,
+      summary: `enrol ${people} people from segment ${input.segmentId}`,
+      touches: {
+        segments: [...new Set([...(touches?.segments ?? []), input.segmentId])],
+        purposes: touches?.purposes ?? [],
+        topics: touches?.topics ?? [],
+        channels: touches?.channels ?? [],
+        artifacts: touches?.artifacts ?? [],
+      },
+    };
+  },
+  target: (i) => i.artifactId,
+  handler: async (input, ctx) => {
+    const ws = ctx.principal.workspaceId;
+    const segments = await publishedSegments(ctx.tx);
+    if (!segments.some((s) => s.id === input.segmentId))
+      throw new AppError('not_found', `Segment ${input.segmentId} has no published version.`);
+    const [journey] = await ctx.tx.select().from(schema.artifacts).where(eq(schema.artifacts.id, input.artifactId));
+    if (journey?.type !== 'journey' || !journey.publishedVersion)
+      throw new AppError('not_found', `Journey ${input.artifactId} has no published version.`);
+
+    const requestedBy = {
+      type: ctx.principal.type,
+      id: ctx.principal.type === 'agent' ? (ctx.principal.agent?.id ?? ctx.principal.userId) : ctx.principal.userId,
+    };
+    if (input.idempotencyKey) {
+      const [existing] = await ctx.tx
+        .select()
+        .from(schema.enrollmentJobs)
+        .where(and(eq(schema.enrollmentJobs.workspaceId, ws), eq(schema.enrollmentJobs.idempotencyKey, input.idempotencyKey)));
+      if (existing) {
+        if (existing.journeyId !== input.artifactId || existing.segmentId !== input.segmentId)
+          throw new AppError('conflict', 'This idempotency key was already used for a different enrollment. Use a new key.');
+        return { jobId: existing.id, status: existing.status, people: existing.people, duplicate: true };
+      }
+    }
+
+    const people = await countSegmentMembers(ctx.tx, input.segmentId, input.limit);
+    const [created] = await ctx.tx
+      .insert(schema.enrollmentJobs)
+      .values({
+        workspaceId: ws,
+        id: newId('job'),
+        journeyId: input.artifactId,
+        segmentId: input.segmentId,
+        status: 'queued',
+        limit: input.limit ?? null,
+        people,
+        requestedByType: requestedBy.type,
+        requestedById: requestedBy.id,
+        reason: input.reason,
+        idempotencyKey: input.idempotencyKey ?? null,
+      })
+      .onConflictDoNothing()
+      .returning();
+    if (!created) {
+      // A concurrent call with the same key won the unique index: return its job.
+      const [existing] = await ctx.tx
+        .select()
+        .from(schema.enrollmentJobs)
+        .where(and(eq(schema.enrollmentJobs.workspaceId, ws), eq(schema.enrollmentJobs.idempotencyKey, input.idempotencyKey ?? '')));
+      if (!existing) throw new AppError('conflict', 'This enrollment could not be created. Try again.');
+      return { jobId: existing.id, status: existing.status, people: existing.people, duplicate: true };
+    }
+    return { jobId: created.id, status: created.status, people: created.people, duplicate: false };
+  },
+});
+
+export const enrollmentJob = defineCommand({
+  name: 'journeys.enrollmentJob',
+  title: 'One bulk enrollment job',
+  description: 'Status, progress and skip reasons of one segment enrollment job.',
+  input: z.object({ jobId: EnrollmentJobId }),
+  output: enrollmentJobOutput,
+  permission: 'artifacts:read',
+  effect: 'read',
+  target: (i) => i.jobId,
+  handler: async (input, ctx) => {
+    const [job] = await ctx.tx.select().from(schema.enrollmentJobs).where(eq(schema.enrollmentJobs.id, input.jobId));
+    if (!job) throw new AppError('not_found', `No enrollment job ${input.jobId}.`);
+    return enrollmentJobOut(job);
+  },
+});
+
+export const enrollmentJobs = defineCommand({
+  name: 'journeys.enrollmentJobs',
+  title: 'Bulk enrollment jobs',
+  description: 'Segment enrollment jobs of a journey or the whole workspace, newest first, with progress and skip reasons.',
+  input: z.object({
+    journeyId: JourneyId.optional(),
+    status: enrollmentJobStatus.optional(),
+    limit: z.number().int().min(1).max(200).default(50),
+  }),
+  output: z.object({ jobs: z.array(enrollmentJobOutput) }),
+  permission: 'artifacts:read',
+  effect: 'read',
+  handler: async (input, ctx) => {
+    const rows = await ctx.tx
+      .select()
+      .from(schema.enrollmentJobs)
+      .where(
+        and(
+          input.journeyId ? eq(schema.enrollmentJobs.journeyId, input.journeyId) : undefined,
+          input.status ? eq(schema.enrollmentJobs.status, input.status) : undefined,
+        ),
+      )
+      .orderBy(desc(schema.enrollmentJobs.createdAt))
+      .limit(input.limit);
+    return { jobs: rows.map(enrollmentJobOut) };
+  },
+});
+
+export const cancelEnrollment = defineCommand({
+  name: 'journeys.cancelEnrollment',
+  title: 'Cancel a bulk enrollment job',
+  description:
+    'Stop a queued or running segment enrollment job. People already enrolled stay in the journey; the job records where it stopped.',
+  input: z.object({ jobId: EnrollmentJobId, reason: z.string().max(200).optional() }),
+  output: enrollmentJobOutput,
+  permission: 'messages:send',
+  effect: 'write',
+  actionClass: 'journey.live',
+  impact: async (input, ctx) => {
+    const [job] = await ctx.tx.select().from(schema.enrollmentJobs).where(eq(schema.enrollmentJobs.id, input.jobId));
+    const touches = job ? await journeyTouches(ctx.tx, job.journeyId) : undefined;
+    return {
+      people: 0,
+      summary: `cancel enrollment job ${input.jobId}`,
+      ...(job
+        ? {
+            touches: {
+              segments: [...new Set([...(touches?.segments ?? []), job.segmentId])],
+              purposes: touches?.purposes ?? [],
+              topics: touches?.topics ?? [],
+              channels: touches?.channels ?? [],
+              artifacts: touches?.artifacts ?? [],
+            },
+          }
+        : {}),
+    };
+  },
+  target: (i) => i.jobId,
+  handler: async (input, ctx) => {
+    const [job] = await ctx.tx.select().from(schema.enrollmentJobs).where(eq(schema.enrollmentJobs.id, input.jobId));
+    if (!job) throw new AppError('not_found', `No enrollment job ${input.jobId}.`);
+    if (job.status !== 'queued' && job.status !== 'running')
+      throw new AppError('conflict', `Enrollment job ${input.jobId} is ${job.status}; only a queued or running job can be cancelled.`);
+    const now = new Date();
+    const [updated] = await ctx.tx
+      .update(schema.enrollmentJobs)
+      .set({ status: 'cancelled', finishedAt: now, updatedAt: now })
+      .where(eq(schema.enrollmentJobs.id, input.jobId))
+      .returning();
+    return enrollmentJobOut(updated);
   },
 });
 
@@ -704,4 +1000,15 @@ export const migrateJourney = defineCommand({
   },
 });
 
-export const journeyCommands = [journeyStats, journeyHoldoutResult, enrollProfiles, simulateJourney, migrateJourney] as const;
+export const journeyCommands = [
+  journeyStats,
+  journeyHoldoutResult,
+  journeySplitResult,
+  enrollProfiles,
+  enrollSegment,
+  enrollmentJob,
+  enrollmentJobs,
+  cancelEnrollment,
+  simulateJourney,
+  migrateJourney,
+] as const;

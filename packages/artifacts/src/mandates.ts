@@ -96,6 +96,7 @@ export async function activeMandate(tx: Tx, agentId: string, now = new Date()): 
         guardrails: m.guardrails,
         purpose: m.purpose,
         learning: m.learning,
+        goals: m.goals,
         shadow: m.shadow as MandateView['shadow'],
       },
     };
@@ -115,14 +116,15 @@ publishValidators.set('agent_mandate', async (content, tx: Tx, artifact) => {
   const settings = autonomySettings(w?.autonomy);
   for (const [cls, level] of Object.entries(m.levels)) {
     // A class in shadow only records what the agent would do, so it may be above the ceiling (#256).
-    if (m.shadow === true || (Array.isArray(m.shadow) && m.shadow.includes(cls as (typeof m.shadow)[number]))) {
-      if (level === 4) problems.push(`levels.${cls} is 4 (run the loop), which arrives in a later release`);
-      continue;
-    }
+    // Level 4 may be recorded in shadow without having earned it: that is how it is earned (#309).
+    if (m.shadow === true || (Array.isArray(m.shadow) && m.shadow.includes(cls as (typeof m.shadow)[number]))) continue;
     const ceiling = settings.maxLevel[cls as ActionClass] ?? 1;
     if ((level ?? 0) > ceiling)
       problems.push(`levels.${cls} is ${level}, above the workspace ceiling of ${ceiling} (raise it in Settings → Agents first)`);
-    if (level === 4) problems.push(`levels.${cls} is 4 (run the loop), which arrives in a later release`);
+    if (level === 4) {
+      const missing = await l4Missing(tx, m.agent, cls as ActionClass);
+      if (missing) problems.push(`levels.${cls} is 4 (run the loop), which is earned: ${missing}`);
+    }
   }
   const until = new Date(m.validUntil).getTime();
   if (until <= Date.now()) problems.push('validUntil is in the past');
@@ -132,6 +134,56 @@ publishValidators.set('agent_mandate', async (content, tx: Tx, artifact) => {
     problems.push(`agent ${m.agent} already has an active mandate (${others.view.id}); archive it or let it expire first`);
   return problems;
 });
+
+/** How long an agent must have run a class at level 3, or in shadow, before a mandate may grant level 4. */
+export const L4_EARNING_DAYS = 28;
+
+/**
+ * What an agent still lacks to be granted level 4 (run the loop) for a class, or null when it has
+ * earned it (design §3.3, #309): it ran the class autonomously (level 3, decided by a mandate) for
+ * at least four weeks with no guardian episode in that time and no cap in force, or its mandate
+ * recorded the class in shadow mode for four weeks without a decision a person rejected.
+ */
+export async function l4Missing(tx: Tx, agentId: string, cls: ActionClass, now = new Date()): Promise<string | null> {
+  const since = new Date(now.getTime() - L4_EARNING_DAYS * 86_400_000);
+  const [agent] = await tx.select({ guard: schema.agents.guard }).from(schema.agents).where(eq(schema.agents.id, agentId));
+  if (agent?.guard) return 'the guardian has limited this agent; clear it first';
+  const [episodes] = await tx
+    .select({ n: sql<number>`count(*)::int` })
+    .from(schema.guardianEvents)
+    .where(and(eq(schema.guardianEvents.agentId, agentId), sql`${schema.guardianEvents.at} > ${since}`));
+  const a = schema.agentActions;
+  // Level 3: allowed by a mandate without a person, i.e. autonomous.
+  const [l3] = await tx
+    .select({ first: sql<Date | null>`min(${a.at})` })
+    .from(a)
+    .where(
+      and(
+        eq(a.agentId, agentId),
+        eq(a.actionClass, cls),
+        eq(a.decision, 'allow'),
+        eq(a.ok, true),
+        sql`${a.mandateId} IS NOT NULL`,
+        sql`${a.shadow} IS NULL`,
+      ),
+    );
+  const l3Earned = !!l3?.first && new Date(l3.first) <= since && (episodes?.n ?? 0) === 0;
+  if (l3Earned) return null;
+  // Shadow mode: what the mandate would have run, and no such action a person rejected.
+  const [shadow] = await tx
+    .select({
+      first: sql<Date | null>`min(${a.at})`,
+      rejected: sql<number>`count(*) FILTER (WHERE ${a.shadow}->>'decision' IN ('allow', 'hold') AND EXISTS (
+        SELECT 1 FROM approval_requests ar WHERE ar.id = ${a.impact}->>'approvalId' AND ar.status = 'rejected'))::int`,
+    })
+    .from(a)
+    .where(and(eq(a.agentId, agentId), eq(a.actionClass, cls), sql`${a.shadow} IS NOT NULL`));
+  if (shadow?.first && new Date(shadow.first) <= since && (shadow.rejected ?? 0) === 0) return null;
+  if ((episodes?.n ?? 0) > 0) return `the guardian acted on this agent in the last ${L4_EARNING_DAYS} days`;
+  if (shadow?.first && (shadow.rejected ?? 0) > 0)
+    return `people rejected ${shadow.rejected} of its shadow decisions for ${cls}; run it at level 3 or in shadow for ${L4_EARNING_DAYS} days without that`;
+  return `it needs ${L4_EARNING_DAYS} days of ${cls} at level 3 without a guardian episode, or ${L4_EARNING_DAYS} days in shadow mode without a decision people rejected`;
+}
 
 /** ms of an ISO hold window such as PT2H. */
 export function holdWindowMs(window: string): number {

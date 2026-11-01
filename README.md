@@ -97,6 +97,7 @@ On Kubernetes: the Helm chart in [`deploy/helm`](deploy/helm/agentic-marketing) 
 ## Documentation
 
 - [Agents](docs/agents.md): connecting an agent over MCP or REST, the workspace's limits, and mandates with autonomy levels and templates by role.
+- [Editorial topics and content briefs](docs/content-briefs.md): the backlog, signals and dedupe, briefs as versioned artifacts, and the agent guardrails.
 - [Development](docs/development.md): layout, running locally, tests, key rotation.
 - [Kubernetes reference deployment](docs/deployment/kubernetes.md): Helm, OpenBao or AWS KMS keys, sizing.
 - [Docker Compose deployment](docs/deployment/compose.md): the release files, the override file, upgrades.
@@ -106,6 +107,8 @@ On Kubernetes: the Helm chart in [`deploy/helm`](deploy/helm/agentic-marketing) 
 - [Single sign-on, SCIM and agent permissions](docs/identity.md).
 - [Architecture](docs/architecture/README.md) and its [ADRs](docs/architecture/adr/).
 - [Integrations](docs/integrations.md): webhooks, connectors, n8n, config as code, warehouse export.
+- [Content sources](docs/content-sources.md): RSS/Atom/JSON feeds, the scored article library, dedupe and versioned selections.
+- [Recipes](docs/recipes.md): installable welcome/DOI, lead-magnet drip, newsletter and win-back loops, the recipe format, and the draft-only install path.
 - [Pilot: MartechSignal](docs/pilots/martechsignal.md): replacing Kit on a static Cloudflare Pages site.
 - Agent skills in [`.claude/skills/`](.claude/skills/):
   - `agentic-marketing-implement`: rolling the stack out on a website;

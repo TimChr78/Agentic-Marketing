@@ -3,6 +3,7 @@ import {
   bigserial,
   boolean,
   customType,
+  date,
   doublePrecision,
   integer,
   jsonb,
@@ -10,6 +11,7 @@ import {
   primaryKey,
   text,
   timestamp,
+  uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
 
@@ -642,6 +644,44 @@ export const journeyEntrySkips = pgTable(
     updatedAt: ts('updated_at').notNull().defaultNow(),
   },
   (t) => [primaryKey({ columns: [t.workspaceId, t.journeyId] })],
+);
+
+export type EnrollmentJobStatus = 'queued' | 'running' | 'done' | 'failed' | 'cancelled';
+/**
+ * A chunked, resumable enrollment of a segment into a journey (#148). The scheduler scans one
+ * chunk per tick from `cursor` (the last profile id it looked at) and commits the participants
+ * with the cursor, so a crash resumes without enrolling anyone twice.
+ */
+export const enrollmentJobs = pgTable(
+  'enrollment_jobs',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    journeyId: text('journey_id').notNull(),
+    segmentId: text('segment_id').notNull(),
+    status: text('status').$type<EnrollmentJobStatus>().notNull().default('queued'),
+    /** How many members the job may try; null means the whole segment. */
+    limit: integer('limit'),
+    /** The last profile id scanned, not the last one enrolled. */
+    cursor: text('cursor'),
+    /** People in the segment when the job was requested, capped by `limit` (the impact estimate). */
+    people: integer('people').notNull().default(0),
+    entered: integer('entered').notNull().default(0),
+    skipped: integer('skipped').notNull().default(0),
+    failed: integer('failed').notNull().default(0),
+    /** Why people were skipped: a reason code (reentry, no_lawful_basis, suppressed…) → people. */
+    skipReasons: jsonb('skip_reasons').$type<Record<string, number>>().notNull().default({}),
+    requestedByType: text('requested_by_type').$type<'user' | 'agent'>().notNull(),
+    requestedById: text('requested_by_id').notNull(),
+    reason: text('reason').notNull(),
+    idempotencyKey: text('idempotency_key'),
+    error: text('error'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    startedAt: ts('started_at'),
+    finishedAt: ts('finished_at'),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
 );
 
 /**
@@ -1331,4 +1371,284 @@ export const agentNotificationDeliveries = pgTable(
     deliveredAt: ts('delivered_at').notNull().defaultNow(),
   },
   (t) => [primaryKey({ columns: [t.workspaceId, t.actionId, t.userId] })],
+);
+
+/**
+ * A conclusion with its evidence (#311, agentic-autonomy §6): what a person or an agent learned
+ * from subject tests, journey or campaign holdouts and experiences. Agents read the active ones as
+ * the MCP resource learnings://current; a person can retract one with a reason.
+ */
+export type LearningStatus = 'active' | 'retracted';
+export type LearningScope = {
+  /** Audience segment ids the learning applies to. */
+  segmentIds?: string[];
+  /** Channel, e.g. "email". */
+  channel?: string;
+  /** Topic under a purpose. */
+  topic?: string;
+  /** Purpose key. */
+  purpose?: string;
+};
+export type LearningEvidence = {
+  kind: 'subject_test' | 'journey_holdout' | 'campaign_holdout' | 'experience';
+  /** The broadcast, journey, campaign or experience the result came from. */
+  id: string;
+  summary: string;
+  /** The measured numbers, e.g. { wins: 3, tests: 4, liftPts: 2.1 }. */
+  numbers: Record<string, number>;
+};
+export const learnings = pgTable(
+  'learnings',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    statement: text('statement').notNull(),
+    scope: jsonb('scope').$type<LearningScope>().notNull().default({}),
+    evidence: jsonb('evidence').$type<LearningEvidence[]>().notNull().default([]),
+    authorType: text('author_type').$type<'user' | 'agent'>().notNull(),
+    authorId: text('author_id').notNull(),
+    agentId: text('agent_id'),
+    status: text('status').$type<LearningStatus>().notNull().default('active'),
+    retractedBy: text('retracted_by'),
+    retractedAt: ts('retracted_at'),
+    retractReason: text('retract_reason'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
+export type ContentTopicStatus = 'idea' | 'scored' | 'brief' | 'approved' | 'drafting' | 'published' | 'archived';
+
+/**
+ * Why a topic surfaced (#141). `content_item` ids are plain strings on purpose: the content library
+ * (#140) owns its own table, and the backlog must merge without depending on it.
+ */
+export type ContentTopicSignal = {
+  kind: 'content_item' | 'community' | 'manual' | 'past_post';
+  id?: string;
+  title?: string;
+  url?: string;
+  relevance?: 'high' | 'medium' | 'low';
+  comments?: number;
+  /** Points this signal adds to the topic's score. */
+  weight?: number;
+};
+
+/**
+ * The editorial backlog (#141): one row per topic, workspace-scoped. Briefs are artifacts, not rows
+ * here; a topic only names its brief and (once published) the canonical URL.
+ */
+export const contentTopics = pgTable(
+  'content_topics',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    title: text('title').notNull(),
+    angle: text('angle').notNull().default(''),
+    audience: text('audience').notNull().default(''),
+    readerRole: text('reader_role').notNull().default(''),
+    keyword: text('keyword'),
+    tags: text('tags').array().notNull().default([]),
+    status: text('status').$type<ContentTopicStatus>().notNull().default('idea'),
+    score: integer('score').notNull().default(0),
+    signals: jsonb('signals').$type<ContentTopicSignal[]>().notNull().default([]),
+    ownerId: text('owner_id'),
+    ownerName: text('owner_name'),
+    targetDate: date('target_date'),
+    canonicalUrl: text('canonical_url'),
+    campaignId: text('campaign_id'),
+    broadcastId: text('broadcast_id'),
+    dedupeKey: text('dedupe_key').notNull(),
+    similarTopicIds: text('similar_topic_ids').array().notNull().default([]),
+    briefArtifactId: text('brief_artifact_id'),
+    createdByType: text('created_by_type').$type<'user' | 'agent'>().notNull(),
+    createdById: text('created_by_id').notNull(),
+    agentId: text('agent_id'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
+export type AgentEventType =
+  | 'hold.ran'
+  | 'hold.vetoed'
+  | 'hold.needs_person'
+  | 'approval.decided'
+  | 'guardian.episode'
+  | 'guardrail.breach'
+  | 'experiment.significant'
+  | 'alert.fired';
+
+/**
+ * An agent's event subscription (#312): which event types it wants, an optional filter on the
+ * event's subject ids, and an optional outbound webhook to deliver them to. Without a webhook the
+ * events are recorded for `agents.events`, the polling fallback.
+ */
+export const agentSubscriptions = pgTable(
+  'agent_subscriptions',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    agentId: text('agent_id').notNull(),
+    eventTypes: text('event_types').array().$type<AgentEventType[]>().notNull(),
+    filter: jsonb('filter').$type<Record<string, string | string[]>>().notNull().default({}),
+    webhookId: text('webhook_id'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
+/** How far each event source has been read for agent subscriptions (#312). */
+export const agentEventCursor = pgTable('agent_event_cursor', {
+  workspaceId: uuid('workspace_id').primaryKey(),
+  lastActionId: bigint('last_action_id', { mode: 'number' }).notNull().default(0),
+  lastApprovalAt: ts('last_approval_at'),
+  lastGuardianAt: ts('last_guardian_at'),
+  lastAlertAt: ts('last_alert_at'),
+  lastExperimentAt: ts('last_experiment_at'),
+});
+
+/** One delivered event per subscription: what `agents.events` pages through and what keeps a re-derived event silent. */
+export const agentEvents = pgTable(
+  'agent_events',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: bigserial('id', { mode: 'number' }).notNull(),
+    agentId: text('agent_id').notNull(),
+    subscriptionId: text('subscription_id').notNull(),
+    type: text('type').$type<AgentEventType>().notNull(),
+    eventKey: text('event_key').notNull(),
+    summary: text('summary').notNull(),
+    subject: jsonb('subject').$type<Record<string, unknown>>().notNull().default({}),
+    at: ts('at').notNull(),
+    createdAt: ts('created_at').notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.id] }),
+    uniqueIndex('agent_events_subscription_key').on(t.workspaceId, t.subscriptionId, t.eventKey),
+  ],
+);
+
+// Content sources (#140): the workspace's RSS/Atom/JSON feeds, the normalised articles they
+// produced, and versioned selections of those articles for an issue or brief.
+
+export type ContentSourceKind = 'rss' | 'atom' | 'json';
+export type ContentSourceCategory = 'platform' | 'publication' | 'vendor' | 'community' | 'open source' | 'thought leader' | 'other';
+export type ContentItemStatus = 'new' | 'selected' | 'ignored' | 'used';
+export type ContentSelectionStatus = 'draft' | 'approved';
+export type ContentAuthorType = 'user' | 'agent';
+
+/** One part of an item's relevance score, so a person can see why it ranked. */
+export type ContentScoreComponent = {
+  kind: 'keyword' | 'authority' | 'recency' | 'section' | 'category';
+  label: string;
+  points: number;
+  detail: string;
+};
+
+/** The score a fetch calculated, stored with the item (issue #140: explainable and deterministic). */
+export type ContentScoreExplanation = {
+  policyVersion: string;
+  total: number;
+  matchedKeywords: string[];
+  section: string;
+  components: ContentScoreComponent[];
+  /** A one-line human summary, e.g. "score 41: 2 high keywords, authority 4, published 6 h ago". */
+  summary: string;
+};
+
+/** A selected item as it looked when the selection was saved: pruning the library keeps history. */
+export type ContentSelectionItem = {
+  itemId: string;
+  sourceId: string;
+  sourceName: string;
+  title: string;
+  url: string;
+  excerpt: string;
+  author: string | null;
+  publishedAt: string | null;
+  score: number;
+  section: string;
+};
+
+export type ContentSelectionSection = {
+  name: string;
+  note: string | null;
+  items: ContentSelectionItem[];
+};
+
+export const contentSources = pgTable(
+  'content_sources',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    kind: text('kind').$type<ContentSourceKind>().notNull(),
+    url: text('url').notNull(),
+    name: text('name').notNull(),
+    category: text('category').$type<ContentSourceCategory>().notNull().default('other'),
+    authority: integer('authority').notNull().default(3),
+    language: text('language').notNull().default('en'),
+    enabled: boolean('enabled').notNull().default(true),
+    fetchIntervalMinutes: integer('fetch_interval_minutes').notNull().default(360),
+    lastFetchAt: ts('last_fetch_at'),
+    etag: text('etag'),
+    lastModified: text('last_modified'),
+    lastError: text('last_error'),
+    consecutiveFailures: integer('consecutive_failures').notNull().default(0),
+    createdByType: text('created_by_type').$type<ContentAuthorType>().notNull(),
+    createdById: text('created_by_id').notNull(),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] }), uniqueIndex('content_sources_url').on(t.workspaceId, t.url)],
+);
+
+export const contentItems = pgTable(
+  'content_items',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    sourceId: text('source_id').notNull(),
+    canonicalUrl: text('canonical_url').notNull(),
+    title: text('title').notNull(),
+    excerpt: text('excerpt').notNull(),
+    author: text('author'),
+    publishedAt: ts('published_at'),
+    fetchedAt: ts('fetched_at').notNull(),
+    lastSeenAt: ts('last_seen_at').notNull(),
+    dedupeKey: text('dedupe_key').notNull(),
+    titleKey: text('title_key').notNull(),
+    language: text('language').notNull().default('en'),
+    section: text('section').notNull(),
+    status: text('status').$type<ContentItemStatus>().notNull().default('new'),
+    relevanceScore: integer('relevance_score').notNull().default(0),
+    scoreExplanation: jsonb('score_explanation')
+      .$type<ContentScoreExplanation>()
+      .notNull()
+      .default({} as ContentScoreExplanation),
+    policyVersion: text('policy_version').notNull(),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] }), uniqueIndex('content_items_dedupe').on(t.workspaceId, t.dedupeKey)],
+);
+
+export const contentSelections = pgTable(
+  'content_selections',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    name: text('name').notNull(),
+    issueDate: date('issue_date', { mode: 'string' }).notNull(),
+    version: integer('version').notNull().default(1),
+    status: text('status').$type<ContentSelectionStatus>().notNull().default('draft'),
+    sections: jsonb('sections').$type<ContentSelectionSection[]>().notNull().default([]),
+    policyVersion: text('policy_version').notNull(),
+    createdByType: text('created_by_type').$type<ContentAuthorType>().notNull(),
+    createdById: text('created_by_id').notNull(),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] }), uniqueIndex('content_selections_version').on(t.workspaceId, t.name, t.version)],
 );

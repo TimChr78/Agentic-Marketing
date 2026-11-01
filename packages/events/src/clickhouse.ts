@@ -56,6 +56,11 @@ export interface EventStore {
     workspaceId: string,
     q: { journeyId: string; from?: Date; to?: Date },
   ): Promise<{ converted: string[]; unsubscribed: string[] }>;
+  /** Which arm of a split node each participant took (the step's detail, "variant N"), for split results (#313). */
+  journeySplitArms(
+    workspaceId: string,
+    q: { journeyId: string; node: string; from?: Date; to?: Date },
+  ): Promise<{ participantId: number; profileId: string; arm: number }[]>;
   /** Goal events by name in a time window, with the identifiers that tie them to a profile. */
   conversionEvents(
     workspaceId: string,
@@ -450,6 +455,26 @@ export function clickHouseStore(opts: { url: string; database: string }): EventS
       });
       return (await rs.json<{ node: string; type: string; c: number }>()).map((r) => ({ node: r.node, type: r.type, count: Number(r.c) }));
     },
+    async journeySplitArms(workspaceId, q) {
+      const from = q.from?.toISOString().replace('Z', '');
+      const to = q.to?.toISOString().replace('Z', '');
+      const rows = await query(workspaceId, {
+        query: `SELECT participant_id, any(profile_id) AS profile, any(detail) AS variant FROM journey_events FINAL
+                WHERE workspace_id = {ws:UUID} AND journey_id = {j:String} AND node = {n:String} AND type = 'step'
+                  AND startsWith(detail, 'variant ')
+                ${from ? "AND at >= {from:DateTime64(3, 'UTC')}" : ''}
+                ${to ? "AND at <= {to:DateTime64(3, 'UTC')}" : ''}
+                GROUP BY participant_id`,
+        query_params: { ws: workspaceId, j: q.journeyId, n: q.node, ...(from ? { from } : {}), ...(to ? { to } : {}) },
+        format: 'JSONEachRow',
+      });
+      return (await rows.json<{ participant_id: number | string; profile: string; variant: string }>()).map((r) => ({
+        participantId: Number(r.participant_id),
+        profileId: r.profile,
+        arm: Number(r.variant.slice('variant '.length)) - 1,
+      }));
+    },
+
     async journeyHoldoutOutcomes(workspaceId, q) {
       const from = q.from?.toISOString().replace('Z', '');
       const to = q.to?.toISOString().replace('Z', '');

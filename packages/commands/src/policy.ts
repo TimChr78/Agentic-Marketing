@@ -46,7 +46,8 @@ export interface Impact {
     purposes?: string[];
     topics?: string[];
     channels?: string[];
-    artifacts?: { id: string; type: string }[];
+    /** `created`: the publish makes this artifact live for the first time (level 4 may create, #309). */
+    artifacts?: { id: string; type: string; created?: boolean }[];
   };
   /** Never autonomous whatever the mandate: consent, purposes, delivery caps, credentials (design §3.2). */
   needsPerson?: string;
@@ -126,6 +127,8 @@ export interface MandateView {
   independentCheck: boolean;
   guardrails: { unsubscribeRate?: number; complaintRate?: number; bounceRate?: number; window: string; minSent: number };
   purpose: string;
+  /** Goals on metric-layer measures, reported by agents.report (#310). */
+  goals?: { measure: string; target?: number; direction: 'up' | 'down' }[];
   /** Learning rules (#257): holdouts the agent's journeys, broadcasts and experiences must have. */
   learning?: { journeyControlPercent?: number; broadcastHoldout?: boolean; experienceHoldoutPercent?: number };
   /**
@@ -252,7 +255,7 @@ export function decide(input: PolicyInput): PolicyOutcome {
 const LEVEL_NAMES = ['observe', 'propose', 'act with veto', 'act within limits', 'run the loop'];
 
 /** Outside the scope a mandate grants: each entry is a reason (design §3.4). */
-function scopeViolations(impact: Impact, scope: MandateView['scope']): string[] {
+function scopeViolations(impact: Impact, scope: MandateView['scope'], level: number): string[] {
   const t = impact.touches ?? {};
   const out: string[] = [];
   const outside = (kind: string, values: string[] | undefined, allowed: string[], emptyMeansAny: boolean) => {
@@ -269,7 +272,9 @@ function scopeViolations(impact: Impact, scope: MandateView['scope']): string[] 
   for (const a of t.artifacts ?? []) {
     if (scope.artifactTypes.length && !scope.artifactTypes.includes(a.type))
       out.push(`Changing a ${a.type} is outside this agent’s mandate.`);
-    if (scope.artifacts.length && !scope.artifacts.includes(a.id)) out.push(`${a.id} is outside this agent’s mandate.`);
+    // Level 4 (run the loop) may create new artifacts of an allowed type without a grant for each.
+    if (scope.artifacts.length && !scope.artifacts.includes(a.id) && !(level >= 4 && a.created))
+      out.push(`${a.id} is outside this agent’s mandate.`);
   }
   return out;
 }
@@ -321,7 +326,7 @@ function decideWithMandate(
     capAt(1, 'This workspace is set to propose-only: every agent change beyond a draft needs a person.');
   if (ALWAYS_A_PERSON.includes(actionClass)) capAt(1, `A ${actionClass} change always needs a person, whatever the mandate.`);
   if (impact.needsPerson) capAt(1, impact.needsPerson);
-  for (const v of scopeViolations(impact, mandate.scope)) capAt(1, v);
+  for (const v of scopeViolations(impact, mandate.scope, level)) capAt(1, v);
   for (const v of learningGaps(impact, mandate.learning)) capAt(1, v);
 
   const people = impact.people ?? 0;

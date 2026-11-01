@@ -69,7 +69,7 @@ Read [references/tools.md](references/tools.md) for the full list with effects a
 |---|---|
 | Artifacts | `artifacts.types`, `.list`, `.get`, `.create`, `.updateDraft`, `.history`, `.diff`, `.requestPublish`, `.requestPublishBundle`; `approvals.list`, `approvals.get` |
 | Analytics | `analytics.query` (measures × up to three dimensions), `analytics.emailPerformance`, `analytics.journeyFunnel`, `analytics.campaignSummary`, `analytics.metrics.list` (the catalogue) |
-| Campaigns | `campaigns.of`, `campaigns.members`, `campaigns.archive`, `campaigns.holdoutResult`; campaigns are `campaign` artifacts grouping broadcasts, journeys, templates, experiences, forms and segments |
+| Campaigns | `campaigns.plan` (an approved brief → deterministic draft plan), `campaigns.fromBrief` (create the plan's drafts), `campaigns.of`, `campaigns.members`, `campaigns.archive`, `campaigns.holdoutResult`; campaigns are `campaign` artifacts grouping broadcasts, journeys, templates, experiences, forms and segments, built from a `campaign_brief` a person approves |
 | Alerts | `alerts.list`, `.get`, `.create`, `.update`, `.delete`, `.test`, `.history` |
 | Blocks | `blocks.preview`, `blocks.usage`; `templates.check` before publishing an e-mail |
 | Topics | `topics.preferences` (a person’s choices), `topics.set` (agents may only unsubscribe); topics live under a purpose |
@@ -92,12 +92,14 @@ Read [references/tools.md](references/tools.md) for the full list with effects a
 ## Recipes
 
 Worked examples with full payloads are in [references/recipes.md](references/recipes.md):
+- installing a starter recipe as drafts (`recipes.list/get/preview/install`: welcome and double opt-in, lead-magnet drip, weekly newsletter, win-back; see [docs/recipes.md](../../../docs/recipes.md));
 - the weekly newsletter (template + broadcast, scheduled for Friday);
 - a segment of engaged readers;
 - a welcome journey after double opt-in;
 - a signup form with double opt-in;
 - an AI-chosen branch with a tested prompt;
 - a campaign with a control group;
+- a campaign from a goal and an approved brief (brief → approval → plan → drafts → bundle → evaluate);
 - a weekly issue built from reusable blocks and published as a bundle;
 - topics, the preference centre and the archive;
 - a subject test and a recipient-local send window;
@@ -107,13 +109,14 @@ Worked examples with full payloads are in [references/recipes.md](references/rec
 
 ## Content rules that save round trips
 
-- **Ids** look like `not_` (note), `jrn_` (journey), `blk_` (e-mail block), `eml_` (e-mail template), `sms_` (SMS template), `psh_` (push template), `seg_` (segment), `exp_` (web experience), `prm_` (AI prompt), `frm_` (signup form), `brd_` (brand), `bct_` (broadcast), `cmp_` (campaign), `tpl_` (tracking plan), `pur_` (purposes), `cvm_` (conversion map), `aud_` (audience sync), `dlp_` (delivery policy), each followed by 32 hex characters. Assets are `ast_` and people are `prf_`.
+- **Ids** look like `not_` (note), `jrn_` (journey), `blk_` (e-mail block), `eml_` (e-mail template), `sms_` (SMS template), `psh_` (push template), `seg_` (segment), `exp_` (web experience), `prm_` (AI prompt), `frm_` (signup form), `brd_` (brand), `bct_` (broadcast), `cmp_` (campaign), `cpb_` (campaign brief), `tpl_` (tracking plan), `pur_` (purposes), `cvm_` (conversion map), `aud_` (audience sync), `dlp_` (delivery policy), each followed by 32 hex characters. Assets are `ast_` and people are `prf_`.
 - **Durations** are ISO 8601: `PT6H`, `P2D`, `P1W`. **Timestamps** are ISO in UTC: `2026-10-30T07:00:00Z`.
 - **E-mail templates:** MJML with Liquid.
   - Variables: `{{ profile.firstName | default: "there" }}`, `{{ content.<slot> }}` (AI-generated text), and journey context.
   - Use `{{ unsubscribe_url | raw }}` in marketing footers and `{{ confirm_url | raw }}` in double opt-in confirmations.
   - Template purposes: `marketing_email` for newsletters, `onboarding` for transactional or confirmation mail.
 - **SMS templates:** plain text with Liquid; purposes `marketing_sms` (needs consent) or `service_sms`. Check `smsTemplates.preview` for segments and cost before publishing.
+- **Campaign briefs:** a `campaign_brief` (`cpb_…`) is the contract for one campaign: objective, measurable goal, audience and segment refs, message, offer, channels, schedule, guardrails, success criteria and holdout intent. Draft it, submit it, and let a person approve it; then `campaigns.plan` and `campaigns.fromBrief` build drafts. Never publish the brief or the bundle on the agent's own authority.
 - **Ads reporting:** campaigns are matched by `utm_campaign` = the platform's campaign id or name; tell the site owner to tag ad URLs that way. Report ROAS from `ads.performance`, and say when conversions are unattributed. Never propose changes as done: budgets and bids are for people.
 - **Conversion map:** rules `{event, value?, currency?, meta?: {connection, eventName}, google?: {connection, conversionAction}}`. Use the confirmed event (e.g. `Subscription Confirmed` → Meta `Lead`), not the form submission. Only people who allowed `ad_measurement` are sent. Agents never change budgets or bids.
 - **Delivery policy:** frequency caps, quiet hours and the auto-pause live in the workspace's `delivery_policy` artifact. A `queued` message with a `quiet_hours:` or `paused:` reason is held, not lost; a `frequency_cap:` reason means it was not sent.
