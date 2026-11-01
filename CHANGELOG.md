@@ -2,7 +2,7 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
-## [Unreleased]
+## [0.6.1] - 2026-11-01
 
 ### Fixed
 
@@ -11,6 +11,14 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 - **`agents.report` counts refusals as denies (#321)** instead of failures, **reports the journeys an agent published (#322)** (it looked for the wrong id prefix), and **counts direct-send events only inside the period (#323)**.
 - **Relative feed links are resolved before they are rejected (#326).** RSS, Atom and JSON Feed items with relative links such as `/post/1` or `post/2` are resolved against the feed URL (and an Atom `xml:base` when present) and kept, instead of being dropped as non-absolute. `javascript:`, `data:` and other non-http(s) links are still refused, and absolute links are unchanged.
 - **Bulk enrollment now pins the journey and segment versions (#324).** `journeys.enrollSegment` records the published journey version and segment version on the job (migration `0061_enrollment_job_versions.sql`), and every participant enters the pinned journey version. Before each chunk the scheduler checks both artifacts and stops the job as `failed` with a clear reason when the journey or segment was republished, archived or unpublished mid-flight — for example “The journey was republished (v1 → v2) during the enrollment; start a new job to enroll the rest into v2.” — instead of splitting participants across versions or continuing with an archived segment. `journeys.enrollmentJob` reports `journeyVersion`, `segmentVersion` and the stop reason. Jobs created before this change pin on their next chunk.
+
+### Upgrading from 0.6.0
+
+- **Migrations:** `0061_enrollment_job_versions.sql` (pinned journey and segment versions on bulk enrollment jobs) and `0062_agent_action_level.sql` (the decided level on each agent ledger entry). Both additive; they run on start.
+- **Configuration:** none.
+- **Breaking changes:** none. Earning level 4 starts again from this release: only ledger entries recorded at level 3 or above count, and entries from before 0.6.1 have no level. A bulk enrollment job still running from 0.6.0 pins the current versions on its next chunk.
+- **Manual steps:** none.
+- **Upgrade:** download `agentic-marketing-compose-<version>.tar.gz`, replace `docker-compose.yml` with its copy, check your configuration with the new image (`AM_VERSION=<version> docker compose run --rm --no-deps -T app am doctor --env-file - < .env`), then set `AM_VERSION=<version>` in `.env` and `docker compose pull && docker compose up -d` (Helm: the chart of the same version). Then `docker compose exec app am doctor`.
 
 ## [0.6.0] - 2026-11-01
 
