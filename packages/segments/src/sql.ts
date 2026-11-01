@@ -33,6 +33,7 @@ export async function compile(cond: SegmentCondition, ctx: SqlContext): Promise<
   if ('event' in cond) return eventPredicate(cond, ctx);
   if ('consent' in cond) return consentPredicate(cond.consent, ctx);
   if ('topic' in cond) return topicPredicate(cond.topic, ctx);
+  if ('score' in cond) return scorePredicate(cond.score, ctx);
   const stack = ctx._stack ?? [];
   if (stack.includes(cond.segment))
     throw new AppError('invalid_input', `Segments refer to each other in a loop: ${[...stack, cond.segment].join(' → ')}`);
@@ -64,6 +65,14 @@ async function topicPredicate(topic: string, ctx: SqlContext): Promise<SQL> {
   if (!found) throw new AppError('invalid_input', `Unknown topic "${topic}" in a segment condition. See purposes.list.`);
   // The same rule as topicSet in evaluate.ts, including the topic's default.
   return topicSubscribedSql(sql`${schema.profiles.id}`, topic, found.topic.default);
+}
+
+/** A stored decision-model score (#194); expired scores never match. */
+function scorePredicate(c: Extract<SegmentCondition, { score: unknown }>['score'], ctx: SqlContext): SQL {
+  return sql`EXISTS (SELECT 1 FROM profile_scores ps WHERE ps.workspace_id = ${ctx.workspaceId}
+    AND ps.profile_id = ${schema.profiles.id} AND ps.key = ${c.key} AND ps.expires_at > now()
+    ${c.gte !== undefined ? sql`AND ps.value >= ${c.gte}` : sql``}
+    ${c.lte !== undefined ? sql`AND ps.value <= ${c.lte}` : sql``})`;
 }
 
 async function eventPredicate(c: Extract<SegmentCondition, { event: string }>, ctx: SqlContext): Promise<SQL> {
