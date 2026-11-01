@@ -327,8 +327,8 @@ describe('learning rules (#257)', () => {
     );
 
   it('a journey needs its control group', () => {
-    expect(run('journey.live', [{ id: 'jny_1', type: 'journey', controlPercent: 5 }])).toMatchObject({ decision: 'ask', level: 1 });
-    expect(run('journey.live', [{ id: 'jny_1', type: 'journey', controlPercent: 10 }]).decision).toBe('allow');
+    expect(run('journey.live', [{ id: 'jrn_1', type: 'journey', controlPercent: 5 }])).toMatchObject({ decision: 'ask', level: 1 });
+    expect(run('journey.live', [{ id: 'jrn_1', type: 'journey', controlPercent: 10 }]).decision).toBe('allow');
   });
 
   it('a broadcast needs a holdout or a subject test', () => {
@@ -374,7 +374,7 @@ describe('level 4, run the loop (#309)', () => {
 
   it('still keeps changes to existing artifacts and other types to the scope', () => {
     expect(publish(4, { id: 'not_other', type: 'note', created: false }).decision).toBe('ask');
-    expect(publish(4, { id: 'jny_new', type: 'journey', created: true }).decision).toBe('ask');
+    expect(publish(4, { id: 'jrn_new', type: 'journey', created: true }).decision).toBe('ask');
   });
 
   it('level 3 does not create outside the list, and without allowLoops level 4 is level 3', () => {

@@ -9,6 +9,7 @@ import {
   jsonb,
   pgTable,
   primaryKey,
+  smallint,
   text,
   timestamp,
   uniqueIndex,
@@ -659,6 +660,10 @@ export const enrollmentJobs = pgTable(
     id: text('id').notNull(),
     journeyId: text('journey_id').notNull(),
     segmentId: text('segment_id').notNull(),
+    /** The journey's published version when the job started; null on jobs from before #324 until their next chunk. */
+    journeyVersion: integer('journey_version'),
+    /** The segment's published version when the job started; null on jobs from before #324 until their next chunk. */
+    segmentVersion: integer('segment_version'),
     status: text('status').$type<EnrollmentJobStatus>().notNull().default('queued'),
     /** How many members the job may try; null means the whole segment. */
     limit: integer('limit'),
@@ -1252,6 +1257,8 @@ export const agentActions = pgTable(
     mandateId: text('mandate_id'),
     mandateVersion: integer('mandate_version'),
     intent: text('intent'),
+    /** The level the policy engine decided at (#327); null for rows before 0.6.1 and without a mandate. */
+    level: smallint('level'),
     /** Shadow mode (#256): what the mandate would have decided; `decision` is what applied. */
     shadow: jsonb('shadow').$type<{
       decision: PolicyDecision;

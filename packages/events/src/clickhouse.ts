@@ -47,7 +47,7 @@ export interface EventStore {
   /** Unique messages per event type since a time, optionally for one template or journey. */
   messageStats(
     workspaceId: string,
-    q: { since: Date; templateId?: string; journeyId?: string; messageIds?: string[] },
+    q: { since: Date; until?: Date; templateId?: string; journeyId?: string; messageIds?: string[] },
   ): Promise<Record<string, number>>;
   /** Per node and event type counts for a journey (analytics, canvas overlays). */
   journeyCounts(workspaceId: string, journeyId: string): Promise<{ node: string; type: string; count: number }[]>;
@@ -432,12 +432,14 @@ export function clickHouseStore(opts: { url: string; database: string }): EventS
       const rs = await query(workspaceId, {
         query: `SELECT type, uniqExact(message_id) AS c FROM message_events FINAL
                 WHERE workspace_id = {ws:UUID} AND at >= {since:DateTime64(3, 'UTC')}
+                ${q.until ? "AND at < {until:DateTime64(3, 'UTC')}" : ''}
                 ${q.templateId ? 'AND template_id = {t:String}' : ''} ${q.journeyId ? 'AND journey_id = {j:String}' : ''}
                 ${q.messageIds ? 'AND message_id IN {ids:Array(String)}' : ''}
                 GROUP BY type`,
         query_params: {
           ws: workspaceId,
           since: q.since.toISOString().replace('Z', ''),
+          ...(q.until ? { until: q.until.toISOString().replace('Z', '') } : {}),
           t: q.templateId ?? '',
           j: q.journeyId ?? '',
           ids: q.messageIds ?? [],

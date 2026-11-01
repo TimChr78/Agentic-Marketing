@@ -691,8 +691,9 @@ export const agentReport = defineCommand({
       .select({
         actionClass: t.actionClass,
         decision: t.decision,
-        failed: sql<number>`count(*) FILTER (WHERE NOT ${t.ok})::int`,
-        n: sql<number>`count(*) FILTER (WHERE ${t.ok})::int`,
+        // A refusal is recorded with ok = false (its transaction rolled back): it is a deny, not a failure (#321).
+        failed: sql<number>`count(*) FILTER (WHERE NOT ${t.ok} AND ${t.decision} <> 'deny')::int`,
+        n: sql<number>`count(*) FILTER (WHERE ${t.ok} OR ${t.decision} = 'deny')::int`,
         undone: sql<number>`count(*) FILTER (WHERE ${t.undoneAt} IS NOT NULL)::int`,
       })
       .from(t)

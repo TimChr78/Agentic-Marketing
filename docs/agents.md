@@ -386,7 +386,7 @@ A programme (#313): the agent reads each journey's splits with `journeys.splitRe
     "topics": [],
     "channels": ["email"],
     "artifactTypes": ["journey", "email_template"],
-    "artifacts": ["jny_0123456789abcdef0123456789abcdef"],
+    "artifacts": ["jrn_0123456789abcdef0123456789abcdef"],
     "brand": null
   },
   "levels": { "content.publish": 3, "journey.live": 3 },

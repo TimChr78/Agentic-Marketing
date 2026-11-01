@@ -49,6 +49,8 @@ export const enrollmentJobOutput = z.object({
   jobId: z.string(),
   journeyId: z.string(),
   segmentId: z.string(),
+  journeyVersion: z.number().int().nullable().describe('The published journey version the job pinned when it started'),
+  segmentVersion: z.number().int().nullable().describe('The published segment version the job pinned when it started'),
   status: enrollmentJobStatus,
   people: z.number().int().describe('People in the segment when the job was requested, capped by limit'),
   limit: z.number().int().nullable().describe('How many members the job may try; null means the whole segment'),
@@ -60,7 +62,7 @@ export const enrollmentJobOutput = z.object({
   requestedBy: z.object({ type: z.enum(['user', 'agent']), id: z.string() }),
   reason: z.string(),
   idempotencyKey: z.string().nullable(),
-  error: z.string().nullable(),
+  error: z.string().nullable().describe('Why the job stopped, when it failed because the journey or segment changed'),
   createdAt: z.string(),
   startedAt: z.string().nullable(),
   finishedAt: z.string().nullable(),
@@ -72,6 +74,8 @@ export function enrollmentJobOut(job: JobRow) {
     jobId: job.id,
     journeyId: job.journeyId,
     segmentId: job.segmentId,
+    journeyVersion: job.journeyVersion,
+    segmentVersion: job.segmentVersion,
     status: job.status,
     people: job.people,
     limit: job.limit,
@@ -122,16 +126,15 @@ interface PublishedJourney {
   graph: Graph;
 }
 
-async function publishedJourney(tx: Tx, journeyId: string): Promise<PublishedJourney | null> {
-  const [a] = await tx.select().from(schema.artifacts).where(eq(schema.artifacts.id, journeyId));
-  if (a?.type !== 'journey' || !a.publishedVersion) return null;
+/** One journey version's definition; published versions are immutable, so a pinned one keeps its meaning. */
+async function publishedJourney(tx: Tx, journeyId: string, version: number): Promise<PublishedJourney | null> {
   const [v] = await tx
     .select({ content: schema.artifactVersions.content })
     .from(schema.artifactVersions)
-    .where(and(eq(schema.artifactVersions.artifactId, journeyId), eq(schema.artifactVersions.number, a.publishedVersion)));
+    .where(and(eq(schema.artifactVersions.artifactId, journeyId), eq(schema.artifactVersions.number, version)));
   if (!v) return null;
   const def = artifactTypes.journey.content.parse(v.content) as JourneyDefinition;
-  return { version: a.publishedVersion, def, graph: compile(def) };
+  return { version, def, graph: compile(def) };
 }
 
 /**
@@ -181,16 +184,41 @@ async function processChunk(deps: EnrollmentDeps, tx: Tx, workspaceId: string, j
       .where(eq(schema.enrollmentJobs.id, job.id));
   };
 
-  const journey = await publishedJourney(tx, job.journeyId);
-  if (!journey) {
-    await finish('failed', { error: `Journey ${job.journeyId} has no published version.` });
+  // #324: a job must not follow a republish or an archive mid-flight. Check the live artifacts
+  // before every chunk and pin the versions a job from before the migration did not record.
+  const [journeyArtifact] = await tx.select().from(schema.artifacts).where(eq(schema.artifacts.id, job.journeyId));
+  const [segmentArtifact] = await tx.select().from(schema.artifacts).where(eq(schema.artifacts.id, job.segmentId));
+  const stop = async (error: string): Promise<ChunkResult> => {
+    await finish('failed', { error });
     return { summary: emptySummary(), holdout: [] };
-  }
+  };
+  if (journeyArtifact?.type !== 'journey' || !journeyArtifact.publishedVersion)
+    return stop(`Journey ${job.journeyId} has no published version.`);
+  if (journeyArtifact.archived) return stop('The journey was archived during the enrollment; start a new job to enroll the rest.');
+  if (segmentArtifact?.type !== 'segment' || !segmentArtifact.publishedVersion)
+    return stop(`Segment ${job.segmentId} has no published version.`);
+  if (segmentArtifact.archived) return stop('The segment was archived during the enrollment; start a new job to enroll the rest.');
+  const journeyVersion = job.journeyVersion ?? journeyArtifact.publishedVersion;
+  const segmentVersion = job.segmentVersion ?? segmentArtifact.publishedVersion;
+  if (job.journeyVersion !== null && job.journeyVersion !== journeyArtifact.publishedVersion)
+    return stop(
+      `The journey was republished (v${job.journeyVersion} → v${journeyArtifact.publishedVersion}) during the enrollment; start a new job to enroll the rest into v${journeyArtifact.publishedVersion}.`,
+    );
+  if (job.segmentVersion !== null && job.segmentVersion !== segmentArtifact.publishedVersion)
+    return stop(
+      `The segment was republished (v${job.segmentVersion} → v${segmentArtifact.publishedVersion}) during the enrollment; start a new job to enroll the rest using the new segment definition.`,
+    );
+  const pin: Partial<JobRow> = {};
+  if (job.journeyVersion === null) pin.journeyVersion = journeyVersion;
+  if (job.segmentVersion === null) pin.segmentVersion = segmentVersion;
+
+  const journey = await publishedJourney(tx, job.journeyId, journeyVersion);
+  if (!journey) return stop(`Journey ${job.journeyId} version v${journeyVersion} could not be read.`);
 
   const processed = job.entered + job.skipped + job.failed;
   const remaining = job.limit === null ? ENROLLMENT_CHUNK_SIZE : Math.max(0, job.limit - processed);
   if (remaining === 0) {
-    await finish('done');
+    await finish('done', pin);
     return { summary: { ...emptySummary(), done: 1 }, holdout: [] };
   }
   const chunkSize = Math.min(ENROLLMENT_CHUNK_SIZE, remaining);
@@ -203,7 +231,7 @@ async function processChunk(deps: EnrollmentDeps, tx: Tx, workspaceId: string, j
     LIMIT ${chunkSize}`);
   const ids = page.rows.map((r) => r.profile_id);
   if (!ids.length) {
-    await finish('done');
+    await finish('done', pin);
     return { summary: { ...emptySummary(), done: 1 }, holdout: [] };
   }
 
@@ -325,6 +353,7 @@ async function processChunk(deps: EnrollmentDeps, tx: Tx, workspaceId: string, j
   const last = ids[ids.length - 1];
   const done = ids.length < chunkSize || processed + ids.length >= (job.limit ?? Number.POSITIVE_INFINITY);
   await finish(done ? 'done' : 'running', {
+    ...pin,
     ...(job.status === 'queued' ? { startedAt: now } : {}),
     cursor: last,
     entered: job.entered + entered,
