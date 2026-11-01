@@ -14,9 +14,11 @@ describe('environment variable history', () => {
 
   it('knows what each release added', () => {
     // Lists of what releases up to the running one added; later ones only appear once released.
-    expect(envKeysSince('0.4.1')).toEqual(['METRICS_TOKEN']);
-    expect(envKeysSince('0.2.10')).toEqual(['ERASURE_GRACE_HOURS', 'METRICS_TOKEN']);
+    expect(envKeysSince('0.6.1')).toEqual(['BACKUP_VERIFY_MAX_AGE_DAYS']);
+    expect(envKeysSince('0.4.1')).toEqual(['BACKUP_VERIFY_MAX_AGE_DAYS', 'METRICS_TOKEN']);
+    expect(envKeysSince('0.2.10')).toEqual(['BACKUP_VERIFY_MAX_AGE_DAYS', 'ERASURE_GRACE_HOURS', 'METRICS_TOKEN']);
     expect(envKeysSince('0.2.5')).toEqual([
+      'BACKUP_VERIFY_MAX_AGE_DAYS',
       'ERASURE_GRACE_HOURS',
       'METRICS_TOKEN',
       'STEP_UP_LOCKOUT_SECONDS',

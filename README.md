@@ -82,7 +82,7 @@ docker compose exec app am doctor   # configuration, services, sending domains
 
 In a checkout, `pnpm --silent --filter @agentic-marketing/server cli init` does the same. Never edit `docker-compose.yml`: site-specific settings go in `compose.override.yaml` (see [`compose.override.example.yaml`](compose.override.example.yaml) and [the Compose guide](docs/deployment/compose.md)), so an upgrade replaces the release file and nothing else.
 
-`AM_VERSION` (default `0.6.1`) selects the released image `ghcr.io/timchr78/agentic-marketing`. Pin a version instead of `latest` so restarts and `docker compose pull` do not silently change what runs. `AM_PORT` (default `3000`) is the published host port: the app still listens on 3000 inside the container, so keep `PUBLIC_URL` and `PUBLIC_LINKS_URL` in step with it. ClickHouse is capped at `CLICKHOUSE_MEM_LIMIT` (default `2g`), which covers the whole container (server, caches and query memory); ClickHouse's own limits such as `max_server_memory_usage` still apply inside it, and 2g is a starting point for the single-node pilot.
+`AM_VERSION` (default `0.7.0`) selects the released image `ghcr.io/timchr78/agentic-marketing`. Pin a version instead of `latest` so restarts and `docker compose pull` do not silently change what runs. `AM_PORT` (default `3000`) is the published host port: the app still listens on 3000 inside the container, so keep `PUBLIC_URL` and `PUBLIC_LINKS_URL` in step with it. ClickHouse is capped at `CLICKHOUSE_MEM_LIMIT` (default `2g`), which covers the whole container (server, caches and query memory); ClickHouse's own limits such as `max_server_memory_usage` still apply inside it, and 2g is a starting point for the single-node pilot.
 
 To build from source (development, CI or a local patch) use the overlay:
 
@@ -166,7 +166,7 @@ Wave 1 (Phases −1 to 5) is complete: foundations, data platform, e-mail, segme
 | 18 | Mandates and the first autonomy | Built in 0.4.0: mandates with levels 0–3, holds with veto windows, the independent check, notifications, business context ([docs/agents.md](docs/agents.md)); the four-week pilot mandate is pending |
 | 19 | The safety net | Built in 0.5.0: the guardian, staged sends, undo, shadow mode, learning rules and thin hosted agents, plus Prometheus metrics, workspace portability and erasure-safe restores. The test-workspace and pilot checks are pending |
 | 20 | Closed loops | Built in 0.6.0: level 4, agent reports, learnings, agent events, the campaign agent and briefs, the newsletter, lifecycle, experimentation and audience programmes, content sources and briefs, recipes and bulk enrollment. The month-long programme runs are pending |
-| 21 | Hosted agents | Planned: the full hosted runtime — event-triggered runs, programme templates, the copilot attached to an agent, decision models in journeys, memory and skills. The thin runtime (scheduled runs, run history, the weekly-report and deliverability-guardian templates) shipped in 0.5.0 |
+| 21 | Hosted agents and decision models | Built in 0.7.0: event-triggered hosted runs, the copilot acting as an agent, hosted-agent memory and skills, decision models (JEV through System One: `ai.score`, stored scores, a journey decision step, calibration), password reset, backup key checks and verification, mjml 5. The thin runtime shipped in 0.5.0. The live decision-model gate is pending |
 | 22 | Many agents, many brands | Planned: coordination, brand scoping, progressive rollout, ad audiences (agent-managed spend needs its own design, #212) |
 
 ## Development
