@@ -76,6 +76,23 @@ its `totalRowsBefore` and a `files` list with `workspace`, `file`, `rows`, `byte
 `rows` is the number of rows ClickHouse actually returned (from `X-ClickHouse-Summary`), never the
 table's estimated total.
 
+It also records which key-encryption key the backup needs, and a sealed check value that proves a
+configured key can unseal it:
+
+```json
+"key": {
+  "reference": "local-3f2a9c1b7d4e",
+  "check": { "kekId": "local-3f2a9c1b7d4e", "wrapped": "…base64 ciphertext…" }
+}
+```
+
+`reference` is the provider's public id: `local-<sha256 prefix>` for a local `MASTER_KEY`,
+`openbao:<mount>/<key>` for OpenBao Transit or `aws-kms:<key-id>` for AWS KMS. `check.wrapped` is a
+fixed value sealed with that key; it is ciphertext, not a key or a data key. A backup container
+started without `MASTER_KEY` (the Compose `backup` service does not need it) writes no `key` object,
+and a restore of that backup logs that the key cannot be checked until the app starts. Take the
+backup from a process with the key configured when you want the pre-restore check.
+
 The data version is the newest `last_started_at` row in `server_versions`, written by the app at
 startup. A database that last ran 0.2.4 or earlier has no such table yet; the backup then maps its
 migration head to the release that shipped it (for example `0027_journey_consent_exits.sql` is
@@ -238,8 +255,18 @@ contents but does not create them.
   ClickHouse file before the first `TRUNCATE`;
 - refuses a manifest whose migration head is newer than this build knows, with a message to upgrade
   the image; `--force` overrides that check (use it only when you know the schema is compatible);
+- **checks the key before replacing anything.** When the manifest has a `key.check`, `am restore`
+  unwraps it with the configured provider. A wrong `MASTER_KEY` stops the restore before Postgres is
+  touched, naming the key the backup needs and the `MASTER_KEY_PREVIOUS` option. A backup without a
+  key check logs that it cannot be verified and continues.
 - creates or updates the `am_app` role before loading, so the dump's `GRANT`s to it apply;
-- runs `pg_restore --clean --if-exists --no-owner`, then reports the restored version.
+- runs `pg_restore --clean --if-exists --no-owner`, then unwraps a real data key from the restored
+  database before reporting success (a second proof that provider, connector and profile secrets
+  will be readable), then reports the restored version.
+
+`--skip-key-check` skips both key checks. Use it only when you know the secrets are not needed (for
+example, restoring a database only to recover profiles and consent); the app will otherwise fail
+when the first provider or connector secret is read.
 
 Backups from 0.2.4 are format 1. Their ClickHouse export is empty whenever row policies are on
 (the default), so `am restore --clickhouse` refuses that part with:
@@ -264,23 +291,62 @@ Restore is deliberately not a merge: rows written after the backup are gone. Era
 the live database since the snapshot are the one exception, because they are replayed. Verify before
 starting traffic, and keep a copy of the current volume until you are satisfied.
 
+## Key rotation and old backups
+
+`am rotate-keys` re-wraps the `data_keys` rows in the live database with the current provider. It
+does **not** rewrite existing backups: a backup taken before the rotation still contains data keys
+wrapped by the old key. Restoring that backup therefore needs the old key available to the restore
+process.
+
+For a local `MASTER_KEY` rotation:
+
+1. Generate the new key. Set `MASTER_KEY=<new>` and `MASTER_KEY_PREVIOUS=<old>` in the environment.
+2. Run `am rotate-keys`. New writes use the new key; the old key stays readable through
+   `MASTER_KEY_PREVIOUS`.
+3. Keep `MASTER_KEY_PREVIOUS=<old>` for at least the backup retention window (`BACKUP_KEEP_DAYS` or
+   the remote lifecycle, whichever is longer), then remove it.
+
+An old backup restored during that window logs `key check passed` and unwraps its data key through
+the previous key. Without `MASTER_KEY_PREVIOUS`, the restore refuses before touching Postgres with:
+
+> this backup needs the key local-…, but the configured key provider is local-… and cannot unseal it
+> … Set MASTER_KEY … or add it to MASTER_KEY_PREVIOUS … `--skip-key-check` restores anyway …
+
+Archive old keys with the backup set, never inside it: a password manager or secret store entry such
+as "agentic-marketing master key 2026-10 (needed by backups before 0.7.1)". Do not put the key in
+`manifest.json`, a filename, a log or the same encrypted volume as the backups, or losing that
+volume loses both.
+
+With OpenBao Transit or AWS KMS, keep the old key version or key id enabled for the same window: the
+manifest's `reference` names the key (`openbao:<mount>/<key>`, `aws-kms:<key-id>`) and the provider
+must still be able to decrypt with it. Disabling a KMS key or destroying a Transit version makes
+every backup that used it permanently unreadable.
+
+The same key is needed for the live database: `am doctor` reports `secrets.master-key-live` by
+unwrapping a stored data key, so a key mismatch is visible before the next restore or send.
+
 ## Testing a restore
 
-A backup is only useful if a restore works. Do a drill on a scratch host or project:
+A backup is only useful if a restore works. A hash check (`am backup --verify`) catches corruption;
+a drill catches a backup that hashes correctly but cannot run. Do a drill on a scratch host or
+project:
 
 1. Take a fresh backup: `docker compose exec app am backup --clickhouse`.
-2. Copy the `am-*` directory somewhere safe.
-3. In a throwaway Compose project with its own volumes, start the same image once (so ClickHouse
+2. Verify it: `docker compose exec app am backup --verify`.
+4. Copy the `am-*` directory somewhere safe.
+5. In a throwaway Compose project with its own volumes, start the same image once (so ClickHouse
    tables are migrated), stop it, then restore:
    `docker compose stop app && docker compose run --rm app am restore /backups/am-… --yes --clickhouse`.
-4. Start the app, sign in, open a profile and a segment, and check that recent events are present.
-5. Run `docker compose exec app am doctor` (or `am smoke`) to check the install.
+6. Start the app, sign in, open a profile and a segment, and check that recent events are present.
+7. Run `docker compose exec app am doctor` (or `am smoke`) to check the install.
 
 The integration test in `apps/server/test/backup.test.ts` does the Postgres part automatically when
 `pg_dump` is on `PATH` (CI installs PostgreSQL 16): it creates a database, inserts a marker, backs
 it up, deletes the row, restores, and checks that the row comes back. It also checks the manifest
 kind and versions, the `0700`/`0600` modes, `--list`, a newer migration head, a corrupted checksum,
-and that a 0.2.4 format 1 backup with ClickHouse data is refused. When ClickHouse is reachable, a
-test creates the real schema with row policies, writes events for two workspaces, and checks that
-the backup has one non-empty file per workspace, that restore brings back each workspace's rows,
-and that a query without `SQL_workspace` still sees none.
+that `--verify` passes on a good backup and fails on a tampered file, that a wrong `MASTER_KEY` is
+refused before the database is touched, that `MASTER_KEY_PREVIOUS` restores an old backup, and that
+a 0.2.4 format 1 backup with ClickHouse data is refused. When ClickHouse is reachable, a test
+creates the real schema with row policies, writes events for two workspaces, and checks that the
+backup has one non-empty file per workspace, that restore brings back each workspace's rows, and
+that a query without `SQL_workspace` still sees none.

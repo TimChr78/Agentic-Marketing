@@ -2,16 +2,17 @@ import { createInterface } from 'node:readline/promises';
 import { parseArgs } from 'node:util';
 import { resolveUserPath, restoreBackup } from './backup-lib';
 
-const USAGE = 'usage: am restore <backup-dir> [--force] [--clickhouse] [--yes]';
+const USAGE = 'usage: am restore <backup-dir> [--force] [--clickhouse] [--skip-key-check] [--yes]';
 
 export async function run(args: string[]): Promise<number> {
   const options = {
     force: { type: 'boolean' as const },
     clickhouse: { type: 'boolean' as const },
+    'skip-key-check': { type: 'boolean' as const },
     yes: { type: 'boolean' as const },
     help: { type: 'boolean' as const, short: 'h' },
   };
-  let values: { force?: boolean; clickhouse?: boolean; yes?: boolean; help?: boolean };
+  let values: { force?: boolean; clickhouse?: boolean; 'skip-key-check'?: boolean; yes?: boolean; help?: boolean };
   let positionals: string[];
   try {
     ({ values, positionals } = parseArgs({ args, options, allowPositionals: true }));
@@ -33,6 +34,8 @@ export async function run(args: string[]): Promise<number> {
   console.error('Restore replaces the current Postgres database (and ClickHouse tables with --clickhouse).');
   console.error('Erasures recorded in the live database are replayed afterwards, so people erased since the');
   console.error('backup stay erased. Stop the app first: docker compose stop app');
+  if (values['skip-key-check'])
+    console.error('--skip-key-check: the master key will not be verified; provider and connector secrets may stay unreadable.');
   if (!values.yes) {
     if (!process.stdin.isTTY) {
       console.error('Refusing without --yes: there is no terminal to confirm on.');
@@ -55,6 +58,7 @@ export async function run(args: string[]): Promise<number> {
       dir: backupDir,
       force: values.force,
       clickhouse: values.clickhouse,
+      skipKeyCheck: values['skip-key-check'],
       log: (message) => console.log(message),
     });
     const dataVersion = manifest.format === 1 ? manifest.version : (manifest.fromVersion ?? 'unknown');

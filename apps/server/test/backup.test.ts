@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { lastServerVersion, latestMigration, migrate, recordServerVersion, releaseForMigrationHead } from '@agentic-marketing/db';
 import { migrateClickHouse } from '@agentic-marketing/events';
+import { localKeyProvider, open, seal } from '@agentic-marketing/secrets';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { run as backupRun } from '../src/ops/backup';
@@ -437,6 +438,133 @@ describe.skipIf(!pgToolsReady)('restore replays erasures (#144)', () => {
     expect((await pool.query('SELECT 1 FROM profiles WHERE workspace_id = $1 AND id = $2', [workspaceId, profileId])).rowCount).toBe(0);
     expect((await pool.query('SELECT 1 FROM erasure_tombstones WHERE workspace_id = $1', [workspaceId])).rowCount).toBe(2);
   }, 180_000);
+});
+
+describe.skipIf(!pgToolsReady)('restore verifies the master key (#143)', () => {
+  const suffix = randomUUID().replace(/-/g, '').slice(0, 10);
+  const dbName = `am_backup_key_${suffix}`;
+  const role = `am_app_key_${suffix}`;
+  const password = 'backup_test_password';
+  const base = new URL(process.env.TEST_DATABASE_URL ?? 'postgres://am:am@localhost:5432/am_test');
+  const dbUrl = new URL(base);
+  dbUrl.pathname = `/${dbName}`;
+  const maintenanceUrl = new URL(base);
+  maintenanceUrl.pathname = '/postgres';
+  const workspaceId = randomUUID();
+  const dataKey = Buffer.alloc(32, 3);
+  const secretValue = 'provider-api-key-that-must-survive';
+  // A and B are the KEKs before and after a rotation; neither is key material for this repository.
+  const keyA = Buffer.alloc(32, 7).toString('base64');
+  const keyB = Buffer.alloc(32, 9).toString('base64');
+  const providerA = localKeyProvider(keyA);
+  const providerBWithPrevious = localKeyProvider(keyB, [keyA]);
+
+  let pool: pg.Pool;
+  let backupDir: string;
+  let backupPath: string;
+  let manifest: BackupManifest;
+
+  const env = {
+    DATABASE_URL: dbUrl.toString(),
+    APP_DB_ROLE: role,
+    APP_DB_PASSWORD: password,
+    KEY_PROVIDER: 'local',
+    MASTER_KEY: keyA,
+  };
+
+  beforeAll(async () => {
+    const maintenance = new pg.Client({ connectionString: maintenanceUrl.toString() });
+    await maintenance.connect();
+    await maintenance.query(`DROP DATABASE IF EXISTS ${dbName} WITH (FORCE)`);
+    await maintenance.query(`CREATE DATABASE ${dbName}`);
+    await maintenance.end();
+
+    pool = new pg.Pool({ connectionString: dbUrl.toString() });
+    await migrate(pool, { appRolePassword: password, appRole: role });
+    await pool.query("INSERT INTO workspaces (id, name) VALUES ($1, 'Key check')", [workspaceId]);
+    const wrapped = await providerA.wrap(dataKey);
+    await pool.query(
+      "INSERT INTO data_keys (workspace_id, id, kek_id, wrapped_key, purpose) VALUES ($1, 'dk_key_check', $2, $3, 'secrets')",
+      [workspaceId, providerA.id, wrapped],
+    );
+    const sealed = seal(dataKey, Buffer.from(secretValue, 'utf8'));
+    await pool.query(
+      `INSERT INTO secrets (workspace_id, name, data_key_id, iv, ciphertext, auth_tag, updated_by)
+       VALUES ($1, 'llm.provider.api_key', 'dk_key_check', $2, $3, $4, 'user_tester')`,
+      [workspaceId, sealed.iv, sealed.ciphertext, sealed.authTag],
+    );
+    // A row in an existing table records whether a refused restore touched the database: an extra
+    // table created after the backup would survive pg_restore --clean (it is not in the dump).
+    await pool.query('CREATE TABLE key_marker (note text NOT NULL)');
+    await pool.query("INSERT INTO key_marker VALUES ('before')");
+
+    backupDir = await mkdtemp(join(tmpdir(), 'am-backup-key-'));
+    expect(await withEnv(env, () => backupRun(['--to', backupDir]))).toBe(0);
+    const entry = (await readdir(backupDir)).find((name) => name.startsWith('am-'));
+    if (!entry) throw new Error('backup did not create an am-* directory');
+    backupPath = join(backupDir, entry);
+    manifest = JSON.parse(await readFile(join(backupPath, 'manifest.json'), 'utf8')) as BackupManifest;
+    await pool.query("UPDATE key_marker SET note = 'live'");
+  }, 120_000);
+
+  afterAll(async () => {
+    await pool?.end();
+    const maintenance = new pg.Client({ connectionString: maintenanceUrl.toString() });
+    await maintenance.connect();
+    await maintenance.query(`DROP DATABASE IF EXISTS ${dbName} WITH (FORCE)`);
+    await maintenance.query(`DROP ROLE IF EXISTS ${role}`);
+    await maintenance.end();
+    if (backupDir) await rm(backupDir, { recursive: true, force: true });
+  }, 120_000);
+
+  it('records a key reference and a sealed key check, never the key', async () => {
+    expect(manifest.key?.reference).toBe(providerA.id);
+    expect(manifest.key?.check?.kekId).toBe(providerA.id);
+    expect(manifest.key?.check?.wrapped).toMatch(/^[A-Za-z0-9+/]+=*$/);
+    const text = await readFile(join(backupPath, 'manifest.json'), 'utf8');
+    expect(text).not.toContain(keyA);
+    expect(text).not.toContain(secretValue);
+  });
+
+  it('refuses a wrong key before touching the database, naming MASTER_KEY_PREVIOUS', async () => {
+    expect(await withEnv({ ...env, MASTER_KEY: keyB }, () => restoreRun([backupPath, '--yes']))).toBe(1);
+    await expect(restoreBackup({ dir: backupPath, env: { ...process.env, ...env, MASTER_KEY: keyB }, log: () => {} })).rejects.toThrow(
+      /MASTER_KEY_PREVIOUS/,
+    );
+    // The marker row written after the snapshot is still there: pg_restore never ran.
+    const { rows } = await pool.query<{ note: string }>('SELECT note FROM key_marker');
+    expect(rows).toEqual([{ note: 'live' }]);
+    expect((await pool.query('SELECT 1 FROM data_keys WHERE workspace_id = $1', [workspaceId])).rowCount).toBe(1);
+  }, 60_000);
+
+  it('restores an old backup with the old key in MASTER_KEY_PREVIOUS and can read its secret', async () => {
+    expect(await withEnv({ ...env, MASTER_KEY: keyB, MASTER_KEY_PREVIOUS: keyA }, () => restoreRun([backupPath, '--yes']))).toBe(0);
+    expect((await pool.query<{ note: string }>('SELECT note FROM key_marker')).rows).toEqual([{ note: 'before' }]);
+    const key = await pool.query<{ kek_id: string; wrapped_key: Buffer }>(
+      'SELECT kek_id, wrapped_key FROM data_keys WHERE workspace_id = $1',
+      [workspaceId],
+    );
+    expect(key.rows).toHaveLength(1);
+    const unwrapped = await providerBWithPrevious.unwrap(key.rows[0].wrapped_key, key.rows[0].kek_id);
+    expect(unwrapped).toEqual(dataKey);
+    const secret = await pool.query<{ iv: Buffer; ciphertext: Buffer; auth_tag: Buffer }>(
+      "SELECT iv, ciphertext, auth_tag FROM secrets WHERE workspace_id = $1 AND name = 'llm.provider.api_key'",
+      [workspaceId],
+    );
+    expect(
+      open(unwrapped, { iv: secret.rows[0].iv, authTag: secret.rows[0].auth_tag, ciphertext: secret.rows[0].ciphertext }).toString(),
+    ).toBe(secretValue);
+  }, 120_000);
+
+  it('restores with the current key alone', async () => {
+    expect(await withEnv(env, () => restoreRun([backupPath, '--yes']))).toBe(0);
+    expect((await pool.query<{ note: string }>('SELECT note FROM key_marker')).rows).toEqual([{ note: 'before' }]);
+  }, 120_000);
+
+  it('allows a deliberate wrong key only with --skip-key-check', async () => {
+    expect(await withEnv({ ...env, MASTER_KEY: keyB }, () => restoreRun([backupPath, '--yes', '--skip-key-check']))).toBe(0);
+    expect((await pool.query<{ note: string }>('SELECT note FROM key_marker')).rows).toEqual([{ note: 'before' }]);
+  }, 120_000);
 });
 
 describe.skipIf(!pgToolsReady || !chUp)('ClickHouse backup under row policies (#129)', () => {

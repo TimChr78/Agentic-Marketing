@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { Dirent } from 'node:fs';
 import { accessSync, createReadStream, createWriteStream, constants as fsConstants, readFileSync, statSync } from 'node:fs';
 import { chmod, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
@@ -12,9 +12,11 @@ import {
   latestMigration,
   listWorkspaceIds,
   migrationHead,
+  readDataKeySample,
   readErasureLog,
   replayErasures,
 } from '@agentic-marketing/db';
+import { keyProviderFromEnv } from '../keys';
 
 // Backup and restore without loading the full server configuration: an operator must be able to
 // run them with only DATABASE_URL (and CLICKHOUSE_URL for events), even when other secrets are
@@ -51,6 +53,17 @@ export interface BackupManifestV1 {
   clickhouse?: { tables: (FileEntry & { name: string; rows: number })[] };
 }
 
+/**
+ * Which key-encryption key (KEK) sealed the data keys in this backup, and a sealed constant that
+ * proves the configured key can still unseal them. Neither field is key material: `reference` is
+ * the provider's public id (`local-<sha256 prefix>`, `openbao:mount/key`, `aws-kms:key-id`) and
+ * `check.wrapped` is a ciphertext.
+ */
+export interface BackupKeyInfo {
+  reference: string;
+  check?: { kekId: string; wrapped: string };
+}
+
 export interface BackupManifest {
   format: 2;
   kind: BackupKind;
@@ -64,6 +77,8 @@ export interface BackupManifest {
   createdAt: string;
   postgres: FileEntry;
   clickhouse?: { tables: ClickHouseTableEntry[] };
+  /** The KEK this backup needs; absent on backups written before 0.7.0. */
+  key?: BackupKeyInfo;
 }
 
 export type AnyBackupManifest = BackupManifest | BackupManifestV1;
@@ -84,6 +99,15 @@ export interface RestoreBackupOptions {
   force?: boolean;
   clickhouse?: boolean;
   databaseUrl?: string;
+  env?: NodeJS.ProcessEnv;
+  log?: (message: string) => void;
+  /** Restore even though the configured key cannot unseal the backup (secrets will be unreadable). */
+  skipKeyCheck?: boolean;
+}
+
+export interface VerifyBackupOptions {
+  /** A backup directory with manifest.json, or a directory containing `am-*` backups. */
+  dir: string;
   env?: NodeJS.ProcessEnv;
   log?: (message: string) => void;
 }
@@ -198,6 +222,140 @@ async function secureFile(path: string): Promise<void> {
   await chmod(path, BACKUP_FILE_MODE);
 }
 
+// A fixed value sealed by the backup's KEK. It proves at restore time that the configured key
+// provider can unwrap what this backup holds, without storing key material or a real data key.
+const KEY_CHECK_PLAINTEXT = Buffer.from('agentic-marketing backup key check v1');
+
+/**
+ * The key reference for the manifest: the provider id (never the key) and, when the configured
+ * provider is available, a sealed check value. A backup container that intentionally has no
+ * MASTER_KEY still backs up; it just cannot record a key check.
+ */
+async function backupKeyInfo(
+  env: NodeJS.ProcessEnv,
+  databaseUrl: string,
+  log: (message: string) => void,
+): Promise<BackupKeyInfo | undefined> {
+  let provider: ReturnType<typeof keyProviderFromEnv>;
+  try {
+    provider = keyProviderFromEnv(env);
+  } catch (err) {
+    log(`warning: not recording a key check: ${(err as Error).message}`);
+    return undefined;
+  }
+  if (!provider) {
+    log('no key provider is configured for this process; the manifest records no key check');
+    return undefined;
+  }
+  const info: BackupKeyInfo = { reference: provider.id };
+  try {
+    const wrapped = await provider.wrap(KEY_CHECK_PLAINTEXT);
+    info.check = { kekId: provider.id, wrapped: wrapped.toString('base64') };
+  } catch (err) {
+    log(`warning: the key provider could not seal a key check (${(err as Error).message}); only its id is recorded`);
+  }
+  // A trial unseal of a real sealed row catches the case where the configured key belongs to a
+  // different workspace/database. It is a warning: the backup itself is still complete.
+  try {
+    const sample = await readDataKeySample(databaseUrl);
+    if (sample) {
+      await provider.unwrap(sample.wrappedKey, sample.kekId);
+      log('the configured key unwraps a data key in this database');
+    }
+  } catch (err) {
+    log(
+      `warning: the configured key does not unwrap a data key in this database (${(err as Error).message}); ` +
+        'restoring this backup with it would leave provider and connector secrets unreadable',
+    );
+  }
+  return info;
+}
+
+function keyMismatchMessage(reference: string, current: string, err?: Error): string {
+  return (
+    `this backup needs the key ${reference}, but the configured key provider is ${current} and cannot unseal it` +
+    `${err ? ` (${err.message})` : ''}. ` +
+    'Set MASTER_KEY to the key that was current when the backup was taken, or add it to MASTER_KEY_PREVIOUS ' +
+    '(comma-separated, newest first) and run `am restore` again. ' +
+    '`--skip-key-check` restores anyway, but provider, connector and profile secrets will stay unreadable.'
+  );
+}
+
+/** Proves the configured key can unseal the backup before the database is replaced (#143). */
+export async function assertBackupKey(
+  manifest: AnyBackupManifest,
+  env: NodeJS.ProcessEnv,
+  log: (message: string) => void = () => {},
+): Promise<void> {
+  const info = manifest.format === 2 ? manifest.key : undefined;
+  if (!info) {
+    log('this backup has no key check (it was written before 0.7.0); the key cannot be verified until the app starts');
+    return;
+  }
+  let provider: ReturnType<typeof keyProviderFromEnv>;
+  try {
+    provider = keyProviderFromEnv(env);
+  } catch (err) {
+    throw new Error(
+      `this backup needs the key ${info.reference}, but the configured key provider is invalid: ${(err as Error).message}. ` +
+        'Fix MASTER_KEY/KEY_PROVIDER before restoring (see MASTER_KEY_PREVIOUS for a key that was rotated out).',
+    );
+  }
+  if (!provider) {
+    throw new Error(
+      `this backup needs the key ${info.reference}, but no key provider is configured. ` +
+        'Set MASTER_KEY (or KEY_PROVIDER and its settings) to the key that was current when the backup was taken. ' +
+        '`--skip-key-check` restores anyway, but provider and connector secrets will stay unreadable.',
+    );
+  }
+  if (info.check) {
+    try {
+      const unwrapped = await provider.unwrap(Buffer.from(info.check.wrapped, 'base64'), info.check.kekId);
+      if (unwrapped.length !== KEY_CHECK_PLAINTEXT.length || !timingSafeEqual(unwrapped, KEY_CHECK_PLAINTEXT))
+        throw new Error('the key check decrypted to an unexpected value');
+    } catch (err) {
+      throw new Error(keyMismatchMessage(info.reference, provider.id, err as Error));
+    }
+    log(`key check passed: ${provider.id} can unseal this backup`);
+    return;
+  }
+  if (provider.id === info.reference || provider.owns?.(info.reference)) {
+    log(`key reference matches the configured provider (${provider.id}); no sealed check was recorded`);
+    return;
+  }
+  throw new Error(keyMismatchMessage(info.reference, provider.id));
+}
+
+/** After pg_restore, unwrap a real data key so a restored install can read its secrets (#143). */
+export async function assertRestoredDataKey(
+  databaseUrl: string,
+  env: NodeJS.ProcessEnv,
+  log: (message: string) => void = () => {},
+): Promise<void> {
+  const provider = keyProviderFromEnv(env);
+  if (!provider)
+    throw new Error(
+      'the restore loaded Postgres, but no key provider is configured, so provider and connector secrets cannot be read. ' +
+        'Set MASTER_KEY (or KEY_PROVIDER and its settings) and run `am restore` again.',
+    );
+  const sample = await readDataKeySample(databaseUrl);
+  if (!sample) {
+    log('the restored database has no data keys; there is no sealed secret to check');
+    return;
+  }
+  try {
+    const key = await provider.unwrap(sample.wrappedKey, sample.kekId);
+    if (key.length !== 32) throw new Error(`unwrapped ${key.length} bytes instead of 32`);
+  } catch (err) {
+    throw new Error(
+      `the restore loaded Postgres, but the configured key provider (${provider.id}) cannot unseal data key ${sample.id} ` +
+        `(${sample.kekId}): ${(err as Error).message}. Set MASTER_KEY to the backup's key or add it to MASTER_KEY_PREVIOUS, ` +
+        'then run `am restore` again. The database has already been replaced; do not start the app until this passes.',
+    );
+  }
+  log(`unsealed data key ${sample.id} from the restored database`);
+}
+
 /** Directory names cannot carry a dash variant safely; keep the release range readable anyway. */
 function versionForName(version: string | null): string {
   return (version ?? 'unknown').replace(/[^A-Za-z0-9._-]+/g, '-');
@@ -265,6 +423,7 @@ export async function createBackup(opts: CreateBackupOptions = {}): Promise<{ di
     const dumpPath = join(tempDir, 'postgres.dump');
     await dumpPostgres(databaseUrl, dumpPath);
     await secureFile(dumpPath);
+    const key = await backupKeyInfo(env, databaseUrl, log);
     const manifest: BackupManifest = {
       format: 2,
       kind,
@@ -274,6 +433,7 @@ export async function createBackup(opts: CreateBackupOptions = {}): Promise<{ di
       migrationHead: migrationHeadValue,
       createdAt: createdAt.toISOString(),
       postgres: await fileEntry(tempDir, 'postgres.dump'),
+      ...(key ? { key } : {}),
     };
 
     if (opts.clickhouse) {
@@ -569,6 +729,16 @@ export async function readManifest(dir: string): Promise<AnyBackupManifest> {
       throw new Error('manifest.json has an invalid fromVersion');
     if (manifest.toVersion !== undefined && typeof manifest.toVersion !== 'string')
       throw new Error('manifest.json has an invalid toVersion');
+    if (manifest.key !== undefined) {
+      const key = manifest.key as { reference?: unknown; check?: unknown };
+      if (!key || typeof key !== 'object' || typeof key.reference !== 'string' || !key.reference)
+        throw new Error('manifest.json has an invalid key reference');
+      if (key.check !== undefined) {
+        const check = key.check as { kekId?: unknown; wrapped?: unknown };
+        if (!check || typeof check !== 'object' || typeof check.kekId !== 'string' || typeof check.wrapped !== 'string')
+          throw new Error('manifest.json has an invalid key check');
+      }
+    }
   }
   return manifest as unknown as AnyBackupManifest;
 }
@@ -663,6 +833,10 @@ export async function restoreBackup(opts: RestoreBackupOptions): Promise<AnyBack
         'Upgrade the image first, or pass --force to restore anyway.',
     );
 
+  // Prove the configured key can unseal this backup before anything is written to Postgres (#143).
+  if (opts.skipKeyCheck) log('skipping the key check (--skip-key-check); sealed secrets may stay unreadable');
+  else await assertBackupKey(manifest, env, log);
+
   if (opts.clickhouse) {
     // 0.2.4 wrote format 1 and its ClickHouse files are empty whenever the default row policies
     // are on (#129). Truncating and loading them would delete the event history without a warning.
@@ -699,6 +873,11 @@ export async function restoreBackup(opts: RestoreBackupOptions): Promise<AnyBack
 
   log('restoring Postgres (this replaces the current database)');
   await restorePostgres(databaseUrl, manifestPath(dir, manifest.postgres.file));
+
+  // The pre-restore check used the sealed value in the manifest; this proves the key also opens a
+  // real data key in the restored data, still before the app is started. `--skip-key-check`
+  // deliberately overrides both. A backup written without a key reference has nothing to compare.
+  if (!opts.skipKeyCheck && manifest.format === 2 && manifest.key) await assertRestoredDataKey(databaseUrl, env, log);
 
   if (erasureLog.erasures.length || erasureLog.tombstones.length) {
     log(`replaying ${erasureLog.erasures.length} erasure(s) and ${erasureLog.tombstones.length} tombstone(s) recorded after the snapshot`);

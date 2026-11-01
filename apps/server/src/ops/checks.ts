@@ -7,6 +7,7 @@ import { isMcpResourceUrlAllowed } from '@agentic-marketing/auth';
 import { createDb, type Db } from '@agentic-marketing/db';
 import { valkeyHotState } from '@agentic-marketing/hotstate';
 import { type Config, ENV_KEYS, loadConfig, REQUIRED_ENV_KEYS } from '../config';
+import { keyProviderFor } from '../keys';
 import { VERSION } from '../version';
 import { compareVersions, envKeysSince, INTERNAL_ENV_KEYS, isComposeOrDockerKey, SUPPLIED_BY_COMPOSE } from './env-history';
 
@@ -499,6 +500,49 @@ async function postgresChecks(db: Db): Promise<{ checks: Check[]; reachable: boo
   return { checks, reachable: true };
 }
 
+/**
+ * Proves the configured key provider can unseal a data key in the live database (#143). The
+ * format check in `checkMasterKey` cannot see a key that was rotated or replaced.
+ */
+export async function checkDataKeyProvider(config: Config, db: Db): Promise<Check> {
+  const id = 'secrets.master-key-live';
+  try {
+    const { rows } = await withTimeout(
+      db.admin.query<{ id: string; kek_id: string; wrapped_key: Buffer }>(
+        'SELECT id, kek_id, wrapped_key FROM data_keys ORDER BY created_at, id LIMIT 1',
+      ),
+      'reading a data key',
+    );
+    if (!rows.length) return { id, status: 'info', message: 'no data keys yet; the key is checked when the first secret is stored' };
+    const provider = keyProviderFor(config);
+    const key = await withTimeout(provider.unwrap(rows[0].wrapped_key, rows[0].kek_id), 'unwrapping a data key');
+    if (key.length !== 32)
+      return {
+        id,
+        status: 'fail',
+        message: `unwrapped data key ${rows[0].id} is ${key.length} bytes instead of 32`,
+        hint: 'The stored key is corrupt or was wrapped by something other than this key provider.',
+      };
+    return { id, status: 'ok', message: `${provider.id} unwraps the workspace data keys` };
+  } catch (err) {
+    if ((err as { code?: string }).code === '42P01')
+      return {
+        id,
+        status: 'warn',
+        message: 'data_keys is missing; start the app to migrate',
+        hint: 'Run `docker compose up -d` (or `am migrate`) and run `am doctor` again.',
+      };
+    return {
+      id,
+      status: 'fail',
+      message: `the configured key provider cannot unwrap a stored data key: ${messageOf(err)}`,
+      hint:
+        'Set MASTER_KEY to the key the workspace was created with, or add the old key to MASTER_KEY_PREVIOUS ' +
+        'and run `am rotate-keys`. A restore needs the same key; see docs/deployment/backups.md.',
+    };
+  }
+}
+
 export async function checkClickHouse(config: Config): Promise<Check> {
   const url = `${config.clickhouse.url.replace(/\/+$/, '')}/ping`;
   try {
@@ -951,7 +995,10 @@ export async function liveChecks(config: Config): Promise<Check[]> {
     checks.push(await checkNats(config));
     checks.push(await checkValkey(config));
 
-    if (postgres.reachable) checks.push(...(await operationalHealthChecks(db)));
+    if (postgres.reachable) {
+      checks.push(await checkDataKeyProvider(config, db));
+      checks.push(...(await operationalHealthChecks(db)));
+    }
 
     if (postgres.reachable) {
       const providers = await readProviders(db);

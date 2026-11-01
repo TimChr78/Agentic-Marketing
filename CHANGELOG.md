@@ -2,6 +2,16 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+### Added
+
+- **Backups record which key they need and prove it can unseal them (#143).** The manifest gains a `key` object with the key provider's public reference (`local-<sha256 prefix>`, `openbao:<mount>/<key>` or `aws-kms:<key-id>`) and a sealed check value. `am restore` unseals that value before it touches Postgres: a wrong `MASTER_KEY` is refused with a message naming the key it needs and the `MASTER_KEY_PREVIOUS` option, before the database is replaced. After `pg_restore` it also unwraps a real data key before reporting success. `--skip-key-check` allows a deliberate override. `am doctor` adds `secrets.master-key-live`, which unwraps a stored data key in the live database. No key material is written to the manifest, a log line or an argument.
+
+### Fixed
+
+- **Backup permissions and key rotation are documented as implemented (#143, #145).** Local backups are plaintext files with `0700` directories and `0600` files; the documentation now says so and asks for an encrypted volume or host instead of claiming that `am backup` encrypts them. `MASTER_KEY_PREVIOUS` is documented as the way to restore a backup taken before a key rotation, for at least the backup retention window.
+
 ## [0.6.1] - 2026-11-01
 
 ### Fixed
