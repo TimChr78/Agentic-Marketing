@@ -213,9 +213,9 @@ live data. The full procedure, names and manifest are in [Backups and restore](b
   restore uses.
 - **Erasures are replayed.** `am restore` reads `erasures` and `erasure_tombstones` from the live
   database before replacing it and re-applies them afterwards: the erased profiles and identifiers
-  are deleted again, suppression hashes are restored and the keyed tombstones are re-inserted. A
-  person erased after the snapshot does not come back. Replay is idempotent; if the erasure log
-  cannot be read, the restore stops instead of risking a resurrection.
+  are deleted again (with their push subscriptions), suppression hashes are restored and the keyed
+  tombstones are re-inserted. A person erased after the snapshot does not come back. Replay is
+  idempotent; if the erasure log cannot be read, the restore stops instead of risking a resurrection.
 - **ClickHouse.** `--clickhouse` reloads the event export as taken. Event rows of a replayed person
   keep their pseudonymous ids and non-personal properties, but the profile key that sealed their
   personal data is deleted by the replay, so that data stays unreadable. Take a `--clickhouse`

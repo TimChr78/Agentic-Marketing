@@ -6,20 +6,20 @@
 packages/
   core/        ids (UUIDv7, prefixed), AppError, canonical JSON hashing, time and network helpers
   db/          SQL migrations and runner, Drizzle schema, owner and row-level-security pools
-  commands/    command registry: defineCommand, permissions/roles, executor (validate → authorize → idempotency → audit)
-  artifacts/   versioned artifacts (journey, email_block, email_template, sms_template, push_template, segment, experience, prompt, form, brand, broadcast, campaign, tracking_plan, purposes, conversion_map, audience_sync, delivery_policy, note), approvals, diffs, bundles, holdouts, hosted pages
+  commands/    command registry: defineCommand, permissions/roles, executor (validate → authorize → idempotency → audit), policy and undo
+  artifacts/   versioned artifacts and their content schemas (table below), approvals, diffs, bundles, holdouts, hosted pages, agent mandates, learnings, content topics and the recipe gallery
   secrets/     envelope encryption (KEK → per-workspace data keys), key providers, write-only secret commands
-  auth/        Better Auth (people), OAuth 2.1 for MCP clients, members, SSO and SCIM, API tokens
+  auth/        Better Auth (people), OAuth 2.1 for MCP clients, members, SSO and SCIM, API tokens, agents, hosted agents and agent events
   telemetry/   pino logger, optional OpenTelemetry tracing (OTLP)
   events/      NATS JetStream bus, ClickHouse event store and sink, event schemas
   ingest/      Segment-compatible ingest gateway, source write keys and consent policy
   hotstate/    Valkey session and profile snapshot for the decision API
   profiles/    profiles, identity resolution and merges, consent ledger, per-person encryption, event worker
   segments/    segment DSL, SQL compiler (Postgres + ClickHouse), streaming evaluator, static lists, snapshots and CSV import
-  journeys/    journey graph model, interpreter, entry keys, wait-until, control groups
+  journeys/    journey graph model, interpreter, entry keys, wait-until, control groups, split results and bulk enrollment
   audience/    signup forms, broadcasts, hosted pages, newsletter archive, subscriber import, message events, retention
   email/       send gateway, provider adapters (e-mail, SMS, push), templates, blocks, rendering, checks, delivery policy
-  campaigns/   campaign members, shared UTM campaign, control-group helpers
+  campaigns/   campaign briefs, plan and from-brief drafting, campaign members, shared UTM campaign, control-group helpers
   personalize/ experiences, decision engine, A/B allocation and results, edge decide
   analytics/   read-only metric layer: query catalogue, named reports, campaign summary
   alerts/      threshold alert rules, five-minute evaluator, webhook and e-mail notifications
@@ -27,6 +27,7 @@ packages/
   ads/         ad platform connectors and conversions, audience sync, click ids, spend import
   integrations/ connections, connector SDK, webhooks (in/out), OAuth, egress guard, Shopify import
   assets/      image and PDF asset library, SVG cleaning, PNG renditions, public asset routes
+  content/     content sources (RSS, Atom, JSON Feed), normalised article items with an explainable score, versioned selections
   warehouse/   warehouse export datasets and destinations
   client/      typed REST client inferred from the command registry
   edge-worker/ the decision API as a Cloudflare Worker, reading Workers KV (docs/deployment/edge.md)
@@ -35,7 +36,42 @@ apps/
   server/      Hono app: REST (/v1/<command>, /openapi.json), MCP (/mcp), sign-in/consent, health; CLI
   web/         React admin UI (app/ shell and router, ui/ design system, features/, pages/) served at /, and the mocked demo at /demo
 spikes/        throw-away prototypes with their FINDINGS.md (not part of CI or the image)
+scripts/       release bundle, smoke, config pull/push, version check and generated MCP tool docs
+e2e/           Playwright specs, screenshots and the seeded server
+deploy/        Helm chart
+docs/          this documentation (architecture/, deployment/, design/, pilots/)
 ```
+
+### Artifact types
+
+Every type shares the generic artifact commands (draft, version, diff, publish, bundle) and its content
+schema is validated on save. The source of truth is `artifactTypes` in
+[`packages/artifacts/src/types.ts`](../packages/artifacts/src/types.ts); the ids carry the prefix.
+
+| Type | Prefix | Holds |
+|---|---|---|
+| `note` | `not_` | Free-form note, used to exercise the artifact system. |
+| `journey` | `jrn_` | Journey graph: trigger, steps, branches, control group. |
+| `email_block` | `blk_` | Reusable MJML fragment with typed parameters. |
+| `email_template` | `eml_` | MJML e-mail with Liquid, subject, preheader and purpose. |
+| `sms_template` | `sms_` | Text message with Liquid and a purpose. |
+| `push_template` | `psh_` | Push title, body, link and image with a purpose. |
+| `segment` | `seg_` | Dynamic condition, static list or snapshot. |
+| `experience` | `exp_` | Web experience: placement, variants, targeting, holdout and goal. |
+| `prompt` | `prm_` | AI prompt for a journey step, with test cases. |
+| `form` | `frm_` | Public signup form: purposes, double opt-in, redirects, Turnstile. |
+| `brand` | `brd_` | Brand for hosted pages and the newsletter archive; one per workspace. |
+| `broadcast` | `bct_` | One send: template, segment, schedule, subject test, staged send, archive. |
+| `campaign` | `cmp_` | Grouping of artifacts under one goal and UTM campaign, with a control group. |
+| `tracking_plan` | `tpl_` | Accepted events and traits, personal data and agent visibility; one per workspace. |
+| `purposes` | `pur_` | Lawful bases, channels and topics; one per workspace. |
+| `conversion_map` | `cvm_` | Ad conversion rules; one per workspace. |
+| `audience_sync` | `aud_` | A segment kept in sync with an ad platform's custom audience. |
+| `delivery_policy` | `dlp_` | Frequency caps, quiet hours, auto-pause; one per workspace. |
+| `agent_mandate` | `mnd_` | An agent's levels (0–4), scope, limits, guardrails and learning rules; people only. |
+| `business_context` | `bcx_` | What the business offers, to whom, in which voice; one per workspace. |
+| `campaign_brief` | `cpb_` | Contract for one campaign: goal, audience, message, schedule, holdout. |
+| `content_brief` | `brf_` | Editorial brief for a topic: thesis, audience, sources, outline, Monday test. |
 
 Adding a capability = one `defineCommand(...)` in a package + adding it to `apps/server/src/registry.ts`. The REST route, OpenAPI entry, MCP tool and typed client call follow automatically.
 
@@ -113,7 +149,8 @@ A seeded server gives you a realistic workspace (a newsletter site with people i
 published prerequisites and pending approvals of every reviewed type) without touching your own data:
 
 ```bash
-npx tsx apps/server/test/e2e/server.ts       # API + built UI on http://localhost:3100, a fresh am_e2e database
+pnpm --filter @agentic-marketing/web build   # writes apps/web/dist, which the seeded server serves
+npx tsx apps/server/test/e2e/server.ts       # API + that build on http://localhost:3100, a fresh am_e2e database
 API_URL=http://localhost:3100 pnpm dev:web   # or the dev UI against it on :5173
 ```
 
@@ -216,9 +253,21 @@ The `server` project runs its files in parallel, four at a time (`TEST_WORKERS=1
 
 CI (`.github/workflows/ci.yml`) runs lint, typecheck, the version check, the audit and the documentation tests in a `static` job, the suite in `test`, and the browser, image and chart checks in `e2e`, `docker-smoke` and `helm`. Pull requests that only change Markdown, `docs/` or `.claude/` skip the slow jobs. The release workflow calls the same file for the tagged commit.
 
+### Migrations
+
+Migrations are forward-only SQL files in `packages/db/migrations`, named `NNNN_name.sql` and applied
+in filename order, each in its own transaction under an advisory lock. The runner creates the
+`am_app` role first (the migrations' `GRANT`s name it) and records each file's checksum in
+`schema_migrations`; editing an applied file stops the process with "was changed after it was
+applied", so add a new file instead. The server migrates on start (`SKIP_MIGRATIONS=true` for a role
+that must not) and `cli migrate` runs the same code. When a release ships a new head, add it to
+`MIGRATION_RELEASES` in [`packages/db/src/migrate.ts`](../packages/db/src/migrate.ts): backups and
+`am doctor` use that map to name the release a database last ran. Only heads are listed; a release
+whose migrations share a head with another is a range.
+
 ### Releasing
 
-A version bump edits every file `scripts/check-versions.mjs` lists: the root, `apps/server`, `apps/web`, `packages/sdk-js` and `packages/edge-worker` package files, the chart's `version` and `appVersion`, `AM_VERSION` in `.env.example`, its default in `docker-compose.yml` and in the README, and a `## [x.y.z]` section in CHANGELOG.md. A new migration also goes into `MIGRATION_RELEASES` in `packages/db/src/migrate.ts`. Then push a `vX.Y.Z` tag (or run the Release workflow from main); it runs CI on that commit and publishes only if it passes. Before tagging, check that private vulnerability reporting is still enabled (Settings → Security), since `SECURITY.md` points reporters to it.
+A version bump edits every file `scripts/check-versions.mjs` lists: the root, `apps/server`, `apps/web`, `packages/sdk-js` and `packages/edge-worker` package files, the chart's `version` and `appVersion`, `AM_VERSION` in `.env.example`, its default in `docker-compose.yml` and in the README, and a `## [x.y.z]` section in CHANGELOG.md. A new migration head also goes into `MIGRATION_RELEASES` (see [Migrations](#migrations)). Then push a `vX.Y.Z` tag (or run the Release workflow from main); it runs CI on that commit and publishes only if it passes. Before tagging, check that private vulnerability reporting is still enabled (Settings → Security), since `SECURITY.md` points reporters to it.
 
 ### Services without Docker
 
