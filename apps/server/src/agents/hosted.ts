@@ -405,6 +405,11 @@ async function finishRun(
         runningStartedAt: null,
         consecutiveFailures: failures,
         ...(disabled ? { enabled: false, nextRunAt: null } : {}),
+        // Events are read once a run handled them; a failed run leaves them for a retry within the
+        // gap and the daily cap, and three failures in a row disable the agent (#342).
+        ...(run.status === 'ok' && origin.readThrough !== undefined
+          ? { lastEventId: sql`GREATEST(${schema.hostedAgents.lastEventId}, ${origin.readThrough})` }
+          : {}),
         updatedAt: finishedAt,
       })
       .where(eq(schema.hostedAgents.agentId, loaded.agent.id));
@@ -435,6 +440,8 @@ interface Claimed {
 /** What started a run (#338): its schedule (or Run now), or events the agent subscribed to. */
 interface RunOrigin {
   trigger: 'schedule' | 'event';
+  /** For an event run: the newest unread event id, marked read only when the run succeeds (#342). */
+  readThrough?: number;
   events: { id: number; type: string; summary: string; subject: Record<string, unknown>; at: Date }[];
 }
 const SCHEDULED: RunOrigin = { trigger: 'schedule', events: [] };
@@ -445,7 +452,6 @@ async function claimDue(
   workspaceId: string,
   agentId: string,
   now: Date,
-  origin: RunOrigin,
 ): Promise<{ kind: 'claimed'; claim: Claimed } | { kind: 'skipped' } | null> {
   return deps.db.withWorkspace(workspaceId, async (tx) => {
     const loaded = await loadHosted(tx, agentId);
@@ -477,8 +483,6 @@ async function claimDue(
         runningStartedAt: now,
         lastRunAt: now,
         nextRunAt: nextHostedRunAt(loaded.hosted.schedule, loaded.timeZone, now),
-        // The events this run handles are read; later events start the next event run (#338).
-        ...(origin.events.length ? { lastEventId: Math.max(...origin.events.map((e) => e.id)) } : {}),
         updatedAt: now,
       })
       .where(
@@ -508,7 +512,7 @@ async function claimDue(
 }
 
 async function runOne(deps: HostedAgentDeps, workspaceId: string, agentId: string, now: Date, origin: RunOrigin = SCHEDULED) {
-  const due = await claimDue(deps, workspaceId, agentId, now, origin);
+  const due = await claimDue(deps, workspaceId, agentId, now);
   if (!due) return 'skipped' as const;
   if (due.kind === 'skipped') return 'skipped' as const;
   const { runId, loaded } = due.claim;
@@ -684,12 +688,26 @@ export async function runHostedAgentsOnce(deps: HostedAgentDeps, now = new Date(
   // Event-triggered runs (#338): agents with new events on their trigger subscription, within the
   // minimum gap between event runs and the daily cap. Events that have to wait start a later run.
   const scheduled = new Set(rows.map((r) => `${r.workspace_id}:${r.agent_id}`));
+  // Only agents that can run now are selected, oldest unread event first, so agents waiting on
+  // their gap or cap never crowd out the rest (#343), and paused or revoked agents produce no
+  // skipped run every tick (#344).
   const { rows: eventDue } = await deps.db.admin.query<{ workspace_id: string; agent_id: string }>(
     `SELECT h.workspace_id, h.agent_id FROM hosted_agents h
+     JOIN agents a ON a.workspace_id = h.workspace_id AND a.id = h.agent_id AND a.status = 'active'
      WHERE h.enabled AND h.trigger_subscription_id IS NOT NULL AND cardinality(h.triggers) > 0
+       AND (h.running_run_id IS NULL OR h.running_started_at < $2)
+       AND NOT EXISTS (SELECT 1 FROM hosted_agent_runs r
+                       WHERE r.workspace_id = h.workspace_id AND r.agent_id = h.agent_id AND r.trigger = 'event'
+                         AND r.started_at > $1::timestamptz - make_interval(mins => h.event_min_gap_minutes))
+       AND (SELECT count(*) FROM hosted_agent_runs r
+            WHERE r.workspace_id = h.workspace_id AND r.agent_id = h.agent_id AND r.trigger = 'event'
+              AND r.started_at > $1::timestamptz - interval '24 hours') < h.event_runs_per_day
        AND EXISTS (SELECT 1 FROM agent_events e
                    WHERE e.workspace_id = h.workspace_id AND e.subscription_id = h.trigger_subscription_id AND e.id > h.last_event_id)
+     ORDER BY (SELECT min(e.id) FROM agent_events e
+               WHERE e.workspace_id = h.workspace_id AND e.subscription_id = h.trigger_subscription_id AND e.id > h.last_event_id)
      LIMIT 100`,
+    [now, new Date(now.getTime() - STALE_CLAIM_MINUTES * 60_000)],
   );
   for (const { workspace_id: workspaceId, agent_id: agentId } of eventDue) {
     if (scheduled.has(`${workspaceId}:${agentId}`)) continue;
@@ -713,6 +731,7 @@ export async function runHostedAgentsOnce(deps: HostedAgentDeps, now = new Date(
 }
 
 /** Most events one run is told about: the newest ones; older unread events are marked read with them. */
+const STALE_EVENT_MS = 86_400_000;
 const MAX_EVENTS_PER_RUN = 20;
 
 /**
@@ -736,6 +755,14 @@ async function eventOrigin(deps: HostedAgentDeps, workspaceId: string, agentId: 
       .orderBy(desc(schema.hostedAgentRuns.startedAt));
     if (runs.length >= h.eventRunsPerDay) return null;
     if (runs[0] && now.getTime() - runs[0].startedAt.getTime() < h.eventMinGapMinutes * 60_000) return null;
+    const unread = and(eq(schema.agentEvents.subscriptionId, h.triggerSubscriptionId), gt(schema.agentEvents.id, h.lastEventId));
+    const [newest] = await tx
+      .select({ id: sql<number>`max(${schema.agentEvents.id})` })
+      .from(schema.agentEvents)
+      .where(unread);
+    if (!newest?.id) return null;
+    // Events older than a day are not acted on (e.g. while the agent was paused): they are marked
+    // read without a run, so resuming does not replay stale events (#344).
     const events = await tx
       .select({
         id: schema.agentEvents.id,
@@ -745,11 +772,17 @@ async function eventOrigin(deps: HostedAgentDeps, workspaceId: string, agentId: 
         at: schema.agentEvents.at,
       })
       .from(schema.agentEvents)
-      .where(and(eq(schema.agentEvents.subscriptionId, h.triggerSubscriptionId), gt(schema.agentEvents.id, h.lastEventId)))
+      .where(and(unread, gt(schema.agentEvents.at, new Date(now.getTime() - STALE_EVENT_MS))))
       .orderBy(desc(schema.agentEvents.id))
       .limit(MAX_EVENTS_PER_RUN);
-    if (!events.length) return null;
-    return { trigger: 'event' as const, events: events.reverse() };
+    if (!events.length) {
+      await tx
+        .update(schema.hostedAgents)
+        .set({ lastEventId: Number(newest.id), updatedAt: now })
+        .where(eq(schema.hostedAgents.agentId, agentId));
+      return null;
+    }
+    return { trigger: 'event' as const, events: events.reverse(), readThrough: Number(newest.id) };
   });
 }
 
