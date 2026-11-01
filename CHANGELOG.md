@@ -2,7 +2,7 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
-## [Unreleased]
+## [0.7.0] - 2026-11-01
 
 ### Added
 
@@ -24,6 +24,14 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 ### Security
 
 - **The mjml advisories are gone (#205).** mjml 5 fixes the `mj-include` directory traversal (GHSA-45h5-66jx-r2wf) and drops `html-minifier`, whose ReDoS (GHSA-pfq8-rq6v-vf5m) had no patched release. `minimatch` and `glob` are pinned with `pnpm.overrides` to the patched 11.0.1 and 14.0.2 (GHSA-g3hv-75wg-m249, GHSA-3g3m-2fjr-6pw4), which `mjml-cli` — a dependency of `mjml` that the server never loads — and `js-beautify` no longer hold back. `SECURITY.md` and `pnpm.auditConfig.ignoreGhsas` now carry only the `uuid` advisory in the spikes, and `pnpm audit --prod --audit-level=moderate` passes.
+
+### Upgrading from 0.6.1
+
+- **Migrations:** `0063_hosted_triggers.sql`, `0064_decision_models.sql`, `0065_hosted_memory.sql`, `0066_password_reset.sql` and `0067_copilot_agents.sql`. All additive; they run on start.
+- **Configuration:** optional `BACKUP_VERIFY_MAX_AGE_DAYS` (default 30): `am backup --health` now also fails when no backup was verified with `am backup --verify` within that many days, so run a verification after upgrading if a monitor calls `--health`. Password-reset mail goes through the transactional e-mail provider of the person's first workspace; without one, no link is sent and a warning is logged. `MASTER_KEY_PREVIOUS` keeps backups made before a key rotation restorable.
+- **Breaking changes:** `am restore` now refuses when the configured master key cannot unseal the backup (`--skip-key-check` overrides). Decision providers refuse states with personal data unless `allowPersonalData` is set by a person.
+- **Manual steps:** none. Look at one rendered e-mail in your main mail clients after the upgrade: mjml 5 renders the same content with slightly different HTML.
+- **Upgrade:** download `agentic-marketing-compose-<version>.tar.gz`, replace `docker-compose.yml` with its copy, check your configuration with the new image (`AM_VERSION=<version> docker compose run --rm --no-deps -T app am doctor --env-file - < .env`), then set `AM_VERSION=<version>` in `.env` and `docker compose pull && docker compose up -d` (Helm: the chart of the same version). Then `docker compose exec app am doctor`.
 
 ## [0.6.1] - 2026-11-01
 
