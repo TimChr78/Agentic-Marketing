@@ -35,7 +35,7 @@ export const publishClass = (type: string): ActionClass => CLASS_BY_TYPE[type] ?
 const RANK: ActionClass[] = ['content.publish', 'experience.live', 'audience.publish', 'settings', 'journey.live', 'send.broadcast'];
 
 export async function publishImpact(
-  ctx: Pick<CommandContext, 'tx' | 'services'>,
+  ctx: Pick<CommandContext, 'tx' | 'services'> & { principal?: CommandContext['principal'] },
   members: { id: string; type: string; version: number }[],
 ): Promise<Impact> {
   let actionClass: ActionClass = 'content.publish';
@@ -53,7 +53,7 @@ export async function publishImpact(
       .select({ publishedVersion: schema.artifacts.publishedVersion })
       .from(schema.artifacts)
       .where(eq(schema.artifacts.id, m.id));
-    touches.artifacts.push({ id: m.id, type: m.type, created: live?.publishedVersion == null });
+    touches.artifacts.push({ id: m.id, type: m.type, created: live?.publishedVersion == null && (await draftedByCaller(ctx, m.id)) });
     if (m.type === 'segment') touches.segments.push(m.id);
     const estimate = await ctx.services.artifactImpact?.[m.type]?.(ctx.tx, m.id, m.version);
     if (estimate?.people !== undefined) people = Math.max(people ?? 0, estimate.people);
@@ -73,6 +73,21 @@ export async function publishImpact(
     ...(needsPerson ? { needsPerson } : {}),
     ...(learning.length ? { learning } : {}),
   };
+}
+
+/**
+ * Whether the calling agent drafted this artifact's first version itself (#325). Level 4 may create
+ * new artifacts outside the mandate's artifact list, but only its own: a never-published draft by a
+ * person or another agent is not a creation of this agent and stays in the list's scope.
+ */
+async function draftedByCaller(ctx: { tx: Tx; principal?: CommandContext['principal'] }, artifactId: string): Promise<boolean> {
+  const p = ctx.principal;
+  if (p?.type !== 'agent' || !p.clientId) return false;
+  const [first] = await ctx.tx
+    .select({ authorType: schema.artifactVersions.authorType, authorClient: schema.artifactVersions.authorClient })
+    .from(schema.artifactVersions)
+    .where(and(eq(schema.artifactVersions.artifactId, artifactId), eq(schema.artifactVersions.number, 1)));
+  return first?.authorType === 'agent' && first.authorClient === p.clientId;
 }
 
 const MEASURED = ['journey', 'broadcast', 'experience'];

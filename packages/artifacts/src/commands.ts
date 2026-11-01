@@ -1507,6 +1507,8 @@ async function recordHeldExecution(
     { name: 'artifacts.requestPublish' },
     {
       decision: 'allow',
+      // It was held for a person's veto, so it ran at level 2, not as autonomous level 3 (#327).
+      level: 2,
       actionClass: held?.actionClass ?? 'content.publish',
       reasons: ['Ran after its veto window ended without a veto.'],
       impact: held?.impact ?? {},

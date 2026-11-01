@@ -1,4 +1,5 @@
 import { runAnalyticsQuery } from '@agentic-marketing/analytics';
+import { artifactTypes } from '@agentic-marketing/artifacts';
 import type { AgentOutcomes } from '@agentic-marketing/commands';
 import { schema, type Tx } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
@@ -25,7 +26,8 @@ export async function agentOutcomes(
     .where(and(eq(a.agentId, agentId), eq(a.decision, 'allow'), eq(a.ok, true), gte(a.at, range.from), lt(a.at, range.to)));
   const ids = (prefix: string) => [...new Set(ran.flatMap((r) => (r.target ?? '').split(',')).filter((id) => id.startsWith(prefix)))];
   const broadcasts = ids('bct_');
-  const journeys = ids('jny_');
+  // Journey ids use the artifact type's prefix (#322).
+  const journeys = ids(`${artifactTypes.journey.prefix}_`);
   const directIds = [
     ...new Set(
       ran
@@ -68,7 +70,8 @@ export async function agentOutcomes(
 
   let direct: AgentOutcomes['direct'] = null;
   if (directIds.length) {
-    const stats = await deps.events.messageStats(deps.workspaceId, { since: range.from, messageIds: directIds });
+    // Only events inside the period, so a report on last month does not count today's opens (#323).
+    const stats = await deps.events.messageStats(deps.workspaceId, { since: range.from, until: range.to, messageIds: directIds });
     direct = {
       count: directIds.length,
       sent: stats.sent ?? 0,

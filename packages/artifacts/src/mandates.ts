@@ -153,7 +153,7 @@ export async function l4Missing(tx: Tx, agentId: string, cls: ActionClass, now =
     .from(schema.guardianEvents)
     .where(and(eq(schema.guardianEvents.agentId, agentId), sql`${schema.guardianEvents.at} > ${since}`));
   const a = schema.agentActions;
-  // Level 3: allowed by a mandate without a person, i.e. autonomous.
+  // Level 3 or above, as the engine recorded it (#327): a held change that ran after its veto window is level 2.
   const [l3] = await tx
     .select({ first: sql<Date | null>`min(${a.at})` })
     .from(a)
@@ -163,7 +163,7 @@ export async function l4Missing(tx: Tx, agentId: string, cls: ActionClass, now =
         eq(a.actionClass, cls),
         eq(a.decision, 'allow'),
         eq(a.ok, true),
-        sql`${a.mandateId} IS NOT NULL`,
+        sql`${a.level} >= 3`,
         sql`${a.shadow} IS NULL`,
       ),
     );

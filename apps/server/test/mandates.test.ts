@@ -591,8 +591,17 @@ describe('audit fixes (#260, #262, #263, #267, #268)', () => {
 
     // Four weeks of the class at level 3, decided by its mandate, without a guardian episode.
     await t.srv.db.admin.query(
-      `INSERT INTO agent_actions (workspace_id, agent_id, command, action_class, decision, ok, surface, mandate_id, mandate_version, at)
-       VALUES ($1, $2, 'artifacts.requestPublish', 'content.publish', 'allow', true, 'rest', $3, 1, now() - interval '30 days')`,
+      `INSERT INTO agent_actions (workspace_id, agent_id, command, action_class, decision, ok, surface, mandate_id, mandate_version, level, at)
+       VALUES ($1, $2, 'artifacts.requestPublish', 'content.publish', 'allow', true, 'internal', $3, 1, 2, now() - interval '30 days')`,
+      [ws, a.id, a.mandate],
+    );
+    // A held change that ran after its veto window is level 2: it does not earn level 4 (#327).
+    await expect(api.call('artifacts.requestPublish', { artifactId: l4.artifactId, note: 'grant L4' })).rejects.toMatchObject({
+      message: expect.stringContaining('is earned'),
+    });
+    await t.srv.db.admin.query(
+      `INSERT INTO agent_actions (workspace_id, agent_id, command, action_class, decision, ok, surface, mandate_id, mandate_version, level, at)
+       VALUES ($1, $2, 'artifacts.requestPublish', 'content.publish', 'allow', true, 'rest', $3, 1, 3, now() - interval '30 days')`,
       [ws, a.id, a.mandate],
     );
     expect((await api.call('artifacts.requestPublish', { artifactId: l4.artifactId, note: 'grant L4' })).status).toBe('published');
@@ -600,6 +609,10 @@ describe('audit fixes (#260, #262, #263, #267, #268)', () => {
     // A new note is not in scope.artifacts, but level 4 may create it.
     const note = (await a.as('artifacts.create', { type: 'note', name: 'New at L4', content: { title: 'n', body: 'n' } })).body.artifactId;
     expect((await a.as('artifacts.requestPublish', { artifactId: note, note: 'a new note' })).body.status).toBe('published');
+    // A draft a person created is not the agent's creation, even if it was never published (#325).
+    const theirs = (await api.call('artifacts.create', { type: 'note', name: 'By a person', content: { title: 'p', body: 'p' } as never }))
+      .artifactId;
+    expect((await a.as('artifacts.requestPublish', { artifactId: theirs, note: 'not mine' })).body.status).toBe('in_review');
     // Changing it again is an existing artifact outside the list: a person decides.
     await a.as('artifacts.updateDraft', { artifactId: note, content: { title: 'n2', body: 'n2' } });
     expect((await a.as('artifacts.requestPublish', { artifactId: note, note: 'again' })).body.status).toBe('in_review');
@@ -663,5 +676,62 @@ describe('audit fixes (#260, #262, #263, #267, #268)', () => {
       evidence: [{ kind: 'subject_test', id: tested.body.artifactId, summary: 'B beat A', numbers: { lift: 0.02 } }],
     });
     expect(learned.status).toBe(200);
+  });
+
+  it('agents.report counts refusals as denies and reports the journeys it published (#321, #322)', async () => {
+    await t.api(owner).call('workspace.setAutonomy', { maxLevel: { 'journey.live': 3, 'content.publish': 3 } });
+    const a = await freshAgent({
+      scope: { segments: [news], purposes: [], topics: [], channels: ['email'], artifactTypes: [], artifacts: [] },
+      levels: { 'journey.live': 3, 'send.broadcast': 0 },
+    });
+    // Level 0 for sends: refused, which is a deny in the report, not a failure.
+    expect((await a.as('artifacts.requestPublish', { artifactId: await a.draft(), note: 'refused' })).status).toBe(403);
+    const journey = await a.as('artifacts.create', {
+      type: 'journey',
+      name: `Report journey ${Date.now()}`,
+      content: {
+        purpose: 'onboarding',
+        nodes: [
+          { id: 'trigger', kind: 'trigger', label: 'Start', config: { event: 'Report Start', reentry: 'once' }, next: [{ to: 'wait' }] },
+          { id: 'wait', kind: 'wait', label: 'Wait', config: { duration: 'P1D' }, next: [{ to: 'done' }] },
+          { id: 'done', kind: 'exit', label: 'Done', config: {} },
+        ],
+      },
+    });
+    expect((await a.as('artifacts.requestPublish', { artifactId: journey.body.artifactId, note: 'journey' })).body.status).toBe(
+      'published',
+    );
+    const report = await t.api(owner).call('agents.report', { agentId: a.id });
+    expect(report.actions['send.broadcast']).toMatchObject({ deny: 1, failed: 0 });
+    expect(report.outcomes?.journeys.map((j) => j.id)).toContain(journey.body.artifactId);
+  });
+
+  it('message stats stop at the end of a period (#323)', async () => {
+    const id = `msg_${Date.now()}`;
+    const at = new Date().toISOString();
+    await t.srv.events.insertMessageEvents([
+      {
+        workspaceId: ws,
+        messageId: id,
+        eventId: `${id}:opened`,
+        type: 'opened',
+        at,
+        profileId: 'prf_x',
+        channel: 'email',
+        purpose: 'marketing_email',
+        provider: 'log',
+        templateId: templateId,
+        templateVersion: 1,
+        journeyId: '',
+        reason: '',
+        url: '',
+      },
+    ]);
+    const since = new Date(Date.now() - 3_600_000);
+    await eventually(
+      () => t.srv.events.messageStats(ws, { since, messageIds: [id] }),
+      (r) => (r.opened ?? 0) === 1,
+    );
+    expect((await t.srv.events.messageStats(ws, { since, until: new Date(Date.now() - 60_000), messageIds: [id] })).opened ?? 0).toBe(0);
   });
 });

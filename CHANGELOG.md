@@ -2,6 +2,14 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+### Fixed
+
+- **Level 4 only creates what the agent drafted itself (#325).** A never-published artifact counts as the agent's creation only when its first version was drafted by the same agent credential; a person's or another agent's draft stays inside the mandate's artifact list.
+- **Level 4 is earned only from level-3 operation (#327).** The ledger records the level the policy engine decided at; a held change that ran after its veto window is level 2 and no longer counts. Ledger rows from before 0.6.1 have no level, so earning starts again from this release.
+- **`agents.report` counts refusals as denies (#321)** instead of failures, **reports the journeys an agent published (#322)** (it looked for the wrong id prefix), and **counts direct-send events only inside the period (#323)**.
+
 ## [0.6.0] - 2026-11-01
 
 ### Added

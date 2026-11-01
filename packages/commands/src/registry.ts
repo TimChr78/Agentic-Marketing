@@ -533,6 +533,7 @@ export async function recordAgentAction(
     mandateId: policy.mandate?.id ?? policy.shadow?.mandateId ?? null,
     mandateVersion: policy.mandate?.version ?? policy.shadow?.mandateVersion ?? null,
     shadow: policy.shadow ?? null,
+    level: policy.level ?? null,
     intent: intent?.slice(0, 2000) ?? null,
     undo: undo ?? null,
   });

@@ -9,6 +9,7 @@ import {
   jsonb,
   pgTable,
   primaryKey,
+  smallint,
   text,
   timestamp,
   uniqueIndex,
@@ -1252,6 +1253,8 @@ export const agentActions = pgTable(
     mandateId: text('mandate_id'),
     mandateVersion: integer('mandate_version'),
     intent: text('intent'),
+    /** The level the policy engine decided at (#327); null for rows before 0.6.1 and without a mandate. */
+    level: smallint('level'),
     /** Shadow mode (#256): what the mandate would have decided; `decision` is what applied. */
     shadow: jsonb('shadow').$type<{
       decision: PolicyDecision;
