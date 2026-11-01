@@ -89,6 +89,7 @@ const MIGRATION_RELEASES: Record<string, string> = {
   '0058_content_sources.sql': '0.6.0',
   '0059_content_topics.sql': '0.6.0',
   '0060_enrollment_jobs.sql': '0.6.0',
+  '0061_enrollment_job_versions.sql': '0.6.1',
   '0062_agent_action_level.sql': '0.6.1',
 };
 

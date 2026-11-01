@@ -482,8 +482,8 @@ export const enrollSegment = defineCommand({
   handler: async (input, ctx) => {
     const ws = ctx.principal.workspaceId;
     const segments = await publishedSegments(ctx.tx);
-    if (!segments.some((s) => s.id === input.segmentId))
-      throw new AppError('not_found', `Segment ${input.segmentId} has no published version.`);
+    const segment = segments.find((s) => s.id === input.segmentId);
+    if (!segment) throw new AppError('not_found', `Segment ${input.segmentId} has no published version.`);
     const [journey] = await ctx.tx.select().from(schema.artifacts).where(eq(schema.artifacts.id, input.artifactId));
     if (journey?.type !== 'journey' || !journey.publishedVersion)
       throw new AppError('not_found', `Journey ${input.artifactId} has no published version.`);
@@ -512,6 +512,8 @@ export const enrollSegment = defineCommand({
         id: newId('job'),
         journeyId: input.artifactId,
         segmentId: input.segmentId,
+        journeyVersion: journey.publishedVersion,
+        segmentVersion: segment.version,
         status: 'queued',
         limit: input.limit ?? null,
         people,
