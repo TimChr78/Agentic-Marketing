@@ -1678,6 +1678,21 @@ const campaignBrief = z
 
 export type CampaignBrief = z.output<typeof campaignBrief>;
 
+// Skills (#340): named instruction blocks a hosted agent's run context can include, versioned as
+// artifacts so people review and publish them like any other content. Only a published version is
+// used, and the agent's own instructions decide when a skill applies.
+const skill = z.object({
+  title: z.string().trim().min(1).max(200).describe('What the skill is called, e.g. "Subject lines that get opened"'),
+  instructions: z
+    .string()
+    .trim()
+    .min(1)
+    .max(8000)
+    .describe('Markdown instructions the hosted agent follows when this skill applies; written by people'),
+  tags: z.array(z.string().trim().min(1).max(40)).max(20).default([]).describe('Short labels for finding the skill, e.g. "newsletter"'),
+});
+export type Skill = z.output<typeof skill>;
+
 export const artifactTypes = {
   note: { prefix: 'not', label: 'Note', description: 'Free-form note, used to exercise the artifact system.', content: note },
   journey: {
@@ -1831,6 +1846,13 @@ export const artifactTypes = {
     description:
       'An editorial brief for one backlog topic: the thesis (the argument, not a summary), audience, angle, sources with citations, outline, do nots, the Monday test and success measure. A versioned artifact like any other, so people approve it and agents can draft it; publishing it moves its topic to approved.',
     content: contentBrief,
+  },
+  skill: {
+    prefix: 'skl',
+    label: 'Skill',
+    description:
+      'A named instruction block (title, markdown instructions up to 8,000 characters and tags) that a hosted agent can follow: reference it on the agent with agents.updateHosted skills, and only its published version is used. People approve skills like any artifact; agents may draft them. Use a skill for reusable know-how, and the agent’s instructions for what each run should do.',
+    content: skill,
   },
 } as const;
 

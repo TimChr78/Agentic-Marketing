@@ -85,17 +85,42 @@ Create one in **Settings → Agents → New hosted agent** (or with `agents.crea
 - **Budgets per run** — a token budget and a tool-call budget. The run stops when either is used up and records a partial summary; a tool call past the tool-call budget never reaches the command layer.
 - **A model** (optional) — an AI provider id; without one the workspace's copilot provider is used.
 
-Each run is a **fresh session** on the copilot's in-process MCP client, acting as the agent principal (the sponsor's role ∩ the scopes). There is no carry-over except the instructions; the mandate applies exactly as it does to an external agent, so a write outside its levels waits for a person or is refused, and the decision lands in the agent's activity ledger.
+Each run is a **fresh session** on the copilot's in-process MCP client, acting as the agent principal (the sponsor's role ∩ the scopes). There is no carry-over except the instructions, the agent's own memory notes and the published skills it references (below); the mandate applies exactly as it does to an external agent, so a write outside its levels waits for a person or is refused, and the decision lands in the agent's activity ledger.
 
 Runs never overlap: a durable claim on the hosted agent is taken before the model is called, and a second sweep records a skipped run instead of starting another. A failed run counts; **three consecutive failures disable the agent** and tell the sponsor by e-mail. The sponsor also receives every run's summary by e-mail.
 
 | Command | Who | What |
 |---|---|---|
-| `agents.createHosted` | people only (`workspace:admin`) | Create the agent, its schedule, scopes and budgets |
-| `agents.updateHosted` | people only (`workspace:admin`) | Change instructions, schedule, scopes, budgets or enabled |
+| `agents.createHosted` | people only (`workspace:admin`) | Create the agent, its schedule, scopes, budgets and skills |
+| `agents.updateHosted` | people only (`workspace:admin`) | Change instructions, schedule, scopes, budgets, skills or enabled |
 | `agents.runHostedNow` | people only (`workspace:admin`) | Start a run at the scheduler's next tick, without changing the schedule |
 | `agents.deleteHosted` | people only (`workspace:admin`) | Delete it and its run history; the ledger stays |
 | `agents.hostedRuns` | `artifacts:read` | The hosted agent and its runs (status, summary, tool calls, tokens, error) |
+| `agents.memory.list` | `artifacts:read` | The agent's notes, newest first; an agent reads only its own |
+| `agents.memory.add` | `artifacts:read` | Add a note; during a run the agent writes its own, people may write any |
+| `agents.memory.update` | people only (`artifacts:write`) | Rewrite a note |
+| `agents.memory.delete` | `artifacts:read` | Delete a note; people any, the agent its own |
+
+### Memory
+
+A hosted agent starts every run fresh, but it can keep a small, inspectable list of **working notes** for itself: "the Tuesday issue goes out at 07:00; last week's numbered subject won". The agent writes them during a run with `agents.memory.add`; people can read, add, edit and delete them on the agent page under **Memory**, and the agent may delete its own notes. Each run's prompt contains the notes, newest first, in a delimited block marked as the agent's own working notes.
+
+Memory is bounded per agent: **at most 50 notes and 10,000 characters**, each note at most 1,000 characters. Adding a note past either limit is refused with the reason and the agent should delete a stale note first. Notes must not hold personal data: an e-mail address or phone number (and the other identifiers the platform's redaction detects) is refused. Memory is not a place for conclusions — those are **learnings** (#311), which require evidence and are served separately. External agents keep their own memory; this store belongs to hosted agents only.
+
+### Skills
+
+A **skill** is a named, reusable instruction block stored as a versioned artifact (`skill`, ids `skl_…`): a title, markdown instructions of up to 8,000 characters and tags. Skills go through the normal artifact flow — agents may draft one, people review and publish it — and only the **published version** is used. Reference skills on a hosted agent with `skills` in `agents.createHosted` / `agents.updateHosted` (or the agent editor's Skills list); the published instructions are added to each run's prompt in their own block, in the agent's order. A referenced skill that is only a draft is listed on the agent page as a draft and is not used until someone publishes it.
+
+### Run context
+
+Besides the instructions, each run's prompt gets these blocks, each delimited and labelled, bounded on its own and together (about 12,000 characters):
+
+- the agent's **memory** notes, newest first;
+- the **published skills** the agent references;
+- the workspace's published **business context**, when there is one;
+- the **active learnings**, newest first.
+
+The prompt says which blocks are data (business context, learnings, memory) and which are instructions from people (skills). When a block is too long it is truncated rather than allowed to crowd out the instructions or the run budgets.
 
 ### Event-triggered runs
 

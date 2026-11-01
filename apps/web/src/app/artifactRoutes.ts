@@ -42,5 +42,6 @@ export const TYPE_LABEL: Record<string, string> = {
   business_context: 'Business context',
   content_brief: 'Content brief',
   campaign_brief: 'Campaign brief',
+  skill: 'Skill',
 };
 export const typeLabel = (t: string) => TYPE_LABEL[t] ?? t.replace(/_/g, ' ');
