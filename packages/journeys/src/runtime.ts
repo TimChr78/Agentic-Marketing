@@ -384,13 +384,23 @@ async function applyEffect(
         kind: eff.task,
         status: 'pending',
         idempotencyKey: `jrn:${p.id}:${eff.node}:${eff.seq}`,
-        promptId: eff.prompt,
+        promptId: eff.task === 'score' ? null : eff.prompt,
         journeyId: p.journeyId,
         participantId: p.id,
         node: eff.node,
         seq: eff.seq,
         profileId: p.profileId,
-        input: { trigger: (p.context as { event?: unknown }).event ?? null },
+        input: {
+          trigger: (p.context as { event?: unknown }).event ?? null,
+          ...(eff.task === 'score' && eff.questions
+            ? {
+                questions: eff.questions,
+                threshold: eff.threshold,
+                ...(eff.answer ? { answer: eff.answer } : {}),
+                scoreKey: eff.scoreKey ?? eff.questions[0]?.key,
+              }
+            : {}),
+        },
       })
       .onConflictDoNothing();
     return null;
