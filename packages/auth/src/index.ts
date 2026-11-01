@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { agentPrincipal, PERMISSIONS, type Principal, userPrincipal } from '@agentic-marketing/commands';
 import type { Db, Role } from '@agentic-marketing/db';
 import { type CimdOptions, cimd } from '@better-auth/cimd';
@@ -9,6 +10,29 @@ import { jwt } from 'better-auth/plugins';
 import type { JWTPayload } from 'jose';
 import { agentForCredential, oauthClientName } from './agents';
 import { type SsoConfig, ssoGuard, ssoPlugin } from './sso';
+
+/** Better Auth stores reset tokens under this prefix in its `verification` table. */
+const RESET_PREFIX = 'reset-password:';
+
+/** Minutes a reset link stays valid (#191). Long enough to find the mail, short enough to matter. */
+export const RESET_PASSWORD_TTL_SECONDS = 45 * 60;
+
+/** The identifier Better Auth stores a reset token under (before hashing). */
+export const resetTokenIdentifier = (token: string) => `${RESET_PREFIX}${token}`;
+
+/**
+ * The identifier as stored: Better Auth hashes reset-password identifiers at rest (#191), so a
+ * database dump or a log of the table never yields a usable link. Only reset tokens are hashed;
+ * other verification values keep Better Auth's plain default.
+ */
+export const hashedResetTokenIdentifier = (token: string) => createHash('sha256').update(resetTokenIdentifier(token)).digest('base64url');
+
+/** Sends the installation-level reset link. Only accounts with a password are eligible. */
+export interface PasswordResetDelivery {
+  /** Seconds a link stays valid; Better Auth's `resetPasswordTokenExpiresIn`. */
+  ttlSeconds?: number;
+  send: (input: { user: { id: string; email: string; name: string }; token: string; request?: Request }) => Promise<void>;
+}
 
 export interface AuthConfig {
   /** Public URL of the server, e.g. https://marketing.example.com */
@@ -24,6 +48,12 @@ export interface AuthConfig {
   cimd?: Partial<CimdOptions>;
   /** Single sign-on settings (domain verification). */
   sso?: SsoConfig;
+  /**
+   * Self-service password reset (#191). Installation-level: the link goes to `PUBLIC_URL`, not a
+   * brand domain. Without it Better Auth refuses reset requests, so a host that does not wire it
+   * simply has no self-service reset (the CLI stays the break-glass path).
+   */
+  passwordReset?: PasswordResetDelivery;
 }
 
 /** Scopes an MCP client can be granted; permissions double as scopes. Agents get read-only unless the person grants more. */
@@ -56,7 +86,39 @@ export function authOptions(config: AuthConfig) {
     secret: config.secret,
     database: config.db.admin,
     trustedOrigins: config.trustedOrigins,
-    emailAndPassword: { enabled: true, minPasswordLength: 10 },
+    emailAndPassword: {
+      enabled: true,
+      minPasswordLength: 10,
+      ...(config.passwordReset
+        ? {
+            // A reset revokes every session of that person (#191), so a stolen cookie stops working.
+            revokeSessionsOnPasswordReset: true,
+            resetPasswordTokenExpiresIn: config.passwordReset.ttlSeconds ?? RESET_PASSWORD_TTL_SECONDS,
+            // Better Auth only calls this for an existing account and never puts the token in a
+            // log line; the delivery decides who gets mail (password accounts only) and from where.
+            sendResetPassword: async (
+              { user, token }: { user: { id: string; email: string; name: string }; token: string },
+              request?: Request,
+            ) => {
+              try {
+                await config.passwordReset?.send({
+                  user: { id: user.id, email: user.email, name: user.name },
+                  token,
+                  request,
+                });
+              } catch {
+                // Delivery is logged by the host; a provider outage must not turn the neutral
+                // "if an account exists, we sent a link" answer into a 500 that reveals it did.
+              }
+            },
+          }
+        : {}),
+    },
+    verification: {
+      // Hash reset tokens at rest (#191). Other verification values stay plain, as Better Auth
+      // expects to find them by their own identifier.
+      storeIdentifier: { default: 'plain', overrides: { [RESET_PREFIX]: 'hashed' } },
+    },
     advanced: {
       ipAddress: { ipAddressHeaders: config.clientIpHeaders ?? [config.clientIpHeader ?? 'x-forwarded-for'] },
     },

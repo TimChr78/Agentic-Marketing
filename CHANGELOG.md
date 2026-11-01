@@ -2,6 +2,12 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+### Added
+
+- **Self-service password reset (#191).** The sign-in page links to `/forgot-password`, which asks for an e-mail address and always answers "If an account exists for that address, we sent a link to reset the password" — the same answer for a known and an unknown address, whether or not mail is configured, and for single sign-on people. A password account gets a single-use link to `<PUBLIC_URL>/reset-password?token=…` that expires after 45 minutes; the page sets a new password (min 10 characters, confirmation) and signs the person out everywhere else by revoking all their sessions (`revokeSessionsOnPasswordReset`). Expired, reused and malformed links get a clear message and a way to request a new one. The mail goes through the transactional provider of the person's oldest workspace (installation-level, never a brand they do not belong to), tokens are stored hashed, the request and the reset are audited with person, IP and outcome but never the token, and both endpoints are rate limited per IP and per address in Valkey (5/IP per 15 min, 3/address per hour plus a 60-second cooldown, 10 submissions/IP per 15 min). Enforced single sign-on domains and passwordless (SSO/SCIM) accounts get no reset mail. API tokens are not revoked; manage them under Settings → Integrations. `am reset-password` stays the break-glass path. Migration `0066_password_reset.sql` adds a nullable `ip` column to the audit log so these entries say where the request came from (older entries keep their hash chain). See [docs/identity.md](docs/identity.md#password-reset-191) and [docs/deployment/operations.md](docs/deployment/operations.md#password-reset-mail).
+
 ## [0.6.1] - 2026-11-01
 
 ### Fixed
