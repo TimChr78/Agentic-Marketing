@@ -707,17 +707,20 @@ export const holdoutAssignments = pgTable(
   (t) => [primaryKey({ columns: [t.workspaceId, t.scopeType, t.scopeId, t.hashVersion, t.profileId] })],
 );
 
-export type AiUse = 'journeys' | 'copilot';
+export type AiUse = 'journeys' | 'copilot' | 'decisions';
+export type AiProviderKind = 'openai-compatible' | 'anthropic-compatible' | 'decision';
 export const aiProviders = pgTable(
   'ai_providers',
   {
     workspaceId: uuid('workspace_id').notNull(),
     id: text('id').notNull(),
     name: text('name').notNull(),
-    kind: text('kind').$type<'openai-compatible' | 'anthropic-compatible'>().notNull(),
+    kind: text('kind').$type<AiProviderKind>().notNull(),
     baseUrl: text('base_url').notNull(),
     models: jsonb('models').$type<{ default: string; fast?: string }>().notNull(),
     structuredOutputs: boolean('structured_outputs').notNull().default(true),
+    /** Decision providers only: whether states may contain personal data (needs a no-retention agreement). */
+    allowPersonalData: boolean('allow_personal_data').notNull().default(false),
     useFor: text('use_for').array().$type<AiUse[]>().notNull().default([]),
     monthlyTokenBudget: bigint('monthly_token_budget', { mode: 'number' }),
     region: text('region').notNull().default(''),
@@ -730,7 +733,7 @@ export const aiProviders = pgTable(
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
 );
 
-export type AiCallKind = 'decide' | 'generate' | 'copilot' | 'test' | 'classify' | 'check' | 'hosted';
+export type AiCallKind = 'decide' | 'generate' | 'copilot' | 'test' | 'classify' | 'check' | 'hosted' | 'score';
 
 export const aiTokenReservations = pgTable(
   'ai_token_reservations',
@@ -781,6 +784,29 @@ export const aiCalls = pgTable(
     reviewedAt: ts('reviewed_at'),
   },
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
+/**
+ * A named score from a decision model, one row per person and key (the newest value). Segments
+ * and journeys read it until `expires_at`; the value is the predicted probability (noul, choice)
+ * or the score normalised to 0–1, so calibration can treat it as one.
+ */
+export const profileScores = pgTable(
+  'profile_scores',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    profileId: text('profile_id').notNull(),
+    key: text('key').notNull(),
+    value: doublePrecision('value').notNull(),
+    confidence: doublePrecision('confidence'),
+    probabilities: jsonb('probabilities').$type<Record<string, number>>().notNull().default({}),
+    model: text('model').notNull(),
+    modelVersion: text('model_version').notNull(),
+    callId: text('call_id'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    expiresAt: ts('expires_at').notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.profileId, t.key] })],
 );
 
 export const aiTextCache = pgTable(
