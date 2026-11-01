@@ -72,6 +72,7 @@ schema is validated on save. The source of truth is `artifactTypes` in
 | `business_context` | `bcx_` | What the business offers, to whom, in which voice; one per workspace. |
 | `campaign_brief` | `cpb_` | Contract for one campaign: goal, audience, message, schedule, holdout. |
 | `content_brief` | `brf_` | Editorial brief for a topic: thesis, audience, sources, outline, Monday test. |
+| `skill` | `skl_` | Named instructions a hosted agent can reference; only the published version is used. |
 
 Adding a capability = one `defineCommand(...)` in a package + adding it to `apps/server/src/registry.ts`. The REST route, OpenAPI entry, MCP tool and typed client call follow automatically.
 
