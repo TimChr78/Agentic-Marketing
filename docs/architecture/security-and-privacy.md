@@ -56,6 +56,7 @@ Evaluation in the send gateway: `consent` basis → needs `granted`; `legitimate
 - **Authorization:** RBAC with built-in roles (owner, admin, marketer, approver, viewer) mapping to permission strings checked in the command layer; per-agent scope sets. Designed so it can move to relationship-based authz (OpenFGA, Apache-2.0) if fine-grained sharing is needed.
 - **Tenant isolation:** `workspace_id` + Postgres RLS (session variable set by the command layer); ClickHouse row policies; NATS subjects per workspace; Valkey key prefixes.
 - **Audit log:** append-only, hash-chained table of every command (principal, effect, input hash, result, ip, user agent), exportable; separate from analytics.
+- **Password reset (#191):** answered identically for known and unknown addresses, so the form cannot be used to enumerate accounts. Links are single-use, expire after 45 minutes, are stored hashed (Better Auth's `verification` table, identifier `reset-password:` hashed) and are delivered only to accounts with a password — enforced single sign-on domains and SSO/SCIM accounts with no password get no mail. A successful reset revokes every session of that person. Requests and resets are rate limited per IP and per address in Valkey (shared by all workers) and audited with person, IP and outcome, never the token ([identity.md](../identity.md#password-reset-191)).
 
 ## 5. Application security controls
 
@@ -66,6 +67,7 @@ Evaluation in the send gateway: `consent` basis → needs `granted`; `legitimate
 | Prompt injection via profile/event data reaching LLMs | Data is passed as clearly delimited data, LLM outputs are schema-validated and can only choose among configured options; AI nodes cannot call platform tools in v1 |
 | Malicious MCP/agent behaviour | Scopes, drafts + approvals, the policy engine (audience threshold, per-agent limits, the autonomy switch), pausing an agent, AI budgets, the send gateway, the action ledger and audit ([agentic-autonomy.md](agentic-autonomy.md)) |
 | Abuse of public write keys | Origin allow-list, rate limits, schema validation, payload size limits, bot filtering |
+| Account enumeration and mail flooding via password reset | One neutral answer for every request, per-IP and per-address token buckets in Valkey, a cooldown per address, single-use tokens that expire, audit entries that never carry the token |
 | XSS in editors/experiences | CSP, sanitization of experience HTML (DOMPurify), editors in sandboxed iframes where possible |
 | Supply chain | Lockfile, Renovate, `pnpm audit`/OSV scanning, SBOM (Syft), signed images (cosign), minimal base images |
 | Custom code steps (later) | Not in v1. If added: isolated runtime (separate sandboxed process / WASM) with no network by default |

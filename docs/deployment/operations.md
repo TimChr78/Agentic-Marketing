@@ -105,6 +105,16 @@ ClickHouse insert lag is deliberately not a row: the events table's `received_at
 
 DNS and egress checks only see enabled e-mail providers. With no providers configured they pass without network traffic.
 
+## Password reset mail
+
+People reset their own password from the sign-in page ("Forgot password?") and receive a single-use link that expires after 45 minutes. The flow is described in [docs/identity.md](../identity.md#password-reset-191); what matters operationally:
+
+- **One transactional provider is all it needs.** The link is sent through the enabled transactional e-mail provider of the person's oldest workspace, from that provider's `fromEmail`/`fromName`. Add one under Settings → Providers (`emailProviders.create` with `useFor: ["transactional"]`, or the `log` adapter to watch it in development) in at least one workspace every person belongs to. The reset page and the link use `PUBLIC_URL`, not a brand domain.
+- **No sender configured.** The request still answers neutrally (no account enumeration) and the server logs `password reset requested but no workspace of this person has an enabled transactional e-mail provider`. Doctor's `egress.<adapter>` rows show whether the provider is reachable.
+- **Mail is broken.** `am reset-password --email them@example.com` (with `AM_RESET_PASSWORD`, a hidden prompt or stdin) sets a password from the server; it is the break-glass path for owners with container access. People who sign in with single sign-on never get a reset mail — they use "Sign in with SSO".
+- **What is stored.** The token lives in Better Auth's `verification` table under a hashed identifier, single use, 45 minutes. The message log row has no token (its idempotency key is a hash) and the audit entry records the person, IP and outcome only (the `ip` column, migration `0066_password_reset.sql`). `am upgrade-notes`, backups and the audit export therefore never contain a usable link.
+- **Limits.** 5 link requests per IP per 15 minutes, 3 per address per hour plus a 60-second cooldown, and 10 reset submissions per IP per 15 minutes, in Valkey and shared by every worker. A `429` carries `Retry-After: 60`.
+
 ## Monitoring
 
 The server exposes `GET /metrics` on the **main** listener (`PORT`, default 3000) in the Prometheus text format. It is never served on the public-only listener (`PUBLIC_PORT`), and it is **off by default**: without `METRICS_TOKEN` the route answers `404` like any unknown path, so an upgrade that sets nothing exposes nothing new.

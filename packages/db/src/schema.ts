@@ -170,6 +170,8 @@ export const auditLog = pgTable('audit_log', {
   error: text('error'),
   prevHash: text('prev_hash'),
   hash: text('hash').notNull(),
+  /** The client IP when the entry did not come from a command (password reset, #191). */
+  ip: text('ip'),
 });
 
 export const idempotencyKeys = pgTable(

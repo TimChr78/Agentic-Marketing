@@ -638,6 +638,7 @@ const AuditEntry = z.object({
   target: z.string().nullable(),
   ok: z.boolean(),
   error: z.string().nullable(),
+  ip: z.string().nullable().describe('The client IP for events outside the command layer (password reset), else null'),
   actorName: z.string().optional().describe('Who ran it: a person, an API token (with owner) or an OAuth client'),
 });
 
@@ -688,6 +689,7 @@ export const listAudit = defineCommand({
         target: r.target,
         ok: r.ok,
         error: r.error,
+        ip: r.ip,
       })),
     };
   },
@@ -718,6 +720,8 @@ export const verifyAudit = defineCommand({
         ok: r.ok,
         error: r.error,
         prevHash: r.prevHash,
+        // Only entries that recorded an IP (password reset, #191) hash it; older rows keep theirs.
+        ...(r.ip ? { ip: r.ip } : {}),
       };
       if (r.prevHash !== prev || r.hash !== sha256(canonicalJson(entry))) return { ok: false, entries: rows.length, firstBrokenSeq: r.seq };
       prev = r.hash;

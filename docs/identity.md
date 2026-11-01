@@ -35,3 +35,21 @@ Supported: `Users` and `Groups` with list (`filter=userName eq "…"`, `external
 ## Agents asking for more permissions (scope step-up)
 
 An MCP client gets the permissions the person granted when connecting, at most what the person's role allows. Tools the role allows but the connection lacks are still listed, marked "Needs the … permission". Calling one answers HTTP 403 with `WWW-Authenticate: Bearer error="insufficient_scope", scope="…"`, which MCP clients answer by sending the person through authorization again for the larger set of scopes. API tokens have fixed scopes and do not step up.
+
+## Password reset (#191)
+
+Anyone who signs in with a password can reset it from the sign-in page ("Forgot password?"), without shell access:
+
+1. `/forgot-password` asks for the e-mail address and posts it to `POST /api/auth/forgot-password` (Better Auth's own `POST /api/auth/request-password-reset` does the same and is rate limited alike).
+2. The answer is always the same — "If an account exists for that address, we sent a link to reset the password." — whether or not the address is known, whether or not a sender is configured, and whether or not the person uses single sign-on. Only a known password account gets mail.
+3. The link goes to `<PUBLIC_URL>/reset-password?token=…` and expires after **45 minutes**. The page asks for the new password twice (at least 10 characters, `autocomplete="new-password"`) and posts it to `POST /api/auth/reset-password` with the token. The server answers `Referrer-Policy: no-referrer` for `/reset-password`, so the token in the query string is not sent on to any other request.
+4. A successful reset **revokes every session of that person**: any other browser has to sign in again. API tokens and connected MCP clients are *not* revoked — they are separate credentials with their own scope, listed and revocable under Settings → Integrations. An expired, used or malformed link gets a clear message and a link to request a new one; a token works exactly once.
+5. Requesting another link inside a **60-second cooldown** is accepted neutrally but sends nothing. A later request issues a new link; the earlier link keeps working until it is used or expires.
+
+**Where the mail comes from.** The flow is installation-level: the link points at `PUBLIC_URL`, never at a brand's domain. The sender is the transactional e-mail provider of the person's **oldest workspace** (the one they have been a member of longest), so it is a sender they belong to and never a stranger's brand. A person who belongs to several brands gets one link, not one per brand. If none of their workspaces has an enabled transactional provider, the request is still answered neutrally and the server logs an operator warning; the CLI below remains the fallback.
+
+**Single sign-on.** People whose domain has an enforced SSO provider, and accounts without a password (SSO or SCIM provisioned), get no reset mail: a password would not sign them in anyway (`ssoGuard` refuses password sign-in for that domain). They sign in with "Sign in with SSO".
+
+**Rate limits and audit.** Per IP, 5 link requests per 15 minutes; per address, 3 per hour plus the 60-second cooldown; per IP, 10 reset submissions per 15 minutes. All buckets live in Valkey and are shared by every server process. Each request and each completed reset appends an entry to the workspace audit log (surface `internal`, command `auth.passwordResetRequest` / `auth.passwordReset`) with the person, the time, the outcome and the IP in the audit log's `ip` column (migration `0066_password_reset.sql`) — never the token or the password. A person without a workspace is only in the server log (the audit log is per workspace).
+
+**Break-glass.** `am reset-password --email you@example.com` (with `AM_RESET_PASSWORD`, a hidden prompt or stdin) still sets a password from the server, for owners with container access and when mail is broken. It is not a user-facing path.
