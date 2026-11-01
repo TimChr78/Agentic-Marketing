@@ -9,6 +9,7 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 - **Level 4 only creates what the agent drafted itself (#325).** A never-published artifact counts as the agent's creation only when its first version was drafted by the same agent credential; a person's or another agent's draft stays inside the mandate's artifact list.
 - **Level 4 is earned only from level-3 operation (#327).** The ledger records the level the policy engine decided at; a held change that ran after its veto window is level 2 and no longer counts. Ledger rows from before 0.6.1 have no level, so earning starts again from this release.
 - **`agents.report` counts refusals as denies (#321)** instead of failures, **reports the journeys an agent published (#322)** (it looked for the wrong id prefix), and **counts direct-send events only inside the period (#323)**.
+- **Relative feed links are resolved before they are rejected (#326).** RSS, Atom and JSON Feed items with relative links such as `/post/1` or `post/2` are resolved against the feed URL (and an Atom `xml:base` when present) and kept, instead of being dropped as non-absolute. `javascript:`, `data:` and other non-http(s) links are still refused, and absolute links are unchanged.
 
 ## [0.6.0] - 2026-11-01
 
