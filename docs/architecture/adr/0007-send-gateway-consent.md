@@ -1,6 +1,6 @@
 # ADR-0007: Single send gateway enforcing lawful basis
 
-- Status: Proposed
+- Status: Accepted (built; the send gateway enforces it since Phase 2)
 - Date: 2026-10-21
 
 ## Context

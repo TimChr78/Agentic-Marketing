@@ -39,3 +39,7 @@ The product's purpose is agents running marketing loops (plan, build, send, meas
 - Agents get clearer feedback (decisions with reasons and the nearest allowed action) and must state intents for autonomous actions.
 - The guardrails promised in `agents-and-mcp.md` become real, and the doc is corrected until they ship.
 - Hosted agent runs and progressive rollout build on the same engine instead of adding their own controls.
+
+## Update (0.6.1)
+
+Phases 17–20 shipped in 0.3.0, 0.4.0, 0.5.0 and 0.6.0, with fixes through 0.6.1: agents as principals with sponsors and a stop switch, action classes and impact estimates, workspace ceilings and the autonomy switch, the policy engine, mandates and levels L0–L3, holds and intent records, the independent check, the guardian, staged sends, undo, shadow mode, learning rules, thin hosted agents, L4, agent reports, learnings, events for agents and the programmes. The context above (guardrails "never built") and the consequence that the doc is "corrected until they ship" describe 0.2.10, not 0.6.1. `policy.check` (the read-only twin in the Decision) is not implemented; the decision and its reasons are returned with the action. The full hosted runtime, event-triggered runs, decision models, many-agent coordination and multi-brand remain Phases 21–22. The current state is in [agentic-autonomy.md §2](../agentic-autonomy.md#2-what-exists-today-061).

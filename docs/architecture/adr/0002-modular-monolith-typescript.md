@@ -1,6 +1,6 @@
 # ADR-0002: TypeScript modular monolith with role-based processes
 
-- Status: Proposed
+- Status: Accepted (built; wave 1)
 - Date: 2026-10-21
 
 ## Context

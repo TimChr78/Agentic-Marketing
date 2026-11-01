@@ -1,6 +1,6 @@
 # Roadmap (team of one, no deadline)
 
-> **Wave 2 (from 2026-10-22):** the phases after the MartechSignal pilot are replanned in [roadmap-wave-2.md](roadmap-wave-2.md): pilot hardening, delivery beyond SMTP and SMS, consent everywhere, performance marketing with Google, Meta and Microsoft, scale, and enterprise. The table below is wave 1.
+> **Waves 2–4 (2026-10-22 to 2026-11-01):** waves 1–3 are built: wave 1 below, then [wave 2](roadmap-wave-2.md) after the MartechSignal pilot, then [wave 3](roadmap-wave-3.md) for install/upgrade, pilot correctness, the newsletter and measurement (through Phase 16, 0.2.10). Wave 4, [roadmap-wave-4.md](roadmap-wave-4.md), is current: Phases 17–20 are built (0.3.0–0.6.0, fixes through 0.6.1) and Phases 21–22 are planned. The table below is wave 1 and is kept as history.
 
 Ordering principle: build the **foundations that are expensive to retrofit** first (command registry, tenancy, artifacts/versioning, consent, audit), then deliver one end-to-end vertical slice, then widen.
 
@@ -22,7 +22,7 @@ Suggested spikes before Phase 0 code freeze on the design (1–3 days each):
 3. ✅ Journey runtime: 1M waiting participants, timer throughput, crash/retry semantics. Done, see [`spikes/journey-runtime/FINDINGS.md`](../../spikes/journey-runtime/FINDINGS.md); ADR-0004 revised (batched table-as-queue instead of job per step).
 4. ✅ NATS JetStream → ClickHouse sink throughput and per-profile ordering on a single node. Done, see [`spikes/event-pipeline/FINDINGS.md`](../../spikes/event-pipeline/FINDINGS.md).
 
-All four spikes are done. Phases 0–5 are built, and Phase 6 was superseded by [wave 2](roadmap-wave-2.md), which is also built.
+All four spikes are done. Phases 0–5 are built, and Phase 6 was superseded by [wave 2](roadmap-wave-2.md), which is also built. [Wave 3](roadmap-wave-3.md) is built through Phase 16, and [wave 4](roadmap-wave-4.md) has shipped Phases 17–20.
 
 ## Phase 0 status (2026-10-22)
 
@@ -56,7 +56,7 @@ Known limits, to address later:
 - Events wait in the JetStream stream (with personal traits, for the profile worker) for its retention window, 7 days by default; erasure cannot remove them from there. Keep the NATS volume on encrypted disk, or shorten `retentionDays`.
 - ClickHouse has no row policies yet; tenant scoping lives in the one module that queries it (`packages/events/src/clickhouse.ts`). Done in wave 2, Phase 10.
 - Tracking-plan warnings are returned to the sender and logged, not yet stored for a report.
-- Segments are in Phase 2 (segments v1), where journeys first need them. Bulk import and bot filtering are not built yet.
+- Segments are in Phase 2 (segments v1), where journeys first need them. Bulk import (`audiences.add`/`audiences.import`) and bot filtering in the ingest gateway have since shipped.
 
 ## Phase 2 status (2026-10-22)
 
@@ -145,7 +145,7 @@ Acceptance: n8n-style orchestration end to end (`apps/server/test/phase5.test.ts
 - a journey that transforms, calls Slack, then sends a webhook, and takes the error edge when Slack fails.
 
 Known limits, to address later:
-- No OAuth2 connectors yet (token store and refresh worker come with Salesforce); first-party connectors beyond the references are not built.
+- OAuth2 connectors and the token store/refresh worker shipped with Salesforce; other first-party connectors beyond the references (Shopify, Salesforce, Slack, generic webhook and HTTP) are still not built.
 - E-mail delivery events (sent, bounced, clicked) are not offered to webhook subscriptions yet; only customer events and journey steps are.
 - Rate limits are per worker process; the egress guard does not cover the e-mail provider adapters, which call fixed provider hosts.
 
