@@ -122,10 +122,10 @@ retention period also widens it: the newest snapshot is then older than `BACKUP_
    current database. If the log cannot be read, the restore stops rather than risk resurrecting
    someone.
 2. After `pg_restore` it re-applies each erasure: profiles and identifiers the erasure names are
-   deleted again (with their profile keys, consent records, messages, journey participations and
-   segment memberships), e-mail and phone suppression hashes are put back, and the erasure row and
-   its keyed tombstones are re-inserted. Replay is idempotent, so restoring twice is safe, and
-   entries for workspaces the snapshot no longer contains are skipped.
+   deleted again (with their profile keys, consent records, messages, journey participations,
+   segment memberships and push subscriptions), e-mail and phone suppression hashes are put back,
+   and the erasure row and its keyed tombstones are re-inserted. Replay is idempotent, so restoring
+   twice is safe, and entries for workspaces the snapshot no longer contains are skipped.
 3. It then restores ClickHouse, if asked, and reports how many profiles and tombstones were replayed.
 
 A person erased after the snapshot therefore stays erased: no profile, no identifiers, no profile

@@ -74,8 +74,8 @@ increments its version; every version is kept. `content.selections.get` and
 `content.selections.list` read them back, filtered by name to see a selection's history.
 
 Creating a selection requires `artifacts:write` and is classed as a `draft`: an agent can propose
-one, and a person approves it before it is used for an issue. There is no approve command on this
-branch; the status stays `draft`.
+one for a person to review. There is no approve command yet, so a selection's status stays `draft`;
+the issue that uses it is reviewed and published through the normal artifact flow.
 
 ## Commands
 
@@ -90,7 +90,7 @@ branch; the status stays `draft`.
 | `content.selections.get` | `artifacts:read` | people and agents | read |
 | `content.selections.list` | `artifacts:read` | people and agents | read |
 
-## Not in this branch
+## Not in this release
 
 - YouTube sources, the policy editor/artifact (`content.policy.*`) and AI summaries
   (`content.items.summarize`).

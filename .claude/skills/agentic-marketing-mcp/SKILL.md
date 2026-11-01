@@ -27,7 +27,7 @@ Tools marked "Needs the … permission" are allowed by the person's role but wer
 1. **Look first.**
    - `artifacts.types` gives the content schema of every type; read it before writing content.
    - `artifacts.list` (filter by `type`) and `artifacts.get` show what exists.
-   - `purposes.list` shows the lawful bases.
+   - `purposes.list` shows the lawful bases, and the MCP resources `learnings://current` and `business-context://current` show what the workspace already learned and what it sells and to whom. Read both before drafting.
 2. **Draft.** `artifacts.create {type, name, content}` makes version 1 as a draft. `artifacts.updateDraft {artifactId, content}` changes it. Content is validated on every save (MJML compiles, references are well formed, journeys have one trigger…).
 3. **Check:**
    - templates: `templates.preview {artifactId, profileId?}` renders HTML and text;
@@ -44,20 +44,25 @@ Tools marked "Needs the … permission" are allowed by the person's role but wer
 - **Agents cannot record a consent**; they can only record restrictions (`consent.record` with `denied`, `withdrawn` or `objected`). Consent comes from forms, double opt-in, the SDK or a person's import.
 - **Personal data is masked.** Agents see only traits the tracking plan marks `agentVisible`, and only with `profiles:pii`.
 - **Writes are drafts.** Nothing reaches customers until a person approves, when the policy requires it.
-- **The agent policy.** Every write is checked against the workspace's autonomy settings (`workspace.autonomy`). A publish that reaches more people than the audience threshold (1,000 by default), or that comes after your daily change limit, goes to a person even when the approval policy would publish it: the result is `in_review` with `heldBecause` saying why. An action that cannot wait for a person (a direct send, `journeys.enroll`, `segments.refresh` while the workspace is propose-only) is refused with the reason. Plan within the limits: read `workspace.autonomy` and `agents.get` (your counts for the last 24 hours) first. With the switch `off` you can only read; when you are paused, every call is refused with the reason, so ask the person.
+- **The agent policy.** Every write is checked against the workspace's autonomy settings (`workspace.autonomy`). A publish answers `published` when it went live, `on_hold` with `runsAt` when a veto window is running (do not resubmit), `in_review` with `heldBecause` and `reviewUrl` when a person decides, or `403` with `details.reasons` when it is refused. A publish that reaches more people than the audience threshold (1,000 by default), or that comes after your daily change limit, goes to a person even when the approval policy would publish it. An action that cannot wait for a person (a direct send, `journeys.enroll`, a bulk `journeys.enrollSegment` above the threshold, `segments.refresh` while the workspace is propose-only) is refused with the reason. Plan within the limits: read `workspace.autonomy` and `agents.get` (your counts for the last 24 hours) first. With the switch `off` you can only read; when you are paused, every call is refused with the reason, so ask the person.
 
 ## Working under a mandate
 
-Your sponsor may have granted you a mandate: a level per action class (0 observe, 1 propose, 2 act with veto, 3 act within limits), a scope, limits and guardrails. Read your borders before a change:
+Your sponsor may have granted you a mandate: a level per action class (0 observe, 1 propose, 2 act with veto, 3 act within limits, 4 run the loop), a scope, limits, guardrails, working hours and an end date. Read your borders before a change:
 
 - `workspace.autonomy` — the switch (`on`, `propose_only`, `off`), the audience threshold, the daily limits and the highest level a mandate may grant per class.
-- `agents.get` with no id — your own record: status, `last24h` counts (`changes`, `escalated`, `denied`) and id. `agents.activity` (with `audit:read`) shows the ledger with the reasons for each decision.
+- `agents.get` with no id — your own record: status, `last24h` counts (`changes`, `escalated`, `denied`) and id. `agents.activity` (with `audit:read`) shows the ledger with the reasons for each decision; `agents.report` shows what your actions led to and your mandate's goals.
+- `learnings.list` or `learnings://current` — what the workspace already learned; `business-context://current` — the brief you write from.
+- `agents.subscriptions` and `agents.events` — the events your loop reacts to. Subscribe with `agents.subscribe` instead of polling; pass the last event id back as `after`, or attach a webhook.
 
 What a result can say:
 
+- `published` — it went live. Read it back with `artifacts.get` or the relevant status command.
 - `on_hold` with `runsAt` — a level-2 action: it runs at that time unless a person vetoes it. Do not resubmit.
 - `in_review` with `heldBecause` — it waits for a person; `reviewUrl` is where they decide. Pass the link on with a one-line summary.
 - `403` with `details.reasons` — refused before it ran. Fix the plan to fit the reason (scope, limit, level 0, propose-only, switch off) or ask a person; retrying does not help.
+
+**Level 4 is earned, not granted on request.** It needs a workspace that allows loops (ceiling 4) and 28 days of the class at level 3 without a guardian episode, or 28 days in shadow without a rejected would-have-run decision. The ledger records the level the policy engine decided, and only entries from 0.6.1 at level 3 or above count; earning restarted in 0.6.1. At level 4 a new artifact of an allowed type is not held to the `scope.artifacts` list, but only when its first version was drafted by your own credential.
 
 State your intent in the `note` of `artifacts.requestPublish` and `artifacts.requestPublishBundle`: it is stored as the action's intent and shown to the reviewer and in the ledger. Never try to create, change or publish a mandate — only people can, and an agent cannot widen its own scope, levels or limits. If a border blocks work you believe is right, ask your sponsor to change the mandate.
 
@@ -68,6 +73,11 @@ Read [references/tools.md](references/tools.md) for the full list with effects a
 | Area | Tools |
 |---|---|
 | Artifacts | `artifacts.types`, `.list`, `.get`, `.create`, `.updateDraft`, `.history`, `.diff`, `.requestPublish`, `.requestPublishBundle`; `approvals.list`, `approvals.get` |
+| Agents | `agents.get`, `.list`, `.activity`, `.report`, `.shadowReport`, `.guardian`, `.subscriptions`, `.subscribe`, `.unsubscribe`, `.events`; hosted agents with `.createHosted`, `.updateHosted`, `.runHostedNow`, `.hostedRuns`, `.deleteHosted`; `.pause`, `.resume`, `.revoke` and `.undo` are people only |
+| Learnings | `learnings.list` (filter by status, segment, channel, topic and purpose), `learnings.add` with evidence; there is no delete, and only people may `learnings.retract` |
+| Content | `content.sources.list` (adding or changing a source is people only), `content.items.list` (score and explanation), `content.selections.create`, `.get`, `.list`; a selection stays a draft, there is no approve command yet |
+| Editorial | `content.topics.list`, `.create`, `.update`, `.score`, `.toBrief` (archive is people only); `toBrief` creates a `content_brief` (`brf_…`) artifact |
+| Recipes | `recipes.list`, `.get`, `.preview`, `.install`; an install creates version 1 drafts and never publishes |
 | Analytics | `analytics.query` (measures × up to three dimensions), `analytics.emailPerformance`, `analytics.journeyFunnel`, `analytics.campaignSummary`, `analytics.metrics.list` (the catalogue) |
 | Campaigns | `campaigns.plan` (an approved brief → deterministic draft plan), `campaigns.fromBrief` (create the plan's drafts), `campaigns.of`, `campaigns.members`, `campaigns.archive`, `campaigns.holdoutResult`; campaigns are `campaign` artifacts grouping broadcasts, journeys, templates, experiences, forms and segments, built from a `campaign_brief` a person approves |
 | Alerts | `alerts.list`, `.get`, `.create`, `.update`, `.delete`, `.test`, `.history` |
@@ -83,7 +93,7 @@ Read [references/tools.md](references/tools.md) for the full list with effects a
 | Deliverability | `deliverability.health`, `emailProviders.checkDomain` |
 | Ads | `ads.performance` (cost, conversions, CPA, ROAS per campaign), `ads.audiences`, `ads.conversions`, `ads.importSpend`, `ads.syncAudience`, `ads.test`; rules are the `conversion_map` and `audience_sync` artifacts (draft them, a person publishes) |
 | Newsletter | `broadcasts.preview`, `broadcasts.sendTest`, `broadcasts.status`, `broadcasts.cancel`; `workspace.setSeedList` (admin) |
-| Journeys | `journeys.simulate`, `journeys.stats`, `journeys.holdoutResult`, `journeys.enroll` (needs `messages:send`), `journeys.migrate` (move people to the published version; dry run first) |
+| Journeys | `journeys.simulate`, `journeys.stats`, `journeys.holdoutResult`, `journeys.splitResult` (each arm against the first, with lift and a verdict), `journeys.enroll` (needs `messages:send`), `journeys.enrollSegment` (bulk, chunks of 500; `journeys.enrollmentJob(s)`, `journeys.cancelEnrollment`), `journeys.migrate` (move people to the published version; dry run first) |
 | Web | `experiences.results` |
 | AI | `prompts.test` + `prompts.testRun`, `ai.calls`, `ai.usage`, `aiProviders.list` |
 | Integrations | `connectors.list`, `connections.list` (shows OAuth status), `connections.runAction`, `webhooks.list`, `deliveries.list`; `connections.authorize` is for people only |
@@ -93,6 +103,7 @@ Read [references/tools.md](references/tools.md) for the full list with effects a
 
 Worked examples with full payloads are in [references/recipes.md](references/recipes.md):
 - installing a starter recipe as drafts (`recipes.list/get/preview/install`: welcome and double opt-in, lead-magnet drip, weekly newsletter, win-back; see [docs/recipes.md](../../../docs/recipes.md));
+- the four programme loops: the newsletter editor (content library and an approved topic brief → issue with a subject test or staged send → report and learning), the lifecycle optimiser (`journeys.splitResult` → promote or retire an arm → learning), the experimentation agent (`experiences.results` → promote, remove, learn) and the audience curator (sizes, overlaps and sunset policies as drafts);
 - the weekly newsletter (template + broadcast, scheduled for Friday);
 - a segment of engaged readers;
 - a welcome journey after double opt-in;
@@ -109,7 +120,7 @@ Worked examples with full payloads are in [references/recipes.md](references/rec
 
 ## Content rules that save round trips
 
-- **Ids** look like `not_` (note), `jrn_` (journey), `blk_` (e-mail block), `eml_` (e-mail template), `sms_` (SMS template), `psh_` (push template), `seg_` (segment), `exp_` (web experience), `prm_` (AI prompt), `frm_` (signup form), `brd_` (brand), `bct_` (broadcast), `cmp_` (campaign), `cpb_` (campaign brief), `tpl_` (tracking plan), `pur_` (purposes), `cvm_` (conversion map), `aud_` (audience sync), `dlp_` (delivery policy), each followed by 32 hex characters. Assets are `ast_` and people are `prf_`.
+- **Ids** look like `not_` (note), `jrn_` (journey), `blk_` (e-mail block), `eml_` (e-mail template), `sms_` (SMS template), `psh_` (push template), `seg_` (segment), `exp_` (web experience), `prm_` (AI prompt), `frm_` (signup form), `brd_` (brand), `bct_` (broadcast), `cmp_` (campaign), `cpb_` (campaign brief), `brf_` (content brief), `tpl_` (tracking plan), `pur_` (purposes), `cvm_` (conversion map), `aud_` (audience sync), `dlp_` (delivery policy), `mnd_` (agent mandate), `bcx_` (business context), each followed by 32 hex characters. Assets are `ast_`, people `prf_`, content topics `ctp_`, content selections `csel_`, content sources `csrc_` and learnings `lrn_`.
 - **Durations** are ISO 8601: `PT6H`, `P2D`, `P1W`. **Timestamps** are ISO in UTC: `2026-10-30T07:00:00Z`.
 - **E-mail templates:** MJML with Liquid.
   - Variables: `{{ profile.firstName | default: "there" }}`, `{{ content.<slot> }}` (AI-generated text), and journey context.

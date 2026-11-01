@@ -1,5 +1,7 @@
 # Roadmap, wave 3 (planned 2026-10-26)
 
+> **Status: history.** Wave 3 is built through Phase 16 (0.2.10). Its single Phase 17 became [wave 4](roadmap-wave-4.md), whose Phases 17–20 shipped in 0.3.0–0.6.0; the parked and later lists below stay historical.
+
 Wave 2 (Phases 6 to 11) is built: delivery beyond SMTP, SMS, consent everywhere, performance marketing, scale and operations, enterprise and ecosystem. MartechSignal went live on 0.2.2, and running it for a few days produced a clear signal: the platform is broad enough, but **installing, upgrading and operating it** is still manual, and a handful of everyday flows have rough edges.
 
 Wave 3 takes in every open issue, and is deliberately critical about them. Issues #64–#102 are a gap analysis against large commercial suites. Many describe good features for a team with a sales force, an app or a shop. This platform is run by a team of one, with one live pilot that is a content site and a newsletter. Those issues are placed by the same rules as everything else, and several are **parked**: kept open and wanted eventually, but not in this wave.
@@ -138,7 +140,7 @@ Done when one `analytics.query` call answers how the last four issues and the we
 
 ## Phase 17: agents with bounded autonomy
 
-Moved and expanded (2026-10-30): the owner asked for autonomy that can go all the way to agents running whole marketing loops within borders, not only "agents draft, people approve". Phase 17 became [wave 4](roadmap-wave-4.md), designed in [agentic-autonomy.md](agentic-autonomy.md) and [ADR-0016](adr/0016-agent-autonomy-model.md). Everything this section listed is in it: the agent-controls inventory (Phase 17), business context and autonomy modes (Phase 18), the campaign agent (Phase 20), and routines (Phase 21). Decision 4 below (Hermes sends the weekly newsletter within a recipient cap) is wave 4's first mandate.
+Moved and expanded (2026-10-30): the owner asked for autonomy that can go all the way to agents running whole marketing loops within borders, not only "agents draft, people approve". Phase 17 became [wave 4](roadmap-wave-4.md), designed in [agentic-autonomy.md](agentic-autonomy.md) and [ADR-0016](adr/0016-agent-autonomy-model.md). Everything this section listed is in it: the agent-controls inventory (Phase 17), business context and autonomy modes (Phase 18), the campaign agent (Phase 20), and routines (Phase 21). Phase 17 shipped in 0.3.0 and Phase 18 in 0.4.0; decision 4 below became wave 4's first mandate template.
 
 ## Later, when a pilot needs it
 
@@ -180,4 +182,4 @@ These stay open, and some are wanted eventually. They are parked because they ar
 1. **#108 ships now, as 0.2.3**, before Phase 12.
 2. **Strict inputs by default** after the evidence from #124: in the first minor release after the pilot's clients have sent no unknown keys for a week.
 3. **The newsletter archive and web version live on the links host**, built on the hosted pages. An export for sites that want to build their own archive can follow if one asks.
-4. **Autonomy for the pilot:** Hermes may send the weekly broadcast to the existing subscriber segment without approval, within a recipient cap, once Phase 17 lands. Everything else stays "propose only" until the agent-controls design (Phase 17) has had a deeper look.
+4. **Autonomy for the pilot:** Hermes may send the weekly broadcast to the existing subscriber segment without approval, within a recipient cap, once Phase 17 lands. Everything else stays "propose only" until the agent-controls design (Phase 17) has had a deeper look. *Phase 17 landed in 0.3.0 and the design became wave 4; the pilot mandate template is in [docs/agents.md](../agents.md).*

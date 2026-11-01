@@ -1,8 +1,22 @@
 # Pilot: MartechSignal.com
 
-A light pilot before Phase 6: run the platform for a real site, the owner's [martechsignal.com](https://martechsignal.com) ([source](https://github.com/TimChr78/martechsignal)), and learn what is missing in practice. This page is the fit assessment and the plan. The implementation is done in a separate session with the [implementation skill](../../.claude/skills/agentic-marketing-implement/SKILL.md).
+A light pilot before Phase 6: run the platform for a real site, the owner's [martechsignal.com](https://martechsignal.com) ([source](https://github.com/TimChr78/martechsignal)), and learn what is missing in practice. This page keeps the 2026 assessment and first plan as history, then says where the pilot is now. The implementation is done in a separate session with the [implementation skill](../../.claude/skills/agentic-marketing-implement/SKILL.md).
 
-## The site today (2026-10-22)
+## Where the pilot is now (0.6.1)
+
+The newsletter loop can now run as an **agentic programme** instead of a sequence of manual drafts. The platform pieces the assessment found missing have shipped; the rows below say which.
+
+- **The mandate.** Publish the **Newsletter agent** mandate from [docs/agents.md](../agents.md#newsletter-agent) for Tim's Hermes agent: one segment, the newsletter topic, `send.broadcast` at level 3 and the other classes at level 1, with the `learning` rule `{ "broadcastHoldout": true }`. That rule requires each issue to carry a holdout (a campaign control group) or a subject test; a publish without one goes to a person with the reason, whatever the level. A send outside the working hours is held.
+- **Who drafts the issue.** Either run the **Newsletter editor** hosted-agent template (Settings → Agents → New hosted agent; every Monday at 09:00) or keep Hermes over MCP and follow "Newsletter editor: the weekly loop" in the MCP skill's [`references/recipes.md`](../../.claude/skills/agentic-marketing-mcp/references/recipes.md). The loop is:
+  1. `content.items.list` for the week's best-scored articles, then `content.selections.create` with the items per section;
+  2. `content.topics.list` with status `approved`, and `artifacts.get` on the linked `content_brief` for the thesis and angle;
+  3. draft the issue template and a broadcast for the mandated segment, with a `subjectTest` **or** a `stagedSend` (the schema refuses both in one broadcast);
+  4. `templates.check`, `broadcasts.preview`, then `artifacts.requestPublishBundle` for the template and broadcast together;
+  5. after the send, `agents.report` for the week and `learnings.add` with the subject test's evidence.
+- **What the agent sees.** `agents.get` gives its status and last-24-hour counts, `workspace.autonomy` the switch, audience threshold, daily limits and ceilings, and the MCP resources `learnings://current` and `business-context://current` what the workspace already knows. `agents.subscribe` (with `agents.events` as the polling fallback) replaces polling for holds, approvals, guardian episodes and significant experiments. A publish answers `published`, `on_hold` with `runsAt` (do not resubmit), `in_review` with `heldBecause` and `reviewUrl`, or `403` with `details.reasons`.
+- **Earning level 4.** Level 4 (run the loop) needs a workspace that allows loops (ceiling 4) and an agent that earned it: 28 days of the class at level 3 without a guardian episode, or 28 days in shadow mode without a rejected would-have-run decision. 0.6.1 records the level the policy engine decided on each ledger entry and counts only level-3 entries; entries from before 0.6.1 have no level, so **earning restarted in 0.6.1**. At level 4 a new artifact of an allowed type is not held to the mandate's `scope.artifacts` list, but it counts as the agent's own creation only when its first version was drafted by the same agent credential (#325); audiences, purposes, topics, channels, limits, guardrails, learning rules and the guardian still apply.
+
+## The site at assessment (2026-10-22, history)
 
 | Aspect | What it is |
 |---|---|
@@ -14,7 +28,7 @@ A light pilot before Phase 6: run the platform for a real site, the owner's [mar
 | Privacy promise | "No tracking cookies, no analytics that build profiles … vendor links have no redirect trackers." The newsletter address is used "for exactly one purpose". |
 | CSP | Strict: `script-src 'self' analytics.martechsignal.com static.cloudflareinsights.com`, `connect-src 'self' …`, `form-action 'self' https://app.kit.com`, no `unsafe-inline` scripts. |
 
-## What the pilot should do
+## What the pilot set out to do (history)
 
 1. **Own the newsletter.** Signups through the platform with double opt-in, and the Friday issue sent as a broadcast to a consent-based segment. The pilot runs the **Brevo** adapter as an interim provider and switches to **Postmark** (Broadcast stream, tracking off) before real subscribers arrive; there is no Kit import for this site (see "E-mail provider" and "Replacing Kit").
 2. **Welcome journey.** A welcome e-mail after confirmation, then a "start here" e-mail a few days later.
@@ -22,7 +36,9 @@ A light pilot before Phase 6: run the platform for a real site, the owner's [mar
 4. **Keep the privacy promise.** Do not track anonymous visitors in phase A. People who subscribe are known by their e-mail; clicks in e-mails are counted by the platform (first-party), not by an ad network. While Brevo is the interim provider it also tracks opens and clicks (see "E-mail provider"); the privacy page discloses this, and the switch to Postmark turns it off.
 5. **Later (phase B, optional).** Consent-gated on-site tracking and personalization, e.g. a newsletter CTA tailored to the category being read, and segments by interest.
 
-## Fit: what was there, what was missing, what was built
+## Fit at assessment (history)
+
+The "Now" column records what exists in 0.6.1; the assessment was made before the pilot.
 
 | Need | Before the pilot | Now |
 |---|---|---|
@@ -33,12 +49,12 @@ A light pilot before Phase 6: run the platform for a real site, the owner's [mar
 | Weekly newsletter | Missing: journeys are triggered; `journeys.enroll` caps at 1,000 and is not a campaign | **Built**: `broadcast` artifact (template + segment + optional `sendAt`); it runs once, in batches, through the send gateway; `broadcasts.preview`, `broadcasts.status`, `broadcasts.cancel` |
 | E-mail links on the site's domain (unsubscribe, clicks, confirm) | Links used `PUBLIC_URL`, which is also the admin and OAuth URL | **Built**: `PUBLIC_LINKS_URL` (option A: e.g. `https://am.martechsignal.com`; option B: `https://martechsignal.com/am`) |
 | Visitor IP behind Cloudflare | Hard-wired `x-forwarded-for` | **Built**: `CLIENT_IP_HEADER` as an ordered list (`cf-connecting-ip,x-forwarded-for`) and `TRUSTED_PROXY_CIDRS`, so the tunnel and the admin path both resolve the right address (0.1.1, #31) |
-| SDK on a site without a bundler, under `script-src 'self'` | Source only | **Built**: `pnpm --filter @agentic-marketing/sdk-js build` makes `dist/am.min.js` (7 KB IIFE, global `AgenticMarketing`) to host on the site |
+| SDK on a site without a bundler, under `script-src 'self'` | Source only | **Built**: `pnpm --filter @agentic-marketing/sdk-js build` makes `dist/am.min.js` (IIFE, global `AgenticMarketing`) to host on the site |
 | Welcome journey, unsubscribe (RFC 8058), suppressions, bounces | Existing | Existing |
-| Agent drafting, approval, audit | Existing (MCP, API tokens, approval policy) | Existing |
+| Agent drafting, approval, audit | Existing (MCP, API tokens, approval policy) | **Built**: mandates with levels 0–4 and holds, the guardian, the action ledger with undo, hosted agents, event subscriptions and `agents.report`; a person still approves what the policy does not let through |
 | Templates in the house style | Existing (MJML + Liquid, visual editor) | Existing |
-| Consent banner (only phase B needs one) | Missing | **Not built**: phase A needs none; for phase B, use a small banner on the SDK's `consent()` or an existing open-source CMP |
-| RSS-to-email | Missing | **Not needed**: the agent drafts the issue from `rss.xml` through MCP |
+| Consent banner (only phase B needs one) | Missing | **Built**: `createConsentBanner` in the SDK (`packages/sdk-js/src/banner.ts`) — CSP-safe (DOM and CSSOM only), texts from the `purposes` artifact, a re-open link, choices recorded as consent proof and Google Consent Mode v2 signals. Phase A does not load tracking, so the pilot does not need to enable it |
+| RSS-to-email | Missing | **Built as content sources**: `content.sources` adds RSS, Atom and JSON Feeds, `content.items.list` returns scored excerpts, and `content.selections.create` snapshots the items an issue uses. It is not a direct feed-to-e-mail renderer; the agent drafts the issue from the selection |
 
 ## Cloudflare specifics
 
@@ -121,7 +137,7 @@ The site's Kit list has one subscriber, the owner, so **there is no Kit import f
 - **Form text:** the `consentText` of the form must match the text shown next to the form. Its hash is stored as proof.
 - **Kit migration:** no import for this site (one subscriber, the owner). Stop sending from Kit and delete the list there once the platform sends. A site with a real list imports only active subscribers, with Kit's subscription date and source as proof.
 
-## Plan for the implementation session
+## Plan for the first implementation session (history)
 
 1. **Platform up.**
    - Docker Compose on the homelab with `PUBLIC_URL` set to the HTTPS Tailscale URL (MCP is only mounted for an HTTPS resource URL; the admin UI and REST still work over the LAN), `PUBLIC_PORT=3001` (public-only listener), `PUBLIC_LINKS_URL=https://am.martechsignal.com`, `CLIENT_IP_HEADER=cf-connecting-ip,x-forwarded-for` and `TRUSTED_PROXY_CIDRS=<tunnel connector>,<Tailscale admin proxy>` (option A).
@@ -150,7 +166,7 @@ The site's Kit list has one subscriber, the owner, so **there is no Kit import f
 
 **Done when:** a real signup gets the confirmation and the welcome e-mail; new subscribers (and the owner) receive one Friday issue sent by a broadcast that Hermes drafted and Tim approved; a subject test, if used, shows its variants and winner in `broadcasts.status`; and unsubscribe and bounces work end to end.
 
-## Upgrading the pilot to 0.2
+## Upgrading the pilot to 0.2 (history)
 
 1. Pull 0.2.0 (`AM_VERSION=0.2.0`); migrations 0023–0025 run on start and only add tables and a column.
 2. The public listener (`PUBLIC_PORT=3001`) already serves `/a/` for assets. With a path rule instead, add `a` (rule above).
@@ -159,9 +175,9 @@ The site's Kit list has one subscriber, the owner, so **there is no Kit import f
 5. Keep `STRICT_INPUTS=false` for the first week. Search the logs for `command input has unknown keys`; if Hermes sends any, fix its prompts or tool use, then set `STRICT_INPUTS=true`.
 6. If Hermes's token needs different scopes, edit it under Settings → Integrations and API tokens (no new token needed).
 
-## Known limits found while assessing
+## Known limits
 
 - People who never confirm keep a profile without consent until retention removes it. The scheduler runs hourly: form-only profiles with no consent record, no other identity and no merge are removed after `RETENTION_UNCONFIRMED_DAYS` (default 30), without suppression so they can sign up again. Finished deliveries and AI calls are removed after `RETENTION_LOG_DAYS` (default 180). `profiles.erase` remains available for an immediate erasure request; it is not needed for routine cleanup.
-- Broadcasts support a subject test (`subjectTest`, 2–4 subjects on a sample, winner to the rest, 0.2.8), but no send-time optimisation (#68); a broadcast goes to the segment as it is at send time.
-- No consent banner component; phase B needs one.
+- Broadcasts support a subject test (`subjectTest`, 2–4 subjects on a sample, winner to the rest), a staged send (a canary share, then the rest after the rates pass) and a recipient-local `sendWindow`, but not per-person send-time optimisation (#68); a broadcast goes to the segment as it is at send time. A subject test and a staged send cannot be combined in one broadcast.
+- Content sources store only an excerpt and the canonical link, never the full article, and a workspace has at most 20 sources and 100 items per fetch. YouTube sources, a policy editor, AI summaries, pruning and a selections approval command are not built yet (see [content sources](../content-sources.md)).
 - E-mail clicks are profile events (`Email Link Clicked`, since 0.2.0), so segments, journey branches and webhooks can use "clicked the newsletter". Opens are counted in message reports but do not create profile events.

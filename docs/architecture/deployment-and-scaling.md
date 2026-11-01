@@ -75,3 +75,10 @@ Added later:
 
 - Postgres: WAL-G or pgBackRest to S3; ClickHouse: `clickhouse-backup`; NATS streams are not a source of truth (replayable window only) — Valkey not backed up (rebuildable).
 - Upgrades: semantic versioning, migrations are forward-only and run automatically; breaking changes to the event or artifact schemas carry versioned migrations; ClickHouse schema migrations via a small migration runner in `cli`.
+- Restores replay erasures: `am restore` reads the live `erasures` and `erasure_tombstones` rows first, then deletes those people again after loading the snapshot (profiles, identifiers, consent, messages, membership and browser/app push subscriptions), so a snapshot taken before an erasure cannot bring the person back. `BACKUP_KEEP_DAYS` (14 by default) is the maximum restore-point age and therefore the window in which a snapshot can predate an erasure. This shipped in 0.5.0 (#144); remote backup targets and integrity checks are still open (#142, #143, #145, #146).
+
+## 5. Operations & health
+
+- `am doctor` reports the live state: a delivery queue that has not drained, overdue journey steps and broadcast runs, due warehouse exports, and deliveries that ended `dead`, with the recent dead share.
+- `GET /metrics` exposes Prometheus metrics when `METRICS_TOKEN` (at least 16 characters) is set; without it the path answers `404`, and it is never served on the public-only listener. It covers process health, HTTP requests, command executions, queue backlog, agent ledger decisions over the last hour and dependency health for Postgres, ClickHouse, NATS and Valkey, labelled only with bounded values (no workspace, person or address). A scrape configuration and example alert rules are in [operations.md](../deployment/operations.md#monitoring). This shipped in 0.5.0 (#147).
+- Both checks matter more with autonomous agents: the guardian acts on the platform's own records, so a stalled worker or an undrained queue is visible before an agent's report is read.
