@@ -3,7 +3,7 @@ import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { Dirent } from 'node:fs';
 import { accessSync, createReadStream, createWriteStream, constants as fsConstants, readFileSync, statSync } from 'node:fs';
 import { chmod, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
-import { join, resolve, sep } from 'node:path';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import {
@@ -814,6 +814,118 @@ async function verifyEntry(root: string, entry: FileEntry): Promise<void> {
   if (actual !== entry.sha256) throw new Error(`${entry.file} does not match its sha256 (expected ${entry.sha256}, got ${actual})`);
 }
 
+export interface VerifyStatus {
+  /** When a backup set last passed `am backup --verify`. */
+  verifiedAt: string;
+  /** The backup that passed, for `--health` and for an operator reading the file. */
+  backup: string;
+}
+
+export const VERIFY_STATUS_FILE = '.verify-status.json';
+
+function verifyStatusPath(dir: string): string {
+  return join(dir, VERIFY_STATUS_FILE);
+}
+
+/** Records a successful verification next to the backup directory, private like the backups. */
+export async function writeVerifyStatus(dir: string, status: VerifyStatus): Promise<void> {
+  await mkdir(dir, { recursive: true });
+  await secureDir(dir);
+  const path = verifyStatusPath(dir);
+  const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  await writeFile(temp, `${JSON.stringify(status, null, 2)}\n`, { mode: BACKUP_FILE_MODE });
+  await secureFile(temp);
+  await rename(temp, path);
+  await secureFile(path);
+}
+
+export async function readVerifyStatus(dir: string): Promise<VerifyStatus | null> {
+  try {
+    const status = JSON.parse(await readFile(verifyStatusPath(dir), 'utf8')) as Partial<VerifyStatus>;
+    if (typeof status.verifiedAt !== 'string' || typeof status.backup !== 'string') return null;
+    return status as VerifyStatus;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * `am backup --verify`: re-reads the manifest, re-hashes every file, checks the recorded
+ * ClickHouse row counts, and asks `pg_restore --list` to read the dump's table of contents. It
+ * writes nothing to a database. On success it records the time in `<dir>/.verify-status.json`,
+ * which `am backup --health` uses to fail when a backup has not been verified for too long.
+ */
+export async function verifyBackup(opts: VerifyBackupOptions): Promise<{ dir: string; manifest: AnyBackupManifest; verifiedAt: string }> {
+  const env = opts.env ?? process.env;
+  const log = opts.log ?? (() => {});
+  const input = resolveUserPath(opts.dir, env);
+  let dir: string;
+  let parent: string;
+  try {
+    await stat(join(input, 'manifest.json'));
+    dir = input;
+    parent = dirname(input);
+  } catch {
+    const backups = await listBackups(input);
+    if (!backups.length) throw new Error(`no completed backups in ${input}`);
+    dir = backups[0].dir;
+    parent = input;
+    log(`verifying the newest backup in ${input}: ${basename(dir)}`);
+  }
+
+  const manifest = await readManifest(dir);
+  log(`verifying ${dir}`);
+  await verifyEntry(dir, manifest.postgres);
+
+  let clickhouseFiles = 0;
+  let clickhouseRows = 0;
+  for (const table of manifest.clickhouse?.tables ?? []) {
+    if (manifest.format === 1) {
+      const legacy = table as FileEntry & { rows?: number };
+      await verifyEntry(dir, legacy);
+      if (typeof legacy.rows === 'number' && (!Number.isInteger(legacy.rows) || legacy.rows < 0))
+        throw new Error(`manifest.json records an invalid row count for ClickHouse ${legacy.file}`);
+      continue;
+    }
+    const entry = table as ClickHouseTableEntry;
+    let rows = 0;
+    for (const file of entry.files) {
+      await verifyEntry(dir, file);
+      if (!Number.isInteger(file.rows) || file.rows < 0) throw new Error(`manifest.json records an invalid row count for ${file.file}`);
+      rows += file.rows;
+      clickhouseFiles += 1;
+    }
+    if (entry.totalRowsBefore > 0 && rows === 0)
+      throw new Error(`ClickHouse ${entry.name} had ${entry.totalRowsBefore} rows before the export but its files record none`);
+    clickhouseRows += rows;
+  }
+
+  // `pg_restore --list` reads the archive without a database: it catches a truncated or corrupt
+  // custom-format dump that happens to keep its hash. A missing client is only a warning.
+  try {
+    await run('pg_restore', ['--list', manifestPath(dir, manifest.postgres.file)], {});
+  } catch (err) {
+    if (/was not found/.test((err as Error).message)) log('warning: pg_restore was not found; the dump archive structure was not checked');
+    else throw new Error(`postgres.dump is not a readable pg_dump archive: ${(err as Error).message}`);
+  }
+
+  const verifiedAt = new Date().toISOString();
+  await writeVerifyStatus(parent, { verifiedAt, backup: basename(dir) });
+  log(
+    `verified ${basename(dir)}: ${manifest.postgres.file} ${manifest.postgres.bytes} bytes` +
+      `${clickhouseFiles ? `, ${clickhouseFiles} ClickHouse file(s) with ${clickhouseRows} row(s)` : ''}`,
+  );
+  return { dir, manifest, verifiedAt };
+}
+
+/** BACKUP_VERIFY_MAX_AGE_DAYS, default 30 days. */
+export function parseVerifyMaxAgeDays(value: string | undefined): number {
+  if (value === undefined || value.trim() === '') return 30;
+  const days = Number(value);
+  if (!Number.isInteger(days) || days < 1) throw new Error('BACKUP_VERIFY_MAX_AGE_DAYS must be a positive whole number of days');
+  return days;
+}
+
 /**
  * Verifies a backup, refuses a newer schema unless forced, then replaces Postgres (and optionally
  * ClickHouse). It does not stop the app: the caller warns the operator to do that first.
@@ -1048,10 +1160,11 @@ export async function backupHealth(
 ): Promise<{ ok: boolean; reason: string }> {
   const env = opts.env ?? process.env;
   const dir = opts.dir ? resolveUserPath(opts.dir, env) : resolveBackupDir(env);
+  const now = opts.now ?? new Date();
   const path = scheduleStatusPath(dir);
   let age: number;
   try {
-    age = (opts.now ?? new Date()).getTime() - (await stat(path)).mtimeMs;
+    age = now.getTime() - (await stat(path)).mtimeMs;
   } catch {
     return { ok: false, reason: `no scheduler heartbeat at ${path}` };
   }
@@ -1064,7 +1177,36 @@ export async function backupHealth(
     const when = status.lastRunAt ? ` at ${status.lastRunAt}` : '';
     return { ok: false, reason: `last scheduled backup${when} failed: ${status.lastError ?? 'unknown error'}` };
   }
-  return { ok: true, reason: `scheduler alive; next backup at ${status.nextRunAt}` };
+  // A heartbeat only proves the scheduler is alive. A backup that has never been verified is a
+  // hypothesis, so --health also enforces the age of the last successful verification (#145).
+  let maxAgeDays: number;
+  try {
+    maxAgeDays = parseVerifyMaxAgeDays(env.BACKUP_VERIFY_MAX_AGE_DAYS);
+  } catch (err) {
+    return { ok: false, reason: (err as Error).message };
+  }
+  const verification = await readVerifyStatus(dir);
+  if (!verification)
+    return {
+      ok: false,
+      reason: `no successful backup verification in ${dir}; run \`am backup --verify\` (or let the backup service verify each run)`,
+    };
+  const verifiedAt = Date.parse(verification.verifiedAt);
+  if (!Number.isFinite(verifiedAt)) return { ok: false, reason: `the verification record in ${dir} has an invalid timestamp` };
+  const verifiedDays = (now.getTime() - verifiedAt) / 86_400_000;
+  if (verifiedDays > maxAgeDays)
+    return {
+      ok: false,
+      reason:
+        `last successful backup verification of ${verification.backup} is ${Math.floor(verifiedDays)} day(s) old, ` +
+        `older than BACKUP_VERIFY_MAX_AGE_DAYS=${maxAgeDays}; run \`am backup --verify\` and do a restore drill`,
+    };
+  return {
+    ok: true,
+    reason:
+      `scheduler alive; last verification of ${verification.backup} was ${verification.verifiedAt}; ` +
+      `next backup at ${status.nextRunAt}`,
+  };
 }
 
 /** `am backup --schedule`: checks the cron expression every minute and keeps going on failure. */

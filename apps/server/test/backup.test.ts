@@ -19,9 +19,12 @@ import {
   nextCronRun,
   parseCron,
   readScheduleStatus,
+  readVerifyStatus,
   restoreBackup,
   restoreClickHouse,
+  verifyBackup,
   writeScheduleStatus,
+  writeVerifyStatus,
 } from '../src/ops/backup-lib';
 import { run as restoreRun } from '../src/ops/restore';
 
@@ -109,14 +112,30 @@ describe('scheduler health', () => {
       const status = { lastRunAt: new Date().toISOString(), lastOk: true, nextRunAt: '2026-10-27T03:30:00.000Z' };
       await writeScheduleStatus(dir, status);
       expect(await readScheduleStatus(dir)).toEqual(status);
+      // A heartbeat alone is not enough: nothing has checked that a backup can be read (#145).
+      const unverified = await backupHealth({ dir });
+      expect(unverified.ok).toBe(false);
+      expect(unverified.reason).toMatch(/no successful backup verification/);
+
+      await writeVerifyStatus(dir, { verifiedAt: new Date().toISOString(), backup: 'am-manual-test' });
+      expect((await readVerifyStatus(dir))?.backup).toBe('am-manual-test');
       expect((await backupHealth({ dir })).ok).toBe(true);
       expect(await backupHealth({ dir, now: new Date(Date.now() + 3 * 60_000) })).toMatchObject({ ok: false });
+
+      const staleVerify = new Date(Date.now() - 40 * 86_400_000).toISOString();
+      await writeVerifyStatus(dir, { verifiedAt: staleVerify, backup: 'am-manual-test' });
+      const stale = await backupHealth({ dir });
+      expect(stale.ok).toBe(false);
+      expect(stale.reason).toMatch(/last successful backup verification .* older/);
+      expect(await backupHealth({ dir, env: { BACKUP_VERIFY_MAX_AGE_DAYS: '3650' } })).toMatchObject({ ok: true });
+      await writeVerifyStatus(dir, { verifiedAt: new Date().toISOString(), backup: 'am-manual-test' });
 
       await writeScheduleStatus(dir, { ...status, lastOk: false, lastError: 'pg_dump failed' });
       const failed = await backupHealth({ dir });
       expect(failed.ok).toBe(false);
       expect(failed.reason).toMatch(/pg_dump failed/);
       expect((await stat(join(dir, '.schedule-status.json'))).mode & 0o777).toBe(0o600);
+      expect((await stat(join(dir, '.verify-status.json'))).mode & 0o777).toBe(0o600);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -247,6 +266,27 @@ describe.skipIf(!pgToolsReady)('backup and restore', () => {
     expect(listings[0]).toMatchObject({ kind: 'manual', dataVersion: '0.2.4', clickhouse: 'no' });
     expect(listings[0].bytes).toBeGreaterThan(0);
   });
+
+  it('verifies a good backup without touching a database (#145)', async () => {
+    const result = await verifyBackup({ dir: backupPath, env: process.env, log: () => {} });
+    expect(result.manifest.postgres.file).toBe('postgres.dump');
+    const status = await readVerifyStatus(backupDir);
+    expect(status?.backup).toBe(backupPath.split('/').pop());
+    expect(status?.verifiedAt).toBeTruthy();
+    expect((await stat(join(backupDir, '.verify-status.json'))).mode & 0o777).toBe(0o600);
+  }, 60_000);
+
+  it('fails verification on a tampered file with the file and both hashes (#145)', async () => {
+    const bad = join(backupDir, 'bad-verify');
+    await cp(backupPath, bad, { recursive: true });
+    const dump = await readFile(join(bad, 'postgres.dump'));
+    dump[dump.length - 1] ^= 0xff;
+    await writeFile(join(bad, 'postgres.dump'), dump);
+    const error = await verifyBackup({ dir: bad, env: process.env, log: () => {} }).catch((err: Error) => err);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(/postgres\.dump does not match its sha256 \(expected [0-9a-f]{64}, got [0-9a-f]{64}\)/);
+    await rm(bad, { recursive: true, force: true });
+  }, 60_000);
 
   it('restores the deleted Postgres row', async () => {
     expect(await withEnv(env, () => restoreRun([backupPath, '--yes']))).toBe(0);

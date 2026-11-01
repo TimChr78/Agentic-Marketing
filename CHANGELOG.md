@@ -6,6 +6,7 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 
 ### Added
 
+- **`am backup --verify` checks a backup without a database (#145).** It re-reads the manifest, re-hashes every Postgres and ClickHouse file, checks the recorded sizes and ClickHouse row counts, and asks `pg_restore --list` to read the dump's table of contents. A mismatch names the file and the expected and actual SHA-256, and the command exits 1. A successful run records the time in `<BACKUP_DIR>/.verify-status.json` (`0600`). `am backup --health` now also fails when that verification is older than `BACKUP_VERIFY_MAX_AGE_DAYS` (default 30) or has never run.
 - **Backups record which key they need and prove it can unseal them (#143).** The manifest gains a `key` object with the key provider's public reference (`local-<sha256 prefix>`, `openbao:<mount>/<key>` or `aws-kms:<key-id>`) and a sealed check value. `am restore` unseals that value before it touches Postgres: a wrong `MASTER_KEY` is refused with a message naming the key it needs and the `MASTER_KEY_PREVIOUS` option, before the database is replaced. After `pg_restore` it also unwraps a real data key before reporting success. `--skip-key-check` allows a deliberate override. `am doctor` adds `secrets.master-key-live`, which unwraps a stored data key in the live database. No key material is written to the manifest, a log line or an argument.
 
 ### Fixed

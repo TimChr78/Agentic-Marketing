@@ -116,9 +116,17 @@ PostgreSQL 16 client tools; a missing `pg_dump` stops the backup with an error.
 
 Backups contain subscriber addresses and consent records. The CLI sets umask `077` and creates the
 backup directory (including the hidden `.partial` directory used during a run) with mode `0700` and
-every file, including `manifest.json`, with `0600`, even when a bind-mounted host directory is
-otherwise world-readable.
-Keep the directory that way; do not loosen the modes to share a backup over a network.
+every file, including `manifest.json` and `.verify-status.json`, with `0600`, even when a
+bind-mounted host directory is otherwise world-readable. Keep the directory that way; do not loosen
+the modes to share a backup over a network.
+
+**The files are not encrypted.** `postgres.dump` and the ClickHouse Native files are plaintext once
+`pg_restore` or ClickHouse can read them, and `manifest.json` has the key reference (never the key).
+Protect the volume or host with encryption at rest (LUKS, ZFS encryption, an encrypted cloud disk or
+an encrypted object-storage bucket), and keep `.env` with `MASTER_KEY` apart from the backups. An
+encrypted volume protects a lost disk; it does not protect a backup copied to a share, so copy
+backups only over an encrypted channel and to an encrypted destination. `am doctor` does not pretend
+to detect volume encryption; this requirement is an operator responsibility.
 
 `--keep-days N` (or `BACKUP_KEEP_DAYS`) deletes completed `am-*` directories older than N days
 after a successful backup. It only removes directories that contain a `manifest.json`; partial
@@ -170,6 +178,36 @@ ClickHouse part, newest first. Format-1 backups (0.2.4) show kind `legacy` and C
 `am restore --clickhouse` refuses it. `--dir` defaults to the same `BACKUP_DIR` / `/backups` /
 `./backups` rule as a backup. Only completed directories with a readable manifest are listed.
 
+## Verifying a backup
+
+```bash
+# The newest backup under BACKUP_DIR (or /backups, or ./backups).
+am backup --verify
+
+# One backup set, or a directory that contains am-* backups.
+am backup --verify /backups/am-manual-0.6.1-20261101T031500Z
+am backup --verify --dir /backups
+```
+
+`--verify` does not touch a database. It:
+
+1. reads `manifest.json` and re-hashes every file it names (Postgres and, when present, each
+   ClickHouse Native file), checking sizes as well;
+2. checks that the manifest's ClickHouse row counts are consistent, and refuses a table that had
+   rows before the export but records none;
+3. runs `pg_restore --list` on `postgres.dump`, which reads the custom-format archive's table of
+   contents without restoring it. If `pg_restore` is not installed, this step is skipped with a
+   warning; the hashes are still checked.
+
+A corrupt or truncated file fails with the file name and the expected and actual SHA-256, and the
+command exits 1. A successful run writes `<BACKUP_DIR>/.verify-status.json` (`0600`, `{ verifiedAt,
+backup }`). Run it after every scheduled backup, and run a real restore drill (below) regularly; a
+hash check cannot prove that the schema and data still restore into a running app.
+
+`am backup --health` reads that file: it exits 1 when no verification has ever run, or when the last
+successful one is older than `BACKUP_VERIFY_MAX_AGE_DAYS` (default 30), in addition to the scheduler
+heartbeat checks.
+
 ## Scheduled backups
 
 The release bundle includes `compose.override.example.yaml` with a commented `backup` service.
@@ -200,8 +238,11 @@ minute tick: `{ lastRunAt, lastOk, lastError?, nextRunAt }`. Check it from a hea
 am backup --health
 ```
 
-It exits 0 when the heartbeat is less than 2 minutes old and the last run did not fail; otherwise
-it exits 1 and prints one line saying why. A Compose healthcheck can use:
+It exits 0 when the heartbeat is less than 2 minutes old, the last run did not fail, and the last
+successful `am backup --verify` is not older than `BACKUP_VERIFY_MAX_AGE_DAYS` (default 30);
+otherwise it exits 1 and prints one line saying why. The scheduler does not verify its own output:
+run `am backup --verify` after the scheduled run (a second one-off container or a host cron entry),
+so the heartbeat and the verification age are both real. A Compose healthcheck can use:
 
 ```yaml
 healthcheck:
