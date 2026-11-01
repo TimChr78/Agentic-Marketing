@@ -153,7 +153,7 @@ Scheduled with the phases, not as a separate release. Bugs first.
 | **Test structure by domain, shared fixtures, UI coverage (#173 rest)** | Applied to the areas each phase touches | **Open** (#173): the 0.2.10 test layout landed, the coverage gaps do not. |
 | **Accessibility checks (#206)** | The agent pages and holds inbox are new UI | **Open** (#206): axe-core checks are not in the e2e suite yet. |
 | **GitHub hardening: provenance, SBOM, Actions policy (#182 rest)** | Supply-chain trust for a platform that runs agents | **Partly shipped 0.3.0**: provenance and SBOM are in the release; CodeQL, rulesets and the Actions policy remain open (#182). |
-| **mjml 5 (#205)** | Removes two accepted advisories; the newsletter agent renders a lot of e-mail | **Open** (#205): mjml 4 is still in use. |
+| **mjml 5 (#205)** | Removes four accepted advisories; the newsletter agent renders a lot of e-mail | **Fixed** (#205): the server and the editor use mjml 5, rendering is async, and the mjml, `minimatch` and `glob` advisories are gone from the audit. |
 | **Contributor scaffolding (#208)** | Before inviting contributors to agent programmes | **Open** (#208). |
 | **Backups: remote target, integrity, key handling, ClickHouse at scale (#142, #143, #145, #146)** | Operational safety; more pressing as agents write more | **Open** (#142, #143, #145, #146). The erasure replay from #144 shipped in 0.5.0; the remote target, key verification, integrity checks and a scaled ClickHouse backup do not. |
 | **Self-service password reset (#191)** | Every agent has a sponsor who must be able to sign in | **Open** (#191). |

@@ -42,7 +42,7 @@ const multisetDiff = (a: string[], b: string[]) => {
 
 const shotPage = await browser.newPage({ viewport: { width: 700, height: 800 } });
 async function render(m: string) {
-  const r = mjml2html(m, { validationLevel: 'soft' });
+  const r = await mjml2html(m, { validationLevel: 'soft' });
   await shotPage.setContent(r.html, { waitUntil: 'load' });
   const text = (await shotPage.evaluate(() => document.body.innerText)).replace(/\s+/g, ' ').trim();
   const png = PNG.sync.read(await shotPage.screenshot({ fullPage: true }));

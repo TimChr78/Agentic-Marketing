@@ -2,6 +2,16 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+### Changed
+
+- **mjml 4 → 5 (#205).** Templates now compile with mjml 5 on the server and mjml-browser 5 in the admin editor. Rendering is asynchronous in mjml 5, so `compileMjml` and `validateTemplate` return promises and the save-time content validation is async with them: `artifacts.create`/`artifacts.update`, bundle import and drift, and `recipes.preview`/`recipes.install` await it, as do `templates.preview`, `templates.check`, `templates.sendTest`, `blocks.preview`, the hosted archive pages and the send path. The compile options are unchanged (`validationLevel: 'soft'`, `ignoreIncludes: true`, `minify: false`), so an `mj-include` still never reads a file and templates that compiled before still compile. The generated HTML differs only cosmetically — attribute order, whitespace, and `word-spacing:normal` also on the wrapper div — and the plain-text part derived from it is unchanged.
+
+### Security
+
+- **The mjml advisories are gone (#205).** mjml 5 fixes the `mj-include` directory traversal (GHSA-45h5-66jx-r2wf) and drops `html-minifier`, whose ReDoS (GHSA-pfq8-rq6v-vf5m) had no patched release. `minimatch` and `glob` are pinned with `pnpm.overrides` to the patched 11.0.1 and 14.0.2 (GHSA-g3hv-75wg-m249, GHSA-3g3m-2fjr-6pw4), which `mjml-cli` — a dependency of `mjml` that the server never loads — and `js-beautify` no longer hold back. `SECURITY.md` and `pnpm.auditConfig.ignoreGhsas` now carry only the `uuid` advisory in the spikes, and `pnpm audit --prod --audit-level=moderate` passes.
+
 ## [0.6.1] - 2026-11-01
 
 ### Fixed

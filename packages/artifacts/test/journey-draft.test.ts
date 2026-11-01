@@ -23,8 +23,8 @@ const complete = {
 };
 
 describe('journey drafts', () => {
-  it('saves an unfinished e-mail step as a draft', () => {
-    expect(() => validateContent('journey', incomplete, 'draft')).not.toThrow();
+  it('saves an unfinished e-mail step as a draft', async () => {
+    await expect(validateContent('journey', incomplete, 'draft')).resolves.toBeTruthy();
   });
 
   it('reports the unfinished step as a warning', () => {
@@ -35,10 +35,10 @@ describe('journey drafts', () => {
     expect(warnings.find((w) => w.nodeId === 'mail')?.message).toContain('An e-mail template id');
   });
 
-  it('refuses to publish the unfinished step with a readable message', () => {
+  it('refuses to publish the unfinished step with a readable message', async () => {
     let error: unknown;
     try {
-      validateContent('journey', incomplete, 'publish');
+      await validateContent('journey', incomplete, 'publish');
     } catch (e) {
       error = e;
     }
@@ -49,7 +49,7 @@ describe('journey drafts', () => {
     expect(message).toContain('An e-mail template id');
   });
 
-  it('still rejects structural mistakes in a draft', () => {
+  it('still rejects structural mistakes in a draft', async () => {
     const twoTriggers = {
       purpose: 'marketing_email',
       nodes: [
@@ -58,7 +58,7 @@ describe('journey drafts', () => {
         { id: 'done', kind: 'exit', label: 'Done', config: {} },
       ],
     };
-    expect(() => validateContent('journey', twoTriggers, 'draft')).toThrow(AppError);
+    await expect(validateContent('journey', twoTriggers, 'draft')).rejects.toBeInstanceOf(AppError);
 
     const unknownEdge = {
       purpose: 'marketing_email',
@@ -67,12 +67,12 @@ describe('journey drafts', () => {
         { id: 'done', kind: 'exit', label: 'Done', config: {} },
       ],
     };
-    expect(() => validateContent('journey', unknownEdge, 'draft')).toThrow(AppError);
+    await expect(validateContent('journey', unknownEdge, 'draft')).rejects.toBeInstanceOf(AppError);
   });
 
-  it('publishes a complete journey without warnings', () => {
-    expect(() => validateContent('journey', complete, 'draft')).not.toThrow();
-    expect(() => validateContent('journey', complete, 'publish')).not.toThrow();
+  it('publishes a complete journey without warnings', async () => {
+    await expect(validateContent('journey', complete, 'draft')).resolves.toBeTruthy();
+    await expect(validateContent('journey', complete, 'publish')).resolves.toBeTruthy();
     expect(contentWarnings('journey', complete)).toEqual([]);
   });
 });
