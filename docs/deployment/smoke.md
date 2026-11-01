@@ -10,7 +10,7 @@ docker compose exec app am smoke --public-url https://links.example.com
 
 ## Token scope
 
-Create a token in **Settings → API tokens** (or with `apiTokens.create`) and grant only `artifacts:read`. That is enough for every token-based check: `system.status` is readable by any authenticated principal, so the provider check no longer needs an admin token (API tokens cannot hold `workspace:admin` anyway). Add `profiles:read` only if you use `--cleanup`, which looks up the profile a signup created. A token is shown once. Read it from `AM_TOKEN` so it does not land in shell history.
+Create a token in **Settings → Integrations and API tokens** (or with `apiTokens.create`) and grant only `artifacts:read`. That is enough for every token-based check: `system.status` is readable by any authenticated principal, so the provider check no longer needs an admin token (API tokens cannot hold `workspace:admin` anyway). Add `profiles:read` only if you use `--cleanup`, which looks up the profile a signup created. A token is shown once. Read it from `AM_TOKEN` so it does not land in shell history.
 
 `profiles.erase` needs both the `profiles:erase` scope and a person: it is deliberately people-only, so no API token can erase a profile, whatever scopes it carries. `am smoke --cleanup` with a token therefore finds the profile, reports its id, and says what to do next. If the signup was never confirmed, the unconfirmed-signup retention (`RETENTION_UNCONFIRMED_DAYS`, 30 days by default) removes it; a signup that recorded consent is not removed by that retention, so erase it as a person in the admin UI.
 

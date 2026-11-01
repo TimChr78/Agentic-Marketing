@@ -95,7 +95,16 @@ Runs never overlap: a durable claim on the hosted agent is taken before the mode
 
 ### Starter templates
 
-Both are ordinary hosted agents; edit anything after creating them.
+Six ordinary hosted agents; edit anything after creating them.
+
+| Template | Schedule | What it does |
+|---|---|---|
+| **Weekly report** | `weekly:mon:07:00` | Read-only summary of last week with `analytics.query`, `analytics.campaignSummary` and `journeys.stats`. |
+| **Deliverability guardian** | `hourly` | Checks bounce and complaint rates and drafts a pause proposal; it never changes settings or pauses a stream. |
+| **Lifecycle optimiser** | `weekly:mon:08:00` | Reads journey splits with `journeys.splitResult`, promotes winners, retires losers and records learnings. |
+| **Newsletter editor** | `weekly:mon:09:00` | Picks the week's articles and an approved topic, drafts the issue with a subject test and submits it, then records last week's result. |
+| **Experimentation agent** | `daily:08:00` | Concludes web experiments from `experiences.results`, promotes winners, removes losers and records learnings. |
+| **Audience curator** | `weekly:mon:07:30` | Checks segment sizes, overlaps and inactive members, and proposes sunset policies as drafts. |
 
 **Weekly report** — `weekly:mon:07:00`, scopes `artifacts:read` and `audit:read`, 30,000 tokens and 25 tool calls per run. It summarises last week's broadcasts, journeys and campaigns with `analytics.query`, `analytics.campaignSummary` and `journeys.stats`, states the data window and recommends at most three next steps. Read-only: it reports, it does not change anything.
 
@@ -152,7 +161,7 @@ Only people can create, change or publish a mandate. An agent that tries gets `4
 | 3 | **Act within limits** | Runs at once when it is inside the scope and limits; recorded in the activity ledger. |
 | 4 | **Run the loop** | Level 3 plus creating new artifacts of the class: a new artifact of an allowed type is not held to the mandate's `scope.artifacts` list. Audiences, purposes, topics, channels, limits, guardrails, learning rules and the guardian still apply. **Earned**, see below. |
 
-**Earning level 4.** A mandate may grant level 4 for a class only when the workspace allows it (`allowLoops` and a ceiling of 4) and the agent has earned it: it ran that class at level 3 (autonomously, decided by its mandate) for at least 28 days with no guardian episode in that time and no guardian cap in force, or its mandate recorded the class in shadow mode for 28 days without a would-have-run decision that a person rejected. Publishing a mandate that grants level 4 without that record is refused with what is missing. A class in shadow may record level 4 at any time; that is how the record is built. A guardian cap lowers level 4 like any other level.
+**Earning level 4.** A mandate may grant level 4 for a class only when the workspace allows it (`allowLoops` and a ceiling of 4) and the agent has earned it: it ran that class at level 3 (autonomously, decided by its mandate) for at least 28 days with no guardian episode in that time and no guardian cap in force, or its mandate recorded the class in shadow mode for 28 days without a would-have-run decision that a person rejected. Publishing a mandate that grants level 4 without that record is refused with what is missing. The ledger records the level the policy engine decided, so a held change that ran after its veto window counts as level 2. Entries from before 0.6.1 have no level, so **earning starts again from 0.6.1**; only entries recorded at level 3 or above count. A class in shadow may record level 4 at any time; that is how the record is built. A guardian cap lowers level 4 like any other level. At level 4 a new artifact is the agent's own creation only when its first version was drafted by the same agent credential; a draft started by a person or another agent stays inside the mandate's `scope.artifacts` list (#325).
 
 A class that is not listed in `levels` counts as 1. Two classes can never be made autonomous, whatever the mandate says: `settings` and `destructive` always need a person, as do changes to purposes, the delivery policy, the tracking plan, a conversion map and the mandate itself. Above one of the mandate's limits an action drops one level: an L3 send becomes an L2 hold, an L2 action a proposal, with the reason. Anything outside the mandate's scope (another audience, purpose, topic, channel or artifact type) is only ever proposed.
 
@@ -367,7 +376,7 @@ The pilot: one segment, one topic, one weekly broadcast at level 3, everything e
 }
 ```
 
-As a **programme** (#316) the agent works from the article library (content sources and selections) and the topic backlog (approved briefs), sends each issue with a subject test (the `learning` rule requires a test or a holdout) and a staged send, and records what the test taught as a learning. The hosted-agent template **Newsletter editor** runs the loop every Monday; the recipe is in the MCP skill (`references/recipes.md`).
+As a **programme** (#316) the agent works from the article library (content sources and selections) and the topic backlog (approved briefs), sends each issue with a subject test or a staged send (the `learning` rule requires a test or a holdout; the schema refuses a subject test and a staged send in the same broadcast), and records what the test taught as a learning. The hosted-agent template **Newsletter editor** runs the loop every Monday; the recipe is in the MCP skill (`references/recipes.md`).
 
 A bundle is judged by its riskiest member. Publishing this issue's template and broadcast together (`artifacts.requestPublishBundle`) counts as `send.broadcast` at level 3; the template on its own is still `content.publish` level 1 and waits for a person.
 
