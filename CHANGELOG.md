@@ -2,7 +2,7 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
-## [Unreleased]
+## [0.6.0] - 2026-11-01
 
 ### Added
 
@@ -24,6 +24,14 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 ### Fixed
 
 - **Undo is offered only when it would work (#305).** `agents.activity` checks each recorded reversal against the current state and reports `undoable: false` with `undoBlockedBy` when newer work went live, the artifact is no longer live, or the send already went out; the agent page shows that reason instead of an Undo button.
+
+### Upgrading from 0.5.5
+
+- **Migrations:** `0056_learnings.sql`, `0057_agent_subscriptions.sql` (with the agent event log and cursor), `0058_content_sources.sql`, `0059_content_topics.sql` and `0060_enrollment_jobs.sql`. All additive; they run on start.
+- **Configuration:** none. Content sources are fetched only once a person adds one; their requests go through the existing egress guard.
+- **Breaking changes:** none. Level 4 stays unavailable until a workspace allows loops (`allowLoops`, ceiling 4) and an agent has earned it. The "Campaign drafter" mandate template in docs/agents.md is now "Campaign agent".
+- **Manual steps:** none. To run the newsletter programme, publish the Newsletter agent mandate with its new `learning` rule and use the **Newsletter editor** hosted-agent template, or follow the recipe from an external agent.
+- **Upgrade:** download `agentic-marketing-compose-<version>.tar.gz`, replace `docker-compose.yml` with its copy, check your configuration with the new image (`AM_VERSION=<version> docker compose run --rm --no-deps -T app am doctor --env-file - < .env`), then set `AM_VERSION=<version>` in `.env` and `docker compose pull && docker compose up -d` (Helm: the chart of the same version). Then `docker compose exec app am doctor`.
 
 ## [0.5.5] - 2026-10-31
 
