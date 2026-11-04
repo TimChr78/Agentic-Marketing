@@ -1,4 +1,15 @@
-import { AiUnavailable, modelFor, recordAiCall, releaseTokens, reserveTokens } from '@agentic-marketing/ai';
+import {
+  AiUnavailable,
+  billingReservationTtlMs,
+  estimateTokens,
+  MIN_STEP_TOKENS,
+  modelFor,
+  recordAiCall,
+  reserveUpToTokens,
+  settleReservation,
+  stepBudget,
+  tokensOfSteps,
+} from '@agentic-marketing/ai';
 import { activeMandate } from '@agentic-marketing/artifacts';
 import { type Auth, principalFromSession } from '@agentic-marketing/auth';
 import { agentPrincipal, type Executor, type Permission, ROLE_PERMISSIONS } from '@agentic-marketing/commands';
@@ -9,11 +20,25 @@ import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
-import { dynamicTool, isStepCount, jsonSchema, type ModelMessage, streamText } from 'ai';
+import { dynamicTool, isStepCount, jsonSchema, type ModelMessage, streamText, type Tool } from 'ai';
 import { and, desc, eq } from 'drizzle-orm';
 import { type Context, Hono } from 'hono';
 import { z } from 'zod';
 import { VERSION } from '../version';
+import {
+  type CopilotTool,
+  copilotTools,
+  DISCOVER_COMMAND,
+  DISCOVER_NAME,
+  DISCOVERY_MAX_MATCHES,
+  discoverTool,
+  discoverTools,
+  discoveryReply,
+  initialTools,
+  MAX_SINGLE_TOOL_TOKENS,
+  selectDiscovered,
+  trimHistory,
+} from './copilot-tools';
 import { mcpServerFor } from './mcp';
 
 // The in-app copilot (agents-and-mcp.md §6) is just another MCP client: it acts as an agent
@@ -34,8 +59,9 @@ const COPILOT_SCOPES: Permission[] = [
 
 const SYSTEM = `You are the copilot of an agent-first marketing platform. You work through tools that are the platform's commands, as an agent acting for the signed-in person.
 - Changes you make are drafts. Publishing follows the workspace's approval policy; a person approves agent changes. You cannot send messages, approve, erase people or change settings.
-- Before building something, look at what exists (artifacts.list, artifacts.types, segments.preview, journeys.simulate). Validate and simulate before you request publishing.
+- Before building something, look at what exists (artifacts.list, artifacts.types; discover segments.preview or journeys.simulate if you need them). Validate and simulate before you request publishing.
 - Tool errors explain what to fix; fix the input and try again.
+- Only a small core toolset is sent at first so the turn fits its AI budget. Call tools__discover with a command name or what you want to do to enable a few more commands for the next step; if it says a tool needs more budget than this turn has, narrow the task.
 - Answer briefly and concretely. Mention the ids of what you created or changed.`;
 
 // A message is at most 8,000 characters; 64 KB covers the JSON envelope with room to spare. The
@@ -75,9 +101,21 @@ export type CopilotEvent =
 /** How many earlier turns the model sees (the stored conversation keeps them all). */
 const HISTORY_TURNS = 20;
 
-/** MCP tool names may contain dots; model APIs allow letters, digits, _ and - only. */
-const toolName = (name: string) => name.replaceAll('.', '__');
+/** The most one copilot turn may reserve, whatever the month has left. */
 const COPILOT_TURN_TOKENS = 20_000;
+/** A remainder below this is not worth starting a turn with; the person is asked to try later. */
+const COPILOT_MIN_TURN_TOKENS = 1_000;
+/** The most one model step may write; a step is also capped by what the turn has left. */
+const COPILOT_MAX_OUTPUT_TOKENS = 2_000;
+/**
+ * A safety margin over the character-based prompt estimate. The provider's tokenizer may split
+ * the same text differently; recorded usage is always the provider's own counts, and this margin
+ * makes the pre-call guard conservative about the input it cannot cap.
+ */
+const PROMPT_TOKEN_MARGIN = 1.2;
+
+/** Thrown by prepareStep when the turn cannot pay for another model call; a normal, quiet stop. */
+class CopilotBudgetStop extends Error {}
 
 /**
  * The agent a conversation acts as (#339), after checking that the person may do so (the agent's
@@ -195,11 +233,24 @@ export function copilotApi(deps: { auth: Auth; db: Db; executor: Executor; kp: K
           COPILOT_SCOPES.filter((p) => ROLE_PERMISSIONS[user.role].includes(p)),
         );
 
-    // A turn may take several model steps; hold enough of the budget for one before starting.
-    const reservation = await reserveTokens(deps.db, ws, model.providerId, COPILOT_TURN_TOKENS).catch((err) => {
+    // The turn may use at most what is actually left of the month's budget, up to the fixed turn
+    // cap. The reserved amount is the hard allowance the loop is held to (#356): reserving the
+    // full cap when less remains is what let a 21k budget pay for a 24k turn.
+    const reservation = await reserveUpToTokens(
+      deps.db,
+      ws,
+      model.providerId,
+      COPILOT_TURN_TOKENS,
+      COPILOT_MIN_TURN_TOKENS,
+      billingReservationTtlMs(),
+    ).catch((err) => {
       if (err instanceof AiUnavailable) throw new AppError('conflict', `The copilot cannot answer: ${err.message}.`);
       throw err;
     });
+    const allowance = reservation.tokens;
+    const system = acting ? `${SYSTEM}\n\n${acting.context}` : SYSTEM;
+    const abort = new AbortController();
+    let cancelled = false;
 
     const encoder = new TextEncoder();
     const body = new ReadableStream<Uint8Array>({
@@ -212,7 +263,15 @@ export function copilotApi(deps: { auth: Auth; db: Db; executor: Executor; kp: K
           pending = '';
         };
         const emit = (e: CopilotEvent) => {
-          controller.enqueue(encoder.encode(`${JSON.stringify(e)}\n`));
+          // A person who closed the tab still gets the turn recorded; only the enqueue is skipped.
+          if (!cancelled) {
+            try {
+              controller.enqueue(encoder.encode(`${JSON.stringify(e)}\n`));
+            } catch {
+              cancelled = true;
+              abort.abort();
+            }
+          }
           if (e.type === 'delta') pending += e.text;
           else if (e.type === 'tool' || e.type === 'toolResult' || e.type === 'error') {
             flush();
@@ -224,63 +283,206 @@ export function copilotApi(deps: { auth: Auth; db: Db; executor: Executor; kp: K
         const client = new Client({ name: 'copilot', version: VERSION });
         const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
         const started = Date.now();
+        // Filled by onStepEnd, so a turn that throws after a step still records that step's
+        // tokens instead of zero.
         let usage = { inputTokens: 0, outputTokens: 0 };
         let error: string | null = null;
-        const used: string[] = [];
+        // Set when prepareStep refuses another model call; the person is told why the turn ended.
+        let budgetStopped = false;
+        const usedTools: string[] = [];
         emit({ type: 'conversation', id: conversation.id, title: conversation.title });
         try {
           await server.connect(serverSide);
           await client.connect(clientSide);
           const { tools } = await client.listTools();
-          const toolset = Object.fromEntries(
-            tools.map((t) => [
-              toolName(t.name),
+          // Every command this principal may run is in the catalog, but only the active subset is
+          // sent to the model. The full catalog can cost more than a 20k turn before the model is
+          // even asked (#356), so the turn starts with the artifact workflow plus discovery.
+          const catalog = copilotTools(tools);
+          const byName = new Map(catalog.map((t) => [t.name, t]));
+          const schemaOf = (t: CopilotTool) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema });
+          // The prompt, the stored history and the *active* tool schemas all count against the
+          // allowance. This is an estimate with a margin, used only to refuse a step before it is
+          // made; what is recorded is the provider's reported usage (onStepEnd).
+          const promptTokens = (history: ModelMessage[], active: CopilotTool[]) =>
+            Math.ceil(
+              estimateTokens({ system, messages: [...history, { role: 'user', content: message }], tools: active.map(schemaOf) }, 0) *
+                PROMPT_TOKEN_MARGIN,
+            );
+          // Drop the oldest complete turns, then the least important core tools, until the first
+          // model call fits. Turns are dropped whole: a tool result must keep the assistant call
+          // it answers. Discovery always stays: it is how a dropped command can come back later.
+          let initial = [discoverTool, ...initialTools(catalog)];
+          const history = trimHistory(conversation.history, (h) => promptTokens(h, initial) + MIN_STEP_TOKENS <= allowance);
+          while (initial.length > 1 && promptTokens(history, initial) + MIN_STEP_TOKENS > allowance) initial = initial.slice(0, -1);
+          if (promptTokens(history, initial) + MIN_STEP_TOKENS > allowance)
+            throw new Error(`this turn needs more tokens than the ${allowance} left in the AI budget, even for the smallest tool set`);
+          const active = new Set(initial.map((t) => t.name));
+          const activeTools = () =>
+            [...active]
+              .map((name) => (name === DISCOVER_NAME ? discoverTool : byName.get(name)))
+              .filter((t): t is CopilotTool => t !== undefined);
+          const activeTokens = () => activeTools().reduce((n, t) => n + t.tokens, 0);
+          // What is left for one discovered command beyond the smallest possible prompt and the
+          // schemas already active, so discovery does not enable a tool the next step must refuse.
+          const basePrompt = Math.ceil(
+            estimateTokens({ system, messages: [...history, { role: 'user', content: message }] }, 0) * PROMPT_TOKEN_MARGIN,
+          );
+          const singleToolBudget = Math.min(MAX_SINGLE_TOOL_TOKENS, allowance - MIN_STEP_TOKENS - basePrompt - activeTokens());
+
+          const toolset: Record<string, Tool> = Object.fromEntries(
+            catalog.map((t) => [
+              t.name,
               dynamicTool({
-                description: t.description ?? t.title ?? t.name,
+                description: t.description,
                 inputSchema: jsonSchema(t.inputSchema as never),
                 execute: async (input, { toolCallId }) => {
-                  used.push(t.name);
-                  emit({ type: 'tool', id: toolCallId, name: t.name, input });
-                  const r = await client.callTool({ name: t.name, arguments: input as Record<string, unknown> });
+                  // Only granted commands are in the catalog, and every call still goes through
+                  // the executor's permission and approval checks.
+                  usedTools.push(t.command);
+                  emit({ type: 'tool', id: toolCallId, name: t.command, input });
+                  const r = await client.callTool({ name: t.command, arguments: input as Record<string, unknown> });
                   const text = (r.content as { type: string; text?: string }[] | undefined)?.find((x) => x.type === 'text')?.text;
                   const output = r.structuredContent ?? (text ? JSON.parse(text) : null);
-                  emit({ type: 'toolResult', id: toolCallId, name: t.name, ok: !r.isError, output });
+                  emit({ type: 'toolResult', id: toolCallId, name: t.command, ok: !r.isError, output });
                   return output;
                 },
               }),
             ]),
           );
+          // Discovery is local to the turn: it enables already-granted commands for the next step,
+          // within a fixed tool/schema budget, and returns a bounded number of matches.
+          toolset[DISCOVER_NAME] = dynamicTool({
+            description: discoverTool.description,
+            inputSchema: jsonSchema(discoverTool.inputSchema as never),
+            execute: async (input, { toolCallId }) => {
+              const args = (input ?? {}) as { query?: unknown; limit?: unknown };
+              const { matches, total } = discoverTools(
+                catalog,
+                typeof args.query === 'string' ? args.query : '',
+                typeof args.limit === 'number' ? args.limit : DISCOVERY_MAX_MATCHES,
+              );
+              const selection = selectDiscovered(
+                matches,
+                { names: active, tokens: activeTokens() },
+                { maxSingleToolTokens: singleToolBudget },
+              );
+              for (const t of selection.enabled) active.add(t.name);
+              const output = discoveryReply(matches, total, selection, (name) => active.has(name));
+              emit({ type: 'tool', id: toolCallId, name: DISCOVER_COMMAND, input });
+              emit({ type: 'toolResult', id: toolCallId, name: DISCOVER_COMMAND, ok: true, output });
+              return output;
+            },
+          });
+
           const r = streamText({
             model: model.model,
-            system: acting ? `${SYSTEM}\n\n${acting.context}` : SYSTEM,
-            messages: [...conversation.history, { role: 'user', content: message }],
+            system,
+            messages: [...history, { role: 'user', content: message }],
             tools: toolset,
-            stopWhen: isStepCount(MAX_STEPS),
-            maxOutputTokens: 2000,
+            // Only the core tools (plus whatever discovery enabled) are advertised to the model.
+            activeTools: [...active],
+            // The whole turn, not each step, is capped at the reserved allowance: the loop stops
+            // once too little is left for a useful step, and prepareStep refuses the next model
+            // call when its prompt plus a minimum answer would not fit (#356).
+            stopWhen: [
+              isStepCount(MAX_STEPS),
+              ({ steps }) => stepBudget({ allowance, used: tokensOfSteps(steps), maxOutputTokens: COPILOT_MAX_OUTPUT_TOKENS }).stop,
+            ],
+            prepareStep: ({ steps, messages: next, instructions }) => {
+              // Re-estimate every step with the messages it will carry and only the schemas that
+              // will actually be sent; discovery may have enabled more (or the turn may have none
+              // of its allowance left).
+              const budget = stepBudget({
+                allowance,
+                used: tokensOfSteps(steps),
+                maxOutputTokens: COPILOT_MAX_OUTPUT_TOKENS,
+                estimatedInput: Math.ceil(
+                  estimateTokens({ system: instructions ?? system, messages: next, tools: activeTools().map(schemaOf) }, 0) *
+                    PROMPT_TOKEN_MARGIN,
+                ),
+              });
+              if (budget.stop) throw new CopilotBudgetStop();
+              return { maxOutputTokens: budget.maxOutputTokens, activeTools: [...active] };
+            },
+            maxOutputTokens: Math.max(1, Math.min(COPILOT_MAX_OUTPUT_TOKENS, allowance)),
             maxRetries: 1,
             timeout: 120_000,
+            abortSignal: abort.signal,
+            onStepEnd: (step) => {
+              usage.inputTokens += step.usage.inputTokens ?? 0;
+              usage.outputTokens += step.usage.outputTokens ?? 0;
+            },
           });
           // Tokens go to the browser as the model writes them.
           for await (const part of r.stream) {
             if (part.type === 'text-delta' && part.text) emit({ type: 'delta', text: part.text });
-            else if (part.type === 'error') throw part.error instanceof Error ? part.error : new Error(String(part.error));
+            else if (part.type === 'error') {
+              const e = part.error instanceof Error ? part.error : new Error(String(part.error));
+              if (e instanceof CopilotBudgetStop) {
+                budgetStopped = true;
+                break;
+              }
+              throw e;
+            }
           }
-          const total = await r.totalUsage;
-          usage = { inputTokens: total.inputTokens ?? 0, outputTokens: total.outputTokens ?? 0 };
-          if ((await r.finishReason) === 'tool-calls')
+          // The provider's total covers the steps that finished; keep the larger of it and the
+          // accumulator so a partial stream is never under-counted.
+          let total: Awaited<typeof r.totalUsage> | undefined;
+          try {
+            total = await r.totalUsage;
+          } catch {
+            total = undefined;
+          }
+          if (total)
+            usage = {
+              inputTokens: Math.max(usage.inputTokens, total.inputTokens ?? 0),
+              outputTokens: Math.max(usage.outputTokens, total.outputTokens ?? 0),
+            };
+          let finishReason: string | undefined;
+          try {
+            finishReason = await r.finishReason;
+          } catch {
+            finishReason = undefined;
+          }
+          if (budgetStopped || usage.inputTokens + usage.outputTokens >= allowance - MIN_STEP_TOKENS)
+            emit({
+              type: 'delta',
+              text: 'I stopped at the AI budget for this turn. Tell me how to continue, or narrow the task.',
+            });
+          else if (finishReason === 'tool-calls')
             emit({
               type: 'delta',
               text: `I stopped after ${MAX_STEPS} steps without finishing. Tell me how to continue, or narrow the task.`,
             });
           flush();
-          messages = [{ role: 'user', content: message }, ...((await r.responseMessages) as ModelMessage[])];
+          let responseMessages: ModelMessage[] = [];
+          try {
+            responseMessages = (await r.responseMessages) as ModelMessage[];
+          } catch {
+            responseMessages = [];
+          }
+          messages = [{ role: 'user', content: message }, ...responseMessages];
           emit({ type: 'done', conversationId: conversation.id, usage });
         } catch (err) {
-          error = (err as Error).message;
-          logger.warn({ err }, 'copilot turn failed');
-          emit({ type: 'error', message: `The model call failed: ${error}` });
+          if (err instanceof CopilotBudgetStop) {
+            // The allowance ran out before any step could be paid for; the turn still ends
+            // normally, with the reason the person can act on.
+            emit({
+              type: 'delta',
+              text: 'I stopped at the AI budget for this turn. Tell me how to continue, or narrow the task.',
+            });
+            flush();
+            messages = [{ role: 'user', content: message }];
+            emit({ type: 'done', conversationId: conversation.id, usage });
+          } else {
+            error = (err as Error).message;
+            logger.warn({ err }, 'copilot turn failed');
+            emit({ type: 'error', message: `The model call failed: ${error}` });
+          }
         } finally {
           flush();
+          if (cancelled && !error) error = 'cancelled: the client stopped the turn';
           await client.close().catch(() => {});
           // The turn is kept even when it failed, so the person sees what happened next time too.
           await deps.db
@@ -308,21 +510,48 @@ export function copilotApi(deps: { auth: Auth; db: Db; executor: Executor; kp: K
               });
             })
             .catch((err) => logger.error({ err }, 'copilot turn not stored'));
-          await recordAiCall(deps.db, ws, {
-            kind: 'copilot',
-            status: error ? 'failed' : 'done',
+          // The usage row commits in the same transaction that releases the reservation (#355),
+          // including the partial usage of a failed or cancelled turn. If that write fails, it is
+          // retried on its own before the hold is released; if it cannot be recorded at all the
+          // hold stays, so the month cannot spend the same budget again.
+          const call = {
+            kind: 'copilot' as const,
+            status: error ? ('failed' as const) : ('done' as const),
             providerId: model.providerId,
             model: model.modelId,
-            input: { tools: used },
+            input: { tools: usedTools },
             error,
             ...usage,
             latencyMs: Date.now() - started,
             principalId: acting ? acting.agent.id : user.userId,
             finishedAt: new Date(),
-          }).catch((err) => logger.error({ err }, 'copilot call not logged'));
-          await releaseTokens(deps.db, ws, reservation).catch(() => {});
-          controller.close();
+          };
+          await settleReservation(
+            deps.db,
+            ws,
+            reservation.id,
+            async (tx) => {
+              await tx.insert(schema.aiCalls).values({ workspaceId: ws, id: newId('aic'), ...call });
+            },
+            {
+              fallback: async () => {
+                await recordAiCall(deps.db, ws, call);
+              },
+              label: 'copilot turn',
+            },
+          );
+          if (!cancelled) {
+            try {
+              controller.close();
+            } catch {
+              // The consumer already went away.
+            }
+          }
         }
+      },
+      cancel() {
+        cancelled = true;
+        abort.abort();
       },
     });
     return new Response(body, { headers: { 'content-type': 'application/x-ndjson', 'cache-control': 'no-store' } });
