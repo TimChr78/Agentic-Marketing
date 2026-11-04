@@ -732,6 +732,10 @@ export const enrollmentJobs = pgTable(
     limit: integer('limit'),
     /** The last profile id scanned, not the last one enrolled. */
     cursor: text('cursor'),
+    /** Consecutive transient chunk failures; reset by a chunk that commits (#370). */
+    attempts: integer('attempts').notNull().default(0),
+    /** Not before this moment after a transient chunk failure; null when due now (#370). */
+    nextAttemptAt: ts('next_attempt_at'),
     /** People in the segment when the job was requested, capped by `limit` (the impact estimate). */
     people: integer('people').notNull().default(0),
     entered: integer('entered').notNull().default(0),
@@ -999,7 +1003,20 @@ export const connections = pgTable(
     oauthStatus: text('oauth_status').$type<'pending' | 'connected' | 'error'>(),
     oauthError: text('oauth_error'),
     /** The authorization in progress: hash of the state, PKCE verifier, redirect URI. */
-    oauthPending: jsonb('oauth_pending').$type<{ stateHash: string; verifier: string; redirectUri: string; at: string }>(),
+    oauthPending: jsonb('oauth_pending').$type<{
+      stateHash: string;
+      verifier: string;
+      redirectUri: string;
+      at: string;
+      /** Set inside the callback's validation transaction: the one-time state is spent (#375). */
+      consumedAt?: string;
+    }>(),
+    /**
+     * The refresh lease (#376): one replica refreshes a rotating token at a time. The token proves
+     * ownership when the result is written back or a failure is recorded.
+     */
+    oauthRefreshLeaseUntil: ts('oauth_refresh_lease_until'),
+    oauthRefreshLeaseToken: text('oauth_refresh_lease_token'),
     tokenExpiresAt: ts('token_expires_at'),
     enabled: boolean('enabled').notNull().default(true),
     createdAt: ts('created_at').notNull().defaultNow(),
@@ -1020,6 +1037,7 @@ export const deliveries = pgTable(
     payload: jsonb('payload').$type<unknown>().notNull(),
     status: text('status').$type<DeliveryStatus>().notNull(),
     attempts: integer('attempts').notNull().default(0),
+    alertRetryCycles: integer('alert_retry_cycles').notNull().default(0),
     nextAttemptAt: ts('next_attempt_at').notNull().defaultNow(),
     leaseUntil: ts('lease_until'),
     idempotencyKey: text('idempotency_key').notNull(),
@@ -1136,9 +1154,22 @@ export type AlertNotification = {
   channel: 'webhook' | 'email';
   target: string;
   at: string;
-  status: 'sent' | 'failed';
+  /**
+   * Truthful delivery state (#368): `queued` while the outbox row is pending/running, `sent` only
+   * after it completed, `failed` when it ended dead/failed (or an e-mail provider refused).
+   */
+  status: 'queued' | 'sent' | 'failed';
   deliveryId?: string;
   error?: string;
+  /** Outbox attempts used by the current cycle, for operators. */
+  attempts?: number;
+  /**
+   * Whether the evaluator may re-open this failed webhook for another outbox cycle. Absent for
+   * e-mail and for older ledger entries, which are retried as before.
+   */
+  retryable?: boolean;
+  /** Completed outbox cycles for this notification; bounds re-opening a dead delivery. */
+  cycles?: number;
 };
 
 /** A threshold rule over the metric layer; `config` is kind-specific and validated by the alerts package. */

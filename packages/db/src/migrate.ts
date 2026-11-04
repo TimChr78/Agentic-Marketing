@@ -101,6 +101,7 @@ const MIGRATION_RELEASES: Record<string, string> = {
   '0070_edge_cleanup.sql': '0.7.2',
   '0071_hosted_agent_delete.sql': '0.7.3',
   '0072_audience_reconciliation.sql': '0.7.4',
+  '0073_ops_reliability.sql': '0.7.4',
 };
 
 export function releaseForMigrationHead(head: string | null): string | null {

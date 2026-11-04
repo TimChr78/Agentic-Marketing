@@ -230,6 +230,78 @@ describe('bulk enrollment by segment (#148)', () => {
     expect(await countParticipants(resumeJourneyId)).toBe(PEOPLE - WITHOUT_CONSENT);
   }, 240_000);
 
+  // #370: a transient chunk failure (deadlock, statement timeout, dropped connection) must not
+  // fail a 40k-person backfill. The chunk rolls back, the committed cursor/counts stay, the job
+  // records one retry attempt and the next tick resumes after the same cursor.
+  it('retries a transient chunk failure without losing the committed cursor or enrolling twice', async () => {
+    const retryJourney = await api().call('artifacts.create', {
+      type: 'journey',
+      name: 'Transient retry',
+      content: journeyContent('always', templateId),
+    });
+    const retryJourneyId = retryJourney.artifactId;
+    await api().call('artifacts.requestPublish', { artifactId: retryJourneyId, note: 'retry fixture' });
+    const created = await api().call('journeys.enrollSegment', { artifactId: retryJourneyId, segmentId, reason: 'retry me' });
+    await runEnrollmentJobsOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events });
+    const first = await api().call('journeys.enrollmentJob', { jobId: created.jobId });
+    expect(first.status).toBe('running');
+    expect(first.cursor).not.toBeNull();
+    expect(first.attempts).toBe(0);
+
+    const firstParticipants = await countParticipants(retryJourneyId);
+    // Execute the next chunk, then fail before commit: all participant/count/cursor writes roll back.
+    let failOnce = true;
+    const flaky = {
+      ...t.srv.db,
+      withWorkspace: (<T>(workspaceId: string, fn: (tx: any) => Promise<T>, opts?: { snapshot?: boolean }) => {
+        return t.srv.db.withWorkspace(
+          workspaceId,
+          async (tx) => {
+            const value = await fn(tx);
+            if (failOnce && workspaceId === ws) {
+              failOnce = false;
+              throw Object.assign(new Error('canceling statement due to statement timeout'), { code: '57014' });
+            }
+            return value;
+          },
+          opts,
+        );
+      }) as typeof t.srv.db.withWorkspace,
+    };
+    await runEnrollmentJobsOnce({
+      db: flaky,
+      kp: t.srv.keyProvider,
+      events: t.srv.events,
+      retry: { maxAttempts: 3, backoffMs: [0, 0] },
+    });
+
+    const retrying = await api().call('journeys.enrollmentJob', { jobId: created.jobId });
+    expect(retrying).toMatchObject({
+      status: 'running',
+      cursor: first.cursor,
+      entered: first.entered,
+      skipped: first.skipped,
+      failed: first.failed,
+      attempts: 1,
+    });
+    expect(await countParticipants(retryJourneyId)).toBe(firstParticipants);
+    expect(retrying.nextAttemptAt).not.toBeNull();
+    expect(retrying.error).toContain('retrying');
+
+    // The retry (backoff 0) finishes the job; the person at the failed boundary is enrolled once.
+    const done = await runUntilSettled(created.jobId);
+    expect(done).toMatchObject({ status: 'done', attempts: 0, nextAttemptAt: null, error: null });
+    const duplicates = await t.srv.db.admin.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM (
+         SELECT profile_id FROM journey_participants
+         WHERE workspace_id = $1 AND journey_id = $2
+         GROUP BY profile_id HAVING count(*) > 1
+       ) d`,
+      [ws, retryJourneyId],
+    );
+    expect(duplicates.rows[0]?.n).toBe(0);
+  }, 240_000);
+
   // #324: the job pins the published journey and segment versions when it starts, so a republish
   // mid-flight cannot split its participants across versions.
   it('stops when the journey is republished mid-job and keeps every participant on the pinned version', async () => {

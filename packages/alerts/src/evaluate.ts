@@ -2,9 +2,9 @@ import { type AnalyticsResult, runAnalyticsQuery } from '@agentic-marketing/anal
 import { newId } from '@agentic-marketing/core';
 import { type AlertChannel, type AlertNotification, schema, type Tx } from '@agentic-marketing/db';
 import { logger } from '@agentic-marketing/telemetry';
-import { and, desc, eq, isNull } from 'drizzle-orm';
+import { and, desc, eq, isNull, sql } from 'drizzle-orm';
 import type { AlertDeps } from './deps';
-import { mergeNotifications, notifyChannels } from './notify';
+import { mergeNotifications, notifyChannels, reconcileAlertNotifications } from './notify';
 import {
   type AlertConfig,
   type DeliverabilityConfig,
@@ -152,16 +152,29 @@ async function measureRule(deps: AlertDeps, tx: Tx, rule: RuleRow, now: Date): P
   }
 }
 
-/** Channels that have not already been notified successfully for this event. */
-function pendingChannels(channels: AlertChannel[], notified: AlertNotification[], event: AlertNotification['event']): AlertChannel[] {
-  const done = new Set(notified.filter((n) => n.event === event && n.status === 'sent').map((n) => `${n.channel}:${n.target}`));
+/**
+ * Channels that still need a send for this event. Only `sent` suppresses a channel permanently;
+ * `queued` is already in the outbox (a second insert would be a duplicate), and `failed` is
+ * retried unless the bounded delivery budget marked it exhausted.
+ */
+export function pendingChannels(
+  channels: AlertChannel[],
+  notified: AlertNotification[],
+  event: AlertNotification['event'],
+): AlertChannel[] {
+  const sent = new Set(notified.filter((n) => n.event === event && n.status === 'sent').map((n) => `${n.channel}:${n.target}`));
+  const inFlight = new Set(notified.filter((n) => n.event === event && n.status === 'queued').map((n) => `${n.channel}:${n.target}`));
+  const exhausted = new Set(
+    notified.filter((n) => n.event === event && n.status === 'failed' && n.retryable === false).map((n) => `${n.channel}:${n.target}`),
+  );
+  const pending = (key: string) => !sent.has(key) && !inFlight.has(key) && !exhausted.has(key);
   const out: AlertChannel[] = [];
   for (const channel of channels) {
     if (channel.type === 'webhook') {
-      if (!done.has(`webhook:${channel.webhookId}`)) out.push(channel);
+      if (pending(`webhook:${channel.webhookId}`)) out.push(channel);
       continue;
     }
-    const userIds = channel.userIds.filter((id) => !done.has(`email:${id}`));
+    const userIds = channel.userIds.filter((id) => pending(`email:${id}`));
     if (userIds.length) out.push({ type: 'email', userIds });
   }
   return out;
@@ -195,6 +208,7 @@ async function notifyFor(
       now,
     },
     channels,
+    existing,
   );
   return mergeNotifications(existing, fresh);
 }
@@ -230,8 +244,11 @@ async function evaluateRule(deps: AlertDeps, tx: Tx, rule: RuleRow, now: Date, o
 
   if (measurement.firing) {
     if (open) {
-      // Still firing: retry only channels that have not succeeded, never re-notify the rest.
-      const notified = await notifyFor(tx, deps, rule, workspace[0], open.id, 'firing', measurement, open.notified, now);
+      // Still firing: first make the ledger truthful against the outbox (a queued delivery that
+      // turned dead is failed, a completed one is sent), then retry only channels that still need
+      // it, never re-notify the rest.
+      const existing = await reconcileAlertNotifications(tx, open.notified);
+      const notified = await notifyFor(tx, deps, rule, workspace[0], open.id, 'firing', measurement, existing, now);
       if (notified !== open.notified) await tx.update(schema.alertEvents).set({ notified }).where(eq(schema.alertEvents.id, open.id));
       return;
     }
@@ -267,8 +284,10 @@ async function evaluateRule(deps: AlertDeps, tx: Tx, rule: RuleRow, now: Date, o
   }
 
   if (!open) return;
-  // Not firing any more: notify resolution once and keep the row as history.
-  const notified = await notifyFor(tx, deps, rule, workspace[0], open.id, 'resolved', measurement, open.notified, now);
+  // Not firing any more: notify resolution once and keep the row as history. The firing ledger is
+  // reconciled first so a delivery still in flight is reported truthfully even as the episode closes.
+  const existing = await reconcileAlertNotifications(tx, open.notified);
+  const notified = await notifyFor(tx, deps, rule, workspace[0], open.id, 'resolved', measurement, existing, now);
   await tx
     .update(schema.alertEvents)
     .set({
@@ -287,9 +306,49 @@ async function evaluateWorkspace(deps: AlertDeps, tx: Tx, now: Date, opts: Evalu
   for (const rule of rules) await evaluateRule(deps, tx, rule, now, opts);
 }
 
+/**
+ * Makes queued alert notifications truthful even when no enabled rule will evaluate their event
+ * (#368): a rule that was disabled, republished away or resolved must not leave a ledger entry
+ * saying `queued` forever. Bounded per tick; it retries the original outbox row within its durable budget.
+ */
+export async function reconcileQueuedAlertEvents(deps: AlertDeps): Promise<number> {
+  const { rows } = await deps.db.admin.query<{ workspace_id: string }>(
+    `SELECT DISTINCT workspace_id FROM alert_events
+     WHERE (notified @> '[{"status":"queued"}]'::jsonb OR notified @> '[{"status":"failed","retryable":true}]'::jsonb)
+     LIMIT 100`,
+  );
+  let reconciled = 0;
+  for (const { workspace_id: workspaceId } of rows) {
+    try {
+      reconciled += await deps.db.withWorkspace(workspaceId, async (tx) => {
+        const events = await tx.execute<{ id: string; notified: AlertNotification[] }>(sql`
+          SELECT id, notified FROM alert_events
+          WHERE (notified @> '[{"status":"queued"}]'::jsonb OR notified @> '[{"status":"failed","retryable":true}]'::jsonb)
+          ORDER BY fired_at
+          LIMIT 200`);
+        let changed = 0;
+        for (const event of events.rows) {
+          const notified = await reconcileAlertNotifications(tx, event.notified, { retry: true });
+          if (notified !== event.notified) {
+            await tx.update(schema.alertEvents).set({ notified }).where(eq(schema.alertEvents.id, event.id));
+            changed++;
+          }
+        }
+        return changed;
+      });
+    } catch (err) {
+      logger.error({ err, workspaceId }, 'alert notification reconciliation failed');
+    }
+  }
+  return reconciled;
+}
+
 /** One sweep over every workspace. The scheduler calls this; tests call it with a fixed clock. */
 export async function evaluateAlerts(deps: AlertDeps, opts: EvaluateOptions = {}) {
   const now = opts.now ?? new Date();
+  // Independent of `enabled` on purpose: a rule switched off mid-flight still has deliveries to
+  // reconcile (the outbox delivers them regardless).
+  await reconcileQueuedAlertEvents(deps);
   const { rows } = await deps.db.admin.query<{ workspace_id: string }>(
     'SELECT DISTINCT workspace_id FROM alert_rules WHERE enabled = true',
   );
