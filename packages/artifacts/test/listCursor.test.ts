@@ -15,4 +15,22 @@ describe('artifacts.list cursor (#382)', () => {
     expect(decodeArtifactListCursor('2026-11-04 12:34:56.789123+00~')).toBeNull();
     expect(decodeArtifactListCursor('2026-11-04 12:34:56.789123+00')).toBeNull();
   });
+  it('rejects impossible calendar and time fields that Date.parse can normalize', () => {
+    for (const stamp of [
+      '2026-02-30 12:00:00+00',
+      '2026-02-29T12:00:00Z',
+      '0000-01-01T00:00:00Z',
+      '2026-13-01T00:00:00Z',
+      '2026-01-00T00:00:00Z',
+      '2026-01-01T24:00:00Z',
+      '2026-01-01T12:60:00Z',
+      '2026-01-01T12:00:60Z',
+      '2026-01-01T12:00:00+16',
+      '0',
+    ]) {
+      expect(decodeArtifactListCursor(`${stamp}~not_1`)).toBeNull();
+    }
+    expect(decodeArtifactListCursor('2028-02-29T12:34:56.123456Z~not_1')).not.toBeNull();
+    expect(decodeArtifactListCursor('2026-11-04 12:34:56.123456+05:30~not_1')).not.toBeNull();
+  });
 });

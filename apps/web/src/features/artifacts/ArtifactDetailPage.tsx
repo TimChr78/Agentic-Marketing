@@ -1,5 +1,5 @@
 import { Copy, MoreHorizontal, Pencil, Send, Undo2 } from 'lucide-react';
-import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError, api, errText, type Out } from '../../app/api';
 import { typeLabel } from '../../app/artifactRoutes';
 import { ButtonLink } from '../../app/links';
@@ -108,6 +108,7 @@ export function ArtifactDetailPage({
 
   const [tab, setTab] = useState<Tab>('content');
   const [draft, setDraft] = useState<unknown>(undefined);
+  const [editorReset, setEditorReset] = useState(0);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [saveError, setSaveError] = useState<string | null>(null);
   const [warnings, setWarnings] = useState<DraftWarning[]>([]);
@@ -171,6 +172,10 @@ export function ArtifactDetailPage({
   }, [savedContent, id, a?.id]);
 
   const resetToSaved = useCallback(() => {
+    // Discard is explicit: reset local editor buffers too, including temporarily invalid JSON.
+    setEditorReset((n) => n + 1);
+    failedDraft.current = null;
+    setConflict(false);
     draftRef.current = savedContent;
     syncRef.current = adoptSnapshot(syncRef.current, a?.id ?? id, savedContent);
     setDraft(savedContent);
@@ -436,27 +441,29 @@ export function ArtifactDetailPage({
           { key: 'activity', label: 'Activity' },
         ]}
       >
-        {tab === 'content' &&
-          draft !== undefined &&
-          (pageEditor ? (
-            pageEditor({ artifact: a, content: draft, onChange: updateDraft, readOnly, errors, warnings })
-          ) : (
-            <div className={wide ? '' : 'max-w-[900px]'}>
-              <JsonEditor value={draft} onChange={updateDraft} readOnly={readOnly} documentKey={a.id} />
+        <Fragment key={`${a.id}:${editorReset}`}>
+          {tab === 'content' &&
+            draft !== undefined &&
+            (pageEditor ? (
+              pageEditor({ artifact: a, content: draft, onChange: updateDraft, readOnly, errors, warnings })
+            ) : (
+              <div className={wide ? '' : 'max-w-[900px]'}>
+                <JsonEditor value={draft} onChange={updateDraft} readOnly={readOnly} documentKey={a.id} />
+              </div>
+            ))}
+          {tab === 'json' && draft !== undefined && (
+            <div className="max-w-[900px]">
+              <JsonEditor
+                value={draft}
+                onChange={updateDraft}
+                readOnly={readOnly}
+                documentKey={a.id}
+                label="Content (JSON)"
+                hint="The same content the editor changes, and what agents read and write. Call artifacts.types for the schema."
+              />
             </div>
-          ))}
-        {tab === 'json' && draft !== undefined && (
-          <div className="max-w-[900px]">
-            <JsonEditor
-              value={draft}
-              onChange={updateDraft}
-              readOnly={readOnly}
-              documentKey={a.id}
-              label="Content (JSON)"
-              hint="The same content the editor changes, and what agents read and write. Call artifacts.types for the schema."
-            />
-          </div>
-        )}
+          )}
+        </Fragment>
         {tab === 'preview' && (
           <div className="max-w-[1100px] space-y-3">
             {dirty && <Alert tone="info">The preview shows the saved version {latest.number}. Save to preview your changes.</Alert>}

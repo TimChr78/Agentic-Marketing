@@ -57,5 +57,10 @@ describe('artifacts.list pagination (#382)', () => {
 
     const bad = await rejects(api.call('artifacts.list', { cursor: 'not-a-cursor' }));
     expect(bad.code).toBe('invalid_input');
+    for (const stamp of ['2026-02-30 12:00:00+00', '0000-01-01 00:00:00+00', '0']) {
+      const invalidDate = await rejects(api.call('artifacts.list', { cursor: `${stamp}~${notes.artifacts[0].id}` }));
+      expect(invalidDate.code).toBe('invalid_input');
+      expect(invalidDate.status).toBe(400);
+    }
   });
 });

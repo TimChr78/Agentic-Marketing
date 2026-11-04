@@ -616,7 +616,7 @@ export const listArtifacts = defineCommand({
   input: z.object({
     type: artifactTypeEnum.optional(),
     limit: z.number().int().min(1).max(ARTIFACT_LIST_MAX_LIMIT).default(50),
-    cursor: z.string().optional().describe('Opaque `nextCursor` from the previous page; omit for the first page'),
+    cursor: z.string().max(256).optional().describe('Opaque `nextCursor` from the previous page; omit for the first page'),
   }),
   output: z.object({
     artifacts: z.array(
@@ -654,7 +654,11 @@ export const listArtifacts = defineCommand({
       : filter;
     // One extra row tells us whether another page exists without a second query.
     const rows = await ctx.tx
-      .select({ a: schema.artifacts, state: schema.artifactVersions.state, cursorAt: sql<string>`${schema.artifacts.updatedAt}::text` })
+      .select({
+        a: schema.artifacts,
+        state: schema.artifactVersions.state,
+        cursorAt: sql<string>`to_char(${schema.artifacts.updatedAt} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
+      })
       .from(schema.artifacts)
       .innerJoin(
         schema.artifactVersions,
