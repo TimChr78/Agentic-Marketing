@@ -1149,6 +1149,25 @@ export const warehouseExports = pgTable(
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
 );
 
+/**
+ * Manual downstream cleanup owed by one export after it reported an erasure it could not fully
+ * apply (#373). Raw user/anonymous ids are never stored here: the erasure id and the datasets a
+ * person still has to clean up are enough, and the captured keys can then be pruned. A person
+ * acknowledges a cleanup with `warehouse.acknowledgeErasures`; deleting the export cascades.
+ */
+export const warehouseErasureBacklog = pgTable(
+  'warehouse_erasure_backlog',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    exportId: text('export_id').notNull(),
+    erasureId: text('erasure_id').notNull(),
+    datasets: text('datasets').array().$type<WarehouseDataset[]>().notNull(),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.exportId, t.erasureId] })],
+);
+
 export const assets = pgTable(
   'assets',
   {
@@ -1201,6 +1220,7 @@ export const assetRenditions = pgTable(
 
 export const edgeTargets = pgTable('edge_targets', {
   workspaceId: uuid('workspace_id').primaryKey(),
+  generation: bigint('generation', { mode: 'number' }).notNull().default(0),
   provider: text('provider').$type<'cloudflare'>().notNull().default('cloudflare'),
   accountId: text('account_id').notNull(),
   namespaceId: text('namespace_id').notNull(),

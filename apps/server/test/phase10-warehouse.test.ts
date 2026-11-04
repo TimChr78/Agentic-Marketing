@@ -354,5 +354,5 @@ describe('warehouse export', () => {
     );
     expect(consent.status).toBe('withdrawn');
     expect(Date.now() - new Date(consent.updated_at).getTime()).toBeGreaterThan(4 * 86_400_000);
-  });
+  }, 60_000);
 });

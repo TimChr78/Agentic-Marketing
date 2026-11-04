@@ -341,8 +341,11 @@ export async function erasuresForExport(
 }
 
 /**
- * Drops captured keys once every enabled destination has exported the erasure that needed them.
- * With no enabled destination nothing will ever apply them, so they go too.
+ * Drops captured keys once every enabled destination has processed the erasure that needed them.
+ * The cursor advances even when a destination reported an incomplete erasure (it has been told; a
+ * retry cannot recover missing keys), so an outstanding manual cleanup never pins later keys. With
+ * no enabled destination nothing applies them meanwhile, so they stay for a possible re-enable
+ * (and are removed when the last destination is deleted); that retention is otherwise unbounded.
  */
 export async function pruneErasureKeys(db: Db, ws: string): Promise<void> {
   await db.withWorkspace(ws, (tx) =>

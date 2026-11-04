@@ -1,3 +1,4 @@
+import { setTimeout as delay } from 'node:timers/promises';
 import { artifactTypes, DEFAULT_PURPOSES, publishedSingleton, publishListeners } from '@agentic-marketing/artifacts';
 import { defineCommand } from '@agentic-marketing/commands';
 import { AppError, sha256 } from '@agentic-marketing/core';
@@ -168,7 +169,7 @@ export function planEdgeConfigure(prev: EdgeSettings | null, input: EdgeConfigur
   const next = {
     accountId: input.accountId,
     namespaceId: input.namespaceId,
-    apiBase: input.apiBase ?? null,
+    apiBase: input.apiBase ?? prev?.apiBase ?? null,
     snapshots: input.snapshots ?? prev?.snapshots ?? true,
     enabled: input.enabled ?? prev?.enabled ?? true,
   };
@@ -190,10 +191,13 @@ export function planEdgeConfigure(prev: EdgeSettings | null, input: EdgeConfigur
     for (const p of [
       ...priorTarget,
       { accountId: prev.accountId, namespaceId: prev.namespaceId, apiBase: prev.apiBase ?? null, keys: [...prev.pushedKeys] },
-    ])
-      merged.set(destination(p), p);
+    ]) {
+      const previous = merged.get(destination(p));
+      merged.set(destination(p), { ...p, keys: [...new Set([...(previous?.keys ?? []), ...p.keys])] });
+    }
     priorTarget = [...merged.values()];
   }
+  const reusedKeys = priorTarget.find((p) => destination(p) === destination(next))?.keys ?? [];
   priorTarget = priorTarget.filter((p) => destination(p) !== destination(next));
   const startsBackfill = moved || (next.enabled && !prev.enabled) || (next.snapshots && !prev.snapshots);
   const servesSnapshots = next.enabled && next.snapshots;
@@ -211,7 +215,7 @@ export function planEdgeConfigure(prev: EdgeSettings | null, input: EdgeConfigur
   return {
     ...next,
     bundleHash: moved || (next.enabled && !prev.enabled) ? null : prev.bundleHash,
-    pushedKeys: moved ? [] : prev.pushedKeys,
+    pushedKeys: moved ? [...reusedKeys] : prev.pushedKeys,
     backfillCursor: !servesSnapshots ? null : startsBackfill ? '' : prev.backfillCursor,
     cleanupMode,
     priorTarget: priorTarget.length ? priorTarget : null,
@@ -250,8 +254,9 @@ export const edgeConfigure = defineCommand({
   sensitive: ['apiToken'],
   handler: async (input, ctx) => {
     const ws = ctx.principal.workspaceId;
+    await ctx.tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`edge-config:${ws}`}, 0))`);
     const sealed = input.apiToken ? await sealJson(ctx.tx, ws, ctx.services.keyProvider, { apiToken: input.apiToken }) : null;
-    const [prev] = await ctx.tx.select().from(schema.edgeTargets);
+    const [prev] = await ctx.tx.select().from(schema.edgeTargets).for('update');
     const plan = planEdgeConfigure(prev ?? null, input);
     const values = {
       ...plan,
@@ -261,7 +266,10 @@ export const edgeConfigure = defineCommand({
     await ctx.tx
       .insert(schema.edgeTargets)
       .values({ workspaceId: ws, ...values })
-      .onConflictDoUpdate({ target: schema.edgeTargets.workspaceId, set: values });
+      .onConflictDoUpdate({
+        target: schema.edgeTargets.workspaceId,
+        set: { ...values, generation: sql`${schema.edgeTargets.generation} + 1` },
+      });
     ctx.afterCommit?.(async () => {
       mirrorOn.delete(ws);
     });
@@ -282,9 +290,15 @@ export const edgeSync = defineCommand({
   effect: 'write',
   actionClass: 'experience.live',
   handler: async (input, ctx) => {
+    await ctx.tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`edge-config:${ctx.principal.workspaceId}`}, 0))`);
     const done = await ctx.tx
       .update(schema.edgeTargets)
-      .set({ bundleHash: null, ...(input.backfillSnapshots ? { backfillCursor: '' } : {}), updatedAt: new Date() })
+      .set({
+        bundleHash: null,
+        generation: sql`${schema.edgeTargets.generation} + 1`,
+        ...(input.backfillSnapshots ? { backfillCursor: sql`CASE WHEN enabled AND snapshots THEN '' ELSE NULL END` } : {}),
+        updatedAt: new Date(),
+      })
       .returning({ ws: schema.edgeTargets.workspaceId });
     if (!done.length) throw new AppError('not_found', 'Edge decisions are not configured. Use edge.configure first.');
     return status(ctx.tx);
@@ -433,6 +447,31 @@ async function deleteWorkspaceCopies(kv: KvClient, ws: string, keys: string[]) {
 
 /** One sync of one workspace: remote cleanup, the bundle if it changed, queued snapshots, and a slice of backfill. */
 export async function syncEdge(deps: EdgeDeps, ws: string) {
+  // A session lock serializes replicas without holding a transaction open during HTTP. A fresh
+  // configuration can still commit; generation fences below stop the old tick before it acks
+  // work or replaces the new state. The next tick cleans any late writes to the old target.
+  const client = await deps.db.admin.connect();
+  let locked = false;
+  let destroy = false;
+  try {
+    const result = await client.query<{ locked: boolean }>('SELECT pg_try_advisory_lock(hashtextextended($1, 0)) AS locked', [
+      `edge-sync:${ws}`,
+    ]);
+    locked = result.rows[0].locked;
+    if (locked) await syncEdgeLocked(deps, ws);
+  } finally {
+    if (locked) {
+      try {
+        await client.query('SELECT pg_advisory_unlock(hashtextextended($1, 0))', [`edge-sync:${ws}`]);
+      } catch {
+        destroy = true;
+      }
+    }
+    client.release(destroy);
+  }
+}
+
+async function syncEdgeLocked(deps: EdgeDeps, ws: string) {
   const state = await deps.db.withWorkspace(ws, async (tx) => {
     const [t] = await tx.select().from(schema.edgeTargets);
     if (!t) return null;
@@ -455,6 +494,16 @@ export async function syncEdge(deps: EdgeDeps, ws: string) {
   });
   if (!state) return;
   const { t, bundle, sources, queued } = state;
+  const update = async (values: Partial<typeof schema.edgeTargets.$inferInsert>) => {
+    const changed = await deps.db.withWorkspace(ws, (tx) =>
+      tx
+        .update(schema.edgeTargets)
+        .set(values)
+        .where(and(eq(schema.edgeTargets.workspaceId, ws), eq(schema.edgeTargets.generation, t.generation)))
+        .returning({ workspaceId: schema.edgeTargets.workspaceId }),
+    );
+    return changed.length > 0;
+  };
   // Experiences, purposes and write keys, as KV entries; pushed only when they changed.
   const entries = [
     { key: kvKeys.bundle(ws), value: JSON.stringify(bundle) },
@@ -479,11 +528,7 @@ export async function syncEdge(deps: EdgeDeps, ws: string) {
   const staleReady = stale.some((p) => !p.nextAttemptAt || Date.parse(p.nextAttemptAt) <= Date.now());
   if (!servesBundle && !queued && !backfills && !t.cleanupMode && !staleReady) return;
   if (!t.secrets || !t.secretsKeyId) {
-    await deps.db.withWorkspace(ws, (tx) =>
-      tx
-        .update(schema.edgeTargets)
-        .set({ lastError: 'No Cloudflare API token: the edge cannot be updated or cleaned up.', lastSyncAt: new Date() }),
-    );
+    await update({ lastError: 'No Cloudflare API token: the edge cannot be updated or cleaned up.', lastSyncAt: new Date() });
     return;
   }
   try {
@@ -516,8 +561,7 @@ export async function syncEdge(deps: EdgeDeps, ws: string) {
       }
       if (keep.length)
         staleError = `${keep.length} prior edge destination(s) still require cleanup: ${keep[0].lastError ?? 'retry pending'}`;
-      if (JSON.stringify(keep) !== JSON.stringify(stale))
-        await deps.db.withWorkspace(ws, (tx) => tx.update(schema.edgeTargets).set({ priorTarget: keep.length ? keep : null }));
+      if (JSON.stringify(keep) !== JSON.stringify(stale)) if (!(await update({ priorTarget: keep.length ? keep : null }))) return;
     }
     // 1. Finish a cleanup owed after serving was turned off, before any write. Until it succeeds the
     // mode stays set and the next sync retries; the status never reports a cleanup that did not run.
@@ -527,17 +571,18 @@ export async function syncEdge(deps: EdgeDeps, ws: string) {
       if (mode === 'all') await deleteWorkspaceCopies(kv, ws, t.pushedKeys);
       else await deleteSnapshots(kv, ws);
       removedAll = mode === 'all';
-      await deps.db.withWorkspace(ws, (tx) =>
-        tx.update(schema.edgeTargets).set({ cleanupMode: null, ...(mode === 'all' ? { pushedKeys: [], bundleHash: null } : {}) }),
-      );
+      if (!(await update({ cleanupMode: null, ...(mode === 'all' ? { pushedKeys: [], bundleHash: null } : {}) }))) return;
     }
     // 2. Experiences, purposes and write keys. Never while serving is off.
     if (t.enabled && (hash !== t.bundleHash || removedAll)) {
-      await kv.put(entries);
       const keys = entries.map((e) => e.key);
+      // Reserve keys before uploading: configure must retain even a write that finishes after
+      // the target moves. Its row lock observes this reservation and queues the old keys.
+      if (!(await update({ pushedKeys: [...new Set([...t.pushedKeys, ...keys])] }))) return;
+      await kv.put(entries);
       const gone = t.pushedKeys.filter((k) => !keys.includes(k));
       if (gone.length) await kv.delete(gone);
-      await deps.db.withWorkspace(ws, (tx) => tx.update(schema.edgeTargets).set({ bundleHash: hash, pushedKeys: keys }));
+      if (!(await update({ bundleHash: hash, pushedKeys: keys }))) return;
     }
     // 3. Queued snapshot writes and deletions; the latest per key wins. When snapshots are off,
     // every queued entry is deleted rather than uploaded, and erasure tombstones are never dropped.
@@ -556,7 +601,12 @@ export async function syncEdge(deps: EdgeDeps, ws: string) {
       const deletes = servesSnapshots ? [...latest].filter(([, v]) => v === null).map(([key]) => key) : [...latest.keys()];
       if (puts.length) await kv.put(puts);
       if (deletes.length) await kv.delete(deletes);
-      await deps.db.admin.query('DELETE FROM edge_outbox WHERE workspace_id = $1 AND id <= $2', [ws, rows[rows.length - 1].id]);
+      const acknowledged = await deps.db.admin.query(
+        `DELETE FROM edge_outbox WHERE workspace_id = $1 AND id <= $2 AND EXISTS (
+           SELECT 1 FROM edge_targets WHERE workspace_id = $1 AND generation = $3)`,
+        [ws, rows[rows.length - 1].id, t.generation],
+      );
+      if (!acknowledged.rowCount) return;
       if (rows.length < 5000) break;
     }
     // 4. Backfill: everyone's snapshot, a slice per sync (written through the mirror above).
@@ -575,13 +625,13 @@ export async function syncEdge(deps: EdgeDeps, ws: string) {
         people.map((p) => p.id),
       );
       const next = people.length === 1000 ? people[people.length - 1].id : null;
-      await deps.db.withWorkspace(ws, (tx) => tx.update(schema.edgeTargets).set({ backfillCursor: next }));
+      if (!(await update({ backfillCursor: next }))) return;
     }
-    await deps.db.withWorkspace(ws, (tx) => tx.update(schema.edgeTargets).set({ lastSyncAt: new Date(), lastError: staleError }));
+    await update({ lastSyncAt: new Date(), lastError: staleError });
   } catch (err) {
     const message = (err as Error).message.slice(0, 500);
     logger.warn({ err, workspace: ws }, 'edge sync failed');
-    await deps.db.withWorkspace(ws, (tx) => tx.update(schema.edgeTargets).set({ lastError: message, lastSyncAt: new Date() }));
+    await update({ lastError: message, lastSyncAt: new Date() });
   }
 }
 
@@ -598,6 +648,8 @@ export async function runEdgeSync(deps: EdgeDeps & { tickMs?: number }, signal: 
     } catch (err) {
       logger.error({ err }, 'edge sync round failed');
     }
-    await new Promise((r) => setTimeout(r, deps.tickMs ?? 1000));
+    await delay(deps.tickMs ?? 1000, undefined, { signal }).catch((err: unknown) => {
+      if (!signal.aborted) throw err;
+    });
   }
 }

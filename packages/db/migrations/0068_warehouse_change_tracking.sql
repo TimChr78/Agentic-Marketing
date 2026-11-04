@@ -115,3 +115,29 @@ END $$;
 CREATE TRIGGER warehouse_exports_drop_unused_erasure_keys
   AFTER DELETE ON warehouse_exports
   FOR EACH ROW EXECUTE FUNCTION warehouse_drop_unused_erasure_keys();
+
+-- Manual cleanup backlog (#373). An erasure whose captured keys are gone (a legacy erasure, or one
+-- another destination already consumed) cannot be applied by a destination that locates events by
+-- identifier. Retrying cannot recover those keys, so the export advances its erasure cursor anyway
+-- and records the outstanding work here. Only the erasure id and the datasets remain: the raw
+-- user/anonymous ids are *not* retained, so later keys stay prunable. A person inspects the list
+-- with warehouse.erasureBacklog and acknowledges selected ids, with a note, through
+-- warehouse.acknowledgeErasures. Deleting the export discards its backlog.
+CREATE TABLE warehouse_erasure_backlog (
+  workspace_id uuid NOT NULL REFERENCES workspaces (id) ON DELETE CASCADE,
+  export_id text NOT NULL,
+  erasure_id text NOT NULL,
+  datasets text[] NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (workspace_id, export_id, erasure_id),
+  FOREIGN KEY (workspace_id, export_id) REFERENCES warehouse_exports (workspace_id, id) ON DELETE CASCADE
+);
+
+ALTER TABLE warehouse_erasure_backlog ENABLE ROW LEVEL SECURITY;
+ALTER TABLE warehouse_erasure_backlog FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON warehouse_erasure_backlog
+  USING (workspace_id = nullif(current_setting('app.workspace_id', true), '')::uuid)
+  WITH CHECK (workspace_id = nullif(current_setting('app.workspace_id', true), '')::uuid);
+
+GRANT SELECT, INSERT, UPDATE, DELETE ON warehouse_erasure_backlog TO am_app;

@@ -206,7 +206,7 @@ export async function startTestServer(
   name: string,
   port: number,
   env: Record<string, string> = {},
-  testOptions: { warehouseTickMs?: number } = {},
+  testOptions: { warehouseTickMs?: number; edgeTickMs?: number } = {},
 ) {
   const base = `http://localhost:${port}`;
   const dbName = `am_${name}`;
@@ -258,7 +258,7 @@ export async function startTestServer(
       broadcastTickMs: 300,
       warehouseTickMs: testOptions.warehouseTickMs ?? 300,
       warehouseLagMs: 0,
-      edgeTickMs: 200,
+      edgeTickMs: testOptions.edgeTickMs ?? 200,
       // Alert tests drive the evaluator directly with a fixed clock; keep the background loop out of the way.
       alertTickMs: 86_400_000,
       // Agent notification tests drive the job directly with a fixed clock; keep the loop away.

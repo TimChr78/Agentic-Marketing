@@ -95,4 +95,17 @@ describe('edge.configure state', () => {
     const plan = planEdgeConfigure(disabled, { accountId: A, namespaceId: B, enabled: false });
     expect(plan.cleanupMode).toBeNull();
   });
+  it('preserves a custom API base on a token-only rotation', () => {
+    const plan = planEdgeConfigure({ ...base, apiBase: 'https://kv.example.com' }, { accountId: A, namespaceId: B });
+    expect(plan).toMatchObject({ apiBase: 'https://kv.example.com', bundleHash: base.bundleHash, cleanupMode: null, priorTarget: null });
+  });
+
+  it('tracks old write keys when returning to an earlier namespace', () => {
+    const plan = planEdgeConfigure(
+      { ...base, namespaceId: 'c'.repeat(32), priorTarget: [{ accountId: A, namespaceId: B, apiBase: null, keys: ['am:key:retired'] }] },
+      { accountId: A, namespaceId: B },
+    );
+    expect(plan.pushedKeys).toEqual(['am:key:retired']);
+    expect(plan.cleanupMode).toBe('all');
+  });
 });
