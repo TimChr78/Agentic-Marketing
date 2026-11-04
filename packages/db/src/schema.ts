@@ -525,12 +525,65 @@ export const audienceMembers = pgTable(
     workspaceId: uuid('workspace_id').notNull(),
     syncId: text('sync_id').notNull(),
     platform: text('platform').$type<'meta' | 'google'>().notNull(),
+    /**
+     * The immutable destination identity: platform, connection, operating account and platform
+     * audience/list id. Rows written before 0.7.4 use `legacy:unknown`; their destination cannot
+     * be proven (#400).
+     */
+    destinationKey: text('destination_key').notNull(),
+    /** Null only for pre-0.7.4 rows whose destination was never recorded. */
+    connectionId: text('connection_id'),
+    destinationId: text('destination_id'),
+    /** Google customerId / Meta ad account id at upload time; never the mutable connection ref alone. */
+    operatingAccountId: text('operating_account_id'),
+    /** Google manager account (loginCustomerId) at upload time, when one was used. */
+    loginAccountId: text('login_account_id'),
+    /** False for pre-0.7.4 rows: the destination is unknown, so erasure cannot claim to clean it. */
+    destinationKnown: boolean('destination_known').notNull().default(false),
     profileId: text('profile_id').notNull(),
     /** What was sent: the platform's hashes of e-mail and phone (needed to remove the person again). */
     hashes: jsonb('hashes').$type<{ email?: string; phone?: string }>().notNull(),
+    /** Set when the stored destination cannot be reached; the row is kept so cleanup is retried/surfaced. */
+    orphanedAt: ts('orphaned_at'),
+    orphanedReason: text('orphaned_reason'),
+    /** Stable id for bounded inspection and human acknowledgement of a manual cleanup. */
+    cleanupId: uuid('cleanup_id').notNull().defaultRandom(),
+    attempts: integer('attempts').notNull().default(0),
+    lastError: text('last_error'),
     addedAt: ts('added_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
   },
-  (t) => [primaryKey({ columns: [t.workspaceId, t.syncId, t.platform, t.profileId] })],
+  (t) => [primaryKey({ columns: [t.workspaceId, t.syncId, t.platform, t.destinationKey, t.profileId] })],
+);
+
+/**
+ * A remote write that may have been applied but whose ledger row is not written yet (#401, #402).
+ * The intent is inserted before the HTTP call and removed in the same transaction as the ledger
+ * row, so a timeout, crash or DB failure cannot leave an uploaded hash untracked for erasure.
+ */
+export const audienceWriteIntents = pgTable(
+  'audience_write_intents',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    syncId: text('sync_id').notNull(),
+    platform: text('platform').$type<'meta' | 'google'>().notNull(),
+    destinationKey: text('destination_key').notNull(),
+    connectionId: text('connection_id').notNull(),
+    destinationId: text('destination_id').notNull(),
+    operatingAccountId: text('operating_account_id').notNull(),
+    loginAccountId: text('login_account_id'),
+    profileId: text('profile_id').notNull(),
+    op: text('op').$type<'add'>().notNull(),
+    hashes: jsonb('hashes').$type<{ email?: string; phone?: string }>().notNull(),
+    orphanedAt: ts('orphaned_at'),
+    orphanedReason: text('orphaned_reason'),
+    cleanupId: uuid('cleanup_id').notNull().defaultRandom(),
+    attempts: integer('attempts').notNull().default(0),
+    lastError: text('last_error'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.syncId, t.platform, t.destinationKey, t.profileId, t.op] })],
 );
 
 export const audienceSyncState = pgTable(
@@ -544,6 +597,14 @@ export const audienceSyncState = pgTable(
     members: integer('members').notNull().default(0),
     added: integer('added').notNull().default(0),
     removed: integer('removed').notNull().default(0),
+    /** The destination the last run reconciled; null when the artifact is not published. */
+    destinationKey: text('destination_key'),
+    /** Keyset cursor for additions (#402): the last profile id scanned for new members. */
+    lastProfileId: text('last_profile_id'),
+    /** Keyset cursor for re-checking already-uploaded members (#401). */
+    reconcileProfileId: text('reconcile_profile_id'),
+    /** Rows kept because their destination is unknown or unreachable; cleanup is still owed. */
+    unresolved: integer('unresolved').notNull().default(0),
     lastRunAt: ts('last_run_at').notNull().defaultNow(),
   },
   (t) => [primaryKey({ columns: [t.workspaceId, t.syncId, t.platform] })],
