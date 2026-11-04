@@ -55,7 +55,8 @@ export function markSaved(state: DraftSyncState, snapshot: string): DraftSyncSta
 /** Switches documents: the new artifact's first refetch always wins over the old draft. */
 export function switchArtifact(state: DraftSyncState, _artifactId: string): DraftSyncState {
   // No artifact owns the draft until the new document's snapshot arrives, and the old save is stale.
-  return { ...state, artifactId: null, synced: null, latestSave: state.saveSeq };
+  const invalidated = state.saveSeq + 1;
+  return { ...state, artifactId: null, synced: null, saveSeq: invalidated, latestSave: invalidated };
 }
 
 /**

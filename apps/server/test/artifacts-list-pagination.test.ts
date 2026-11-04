@@ -6,11 +6,12 @@ import { rejects, startTestServer, testPort, type User } from './harness';
 
 let t: Awaited<ReturnType<typeof startTestServer>>;
 let owner: User;
+let ws = '';
 
 beforeAll(async () => {
   t = await startTestServer('test_artifact_pages', testPort(3510));
   owner = await t.signUp(`pages-${Date.now()}@example.com`);
-  await t.workspaceWith([[owner, 'owner']]);
+  ws = await t.workspaceWith([[owner, 'owner']]);
   const api = t.api(owner);
   for (let i = 0; i < 201; i++) {
     await api.call('artifacts.create', { type: 'note', name: `Numbered note ${i}`, content: { title: `Note ${i}`, body: 'Body' } });
@@ -22,6 +23,18 @@ describe('artifacts.list pagination (#382)', () => {
   it('reaches every artifact and reports the server total, not the page length', async () => {
     const api = t.api(owner);
 
+    // Every row shares a JS millisecond. A cursor rounded through Date would skip the last
+    // microsecond-tied row, even though ordinary creation timestamps might hide that bug.
+    await t.srv.db.admin.query(
+      `
+      WITH ranked AS (
+        SELECT id, row_number() OVER (ORDER BY id) AS n FROM artifacts
+        WHERE workspace_id = $1 AND type = 'note'
+      ) UPDATE artifacts a
+      SET updated_at = '2026-11-04 12:34:56.123000+00'::timestamptz + ranked.n * interval '1 microsecond'
+      FROM ranked WHERE a.workspace_id = $1 AND a.id = ranked.id`,
+      [ws],
+    );
     const first = await api.call('artifacts.list', { type: 'note', limit: 200 });
     expect(first.artifacts).toHaveLength(200);
     expect(first.total).toBe(201);

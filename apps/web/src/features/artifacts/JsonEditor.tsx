@@ -30,6 +30,7 @@ export function JsonEditor({
     // the text does not parse it stays put: a refetch of the last valid content must not erase it.
     const documentChanged = documentRef.current !== documentKey;
     documentRef.current = documentKey;
+    if (documentChanged) setError(null);
     if (shouldSyncJsonText({ text, value, documentChanged })) setText(JSON.stringify(value, null, 2));
   }, [value, documentKey]);
   return (

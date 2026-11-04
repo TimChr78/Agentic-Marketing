@@ -69,6 +69,16 @@ describe('artifact draft sync (#381)', () => {
     expect(shouldAdoptSnapshot(state, 'jrn_2', { nodes: ['A', 'B'] }, { nodes: ['X'] })).toBe(true);
   });
 
+  it('cannot revive an old save after leaving and returning to the same document', () => {
+    let state = adoptSnapshot(createDraftSync(), 'jrn_1', { nodes: ['A'] });
+    const oldVisit = beginSave(state, 'jrn_1', { nodes: ['A', 'B'] });
+    state = adoptSnapshot(switchArtifact(oldVisit.state, 'jrn_2'), 'jrn_2', { nodes: ['X'] });
+    state = adoptSnapshot(switchArtifact(state, 'jrn_1'), 'jrn_1', { nodes: ['A'] });
+    expect(saveResponseIsCurrent(state, oldVisit.seq, 'jrn_1')).toBe(false);
+    const newVisit = beginSave(state, 'jrn_1', { nodes: ['C'] });
+    expect(saveResponseIsCurrent(newVisit.state, newVisit.seq, 'jrn_1')).toBe(true);
+  });
+
   it('keeps local edits on an ordinary refetch but follows the server when untouched', () => {
     let state = adoptSnapshot(createDraftSync(), 'jrn_1', { title: 'A' });
 

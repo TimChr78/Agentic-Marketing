@@ -30,6 +30,7 @@ describe('JSON editor draft text (#384)', () => {
     // Switching artifacts must not leave the previous document's broken text in place.
     rerender(<JsonEditor value={{ b: 2 }} onChange={onChange} documentKey="exp_2" />);
     expect((text as HTMLTextAreaElement).value).toBe(JSON.stringify({ b: 2 }, null, 2));
+    expect(screen.queryByText(/Not valid JSON yet/)).toBeNull();
   });
 
   it('follows a genuinely different valid value from the outside', () => {
