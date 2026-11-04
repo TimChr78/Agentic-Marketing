@@ -1,16 +1,25 @@
-{{- with .Values.roles.ingest.autoscaling }}
+{{- range $role, $r := .Values.roles }}
+{{- if and $r.autoscaling $r.autoscaling.enabled (eq $role "scheduler") }}
+{{- fail "roles.scheduler.autoscaling must stay disabled: scheduler loops are not coordinated across replicas" }}
+{{- end }}
+{{- with $r.autoscaling }}
 {{- if .enabled }}
+{{- $min := .minReplicas | default $r.replicas | default 1 }}
+---
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: {{ include "am.fullname" $ }}-ingest
-  labels: {{- include "am.labels" $ | nindent 4 }}
+  name: {{ include "am.fullname" $ }}-{{ $role }}
+  labels:
+    {{- include "am.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $role }}
 spec:
-  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: {{ include "am.fullname" $ }}-ingest }
-  minReplicas: {{ .minReplicas }}
-  maxReplicas: {{ .maxReplicas }}
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: {{ include "am.fullname" $ }}-{{ $role }} }
+  minReplicas: {{ $min }}
+  maxReplicas: {{ .maxReplicas | default $min }}
   metrics:
     - type: Resource
-      resource: { name: cpu, target: { type: Utilization, averageUtilization: {{ .targetCPUUtilizationPercentage }} } }
+      resource: { name: cpu, target: { type: Utilization, averageUtilization: {{ .targetCPUUtilizationPercentage | default 70 }} } }
+{{- end }}
 {{- end }}
 {{- end }}

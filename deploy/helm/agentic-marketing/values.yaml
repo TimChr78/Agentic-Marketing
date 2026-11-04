@@ -42,6 +42,7 @@ config:
   NATS_RETENTION_HOURS: "24"
   VALKEY_URL: redis://valkey:6379
   KEY_PROVIDER: local   # local (MASTER_KEY), openbao or aws-kms
+  LOG_LEVEL: info       # pino: fatal, error, warn, info, debug, trace or silent
   EMAIL_TRACK_CLICKS: "true"
   RETENTION_UNCONFIRMED_DAYS: "30"
   RETENTION_LOG_DAYS: "180"
@@ -54,6 +55,11 @@ config:
 # to enable GET /metrics; without it the endpoint answers 404.
 secrets:
   existingSecret: ""
+  # Helm cannot read an existingSecret's contents, so changing it in place does not change the pod
+  # template. Bump this value (for example to the rotation date) in the same `helm upgrade` to roll
+  # the roles; alternatively run `kubectl rollout restart`. Managed secrets.values roll by
+  # themselves because the rendered Secret is part of the checksum.
+  revision: ""
   values: {}
   #   DATABASE_URL: postgres://am:…@postgres:5432/am
   #   APP_DB_PASSWORD: …
@@ -61,15 +67,21 @@ secrets:
   #   MASTER_KEY: …
   #   METRICS_TOKEN: …   # openssl rand -hex 24; scrape /metrics with Bearer $METRICS_TOKEN
 
-# Extra environment for every role, e.g. a token file mounted by an OpenBao agent.
+# Extra environment for every role, e.g. a token file mounted by an OpenBao agent. The migration
+# hook uses these too, so on a first install any Secret or ConfigMap they reference must already
+# exist in the namespace.
 extraEnv: []
 extraVolumes: []
 extraVolumeMounts: []
 
-# Database, ClickHouse and Valkey migrations run as a Helm hook before each install and upgrade.
+# Postgres, ClickHouse and Valkey migrations run as a pre-install/pre-upgrade hook: before the
+# roles are created on a first install and before they roll on an upgrade. The hook carries its
+# configuration and secret values itself because the release's ConfigMap and Secret do not exist
+# yet on install; see docs/deployment/kubernetes.md.
 migrations:
   enabled: true
   backoffLimit: 3
+  resources: { requests: { cpu: 250m, memory: 512Mi }, limits: { memory: 1Gi } }
 
 service:
   type: ClusterIP

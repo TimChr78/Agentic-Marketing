@@ -124,6 +124,10 @@ openssl rand -hex 24          # the token; put it in .env (or a Kubernetes Secre
 curl -fsS -H "Authorization: Bearer $METRICS_TOKEN" http://localhost:3000/metrics
 ```
 
+In Docker Compose every variable documented in `.env.example` reaches the app container, so setting `METRICS_TOKEN` and running `docker compose up -d` recreates the container with `/metrics` enabled. `PUBLIC_PORT` still never serves it.
+
+The server writes JSON logs at `LOG_LEVEL` (default `info`; also `fatal`, `error`, `warn`, `debug`, `trace` or `silent`). An unset or empty value keeps `info`, so a Compose or Kubernetes variable left blank does not break start-up.
+
 The endpoint accepts only the `Authorization: Bearer …` header: a missing or wrong token gets `401` (no `?token=` query form, so the secret stays out of proxy access logs). Each scrape runs the dependency checks and one aggregate query against Postgres, every one of them limited to 3 seconds.
 
 ### Scrape configuration

@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { ENV_KEYS } from '../src/config';
 
 // The repository root, so this test reads the deployment files an operator sees (no Docker, no network).
 const root = fileURLToPath(new URL('../../../', import.meta.url));
@@ -36,6 +37,24 @@ const [
   read('deploy/helm/agentic-marketing/templates/ingress.yaml'),
   read('docs/deployment/kubernetes.md'),
 ]);
+
+const [helmDeployments, helmMigrateJob, helmNotes, helmHelpers, helmHpa] = await Promise.all([
+  read('deploy/helm/agentic-marketing/templates/deployments.yaml'),
+  read('deploy/helm/agentic-marketing/templates/migrate-job.yaml'),
+  read('deploy/helm/agentic-marketing/templates/NOTES.txt'),
+  read('deploy/helm/agentic-marketing/templates/_helpers.tpl'),
+  read('deploy/helm/agentic-marketing/templates/hpa.yaml'),
+]);
+
+/** Environment-file keys, including commented examples (`# KEY=value`). */
+function envFileKeys(text: string): string[] {
+  const keys: string[] = [];
+  for (const raw of text.split(/\r?\n/)) {
+    const match = /^(?:#\s*)?(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=/.exec(raw.trim());
+    if (match) keys.push(match[1]);
+  }
+  return keys;
+}
 
 /** The lines of one service, up to the next two-space service key. */
 function service(text: string, name: string): string {
@@ -168,6 +187,75 @@ describe('.env.example', () => {
   it('documents the public listener bind address', () => {
     expect(envExample).toMatch(/^# PUBLIC_BIND=127\.0\.0\.1:3201$/m);
     expect(envExample).toMatch(/PUBLIC_BIND[\s\S]{0,300}(tunnel|network)/i);
+  });
+
+  it('documents every variable the server reads, including runtime plumbing (#387)', () => {
+    const documented = new Set(envFileKeys(envExample));
+    expect(ENV_KEYS.filter((key) => !documented.has(key))).toEqual([]);
+    expect(documented.has('LOG_LEVEL')).toBe(true);
+    expect(envExample).toMatch(/^# LOG_LEVEL=info$/m);
+  });
+});
+
+describe('compose environment completeness (#385)', () => {
+  const app = service(compose, 'app');
+  const passed = new Set([...app.matchAll(/^ {6}([A-Z][A-Z0-9_]+):/gm)].map((match) => match[1]));
+
+  it('passes every server variable into the app container', () => {
+    expect(ENV_KEYS.filter((key) => !passed.has(key))).toEqual([]);
+  });
+
+  it('keeps optional values empty-safe and requires only the secrets a start cannot do without', () => {
+    for (const key of ENV_KEYS) {
+      const line = app.split('\n').find((candidate) => candidate.trimStart().startsWith(`${key}:`));
+      expect(line, `${key} is missing from the app environment`).toBeTruthy();
+      const reference = `\${${key}`;
+      if (line?.includes(reference)) expect(line).toMatch(new RegExp(`\\$\\{${key}:(?:-|\\?)`));
+    }
+  });
+
+  it('gives the scheduled backup service the verify-age setting', () => {
+    expect(composeOverride).toContain('BACKUP_VERIFY_MAX_AGE_DAYS');
+  });
+
+  it('documents that Compose now forwards every documented variable', () => {
+    expect(composeDoc).toContain('Every variable the server reads is passed into the `app` container');
+  });
+});
+
+describe('Helm rollout, migration and replica reporting', () => {
+  it('checksums the ConfigMap and the Secret, and offers a revision for external Secrets (#388)', () => {
+    expect(helmDeployments).toContain('checksum/config:');
+    expect(helmDeployments).toContain('checksum/secret:');
+    expect(helmDeployments).toContain('checksum/secret-revision:');
+    expect(helmValues).toMatch(/^\s+revision:\s*""/m);
+    expect(kubeDoc).toContain('secrets.revision');
+    expect(kubeDoc).toContain('kubectl rollout restart');
+  });
+
+  it('migrates before the roles on install and upgrade, without a post-install readiness deadlock (#389)', () => {
+    expect(helmMigrateJob).toMatch(/helm\.sh\/hook:\s*pre-install,pre-upgrade/);
+    expect(helmMigrateJob).not.toMatch(/helm\.sh\/hook:.*post-install/);
+    expect(helmMigrateJob).toContain('range $k, $v := .Values.config');
+    expect(helmMigrateJob).not.toContain('configMapRef');
+    expect(helmMigrateJob).toContain('-migrate-secrets');
+    expect(helmMigrateJob).toContain('if not .Values.serviceAccount.create');
+    expect(kubeDoc).toContain('pre-install/pre-upgrade');
+    expect(kubeDoc).toMatch(/--wait/);
+    expect(kubeDoc).toMatch(/forward-only/i);
+  });
+
+  it('gives the migration Job the same resource pattern as the roles (#390)', () => {
+    expect(helmMigrateJob).toContain('resources: {{- toYaml .Values.migrations.resources');
+    expect(helmValues).toMatch(/migrations:[\s\S]{0,400}resources:/);
+  });
+
+  it('prints the configured or autoscaled replicas, including the scheduler (#391)', () => {
+    expect(helmNotes).not.toMatch(/scheduler \(1\)/);
+    expect(helmNotes).toContain('am.roleReplicas');
+    expect(helmNotes).toContain('.Values.roles.scheduler');
+    expect(helmHelpers).toContain('define "am.roleReplicas"');
+    expect(helmHpa).toContain('range $role, $r := .Values.roles');
   });
 });
 

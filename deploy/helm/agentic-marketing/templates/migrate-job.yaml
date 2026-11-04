@@ -1,12 +1,38 @@
 {{- if .Values.migrations.enabled }}
+{{- if not .Values.secrets.existingSecret }}
+# The release Secret is created after a pre-install hook, so the hook gets its own copy. It is
+# deleted when the job succeeds and kept when it fails, so the logs and the configuration can be
+# inspected. Managed secrets.values roll the roles through checksum/secret in deployments.yaml.
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "am.fullname" . }}-migrate-secrets
+  labels: {{- include "am.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+type: Opaque
+stringData:
+{{- range $k, $v := .Values.secrets.values }}
+  {{ $k }}: {{ $v | toString | quote }}
+{{- end }}
+{{- end }}
+---
 apiVersion: batch/v1
 kind: Job
 metadata:
   name: {{ include "am.fullname" . }}-migrate-{{ .Release.Revision }}
   labels: {{- include "am.labels" . | nindent 4 }}
   annotations:
-    # After the ConfigMap and Secret exist (post-install for the first release), before the roles roll.
-    helm.sh/hook: post-install,pre-upgrade
+    # Pre-install/pre-upgrade, never post-install. Helm runs post-install hooks after the release
+    # resources are created (and after --wait), so on a first install the four roles with
+    # SKIP_MIGRATIONS=true would serve from an unmigrated database behind a healthy /readyz.
+    # This hook runs before any role exists on install and before the new ReplicaSets roll on
+    # upgrade. It carries its own configuration (and, for managed secrets, its own Secret) because
+    # the release ConfigMap and Secret do not exist yet on a first install.
+    helm.sh/hook: pre-install,pre-upgrade
     helm.sh/hook-weight: "0"
     helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
 spec:
@@ -18,7 +44,15 @@ spec:
         app.kubernetes.io/component: migrate
     spec:
       restartPolicy: Never
+      {{- if not .Values.serviceAccount.create }}
+      # A chart-created ServiceAccount does not exist until after a pre-install hook. The migration
+      # needs no API access, so it uses the namespace default; an external ServiceAccount is
+      # already there and stays attached for clusters that require it for pulls or IAM.
       serviceAccountName: {{ include "am.serviceAccountName" . }}
+      {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
       securityContext: {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
         - name: migrate
@@ -26,10 +60,24 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext: {{- toYaml .Values.securityContext | nindent 12 }}
           command: [pnpm, --filter, "@agentic-marketing/server", cli, migrate]
-          {{- with .Values.extraEnv }}
-          env: {{- toYaml . | nindent 12 }}
-          {{- end }}
-          envFrom: {{- include "am.envFrom" . | nindent 12 }}
+          env:
+            {{- if not (hasKey .Values.config "PORT") }}
+            - name: PORT
+              value: "3000"
+            {{- end }}
+            {{- range $k, $v := .Values.config }}
+            {{- if ne (toString $v) "" }}
+            - name: {{ $k }}
+              value: {{ $v | toString | quote }}
+            {{- end }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          envFrom:
+            - secretRef:
+                name: {{ if .Values.secrets.existingSecret }}{{ include "am.secretName" . }}{{ else }}{{ include "am.fullname" . }}-migrate-secrets{{ end }}
+          resources: {{- toYaml .Values.migrations.resources | nindent 12 }}
           {{- with .Values.extraVolumeMounts }}
           volumeMounts: {{- toYaml . | nindent 12 }}
           {{- end }}

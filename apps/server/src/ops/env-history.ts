@@ -90,6 +90,9 @@ export const ENV_SINCE: Record<string, string> = {
 
   // 0.7.0 (issue #145)
   BACKUP_VERIFY_MAX_AGE_DAYS: '0.7.0',
+
+  // 0.7.4 (issue #387): read by the pino logger, not by src/config.ts
+  LOG_LEVEL: '0.7.4',
 };
 
 /**
