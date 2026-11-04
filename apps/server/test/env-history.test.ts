@@ -13,11 +13,11 @@ describe('environment variable history', () => {
   });
 
   it('knows what each release added', () => {
-    // Lists of what releases up to the running one added; later ones only appear once released.
-    expect(envKeysSince('0.6.1')).toEqual(['BACKUP_VERIFY_MAX_AGE_DAYS']);
-    expect(envKeysSince('0.4.1')).toEqual(['BACKUP_VERIFY_MAX_AGE_DAYS', 'METRICS_TOKEN']);
-    expect(envKeysSince('0.2.10')).toEqual(['BACKUP_VERIFY_MAX_AGE_DAYS', 'ERASURE_GRACE_HOURS', 'METRICS_TOKEN']);
-    expect(envKeysSince('0.2.5')).toEqual([
+    // Freeze historical lists at 0.7.3; new release keys have their own explicit assertions.
+    expect(envKeysSince('0.6.1', '0.7.3')).toEqual(['BACKUP_VERIFY_MAX_AGE_DAYS']);
+    expect(envKeysSince('0.4.1', '0.7.3')).toEqual(['BACKUP_VERIFY_MAX_AGE_DAYS', 'METRICS_TOKEN']);
+    expect(envKeysSince('0.2.10', '0.7.3')).toEqual(['BACKUP_VERIFY_MAX_AGE_DAYS', 'ERASURE_GRACE_HOURS', 'METRICS_TOKEN']);
+    expect(envKeysSince('0.2.5', '0.7.3')).toEqual([
       'BACKUP_VERIFY_MAX_AGE_DAYS',
       'ERASURE_GRACE_HOURS',
       'METRICS_TOKEN',
@@ -25,14 +25,20 @@ describe('environment variable history', () => {
       'STEP_UP_MAX_FAILURES',
       'STEP_UP_WINDOW_SECONDS',
     ]);
-    expect(envKeysSince('0.2.4')).toEqual(envKeysSince('0.2.5'));
-    expect(envKeysSince('0.2.3')).toEqual(
+    expect(envKeysSince('0.2.4', '0.7.3')).toEqual(envKeysSince('0.2.5', '0.7.3'));
+    expect(envKeysSince('0.2.3', '0.7.3')).toEqual(
       expect.arrayContaining(['BACKUP_CRON', 'BACKUP_DIR', 'BACKUP_KEEP_DAYS', 'PUBLIC_BIND', 'SKIP_PRE_UPGRADE_BACKUP']),
     );
-    expect(envKeysSince('0.1.2')).toEqual(
+    expect(envKeysSince('0.1.2', '0.7.3')).toEqual(
       expect.arrayContaining(['ASSET_MAX_BYTES', 'MCP_TEXT_CONTENT', 'MCP_TOOL_NAME_STYLE', 'STRICT_INPUTS']),
     );
-    expect(envKeysSince('0.2.4')).not.toContain('BACKUP_DIR');
+    expect(envKeysSince('0.2.4', '0.7.3')).not.toContain('BACKUP_DIR');
+  });
+
+  it('includes LOG_LEVEL starting with 0.7.4, while excluding future releases', () => {
+    expect(envKeysSince('0.7.3', '0.7.3')).toEqual([]);
+    expect(envKeysSince('0.7.3', '0.7.4')).toEqual(['LOG_LEVEL']);
+    expect(envKeysSince('0.7.4', '0.7.4')).toEqual([]);
   });
 
   it('compares release versions and rejects non-versions', () => {
