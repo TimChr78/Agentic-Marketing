@@ -161,10 +161,28 @@ export function emailRoutes(deps: EmailRouteDeps) {
         })),
       }));
   };
-  const preferenceToken = (token: string) => deps.email.links.verify<UnsubscribeLink>(token);
+  // Links issued before a merge still name the old id. Resolve them inside their workspace so
+  // preference reads, writes and the segment update all refer to the surviving person.
+  const canonicalLink = async <T extends { w: string; p: string }>(link: T | null): Promise<T | null> => {
+    if (!link) return null;
+    return deps.db.withWorkspace(link.w, async (tx) => {
+      let id = link.p;
+      for (let i = 0; i < 20; i++) {
+        const [row] = await tx
+          .select({ mergedInto: schema.profiles.mergedInto })
+          .from(schema.profiles)
+          .where(and(eq(schema.profiles.workspaceId, link.w), eq(schema.profiles.id, id)));
+        if (!row) return null;
+        if (!row.mergedInto) return { ...link, p: id };
+        id = row.mergedInto;
+      }
+      return null;
+    });
+  };
+  const preferenceToken = (token: string) => canonicalLink(deps.email.links.verify<UnsubscribeLink>(token));
   const topicToken = (token: string) => {
     const link = deps.email.links.verify<TopicLink>(token);
-    return link?.topic ? link : null;
+    return canonicalLink(link?.topic ? link : null);
   };
   /** The topic's display name, only when it really belongs to the purpose in the token. */
   const topicOf = async (ws: string, purpose: string, topic: string) => {
@@ -189,7 +207,7 @@ export function emailRoutes(deps: EmailRouteDeps) {
   // The token is the same signed payload as the unsubscribe link, so mail scanners that follow
   // links cannot change anything.
   app.get('/u/p/:token', async (c) => {
-    const link = preferenceToken(c.req.param('token'));
+    const link = await preferenceToken(c.req.param('token'));
     if (!link || !(await profileExists(link.w, link.p))) return hosted(c, await hostedPage('expired', null, invalidLink), 404);
     const brand = await deps.db.withWorkspace(link.w, (tx) => publishedSingleton(tx, 'brand'));
     const purposes = await preferencePurposes(link.w, link.p);
@@ -198,7 +216,7 @@ export function emailRoutes(deps: EmailRouteDeps) {
   });
   app.post('/u/p/:token', bodyLimit(PREFERENCES_MAX_BODY, PREFERENCES_TOO_LARGE), async (c) => {
     const token = c.req.param('token');
-    const link = preferenceToken(token);
+    const link = await preferenceToken(token);
     if (!link || !(await profileExists(link.w, link.p))) return hosted(c, await hostedPage('expired', null, invalidLink), 404);
     const body = await c.req.parseBody();
     const action = typeof body.action === 'string' ? body.action : '';
@@ -243,7 +261,7 @@ export function emailRoutes(deps: EmailRouteDeps) {
 
   // A topic link only turns that finer choice off; the purpose's consent is untouched.
   app.get('/u/t/:token', async (c) => {
-    const link = topicToken(c.req.param('token'));
+    const link = await topicToken(c.req.param('token'));
     if (!link || !(await profileExists(link.w, link.p))) return hosted(c, await hostedPage('expired', null, invalidLink), 404);
     const topic = await topicOf(link.w, link.u, link.topic);
     if (!topic) return hosted(c, await hostedPage('expired', null, invalidLink), 404);
@@ -261,7 +279,7 @@ export function emailRoutes(deps: EmailRouteDeps) {
   });
   app.post('/u/t/:token', bodyLimit(PREFERENCES_MAX_BODY, PREFERENCES_TOO_LARGE), async (c) => {
     const token = c.req.param('token');
-    const link = topicToken(token);
+    const link = await topicToken(token);
     if (!link || !(await profileExists(link.w, link.p))) return hosted(c, await hostedPage('expired', null, invalidLink), 404);
     const topic = await topicOf(link.w, link.u, link.topic);
     if (!topic) return hosted(c, await hostedPage('expired', null, invalidLink), 404);

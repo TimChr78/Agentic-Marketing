@@ -136,6 +136,7 @@ export const listProfiles = defineCommand({
   }),
   permission: 'profiles:read',
   effect: 'read',
+  auditReads: true,
   handler: async (input, ctx) => {
     const purposes = await purposesOf(ctx);
     // One query for the page: consentStatusSql is the shared rule (ADR-0014) as a scalar subquery.

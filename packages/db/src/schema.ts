@@ -1149,6 +1149,25 @@ export const warehouseExports = pgTable(
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
 );
 
+/**
+ * Manual downstream cleanup owed by one export after it reported an erasure it could not fully
+ * apply (#373). Raw user/anonymous ids are never stored here: the erasure id and the datasets a
+ * person still has to clean up are enough, and the captured keys can then be pruned. A person
+ * acknowledges a cleanup with `warehouse.acknowledgeErasures`; deleting the export cascades.
+ */
+export const warehouseErasureBacklog = pgTable(
+  'warehouse_erasure_backlog',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    exportId: text('export_id').notNull(),
+    erasureId: text('erasure_id').notNull(),
+    datasets: text('datasets').array().$type<WarehouseDataset[]>().notNull(),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.exportId, t.erasureId] })],
+);
+
 export const assets = pgTable(
   'assets',
   {
@@ -1201,6 +1220,7 @@ export const assetRenditions = pgTable(
 
 export const edgeTargets = pgTable('edge_targets', {
   workspaceId: uuid('workspace_id').primaryKey(),
+  generation: bigint('generation', { mode: 'number' }).notNull().default(0),
   provider: text('provider').$type<'cloudflare'>().notNull().default('cloudflare'),
   accountId: text('account_id').notNull(),
   namespaceId: text('namespace_id').notNull(),
@@ -1212,6 +1232,20 @@ export const edgeTargets = pgTable('edge_targets', {
   bundleHash: text('bundle_hash'),
   pushedKeys: text('pushed_keys').array().$type<string[]>().notNull().default([]),
   backfillCursor: text('backfill_cursor'),
+  /** Remote deletion owed after serving was turned off; cleared only when KV confirms it. */
+  cleanupMode: text('cleanup_mode').$type<'snapshots' | 'all'>(),
+  /** Destinations this workspace moved away from, kept until their KV copies are deleted. */
+  priorTarget:
+    jsonb('prior_target').$type<
+      {
+        accountId: string;
+        namespaceId: string;
+        apiBase: string | null;
+        keys: string[];
+        nextAttemptAt?: string;
+        lastError?: string;
+      }[]
+    >(),
   lastSyncAt: ts('last_sync_at'),
   lastError: text('last_error'),
   createdAt: ts('created_at').notNull().defaultNow(),

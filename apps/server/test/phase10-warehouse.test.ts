@@ -202,4 +202,166 @@ describe('warehouse export', () => {
     expect(done).toMatchObject({ lastStatus: 'failed' });
     expect(done.lastError).toContain('private address');
   });
+
+  // #373: an events-only destination does not receive am_identifiers, so erasure used to delete
+  // nothing and still record success in am_erasures.
+  it('erases events for a destination that exports only events', async () => {
+    const api = t.api(owner);
+    const userId = `wh-events-only-${Date.now()}`;
+    await send([
+      { type: 'identify', userId, traits: { plan: 'events' } },
+      { type: 'track', event: 'Viewed', userId, properties: { page: 'pricing' } },
+    ]);
+    const profileId = (
+      await eventually(
+        () => api.call('profiles.find', { type: 'user_id', value: userId }),
+        (r) => !!r.profileId,
+      )
+    ).profileId!;
+    await eventually(
+      () => api.call('profiles.events', { profileId }),
+      (r) => r.events.length >= 1,
+    );
+    await new Promise((r) => setTimeout(r, 1500)); // the sink stores the event
+
+    const x = await api.call('warehouse.create', {
+      name: 'Events only',
+      kind: 'postgres',
+      config: { schema: 'events_only' },
+      secrets: { url: destUrl },
+      datasets: ['events'],
+    });
+    expect(await exported(x.id, null)).toMatchObject({ lastStatus: 'ok' });
+
+    const events = async () =>
+      (await dest.query('SELECT count(*)::int AS n FROM events_only.am_events WHERE workspace_id = $1 AND user_id = $2', [ws, userId]))
+        .rows[0].n as number;
+    expect(await events()).toBeGreaterThanOrEqual(1);
+    expect(
+      (
+        await dest.query(
+          "SELECT count(*)::int AS n FROM events_only.am_events WHERE workspace_id = $1 AND user_id = $2 AND name = 'Viewed'",
+          [ws, userId],
+        )
+      ).rows[0].n,
+    ).toBe(1);
+    // It never received the identifiers dataset.
+    expect((await dest.query('SELECT count(*)::int AS n FROM events_only.am_identifiers WHERE workspace_id = $1', [ws])).rows[0].n).toBe(0);
+
+    await api.call('profiles.erase', { profileId, reason: 'Erasure request, events-only test' });
+    await api.call('warehouse.run', { id: x.id });
+    expect(await eventually(events, (n) => n === 0)).toBe(0);
+    const recorded = await eventually(
+      async () =>
+        (
+          await dest.query('SELECT applied, uncovered FROM events_only.am_erasures WHERE workspace_id = $1 AND $2 = ANY(profile_ids)', [
+            ws,
+            profileId,
+          ])
+        ).rows[0],
+      (r) => !!r,
+    );
+    expect(recorded).toMatchObject({ applied: true, uncovered: null });
+  });
+
+  // #374: a merge re-points identifiers without touching first_seen, and the surviving consent
+  // row is materialised with the winning ledger record's (older) time. Both must be re-exported.
+  it('re-exports identifiers re-pointed by a merge and consent rewritten with an older time', async () => {
+    const api = t.api(owner);
+    const anon = `wh-merge-anon-${Date.now()}`;
+    const user = `wh-merge-user-${Date.now()}`;
+    // The resolver keeps the oldest profile, regardless of identifier strength. Wait for the
+    // intended survivor to exist before sending the other identity: different shard workers
+    // may otherwise apply these two identifies in either order.
+    await send([{ type: 'identify', userId: user, traits: { plan: 'survivor' } }]);
+    const into = (
+      await eventually(
+        () => api.call('profiles.find', { type: 'user_id', value: user }),
+        (r) => !!r.profileId,
+      )
+    ).profileId!;
+    expect(into).toBeTruthy();
+    await send([{ type: 'identify', anonymousId: anon, traits: { plan: 'merged' } }]);
+    const from = (
+      await eventually(
+        () => api.call('profiles.find', { type: 'anonymous_id', value: anon }),
+        (r) => !!r.profileId,
+      )
+    ).profileId!;
+    expect(from).toBeTruthy();
+
+    // A withdrew ad_targeting five days ago; B granted it ten days ago. The recomputed survivor
+    // row keeps the newer ledger time (five days ago) and status withdrawn.
+    await api.call('consent.record', { profileId: from, purpose: 'ad_targeting', status: 'withdrawn', source: 'api' });
+    await t.srv.db.admin.query(
+      `UPDATE consent_records SET recorded_at = now() - interval '5 days'
+       WHERE workspace_id = $1 AND profile_id = $2 AND purpose = 'ad_targeting'`,
+      [ws, from],
+    );
+    // A further record recomputes consent_state, so the withdrawal's old recorded_at becomes
+    // the materialised updated_at.
+    await api.call('consent.record', { profileId: from, purpose: 'marketing_email', status: 'granted', source: 'api' });
+    await api.call('consent.record', { profileId: into, purpose: 'ad_targeting', status: 'granted', source: 'api' });
+    await t.srv.db.admin.query(
+      `UPDATE consent_records SET recorded_at = now() - interval '10 days'
+       WHERE workspace_id = $1 AND profile_id = $2 AND purpose = 'ad_targeting'`,
+      [ws, into],
+    );
+    await api.call('consent.record', { profileId: into, purpose: 'marketing_email', status: 'granted', source: 'api' });
+
+    const beforeMerge = (await api.call('warehouse.list', {})).exports.find((e) => e.id === exportId)!.lastRunAt;
+    await api.call('warehouse.run', { id: exportId });
+    await exported(exportId, beforeMerge);
+    expect(
+      await eventually(
+        async () =>
+          (
+            await dest.query(
+              'SELECT status FROM agentic_marketing.am_consent WHERE workspace_id = $1 AND profile_id = $2 AND purpose = $3',
+              [ws, into, 'ad_targeting'],
+            )
+          ).rows[0]?.status,
+        (s) => s === 'granted',
+      ),
+    ).toBe('granted');
+
+    // Merging the anonymous profile into the user profile re-points the identifier and rewrites
+    // the survivor's consent state, both with timestamps older than the export cursor.
+    await send([{ type: 'alias', previousId: anon, userId: user }]);
+    expect(
+      (
+        await eventually(
+          () => api.call('profiles.find', { type: 'anonymous_id', value: anon }),
+          (r) => r.profileId === into,
+        )
+      ).profileId,
+    ).toBe(into);
+
+    await api.call('warehouse.run', { id: exportId });
+    const identifiers = await eventually(
+      async () =>
+        (
+          await dest.query('SELECT value, profile_id FROM agentic_marketing.am_identifiers WHERE workspace_id = $1 AND value IN ($2, $3)', [
+            ws,
+            anon,
+            user,
+          ])
+        ).rows,
+      (rows) => rows.length === 2 && rows.every((r) => r.profile_id === into),
+    );
+    expect(identifiers).toHaveLength(2);
+    expect(identifiers.every((r) => r.profile_id === into)).toBe(true);
+    const consent = await eventually(
+      async () =>
+        (
+          await dest.query(
+            'SELECT status, updated_at FROM agentic_marketing.am_consent WHERE workspace_id = $1 AND profile_id = $2 AND purpose = $3',
+            [ws, into, 'ad_targeting'],
+          )
+        ).rows[0],
+      (r) => r?.status === 'withdrawn',
+    );
+    expect(consent.status).toBe('withdrawn');
+    expect(Date.now() - new Date(consent.updated_at).getTime()).toBeGreaterThan(4 * 86_400_000);
+  }, 60_000);
 });

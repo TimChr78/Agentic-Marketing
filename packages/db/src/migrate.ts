@@ -95,7 +95,10 @@ const MIGRATION_RELEASES: Record<string, string> = {
   '0064_decision_models.sql': '0.7.0',
   '0065_hosted_memory.sql': '0.7.0',
   '0066_password_reset.sql': '0.7.0',
-  '0067_copilot_agents.sql': '0.7.0',
+  '0067_copilot_agents.sql': '0.7.0–0.7.1',
+  '0068_warehouse_change_tracking.sql': '0.7.2',
+  '0069_merge_preferences_memberships.sql': '0.7.2',
+  '0070_edge_cleanup.sql': '0.7.2',
 };
 
 export function releaseForMigrationHead(head: string | null): string | null {
