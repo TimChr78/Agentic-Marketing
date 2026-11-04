@@ -3,6 +3,7 @@ import { api } from '../../app/api';
 import { ButtonLink } from '../../app/links';
 import { useCrumbs } from '../../app/page';
 import { useApi } from '../../app/useApi';
+import { useAllArtifacts } from '../../features/artifacts/artifactList';
 import { HostedPreview } from '../../features/brand/HostedPreview';
 import { Card, Field, Meta, Mono, PageHeader, Select } from '../../ui';
 import { pageWidth } from '../../ui/layout';
@@ -10,7 +11,7 @@ import { pageWidth } from '../../ui/layout';
 /** Design → Hosted pages (#37): what subscribers see on your links address, per form. */
 export default function HostedPagesPage() {
   useCrumbs([{ label: 'Hosted pages' }]);
-  const forms = useApi(() => api.call('artifacts.list', { type: 'form', limit: 200 }), []);
+  const forms = useAllArtifacts('form');
   const archive = useApi(() => api.call('archive.issues', {}), []);
   const archiveSettings = archive.data?.settings;
   const [formId, setFormId] = useState('');

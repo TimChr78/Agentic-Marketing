@@ -1,11 +1,10 @@
 import { Plus, Search } from 'lucide-react';
 import { type ReactNode, useMemo, useState } from 'react';
-import { api, errText, type Out } from '../../app/api';
+import { api, errText } from '../../app/api';
 import { artifactPath } from '../../app/artifactRoutes';
 import { useCrumbs } from '../../app/page';
 import { Link, navigate } from '../../app/router';
 import { useSession } from '../../app/session';
-import { useApi } from '../../app/useApi';
 import {
   Alert,
   Button,
@@ -27,8 +26,9 @@ import {
   useToast,
 } from '../../ui';
 import { pageWidth } from '../../ui/layout';
+import { type ArtifactRow, useAllArtifacts } from './artifactList';
 
-export type ArtifactRow = Out<'artifacts.list'>['artifacts'][number];
+export type { ArtifactRow } from './artifactList';
 
 export interface CreateSpec<S> {
   /** Label of the primary action, e.g. "New journey". */
@@ -71,7 +71,7 @@ export function ArtifactListPage<S = Record<string, never>>({
 }) {
   useCrumbs([{ label: crumb ?? title }]);
   const { can } = useSession();
-  const list = useApi(() => api.call('artifacts.list', { type: type as never, limit: 200 }), [type]);
+  const list = useAllArtifacts(type);
   const [q, setQ] = useState('');
   const [state, setState] = useState('');
   const [creating, setCreating] = useState(false);
@@ -84,7 +84,8 @@ export function ArtifactListPage<S = Record<string, never>>({
       ),
     [list.data, q, state],
   );
-  const total = list.data?.artifacts.length ?? 0;
+  const total = list.data?.total ?? 0;
+  const loaded = list.data?.artifacts.length ?? 0;
   const canCreate = !!create && can('artifacts:write');
 
   return (
@@ -127,7 +128,11 @@ export function ArtifactListPage<S = Record<string, never>>({
                 <option value="rejected">Rejected</option>
               </Select>
               <span className="ml-auto text-[12px] text-muted">
-                {rows.length === total ? `${total} total` : `${rows.length} of ${total}`}
+                {list.data && !list.data.complete
+                  ? `${loaded} of ${total} loaded`
+                  : rows.length === total
+                    ? `${total} total`
+                    : `${rows.length} of ${total}`}
               </span>
             </>
           )
