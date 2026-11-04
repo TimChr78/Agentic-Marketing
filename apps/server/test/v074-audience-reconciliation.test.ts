@@ -170,11 +170,11 @@ async function person(userId: string, email: string, phone: string, plan: string
   return profileId!;
 }
 
-async function createSegment(name: string) {
+async function createSegment(name: string, staticList = false) {
   const a = await api().call('artifacts.create', {
     type: 'segment',
     name: `Audience ${name}`,
-    content: { condition: { trait: 'plan', op: 'eq', value: name } },
+    content: staticList ? { mode: 'static' } : { condition: { trait: 'plan', op: 'eq', value: name } },
   });
   await api().call('artifacts.requestPublish', { artifactId: a.artifactId, note: 'test' });
   return a.artifactId;
@@ -495,22 +495,18 @@ describe('cleanup independent of publication (#400 P1)', () => {
 
 describe('shared destination and profile merges', () => {
   it('does not delete a member another sync still owns at the same destination', async () => {
-    const segmentA = await createSegment('shared-a');
-    const segmentB = await createSegment('shared-b');
+    const segmentA = await createSegment('shared-a', true);
+    const segmentB = await createSegment('shared-b', true);
     const profile = await person('shared-a', 'shared-a@example.com', '+4511000301', 'shared');
-    await addToSegment(segmentA, profile);
-    await addToSegment(segmentB, profile);
+    await api().call('audiences.add', { segmentId: segmentA, profileIds: [profile] });
+    await api().call('audiences.add', { segmentId: segmentB, profileIds: [profile] });
     const syncA = await createSync({ segment: segmentA, meta: { connection: ids.meta, audienceId: '90000401' } });
     const syncB = await createSync({ segment: segmentB, meta: { connection: ids.meta2, audienceId: '90000401' } });
     expect((await syncNow(syncA))[0]).toMatchObject({ added: 1 });
     expect((await syncNow(syncB))[0]).toMatchObject({ added: 1 });
     expect(membersOf('meta', '90000401')).toHaveLength(1);
 
-    await t.srv.db.admin.query(`DELETE FROM segment_memberships WHERE workspace_id = $1 AND segment_id = $2 AND profile_id = $3`, [
-      ws,
-      segmentA,
-      profile,
-    ]);
+    await api().call('audiences.remove', { segmentId: segmentA, profileIds: [profile] });
     await syncNow(syncA);
     // Sync A no longer wants the person, but sync B does; the shared remote member must stay.
     expect(membersOf('meta', '90000401')).toHaveLength(1);
@@ -520,11 +516,7 @@ describe('shared destination and profile merges', () => {
     );
     expect(stillB.rows[0]!.n).toBe(1);
 
-    await t.srv.db.admin.query(`DELETE FROM segment_memberships WHERE workspace_id = $1 AND segment_id = $2 AND profile_id = $3`, [
-      ws,
-      segmentB,
-      profile,
-    ]);
+    await api().call('audiences.remove', { segmentId: segmentB, profileIds: [profile] });
     await syncNow(syncB);
     expect(membersOf('meta', '90000401')).toHaveLength(0);
   });
@@ -533,14 +525,14 @@ describe('shared destination and profile merges', () => {
     const segment = await createSegment('spend-setting');
     const profile = await person('spend-setting', 'spend-setting@example.com', '+4511000901', 'spend-setting');
     await addToSegment(segment, profile);
-    const sync = await createSync({ segment, meta: { connection: ids.meta, audienceId: '90000403' } });
+    const sync = await createSync({ segment, meta: { connection: ids.meta, audienceId: '90000406' } });
     await syncNow(sync);
     const before = received.length;
     await api().call('connections.update', { id: ids.meta, settings: { pixelId: '123456789', apiBase: platformUrl } });
     const [result] = await syncNow(sync);
     expect(result).toMatchObject({ status: 'ok', added: 0, removed: 0, members: 1 });
-    expect(received.slice(before).filter((r) => r.path.includes('90000403'))).toHaveLength(0);
-    expect(membersOf('meta', '90000403')).toHaveLength(1);
+    expect(received.slice(before).filter((r) => r.path.includes('90000406'))).toHaveLength(0);
+    expect(membersOf('meta', '90000406')).toHaveLength(1);
   });
 
   for (const mode of ['member', 'intent'] as const)
