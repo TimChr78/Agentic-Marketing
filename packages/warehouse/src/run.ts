@@ -5,7 +5,7 @@ import type { EventStore } from '@agentic-marketing/events';
 import type { EgressPolicy } from '@agentic-marketing/integrations';
 import { type KeyProvider, openJson } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
-import { and, count, eq, inArray, sql } from 'drizzle-orm';
+import { and, count, eq, sql } from 'drizzle-orm';
 import { DATASETS, erasuresForExport, pruneErasureKeys, readDataset } from './datasets';
 import { type Destination, postgresConfig, postgresDestination, postgresSecrets, s3Config, s3Destination, s3Secrets } from './destinations';
 
@@ -175,11 +175,12 @@ async function finishRun(
 ): Promise<{ warning: string | null; backlogCount: number }> {
   return db.withWorkspace(ws, async (tx) => {
     await tx.execute(sql`SELECT 1 FROM warehouse_exports WHERE workspace_id = ${ws} AND id = ${id} FOR UPDATE`);
-    if (input.incomplete.length) {
+    // Bound VALUES parameters too: a large first export can report many legacy erasures.
+    for (let offset = 0; offset < input.incomplete.length; offset += 5000) {
       await tx
         .insert(schema.warehouseErasureBacklog)
         .values(
-          input.incomplete.map((e) => ({
+          input.incomplete.slice(offset, offset + 5000).map((e) => ({
             workspaceId: ws,
             exportId: id,
             erasureId: e.id,
@@ -204,7 +205,7 @@ async function finishRun(
           and(
             eq(schema.warehouseErasureBacklog.workspaceId, ws),
             eq(schema.warehouseErasureBacklog.exportId, id),
-            inArray(schema.warehouseErasureBacklog.erasureId, completed),
+            sql`${schema.warehouseErasureBacklog.erasureId} = ANY(${sql.param(completed)}::text[])`,
           ),
         );
     const [{ pending }] = await tx

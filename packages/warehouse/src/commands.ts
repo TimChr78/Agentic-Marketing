@@ -295,7 +295,15 @@ export const acknowledgeErasures = defineCommand({
     if (remaining) {
       await ctx.tx
         .update(schema.warehouseExports)
-        .set({ lastStatus: 'failed', lastError: cleanupPendingWarning(remaining), updatedAt: new Date() })
+        // Preserve an unrelated export failure while updating this backlog's warning.
+        .set({
+          lastStatus: 'failed',
+          lastError: sql`CASE WHEN ${schema.warehouseExports.lastError} IS NULL
+            OR ${schema.warehouseExports.lastError} LIKE ${`${INCOMPLETE_ERASURE_PREFIX}%`}
+            OR ${schema.warehouseExports.lastError} LIKE ${`${CLEANUP_PENDING_PREFIX}%`}
+            THEN ${cleanupPendingWarning(remaining)} ELSE ${schema.warehouseExports.lastError} END`,
+          updatedAt: new Date(),
+        })
         .where(eq(schema.warehouseExports.id, id));
     } else {
       // Clear only a warning this backlog produced; a real run failure stays visible.

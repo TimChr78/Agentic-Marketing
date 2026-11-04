@@ -167,6 +167,29 @@ describe('warehouse erasure safety', () => {
     expect(await backlogRowCount()).toBe(0);
   });
 
+  it('preserves an unrelated run failure during partial and final acknowledgement', async () => {
+    const first = await erase('0');
+    const second = await erase('9');
+    await t.srv.db.admin.query('DELETE FROM warehouse_erasure_keys WHERE workspace_id = $1', [ws]);
+    await sleep(10);
+    expect((await run()).status).toBe('failed');
+    expect(await backlogRowCount()).toBe(2);
+    await t.srv.db.admin.query(
+      "UPDATE warehouse_exports SET last_status = 'failed', last_error = 'Destination connection refused' WHERE workspace_id = $1 AND id = $2",
+      [ws, exportId],
+    );
+    for (const erasureId of [first, second]) {
+      await t.api(owner).call('warehouse.acknowledgeErasures', {
+        id: exportId,
+        erasureIds: [erasureId],
+        note: 'Manually removed this person from the downstream copy.',
+      });
+      expect(await exportRow()).toMatchObject({ lastStatus: 'failed', lastError: 'Destination connection refused' });
+    }
+    expect(await backlogRowCount()).toBe(0);
+    expect((await run()).status).toBe('ok');
+  });
+
   it('drops remaining private keys and backlog when the final destination is removed', async () => {
     await erase('e');
     await t.srv.db.admin.query('DELETE FROM warehouse_erasure_keys WHERE workspace_id = $1', [ws]);
