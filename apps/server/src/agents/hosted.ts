@@ -2,7 +2,7 @@ import { AiUnavailable, languageModel, modelFor, recordAiCall, releaseTokens, re
 import type { NotifyDeps } from '@agentic-marketing/alerts';
 import { sendMemberEmails } from '@agentic-marketing/alerts';
 import { artifactTypes, publishedSingleton } from '@agentic-marketing/artifacts';
-import { nextHostedRunAt } from '@agentic-marketing/auth';
+import { HOSTED_CLAIM_STALE_MINUTES, nextHostedRunAt } from '@agentic-marketing/auth';
 import { agentPrincipal, type Executor, type Principal } from '@agentic-marketing/commands';
 import { newId } from '@agentic-marketing/core';
 import { type Db, type Role, schema, type Tx } from '@agentic-marketing/db';
@@ -22,7 +22,6 @@ import { VERSION } from '../version';
 
 const MAX_CONSECUTIVE_FAILURES = 3;
 const MAX_STEPS = 12;
-const STALE_CLAIM_MINUTES = 60;
 const MAX_OUTPUT_TOKENS = 2000;
 /** A step starts only when the run's remaining allowance can give its output at least this much. */
 const MIN_STEP_TOKENS = 100;
@@ -382,8 +381,40 @@ async function finishRun(
 ): Promise<{ disabled: boolean }> {
   const finishedAt = new Date();
   return deps.db.withWorkspace(loaded.agent.workspaceId, async (tx) => {
-    const failures = run.status === 'ok' ? 0 : loaded.hosted.consecutiveFailures + 1;
-    const disabled = failures >= MAX_CONSECUTIVE_FAILURES;
+    // The claim this run took is its fence (#363): a run that outlived it (a sweep took the claim
+    // over after HOSTED_CLAIM_STALE_MINUTES) must not release its successor's claim, reset or
+    // advance the failure streak, disable the agent, or mark events read. The guarded update below
+    // matches only while this run still owns the claim, so a late completion changes none of the
+    // agent's state. Its own outcome is still recorded below: what it did stays auditable.
+    const failures = run.status === 'ok' ? sql`0` : sql`${schema.hostedAgents.consecutiveFailures} + 1`;
+    const disables = sql`${failures} >= ${MAX_CONSECUTIVE_FAILURES}`;
+    const [owned] = await tx
+      .update(schema.hostedAgents)
+      .set({
+        runningRunId: null,
+        runningStartedAt: null,
+        consecutiveFailures: failures,
+        enabled: sql`CASE WHEN ${disables} THEN false ELSE ${schema.hostedAgents.enabled} END`,
+        nextRunAt: sql`CASE WHEN ${disables} THEN NULL ELSE ${schema.hostedAgents.nextRunAt} END`,
+        // Events are read once a run handled them; a failed run leaves them for a retry within the
+        // gap and the daily cap, and three failures in a row disable the agent (#342).
+        ...(run.status === 'ok' && origin.readThrough !== undefined
+          ? { lastEventId: sql`GREATEST(${schema.hostedAgents.lastEventId}, ${origin.readThrough})` }
+          : {}),
+        updatedAt: finishedAt,
+      })
+      .where(and(eq(schema.hostedAgents.agentId, loaded.agent.id), eq(schema.hostedAgents.runningRunId, run.id)))
+      .returning({ consecutiveFailures: schema.hostedAgents.consecutiveFailures });
+    const disabled = owned !== undefined && owned.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES;
+    // A run whose agent was deleted meanwhile (its stale claim allowed deletion, #362) has nowhere
+    // to record its outcome: the agent and its run history are gone, so it writes no run and mails
+    // nobody. A run that merely lost its claim to a successor keeps its own history below.
+    const [present] = await tx
+      .select({ agentId: schema.hostedAgents.agentId })
+      .from(schema.hostedAgents)
+      .where(eq(schema.hostedAgents.agentId, loaded.agent.id))
+      .for('key share');
+    if (!present) return { disabled: false };
     await tx.insert(schema.hostedAgentRuns).values({
       workspaceId: loaded.agent.workspaceId,
       id: run.id,
@@ -398,21 +429,6 @@ async function finishRun(
       trigger: origin.trigger,
       eventIds: origin.events.map((e) => e.id),
     });
-    await tx
-      .update(schema.hostedAgents)
-      .set({
-        runningRunId: null,
-        runningStartedAt: null,
-        consecutiveFailures: failures,
-        ...(disabled ? { enabled: false, nextRunAt: null } : {}),
-        // Events are read once a run handled them; a failed run leaves them for a retry within the
-        // gap and the daily cap, and three failures in a row disable the agent (#342).
-        ...(run.status === 'ok' && origin.readThrough !== undefined
-          ? { lastEventId: sql`GREATEST(${schema.hostedAgents.lastEventId}, ${origin.readThrough})` }
-          : {}),
-        updatedAt: finishedAt,
-      })
-      .where(eq(schema.hostedAgents.agentId, loaded.agent.id));
     const content = runEmail(deps, loaded.agent, run.status, {
       summary: run.summary,
       error: run.error,
@@ -452,6 +468,7 @@ async function claimDue(
   workspaceId: string,
   agentId: string,
   now: Date,
+  origin: RunOrigin = SCHEDULED,
 ): Promise<{ kind: 'claimed'; claim: Claimed } | { kind: 'skipped' } | null> {
   return deps.db.withWorkspace(workspaceId, async (tx) => {
     const loaded = await loadHosted(tx, agentId);
@@ -467,6 +484,10 @@ async function claimDue(
         summary: `Skipped: the agent is ${loaded.agent.status}.`,
         toolCalls: 0,
         tokens: 0,
+        // The attempt is still the origin's (#365): a paused or revoked agent must not turn the
+        // event that woke it into an apparent scheduled attempt.
+        trigger: origin.trigger,
+        eventIds: origin.events.map((e) => e.id),
       });
       await tx
         .update(schema.hostedAgents)
@@ -475,7 +496,7 @@ async function claimDue(
       return { kind: 'skipped' as const };
     }
     const runId = newId('har');
-    const staleBefore = new Date(now.getTime() - STALE_CLAIM_MINUTES * 60_000);
+    const staleBefore = new Date(now.getTime() - HOSTED_CLAIM_STALE_MINUTES * 60_000);
     const claimed = await tx
       .update(schema.hostedAgents)
       .set({
@@ -504,6 +525,9 @@ async function claimDue(
         summary: 'Skipped: an earlier run of this agent was still going.',
         toolCalls: 0,
         tokens: 0,
+        // A lost claim race keeps the origin too (#365).
+        trigger: origin.trigger,
+        eventIds: origin.events.map((e) => e.id),
       });
       return { kind: 'skipped' as const };
     }
@@ -512,7 +536,7 @@ async function claimDue(
 }
 
 async function runOne(deps: HostedAgentDeps, workspaceId: string, agentId: string, now: Date, origin: RunOrigin = SCHEDULED) {
-  const due = await claimDue(deps, workspaceId, agentId, now);
+  const due = await claimDue(deps, workspaceId, agentId, now, origin);
   if (!due) return 'skipped' as const;
   if (due.kind === 'skipped') return 'skipped' as const;
   const { runId, loaded } = due.claim;
@@ -697,17 +721,17 @@ export async function runHostedAgentsOnce(deps: HostedAgentDeps, now = new Date(
      WHERE h.enabled AND h.trigger_subscription_id IS NOT NULL AND cardinality(h.triggers) > 0
        AND (h.running_run_id IS NULL OR h.running_started_at < $2)
        AND NOT EXISTS (SELECT 1 FROM hosted_agent_runs r
-                       WHERE r.workspace_id = h.workspace_id AND r.agent_id = h.agent_id AND r.trigger = 'event'
+                       WHERE r.workspace_id = h.workspace_id AND r.agent_id = h.agent_id AND r.trigger = 'event' AND r.status <> 'skipped'
                          AND r.started_at > $1::timestamptz - make_interval(mins => h.event_min_gap_minutes))
        AND (SELECT count(*) FROM hosted_agent_runs r
-            WHERE r.workspace_id = h.workspace_id AND r.agent_id = h.agent_id AND r.trigger = 'event'
+            WHERE r.workspace_id = h.workspace_id AND r.agent_id = h.agent_id AND r.trigger = 'event' AND r.status <> 'skipped'
               AND r.started_at > $1::timestamptz - interval '24 hours') < h.event_runs_per_day
        AND EXISTS (SELECT 1 FROM agent_events e
                    WHERE e.workspace_id = h.workspace_id AND e.subscription_id = h.trigger_subscription_id AND e.id > h.last_event_id)
      ORDER BY (SELECT min(e.id) FROM agent_events e
                WHERE e.workspace_id = h.workspace_id AND e.subscription_id = h.trigger_subscription_id AND e.id > h.last_event_id)
      LIMIT 100`,
-    [now, new Date(now.getTime() - STALE_CLAIM_MINUTES * 60_000)],
+    [now, new Date(now.getTime() - HOSTED_CLAIM_STALE_MINUTES * 60_000)],
   );
   for (const { workspace_id: workspaceId, agent_id: agentId } of eventDue) {
     if (scheduled.has(`${workspaceId}:${agentId}`)) continue;
@@ -749,6 +773,7 @@ async function eventOrigin(deps: HostedAgentDeps, workspaceId: string, agentId: 
         and(
           eq(schema.hostedAgentRuns.agentId, agentId),
           eq(schema.hostedAgentRuns.trigger, 'event'),
+          sql`${schema.hostedAgentRuns.status} <> 'skipped'`,
           sql`${schema.hostedAgentRuns.startedAt} > ${new Date(now.getTime() - 86_400_000)}`,
         ),
       )
