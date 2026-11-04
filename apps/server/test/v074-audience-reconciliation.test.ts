@@ -562,9 +562,7 @@ describe('shared destination and profile merges', () => {
     expect(result.status).toBe('ok');
     const remaining = membersOf('meta', '90000402');
     expect(remaining).toHaveLength(1);
-    // The survivor's identifier set may be either profile's e-mail depending on resolver order;
-    // what matters is that the merged person still has a member and the survivor row was kept.
-    expect([metaEmail('merge-a@example.com'), metaEmail('merge-b@example.com')]).toContain(remaining[0]!.email);
+    expect(remaining[0]).toEqual({ email: metaEmail('merge-b@example.com'), phone: metaPhone('+4511000302') });
     const survivorRow = await t.srv.db.admin.query<{ n: number }>(
       `SELECT count(*)::int AS n FROM audience_members WHERE workspace_id = $1 AND sync_id = $2 AND profile_id = $3`,
       [ws, sync, survivor],

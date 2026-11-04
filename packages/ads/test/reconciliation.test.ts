@@ -106,11 +106,11 @@ describe('member-level remove then full restore (#401 P1)', () => {
     });
   });
 
-  it('only uploads the new identifier when nothing is removed', () => {
+  it('includes the existing identifier as a match bridge when a new one appears', () => {
     expect(planMemberWrite({ profileId: 'prf_1', stored: { email: 'e1' }, current: { email: 'e1', phone: 'p1' }, intent: null })).toEqual({
       profileId: 'prf_1',
       remove: [],
-      add: { phone: 'p1' },
+      add: { email: 'e1', phone: 'p1' },
       final: { email: 'e1', phone: 'p1' },
     });
   });

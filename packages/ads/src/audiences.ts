@@ -142,7 +142,10 @@ export function planMemberWrite(input: MemberWriteInput): MemberWritePlan | null
   const obsolete = stored ? obsoleteHashes(stored, current) : {};
   addRemove(obsolete);
   if (intent && !sameHashes(intent, current)) addRemove(intent);
-  const add = remove.length || !stored || intent ? current : addedHashes(stored, current);
+  // Include the unchanged identifiers as the match bridge. A new hash alone can create a
+  // second remote member instead of attaching it to the member already represented here.
+  const changed = remove.length || !stored || intent || hasAnyHashes(addedHashes(stored, current));
+  const add = changed ? current : null;
   if (!remove.length && !hasAnyHashes(add) && stored && !intent) return null;
   return { profileId, remove, add: hasAnyHashes(add) ? add : null, final: current };
 }
