@@ -35,3 +35,16 @@ app.kubernetes.io/component: {{ .role }}
 - secretRef:
     name: {{ include "am.secretName" . }}
 {{- end -}}
+
+{{/*
+The replicas a role will actually run: the configured count, or the HPA range when autoscaling is
+on. NOTES prints this so a scheduler count is never invented and an autoscaled role is not shown as
+a fixed number that the HPA overrides.
+*/}}
+{{- define "am.roleReplicas" -}}
+{{- if and .autoscaling .autoscaling.enabled -}}
+autoscaled {{ .autoscaling.minReplicas }}-{{ .autoscaling.maxReplicas }}
+{{- else -}}
+{{ .replicas }}
+{{- end -}}
+{{- end -}}
