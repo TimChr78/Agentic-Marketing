@@ -1,8 +1,8 @@
 import { newId } from '@agentic-marketing/core';
-import { type AlertChannel, type AlertKind, type AlertNotification, schema, type Tx } from '@agentic-marketing/db';
+import { type AlertChannel, type AlertKind, type AlertNotification, type DeliveryStatus, schema, type Tx } from '@agentic-marketing/db';
 import { MESSAGE_ID_HEADER, transportFor } from '@agentic-marketing/email';
 import { logger } from '@agentic-marketing/telemetry';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, lt, sql } from 'drizzle-orm';
 import type { NotifyDeps } from './deps';
 import { type AlertConfig, isRatioMetric, metricId, metricLabel, windowLabel } from './rules';
 
@@ -91,7 +91,88 @@ ${input.previous === undefined ? '' : `<tr><td style="padding:2px 12px 2px 0;col
   return { subject, text, html };
 }
 
-async function notifyWebhook(tx: Tx, input: NotifyInput, channel: Extract<AlertChannel, { type: 'webhook' }>, url: string) {
+/**
+ * How many outbox cycles one alert webhook may use. A cycle is the delivery worker's own backoff
+ * schedule (seven attempts over ~17 hours); after the first exhausts, the evaluator re-opens the
+ * same row for one more cycle, then records a permanent failure. Bounded so a dead endpoint cannot
+ * keep a firing rule retrying forever, and the same row is reused so no duplicate is queued.
+ */
+export const MAX_ALERT_DELIVERY_CYCLES = 2;
+
+/** The notification state that matches a delivery row: only `done` counts as delivered. */
+export function deliveryNotificationStatus(status: DeliveryStatus): AlertNotification['status'] {
+  if (status === 'done') return 'sent';
+  if (status === 'dead' || status === 'failed') return 'failed';
+  return 'queued';
+}
+
+type DeliveryState = { id: string; status: DeliveryStatus; attempts: number; error: string | null; retryCycles?: number };
+
+/** The ledger entry for one webhook delivery row, without inventing a second queued row. */
+function notificationOf(
+  input: NotifyInput,
+  target: string,
+  delivery: Pick<DeliveryState, 'id' | 'status' | 'attempts' | 'retryCycles'>,
+  _previous: AlertNotification | undefined,
+  error?: string | null,
+): AlertNotification {
+  const status = deliveryNotificationStatus(delivery.status);
+  return {
+    event: input.event,
+    channel: 'webhook',
+    target,
+    at: input.now.toISOString(),
+    status,
+    deliveryId: delivery.id,
+    attempts: delivery.attempts,
+    cycles: (delivery.retryCycles ?? 0) + 1,
+    ...(status === 'failed'
+      ? { error: error ?? 'the delivery ended without a response', retryable: (delivery.retryCycles ?? 0) + 1 < MAX_ALERT_DELIVERY_CYCLES }
+      : error
+        ? { error }
+        : {}),
+  };
+}
+
+async function reopenAlertDelivery(tx: Tx, id: string): Promise<(DeliveryState & { retryCycles: number }) | undefined> {
+  const [row] = await tx
+    .update(schema.deliveries)
+    .set({
+      status: 'pending',
+      attempts: 0,
+      nextAttemptAt: new Date(),
+      leaseUntil: null,
+      statusCode: null,
+      response: null,
+      error: null,
+      durationMs: null,
+      finishedAt: null,
+      alertRetryCycles: sql`${schema.deliveries.alertRetryCycles} + 1`,
+    })
+    .where(
+      and(
+        eq(schema.deliveries.id, id),
+        inArray(schema.deliveries.status, ['dead', 'failed']),
+        lt(schema.deliveries.alertRetryCycles, MAX_ALERT_DELIVERY_CYCLES - 1),
+      ),
+    )
+    .returning({
+      id: schema.deliveries.id,
+      status: schema.deliveries.status,
+      attempts: schema.deliveries.attempts,
+      error: schema.deliveries.error,
+      retryCycles: schema.deliveries.alertRetryCycles,
+    });
+  return row;
+}
+
+async function notifyWebhook(
+  tx: Tx,
+  input: NotifyInput,
+  channel: Extract<AlertChannel, { type: 'webhook' }>,
+  url: string,
+  existing: AlertNotification | undefined,
+) {
   const [endpoint] = await tx.select().from(schema.webhookEndpoints).where(eq(schema.webhookEndpoints.id, channel.webhookId));
   if (!endpoint?.enabled)
     return {
@@ -101,34 +182,136 @@ async function notifyWebhook(tx: Tx, input: NotifyInput, channel: Extract<AlertC
       at: input.now.toISOString(),
       status: 'failed' as const,
       error: 'the webhook endpoint was deleted or disabled',
+      retryable: false,
     };
   const idempotencyKey = `alert:${input.eventId}:${input.event}:${channel.webhookId}`;
-  const values = {
-    workspaceId: input.workspace.id,
-    id: newId('dlv'),
-    kind: 'webhook' as const,
-    targetId: channel.webhookId,
-    payload: alertPayload(input, url),
-    status: 'pending' as const,
-    idempotencyKey,
-  };
-  const [inserted] = await tx.insert(schema.deliveries).values(values).onConflictDoNothing().returning({ id: schema.deliveries.id });
-  let deliveryId = inserted?.id;
-  if (!deliveryId) {
-    const [existing] = await tx
-      .select({ id: schema.deliveries.id })
+  const [inserted] = await tx
+    .insert(schema.deliveries)
+    .values({
+      workspaceId: input.workspace.id,
+      id: newId('dlv'),
+      kind: 'webhook' as const,
+      targetId: channel.webhookId,
+      payload: alertPayload(input, url),
+      status: 'pending' as const,
+      idempotencyKey,
+    })
+    .onConflictDoNothing()
+    .returning({ id: schema.deliveries.id });
+  if (inserted) return notificationOf(input, channel.webhookId, { id: inserted.id, status: 'pending', attempts: 0 }, existing);
+
+  const [current] = await tx
+    .select({
+      id: schema.deliveries.id,
+      status: schema.deliveries.status,
+      attempts: schema.deliveries.attempts,
+      error: schema.deliveries.error,
+      retryCycles: schema.deliveries.alertRetryCycles,
+    })
+    .from(schema.deliveries)
+    .where(eq(schema.deliveries.idempotencyKey, idempotencyKey));
+  if (!current)
+    return {
+      event: input.event,
+      channel: 'webhook' as const,
+      target: channel.webhookId,
+      at: input.now.toISOString(),
+      status: 'failed' as const,
+      error: 'the queued delivery disappeared; it will be queued again',
+      retryable: true,
+    };
+
+  // A terminal delivery is retried in a new cycle, but only while the bounded budget lasts and
+  // only when the caller selected this channel (i.e. the ledger no longer says sent). Reuse the
+  // row: the unique idempotency key keeps one delivery per event/channel, and an in-flight
+  // (pending/running) row is never reset.
+  if (current.status === 'dead' || current.status === 'failed') {
+    const reopened = await reopenAlertDelivery(tx, current.id);
+    if (reopened) return notificationOf(input, channel.webhookId, reopened, existing);
+    // A competing scheduler/worker may have advanced it while the UPDATE waited. Re-read.
+    const [latest] = await tx
+      .select({
+        id: schema.deliveries.id,
+        status: schema.deliveries.status,
+        attempts: schema.deliveries.attempts,
+        error: schema.deliveries.error,
+        retryCycles: schema.deliveries.alertRetryCycles,
+      })
       .from(schema.deliveries)
-      .where(eq(schema.deliveries.idempotencyKey, idempotencyKey));
-    deliveryId = existing?.id;
+      .where(eq(schema.deliveries.id, current.id));
+    return notificationOf(input, channel.webhookId, latest ?? current, existing, latest ? latest.error : current.error);
   }
-  return {
-    event: input.event,
-    channel: 'webhook' as const,
-    target: channel.webhookId,
-    at: input.now.toISOString(),
-    status: 'sent' as const,
-    deliveryId,
-  };
+
+  return notificationOf(input, channel.webhookId, current, existing, current.error);
+}
+
+/**
+ * Re-reads the outbox rows behind a ledger and makes the ledger truthful (#368): pending/running
+ * stays `queued`, done becomes `sent`, dead/failed becomes `failed` with the bounded retry flag.
+ * With retry enabled, atomically re-opens terminal rows within their durable budget; payloads stay unchanged.
+ */
+export async function reconcileAlertNotifications(
+  tx: Tx,
+  notified: AlertNotification[],
+  opts: { retry?: boolean } = {},
+): Promise<AlertNotification[]> {
+  const ids = [...new Set(notified.flatMap((n) => (n.deliveryId ? [n.deliveryId] : [])))];
+  if (!ids.length) return notified;
+  const rows = await tx
+    .select({
+      id: schema.deliveries.id,
+      status: schema.deliveries.status,
+      attempts: schema.deliveries.attempts,
+      error: schema.deliveries.error,
+      retryCycles: schema.deliveries.alertRetryCycles,
+    })
+    .from(schema.deliveries)
+    .where(inArray(schema.deliveries.id, ids));
+  if (opts.retry) {
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i]!;
+      if (row.status === 'dead' || row.status === 'failed') rows[i] = (await reopenAlertDelivery(tx, row.id)) ?? row;
+    }
+  }
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  let changed = false;
+  const out = notified.map((n) => {
+    if (!n.deliveryId) return n;
+    const delivery = byId.get(n.deliveryId);
+    if (!delivery) {
+      // The row and its payload are gone; this notification cannot retry automatically.
+      const missing = {
+        ...n,
+        status: 'failed' as const,
+        error: 'the queued delivery row no longer exists',
+        retryable: false,
+      };
+      changed = true;
+      return missing;
+    }
+    const status = deliveryNotificationStatus(delivery.status);
+    const retryable = status === 'failed' ? delivery.retryCycles + 1 < MAX_ALERT_DELIVERY_CYCLES : undefined;
+    const error =
+      status === 'failed' ? (delivery.error ?? n.error ?? 'the delivery ended without a response') : (delivery.error ?? undefined);
+    if (
+      n.status === status &&
+      n.attempts === delivery.attempts &&
+      n.error === error &&
+      n.retryable === retryable &&
+      n.cycles === delivery.retryCycles + 1
+    )
+      return n;
+    changed = true;
+    return {
+      ...n,
+      status,
+      attempts: delivery.attempts,
+      cycles: delivery.retryCycles + 1,
+      ...(error === undefined ? { error: undefined } : { error }),
+      ...(retryable === undefined ? { retryable: undefined } : { retryable }),
+    };
+  });
+  return changed ? out : notified;
 }
 
 export interface MemberEmail {
@@ -272,13 +455,31 @@ async function notifyEmails(tx: Tx, deps: NotifyDeps, input: NotifyInput, userId
   }));
 }
 
-/** Sends one event to the selected channels. The caller stores the returned `notified` entries. */
-export async function notifyChannels(tx: Tx, deps: NotifyDeps, input: NotifyInput, channels: AlertChannel[]): Promise<AlertNotification[]> {
+/**
+ * Sends one event to the selected channels. The caller stores the returned `notified` entries.
+ * `existing` is the reconciled ledger; it only supplies the bounded retry cycle of a dead webhook.
+ */
+export async function notifyChannels(
+  tx: Tx,
+  deps: NotifyDeps,
+  input: NotifyInput,
+  channels: AlertChannel[],
+  existing: AlertNotification[] = [],
+): Promise<AlertNotification[]> {
   const url = alertUrl(deps, input.rule.id);
   const out: AlertNotification[] = [];
   const emailIds: string[] = [];
   for (const channel of channels) {
-    if (channel.type === 'webhook') out.push(await notifyWebhook(tx, input, channel, url));
+    if (channel.type === 'webhook')
+      out.push(
+        await notifyWebhook(
+          tx,
+          input,
+          channel,
+          url,
+          existing.find((n) => n.event === input.event && n.channel === 'webhook' && n.target === channel.webhookId),
+        ),
+      );
     else emailIds.push(...channel.userIds);
   }
   if (emailIds.length) out.push(...(await notifyEmails(tx, deps, input, [...new Set(emailIds)], url)));
