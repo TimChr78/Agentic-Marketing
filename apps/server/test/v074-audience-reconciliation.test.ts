@@ -720,18 +720,14 @@ describe('bounded progress and scheduler isolation', () => {
 });
 
 describe('merge restore covers every prior hash and intent', () => {
-  for (const mode of ['stale', 'intent'] as const)
+  for (const mode of ['stale', 'intent', 'loser-intent'] as const)
     it(`preserves ${mode} survivor coverage during immediate restore`, async () => {
+      const modeNumber = ['stale', 'intent', 'loser-intent'].indexOf(mode);
       const segment = await createSegment(`covered-${mode}`, true);
-      const survivor = await person(
-        `cover-${mode}`,
-        `cover-${mode}@example.com`,
-        mode === 'stale' ? '+4511000801' : '+4511000802',
-        'covered',
-      );
-      const loser = await person(`lose-${mode}`, `lose-${mode}@example.com`, mode === 'stale' ? '+4511000803' : '+4511000804', 'covered');
+      const survivor = await person(`cover-${mode}`, `cover-${mode}@example.com`, `+45110008${21 + modeNumber}`, 'covered');
+      const loser = await person(`lose-${mode}`, `lose-${mode}@example.com`, `+45110008${31 + modeNumber}`, 'covered');
       await api().call('audiences.add', { segmentId: segment, profileIds: [survivor, loser] });
-      const audienceId = mode === 'stale' ? '90000801' : '90000802';
+      const audienceId = String(90000821 + modeNumber);
       const sync = await createSync({ segment, meta: { connection: ids.meta, audienceId } });
       await syncNow(sync);
       const old = { email: `historical-${mode}`, phone: `historical-phone-${mode}` };
@@ -743,14 +739,15 @@ describe('merge restore covers every prior hash and intent', () => {
         const member = membersOf('meta', audienceId).find((r) => r.email === metaEmail(`cover-${mode}@example.com`))!;
         Object.assign(member, old);
       } else {
-        const owner = await person('shared-intent-owner', 'shared-intent-owner@example.com', '+4511000805', 'owner');
+        const owner = await person(`shared-owner-${mode}`, `shared-owner-${mode}@example.com`, `+45110008${41 + modeNumber}`, 'owner');
+        const intentProfile = mode === 'loser-intent' ? loser : survivor;
         const otherSync = await createSync({ segment, meta: { connection: ids.meta2, audienceId } });
         // Historical ambiguous upload of both hashes; another row owns only the e-mail.
         await t.srv.db.admin.query(
           `INSERT INTO audience_write_intents (workspace_id, sync_id, platform, destination_key, connection_id, destination_id, operating_account_id, login_account_id, profile_id, op, hashes, orphaned_at, orphaned_reason)
         SELECT workspace_id, sync_id, platform, destination_key, connection_id, destination_id, operating_account_id, login_account_id, profile_id, 'add', $4::jsonb, now(), 'partial shared cleanup'
         FROM audience_members WHERE workspace_id = $1 AND sync_id = $2 AND profile_id = $3`,
-          [ws, sync, survivor, JSON.stringify(old)],
+          [ws, sync, intentProfile, JSON.stringify(old)],
         );
         await t.srv.db.admin.query(
           `INSERT INTO audience_members (workspace_id, sync_id, platform, destination_key, connection_id, destination_id, operating_account_id, login_account_id, destination_known, profile_id, hashes)
@@ -779,7 +776,7 @@ describe('merge restore covers every prior hash and intent', () => {
         expect(result.status).toBe('error');
         const pending = await t.srv.db.admin.query<{ hashes: unknown; orphaned_at: unknown }>(
           'SELECT hashes, orphaned_at FROM audience_write_intents WHERE workspace_id = $1 AND sync_id = $2 AND profile_id = $3',
-          [ws, sync, survivor],
+          [ws, sync, mode === 'loser-intent' ? loser : survivor],
         );
         expect(pending.rows).toHaveLength(1);
         expect(pending.rows[0]!.hashes).toEqual(old);

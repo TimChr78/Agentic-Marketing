@@ -534,7 +534,7 @@ export const audienceMembers = pgTable(
     /** Null only for pre-0.7.4 rows whose destination was never recorded. */
     connectionId: text('connection_id'),
     destinationId: text('destination_id'),
-    /** Google customerId / Meta ad account id at upload time; never the mutable connection ref alone. */
+    /** Google customerId at upload time; empty for Meta (the audience id identifies its target). */
     operatingAccountId: text('operating_account_id'),
     /** Google manager account (loginCustomerId) at upload time, when one was used. */
     loginAccountId: text('login_account_id'),

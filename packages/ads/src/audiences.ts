@@ -591,7 +591,7 @@ async function recordAddIntents(
 /**
  * A remove must not delete a member another sync still owns at the same remote destination (or a
  * different profile that now holds the same identifier after a merge/reassignment). Ownership is
- * checked by profile id and by the actual hash values, before any removal is sent.
+ * checked by actual hash values before removal; a shared profile id alone never covers a different hash.
  */
 async function ownedElsewhere(
   db: Db,
@@ -975,6 +975,18 @@ async function processMergeRepair(
       ORDER BY m.profile_id LIMIT ${limit}`);
     const out: MemberWritePlan[] = [];
     for (const row of rows) {
+      const [mergedIntent] = await tx
+        .select({ hashes: schema.audienceWriteIntents.hashes })
+        .from(schema.audienceWriteIntents)
+        .where(
+          and(
+            eq(schema.audienceWriteIntents.workspaceId, ws),
+            eq(schema.audienceWriteIntents.syncId, syncId),
+            eq(schema.audienceWriteIntents.platform, platform),
+            eq(schema.audienceWriteIntents.destinationKey, destinationKey),
+            eq(schema.audienceWriteIntents.profileId, row.profile_id),
+          ),
+        );
       let survivor: string | null = row.merged_into;
       for (let i = 0; i < 20 && survivor; i++) {
         const [p] = await tx
@@ -989,7 +1001,12 @@ async function processMergeRepair(
         survivor = p.mergedInto;
       }
       if (!survivor) {
-        const plan = planMemberWrite({ profileId: row.profile_id, current: null, stored: row.hashes, intent: null });
+        const plan = planMemberWrite({
+          profileId: row.profile_id,
+          current: null,
+          stored: row.hashes,
+          intent: mergedIntent?.hashes ?? null,
+        });
         if (plan) out.push(plan);
         continue;
       }
@@ -1021,7 +1038,12 @@ async function processMergeRepair(
               ),
             );
         } else {
-          const plan = planMemberWrite({ profileId: row.profile_id, current: null, stored: row.hashes, intent: null });
+          const plan = planMemberWrite({
+            profileId: row.profile_id,
+            current: null,
+            stored: row.hashes,
+            intent: mergedIntent?.hashes ?? null,
+          });
           if (plan) out.push(plan);
           const allowed = await eligibilityMap(tx, ws, purposes, [survivor]);
           const [membership] = await tx
