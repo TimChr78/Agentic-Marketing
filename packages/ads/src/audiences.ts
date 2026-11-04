@@ -614,7 +614,7 @@ async function ownedElsewhere(
           AND (${platform} = 'meta' OR (operating_account_id = ${ref.operatingAccountId}
             AND coalesce(login_account_id, '') = ${ref.loginAccountId ?? ''}))
           AND destination_id = ${ref.destinationId}
-          AND NOT (sync_id = ${syncId} AND profile_id = ANY(${sql.param(ids)}::text[]))
+          AND NOT (sync_id = ${syncId} AND destination_key = ${destinationKeyOf(ref)} AND profile_id = ANY(${sql.param(ids)}::text[]))
           AND (profile_id = ANY(${sql.param(ids)}::text[])
             OR hashes->>'email' = ANY(${sql.param(values)}::text[])
             OR hashes->>'phone' = ANY(${sql.param(values)}::text[]))
@@ -624,7 +624,7 @@ async function ownedElsewhere(
           AND (${platform} = 'meta' OR (operating_account_id = ${ref.operatingAccountId}
             AND coalesce(login_account_id, '') = ${ref.loginAccountId ?? ''}))
           AND destination_id = ${ref.destinationId}
-          AND NOT (sync_id = ${syncId} AND profile_id = ANY(${sql.param(ids)}::text[]))
+          AND NOT (sync_id = ${syncId} AND destination_key = ${destinationKeyOf(ref)} AND profile_id = ANY(${sql.param(ids)}::text[]))
           AND (profile_id = ANY(${sql.param(ids)}::text[])
             OR hashes->>'email' = ANY(${sql.param(values)}::text[])
             OR hashes->>'phone' = ANY(${sql.param(values)}::text[]))`);
@@ -725,6 +725,7 @@ interface WriteOutcome {
   removed: number;
   errors: string[];
   lastOk: string | null;
+  retryableError?: boolean;
 }
 
 /**
@@ -743,11 +744,13 @@ async function writePlans(
 ): Promise<WriteOutcome> {
   const outcome: WriteOutcome = { added: 0, removed: 0, errors: [], lastOk: null };
   if (!deps.connection) {
+    outcome.retryableError = true;
     outcome.errors.push('no usable connection was resolved for this destination');
     return outcome;
   }
   const call = callFor(platform, deps.connection, deps.secrets ?? {}, ref, deps.egress);
   if ('error' in call) {
+    outcome.retryableError = true;
     outcome.errors.push(call.error);
     return outcome;
   }
@@ -766,7 +769,6 @@ async function writePlans(
         const reason = `${CLEANUP_PENDING_PREFIX}: identifiers partially overlap another member; manual removal and restoration are required`;
         await markProfilesOrphaned(db, ws, syncId, platform, destinationKeyOf(ref), [p.profileId], reason, 'both');
         outcome.errors.push(reason);
-        if (opts.stopOnError) return outcome;
       } else safe.push(p);
     }
     const send = safe.map((p) => ({
@@ -811,12 +813,14 @@ async function writePlans(
       }
     }
     if (failed) {
+      outcome.retryableError = true;
       if (opts.stopOnError) return outcome;
       continue;
     }
     try {
       await finalizePlans(db, ws, syncId, platform, ref, safe);
     } catch (err) {
+      outcome.retryableError = true;
       // The intents stay: a later run or erasure can still remove what the provider accepted.
       outcome.errors.push(`recording the audience ledger failed: ${messageOf(err)}`);
       if (opts.stopOnError) return outcome;
@@ -1033,7 +1037,23 @@ async function processMergeRepair(
           const person =
             allowed.has(survivor) && (membership || def.removals === false) ? await profileForMessage(tx, ws, survivor, deps.kp) : null;
           const current = person ? hashesFor(platform, person, def.identifiers) : null;
-          if (hasAnyHashes(current)) restores.push({ profileId: survivor, remove: [], add: current, final: current });
+          if (hasAnyHashes(current)) {
+            const [intent] = await tx
+              .select({ hashes: schema.audienceWriteIntents.hashes })
+              .from(schema.audienceWriteIntents)
+              .where(
+                and(
+                  eq(schema.audienceWriteIntents.workspaceId, ws),
+                  eq(schema.audienceWriteIntents.syncId, syncId),
+                  eq(schema.audienceWriteIntents.platform, platform),
+                  eq(schema.audienceWriteIntents.destinationKey, destinationKey),
+                  eq(schema.audienceWriteIntents.profileId, survivor),
+                ),
+              );
+            const restore = planMemberWrite({ profileId: survivor, current, stored: survivorRow.hashes, intent: intent?.hashes ?? null });
+            // Even unchanged hashes need an add after the merged-away member's removal.
+            restores.push(restore ?? { profileId: survivor, remove: [], add: current, final: current });
+          }
         }
       } else {
         // Move the row to the survivor so a later removal cannot delete the person while the
@@ -1169,7 +1189,7 @@ async function processReconcile(
     return { plans: out, lastId: rows.at(-1)?.profile_id ?? null, complete: rows.length < limit };
   });
   const outcome = await writePlans(db, ws, syncId, platform, ref, plans, deps, { stopOnError: true });
-  const next = outcome.errors.length ? (outcome.lastOk ?? cursor) : complete ? null : lastId;
+  const next = outcome.retryableError ? (outcome.lastOk ?? cursor) : complete ? null : lastId;
   return { next, complete, outcome };
 }
 

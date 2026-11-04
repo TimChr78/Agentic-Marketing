@@ -719,6 +719,122 @@ describe('bounded progress and scheduler isolation', () => {
   }, 120_000);
 });
 
+describe('merge restore covers every prior hash and intent', () => {
+  for (const mode of ['stale', 'intent'] as const)
+    it(`preserves ${mode} survivor coverage during immediate restore`, async () => {
+      const segment = await createSegment(`covered-${mode}`, true);
+      const survivor = await person(
+        `cover-${mode}`,
+        `cover-${mode}@example.com`,
+        mode === 'stale' ? '+4511000801' : '+4511000802',
+        'covered',
+      );
+      const loser = await person(`lose-${mode}`, `lose-${mode}@example.com`, mode === 'stale' ? '+4511000803' : '+4511000804', 'covered');
+      await api().call('audiences.add', { segmentId: segment, profileIds: [survivor, loser] });
+      const audienceId = mode === 'stale' ? '90000801' : '90000802';
+      const sync = await createSync({ segment, meta: { connection: ids.meta, audienceId } });
+      await syncNow(sync);
+      const old = { email: `historical-${mode}`, phone: `historical-phone-${mode}` };
+      if (mode === 'stale') {
+        await t.srv.db.admin.query(
+          `UPDATE audience_members SET hashes = $3::jsonb WHERE workspace_id = $1 AND sync_id = $2 AND profile_id = $4`,
+          [ws, sync, JSON.stringify(old), survivor],
+        );
+        const member = membersOf('meta', audienceId).find((r) => r.email === metaEmail(`cover-${mode}@example.com`))!;
+        Object.assign(member, old);
+      } else {
+        const owner = await person('shared-intent-owner', 'shared-intent-owner@example.com', '+4511000805', 'owner');
+        const otherSync = await createSync({ segment, meta: { connection: ids.meta2, audienceId } });
+        // Historical ambiguous upload of both hashes; another row owns only the e-mail.
+        await t.srv.db.admin.query(
+          `INSERT INTO audience_write_intents (workspace_id, sync_id, platform, destination_key, connection_id, destination_id, operating_account_id, login_account_id, profile_id, op, hashes, orphaned_at, orphaned_reason)
+        SELECT workspace_id, sync_id, platform, destination_key, connection_id, destination_id, operating_account_id, login_account_id, profile_id, 'add', $4::jsonb, now(), 'partial shared cleanup'
+        FROM audience_members WHERE workspace_id = $1 AND sync_id = $2 AND profile_id = $3`,
+          [ws, sync, survivor, JSON.stringify(old)],
+        );
+        await t.srv.db.admin.query(
+          `INSERT INTO audience_members (workspace_id, sync_id, platform, destination_key, connection_id, destination_id, operating_account_id, login_account_id, destination_known, profile_id, hashes)
+        SELECT workspace_id, $4, platform, destination_key, connection_id, destination_id, operating_account_id, login_account_id, true, $5, $6::jsonb
+        FROM audience_members WHERE workspace_id = $1 AND sync_id = $2 AND profile_id = $3`,
+          [ws, sync, survivor, otherSync, owner, JSON.stringify({ email: old.email })],
+        );
+        upsertMember(keyOf('meta', audienceId), old);
+      }
+      // Snapshot the merge tombstone at this seam. Actual resolver merge behavior is covered above.
+      await t.srv.db.admin.query('UPDATE profiles SET merged_into = $3 WHERE workspace_id = $1 AND id = $2', [ws, loser, survivor]);
+      const [result] = await syncAudience(t.srv.db, ws, sync, defOf(segment, { meta: { connection: ids.meta, audienceId } }), {
+        kp: t.srv.keyProvider,
+        egress: t.srv.egress,
+        maxReconcilePerRun: 0,
+        maxAddsPerRun: 0,
+      });
+      if (mode === 'stale') {
+        expect(result.status).toBe('ok');
+        expect(membersOf('meta', audienceId)).toHaveLength(1);
+        expect(membersOf('meta', audienceId)[0]!.email).toBe(metaEmail('cover-stale@example.com'));
+        await api().call('profiles.erase', { profileId: survivor, reason: 'Stale survivor coverage test' });
+        await syncNow(sync);
+        expect(membersOf('meta', audienceId)).toHaveLength(0);
+      } else {
+        expect(result.status).toBe('error');
+        const pending = await t.srv.db.admin.query<{ hashes: unknown; orphaned_at: unknown }>(
+          'SELECT hashes, orphaned_at FROM audience_write_intents WHERE workspace_id = $1 AND sync_id = $2 AND profile_id = $3',
+          [ws, sync, survivor],
+        );
+        expect(pending.rows).toHaveLength(1);
+        expect(pending.rows[0]!.hashes).toEqual(old);
+        expect(pending.rows[0]!.orphaned_at).toBeTruthy();
+      }
+    });
+
+  it('advances the reconcile cursor past a manual obligation to later members', async () => {
+    const segment = await createSegment('partial-progress', true);
+    const blocked = await person('progress-a', 'progress-a@example.com', '+4511000811', 'progress');
+    const later = await person('progress-b', 'progress-b@example.com', '+4511000812', 'progress');
+    const owner = await person('progress-owner', 'progress-owner@example.com', '+4511000813', 'owner');
+    expect(blocked < later).toBe(true);
+    await api().call('audiences.add', { segmentId: segment, profileIds: [blocked, later] });
+    const audienceId = '90000804';
+    const sync = await createSync({ segment, meta: { connection: ids.meta, audienceId } });
+    const otherSync = await createSync({ segment, meta: { connection: ids.meta2, audienceId } });
+    await syncNow(sync);
+    const oldBlocked = { email: 'progress-shared', phone: 'progress-private' };
+    const oldLater = { email: 'progress-old-later', phone: 'progress-old-phone' };
+    await t.srv.db.admin.query(
+      `UPDATE audience_members SET hashes = CASE WHEN profile_id = $3 THEN $5::jsonb ELSE $6::jsonb END WHERE workspace_id = $1 AND sync_id = $2 AND profile_id = ANY($4::text[])`,
+      [ws, sync, blocked, [blocked, later], JSON.stringify(oldBlocked), JSON.stringify(oldLater)],
+    );
+    await t.srv.db.admin.query(
+      `INSERT INTO audience_members (workspace_id, sync_id, platform, destination_key, connection_id, destination_id, operating_account_id, login_account_id, destination_known, profile_id, hashes)
+      SELECT workspace_id, $4, platform, destination_key, connection_id, destination_id, operating_account_id, login_account_id, true, $5, $6::jsonb
+      FROM audience_members WHERE workspace_id = $1 AND sync_id = $2 AND profile_id = $3`,
+      [ws, sync, blocked, otherSync, owner, JSON.stringify({ email: oldBlocked.email })],
+    );
+    remote.set(keyOf('meta', audienceId), [oldBlocked, oldLater]);
+    const deps = { kp: t.srv.keyProvider, egress: t.srv.egress, maxReconcilePerRun: 1, maxAddsPerRun: 0 };
+    const def = defOf(segment, { meta: { connection: ids.meta, audienceId } });
+    await syncAudience(t.srv.db, ws, sync, def, deps);
+    await syncAudience(t.srv.db, ws, sync, def, deps);
+    expect(membersOf('meta', audienceId).some((m) => m.email === metaEmail('progress-b@example.com'))).toBe(true);
+    expect((await api().call('ads.audienceBacklog', { syncId: sync })).total).toBe(1);
+  });
+
+  it('does not remove the current member when retrying an old connection at the same Meta audience', async () => {
+    const segment = await createSegment('same-target', true);
+    const profile = await person('same-target', 'same-target@example.com', '+4511000806', 'same-target');
+    await api().call('audiences.add', { segmentId: segment, profileIds: [profile] });
+    const audienceId = '90000803';
+    const sync = await createSync({ segment, meta: { connection: ids.meta, audienceId } });
+    await syncNow(sync);
+    await updateSync(sync, defOf(segment, { meta: { connection: ids.meta2, audienceId } }) as unknown as Record<string, unknown>);
+    failRemoveAfterApply = 'http500';
+    expect((await syncNow(sync))[0]!.status).toBe('error');
+    expect(membersOf('meta', audienceId)).toHaveLength(1);
+    expect((await syncNow(sync))[0]!.status).toBe('ok');
+    expect(membersOf('meta', audienceId)).toHaveLength(1);
+  });
+});
+
 describe('bounded cleanup discovery', () => {
   it('advances bounded scheduler pages across every candidate and wraps after the pass', async () => {
     const db = { ...t.srv.db }; // Independent scheduler cursor; same real database.
