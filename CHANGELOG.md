@@ -2,6 +2,27 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [0.7.4] - 2026-11-04
+
+### Fixed
+
+- Track webhook alert acceptance as queued, confirmed delivery as sent, and exhausted delivery as failed (#368). Retry the same payload and outbox row after resolution or rule disablement, with one extra delivery cycle and a durable retry budget. The UI reports sent/queued/failed separately.
+- Resume segment enrollment after transient chunk failures with persisted bounded backoff, preserving committed cursors, counts and published-version pins (#370).
+- Exchange OAuth callback codes outside pooled transactions and fence results against newer authorizations (#375). Serialize rotating refreshes across replicas and ignore stale invalid-grant responses (#376).
+- Forward all server configuration through Compose and document the environment keys (#385, #387). Remote key providers no longer require a local MASTER_KEY; empty LOG_LEVEL uses the default.
+- Roll deployments after managed Secret changes and support explicit revision bumps for external Secrets (#388). Run self-contained Helm migrations before install/upgrade, with configurable resources; render accurate replica notes and reject scheduler autoscaling (#389–#391).
+- Preserve edits made during an in-flight autosave and ignore stale saves across document switches (#381). Artifact lists and pickers follow full-precision keyset pages instead of stopping at 200 items (#382).
+- Preserve journey-node positions and selection during statistics polls (#383). Keep invalid JSON text across refetches and restore the saved buffer on explicit Discard (#384).
+- Reconcile audience destination/connection changes, identifier changes and capped additions (#400–#402). Persist immutable destination provenance and write intents before remote additions, retain ambiguous writes for cleanup, and restore complete identifier sets after member-level removals. Cleanup continues for unpublished/deleted syncs and erased/refused profiles. Shared-target ownership and merge repair preserve every recorded hash or report an explicit manual obligation.
+
+### Upgrading from 0.7.3
+
+- **Migrations:** 0072 adds audience provenance, write intents, bounded reconciliation state and an explicit legacy cleanup backlog. Existing audience rows have unknown historical destinations and are marked unresolved. 0073 adds enrollment retry state, OAuth refresh leases and durable alert retry budgets. Released migrations are unchanged.
+- **Configuration:** Compose now forwards documented optional server settings. Helm-managed Secret values roll workloads automatically; for an existing Secret, bump `secrets.revision` after rotation or restart the deployments explicitly. Migration jobs use their own hook configuration; custom migration resources are under `migrations.resources`.
+- **Compatibility:** existing command/artifact fields are retained. Artifact pagination and audience state/recovery fields are additive. Artifact loaders cap at 20,000 items; the main list discloses partial loading. Queued webhook notifications are no longer described as sent.
+- **Manual audience cleanup:** inspect `ads.audienceBacklog`, complete historical or partially shared-member removal/restoration at the provider, and acknowledge only the selected entries with human-admin `ads.acknowledgeAudienceCleanup` and a non-empty note. `ads.retryAudienceCleanup` retries recorded work. Unknown historical destinations cannot be reconstructed; this release does not claim those copies were removed. Acknowledgement does not prevent a still-eligible member from being added again by a published sync. Failed or manual cleanup remains visible.
+- **Upgrade:** download `agentic-marketing-compose-0.7.4.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.7.4 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.7.4` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.7.4). Run `docker compose exec app am doctor` and inspect audience cleanup status.
+
 ## [0.7.3] - 2026-11-04
 
 ### Fixed
