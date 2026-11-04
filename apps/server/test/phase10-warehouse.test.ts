@@ -270,20 +270,25 @@ describe('warehouse export', () => {
     const api = t.api(owner);
     const anon = `wh-merge-anon-${Date.now()}`;
     const user = `wh-merge-user-${Date.now()}`;
-    await send([{ type: 'identify', anonymousId: anon, traits: { plan: 'merged' } }]);
+    // The resolver keeps the oldest profile, regardless of identifier strength. Wait for the
+    // intended survivor to exist before sending the other identity: different shard workers
+    // may otherwise apply these two identifies in either order.
     await send([{ type: 'identify', userId: user, traits: { plan: 'survivor' } }]);
-    const from = (
-      await eventually(
-        () => api.call('profiles.find', { type: 'anonymous_id', value: anon }),
-        (r) => !!r.profileId,
-      )
-    ).profileId!;
     const into = (
       await eventually(
         () => api.call('profiles.find', { type: 'user_id', value: user }),
         (r) => !!r.profileId,
       )
     ).profileId!;
+    expect(into).toBeTruthy();
+    await send([{ type: 'identify', anonymousId: anon, traits: { plan: 'merged' } }]);
+    const from = (
+      await eventually(
+        () => api.call('profiles.find', { type: 'anonymous_id', value: anon }),
+        (r) => !!r.profileId,
+      )
+    ).profileId!;
+    expect(from).toBeTruthy();
 
     // A withdrew ad_targeting five days ago; B granted it ten days ago. The recomputed survivor
     // row keeps the newer ledger time (five days ago) and status withdrawn.
@@ -323,10 +328,14 @@ describe('warehouse export', () => {
     // Merging the anonymous profile into the user profile re-points the identifier and rewrites
     // the survivor's consent state, both with timestamps older than the export cursor.
     await send([{ type: 'alias', previousId: anon, userId: user }]);
-    await eventually(
-      () => api.call('profiles.find', { type: 'anonymous_id', value: anon }),
-      (r) => r.profileId === into,
-    );
+    expect(
+      (
+        await eventually(
+          () => api.call('profiles.find', { type: 'anonymous_id', value: anon }),
+          (r) => r.profileId === into,
+        )
+      ).profileId,
+    ).toBe(into);
 
     await api.call('warehouse.run', { id: exportId });
     const identifiers = await eventually(
