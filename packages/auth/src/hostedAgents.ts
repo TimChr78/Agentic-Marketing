@@ -11,6 +11,13 @@ import { describeHostedSchedule, isValidHostedSchedule, nextHostedRunAt } from '
 // mandate like any other. People create, change, delete and run them; their runs are read-only for
 // anyone who may read artifacts. The scheduler in apps/server executes them.
 
+/**
+ * How long a run may hold its claim before the claim is treated as stale (#362, #363). The
+ * scheduler takes over a stale claim; deleting a hosted agent ignores one, so a crashed run
+ * cannot block deletion forever. A live claim still refuses both.
+ */
+export const HOSTED_CLAIM_STALE_MINUTES = 60;
+
 const AGENT_ID = z.string().regex(/^agt_[0-9a-f]{32}$/, 'An agent id looks like agt_…');
 const ProviderId = z.string().regex(/^aip_[0-9a-f]{32}$/, 'An AI provider id looks like aip_…');
 const SkillId = z.string().regex(/^skl_[0-9a-f]{32}$/, 'A skill artifact id looks like skl_…');
@@ -357,12 +364,24 @@ export const deleteHostedAgent = defineCommand({
   humansOnly: true,
   target: (i) => i.agentId,
   handler: async (input, ctx) => {
+    // Match updateHosted's agents -> hosted_agents order, so a concurrent rename cannot
+    // deadlock with deletion while the claim remains protected against takeover.
+    await ctx.tx.select({ id: schema.agents.id }).from(schema.agents).where(eq(schema.agents.id, input.agentId)).for('update');
     const [hosted] = await ctx.tx
-      .select({ runningRunId: schema.hostedAgents.runningRunId })
+      .select({
+        runningRunId: schema.hostedAgents.runningRunId,
+        runningStartedAt: schema.hostedAgents.runningStartedAt,
+      })
       .from(schema.hostedAgents)
-      .where(eq(schema.hostedAgents.agentId, input.agentId));
+      .where(eq(schema.hostedAgents.agentId, input.agentId))
+      .for('update');
     if (!hosted) throw new AppError('not_found', `No hosted agent ${input.agentId}.`);
-    if (hosted.runningRunId) throw new AppError('conflict', 'A run is going; wait for it to finish before deleting this hosted agent.');
+    // Only a live claim blocks deletion (#362). A claim left behind by a crashed run is older than
+    // the stale window, or has no start time to prove it live, and must not block a disabled,
+    // paused or revoked agent's deletion forever. A live run's claim still refuses.
+    const staleBefore = new Date(Date.now() - HOSTED_CLAIM_STALE_MINUTES * 60_000);
+    const liveClaim = hosted.runningRunId !== null && hosted.runningStartedAt !== null && hosted.runningStartedAt > staleBefore;
+    if (liveClaim) throw new AppError('conflict', 'A run is going; wait for it to finish before deleting this hosted agent.');
     const done = await ctx.tx.delete(schema.agents).where(eq(schema.agents.id, input.agentId)).returning({ id: schema.agents.id });
     if (!done.length) throw new AppError('not_found', `No agent ${input.agentId}.`);
     return { deleted: true as const };

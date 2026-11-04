@@ -2,6 +2,7 @@ import { defineCommand } from '@agentic-marketing/commands';
 import { AppError, newId } from '@agentic-marketing/core';
 import { type AiUse, type Db, schema, type Tx } from '@agentic-marketing/db';
 import { type KeyProvider, openJson, sealJson } from '@agentic-marketing/secrets';
+import { logger } from '@agentic-marketing/telemetry';
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import type { LanguageModel } from 'ai';
@@ -85,6 +86,156 @@ export async function reserveTokens(db: Db, workspaceId: string, providerId: str
 
 export async function releaseTokens(db: Db, workspaceId: string, id: string) {
   await db.withWorkspace(workspaceId, (tx) => tx.delete(schema.aiTokenReservations).where(eq(schema.aiTokenReservations.id, id)));
+}
+
+/** A reservation's id and the tokens it holds. */
+export interface TokenReservation {
+  id: string;
+  tokens: number;
+}
+
+/**
+ * Reserves at most `maxTokens` for one turn, but never more than the month's actual remaining
+ * allowance, and returns the amount reserved (the hard cap for the turn). A remainder below
+ * `minimumTokens` refuses the turn with AiUnavailable('budget') instead of starting one that
+ * cannot produce a useful answer. The check runs under the same per-provider lock as
+ * `reserveTokens`, so two turns cannot both take the last of the budget.
+ */
+export async function reserveUpToTokens(
+  db: Db,
+  workspaceId: string,
+  providerId: string,
+  maxTokens: number,
+  minimumTokens: number,
+  ttlMs = 5 * 60_000,
+): Promise<TokenReservation> {
+  return db.withWorkspace(workspaceId, async (tx) => {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`ai-budget:${providerId}`}))`);
+    const [row] = await tx.select().from(schema.aiProviders).where(eq(schema.aiProviders.id, providerId));
+    const used = await usedThisMonth(tx, providerId);
+    const budget = row?.monthlyTokenBudget;
+    const remaining = budget === null || budget === undefined ? maxTokens : budget - used;
+    const tokens = Math.min(maxTokens, remaining);
+    if (tokens < minimumTokens) throw new AiUnavailable('budget');
+    const id = newId('rsv');
+    await tx.insert(schema.aiTokenReservations).values({ workspaceId, id, providerId, tokens, expiresAt: new Date(Date.now() + ttlMs) });
+    return { id, tokens };
+  });
+}
+
+export type SettleOutcome = 'settled' | 'fallback' | 'held';
+
+/** The first instant of the next UTC month: a usage write that failed keeps its hold through the month. */
+export const nextMonthStart = (now = new Date()) => new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
+
+/** Reserve durably before I/O, including the following month for calls crossing UTC month-end.
+ * Successful settlement deletes the hold immediately. A crash/outage keeps conservative budget
+ * coverage until this deadline instead of freeing billed usage after five minutes. */
+export const billingReservationTtlMs = (now = new Date()) => nextMonthStart(nextMonthStart(now)).getTime() - now.getTime();
+
+/**
+ * Keeps a reservation counted past its normal five-minute TTL when its usage could not be
+ * written (#355). The hold is the only remaining record of tokens the provider billed; letting
+ * it expire would let later calls spend that budget again. Metered decision/copilot calls already
+ * commit a hold through the following UTC month before provider I/O; this extension never
+ * shortens that deadline. If the database is unavailable, the original deadline remains valid.
+ */
+export async function holdReservationForMonth(db: Db, workspaceId: string, reservationId: string, now = new Date()): Promise<boolean> {
+  try {
+    await db.withWorkspace(workspaceId, (tx) =>
+      tx
+        .update(schema.aiTokenReservations)
+        .set({ expiresAt: sql`GREATEST(${schema.aiTokenReservations.expiresAt}, ${nextMonthStart(now)})` })
+        .where(eq(schema.aiTokenReservations.id, reservationId)),
+    );
+    return true;
+  } catch (err) {
+    logger.error({ err }, 'AI budget reservation extension failed; its pre-call deadline remains in force');
+    return false;
+  }
+}
+
+/**
+ * Records what a reservation bought and releases the reservation in one transaction (#355).
+ * `usedThisMonth` counts the committed `ai_calls` rows plus live reservations, so an atomic
+ * swap means a concurrent call never sees neither: it sees the hold, or the usage, but not a
+ * gap in which the month looks free.
+ *
+ * `write` must persist the call's tokens. When it fails, `fallback` (if given) writes the same
+ * usage in its own transaction before the hold is released. If both fail the reservation is kept
+ * on purpose and extended through the billing month: freeing it would let the month spend budget
+ * the provider has already billed. The caller sees `'held'` and reports the failure.
+ */
+export async function settleReservation(
+  db: Db,
+  workspaceId: string,
+  reservationId: string,
+  write: (tx: Tx) => Promise<void>,
+  opts: { fallback?: () => Promise<void>; label?: string } = {},
+): Promise<SettleOutcome> {
+  try {
+    await db.withWorkspace(workspaceId, async (tx) => {
+      await write(tx);
+      await tx.delete(schema.aiTokenReservations).where(eq(schema.aiTokenReservations.id, reservationId));
+    });
+    return 'settled';
+  } catch (err) {
+    logger.error({ err, label: opts.label }, 'AI usage could not be recorded with its reservation');
+  }
+  if (!opts.fallback) {
+    await holdReservationForMonth(db, workspaceId, reservationId);
+    return 'held';
+  }
+  try {
+    await opts.fallback();
+  } catch (err) {
+    logger.error({ err, label: opts.label }, 'AI usage could not be recorded at all; keeping the reservation');
+    await holdReservationForMonth(db, workspaceId, reservationId);
+    return 'held';
+  }
+  try {
+    await releaseTokens(db, workspaceId, reservationId);
+  } catch (err) {
+    // The usage is durable; the hold is only double-counting until it expires, which is the safe
+    // direction for a budget.
+    logger.error({ err, label: opts.label }, 'AI usage was recorded but its reservation could not be released');
+  }
+  return 'fallback';
+}
+
+/** The fewest tokens worth starting another model step with (the hosted-run pattern). */
+export const MIN_STEP_TOKENS = 100;
+
+/** Tokens used by the steps so far (input and output), for a turn or run cap. */
+export const tokensOfSteps = (steps: { usage: { inputTokens?: number; outputTokens?: number } }[]) =>
+  steps.reduce((n, s) => n + (s.usage.inputTokens ?? 0) + (s.usage.outputTokens ?? 0), 0);
+
+export interface StepBudget {
+  /** No further model call: too little of the allowance is left for a useful step. */
+  stop: boolean;
+  /** The output cap for the next step. */
+  maxOutputTokens: number;
+}
+
+/**
+ * The budget for the next model step of a capped turn: what is left of the allowance after the
+ * steps already taken and after an estimate of this step's input (prompt, history, tool results).
+ * A turn stops before the call when the room left cannot pay for a useful step, so the cap is
+ * checked before the model is asked again rather than after it has overspent (#356).
+ */
+export function stepBudget(input: {
+  allowance: number;
+  used: number;
+  maxOutputTokens: number;
+  estimatedInput?: number;
+  minStepTokens?: number;
+}): StepBudget {
+  const min = input.minStepTokens ?? MIN_STEP_TOKENS;
+  const remaining = input.allowance - input.used;
+  if (remaining < min) return { stop: true, maxOutputTokens: 1 };
+  const room = remaining - Math.max(0, input.estimatedInput ?? 0);
+  if (room < min) return { stop: true, maxOutputTokens: 1 };
+  return { stop: false, maxOutputTokens: Math.max(1, Math.min(input.maxOutputTokens, room)) };
 }
 
 const providerOut = async (tx: Tx, r: ProviderRow) => ({

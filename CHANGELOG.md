@@ -2,6 +2,23 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [0.7.3] - 2026-11-04
+
+### Fixed
+
+- Settle decision-call usage together with budget reservation release, and bound copilot steps by the remaining turn allowance (#355, #356). Copilot turns advertise core artifact tools plus bounded `tools.discover`, estimate only active schemas, and trim history by complete user turns so tool results keep their assistant calls.
+- Allow deletion of hosted agents whose claims are stale, while refusing live claims (#362). The application role now has the database DELETE grant required by the existing human-only workspace-admin command; deletion and claim takeover serialize on the hosted row.
+- Fence hosted-run completion by claim ownership so a late run cannot release its successor's claim, overwrite its failure streak, disable it or mark its events read (#363). Own-run history remains auditable.
+- Preserve event triggers and event ids when event-driven hosted attempts are skipped; scheduled attempts remain labelled as scheduled (#365). Skipped attempts stay audit-only and do not consume event-run gap or daily limits.
+
+### Upgrading from 0.7.2
+
+- **Migrations:** `0071_hosted_agent_delete.sql` grants the application role DELETE on the existing workspace-isolated agents table. It runs on start-up; command authorization is unchanged.
+- **Configuration:** no new environment variables.
+- **Breaking changes:** no removed command or artifact fields. AI calls can stop earlier when their budget cannot cover another step. Copilot turns enable non-core permitted commands through `tools.discover`; commands too large for the turn budget are reported instead of offered. Live hosted claims still block deletion; claims older than 60 minutes, or missing their start time, no longer block deletion indefinitely.
+- **Manual steps:** inspect provider usage/errors if an interrupted AI call leaves a conservative budget hold. Holds are reserved before provider I/O through the end of the following UTC month and removed after durable usage recording. Copilot input-token checks use an estimate; provider-specific tokenization can exceed that estimate on the final step. Audience reconciliation issues #400–#402 remain open and are deferred to 0.7.4; this release does not claim to repair prior audience destinations or remote cleanup.
+- **Upgrade:** download `agentic-marketing-compose-0.7.3.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.7.3 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.7.3` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.7.3). Run `docker compose exec app am doctor`.
+
 ## [0.7.2] - 2026-11-04
 
 ### Fixed

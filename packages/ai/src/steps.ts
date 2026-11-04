@@ -107,8 +107,8 @@ async function prepare(tx: Tx, c: CallRow, deps: AiStepDeps): Promise<Prepared |
   }
 }
 
-async function finish(
-  db: Db,
+async function finishIn(
+  tx: Tx,
   c: CallRow,
   prep: (Pick<Prepared, 'person'> & Partial<Pick<Prepared, 'def' | 'version' | 'model'>>) | null,
   out: {
@@ -141,54 +141,53 @@ async function finish(
     };
   },
 ) {
-  await db.withWorkspace(c.workspaceId, async (tx) => {
-    const outcome = {
-      seq: c.seq,
-      ...(out.option ? { option: out.option, rationale: out.rationale ?? '' } : {}),
-      ...(out.probability !== undefined ? { probability: out.probability } : {}),
-      ...(out.status !== 'done' ? { fallback: out.error ?? 'failed' } : {}),
-    };
-    // On a fallback the journey fills the slots with the prompt's fallback texts itself.
-    const content = out.slots;
-    // A decision call logs a state hash and a sanitised question set, never the person's state
-    // or a trigger event with its properties (#358). Redacting the questions also keeps contact
-    // details out of a refused call's audit row (#352).
-    const input: Record<string, unknown> = { ...(c.input as Record<string, unknown>) };
-    if (c.kind === 'score') {
-      input.questions = Array.isArray(input.questions) ? input.questions.map((q) => redact(q)) : input.questions;
-      const trigger = input.trigger as { name?: unknown } | string | null | undefined;
-      const name = trigger && typeof trigger === 'object' ? trigger.name : trigger;
-      input.trigger = typeof name === 'string' ? { name } : null;
-    }
-    // A decision step locks and verifies the still-waiting participant first, then the profile,
-    // before writing anything (#351, #359 interplay). A step that finds the participant gone or
-    // not waiting, or the profile erased, is late and commits no score, so an erased person's
-    // scores cannot come back.
-    //
-    // Lock order: participant -> profile -> profile_scores. The journey runtime already claims
-    // participants (FOR UPDATE) and then updates profiles in the same transaction, so this order
-    // avoids a deadlock with it. removeProfiles deletes the person's participants before deleting the profile row; its
-    // existing foreign key cascades the score deletion.
-    let waiting = true;
-    if (c.kind === 'score') {
-      const lockedParticipant = await tx.execute<{ id: string }>(sql`
+  const outcome = {
+    seq: c.seq,
+    ...(out.option ? { option: out.option, rationale: out.rationale ?? '' } : {}),
+    ...(out.probability !== undefined ? { probability: out.probability } : {}),
+    ...(out.status !== 'done' ? { fallback: out.error ?? 'failed' } : {}),
+  };
+  // On a fallback the journey fills the slots with the prompt's fallback texts itself.
+  const content = out.slots;
+  // A decision call logs a state hash and a sanitised question set, never the person's state
+  // or a trigger event with its properties (#358). Redacting the questions also keeps contact
+  // details out of a refused call's audit row (#352).
+  const input: Record<string, unknown> = { ...(c.input as Record<string, unknown>) };
+  if (c.kind === 'score') {
+    input.questions = Array.isArray(input.questions) ? input.questions.map((q) => redact(q)) : input.questions;
+    const trigger = input.trigger as { name?: unknown } | string | null | undefined;
+    const name = trigger && typeof trigger === 'object' ? trigger.name : trigger;
+    input.trigger = typeof name === 'string' ? { name } : null;
+  }
+  // A decision step locks and verifies the still-waiting participant first, then the profile,
+  // before writing anything (#351, #359 interplay). A step that finds the participant gone or
+  // not waiting, or the profile erased, is late and commits no score, so an erased person's
+  // scores cannot come back.
+  //
+  // Lock order: participant -> profile -> profile_scores. The journey runtime already claims
+  // participants (FOR UPDATE) and then updates profiles in the same transaction, so this order
+  // avoids a deadlock with it. removeProfiles deletes the person's participants before deleting the profile row; its
+  // existing foreign key cascades the score deletion.
+  let waiting = true;
+  if (c.kind === 'score') {
+    const lockedParticipant = await tx.execute<{ id: string }>(sql`
         SELECT id FROM journey_participants
         WHERE workspace_id = ${c.workspaceId} AND id = ${c.participantId} AND node = ${c.node} AND seq = ${c.seq} AND status = 'waiting'
         FOR UPDATE`);
-      waiting = lockedParticipant.rows.length > 0;
-      if (waiting && c.profileId) {
-        const lockedProfile = await tx.execute<{ id: string }>(
-          sql`SELECT id FROM profiles WHERE workspace_id = ${c.workspaceId} AND id = ${c.profileId} FOR UPDATE`,
-        );
-        if (!lockedProfile.rows.length) waiting = false;
-      }
-      // The score and the wakeup commit together: a worker cannot claim the participant and read a
-      // missing (or previous) value, and a failed score write leaves the step waiting to retry.
-      if (waiting && out.storeScore) await insertProfileScore(tx, c.workspaceId, out.storeScore);
+    waiting = lockedParticipant.rows.length > 0;
+    if (waiting && c.profileId) {
+      const lockedProfile = await tx.execute<{ id: string }>(
+        sql`SELECT id FROM profiles WHERE workspace_id = ${c.workspaceId} AND id = ${c.profileId} FOR UPDATE`,
+      );
+      if (!lockedProfile.rows.length) waiting = false;
     }
-    // Wake the participant only if it still waits at this step; otherwise the answer came too late.
-    const woke = waiting
-      ? await tx.execute(sql`
+    // The score and the wakeup commit together: a worker cannot claim the participant and read a
+    // missing (or previous) value, and a failed score write leaves the step waiting to retry.
+    if (waiting && out.storeScore) await insertProfileScore(tx, c.workspaceId, out.storeScore);
+  }
+  // Wake the participant only if it still waits at this step; otherwise the answer came too late.
+  const woke = waiting
+    ? await tx.execute(sql`
       UPDATE journey_participants SET
         context = jsonb_set(
           CASE WHEN ${content ? JSON.stringify(content) : null}::jsonb IS NULL THEN context
@@ -196,29 +195,37 @@ async function finish(
           '{ai}', coalesce(context->'ai', '{}') || jsonb_build_object(${c.node}::text, ${JSON.stringify(outcome)}::jsonb)),
         due_at = now(), updated_at = now()
       WHERE workspace_id = ${c.workspaceId} AND id = ${c.participantId} AND node = ${c.node} AND seq = ${c.seq} AND status = 'waiting'`)
-      : { rowCount: 0 };
-    const late = !woke.rowCount && out.status === 'done';
-    await tx
-      .update(schema.aiCalls)
-      .set({
-        status: late ? 'fallback' : out.status,
-        leaseUntil: null,
-        promptVersion: prep?.version ?? null,
-        providerId: prep?.model?.providerId ?? out.providerId ?? null,
-        model: prep?.model?.modelId ?? out.model ?? null,
-        input: { ...input, ...(c.kind !== 'score' && prep?.person ? { person: prep.person } : {}) },
-        output: out.output ?? null,
-        rationale: out.rationale ?? null,
-        error: late ? 'too_late: the step had timed out and took its fallback' : (out.error ?? null),
-        inputTokens: out.inputTokens ?? 0,
-        outputTokens: out.outputTokens ?? 0,
-        latencyMs: out.latencyMs ?? null,
-        cached: out.cached ?? false,
-        reviewStatus: !late && out.status === 'done' && sampled(prep?.def) ? 'pending' : null,
-        finishedAt: new Date(),
-      })
-      .where(and(eq(schema.aiCalls.workspaceId, c.workspaceId), eq(schema.aiCalls.id, c.id)));
-  });
+    : { rowCount: 0 };
+  const late = !woke.rowCount && out.status === 'done';
+  await tx
+    .update(schema.aiCalls)
+    .set({
+      status: late ? 'fallback' : out.status,
+      leaseUntil: null,
+      promptVersion: prep?.version ?? null,
+      providerId: prep?.model?.providerId ?? out.providerId ?? null,
+      model: prep?.model?.modelId ?? out.model ?? null,
+      input: { ...input, ...(c.kind !== 'score' && prep?.person ? { person: prep.person } : {}) },
+      output: out.output ?? null,
+      rationale: out.rationale ?? null,
+      error: late ? 'too_late: the step had timed out and took its fallback' : (out.error ?? null),
+      inputTokens: out.inputTokens ?? 0,
+      outputTokens: out.outputTokens ?? 0,
+      latencyMs: out.latencyMs ?? null,
+      cached: out.cached ?? false,
+      reviewStatus: !late && out.status === 'done' && sampled(prep?.def) ? 'pending' : null,
+      finishedAt: new Date(),
+    })
+    .where(and(eq(schema.aiCalls.workspaceId, c.workspaceId), eq(schema.aiCalls.id, c.id)));
+}
+
+async function finish(
+  db: Db,
+  c: CallRow,
+  prep: (Pick<Prepared, 'person'> & Partial<Pick<Prepared, 'def' | 'version' | 'model'>>) | null,
+  out: Parameters<typeof finishIn>[3],
+) {
+  await db.withWorkspace(c.workspaceId, (tx) => finishIn(tx, c, prep, out));
 }
 
 async function handle(db: Db, c: CallRow, deps: AiStepDeps) {
@@ -245,11 +252,15 @@ async function handle(db: Db, c: CallRow, deps: AiStepDeps) {
     throw err;
   }
   const started = Date.now();
+  let recorded = false;
   try {
     const r = await runPrompt(prep.model, prep.def, prep.person, { timeoutMs: 60_000 });
     const usage = { ...r.usage, latencyMs: Date.now() - started };
-    if (r.kind === 'decide')
-      return finish(db, c, prep, { status: 'done', option: r.option, rationale: r.rationale, output: { option: r.option }, ...usage });
+    if (r.kind === 'decide') {
+      await finish(db, c, prep, { status: 'done', option: r.option, rationale: r.rationale, output: { option: r.option }, ...usage });
+      recorded = true;
+      return;
+    }
     const rejected = Object.entries(r.rejected).map(([k, v]) => `${k}: ${v}`);
     // Only text that passed every check is worth reusing.
     if (prep.cache && prep.def.cache && !rejected.length)
@@ -274,18 +285,25 @@ async function handle(db: Db, c: CallRow, deps: AiStepDeps) {
             set: { slots: r.slots, createdAt: new Date(), expiresAt: new Date(Date.now() + prep.def.cache!.ttlHours * 3_600_000) },
           }),
       );
-    return finish(db, c, prep, {
+    await finish(db, c, prep, {
       status: 'done',
       slots: r.slots,
       output: { slots: r.slots, rejected: r.rejected },
       error: rejected.length ? `fallback text for ${rejected.join('; ')}` : undefined,
       ...usage,
     });
+    recorded = true;
   } catch (err) {
-    return finish(db, c, prep, { status: 'fallback', error: `model_error: ${(err as Error).message}`, latencyMs: Date.now() - started });
+    await finish(db, c, prep, { status: 'fallback', error: `model_error: ${(err as Error).message}`, latencyMs: Date.now() - started });
+    recorded = true;
   } finally {
-    // The call's real usage is in ai_calls now (finish ran first), so the hold can go.
-    await releaseTokens(db, c.workspaceId, reservation);
+    // The call's real usage is in ai_calls now (finish ran first), so the hold can go. If the
+    // write failed, the hold stays: freeing it would let the month spend the same budget twice.
+    if (recorded)
+      await releaseTokens(db, c.workspaceId, reservation).catch((err) =>
+        logger.error({ err }, 'AI budget reservation could not be released'),
+      );
+    else logger.error({ workspaceId: c.workspaceId, callId: c.id }, 'AI step usage not recorded; keeping the budget reservation');
   }
 }
 
@@ -325,6 +343,7 @@ async function handleTest(db: Db, c: CallRow, deps: AiStepDeps) {
     throw err;
   }
   const started = Date.now();
+  let recorded = false;
   try {
     const r = await runTestCase(ready.model, ready.def, ready.test);
     await record({
@@ -337,8 +356,13 @@ async function handleTest(db: Db, c: CallRow, deps: AiStepDeps) {
       ...r.usage,
       latencyMs: Date.now() - started,
     });
+    recorded = true;
   } finally {
-    await releaseTokens(db, c.workspaceId, reservation);
+    if (recorded)
+      await releaseTokens(db, c.workspaceId, reservation).catch((err) =>
+        logger.error({ err }, 'AI budget reservation could not be released'),
+      );
+    else logger.error({ workspaceId: c.workspaceId, callId: c.id }, 'AI test usage not recorded; keeping the budget reservation');
   }
 }
 
@@ -380,6 +404,7 @@ async function handleClassify(db: Db, c: CallRow, deps: AiStepDeps) {
     throw err;
   }
   const started = Date.now();
+  let recorded = false;
   try {
     const r = await runClassify(ready.model, ready.def, text, { timeoutMs: 60_000 });
     let trait: string | null = null;
@@ -404,10 +429,16 @@ async function handleClassify(db: Db, c: CallRow, deps: AiStepDeps) {
       latencyMs: Date.now() - started,
       reviewStatus: sampled(ready.def) ? 'pending' : null,
     });
+    recorded = true;
   } catch (err) {
     await record({ status: 'failed', error: `model_error: ${(err as Error).message}`, latencyMs: Date.now() - started });
+    recorded = true;
   } finally {
-    await releaseTokens(db, c.workspaceId, reservation);
+    if (recorded)
+      await releaseTokens(db, c.workspaceId, reservation).catch((err) =>
+        logger.error({ err }, 'AI budget reservation could not be released'),
+      );
+    else logger.error({ workspaceId: c.workspaceId, callId: c.id }, 'AI classify usage not recorded; keeping the budget reservation');
   }
 }
 
@@ -448,22 +479,41 @@ async function handleScore(db: Db, c: CallRow, deps: AiStepDeps) {
     }
   });
   if ('error' in ready) return finish(db, c, null, { status: 'fallback', error: ready.error });
-  let result: Awaited<ReturnType<typeof decisionCall>>;
-  try {
-    result = await decisionCall(db, c.workspaceId, ready.provider, ready.state, questions, { egress: deps.egress });
-  } catch (err) {
-    return finish(db, c, null, { status: 'fallback', error: `model_error: ${(err as Error).message}` });
-  }
-  const first = result.answers[0];
   // A choice routes on the probability of the configured label, not on whichever label won.
-  const answer = typeof raw.answer === 'string' ? raw.answer : undefined;
-  let routed: DecisionAnswer | undefined = first;
-  if (first?.type === 'choice' && answer) {
-    const p = Object.hasOwn(first.probabilities, answer) ? first.probabilities[answer] : 0;
-    // The stored value must be the probability the journey routed on (#350).
-    routed = { ...first, probability: p };
-  }
-  const probability = routed?.probability;
+  const done = (r: Awaited<ReturnType<typeof decisionCall>>): Parameters<typeof finishIn>[3] => {
+    const first = r.answers[0];
+    const answer = typeof raw.answer === 'string' ? raw.answer : undefined;
+    let routed: DecisionAnswer | undefined = first;
+    if (first?.type === 'choice' && answer) {
+      const p = Object.hasOwn(first.probabilities, answer) ? first.probabilities[answer] : 0;
+      // The stored value must be the probability the journey routed on (#350).
+      routed = { ...first, probability: p };
+    }
+    return {
+      status: 'done',
+      probability: routed?.probability,
+      output: { answers: r.answers },
+      inputTokens: r.inputTokens,
+      outputTokens: r.outputTokens,
+      latencyMs: r.latencyMs,
+      providerId: ready.provider.providerId,
+      model: r.modelVersion,
+      // Committed before the participant is woken, in the same transaction (#351).
+      ...(c.profileId && routed
+        ? {
+            storeScore: {
+              profileId: c.profileId,
+              key: scoreKey,
+              answer: routed,
+              model: ready.provider.model,
+              modelVersion: r.modelVersion,
+              callId: c.id,
+              ttlHours: typeof raw.ttlHours === 'number' ? raw.ttlHours : 168,
+            },
+          }
+        : {}),
+    };
+  };
   // Record the state hash, never the raw state, in the call row beside the question and threshold.
   const call = {
     ...c,
@@ -473,30 +523,31 @@ async function handleScore(db: Db, c: CallRow, deps: AiStepDeps) {
       stateTokens: Math.ceil(JSON.stringify(ready.state ?? null).length / 4),
     },
   };
-  await finish(db, call, null, {
-    status: 'done',
-    probability,
-    output: { answers: result.answers },
-    inputTokens: result.inputTokens,
-    outputTokens: result.outputTokens,
-    latencyMs: result.latencyMs,
-    providerId: ready.provider.providerId,
-    model: result.modelVersion,
-    // Committed before the participant is woken, in the same transaction (#351).
-    ...(c.profileId && routed
-      ? {
-          storeScore: {
-            profileId: c.profileId,
-            key: scoreKey,
-            answer: routed,
-            model: ready.provider.model,
-            modelVersion: result.modelVersion,
-            callId: c.id,
-            ttlHours: typeof raw.ttlHours === 'number' ? raw.ttlHours : 168,
-          },
-        }
-      : {}),
-  });
+  try {
+    await decisionCall(db, c.workspaceId, ready.provider, ready.state, questions, {
+      egress: deps.egress,
+      // The answer, the score and the wakeup commit in the transaction that releases the
+      // reservation (#355). A late or erased step still records the tokens it was billed for;
+      // only the score is withheld.
+      record: (tx, r) => finishIn(tx, call, null, done(r)),
+      // If that transaction fails, record provider-attributed usage and wake the fallback in one
+      // transaction, without a score or second provider call. It must not wait for node timeout.
+      recordUsage: (r) =>
+        db.withWorkspace(c.workspaceId, (tx) =>
+          finishIn(tx, call, null, {
+            status: 'fallback',
+            error: 'usage_recorded: the step outcome could not be stored',
+            inputTokens: r.inputTokens,
+            outputTokens: r.outputTokens,
+            latencyMs: r.latencyMs,
+            providerId: ready.provider.providerId,
+            model: r.modelVersion,
+          }),
+        ),
+    });
+  } catch (err) {
+    return finish(db, c, null, { status: 'fallback', error: `model_error: ${(err as Error).message}` });
+  }
 }
 
 /** Claims due AI steps across workspaces and answers them, a few at a time. Returns how many it handled. */

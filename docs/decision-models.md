@@ -176,7 +176,7 @@ The profile id is not sent. When a caller passes its own `state`, the same guard
 
 ## Budgets and the call log
 
-Decision calls use the same reservation and budget path as other providers: the estimated tokens (state + questions + a small answer allowance) are reserved under a per-provider lock before the call and released after it. `monthlyTokenBudget` is shared with the provider's other uses; when it is reached, `ai.score` returns a budget conflict and a journey decision takes its fallback edge.
+Decision calls use the same reservation and budget path as other providers: the estimated tokens (state + questions + a small answer allowance) are reserved under a per-provider lock before the call. Usage persistence and reservation release commit together; if the usage write fails, a separate writer retries it. The original reservation is durable through the end of the following UTC month before any provider request, so a database outage or crashed process cannot free it after five minutes. Normal successful settlement removes it immediately. An unreconciled hold conservatively reduces the available budget until its deadline; inspect provider usage and errors before manually reconciling an orphaned hold. `monthlyTokenBudget` is shared with the provider's other uses; when it is reached, `ai.score` returns a budget conflict and a journey decision takes its fallback edge.
 
 `ai.calls` records kind `score`, status (`done`, `fallback`, `failed`), provider, model/version, tokens, latency and the state hash. `ai.usage` counts these tokens in the month and the estimated cost.
 

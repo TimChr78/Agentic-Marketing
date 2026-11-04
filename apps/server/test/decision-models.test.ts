@@ -1,4 +1,5 @@
-import { storeProfileScore } from '@agentic-marketing/ai';
+import { createHash } from 'node:crypto';
+import { estimateTokens, storeProfileScore, systemOneRequest } from '@agentic-marketing/ai';
 import { type FakeSystemOneRequest, fakeSystemOne } from '@agentic-marketing/ai/testing';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { eventually, rejects, startTestServer, testPort, type User } from './harness';
@@ -20,8 +21,8 @@ const noul = (key: string, instructions: string) => ({ key, type: 'noul' as cons
 const NOUL = noul('conversion_propensity', 'Is this person likely to convert in the next 14 days?');
 
 /** The fake answers by the state it was given: `p` sets a noul probability, `fail` errors. */
-function answer(r: FakeSystemOneRequest) {
-  const state = (r.state ?? {}) as { p?: number; fail?: boolean; traits?: { fail?: boolean } };
+async function answer(r: FakeSystemOneRequest) {
+  const state = (r.state ?? {}) as { p?: number; fail?: boolean; traits?: { fail?: boolean }; concurrent?: boolean };
   if (state.fail || state.traits?.fail) return { status: 500, error: 'upstream model exploded' };
   const answers: Record<string, Record<string, unknown>> = {};
   for (const [id, q] of Object.entries(r.questions)) {
@@ -29,6 +30,12 @@ function answer(r: FakeSystemOneRequest) {
     else if (q.type === 'choice')
       answers[id] = { type: 'choice', choice: 'email', confidence: 0.7, probabilities: { email: 0.7, sms: 0.2, push: 0.1 } };
     else answers[id] = { type: 'score', score: 1.5, confidence: 0.5, probabilities: { 0: 0.1, 1: 0.3, 2: 0.6 } };
+  }
+  // The concurrency test needs the first call to still hold its reservation when the second one
+  // asks for budget, and a usage small enough that one reservation is the whole month's budget.
+  if (state.concurrent) {
+    await new Promise((r) => setTimeout(r, 150));
+    return { answers, inputTokens: 10, outputTokens: 5 };
   }
   return { answers, inputTokens: 210, outputTokens: 14 };
 }
@@ -185,6 +192,107 @@ describe('ai.score', () => {
       expect(err.message).toContain('budget');
     } finally {
       await api.call('aiProviders.update', { id: providerId, monthlyTokenBudget: null });
+    }
+  });
+
+  it('admits only one of two concurrent decision calls when the budget fits one (#355)', async () => {
+    const api = t.api(owner);
+    const usedOf = async () => (await api.call('aiProviders.list', {})).providers.find((p) => p.id === providerId)!.usedThisMonth;
+    const state = { concurrent: true };
+    // The reservation the call makes for this state and question; the month is given exactly one
+    // reservation more than it has spent, so it can pay for one call, never two.
+    const one = estimateTokens(systemOneRequest('typesafe/jev', state, [NOUL]), 20 + 50);
+    const usedBefore = await usedOf();
+    await api.call('aiProviders.update', { id: providerId, monthlyTokenBudget: usedBefore + one });
+    try {
+      const before = (await api.call('ai.calls', { kind: 'score' })).calls.length;
+      const results = await Promise.allSettled([
+        api.call('ai.score', { questions: [NOUL], state }),
+        api.call('ai.score', { questions: [NOUL], state }),
+      ]);
+      expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+      const failed = results.find((r) => r.status === 'rejected') as PromiseRejectedResult;
+      expect(failed.reason.message).toContain('budget');
+      // One done row and one failed row (the refused call is auditable); the reservation was
+      // held until the winning call's usage was durable.
+      const calls = (await api.call('ai.calls', { kind: 'score' })).calls;
+      expect(calls).toHaveLength(before + 2);
+      const fresh = calls.slice(0, 2);
+      expect(fresh.filter((c) => c.status === 'done')).toHaveLength(1);
+      expect(fresh.filter((c) => c.status === 'failed')).toHaveLength(1);
+      const usedAfter = await usedOf();
+      expect(usedAfter - usedBefore).toBe(15); // 10 input + 5 output; no reservation left behind
+      expect(usedAfter).toBeLessThanOrEqual(usedBefore + one);
+    } finally {
+      await api.call('aiProviders.update', { id: providerId, monthlyTokenBudget: null });
+    }
+  });
+
+  it('records usage before releasing the reservation when the first ai_calls write fails (#355)', async () => {
+    const api = t.api(owner);
+    const state = { persist: true };
+    const hash = createHash('sha256').update(JSON.stringify(state)).digest('hex');
+    // One-shot failure: the first insert for this state raises, later inserts succeed. A sequence
+    // is used because nextval is not rolled back with the failed transaction.
+    await t.srv.db.admin.query('DROP SEQUENCE IF EXISTS ai_call_fail_once');
+    await t.srv.db.admin.query('CREATE SEQUENCE ai_call_fail_once START 1');
+    await t.srv.db.admin.query(`CREATE OR REPLACE FUNCTION ai_call_fail_once_fn() RETURNS trigger
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      BEGIN
+        IF NEW.input->>'stateHash' = '${hash}' AND nextval('ai_call_fail_once') = 1
+          THEN RAISE EXCEPTION 'injected ai_calls failure';
+        END IF;
+        RETURN NEW;
+      END $$`);
+    await t.srv.db.admin.query('DROP TRIGGER IF EXISTS ai_call_fail_once_trg ON ai_calls');
+    await t.srv.db.admin.query(
+      'CREATE TRIGGER ai_call_fail_once_trg BEFORE INSERT ON ai_calls FOR EACH ROW EXECUTE FUNCTION ai_call_fail_once_fn()',
+    );
+    const usedOf = async () => (await api.call('aiProviders.list', {})).providers.find((p) => p.id === providerId)!.usedThisMonth;
+    try {
+      const before = await usedOf();
+      const r = await api.call('ai.score', { questions: [NOUL], state });
+      const row = (await api.call('ai.calls', { kind: 'score' })).calls.find((c) => c.id === r.callId)!;
+      expect(row).toMatchObject({ status: 'done', inputTokens: 210, outputTokens: 14 });
+      // The usage is durable and the reservation is gone: the month counts the tokens once.
+      expect((await usedOf()) - before).toBe(224);
+    } finally {
+      await t.srv.db.admin.query('DROP TRIGGER IF EXISTS ai_call_fail_once_trg ON ai_calls');
+      await t.srv.db.admin.query('DROP FUNCTION IF EXISTS ai_call_fail_once_fn()');
+      await t.srv.db.admin.query('DROP SEQUENCE IF EXISTS ai_call_fail_once');
+    }
+  });
+
+  it('keeps the reservation when neither usage write can land (#355)', async () => {
+    const api = t.api(owner);
+    const state = { persistAlways: true };
+    const hash = createHash('sha256').update(JSON.stringify(state)).digest('hex');
+    await t.srv.db.admin.query(`CREATE OR REPLACE FUNCTION ai_call_fail_hash_fn() RETURNS trigger AS $$
+      BEGIN
+        IF NEW.input->>'stateHash' = '${hash}' THEN RAISE EXCEPTION 'injected ai_calls failure'; END IF;
+        RETURN NEW;
+      END $$ LANGUAGE plpgsql`);
+    await t.srv.db.admin.query('DROP TRIGGER IF EXISTS ai_call_fail_hash_trg ON ai_calls');
+    await t.srv.db.admin.query(
+      'CREATE TRIGGER ai_call_fail_hash_trg BEFORE INSERT ON ai_calls FOR EACH ROW EXECUTE FUNCTION ai_call_fail_hash_fn()',
+    );
+    try {
+      await rejects(api.call('ai.score', { questions: [NOUL], state }));
+      // The provider was billed. The hold stays and is extended through the billing month, so the
+      // month cannot spend the same budget again when the normal five-minute TTL would lapse.
+      const held = await t.srv.db.admin.query<{ tokens: number; expires_at: Date }>(
+        'SELECT tokens, expires_at FROM ai_token_reservations WHERE provider_id = $1',
+        [providerId],
+      );
+      expect(held.rows).toHaveLength(1);
+      expect(held.rows[0].tokens).toBeGreaterThan(0);
+      const now = new Date();
+      const nextMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
+      expect(held.rows[0].expires_at.getTime()).toBeGreaterThanOrEqual(nextMonth.getTime());
+    } finally {
+      await t.srv.db.admin.query('DROP TRIGGER IF EXISTS ai_call_fail_hash_trg ON ai_calls');
+      await t.srv.db.admin.query('DROP FUNCTION IF EXISTS ai_call_fail_hash_fn()');
+      await t.srv.db.admin.query('DELETE FROM ai_token_reservations WHERE provider_id = $1', [providerId]);
     }
   });
 
@@ -440,7 +548,7 @@ describe('a failed score write', () => {
     });
   }, 60_000);
 
-  it('does not wake the participant when the score cannot be stored (#351)', async () => {
+  it('takes fallback promptly without a score and retains billed usage when the score write fails (#351, #355)', async () => {
     const api = t.api(owner);
     await t.srv.db.admin.query(`DROP TRIGGER IF EXISTS am_test_fail_score ON profile_scores`);
     await t.srv.db.admin.query(`
@@ -460,20 +568,24 @@ describe('a failed score write', () => {
         { type: 'track', event: 'Score Store Fails', userId: 'score_failure' },
       ]);
       const profileId = (await profileOf('score_failure'))!;
-      // The worker claims the step, then the score insert throws: the wakeup rolls back with it.
+      // The answer/score transaction fails; its fallback must wake immediately rather than
+      // leave the person waiting for the five-minute node timeout. Billing stays attributed.
       const attempted = await eventually(
         () =>
-          t.srv.db.admin.query<{ attempts: number; status: string }>(
-            'SELECT attempts, status FROM ai_calls WHERE journey_id = $1 AND profile_id = $2',
+          t.srv.db.admin.query<{ attempts: number; status: string; provider_id: string; input_tokens: number; output_tokens: number }>(
+            'SELECT attempts, status, provider_id, input_tokens, output_tokens FROM ai_calls WHERE journey_id = $1 AND profile_id = $2',
             [failJourneyId, profileId],
           ),
-        (r) => (r.rows[0]?.attempts ?? 0) >= 1,
+        (r) => r.rows[0]?.status === 'fallback',
         20_000,
       );
-      expect(attempted.rows[0]).toMatchObject({ status: 'running' });
-      await new Promise((r) => setTimeout(r, 500));
-      const profile = await api.call('profiles.get', { profileId });
-      expect(profile.traits.decision_path).toBeUndefined();
+      expect(attempted.rows[0]).toMatchObject({ status: 'fallback', provider_id: providerId, input_tokens: 210, output_tokens: 14 });
+      const profile = await eventually(
+        () => api.call('profiles.get', { profileId }),
+        (p) => p.traits.decision_path === 'low',
+        20_000,
+      );
+      expect(profile.traits.decision_path).toBe('low');
       expect((await api.call('profiles.scores', { profileId, key: 'forced_failure' })).scores).toHaveLength(0);
     } finally {
       await t.srv.db.admin.query(`DROP TRIGGER IF EXISTS am_test_fail_score ON profile_scores`);

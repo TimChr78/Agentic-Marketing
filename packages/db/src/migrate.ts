@@ -99,6 +99,7 @@ const MIGRATION_RELEASES: Record<string, string> = {
   '0068_warehouse_change_tracking.sql': '0.7.2',
   '0069_merge_preferences_memberships.sql': '0.7.2',
   '0070_edge_cleanup.sql': '0.7.2',
+  '0071_hosted_agent_delete.sql': '0.7.3',
 };
 
 export function releaseForMigrationHead(head: string | null): string | null {

@@ -8,7 +8,7 @@ import { type KeyProvider, openJson } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, sql } from 'drizzle-orm';
 import { personalDataIn } from './context';
-import { AiUnavailable, estimateTokens, releaseTokens, reserveTokens } from './providers';
+import { AiUnavailable, billingReservationTtlMs, estimateTokens, releaseTokens, reserveTokens, settleReservation } from './providers';
 
 // The decision-model adapter (#194): TypeSafe's System One API, reached through CommandCode
 // (https://api.commandcode.ai/provider/v1) or TypeSafe directly (https://api.typesafe.ai/v1).
@@ -350,8 +350,13 @@ export async function callSystemOne(
 }
 
 /**
- * One metered decision call: reserves the provider's budget, calls the model, frees the hold.
- * The caller records the ai_calls row (kind score) so usage counts even when the call fails.
+ * One metered decision call: reserves the provider's budget, calls the model, and settles the
+ * hold. Usage is written by `record` in the same transaction that releases the reservation, so
+ * the month never counts neither the hold nor the tokens (#355). `record` is required: a
+ * reservation is never released for a call whose usage was not written. `recordUsage` is the
+ * last-resort writer used when that transaction fails; without it, or if it also fails, the
+ * reservation is kept and extended through the billing month rather than freeing budget for
+ * tokens the provider already billed.
  */
 export async function decisionCall(
   db: Db,
@@ -359,17 +364,51 @@ export async function decisionCall(
   provider: DecisionProvider,
   state: unknown,
   questions: DecisionQuestion[],
-  opts: { timeoutMs?: number; egress?: EgressPolicy } = {},
+  opts: {
+    timeoutMs?: number;
+    egress?: EgressPolicy;
+    /** Persists the call's usage row in the settling transaction; the reservation goes only if it commits. */
+    record: (tx: Tx, result: Omit<DecisionResult, 'providerId' | 'model'>) => Promise<void>;
+    /** Writes the same usage in its own transaction when `record` fails. */
+    recordUsage?: (result: Omit<DecisionResult, 'providerId' | 'model'>) => Promise<void>;
+  },
 ): Promise<Omit<DecisionResult, 'providerId' | 'model'>> {
+  // A successful provider call must never be released without its usage. The type requires a
+  // writer; this guard keeps a JavaScript caller from bypassing that contract.
+  if (typeof opts.record !== 'function')
+    throw new DecisionError('invalid_request', 'decisionCall needs a record writer: a reservation is never released without its usage.');
   const request = systemOneRequest(provider.model, state, questions);
-  const reservation = await reserveTokens(db, workspaceId, provider.providerId, estimateTokens(request, 20 * questions.length + 50));
+  const reservation = await reserveTokens(
+    db,
+    workspaceId,
+    provider.providerId,
+    estimateTokens(request, 20 * questions.length + 50),
+    billingReservationTtlMs(),
+  );
   const started = Date.now();
+  let result: Omit<DecisionResult, 'providerId' | 'model'>;
   try {
-    const r = await callSystemOne(provider, state, questions, opts);
-    return { ...r, latencyMs: Date.now() - started };
-  } finally {
-    await releaseTokens(db, workspaceId, reservation);
+    result = { ...(await callSystemOne(provider, state, questions, opts)), latencyMs: Date.now() - started };
+  } catch (err) {
+    // No usage is known: the provider refused the request or it never completed. The caller
+    // records a failed row with zero tokens, so the hold can go.
+    await releaseTokens(db, workspaceId, reservation).catch((releaseErr) =>
+      logger.error({ err: releaseErr, providerId: provider.providerId }, 'decision budget reservation could not be released'),
+    );
+    throw err;
   }
+  const outcome = await settleReservation(db, workspaceId, reservation, (tx) => opts.record(tx, result), {
+    fallback: opts.recordUsage ? () => opts.recordUsage!(result) : undefined,
+    label: 'decision call',
+  });
+  // 'fallback' means the usage is durable even though the caller's own row could not commit in
+  // the settling transaction; the caller can carry on with a call id that exists.
+  if (outcome === 'held')
+    throw new DecisionError(
+      'provider_error',
+      'The decision call was billed, but its usage could not be recorded. The budget reservation is kept through the month so the month is not under-counted.',
+    );
+  return result;
 }
 
 /** Writes the newest value of a named score for a person, with its TTL, in the caller's transaction. */
