@@ -234,7 +234,14 @@ describe('bulk enrollment by segment (#148)', () => {
   // fail a 40k-person backfill. The chunk rolls back, the committed cursor/counts stay, the job
   // records one retry attempt and the next tick resumes after the same cursor.
   it('retries a transient chunk failure without losing the committed cursor or enrolling twice', async () => {
-    const created = await api().call('journeys.enrollSegment', { artifactId: resumeJourneyId, segmentId, reason: 'retry me' });
+    const retryJourney = await api().call('artifacts.create', {
+      type: 'journey',
+      name: 'Transient retry',
+      content: journeyContent('always', templateId),
+    });
+    const retryJourneyId = retryJourney.artifactId;
+    await api().call('artifacts.requestPublish', { artifactId: retryJourneyId, note: 'retry fixture' });
+    const created = await api().call('journeys.enrollSegment', { artifactId: retryJourneyId, segmentId, reason: 'retry me' });
     await runEnrollmentJobsOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events });
     const first = await api().call('journeys.enrollmentJob', { jobId: created.jobId });
     expect(first.status).toBe('running');
@@ -281,7 +288,7 @@ describe('bulk enrollment by segment (#148)', () => {
          WHERE workspace_id = $1 AND journey_id = $2
          GROUP BY profile_id HAVING count(*) > 1
        ) d`,
-      [ws, resumeJourneyId],
+      [ws, retryJourneyId],
     );
     expect(duplicates.rows[0]?.n).toBe(0);
   }, 240_000);
