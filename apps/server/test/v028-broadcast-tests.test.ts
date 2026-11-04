@@ -196,19 +196,24 @@ describe('subject A/B test', () => {
     expect(deciding.test?.decideAt).not.toBeNull();
 
     sampleMessages = (await messagesOf(winnerId)).filter((m) => m.variant !== null);
-    expect(sampleMessages.length).toBeGreaterThanOrEqual(45);
-    expect(sampleMessages.length).toBeLessThanOrEqual(75);
-    const byVariant = new Map<string, number>();
-    for (const m of sampleMessages) byVariant.set(m.variant!, (byVariant.get(m.variant!) ?? 0) + 1);
-    expect(byVariant.get('A')).toBeGreaterThanOrEqual(20);
-    expect(byVariant.get('B')).toBeGreaterThanOrEqual(20);
-    // The split is a hash of random profile ids, so it is binomial: with ~60 sends the difference
-    // has a standard deviation near 8. Each arm within 30–70% is about three standard deviations.
-    for (const v of ['A', 'B']) {
-      const share = (byVariant.get(v) ?? 0) / sampleMessages.length;
-      expect(share).toBeGreaterThanOrEqual(0.3);
-      expect(share).toBeLessThanOrEqual(0.7);
-    }
+    const members = await t.srv.db.admin.query<{ profile_id: string }>(
+      'SELECT profile_id FROM segment_memberships WHERE workspace_id = $1 AND segment_id = $2',
+      [ws, segment],
+    );
+    const expected = new Map(
+      members.rows.flatMap(({ profile_id }) => {
+        const variant = subjectAssignment(profile_id, winnerId, 50, 2);
+        return variant ? [[profile_id, variant] as const] : [];
+      }),
+    );
+    // Runtime ids are random, so a valid sample need not fall inside an arbitrary count band.
+    // Fixed-id distribution coverage lives above; here verify the worker sent exactly its
+    // assigned recipients, once each, with the right subject variant.
+    expect(sampleMessages).toHaveLength(expected.size);
+    expect(new Set(sampleMessages.map((m) => m.profile_id))).toEqual(new Set(expected.keys()));
+    for (const message of sampleMessages) expect(message.variant).toBe(expected.get(message.profile_id));
+    expect(sampleMessages.some((m) => m.variant === 'A')).toBe(true);
+    expect(sampleMessages.some((m) => m.variant === 'B')).toBe(true);
     await eventually(
       () => status(winnerId),
       (s) => (s.test?.variants.reduce((n, v) => n + v.sent, 0) ?? 0) === sampleMessages.length,
