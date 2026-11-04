@@ -17,7 +17,7 @@ test('create an alert, send a test and see the empty history (#76)', async ({ pa
   await expect(page.getByText('Bounce watch')).toBeVisible();
   await expect(page.getByText(/Bounce rate above 5/)).toBeVisible();
   await page.getByRole('button', { name: 'Send a test' }).click();
-  await expect(page.getByText(/Test notification sent to 1 channel/)).toBeVisible();
+  await expect(page.getByText('Test notifications: 1 sent, 0 queued, 0 failed.')).toBeVisible();
   await expect(page.getByText('Nothing has fired yet')).toBeVisible();
 
   const rules = await call<{ rules: { id: string; name: string }[] }>(page.request, 'alerts.list', {});

@@ -71,6 +71,14 @@ Example generic mapping (a form tool):
 { "type": "track", "event": "Lead Created", "userId": "lead:" & body.id, "properties": { "score": body.score } }
 ```
 
+## OAuth connections
+
+Connectors that authenticate with OAuth 2.0 (`oauth_http`, `shopify_app`, `salesforce`) use the authorization-code flow with PKCE. `connections.authorize` returns the provider URL; the provider sends the person back to `/oauth/callback`.
+
+- **One-time state.** The callback consumes the authorization state in a short transaction before contacting the provider, so a replayed callback cannot exchange a second code. A newer `connections.authorize` replaces the pending state: a callback that was already in flight then reports "a newer authorization replaced this one" and does not overwrite the tokens. A connection deleted or disabled meanwhile is never written back.
+- **No transaction over HTTP.** The code-for-token exchange runs with no database transaction or pooled connection held; only two short transactions (consume, persist) touch the database. A slow provider therefore cannot pin the shared application pool.
+- **Refreshing.** Tokens that expire within ten minutes are refreshed by the scheduler. One replica claims a short lease per connection before calling the provider, so a rotating refresh token is redeemed once even when two schedulers run; the write-back re-reads the connection and discards a result that lost to a newer refresh or re-authorization. A stale `invalid_grant` is ignored for the same reason, while a genuinely refused refresh token marks the connection `error` and asks the person to connect again. Transient refresh failures are retried on the next tick.
+
 ## Automation steps in journeys
 
 | Step | Config | Behaviour |

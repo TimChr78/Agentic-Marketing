@@ -1,5 +1,6 @@
 import { artifactTypes, type JourneyDefinition } from '@agentic-marketing/artifacts';
 import { campaignWithControlForMember } from '@agentic-marketing/campaigns';
+import { AppError } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import { checkPushRecipient, checkRecipient, checkSmsRecipient } from '@agentic-marketing/email';
 import type { EventStore, JourneyEvent } from '@agentic-marketing/events';
@@ -25,10 +26,69 @@ const MAX_JOBS_PER_RUN = 100;
 export const enrollmentJobStatus = z.enum(['queued', 'running', 'done', 'failed', 'cancelled']);
 export type EnrollmentJobStatus = z.infer<typeof enrollmentJobStatus>;
 
+/**
+ * Bounded retry for a chunk that failed on something transient (#370): a deadlock, a statement
+ * timeout, a dropped connection. A chunk is atomic, so the previous cursor/counts/version pins
+ * remain committed and the retry rescans from there; the deterministic entry key still prevents a
+ * second participant. Artifact/schema failures are permanent and skip this schedule.
+ */
+export interface EnrollmentRetryPolicy {
+  /** Consecutive chunk failures before the job becomes terminal `failed`. */
+  maxAttempts: number;
+  /** Delay before attempt 2, 3, … The last entry repeats. */
+  backoffMs: number[];
+}
+
+export const DEFAULT_ENROLLMENT_RETRY: EnrollmentRetryPolicy = {
+  maxAttempts: 5,
+  backoffMs: [10_000, 60_000, 300_000, 900_000],
+};
+
 export interface EnrollmentDeps {
   db: Db;
   kp: KeyProvider;
   events?: Pick<EventStore, 'insertJourneyEvents'>;
+  /** Tests and specialised schedulers can bound the retry; the default is documented above. */
+  retry?: Partial<EnrollmentRetryPolicy>;
+}
+
+/** A schema/validation error cannot heal with time: retrying would fail the same way. */
+export function isPermanentEnrollmentError(err: unknown): boolean {
+  if (err instanceof z.ZodError) return true;
+  return err instanceof AppError && ['invalid_input', 'not_found', 'conflict'].includes(err.code);
+}
+
+export interface ChunkFailureOutcome {
+  status: 'queued' | 'running' | 'failed';
+  attempts: number;
+  nextAttemptAt: Date | null;
+  error: string;
+  finishedAt: Date | null;
+}
+
+/** The persisted transition after a chunk threw. Pure, so the status machine is unit-testable. */
+export function chunkFailureOutcome(
+  job: { status: EnrollmentJobStatus; attempts: number },
+  message: string,
+  opts: { permanent?: boolean; retry?: EnrollmentRetryPolicy; now?: Date } = {},
+): ChunkFailureOutcome {
+  const policy = opts.retry ?? DEFAULT_ENROLLMENT_RETRY;
+  const now = opts.now ?? new Date();
+  const attempts = job.attempts + 1;
+  if (opts.permanent || attempts >= policy.maxAttempts)
+    return { status: 'failed', attempts, nextAttemptAt: null, error: message.slice(0, 1000), finishedAt: now };
+  const delay = policy.backoffMs[Math.min(attempts - 1, policy.backoffMs.length - 1)] ?? 0;
+  return {
+    status: job.status === 'failed' || job.status === 'done' || job.status === 'cancelled' ? 'running' : job.status,
+    attempts,
+    nextAttemptAt: new Date(now.getTime() + delay),
+    error: `chunk attempt ${attempts} of ${policy.maxAttempts} failed; retrying: ${message}`.slice(0, 1000),
+    finishedAt: null,
+  };
+}
+
+function retryPolicy(deps: EnrollmentDeps): EnrollmentRetryPolicy {
+  return { ...DEFAULT_ENROLLMENT_RETRY, ...deps.retry };
 }
 
 export interface EnrollmentSummary {
@@ -55,14 +115,16 @@ export const enrollmentJobOutput = z.object({
   people: z.number().int().describe('People in the segment when the job was requested, capped by limit'),
   limit: z.number().int().nullable().describe('How many members the job may try; null means the whole segment'),
   cursor: z.string().nullable().describe('The last profile id scanned; the job resumes after it'),
+  attempts: z.number().int().describe('Consecutive transient chunk retries; a committed chunk resets it'),
+  nextAttemptAt: z.string().nullable().describe('When the scheduler may retry the job after a transient failure'),
   entered: z.number().int(),
   skipped: z.number().int(),
-  failed: z.number().int(),
+  failed: z.number().int().describe('People skipped after a per-person error, not chunk retry attempts'),
   skipReasons: z.record(z.string(), z.number().int()).describe('Why people were skipped: a reason code → people'),
   requestedBy: z.object({ type: z.enum(['user', 'agent']), id: z.string() }),
   reason: z.string(),
   idempotencyKey: z.string().nullable(),
-  error: z.string().nullable().describe('Why the job stopped, when it failed because the journey or segment changed'),
+  error: z.string().nullable().describe('The last transient retry error while the job is running, or why it stopped when failed'),
   createdAt: z.string(),
   startedAt: z.string().nullable(),
   finishedAt: z.string().nullable(),
@@ -80,6 +142,8 @@ export function enrollmentJobOut(job: JobRow) {
     people: job.people,
     limit: job.limit,
     cursor: job.cursor,
+    attempts: job.attempts,
+    nextAttemptAt: job.nextAttemptAt?.toISOString() ?? null,
     entered: job.entered,
     skipped: job.skipped,
     failed: job.failed,
@@ -180,7 +244,14 @@ async function processChunk(deps: EnrollmentDeps, tx: Tx, workspaceId: string, j
   const finish = async (status: EnrollmentJobStatus, extra: Partial<JobRow> = {}) => {
     await tx
       .update(schema.enrollmentJobs)
-      .set({ status, updatedAt: now, ...(status === 'done' || status === 'failed' ? { finishedAt: now } : {}), ...extra })
+      .set({
+        status,
+        updatedAt: now,
+        ...(status === 'done' || status === 'failed' ? { finishedAt: now } : {}),
+        // A chunk that commits (running or done) ends the transient-failure streak.
+        ...(status === 'running' || status === 'done' ? { attempts: 0, nextAttemptAt: null, error: null } : {}),
+        ...extra,
+      })
       .where(eq(schema.enrollmentJobs.id, job.id));
   };
 
@@ -372,6 +443,7 @@ export async function runEnrollmentJobsOnce(deps: EnrollmentDeps): Promise<Enrol
   const { rows } = await deps.db.admin.query<{ workspace_id: string; id: string }>(
     `SELECT workspace_id, id FROM enrollment_jobs
      WHERE status IN ('queued', 'running')
+       AND (next_attempt_at IS NULL OR next_attempt_at <= now())
      ORDER BY created_at
      LIMIT ${MAX_JOBS_PER_RUN}`,
   );
@@ -387,16 +459,33 @@ export async function runEnrollmentJobsOnce(deps: EnrollmentDeps): Promise<Enrol
       total.done += result.summary.done;
       if (deps.events && result.holdout.length) await deps.events.insertJourneyEvents(result.holdout).catch(() => {});
     } catch (err) {
-      logger.error({ err, workspaceId, job: id }, 'enrollment job chunk failed');
       const message = err instanceof Error ? err.message : String(err);
-      await deps.db
-        .withWorkspace(workspaceId, (tx) =>
-          tx
+      const permanent = isPermanentEnrollmentError(err);
+      try {
+        // The failed chunk rolled back, so its cursor/counts/pins are still the previous chunk's.
+        // Record one retry attempt in a fresh transaction; a crash between the two only means the
+        // streak is not counted, never that work is lost or repeated (the next tick rescans).
+        await deps.db.withWorkspace(workspaceId, async (tx) => {
+          const [job] = await tx.select().from(schema.enrollmentJobs).where(eq(schema.enrollmentJobs.id, id)).for('update');
+          if (!job || (job.status !== 'queued' && job.status !== 'running')) return;
+          const outcome = chunkFailureOutcome(job, message, { permanent, retry: retryPolicy(deps) });
+          await tx
             .update(schema.enrollmentJobs)
-            .set({ status: 'failed', error: message.slice(0, 1000), finishedAt: new Date(), updatedAt: new Date() })
-            .where(and(eq(schema.enrollmentJobs.id, id), inArray(schema.enrollmentJobs.status, ['queued', 'running']))),
-        )
-        .catch(() => {});
+            .set({
+              status: outcome.status,
+              attempts: outcome.attempts,
+              nextAttemptAt: outcome.nextAttemptAt,
+              error: outcome.error,
+              finishedAt: outcome.finishedAt,
+              updatedAt: new Date(),
+            })
+            .where(eq(schema.enrollmentJobs.id, id));
+        });
+      } catch (updateErr) {
+        logger.error({ err: updateErr, workspaceId, job: id }, 'enrollment job retry state could not be stored');
+      }
+      if (permanent) logger.error({ err, workspaceId, job: id }, 'enrollment job stopped on a permanent error');
+      else logger.warn({ err, workspaceId, job: id }, 'enrollment job chunk failed; it will retry');
     }
   }
   return total;

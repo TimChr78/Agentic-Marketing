@@ -243,14 +243,14 @@ describe('OAuth 2.0 connections', () => {
   it('refreshes tokens, keeps the refresh token, and asks to reconnect when it is revoked', async () => {
     const api = t.api(owner);
     const [ws] = (await t.srv.db.admin.query<{ workspace_id: string }>('SELECT workspace_id FROM connections WHERE id = $1', [id])).rows;
-    await refreshConnection(t.srv.db, ws.workspace_id, id, { kp: t.srv.keyProvider, egress: t.srv.egress });
+    await refreshConnection(t.srv.db, ws.workspace_id, id, { db: t.srv.db, kp: t.srv.keyProvider, egress: t.srv.egress }, { force: true });
     expect(provider.tokenCalls.at(-1)).toMatchObject({ grant_type: 'refresh_token', refresh_token: 'rt-1' });
     expect(await api.call('connections.runAction', { id, action: 'request', input: { path: 'me' } })).toMatchObject({
       result: { status: 200 },
     });
 
     provider.refuseRefresh = true;
-    await refreshConnection(t.srv.db, ws.workspace_id, id, { kp: t.srv.keyProvider, egress: t.srv.egress });
+    await refreshConnection(t.srv.db, ws.workspace_id, id, { db: t.srv.db, kp: t.srv.keyProvider, egress: t.srv.egress }, { force: true });
     const listed = (await api.call('connections.list', {})).connections.find((c) => c.id === id)!;
     expect(listed.oauth?.status).toBe('error');
     expect(listed.oauth?.error).toContain('connect again');

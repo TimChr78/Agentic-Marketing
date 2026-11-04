@@ -446,7 +446,11 @@ describe('alert commands', () => {
     });
     const result = await api().call('alerts.test', { id: rule.rule.id });
     expect(result.notifications).toHaveLength(2);
-    expect(result.notifications.every((n) => n.event === 'test' && n.status === 'sent')).toBe(true);
+    const byChannel = new Map(result.notifications.map((n: Record<string, unknown>) => [String(n.channel), n]));
+    // The e-mail was attempted inline; the webhook is truthful about being queued in the outbox
+    // until the delivery worker completes (#368).
+    expect(byChannel.get('email')).toMatchObject({ event: 'test', status: 'sent' });
+    expect(byChannel.get('webhook')).toMatchObject({ event: 'test', status: 'queued' });
     const deliveries = await eventually(
       async () => received.filter((r) => r.path === '/alerts' && JSON.parse(r.body).type === 'alert.test'),
       (rows) => rows.length === 1,

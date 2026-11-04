@@ -30,6 +30,7 @@ import {
   useToast,
 } from '../../ui';
 import { pageWidth } from '../../ui/layout';
+import { alertTestFeedback } from './alertTestFeedback';
 
 type Rule = Out<'alerts.list'>['rules'][number];
 type Event = Out<'alerts.history'>['events'][number];
@@ -177,11 +178,9 @@ export default function AlertsPage() {
   const test = async (rule: Rule) => {
     try {
       const result = await api.call('alerts.test', { id: rule.id });
-      const failed = result.notifications.filter((n) => n.status === 'failed');
-      if (failed.length)
-        toast.info(`Test sent to ${result.notifications.length - failed.length} of ${result.notifications.length} channels.`);
-      else
-        toast.success(`Test notification sent to ${result.notifications.length} channel${result.notifications.length === 1 ? '' : 's'}.`);
+      const feedback = alertTestFeedback(result.notifications);
+      if (feedback.success) toast.success(feedback.message);
+      else toast.info(feedback.message);
       reload();
     } catch (e) {
       toast.error(errText(e));
