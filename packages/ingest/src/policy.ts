@@ -37,7 +37,7 @@ export type TraitClass = 'none' | 'personal' | 'sensitive' | 'drop';
 
 /**
  * Segment reserved property names that are personal data. They are removed from every accepted
- * event, with or without a tracking plan: the plan's own `pii` flag only adds to this list.
+ * unclassified event. A published plan may explicitly classify a property as non-personal.
  */
 const PERSONAL_PROPERTIES = new Set([
   'email',
@@ -70,8 +70,8 @@ const PERSONAL_PROPERTIES = new Set([
 ]);
 
 /** Top-level reserved personal keys only: nested objects keep their metrics (e.g. products[].name). */
-function redactReservedProperties(properties: Record<string, unknown>) {
-  for (const key of Object.keys(properties)) if (PERSONAL_PROPERTIES.has(key)) delete properties[key];
+function redactReservedProperties(properties: Record<string, unknown>, nonPersonal: Set<string>) {
+  for (const key of Object.keys(properties)) if (PERSONAL_PROPERTIES.has(key) && !nonPersonal.has(key)) delete properties[key];
 }
 
 export function traitClass(plan: TrackingPlan | null, name: string): TraitClass {
@@ -135,6 +135,14 @@ export function processEvent(
 
   let properties: Record<string, unknown> = 'properties' in e ? { ...(e.properties ?? {}) } : {};
   const plan = policy.plan;
+  // A schema classifies the value's meaning: product.name can be non-personal even though an
+  // unclassified name may identify a person. Only a published plan can make that exception.
+  const nonPersonal = new Set(
+    plan?.events
+      .find((d) => d.name === name)
+      ?.properties.filter((p) => !p.pii)
+      .map((p) => p.name),
+  );
   if (plan && !isConsentChange && (e.type === 'track' || e.type === 'page' || e.type === 'screen')) {
     const def = plan.events.find((d) => d.name === name);
     if (!def) {
@@ -150,7 +158,7 @@ export function processEvent(
         if (p.pii) delete properties[p.name];
       }
       // Reserved personal keys are not "unknown" properties: they are removed, not a schema error.
-      redactReservedProperties(properties);
+      redactReservedProperties(properties, nonPersonal);
       const unknown = Object.keys(properties).filter((k) => !def.properties.some((p) => p.name === k));
       if (unknown.length && plan.unknownProperties !== 'allow') {
         const msg = `Properties not in the tracking plan for "${name}": ${unknown.join(', ')}`;
@@ -166,7 +174,7 @@ export function processEvent(
   }
   // No plan (and unlisted events) get the same reserved-key removal: a track "Order Completed"
   // with properties.email must not put a plaintext address in the event store and the warehouse.
-  if (!isConsentChange) redactReservedProperties(properties);
+  if (!isConsentChange) redactReservedProperties(properties, nonPersonal);
 
   const context: Record<string, unknown> = { ...(e.context ?? {}) };
   const traitSource = e.type === 'identify' ? e.traits : (context.traits as Record<string, unknown> | undefined);

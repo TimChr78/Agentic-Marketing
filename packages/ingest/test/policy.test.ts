@@ -139,12 +139,12 @@ describe('personal data', () => {
     expect(order).toMatchObject({ kind: 'accepted', event: { properties: { total: 99 } } });
   });
 
-  it('a plan cannot opt a reserved personal key back in', () => {
+  it('honors published non-personal classifications while removing declared PII', () => {
     const p: WorkspacePolicy = {
       ...defaultPolicy,
       plan: artifactTypes.tracking_plan.content.parse({
         unknownEvents: 'allow',
-        events: [{ name: 'Order Completed', properties: [{ name: 'email' }, { name: 'total' }] }],
+        events: [{ name: 'Order Completed', properties: [{ name: 'email', pii: true }, { name: 'name', pii: false }, { name: 'total' }] }],
       }),
     };
     const out = run(
@@ -152,14 +152,14 @@ describe('personal data', () => {
         type: 'track',
         event: 'Order Completed',
         anonymousId: 'a',
-        properties: { email: 'x@example.com', total: 2 },
+        properties: { email: 'x@example.com', name: 'Tent', total: 2 },
         context: yes,
       },
       browser,
       p,
     );
     if (out.kind !== 'accepted') throw new Error(out.kind);
-    expect(out.event.properties).toEqual({ total: 2 });
+    expect(out.event.properties).toEqual({ name: 'Tent', total: 2 });
   });
 });
 
