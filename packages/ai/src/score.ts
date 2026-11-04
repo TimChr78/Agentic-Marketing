@@ -134,7 +134,30 @@ export const score = defineCommand({
     }
     let result: Awaited<ReturnType<typeof decisionCall>>;
     try {
-      result = await decisionCall(db, ctx.principal.workspaceId, provider, state, input.questions, { egress: ctx.services.egress });
+      result = await decisionCall(db, ctx.principal.workspaceId, provider, state, input.questions, {
+        egress: ctx.services.egress,
+        // The row is written in the transaction that releases the reservation (#355): the month
+        // never sees neither the hold nor the tokens. If that transaction fails, the same row is
+        // retried on its own before the hold is released.
+        record: (tx, r) =>
+          insertCall(tx, ctx.principal, callId, provider, input, state, {
+            status: 'done',
+            modelVersion: r.modelVersion,
+            answers: r.answers,
+            inputTokens: r.inputTokens,
+            outputTokens: r.outputTokens,
+            latencyMs: r.latencyMs,
+          }),
+        recordUsage: (r) =>
+          logCall(db, ctx.principal, callId, provider, input, state, {
+            status: 'done',
+            modelVersion: r.modelVersion,
+            answers: r.answers,
+            inputTokens: r.inputTokens,
+            outputTokens: r.outputTokens,
+            latencyMs: r.latencyMs,
+          }),
+      });
     } catch (err) {
       await logCall(db, ctx.principal, callId, provider, input, state, {
         status: 'failed',
@@ -142,14 +165,6 @@ export const score = defineCommand({
       });
       return appError(err);
     }
-    await logCall(db, ctx.principal, callId, provider, input, state, {
-      status: 'done',
-      modelVersion: result.modelVersion,
-      answers: result.answers,
-      inputTokens: result.inputTokens,
-      outputTokens: result.outputTokens,
-      latencyMs: result.latencyMs,
-    });
     const first = result.answers[0];
     let stored: { profileId: string; key: string; value: number; expiresAt: string } | null = null;
     if (input.store && input.profileId && first) {
@@ -183,8 +198,8 @@ export const score = defineCommand({
 });
 
 /** One ai_calls row, kind score: the state is hashed, never stored in clear. */
-async function logCall(
-  db: Db,
+async function insertCall(
+  tx: Tx,
   principal: { workspaceId: string; userId: string },
   callId: string,
   provider: { providerId: string; model: string },
@@ -200,8 +215,9 @@ async function logCall(
     error?: string;
   },
 ) {
-  await db.withWorkspace(principal.workspaceId, (tx) =>
-    tx.insert(schema.aiCalls).values({
+  await tx
+    .insert(schema.aiCalls)
+    .values({
       workspaceId: principal.workspaceId,
       id: callId,
       kind: 'score',
@@ -223,8 +239,30 @@ async function logCall(
       latencyMs: out.latencyMs ?? null,
       principalId: principal.userId,
       finishedAt: new Date(),
-    }),
-  );
+    })
+    // The settling transaction may have committed the row already; a last-resort retry of the
+    // same call id must not fail (or duplicate) because of it.
+    .onConflictDoNothing();
+}
+
+async function logCall(
+  db: Db,
+  principal: { workspaceId: string; userId: string },
+  callId: string,
+  provider: { providerId: string; model: string },
+  input: { questions: unknown; profileId?: string },
+  state: unknown,
+  out: {
+    status: 'done' | 'failed';
+    modelVersion?: string;
+    answers?: unknown;
+    inputTokens?: number;
+    outputTokens?: number;
+    latencyMs?: number;
+    error?: string;
+  },
+) {
+  await db.withWorkspace(principal.workspaceId, (tx) => insertCall(tx, principal, callId, provider, input, state, out));
 }
 
 const Score = z.object({

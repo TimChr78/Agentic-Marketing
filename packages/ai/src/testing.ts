@@ -25,7 +25,7 @@ export interface FakeRequest {
 
 export type FakeReply =
   | { text: string; inputTokens?: number; outputTokens?: number }
-  | { toolCalls: { name: string; input: unknown }[] }
+  | { toolCalls: { name: string; input: unknown }[]; inputTokens?: number; outputTokens?: number }
   | { status: number; error: string };
 
 const textOf = (c: unknown): string =>
@@ -98,7 +98,7 @@ function encode(api: FakeRequest['api'], model: string, reply: FakeReply) {
           ? { error: { message: reply.error, type: 'error' } }
           : { type: 'error', error: { type: 'api_error', message: reply.error } },
     };
-  const usage = 'text' in reply ? { input: reply.inputTokens ?? 100, output: reply.outputTokens ?? 20 } : { input: 100, output: 20 };
+  const usage = { input: reply.inputTokens ?? 100, output: reply.outputTokens ?? 20 };
   if (api === 'openai')
     return {
       status: 200,
@@ -156,7 +156,7 @@ const pieces = (text: string) => {
 /** The same reply as server-sent events, in the provider's streaming format. */
 function encodeStream(api: FakeRequest['api'], model: string, reply: Exclude<FakeReply, { status: number }>): string {
   const id = `fake_${++seq}`;
-  const usage = 'text' in reply ? { input: reply.inputTokens ?? 100, output: reply.outputTokens ?? 20 } : { input: 100, output: 20 };
+  const usage = { input: reply.inputTokens ?? 100, output: reply.outputTokens ?? 20 };
   if (api === 'openai') {
     const chunk = (delta: unknown, finish: string | null = null, extra: object = {}) =>
       `data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model, choices: [{ index: 0, delta, finish_reason: finish }], ...extra })}\n\n`;
