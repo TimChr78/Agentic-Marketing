@@ -73,34 +73,65 @@ services:
       valkey:
         condition: service_healthy
     environment:
+      # Every variable in apps/server/src/config.ts is passed here. Keep the explicit list (rather
+      # than env_file) so Compose's own settings and the fixed service URLs below cannot leak into
+      # the app container. An unset or empty value is not set: loadConfig() ignores '' and applies
+      # the documented default.
       ROLE: all
       PORT: 3000
+      SKIP_MIGRATIONS: ${SKIP_MIGRATIONS:-false}
+      LOG_LEVEL: ${LOG_LEVEL:-}
       PUBLIC_PORT: ${PUBLIC_PORT:-}
       PUBLIC_URL: ${PUBLIC_URL:-http://localhost:3000}
       PUBLIC_LINKS_URL: ${PUBLIC_LINKS_URL:-}
+      WEB_DIST: ${WEB_DIST:-}
       CLIENT_IP_HEADER: ${CLIENT_IP_HEADER:-x-forwarded-for}
       TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-}
       EGRESS_ALLOWED_HOSTS: ${EGRESS_ALLOWED_HOSTS:-}
       EMAIL_TRACK_CLICKS: ${EMAIL_TRACK_CLICKS:-true}
       STRICT_INPUTS: ${STRICT_INPUTS:-false}
+      SSO_DOMAIN_VERIFICATION: ${SSO_DOMAIN_VERIFICATION:-}
       MCP_TEXT_CONTENT: ${MCP_TEXT_CONTENT:-json}
       MCP_TOOL_NAME_STYLE: ${MCP_TOOL_NAME_STYLE:-dotted}
       ASSET_MAX_BYTES: ${ASSET_MAX_BYTES:-5242880}
       RETENTION_UNCONFIRMED_DAYS: ${RETENTION_UNCONFIRMED_DAYS:-30}
       RETENTION_LOG_DAYS: ${RETENTION_LOG_DAYS:-180}
+      ERASURE_GRACE_HOURS: ${ERASURE_GRACE_HOURS:-}
+      STEP_UP_MAX_FAILURES: ${STEP_UP_MAX_FAILURES:-}
+      STEP_UP_WINDOW_SECONDS: ${STEP_UP_WINDOW_SECONDS:-}
+      STEP_UP_LOCKOUT_SECONDS: ${STEP_UP_LOCKOUT_SECONDS:-}
       TRUSTED_ORIGINS: ${TRUSTED_ORIGINS:-}
       DATABASE_URL: postgres://am:${POSTGRES_PASSWORD}@postgres:5432/am
+      APP_DB_ROLE: ${APP_DB_ROLE:-}
       APP_DB_PASSWORD: ${APP_DB_PASSWORD:?set APP_DB_PASSWORD in .env}
       AUTH_SECRET: ${AUTH_SECRET:?set AUTH_SECRET in .env}
-      MASTER_KEY: ${MASTER_KEY:?set MASTER_KEY in .env}
+      MASTER_KEY: ${MASTER_KEY:-}
       MASTER_KEY_PREVIOUS: ${MASTER_KEY_PREVIOUS:-}
+      KEY_PROVIDER: ${KEY_PROVIDER:-}
+      OPENBAO_ADDR: ${OPENBAO_ADDR:-}
+      OPENBAO_TOKEN: ${OPENBAO_TOKEN:-}
+      OPENBAO_TOKEN_FILE: ${OPENBAO_TOKEN_FILE:-}
+      OPENBAO_TRANSIT_MOUNT: ${OPENBAO_TRANSIT_MOUNT:-}
+      OPENBAO_TRANSIT_KEY: ${OPENBAO_TRANSIT_KEY:-}
+      OPENBAO_NAMESPACE: ${OPENBAO_NAMESPACE:-}
+      AWS_KMS_KEY_ID: ${AWS_KMS_KEY_ID:-}
+      AWS_REGION: ${AWS_REGION:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+      AWS_KMS_ENDPOINT: ${AWS_KMS_ENDPOINT:-}
       CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_DATABASE: ${CLICKHOUSE_DATABASE:-}
       CLICKHOUSE_ROW_POLICIES: ${CLICKHOUSE_ROW_POLICIES:-required}
       NATS_URL: nats://nats:4222
+      NATS_NAMESPACE: ${NATS_NAMESPACE:-}
       NATS_RETENTION_HOURS: ${NATS_RETENTION_HOURS:-24}
       VALKEY_URL: redis://valkey:6379
+      VALKEY_PREFIX: ${VALKEY_PREFIX:-}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      METRICS_TOKEN: ${METRICS_TOKEN:-}
       BACKUP_DIR: /backups
+      BACKUP_VERIFY_MAX_AGE_DAYS: ${BACKUP_VERIFY_MAX_AGE_DAYS:-}
       SKIP_PRE_UPGRADE_BACKUP: ${SKIP_PRE_UPGRADE_BACKUP:-false}
     volumes:
       - backups:/backups

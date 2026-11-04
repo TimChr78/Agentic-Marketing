@@ -23,6 +23,10 @@ spec:
         app.kubernetes.io/component: {{ $role }}
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") $ | sha256sum }}
+        # The Secret is also mounted through envFrom. Managed secrets.values change this hash;
+        # an existingSecret's contents cannot be read offline, so secrets.revision is hashed too.
+        checksum/secret: {{ printf "%s|%s" (include (print $.Template.BasePath "/secret.yaml") $) (toString $.Values.secrets.existingSecret) | sha256sum }}
+        checksum/secret-revision: {{ $.Values.secrets.revision | default "" | quote }}
         {{- with $.Values.podAnnotations }}{{ toYaml . | nindent 8 }}{{- end }}
     spec:
       serviceAccountName: {{ include "am.serviceAccountName" $ }}

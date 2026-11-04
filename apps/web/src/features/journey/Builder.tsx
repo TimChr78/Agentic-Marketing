@@ -53,6 +53,7 @@ import {
 } from '../../ui';
 import { referencedIds, useArtifactNames } from '../artifactCache';
 import type { EditorProps } from '../artifacts/ArtifactDetailPage';
+import { type StepStats, withNodeStats } from './canvas';
 import { localWarnings, mergeWarnings } from './checks';
 import { Inspector } from './Inspector';
 import { Legend } from './Legend';
@@ -213,15 +214,28 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
           node: n,
           summary: summary(n, names),
           warnings: warnings[n.id] ?? [],
-          stats: statData ? { reached: statData.reached[n.id] ?? 0, waiting: statData.waitingAt[n.id] ?? 0 } : undefined,
           readOnly,
           highlight: path.includes(n.id),
         } satisfies NodeData,
       })),
-    [nodes, positions, sel, readOnly, names, warnings, path, statData],
+    [nodes, positions, sel, readOnly, names, warnings, path],
   );
   const [rfNodes, setRfNodes] = useState<Node[]>(build);
-  useEffect(() => setRfNodes(build()), [build]);
+  // A stats poll or cache refresh must not rebuild the canvas mid-drag (#383): those updates only
+  // touch node data, and a structural rebuild waits until the drag ends.
+  const statsRef = useRef<StepStats | undefined>(statData);
+  const dragging = useRef(false);
+  useEffect(() => {
+    statsRef.current = statData;
+  }, [statData]);
+  useEffect(() => {
+    if (dragging.current) return;
+    setRfNodes(withNodeStats(build(), statsRef.current));
+  }, [build]);
+  useEffect(() => {
+    if (dragging.current) return;
+    setRfNodes((ns) => withNodeStats(ns, statData));
+  }, [statData]);
 
   const rfEdges = useMemo<Edge[]>(
     () =>
@@ -535,7 +549,13 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
                   ),
                 )
               }
-              onNodeDragStop={() => commit({ nodes: withPositions(nodes, Object.fromEntries(rfNodes.map((n) => [n.id, n.position]))) })}
+              onNodeDragStart={() => {
+                dragging.current = true;
+              }}
+              onNodeDragStop={() => {
+                dragging.current = false;
+                commit({ nodes: withPositions(nodes, Object.fromEntries(rfNodes.map((n) => [n.id, n.position]))) });
+              }}
               onNodeClick={(_, n) => {
                 setSel({ kind: 'node', id: n.id });
                 setPanel('inspect');

@@ -20,6 +20,12 @@ docker compose exec app am doctor
 
 `AM_VERSION` pins the released image `ghcr.io/timchr78/agentic-marketing`; `AM_PORT` is the published admin port (the app still listens on 3000 inside the container). The admin UI and REST API are then on `http://localhost:3000`; MCP needs an HTTPS `PUBLIC_URL`.
 
+## Environment variables
+
+Every variable the server reads is passed into the `app` container, including `METRICS_TOKEN`, the step-up limits, `ERASURE_GRACE_HOURS`, `KEY_PROVIDER` with the OpenBao/AWS KMS settings, and the isolation keys `APP_DB_ROLE`, `CLICKHOUSE_DATABASE`, `NATS_NAMESPACE` and `VALKEY_PREFIX`. Uncomment or append an entry in `.env` and run `docker compose up -d`; Compose recreates the container when the environment changes. `.env.example` documents every key with its default, so an unset (or empty) value still applies that default.
+
+Compose supplies the service URLs (`DATABASE_URL`, `CLICKHOUSE_URL`, `NATS_URL`, `VALKEY_URL`), `ROLE=all`, `PORT=3000` and `BACKUP_DIR=/backups` itself. They are documented in `.env.example` for other deployments; changing them in the Compose `.env` does not move the Compose stack to another service.
+
 ## Never edit docker-compose.yml
 
 Treat `docker-compose.yml` as read-only. Compose reads `compose.override.yaml` from the same directory automatically, so site-specific changes go there:

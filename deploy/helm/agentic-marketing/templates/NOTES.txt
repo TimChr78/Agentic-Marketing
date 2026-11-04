@@ -1,8 +1,17 @@
 Agentic Marketing {{ .Chart.AppVersion }} is deploying as {{ include "am.fullname" . }}:
-  api ({{ .Values.roles.api.replicas }}), ingest ({{ .Values.roles.ingest.replicas }}), worker ({{ .Values.roles.worker.replicas }}), scheduler (1).
+  api ({{ include "am.roleReplicas" .Values.roles.api }}), ingest ({{ include "am.roleReplicas" .Values.roles.ingest }}),
+  worker ({{ include "am.roleReplicas" .Values.roles.worker }}), scheduler ({{ include "am.roleReplicas" .Values.roles.scheduler }}).
+
+Migrations run as a pre-install/pre-upgrade hook, before the roles are created or rolled. A failed
+migration fails the release; with `--atomic`, Helm rolls the release back, but the database schema is
+forward-only (restore a backup instead of expecting a schema rollback). `--wait` waits for the hook
+and then for the roles, so a first install does not serve from an unmigrated database.
 
 Create the first workspace and owner (it prompts for the password without echo):
   kubectl exec -it deploy/{{ include "am.fullname" . }}-api -- am bootstrap \
     --email you@example.com --workspace 'My site'
 
 Then open {{ .Values.config.PUBLIC_URL }} and connect MCP clients to {{ .Values.config.PUBLIC_URL }}/mcp.
+
+After rotating an existing Secret in place, roll the pods in the same upgrade with
+`--set secrets.revision=<new value>`, or run `kubectl rollout restart` on the four Deployments.

@@ -4,6 +4,7 @@ import { api, errText, type In, type Out } from '../../app/api';
 import { useCrumbs } from '../../app/page';
 import { useSession } from '../../app/session';
 import { useApi } from '../../app/useApi';
+import { useAllArtifacts } from '../../features/artifacts/artifactList';
 import {
   Alert,
   Button,
@@ -133,7 +134,7 @@ export default function AlertsPage() {
   const rules = useApi(() => api.call('alerts.list', {}), []);
   const endpoints = useApi(() => api.call('webhooks.list', {}), []);
   const members = useApi(() => api.call('members.list', {}), [], { skip: !admin });
-  const journeys = useApi(() => api.call('artifacts.list', { type: 'journey' as never, limit: 200 }), []);
+  const journeys = useAllArtifacts('journey');
   const history = useApi(() => api.call('alerts.history', { limit: 50 }), [rules.data]);
   const ruleHistory = useApi(() => api.call('alerts.history', { ruleId: historyRule?.id, limit: 200 }), [historyRule?.id], {
     skip: !historyRule,

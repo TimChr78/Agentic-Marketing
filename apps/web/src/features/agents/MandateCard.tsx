@@ -7,6 +7,7 @@ import { Link, navigate } from '../../app/router';
 import { useWorkspace } from '../../app/session';
 import { useApi } from '../../app/useApi';
 import { Alert, Button, Card, formatDate, formatDateTime, Meta, StatusPill, Tag, timeAgo, useToast } from '../../ui';
+import { fetchAllArtifacts } from '../artifacts/artifactList';
 import { defaultLevels, type MandateContent, type MandateScope } from '../artifacts/MandateEditor';
 import type { Agent } from './labels';
 
@@ -55,10 +56,7 @@ export function MandateCard({ agent }: { agent: Agent }) {
   const [createError, setCreateError] = useState<string | null>(null);
 
   const mandates = useApi(async () => {
-    const [list, autonomy] = await Promise.all([
-      api.call('artifacts.list', { type: 'agent_mandate', limit: 200 }),
-      api.call('workspace.autonomy', {}),
-    ]);
+    const [list, autonomy] = await Promise.all([fetchAllArtifacts('agent_mandate'), api.call('workspace.autonomy', {})]);
     const details = (
       await Promise.all(
         list.artifacts.map(async (a): Promise<MandateDetail | null> => {
