@@ -1,5 +1,5 @@
 import { Copy, MoreHorizontal, Pencil, Send, Undo2 } from 'lucide-react';
-import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError, api, errText, type Out } from '../../app/api';
 import { typeLabel } from '../../app/artifactRoutes';
 import { ButtonLink } from '../../app/links';
@@ -30,6 +30,17 @@ import { withLayout } from '../journey/layout';
 import type { JNode } from '../journey/model';
 import { ArtifactPreview } from '../previews/ArtifactPreview';
 import { ActivityPanel } from './ActivityPanel';
+import {
+  adoptSnapshot,
+  beginSave,
+  createDraftSync,
+  draftJson,
+  markSaved,
+  saveResponseIsCurrent,
+  shouldAdoptSnapshot,
+  shouldScheduleAutosave,
+  switchArtifact,
+} from './draftSync';
 import { ExperienceEditor } from './ExperienceEditor';
 import { JsonEditor } from './JsonEditor';
 import { MandateEditor } from './MandateEditor';
@@ -97,6 +108,7 @@ export function ArtifactDetailPage({
 
   const [tab, setTab] = useState<Tab>('content');
   const [draft, setDraft] = useState<unknown>(undefined);
+  const [editorReset, setEditorReset] = useState(0);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [saveError, setSaveError] = useState<string | null>(null);
   const [warnings, setWarnings] = useState<DraftWarning[]>([]);
@@ -107,6 +119,20 @@ export function ArtifactDetailPage({
   const [discardError, setDiscardError] = useState<string | null>(null);
   const [discarding, setDiscarding] = useState(false);
   const [lastSave, setLastSave] = useState<'content' | 'layout' | null>(null);
+  const [savedAt, setSavedAt] = useState<number | null>(null);
+  const [conflict, setConflict] = useState(false);
+  // Refs mirror the latest draft, artifact and save attempt so delayed responses and refetches can
+  // be ordered without waiting for a render (#381).
+  const draftRef = useRef<unknown>(undefined);
+  const syncRef = useRef(createDraftSync());
+  const activeIdRef = useRef(id);
+  const savingRef = useRef(false);
+  const failedDraft = useRef<string | null>(null);
+
+  const updateDraft = useCallback((next: unknown) => {
+    draftRef.current = next;
+    setDraft(next);
+  }, []);
 
   // Journeys show the saved layout on top of the version's own positions, so moving a step counts
   // as an unsaved change until it is saved, without pretending the version content changed.
@@ -117,9 +143,46 @@ export function ArtifactDetailPage({
         : a?.version.content,
     [a],
   );
+
+  // A different artifact is a different document: drop the old draft and make its in-flight save stale.
   useEffect(() => {
-    if (savedContent !== undefined) setDraft(savedContent);
-  }, [savedContent]);
+    activeIdRef.current = id;
+    syncRef.current = switchArtifact(syncRef.current, id);
+    draftRef.current = undefined;
+    setDraft(undefined);
+    failedDraft.current = null;
+    setConflict(false);
+    setSaveError(null);
+    setErrors({});
+    setWarnings([]);
+    setSavedAt(null);
+    setLastSave(null);
+  }, [id]);
+
+  // Adopt refetched server content only when it does not overwrite local work (#381).
+  useEffect(() => {
+    if (savedContent === undefined || a?.id !== id) return;
+    if (shouldAdoptSnapshot(syncRef.current, id, draftRef.current, savedContent)) {
+      draftRef.current = savedContent;
+      setDraft(savedContent);
+      syncRef.current = adoptSnapshot(syncRef.current, id, savedContent);
+    } else {
+      syncRef.current = { ...syncRef.current, artifactId: id };
+    }
+  }, [savedContent, id, a?.id]);
+
+  const resetToSaved = useCallback(() => {
+    // Discard is explicit: reset local editor buffers too, including temporarily invalid JSON.
+    setEditorReset((n) => n + 1);
+    failedDraft.current = null;
+    setConflict(false);
+    draftRef.current = savedContent;
+    syncRef.current = adoptSnapshot(syncRef.current, a?.id ?? id, savedContent);
+    setDraft(savedContent);
+    setSaveError(null);
+    setErrors({});
+  }, [a?.id, id, savedContent]);
+
   const dirty = draft !== undefined && JSON.stringify(draft) !== JSON.stringify(savedContent);
   const readOnly = !can('artifacts:write');
 
@@ -134,26 +197,34 @@ export function ArtifactDetailPage({
     };
   }, [dirty]);
 
-  const [savedAt, setSavedAt] = useState<number | null>(null);
-  const [conflict, setConflict] = useState(false);
-  const failedDraft = useRef<string | null>(null);
   const save = useCallback(
     async (opts: { name?: string; quiet?: boolean } = {}) => {
       if (!a) return false;
+      // One save at a time: a response that lands after a newer attempt must not move the draft back.
+      if (savingRef.current) return false;
+      const artifactId = a.id;
+      const snapshotValue = draftRef.current;
+      const started = beginSave(syncRef.current, artifactId, snapshotValue);
+      syncRef.current = started.state;
+      savingRef.current = true;
       setSaving(true);
       setSaveError(null);
       setErrors({});
       try {
         const r = await api.call('artifacts.updateDraft', {
-          artifactId: a.id,
-          content: draft,
+          artifactId,
+          content: snapshotValue,
           expectedContentHash: a.version.contentHash,
           ...(opts.name ? { name: opts.name } : {}),
         });
+        if (!saveResponseIsCurrent(syncRef.current, started.seq, activeIdRef.current)) return false;
+        syncRef.current = markSaved(syncRef.current, started.snapshot);
+        failedDraft.current = null;
         setWarnings(r.warnings);
         setLastSave(r.layoutOnly ? 'layout' : 'content');
-        invalidateArtifact(a.id);
+        invalidateArtifact(artifactId);
         await art.reload();
+        if (!saveResponseIsCurrent(syncRef.current, started.seq, activeIdRef.current)) return false;
         setSavedAt(Date.now());
         if (!opts.quiet || r.version !== a.version.number) {
           if (r.layoutOnly) toast.success('Layout saved.');
@@ -166,6 +237,9 @@ export function ArtifactDetailPage({
         }
         return true;
       } catch (e) {
+        if (!saveResponseIsCurrent(syncRef.current, started.seq, activeIdRef.current)) return false;
+        // Do not retry the same failing snapshot until the person changes it again.
+        failedDraft.current = started.snapshot;
         if (e instanceof ApiError && e.code === 'invalid_input') setErrors(fieldErrors(e.details));
         setConflict(e instanceof ApiError && e.status === 412);
         setSaveError(
@@ -173,22 +247,32 @@ export function ArtifactDetailPage({
         );
         return false;
       } finally {
+        savingRef.current = false;
         setSaving(false);
       }
     },
-    [a, draft, art, toast],
+    [a, art, toast],
   );
 
   // Autosave: a moment after the last change; retried on the next change after an error, but never
-  // over someone else's newer version (412), where the person decides.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: save is recreated from draft, which is already a dependency; an artifact refetch must not restart the timer
+  // over someone else's newer version (412), where the person decides. Edits typed during an
+  // in-flight save stay dirty, so this re-arms when the save finishes instead of accepting the reload.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: save reads the draft from a ref, which the deps already track; an artifact refetch must not restart the timer
   useEffect(() => {
-    if (!autosave || !dirty || readOnly || saving || conflict) return;
-    const snapshot = JSON.stringify(draft);
-    if (failedDraft.current === snapshot) return;
-    const t = setTimeout(async () => {
-      if (!(await save({ quiet: true }))) failedDraft.current = snapshot;
-    }, 1200);
+    const snapshot = draftJson(draft);
+    if (
+      !shouldScheduleAutosave({
+        autosave: !!autosave,
+        dirty,
+        readOnly,
+        saving,
+        conflict,
+        snapshot,
+        failedSnapshot: failedDraft.current,
+      })
+    )
+      return;
+    const t = setTimeout(() => void save({ quiet: true }), 1200);
     return () => clearTimeout(t);
   }, [autosave, dirty, readOnly, saving, conflict, draft]);
 
@@ -229,6 +313,10 @@ export function ArtifactDetailPage({
       setWarnings([]);
       setSavedAt(null);
       setLastSave(null);
+      // The next server snapshot is authoritative, even over local JSON that does not parse.
+      draftRef.current = undefined;
+      setDraft(undefined);
+      syncRef.current = switchArtifact(syncRef.current, a.id);
       invalidateArtifact(a.id);
       await art.reload();
     } catch (e) {
@@ -274,7 +362,7 @@ export function ArtifactDetailPage({
             )}
             {dirty && !readOnly && (!autosave || conflict) && (
               <>
-                <Button variant="ghost" onClick={() => setDraft(savedContent)}>
+                <Button variant="ghost" onClick={resetToSaved}>
                   Discard changes
                 </Button>
                 <Button variant="primary" loading={saving} onClick={() => void save()}>
@@ -353,26 +441,29 @@ export function ArtifactDetailPage({
           { key: 'activity', label: 'Activity' },
         ]}
       >
-        {tab === 'content' &&
-          draft !== undefined &&
-          (pageEditor ? (
-            pageEditor({ artifact: a, content: draft, onChange: setDraft, readOnly, errors, warnings })
-          ) : (
-            <div className={wide ? '' : 'max-w-[900px]'}>
-              <JsonEditor value={draft} onChange={setDraft} readOnly={readOnly} />
+        <Fragment key={`${a.id}:${editorReset}`}>
+          {tab === 'content' &&
+            draft !== undefined &&
+            (pageEditor ? (
+              pageEditor({ artifact: a, content: draft, onChange: updateDraft, readOnly, errors, warnings })
+            ) : (
+              <div className={wide ? '' : 'max-w-[900px]'}>
+                <JsonEditor value={draft} onChange={updateDraft} readOnly={readOnly} documentKey={a.id} />
+              </div>
+            ))}
+          {tab === 'json' && draft !== undefined && (
+            <div className="max-w-[900px]">
+              <JsonEditor
+                value={draft}
+                onChange={updateDraft}
+                readOnly={readOnly}
+                documentKey={a.id}
+                label="Content (JSON)"
+                hint="The same content the editor changes, and what agents read and write. Call artifacts.types for the schema."
+              />
             </div>
-          ))}
-        {tab === 'json' && draft !== undefined && (
-          <div className="max-w-[900px]">
-            <JsonEditor
-              value={draft}
-              onChange={setDraft}
-              readOnly={readOnly}
-              label="Content (JSON)"
-              hint="The same content the editor changes, and what agents read and write. Call artifacts.types for the schema."
-            />
-          </div>
-        )}
+          )}
+        </Fragment>
         {tab === 'preview' && (
           <div className="max-w-[1100px] space-y-3">
             {dirty && <Alert tone="info">The preview shows the saved version {latest.number}. Save to preview your changes.</Alert>}

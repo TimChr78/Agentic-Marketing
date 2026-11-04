@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { api, errText } from '../../app/api';
 import { useApi } from '../../app/useApi';
 import { Alert, Button, Checkbox, Drawer, Field, FieldGroup, Input, Select, Switch, Textarea, useToast } from '../../ui';
+import { useAllArtifacts } from '../artifacts/artifactList';
 import { HOSTED_SCOPES, type HostedAgentView, type HostedScope } from './labels';
 
 // Create or edit a hosted agent (#258): the platform runs it on a schedule, under the agent's
@@ -37,7 +38,7 @@ export function HostedAgentDialog({
 }) {
   const toast = useToast();
   const providers = useApi(() => api.call('aiProviders.list', {}), []);
-  const skillArts = useApi(() => api.call('artifacts.list', { type: 'skill', limit: 200 }), []);
+  const skillArts = useAllArtifacts('skill');
   const first = HOSTED_AGENT_TEMPLATES[0]!;
   const initial = agent
     ? {

@@ -1,12 +1,12 @@
 import { useState } from 'react';
 import { api, errText } from '../../app/api';
-import { useApi } from '../../app/useApi';
 import { Alert, Button, LoadingBlock, Modal, StatusPill } from '../../ui';
+import { useAllArtifacts } from '../artifacts/artifactList';
 import { type BlockContent, blockTagSnippet } from './model';
 
 /** Lists the workspace's blocks and inserts the Liquid tag with every parameter as a placeholder. */
 export function BlockPicker({ onClose, onPick }: { onClose: () => void; onPick: (tag: string) => void }) {
-  const list = useApi(() => api.call('artifacts.list', { type: 'email_block', limit: 200 }), []);
+  const list = useAllArtifacts('email_block');
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 

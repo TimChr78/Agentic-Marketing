@@ -9,7 +9,11 @@ The Helm chart in [`deploy/helm/agentic-marketing`](../../deploy/helm/agentic-ma
 | `worker` | ClickHouse sink, profile workers, journeys, AI steps, deliveries | 2+ replicas; consumers share work through NATS and `SKIP LOCKED` claims |
 | `scheduler` | segment refreshes, broadcasts, retention, token refresh, audience sync, spend import, warehouse exports, edge sync, threshold alerts, held agent changes, agent notifications and events, hosted agents, content sources, segment enrollment jobs | exactly 1 (`Recreate`) |
 
-The Ingress sends the public collection paths to `ingest` and everything else to `api`. The Job runs `cli migrate` (Postgres, auth tables, ClickHouse and its row policies) after the first install and before each upgrade; the roles start with `SKIP_MIGRATIONS=true`.
+The Ingress sends the public collection paths to `ingest` and everything else to `api`. The Job runs `cli migrate` (Postgres, auth tables, ClickHouse and its row policies) as a **pre-install/pre-upgrade** hook: before any role Deployment exists on a first install and before the new ReplicaSets roll on an upgrade. The roles start with `SKIP_MIGRATIONS=true`, because the hook has already migrated the database before they start.
+
+The hook cannot rely on the release's ConfigMap and Secret: Helm runs pre-install hooks before it creates them. It therefore takes its configuration from the chart's `config` values and its secret values from `secrets.existingSecret` (which must exist) or from a temporary hook Secret rendered from `secrets.values`. `extraEnv` and `extraVolumes` are also passed to the hook, so any Secret or ConfigMap they reference must already exist in the namespace on a first install. The chart-created ServiceAccount also appears after the hook; the migration uses the namespace's default ServiceAccount and needs no API access (set `serviceAccount.create=false` if a cluster requires a specific existing ServiceAccount for image pulls).
+
+This ordering is what makes `helm install --wait` safe: Helm waits for the migration hook, then creates the roles and waits for them, and never waits on a readiness probe of a pod that is itself waiting for a post-install job. A failed migration fails the install or upgrade before the roles are created or rolled. With `--atomic`, Helm rolls the release back, but the database schema is forward-only: restore a Postgres backup rather than expecting the schema to roll back with the release.
 
 If the platform is reached through a tunnel or proxy that should see only the public paths, set `PUBLIC_PORT` (e.g. `3001`) on the `api` and `ingest` roles: the server adds a listener that serves only `/f`, `/u`, `/c`, `/a`, `/n`, `/hooks`, `/healthz` and `/readyz`. The chart does not publish a second Service port, so expose it through your own Service/Ingress or keep the path split above. Both listeners reject raw dot-segment and encoded-separator paths with 400, so a loose proxy rule cannot reach the admin API.
 
@@ -30,8 +34,11 @@ helm install am deploy/helm/agentic-marketing \
   --set config.CLIENT_IP_HEADER=x-forwarded-for \
   --set config.TRUSTED_PROXY_CIDRS=10.244.0.0/16 \
   --set config.CLICKHOUSE_URL=http://am:…@clickhouse:8123 \
-  --set ingress.enabled=true --set ingress.host=marketing.example.com
+  --set ingress.enabled=true --set ingress.host=marketing.example.com \
+  --wait --atomic
 ```
+
+`--wait` is supported precisely because migrations are a pre-install hook (see above). `--atomic` rolls the release back if a role does not become ready; it does not undo the schema migration, so take a Postgres backup before the upgrade (the chart's hook runs `cli migrate`, not a backup). For upgrades use the same flags with `helm upgrade`; the pre-upgrade hook migrates with the new values before any role rolls.
 
 The chart uses the released image, `ghcr.io/timchr78/agentic-marketing:<appVersion>`; the packaged chart is also attached to each [GitHub release](https://github.com/TimChr78/Agentic-Marketing/releases). For your own build, push it to your registry and set `image.repository` and `image.tag`.
 
@@ -82,6 +89,15 @@ Secrets (provider API keys, OAuth tokens) and personal data are encrypted with p
 Unwrapped data keys are cached in memory for ten minutes, so the KEK is called about once per data key and interval, not per request.
 
 **Moving from `MASTER_KEY`:** set `KEY_PROVIDER` and its settings while keeping `MASTER_KEY`. Data keys wrapped by the local key keep working, and new ones are wrapped by the provider. Run `cli rotate-keys` once to re-wrap every existing data key, then remove `MASTER_KEY` (and `MASTER_KEY_PREVIOUS`).
+
+**Rolling out a Secret change.** The pod template carries a `checksum/secret` annotation. With `secrets.values` the rendered Secret is part of that hash, so a changed value rolls the four Deployments on `helm upgrade`. Helm cannot read a `secrets.existingSecret` (sealed-secrets, External Secrets, Vault agent, a manual `kubectl create secret`), so changing that object in place does not change the pod template and the running pods keep the old environment. After changing it, bump `secrets.revision` in the same upgrade, for example:
+
+```bash
+helm upgrade am deploy/helm/agentic-marketing --reuse-values \
+  --set secrets.revision="$(date +%F)" --wait --atomic
+```
+
+Alternatively, run `kubectl rollout restart deploy/am-agentic-marketing-api deploy/am-agentic-marketing-ingest deploy/am-agentic-marketing-worker deploy/am-agentic-marketing-scheduler` (use your release name). Do one of these for every Secret-only rotation, including `MASTER_KEY`, `METRICS_TOKEN` and a `KEY_PROVIDER` switch; otherwise the rotation silently does not take effect until the next unrelated rollout.
 
 ## Sizing
 

@@ -1,6 +1,6 @@
 import { api } from '../../app/api';
-import { useApi } from '../../app/useApi';
 import { ArtifactListPage } from '../../features/artifacts/ArtifactListPage';
+import { useAllArtifacts } from '../../features/artifacts/artifactList';
 import { Field, Select } from '../../ui';
 
 type Mode = 'dynamic' | 'static' | 'snapshot';
@@ -53,7 +53,7 @@ export default function SegmentsPage() {
 }
 
 function SnapshotSource({ value, onChange }: { value: string; onChange: (id: string) => void }) {
-  const list = useApi(() => api.call('artifacts.list', { type: 'segment' as never, limit: 200 }), []);
+  const list = useAllArtifacts('segment');
   const items = (list.data?.artifacts ?? []).filter((a) => a.publishedVersion);
   return (
     <Field label="Source segment" hint="Its current members are copied and frozen. Publish it first.">

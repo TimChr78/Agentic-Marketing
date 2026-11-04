@@ -3,7 +3,9 @@ import { NodeSDK } from '@opentelemetry/sdk-node';
 import pino from 'pino';
 
 export const logger = pino({
-  level: process.env.LOG_LEVEL ?? 'info',
+  // Compose and Kubernetes pass unset variables as empty strings; an empty level is not a pino
+  // level, so fall back to info exactly as for an absent variable.
+  level: process.env.LOG_LEVEL?.trim() || 'info',
   // Never log credentials, even by accident.
   redact: ['req.headers.authorization', 'req.headers.cookie', '*.password', '*.apiKey', '*.value'],
 });

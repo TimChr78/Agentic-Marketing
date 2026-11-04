@@ -5,6 +5,7 @@ import { useSession } from '../../app/session';
 import { useApi } from '../../app/useApi';
 import { Button, Field, IconButton, Input, JsonView, Select, Skeleton, Textarea } from '../../ui';
 import type { EditorProps } from './ArtifactDetailPage';
+import { useAllArtifacts } from './artifactList';
 import { ListAudiencePanel } from './ListAudiencePanel';
 
 // Segment condition builder: the same tree agents read and write, edited as rows instead of JSON.
@@ -556,7 +557,7 @@ function SegmentPicker({
   disabled?: boolean;
   index: number;
 }) {
-  const list = useApi(() => api.call('artifacts.list', { type: 'segment' as never, limit: 200 }), []);
+  const list = useAllArtifacts('segment');
   const items = (list.data?.artifacts ?? []).filter((a) => a.id !== exclude);
   const known = !value || items.some((a) => a.id === value);
   return (

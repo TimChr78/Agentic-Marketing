@@ -1,8 +1,7 @@
 import { Plus, Trash2 } from 'lucide-react';
-import { api } from '../../app/api';
-import { useApi } from '../../app/useApi';
 import { Button, Checkbox, DateTimeInput, Field, FieldGroup, IconButton, Input, Select, Textarea } from '../../ui';
 import type { EditorProps } from './ArtifactDetailPage';
+import { useAllArtifacts } from './artifactList';
 
 // A campaign (#65): a thin parent. The goal says what success means, utmCampaign ties the e-mail
 // traffic together, and members are references to work that already exists — nothing is copied or
@@ -76,7 +75,7 @@ export function CampaignEditor({ content, onChange, readOnly, errors }: EditorPr
   const goal = content.goal ?? { kind: 'engagement' as const, attributionDays: 7 };
   const setGoal = (patch: Partial<CampaignGoal>) => set({ goal: { ...goal, ...patch } });
   const members = content.members ?? [];
-  const artifacts = useApi(() => api.call('artifacts.list', { limit: 200 }), []);
+  const artifacts = useAllArtifacts();
   const choices = (artifacts.data?.artifacts ?? []).filter((a) => MEMBER_PREFIX.test(a.id));
   const setMember = (i: number, patch: Partial<CampaignMember>) =>
     set({ members: members.map((m, j) => (j === i ? { ...m, ...patch } : m)) });
