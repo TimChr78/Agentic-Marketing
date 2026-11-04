@@ -518,16 +518,36 @@ describe('shared destination and profile merges', () => {
 
   it('keeps the survivor in the remote audience when two profiles merge', async () => {
     const segment = await createSegment('merge');
-    const survivor = await person('merge-a', 'merge-a@example.com', '+4511000302', 'merge');
-    const mergedAway = await person('merge-b', 'merge-b@example.com', '+4511000303', 'merge');
+    // Complementary identities can merge; two different user ids/emails/phones must not.
+    await send([{ type: 'identify', userId: 'merge-a', traits: { phone: '+4511000302', plan: 'merge' } }]);
+    await send([{ type: 'identify', anonymousId: 'merge-b-device', traits: { email: 'merge-b@example.com', plan: 'merge' } }]);
+    const survivor = (
+      await eventually(
+        () => api().call('profiles.find', { type: 'user_id', value: 'merge-a' }),
+        (r) => !!r.profileId,
+      )
+    ).profileId!;
+    const mergedAway = (
+      await eventually(
+        () => api().call('profiles.find', { type: 'anonymous_id', value: 'merge-b-device' }),
+        (r) => !!r.profileId,
+      )
+    ).profileId!;
+    for (const profileId of [survivor, mergedAway]) {
+      await api().call('consent.record', { profileId, purpose: 'ad_targeting', status: 'granted', source: 'api', proof: { test: true } });
+    }
+    await t.srv.db.admin.query(
+      `UPDATE profiles SET created_at = CASE WHEN id = $2 THEN '2020-01-01'::timestamptz ELSE '2021-01-01'::timestamptz END WHERE workspace_id = $1 AND id = ANY($3::text[])`,
+      [ws, survivor, [survivor, mergedAway]],
+    );
     await addToSegment(segment, survivor);
     await addToSegment(segment, mergedAway);
     const sync = await createSync({ segment, meta: { connection: ids.meta, audienceId: '90000402' } });
     expect((await syncNow(sync))[0]).toMatchObject({ added: 2, members: 2 });
     expect(membersOf('meta', '90000402')).toHaveLength(2);
 
-    // An event carrying both identities makes the resolver merge merge-b into merge-a.
-    await send([{ type: 'identify', userId: 'merge-a', traits: { email: 'merge-b@example.com', plan: 'merge' } }]);
+    // Link the anonymous identity to the known user; oldest profile survives.
+    await send([{ type: 'identify', userId: 'merge-a', anonymousId: 'merge-b-device', traits: { plan: 'merge' } }]);
     const merged = await eventually(
       () =>
         t.srv.db.admin.query<{ merged_into: string | null }>(`SELECT merged_into FROM profiles WHERE workspace_id = $1 AND id = $2`, [

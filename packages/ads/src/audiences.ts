@@ -2075,8 +2075,8 @@ export const audienceBacklog = defineCommand({
       reason: string | null;
       attempts: number;
       last_error: string | null;
-      created_at: Date;
-      updated_at: Date;
+      created_at: Date | string;
+      updated_at: Date | string;
     }>(sql`
       SELECT cleanup_id::text, sync_id, platform, 'member'::text AS kind, destination_key,
              orphaned_reason AS reason, attempts, last_error, added_at AS created_at, updated_at
@@ -2105,8 +2105,8 @@ export const audienceBacklog = defineCommand({
         reason: r.reason,
         attempts: r.attempts,
         lastError: r.last_error,
-        createdAt: r.created_at.toISOString(),
-        updatedAt: r.updated_at.toISOString(),
+        createdAt: new Date(r.created_at).toISOString(),
+        updatedAt: new Date(r.updated_at).toISOString(),
       })),
       next: rows.length > limit ? page[page.length - 1]!.cleanup_id : null,
       total: totals[0]?.n ?? 0,
