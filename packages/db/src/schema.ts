@@ -976,6 +976,7 @@ export const deliveries = pgTable(
     payload: jsonb('payload').$type<unknown>().notNull(),
     status: text('status').$type<DeliveryStatus>().notNull(),
     attempts: integer('attempts').notNull().default(0),
+    alertRetryCycles: integer('alert_retry_cycles').notNull().default(0),
     nextAttemptAt: ts('next_attempt_at').notNull().defaultNow(),
     leaseUntil: ts('lease_until'),
     idempotencyKey: text('idempotency_key').notNull(),

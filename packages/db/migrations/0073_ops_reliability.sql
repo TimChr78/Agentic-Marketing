@@ -36,3 +36,6 @@ COMMENT ON COLUMN connections.oauth_refresh_lease_until IS
 -- for resolved or disabled rules). The GIN index keeps that scan proportional to the queued rows
 -- instead of every firing episode in the workspace.
 CREATE INDEX alert_events_notified ON alert_events USING gin (notified jsonb_path_ops);
+
+-- Alert retry budget belongs to the durable outbox row, not the optional notification ledger.
+ALTER TABLE deliveries ADD COLUMN alert_retry_cycles integer NOT NULL DEFAULT 0;

@@ -116,12 +116,12 @@ describe.skipIf(!hasTestDatabase())('alert notifications follow the delivery (#3
     await setDelivery(initial!.deliveryId!, 'dead', 7, 'HTTP 500');
     const [failed] = await reconcile([initial!]);
     expect(failed).toMatchObject({ status: 'failed', retryable: true, error: 'HTTP 500' });
-    expect(failed?.cycles).toBeUndefined();
+    expect(failed?.cycles).toBe(1);
     // A failed-but-retryable webhook is selected again.
     expect(pendingChannels([{ type: 'webhook', webhookId: WEBHOOK_ID }], [failed!], 'firing')).toHaveLength(1);
 
     const [retried] = await send('evt_dead', [failed!]);
-    expect(retried).toMatchObject({ status: 'queued', attempts: 0, cycles: 1 });
+    expect(retried).toMatchObject({ status: 'queued', attempts: 0, cycles: 2 });
     const rows = await deliveryRows(key);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ status: 'pending', attempts: 0, error: null });
@@ -129,7 +129,7 @@ describe.skipIf(!hasTestDatabase())('alert notifications follow the delivery (#3
     // The retry cycle exhausts too: the notification becomes a permanent failure.
     await setDelivery(retried!.deliveryId!, 'dead', 7, 'HTTP 500');
     const [failedAgain] = await reconcile([retried!]);
-    expect(failedAgain).toMatchObject({ status: 'failed', retryable: true, cycles: 1 });
+    expect(failedAgain).toMatchObject({ status: 'failed', retryable: false, cycles: 2 });
     const [exhausted] = await send('evt_dead', [failedAgain!]);
     expect(exhausted).toMatchObject({
       status: 'failed',
@@ -138,6 +138,17 @@ describe.skipIf(!hasTestDatabase())('alert notifications follow the delivery (#3
     });
     expect(pendingChannels([{ type: 'webhook', webhookId: WEBHOOK_ID }], [exhausted!], 'firing')).toEqual([]);
     expect(await deliveryRows(key)).toHaveLength(1);
+  });
+
+  it('keeps its retry budget when the ledger entry is missing', async () => {
+    const [initial] = await send('evt_missing_ledger');
+    await setDelivery(initial!.deliveryId!, 'dead', 7, 'unavailable');
+    const [retried] = await send('evt_missing_ledger');
+    expect(retried).toMatchObject({ status: 'queued', cycles: 2 });
+    await setDelivery(initial!.deliveryId!, 'dead', 7, 'unavailable');
+    const [terminal] = await send('evt_missing_ledger');
+    expect(terminal).toMatchObject({ status: 'failed', retryable: false, cycles: 2 });
+    expect((await deliveryRows(`alert:evt_missing_ledger:firing:${WEBHOOK_ID}`))[0]).toMatchObject({ status: 'dead', attempts: 7 });
   });
 
   it('records a disabled endpoint as failed and does not retry it automatically', async () => {
@@ -159,14 +170,19 @@ describe.skipIf(!hasTestDatabase())('alert notifications follow the delivery (#3
       await t.db.admin.query(
         `INSERT INTO alert_events (workspace_id, id, rule_id, state, value, threshold, "window", fired_at, resolved_at, notified)
          VALUES ($1, $2, $3, 'resolved', 0.08, 0.05, 'PT24H', $4, $4, $5)`,
-        [t.workspace, eventId, RULE_ID, AT, JSON.stringify([initial])],
+        [t.workspace, eventId, RULE_ID, AT, JSON.stringify(await reconcile([initial!]))],
       );
       const changed = await reconcileQueuedAlertEvents({ db: t.db, events: {} as never, ...deps });
       expect(changed).toBe(1);
       const { rows } = await t.db.admin.query<{ notified: AlertNotification[] }>('SELECT notified FROM alert_events WHERE id = $1', [
         eventId,
       ]);
-      expect(rows[0]?.notified[0]).toMatchObject({ status: 'failed', error: 'HTTP 500' });
+      expect(rows[0]?.notified[0]).toMatchObject({ status: 'queued', cycles: 2 });
+      expect((await deliveryRows(`alert:evt_resolved:firing:${WEBHOOK_ID}`))[0]).toMatchObject({ status: 'pending', attempts: 0 });
+      await setDelivery(initial!.deliveryId!, 'done', 1);
+      await reconcileQueuedAlertEvents({ db: t.db, events: {} as never, ...deps });
+      const sent = await t.db.admin.query<{ notified: AlertNotification[] }>('SELECT notified FROM alert_events WHERE id = $1', [eventId]);
+      expect(sent.rows[0]?.notified[0]).toMatchObject({ status: 'sent', cycles: 2 });
     } finally {
       await t.db.admin.query('UPDATE alert_rules SET enabled = true WHERE id = $1', [RULE_ID]);
     }

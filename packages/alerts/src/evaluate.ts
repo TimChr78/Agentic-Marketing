@@ -309,12 +309,12 @@ async function evaluateWorkspace(deps: AlertDeps, tx: Tx, now: Date, opts: Evalu
 /**
  * Makes queued alert notifications truthful even when no enabled rule will evaluate their event
  * (#368): a rule that was disabled, republished away or resolved must not leave a ledger entry
- * saying `queued` forever. Bounded per tick; it never enqueues anything.
+ * saying `queued` forever. Bounded per tick; it retries the original outbox row within its durable budget.
  */
 export async function reconcileQueuedAlertEvents(deps: AlertDeps): Promise<number> {
   const { rows } = await deps.db.admin.query<{ workspace_id: string }>(
     `SELECT DISTINCT workspace_id FROM alert_events
-     WHERE notified @> '[{"status":"queued"}]'::jsonb
+     WHERE (notified @> '[{"status":"queued"}]'::jsonb OR notified @> '[{"status":"failed","retryable":true}]'::jsonb)
      LIMIT 100`,
   );
   let reconciled = 0;
@@ -323,12 +323,12 @@ export async function reconcileQueuedAlertEvents(deps: AlertDeps): Promise<numbe
       reconciled += await deps.db.withWorkspace(workspaceId, async (tx) => {
         const events = await tx.execute<{ id: string; notified: AlertNotification[] }>(sql`
           SELECT id, notified FROM alert_events
-          WHERE notified @> '[{"status":"queued"}]'::jsonb
+          WHERE (notified @> '[{"status":"queued"}]'::jsonb OR notified @> '[{"status":"failed","retryable":true}]'::jsonb)
           ORDER BY fired_at
           LIMIT 200`);
         let changed = 0;
         for (const event of events.rows) {
-          const notified = await reconcileAlertNotifications(tx, event.notified);
+          const notified = await reconcileAlertNotifications(tx, event.notified, { retry: true });
           if (notified !== event.notified) {
             await tx.update(schema.alertEvents).set({ notified }).where(eq(schema.alertEvents.id, event.id));
             changed++;

@@ -248,16 +248,24 @@ describe('bulk enrollment by segment (#148)', () => {
     expect(first.cursor).not.toBeNull();
     expect(first.attempts).toBe(0);
 
-    // The next chunk fails before it can commit (a statement timeout).
+    const firstParticipants = await countParticipants(retryJourneyId);
+    // Execute the next chunk, then fail before commit: all participant/count/cursor writes roll back.
     let failOnce = true;
     const flaky = {
       ...t.srv.db,
       withWorkspace: (<T>(workspaceId: string, fn: (tx: any) => Promise<T>, opts?: { snapshot?: boolean }) => {
-        if (failOnce && workspaceId === ws) {
-          failOnce = false;
-          return Promise.reject(Object.assign(new Error('canceling statement due to statement timeout'), { code: '57014' }));
-        }
-        return t.srv.db.withWorkspace(workspaceId, fn, opts);
+        return t.srv.db.withWorkspace(
+          workspaceId,
+          async (tx) => {
+            const value = await fn(tx);
+            if (failOnce && workspaceId === ws) {
+              failOnce = false;
+              throw Object.assign(new Error('canceling statement due to statement timeout'), { code: '57014' });
+            }
+            return value;
+          },
+          opts,
+        );
       }) as typeof t.srv.db.withWorkspace,
     };
     await runEnrollmentJobsOnce({
@@ -276,6 +284,7 @@ describe('bulk enrollment by segment (#148)', () => {
       failed: first.failed,
       attempts: 1,
     });
+    expect(await countParticipants(retryJourneyId)).toBe(firstParticipants);
     expect(retrying.nextAttemptAt).not.toBeNull();
     expect(retrying.error).toContain('retrying');
 
