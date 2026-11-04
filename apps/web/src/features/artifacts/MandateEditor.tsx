@@ -5,6 +5,7 @@ import { useApi } from '../../app/useApi';
 import { Alert, Button, Checkbox, cx, Field, FieldGroup, IconButton, Input, Select, Switch, Textarea } from '../../ui';
 import { ACTION_CLASS_LABEL, AUTONOMY_LEVEL, type Autonomy, levelFor, levelLabel, MANDATE_CLASSES } from '../agents/labels';
 import type { EditorProps } from './ArtifactDetailPage';
+import { useAllArtifacts } from './artifactList';
 
 // The borders a person grants one agent (ADR-0016, #228). A level per action class, never above
 // the workspace ceiling and never 4 (a later release); the audiences, purposes, topics, channels
@@ -338,7 +339,7 @@ export function MandateEditor({
   const fetchedAutonomy = useApi(() => api.call('workspace.autonomy', {}), [], { skip: autonomy !== undefined });
   const settings = autonomy !== undefined ? autonomy : (fetchedAutonomy.data ?? null);
   const agents = useApi(() => api.call('agents.list', {}), []);
-  const segments = useApi(() => api.call('artifacts.list', { type: 'segment', limit: 200 }), []);
+  const segments = useAllArtifacts('segment');
   const purposes = useApi(() => api.call('purposes.list', {}), []);
   const members = useApi(() => api.call('members.list', {}), []);
 

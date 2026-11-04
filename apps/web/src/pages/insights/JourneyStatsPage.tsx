@@ -5,6 +5,7 @@ import { ButtonLink } from '../../app/links';
 import { useCrumbs } from '../../app/page';
 import { useSession } from '../../app/session';
 import { useApi } from '../../app/useApi';
+import { useAllArtifacts } from '../../features/artifacts/artifactList';
 import { HoldoutCard } from '../../features/insights/HoldoutCard';
 import { StatCard, StatGrid } from '../../features/insights/Stats';
 import { Alert, EmptyState, Field, LoadingBlock, Mono, PageHeader, Select, Table, TableFrame, Tag, Td, THead, Th, Tr } from '../../ui';
@@ -18,7 +19,7 @@ export default function JourneyStatsPage() {
   const { can } = useSession();
   const [selected, setSelected] = useState('');
 
-  const journeys = useApi(() => api.call('artifacts.list', { type: 'journey' as never, limit: 200 }), []);
+  const journeys = useAllArtifacts('journey');
   useEffect(() => {
     if (!selected && journeys.data?.artifacts.length) setSelected(journeys.data.artifacts[0].id);
   }, [journeys.data, selected]);

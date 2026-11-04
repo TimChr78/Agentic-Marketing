@@ -1,6 +1,5 @@
-import { api } from '../../app/api';
-import { useApi } from '../../app/useApi';
 import { Select } from '../../ui';
+import { useAllArtifacts } from './artifactList';
 
 /** Pick an artifact of one type; labels say which ones are live (only live ones can be used when publishing). */
 export function ArtifactSelect({
@@ -20,7 +19,7 @@ export function ArtifactSelect({
   id?: string;
   prefix?: string;
 }) {
-  const list = useApi(() => api.call('artifacts.list', { type: type as never, limit: 200 }), [type]);
+  const list = useAllArtifacts(type);
   const items = (list.data?.artifacts ?? []).filter((a) => !prefix || a.id.startsWith(prefix));
   const known = !value || items.some((a) => a.id === value);
   return (

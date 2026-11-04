@@ -1,10 +1,11 @@
 import { type ActionClass, type CommandContext, defineCommand, type Impact, recordAgentAction } from '@agentic-marketing/commands';
 import { AppError, canonicalJson, hashValue, newId } from '@agentic-marketing/core';
 import { type AgentUndo, schema, type VersionState } from '@agentic-marketing/db';
-import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, count, desc, eq, inArray, lt, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { diffJson } from './diff';
 import { noteWithPolicy, publishImpact } from './impact';
+import { ARTIFACT_LIST_MAX_LIMIT, decodeArtifactListCursor, encodeArtifactListCursor } from './list';
 import { holdWindowMs } from './mandates';
 import {
   ARTIFACT_TYPES,
@@ -612,7 +613,11 @@ export const listArtifacts = defineCommand({
   name: 'artifacts.list',
   title: 'List artifacts',
   description: 'List artifacts in this workspace, newest first, optionally filtered by type.',
-  input: z.object({ type: artifactTypeEnum.optional(), limit: z.number().int().min(1).max(200).default(50) }),
+  input: z.object({
+    type: artifactTypeEnum.optional(),
+    limit: z.number().int().min(1).max(ARTIFACT_LIST_MAX_LIMIT).default(50),
+    cursor: z.string().optional().describe('Opaque `nextCursor` from the previous page; omit for the first page'),
+  }),
   output: z.object({
     artifacts: z.array(
       z.object({
@@ -625,13 +630,31 @@ export const listArtifacts = defineCommand({
         updatedAt: z.string(),
       }),
     ),
+    total: z.number().int().describe('All artifacts matching the type filter, across every page'),
+    nextCursor: z.string().nullable().describe('Pass as `cursor` for the next page; null on the last page'),
   }),
   permission: 'artifacts:read',
   effect: 'read',
   // Workspace scoping comes from row-level security; there is deliberately no workspace filter here.
   handler: async (input, ctx) => {
+    const cursor = input.cursor ? decodeArtifactListCursor(input.cursor) : undefined;
+    if (input.cursor && !cursor) {
+      throw new AppError('invalid_input', 'The cursor is not valid. Omit it to start from the first page.');
+    }
+    const filter = input.type ? eq(schema.artifacts.type, input.type) : undefined;
+    // Compare in the database's timestamp type so microseconds survive the round trip.
+    const pageFilter = cursor
+      ? and(
+          filter,
+          or(
+            lt(schema.artifacts.updatedAt, sql`${cursor.updatedAt}::timestamptz`),
+            and(eq(schema.artifacts.updatedAt, sql`${cursor.updatedAt}::timestamptz`), lt(schema.artifacts.id, cursor.id)),
+          ),
+        )
+      : filter;
+    // One extra row tells us whether another page exists without a second query.
     const rows = await ctx.tx
-      .select({ a: schema.artifacts, state: schema.artifactVersions.state })
+      .select({ a: schema.artifacts, state: schema.artifactVersions.state, cursorAt: sql<string>`${schema.artifacts.updatedAt}::text` })
       .from(schema.artifacts)
       .innerJoin(
         schema.artifactVersions,
@@ -641,11 +664,14 @@ export const listArtifacts = defineCommand({
           eq(schema.artifactVersions.number, schema.artifacts.latestVersion),
         ),
       )
-      .where(input.type ? eq(schema.artifacts.type, input.type) : undefined)
-      .orderBy(desc(schema.artifacts.updatedAt))
-      .limit(input.limit);
+      .where(pageFilter)
+      .orderBy(desc(schema.artifacts.updatedAt), desc(schema.artifacts.id))
+      .limit(input.limit + 1);
+    const [{ n }] = await ctx.tx.select({ n: count() }).from(schema.artifacts).where(filter);
+    const page = rows.slice(0, input.limit);
+    const last = page[page.length - 1];
     return {
-      artifacts: rows.map(({ a, state }) => ({
+      artifacts: page.map(({ a, state }) => ({
         id: a.id,
         type: a.type,
         name: a.name,
@@ -654,6 +680,8 @@ export const listArtifacts = defineCommand({
         publishedVersion: a.publishedVersion,
         updatedAt: a.updatedAt.toISOString(),
       })),
+      total: Number(n),
+      nextCursor: rows.length > input.limit && last ? encodeArtifactListCursor({ updatedAt: last.cursorAt, id: last.a.id }) : null,
     };
   },
 });

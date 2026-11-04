@@ -1,9 +1,10 @@
 import { FileText, Search } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { fetchAllArtifacts } from '../features/artifacts/artifactList';
 import { cx, StatePill, Tag } from '../ui';
 import { useFocusTrap } from '../ui/focus';
-import { api, errText, type Out } from './api';
+import { errText, type Out } from './api';
 import { artifactPath, typeLabel } from './artifactRoutes';
 import { visibleNav } from './nav';
 import { navigate } from './router';
@@ -31,8 +32,7 @@ export function SearchPalette({ onClose }: { onClose: () => void }) {
 
   useEffect(() => {
     if (!can('artifacts:read')) return setItems([]);
-    api
-      .call('artifacts.list', { limit: 200 })
+    fetchAllArtifacts()
       .then((r) => setItems(r.artifacts))
       .catch((e) => setErr(errText(e)));
   }, [can]);

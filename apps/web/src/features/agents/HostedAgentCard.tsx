@@ -25,6 +25,7 @@ import {
   useConfirm,
   useToast,
 } from '../../ui';
+import { useAllArtifacts } from '../artifacts/artifactList';
 import { HostedAgentDialog } from './HostedAgentDialog';
 import type { HostedAgentRun } from './labels';
 
@@ -46,7 +47,7 @@ export function HostedAgentCard({ agentId, onChanged }: { agentId: string; onCha
   const [memoryBusy, setMemoryBusy] = useState<string | null>(null);
   const view = useApi(() => api.call('agents.hostedRuns', { agentId }), [agentId]);
   const memory = useApi(() => api.call('agents.memory.list', { agentId }), [agentId]);
-  const skillArts = useApi(() => api.call('artifacts.list', { type: 'skill', limit: 200 }), []);
+  const skillArts = useAllArtifacts('skill');
   const admin = can('workspace:admin');
 
   if (view.loading && !view.data)

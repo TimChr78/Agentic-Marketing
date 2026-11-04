@@ -1,9 +1,8 @@
 import { Plus, Trash2 } from 'lucide-react';
 import { useEffect, useState } from 'react';
-import { api } from '../../app/api';
-import { useApi } from '../../app/useApi';
 import { Button, Checkbox, Field, FieldGroup, IconButton, Input, Select, Textarea } from '../../ui';
 import type { EditorProps } from './ArtifactDetailPage';
+import { useAllArtifacts } from './artifactList';
 import { JsonEditor } from './JsonEditor';
 
 // A prompt for AI journey steps: decide between options, write text for slots, or classify a text.
@@ -123,7 +122,7 @@ export function PromptEditor({ content, onChange, readOnly, errors }: EditorProp
   const options = content.options ?? [];
   const slots = content.slots ?? [];
   const forbidden = content.forbidden ?? [];
-  const segments = useApi(() => api.call('artifacts.list', { type: 'segment' as never, limit: 200 }), []);
+  const segments = useAllArtifacts('segment');
   const cacheSegments = content.cache?.segments ?? [];
   const [forbiddenText, setForbiddenText] = useState(forbidden.join('\n'));
   // biome-ignore lint/correctness/useExhaustiveDependencies: only follow changes from outside this field, not the local text

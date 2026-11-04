@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Field, Textarea } from '../../ui';
+import { shouldSyncJsonText } from './jsonDraft';
 
 /** Content as JSON, for types without a form of their own. Parses on every change; shows the parse error. */
 export function JsonEditor({
@@ -9,6 +10,7 @@ export function JsonEditor({
   label = 'Content (JSON)',
   hint,
   rows = 22,
+  documentKey,
 }: {
   value: unknown;
   onChange: (v: unknown) => void;
@@ -16,17 +18,20 @@ export function JsonEditor({
   label?: string;
   hint?: string;
   rows?: number;
+  /** Identifies the artifact being edited, so a document switch still replaces invalid text. */
+  documentKey?: string;
 }) {
   const [text, setText] = useState(() => JSON.stringify(value, null, 2));
   const [error, setError] = useState<string | null>(null);
+  const documentRef = useRef(documentKey);
   // biome-ignore lint/correctness/useExhaustiveDependencies: only follow changes from outside this field, not the local text
   useEffect(() => {
-    // Follow outside changes (reload, discard) unless the text already means the same value.
-    try {
-      if (JSON.stringify(JSON.parse(text)) === JSON.stringify(value)) return;
-    } catch {}
-    setText(JSON.stringify(value, null, 2));
-  }, [value]);
+    // Follow outside changes (reload, discard) unless the text already means the same value. While
+    // the text does not parse it stays put: a refetch of the last valid content must not erase it.
+    const documentChanged = documentRef.current !== documentKey;
+    documentRef.current = documentKey;
+    if (shouldSyncJsonText({ text, value, documentChanged })) setText(JSON.stringify(value, null, 2));
+  }, [value, documentKey]);
   return (
     <Field label={label} hint={hint ?? 'The same JSON agents read and write. Call artifacts.types for the schema.'} error={error}>
       <Textarea
