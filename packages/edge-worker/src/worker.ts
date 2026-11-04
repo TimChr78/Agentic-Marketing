@@ -57,9 +57,16 @@ const str = (v: unknown, max: number) => (typeof v === 'string' && v.length > 0 
 
 function keyOf(req: Request, body: Record<string, unknown>) {
   const auth = req.headers.get('authorization');
-  if (auth?.startsWith('Basic ')) return atob(auth.slice(6)).split(':')[0];
+  if (auth?.startsWith('Basic ')) {
+    try {
+      return atob(auth.slice(6)).split(':')[0];
+    } catch {
+      return undefined;
+    }
+  }
   if (auth?.startsWith('Bearer ')) return auth.slice(7);
-  return (body.writeKey as string | undefined) ?? req.headers.get('x-write-key') ?? undefined;
+  const fromBody = typeof body.writeKey === 'string' ? body.writeKey : undefined;
+  return fromBody ?? req.headers.get('x-write-key') ?? undefined;
 }
 
 export async function decide(req: Request, env: Env): Promise<Response> {

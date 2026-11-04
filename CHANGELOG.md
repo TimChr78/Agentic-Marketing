@@ -2,6 +2,24 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [0.7.2] - 2026-11-04
+
+### Fixed
+
+- Preserve current topic preferences and static/snapshot list memberships when identities merge (#395, #396). Topic conflicts use the newest choice, with an opt-out winning an exact timestamp tie. Lists deduplicate onto the surviving profile while keeping the earliest addition and provenance. A migration repairs existing merged-away rows; history stays append-only and exports still include the merged family. Topic/preference links issued before a merge follow the survivor, and topic writes serialize with merges. Dynamic memberships are recomputed by the normal refresh.
+- Audit successful `profiles.list` and `segments.members` reads, including redacted responses, through the same input-hash audit chain used by individual profile reads (#398). Decrypted output is never stored in that audit entry.
+- Honor ad-targeting refusals even when an audience sync sets `removals: false` (#399). That option now applies only to ordinary segment leavers; consent eligibility is checked for all previously synced members, including people who already left the segment.
+- Warehouse erasure no longer relies on an exported identifiers dataset, and incremental export change markers include identity reassignment and consent materialization changes without rewriting their original business timestamps (#373, #374).
+- Edge mirroring retains cleanup work when disabled or when snapshots are turned off, and changing the KV destination resets backfill and schedules cleanup of the previous target (#403, #404).
+
+### Upgrading from 0.7.1
+
+- **Migrations:** `0068_warehouse_change_tracking.sql`, `0069_merge_preferences_memberships.sql` and `0070_edge_cleanup.sql`. They run on start-up; merge repair transfers existing current topic/list rows along resolvable merge chains (up to 20 links), preserving history. Review the detailed validation and upgrade limits before deployment.
+- **Configuration:** no new environment variables.
+- **Breaking changes:** no removed or renamed command/artifact fields. `edge.status` adds cleanup progress, pending deletion counts and stale-target details. Privacy corrections remove audience members after consent is refused regardless of `removals`, and disabled edge mirroring initiates remote cleanup instead of retaining serving copies.
+- **Manual steps:** keep credentials for warehouse and edge destinations valid until outstanding erasure/cleanup work completes. Older warehouse erasures without captured keys require manual downstream cleanup; incomplete erasures keep their cursor pending and their failure visible. A cross-account edge move may require manual cleanup of the old KV namespace if the current token cannot access it; `edge.status` reports the outstanding target. The first warehouse export after upgrading re-exports changed identity/consent rows. Read `docs/triage/0.7.2-bugfix-plan.md` for repair limits and final validation evidence.
+- **Upgrade:** download `agentic-marketing-compose-0.7.2.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.7.2 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.7.2` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.7.2). Run `docker compose exec app am doctor`.
+
 ## [0.7.1] - 2026-11-04
 
 ### Fixed

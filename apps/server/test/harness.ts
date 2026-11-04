@@ -202,7 +202,12 @@ export async function freshDatabase(dbName: string): Promise<{ url: URL; migrate
   return { url: testDatabaseUrl(dbName), migrated: Boolean(template) };
 }
 
-export async function startTestServer(name: string, port: number, env: Record<string, string> = {}) {
+export async function startTestServer(
+  name: string,
+  port: number,
+  env: Record<string, string> = {},
+  testOptions: { warehouseTickMs?: number } = {},
+) {
   const base = `http://localhost:${port}`;
   const dbName = `am_${name}`;
   const { url: pgUrl, migrated } = await freshDatabase(dbName);
@@ -251,7 +256,7 @@ export async function startTestServer(name: string, port: number, env: Record<st
     ...startScheduler(srv, stop.signal, {
       segmentTickMs: 500,
       broadcastTickMs: 300,
-      warehouseTickMs: 300,
+      warehouseTickMs: testOptions.warehouseTickMs ?? 300,
       warehouseLagMs: 0,
       edgeTickMs: 200,
       // Alert tests drive the evaluator directly with a fixed clock; keep the background loop out of the way.

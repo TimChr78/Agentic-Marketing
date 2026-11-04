@@ -244,7 +244,10 @@ async function resolve(tx: Tx, workspaceId: string, ids: Ident[], crypto: Person
   return target;
 }
 
-/** Folds `from` into `into`: identifiers, traits and personal data move; consent state is recomputed. */
+/**
+ * Folds `from` into `into`: identifiers, journeys, holdouts, topic choices, static/snapshot list
+ * memberships, traits and personal data move; purpose consent is recomputed.
+ */
 async function merge(tx: Tx, workspaceId: string, from: string, into: string, crypto: PersonCrypto, reason: string) {
   const [src] = await tx
     .select()
@@ -278,6 +281,12 @@ async function merge(tx: Tx, workspaceId: string, from: string, into: string, cr
   // Holdout arms follow too: the survivor keeps its arm for a scope and otherwise inherits the
   // merged profile's (earliest wins). The function is the app role's only way to move these rows.
   await tx.execute(sql`SELECT merge_holdout_assignments(${from}, ${into})`);
+  // The person's own topic choices follow (#395): the newest choice wins, an opt-out wins an exact
+  // timestamp tie, and the choice's evidence stays in the append-only history on the merged-away id.
+  await tx.execute(sql`SELECT merge_topic_preferences(${from}, ${into})`);
+  // Static/snapshot list membership follows and is deduplicated (#396); dynamic memberships are
+  // derived from the rule and are left for the next refresh to recompute from the merged traits.
+  await tx.execute(sql`SELECT merge_segment_memberships(${from}, ${into})`);
 
   const srcPii = (await crypto.open<Record<string, unknown>>(from, src.pii)) ?? {};
   const dstPii = (await crypto.open<Record<string, unknown>>(into, dst.pii)) ?? {};

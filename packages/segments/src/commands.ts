@@ -101,6 +101,7 @@ export const segmentMembers = defineCommand({
   }),
   permission: 'profiles:read',
   effect: 'read',
+  auditReads: true,
   handler: async (input, ctx) => {
     const rows = await ctx.tx
       .select({

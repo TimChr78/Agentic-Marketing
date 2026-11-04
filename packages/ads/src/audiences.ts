@@ -189,18 +189,24 @@ export async function syncAudience(
         .from(schema.audienceMembers)
         .where(and(eq(schema.audienceMembers.syncId, syncId), eq(schema.audienceMembers.platform, platform)));
       const have = new Set(existing.map((e) => e.profileId));
-      const alive = new Set(
+      // Consent eligibility is independent of segment membership: removals=false only preserves
+      // ordinary leavers, never erased people or people whose targeting purpose no longer holds.
+      const eligible = new Set(
         existing.length
           ? (
               await tx
-                .select({ id: schema.profiles.id })
+                .select({
+                  id: schema.profiles.id,
+                  status: sql<string | null>`${consentStatusSql(sql`${schema.profiles.id}`, 'ad_targeting')}`,
+                })
                 .from(schema.profiles)
                 .where(inArray(schema.profiles.id, [...have]))
-            ).map((p) => p.id)
+            )
+              .filter((p) => purposeHolds(purposes, 'ad_targeting', undefined, p.status ?? undefined))
+              .map((p) => p.id)
           : [],
       );
-      // Erased people always go; leavers only when removals are on.
-      const removals = existing.filter((e) => !alive.has(e.profileId) || (def.removals && !desired.has(e.profileId)));
+      const removals = existing.filter((e) => !eligible.has(e.profileId) || (def.removals && !desired.has(e.profileId)));
       const adds: { profileId: string; hashes: Hashes }[] = [];
       for (const id of [...desired].filter((d) => !have.has(d)).slice(0, MAX_ADDS_PER_RUN)) {
         const person = await profileForMessage(tx, ws, id, deps.kp);

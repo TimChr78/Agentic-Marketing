@@ -1,3 +1,4 @@
+import { setTimeout as delay } from 'node:timers/promises';
 import { newId } from '@agentic-marketing/core';
 import { type Db, schema } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
@@ -5,7 +6,7 @@ import type { EgressPolicy } from '@agentic-marketing/integrations';
 import { type KeyProvider, openJson } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { eq } from 'drizzle-orm';
-import { DATASETS, erasuresIn, readDataset } from './datasets';
+import { DATASETS, erasuresForExport, pruneErasureKeys, readDataset } from './datasets';
 import { type Destination, postgresConfig, postgresDestination, postgresSecrets, s3Config, s3Destination, s3Secrets } from './destinations';
 
 export interface WarehouseDeps {
@@ -60,11 +61,27 @@ export async function runExport(deps: WarehouseDeps, ws: string, id: string) {
       }
       cursors[dataset] = until;
     }
-    const erasures = await erasuresIn(deps.db, ws, cursors.erasures ?? EPOCH, until);
-    await dest.erase(erasures);
-    counts.erasures = erasures.length;
-    cursors.erasures = until;
-    await finish(deps.db, ws, id, { cursors, lastStatus: 'ok', lastError: null, lastCounts: counts });
+    const erasures = await erasuresForExport(deps.db, ws, cursors.erasures ?? EPOCH, until, row.datasets, row.createdAt.toISOString());
+    const report = await dest.erase(erasures);
+    counts.erasures = report.applied;
+    if (report.incomplete.length) counts.erasuresIncomplete = report.incomplete.length;
+    if (!report.incomplete.length) cursors.erasures = until;
+    // Keep an incomplete erasure outstanding: a later empty run must not clear the failure and
+    // claim this destination is healthy while it still holds data requiring manual cleanup.
+    const warning = report.incomplete.length
+      ? `erasure not fully applied downstream for ${report.incomplete.length} person(s): ${report.incomplete
+          .flatMap((e) => e.uncovered)
+          .join(
+            ', ',
+          )} data could not be located (the erasure predates key tracking, or its keys were already pruned); remove it downstream manually`
+      : null;
+    await finish(deps.db, ws, id, { cursors, lastStatus: warning ? 'failed' : 'ok', lastError: warning, lastCounts: counts });
+    // Keys are only dropped once every enabled destination has passed their erasure.
+    await pruneErasureKeys(deps.db, ws).catch((err) => logger.warn({ workspace: ws, err }, 'warehouse erasure key cleanup failed'));
+    if (warning) {
+      logger.warn({ workspace: ws, export: id, counts }, 'warehouse export applied an incomplete erasure');
+      return { status: 'failed' as const, counts, error: warning };
+    }
     logger.info({ workspace: ws, export: id, counts }, 'warehouse export done');
     return { status: 'ok' as const, counts };
   } catch (err) {
@@ -102,6 +119,8 @@ export async function runWarehouseExports(deps: WarehouseDeps & { tickMs?: numbe
     } catch (err) {
       logger.error({ err }, 'warehouse export round failed');
     }
-    await new Promise((r) => setTimeout(r, deps.tickMs ?? 30_000));
+    await delay(deps.tickMs ?? 30_000, undefined, { signal }).catch((err: unknown) => {
+      if (!signal.aborted) throw err;
+    });
   }
 }

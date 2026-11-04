@@ -340,26 +340,39 @@ export async function recordTopicPreference(
   source: TopicPreferenceSource,
   opts: { note?: string; proof?: Record<string, unknown>; recordedBy?: string } = {},
 ) {
+  // Serialize topic writes with identity merges, then resolve again in the write transaction.
+  // Otherwise an old signed preference link can recreate a choice on a merged-away profile.
+  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`identity:${workspaceId}`}, 0))`);
+  let canonicalId = profileId;
+  for (let i = 0; i < 20; i++) {
+    const [profile] = await tx
+      .select({ mergedInto: schema.profiles.mergedInto })
+      .from(schema.profiles)
+      .where(and(eq(schema.profiles.workspaceId, workspaceId), eq(schema.profiles.id, canonicalId)));
+    if (!profile?.mergedInto) break;
+    canonicalId = profile.mergedInto;
+    if (i === 19) throw new Error('Profile merge chain exceeds the supported depth.');
+  }
   const [current] = await tx
     .select({ status: schema.topicPreferences.status })
     .from(schema.topicPreferences)
     .where(
       and(
         eq(schema.topicPreferences.workspaceId, workspaceId),
-        eq(schema.topicPreferences.profileId, profileId),
+        eq(schema.topicPreferences.profileId, canonicalId),
         eq(schema.topicPreferences.topic, topic),
       ),
     );
   await tx
     .insert(schema.topicPreferences)
-    .values({ workspaceId, profileId, topic, status, source, updatedAt: new Date() })
+    .values({ workspaceId, profileId: canonicalId, topic, status, source, updatedAt: new Date() })
     .onConflictDoUpdate({
       target: [schema.topicPreferences.workspaceId, schema.topicPreferences.profileId, schema.topicPreferences.topic],
       set: { status, source, updatedAt: new Date() },
     });
   await tx.insert(schema.topicPreferenceHistory).values({
     workspaceId,
-    profileId,
+    profileId: canonicalId,
     topic,
     purpose,
     status,

@@ -10,7 +10,7 @@ The decision API (`POST /v1/decide`) can also answer from a Cloudflare Worker, i
 | `am:exp:<workspace>` | published experiences and the workspace's purposes | when either changes |
 | `am:snap:<workspace>:a:<anonymous id>`, `…:u:<user id>` | the profile snapshot: profile id, non-personal traits, segment ids | as snapshots change, 30-day expiry |
 
-Write keys are stored only as hashes. Snapshots hold what the server's hot state holds and nothing more: no e-mail, phone or other personal traits. Erasing a person deletes their snapshots at the edge too, within seconds. With `snapshots: false` nothing about people goes to KV, and only page, referrer, UTM and device targeting work at the edge.
+Write keys are stored only as hashes. Snapshots hold what the server's hot state holds and nothing more: no e-mail, phone or other personal traits. Erasing a person deletes their snapshots at the edge too, within seconds. With `snapshots: false` nothing new about people is written to KV, any snapshots already there are removed (see below), and only page, referrer, UTM and device targeting work at the edge.
 
 The edge does not see this visit's session (page views and events so far): session and new-visitor conditions read as "no session" there. Keep experiences that need them on the server's decision API.
 
@@ -39,6 +39,16 @@ The edge does not see this visit's session (page views and events so far): sessi
    ```
 
 Events, forms and e-mail links keep going to `host`.
+
+## Turning it off, and changing the target
+
+`edge.configure` with `enabled: false` stops all writes and owes a remote cleanup: the next sync deletes the workspace's bundle, write keys and every snapshot under `am:snap:<workspace>:` in KV. The worker then answers 401 (its write key is gone) and returns no experiences, so disabling the mirror revokes the serving configuration instead of only stopping new uploads. `snapshots: false` while staying enabled removes only the people (`am:snap:<workspace>:*`) and keeps the bundle and write keys for page, referrer, UTM and device targeting.
+
+The cleanup is a state on the target, not a best-effort delete: `edge.status.cleanup` stays `snapshots` or `all` until Cloudflare confirms the deletions, `edge.status.lastError` shows a failed attempt, and the scheduler retries. People erased while a cleanup is owed are queued as tombstones and retried the same way; `edge.status.pendingDeletes` counts them. Never treat an erasure as complete at the edge while `pendingDeletes` or `cleanup` is non-zero. There is still a short window after a successful cleanup in which the worker's isolate cache (`AM_CACHE_SECONDS`) and KV propagation can serve the last copy; deployments that need an immediate cut-off should also remove the worker route.
+
+Changing `accountId`, `namespaceId` or `apiBase` is a destination migration. It starts a fresh backfill in the new namespace and lists the old namespace's `am:snap:<workspace>:` keys and the keys the workspace pushed, deleting them before anything is written to the new target. Rotating only `apiToken` keeps the bundle and the finished backfill. Targets disabled by an older version get the pending cleanup automatically when migration `0070_edge_cleanup.sql` runs.
+
+An earlier destination is cleaned with the current token. The same account is enough when only the namespace moved; a target in another account needs a token with access to that account, which this version does not retain. Such copies remain listed in `edge.status.staleTargets` with the last error and must be deleted manually in Cloudflare (in the old namespace: `am:exp:<workspace>`, the workspace's `am:key:*` entries and `am:snap:<workspace>:*`). The server cannot discover them without credentials for that account and does not report the migration as fully cleaned.
 
 ## Freshness
 

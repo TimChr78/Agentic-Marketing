@@ -1212,6 +1212,20 @@ export const edgeTargets = pgTable('edge_targets', {
   bundleHash: text('bundle_hash'),
   pushedKeys: text('pushed_keys').array().$type<string[]>().notNull().default([]),
   backfillCursor: text('backfill_cursor'),
+  /** Remote deletion owed after serving was turned off; cleared only when KV confirms it. */
+  cleanupMode: text('cleanup_mode').$type<'snapshots' | 'all'>(),
+  /** Destinations this workspace moved away from, kept until their KV copies are deleted. */
+  priorTarget:
+    jsonb('prior_target').$type<
+      {
+        accountId: string;
+        namespaceId: string;
+        apiBase: string | null;
+        keys: string[];
+        nextAttemptAt?: string;
+        lastError?: string;
+      }[]
+    >(),
   lastSyncAt: ts('last_sync_at'),
   lastError: text('last_error'),
   createdAt: ts('created_at').notNull().defaultNow(),

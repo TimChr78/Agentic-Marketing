@@ -7,12 +7,19 @@ import { type EgressPolicy, egressFetch, isBlockedAddress } from '@agentic-marke
 import { AwsClient } from 'aws4fetch';
 import pg from 'pg';
 import { z } from 'zod';
-import { DATASETS, type Row } from './datasets';
+import { DATASETS, type Erasure, type Row } from './datasets';
 
 // Where exports go. Postgres receives upserts into am_* tables (with the workspace id in every key),
 // snapshots replaced in one transaction and erasures applied as deletes. S3-compatible storage
 // receives gzipped NDJSON files that BigQuery, Snowflake, Redshift, DuckDB or Spark load as they
 // are; erasures arrive as files of their own, for the warehouse to apply.
+
+export interface EraseReport {
+  /** Erasures this destination applied to every dataset it exported. */
+  applied: number;
+  /** Erasures it could not fully apply, with the datasets it could not cover. */
+  incomplete: { id: string; uncovered: string[] }[];
+}
 
 export interface Destination {
   /** Incremental rows, written as an upsert (Postgres) or appended (files). */
@@ -21,7 +28,7 @@ export interface Destination {
   beginSnapshot(dataset: WarehouseDataset): Promise<void>;
   writeSnapshot(dataset: WarehouseDataset, rows: Row[]): Promise<void>;
   endSnapshot(dataset: WarehouseDataset): Promise<void>;
-  erase(erasures: { id: string; profileIds: string[]; at: string }[]): Promise<void>;
+  erase(erasures: Erasure[]): Promise<EraseReport>;
   close(): Promise<void>;
 }
 
@@ -123,7 +130,11 @@ export async function postgresDestination(
     );
   }
   await client.query(`CREATE TABLE IF NOT EXISTS ${schemaName}.am_erasures (workspace_id uuid NOT NULL, id text NOT NULL,
-    profile_ids text[] NOT NULL, at timestamptz NOT NULL, PRIMARY KEY (workspace_id, id))`);
+    profile_ids text[] NOT NULL, at timestamptz NOT NULL, applied boolean NOT NULL DEFAULT true, uncovered text[],
+    PRIMARY KEY (workspace_id, id))`);
+  // Destinations created by an earlier version get the coverage columns too.
+  await client.query(`ALTER TABLE ${schemaName}.am_erasures ADD COLUMN IF NOT EXISTS applied boolean NOT NULL DEFAULT true`);
+  await client.query(`ALTER TABLE ${schemaName}.am_erasures ADD COLUMN IF NOT EXISTS uncovered text[]`);
 
   async function upsert(dataset: WarehouseDataset, rows: Row[]) {
     const spec = DATASETS[dataset];
@@ -157,24 +168,41 @@ export async function postgresDestination(
       await client.query('COMMIT');
     },
     async erase(erasures) {
-      if (!erasures.length) return;
-      const people = erasures.flatMap((e) => e.profileIds);
+      if (!erasures.length) return { applied: 0, incomplete: [] };
+      const people = [...new Set(erasures.flatMap((e) => e.profileIds))];
       await client.query('BEGIN');
-      // Events are keyed by the person's ids, which are known through the exported identifiers.
-      await client.query(
-        `DELETE FROM ${schemaName}.am_events e USING ${schemaName}.am_identifiers i
-         WHERE e.workspace_id = $1 AND i.workspace_id = $1 AND i.profile_id = ANY($2)
-           AND ((i.type = 'user_id' AND e.user_id = i.value) OR (i.type = 'anonymous_id' AND e.anonymous_id = i.value))`,
-        [ws, people],
-      );
-      for (const d of ['identifiers', 'consent', 'segment_memberships', 'message_events', 'profiles'] as const)
-        await client.query(`DELETE FROM ${schemaName}.${table(d)} WHERE workspace_id = $1 AND profile_id = ANY($2)`, [ws, people]);
-      for (const e of erasures)
-        await client.query(
-          `INSERT INTO ${schemaName}.am_erasures (workspace_id, id, profile_ids, at) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`,
-          [ws, e.id, e.profileIds, e.at],
-        );
-      await client.query('COMMIT');
+      try {
+        // Events are found by the pseudonymous ids captured when the person was erased (#373).
+        // This is independent of the identifiers dataset: an events-only destination never
+        // receives am_identifiers, and used to delete nothing here while recording success.
+        for (const e of erasures) {
+          const userIds = e.identifiers.filter((i) => i.type === 'user_id').map((i) => i.value);
+          const anonymousIds = e.identifiers.filter((i) => i.type === 'anonymous_id').map((i) => i.value);
+          if (userIds.length || anonymousIds.length)
+            await client.query(
+              `DELETE FROM ${schemaName}.am_events
+               WHERE workspace_id = $1 AND (user_id = ANY($2) OR anonymous_id = ANY($3))`,
+              [ws, userIds, anonymousIds],
+            );
+        }
+        for (const d of ['identifiers', 'consent', 'segment_memberships', 'message_events', 'profiles'] as const)
+          await client.query(`DELETE FROM ${schemaName}.${table(d)} WHERE workspace_id = $1 AND profile_id = ANY($2)`, [ws, people]);
+        for (const e of erasures)
+          await client.query(
+            `INSERT INTO ${schemaName}.am_erasures (workspace_id, id, profile_ids, at, applied, uncovered)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (workspace_id, id) DO UPDATE
+               SET profile_ids = excluded.profile_ids, at = excluded.at,
+                   applied = excluded.applied, uncovered = excluded.uncovered`,
+            [ws, e.id, e.profileIds, e.at, e.uncovered.length === 0, e.uncovered.length ? e.uncovered : null],
+          );
+        await client.query('COMMIT');
+      } catch (err) {
+        await client.query('ROLLBACK').catch(() => {});
+        throw err;
+      }
+      const incomplete = erasures.filter((e) => e.uncovered.length).map((e) => ({ id: e.id, uncovered: e.uncovered }));
+      return { applied: erasures.length - incomplete.length, incomplete };
     },
     async close() {
       await client.end();
@@ -228,6 +256,8 @@ export function s3Destination(
     },
     async erase(erasures) {
       if (erasures.length) await put(`${prefix}erasures/dt=${day}/${runId}.ndjson.gz`, erasures);
+      const incomplete = erasures.filter((e) => e.uncovered.length).map((e) => ({ id: e.id, uncovered: e.uncovered }));
+      return { applied: erasures.length - incomplete.length, incomplete };
     },
     async close() {},
   };

@@ -29,6 +29,26 @@ export const kvKeys = {
   snapshot: (ws: string, kind: 'a' | 'u', id: string) => `am:snap:${ws}:${kind}:${id}`,
 };
 
+/** The prefix every snapshot of a workspace shares, so a cleanup can find the ones it can no longer derive. */
+export const snapshotPrefix = (ws: string) => `am:snap:${ws}:`;
+
+/** What remains to remove from KV after serving was turned off: people (snapshots) or everything. */
+export type EdgeCleanupMode = 'snapshots' | 'all';
+
+/**
+ * A destination we stopped using. Its keys cannot be derived from the current target, so the
+ * identity and the keys we pushed are kept until a deletion with the current token succeeds.
+ */
+export interface PriorEdgeTarget {
+  accountId: string;
+  namespaceId: string;
+  apiBase: string | null;
+  keys: string[];
+  /** Failed attempts back off instead of calling a namespace the current token cannot reach every second. */
+  nextAttemptAt?: string;
+  lastError?: string;
+}
+
 /** What the worker reads per workspace. */
 export interface EdgeBundle {
   experiences: PublishedExperience[];
@@ -68,11 +88,29 @@ const Status = z.object({
   lastError: z.string().nullable(),
   queuedSnapshots: z.number().int(),
   backfilling: z.boolean(),
+  /** Remote cleanup still owed after serving was turned off (null when there is none). */
+  cleanup: z.enum(['snapshots', 'all']).nullable(),
+  /** Queued deletions not yet delivered to KV; they survive a failed sync. */
+  pendingDeletes: z.number().int(),
+  /** Earlier destinations whose copies could not be removed yet (e.g. a token for another account). */
+  staleTargets: z.array(
+    z.object({
+      accountId: z.string(),
+      namespaceId: z.string(),
+      apiBase: z.string().nullable(),
+      lastError: z.string().nullable(),
+      nextAttemptAt: z.string().nullable(),
+    }),
+  ),
 });
 
 async function status(tx: Tx): Promise<z.infer<typeof Status>> {
   const [t] = await tx.select().from(schema.edgeTargets);
-  const [q] = (await tx.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM edge_outbox`)).rows;
+  const [q] = (
+    await tx.execute<{ n: number; d: number }>(
+      sql`SELECT count(*)::int AS n, count(*) FILTER (WHERE value IS NULL)::int AS d FROM edge_outbox`,
+    )
+  ).rows;
   return {
     configured: !!t,
     enabled: t?.enabled ?? false,
@@ -84,6 +122,99 @@ async function status(tx: Tx): Promise<z.infer<typeof Status>> {
     lastError: t?.lastError ?? null,
     queuedSnapshots: q?.n ?? 0,
     backfilling: t?.backfillCursor != null,
+    cleanup: t?.cleanupMode ?? null,
+    pendingDeletes: q?.d ?? 0,
+    staleTargets: (t?.priorTarget ?? []).map((p) => ({
+      accountId: p.accountId,
+      namespaceId: p.namespaceId,
+      apiBase: p.apiBase ?? null,
+      lastError: p.lastError ?? null,
+      nextAttemptAt: p.nextAttemptAt ?? null,
+    })),
+  };
+}
+
+export interface EdgeSettings {
+  accountId: string;
+  namespaceId: string;
+  apiBase: string | null;
+  snapshots: boolean;
+  enabled: boolean;
+  bundleHash: string | null;
+  pushedKeys: string[];
+  backfillCursor: string | null;
+  cleanupMode: EdgeCleanupMode | null;
+  priorTarget: PriorEdgeTarget[] | null;
+}
+
+export interface EdgeConfigureInput {
+  accountId: string;
+  namespaceId: string;
+  apiBase?: string;
+  snapshots?: boolean;
+  enabled?: boolean;
+}
+
+const destination = (t: { accountId: string; namespaceId: string; apiBase?: string | null }) =>
+  `${t.accountId}/${t.namespaceId}/${t.apiBase ?? ''}`;
+
+/**
+ * The target row after `edge.configure`. Enabling a destination that never served (or re-enabling
+ * one) starts a backfill; a new account, namespace or API base restarts it and queues removal of
+ * the copies in the old namespace. Rotating only the token leaves the backfill and bundle alone.
+ * Turning serving off never clears the cleanup: the next sync removes the remote copies first.
+ */
+export function planEdgeConfigure(prev: EdgeSettings | null, input: EdgeConfigureInput) {
+  const next = {
+    accountId: input.accountId,
+    namespaceId: input.namespaceId,
+    apiBase: input.apiBase ?? null,
+    snapshots: input.snapshots ?? prev?.snapshots ?? true,
+    enabled: input.enabled ?? prev?.enabled ?? true,
+  };
+  if (!prev) {
+    return {
+      ...next,
+      bundleHash: null,
+      pushedKeys: [] as string[],
+      backfillCursor: next.enabled && next.snapshots ? '' : null,
+      cleanupMode: null as EdgeCleanupMode | null,
+      priorTarget: null as PriorEdgeTarget[] | null,
+    };
+  }
+  const moved = destination(prev) !== destination(next);
+  // Deduplicate earlier destinations; one we are about to reuse is cleaned by cleanupMode below.
+  let priorTarget = prev.priorTarget ?? [];
+  if (moved) {
+    const merged = new Map<string, PriorEdgeTarget>();
+    for (const p of [
+      ...priorTarget,
+      { accountId: prev.accountId, namespaceId: prev.namespaceId, apiBase: prev.apiBase ?? null, keys: [...prev.pushedKeys] },
+    ])
+      merged.set(destination(p), p);
+    priorTarget = [...merged.values()];
+  }
+  priorTarget = priorTarget.filter((p) => destination(p) !== destination(next));
+  const startsBackfill = moved || (next.enabled && !prev.enabled) || (next.snapshots && !prev.snapshots);
+  const servesSnapshots = next.enabled && next.snapshots;
+  let cleanupMode = prev.cleanupMode;
+  if (!next.enabled) {
+    // Removing the bundle and write keys is what revokes the edge endpoint; it does not wait for
+    // the next configure, and a failure leaves this set so the sync retries.
+    if (prev.enabled) cleanupMode = 'all';
+  } else if (!next.snapshots) {
+    if (prev.snapshots) cleanupMode = prev.cleanupMode === 'all' ? 'all' : 'snapshots';
+  }
+  // A new (or reused) namespace may hold copies from an earlier configuration: clear it before
+  // the first bundle write. Re-enabling also pushes the bundle again (the cleanup deleted it).
+  if (moved) cleanupMode = 'all';
+  return {
+    ...next,
+    bundleHash: moved || (next.enabled && !prev.enabled) ? null : prev.bundleHash,
+    pushedKeys: moved ? [] : prev.pushedKeys,
+    backfillCursor: !servesSnapshots ? null : startsBackfill ? '' : prev.backfillCursor,
+    cleanupMode,
+    priorTarget: priorTarget.length ? priorTarget : null,
   };
 }
 
@@ -118,27 +249,21 @@ export const edgeConfigure = defineCommand({
   humansOnly: true,
   sensitive: ['apiToken'],
   handler: async (input, ctx) => {
-    const sealed = input.apiToken
-      ? await sealJson(ctx.tx, ctx.principal.workspaceId, ctx.services.keyProvider, { apiToken: input.apiToken })
-      : null;
+    const ws = ctx.principal.workspaceId;
+    const sealed = input.apiToken ? await sealJson(ctx.tx, ws, ctx.services.keyProvider, { apiToken: input.apiToken }) : null;
+    const [prev] = await ctx.tx.select().from(schema.edgeTargets);
+    const plan = planEdgeConfigure(prev ?? null, input);
     const values = {
-      accountId: input.accountId,
-      namespaceId: input.namespaceId,
-      apiBase: input.apiBase ?? null,
-      ...(input.snapshots !== undefined ? { snapshots: input.snapshots } : {}),
-      ...(input.enabled !== undefined ? { enabled: input.enabled } : {}),
+      ...plan,
       ...(sealed ? { secrets: sealed.blob, secretsKeyId: sealed.keyId } : {}),
-      // A new target gets everything again.
-      bundleHash: null,
       updatedAt: new Date(),
     };
     await ctx.tx
       .insert(schema.edgeTargets)
-      // A new target starts with everyone's snapshot (a backfill), then follows changes.
-      .values({ workspaceId: ctx.principal.workspaceId, ...values, backfillCursor: '' })
+      .values({ workspaceId: ws, ...values })
       .onConflictDoUpdate({ target: schema.edgeTargets.workspaceId, set: values });
     ctx.afterCommit?.(async () => {
-      mirrorOn.delete(ctx.principal.workspaceId);
+      mirrorOn.delete(ws);
     });
     const s = await status(ctx.tx);
     if (!s.hasToken) throw new AppError('invalid_input', 'Give the Cloudflare API token (apiToken) the first time.');
@@ -195,8 +320,19 @@ export function edgeMirror(hot: HotState, db: Db): HotState {
     on.set(ws, { at: Date.now(), value });
     return value;
   };
+  // Deletions are never taken from the 30-second cache (#403): a target that just lost snapshots
+  // must still receive an erasure, and a queued tombstone is retried by the scheduler.
+  const remoteCopies = (ws: string) =>
+    db.admin
+      .query<{ enabled: boolean; snapshots: boolean; cleanupMode: string | null }>(
+        'SELECT enabled, snapshots, cleanup_mode AS "cleanupMode" FROM edge_targets WHERE workspace_id = $1',
+        [ws],
+      )
+      .then((r) => {
+        const t = r.rows[0];
+        return !!t && ((t.enabled && t.snapshots) || t.cleanupMode !== null);
+      });
   const queue = async (ws: string, ids: { anonymousIds: string[]; userIds: string[] }, value: ProfileSnapshot | null) => {
-    if (!(await enabled(ws))) return;
     const keys = [...ids.anonymousIds.map((a) => kvKeys.snapshot(ws, 'a', a)), ...ids.userIds.map((u) => kvKeys.snapshot(ws, 'u', u))];
     if (!keys.length) return;
     await db.admin.query('INSERT INTO edge_outbox (workspace_id, key, value) SELECT $1, k, $3::jsonb FROM unnest($2::text[]) AS k', [
@@ -209,11 +345,15 @@ export function edgeMirror(hot: HotState, db: Db): HotState {
     ...hot,
     async writeSnapshot(ws, ids, snap) {
       await hot.writeSnapshot(ws, ids, snap);
+      if (!(await enabled(ws))) return;
       await queue(ws, ids, snap).catch((err) => logger.warn({ err }, 'edge snapshot not queued'));
     },
     async deleteSnapshot(ws, ids) {
       await hot.deleteSnapshot(ws, ids);
-      // Erasure must reach the edge too: a failure here is an error, not a warning.
+      // Erasure must reach the edge too: a failure here is an error, not a warning. Only queue when
+      // a remote copy can exist; a target that never served snapshots, or whose cleanup already
+      // listed and deleted them, has none.
+      if (!(await remoteCopies(ws))) return;
       await queue(ws, ids, null);
     },
   };
@@ -224,6 +364,8 @@ export function edgeMirror(hot: HotState, db: Db): HotState {
 interface KvClient {
   put(entries: { key: string; value: string; expiration_ttl?: number }[]): Promise<void>;
   delete(keys: string[]): Promise<void>;
+  /** The first page (up to 1,000 names) with this prefix; a cleanup repeats until it is empty. */
+  list(prefix: string): Promise<string[]>;
 }
 
 /** Cloudflare's Workers KV bulk API (up to 10,000 entries per call). */
@@ -234,15 +376,21 @@ function cloudflareKv(
 ): KvClient {
   const f = egressFetch(egress);
   const base = `${(t.apiBase ?? 'https://api.cloudflare.com/client/v4').replace(/\/$/, '')}/accounts/${t.accountId}/storage/kv/namespaces/${t.namespaceId}`;
-  const call = async (method: string, path: string, body: unknown) => {
+  const call = async (method: string, path: string, body?: unknown) => {
     const res = await f(`${base}${path}`, {
       method,
       headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
-      body: JSON.stringify(body),
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
-    const out = (await res.json().catch(() => ({}))) as { success?: boolean; errors?: { message: string }[] };
+    const out = (await res.json().catch(() => ({}))) as {
+      success?: boolean;
+      errors?: { message: string }[];
+      result?: { name?: string }[];
+      result_info?: { cursor?: string };
+    };
     if (!res.ok || out.success === false)
       throw new Error(`Cloudflare KV ${path}: HTTP ${res.status} ${out.errors?.map((e) => e.message).join('; ') ?? ''}`);
+    return out;
   };
   const chunks = <T>(xs: T[]) => Array.from({ length: Math.ceil(xs.length / 10_000) }, (_, i) => xs.slice(i * 10_000, (i + 1) * 10_000));
   return {
@@ -251,6 +399,10 @@ function cloudflareKv(
     },
     async delete(keys) {
       for (const c of chunks(keys)) await call('POST', '/bulk/delete', c);
+    },
+    async list(prefix) {
+      const out = await call('GET', `/keys?prefix=${encodeURIComponent(prefix)}&limit=1000`);
+      return (out.result ?? []).map((r) => r.name).filter((n): n is string => !!n);
     },
   };
 }
@@ -262,11 +414,28 @@ export interface EdgeDeps {
   egress: EgressPolicy;
 }
 
-/** One sync of one workspace: the bundle if it changed, queued snapshots, and a slice of backfill. */
+/** Deletes every key with the snapshot prefix. KV listing can lag behind deletes, so repeat until empty. */
+async function deleteSnapshots(kv: KvClient, ws: string): Promise<void> {
+  const prefix = snapshotPrefix(ws);
+  for (let round = 0; round < 60; round++) {
+    const keys = await kv.list(prefix);
+    if (!keys.length) return;
+    await kv.delete(keys);
+  }
+  throw new Error(`KV still lists snapshots with prefix ${prefix}; the cleanup will retry`);
+}
+
+/** Removes this workspace's serving copies from one namespace: people, experiences and write keys. */
+async function deleteWorkspaceCopies(kv: KvClient, ws: string, keys: string[]) {
+  await deleteSnapshots(kv, ws);
+  await kv.delete([...new Set([...keys, kvKeys.bundle(ws)])]);
+}
+
+/** One sync of one workspace: remote cleanup, the bundle if it changed, queued snapshots, and a slice of backfill. */
 export async function syncEdge(deps: EdgeDeps, ws: string) {
   const state = await deps.db.withWorkspace(ws, async (tx) => {
     const [t] = await tx.select().from(schema.edgeTargets);
-    if (!t?.enabled || !t.secrets || !t.secretsKeyId) return null;
+    if (!t) return null;
     const purposes = ((await publishedSingleton(tx, 'purposes'))?.purposes ?? DEFAULT_PURPOSES).map((p) => ({
       key: p.key,
       basis: p.basis,
@@ -301,22 +470,77 @@ export async function syncEdge(deps: EdgeDeps, ws: string) {
     })),
   ];
   const hash = sha256(JSON.stringify(entries));
-  // Nothing to do: no token is unsealed (with a KMS, that is a call per unseal).
-  if (hash === t.bundleHash && !queued && (t.backfillCursor === null || !t.snapshots)) return;
+  const stale = t.priorTarget ?? [];
+  // Nothing to do: no token is unsealed (with a KMS, that is a call per unseal). A disabled target
+  // is still synced while it owes a cleanup or a queued deletion.
+  const servesBundle = t.enabled && hash !== t.bundleHash;
+  const servesSnapshots = t.enabled && t.snapshots;
+  const backfills = servesSnapshots && t.backfillCursor !== null;
+  const staleReady = stale.some((p) => !p.nextAttemptAt || Date.parse(p.nextAttemptAt) <= Date.now());
+  if (!servesBundle && !queued && !backfills && !t.cleanupMode && !staleReady) return;
+  if (!t.secrets || !t.secretsKeyId) {
+    await deps.db.withWorkspace(ws, (tx) =>
+      tx
+        .update(schema.edgeTargets)
+        .set({ lastError: 'No Cloudflare API token: the edge cannot be updated or cleaned up.', lastSyncAt: new Date() }),
+    );
+    return;
+  }
   try {
     const { apiToken } = await deps.db.withWorkspace(ws, (tx) =>
       openJson<{ apiToken: string }>(tx, ws, deps.kp, t.secrets as Buffer, t.secretsKeyId as string),
     );
     const kv = cloudflareKv(t, apiToken, deps.egress);
-    // 1. Experiences, purposes and write keys.
-    if (hash !== t.bundleHash) {
+    // 0. Destinations we left: remove their copies, or keep them listed with the failure. The
+    // current token may not reach another account; then only the operator can delete them.
+    let staleError: string | null = null;
+    if (stale.length) {
+      const keep: PriorEdgeTarget[] = [];
+      for (const old of stale) {
+        if (old.nextAttemptAt && Date.parse(old.nextAttemptAt) > Date.now()) {
+          keep.push(old);
+          continue;
+        }
+        try {
+          const oldKv = cloudflareKv(
+            { accountId: old.accountId, namespaceId: old.namespaceId, apiBase: old.apiBase ?? null },
+            apiToken,
+            deps.egress,
+          );
+          await deleteWorkspaceCopies(oldKv, ws, old.keys);
+        } catch (err) {
+          const message = (err as Error).message.slice(0, 500);
+          logger.warn({ err, workspace: ws }, 'edge cleanup of an earlier target failed');
+          keep.push({ ...old, lastError: message, nextAttemptAt: new Date(Date.now() + 15 * 60_000).toISOString() });
+        }
+      }
+      if (keep.length)
+        staleError = `${keep.length} prior edge destination(s) still require cleanup: ${keep[0].lastError ?? 'retry pending'}`;
+      if (JSON.stringify(keep) !== JSON.stringify(stale))
+        await deps.db.withWorkspace(ws, (tx) => tx.update(schema.edgeTargets).set({ priorTarget: keep.length ? keep : null }));
+    }
+    // 1. Finish a cleanup owed after serving was turned off, before any write. Until it succeeds the
+    // mode stays set and the next sync retries; the status never reports a cleanup that did not run.
+    let removedAll = false;
+    if (t.cleanupMode) {
+      const mode = t.cleanupMode;
+      if (mode === 'all') await deleteWorkspaceCopies(kv, ws, t.pushedKeys);
+      else await deleteSnapshots(kv, ws);
+      removedAll = mode === 'all';
+      await deps.db.withWorkspace(ws, (tx) =>
+        tx.update(schema.edgeTargets).set({ cleanupMode: null, ...(mode === 'all' ? { pushedKeys: [], bundleHash: null } : {}) }),
+      );
+    }
+    // 2. Experiences, purposes and write keys. Never while serving is off.
+    if (t.enabled && (hash !== t.bundleHash || removedAll)) {
       await kv.put(entries);
       const keys = entries.map((e) => e.key);
       const gone = t.pushedKeys.filter((k) => !keys.includes(k));
       if (gone.length) await kv.delete(gone);
       await deps.db.withWorkspace(ws, (tx) => tx.update(schema.edgeTargets).set({ bundleHash: hash, pushedKeys: keys }));
     }
-    // 2. Queued snapshot writes and deletions; the latest per key wins.
+    // 3. Queued snapshot writes and deletions; the latest per key wins. When snapshots are off,
+    // every queued entry is deleted rather than uploaded, and erasure tombstones are never dropped.
     for (;;) {
       const { rows } = await deps.db.admin.query<{ id: string; key: string; value: unknown }>(
         'SELECT id, key, value FROM edge_outbox WHERE workspace_id = $1 ORDER BY id LIMIT 5000',
@@ -324,17 +548,19 @@ export async function syncEdge(deps: EdgeDeps, ws: string) {
       );
       if (!rows.length) break;
       const latest = new Map(rows.map((r) => [r.key, r.value]));
-      const puts = [...latest]
-        .filter(([, v]) => v !== null)
-        .map(([key, v]) => ({ key, value: JSON.stringify(v), expiration_ttl: KV_SNAPSHOT_TTL_S }));
-      const deletes = [...latest].filter(([, v]) => v === null).map(([key]) => key);
+      const puts = servesSnapshots
+        ? [...latest]
+            .filter(([, v]) => v !== null)
+            .map(([key, v]) => ({ key, value: JSON.stringify(v), expiration_ttl: KV_SNAPSHOT_TTL_S }))
+        : [];
+      const deletes = servesSnapshots ? [...latest].filter(([, v]) => v === null).map(([key]) => key) : [...latest.keys()];
       if (puts.length) await kv.put(puts);
       if (deletes.length) await kv.delete(deletes);
       await deps.db.admin.query('DELETE FROM edge_outbox WHERE workspace_id = $1 AND id <= $2', [ws, rows[rows.length - 1].id]);
       if (rows.length < 5000) break;
     }
-    // 3. Backfill: everyone's snapshot, a slice per sync (written through the mirror above).
-    if (t.backfillCursor !== null && t.snapshots) {
+    // 4. Backfill: everyone's snapshot, a slice per sync (written through the mirror above).
+    if (servesSnapshots && t.backfillCursor !== null) {
       const people = await deps.db.withWorkspace(ws, (tx) =>
         tx
           .select({ id: schema.profiles.id })
@@ -351,7 +577,7 @@ export async function syncEdge(deps: EdgeDeps, ws: string) {
       const next = people.length === 1000 ? people[people.length - 1].id : null;
       await deps.db.withWorkspace(ws, (tx) => tx.update(schema.edgeTargets).set({ backfillCursor: next }));
     }
-    await deps.db.withWorkspace(ws, (tx) => tx.update(schema.edgeTargets).set({ lastSyncAt: new Date(), lastError: null }));
+    await deps.db.withWorkspace(ws, (tx) => tx.update(schema.edgeTargets).set({ lastSyncAt: new Date(), lastError: staleError }));
   } catch (err) {
     const message = (err as Error).message.slice(0, 500);
     logger.warn({ err, workspace: ws }, 'edge sync failed');
@@ -359,11 +585,15 @@ export async function syncEdge(deps: EdgeDeps, ws: string) {
   }
 }
 
-/** Scheduler role: keeps every enabled edge target in sync. */
+/** Scheduler role: keeps every enabled edge target in sync, and finishes cleanup after one is turned off. */
 export async function runEdgeSync(deps: EdgeDeps & { tickMs?: number }, signal: AbortSignal) {
   while (!signal.aborted) {
     try {
-      const { rows } = await deps.db.admin.query<{ workspace_id: string }>('SELECT workspace_id FROM edge_targets WHERE enabled');
+      const { rows } = await deps.db.admin.query<{ workspace_id: string }>(
+        `SELECT t.workspace_id FROM edge_targets t
+          WHERE t.enabled OR t.cleanup_mode IS NOT NULL OR t.prior_target IS NOT NULL
+             OR EXISTS (SELECT 1 FROM edge_outbox o WHERE o.workspace_id = t.workspace_id)`,
+      );
       for (const r of rows) await syncEdge(deps, r.workspace_id);
     } catch (err) {
       logger.error({ err }, 'edge sync round failed');

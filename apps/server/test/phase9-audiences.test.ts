@@ -272,6 +272,61 @@ describe('audience sync', () => {
       ['google', 1, 0],
     ]);
   });
+  it('always removes consent refusals with removals=false, including people outside the segment (#399)', async () => {
+    const api = t.api(owner);
+    const withdraw = await person('anon-retained-refusal', 'refusal@example.com', '+4555555555', 'retained-sync', true);
+    const leave = await person('anon-retained-leaver', 'leaver@example.com', '+4566666666', 'retained-sync', true);
+    const segment = await api.call('artifacts.create', {
+      type: 'segment',
+      name: 'Retained sync fixture',
+      content: { condition: { trait: 'plan', op: 'eq', value: 'retained-sync' } },
+    });
+    await api.call('artifacts.requestPublish', { artifactId: segment.artifactId, note: 'Fixture' });
+    await api.call('segments.refresh', { artifactId: segment.artifactId });
+    const sync = await api.call('artifacts.create', {
+      type: 'audience_sync',
+      name: 'Keep ordinary leavers',
+      content: {
+        segment: segment.artifactId,
+        removals: false,
+        meta: { connection: ids.meta, audienceId: '88776655' },
+        google: { connection: ids.google, userListId: '556' },
+      },
+    });
+    await api.call('artifacts.requestPublish', { artifactId: sync.artifactId, note: 'Fixture' });
+    expect((await api.call('ads.syncAudience', { artifactId: sync.artifactId })).results.map((r) => [r.platform, r.members])).toEqual([
+      ['meta', 2],
+      ['google', 2],
+    ]);
+    await ingest(
+      ['anon-retained-refusal', 'anon-retained-leaver'].map((anonymousId) => ({
+        type: 'identify',
+        anonymousId,
+        traits: { plan: 'basic' },
+        context: { consent: { categoryPreferences: { analytics: true } } },
+      })),
+    );
+    for (const profileId of [withdraw, leave])
+      await eventually(
+        () => api.call('profiles.get', { profileId }),
+        (r) => r.traits.plan === 'basic',
+      );
+    await api.call('segments.refresh', { artifactId: segment.artifactId });
+    expect((await api.call('segments.members', { artifactId: segment.artifactId })).members).toEqual([]);
+    await api.call('consent.record', { profileId: withdraw, purpose: 'ad_targeting', status: 'withdrawn' });
+    const first = await api.call('ads.syncAudience', { artifactId: sync.artifactId });
+    expect(first.results.map((r) => [r.platform, r.removed, r.members])).toEqual([
+      ['meta', 1, 1],
+      ['google', 1, 1],
+    ]);
+    // The ordinary leaver remains until they too withdraw, even though neither person is in the segment.
+    await api.call('consent.record', { profileId: leave, purpose: 'ad_targeting', channel: 'web', status: 'denied' });
+    const second = await api.call('ads.syncAudience', { artifactId: sync.artifactId });
+    expect(second.results.map((r) => [r.platform, r.removed, r.members])).toEqual([
+      ['meta', 1, 0],
+      ['google', 1, 0],
+    ]);
+  }, 30_000);
 });
 
 describe('spend and ROAS', () => {
