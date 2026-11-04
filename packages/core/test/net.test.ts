@@ -16,11 +16,13 @@ const resolve = (
 
 describe('resolveClientIp', () => {
   it('uses headers in the configured order (cf-connecting-ip before x-forwarded-for)', () => {
-    expect(resolve({ 'cf-connecting-ip': '203.0.113.7', 'x-forwarded-for': '198.51.100.1' }, '192.0.2.1')).toBe('203.0.113.7');
+    expect(resolve({ 'cf-connecting-ip': '203.0.113.7', 'x-forwarded-for': '198.51.100.1' }, '192.0.2.1', ['192.0.2.0/24'])).toBe(
+      '203.0.113.7',
+    );
   });
 
-  it('takes the first address of a comma-separated x-forwarded-for', () => {
-    expect(resolve({ 'x-forwarded-for': '198.51.100.1, 10.0.0.1' }, '192.0.2.1')).toBe('198.51.100.1');
+  it('takes the first address of a comma-separated x-forwarded-for when the rest are trusted hops', () => {
+    expect(resolve({ 'x-forwarded-for': '198.51.100.1, 192.0.2.10' }, '192.0.2.1', ['192.0.2.0/24'])).toBe('198.51.100.1');
   });
 
   it('trusts a forwarded header from a listed IPv4 proxy', () => {
@@ -60,8 +62,19 @@ describe('resolveClientIp', () => {
     expect(resolve({ 'cf-connecting-ip': '1.2.3.4' }, '203.0.113.9', ['10.0.0.0/8'])).toBe('203.0.113.9');
   });
 
-  it('trusts headers when no proxy list is configured (backward compatibility)', () => {
-    expect(resolve({ 'cf-connecting-ip': '1.2.3.4' }, '192.0.2.1', [])).toBe('1.2.3.4');
+  // #378: the shipped default is an empty list. It must not let the caller choose its IP, so the
+  // forwarding header is ignored and the socket peer wins.
+  it('ignores forwarding headers when no proxy list is configured, using the socket peer (#378)', () => {
+    expect(resolve({ 'cf-connecting-ip': '1.2.3.4', 'x-forwarded-for': '5.6.7.8' }, '203.0.113.9', [])).toBe('203.0.113.9');
+    expect(resolve({ 'x-forwarded-for': '1.2.3.4, 10.0.0.5' }, '203.0.113.9')).toBe('203.0.113.9');
+  });
+
+  it('trusts the forwarded header once the socket peer is in the list', () => {
+    expect(resolve({ 'x-forwarded-for': '1.2.3.4, 10.0.0.5' }, '10.0.0.5', ['10.0.0.0/8'])).toBe('1.2.3.4');
+  });
+
+  it('treats a list with only malformed entries as trusting nobody', () => {
+    expect(resolve({ 'x-forwarded-for': '1.2.3.4' }, '192.0.2.1', ['not-a-cidr'])).toBe('192.0.2.1');
   });
 
   it('falls back to the socket address when no header is present', () => {
@@ -69,7 +82,9 @@ describe('resolveClientIp', () => {
   });
 
   it('skips an invalid header and uses the next one', () => {
-    expect(resolve({ 'cf-connecting-ip': 'not-an-ip', 'x-forwarded-for': '198.51.100.7' }, '192.0.2.1')).toBe('198.51.100.7');
+    expect(resolve({ 'cf-connecting-ip': 'not-an-ip', 'x-forwarded-for': '198.51.100.7' }, '192.0.2.1', ['192.0.2.0/24'])).toBe(
+      '198.51.100.7',
+    );
   });
 
   it('never returns a non-IP value', () => {

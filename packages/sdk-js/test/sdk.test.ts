@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { createAnalytics } from '../src';
+import { type AnalyticsOptions, createAnalytics } from '../src';
 
 function harness(status = 200) {
   const sent: any[] = [];
   const data = new Map<string, string>();
+  let current = status;
   const storage = {
     getItem: (k: string) => data.get(k) ?? null,
     setItem: (k: string, v: string) => void data.set(k, v),
@@ -11,15 +12,114 @@ function harness(status = 200) {
   };
   const fetch = (async (_url: string, init: RequestInit) => {
     sent.push(JSON.parse(String(init.body)));
-    return new Response('{}', { status });
+    return new Response('{}', { status: current });
   }) as typeof globalThis.fetch;
   const page = () => ({ path: '/tents', url: 'https://shop.example.com/tents', title: 'Tents', referrer: '' });
-  const make = () =>
-    createAnalytics({ writeKey: 'pk_test', host: 'https://collect.example.com', fetch, storage, page, flushInterval: 10_000 });
-  return { sent, data, make, events: () => sent.flatMap((b) => b.batch) };
+  const make = (extra: Partial<AnalyticsOptions> = {}) =>
+    createAnalytics({
+      writeKey: 'pk_test',
+      host: 'https://collect.example.com',
+      fetch,
+      storage,
+      page,
+      flushInterval: 10_000,
+      ...extra,
+    });
+  return { sent, data, make, setStatus: (s: number) => (current = s), events: () => sent.flatMap((b) => b.batch) };
 }
 
 describe('sdk-js', () => {
+  it('forgets the user id on reset even while analytics stays allowed', async () => {
+    const h = harness();
+    const a = h.make();
+    a.setConsent({ analytics: true });
+    a.identify('alice');
+    await a.flush();
+    expect(h.data.get('am.uid')).toBe('alice');
+
+    a.reset();
+    await a.flush();
+    expect(h.data.has('am.uid')).toBe(false);
+
+    const b = h.make();
+    b.track('After logout');
+    await b.flush();
+    expect(h.events().at(-1).event).toBe('After logout');
+    expect(h.events().at(-1).userId).toBeUndefined();
+  });
+
+  it('discards events queued under a grant when consent is withdrawn, keeping the consent update', async () => {
+    const h = harness();
+    const a = h.make();
+    a.setConsent({ analytics: true });
+    await a.flush();
+    a.track('Queued before refusal');
+    a.setConsent({ analytics: false });
+    await a.flush();
+
+    expect(h.events().some((e) => e.event === 'Queued before refusal')).toBe(false);
+    const consentEvents = h.events().filter((e) => e.event === 'Segment Consent Preference Updated');
+    expect(consentEvents.at(-1).context.consent.categoryPreferences).toEqual({ analytics: false });
+  });
+
+  it('does not retry a failed batch after consent is withdrawn', async () => {
+    const h = harness(503);
+    const a = h.make();
+    a.setConsent({ analytics: true });
+    await a.flush();
+    a.track('Failed under grant');
+    await a.flush(); // rejected and requeued
+    const attempts = h.sent.length;
+    h.setStatus(200);
+    a.setConsent({ analytics: false });
+    await a.flush();
+
+    const afterWithdrawal = h.sent.slice(attempts).flatMap((b) => b.batch);
+    expect(afterWithdrawal.some((e) => e.event === 'Failed under grant')).toBe(false);
+  });
+
+  it('keeps the page-hide batch when the beacon is rejected, in order, and recovers with fetch', async () => {
+    const previous = {
+      listener: Object.getOwnPropertyDescriptor(globalThis, 'addEventListener'),
+      document: Object.getOwnPropertyDescriptor(globalThis, 'document'),
+    };
+    let hidden: (() => void) | undefined;
+    (globalThis as any).addEventListener = (type: string, fn: () => void) => {
+      if (type === 'visibilitychange') hidden = fn;
+    };
+    (globalThis as any).document = { visibilityState: 'hidden', title: '', cookie: '' };
+    try {
+      const h = harness();
+      let beacons = 0;
+      const a = h.make({
+        sendBeacon: () => {
+          beacons += 1;
+          return false;
+        },
+      });
+      a.setConsent({ analytics: true });
+      await a.flush();
+      a.track('First hidden event');
+      a.track('Second hidden event');
+
+      hidden!();
+      await a.flush();
+
+      expect(beacons).toBe(1);
+      expect(
+        h
+          .events()
+          .map((e) => e.event)
+          .slice(-2),
+      ).toEqual(['First hidden event', 'Second hidden event']);
+    } finally {
+      if (previous.listener) Object.defineProperty(globalThis, 'addEventListener', previous.listener);
+      else delete (globalThis as any).addEventListener;
+      if (previous.document) Object.defineProperty(globalThis, 'document', previous.document);
+      else delete (globalThis as any).document;
+    }
+  });
+
   it('sends and stores nothing before the visitor chooses, then releases the queue on yes', async () => {
     const h = harness();
     const a = h.make();

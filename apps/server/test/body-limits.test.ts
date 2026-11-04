@@ -323,3 +323,169 @@ describe('REST commands (#242)', () => {
     expect(res.status).toBe(200);
   });
 });
+
+// #377: these routes read the whole body before any size or auth check. The 413 has to arrive
+// before the write key, the webhook token, the SCIM bearer token or the session is looked at, and
+// a chunked body without Content-Length must be refused while the client is still writing.
+
+describe('push subscription (#377)', () => {
+  it('refuses an oversized body with a correct Content-Length before the write-key check', async () => {
+    const res = await fetch(`${t.base}/v1/push/subscribe`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ anonymousId: 'limits', pad: oversize(100 * 1024) }),
+    });
+    expect(res.status).toBe(413);
+    expect(await res.json()).toMatchObject({ error: 'payload_too_large' });
+  });
+
+  it('refuses an oversized chunked body before reading all of it', async () => {
+    const total = 8 * 1024 * 1024;
+    const res = await postChunked('/v1/push/subscribe', { total });
+    expect(res.status).toBe(413);
+    expect(res.writtenAtResponse).toBeLessThan(total);
+  });
+
+  it('still accepts a normal subscription', async () => {
+    const res = await fetch(`${t.base}/v1/push/subscribe`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Basic ${Buffer.from(`${writeKey}:`).toString('base64')}` },
+      body: JSON.stringify({ userId: 'limits-user', kind: 'fcm', token: 'limits-fcm-token-012345' }),
+    });
+    expect(res.status).toBe(200);
+  });
+});
+
+describe('e-mail delivery webhook (#377)', () => {
+  it('refuses an oversized body with a correct Content-Length before the token lookup', async () => {
+    const res = await fetch(`${t.base}/hooks/email/x/y`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ pad: oversize(2 * 1024 * 1024) }),
+    });
+    expect(res.status).toBe(413);
+  });
+
+  it('refuses an oversized chunked body without Content-Length', async () => {
+    const total = 8 * 1024 * 1024;
+    const res = await postChunked('/hooks/email/x/y', { total });
+    expect(res.status).toBe(413);
+    expect(res.writtenAtResponse).toBeLessThan(total);
+  });
+
+  it('still reaches the token check for a normal body', async () => {
+    const res = await fetch(`${t.base}/hooks/email/x/y`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    });
+    expect(res.status).toBe(404);
+  });
+});
+
+describe('SCIM (#377)', () => {
+  it('refuses an oversized body with a correct Content-Length before the bearer check', async () => {
+    const res = await fetch(`${t.base}/scim/v2/Users`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ userName: 'a@example.com', pad: oversize(2 * 1024 * 1024) }),
+    });
+    expect(res.status).toBe(413);
+    expect(await res.json()).toMatchObject({ status: '413' });
+  });
+
+  it('refuses an oversized chunked body without Content-Length', async () => {
+    const total = 8 * 1024 * 1024;
+    const res = await postChunked('/scim/v2/Users', { total, headers: { authorization: 'Bearer not-a-token' } });
+    expect(res.status).toBe(413);
+    expect(res.writtenAtResponse).toBeLessThan(total);
+  });
+
+  it('still checks the token for a normal body', async () => {
+    const res = await fetch(`${t.base}/scim/v2/Users`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: 'Bearer not-a-token' },
+      body: '{}',
+    });
+    expect(res.status).toBe(401);
+  });
+});
+
+describe('invitation acceptance (#377)', () => {
+  it('refuses an oversized body with a correct Content-Length before the session lookup', async () => {
+    const res = await fetch(`${t.base}/api/invitations/accept`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ token: 'x', pad: oversize(100 * 1024) }),
+    });
+    expect(res.status).toBe(413);
+  });
+
+  it('refuses an oversized chunked body without Content-Length', async () => {
+    const total = 8 * 1024 * 1024;
+    const res = await postChunked('/api/invitations/accept', { total });
+    expect(res.status).toBe(413);
+    expect(res.writtenAtResponse).toBeLessThan(total);
+  });
+
+  it('still answers the session check for a normal body', async () => {
+    const res = await fetch(`${t.base}/api/invitations/accept`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    });
+    expect(res.status).toBe(401);
+  });
+});
+
+describe('password reset and copilot (#347)', () => {
+  it('refuses an oversized password-reset body before doing any work', async () => {
+    const res = await fetch(`${t.base}/api/auth/forgot-password`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'a@example.com', pad: oversize(100 * 1024) }),
+    });
+    expect(res.status).toBe(413);
+  });
+
+  it('refuses an oversized chunked password-reset body without Content-Length', async () => {
+    const total = 8 * 1024 * 1024;
+    const res = await postChunked('/api/auth/request-password-reset', { total });
+    expect(res.status).toBe(413);
+    expect(res.writtenAtResponse).toBeLessThan(total);
+  });
+
+  it('still validates a normal password-reset body', async () => {
+    const res = await fetch(`${t.base}/api/auth/forgot-password`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'not-an-address' }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('refuses an oversized copilot body before the session check', async () => {
+    const res = await fetch(`${t.base}/api/copilot`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ message: 'hi', pad: oversize(100 * 1024) }),
+    });
+    expect(res.status).toBe(413);
+  });
+
+  it('refuses an oversized chunked copilot body without Content-Length', async () => {
+    const total = 8 * 1024 * 1024;
+    const res = await postChunked('/api/copilot', { total });
+    expect(res.status).toBe(413);
+    expect(res.writtenAtResponse).toBeLessThan(total);
+  });
+
+  it('still answers the copilot session check for a normal body', async () => {
+    const res = await fetch(`${t.base}/api/copilot`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ message: 'hi' }),
+    });
+    expect(res.status).toBe(401);
+  });
+});

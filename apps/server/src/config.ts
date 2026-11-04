@@ -75,7 +75,7 @@ const Env = z.object({
       'TRUSTED_PROXY_CIDRS must be a comma-separated list of IP addresses or CIDR ranges',
     )
     .describe(
-      'Comma-separated proxy/loopback ranges whose forwarding headers are trusted, e.g. 127.0.0.1/32,::1/128,10.0.0.0/8; empty trusts the forwarded headers from any source (backward compatible)',
+      'Comma-separated proxy/loopback ranges whose forwarding headers are trusted, e.g. 127.0.0.1/32,::1/128,10.0.0.0/8; empty ignores forwarding headers and uses the socket address, so set the ranges when a proxy is in front',
     ),
   DATABASE_URL: z.string().describe('Owner/admin connection, used for migrations and auth tables'),
   APP_DB_ROLE: z

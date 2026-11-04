@@ -2,6 +2,7 @@ import type { Auth } from '@agentic-marketing/auth';
 import { RESOLVED_CLIENT_IP_HEADER, remoteAddressFromEnv, resolveClientIp, sha256 } from '@agentic-marketing/core';
 import type { Db } from '@agentic-marketing/db';
 import type { HotState } from '@agentic-marketing/hotstate';
+import { bodyLimit } from '@agentic-marketing/ingest';
 import { logger } from '@agentic-marketing/telemetry';
 import type { Context, Hono } from 'hono';
 import {
@@ -39,6 +40,11 @@ export interface PasswordResetRoutesDeps {
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const INVALID_LINK = 'This reset link is not valid any more. Ask for a new one.';
 const TOO_MANY = 'Too many attempts. Wait a few minutes and try again.';
+
+// An address or a token plus a password is far below this; the limit applies before the body is
+// parsed, so an unauthenticated caller cannot buffer an endless JSON body.
+const RESET_MAX_BODY = 8 * 1024;
+const RESET_TOO_LARGE = (c: Context) => c.json({ status: false, code: 'PAYLOAD_TOO_LARGE', message: 'That request is too large.' }, 413);
 
 const neutral = () => ({ status: true, message: RESET_REQUEST_MESSAGE });
 
@@ -174,8 +180,8 @@ export function passwordResetRoutes(app: Hono, deps: PasswordResetRoutesDeps) {
 
   // Before the `/api/auth/*` handler: these paths (and Better Auth's own names for them) are
   // rate limited and audited here. `forget-password` is the name issue #191 uses.
-  app.post('/api/auth/forgot-password', requested);
-  app.post('/api/auth/forget-password', requested);
-  app.post('/api/auth/request-password-reset', requested);
-  app.post('/api/auth/reset-password', resetPassword);
+  app.post('/api/auth/forgot-password', bodyLimit(RESET_MAX_BODY, RESET_TOO_LARGE), requested);
+  app.post('/api/auth/forget-password', bodyLimit(RESET_MAX_BODY, RESET_TOO_LARGE), requested);
+  app.post('/api/auth/request-password-reset', bodyLimit(RESET_MAX_BODY, RESET_TOO_LARGE), requested);
+  app.post('/api/auth/reset-password', bodyLimit(RESET_MAX_BODY, RESET_TOO_LARGE), resetPassword);
 }

@@ -1,5 +1,6 @@
+import { storeProfileScore } from '@agentic-marketing/ai';
 import { type FakeSystemOneRequest, fakeSystemOne } from '@agentic-marketing/ai/testing';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { eventually, rejects, startTestServer, testPort, type User } from './harness';
 
 // Phase 21 (#194, epic #192): decision models. A third AI provider kind answers typed questions
@@ -13,6 +14,7 @@ let owner: User;
 let key = '';
 let providerId = '';
 let journeyId = '';
+let workspaceId = '';
 
 const noul = (key: string, instructions: string) => ({ key, type: 'noul' as const, instructions });
 const NOUL = noul('conversion_propensity', 'Is this person likely to convert in the next 14 days?');
@@ -64,6 +66,7 @@ beforeAll(async () => {
   t = await startTestServer('test_decision_models', testPort(3465));
   owner = await t.signUp(`owner-${Date.now()}@example.com`);
   await t.workspaceWith([[owner, 'owner']], 'none');
+  workspaceId = (await t.api(owner).call('workspace.get', {})).id;
   const api = t.api(owner);
   key = (await api.call('sources.create', { name: 'Backend', kind: 'server' })).key;
   providerId = (
@@ -126,6 +129,24 @@ describe('ai.score', () => {
     expect(failed.some((c) => c.error?.includes('no zero-data-retention'))).toBe(true);
   });
 
+  it('refuses contact details in a question and redacts them in the audit log (#352)', async () => {
+    const api = t.api(owner);
+    const before = sys.requests.length;
+    const err = await rejects(
+      api.call('ai.score', {
+        questions: [{ key: 'contact_q', type: 'noul', instructions: 'Write to ada@example.com if this person is likely to buy' }],
+        state: { plan: 'pro' },
+      }),
+    );
+    expect(err.code).toBe('invalid_input');
+    expect(err.message).toContain('A question contains email data');
+    expect(sys.requests.length).toBe(before);
+    const failed = (await api.call('ai.calls', { kind: 'score' })).calls.filter((c) => c.status === 'failed');
+    const row = failed.find((c) => c.error?.includes('A question contains email data'))!;
+    expect(JSON.stringify(row.input)).not.toContain('ada@example.com');
+    expect(JSON.stringify(row.input)).toContain('[email]');
+  });
+
   it('allows personal data only after a person marks the provider allowPersonalData', async () => {
     const api = t.api(owner);
     await api.call('aiProviders.update', { id: providerId, allowPersonalData: true });
@@ -135,6 +156,20 @@ describe('ai.score', () => {
       expect((await api.call('aiProviders.list', {})).providers[0].allowPersonalData).toBe(true);
     } finally {
       await api.call('aiProviders.update', { id: providerId, allowPersonalData: false });
+    }
+  });
+
+  it('refuses a decision endpoint on a private name before any request reaches it (#354)', async () => {
+    const api = t.api(owner);
+    const before = sys.requests.length;
+    await api.call('aiProviders.update', { id: providerId, baseUrl: sys.url.replace('127.0.0.1', 'localhost') + '/v1' });
+    try {
+      const err = await rejects(api.call('ai.score', { questions: [NOUL], state: { plan: 'pro' } }));
+      expect(err.code).toBe('conflict');
+      expect(err.message).toContain('localhost is an internal address');
+      expect(sys.requests.length).toBe(before);
+    } finally {
+      await api.call('aiProviders.update', { id: providerId, baseUrl: sys.baseUrl });
     }
   });
 
@@ -163,9 +198,9 @@ describe('ai.score', () => {
       store: { key: 'conversion_propensity', ttlHours: 24 },
     });
     expect(r.stored).toMatchObject({ profileId, key: 'conversion_propensity', value: 0.82 });
-    // The state was built from the person: non-personal traits and event counts, not identifiers.
+    // With no published tracking plan the state fails closed: no traits at all (#357).
     const request = sys.requests.at(-1)!;
-    expect(request.state).toMatchObject({ traits: { plan: 'pro', lifetime_value: 2400 } });
+    expect(request.state).toMatchObject({ traits: {} });
     expect(JSON.stringify(request.state)).not.toContain('scored');
 
     const scores = await api.call('profiles.scores', { profileId });
@@ -190,10 +225,51 @@ describe('ai.score', () => {
     });
     expect(expired.count).toBe(0);
   });
+
+  it('does not send free-text traits before a tracking plan is published (#357)', async () => {
+    const api = t.api(owner);
+    await send([
+      { type: 'identify', userId: 'plain_traits', traits: { notes: 'Ada from Amsterdam, vegetarian', job_title: 'Engineer' } },
+      aiConsent('plain_traits'),
+    ]);
+    const profileId = (await profileOf('plain_traits'))!;
+    await api.call('ai.score', { questions: [NOUL], profileId });
+    const state = JSON.stringify(sys.requests.at(-1)!.state);
+    expect(sys.requests.at(-1)!.state).toMatchObject({ traits: {} });
+    expect(state).not.toContain('Amsterdam');
+    expect(state).not.toContain('Engineer');
+  });
+
+  it('does not recreate a score for an erased profile through the direct writer (#359)', async () => {
+    const api = t.api(owner);
+    await send([{ type: 'identify', userId: 'erased_score', traits: { plan: 'pro' } }, aiConsent('erased_score')]);
+    const profileId = (await profileOf('erased_score'))!;
+    await api.call('profiles.erase', { profileId, reason: 'Erasure request (test)' });
+    const saved = await storeProfileScore(t.srv.db, workspaceId, {
+      profileId,
+      key: 'conversion_propensity',
+      answer: { key: 'conversion_propensity', type: 'noul', probability: 0.5, probabilities: { true: 0.5, false: 0.5 } },
+      model: 'typesafe/jev',
+      modelVersion: 'jev-test-1.0.0',
+      callId: null,
+      ttlHours: 24,
+    });
+    expect(saved).toBeNull();
+    expect((await api.call('profiles.scores', { profileId })).scores).toHaveLength(0);
+  });
 });
 
 describe('a decision node in a journey', () => {
   beforeAll(async () => {
+    // The plan lets the model see these non-personal traits; without it the state fails closed.
+    await publish('tracking_plan', 'Decision traits', {
+      unknownTraits: 'store',
+      traits: [
+        { name: 'plan', type: 'string', pii: 'none', agentVisible: true },
+        { name: 'lifetime_value', type: 'number', pii: 'none', agentVisible: true },
+        { name: 'fail', type: 'boolean', pii: 'none', agentVisible: true },
+      ],
+    });
     journeyId = await publish('journey', 'Decide who gets the offer', {
       purpose: 'marketing_email',
       nodes: [
@@ -278,10 +354,131 @@ describe('a decision node in a journey', () => {
     const done = calls.filter((c) => c.kind === 'score' && c.node === 'decide' && c.status === 'done');
     expect(done.length).toBeGreaterThanOrEqual(1);
     expect(done[0].output).toMatchObject({ answers: [{ key: 'conversion_propensity', probability: 0.82 }] });
+    // The call row keeps a state hash and the question set, never the raw state (#358).
+    expect(done[0].input).toMatchObject({ stateHash: expect.any(String), stateTokens: expect.any(Number) });
+    expect(done[0].input).not.toHaveProperty('person');
+    expect(JSON.stringify(done[0].input)).not.toContain('router_high');
+    expect(JSON.stringify(done[0].input)).not.toContain('plan');
     const failed = calls.filter((c) => c.kind === 'score' && c.status === 'fallback');
     expect(failed.some((c) => c.error?.includes('upstream model exploded'))).toBe(true);
     const stored = await api.call('profiles.scores', { profileId: high });
     expect(stored.scores.find((s) => s.key === 'conversion_propensity')?.value).toBe(0.82);
+  }, 30_000);
+});
+
+describe('a choice decision node', () => {
+  beforeAll(async () => {
+    await publish('journey', 'Choose a channel', {
+      purpose: 'marketing_email',
+      nodes: [
+        { id: 'start', kind: 'trigger', label: 'Choice', config: { event: 'Choice Ready', reentry: 'once' } },
+        {
+          id: 'decide',
+          kind: 'decision',
+          label: 'Which channel?',
+          config: {
+            question: {
+              key: 'channel',
+              type: 'choice',
+              instructions: 'Which channel fits?',
+              criteria: { email: 'E-mail', sms: 'SMS', push: 'Push' },
+            },
+            threshold: 0.5,
+            answer: 'sms',
+            scoreKey: 'sms_probability',
+            timeout: 'PT5M',
+          },
+          next: [{ to: 'high' }, { to: 'low' }],
+        },
+        { id: 'high', kind: 'updateProfile', label: 'High', config: { trait: 'decision_path', value: 'high' }, next: [{ to: 'end' }] },
+        { id: 'low', kind: 'updateProfile', label: 'Low', config: { trait: 'decision_path', value: 'low' }, next: [{ to: 'end' }] },
+        { id: 'end', kind: 'exit', label: 'Done', config: {} },
+      ],
+    });
+  }, 60_000);
+
+  it('routes and stores the probability of the configured label (#350)', async () => {
+    const api = t.api(owner);
+    await send([
+      { type: 'identify', userId: 'choice_router', traits: { plan: 'pro' } },
+      aiConsent('choice_router'),
+      { type: 'track', event: 'Choice Ready', userId: 'choice_router' },
+    ]);
+    const profileId = (await profileOf('choice_router'))!;
+    // The fake provider always chooses e-mail (0.7) with sms at 0.2; the journey compares sms.
+    const profile = await eventually(
+      () => api.call('profiles.get', { profileId }),
+      (p) => p.traits.decision_path !== undefined,
+      20_000,
+    );
+    expect(profile.traits.decision_path).toBe('low');
+    const score = (await api.call('profiles.scores', { profileId, key: 'sms_probability' })).scores[0];
+    expect(score.value).toBeCloseTo(0.2, 10);
+    expect(score.probabilities).toMatchObject({ email: 0.7, sms: 0.2 });
+  }, 30_000);
+});
+
+describe('a failed score write', () => {
+  let failJourneyId = '';
+
+  beforeAll(async () => {
+    failJourneyId = await publish('journey', 'Scoring must commit', {
+      purpose: 'marketing_email',
+      nodes: [
+        { id: 'start', kind: 'trigger', label: 'Start', config: { event: 'Score Store Fails', reentry: 'once' } },
+        {
+          id: 'decide',
+          kind: 'decision',
+          label: 'Likely?',
+          config: { question: NOUL, threshold: 0.5, scoreKey: 'forced_failure', timeout: 'PT5M' },
+          next: [{ to: 'high' }, { to: 'low' }],
+        },
+        { id: 'high', kind: 'updateProfile', label: 'High', config: { trait: 'decision_path', value: 'high' }, next: [{ to: 'end' }] },
+        { id: 'low', kind: 'updateProfile', label: 'Low', config: { trait: 'decision_path', value: 'low' }, next: [{ to: 'end' }] },
+        { id: 'end', kind: 'exit', label: 'Done', config: {} },
+      ],
+    });
+  }, 60_000);
+
+  it('does not wake the participant when the score cannot be stored (#351)', async () => {
+    const api = t.api(owner);
+    await t.srv.db.admin.query(`DROP TRIGGER IF EXISTS am_test_fail_score ON profile_scores`);
+    await t.srv.db.admin.query(`
+      CREATE OR REPLACE FUNCTION am_test_fail_score() RETURNS trigger AS $$
+      BEGIN
+        IF NEW.key = 'forced_failure' THEN RAISE EXCEPTION 'forced score failure'; END IF;
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql`);
+    await t.srv.db.admin.query(`
+      CREATE TRIGGER am_test_fail_score BEFORE INSERT OR UPDATE ON profile_scores
+      FOR EACH ROW EXECUTE FUNCTION am_test_fail_score()`);
+    try {
+      await send([
+        { type: 'identify', userId: 'score_failure', traits: { plan: 'pro' } },
+        aiConsent('score_failure'),
+        { type: 'track', event: 'Score Store Fails', userId: 'score_failure' },
+      ]);
+      const profileId = (await profileOf('score_failure'))!;
+      // The worker claims the step, then the score insert throws: the wakeup rolls back with it.
+      const attempted = await eventually(
+        () =>
+          t.srv.db.admin.query<{ attempts: number; status: string }>(
+            'SELECT attempts, status FROM ai_calls WHERE journey_id = $1 AND profile_id = $2',
+            [failJourneyId, profileId],
+          ),
+        (r) => (r.rows[0]?.attempts ?? 0) >= 1,
+        20_000,
+      );
+      expect(attempted.rows[0]).toMatchObject({ status: 'running' });
+      await new Promise((r) => setTimeout(r, 500));
+      const profile = await api.call('profiles.get', { profileId });
+      expect(profile.traits.decision_path).toBeUndefined();
+      expect((await api.call('profiles.scores', { profileId, key: 'forced_failure' })).scores).toHaveLength(0);
+    } finally {
+      await t.srv.db.admin.query(`DROP TRIGGER IF EXISTS am_test_fail_score ON profile_scores`);
+      await t.srv.db.admin.query(`DROP FUNCTION IF EXISTS am_test_fail_score()`);
+    }
   }, 30_000);
 });
 
@@ -330,4 +527,16 @@ describe('ai.calibration', () => {
     expect(bin(0.9)).toMatchObject({ n: 1, predicted: 0.9, observed: 1 });
     expect(r.reliability.filter((b) => b.n === 0).every((b) => b.predicted === null)).toBe(true);
   }, 30_000);
+
+  it('reports a ClickHouse failure instead of a zero report (#360)', async () => {
+    const api = t.api(owner);
+    const spy = vi.spyOn(t.srv.events, 'conversionEvents').mockRejectedValueOnce(new Error('ClickHouse is down'));
+    try {
+      const err = await rejects(api.call('ai.calibration', { scoreKey: 'calibration_test', event: 'Order Completed' }));
+      expect(err.code).toBe('conflict');
+      expect(err.message).toContain('ClickHouse is down');
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });

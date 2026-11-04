@@ -168,7 +168,9 @@ export function createAnalytics(opts: AnalyticsOptions) {
     else store.remove(KEYS.clickIds);
     if (allowed()) {
       store.set(KEYS.anonymousId, anonymousId);
+      // A forgotten user (reset, logout) must not be restored on the next page load.
       if (userId) store.set(KEYS.userId, userId);
+      else store.remove(KEYS.userId);
     } else {
       store.remove(KEYS.anonymousId);
       store.remove(KEYS.userId);
@@ -203,6 +205,11 @@ export function createAnalytics(opts: AnalyticsOptions) {
     if (!timer) timer = setTimeout(() => void flush(), (opts.flushInterval ?? 1000) + backoff);
   }
 
+  // Consent is re-checked at every point data could leave the browser, not only when an event is
+  // queued: a withdrawal drops the unsent queue, and neither a retry nor a page-hide beacon may
+  // resurrect an event whose purpose is no longer allowed. Consent updates themselves always go.
+  const maySend = (e: QueuedEvent) => allowed() || e.event === CONSENT_EVENT;
+
   // One send at a time, so a failed batch goes back in front of later ones and order is kept.
   let sending: Promise<void> = Promise.resolve();
   function flush(): Promise<void> {
@@ -214,7 +221,11 @@ export function createAnalytics(opts: AnalyticsOptions) {
     clearTimeout(timer);
     timer = undefined;
     if (!outbox.length) return;
-    const batch = outbox.splice(0, 100);
+    const batch = outbox.splice(0, 100).filter(maySend);
+    if (!batch.length) {
+      if (outbox.length) schedule();
+      return;
+    }
     try {
       const res = await doFetch(endpoint, {
         method: 'POST',
@@ -226,7 +237,8 @@ export function createAnalytics(opts: AnalyticsOptions) {
       if (res.status >= 500 || res.status === 429) throw new Error(`collector answered ${res.status}`);
       backoff = 0;
     } catch {
-      outbox.unshift(...batch.slice(0, MAX_QUEUE - outbox.length));
+      // A withdrawal during the request wins over the failed batch.
+      outbox.unshift(...batch.filter(maySend).slice(0, Math.max(0, MAX_QUEUE - outbox.length)));
       backoff = Math.min(60_000, backoff ? backoff * 2 : 1000);
     }
     if (outbox.length) schedule();
@@ -238,8 +250,14 @@ export function createAnalytics(opts: AnalyticsOptions) {
     const beacon =
       opts.sendBeacon ?? (typeof navigator !== 'undefined' && navigator.sendBeacon ? navigator.sendBeacon.bind(navigator) : undefined);
     if (!beacon) return void flush();
-    const batch = outbox.splice(0, 100);
-    beacon(endpoint, JSON.stringify({ writeKey: opts.writeKey, batch, sentAt: new Date().toISOString() }));
+    const batch = outbox.splice(0, 100).filter(maySend);
+    if (!batch.length) return;
+    // sendBeacon answers false when the browser refuses the request (keepalive quota, shutdown):
+    // the events were never queued, so put them back in order and use the normal fetch path.
+    if (!beacon(endpoint, JSON.stringify({ writeKey: opts.writeKey, batch, sentAt: new Date().toISOString() }))) {
+      outbox.unshift(...batch.slice(0, Math.max(0, MAX_QUEUE - outbox.length)));
+      void flush();
+    }
   }
   if (typeof addEventListener === 'function')
     addEventListener('visibilitychange', () => typeof document !== 'undefined' && document.visibilityState === 'hidden' && flushOnHide());
@@ -266,6 +284,10 @@ export function createAnalytics(opts: AnalyticsOptions) {
       consent = { ...(consent ?? {}), ...choice };
       store.set(KEYS.consent, JSON.stringify(consent));
       persistIds();
+      // A withdrawal discards what was collected under the old grant; only consent updates survive.
+      if (!allowed()) {
+        for (let i = outbox.length - 1; i >= 0; i--) if (outbox[i].event !== CONSENT_EVENT) outbox.splice(i, 1);
+      }
       if (JSON.stringify(consent) !== before) enqueue({ type: 'track', event: CONSENT_EVENT, properties: {} });
       const held = pending;
       pending = [];

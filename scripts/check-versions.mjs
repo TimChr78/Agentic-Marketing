@@ -26,6 +26,10 @@ export const SURFACES = [
   ['docker-compose.yml AM_VERSION default', match('docker-compose.yml', /agentic-marketing:\$\{AM_VERSION:-([^}]+)\}/)],
   ['README.md AM_VERSION default', match('README.md', /`AM_VERSION` \(default `([^`]+)`\)/)],
   [
+    'README.md release line',
+    (v) => (read('README.md').includes(`current release is the **${v.split('.').slice(0, 2).join('.')}** line`) ? v : 'wrong release line'),
+  ],
+  [
     'CHANGELOG.md section',
     (v) =>
       read('CHANGELOG.md')

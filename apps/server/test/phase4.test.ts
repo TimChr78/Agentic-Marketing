@@ -87,6 +87,17 @@ beforeAll(async () => {
   const api = t.api(owner);
   key = (await api.call('sources.create', { name: 'Backend', kind: 'server' })).key;
   await api.call('emailProviders.create', { name: 'Outbox', adapter: 'log', fromEmail: 'hej@shop.example.com', useFor: ['marketing'] });
+  // "name" is the product's name here; the published schema distinguishes it from a person's.
+  const plan = await api.call('artifacts.create', {
+    type: 'tracking_plan',
+    name: 'Product events',
+    content: {
+      unknownEvents: 'allow',
+      unknownProperties: 'allow',
+      events: [{ name: 'Product Viewed', properties: [{ name: 'name', type: 'string', pii: false }] }],
+    },
+  });
+  await api.call('artifacts.requestPublish', { artifactId: plan.artifactId, note: 'Product names are non-personal' });
 }, 60_000);
 afterAll(async () => {
   await t?.close();

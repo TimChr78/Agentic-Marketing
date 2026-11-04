@@ -502,6 +502,11 @@ function assertNoPersonalData(text: string) {
     );
 }
 
+/** Serialize mutations per workspace and agent before reading the shared memory budget. */
+async function lockMemory(ctx: CommandContext, agentId: string) {
+  await ctx.tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${ctx.principal.workspaceId}), hashtext(${`hosted-memory:${agentId}`}))`);
+}
+
 async function memoryUsage(ctx: CommandContext, agentId: string) {
   const [row] = await ctx.tx
     .select({
@@ -565,13 +570,14 @@ export const addHostedMemory = defineCommand({
     await assertHostedForMemory(ctx, input.agentId);
     assertMemoryScope(ctx, input.agentId);
     assertNoPersonalData(input.text);
+    await lockMemory(ctx, input.agentId);
     const { notes, characters } = await memoryUsage(ctx, input.agentId);
     if (notes >= MEMORY_MAX_NOTES)
       throw new AppError(
         'conflict',
         `This agent already has ${MEMORY_MAX_NOTES} memory notes, the maximum. Delete a stale note with agents.memory.delete before adding another.`,
       );
-    if (characters + input.text.length > MEMORY_MAX_CHARS)
+    if (characters + Array.from(input.text).length > MEMORY_MAX_CHARS)
       throw new AppError(
         'conflict',
         `This note would take the agent past ${MEMORY_MAX_CHARS.toLocaleString('en-US')} characters of memory. Delete a stale note with agents.memory.delete before adding another.`,
@@ -613,11 +619,14 @@ export const updateHostedMemory = defineCommand({
   actionClass: 'draft',
   target: (i) => i.id,
   handler: async (input, ctx) => {
-    const [row] = await ctx.tx.select().from(schema.hostedAgentMemory).where(eq(schema.hostedAgentMemory.id, input.id));
+    let [row] = await ctx.tx.select().from(schema.hostedAgentMemory).where(eq(schema.hostedAgentMemory.id, input.id));
+    if (!row) throw new AppError('not_found', `No memory note ${input.id}.`);
+    await lockMemory(ctx, row.agentId);
+    [row] = await ctx.tx.select().from(schema.hostedAgentMemory).where(eq(schema.hostedAgentMemory.id, input.id));
     if (!row) throw new AppError('not_found', `No memory note ${input.id}.`);
     assertNoPersonalData(input.text);
     const { characters } = await memoryUsage(ctx, row.agentId);
-    if (characters - row.text.length + input.text.length > MEMORY_MAX_CHARS)
+    if (characters - Array.from(row.text).length + Array.from(input.text).length > MEMORY_MAX_CHARS)
       throw new AppError(
         'conflict',
         `This edit would take the agent past ${MEMORY_MAX_CHARS.toLocaleString('en-US')} characters of memory. Delete a stale note first.`,
@@ -646,6 +655,16 @@ export const deleteHostedMemory = defineCommand({
     const [row] = await ctx.tx.select().from(schema.hostedAgentMemory).where(eq(schema.hostedAgentMemory.id, input.id));
     if (!row) throw new AppError('not_found', `No memory note ${input.id}.`);
     assertMemoryScope(ctx, row.agentId);
+    if (ctx.principal.type === 'agent') {
+      const [run] = row.createdByRunId
+        ? await ctx.tx
+            .select({ agentId: schema.hostedAgentRuns.agentId })
+            .from(schema.hostedAgentRuns)
+            .where(eq(schema.hostedAgentRuns.id, row.createdByRunId))
+        : [];
+      if (!run || run.agentId !== row.agentId) throw new AppError('forbidden', 'An agent may only delete notes written by its own runs.');
+    }
+    await lockMemory(ctx, row.agentId);
     await ctx.tx.delete(schema.hostedAgentMemory).where(eq(schema.hostedAgentMemory.id, input.id));
     return { deleted: true as const };
   },

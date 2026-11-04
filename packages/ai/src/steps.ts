@@ -1,11 +1,20 @@
 import { type DecisionQuestion, decisionQuestions, type PromptDefinition, publishedSingleton } from '@agentic-marketing/artifacts';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
+import type { EgressPolicy } from '@agentic-marketing/integrations';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, inArray, sql } from 'drizzle-orm';
-import { aiAllowed, personContext } from './context';
-import { DecisionError, decisionCall, decisionProvider, nonPersonalState, stateHash, storeProfileScore } from './decision';
+import { aiAllowed, personContext, redact } from './context';
+import {
+  type DecisionAnswer,
+  DecisionError,
+  decisionCall,
+  decisionProvider,
+  insertProfileScore,
+  nonPersonalState,
+  stateHash,
+} from './decision';
 import { promptVersion, runClassify, runPrompt, runTestCase } from './prompts';
 import { AiUnavailable, estimateTokens, modelFor, type ReadyModel, releaseTokens, reserveTokens } from './providers';
 
@@ -17,6 +26,8 @@ import { AiUnavailable, estimateTokens, modelFor, type ReadyModel, releaseTokens
 export interface AiStepDeps {
   kp: KeyProvider;
   events: EventStore;
+  /** The server's egress policy; decision calls go through the same guard as webhooks (#354). */
+  egress?: EgressPolicy;
 }
 
 type CallRow = typeof schema.aiCalls.$inferSelect;
@@ -115,6 +126,19 @@ async function finish(
     cached?: boolean;
     providerId?: string;
     model?: string;
+    /**
+     * A decision score to commit in the same transaction as the wakeup, before the participant
+     * can be claimed again (#350, #351).
+     */
+    storeScore?: {
+      profileId: string;
+      key: string;
+      answer: DecisionAnswer;
+      model: string;
+      modelVersion: string;
+      callId: string | null;
+      ttlHours: number;
+    };
   },
 ) {
   await db.withWorkspace(c.workspaceId, async (tx) => {
@@ -126,15 +150,53 @@ async function finish(
     };
     // On a fallback the journey fills the slots with the prompt's fallback texts itself.
     const content = out.slots;
+    // A decision call logs a state hash and a sanitised question set, never the person's state
+    // or a trigger event with its properties (#358). Redacting the questions also keeps contact
+    // details out of a refused call's audit row (#352).
+    const input: Record<string, unknown> = { ...(c.input as Record<string, unknown>) };
+    if (c.kind === 'score') {
+      input.questions = Array.isArray(input.questions) ? input.questions.map((q) => redact(q)) : input.questions;
+      const trigger = input.trigger as { name?: unknown } | string | null | undefined;
+      const name = trigger && typeof trigger === 'object' ? trigger.name : trigger;
+      input.trigger = typeof name === 'string' ? { name } : null;
+    }
+    // A decision step locks and verifies the still-waiting participant first, then the profile,
+    // before writing anything (#351, #359 interplay). A step that finds the participant gone or
+    // not waiting, or the profile erased, is late and commits no score, so an erased person's
+    // scores cannot come back.
+    //
+    // Lock order: participant -> profile -> profile_scores. The journey runtime already claims
+    // participants (FOR UPDATE) and then updates profiles in the same transaction, so this order
+    // avoids a deadlock with it. removeProfiles deletes the person's participants before deleting the profile row; its
+    // existing foreign key cascades the score deletion.
+    let waiting = true;
+    if (c.kind === 'score') {
+      const lockedParticipant = await tx.execute<{ id: string }>(sql`
+        SELECT id FROM journey_participants
+        WHERE workspace_id = ${c.workspaceId} AND id = ${c.participantId} AND node = ${c.node} AND seq = ${c.seq} AND status = 'waiting'
+        FOR UPDATE`);
+      waiting = lockedParticipant.rows.length > 0;
+      if (waiting && c.profileId) {
+        const lockedProfile = await tx.execute<{ id: string }>(
+          sql`SELECT id FROM profiles WHERE workspace_id = ${c.workspaceId} AND id = ${c.profileId} FOR UPDATE`,
+        );
+        if (!lockedProfile.rows.length) waiting = false;
+      }
+      // The score and the wakeup commit together: a worker cannot claim the participant and read a
+      // missing (or previous) value, and a failed score write leaves the step waiting to retry.
+      if (waiting && out.storeScore) await insertProfileScore(tx, c.workspaceId, out.storeScore);
+    }
     // Wake the participant only if it still waits at this step; otherwise the answer came too late.
-    const woke = await tx.execute(sql`
+    const woke = waiting
+      ? await tx.execute(sql`
       UPDATE journey_participants SET
         context = jsonb_set(
           CASE WHEN ${content ? JSON.stringify(content) : null}::jsonb IS NULL THEN context
                ELSE jsonb_set(context, '{content}', coalesce(context->'content', '{}') || ${content ? JSON.stringify(content) : null}::jsonb) END,
           '{ai}', coalesce(context->'ai', '{}') || jsonb_build_object(${c.node}::text, ${JSON.stringify(outcome)}::jsonb)),
         due_at = now(), updated_at = now()
-      WHERE workspace_id = ${c.workspaceId} AND id = ${c.participantId} AND node = ${c.node} AND seq = ${c.seq} AND status = 'waiting'`);
+      WHERE workspace_id = ${c.workspaceId} AND id = ${c.participantId} AND node = ${c.node} AND seq = ${c.seq} AND status = 'waiting'`)
+      : { rowCount: 0 };
     const late = !woke.rowCount && out.status === 'done';
     await tx
       .update(schema.aiCalls)
@@ -144,7 +206,7 @@ async function finish(
         promptVersion: prep?.version ?? null,
         providerId: prep?.model?.providerId ?? out.providerId ?? null,
         model: prep?.model?.modelId ?? out.model ?? null,
-        input: { ...c.input, ...(prep?.person ? { person: prep.person } : {}) },
+        input: { ...input, ...(c.kind !== 'score' && prep?.person ? { person: prep.person } : {}) },
         output: out.output ?? null,
         rationale: out.rationale ?? null,
         error: late ? 'too_late: the step had timed out and took its fallback' : (out.error ?? null),
@@ -388,41 +450,53 @@ async function handleScore(db: Db, c: CallRow, deps: AiStepDeps) {
   if ('error' in ready) return finish(db, c, null, { status: 'fallback', error: ready.error });
   let result: Awaited<ReturnType<typeof decisionCall>>;
   try {
-    result = await decisionCall(db, c.workspaceId, ready.provider, ready.state, questions);
+    result = await decisionCall(db, c.workspaceId, ready.provider, ready.state, questions, { egress: deps.egress });
   } catch (err) {
-    return finish(db, c, { person: ready.state }, { status: 'fallback', error: `model_error: ${(err as Error).message}` });
+    return finish(db, c, null, { status: 'fallback', error: `model_error: ${(err as Error).message}` });
   }
   const first = result.answers[0];
-  // Record the state hash, never the raw state, in the call row beside the question and threshold.
-  const call = { ...c, input: { ...c.input, stateHash: stateHash(ready.state) } };
   // A choice routes on the probability of the configured label, not on whichever label won.
   const answer = typeof raw.answer === 'string' ? raw.answer : undefined;
-  const probability = first?.type === 'choice' && answer ? (first.probabilities[answer] ?? 0) : first?.probability;
-  await finish(
-    db,
-    call,
-    { person: ready.state },
-    {
-      status: 'done',
-      probability,
-      output: { answers: result.answers },
-      inputTokens: result.inputTokens,
-      outputTokens: result.outputTokens,
-      latencyMs: result.latencyMs,
-      providerId: ready.provider.providerId,
-      model: result.modelVersion,
+  let routed: DecisionAnswer | undefined = first;
+  if (first?.type === 'choice' && answer) {
+    const p = Object.hasOwn(first.probabilities, answer) ? first.probabilities[answer] : 0;
+    // The stored value must be the probability the journey routed on (#350).
+    routed = { ...first, probability: p };
+  }
+  const probability = routed?.probability;
+  // Record the state hash, never the raw state, in the call row beside the question and threshold.
+  const call = {
+    ...c,
+    input: {
+      ...c.input,
+      stateHash: stateHash(ready.state),
+      stateTokens: Math.ceil(JSON.stringify(ready.state ?? null).length / 4),
     },
-  );
-  if (c.profileId && first)
-    await storeProfileScore(db, c.workspaceId, {
-      profileId: c.profileId,
-      key: scoreKey,
-      answer: first,
-      model: ready.provider.model,
-      modelVersion: result.modelVersion,
-      callId: c.id,
-      ttlHours: typeof raw.ttlHours === 'number' ? raw.ttlHours : 168,
-    }).catch((err) => logger.error({ err, call: c.id }, 'storing the decision score failed'));
+  };
+  await finish(db, call, null, {
+    status: 'done',
+    probability,
+    output: { answers: result.answers },
+    inputTokens: result.inputTokens,
+    outputTokens: result.outputTokens,
+    latencyMs: result.latencyMs,
+    providerId: ready.provider.providerId,
+    model: result.modelVersion,
+    // Committed before the participant is woken, in the same transaction (#351).
+    ...(c.profileId && routed
+      ? {
+          storeScore: {
+            profileId: c.profileId,
+            key: scoreKey,
+            answer: routed,
+            model: ready.provider.model,
+            modelVersion: result.modelVersion,
+            callId: c.id,
+            ttlHours: typeof raw.ttlHours === 'number' ? raw.ttlHours : 168,
+          },
+        }
+      : {}),
+  });
 }
 
 /** Claims due AI steps across workspaces and answers them, a few at a time. Returns how many it handled. */

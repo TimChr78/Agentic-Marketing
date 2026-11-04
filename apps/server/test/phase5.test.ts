@@ -21,14 +21,20 @@ interface Received {
 const received: Received[] = [];
 /** Status codes to answer per path, in order; 200 when the list is empty. */
 const script = new Map<string, number[]>();
+/** Milliseconds to hold a response per path, so a test can act while a delivery is in flight. */
+const delays = new Map<string, number>();
 let receiverUrl = '';
 const receiver = createServer((req, res) => {
   let body = '';
   req.on('data', (c) => (body += c));
   req.on('end', () => {
-    received.push({ path: req.url ?? '', headers: req.headers, body });
-    res.statusCode = script.get(req.url ?? '')?.shift() ?? 200;
-    res.end(res.statusCode === 200 ? 'ok' : 'nope');
+    const path = req.url ?? '';
+    received.push({ path, headers: req.headers, body });
+    res.statusCode = script.get(path)?.shift() ?? 200;
+    const answer = () => res.end(res.statusCode === 200 ? 'ok' : 'nope');
+    const hold = delays.get(path);
+    if (hold) setTimeout(answer, hold);
+    else answer();
   });
 });
 const at = (path: string) => received.filter((r) => r.path === path);
@@ -144,6 +150,113 @@ describe('outbound webhooks', () => {
     );
     // No marketing consent: nothing for the purpose-bound endpoint.
     expect((await api.call('deliveries.list', { targetId: gated.id })).deliveries).toHaveLength(0);
+  });
+
+  it('suppresses a queued webhook after the endpoint purpose is withdrawn, but still sends a ping', async () => {
+    const api = t.api(owner);
+    const ep = await api.call('webhooks.create', {
+      name: 'Ads, withdrawal',
+      url: `${receiverUrl}/ads-withdraw`,
+      events: ['Order Completed'],
+      purpose: 'marketing_email',
+    });
+    await send([
+      { type: 'identify', userId: 'greta', traits: { email: 'greta@example.com' } },
+      {
+        type: 'track',
+        event: 'Segment Consent Preference Updated',
+        userId: 'greta',
+        messageId: 'greta-consent-1',
+        context: { consent: { categoryPreferences: { marketing_email: true } } },
+      },
+    ]);
+    const { profileId } = await eventually(
+      () => api.call('profiles.find', { type: 'user_id', value: 'greta' }),
+      (r) => !!r.profileId,
+    );
+    expect(profileId).toBeTruthy();
+
+    // Hold the first answer, so the withdrawal lands while the delivery is in flight; the retry
+    // then has to re-check the purpose instead of sending the queued payload.
+    delays.set('/ads-withdraw', 1500);
+    script.set('/ads-withdraw', [500]);
+    await send([{ type: 'track', event: 'Order Completed', userId: 'greta', messageId: 'greta-order-1' }]);
+    await eventually(
+      async () => at('/ads-withdraw'),
+      (r) => r.length === 1,
+    );
+
+    await api.call('consent.record', { profileId: profileId!, purpose: 'marketing_email', status: 'withdrawn' });
+    await new Promise((r) => setTimeout(r, 2200));
+    delays.delete('/ads-withdraw');
+
+    expect(at('/ads-withdraw')).toHaveLength(1);
+    const { deliveries } = await api.call('deliveries.list', { targetId: ep.id });
+    expect(deliveries[0]).toMatchObject({ status: 'dead', response: { suppressed: 'consent' } });
+
+    // A ping has no profile, so the endpoint purpose does not apply to it.
+    script.delete('/ads-withdraw');
+    await api.call('webhooks.test', { id: ep.id });
+    await eventually(
+      async () => at('/ads-withdraw'),
+      (r) => r.length === 2,
+    );
+    await eventually(
+      () => api.call('deliveries.list', { targetId: ep.id }),
+      (r) => r.deliveries.some((d) => d.status === 'done'),
+    );
+  });
+
+  it('suppresses a queued webhook when the losing identity was merged and had withdrawn', async () => {
+    const api = t.api(owner);
+    const ep = await api.call('webhooks.create', {
+      name: 'Ads, merged identity',
+      url: `${receiverUrl}/merge-gate`,
+      events: ['Order Completed'],
+      purpose: 'marketing_email',
+    });
+    await send([
+      { type: 'identify', userId: 'ivy', traits: { email: 'ivy@example.com' } },
+      { type: 'identify', anonymousId: 'anon-ivy' },
+      {
+        type: 'track',
+        event: 'Segment Consent Preference Updated',
+        userId: 'ivy',
+        messageId: 'ivy-consent-1',
+        context: { consent: { categoryPreferences: { marketing_email: true } } },
+      },
+    ]);
+    const canonical = (
+      await eventually(
+        () => api.call('profiles.find', { type: 'user_id', value: 'ivy' }),
+        (r) => !!r.profileId,
+      )
+    ).profileId!;
+    const losing = (
+      await eventually(
+        () => api.call('profiles.find', { type: 'anonymous_id', value: 'anon-ivy' }),
+        (r) => !!r.profileId,
+      )
+    ).profileId!;
+    expect(canonical).toBeTruthy();
+    expect(losing).toBeTruthy();
+
+    delays.set('/merge-gate', 1500);
+    script.set('/merge-gate', [500]);
+    await send([{ type: 'track', event: 'Order Completed', userId: 'ivy', messageId: 'ivy-order-1' }]);
+    await eventually(
+      async () => at('/merge-gate'),
+      (r) => r.length === 1,
+    );
+
+    await api.call('consent.record', { profileId: losing, purpose: 'marketing_email', status: 'withdrawn' });
+    await send([{ type: 'identify', userId: 'ivy', anonymousId: 'anon-ivy' }]);
+    await new Promise((r) => setTimeout(r, 2200));
+    delays.delete('/merge-gate');
+
+    expect(at('/merge-gate')).toHaveLength(1);
+    const { deliveries } = await api.call('deliveries.list', { targetId: ep.id });
+    expect(deliveries[0]).toMatchObject({ status: 'dead', response: { suppressed: 'consent' } });
   });
 });
 

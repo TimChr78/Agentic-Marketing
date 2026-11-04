@@ -1,5 +1,6 @@
 import type { Purposes } from '@agentic-marketing/artifacts';
 import type { ClickIdType } from '@agentic-marketing/db';
+import { REFUSALS } from '@agentic-marketing/profiles';
 
 // Ad click ids (performance-marketing.md, "Data model"). A click id is pseudonymous, but it
 // links a visit to an ad platform's knowledge of the person, so it is kept only with the
@@ -44,9 +45,17 @@ export function googleConsentMode(allowed: (purpose: string) => boolean) {
   };
 }
 
-/** Whether a purpose holds given a signal and the ledger: consent needs a yes, other bases hold unless objected to. */
+/** Whether a consent status is a refusal (withdrawn, denied, objected). */
+export const isRefusal = (status: string | undefined) => !!status && (REFUSALS as readonly string[]).includes(status);
+
+/**
+ * Whether a purpose holds given a signal and the ledger. A refusal in the ledger is final: the
+ * event's signal is client-controlled (stale CMP state, a replayed batch) and can never override
+ * a standing withdrawal. Never-recorded people may still be covered by an explicit yes.
+ */
 export function purposeHolds(purposes: Purposes, key: string, signal: boolean | undefined, ledger: string | undefined) {
   const basis = purposes.find((p) => p.key === key)?.basis ?? 'consent';
+  if (isRefusal(ledger)) return false;
   if (basis === 'consent') return signal === true || (signal === undefined && ledger === 'granted');
-  return signal !== false && ledger !== 'objected' && ledger !== 'withdrawn' && ledger !== 'denied';
+  return signal !== false;
 }

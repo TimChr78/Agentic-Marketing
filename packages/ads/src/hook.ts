@@ -7,8 +7,8 @@ import { CLICK_ID_TYPES, clickIdsOfEvent, purposeHolds } from './clickIds';
 
 /**
  * Post-resolve hook: stores the click ids an event carries as identifiers of its profile, when
- * `ad_measurement` holds (the event's consent signal, else the consent ledger). A click id seen
- * again keeps its first profile and first-seen time.
+ * `ad_measurement` holds (a ledger refusal wins over the event's consent signal, else the signal
+ * or a ledger grant). A click id seen again keeps its first profile and first-seen time.
  */
 export function clickIdHook(deps: { db: Db }) {
   return async (workspaceId: string, resolved: ResolvedEvent[]) => {

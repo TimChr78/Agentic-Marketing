@@ -8,7 +8,7 @@ import { consentStateOf, currentConsent, profileForMessage, type ResolvedEvent }
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { and, desc, eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
-import { CLICK_ID_TYPES, type ClickIds, purposeHolds } from './clickIds';
+import { CLICK_ID_TYPES, type ClickIds, isRefusal, purposeHolds } from './clickIds';
 import {
   type Conversion,
   googleAdsConnector,
@@ -247,10 +247,9 @@ deliveryHandlers.set('ad_conversion', async (db, d, deps) => {
     if (!row?.enabled) return { ok: false, error: 'the connection was deleted or disabled', permanent: true };
     const found = await personFor(tx, d.workspaceId, c.profileId, deps.kp, c.adTargeting);
     if (!found) return { ok: false, error: 'the person was erased', permanent: true };
-    // A withdrawal after the event wins: nothing is sent.
+    // A refusal is final, whenever it was recorded: a stale positive event signal never wins over it.
     const now = await latestStatus(tx, d.workspaceId, found.id, 'ad_measurement');
-    if (now && ['withdrawn', 'denied', 'objected'].includes(now.status) && now.updatedAt.getTime() > Date.parse(c.at))
-      return { ok: false, error: 'ad_measurement was withdrawn after the event', permanent: true };
+    if (isRefusal(now?.status)) return { ok: false, error: 'ad_measurement is refused', permanent: true };
     return { row, found, secrets: await connectionSecrets(tx, row, deps.kp) };
   });
   if ('ok' in ready) return ready;

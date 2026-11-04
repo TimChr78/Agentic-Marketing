@@ -115,10 +115,10 @@ describe('am doctor offline checks', () => {
     expect(check({ ...good, AM_PORT: 'nope' }, 'ports')?.status).toBe('fail');
   });
 
-  it('warns when forwarded headers are trusted from anywhere', () => {
+  it('warns when the trusted proxy list is empty', () => {
     const empty = checkTrustedProxyCidrs({ ...good, TRUSTED_PROXY_CIDRS: '' });
     expect(empty.status).toBe('warn');
-    expect(empty.message).toContain('any source');
+    expect(empty.message).toContain('forwarding headers are ignored');
     expect(checkTrustedProxyCidrs(good).status).toBe('ok');
   });
 

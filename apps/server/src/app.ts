@@ -45,6 +45,9 @@ import { keyProviderFor } from './keys';
 import { createMetricsRegistry, routeGroup, statusClass } from './metrics';
 import { COMMIT, VERSION } from './version';
 
+// An invitation token is short; the limit runs before the session lookup and the body parse.
+const INVITATION_MAX_BODY = 8 * 1024;
+
 /** `overrides` exist for tests, e.g. a stub transport for Client ID Metadata Documents. */
 export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'> = {}) {
   const db = createDb({ adminUrl: config.adminDatabaseUrl, appUrl: config.appDatabaseUrl });
@@ -258,17 +261,23 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
 
   // Accepting an invitation: the person is signed in but not yet a member, so the workspace comes
   // from the token rather than from their memberships.
-  app.post('/api/invitations/accept', async (c) => {
-    const session = await auth.api.getSession({ headers: c.req.raw.headers });
-    if (!session) throw new AppError('unauthorized', 'Sign in (or create an account) with the invited e-mail address first.');
-    const { token } = (await c.req.json().catch(() => ({}))) as { token?: unknown };
-    const inv = typeof token === 'string' ? await invitationWorkspace(db, token) : null;
-    if (!inv) throw new AppError('not_found', 'This invitation link is not valid any more. Ask for a new one.');
-    // Accepting needs no permission; the principal carries none until the membership exists.
-    const invitee = { ...userPrincipal(session.user.id, inv.workspaceId, inv.role), permissions: new Set<never>() };
-    const out = await executor.execute(acceptInvitation, { token, email: session.user.email }, invitee, { surface: 'rest' });
-    return c.json(out);
-  });
+  app.post(
+    '/api/invitations/accept',
+    bodyLimit(INVITATION_MAX_BODY, (c) =>
+      c.json({ error: 'payload_too_large', message: `Requests are limited to ${INVITATION_MAX_BODY / 1024} KB.` }, 413),
+    ),
+    async (c) => {
+      const session = await auth.api.getSession({ headers: c.req.raw.headers });
+      if (!session) throw new AppError('unauthorized', 'Sign in (or create an account) with the invited e-mail address first.');
+      const { token } = (await c.req.json().catch(() => ({}))) as { token?: unknown };
+      const inv = typeof token === 'string' ? await invitationWorkspace(db, token) : null;
+      if (!inv) throw new AppError('not_found', 'This invitation link is not valid any more. Ask for a new one.');
+      // Accepting needs no permission; the principal carries none until the membership exists.
+      const invitee = { ...userPrincipal(session.user.id, inv.workspaceId, inv.role), permissions: new Set<never>() };
+      const out = await executor.execute(acceptInvitation, { token, email: session.user.email }, invitee, { surface: 'rest' });
+      return c.json(out);
+    },
+  );
 
   // The decision API goes first: the ingest routes claim every other /v1/<word> path.
   if (config.roles.has('ingest')) app.route('/', decideApi({ db, hot }));

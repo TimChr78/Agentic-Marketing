@@ -19,8 +19,11 @@ let llm: Awaited<ReturnType<typeof fakeLlm>>;
 
 /** The hosted agent the fake model writes a note for, set before a run. */
 let memoryTarget: string | null = null;
+let deletionTarget: string | null = null;
 
 function answer(r: FakeRequest) {
+  if (r.user.includes('[delete]') && r.toolResults.length === 0 && deletionTarget)
+    return { toolCalls: [{ name: 'agents__memory__delete', input: { id: deletionTarget } }] };
   if (r.user.includes('[remember]') && r.toolResults.length === 0 && memoryTarget) {
     return {
       toolCalls: [
@@ -222,6 +225,76 @@ describe('hosted memory and skills (#340)', () => {
     const memory = await s.api.call('agents.memory.list', { agentId: s.agentId });
     expect(memory.count).toBe(1);
     expect(memory.notes[0]!.text).toBe('Use the shorter preheader.');
+  }, 30_000);
+
+  it('refuses a run deleting a person note and lets it delete a run note', async () => {
+    const s = await setup('[delete] Delete the selected memory note.');
+    const human = await s.api.call('agents.memory.add', { agentId: s.agentId, text: 'A person wrote this.' });
+    deletionTarget = human.id;
+    await onlyDue(s.agentId);
+    await runAt(DUE());
+    expect((await s.api.call('agents.memory.list', { agentId: s.agentId })).notes.map((n) => n.id)).toContain(human.id);
+    expect(llm.requests.at(-1)?.toolResults.join(' ')).toContain('only delete notes written by its own runs');
+    // Write a note through a real run, then delete it in a later run of the same agent.
+    await s.api.call('agents.updateHosted', { agentId: s.agentId, instructions: '[remember] Remember what works.' });
+    memoryTarget = s.agentId;
+    await onlyDue(s.agentId);
+    await runAt(DUE());
+    const written = (await s.api.call('agents.memory.list', { agentId: s.agentId })).notes.find((n) => n.createdBy.type === 'run')!;
+    expect(written).toBeTruthy();
+    deletionTarget = written.id;
+    await s.api.call('agents.updateHosted', { agentId: s.agentId, instructions: '[delete] Delete the selected note.' });
+    await onlyDue(s.agentId);
+    await runAt(DUE());
+    expect((await s.api.call('agents.memory.list', { agentId: s.agentId })).notes.map((n) => n.id)).toEqual([human.id]);
+    deletionTarget = null;
+  }, 60_000);
+
+  it('serializes concurrent additions at the note cap', async () => {
+    const s = await setup('Keep notes.');
+    await t.srv.db.admin.query(
+      `INSERT INTO hosted_agent_memory (workspace_id, id, agent_id, text, created_by_user_id)
+       SELECT $1, 'hmm_' || lpad(g::text, 32, '0'), $2, 'note', $3 FROM generate_series(1, 49) g`,
+      [s.ws, s.agentId, s.owner.id],
+    );
+    const results = await Promise.allSettled([
+      s.api.call('agents.memory.add', { agentId: s.agentId, text: 'One.' }),
+      s.api.call('agents.memory.add', { agentId: s.agentId, text: 'Two.' }),
+    ]);
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    expect(results.find((r) => r.status === 'rejected')).toMatchObject({ reason: { message: expect.stringContaining('50 memory notes') } });
+    expect((await s.api.call('agents.memory.list', { agentId: s.agentId })).count).toBe(50);
+  }, 30_000);
+
+  it('serializes concurrent edits at the character cap', async () => {
+    const s = await setup('Keep notes.');
+    await t.srv.db.admin.query(
+      `INSERT INTO hosted_agent_memory (workspace_id, id, agent_id, text, created_by_user_id)
+       SELECT $1, 'hmm_' || lpad(g::text, 32, '0'), $2, repeat('x', 900), $3 FROM generate_series(1, 11) g`,
+      [s.ws, s.agentId, s.owner.id],
+    );
+    const notes = (await s.api.call('agents.memory.list', { agentId: s.agentId })).notes;
+    // Two 100-character growths race for only 100 remaining characters.
+    const results = await Promise.allSettled(
+      notes.slice(0, 2).map((note) => s.api.call('agents.memory.update', { id: note.id, text: 'x'.repeat(1000) })),
+    );
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    expect(results.find((r) => r.status === 'rejected')).toMatchObject({
+      reason: { message: expect.stringContaining('characters of memory') },
+    });
+    expect((await s.api.call('agents.memory.list', { agentId: s.agentId })).characters).toBe(10000);
+  }, 30_000);
+
+  it('counts Unicode characters consistently when replacing emoji with ASCII', async () => {
+    const s = await setup('Keep notes.');
+    const notes = [];
+    for (let i = 0; i < 19; i++) notes.push(await s.api.call('agents.memory.add', { agentId: s.agentId, text: '🌲'.repeat(500) }));
+    expect((await s.api.call('agents.memory.list', { agentId: s.agentId })).characters).toBe(9500);
+    await s.api.call('agents.memory.update', { id: notes[0]!.id, text: 'x'.repeat(1000) });
+    await expect(s.api.call('agents.memory.update', { id: notes[1]!.id, text: 'x'.repeat(1000) })).rejects.toMatchObject({
+      message: expect.stringContaining('characters of memory'),
+    });
+    expect((await s.api.call('agents.memory.list', { agentId: s.agentId })).characters).toBe(10000);
   }, 30_000);
 
   it('never lets another agent write to this agent’s memory', async () => {

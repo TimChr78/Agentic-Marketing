@@ -82,7 +82,12 @@ describe('warehouse export', () => {
     const api = t.api(owner);
     await send([
       { type: 'identify', userId: 'wh-1', traits: { email: 'secret-person@example.com', plan: 'pro' } },
-      { type: 'track', event: 'Order Completed', userId: 'wh-1', properties: { total: 42 } },
+      {
+        type: 'track',
+        event: 'Order Completed',
+        userId: 'wh-1',
+        properties: { total: 42, email: 'buyer@example.com', name: 'Buyer Name', address: '1 Main Street' },
+      },
       {
         type: 'track',
         event: 'Segment Consent Preference Updated',
@@ -121,9 +126,13 @@ describe('warehouse export', () => {
     expect((await q('am_consent')).find((r) => r.purpose === 'marketing_email')).toMatchObject({ status: 'granted' });
     expect((await q('am_segment_memberships'))[0]).toMatchObject({ segment_id: seg.artifactId, profile_id: profileId });
     const events = await q('am_events');
-    expect(events.find((e) => e.name === 'Order Completed')).toMatchObject({ user_id: 'wh-1', properties: { total: 42 } });
+    const orderEvent = events.find((e) => e.name === 'Order Completed')!;
+    expect(orderEvent).toMatchObject({ user_id: 'wh-1' });
+    expect(orderEvent.properties).toEqual({ total: 42 });
     const everything = JSON.stringify(await Promise.all(['am_profiles', 'am_identifiers', 'am_consent', 'am_events'].map(q)));
     expect(everything).not.toContain('secret-person@example.com');
+    expect(everything).not.toContain('buyer@example.com');
+    expect(everything).not.toContain('1 Main Street');
   });
 
   it('adds what changed on the next run, replaces membership snapshots, and applies erasures', async () => {

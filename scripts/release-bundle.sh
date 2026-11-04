@@ -22,8 +22,9 @@ section=$(awk -v v="$v" '$0 ~ "^## \\[" v "\\]" {on=1; next} /^## \[/ {on=0} on'
 [ -n "$section" ] || fail "CHANGELOG.md has no section for $v"
 upgrade=$(printf '%s\n' "$section" | awk '/^### Upgrading from / {on=1} /^### / && !/^### Upgrading from / {on=0} on')
 [ -n "$upgrade" ] || fail "the $v section of CHANGELOG.md has no '### Upgrading from …' block"
+# Consume the whole pipe: grep -q can close early and give printf SIGPIPE under pipefail.
 for label in Migrations Configuration 'Breaking changes' 'Manual steps' Upgrade; do
-  printf '%s\n' "$upgrade" | grep -q "^- \*\*$label:\*\*" || fail "the upgrade block of $v has no '- **$label:**' line"
+  printf '%s\n' "$upgrade" | grep "^- \*\*$label:\*\*" >/dev/null || fail "the upgrade block of $v has no '- **$label:**' line"
 done
 
 name="agentic-marketing-compose-$v"

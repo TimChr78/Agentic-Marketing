@@ -2,9 +2,9 @@ import { decisionQuestions } from '@agentic-marketing/artifacts';
 import { defineCommand } from '@agentic-marketing/commands';
 import { AppError, isoDateTime, newId } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
-import { and, asc, eq, gte, inArray, lte, sql } from 'drizzle-orm';
+import { and, asc, eq, gt, gte, inArray, lte, sql } from 'drizzle-orm';
 import { z } from 'zod';
-import { aiAllowed } from './context';
+import { aiAllowed, redact } from './context';
 import {
   assertStateAllowed,
   DecisionError,
@@ -124,7 +124,7 @@ export const score = defineCommand({
     }
     const callId = newId('aic');
     try {
-      assertStateAllowed(state, provider);
+      assertStateAllowed(state, provider, input.questions);
     } catch (err) {
       await logCall(db, ctx.principal, callId, provider, input, state, {
         status: 'failed',
@@ -134,7 +134,7 @@ export const score = defineCommand({
     }
     let result: Awaited<ReturnType<typeof decisionCall>>;
     try {
-      result = await decisionCall(db, ctx.principal.workspaceId, provider, state, input.questions);
+      result = await decisionCall(db, ctx.principal.workspaceId, provider, state, input.questions, { egress: ctx.services.egress });
     } catch (err) {
       await logCall(db, ctx.principal, callId, provider, input, state, {
         status: 'failed',
@@ -162,7 +162,11 @@ export const score = defineCommand({
         callId,
         ttlHours: input.store.ttlHours,
       });
-      stored = { profileId: input.profileId, key: input.store.key, value: first.probability, expiresAt: expiresAt.toISOString() };
+      // The profile may have been erased between the consent check and the write; the lock in
+      // insertProfileScore then finds no row and no score is stored.
+      if (expiresAt) {
+        stored = { profileId: input.profileId, key: input.store.key, value: first.probability, expiresAt: expiresAt.toISOString() };
+      }
     }
     return {
       answer: { ...first, confidence: first.confidence ?? null },
@@ -208,7 +212,9 @@ async function logCall(
       input: {
         stateHash: stateHash(state),
         stateTokens: Math.ceil(JSON.stringify(state ?? null).length / 4),
-        questions: input.questions as Record<string, unknown>[],
+        // Question instructions are part of the request: redact contact details before they are
+        // kept, including on a refused call (#352).
+        questions: Array.isArray(input.questions) ? input.questions.map((q) => redact(q)) : input.questions,
       },
       output: out.answers ? { answers: out.answers } : null,
       error: out.error ?? null,
@@ -264,7 +270,7 @@ export const calibration = defineCommand({
   name: 'ai.calibration',
   title: 'Calibrate a decision score',
   description:
-    'Compares stored predictions for a score key with a later event (e.g. click or conversion) within N days: a reliability table by predicted-probability bin and the Brier score. A decision model without calibration is just a random number generator with confidence.',
+    'Compares unexpired latest predictions for a score key with a later event (e.g. click or conversion) within N days: a reliability table by predicted-probability bin and the Brier score. A decision model without calibration is just a random number generator with confidence.',
   input: z.object({
     scoreKey: ScoreKey,
     event: z.string().min(1).max(200).describe('The observed outcome, e.g. "Order Completed" or "Email Clicked"'),
@@ -303,6 +309,7 @@ export const calibration = defineCommand({
         and(
           eq(schema.profileScores.workspaceId, ws),
           eq(schema.profileScores.key, input.scoreKey),
+          gt(schema.profileScores.expiresAt, new Date()),
           input.from ? gte(schema.profileScores.createdAt, new Date(input.from)) : undefined,
           input.to ? lte(schema.profileScores.createdAt, new Date(input.to)) : undefined,
         ),
@@ -324,7 +331,13 @@ export const calibration = defineCommand({
     const from = new Date(Math.min(...rows.map((r) => r.createdAt.getTime())));
     const to = new Date(Math.max(...rows.map((r) => r.createdAt.getTime())) + windowMs);
     // One ClickHouse query for the outcome events in the whole window, then map identifiers to profiles.
-    const events = await ctx.services.events.conversionEvents(ws, { names: [input.event], from, to }).catch(() => []);
+    // A failed read is not "nobody converted": report it rather than a zero report (#360).
+    let events: Awaited<ReturnType<typeof ctx.services.events.conversionEvents>>;
+    try {
+      events = await ctx.services.events.conversionEvents(ws, { names: [input.event], from, to });
+    } catch (err) {
+      throw new AppError('conflict', `ai.calibration could not read outcome events: ${(err as Error).message}`);
+    }
     const values = [...new Set(events.flatMap((e) => [e.anonymousId, e.userId]).filter(Boolean))];
     const ids = values.length
       ? await ctx.tx

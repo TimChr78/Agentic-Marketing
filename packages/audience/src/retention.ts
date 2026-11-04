@@ -26,9 +26,14 @@ const INPUT_WARNING_DAYS = 30;
 /** Tombstones outlive the grace window by this much, so a clock or replay near it is still covered. */
 const TOMBSTONE_EXTRA_DAYS = 7;
 
-export async function runRetentionOnce(
-  deps: RetentionDeps,
-): Promise<{ profiles: number; deliveries: number; aiCalls: number; inputWarnings: number; erasureTombstones: number }> {
+export async function runRetentionOnce(deps: RetentionDeps): Promise<{
+  profiles: number;
+  deliveries: number;
+  aiCalls: number;
+  inputWarnings: number;
+  erasureTombstones: number;
+  profileScores: number;
+}> {
   const { rows } = await deps.db.admin.query<{ workspace_id: string; id: string }>(
     `SELECT p.workspace_id, p.id FROM profiles p
      WHERE p.merged_into IS NULL AND p.first_seen < now() - make_interval(days => $1)
@@ -58,6 +63,20 @@ export async function runRetentionOnce(
     `DELETE FROM ai_calls WHERE status IN ('done', 'fallback', 'failed') AND created_at < now() - make_interval(days => $1)`,
     [deps.logDays],
   );
+  // Scope by workspace to use (workspace_id, expires_at), and bound each transaction.
+  let profileScoreCount = 0;
+  const workspaces = await deps.db.admin.query<{ id: string }>('SELECT id FROM workspaces');
+  for (const { id } of workspaces.rows) {
+    const removed = await deps.db.admin.query(
+      `DELETE FROM profile_scores WHERE workspace_id = $1 AND (profile_id, key) IN (
+         SELECT profile_id, key FROM profile_scores WHERE workspace_id = $1 AND expires_at <= now()
+         ORDER BY expires_at LIMIT 5000
+       )`,
+      [id],
+    );
+    profileScoreCount += removed.rowCount ?? 0;
+  }
+  const profileScores = { rowCount: profileScoreCount };
   const inputWarnings = await deps.db.admin.query(`DELETE FROM input_warnings WHERE last_seen < now() - make_interval(days => $1)`, [
     INPUT_WARNING_DAYS,
   ]);
@@ -66,12 +85,13 @@ export async function runRetentionOnce(
     `DELETE FROM erasure_tombstones WHERE erased_at < now() - make_interval(hours => $1)`,
     [(deps.erasureGraceHours ?? 24) + TOMBSTONE_EXTRA_DAYS * 24],
   );
-  if (profiles || deliveries.rowCount || aiCalls.rowCount || inputWarnings.rowCount || erasureTombstones.rowCount)
+  if (profiles || deliveries.rowCount || aiCalls.rowCount || profileScores.rowCount || inputWarnings.rowCount || erasureTombstones.rowCount)
     logger.info(
       {
         profiles,
         deliveries: deliveries.rowCount,
         aiCalls: aiCalls.rowCount,
+        profileScores: profileScores.rowCount,
         inputWarnings: inputWarnings.rowCount,
         erasureTombstones: erasureTombstones.rowCount,
       },
@@ -81,6 +101,7 @@ export async function runRetentionOnce(
     profiles,
     deliveries: deliveries.rowCount ?? 0,
     aiCalls: aiCalls.rowCount ?? 0,
+    profileScores: profileScores.rowCount ?? 0,
     inputWarnings: inputWarnings.rowCount ?? 0,
     erasureTombstones: erasureTombstones.rowCount ?? 0,
   };
