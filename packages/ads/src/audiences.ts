@@ -50,7 +50,7 @@ export interface DestinationRef {
   platform: Platform;
   connectionId: string;
   destinationId: string;
-  /** Google customerId / Meta ad account id. Part of the immutable destination identity. */
+  /** Google customerId; empty for Meta, whose audience id identifies the target. */
   operatingAccountId: string;
   /** Google manager account (loginCustomerId), when one was used. */
   loginAccountId: string | null;
@@ -58,12 +58,12 @@ export interface DestinationRef {
 
 /**
  * A stable identity for one platform destination. It deliberately includes the operating account
- * (Google customerId / Meta ad account), not only the mutable connection id: changing a
+ * (Google customerId), not only the mutable connection id: changing a
  * connection's account settings must never make a cleanup claim success against a different
  * account that happens to have a list with the same id.
  */
 export function destinationKeyOf(ref: DestinationRef): string {
-  return [ref.platform, ref.connectionId, ref.operatingAccountId, ref.loginAccountId ?? '', ref.destinationId].join(':');
+  return [ref.connectionId, remoteTargetKeyOf(ref)].join(':');
 }
 
 /**
@@ -72,7 +72,9 @@ export function destinationKeyOf(ref: DestinationRef): string {
  * provenance still keeps the connection so cleanup can use the credentials that uploaded a row.
  */
 export function remoteTargetKeyOf(ref: DestinationRef): string {
-  return [ref.platform, ref.operatingAccountId, ref.loginAccountId ?? '', ref.destinationId].join(':');
+  return ref.platform === 'meta'
+    ? ['meta', ref.destinationId].join(':')
+    : [ref.platform, ref.operatingAccountId, ref.loginAccountId ?? '', ref.destinationId].join(':');
 }
 
 export function sameHashes(a: Hashes, b: Hashes): boolean {
@@ -350,12 +352,12 @@ async function loadConnection(tx: Tx, id: string, kp: KeyProvider): Promise<Load
 
 function refFromCurrent(platform: Platform, def: AudienceSync, conn: ConnectionRow): DestinationRef | null {
   if (platform === 'meta' && def.meta) {
-    const settings = metaAdsConnector.settings.parse(conn.settings);
+    metaAdsConnector.settings.parse(conn.settings);
     return {
       platform,
       connectionId: def.meta.connection,
       destinationId: def.meta.audienceId,
-      operatingAccountId: settings.adAccountId ?? '',
+      operatingAccountId: '',
       loginAccountId: null,
     };
   }
@@ -609,8 +611,8 @@ async function ownedElsewhere(
       const { rows } = await tx.execute<{ profile_id: string; hashes: Hashes }>(sql`
         SELECT profile_id, hashes FROM audience_members
         WHERE workspace_id = ${ws} AND platform = ${platform}
-          AND operating_account_id = ${ref.operatingAccountId}
-          AND coalesce(login_account_id, '') = ${ref.loginAccountId ?? ''}
+          AND (${platform} = 'meta' OR (operating_account_id = ${ref.operatingAccountId}
+            AND coalesce(login_account_id, '') = ${ref.loginAccountId ?? ''}))
           AND destination_id = ${ref.destinationId}
           AND NOT (sync_id = ${syncId} AND profile_id = ANY(${sql.param(ids)}::text[]))
           AND (profile_id = ANY(${sql.param(ids)}::text[])
@@ -619,8 +621,8 @@ async function ownedElsewhere(
         UNION ALL
         SELECT profile_id, hashes FROM audience_write_intents
         WHERE workspace_id = ${ws} AND platform = ${platform}
-          AND operating_account_id = ${ref.operatingAccountId}
-          AND coalesce(login_account_id, '') = ${ref.loginAccountId ?? ''}
+          AND (${platform} = 'meta' OR (operating_account_id = ${ref.operatingAccountId}
+            AND coalesce(login_account_id, '') = ${ref.loginAccountId ?? ''}))
           AND destination_id = ${ref.destinationId}
           AND NOT (sync_id = ${syncId} AND profile_id = ANY(${sql.param(ids)}::text[]))
           AND (profile_id = ANY(${sql.param(ids)}::text[])
@@ -751,11 +753,25 @@ async function writePlans(
   }
   for (const batch of chunks(plans)) {
     const owned = await ownedElsewhere(db, ws, syncId, platform, ref, batch);
-    const send = batch.map((p) => ({
+    // A provider remove deletes the whole member. Partial overlap cannot be safely closed:
+    // retain every hash (including ambiguous intents) as a visible manual cleanup obligation.
+    const safe: MemberWritePlan[] = [];
+    for (const p of batch) {
+      const partial = p.remove.some((h) => {
+        const values = [h.email, h.phone].filter((v): v is string => !!v);
+        const shared = values.filter((v) => owned.hashes.has(v)).length;
+        return shared > 0 && shared < values.length;
+      });
+      if (partial) {
+        const reason = `${CLEANUP_PENDING_PREFIX}: identifiers partially overlap another member; manual removal and restoration are required`;
+        await markProfilesOrphaned(db, ws, syncId, platform, destinationKeyOf(ref), [p.profileId], reason, 'both');
+        outcome.errors.push(reason);
+        if (opts.stopOnError) return outcome;
+      } else safe.push(p);
+    }
+    const send = safe.map((p) => ({
       plan: p,
-      remove: p.remove.filter(
-        (h) => !owned.profiles.has(p.profileId) && !(h.email && owned.hashes.has(h.email)) && !(h.phone && owned.hashes.has(h.phone)),
-      ),
+      remove: p.remove.filter((h) => ![h.email, h.phone].some((v) => v && owned.hashes.has(v))),
     }));
     const removeSets = send.flatMap((s) => s.remove);
     const addEntries = send.filter((s) => s.plan.add).map((s) => ({ profileId: s.plan.profileId, hashes: s.plan.add! }));
@@ -799,7 +815,7 @@ async function writePlans(
       continue;
     }
     try {
-      await finalizePlans(db, ws, syncId, platform, ref, batch);
+      await finalizePlans(db, ws, syncId, platform, ref, safe);
     } catch (err) {
       // The intents stay: a later run or erasure can still remove what the provider accepted.
       outcome.errors.push(`recording the audience ledger failed: ${messageOf(err)}`);
@@ -808,7 +824,7 @@ async function writePlans(
     }
     outcome.added += addEntries.length;
     outcome.removed += send.filter((s) => s.remove.length).length;
-    outcome.lastOk = batch.at(-1)?.scanId ?? batch.at(-1)?.profileId ?? outcome.lastOk;
+    outcome.lastOk = safe.at(-1)?.scanId ?? safe.at(-1)?.profileId ?? outcome.lastOk;
   }
   return outcome;
 }
@@ -939,9 +955,12 @@ async function processMergeRepair(
   platform: Platform,
   ref: DestinationRef,
   deps: AudienceSyncDeps,
+  def: AudienceSync,
+  purposes: Purposes,
   limit: number,
 ): Promise<{ repaired: number; errors: string[] }> {
   const destinationKey = destinationKeyOf(ref);
+  const restores: MemberWritePlan[] = [];
   const plans = await db.withWorkspace(ws, async (tx) => {
     const { rows } = await tx.execute<{ profile_id: string; hashes: Hashes; merged_into: string }>(sql`
       SELECT m.profile_id, m.hashes, p.merged_into
@@ -1000,6 +1019,21 @@ async function processMergeRepair(
         } else {
           const plan = planMemberWrite({ profileId: row.profile_id, current: null, stored: row.hashes, intent: null });
           if (plan) out.push(plan);
+          const allowed = await eligibilityMap(tx, ws, purposes, [survivor]);
+          const [membership] = await tx
+            .select({ id: schema.segmentMemberships.profileId })
+            .from(schema.segmentMemberships)
+            .where(
+              and(
+                eq(schema.segmentMemberships.workspaceId, ws),
+                eq(schema.segmentMemberships.segmentId, def.segment),
+                eq(schema.segmentMemberships.profileId, survivor),
+              ),
+            );
+          const person =
+            allowed.has(survivor) && (membership || def.removals === false) ? await profileForMessage(tx, ws, survivor, deps.kp) : null;
+          const current = person ? hashesFor(platform, person, def.identifiers) : null;
+          if (hasAnyHashes(current)) restores.push({ profileId: survivor, remove: [], add: current, final: current });
         }
       } else {
         // Move the row to the survivor so a later removal cannot delete the person while the
@@ -1033,7 +1067,8 @@ async function processMergeRepair(
     return out;
   });
   const outcome = await writePlans(db, ws, syncId, platform, ref, plans, deps, { stopOnError: false });
-  return { repaired: outcome.removed, errors: outcome.errors };
+  const restore = await writePlans(db, ws, syncId, platform, ref, [...new Map(restores.map((p) => [p.profileId, p])).values()], deps);
+  return { repaired: outcome.removed, errors: [...outcome.errors, ...restore.errors] };
 }
 
 async function processRemovals(
@@ -1546,13 +1581,13 @@ async function fullPlatform(
   // surface its cleanup instead; only rows at other recorded destinations are evacuated.
   const currentUnresolved = !!ref && !current;
   const effectiveCurrentKey = currentKey ?? (ref ? (state?.destinationKey ?? null) : null);
-  if (currentUnresolved && state?.destinationKey) {
+  if ((currentUnresolved || currentError) && effectiveCurrentKey) {
     await markDestinationOrphaned(
       db,
       ws,
       syncId,
       platform,
-      state.destinationKey,
+      effectiveCurrentKey,
       `${CLEANUP_PENDING_PREFIX}: ${currentError ?? 'the current destination could not be resolved'}`,
     );
   }
@@ -1616,7 +1651,7 @@ async function fullPlatform(
     added += intents.added;
     for (const e of intents.errors) addError(e);
 
-    const merges = await processMergeRepair(db, ws, syncId, platform, current, currentDeps, maxMerges);
+    const merges = await processMergeRepair(db, ws, syncId, platform, current, currentDeps, def, purposes, maxMerges);
     for (const e of merges.errors) addError(e);
 
     const removals = await processRemovals(db, ws, syncId, platform, def, current, purposes, currentDeps, maxRemovals);
@@ -1709,7 +1744,15 @@ async function storedAudienceState(db: Db, ws: string, syncId: string): Promise<
       FROM audience_sync_state WHERE workspace_id = ${ws} AND sync_id = ${syncId}`);
     const targets = rows
       .filter((r) => r.operating_account_id !== null && r.destination_id !== null)
-      .map((r) => [r.platform, r.operating_account_id, r.login_account_id ?? '', r.destination_id].join(':'));
+      .map((r) =>
+        remoteTargetKeyOf({
+          platform: r.platform,
+          connectionId: '',
+          operatingAccountId: r.operating_account_id!,
+          loginAccountId: r.login_account_id,
+          destinationId: r.destination_id!,
+        }),
+      );
     return { platforms: [...new Set(rows.map((r) => r.platform))], targets: [...new Set(targets)] };
   });
 }
@@ -1848,18 +1891,34 @@ async function definitionFor(
  * destination) is logged and the rest of the round still runs. Published artifacts get a full
  * reconcile; unpublished or deleted ones still get erasure/refusal cleanup and intent recovery.
  */
+// Fair bounded scans across ticks, including poisoned entries; a scheduler restart starts a new pass.
+const roundCursors = new WeakMap<Db, { workspace_id: string; sync_id: string }>();
+
+export async function selectAudienceSyncRound(db: Db, limit = MAX_SYNCS_PER_ROUND): Promise<{ workspace_id: string; sync_id: string }[]> {
+  const after = roundCursors.get(db);
+  const { rows } = await db.admin.query<{ workspace_id: string; sync_id: string }>(
+    `WITH candidates AS (
+       SELECT workspace_id, id AS sync_id FROM artifacts WHERE type = 'audience_sync' AND published_version IS NOT NULL
+       UNION SELECT DISTINCT workspace_id, sync_id FROM audience_members
+       UNION SELECT DISTINCT workspace_id, sync_id FROM audience_write_intents
+       UNION SELECT workspace_id, sync_id FROM audience_sync_state
+     ) SELECT workspace_id, sync_id FROM candidates
+     WHERE $1::uuid IS NULL OR (workspace_id, sync_id) > ($1::uuid, $2::text)
+     ORDER BY workspace_id, sync_id LIMIT ${Math.max(1, Math.min(limit, MAX_SYNCS_PER_ROUND))}`,
+    [after?.workspace_id ?? null, after?.sync_id ?? null],
+  );
+  if (rows.length) roundCursors.set(db, rows[rows.length - 1]!);
+  else roundCursors.delete(db);
+  return rows;
+}
+
 export async function runAudienceSyncRound(deps: {
   db: Db;
   kp: KeyProvider;
   egress: EgressPolicy;
 }): Promise<{ syncs: number; failures: number }> {
-  const { rows } = await deps.db.admin.query<{ workspace_id: string; sync_id: string }>(
-    `SELECT workspace_id, id AS sync_id FROM artifacts WHERE type = 'audience_sync' AND published_version IS NOT NULL
-     UNION SELECT DISTINCT workspace_id, sync_id FROM audience_members
-     UNION SELECT DISTINCT workspace_id, sync_id FROM audience_write_intents
-     UNION SELECT workspace_id, sync_id FROM audience_sync_state
-     LIMIT ${MAX_SYNCS_PER_ROUND}`,
-  );
+  let rows = await selectAudienceSyncRound(deps.db);
+  if (!rows.length) rows = await selectAudienceSyncRound(deps.db);
   let failures = 0;
   for (const row of rows) {
     try {
@@ -1926,16 +1985,18 @@ export const listAudiences = defineCommand({
   title: 'Audience syncs and their state',
   description:
     'Published audience syncs (segment → Meta custom audience / Google Customer Match list) with how many people are synced, the last run, unresolved cleanup and its error. Also lists cleanup owed by unpublished or deleted syncs, so erasure/refusal obligations remain visible. Members are people in the segment who allowed ad_targeting and have an e-mail or phone.',
-  input: z.object({}),
+  input: z.object({ cleanupAfter: z.string().optional() }),
   output: z.object({
     audiences: z.array(
       z.object({ id: z.string(), segment: z.string(), platforms: z.array(SyncOut.extend({ lastRunAt: z.string().nullable() })) }),
     ),
     cleanup: z.array(CleanupOut),
+    cleanupNext: z.string().nullable(),
+    cleanupTotal: z.number().int(),
   }),
   permission: 'artifacts:read',
   effect: 'read',
-  handler: async (_i, ctx) => {
+  handler: async ({ cleanupAfter }, ctx) => {
     const syncs = await publishedSyncs(ctx.tx);
     const states = await ctx.tx.select().from(schema.audienceSyncState);
     const published = new Set(syncs.map((s) => s.id));
@@ -1976,8 +2037,11 @@ export const listAudiences = defineCommand({
       });
     }
     const cleanup: z.output<typeof CleanupOut>[] = [];
-    const cleanupSyncIds = [...new Set([...states.map((s) => s.syncId), ...rows.map((r) => r.sync_id)])].filter((id) => !published.has(id));
-    for (const syncId of cleanupSyncIds.slice(0, MAX_BACKLOG_PAGE)) {
+    const cleanupSyncIds = [...new Set([...states.map((s) => s.syncId), ...rows.map((r) => r.sync_id)])]
+      .filter((id) => !published.has(id))
+      .sort();
+    const cleanupPage = cleanupSyncIds.filter((id) => !cleanupAfter || id > cleanupAfter).slice(0, MAX_BACKLOG_PAGE + 1);
+    for (const syncId of cleanupPage.slice(0, MAX_BACKLOG_PAGE)) {
       for (const platform of ['meta', 'google'] as const) {
         const st = states.find((x) => x.syncId === syncId && x.platform === platform);
         const c = counts.get(`${syncId}:${platform}`);
@@ -2023,6 +2087,8 @@ export const listAudiences = defineCommand({
           }),
       })),
       cleanup,
+      cleanupNext: cleanupPage.length > MAX_BACKLOG_PAGE ? cleanupPage[MAX_BACKLOG_PAGE - 1]! : null,
+      cleanupTotal: cleanupSyncIds.length,
     };
   },
 });

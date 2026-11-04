@@ -32,9 +32,9 @@ describe('audience destination provenance', () => {
     // against the new account must never be reported as cleaning the old account's list.
     expect(destinationKeyOf(ref)).not.toBe(destinationKeyOf({ ...ref, operatingAccountId: '2222222222' }));
     expect(destinationKeyOf(ref)).not.toBe(destinationKeyOf({ ...ref, loginAccountId: '9999999999' }));
-    expect(destinationKeyOf({ ...ref, platform: 'meta', operatingAccountId: 'act_123', loginAccountId: null })).toContain(
-      'meta:con_a:act_123:',
-    );
+    const meta = { ...ref, platform: 'meta' as const, operatingAccountId: 'act_123', loginAccountId: null };
+    expect(destinationKeyOf(meta)).toBe(destinationKeyOf({ ...meta, operatingAccountId: '' }));
+    expect(remoteTargetKeyOf(meta)).toBe(remoteTargetKeyOf({ ...meta, connectionId: 'con_b', operatingAccountId: '' }));
   });
 
   it('treats two connections to the same operating account/list as one remote target', () => {

@@ -1,6 +1,13 @@
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { adAudienceCommands, metaEmail, metaPhone, runAudienceSyncRound, syncAudience } from '@agentic-marketing/ads';
+import {
+  adAudienceCommands,
+  metaEmail,
+  metaPhone,
+  runAudienceSyncRound,
+  selectAudienceSyncRound,
+  syncAudience,
+} from '@agentic-marketing/ads';
 import type { AudienceSync } from '@agentic-marketing/artifacts';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { eventually, startTestServer, testPort, type User } from './harness';
@@ -411,6 +418,8 @@ describe('concurrency fencing', () => {
     const sync = await createSync({ segment, meta: { connection: ids.meta, audienceId: '90000403' } });
     const def = defOf(segment, { meta: { connection: ids.meta, audienceId: '90000403' } });
     const deps = { kp: t.srv.keyProvider, egress: t.srv.egress };
+    const otherSync = await createSync({ segment, meta: { connection: ids.meta2, audienceId: '90000403' } });
+    const otherDef = defOf(segment, { meta: { connection: ids.meta2, audienceId: '90000403' } });
 
     holdAdds = true;
     let reached: () => void;
@@ -422,6 +431,8 @@ describe('concurrency fencing', () => {
     await seen;
     const second = await syncAudience(t.srv.db, ws, sync, def, deps);
     expect(second[0]).toMatchObject({ status: 'error', error: expect.stringMatching(/already running/i) });
+    const other = await syncAudience(t.srv.db, ws, otherSync, otherDef, deps);
+    expect(other[0]).toMatchObject({ status: 'error', error: expect.stringMatching(/already running/i) });
     releaseAdd!();
     holdAdds = false;
     const [firstResult] = await first;
@@ -470,6 +481,8 @@ describe('cleanup independent of publication (#400 P1)', () => {
     const [blocked] = await syncNow(sync);
     expect(blocked.status).toBe('error');
     expect(blocked.error).toMatch(/disabled/i);
+    expect(blocked.unresolved).toBeGreaterThan(0);
+    expect((await api().call('ads.audienceBacklog', { syncId: sync })).total).toBeGreaterThan(0);
     expect(membersOf('meta', '90000303')).toHaveLength(1);
 
     await api().call('profiles.erase', { profileId: profile, reason: 'Erasure request (disabled test)' });
@@ -488,7 +501,7 @@ describe('shared destination and profile merges', () => {
     await addToSegment(segmentA, profile);
     await addToSegment(segmentB, profile);
     const syncA = await createSync({ segment: segmentA, meta: { connection: ids.meta, audienceId: '90000401' } });
-    const syncB = await createSync({ segment: segmentB, meta: { connection: ids.meta, audienceId: '90000401' } });
+    const syncB = await createSync({ segment: segmentB, meta: { connection: ids.meta2, audienceId: '90000401' } });
     expect((await syncNow(syncA))[0]).toMatchObject({ added: 1 });
     expect((await syncNow(syncB))[0]).toMatchObject({ added: 1 });
     expect(membersOf('meta', '90000401')).toHaveLength(1);
@@ -515,6 +528,68 @@ describe('shared destination and profile merges', () => {
     await syncNow(syncB);
     expect(membersOf('meta', '90000401')).toHaveLength(0);
   });
+
+  it('does not evacuate Meta when only the spend-import account changes', async () => {
+    const segment = await createSegment('spend-setting');
+    const profile = await person('spend-setting', 'spend-setting@example.com', '+4511000901', 'spend-setting');
+    await addToSegment(segment, profile);
+    const sync = await createSync({ segment, meta: { connection: ids.meta, audienceId: '90000403' } });
+    await syncNow(sync);
+    const before = received.length;
+    await api().call('connections.update', { id: ids.meta, settings: { pixelId: '123456789', apiBase: platformUrl } });
+    const [result] = await syncNow(sync);
+    expect(result).toMatchObject({ status: 'ok', added: 0, removed: 0, members: 1 });
+    expect(received.slice(before).filter((r) => r.path.includes('90000403'))).toHaveLength(0);
+    expect(membersOf('meta', '90000403')).toHaveLength(1);
+  });
+
+  for (const mode of ['member', 'intent'] as const)
+    it(`retains a partial shared-hash ${mode} cleanup obligation`, async () => {
+      const segment = await createSegment(`partial-${mode}`);
+      const profile = await person(
+        `partial-${mode}`,
+        `partial-${mode}@example.com`,
+        mode === 'member' ? '+4511000402' : '+4511000403',
+        `partial-${mode}`,
+      );
+      const other = await person(`owner-${mode}`, `owner-${mode}@example.com`, mode === 'member' ? '+4511000404' : '+4511000405', 'owner');
+      await addToSegment(segment, profile);
+      const audienceId = mode === 'member' ? '90000404' : '90000405';
+      const sync = await createSync({ segment, meta: { connection: ids.meta, audienceId } });
+      const otherSync = await createSync({ segment, meta: { connection: ids.meta2, audienceId } });
+      await syncNow(sync);
+      // Seed the historical state after this e-mail was reassigned to another consenting profile:
+      // that row owns the email only, never the erased person's phone.
+      await t.srv.db.admin.query(
+        `INSERT INTO audience_members
+      (workspace_id, sync_id, platform, destination_key, connection_id, destination_id, operating_account_id,
+       login_account_id, destination_known, profile_id, hashes)
+      SELECT workspace_id, $3, platform, destination_key, connection_id, destination_id, operating_account_id,
+       login_account_id, destination_known, $4, jsonb_build_object('email', hashes->>'email')
+      FROM audience_members WHERE workspace_id = $1 AND sync_id = $2`,
+        [ws, sync, otherSync, other],
+      );
+      if (mode === 'intent') {
+        await t.srv.db.admin.query(
+          `INSERT INTO audience_write_intents
+        (workspace_id, sync_id, platform, destination_key, connection_id, destination_id, operating_account_id,
+         login_account_id, profile_id, op, hashes)
+        SELECT workspace_id, sync_id, platform, destination_key, connection_id, destination_id, operating_account_id,
+         login_account_id, profile_id, 'add', hashes FROM audience_members WHERE workspace_id = $1 AND sync_id = $2`,
+          [ws, sync],
+        );
+        await t.srv.db.admin.query('DELETE FROM audience_members WHERE workspace_id = $1 AND sync_id = $2', [ws, sync]);
+      }
+      await api().call('profiles.erase', { profileId: profile, reason: 'Partial ownership regression' });
+      const [result] = await syncNow(sync);
+      expect(result.status).toBe('error');
+      expect(result.unresolved).toBeGreaterThan(0);
+      expect(result.error).toMatch(/partially overlap/);
+      const backlog = await api().call('ads.audienceBacklog', { syncId: sync });
+      expect(backlog.entries.some((e) => e.kind === mode)).toBe(true);
+      expect(membersOf('meta', audienceId)).toHaveLength(1);
+      expect(membersOf('meta', audienceId)[0]!.phone).toBeTruthy();
+    });
 
   it('keeps the survivor in the remote audience when two profiles merge', async () => {
     const segment = await createSegment('merge');
@@ -558,7 +633,11 @@ describe('shared destination and profile merges', () => {
     );
     expect(merged.rows[0]!.merged_into).toBe(survivor);
 
-    const [result] = await syncNow(sync);
+    const [result] = await syncAudience(t.srv.db, ws, sync, defOf(segment, { meta: { connection: ids.meta, audienceId: '90000402' } }), {
+      kp: t.srv.keyProvider,
+      egress: t.srv.egress,
+      maxReconcilePerRun: 0,
+    });
     expect(result.status).toBe('ok');
     const remaining = membersOf('meta', '90000402');
     expect(remaining).toHaveLength(1);
@@ -646,4 +725,41 @@ describe('bounded progress and scheduler isolation', () => {
     expect(state.rows[0]!.unresolved).toBe(65536);
     expect((await syncNow(goodSync))[0]).toMatchObject({ status: 'ok', members: 1 });
   }, 120_000);
+});
+
+describe('bounded cleanup discovery', () => {
+  it('advances bounded scheduler pages across every candidate and wraps after the pass', async () => {
+    const db = { ...t.srv.db }; // Independent scheduler cursor; same real database.
+    const expected = await t.srv.db.admin.query<{ workspace_id: string; sync_id: string }>(
+      `SELECT workspace_id, id AS sync_id FROM artifacts WHERE type = 'audience_sync' AND published_version IS NOT NULL UNION SELECT workspace_id, sync_id FROM audience_members UNION SELECT workspace_id, sync_id FROM audience_write_intents UNION SELECT workspace_id, sync_id FROM audience_sync_state ORDER BY workspace_id, sync_id`,
+    );
+    const found: string[] = [];
+    for (let i = 0; i <= expected.rows.length; i++) {
+      const page = await selectAudienceSyncRound(db, 2);
+      expect(page.length).toBeLessThanOrEqual(2);
+      if (!page.length) break;
+      found.push(...page.map((r) => `${r.workspace_id}:${r.sync_id}`));
+    }
+    expect(found).toEqual(expected.rows.map((r) => `${r.workspace_id}:${r.sync_id}`));
+    expect((await selectAudienceSyncRound(db, 2))[0]).toEqual(expected.rows[0]);
+  });
+
+  it('pages all cleanup summaries beyond the 200-sync cap', async () => {
+    await t.srv.db.admin.query(
+      `INSERT INTO audience_sync_state (workspace_id, sync_id, platform, status) SELECT $1, 'aud_' || lpad(n::text, 32, '0'), 'meta', 'ok' FROM generate_series(1, 205) n ON CONFLICT DO NOTHING`,
+      [ws],
+    );
+    const seen = new Set<string>();
+    let cleanupAfter: string | undefined;
+    let total = 0;
+    for (let page = 0; page < 5; page++) {
+      const result = await api().call('ads.audiences', { cleanupAfter });
+      total = result.cleanupTotal;
+      for (const row of result.cleanup) seen.add(row.syncId);
+      if (!result.cleanupNext) break;
+      cleanupAfter = result.cleanupNext;
+    }
+    expect(total).toBeGreaterThanOrEqual(205);
+    expect(seen.size).toBe(total);
+  });
 });
