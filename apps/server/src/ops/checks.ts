@@ -298,7 +298,7 @@ export function checkTrustedProxyCidrs(env: Env): Check {
     return {
       id,
       status: 'warn',
-      message: 'TRUSTED_PROXY_CIDRS is empty; forwarded headers are trusted from any source',
+      message: 'TRUSTED_PROXY_CIDRS is empty; forwarding headers are ignored and the socket address is used',
       hint: 'Set it to the proxy and loopback ranges, for example 127.0.0.1/32,::1/128,10.0.0.0/8.',
     };
   return { id, status: 'ok', message: 'forwarded headers are trusted only from the configured proxy ranges' };

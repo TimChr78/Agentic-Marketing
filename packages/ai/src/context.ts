@@ -61,26 +61,32 @@ const PERSONAL_KEY =
  * as `redact`, so a decision provider without a no-retention agreement can refuse a state
  * instead of sending it (#194).
  */
-export function personalDataIn(v: unknown, depth = 0): string | null {
-  if (typeof v === 'string') {
-    for (const [re, label] of detectors) {
-      re.lastIndex = 0;
-      if (re.test(v)) return label.replace(/[[\]]/g, '');
+export function personalDataIn(v: unknown): string | null {
+  // Iterative, with no depth cap: a value nested deeper than the old limit of 8 used to be
+  // skipped entirely, so an e-mail nine levels down reached the provider (#352). The stack also
+  // keeps a deeply nested value from overflowing the call stack.
+  const stack: unknown[] = [v];
+  const seen = new WeakSet<object>();
+  while (stack.length) {
+    const x = stack.pop();
+    if (typeof x === 'string') {
+      for (const [re, label] of detectors) {
+        re.lastIndex = 0;
+        if (re.test(x)) return label.replace(/[[\]]/g, '');
+      }
+      continue;
     }
-    return null;
-  }
-  if (depth > 8 || v === null || typeof v !== 'object') return null;
-  if (Array.isArray(v)) {
-    for (const x of v) {
-      const found = personalDataIn(x, depth + 1);
-      if (found) return found;
+    if (x === null || typeof x !== 'object') continue;
+    if (seen.has(x)) continue;
+    seen.add(x);
+    if (Array.isArray(x)) {
+      for (const item of x) stack.push(item);
+      continue;
     }
-    return null;
-  }
-  for (const [k, x] of Object.entries(v as Record<string, unknown>)) {
-    if (PERSONAL_KEY.test(k)) return 'identifier';
-    const found = personalDataIn(x, depth + 1);
-    if (found) return found;
+    for (const [k, item] of Object.entries(x as Record<string, unknown>)) {
+      if (PERSONAL_KEY.test(k)) return 'identifier';
+      stack.push(item);
+    }
   }
   return null;
 }

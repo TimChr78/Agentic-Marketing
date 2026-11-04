@@ -33,6 +33,12 @@ const PREFERENCES_MAX_BODY = 64 * 1024;
 
 const PREFERENCES_TOO_LARGE = (c: Context) => c.json({ error: 'payload_too_large' }, 413);
 
+// Provider delivery webhooks carry event batches (SendGrid, Postmark, SES…); 1 MB matches the
+// inbound webhook limit and bounds the body before the token is checked or anything is parsed.
+const WEBHOOK_MAX_BODY = 1024 * 1024;
+
+const WEBHOOK_TOO_LARGE = (c: Context) => c.json({ error: 'payload_too_large' }, 413);
+
 export interface EmailRouteDeps {
   db: Db;
   kp: KeyProvider;
@@ -53,7 +59,7 @@ export function emailRoutes(deps: EmailRouteDeps) {
   };
   app.route('/', smsRoutes(deps));
 
-  app.post('/hooks/email/:id/:token', async (c) => {
+  app.post('/hooks/email/:id/:token', bodyLimit(WEBHOOK_MAX_BODY, WEBHOOK_TOO_LARGE), async (c) => {
     const { id, token } = c.req.param();
     const { rows } = await deps.db.admin.query<{ workspace_id: string }>(
       'SELECT workspace_id FROM email_providers WHERE id = $1 AND webhook_token_hash = $2',

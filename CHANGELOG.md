@@ -2,6 +2,26 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [0.7.1] - 2026-11-04
+
+### Fixed
+
+- Bound JSON and webhook request bodies before buffering on password reset, copilot, push, SCIM and invitation routes (#347, #377). Empty `TRUSTED_PROXY_CIDRS` now ignores forwarded headers; configure the actual proxy ranges to preserve visitor IPs behind a reverse proxy (#378).
+- Decision models inspect deeply nested state and question text for personal data, send only explicitly declared agent-visible non-personal traits, and use the existing egress guard with bounded responses (#352, #354, #357). Journey call logs keep a state hash instead of raw profile state (#358).
+- Decision answers reject invalid probabilities, confidence and token usage, and prototype-inherited choice labels (#353, #361). Journey scores match the probability used to route and are stored in the same transaction that wakes the participant (#350, #351). Calibration reports dependency errors instead of returning a misleading zero-conversion report (#360), and consistently excludes expired scores before and after retention. It evaluates the latest unexpired predictions; choose a score TTL longer than the outcome window for a complete evaluation.
+- Hourly retention prunes expired decision scores in bounded per-workspace batches (#359); profile erasure remains covered by the existing cascading database foreign key. Hosted agents cannot delete people’s memory notes, and concurrent memory writes respect the note and character caps (#348, #349).
+- Browser SDK reset removes the stored user identity, analytics withdrawal clears queued events and prevents retries from reviving them, and a rejected page-hide beacon falls back to fetch (#392, #393, #394).
+- Recheck a queued event webhook’s required purpose before each send, and let a standing ad-measurement refusal override a per-event positive signal (#405, #372). Remove known personal properties from no-plan and unlisted events as well as schema-declared PII (#371).
+- Correct the README’s current release line and check it with the other version surfaces (#386). Release-bundle validation no longer falsely reports a missing upgrade field when a pipe closes early. The issue inventory, validation evidence and later 0.7.x batches are recorded in `docs/triage/0.7-bugfix-plan.md`.
+
+### Upgrading from 0.7.0
+
+- **Migrations:** none.
+- **Configuration:** `TRUSTED_PROXY_CIDRS` still defaults to empty, but empty now trusts no forwarded headers. Set the ranges of the reverse proxies that connect directly to the application before upgrading if you depend on forwarded client IPs. Private decision-provider endpoints must be explicitly allowed by `EGRESS_ALLOWED_HOSTS`.
+- **Breaking changes:** no command or artifact schema changes. Security corrections reject malformed provider responses and personal question text without a no-retention agreement; missing tracking plans no longer expose profile traits to decision providers. Calibration now fails clearly when its event store is unavailable.
+- **Manual steps:** deploy the rebuilt browser SDK on your tracked sites. Review your tracking plan’s personal-property classifications and agent-visible traits. Existing raw decision-call inputs and previously exported personal event properties are not rewritten by this release; assess stored copies and downstream destinations under your retention/erasure procedure. For reverse proxies, configure trusted ranges as above.
+- **Upgrade:** download `agentic-marketing-compose-0.7.1.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.7.1 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.7.1` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.7.1). Run `docker compose exec app am doctor`.
+
 ## [0.7.0] - 2026-11-01
 
 ### Added

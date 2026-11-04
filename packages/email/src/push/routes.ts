@@ -1,9 +1,9 @@
 import { sha256 } from '@agentic-marketing/core';
 import { type Db, schema } from '@agentic-marketing/db';
-import { originAllowed, sourceLookups, writeKeyOf } from '@agentic-marketing/ingest';
+import { bodyLimit, originAllowed, sourceLookups, writeKeyOf } from '@agentic-marketing/ingest';
 import { type KeyProvider, sealJson } from '@agentic-marketing/secrets';
 import { and, eq, inArray, sql } from 'drizzle-orm';
-import { Hono } from 'hono';
+import { type Context, Hono } from 'hono';
 import { z } from 'zod';
 import type { PushRegistration } from './adapters';
 
@@ -15,6 +15,16 @@ import type { PushRegistration } from './adapters';
 // Registrations are sealed with the workspace key; only a hash of the endpoint or token is
 // stored in the clear, to find the device again. Consent is separate: the SDK records the
 // purpose the visitor agreed to (e.g. marketing_push) as a consent event when it subscribes.
+
+// A subscription or token is a few KB at most; the limit applies before the body is parsed and
+// before the write key is checked, so an unauthenticated caller cannot buffer an endless body.
+const PUSH_MAX_BODY = 32 * 1024;
+const PUSH_TOO_LARGE = (c: Context) =>
+  c.json(
+    { error: 'payload_too_large', message: `Push requests are limited to ${PUSH_MAX_BODY / 1024} KB.` },
+    413,
+    c.req.header('origin') ? { 'access-control-allow-origin': c.req.header('origin') as string, vary: 'origin' } : {},
+  );
 
 const Id = z.string().min(1).max(200);
 const Subscribe = z
@@ -81,7 +91,7 @@ export function pushRoutes(deps: { db: Db; kp: KeyProvider }) {
     return c.json({ webPush: web ? { publicKey: web.publicKey } : null }, 200, { ...cors(origin), 'cache-control': 'max-age=300' });
   });
 
-  app.post('/v1/push/:op{subscribe|unsubscribe}', async (c) => {
+  app.post('/v1/push/:op{subscribe|unsubscribe}', bodyLimit(PUSH_MAX_BODY, PUSH_TOO_LARGE), async (c) => {
     const origin = c.req.header('origin');
     let body: Record<string, unknown>;
     try {

@@ -127,7 +127,7 @@ export function startWorkers(
   return [
     run('clickhouse-sink', runSink(srv.bus, srv.events, signal)),
     run('journey-sweeper', runSweeper(srv.db, { kp: srv.keyProvider, events: srv.events }, signal)),
-    run('ai-steps', runAiWorker(srv.db, { kp: srv.keyProvider, events: srv.events }, signal)),
+    run('ai-steps', runAiWorker(srv.db, { kp: srv.keyProvider, events: srv.events, egress: srv.egress }, signal)),
     run('deliveries', runDeliveries(srv.db, { kp: srv.keyProvider, egress: srv.egress, hot: srv.hot, ...opts.deliveries }, signal)),
     run('email-delivery', runDeliveryWorker(srv.db, { kp: srv.keyProvider, events: srv.events, email: srv.email }, signal)),
     ...runProfileWorkers(

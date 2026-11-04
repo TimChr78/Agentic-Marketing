@@ -85,7 +85,45 @@ describe('personal data', () => {
     expect(truncateIp('2001:db8:85a3:8d3:1319:8a2e:370:7348')).toBe('2001:db8:85a3::');
   });
 
-  it('follows the attribute schema and removes PII properties', () => {
+  it('removes reserved personal properties without a plan, keeping non-personal metrics', () => {
+    const out = run({
+      type: 'track',
+      event: 'Order Completed',
+      userId: 'u1',
+      properties: {
+        total: 899,
+        sku: 'TENT-2',
+        email: 'buyer@example.com',
+        name: 'Ada Lovelace',
+        address: '1 Main Street',
+        phone: '+4512345678',
+        products: [{ name: 'Tent', price: 899 }],
+      },
+      context: yes,
+    });
+    expect(out).toMatchObject({ kind: 'accepted' });
+    if (out.kind !== 'accepted') throw new Error(out.kind);
+    expect(out.event.properties).toEqual({ total: 899, sku: 'TENT-2', products: [{ name: 'Tent', price: 899 }] });
+  });
+
+  it('removes top-level reserved keys from unlisted events, and keeps nested product metrics', () => {
+    const p: WorkspacePolicy = { ...defaultPolicy, plan };
+    const out = run(
+      {
+        type: 'track',
+        event: 'Mystery',
+        anonymousId: 'a',
+        properties: { email: 'x@example.com', total: 1, products: [{ name: 'Tent', price: 20 }] },
+        context: yes,
+      },
+      browser,
+      p,
+    );
+    if (out.kind !== 'accepted') throw new Error(out.kind);
+    expect(out.event.properties).toEqual({ total: 1, products: [{ name: 'Tent', price: 20 }] });
+  });
+
+  it('follows the attribute schema and removes PII properties, even when reserved', () => {
     const p: WorkspacePolicy = { ...defaultPolicy, plan };
     const id = run(
       { type: 'identify', userId: 'u1', traits: { loyaltyTier: 'gold', healthNotes: 'x', other: 1 }, context: yes },
@@ -99,6 +137,29 @@ describe('personal data', () => {
       p,
     );
     expect(order).toMatchObject({ kind: 'accepted', event: { properties: { total: 99 } } });
+  });
+
+  it('a plan cannot opt a reserved personal key back in', () => {
+    const p: WorkspacePolicy = {
+      ...defaultPolicy,
+      plan: artifactTypes.tracking_plan.content.parse({
+        unknownEvents: 'allow',
+        events: [{ name: 'Order Completed', properties: [{ name: 'email' }, { name: 'total' }] }],
+      }),
+    };
+    const out = run(
+      {
+        type: 'track',
+        event: 'Order Completed',
+        anonymousId: 'a',
+        properties: { email: 'x@example.com', total: 2 },
+        context: yes,
+      },
+      browser,
+      p,
+    );
+    if (out.kind !== 'accepted') throw new Error(out.kind);
+    expect(out.event.properties).toEqual({ total: 2 });
   });
 });
 

@@ -1,6 +1,8 @@
+import { DEFAULT_PURPOSES, publishedSingleton } from '@agentic-marketing/artifacts';
 import { AppError } from '@agentic-marketing/core';
-import { type Db, schema } from '@agentic-marketing/db';
+import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import type { HotState } from '@agentic-marketing/hotstate';
+import { consentStateOf, currentConsent, purposeAllowed } from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, inArray, sql } from 'drizzle-orm';
@@ -44,7 +46,7 @@ function takeToken(key: string, perMinute: number) {
 
 type Outcome =
   | { ok: true; statusCode?: number; response: unknown }
-  | { ok: false; statusCode?: number; error: string; permanent?: boolean };
+  | { ok: false; statusCode?: number; error: string; permanent?: boolean; suppressed?: 'consent' };
 
 /**
  * Handlers for delivery kinds other packages add (e.g. ad conversions). They return the outcome
@@ -54,14 +56,43 @@ export const deliveryHandlers = new Map<string, (db: Db, d: Row, deps: DeliveryD
 export type DeliveryOutcome = Outcome;
 export type DeliveryRow = Row;
 
+/**
+ * The purpose gate at send time (#405): a queued delivery can wait hours in the retry backoff, so
+ * consent is re-read for the canonical profile (following merges) immediately before the request.
+ * A missing profile (erased) also suppresses: nothing personal may leave after an erasure.
+ */
+async function purposeStillAllowed(tx: Tx, workspaceId: string, profileId: string, purpose: string): Promise<boolean> {
+  let id = profileId;
+  for (let i = 0; i < 20; i++) {
+    const [p] = await tx
+      .select({ mergedInto: schema.profiles.mergedInto })
+      .from(schema.profiles)
+      .where(and(eq(schema.profiles.workspaceId, workspaceId), eq(schema.profiles.id, id)));
+    if (!p) return false;
+    if (p.mergedInto) {
+      id = p.mergedInto;
+      continue;
+    }
+    const purposes = (await publishedSingleton(tx, 'purposes'))?.purposes ?? DEFAULT_PURPOSES;
+    const basis = purposes.find((x) => x.key === purpose)?.basis ?? 'consent';
+    const state = currentConsent(await consentStateOf(tx, workspaceId, id), purpose);
+    return purposeAllowed(basis, state?.status);
+  }
+  return false;
+}
+
 async function attempt(db: Db, d: Row, deps: DeliveryDeps): Promise<Outcome | 'later'> {
   const handler = deliveryHandlers.get(d.kind);
   if (handler) return handler(db, d, deps);
   if (d.kind === 'webhook') {
     const target = await db.withWorkspace(d.workspaceId, async (tx) => {
       const [e] = await tx.select().from(schema.webhookEndpoints).where(eq(schema.webhookEndpoints.id, d.targetId));
-      return e?.enabled ? { url: e.url, secret: await endpointSecret(tx, e, deps.kp) } : null;
+      if (!e?.enabled) return null;
+      if (e.purpose && d.profileId && !(await purposeStillAllowed(tx, d.workspaceId, d.profileId, e.purpose))) return 'cancelled' as const;
+      return { url: e.url, secret: await endpointSecret(tx, e, deps.kp) };
     });
+    if (target === 'cancelled')
+      return { ok: false, error: 'the endpoint purpose was refused before delivery', permanent: true, suppressed: 'consent' };
     if (!target) return { ok: false, error: 'the endpoint was deleted or disabled', permanent: true };
     const body = JSON.stringify(d.payload);
     const res = await safeRequest(target.url, { method: 'POST', headers: webhookHeaders(target.secret, d.id, body), body }, deps.egress);
@@ -113,6 +144,18 @@ async function handle(db: Db, d: Row, deps: DeliveryDeps) {
   if (out.ok) {
     await set({ status: 'done', statusCode: out.statusCode ?? null, response: out.response, error: null, finishedAt: new Date() });
     return wake(db, d, { ok: true, result: out.response });
+  }
+  if (out.suppressed) {
+    // The delivery is terminal, not retried: its payload never left, and retrying would only
+    // re-check the same refusal. `response` records why (the status vocabulary has no "cancelled").
+    await set({
+      status: 'dead',
+      statusCode: null,
+      response: { suppressed: out.suppressed },
+      error: out.error,
+      finishedAt: new Date(),
+    });
+    return;
   }
   const backoff = d.kind === 'action' ? (deps.actionBackoffMs ?? ACTION_BACKOFF) : (deps.webhookBackoffMs ?? WEBHOOK_BACKOFF);
   const last = out.permanent || d.attempts > backoff.length;

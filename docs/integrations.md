@@ -25,7 +25,7 @@ The same token works for MCP at `/mcp`. In n8n, use the **MCP Client Tool** with
 - **Customer events.** List event names (`"Order Completed"`, `"Segment Entered"`), `identify`/`page` for those calls, or `*` for everything.
 - **Journey webhook steps**, which send to an endpoint whatever their events setting.
 
-**Purpose.** Set `purpose` and only people for whom that purpose is allowed are sent. Journey steps check the journey's purpose.
+**Purpose.** Set `purpose` and only people for whom that purpose is allowed are sent. Journey steps check the journey's purpose. The gate is re-checked for the canonical person immediately before every attempt, not only when the delivery is queued: if the purpose was withdrawn (or the person was merged or erased) while a delivery waited in the retry backoff, the payload is never sent; the delivery ends `dead` with `response.suppressed: "consent"` and an explanatory error. Ping/test deliveries carry no profile and are not gated.
 
 **Payload** (Standard Webhooks; no e-mail addresses, phone numbers or other personal traits):
 ```json
@@ -44,7 +44,7 @@ const ok = sig.split(' ').includes(expected) && Math.abs(Date.now() / 1000 - ts)
 ```
 
 **Retries.**
-- A non-2xx answer or a timeout (10 s) is retried after 10 s, 1 min, 5 min, 30 min, 2 h, 6 h and 12 h, then the delivery is `dead`. A `410 Gone` gives up at once.
+- A non-2xx answer or a timeout (10 s) is retried after 10 s, 1 min, 5 min, 30 min, 2 h, 6 h and 12 h, then the delivery is `dead`. A `410 Gone` gives up at once. A delivery whose profile withdrew the endpoint's purpose is also terminal: it is `dead` with `response.suppressed: "consent"` and never sent.
 - `deliveries.list` shows every attempt. `deliveries.retry` sends a dead delivery again.
 - Each event's `webhook-id` stays the same across retries, so receivers can de-duplicate.
 
@@ -167,7 +167,7 @@ Cloning a workspace (for example staging → a new production workspace):
 | `events` | events with properties and context | incremental, from ClickHouse |
 | `message_events` | sends, deliveries, opens, clicks, bounces… | incremental, from ClickHouse |
 
-Personal traits stay behind: they are sealed per person and never exported. Erasures are exported too, so the warehouse can forget the same people.
+Personal traits stay behind: they are sealed per person and never exported. Event properties are filtered at ingest: top-level reserved personal keys (`email`, `phone`, `name`, `address`, …) and top-level properties the tracking plan marks `pii` are removed before an event reaches the store or this export, with or without a published plan. The filter inspects top-level property names only; it cannot recognise personal data in arbitrary free text or nested objects, and a tracking-plan `pii` flag covers only the property name it is declared on. `context` is exported as sent (traits removed, IP truncated), so keep personal fields out of it too. Redaction does not rewrite rows exported before 0.7.1: purge or re-export those destinations if they already received unfiltered properties. Erasures are exported too, so the warehouse can forget the same people.
 
 - **Postgres** (`kind: "postgres"`, `secrets: { url }`, `config: { schema }`): upserts into `am_*` tables with the workspace id in every key; snapshots are replaced in one transaction; erasures delete the person's rows (events through the exported ids) and are recorded in `am_erasures`.
 - **S3-compatible storage** (`kind: "s3"`, `config: { bucket, region, endpoint?, prefix }`, `secrets: { accessKeyId, secretAccessKey }`): gzipped NDJSON under `<prefix>/workspace=<id>/<dataset>/dt=<day>/` (snapshots under `snapshot=<run>/`, complete when `_complete.ndjson.gz` exists; erasures under `erasures/`). Load it with BigQuery (`bq load --source_format=NEWLINE_DELIMITED_JSON`, or an external table), Snowflake (an external stage and `COPY INTO … FILE_FORMAT = (TYPE = JSON)`), Redshift `COPY … FORMAT JSON 'auto'`, DuckDB or Spark. Endpoints for R2, GCS (interoperability) or MinIO take path-style requests. Apply the erasure files downstream.

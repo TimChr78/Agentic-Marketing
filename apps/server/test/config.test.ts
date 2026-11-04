@@ -43,6 +43,10 @@ describe('configuration', () => {
     expect(c.trustedProxyCidrs).toEqual(['127.0.0.1/32', '::1/128', '10.0.0.0/8']);
   });
 
+  it('defaults to an empty trusted proxy list so forwarding headers are ignored (#378)', () => {
+    expect(loadConfig(base).trustedProxyCidrs).toEqual([]);
+  });
+
   it('rejects an invalid TRUSTED_PROXY_CIDRS entry', () => {
     expect(() => loadConfig({ ...base, TRUSTED_PROXY_CIDRS: '127.0.0.1/32,not-a-cidr' })).toThrow('TRUSTED_PROXY_CIDRS');
   });

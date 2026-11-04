@@ -1,7 +1,10 @@
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import type { DecisionQuestion } from '@agentic-marketing/artifacts';
 import { describe, expect, it } from 'vitest';
 import { personalDataIn } from '../src/context';
 import {
+  assertStateAllowed,
   callSystemOne,
   checkDecisionLimits,
   DecisionError,
@@ -33,6 +36,9 @@ const score: DecisionQuestion = {
   instructions: 'How strong is the intent?',
   criteria: ['Low', 'Medium', 'High'],
 };
+
+/** The fake provider listens on loopback; the real egress guard allows it when asked to. */
+const local = { allowedHosts: ['127.0.0.1'] };
 
 describe('the System One request', () => {
   it('maps each typed question to the provider shape, keyed by the answer key', () => {
@@ -113,6 +119,71 @@ describe('the System One response', () => {
     );
   });
 
+  it('rejects out-of-range probabilities, confidences and distributions (#353)', () => {
+    const choiceAnswer = (over: Record<string, unknown>) => ({
+      model: 'x',
+      answers: { channel: { type: 'choice', choice: 'email', probabilities: { email: 0.7, sms: 0.3 }, ...over } },
+    });
+    expect(() => parseSystemOneAnswers([choice], choiceAnswer({ confidence: 5 }))).toThrow('confidence is outside 0–1');
+    expect(() => parseSystemOneAnswers([choice], choiceAnswer({ confidence: -1 }))).toThrow('confidence is outside 0–1');
+    expect(() =>
+      parseSystemOneAnswers([choice], {
+        model: 'x',
+        answers: { channel: { type: 'choice', choice: 'email', probabilities: { email: 1.7, sms: -0.7 } } },
+      }),
+    ).toThrow('probability for email is outside 0–1');
+  });
+
+  it('rejects prototype keys instead of returning a function-valued probability (#361)', () => {
+    for (const label of ['constructor', 'toString', '__proto__']) {
+      expect(() =>
+        parseSystemOneAnswers([choice], {
+          model: 'x',
+          answers: { channel: { type: 'choice', choice: label, probabilities: { email: 0.9, sms: 0.1 } } },
+        }),
+      ).toThrow('chose an unknown label');
+    }
+  });
+
+  it('returns ordinary probability records that Drizzle can serialise as JSONB', () => {
+    const r = parseSystemOneAnswers([choice], {
+      model: 'x',
+      answers: { channel: { type: 'choice', choice: 'email', probabilities: { email: 0.7, sms: 0.3 } } },
+    });
+    expect(Object.getPrototypeOf(r.answers[0].probabilities)).toBe(Object.prototype);
+    expect(Object.hasOwn(r.answers[0].probabilities, 'email')).toBe(true);
+  });
+
+  it('rejects negative, fractional or non-finite token usage instead of corrupting the budget', async () => {
+    const provider = (baseUrl: string): DecisionProvider => ({
+      providerId: 'aip_0123456789abcdef0123456789abcdef',
+      model: 'typesafe/jev',
+      baseUrl,
+      apiKey: 'sk-test',
+      allowPersonalData: false,
+    });
+    const negative = await fakeSystemOne(() => ({
+      answers: { propensity: { type: 'noul', noul: 0.91 } },
+      inputTokens: -100,
+      outputTokens: 9,
+    }));
+    try {
+      await expect(callSystemOne(provider(negative.baseUrl), 'hot', [noul], { egress: local })).rejects.toThrow('invalid input_tokens');
+    } finally {
+      await negative.close();
+    }
+    const fractional = await fakeSystemOne(() => ({
+      answers: { propensity: { type: 'noul', noul: 0.91 } },
+      inputTokens: 1.5,
+      outputTokens: 9,
+    }));
+    try {
+      await expect(callSystemOne(provider(fractional.baseUrl), 'hot', [noul], { egress: local })).rejects.toThrow('invalid input_tokens');
+    } finally {
+      await fractional.close();
+    }
+  });
+
   it('calls the same endpoint shape over HTTP and reads usage', async () => {
     const fake = await fakeSystemOne((r) => ({
       answers: { propensity: { type: 'noul', noul: r.state === 'hot' ? 0.91 : 0.12 } },
@@ -127,13 +198,52 @@ describe('the System One response', () => {
       allowPersonalData: false,
     };
     try {
-      const r = await callSystemOne(provider, 'hot', [noul]);
+      const r = await callSystemOne(provider, 'hot', [noul], { egress: local });
       expect(r).toMatchObject({ modelVersion: 'jev-test-1.0.0', inputTokens: 137, outputTokens: 9 });
       expect(r.answers[0].probability).toBe(0.91);
       expect(fake.requests[0]).toMatchObject({ model: 'typesafe/jev', apiKey: 'sk-test', state: 'hot' });
       expect(fake.requests[0].questions.propensity).toMatchObject({ type: 'noul' });
     } finally {
       await fake.close();
+    }
+  });
+
+  it('refuses a private target before any socket opens and never sends the API key', async () => {
+    const fake = await fakeSystemOne(() => ({ answers: { propensity: { type: 'noul', noul: 0.5 } } }));
+    const provider: DecisionProvider = {
+      providerId: 'aip_0123456789abcdef0123456789abcdef',
+      model: 'typesafe/jev',
+      // localhost is internal even though 127.0.0.1 is allowed below.
+      baseUrl: fake.url.replace('127.0.0.1', 'localhost'),
+      apiKey: 'sk-must-not-leave',
+      allowPersonalData: false,
+    };
+    try {
+      await expect(callSystemOne(provider, 'x', [noul], { egress: local })).rejects.toThrow(/localhost is an internal address/);
+      expect(fake.requests).toHaveLength(0);
+    } finally {
+      await fake.close();
+    }
+  });
+
+  it('aborts an oversized response at the reading bound', async () => {
+    const server = createServer((_req, res) => {
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ model: 'jev-test-1.0.0', answers: {}, padding: 'x'.repeat(64 * 1024) }));
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const provider: DecisionProvider = {
+      providerId: 'aip_0123456789abcdef0123456789abcdef',
+      model: 'typesafe/jev',
+      baseUrl: url,
+      apiKey: 'sk-test',
+      allowPersonalData: false,
+    };
+    try {
+      await expect(callSystemOne(provider, 'x', [noul], { egress: local, maxBytes: 1024 })).rejects.toThrow('response exceeds 1024 bytes');
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
     }
   });
 
@@ -147,7 +257,7 @@ describe('the System One response', () => {
       allowPersonalData: false,
     };
     try {
-      await expect(callSystemOne(provider, 'x', [noul])).rejects.toThrow('422: zero data retention is not available');
+      await expect(callSystemOne(provider, 'x', [noul], { egress: local })).rejects.toThrow('422: zero data retention is not available');
     } finally {
       await fake.close();
     }
@@ -160,6 +270,37 @@ describe('the personal-data guard', () => {
     expect(personalDataIn({ note: 'call +45 12 34 56 78' })).toBe('phone');
     expect(personalDataIn({ email: 'not-an-address' })).toBe('identifier');
     expect(personalDataIn({ traits: { plan: 'pro' }, segments: ['seg_1'], eventCounts: { page: 3 } })).toBeNull();
+  });
+
+  it('finds an e-mail nine or more levels down, where the old depth cap stopped (#352)', () => {
+    let deep: Record<string, unknown> = { email: 'ada@example.com' };
+    for (let i = 0; i < 12; i++) deep = { nested: deep };
+    expect(personalDataIn(deep)).toBe('identifier');
+    expect(personalDataIn({ a: { b: { c: { d: { e: { f: { g: { h: { i: { j: 'ada@example.com' } } } } } } } } } })).toBe('email');
+  });
+
+  it('sweeps the question text as well as the state', () => {
+    const provider = { allowPersonalData: false, model: 'typesafe/jev' };
+    expect(() => assertStateAllowed({ plan: 'pro' }, provider, [{ instructions: 'Write to ada@example.com' }])).toThrow(
+      'A question contains email data',
+    );
+    expect(() => assertStateAllowed({ note: 'ada@example.com' }, provider, [{ instructions: 'Safe' }])).toThrow(
+      'The state contains email data',
+    );
+    expect(() => assertStateAllowed({ plan: 'pro' }, provider, [{ instructions: 'Safe' }])).not.toThrow();
+    expect(() => assertStateAllowed({ email: 'ada@example.com' }, { allowPersonalData: true, model: 'typesafe/jev' }, [])).not.toThrow();
+  });
+
+  it('treats choice labels as text, so an ordinary email/sms choice passes', () => {
+    const provider = { allowPersonalData: false, model: 'typesafe/jev' };
+    // "email" and "sms" are channel labels, not the person's address.
+    expect(() => assertStateAllowed({ plan: 'pro' }, provider, [choice])).not.toThrow();
+    expect(() =>
+      assertStateAllowed({ plan: 'pro' }, provider, [{ ...choice, criteria: { email: 'E-mail', sms: 'ada@example.com' } }]),
+    ).toThrow('A question contains email data');
+    expect(() =>
+      assertStateAllowed({ plan: 'pro' }, provider, [{ ...choice, criteria: { 'ada@example.com': 'E-mail', sms: 'SMS' } }]),
+    ).toThrow('A question contains email data');
   });
 });
 

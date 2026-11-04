@@ -311,6 +311,9 @@ importers:
       '@agentic-marketing/events':
         specifier: workspace:*
         version: link:../events
+      '@agentic-marketing/integrations':
+        specifier: workspace:*
+        version: link:../integrations
       '@agentic-marketing/profiles':
         specifier: workspace:*
         version: link:../profiles

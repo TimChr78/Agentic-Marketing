@@ -52,7 +52,9 @@ async function newAccount(): Promise<User> {
 }
 
 beforeAll(async () => {
-  t = await startTestServer('test_pwreset', PORT);
+  // The test client connects over loopback and passes a distinct x-forwarded-for per call, so the
+  // loopback peer must be a trusted proxy for the per-IP buckets (#378 made the default ignore it).
+  t = await startTestServer('test_pwreset', PORT, { TRUSTED_PROXY_CIDRS: '127.0.0.1/32,::1/128' });
   owner = await t.signUp(`owner-${Date.now()}@example.com`);
   ws = await t.workspaceWith([[owner, 'owner']]);
 }, 90_000);

@@ -23,7 +23,7 @@ Rule: **Postgres and ClickHouse are sources of truth; Valkey is always rebuildab
   1. Authenticate source, rate-limit per key/IP.
   2. Validate against the **tracking plan** (optional strictness: `allow`, `warn`, `block` unknown events/properties).
   3. **Consent filter:** event carries consent state from the SDK/CMP; events for purposes the visitor has not allowed are dropped or reduced to strictly-necessary.
-  4. **PII handling:** properties tagged as PII in the tracking plan are encrypted (see crypto-shredding) or dropped per policy; IPs truncated/geolocated then discarded by default.
+  4. **PII handling:** top-level event properties marked PII in the tracking plan, and reserved personal property names (`email`, `phone`, `name`, `address`, …), are removed before the event is stored — with or without a published plan. Arbitrary free text and nested objects cannot be detected this way; keep personal data out of event properties. IPs are truncated/geolocated then discarded by default.
   5. Update **session state & real-time counters** in Valkey (so the decision API sees the event immediately).
   6. Publish to NATS JetStream subject `events.<workspace>.<type>` and ack.
 - **Async (workers):** bot filtering, geo/UA enrichment, ClickHouse sink (batched inserts ~1 s / 10k rows), identity & profile updates, segment & journey evaluation.

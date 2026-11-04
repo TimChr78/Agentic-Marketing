@@ -35,6 +35,45 @@ const PERSONAL_TRAITS = new Set([
 
 export type TraitClass = 'none' | 'personal' | 'sensitive' | 'drop';
 
+/**
+ * Segment reserved property names that are personal data. They are removed from every accepted
+ * event, with or without a tracking plan: the plan's own `pii` flag only adds to this list.
+ */
+const PERSONAL_PROPERTIES = new Set([
+  'email',
+  'email_address',
+  'phone',
+  'phone_number',
+  'name',
+  'full_name',
+  'firstName',
+  'lastName',
+  'first_name',
+  'last_name',
+  'address',
+  'street',
+  'streetAddress',
+  'street_address',
+  'postalCode',
+  'postal_code',
+  'zip',
+  'zipCode',
+  'zip_code',
+  'birthday',
+  'dateOfBirth',
+  'date_of_birth',
+  'username',
+  'avatar',
+  'ip',
+  'ipAddress',
+  'ip_address',
+]);
+
+/** Top-level reserved personal keys only: nested objects keep their metrics (e.g. products[].name). */
+function redactReservedProperties(properties: Record<string, unknown>) {
+  for (const key of Object.keys(properties)) if (PERSONAL_PROPERTIES.has(key)) delete properties[key];
+}
+
 export function traitClass(plan: TrackingPlan | null, name: string): TraitClass {
   const t = plan?.traits.find((x) => x.name === name);
   if (t) return t.pii;
@@ -110,6 +149,8 @@ export function processEvent(
         } else if (!typeOk(p.type, v)) problems.push(`"${p.name}" should be ${p.type}`);
         if (p.pii) delete properties[p.name];
       }
+      // Reserved personal keys are not "unknown" properties: they are removed, not a schema error.
+      redactReservedProperties(properties);
       const unknown = Object.keys(properties).filter((k) => !def.properties.some((p) => p.name === k));
       if (unknown.length && plan.unknownProperties !== 'allow') {
         const msg = `Properties not in the tracking plan for "${name}": ${unknown.join(', ')}`;
@@ -123,6 +164,9 @@ export function processEvent(
       }
     }
   }
+  // No plan (and unlisted events) get the same reserved-key removal: a track "Order Completed"
+  // with properties.email must not put a plaintext address in the event store and the warehouse.
+  if (!isConsentChange) redactReservedProperties(properties);
 
   const context: Record<string, unknown> = { ...(e.context ?? {}) };
   const traitSource = e.type === 'identify' ? e.traits : (context.traits as Record<string, unknown> | undefined);

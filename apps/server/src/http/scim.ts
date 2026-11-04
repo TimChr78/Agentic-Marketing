@@ -10,6 +10,7 @@ import {
 import type { Executor } from '@agentic-marketing/commands';
 import { AppError, newId } from '@agentic-marketing/core';
 import type { Db } from '@agentic-marketing/db';
+import { bodyLimit } from '@agentic-marketing/ingest';
 import { Hono } from 'hono';
 
 // SCIM 2.0 (RFC 7643, 7644) for identity providers: Users and Groups of one workspace, chosen by
@@ -25,6 +26,10 @@ const LIST = 'urn:ietf:params:scim:api:messages:2.0:ListResponse';
 const ERROR = 'urn:ietf:params:scim:api:messages:2.0:Error';
 const PATCH = 'urn:ietf:params:scim:api:messages:2.0:PatchOp';
 const TYPE = 'application/scim+json';
+
+// A User or Group resource is small; even a large group membership stays far below 1 MB. The limit
+// runs before the bearer token lookup and before the JSON is parsed.
+const SCIM_MAX_BODY = 1024 * 1024;
 
 // biome-ignore lint/suspicious/noExplicitAny: SCIM bodies are free-form JSON from the identity provider, read field by field
 type Json = Record<string, any>;
@@ -53,6 +58,12 @@ export function scimApi(deps: { auth: Auth; db: Db; executor: Executor; publicUr
   const reply = (body: unknown, status = 200) =>
     new Response(status === 204 ? null : JSON.stringify(body), { status, headers: { 'content-type': TYPE } });
 
+  app.use(
+    '/scim/v2/*',
+    bodyLimit(SCIM_MAX_BODY, () =>
+      reply({ schemas: [ERROR], status: '413', detail: `SCIM requests are limited to ${SCIM_MAX_BODY / (1024 * 1024)} MB.` }, 413),
+    ),
+  );
   app.use('/scim/v2/*', async (c, next) => {
     const token = c.req.header('authorization')?.match(/^Bearer (\S+)$/)?.[1];
     const ws = token ? await workspaceForScimToken(deps.db, token) : null;

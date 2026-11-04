@@ -119,7 +119,7 @@ The command writes one `ai_calls` row of kind `score` with the provider, model/v
 
 ## Scores, segments and journeys
 
-Scores live in `profile_scores`, one row per person and key (the newest value), with the value as a predicted probability in 0–1, confidence, the full distribution, model, model version, call id and `expires_at`. Expired scores are invisible to reads and segments.
+Scores live in `profile_scores`, one row per person and key (the newest value), with the value as a predicted probability in 0–1, confidence, the full distribution, model, model version, call id and `expires_at`. Expired scores are invisible to reads, segments and calibration; hourly retention deletes up to 5,000 expired scores per workspace per pass. Calibration uses only the latest, unexpired score per person and key, not a historical prediction archive.
 
 - `profiles.scores { profileId, key? }` returns the unexpired scores.
 - A segment condition can read one:
@@ -182,7 +182,7 @@ Decision calls use the same reservation and budget path as other providers: the 
 
 ## Calibration
 
-A decision model without calibration is a random number generator with confidence. `ai.calibration` compares stored predictions for one score key with a later event:
+A decision model without calibration is a random number generator with confidence. `ai.calibration` compares the latest unexpired predictions for one score key with a later event. `withinDays` is the outcome window after each prediction, not a promise of that much retained history. Set `store.ttlHours` longer than that window when planning a complete evaluation (for example, more than 336 hours for a 14-day window); the default seven-day TTL cannot support a complete 14-day evaluation. Expired or overwritten predictions are excluded consistently before and after retention runs:
 
 ```json
 POST /v1/ai.calibration

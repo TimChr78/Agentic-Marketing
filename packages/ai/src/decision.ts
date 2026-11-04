@@ -3,8 +3,10 @@ import { type DecisionQuestion, decisionQuestions, publishedSingleton } from '@a
 import type { Db, Tx } from '@agentic-marketing/db';
 import { schema } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
+import { type EgressPolicy, safeRequest } from '@agentic-marketing/integrations';
 import { type KeyProvider, openJson } from '@agentic-marketing/secrets';
-import { and, eq } from 'drizzle-orm';
+import { logger } from '@agentic-marketing/telemetry';
+import { and, eq, sql } from 'drizzle-orm';
 import { personalDataIn } from './context';
 import { AiUnavailable, estimateTokens, releaseTokens, reserveTokens } from './providers';
 
@@ -129,12 +131,34 @@ const number = (v: unknown, field: string): number => {
   return v;
 };
 
+/** A probability, confidence or distribution entry: finite and inside 0–1 (#353). */
+const probability = (v: unknown, field: string): number => {
+  const n = number(v, field);
+  if (n < 0 || n > 1) throw new DecisionError('invalid_response', `The ${field} is outside 0–1.`);
+  return n;
+};
+
 const distribution = (v: unknown): Record<string, number> => {
   if (!v || typeof v !== 'object' || Array.isArray(v))
     throw new DecisionError('invalid_response', 'The answer has no probabilities object.');
-  const out: Record<string, number> = {};
-  for (const [k, x] of Object.entries(v as Record<string, unknown>)) out[k] = number(x, `probability for ${k}`);
+  // A plain own-property record: Object.fromEntries creates own keys (even "__proto__") and stays
+  // an ordinary object, which Drizzle needs when it serialises the JSONB column. `Object.hasOwn`
+  // still keeps prototype names out of the choice-label lookup (#361).
+  const out = Object.fromEntries(
+    Object.entries(v as Record<string, unknown>).map(([k, x]) => [k, probability(x, `probability for ${k}`)]),
+  ) as Record<string, number>;
+  const total = Object.values(out).reduce((sum, x) => sum + x, 0);
+  if (Object.keys(out).length && Math.abs(total - 1) > 0.01)
+    logger.warn({ total, labels: Object.keys(out).length }, 'decision provider returned a probability distribution that does not sum to 1');
   return out;
+};
+
+/** A usage count: a finite, non-negative whole number. A provider cannot spend negative or fractional tokens. */
+const tokens = (v: unknown, field: string, fallback: number): number => {
+  if (v === undefined) return fallback;
+  if (typeof v !== 'number' || !Number.isFinite(v) || v < 0 || !Number.isInteger(v))
+    throw new DecisionError('invalid_response', `The usage has an invalid ${field}.`);
+  return v;
 };
 
 /** Normalises the provider's answers to the questions that were asked. */
@@ -150,20 +174,21 @@ export function parseSystemOneAnswers(questions: DecisionQuestion[], body: unkno
     if (a.type !== q.type)
       throw new DecisionError('invalid_response', `The answer for "${q.key}" is a ${String(a.type)}, not a ${q.type}.`);
     if (q.type === 'noul') {
-      const p = number(a.noul, 'noul');
-      if (p < 0 || p > 1) throw new DecisionError('invalid_response', `The answer for "${q.key}" is outside 0–1.`);
+      const p = probability(a.noul, `probability for "${q.key}"`);
       out.push({ key: q.key, type: 'noul', probability: p, probabilities: { true: p, false: 1 - p } });
     } else if (q.type === 'choice') {
       const label = String(a.choice ?? '');
       const probabilities = distribution(a.probabilities);
-      if (!(label in probabilities) || !(label in q.criteria))
+      // Own keys only: `label in object` walks Object.prototype, so "constructor" used to be
+      // accepted with a function-valued probability (#361).
+      if (!Object.hasOwn(probabilities, label) || !Object.hasOwn(q.criteria, label))
         throw new DecisionError('invalid_response', `The answer for "${q.key}" chose an unknown label.`);
       out.push({
         key: q.key,
         type: 'choice',
-        probability: probabilities[label] ?? 0,
+        probability: probabilities[label],
         label,
-        confidence: a.confidence === undefined ? undefined : number(a.confidence, 'confidence'),
+        confidence: a.confidence === undefined ? undefined : probability(a.confidence, 'confidence'),
         probabilities,
       });
     } else {
@@ -175,7 +200,7 @@ export function parseSystemOneAnswers(questions: DecisionQuestion[], body: unkno
         type: 'score',
         probability: top ? value / top : 0,
         value,
-        confidence: a.confidence === undefined ? undefined : number(a.confidence, 'confidence'),
+        confidence: a.confidence === undefined ? undefined : probability(a.confidence, 'confidence'),
         probabilities: distribution(a.probabilities),
       });
     }
@@ -218,14 +243,43 @@ export async function decisionProvider(tx: Tx, kp: KeyProvider, providerId?: str
   };
 }
 
-/** Refuses a state with personal data when the provider has no no-retention agreement. */
-export function assertStateAllowed(state: unknown, provider: Pick<DecisionProvider, 'allowPersonalData' | 'model'>) {
+/**
+ * The free text of each question: its key, instructions and criteria descriptions, plus the
+ * criteria labels. They are swept as plain strings, so a label such as "email" (a channel name)
+ * is not mistaken for the person's address, while an address written into a label or description
+ * is still refused.
+ */
+function questionTexts(questions: unknown): unknown[] {
+  if (!Array.isArray(questions)) return [];
+  return questions.flatMap((q) => {
+    if (!q || typeof q !== 'object') return [q];
+    const { key, instructions, criteria } = q as { key?: unknown; instructions?: unknown; criteria?: unknown };
+    const labels = Array.isArray(criteria)
+      ? criteria
+      : criteria && typeof criteria === 'object'
+        ? Object.entries(criteria as Record<string, unknown>).flatMap(([label, description]) => [label, description])
+        : [];
+    return [key, instructions, ...labels];
+  });
+}
+
+/**
+ * Refuses a request with personal data when the provider has no no-retention agreement. The sweep
+ * covers the whole request, state and question text alike (#352); it has no depth limit.
+ */
+export function assertStateAllowed(state: unknown, provider: Pick<DecisionProvider, 'allowPersonalData' | 'model'>, questions?: unknown) {
   if (provider.allowPersonalData) return;
   const found = personalDataIn(state);
   if (found)
     throw new DecisionError(
       'personal_data',
       `The state contains ${found} data, and decision model ${provider.model} has no zero-data-retention agreement. Send only non-personal traits, segment ids, event counts and context, or use a provider marked allowPersonalData under a no-retention agreement.`,
+    );
+  const inQuestions = personalDataIn(questionTexts(questions));
+  if (inQuestions)
+    throw new DecisionError(
+      'personal_data',
+      `A question contains ${inQuestions} data, and decision model ${provider.model} has no zero-data-retention agreement. Remove contact details from the question instructions and criteria, or use a provider marked allowPersonalData under a no-retention agreement.`,
     );
 }
 
@@ -234,29 +288,42 @@ export const stateHash = (state: unknown) =>
     .update(JSON.stringify(state ?? null))
     .digest('hex');
 
+/** The largest response a decision provider may send: enough for 100 typed answers. */
+export const MAX_RESPONSE_BYTES = 1024 * 1024;
+
 /** Sends one request. Never called with a real endpoint from tests. */
 export async function callSystemOne(
   provider: DecisionProvider,
   state: unknown,
   questions: DecisionQuestion[],
-  opts: { timeoutMs?: number } = {},
+  opts: { timeoutMs?: number; egress?: EgressPolicy; maxBytes?: number } = {},
 ): Promise<{ modelVersion: string; answers: DecisionAnswer[]; inputTokens: number; outputTokens: number }> {
   const body = systemOneRequest(provider.model, state, questions);
-  let res: Response;
+  assertStateAllowed(state, provider, questions);
+  const timeoutMs = opts.timeoutMs ?? 30_000;
+  let res: { status: number; body: string };
   try {
-    res = await fetch(systemOneUrl(provider.baseUrl), {
-      method: 'POST',
-      headers: { authorization: `Bearer ${provider.apiKey}`, 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(opts.timeoutMs ?? 30_000),
-    });
+    // The same egress guard as webhooks and connectors (#354): no redirects, no private target
+    // unless EGRESS_ALLOWED_HOSTS allows it, a total deadline and a bounded read. Without an
+    // explicit policy, private networks are refused (the server always passes its config).
+    res = await safeRequest(
+      systemOneUrl(provider.baseUrl),
+      {
+        method: 'POST',
+        headers: { authorization: `Bearer ${provider.apiKey}`, 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+        timeoutMs,
+        maxBytes: opts.maxBytes ?? MAX_RESPONSE_BYTES,
+      },
+      opts.egress ?? { allowedHosts: [] },
+    );
   } catch (err) {
-    if ((err as Error).name === 'TimeoutError' || (err as Error).name === 'AbortError')
-      throw new DecisionError('timeout', `The decision provider did not answer within ${opts.timeoutMs ?? 30_000} ms.`);
+    if ((err as Error).message.startsWith('timed out after'))
+      throw new DecisionError('timeout', `The decision provider did not answer within ${timeoutMs} ms.`);
     throw new DecisionError('provider_error', `The decision provider could not be reached: ${(err as Error).message}`);
   }
-  const text = await res.text();
-  if (!res.ok) {
+  const text = res.body;
+  if (res.status < 200 || res.status >= 300) {
     let detail = text.slice(0, 500);
     try {
       const parsed = JSON.parse(text) as { detail?: unknown };
@@ -277,8 +344,8 @@ export async function callSystemOne(
   return {
     modelVersion: parsed.model,
     answers: parsed.answers,
-    inputTokens: typeof usage.input_tokens === 'number' ? usage.input_tokens : estimateTokens(body, 0),
-    outputTokens: typeof usage.output_tokens === 'number' ? usage.output_tokens : 0,
+    inputTokens: tokens(usage.input_tokens, 'input_tokens', estimateTokens(body, 0)),
+    outputTokens: tokens(usage.output_tokens, 'output_tokens', 0),
   };
 }
 
@@ -292,7 +359,7 @@ export async function decisionCall(
   provider: DecisionProvider,
   state: unknown,
   questions: DecisionQuestion[],
-  opts: { timeoutMs?: number } = {},
+  opts: { timeoutMs?: number; egress?: EgressPolicy } = {},
 ): Promise<Omit<DecisionResult, 'providerId' | 'model'>> {
   const request = systemOneRequest(provider.model, state, questions);
   const reservation = await reserveTokens(db, workspaceId, provider.providerId, estimateTokens(request, 20 * questions.length + 50));
@@ -303,6 +370,58 @@ export async function decisionCall(
   } finally {
     await releaseTokens(db, workspaceId, reservation);
   }
+}
+
+/** Writes the newest value of a named score for a person, with its TTL, in the caller's transaction. */
+export async function insertProfileScore(
+  tx: Tx,
+  workspaceId: string,
+  score: {
+    profileId: string;
+    key: string;
+    answer: DecisionAnswer;
+    model: string;
+    modelVersion: string;
+    callId: string | null;
+    ttlHours: number;
+  },
+): Promise<Date | null> {
+  // Lock and recheck the profile in the score's own transaction. the existing erasure DELETE locks the profile
+  // before its foreign key cascades to profile_scores, so an erasure that got there first leaves no profile to lock
+  // and no score is written; an erasure that arrives later waits and then deletes this row.
+  const locked = await tx.execute<{ id: string }>(
+    sql`SELECT id FROM profiles WHERE workspace_id = ${workspaceId} AND id = ${score.profileId} FOR UPDATE`,
+  );
+  if (!locked.rows.length) return null;
+  const expiresAt = new Date(Date.now() + score.ttlHours * 3_600_000);
+  await tx
+    .insert(schema.profileScores)
+    .values({
+      workspaceId,
+      profileId: score.profileId,
+      key: score.key,
+      value: score.answer.probability,
+      confidence: score.answer.confidence ?? null,
+      probabilities: score.answer.probabilities,
+      model: score.model,
+      modelVersion: score.modelVersion,
+      callId: score.callId,
+      expiresAt,
+    })
+    .onConflictDoUpdate({
+      target: [schema.profileScores.workspaceId, schema.profileScores.profileId, schema.profileScores.key],
+      set: {
+        value: score.answer.probability,
+        confidence: score.answer.confidence ?? null,
+        probabilities: score.answer.probabilities,
+        model: score.model,
+        modelVersion: score.modelVersion,
+        callId: score.callId,
+        createdAt: new Date(),
+        expiresAt,
+      },
+    });
+  return expiresAt;
 }
 
 /** Writes the newest value of a named score for a person, with its TTL. */
@@ -319,37 +438,7 @@ export async function storeProfileScore(
     ttlHours: number;
   },
 ) {
-  const expiresAt = new Date(Date.now() + score.ttlHours * 3_600_000);
-  await db.withWorkspace(workspaceId, (tx) =>
-    tx
-      .insert(schema.profileScores)
-      .values({
-        workspaceId,
-        profileId: score.profileId,
-        key: score.key,
-        value: score.answer.probability,
-        confidence: score.answer.confidence ?? null,
-        probabilities: score.answer.probabilities,
-        model: score.model,
-        modelVersion: score.modelVersion,
-        callId: score.callId,
-        expiresAt,
-      })
-      .onConflictDoUpdate({
-        target: [schema.profileScores.workspaceId, schema.profileScores.profileId, schema.profileScores.key],
-        set: {
-          value: score.answer.probability,
-          confidence: score.answer.confidence ?? null,
-          probabilities: score.answer.probabilities,
-          model: score.model,
-          modelVersion: score.modelVersion,
-          callId: score.callId,
-          createdAt: new Date(),
-          expiresAt,
-        },
-      }),
-  );
-  return expiresAt;
+  return db.withWorkspace(workspaceId, (tx) => insertProfileScore(tx, workspaceId, score));
 }
 
 /**
@@ -371,9 +460,9 @@ export async function nonPersonalState(
   if (!p) return null;
   const plan = await publishedSingleton(tx, 'tracking_plan');
   const visible = new Set(plan?.traits.filter((t) => t.pii === 'none' && t.agentVisible).map((t) => t.name));
-  const traits = plan
-    ? Object.fromEntries(Object.entries(p.traits).filter(([k]) => visible.has(k)))
-    : (p.traits as Record<string, unknown>);
+  // Fail closed without a published plan (#357): an unlisted trait may be free text, a job title
+  // or a city, so it is not sent just because the plan has not been published yet.
+  const traits = plan ? Object.fromEntries(Object.entries(p.traits).filter(([k]) => visible.has(k))) : {};
   const segments = await tx
     .select({ id: schema.segmentMemberships.segmentId })
     .from(schema.segmentMemberships)

@@ -86,21 +86,20 @@ function proxyList(cidrs: string[]): BlockList {
  * ranges: that is the client as seen by the outermost trusted proxy. A proxy that appends to an
  * existing header (nginx's default `proxy_add_x_forwarded_for`) leaves client-supplied values on
  * the left, so the leftmost address is not trustworthy. If every address is trusted, use the
- * leftmost. With no proxy list configured (backward compatibility) the leftmost value is used; when
- * the socket peer is not a trusted proxy the header is ignored. Never returns a value that is not
- * an IP address.
+ * leftmost. With no proxy list configured the forwarding headers are ignored entirely and the
+ * socket peer is returned, so a caller cannot choose its own rate-limit or audit IP; set the ranges
+ * when a proxy sits in front. When the socket peer is not a trusted proxy the header is ignored
+ * too. Never returns a value that is not an IP address.
  */
 export function resolveClientIp(req: ClientIpRequest): string | undefined {
   const remote = normalizeIp(req.remoteAddress);
   const trusted = req.trustedProxyCidrs ?? [];
   const list = trusted.length ? proxyList(trusted) : undefined;
   const family = remote ? isIP(remote) : 0;
-  const proxyTrusted = !list || (remote !== undefined && list.check(remote, family === 6 ? 'ipv6' : 'ipv4'));
-
-  if (!proxyTrusted) return remote;
+  // An empty (or entirely malformed) list trusts no proxy, so a forwarding header is never read.
+  if (!list || remote === undefined || !list.check(remote, family === 6 ? 'ipv6' : 'ipv4')) return remote;
 
   const isTrusted = (ip: string): boolean => {
-    if (!list) return false;
     const ipFamily = isIP(ip);
     return list.check(ip, ipFamily === 6 ? 'ipv6' : 'ipv4');
   };
@@ -113,7 +112,6 @@ export function resolveClientIp(req: ClientIpRequest): string | undefined {
       .map((entry) => normalizeIp(entry))
       .filter((entry): entry is string => entry !== undefined);
     if (addresses.length === 0) continue;
-    if (!list) return addresses[0];
     for (let index = addresses.length - 1; index >= 0; index -= 1) {
       const ip = addresses[index];
       if (!isTrusted(ip)) return ip;

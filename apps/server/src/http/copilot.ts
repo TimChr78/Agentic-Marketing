@@ -4,13 +4,14 @@ import { type Auth, principalFromSession } from '@agentic-marketing/auth';
 import { agentPrincipal, type Executor, type Permission, ROLE_PERMISSIONS } from '@agentic-marketing/commands';
 import { AppError, newId } from '@agentic-marketing/core';
 import { type Db, type Role, schema, type Tx } from '@agentic-marketing/db';
+import { bodyLimit } from '@agentic-marketing/ingest';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { dynamicTool, isStepCount, jsonSchema, type ModelMessage, streamText } from 'ai';
 import { and, desc, eq } from 'drizzle-orm';
-import { Hono } from 'hono';
+import { type Context, Hono } from 'hono';
 import { z } from 'zod';
 import { VERSION } from '../version';
 import { mcpServerFor } from './mcp';
@@ -36,6 +37,12 @@ const SYSTEM = `You are the copilot of an agent-first marketing platform. You wo
 - Before building something, look at what exists (artifacts.list, artifacts.types, segments.preview, journeys.simulate). Validate and simulate before you request publishing.
 - Tool errors explain what to fix; fix the input and try again.
 - Answer briefly and concretely. Mention the ids of what you created or changed.`;
+
+// A message is at most 8,000 characters; 64 KB covers the JSON envelope with room to spare. The
+// limit runs before the session lookup and the body parse.
+const COPILOT_MAX_BODY = 64 * 1024;
+const COPILOT_TOO_LARGE = (c: Context) =>
+  c.json({ error: 'payload_too_large', message: `Copilot requests are limited to ${COPILOT_MAX_BODY / 1024} KB.` }, 413);
 
 const Body = z.object({
   message: z.string().min(1).max(8000),
@@ -120,7 +127,7 @@ async function agentForConversation(
 
 export function copilotApi(deps: { auth: Auth; db: Db; executor: Executor; kp: KeyProvider }) {
   const app = new Hono();
-  app.post('/api/copilot', async (c) => {
+  app.post('/api/copilot', bodyLimit(COPILOT_MAX_BODY, COPILOT_TOO_LARGE), async (c) => {
     const user = await principalFromSession(deps.auth, deps.db, c.req.raw.headers);
     if (!user) throw new AppError('unauthorized', 'Sign in first.');
     const parsed = Body.safeParse(await c.req.json().catch(() => ({})));

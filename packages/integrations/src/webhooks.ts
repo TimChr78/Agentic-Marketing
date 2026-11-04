@@ -203,7 +203,7 @@ export const listDeliveries = defineCommand({
   name: 'deliveries.list',
   title: 'Webhook and action deliveries',
   description:
-    'Recent deliveries to webhook endpoints and connector actions, newest first, with attempts, status codes and errors. `dead` ones gave up.',
+    'Recent deliveries to webhook endpoints and connector actions, newest first, with attempts, status codes and errors. `dead` ones gave up; a suppressed delivery records `response.suppressed` instead of sending the payload.',
   input: z.object({
     targetId: z.string().optional().describe('An endpoint (whk_…) or connection (con_…) id'),
     status: z.enum(['pending', 'running', 'done', 'failed', 'dead']).optional(),

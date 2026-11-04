@@ -1,6 +1,7 @@
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { sha256 } from '@agentic-marketing/ads';
+import { deliveryHandlers } from '@agentic-marketing/integrations';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { eventually, rejects, startTestServer, testPort, type User } from './harness';
 
@@ -220,6 +221,82 @@ describe('sending conversions', () => {
     await new Promise((r) => setTimeout(r, 2500));
     expect(received.length).toBe(before);
     expect((await t.api(owner).call('ads.conversions', {})).conversions.some((c) => c.value === 99)).toBe(false);
+  });
+
+  it('a standing ad_measurement refusal wins over a positive per-event consent signal', async () => {
+    const api = t.api(owner);
+    await ingest([
+      {
+        type: 'identify',
+        anonymousId: 'anon-refused',
+        traits: { email: 'refused@example.com' },
+        context: prefs({ ad_measurement: true }),
+      },
+    ]);
+    const { profileId } = await eventually(
+      () => api.call('profiles.find', { type: 'email', value: 'refused@example.com' }),
+      (r) => !!r.profileId,
+    );
+    await api.call('consent.record', { profileId: profileId!, purpose: 'ad_measurement', status: 'withdrawn' });
+
+    // The site's stale CMP still says yes; the ledger refusal must still stop the conversion.
+    const before = received.length;
+    await ingest([
+      {
+        type: 'track',
+        event: 'Order Completed',
+        anonymousId: 'anon-refused',
+        messageId: 'refused-order-1',
+        properties: { total: 321 },
+        context: prefs({ ad_measurement: true }),
+      },
+    ]);
+    await new Promise((r) => setTimeout(r, 2500));
+    expect(received.length).toBe(before);
+    expect((await api.call('ads.conversions', {})).conversions.some((c) => c.value === 321)).toBe(false);
+
+    // A delivery queued before the refusal (or by an older build) is re-checked at send time too.
+    const ws = (await t.srv.db.admin.query<{ workspace_id: string }>('SELECT workspace_id FROM profiles WHERE id = $1', [profileId!]))
+      .rows[0].workspace_id;
+    const handler = deliveryHandlers.get('ad_conversion')!;
+    const row = {
+      workspaceId: ws,
+      id: 'dlv_refused_send_1',
+      kind: 'ad_conversion',
+      targetId: ids.meta,
+      action: 'meta',
+      payload: {
+        eventId: 'refused-send-1',
+        name: 'Order Completed',
+        at: new Date().toISOString(),
+        value: 321,
+        currency: 'DKK',
+        profileId: profileId!,
+        destination: { eventName: 'Purchase' },
+      },
+      status: 'pending',
+      attempts: 1,
+      nextAttemptAt: new Date(),
+      leaseUntil: null,
+      idempotencyKey: 'refused-send-1',
+      statusCode: null,
+      response: null,
+      error: null,
+      durationMs: null,
+      participantId: null,
+      node: null,
+      seq: null,
+      profileId: profileId!,
+      createdAt: new Date(),
+      finishedAt: null,
+    };
+    const out = await handler(t.srv.db, row as never, {
+      kp: t.srv.keyProvider,
+      egress: t.srv.egress,
+      hot: t.srv.hot,
+    });
+    expect(out).toMatchObject({ ok: false, permanent: true, error: expect.stringContaining('refused') });
+    expect(received.length).toBe(before);
   });
 
   it('lists what was sent about a person in their data export', async () => {

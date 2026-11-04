@@ -37,7 +37,7 @@ The chart uses the released image, `ghcr.io/timchr78/agentic-marketing:<appVersi
 
 ## Client IP behind the Ingress
 
-The server rate-limits sign-in and public endpoints per client IP. Behind the Ingress the socket peer is the ingress controller, and the client IP arrives in a forwarding header. Set `config.TRUSTED_PROXY_CIDRS` to the ranges the app sees as its peer; the chart refuses to render with `ingress.enabled=true` and an empty list, because an empty list would trust a forwarding header from any client.
+The server rate-limits sign-in and public endpoints per client IP. Behind the Ingress the socket peer is the ingress controller, and the client IP arrives in a forwarding header. Set `config.TRUSTED_PROXY_CIDRS` to the ranges the app sees as its peer; the chart refuses to render with `ingress.enabled=true` and an empty list, because with an empty list the forwarding header is ignored, every client is seen as the ingress controller and per-client rate limits collapse into one shared bucket.
 
 `resolveClientIp` walks a multi-value header such as `x-forwarded-for` from right to left, skipping addresses inside `TRUSTED_PROXY_CIDRS`, and returns the first address outside them. An appending proxy (nginx's default `proxy_add_x_forwarded_for`) leaves a client-supplied prefix in place, so the rightmost untrusted address is the real client. A single-value header that the controller overwrites (`cf-connecting-ip`, `x-real-ip`) is used as-is.
 

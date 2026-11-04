@@ -732,7 +732,7 @@ export async function removeProfiles(
     .returning({ id: schema.consentRecords.id });
   await tx.delete(schema.profileMerges).where(inArray(schema.profileMerges.fromId, family));
   await tx.delete(schema.profileMerges).where(inArray(schema.profileMerges.intoId, family));
-  // Cascades to identifiers, profile keys (crypto-shredding) and consent state.
+  // Cascades to identifiers, profile keys (crypto-shredding), consent state and decision scores.
   await tx.delete(schema.profiles).where(inArray(schema.profiles.id, family));
   return { profiles: family.length, identifiers: ids.length, consentRecords: consent.length };
 }
