@@ -1,4 +1,5 @@
 export * from './data-keys';
+export * from './domains';
 export * from './erasures';
 export * from './migrate';
 export * from './pool';
@@ -45,5 +46,6 @@ export type {
   TopicStatus,
   VersionState,
   WarehouseDataset,
+  WorkspaceDomainStatus,
 } from './schema';
 export * as schema from './schema';

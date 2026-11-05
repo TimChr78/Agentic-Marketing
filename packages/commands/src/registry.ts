@@ -30,6 +30,13 @@ export interface Services {
   publicUrl?: string;
   /** Links host (PUBLIC_LINKS_URL), for shareable unsubscribe, form, web-version and archive URLs. */
   linksUrl?: string;
+  /**
+   * The links URL for one workspace: its primary brand domain, else `linksUrl` (#186). Wired by the
+   * server; commands that build links for a specific workspace use this instead of the global value.
+   */
+  linksUrlFor?: (workspaceId: string) => Promise<string>;
+  /** Drop the host-resolver cache after a domain write (#186). */
+  invalidateDomainCache?: () => void;
   /** Version of the running server, so command output can show it (workspace.get). */
   serverVersion: string;
   /** Whether unknown input keys are rejected rather than warned about (STRICT_INPUTS). */

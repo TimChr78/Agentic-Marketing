@@ -2,6 +2,12 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+### Added
+
+- Add a workspace domain registry (`workspace_domains`) and host resolver for multi-brand installs. A brand is a workspace, and each may register one or more public hostnames with an optional path prefix and one primary domain; the resolver picks the longest matching prefix across workspaces. `workspace.domains.list/add/update/remove` are people-only (`workspace:admin`) and audited, `workspace.get` reports a workspace's domains and effective `linksUrl`, and `am doctor` checks DNS, `/healthz` and TLS for every registered domain. `PUBLIC_LINKS_URL` remains the unchanged fallback for workspaces without a domain, and there is no SQL backfill (#186).
+
 ## [0.7.6] - 2026-11-05
 
 ### Fixed

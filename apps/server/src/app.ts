@@ -30,6 +30,7 @@ import { Hono } from 'hono';
 import { mandateGuardrailBreach } from './agents/guardrails';
 import { agentOutcomes } from './agents/report';
 import type { Config } from './config';
+import { createDomainService } from './domains';
 import { copilotApi } from './http/copilot';
 import { MCP_MAX_BODY, mcpEndpoint } from './http/mcp';
 import { metricsHandler } from './http/metrics';
@@ -51,6 +52,8 @@ const INVITATION_MAX_BODY = 8 * 1024;
 /** `overrides` exist for tests, e.g. a stub transport for Client ID Metadata Documents. */
 export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'> = {}) {
   const db = createDb({ adminUrl: config.adminDatabaseUrl, appUrl: config.appDatabaseUrl });
+  // Brand hostnames, read across workspaces before the session is known (#186).
+  const domains = createDomainService(db, config.linksUrl);
   const mcpEnabled = isMcpResourceUrlAllowed(config.publicUrl);
   if (!mcpEnabled) {
     logger.warn(
@@ -113,6 +116,8 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
     egress: config.egress,
     publicUrl: config.publicUrl,
     linksUrl: config.linksUrl,
+    linksUrlFor: (workspaceId) => domains.linksUrlFor(workspaceId),
+    invalidateDomainCache: () => domains.invalidate(),
     db,
     serverVersion: VERSION,
     strictInputs: config.strictInputs,
@@ -358,6 +363,7 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
     publicUrl: config.publicUrl,
     authSecret: config.authSecret,
     linksUrl: config.linksUrl,
+    domains,
     retention: config.retention,
     erasureGraceHours: config.erasureGraceHours,
     services,
