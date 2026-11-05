@@ -74,6 +74,10 @@ workspace switcher already separate brands; a domain only decides which workspac
 belongs to. One installation keeps **one admin host** (`PUBLIC_URL`) where people sign in and switch
 brand; each brand may have its own public links hostname.
 
+Data follows the same boundary: the same e-mail address can be two profiles, an unsubscribe or
+suppression applies only inside its brand, and erasure and export are repeated per brand. The full
+list is in [Multiple brands on one instance](architecture/security-and-privacy.md#7-multiple-brands-on-one-instance).
+
 ### Register a domain
 
 `workspace.domains.add/update/remove/verify/list` are people-only (`workspace:admin`) and audited. A

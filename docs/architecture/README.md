@@ -34,7 +34,7 @@ An open-source, self-hostable, **event-driven marketing platform built agent-fir
 | [journeys-and-editors.md](journeys-and-editors.md) | Journey engine, flow canvas, email editor, versioning & approvals |
 | [channels-and-personalization.md](channels-and-personalization.md) | Send gateway, channel adapters, web personalization / decision API, integrations |
 | [agents-and-mcp.md](agents-and-mcp.md) | Command registry, MCP server, LLM gateway (BYOK), AI journey steps, guardrails |
-| [security-and-privacy.md](security-and-privacy.md) | GDPR, consent & legitimate interest, encryption, erasure, authz, threat model |
+| [security-and-privacy.md](security-and-privacy.md) | GDPR, consent & legitimate interest, encryption, erasure, multi-brand data boundaries, authz, threat model |
 | [analytics-and-reporting.md](analytics-and-reporting.md) | Built-in marketing analytics, BI access, forwarding to Umami / Matomo / PostHog |
 | [tech-stack.md](tech-stack.md) | Technology selection matrix with alternatives and licenses |
 | [deployment-and-scaling.md](deployment-and-scaling.md) | Self-host topology, scaling path to 10M profiles and multi-tenant SaaS |

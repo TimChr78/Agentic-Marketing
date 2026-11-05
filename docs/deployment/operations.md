@@ -240,6 +240,10 @@ live data. The full procedure, names and manifest are in [Backups and restore](b
   keep their pseudonymous ids and non-personal properties, but the profile key that sealed their
   personal data is deleted by the replay, so that data stays unreadable. Take a `--clickhouse`
   backup after erasures when the DSR procedure requires removing event rows too.
+- **Repeat per brand.** A brand is a workspace, so an erasure, export or suppression applies to one
+  brand only. A request that covers several brands must run `profiles.erase` and `profiles.export`
+  in each one; the export names its workspace in `workspaceId`. See
+  [Multiple brands on one instance](../architecture/security-and-privacy.md#7-multiple-brands-on-one-instance).
 - **Keep `.env` apart.** Backups do not include `MASTER_KEY`; without it the restored secrets and
   personal data cannot be decrypted.
 
