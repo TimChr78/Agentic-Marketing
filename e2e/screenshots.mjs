@@ -33,6 +33,7 @@ const find = async (type, name) => (await list(type)).find((a) => a.name === nam
 const approvals = (await api(ctx.request, 'approvals.list', {})).approvals;
 const apr = (t) => approvals.find((a) => a.artifactType === t)?.id;
 const tokens = (await api(ctx.request, 'apiTokens.list', {})).tokens;
+const agents = (await api(ctx.request, 'agents.list', {})).agents;
 
 const pages = [
   ['signin', '/', { signedOut: true }],
@@ -60,6 +61,7 @@ const pages = [
   ['people', '/audience/people'],
   ['consent', '/audience/consent'],
   ['imports', '/audience/imports'],
+  ['analytics', '/insights/analytics'],
   ['messages', '/insights/messages'],
   ['deliverability', '/insights/deliverability'],
   ['journey-stats', '/insights/journeys'],
@@ -71,6 +73,8 @@ const pages = [
   ['users', '/settings/users'],
   ['approval-policy', '/settings/approval-policy'],
   ['purposes', '/settings/purposes'],
+  ['agents', '/settings/agents'],
+  ['agent', `/settings/agents/${agents[0]?.id ?? ''}`],
   ['workspace', '/settings/workspace'],
   ['preferences', '/settings/preferences'],
 ];

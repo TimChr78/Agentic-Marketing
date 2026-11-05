@@ -104,10 +104,10 @@ export function Overview() {
                   {
                     type: 'line',
                     data: daily.map((d) => d.revenue),
-                    smooth: true,
-                    symbol: 'none',
-                    lineStyle: { color: c.accent, width: 2 },
-                    areaStyle: { color: c.accent, opacity: 0.12 },
+                    smooth: false,
+                    showSymbol: false,
+                    lineStyle: { color: c.viz[1], width: 2 },
+                    areaStyle: { color: c.viz[1], opacity: 0.08 },
                   },
                 ],
               })}

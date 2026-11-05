@@ -2,15 +2,22 @@ import type { EChartsOption } from 'echarts';
 import { lazy, Suspense } from 'react';
 import { LoadingBlock } from '../ui';
 
+/**
+ * Colours read from the v2 tokens: neutral chrome, categorical `viz` series, and the sequential /
+ * `seq` and diverging `div` ramps. There is no agent colour: an agent is an identity (bot icon and
+ * label), never a chart series or status colour.
+ */
 export type ChartColors = {
   fg: string;
+  fg2: string;
   muted: string;
   line: string;
-  accent: string;
-  agent: string;
-  good: string;
-  bad: string;
+  control: string;
   surface: string;
+  accent: string;
+  viz: string[];
+  seq: string[];
+  div: string[];
 };
 
 export type ChartProps = { option: (c: ChartColors) => EChartsOption; height?: number; deps?: unknown[] };

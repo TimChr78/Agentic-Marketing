@@ -1,4 +1,5 @@
 export * from './Button';
+export * from './charts';
 export * from './code';
 export * from './cx';
 export * from './DateTimeInput';

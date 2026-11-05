@@ -53,10 +53,10 @@ export function Analytics() {
                     name: 'Click rate',
                     type: 'line',
                     yAxisIndex: 1,
-                    smooth: true,
-                    symbol: 'none',
+                    smooth: false,
+                    showSymbol: false,
                     data: daily.map((d) => +((d.clicks / d.sent) * 100).toFixed(2)),
-                    lineStyle: { color: c.accent, width: 2 },
+                    lineStyle: { color: c.viz[1], width: 2 },
                   },
                 ],
               })}
@@ -101,7 +101,7 @@ export function Analytics() {
                     type: 'bar',
                     data: steps.map((s) => ({
                       value: s.stats!.entered,
-                      itemStyle: { color: s.kind.startsWith('ai') ? c.agent : s.kind === 'goal' ? c.good : c.accent },
+                      itemStyle: { color: s.kind.startsWith('ai') ? c.viz[3] : s.kind === 'goal' ? c.viz[1] : c.viz[0] },
                     })),
                     label: {
                       show: true,
