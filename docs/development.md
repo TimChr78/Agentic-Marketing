@@ -204,7 +204,7 @@ See [integrations.md](integrations.md) for API tokens, webhooks, connectors and 
 
 ### Members
 
-Owners and admins invite people with `members.invite` (UI, REST or the typed client; agents cannot). The response holds a one-time link, `<PUBLIC_URL>/invite#<token>`, valid for 7 days. Send it to the person; they sign in or create an account with the invited e-mail address and join with the invited role. Only owners can make or change owners, and the last owner can be neither demoted nor removed. `workspace.memberships` lists the workspaces a signed-in person belongs to with their role; REST clients switch by sending `X-Workspace-Id: <workspace id>` on later calls (the admin UI keeps the choice).
+Owners and admins invite people with `members.invite` (UI, REST or the typed client; agents cannot). The response holds a one-time link, `<PUBLIC_URL>/invite#<token>`, valid for 7 days. Send it to the person; they sign in or create an account with the invited e-mail address and join with the invited role. Only owners can make or change owners, and the last owner can be neither demoted nor removed. `workspace.memberships` lists the workspaces a signed-in person belongs to with their role; REST clients switch by sending `X-Workspace-Id: <workspace id>` on later calls (the admin UI keeps the choice). A token or OAuth connection is bound to one workspace and sees only that one; the header is refused for it (#187).
 
 ### Rotating the master key
 

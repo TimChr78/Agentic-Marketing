@@ -2,6 +2,16 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+### Added
+
+- API tokens and OAuth/MCP connections are bound to one brand (workspace). The consent page lets a person with several memberships choose the brand, and the grant carries it; the token UI shows the brand and offers a brand selector when creating a token; `workspace.memberships` returns only the bound brand to a credential, and its audit entries record both the token id and the workspace (#187).
+
+### Fixed
+
+- `X-Workspace-Id` no longer affects a token or OAuth connection: a request that sends a different workspace is refused with `403` instead of silently acting in it, so a credential for one brand cannot read or write another (#187).
+
 ## [0.7.6] - 2026-11-05
 
 ### Fixed
