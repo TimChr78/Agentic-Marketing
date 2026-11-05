@@ -88,7 +88,39 @@ export function quietUntil(now: Date, window: { start: string; end: string }, ti
   // the end changes the elapsed real time. The end is today when it is still ahead today (also
   // for the after-midnight part of an overnight window), otherwise tomorrow.
   const date = new Date(Date.UTC(p.y, p.m - 1, p.d) + (t < e ? 0 : DAY));
-  const until = wallClockEnd(date.getUTCFullYear(), date.getUTCMonth() + 1, date.getUTCDate(), e, timeZone, now);
+  let until = wallClockEnd(date.getUTCFullYear(), date.getUTCMonth() + 1, date.getUTCDate(), e, timeZone, now);
+  const quietAt = (at: Date) => {
+    const p = zonedParts(at, timeZone);
+    const minute = p.h * 60 + p.min;
+    return s <= e ? minute >= s && minute < e : minute >= s || minute < e;
+  };
+  // A clock rollback can cross the START backwards, leaving quiet hours before the end
+  // reading occurs (01:45 -> 01:00 in a 01:30–02:30 window). Inspect intervening offset
+  // transitions as well as the nominal end, in bounded six-hour brackets.
+  let at = Math.floor(now.getTime() / MINUTE) * MINUTE;
+  let offset = offsetMinutes(new Date(at), timeZone);
+  while (at < until.getTime()) {
+    const stop = Math.min(at + 6 * 3_600_000, until.getTime());
+    const nextOffset = offsetMinutes(new Date(stop), timeZone);
+    if (nextOffset !== offset) {
+      let lo = at;
+      let hi = stop;
+      while (hi - lo > MINUTE) {
+        const mid = lo + Math.floor((hi - lo) / 2 / MINUTE) * MINUTE;
+        if (offsetMinutes(new Date(mid), timeZone) === offset) lo = mid;
+        else hi = mid;
+      }
+      if (!quietAt(new Date(hi))) {
+        until = new Date(hi);
+        break;
+      }
+      at = hi;
+      offset = offsetMinutes(new Date(at), timeZone);
+    } else at = stop;
+  }
+  // A date-line jump can skip the entire local end date and land inside the next quiet
+  // window. Continue to that window's end rather than returning an instant still quiet.
+  if (until.getTime() > now.getTime() && quietAt(until)) return quietUntil(until, window, timeZone);
   return new Date(Math.ceil(until.getTime() / MINUTE) * MINUTE);
 }
 

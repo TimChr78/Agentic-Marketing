@@ -62,6 +62,22 @@ describe('quiet hours across daylight-saving transitions', () => {
     );
   });
 
+  it('ends when a rollback crosses the start backwards, before the nominal end', () => {
+    expect(iso(quietUntil(new Date('2026-11-01T05:45:00Z'), { start: '01:30', end: '02:30' }, 'America/New_York'))).toBe(
+      '2026-11-01T06:00:00.000Z',
+    );
+    expect(iso(quietUntil(new Date('2026-11-01T05:45:00Z'), { start: '01:30', end: '01:00' }, 'America/New_York'))).toBe(
+      '2026-11-01T06:00:00.000Z',
+    );
+    expect(iso(quietUntil(new Date('2026-04-04T14:50:00Z'), { start: '01:45', end: '02:30' }, 'Australia/Lord_Howe'))).toBe(
+      '2026-04-04T15:00:00.000Z',
+    );
+  });
+
+  it('does not end inside quiet hours when a date-line jump skips the end date', () => {
+    expect(iso(quietUntil(new Date('2011-12-30T09:00:00Z'), overnight, 'Pacific/Apia'))).toBe('2011-12-30T18:00:00.000Z');
+  });
+
   it('uses the same wall-clock end in a zone without daylight saving', () => {
     // 05:00 JST on 2026-03-09 -> 08:00 JST = 2026-03-08T23:00Z.
     expect(iso(quietUntil(new Date('2026-03-08T20:00:00Z'), overnight, 'Asia/Tokyo'))).toBe('2026-03-08T23:00:00.000Z');

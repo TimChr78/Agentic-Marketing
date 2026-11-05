@@ -18,6 +18,11 @@ describe('#367 quiet hours resolve the real window end across a DST transition',
     const until = quietUntil(new Date('2026-03-08T06:30:00Z'), { start: '22:00', end: '08:00' }, 'America/New_York');
     expect(until?.toISOString()).toBe('2026-03-08T12:00:00.000Z');
   });
+  it('ends a short quiet interval when fall-back crosses its start backwards', () => {
+    expect(quietUntil(new Date('2026-11-01T05:45:00Z'), { start: '01:30', end: '02:30' }, 'America/New_York')?.toISOString()).toBe(
+      '2026-11-01T06:00:00.000Z',
+    );
+  });
 });
 
 describe('#406 the production e-mail chain no longer uses the unpatched deepmerge', () => {
