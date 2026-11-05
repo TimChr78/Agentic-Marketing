@@ -24,7 +24,7 @@
     "aws4fetch": "1.0.20",
     "drizzle-orm": "0.45.4",
     "hono": "4.13.13",
-    "html-to-text": "9.0.5",
+    "html-to-text": "10.0.1",
     "htmlparser2": "9.1.0",
     "liquidjs": "10.30.0",
     "mjml": "5.4.1",
