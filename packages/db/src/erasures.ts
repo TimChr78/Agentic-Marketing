@@ -15,6 +15,14 @@ export interface ErasureRecord {
   reason: string;
   counts: Record<string, number>;
   at: string;
+  /**
+   * User and anonymous ids the live database had captured when the erasure was recorded (#373).
+   * Absent when the live log predates warehouse key tracking, so absence must not be read as a
+   * known zero. Replay keeps the larger of this count and the keys it recaptures from the restored
+   * snapshot, so later key pruning is never mistaken for a person who never had event-capable ids
+   * (#421).
+   */
+  warehouseKeyCount?: number;
 }
 
 export interface ErasureTombstoneRecord {
@@ -64,6 +72,15 @@ async function hasTable(client: pg.Client, name: string): Promise<boolean> {
   return rows.length > 0;
 }
 
+async function hasColumn(client: pg.Client, table: string, column: string): Promise<boolean> {
+  const { rows } = await client.query(
+    `SELECT 1 FROM information_schema.columns
+     WHERE table_schema = 'public' AND table_name = $1 AND column_name = $2`,
+    [table, column],
+  );
+  return rows.length > 0;
+}
+
 const iso = (value: Date | string) => new Date(value).toISOString();
 
 /**
@@ -73,7 +90,18 @@ const iso = (value: Date | string) => new Date(value).toISOString();
  */
 export async function readErasureLog(databaseUrl: string): Promise<ErasureLog> {
   return withClient(databaseUrl, async (client) => {
-    const erasures = (await hasTable(client, 'erasures'))
+    const erasuresTable = await hasTable(client, 'erasures');
+    const erasuresHaveKeyCount = erasuresTable && (await hasColumn(client, 'erasures', 'warehouse_key_count'));
+    const keysPresent = erasuresHaveKeyCount && (await hasTable(client, 'warehouse_erasure_keys'));
+    // A pre-0068 erasure was given the column's default of zero by the migration, not by a real
+    // capture. Reading the tracking start lets the log tell that unknown legacy coverage apart from
+    // a known zero, so replay does not turn "we cannot know" into "there was nothing" (#421).
+    let trackingSince: string | undefined;
+    if (erasuresHaveKeyCount && (await hasTable(client, 'warehouse_erasure_key_tracking'))) {
+      const { rows } = await client.query<{ since: Date | string }>('SELECT since FROM warehouse_erasure_key_tracking LIMIT 1');
+      if (rows[0]) trackingSince = iso(rows[0].since);
+    }
+    const erasures = erasuresTable
       ? (
           await client.query<{
             workspace_id: string;
@@ -83,16 +111,40 @@ export async function readErasureLog(databaseUrl: string): Promise<ErasureLog> {
             reason: string;
             counts: Record<string, number>;
             at: Date | string;
-          }>('SELECT workspace_id, id, profile_ids, requested_by, reason, counts, at FROM erasures')
-        ).rows.map((row) => ({
-          workspaceId: row.workspace_id,
-          id: row.id,
-          profileIds: row.profile_ids,
-          requestedBy: row.requested_by,
-          reason: row.reason,
-          counts: row.counts,
-          at: iso(row.at),
-        }))
+            warehouse_key_count?: number | string | null;
+          }>(
+            `SELECT workspace_id, id, profile_ids, requested_by, reason, counts, at${
+              erasuresHaveKeyCount
+                ? keysPresent
+                  ? `, CASE WHEN warehouse_key_count = 0 THEN GREATEST(warehouse_key_count,
+                (SELECT count(*)::integer FROM warehouse_erasure_keys k WHERE k.workspace_id = e.workspace_id
+                 AND k.profile_id = ANY(e.profile_ids))) ELSE warehouse_key_count END AS warehouse_key_count`
+                  : ', warehouse_key_count'
+                : ''
+            } FROM erasures e`,
+          )
+        ).rows.map((row) => {
+          const at = iso(row.at);
+          const known =
+            erasuresHaveKeyCount &&
+            row.warehouse_key_count !== undefined &&
+            row.warehouse_key_count !== null &&
+            Number(row.warehouse_key_count) >= 0 &&
+            trackingSince !== undefined &&
+            Date.parse(at) >= Date.parse(trackingSince)
+              ? Number(row.warehouse_key_count)
+              : undefined;
+          return {
+            workspaceId: row.workspace_id,
+            id: row.id,
+            profileIds: row.profile_ids,
+            requestedBy: row.requested_by,
+            reason: row.reason,
+            counts: row.counts,
+            at,
+            ...(known === undefined ? {} : { warehouseKeyCount: known }),
+          };
+        })
       : [];
     const tombstones = (await hasTable(client, 'erasure_tombstones'))
       ? (
@@ -166,6 +218,8 @@ export async function replayErasures(
   return withClient(databaseUrl, async (client) => {
     const workspaces = new Set((await client.query<{ id: string }>('SELECT id FROM workspaces')).rows.map((row) => row.id));
     const erasuresTable = await hasTable(client, 'erasures');
+    const erasuresHaveKeyCount = erasuresTable && (await hasColumn(client, 'erasures', 'warehouse_key_count'));
+    const erasureKeysTable = erasuresHaveKeyCount && (await hasTable(client, 'warehouse_erasure_keys'));
     const tombstonesTable = await hasTable(client, 'erasure_tombstones');
     if (log.tombstones.length && !tombstonesTable)
       opts.log?.('warning: the restored database predates erasure_tombstones; only profiles and suppression hashes are replayed');
@@ -201,6 +255,37 @@ export async function replayErasures(
               [workspaceId, erasure.id, erasure.profileIds, erasure.requestedBy, erasure.reason, erasure.counts, erasure.at],
             );
           result.profiles += await eraseFamily(client, workspaceId, erasure.profileIds);
+          // The erasure row was inserted before eraseFamily (the snapshot still held the person),
+          // so its AFTER INSERT trigger counted zero. eraseFamily has now deleted the identifiers
+          // and the capture trigger has stored their user/anonymous ids. Reconcile the count with
+          // both those keys and the count the live log recorded: deleting restored identifiers must
+          // never turn a known positive count into zero, and a later prune must not look like a
+          // person who never had event-capable ids (#421).
+          // -1 preserves unknown legacy coverage without changing the released integer column.
+          if (erasuresHaveKeyCount) {
+            const known = erasure.warehouseKeyCount !== undefined && erasure.warehouseKeyCount >= 0 ? erasure.warehouseKeyCount : undefined;
+            if (erasureKeysTable) {
+              await client.query(
+                `WITH captured AS (
+                   SELECT count(*)::integer AS n FROM warehouse_erasure_keys k
+                    WHERE k.workspace_id = $1 AND k.profile_id = ANY($2::text[])
+                 )
+                 UPDATE erasures e SET warehouse_key_count = CASE
+                   WHEN $3::integer IS NULL AND e.warehouse_key_count <= 0 AND captured.n = 0 THEN -1
+                   ELSE GREATEST(e.warehouse_key_count, COALESCE($3::integer, 0), captured.n)
+                 END FROM captured WHERE e.workspace_id = $1 AND e.id = $4`,
+                [workspaceId, erasure.profileIds, known ?? null, erasure.id],
+              );
+            } else {
+              await client.query(
+                `UPDATE erasures SET warehouse_key_count = CASE
+                   WHEN $3::integer IS NULL AND warehouse_key_count <= 0 THEN -1
+                   ELSE GREATEST(warehouse_key_count, COALESCE($3::integer, 0))
+                 END WHERE workspace_id = $1 AND id = $2`,
+                [workspaceId, erasure.id, known ?? null],
+              );
+            }
+          }
           result.erasures += 1;
         }
         for (const tombstone of entries.tombstones) {
