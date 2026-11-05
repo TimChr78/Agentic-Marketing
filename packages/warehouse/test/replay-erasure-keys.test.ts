@@ -254,6 +254,53 @@ describe.skipIf(!hasTestDatabase())('restore erasure replay and warehouse keys (
     expect(legacyErasures[0]!.uncovered).toEqual(['events']);
   });
 
+  it('preserves unknown legacy coverage after the restored tracking epoch and repeated replay', async () => {
+    const ws = await addWorkspace(d);
+    await addExport(d, ws, 'wh_a', true);
+    await addExport(d, ws, 'wh_b', false);
+    // A newer backup may have no person left to recapture; an older-format live log has no count.
+    const legacy: ErasureLog = {
+      erasures: [
+        {
+          workspaceId: ws,
+          id: 'era_newer_snapshot',
+          profileIds: ['prf_not_in_snapshot'],
+          requestedBy: 'tester',
+          reason: 'legacy count unknown',
+          counts: {},
+          at: new Date().toISOString(),
+        },
+      ],
+      tombstones: [],
+    };
+    await replayErasures(d.url.toString(), legacy);
+    expect(await countFor(d, ws)).toBe(-1);
+    const roundTrip = await logFor(d, 'era_newer_snapshot');
+    expect(roundTrip.erasures[0]?.warehouseKeyCount).toBeUndefined();
+    await replayErasures(d.url.toString(), roundTrip);
+    expect(await countFor(d, ws)).toBe(-1);
+    await d.db.admin.query(
+      `UPDATE warehouse_exports SET cursors = jsonb_build_object('erasures', (now() + interval '1 minute')::text)
+      WHERE workspace_id = $1 AND id = 'wh_a'`,
+      [ws],
+    );
+    await pruneErasureKeys(appDb, ws);
+    await d.db.admin.query(`UPDATE warehouse_exports SET enabled = true WHERE workspace_id = $1 AND id = 'wh_b'`, [ws]);
+    const events = await erasuresForExport(appDb, ws, EPOCH, new Date(Date.now() + 3_600_000).toISOString(), ['events'], EPOCH);
+    expect(events[0]!.identifiers).toEqual([]);
+    expect(events[0]!.uncovered).toEqual(['events']);
+  });
+
+  it('recovers an old replay zero while its captured keys still exist', async () => {
+    const ws = await addWorkspace(d);
+    await addExport(d, ws, 'wh_a', true);
+    await seedPerson(d, ws, 'prf_old_replay_zero', ['user_id', 'anonymous_id']);
+    await liveErase(d, ws, 'prf_old_replay_zero', 'era_old_replay_zero');
+    await d.db.admin.query('UPDATE erasures SET warehouse_key_count = 0 WHERE workspace_id = $1', [ws]);
+    const log = await logFor(d, 'era_old_replay_zero');
+    expect(log.erasures[0]?.warehouseKeyCount).toBe(2);
+  });
+
   it('reads a pre-tracking erasure on a migrated database as unknown rather than zero', async () => {
     const ws = await addWorkspace(d);
     const { rows: tracking } = await d.db.admin.query<{ since: Date }>('SELECT since FROM warehouse_erasure_key_tracking LIMIT 1');

@@ -92,6 +92,7 @@ export async function readErasureLog(databaseUrl: string): Promise<ErasureLog> {
   return withClient(databaseUrl, async (client) => {
     const erasuresTable = await hasTable(client, 'erasures');
     const erasuresHaveKeyCount = erasuresTable && (await hasColumn(client, 'erasures', 'warehouse_key_count'));
+    const keysPresent = erasuresHaveKeyCount && (await hasTable(client, 'warehouse_erasure_keys'));
     // A pre-0068 erasure was given the column's default of zero by the migration, not by a real
     // capture. Reading the tracking start lets the log tell that unknown legacy coverage apart from
     // a known zero, so replay does not turn "we cannot know" into "there was nothing" (#421).
@@ -113,8 +114,14 @@ export async function readErasureLog(databaseUrl: string): Promise<ErasureLog> {
             warehouse_key_count?: number | string | null;
           }>(
             `SELECT workspace_id, id, profile_ids, requested_by, reason, counts, at${
-              erasuresHaveKeyCount ? ', warehouse_key_count' : ''
-            } FROM erasures`,
+              erasuresHaveKeyCount
+                ? keysPresent
+                  ? `, CASE WHEN warehouse_key_count = 0 THEN GREATEST(warehouse_key_count,
+                (SELECT count(*)::integer FROM warehouse_erasure_keys k WHERE k.workspace_id = e.workspace_id
+                 AND k.profile_id = ANY(e.profile_ids))) ELSE warehouse_key_count END AS warehouse_key_count`
+                  : ', warehouse_key_count'
+                : ''
+            } FROM erasures e`,
           )
         ).rows.map((row) => {
           const at = iso(row.at);
@@ -122,6 +129,7 @@ export async function readErasureLog(databaseUrl: string): Promise<ErasureLog> {
             erasuresHaveKeyCount &&
             row.warehouse_key_count !== undefined &&
             row.warehouse_key_count !== null &&
+            Number(row.warehouse_key_count) >= 0 &&
             trackingSince !== undefined &&
             Date.parse(at) >= Date.parse(trackingSince)
               ? Number(row.warehouse_key_count)
@@ -253,23 +261,28 @@ export async function replayErasures(
           // both those keys and the count the live log recorded: deleting restored identifiers must
           // never turn a known positive count into zero, and a later prune must not look like a
           // person who never had event-capable ids (#421).
+          // -1 preserves unknown legacy coverage without changing the released integer column.
           if (erasuresHaveKeyCount) {
-            const known = erasure.warehouseKeyCount;
+            const known = erasure.warehouseKeyCount !== undefined && erasure.warehouseKeyCount >= 0 ? erasure.warehouseKeyCount : undefined;
             if (erasureKeysTable) {
               await client.query(
-                `UPDATE erasures SET warehouse_key_count = GREATEST(
-                   warehouse_key_count,
-                   $3::integer,
-                   (SELECT count(*)::integer FROM warehouse_erasure_keys k
-                    WHERE k.workspace_id = $1 AND k.profile_id = ANY($2::text[]))
-                 ) WHERE workspace_id = $1 AND id = $4`,
-                [workspaceId, erasure.profileIds, known ?? 0, erasure.id],
+                `WITH captured AS (
+                   SELECT count(*)::integer AS n FROM warehouse_erasure_keys k
+                    WHERE k.workspace_id = $1 AND k.profile_id = ANY($2::text[])
+                 )
+                 UPDATE erasures e SET warehouse_key_count = CASE
+                   WHEN $3::integer IS NULL AND e.warehouse_key_count <= 0 AND captured.n = 0 THEN -1
+                   ELSE GREATEST(e.warehouse_key_count, COALESCE($3::integer, 0), captured.n)
+                 END FROM captured WHERE e.workspace_id = $1 AND e.id = $4`,
+                [workspaceId, erasure.profileIds, known ?? null, erasure.id],
               );
-            } else if (known !== undefined) {
+            } else {
               await client.query(
-                `UPDATE erasures SET warehouse_key_count = GREATEST(warehouse_key_count, $3::integer)
-                 WHERE workspace_id = $1 AND id = $2`,
-                [workspaceId, erasure.id, known],
+                `UPDATE erasures SET warehouse_key_count = CASE
+                   WHEN $3::integer IS NULL AND warehouse_key_count <= 0 THEN -1
+                   ELSE GREATEST(warehouse_key_count, COALESCE($3::integer, 0))
+                 END WHERE workspace_id = $1 AND id = $2`,
+                [workspaceId, erasure.id, known ?? null],
               );
             }
           }

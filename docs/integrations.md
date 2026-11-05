@@ -179,6 +179,9 @@ A published `audience_sync` artifact keeps a segment's consented members (`ad_ta
 
 ## Warehouse export
 
+Restore replay preserves erasure-key counts after recapturing restored identifiers. An older-format log with unknown coverage remains unknown even when its timestamp falls after the restored tracking epoch; missing keys then remain a manual event-cleanup obligation, rather than proof of a genuine zero. Use the updated restore CLI and warehouse workers together. If a prior restore already lost both its correct count and captured keys, historical identifiers cannot be recovered automatically: review and clean the affected remote events manually. Full restore uses the documented owner/admin database connection.
+
+
 `warehouse.create` (owners and admins, in the UI or over REST) adds a destination that receives the workspace's data on a schedule (`everyMinutes`, default 60; `warehouse.run` runs it now):
 
 | Dataset | Rows | How |

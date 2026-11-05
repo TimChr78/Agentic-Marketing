@@ -276,7 +276,7 @@ const EPOCH = '1970-01-01T00:00:00.000Z';
 export function uncoveredDatasets(input: {
   datasets: WarehouseDataset[];
   identifiers: ErasureIdentifier[];
-  /** Keys captured for the erasure at the time it was recorded. */
+  /** Keys captured for the erasure; -1 means coverage is unknown after legacy replay. */
   keyCount: number;
   erasedAt: string;
   trackingSince: string;
@@ -290,9 +290,9 @@ export function uncoveredDatasets(input: {
   // Recorded by a version that did not capture keys: we cannot know whether events were exported.
   if (Date.parse(erasedAt) < Date.parse(trackingSince)) return ['events'];
   // It had event-capable ids when erased, but another destination already consumed and pruned
-  // them: this one cannot locate the events it may hold. Zero keys means the person never had a
-  // user or anonymous id, so no event can name them.
-  return keyCount > 0 ? ['events'] : [];
+  // them: this one cannot locate the events it may hold. Only a known zero proves no event-capable
+  // ids existed. The restore sentinel -1 preserves unknown coverage and requires manual cleanup.
+  return keyCount !== 0 ? ['events'] : [];
 }
 
 /**
