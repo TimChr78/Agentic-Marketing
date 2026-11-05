@@ -399,6 +399,11 @@ describe('event-triggered hosted runs (#338)', () => {
     );
   }
   const runs = async (s: Setup) => (await s.api.call('agents.hostedRuns', { agentId: s.agentId })).runs;
+  const eventOnlyAt = async (now: Date) => {
+    // Event claims recalculate scheduled wakes; keep all event-only tests independent of clock time.
+    await t.srv.db.admin.query(`UPDATE hosted_agents SET next_run_at = '2999-01-01'`);
+    return runAt(now);
+  };
 
   it('runs when a subscribed event arrives, with the event in its prompt, within the gap and daily cap', async () => {
     const s = await setup('Check deliverability now.', { name: 'Event guardian' });
@@ -411,11 +416,6 @@ describe('event-triggered hosted runs (#338)', () => {
       eventRunsPerDay: 2,
     });
     expect(view).toMatchObject({ triggers: ['guardrail.breach'], eventMinGapMinutes: 30, eventRunsPerDay: 2 });
-    const eventOnlyAt = async (now: Date) => {
-      // An event claim recalculates next_run_at; exclude scheduled wakes at every simulated tick.
-      await t.srv.db.admin.query(`UPDATE hosted_agents SET next_run_at = '2999-01-01' WHERE agent_id = $1`, [s.agentId]);
-      return runAt(now);
-    };
 
     // No event yet: nothing runs.
     await eventOnlyAt(new Date());
@@ -460,17 +460,17 @@ describe('event-triggered hosted runs (#338)', () => {
       eventRunsPerDay: 5,
     });
     await event(s, 'Unsubscribe rate 3%.');
-    await runAt(new Date());
+    await eventOnlyAt(new Date());
     const failed = await runs(s);
     expect(failed).toHaveLength(1);
     expect(failed[0]).toMatchObject({ status: 'failed', trigger: 'event' });
     // The event was not consumed: after the gap it is retried with the same event.
-    await runAt(new Date(Date.now() + 31 * 60_000));
+    await eventOnlyAt(new Date(Date.now() + 31 * 60_000));
     const retried = await runs(s);
     expect(retried).toHaveLength(2);
     expect(retried[0].eventIds).toEqual(failed[0].eventIds);
     // Inside the gap, nothing is selected and no skipped run is written (#343).
-    await runAt(new Date(Date.now() + 40 * 60_000));
+    await eventOnlyAt(new Date(Date.now() + 40 * 60_000));
     expect(await runs(s)).toHaveLength(2);
 
     // Paused: no run and no skipped row per tick, however many sweeps (#344).
@@ -479,12 +479,12 @@ describe('event-triggered hosted runs (#338)', () => {
     await p.api.call('agents.updateHosted', { agentId: p.agentId, triggers: ['guardrail.breach'] });
     await p.api.call('agents.pause', { id: p.agentId, reason: 'Holiday' });
     await event(p, 'Complaint rate 0.4%.', new Date(Date.now() - 2 * 86_400_000));
-    await runAt(new Date());
-    await runAt(new Date());
+    await eventOnlyAt(new Date());
+    await eventOnlyAt(new Date());
     expect(await runs(p)).toHaveLength(0);
     // Resumed: the two-day-old event is marked read without a run.
     await p.api.call('agents.resume', { id: p.agentId });
-    await runAt(new Date());
+    await eventOnlyAt(new Date());
     expect(await runs(p)).toHaveLength(0);
     const { rows } = await t.srv.db.admin.query<{ last_event_id: string }>('SELECT last_event_id FROM hosted_agents WHERE agent_id = $1', [
       p.agentId,
