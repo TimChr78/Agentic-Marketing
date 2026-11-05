@@ -2,6 +2,22 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [0.7.6] - 2026-11-05
+
+### Fixed
+
+- Credit a split conversion only to its explicit participant's own eligible split take. Re-entries that bypass the split or convert before reaching it no longer inflate another entry's arm. Participant identity survives profile merges; genuinely participant-less outcomes retain temporal fallback (#419).
+- Keep billed hosted usage covered when accounting writes fail. Durable reservations settle atomically with usage, stable ids prevent duplicate fallback records, and both-writers-fail retains the hold. Budget refusals preserve the model-failure streak instead of disabling an agent after three refusals; actual run failures retain the three-strike rule (#420).
+- Reconcile warehouse erasure-key coverage after restored identifiers are deleted, preserve original known counts, and retain unknown legacy coverage across replay and log round trips. A re-enabled destination cannot mistake pruned/missing keys for proof that no event-capable identifiers existed. Previously incorrect zero counts are recoverable while captured keys remain (#421).
+
+### Upgrading from 0.7.5
+
+- **Migrations:** none. Released migrations through 0074 are unchanged; the restore correction uses the existing counter and portable log metadata.
+- **Configuration:** no new environment variables. Restore continues to use the documented owner/admin `DATABASE_URL`.
+- **Breaking changes:** no removed command or artifact fields. Corrected split attribution can lower reports which previously credited conversions from non-participating entries. Hosted budget refusals remain visible failed run records but no longer increment the model-failure streak. Restore logs add optional known-key-count metadata while retaining older-log compatibility.
+- **Manual steps:** use the updated restore CLI and warehouse workers together. After a restore, inspect `warehouse.erasureBacklog` and resolve downstream cleanup before acknowledging it. If an earlier restore already lost both the correct count and captured keys, historical identifiers cannot be reconstructed automatically and affected remote events need manual review/cleanup. Inspect provider usage and accounting errors before reconciling an orphaned billing hold; retained coverage can conservatively reduce available allowance through its billing deadline.
+- **Upgrade:** download `agentic-marketing-compose-0.7.6.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.7.6 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.7.6` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.7.6). Run `docker compose exec app am doctor`.
+
 ## [0.7.5] - 2026-11-05
 
 ### Fixed
