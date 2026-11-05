@@ -1,6 +1,6 @@
 import { hkdfSync } from 'node:crypto';
 import { type NotifyDeps, sendMemberEmails } from '@agentic-marketing/alerts';
-import { type Auth, createPasswordResetToken, hashedResetTokenIdentifier } from '@agentic-marketing/auth';
+import { type Auth, hashedResetTokenIdentifier, mintResetVerification } from '@agentic-marketing/auth';
 import { canonicalJson, newId, sha256 } from '@agentic-marketing/core';
 import { type Db, schema } from '@agentic-marketing/db';
 import { open, seal } from '@agentic-marketing/secrets';
@@ -528,7 +528,7 @@ async function deliverReset(
     }
   } else {
     try {
-      token = await createPasswordResetToken(deps.auth, account.id, deps.ttlSeconds);
+      token = await mintResetVerification(deps.auth, account.id, deps.ttlSeconds);
     } catch (err) {
       // A transient database/auth-context failure is retryable; the attempt bound still applies.
       logger.warn({ err, id: row.id }, 'password reset token could not be minted');

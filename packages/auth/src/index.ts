@@ -28,17 +28,14 @@ export const resetTokenIdentifier = (token: string) => `${RESET_PREFIX}${token}`
 export const hashedResetTokenIdentifier = (token: string) => createHash('sha256').update(resetTokenIdentifier(token)).digest('base64url');
 
 /**
- * Mints a password reset token with Better Auth's own verification semantics (#379): the row is
+ * Mints a 192-bit random reset verification token, never a user-chosen password (#379).
+ * SHA-256 identifier hashing follows Better Auth's verification semantics: the row is
  * written through the auth context's internal adapter, so the configured identifier hashing
  * (`reset-password:` → SHA-256 base64url), expiry and single-use consumption are identical to a
  * token minted by Better Auth's request endpoint. The delivery worker calls this only after the
  * durable request has been claimed and eligibility re-checked; the public request path never does.
  */
-export async function createPasswordResetToken(
-  auth: Auth,
-  userId: string,
-  ttlSeconds: number = RESET_PASSWORD_TTL_SECONDS,
-): Promise<string> {
+export async function mintResetVerification(auth: Auth, userId: string, ttlSeconds: number = RESET_PASSWORD_TTL_SECONDS): Promise<string> {
   const token = randomBytes(24).toString('base64url');
   const ctx = await auth.$context;
   await ctx.internalAdapter.createVerificationValue({
