@@ -512,14 +512,19 @@ describe('event-triggered hosted runs (#338)', () => {
       eventRunsPerDay: 2,
     });
     expect(view).toMatchObject({ triggers: ['guardrail.breach'], eventMinGapMinutes: 30, eventRunsPerDay: 2 });
+    const eventOnlyAt = async (now: Date) => {
+      // An event claim recalculates next_run_at; exclude scheduled wakes at every simulated tick.
+      await t.srv.db.admin.query(`UPDATE hosted_agents SET next_run_at = '2999-01-01' WHERE agent_id = $1`, [s.agentId]);
+      return runAt(now);
+    };
 
     // No event yet: nothing runs.
-    await runAt(new Date());
+    await eventOnlyAt(new Date());
     expect(await runs(s)).toHaveLength(0);
 
     await event(s, 'Unsubscribe rate 3%, above the mandate guardrail of 1%.');
     const before = llm.requests.length;
-    await runAt(new Date());
+    await eventOnlyAt(new Date());
     const first = await runs(s);
     expect(first).toHaveLength(1);
     expect(first[0]).toMatchObject({ status: 'ok', trigger: 'event' });
@@ -530,14 +535,14 @@ describe('event-triggered hosted runs (#338)', () => {
 
     // A second event inside the 30-minute gap waits; after the gap it runs.
     await event(s, 'Complaint rate 0.4%.');
-    await runAt(new Date());
+    await eventOnlyAt(new Date());
     expect(await runs(s)).toHaveLength(1);
-    await runAt(new Date(Date.now() + 31 * 60_000));
+    await eventOnlyAt(new Date(Date.now() + 31 * 60_000));
     expect(await runs(s)).toHaveLength(2);
 
     // The daily cap of 2 event runs holds back a third.
     await event(s, 'Bounce rate 6%.');
-    await runAt(new Date(Date.now() + 70 * 60_000));
+    await eventOnlyAt(new Date(Date.now() + 70 * 60_000));
     expect(await runs(s)).toHaveLength(2);
 
     // Without triggers the subscription is removed and events stop runs.
