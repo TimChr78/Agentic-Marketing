@@ -390,7 +390,16 @@ ${outcome.disabled ? '<p><strong>The agent failed three times in a row and is no
 async function finishRun(
   deps: HostedAgentDeps,
   loaded: LoadedHosted,
-  run: { id: string; startedAt: Date; status: 'ok' | 'failed'; summary: string; toolCalls: number; tokens: number; error: string | null },
+  run: {
+    id: string;
+    startedAt: Date;
+    status: 'ok' | 'failed';
+    summary: string;
+    toolCalls: number;
+    tokens: number;
+    error: string | null;
+    countsAsFailure?: boolean;
+  },
   origin: RunOrigin = SCHEDULED,
 ): Promise<{ disabled: boolean }> {
   const finishedAt = new Date();
@@ -400,8 +409,13 @@ async function finishRun(
     // advance the failure streak, disable the agent, or mark events read. The guarded update below
     // matches only while this run still owns the claim, so a late completion changes none of the
     // agent's state. Its own outcome is still recorded below: what it did stays auditable.
-    const failures = run.status === 'ok' ? sql`0` : sql`${schema.hostedAgents.consecutiveFailures} + 1`;
-    const disables = sql`${failures} >= ${MAX_CONSECUTIVE_FAILURES}`;
+    const failures =
+      run.countsAsFailure === false
+        ? sql`${schema.hostedAgents.consecutiveFailures}`
+        : run.status === 'ok'
+          ? sql`0`
+          : sql`${schema.hostedAgents.consecutiveFailures} + 1`;
+    const disables = run.countsAsFailure === false ? sql`false` : sql`${failures} >= ${MAX_CONSECUTIVE_FAILURES}`;
     const [owned] = await tx
       .update(schema.hostedAgents)
       .set({
@@ -419,7 +433,7 @@ async function finishRun(
       })
       .where(and(eq(schema.hostedAgents.agentId, loaded.agent.id), eq(schema.hostedAgents.runningRunId, run.id)))
       .returning({ consecutiveFailures: schema.hostedAgents.consecutiveFailures });
-    const disabled = owned !== undefined && owned.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES;
+    const disabled = run.countsAsFailure !== false && owned !== undefined && owned.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES;
     // A run whose agent was deleted meanwhile (its stale claim allowed deletion, #362) has nowhere
     // to record its outcome: the agent and its run history are gone, so it writes no run and mails
     // nobody. A run that merely lost its claim to a successor keeps its own history below.
@@ -575,6 +589,7 @@ async function runOne(deps: HostedAgentDeps, workspaceId: string, agentId: strin
         toolCalls: 0,
         tokens: 0,
         error,
+        countsAsFailure: !(err instanceof AiUnavailable && err.reason === 'budget'),
       },
       origin,
     );
@@ -602,6 +617,7 @@ async function runOne(deps: HostedAgentDeps, workspaceId: string, agentId: strin
         toolCalls: 0,
         tokens: 0,
         error,
+        countsAsFailure: !(err instanceof AiUnavailable && err.reason === 'budget'),
       },
       origin,
     );
@@ -730,7 +746,7 @@ async function runOne(deps: HostedAgentDeps, workspaceId: string, agentId: strin
         if (outcome === 'held')
           logger.error(
             { workspaceId, agentId, runId, callId: call.id },
-            'hosted agent AI usage could not be recorded; reservation kept through the billing month',
+            'hosted agent AI settlement could not be confirmed; retaining any outstanding billing reservation',
           );
       }
     }

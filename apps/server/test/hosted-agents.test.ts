@@ -1,5 +1,8 @@
+import { recordAiCall } from '@agentic-marketing/ai';
 import { type FakeRequest, fakeLlm } from '@agentic-marketing/ai/testing';
 import { agentPrincipal } from '@agentic-marketing/commands';
+import { newId } from '@agentic-marketing/core';
+import type { Db } from '@agentic-marketing/db';
 import { outbox } from '@agentic-marketing/email';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { runHostedAgentsOnce } from '../src/agents/hosted';
@@ -343,13 +346,16 @@ describe('hosted agents (#258)', () => {
       );
 
       // The allowance is genuinely unavailable: the next due run is refused before the model.
-      await onlyDue(billingHeld.agentId);
       const requestsBefore = llm.requests.length;
-      const retry = await runAt(new Date(DUE().getTime() + 1000));
-      expect(retry).toMatchObject({ due: 1, failed: 1 });
+      for (let i = 0; i < 3; i++) {
+        await onlyDue(billingHeld.agentId);
+        const retry = await runAt(new Date(DUE().getTime() + (i + 1) * 1000));
+        expect(retry).toMatchObject({ due: 1, failed: 1, disabled: 0 });
+      }
       expect(llm.requests.length).toBe(requestsBefore);
       const runs = await billingHeld.api.call('agents.hostedRuns', { agentId: billingHeld.agentId });
       expect(runs.runs[0]!.error).toContain('budget');
+      expect(runs.hosted).toMatchObject({ enabled: true, consecutiveFailures: 0 });
     } finally {
       await t.srv.db.admin.query('DROP TRIGGER IF EXISTS hosted_ai_call_fail_trg ON ai_calls');
       await t.srv.db.admin.query('DROP FUNCTION IF EXISTS hosted_ai_call_fail_fn()');
@@ -395,6 +401,55 @@ describe('hosted agents (#258)', () => {
       await t.srv.db.admin.query('DROP SEQUENCE IF EXISTS hosted_ai_call_fail_once');
     }
   }, 90_000);
+
+  it('does not bill an idempotent usage retry twice when its row already exists', async () => {
+    const s = await setup('No run needed.', { name: 'Idempotent usage' });
+    const providerId = (await s.api.call('aiProviders.list', {})).providers[0]!.id;
+    const call = {
+      id: newId('aic'),
+      kind: 'hosted' as const,
+      status: 'done' as const,
+      providerId,
+      model: 'test',
+      inputTokens: 100,
+      outputTokens: 20,
+    };
+    await recordAiCall(t.srv.db, s.ws, call);
+    await recordAiCall(t.srv.db, s.ws, call, { idempotent: true });
+    expect((await s.api.call('ai.calls', { kind: 'hosted' })).calls).toHaveLength(1);
+    expect((await s.api.call('aiProviders.list', {})).providers[0]!.usedThisMonth).toBe(120);
+  });
+
+  it('releases an unbilled reservation when context loading fails before the provider', async () => {
+    const s = await setup('No model call.', { name: 'Context failure' });
+    await onlyDue(s.agentId);
+    const original = t.srv.db.withWorkspace.bind(t.srv.db);
+    let failNextContext = false;
+    let injected = false;
+    const db: Db = {
+      ...t.srv.db,
+      withWorkspace: async (workspaceId, fn, opts) => {
+        if (failNextContext) {
+          failNextContext = false;
+          injected = true;
+          throw new Error('injected context loading failure');
+        }
+        const result = await original(workspaceId, fn, opts);
+        // reserveTokens returns its committed rsv id; the next transaction loads the run context.
+        if (typeof result === 'string' && result.startsWith('rsv_')) failNextContext = true;
+        return result;
+      },
+    };
+    const before = llm.requests.length;
+    const result = await runHostedAgentsOnce({ ...deps(), db }, DUE());
+    expect(injected).toBe(true);
+    expect(result).toMatchObject({ due: 1, failed: 1 });
+    expect(llm.requests.length).toBe(before);
+    expect((await s.api.call('aiProviders.list', {})).providers[0]!.usedThisMonth).toBe(0);
+    const held = await t.srv.db.admin.query('SELECT id FROM ai_token_reservations WHERE workspace_id = $1', [s.ws]);
+    expect(held.rows).toHaveLength(0);
+    expect((await s.api.call('ai.calls', { kind: 'hosted' })).calls).toHaveLength(1);
+  });
 
   it('refuses a run whose full token allowance does not fit the monthly budget, before calling the model', async () => {
     await onlyDue(tooBigBudget.agentId);
@@ -500,6 +555,11 @@ describe('event-triggered hosted runs (#338)', () => {
     );
   }
   const runs = async (s: Setup) => (await s.api.call('agents.hostedRuns', { agentId: s.agentId })).runs;
+  const eventOnlyAt = async (now: Date) => {
+    // Event claims recalculate scheduled wakes; keep all event-only tests independent of clock time.
+    await t.srv.db.admin.query(`UPDATE hosted_agents SET next_run_at = '2999-01-01'`);
+    return runAt(now);
+  };
 
   it('runs when a subscribed event arrives, with the event in its prompt, within the gap and daily cap', async () => {
     const s = await setup('Check deliverability now.', { name: 'Event guardian' });
@@ -512,11 +572,6 @@ describe('event-triggered hosted runs (#338)', () => {
       eventRunsPerDay: 2,
     });
     expect(view).toMatchObject({ triggers: ['guardrail.breach'], eventMinGapMinutes: 30, eventRunsPerDay: 2 });
-    const eventOnlyAt = async (now: Date) => {
-      // An event claim recalculates next_run_at; exclude scheduled wakes at every simulated tick.
-      await t.srv.db.admin.query(`UPDATE hosted_agents SET next_run_at = '2999-01-01' WHERE agent_id = $1`, [s.agentId]);
-      return runAt(now);
-    };
 
     // No event yet: nothing runs.
     await eventOnlyAt(new Date());
@@ -561,17 +616,17 @@ describe('event-triggered hosted runs (#338)', () => {
       eventRunsPerDay: 5,
     });
     await event(s, 'Unsubscribe rate 3%.');
-    await runAt(new Date());
+    await eventOnlyAt(new Date());
     const failed = await runs(s);
     expect(failed).toHaveLength(1);
     expect(failed[0]).toMatchObject({ status: 'failed', trigger: 'event' });
     // The event was not consumed: after the gap it is retried with the same event.
-    await runAt(new Date(Date.now() + 31 * 60_000));
+    await eventOnlyAt(new Date(Date.now() + 31 * 60_000));
     const retried = await runs(s);
     expect(retried).toHaveLength(2);
     expect(retried[0].eventIds).toEqual(failed[0].eventIds);
     // Inside the gap, nothing is selected and no skipped run is written (#343).
-    await runAt(new Date(Date.now() + 40 * 60_000));
+    await eventOnlyAt(new Date(Date.now() + 40 * 60_000));
     expect(await runs(s)).toHaveLength(2);
 
     // Paused: no run and no skipped row per tick, however many sweeps (#344).
@@ -580,12 +635,12 @@ describe('event-triggered hosted runs (#338)', () => {
     await p.api.call('agents.updateHosted', { agentId: p.agentId, triggers: ['guardrail.breach'] });
     await p.api.call('agents.pause', { id: p.agentId, reason: 'Holiday' });
     await event(p, 'Complaint rate 0.4%.', new Date(Date.now() - 2 * 86_400_000));
-    await runAt(new Date());
-    await runAt(new Date());
+    await eventOnlyAt(new Date());
+    await eventOnlyAt(new Date());
     expect(await runs(p)).toHaveLength(0);
     // Resumed: the two-day-old event is marked read without a run.
     await p.api.call('agents.resume', { id: p.agentId });
-    await runAt(new Date());
+    await eventOnlyAt(new Date());
     expect(await runs(p)).toHaveLength(0);
     const { rows } = await t.srv.db.admin.query<{ last_event_id: string }>('SELECT last_event_id FROM hosted_agents WHERE agent_id = $1', [
       p.agentId,
