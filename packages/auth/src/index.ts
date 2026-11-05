@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { agentPrincipal, PERMISSIONS, type Principal, userPrincipal } from '@agentic-marketing/commands';
 import type { Db, Role } from '@agentic-marketing/db';
 import { type CimdOptions, cimd } from '@better-auth/cimd';
@@ -26,6 +26,25 @@ export const resetTokenIdentifier = (token: string) => `${RESET_PREFIX}${token}`
  * other verification values keep Better Auth's plain default.
  */
 export const hashedResetTokenIdentifier = (token: string) => createHash('sha256').update(resetTokenIdentifier(token)).digest('base64url');
+
+/**
+ * Mints a 192-bit random reset verification token, never a user-chosen password (#379).
+ * SHA-256 identifier hashing follows Better Auth's verification semantics: the row is
+ * written through the auth context's internal adapter, so the configured identifier hashing
+ * (`reset-password:` → SHA-256 base64url), expiry and single-use consumption are identical to a
+ * token minted by Better Auth's request endpoint. The delivery worker calls this only after the
+ * durable request has been claimed and eligibility re-checked; the public request path never does.
+ */
+export async function mintResetVerification(auth: Auth, userId: string, ttlSeconds: number = RESET_PASSWORD_TTL_SECONDS): Promise<string> {
+  const token = randomBytes(24).toString('base64url');
+  const ctx = await auth.$context;
+  await ctx.internalAdapter.createVerificationValue({
+    value: userId,
+    identifier: resetTokenIdentifier(token),
+    expiresAt: new Date(Date.now() + ttlSeconds * 1000),
+  });
+  return token;
+}
 
 /** Sends the installation-level reset link. Only accounts with a password are eligible. */
 export interface PasswordResetDelivery {

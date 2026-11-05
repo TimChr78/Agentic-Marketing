@@ -252,7 +252,11 @@ export async function startTestServer(
   }
   const stop = new AbortController();
   const workers = [
-    ...startWorkers(srv, stop.signal, { deliveries: { webhookBackoffMs: [200, 200], actionBackoffMs: [100] } }),
+    ...startWorkers(srv, stop.signal, {
+      deliveries: { webhookBackoffMs: [200, 200], actionBackoffMs: [100] },
+      // Password-reset tests drive delivery rounds directly, so the background loop cannot race them.
+      passwordResetTickMs: 86_400_000,
+    }),
     ...startScheduler(srv, stop.signal, {
       segmentTickMs: 500,
       broadcastTickMs: 300,

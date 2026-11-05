@@ -17,6 +17,7 @@ import { remoteAddressFromEnv, resolveClientIp } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import type { LinkSigner } from '@agentic-marketing/email';
 import type { EventBus } from '@agentic-marketing/events';
+import type { HotState } from '@agentic-marketing/hotstate';
 import { acceptItems, bodyLimit, sourceLookups } from '@agentic-marketing/ingest';
 import { type EgressPolicy, safeRequest } from '@agentic-marketing/integrations';
 import { type KeyProvider, readSecret } from '@agentic-marketing/secrets';
@@ -98,20 +99,24 @@ export async function publishedForm(tx: Tx, formId: string, version?: number) {
   return v ? { version: number, def: artifactTypes.form.content.parse(v.content) as FormDefinition } : null;
 }
 
-/** Token bucket per key: `rate` per minute with bursts up to `burst`. */
-function limiter(rate: number, burst: number) {
-  const buckets = new Map<string, { tokens: number; at: number }>();
-  return (key: string) => {
-    const now = Date.now();
-    const b = buckets.get(key) ?? { tokens: burst, at: now };
-    b.tokens = Math.min(burst, b.tokens + ((now - b.at) / 60_000) * rate);
-    b.at = now;
-    if (buckets.size > 50_000) buckets.clear();
-    buckets.set(key, b);
-    if (b.tokens < 1) return false;
-    b.tokens -= 1;
-    return true;
-  };
+/**
+ * The submission bucket for one workspace, form and client, in the shared hot state so every
+ * replica sees the same rate and burst (#380). A missing or unavailable store is reported to the
+ * caller instead of falling back to an unbounded process-local allowance.
+ */
+export async function takeFormSubmission(
+  hot: Pick<HotState, 'take'> | undefined,
+  key: string,
+  ratePerMinute: number,
+): Promise<'ok' | 'limited' | 'unavailable'> {
+  if (!hot) return 'unavailable';
+  try {
+    // `rate` is per second; the burst stays at three times the per-minute rate, as before.
+    return (await hot.take(`form:${key}`, 1, ratePerMinute / 60, ratePerMinute * 3)) ? 'ok' : 'limited';
+  } catch (err) {
+    logger.warn({ err, key }, 'form rate limit store unavailable; refusing the submission');
+    return 'unavailable';
+  }
 }
 
 export interface FormsDeps {
@@ -120,6 +125,8 @@ export interface FormsDeps {
   kp: KeyProvider;
   links: LinkSigner;
   egress: EgressPolicy;
+  /** Shared token buckets; required so a multi-replica deployment limits per form, not per process. */
+  hot: Pick<HotState, 'take'>;
   /** Headers with the client IP, in trust order (e.g. cf-connecting-ip, x-forwarded-for). */
   clientIpHeaders?: string[];
   /** When set, forwarding headers are trusted only from these proxy/loopback ranges. */
@@ -152,7 +159,7 @@ export function formOrigin(def: Pick<FormDefinition, 'allowedOrigins' | 'success
 
 export function formsApi(deps: FormsDeps) {
   const { loadPolicy } = sourceLookups(deps.db);
-  const allow = limiter(deps.ratePerMinute ?? 5, (deps.ratePerMinute ?? 5) * 3);
+  const ratePerMinute = deps.ratePerMinute ?? 5;
   const app = new Hono();
 
   const formOf = async (formId: string) => {
@@ -220,7 +227,7 @@ export function formsApi(deps: FormsDeps) {
       const origin = c.req.header('origin');
       const cors: Record<string, string> = origin ? { 'access-control-allow-origin': origin, vary: 'origin' } : {};
       const form = await formOf(c.req.param('id'));
-      const done = (ok: boolean, error?: string, status: 400 | 403 | 404 | 429 = 400) => {
+      const done = (ok: boolean, error?: string, status: 400 | 403 | 404 | 429 | 503 = 400) => {
         if (isJson || !form)
           return c.json(ok ? { ok: true, doubleOptIn: form?.def.doubleOptIn ?? false } : { ok: false, error }, ok ? 200 : status, cors);
         const target = ok ? form.def.successUrl : (form.def.errorUrl ?? form.def.successUrl);
@@ -235,7 +242,10 @@ export function formsApi(deps: FormsDeps) {
       // Bots fill every field; people never see this one. Pretend success so they learn nothing.
       if (str('am_hp')) return done(true);
       const ip = ipOf(c);
-      if (!allow(`${form.ws}:${c.req.param('id')}:${ip ?? 'unknown'}`)) return done(false, 'rate_limited', 429);
+      const verdict = await takeFormSubmission(deps.hot, `${form.ws}:${c.req.param('id')}:${ip ?? 'unknown'}`, ratePerMinute);
+      if (verdict === 'limited') return done(false, 'rate_limited', 429);
+      // A limiter we cannot reach must not silently allow unlimited mail. Say so, and send nothing.
+      if (verdict === 'unavailable') return done(false, 'rate_limit_unavailable', 503);
       const email = z.email().max(320).safeParse(str('email'));
       if (!email.success) return done(false, 'invalid_email');
       if (form.def.turnstile) {

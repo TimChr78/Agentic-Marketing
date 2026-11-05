@@ -102,6 +102,7 @@ const MIGRATION_RELEASES: Record<string, string> = {
   '0071_hosted_agent_delete.sql': '0.7.3',
   '0072_audience_reconciliation.sql': '0.7.4',
   '0073_ops_reliability.sql': '0.7.4',
+  '0074_password_reset_queue.sql': '0.7.5',
 };
 
 export function releaseForMigrationHead(head: string | null): string | null {

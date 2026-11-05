@@ -34,7 +34,7 @@ import { copilotApi } from './http/copilot';
 import { MCP_MAX_BODY, mcpEndpoint } from './http/mcp';
 import { metricsHandler } from './http/metrics';
 import { consentPage, invitePage, loginPage } from './http/pages';
-import { deliverResetLink, passwordResetRoutes } from './http/password-reset';
+import { passwordResetRoutes } from './http/password-reset';
 import { rejectUnsafeRawPath } from './http/raw-path';
 import { restApi } from './http/rest';
 import { scimApi } from './http/scim';
@@ -65,18 +65,13 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
     trustedOrigins: config.trustedOrigins,
     clientIpHeaders: [RESOLVED_CLIENT_IP_HEADER],
     sso: config.sso,
-    // Self-service password reset (#191): Better Auth makes and consumes the token; the host
-    // delivers it through the person's transactional provider and audits the outcome.
+    // Self-service password reset (#191): Better Auth owns token minting/consumption and the
+    // password change. The public route queues every address uniformly and the delivery worker
+    // mints the token and sends it (#379); reaching this callback would bypass that queue, so it
+    // deliberately delivers nothing.
     passwordReset: {
       ttlSeconds: RESET_PASSWORD_TTL_SECONDS,
-      send: async ({ user, token, request }) => {
-        const ip = request?.headers.get(RESOLVED_CLIENT_IP_HEADER) ?? 'unknown';
-        await deliverResetLink(
-          { db, mail: { db, kp: keyProvider, email, directory, publicUrl: config.publicUrl }, ttlSeconds: RESET_PASSWORD_TTL_SECONDS, ip },
-          user,
-          token,
-        );
-      },
+      send: async () => {},
     },
     ...overrides,
   });
@@ -236,9 +231,9 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
     db,
     hot,
     publicUrl: config.publicUrl,
+    authSecret: config.authSecret,
     clientIpHeaders: config.clientIpHeaders,
     trustedProxyCidrs: config.trustedProxyCidrs,
-    mail: { db, kp: keyProvider, email, directory, publicUrl: config.publicUrl },
   });
   app.on(['GET', 'POST'], '/api/auth/*', (c) => auth.handler(withClientIp(c)));
 
@@ -314,6 +309,7 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
         kp: keyProvider,
         links: email.links,
         egress: config.egress,
+        hot,
         clientIpHeaders: config.clientIpHeaders,
         trustedProxyCidrs: config.trustedProxyCidrs,
       }),
@@ -360,6 +356,7 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
     hot,
     egress: config.egress,
     publicUrl: config.publicUrl,
+    authSecret: config.authSecret,
     linksUrl: config.linksUrl,
     retention: config.retention,
     erasureGraceHours: config.erasureGraceHours,

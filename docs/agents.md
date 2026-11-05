@@ -81,7 +81,7 @@ Create one in **Settings → Agents → New hosted agent** (or with `agents.crea
   - `hourly` — every hour, at minute 0.
   - `daily:07:00` — every day at 07:00.
   - `weekly:mon:07:00` — every Monday at 07:00. Days are `mon`, `tue`, `wed`, `thu`, `fri`, `sat`, `sun`; times are 24-hour `HH:MM`.
-- **Scopes** — the permissions a run may use. They are intersected with the sponsor's role, so a hosted agent never has more than the person accountable for it. A tool outside them is not offered, and a call made anyway is refused by the executor.
+- **Scopes** — the permissions a run may use. They are intersected with the sponsor's role, so a hosted agent never has more than the person accountable for it. A tool outside them is not offered — a scheduled run has no one to ask for a scope step-up — and a call made anyway is refused by the executor.
 - **Budgets per run** — a token budget and a tool-call budget. The run stops when either is used up and records a partial summary; a tool call past the tool-call budget never reaches the command layer.
 - **A model** (optional) — an AI provider id; without one the workspace's copilot provider is used.
 

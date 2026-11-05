@@ -1,9 +1,11 @@
 import { type FakeRequest, fakeLlm } from '@agentic-marketing/ai/testing';
+import { agentPrincipal } from '@agentic-marketing/commands';
 import { outbox } from '@agentic-marketing/email';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { runHostedAgentsOnce } from '../src/agents/hosted';
 import { HOSTED_AGENT_TEMPLATES, hostedAgentTemplate } from '../src/agents/hostedTemplates';
-import { startTestServer, testPort, type User } from './harness';
+import { commands } from '../src/registry';
+import { rejects, startTestServer, testPort, type User } from './harness';
 
 // Wave 4, Phase 19 (#258, #86): the platform runs a hosted agent itself on a schedule. Each run is
 // a fresh copilot session on the in-process MCP client, as the agent principal, with budgets and a
@@ -36,13 +38,7 @@ function answer(r: FakeRequest) {
     return blockReleasePromise.then(() => ({ text: 'Overlapping run finished.' }));
   }
   if (r.messages.some((m) => m.text.includes('[budget]'))) return { toolCalls: [{ name: 'agents__get', input: {} }] };
-  if (r.user.includes('[scope]')) {
-    if (r.toolResults.length === 0)
-      return {
-        toolCalls: [{ name: 'artifacts__create', input: { type: 'note', name: 'Not allowed', content: { title: 'No', body: 'No.' } } }],
-      };
-    return { text: 'The write was refused, as expected.' };
-  }
+  if (r.user.includes('[scope]')) return { text: 'Only the tools my scopes grant were offered.' };
   if (r.toolResults.length === 0) return { toolCalls: [{ name: 'agents__get', input: {} }] };
   return { text: 'Last week: 1 broadcast, 2 live journeys, all within the limits.' };
 }
@@ -222,19 +218,35 @@ describe('hosted agents (#258)', () => {
     expect(mails[0]!.text).toContain('Last week');
   }, 60_000);
 
-  it('refuses a tool call outside its scopes and still finishes the run', async () => {
+  it('offers no tool outside its scopes, and the executor still refuses a direct call', async () => {
     await onlyDue(scope.agentId);
     const before = llm.requests.length;
     const summary = await runAt(DUE());
     expect(summary.ok).toBe(1);
-    expect(llm.requests.length - before).toBe(2);
-    // The executor refused the write: the model saw a 403, and no note was created.
-    expect(llm.requests.at(-1)?.toolResults[0]).toContain('This agent was not granted the');
-    expect(llm.requests.at(-1)?.toolResults[0]).toContain('artifacts:write');
+    // One model step: the run was offered read tools only, never the write it could not use, so
+    // there was nothing to call and nothing to retry (#364).
+    expect(llm.requests.length - before).toBe(1);
+    const offered = llm.requests.at(-1)?.tools ?? [];
+    expect(offered).toContain('agents__get');
+    expect(offered).not.toContain('artifacts__create');
+    expect(offered).not.toContain('artifacts__requestPublish');
     const artifacts = await scope.api.call('artifacts.list', {});
     expect(artifacts.artifacts.filter((a) => a.name === 'Not allowed')).toHaveLength(0);
     const runs = await scope.api.call('agents.hostedRuns', { agentId: scope.agentId });
-    expect(runs.runs[0]).toMatchObject({ status: 'ok', toolCalls: 1, error: null });
+    expect(runs.runs[0]).toMatchObject({ status: 'ok', toolCalls: 0, error: null });
+    expect(runs.runs[0]!.summary).toContain('scopes');
+
+    // The catalogue is a filter, not the enforcement point: a direct call outside the scopes is
+    // still refused by the executor with the same mandate.
+    const create = commands.find((c) => c.name === 'artifacts.create')!;
+    const principal = agentPrincipal(scope.owner.id, 'hosted-test-client', scope.ws, 'viewer', ['artifacts:read']);
+    const err = await rejects(
+      t.srv.executor.execute(create, { type: 'note', name: 'Not allowed', content: { title: 'No', body: 'No.' } }, principal, {
+        surface: 'mcp',
+      }),
+    );
+    expect(err.message).toContain('not granted');
+    expect(err.message).toContain('artifacts:write');
   }, 60_000);
 
   it('stops at the token budget', async () => {
