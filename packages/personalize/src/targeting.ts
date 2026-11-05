@@ -66,6 +66,17 @@ export function matches(c: DecideCondition, ctx: DecideContext): boolean {
 const unit = (key: string) => createHash('sha256').update(key).digest().readUInt32BE(0) / 2 ** 32;
 
 /**
+ * Sticky ramp admission (#427): whether this person is in the share of visitors served while an
+ * experience rolls out. The salt is distinct from variant and holdout, and the same person always
+ * gets the same number, so widening a ramp (5% → 25%) keeps everyone already admitted.
+ */
+export function rampAdmits(experienceId: string, stableId: string, share: number) {
+  if (share >= 100) return true;
+  if (share <= 0 || !stableId) return false;
+  return unit(`${experienceId}:ramp:${stableId}`) * 100 < share;
+}
+
+/**
  * Sticky allocation: the same person always lands in the same bucket of an experience (by
  * profile when known, so it holds across devices). Returns the variant, or null for the holdout.
  */

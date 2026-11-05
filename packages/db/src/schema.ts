@@ -1422,6 +1422,41 @@ export const edgeTargets = pgTable('edge_targets', {
   updatedAt: ts('updated_at').notNull().defaultNow(),
 });
 
+/** The rollout state of a published experience (#427): its step, share and guardrail reading. */
+export const experienceRollouts = pgTable(
+  'experience_rollouts',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    artifactId: text('artifact_id').notNull(),
+    version: integer('version').notNull(),
+    steps: integer('steps').array().$type<number[]>().notNull(),
+    stepHours: integer('step_hours').notNull(),
+    stepIndex: integer('step_index').notNull().default(0),
+    share: integer('share').notNull().default(0),
+    status: text('status').$type<'running' | 'paused' | 'stopped' | 'complete'>().notNull().default('running'),
+    /** The ramp's guardrail definition from the experience content, if it has one. */
+    guardrail: jsonb('guardrail').$type<{ measure: string; maxDropPercent: number } | null>(),
+    /** The latest metric-layer reading, kept even after the ramp stops for the record. */
+    lastGuardrail: jsonb('last_guardrail').$type<{
+      at: string;
+      measure: string;
+      value: number;
+      baseline: number;
+      dropPercent: number;
+      ok: boolean;
+    } | null>(),
+    startedAt: ts('started_at').notNull().defaultNow(),
+    advancedAt: ts('advanced_at').notNull().defaultNow(),
+    nextStepAt: ts('next_step_at'),
+    pausedAt: ts('paused_at'),
+    stoppedAt: ts('stopped_at'),
+    reason: text('reason'),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+    updatedBy: text('updated_by'),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.artifactId] })],
+);
+
 export type AgentStatus = 'active' | 'paused' | 'revoked';
 export type AgentCredentialKind = 'api_token' | 'oauth_client' | 'hosted' | 'copilot';
 export type HostedAgentRunStatus = 'ok' | 'failed' | 'skipped';
@@ -1753,6 +1788,7 @@ export type AgentEventType =
   | 'guardian.episode'
   | 'guardrail.breach'
   | 'experiment.significant'
+  | 'experience.rollout_paused'
   | 'alert.fired';
 
 /**
@@ -1782,6 +1818,7 @@ export const agentEventCursor = pgTable('agent_event_cursor', {
   lastGuardianAt: ts('last_guardian_at'),
   lastAlertAt: ts('last_alert_at'),
   lastExperimentAt: ts('last_experiment_at'),
+  lastRolloutAt: ts('last_rollout_at'),
 });
 
 /** One delivered event per subscription: what `agents.events` pages through and what keeps a re-derived event silent. */
