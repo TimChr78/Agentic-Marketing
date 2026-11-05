@@ -5,6 +5,7 @@ import { initTelemetry, logger, shutdownTelemetry } from '@agentic-marketing/tel
 import { serve } from '@hono/node-server';
 import { createServer } from './app';
 import { ConfigError, loadConfig } from './config';
+import { prefixOf } from './domains';
 import { publicOnly } from './http/public-only';
 import { createBackup, keepDaysFromEnv } from './ops/backup-lib';
 import { offlineChecks } from './ops/checks';
@@ -57,7 +58,7 @@ if (config.roles.has('api') || config.roles.has('ingest')) {
 // Optional public edge: only the form, link and webhook routes, so a tunnel needs no path rule.
 if (config.publicPort && (config.roles.has('api') || config.roles.has('ingest'))) {
   servers.push(
-    serve({ fetch: publicOnly(app).fetch, port: config.publicPort }, () =>
+    serve({ fetch: publicOnly(app, prefixOf(srv.domains)).fetch, port: config.publicPort }, () =>
       logger.info({ port: config.publicPort }, 'public listener started'),
     ),
   );

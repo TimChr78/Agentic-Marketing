@@ -319,12 +319,16 @@ export function formsApi(deps: FormsDeps) {
   };
   app.get('/f/confirm/:token', async (c) => {
     const t = tokenOf(c.req.param('token'));
-    if (!verified(c.req.param('token')) || (t && crossBrand(c, t.w))) return hosted(c, await hostedPage('expired', t), 404);
+    // Another brand's link on this host is not found, and shows nothing of that brand (#185).
+    if (t && crossBrand(c, t.w)) return hosted(c, await hostedPage('expired', null), 404);
+    if (!verified(c.req.param('token'))) return hosted(c, await hostedPage('expired', t), 410);
     return hosted(c, await hostedPage('confirm', t), 200);
   });
   app.post('/f/confirm/:token', async (c) => {
     const t = verified(c.req.param('token'));
-    if (!t || crossBrand(c, t.w)) return hosted(c, await hostedPage('expired', tokenOf(c.req.param('token'))), 404);
+    const any = tokenOf(c.req.param('token'));
+    if (any && crossBrand(c, any.w)) return hosted(c, await hostedPage('expired', null), 404);
+    if (!t) return hosted(c, await hostedPage('expired', any), 410);
     const form = await deps.db.withWorkspace(t.w, (tx) => publishedForm(tx, t.f, t.v));
     if (!form)
       return hosted(

@@ -30,12 +30,26 @@ export function isBrandPath(path: string): boolean {
   return PUBLIC_ROOTS.has(root);
 }
 
-export function publicOnly(app: Hono) {
+/**
+ * The path prefix a Host serves (a verified brand domain's, or PUBLIC_LINKS_URL's), so a prefixed
+ * path is only let through when that prefix is really registered for the host.
+ */
+export type PrefixOf = (host: string, path: string) => Promise<string | null>;
+
+export function publicOnly(app: Hono, prefixOf?: PrefixOf) {
   const pub = new Hono();
   pub.use('*', rejectUnsafeRawPath);
-  pub.all('*', (c) => {
-    if (isPublicPath(c.req.path)) return app.fetch(c.req.raw, c.env);
-    return c.json({ error: 'not_found', message: 'Not found.' }, 404);
+  pub.all('*', async (c) => {
+    const path = c.req.path;
+    if (!isPublicPath(path)) return c.json({ error: 'not_found', message: 'Not found.' }, 404);
+    // A prefixed public root (`/am/f/…`) only passes for the prefix this host serves; any other
+    // prefix would otherwise fall through to the app's catch-all.
+    const direct = isBrandPath(path) || PUBLIC_EXACT.has(path) || isDomainChallengePath(path);
+    if (!direct && prefixOf) {
+      const prefix = await prefixOf(c.req.header('host') ?? '', path);
+      if (!prefix || !(path === prefix || path.startsWith(`${prefix}/`))) return c.json({ error: 'not_found', message: 'Not found.' }, 404);
+    }
+    return app.fetch(c.req.raw, c.env);
   });
   return pub;
 }

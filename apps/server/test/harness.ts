@@ -9,6 +9,7 @@ import { Client, type OAuthClientProvider, StreamableHTTPClientTransport, Unauth
 import pg from 'pg';
 import { createServer } from '../src/app';
 import { loadConfig } from '../src/config';
+import { prefixOf } from '../src/domains';
 import { publicOnly } from '../src/http/public-only';
 import type { Commands } from '../src/registry';
 import { startScheduler, startWorkers } from '../src/workers';
@@ -256,7 +257,9 @@ export async function startTestServer(
   let publicHttp: { close: () => void } | undefined;
   if (config.publicPort) {
     await new Promise<void>((resolve) => {
-      publicHttp = serve({ fetch: publicOnly(srv.app).fetch, port: config.publicPort! }, (_i: AddressInfo) => resolve());
+      publicHttp = serve({ fetch: publicOnly(srv.app, prefixOf(srv.domains)).fetch, port: config.publicPort! }, (_i: AddressInfo) =>
+        resolve(),
+      );
     });
   }
   const stop = new AbortController();

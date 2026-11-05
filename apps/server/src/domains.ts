@@ -90,3 +90,9 @@ export function createDomainService(db: Db, fallbackLinksUrl: string): DomainSer
     invalidate: () => resolver.invalidate(),
   };
 }
+
+/** For the public listener: the path prefix a request's Host serves, or null (#185). */
+export const prefixOf =
+  (domains: Pick<DomainService, 'resolvePublicRequest'>) =>
+  async (host: string, path: string): Promise<string | null> =>
+    (await domains.resolvePublicRequest(host, path))?.pathPrefix ?? null;
