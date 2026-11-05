@@ -11,7 +11,7 @@ import {
 } from '@agentic-marketing/artifacts';
 import { campaignWithControlForMember } from '@agentic-marketing/campaigns';
 import { defineCommand } from '@agentic-marketing/commands';
-import { AppError, newId } from '@agentic-marketing/core';
+import { AppError, newId, type ZonedTime, zonedInstant, zonedParts } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import {
   checkPushRecipient,
@@ -83,45 +83,9 @@ export function canaryAssignment(profileId: string, broadcastId: string, canaryP
 const WEEKDAYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'] as const;
 const minutesOf = (hhmm: string) => Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3));
 
-interface LocalTime {
-  y: number;
-  m: number;
-  d: number;
-  h: number;
-  min: number;
-}
-
-/** Wall-clock parts of an instant in a time zone (no dependency: Intl has the zone data). */
-function localParts(at: Date, timeZone: string): LocalTime {
-  const parts = new Intl.DateTimeFormat('en-GB', {
-    timeZone,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    hourCycle: 'h23',
-  }).formatToParts(at);
-  const get = (t: string) => Number(parts.find((p) => p.type === t)?.value ?? 0);
-  return { y: get('year'), m: get('month'), d: get('day'), h: get('hour'), min: get('minute') };
-}
-
 const weekdayOf = (y: number, m: number, d: number) => new Date(Date.UTC(y, m - 1, d)).getUTCDay();
 
-/** The UTC instant of a wall-clock time in a zone, by correcting a UTC guess with Intl's offset. */
-function zonedInstant(y: number, m: number, d: number, h: number, min: number, timeZone: string): Date {
-  const wanted = Date.UTC(y, m - 1, d, h, min);
-  let ts = wanted;
-  for (let i = 0; i < 3; i++) {
-    const p = localParts(new Date(ts), timeZone);
-    const actual = Date.UTC(p.y, p.m - 1, p.d, p.h, p.min);
-    if (actual === wanted) break;
-    ts += wanted - actual;
-  }
-  return new Date(ts);
-}
-
-function insideWindow(now: LocalTime, window: SendWindowDefinition): boolean {
+function insideWindow(now: ZonedTime, window: SendWindowDefinition): boolean {
   const t = now.h * 60 + now.min;
   const [s, e] = [minutesOf(window.start), minutesOf(window.end)];
   const today = WEEKDAYS[weekdayOf(now.y, now.m, now.d)];
@@ -135,7 +99,7 @@ function insideWindow(now: LocalTime, window: SendWindowDefinition): boolean {
 }
 
 function nextOpening(now: Date, window: SendWindowDefinition, timeZone: string): Date | null {
-  const p = localParts(now, timeZone);
+  const p = zonedParts(now, timeZone);
   const today = Date.UTC(p.y, p.m - 1, p.d);
   const [s, sm] = [Number(window.start.slice(0, 2)), Number(window.start.slice(3))];
   for (let offset = 0; offset <= 8; offset++) {
@@ -158,7 +122,7 @@ export function sendWindowHold(
   anchor: Date,
   maxDelaySeconds: number,
 ): { next: Date | null; skip: boolean } {
-  if (insideWindow(localParts(now, timeZone), window)) return { next: null, skip: false };
+  if (insideWindow(zonedParts(now, timeZone), window)) return { next: null, skip: false };
   const next = nextOpening(now, window, timeZone);
   if (!next) return { next: null, skip: true };
   return { next, skip: next.getTime() > anchor.getTime() + maxDelaySeconds * 1000 };
