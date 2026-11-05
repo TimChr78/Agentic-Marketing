@@ -22,11 +22,12 @@ const CLASS_BY_TYPE: Record<string, ActionClass> = {
   purposes: 'settings',
   delivery_policy: 'settings',
   tracking_plan: 'settings',
-  conversion_map: 'settings',
+  // A conversion map sends events to ad platforms: an audience publish under the `ads` channel (#428).
+  conversion_map: 'audience.publish',
 };
 
 /** Types whose publishing a mandate can never make autonomous (design §3.2, the fixed rule). */
-const NEEDS_PERSON = ['purposes', 'delivery_policy', 'tracking_plan', 'conversion_map', 'agent_mandate'];
+const NEEDS_PERSON = ['purposes', 'delivery_policy', 'tracking_plan', 'agent_mandate'];
 
 /** The class of publishing an artifact of this type. */
 export const publishClass = (type: string): ActionClass => CLASS_BY_TYPE[type] ?? 'content.publish';

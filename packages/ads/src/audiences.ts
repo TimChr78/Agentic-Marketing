@@ -186,8 +186,9 @@ publishValidators.set('audience_sync', async (content, tx: Tx) => {
 });
 
 /**
- * What publishing an audience sync touches, for the agent policy engine (#264): the segment whose
- * members leave the workspace (hashed) for an ad platform, so a mandate scopes it by audience.
+ * What publishing an audience sync touches, for the agent policy engine (#264, #428): the segment
+ * whose members leave the workspace (hashed) for an ad platform, so a mandate scopes it by
+ * audience, and the `ads` channel.
  */
 export async function audienceSyncImpact(tx: Tx, artifactId: string, version: number): Promise<Impact> {
   const [v] = await tx
@@ -195,7 +196,7 @@ export async function audienceSyncImpact(tx: Tx, artifactId: string, version: nu
     .from(schema.artifactVersions)
     .where(and(eq(schema.artifactVersions.artifactId, artifactId), eq(schema.artifactVersions.number, version)));
   const segment = (v?.content as { segment?: unknown } | undefined)?.segment;
-  return { touches: { segments: typeof segment === 'string' ? [segment] : [] } };
+  return { touches: { segments: typeof segment === 'string' ? [segment] : [], channels: ['ads'] } };
 }
 
 const messageOf = (err: unknown) => (err instanceof Error ? err.message : String(err));

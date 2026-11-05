@@ -1,3 +1,4 @@
+import { estimatedCost } from '@agentic-marketing/ai';
 import {
   type ActionClass,
   AutonomySettings,
@@ -735,6 +736,130 @@ const EmailOutcome = z
   })
   .nullable();
 
+const GoalOutcome = z.object({
+  measure: z.string(),
+  target: z.number().optional(),
+  direction: z.enum(['up', 'down']),
+  value: z.number().nullable(),
+  met: z.boolean().nullable(),
+  note: z.string().nullable(),
+});
+
+const Outcomes = z
+  .object({
+    broadcasts: EmailOutcome,
+    direct: EmailOutcome,
+    journeys: z.array(z.object({ id: z.string(), verdict: z.string().nullable(), note: z.string() })),
+    goals: z.array(GoalOutcome),
+  })
+  .nullable();
+
+const ActionTally = z.object({
+  allow: z.number().int(),
+  hold: z.number().int(),
+  ask: z.number().int(),
+  deny: z.number().int(),
+  failed: z.number().int(),
+});
+
+/** The artifacts an agent has published at any time, from its ledger. */
+async function publishedArtifactIds(tx: Tx, agentId: string): Promise<string[]> {
+  const t = schema.agentActions;
+  const rows = await tx
+    .select({ target: t.target })
+    .from(t)
+    .where(
+      and(
+        eq(t.agentId, agentId),
+        eq(t.decision, 'allow'),
+        eq(t.ok, true),
+        sql`${t.command} IN ('artifacts.requestPublish', 'artifacts.requestPublishBundle')`,
+      ),
+    );
+  return [...new Set(rows.flatMap((r) => (r.target ?? '').split(',')).filter(Boolean))];
+}
+
+/** The agent's audience syncs with their current size, last run and platforms (#428). */
+async function audienceSyncsOf(tx: Tx, artifactIds: string[]) {
+  const syncIds = artifactIds.filter((id) => id.startsWith('aud_'));
+  if (!syncIds.length) return [];
+  const rows = await tx
+    .select({ id: schema.artifacts.id, name: schema.artifacts.name, content: schema.artifactVersions.content })
+    .from(schema.artifacts)
+    .innerJoin(
+      schema.artifactVersions,
+      and(
+        eq(schema.artifactVersions.workspaceId, schema.artifacts.workspaceId),
+        eq(schema.artifactVersions.artifactId, schema.artifacts.id),
+        eq(schema.artifactVersions.number, schema.artifacts.publishedVersion),
+      ),
+    )
+    .where(
+      and(inArray(schema.artifacts.id, syncIds), eq(schema.artifacts.type, 'audience_sync'), isNotNull(schema.artifacts.publishedVersion)),
+    );
+  const states = await tx
+    .select({
+      syncId: schema.audienceSyncState.syncId,
+      platform: schema.audienceSyncState.platform,
+      members: schema.audienceSyncState.members,
+      lastRunAt: schema.audienceSyncState.lastRunAt,
+    })
+    .from(schema.audienceSyncState)
+    .where(inArray(schema.audienceSyncState.syncId, syncIds));
+  return rows.map((r) => {
+    const own = states.filter((s) => s.syncId === r.id);
+    const content = (r.content ?? {}) as { meta?: unknown; google?: unknown };
+    const platforms = ['meta', 'google'].filter((p) => content[p as 'meta' | 'google'] || own.some((s) => s.platform === p));
+    const members = own.reduce((n, s) => Math.max(n, s.members), 0);
+    const last = own.map((s) => s.lastRunAt).sort((a, b) => b.getTime() - a.getTime())[0];
+    return { id: r.id, name: r.name, members, lastSync: last?.toISOString() ?? null, platforms };
+  });
+}
+
+/** Ad conversion uploads in the period, when the agent published the workspace's conversion map (#428). */
+async function conversionUploadsOf(tx: Tx, artifactIds: string[], range: { from: Date; to: Date }) {
+  if (!artifactIds.some((id) => id.startsWith('cvm_'))) return undefined;
+  const [row] = await tx
+    .select({ n: sql<number>`count(*)::int` })
+    .from(schema.deliveries)
+    .where(
+      and(
+        eq(schema.deliveries.kind, 'ad_conversion'),
+        gte(schema.deliveries.createdAt, range.from),
+        lt(schema.deliveries.createdAt, range.to),
+      ),
+    );
+  return row?.n ?? 0;
+}
+
+/** The agent's hosted AI usage and estimated cost in the period (#428). */
+async function aiCostOf(tx: Tx, agentId: string, range: { from: Date; to: Date }) {
+  const c = schema.aiCalls;
+  const rows = await tx
+    .select({
+      model: c.model,
+      calls: sql<number>`count(*)::int`,
+      inputTokens: sql<number>`coalesce(sum(${c.inputTokens}), 0)::int`,
+      outputTokens: sql<number>`coalesce(sum(${c.outputTokens}), 0)::int`,
+    })
+    .from(c)
+    .where(
+      and(eq(c.kind, 'hosted'), sql`${c.input}->>'hostedAgentId' = ${agentId}`, gte(c.createdAt, range.from), lt(c.createdAt, range.to)),
+    )
+    .groupBy(c.model);
+  const totals = rows.reduce(
+    (acc, r) => ({
+      calls: acc.calls + r.calls,
+      inputTokens: acc.inputTokens + r.inputTokens,
+      outputTokens: acc.outputTokens + r.outputTokens,
+    }),
+    { calls: 0, inputTokens: 0, outputTokens: 0 },
+  );
+  const costs = rows.map((r) => estimatedCost(r.model, r.inputTokens, r.outputTokens));
+  const cost = costs.some((v) => v !== null) ? Math.round(costs.reduce<number>((n, v) => n + (v ?? 0), 0) * 1e6) / 1e6 : null;
+  return { ...totals, cost };
+}
+
 export const agentReport = defineCommand({
   name: 'agents.report',
   title: 'Agent report',
@@ -768,24 +893,24 @@ export const agentReport = defineCommand({
       .int()
       .optional()
       .describe('Marketing messages of this agent that the contact-pressure cap skipped in the period (#426)'),
-    outcomes: z
-      .object({
-        broadcasts: EmailOutcome,
-        direct: EmailOutcome,
-        journeys: z.array(z.object({ id: z.string(), verdict: z.string().nullable(), note: z.string() })),
-        goals: z.array(
-          z.object({
-            measure: z.string(),
-            target: z.number().optional(),
-            direction: z.enum(['up', 'down']),
-            value: z.number().nullable(),
-            met: z.boolean().nullable(),
-            note: z.string().nullable(),
-          }),
-        ),
-      })
-      .nullable()
-      .describe('Null when the server has no metric layer for reports'),
+    audienceSyncs: z
+      .array(
+        z.object({
+          id: z.string(),
+          name: z.string(),
+          members: z.number().int().describe('People in the synced audience, from the last run'),
+          lastSync: z.string().nullable(),
+          platforms: z.array(z.string()),
+        }),
+      )
+      .optional()
+      .describe('Audience syncs this agent published, with their size, last run and platforms (#428)'),
+    conversionUploads: z
+      .number()
+      .int()
+      .optional()
+      .describe('Ad conversion uploads in the period, when this agent published the conversion map (#428)'),
+    outcomes: Outcomes.describe('Null when the server has no metric layer for reports'),
   }),
   permission: 'audit:read',
   effect: 'read',
@@ -830,6 +955,9 @@ export const agentReport = defineCommand({
     const outcomes = ctx.services.agentOutcomes
       ? await ctx.services.agentOutcomes(ctx.tx, ctx.principal.workspaceId, agentId, { from, to }, goals)
       : null;
+    const published = await publishedArtifactIds(ctx.tx, agentId);
+    const audienceSyncs = await audienceSyncsOf(ctx.tx, published);
+    const conversionUploads = await conversionUploadsOf(ctx.tx, published, { from, to });
     return {
       agentId,
       from: from.toISOString(),
@@ -839,8 +967,191 @@ export const agentReport = defineCommand({
       guardian: Object.fromEntries(episodes.map((e) => [e.kind, e.n])),
       ...(await coordinationOf(ctx.tx, agentId)),
       contactPressureSkipped: await contactPressureSkipped(ctx.tx, agentId, { from, to }),
+      ...(audienceSyncs.length ? { audienceSyncs } : {}),
+      ...(conversionUploads !== undefined ? { conversionUploads } : {}),
       outcomes,
     };
+  },
+});
+
+// --- Comparison (#428) ---------------------------------------------------------------------------
+
+const MandateComparison = z.object({
+  mandateId: z.string().nullable().describe('Null: actions recorded without a mandate'),
+  version: z.number().int().nullable(),
+  validUntil: z.string().nullable(),
+  active: z.boolean().describe('Whether this mandate version is still in force'),
+  actions: z.record(z.string(), ActionTally),
+  undone: z.number().int(),
+  holds: z.object({
+    rejected: z.number().int().describe('Holds a person vetoed'),
+    ran: z.number().int().describe('Holds that ran after their veto window'),
+    pending: z.number().int(),
+  }),
+});
+
+const AgentComparison = z.object({
+  agentId: z.string(),
+  name: z.string(),
+  status: z.string(),
+  outcomes: Outcomes.describe('What its actions led to in the period; null without a metric layer'),
+  goalsMet: z.number().int(),
+  goalsTotal: z.number().int(),
+  guardian: z.object({
+    caps: z.number().int().describe('Guardian episodes that capped the agent in the period'),
+    episodes: z.record(z.string(), z.number().int()).describe('All guardian episodes by kind'),
+  }),
+  ai: z.object({
+    calls: z.number().int(),
+    inputTokens: z.number().int(),
+    outputTokens: z.number().int(),
+    cost: z.number().nullable().describe('Estimated USD from the price table; null for an unknown model'),
+  }),
+  mandates: z.array(MandateComparison).describe('One entry per mandate version the agent acted under, plus its actions without one'),
+});
+
+export const compareAgents = defineCommand({
+  name: 'agents.compare',
+  title: 'Compare agents',
+  description:
+    'Put several agents side by side for a period (default: the last 30 days): per mandate version, actions by class and decision (ran, held, sent to a person, refused, failed), undos and holds vetoed or run; per agent, the outcomes of its broadcasts, direct messages and journeys, its mandate goals, guardian caps and its hosted AI usage and estimated cost. Omit agentIds to compare every agent in the workspace.',
+  input: z.object({
+    from: z.string().datetime().optional(),
+    to: z.string().datetime().optional(),
+    agentIds: z.array(AGENT_ID).max(50).optional().describe('Agents to compare; omit for all'),
+  }),
+  output: z.object({ from: z.string(), to: z.string(), agents: z.array(AgentComparison) }),
+  permission: 'audit:read',
+  effect: 'read',
+  handler: async (input, ctx) => {
+    const to = input.to ? new Date(input.to) : new Date();
+    const from = input.from ? new Date(input.from) : new Date(to.getTime() - 30 * 86_400_000);
+    if (from >= to) throw new AppError('invalid_input', '`from` must be before `to`.');
+    const agents = await ctx.tx
+      .select({ id: schema.agents.id, name: schema.agents.name, status: schema.agents.status })
+      .from(schema.agents)
+      .where(input.agentIds ? inArray(schema.agents.id, input.agentIds) : undefined)
+      .orderBy(schema.agents.name);
+    if (input.agentIds) {
+      const found = new Set(agents.map((a) => a.id));
+      const missing = input.agentIds.filter((id) => !found.has(id));
+      if (missing.length) throw new AppError('not_found', `Agent ${missing.join(', ')} not found.`);
+    }
+    const t = schema.agentActions;
+    const compared: z.output<typeof AgentComparison>[] = [];
+    for (const agent of agents) {
+      const buckets = new Map<string, z.output<typeof MandateComparison>>();
+      const bucketOf = (mandateId: string | null, version: number | null) => {
+        const key = `${mandateId ?? ''}|${version ?? ''}`;
+        let b = buckets.get(key);
+        if (!b) {
+          b = { mandateId, version, validUntil: null, active: false, actions: {}, undone: 0, holds: { rejected: 0, ran: 0, pending: 0 } };
+          buckets.set(key, b);
+        }
+        return b;
+      };
+      const rows = await ctx.tx
+        .select({
+          mandateId: t.mandateId,
+          mandateVersion: t.mandateVersion,
+          actionClass: t.actionClass,
+          decision: t.decision,
+          // A refusal is recorded with ok = false: it is a deny, not a failure (#321).
+          failed: sql<number>`count(*) FILTER (WHERE NOT ${t.ok} AND ${t.decision} <> 'deny')::int`,
+          n: sql<number>`count(*) FILTER (WHERE ${t.ok} OR ${t.decision} = 'deny')::int`,
+          undone: sql<number>`count(*) FILTER (WHERE ${t.undoneAt} IS NOT NULL)::int`,
+        })
+        .from(t)
+        .where(and(eq(t.agentId, agent.id), gte(t.at, from), lt(t.at, to), sql`${t.command} <> 'artifacts.heldRecheck'`))
+        .groupBy(t.mandateId, t.mandateVersion, t.actionClass, t.decision);
+      for (const r of rows) {
+        const b = bucketOf(r.mandateId, r.mandateVersion);
+        const c = b.actions[r.actionClass] ?? { allow: 0, hold: 0, ask: 0, deny: 0, failed: 0 };
+        b.actions[r.actionClass] = c;
+        c[r.decision as 'allow' | 'hold' | 'ask' | 'deny'] += r.n;
+        c.failed += r.failed;
+        b.undone += r.undone;
+      }
+      // Holds are approval requests linked from the hold rows; their outcome is a person's veto or the window ending.
+      const holdRows = await ctx.tx
+        .select({
+          mandateId: t.mandateId,
+          mandateVersion: t.mandateVersion,
+          approvalId: sql<string | null>`${t.impact}->>'approvalId'`,
+        })
+        .from(t)
+        .where(and(eq(t.agentId, agent.id), eq(t.decision, 'hold'), gte(t.at, from), lt(t.at, to)));
+      const approvalIds = [...new Set(holdRows.map((r) => r.approvalId).filter((id): id is string => !!id))];
+      const approvals = approvalIds.length
+        ? await ctx.tx
+            .select({
+              id: schema.approvalRequests.id,
+              status: schema.approvalRequests.status,
+              decidedBy: schema.approvalRequests.decidedBy,
+            })
+            .from(schema.approvalRequests)
+            .where(inArray(schema.approvalRequests.id, approvalIds))
+        : [];
+      const approvalById = new Map(approvals.map((a) => [a.id, a]));
+      for (const r of holdRows) {
+        const b = bucketOf(r.mandateId, r.mandateVersion);
+        const a = r.approvalId ? approvalById.get(r.approvalId) : undefined;
+        if (a?.status === 'rejected') b.holds.rejected++;
+        else if (a?.status === 'approved' && a.decidedBy === 'policy:hold') b.holds.ran++;
+        else if (a?.status === 'pending') b.holds.pending++;
+      }
+      // The version's own validUntil, so a comparison across renewals shows which terms applied.
+      const mandateIds = [...new Set([...buckets.values()].map((b) => b.mandateId).filter((id): id is string => !!id))];
+      if (mandateIds.length) {
+        const versions = await ctx.tx
+          .select({
+            artifactId: schema.artifactVersions.artifactId,
+            number: schema.artifactVersions.number,
+            content: schema.artifactVersions.content,
+          })
+          .from(schema.artifactVersions)
+          .where(inArray(schema.artifactVersions.artifactId, mandateIds));
+        const byVersion = new Map(versions.map((v) => [`${v.artifactId}|${v.number}`, v.content]));
+        for (const b of buckets.values()) {
+          if (!b.mandateId) continue;
+          const content = byVersion.get(`${b.mandateId}|${b.version}`) as { validUntil?: string } | undefined;
+          if (!content?.validUntil) continue;
+          const until = new Date(content.validUntil);
+          b.validUntil = until.toISOString();
+          b.active = until > new Date();
+        }
+      }
+      const episodes = await ctx.tx
+        .select({ kind: schema.guardianEvents.kind, action: schema.guardianEvents.action, n: sql<number>`count(*)::int` })
+        .from(schema.guardianEvents)
+        .where(and(eq(schema.guardianEvents.agentId, agent.id), gte(schema.guardianEvents.at, from), lt(schema.guardianEvents.at, to)))
+        .groupBy(schema.guardianEvents.kind, schema.guardianEvents.action);
+      const mandate = await ctx.services.activeMandate?.(ctx.tx, agent.id);
+      const goals = mandate?.view.goals ?? [];
+      const outcomes = ctx.services.agentOutcomes
+        ? await ctx.services.agentOutcomes(ctx.tx, ctx.principal.workspaceId, agent.id, { from, to }, goals)
+        : null;
+      compared.push({
+        agentId: agent.id,
+        name: agent.name,
+        status: agent.status,
+        outcomes,
+        goalsMet: outcomes?.goals.filter((g) => g.met === true).length ?? 0,
+        goalsTotal: outcomes?.goals.length ?? 0,
+        guardian: {
+          caps: episodes.filter((e) => e.action === 'cap').reduce((n, e) => n + e.n, 0),
+          episodes: episodes.reduce<Record<string, number>>((acc, e) => {
+            acc[e.kind] = (acc[e.kind] ?? 0) + e.n;
+            return acc;
+          }, {}),
+        },
+        ai: await aiCostOf(ctx.tx, agent.id, { from, to }),
+        mandates: [...buckets.values()].sort(
+          (a, b) => (a.validUntil ?? '').localeCompare(b.validUntil ?? '') || (a.version ?? 0) - (b.version ?? 0),
+        ),
+      });
+    }
+    return { from: from.toISOString(), to: to.toISOString(), agents: compared };
   },
 });
 
@@ -900,6 +1211,7 @@ export const agentCommands = [
   clearGuard,
   shadowReport,
   agentReport,
+  compareAgents,
   undoAgent,
   getAutonomy,
   setAutonomy,

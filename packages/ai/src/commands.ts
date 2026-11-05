@@ -105,7 +105,7 @@ const MODEL_PRICES: Record<string, { input: number; output: number }> = {
 };
 
 /** An estimated cost in USD, or null when the model is not in the table. */
-function estimatedCost(model: string | null, inputTokens: number, outputTokens: number): number | null {
+export function estimatedCost(model: string | null, inputTokens: number, outputTokens: number): number | null {
   const price = model ? MODEL_PRICES[model] : undefined;
   if (!price) return null;
   return Math.round(((inputTokens * price.input + outputTokens * price.output) / 1_000_000) * 1e6) / 1e6;

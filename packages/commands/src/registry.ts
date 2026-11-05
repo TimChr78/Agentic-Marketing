@@ -98,6 +98,8 @@ export interface CommandContext {
   principal: Principal;
   tx: Tx;
   services: Services;
+  /** The surface the command came in on, for commands that append their own audit entries. */
+  surface?: Surface;
   /** Runs `fn` once the command's transaction has committed (e.g. to invalidate caches); errors are logged, not thrown. */
   afterCommit?: (fn: () => Promise<void>) => void;
   /** The policy engine's decision for an agent write (ADR-0016). "ask" means the change must wait for a person. */
@@ -143,6 +145,12 @@ export interface CommandDef<I extends z.ZodType = z.ZodType, O extends z.ZodType
   sensitiveOutput?: readonly string[];
   /** Audit successful calls of a read command too (e.g. reads of personal data). Writes and all failures are always audited. */
   auditReads?: boolean;
+  /**
+   * The handler appends its own audit entries (one per item it changed) instead of the executor
+   * appending one for the whole call, e.g. agents.renewMandates (#428). A call that throws is still
+   * audited by the executor.
+   */
+  auditsItself?: boolean;
   /** What the command acts on, for the audit log (e.g. an artifact id). */
   target?: (input: z.output<I>) => string | undefined;
   /**
@@ -223,8 +231,49 @@ function redact(input: unknown, fields?: readonly string[]) {
   return Object.fromEntries(Object.entries(input).map(([k, v]) => [k, fields.includes(k) ? '[redacted]' : v]));
 }
 
+/**
+ * Appends one entry to a workspace's audit log, keeping its hash chain. The executor calls this for
+ * every command; a command that records several items itself (agents.renewMandates, one per
+ * mandate) calls it directly and declares `auditsItself`.
+ */
+export async function appendAuditEntry(
+  tx: Tx,
+  p: Principal,
+  surface: Surface,
+  cmd: { name: string; effect: string },
+  inputHash: string,
+  target: string | undefined,
+  error?: AppError,
+  ip?: string | null,
+) {
+  // Serialise appends per workspace so the hash chain never forks under concurrency.
+  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`audit:${p.workspaceId}`}, 0))`);
+  const [prev] = await tx
+    .select({ hash: schema.auditLog.hash })
+    .from(schema.auditLog)
+    .where(eq(schema.auditLog.workspaceId, p.workspaceId))
+    .orderBy(desc(schema.auditLog.seq))
+    .limit(1);
+  const entry = {
+    workspaceId: p.workspaceId,
+    principalType: p.type,
+    principalId: p.userId,
+    clientId: p.clientId ?? null,
+    surface,
+    command: cmd.name,
+    effect: cmd.effect,
+    target: target ?? null,
+    inputHash,
+    ok: !error,
+    error: error ? `${error.code}: ${error.message}` : null,
+    prevHash: prev?.hash ?? null,
+    ...(ip ? { ip } : {}),
+  };
+  await tx.insert(schema.auditLog).values({ ...entry, hash: sha256(canonicalJson(entry)) });
+}
+
 export function createExecutor(db: Db, services: Services, options: ExecutorOptions = {}) {
-  async function appendAudit(
+  const appendAudit = (
     tx: Tx,
     p: Principal,
     surface: Surface,
@@ -232,31 +281,7 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
     inputHash: string,
     target: string | undefined,
     error?: AppError,
-  ) {
-    // Serialise appends per workspace so the hash chain never forks under concurrency.
-    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`audit:${p.workspaceId}`}, 0))`);
-    const [prev] = await tx
-      .select({ hash: schema.auditLog.hash })
-      .from(schema.auditLog)
-      .where(eq(schema.auditLog.workspaceId, p.workspaceId))
-      .orderBy(desc(schema.auditLog.seq))
-      .limit(1);
-    const entry = {
-      workspaceId: p.workspaceId,
-      principalType: p.type,
-      principalId: p.userId,
-      clientId: p.clientId ?? null,
-      surface,
-      command: cmd.name,
-      effect: cmd.effect,
-      target: target ?? null,
-      inputHash,
-      ok: !error,
-      error: error ? `${error.code}: ${error.message}` : null,
-      prevHash: prev?.hash ?? null,
-    };
-    await tx.insert(schema.auditLog).values({ ...entry, hash: sha256(canonicalJson(entry)) });
-  }
+  ) => appendAuditEntry(tx, p, surface, cmd, inputHash, target, error);
 
   /** Validate → authorize → idempotency → handler → validate output → audit (writes and failures), in one transaction. */
   async function execute<C extends AnyCommand>(
@@ -386,7 +411,15 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
               const undo = createUndoCollector();
               const out = withInputWarnings(
                 cmd.output.parse(
-                  await cmd.handler(parsed.data, { principal, tx, services, policy, undo, afterCommit: (fn) => committed.push(fn) }),
+                  await cmd.handler(parsed.data, {
+                    principal,
+                    tx,
+                    services,
+                    surface: opts.surface,
+                    policy,
+                    undo,
+                    afterCommit: (fn) => committed.push(fn),
+                  }),
                 ),
                 unknownMessages,
               ) as z.output<C['output']>;
@@ -405,7 +438,7 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
                   response: redact(out, cmd.sensitiveOutput) as object,
                 });
               if (cmd.effect !== 'read') target = cmd.auditTarget?.(out) ?? target;
-              if (cmd.effect !== 'read') await appendAudit(tx, principal, opts.surface, cmd, inputHash, target);
+              if (cmd.effect !== 'read' && !cmd.auditsItself) await appendAudit(tx, principal, opts.surface, cmd, inputHash, target);
               if (agent && policy)
                 await recordAgentAction(tx, agent.id, cmd, policy, opts.surface, target, null, intentOf(parsed.data), undo.get());
               return out;

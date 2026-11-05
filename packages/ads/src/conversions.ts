@@ -1,5 +1,5 @@
 import { type ConversionMap, DEFAULT_PURPOSES, publishedSingleton, publishValidators } from '@agentic-marketing/artifacts';
-import { defineCommand } from '@agentic-marketing/commands';
+import { defineCommand, type Impact } from '@agentic-marketing/commands';
 import { AppError, newId } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import { consentOf } from '@agentic-marketing/events';
@@ -59,6 +59,15 @@ publishValidators.set('conversion_map', async (content, tx: Tx) => {
   }
   return problems;
 });
+
+/**
+ * What publishing a conversion map touches, for the agent policy engine (#428): mapped events
+ * leave the workspace for the ad platforms, for the ad_measurement purpose. A mandate needs the
+ * `ads` channel (and that purpose, unless it scopes purposes openly) to publish it autonomously.
+ */
+export async function conversionMapImpact(): Promise<Impact> {
+  return { touches: { channels: ['ads'], purposes: ['ad_measurement'] } };
+}
 
 const get = (o: unknown, path: string) =>
   path.split('.').reduce<unknown>((v, k) => (v && typeof v === 'object' ? (v as Record<string, unknown>)[k] : undefined), o);
