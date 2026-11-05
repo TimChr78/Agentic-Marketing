@@ -116,6 +116,11 @@ People reset their own password from the sign-in page ("Forgot password?") and r
 - **What is stored.** The token lives in Better Auth's `verification` table under a hashed identifier, single use, 45 minutes, and temporarily (sealed with a purpose-separated installation key) in the delivery row until the worker settles it. The sealed address is stored the same way and wiped at terminal completion or after 24 hours. The message log row has no token (its idempotency key is a hash) and the audit entry records the person, IP and outcome only (the `ip` column, migration `0066_password_reset.sql`). `am upgrade-notes`, backups and the audit export therefore never contain a usable link or a queued address in plaintext.
 - **Limits.** 5 link requests per IP per 15 minutes, 3 per address per hour plus a 60-second cooldown, and 10 reset submissions per IP per 15 minutes, in Valkey and shared by every worker. A `429` carries `Retry-After: 60`.
 
+**0.7.5 development snapshots.** Released 0.7.4 ends at migration `0073`; upgrading that release applies the final `0074_password_reset_queue.sql` normally. Migration 0074 changed during pre-release PR development. A disposable development database which already applied an earlier PR417 version will fail checksum validation: recreate that disposable database against the final migration before testing. For a non-disposable database, prepare a reviewed schema/data transition from its exact snapshot; do not delete or edit migration checksums to bypass validation. No released migration was rewritten.
+
+Reset request and submission endpoints fail closed with a generic `503 RATE_LIMIT_UNAVAILABLE` if Valkey buckets are unavailable. This prevents unbounded enqueueing during a rate-limit-store outage. Without a worker, queued data still does not expire physically. Rotating `AUTH_SECRET` also prevents the worker from opening an older sealed token to revoke it; an already minted verification then remains subject to its existing 45-minute expiry and single-use rule.
+
+
 ## Monitoring
 
 The server exposes `GET /metrics` on the **main** listener (`PORT`, default 3000) in the Prometheus text format. It is never served on the public-only listener (`PUBLIC_PORT`), and it is **off by default**: without `METRICS_TOKEN` the route answers `404` like any unknown path, so an upgrade that sets nothing exposes nothing new.

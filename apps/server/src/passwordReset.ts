@@ -1,4 +1,5 @@
 import { hkdfSync } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import { type NotifyDeps, sendMemberEmails } from '@agentic-marketing/alerts';
 import { type Auth, hashedResetTokenIdentifier, mintResetVerification } from '@agentic-marketing/auth';
 import { canonicalJson, newId, sha256 } from '@agentic-marketing/core';
@@ -497,28 +498,42 @@ async function deliverReset(
 ): Promise<DeliveryResult> {
   const settle = async (status: 'sent' | 'failed' | 'skipped', outcome: ResetOutcome, error: string | null): Promise<DeliveryResult> =>
     (await settleReset(deps, row, status, outcome, error)) ? status : 'superseded';
-  const dropToken = async (token: string) => {
-    await deleteClaimedResetToken(deps.db, token, row).catch((err) =>
-      logger.warn({ err, id: row.id }, 'could not remove an unused reset token'),
-    );
+  // If revocation fails, retain the sealed payload and let stale-claim recovery retry it.
+  const dropToken = (token: string) => deleteClaimedResetToken(deps.db, token, row);
+  const discardPendingToken = async () => {
+    if (!row.token_sealed) return;
+    let pending: string;
+    try {
+      pending = openResetToken(deps.secret, row.token_sealed);
+    } catch {
+      // A rotated installation secret cannot recover the token; verification expiry still applies.
+      logger.warn({ id: row.id }, 'pending verification could not be opened for revocation');
+      return;
+    }
+    await dropToken(pending);
   };
-
-  if (!row.email_sealed) return settle('failed', 'email_unreadable', 'email_missing');
+  if (!row.email_sealed) {
+    await discardPendingToken();
+    return settle('failed', 'email_unreadable', 'email_missing');
+  }
   let email: string;
   try {
     email = openResetEmail(deps.secret, row.email_sealed);
   } catch (err) {
     logger.warn({ err, id: row.id }, 'queued password reset address could not be opened');
+    await discardPendingToken();
     return settle('failed', 'email_unreadable', 'email_unreadable');
   }
 
   const account = await accountForEmail(deps.db, email);
   if (!account) {
     // A previously claimed row has an account id: the account is gone, not merely unknown.
+    await discardPendingToken();
     return row.user_id ? settle('failed', 'account_gone', 'account_gone') : settle('skipped', 'unknown', null);
   }
   if (row.user_id && row.user_id !== account.id) {
     // The address now belongs to someone else; never mail a token minted for the old account.
+    await discardPendingToken();
     return settle('failed', 'account_gone', 'account_changed');
   }
   if (!row.user_id) {
@@ -534,7 +549,10 @@ async function deliverReset(
   }
 
   const eligibility = await resetEligibility(deps.db, account);
-  if (eligibility !== 'ok') return settle('skipped', eligibility, null);
+  if (eligibility !== 'ok') {
+    await discardPendingToken();
+    return settle('skipped', eligibility, null);
+  }
 
   let token: string;
   if (row.token_sealed) {
@@ -570,7 +588,10 @@ async function deliverReset(
   // Verification ownership, expiry and consumption immediately before delivery.
   const tokenState = await resetTokenState(deps.db, token);
   if (!tokenState) return settle('failed', 'consumed', 'token_consumed');
-  if (tokenState.userId !== account.id) return settle('failed', 'invalid_token', 'token_owner_mismatch');
+  if (tokenState.userId !== account.id) {
+    await dropToken(token);
+    return settle('failed', 'invalid_token', 'token_owner_mismatch');
+  }
   if (tokenState.expiresAt.getTime() <= Date.now()) {
     await dropToken(token);
     return settle('failed', 'expired', 'token_expired');
@@ -646,16 +667,8 @@ export async function runPasswordResetDeliveries(
     }
     if (signal.aborted) break;
     if (!handled)
-      await new Promise<void>((resolve) => {
-        const timer = setTimeout(resolve, tickMs);
-        signal.addEventListener(
-          'abort',
-          () => {
-            clearTimeout(timer);
-            resolve();
-          },
-          { once: true },
-        );
+      await delay(tickMs, undefined, { signal }).catch((err) => {
+        if (!signal.aborted) throw err;
       });
   }
 }

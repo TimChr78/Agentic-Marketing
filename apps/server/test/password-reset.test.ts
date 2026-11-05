@@ -1,3 +1,4 @@
+import { getEventListeners } from 'node:events';
 import { hashedResetTokenIdentifier, RESET_PASSWORD_TTL_SECONDS } from '@agentic-marketing/auth';
 import type { Db } from '@agentic-marketing/db';
 import { outbox } from '@agentic-marketing/email';
@@ -8,6 +9,7 @@ import {
   enqueueResetRequest,
   openResetEmail,
   openResetToken,
+  runPasswordResetDeliveries,
   runPasswordResetDeliveriesOnce,
   sendPasswordResetEmail,
 } from '../src/passwordReset';
@@ -469,6 +471,89 @@ describe('the answer does not depend on the account (#379)', () => {
   });
 });
 
+describe('reset limiter availability', () => {
+  it.each([1, 2, 3])('refuses to enqueue all aliases when bucket %i is unavailable', async (failAt) => {
+    let calls = 0;
+    let writes = 0;
+    let forwards = 0;
+    const fake = {
+      admin: {
+        query: async () => {
+          writes++;
+          return { rows: [] };
+        },
+      },
+    } as unknown as Db;
+    const app = new Hono();
+    passwordResetRoutes(app, {
+      auth: {
+        handler: async () => {
+          forwards++;
+          return new Response();
+        },
+      } as never,
+      db: fake,
+      hot: {
+        take: async () => {
+          if (++calls === failAt) throw new Error('Valkey unavailable');
+          return true;
+        },
+      } as never,
+      publicUrl: BASE,
+      authSecret: 's'.repeat(32),
+      clientIpHeaders: [],
+      trustedProxyCidrs: [],
+    });
+    const responses: unknown[] = [];
+    for (const alias of ['forgot-password', 'forget-password', 'request-password-reset']) {
+      for (const email of [owner.email, 'unknown@example.com']) {
+        calls = 0;
+        const response = await app.request(`/api/auth/${alias}`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ email }),
+        });
+        expect(response.status).toBe(503);
+        responses.push(await response.json());
+      }
+    }
+    expect(responses.every((body) => JSON.stringify(body) === JSON.stringify(responses[0]))).toBe(true);
+    expect(responses[0]).toMatchObject({ status: false, code: 'RATE_LIMIT_UNAVAILABLE' });
+    expect(writes).toBe(0);
+    expect(forwards).toBe(0);
+  });
+
+  it('does not forward a reset submission while its shared limiter is unavailable', async () => {
+    let forwards = 0;
+    const app = new Hono();
+    passwordResetRoutes(app, {
+      auth: {
+        handler: async () => {
+          forwards++;
+          return new Response();
+        },
+      } as never,
+      db: {} as Db,
+      hot: {
+        take: async () => {
+          throw new Error('Valkey unavailable');
+        },
+      } as never,
+      publicUrl: BASE,
+      authSecret: 's'.repeat(32),
+      clientIpHeaders: [],
+      trustedProxyCidrs: [],
+    });
+    const response = await app.request('/api/auth/reset-password', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ token: 'pending', newPassword: NEW_PASSWORD }),
+    });
+    expect(response.status).toBe(503);
+    expect(forwards).toBe(0);
+  });
+});
+
 describe('the reset delivery queue (#379)', () => {
   const failingSender = async () => 'failed' as const;
 
@@ -584,6 +669,76 @@ describe('the reset delivery queue (#379)', () => {
     expect(mailsTo(account.email)).toHaveLength(0);
     expect((await queueRows(account.id))[0]).toMatchObject({ status: 'skipped', outcome: 'sso_only', token_sealed: null });
     expect((await auditRows(account.id)).at(-1)?.error).toContain('sso_only');
+  });
+
+  it.each(['credential', 'sso', 'address', 'owner'] as const)(
+    'revokes a retry token after an eligibility or ownership change: %s',
+    async (change) => {
+      await ensureTransactionalProvider();
+      const domain = `revoke-${Date.now()}-${change}.test`;
+      const account = await newAccountAt(`person@${domain}`);
+      await forgot(account.email);
+      expect(await deliver(failingSender)).toMatchObject({ retried: 1 });
+      const [pending] = await queueRows(account.id);
+      expect(pending.token_sealed).toBeTruthy();
+      expect(await verificationRows(account.id)).toHaveLength(1);
+      if (change === 'credential') {
+        await t.srv.db.admin.query('DELETE FROM "account" WHERE "userId" = $1 AND "providerId" = $2', [account.id, 'credential']);
+      } else if (change === 'sso') {
+        await t.srv.db.admin.query(
+          `INSERT INTO "ssoProvider" (id, issuer, "userId", "providerId", domain, "workspaceId", "domainVerified", enforced)
+         VALUES ($1, $2, $3, $4, $5, $6, true, true)`,
+          [`revoke-${domain}`, 'https://idp.example', owner.id, `provider-${domain}`, domain, ws],
+        );
+      } else {
+        await t.srv.db.admin.query('UPDATE "user" SET email = $2 WHERE id = $1', [account.id, `moved@${domain}`]);
+        if (change === 'owner') await newAccountAt(account.email);
+      }
+      await t.srv.db.admin.query('UPDATE password_reset_deliveries SET next_attempt_at = now() WHERE id = $1', [pending.id]);
+      const result = await deliver();
+      expect(result).toMatchObject({ handled: 1, sent: 0 });
+      const [settled] = await queueRows(account.id);
+      expect(settled).toMatchObject({
+        status: change === 'credential' || change === 'sso' ? 'skipped' : 'failed',
+        outcome: change === 'credential' ? 'no_password' : change === 'sso' ? 'sso_only' : 'account_gone',
+        token_sealed: null,
+      });
+      expect(await verificationRows(account.id)).toHaveLength(0);
+      expect(mailsTo(account.email)).toHaveLength(0);
+    },
+    30_000,
+  );
+
+  it('releases idle abort listeners between ticks', async () => {
+    const controller = new AbortController();
+    let claims = 0;
+    let mostListeners = 0;
+    const fake = {
+      admin: {
+        query: async (query: string) => {
+          mostListeners = Math.max(mostListeners, getEventListeners(controller.signal, 'abort').length);
+          if (query.includes('claim_id = gen_random_uuid') && ++claims === 30) controller.abort();
+          return { rows: [], rowCount: 0 };
+        },
+      },
+    } as unknown as Db;
+    await runPasswordResetDeliveries(
+      {
+        db: fake,
+        auth: t.srv.auth,
+        kp: t.srv.keyProvider,
+        email: t.srv.email,
+        directory: t.srv.directory,
+        publicUrl: t.base,
+        ttlSeconds: RESET_PASSWORD_TTL_SECONDS,
+        secret: t.srv.authSecret,
+      },
+      controller.signal,
+      { tickMs: 1 },
+    );
+    expect(claims).toBe(30);
+    expect(mostListeners).toBeLessThanOrEqual(1);
+    expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
   });
 
   it('does not mail an expired or consumed queued token', async () => {

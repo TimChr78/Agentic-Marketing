@@ -17,7 +17,7 @@ CREATE TABLE password_reset_deliveries (
   email_sealed bytea,
   -- The requesting client IP, used only for the audit entry the worker appends.
   ip text NOT NULL,
-  -- The account resolved by the worker; null until then, and wiped on terminal completion.
+  -- The account resolved by the worker; null until then, retained until terminal-row pruning.
   user_id text,
   -- Worker-minted Better Auth token, sealed with the installation secret.
   token_sealed bytea,

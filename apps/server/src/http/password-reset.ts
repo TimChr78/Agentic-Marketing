@@ -54,15 +54,20 @@ export function passwordResetRoutes(app: Hono, deps: PasswordResetRoutesDeps) {
       trustedProxyCidrs: deps.trustedProxyCidrs,
     }) ?? 'unknown';
 
-  /** A token bucket shared by every worker. Valkey trouble must not lock everyone out. */
+  /** Shared limits must be available before enqueueing or forwarding a public reset. */
   async function take(key: string, bucket: { rate: number; burst: number }) {
     try {
       return await deps.hot.take(key, 1, bucket.rate, bucket.burst);
     } catch (err) {
-      logger.warn({ err, key }, 'password reset rate limit unavailable; allowing the request');
-      return true;
+      logger.warn({ err }, 'password reset rate limit unavailable');
+      return null;
     }
   }
+
+  const unavailable = (c: Context) =>
+    c.json({ status: false, code: 'RATE_LIMIT_UNAVAILABLE', message: 'Password reset is temporarily unavailable. Try again later.' }, 503, {
+      'retry-after': '60',
+    });
 
   const tooMany = (c: Context) => c.json({ status: false, code: 'RATE_LIMITED', message: TOO_MANY }, 429, { 'retry-after': '60' });
 
@@ -87,11 +92,18 @@ export function passwordResetRoutes(app: Hono, deps: PasswordResetRoutesDeps) {
     const email = typeof input.email === 'string' ? input.email.trim().toLowerCase() : '';
     if (!email || email.length > 320 || !EMAIL.test(email)) return c.json({ status: false, message: 'Enter a valid e-mail address.' }, 400);
 
-    // Per IP first, then per address, both independent of whether the account exists.
-    if (!(await take(`pwreset:ip:${ip}`, RESET_IP_BUCKET))) return tooMany(c);
-    if (!(await take(`pwreset:email:${sha256(email)}`, RESET_EMAIL_BUCKET))) return tooMany(c);
-    // A short cooldown keeps one impatient person from filling a mailbox; the answer stays neutral.
-    if (!(await take(`pwreset:cooldown:${sha256(email)}`, { rate: 1 / RESET_COOLDOWN_SECONDS, burst: 1 }))) return c.json(neutral());
+    // All valid addresses use the same shared limits before any durable write.
+    const addressKey = sha256(email);
+    const limits = [
+      { key: `pwreset:ip:${ip}`, bucket: RESET_IP_BUCKET, cooldown: false },
+      { key: `pwreset:email:${addressKey}`, bucket: RESET_EMAIL_BUCKET, cooldown: false },
+      { key: `pwreset:cooldown:${addressKey}`, bucket: { rate: 1 / RESET_COOLDOWN_SECONDS, burst: 1 }, cooldown: true },
+    ];
+    for (const limit of limits) {
+      const allowed = await take(limit.key, limit.bucket);
+      if (allowed === null) return unavailable(c);
+      if (!allowed) return limit.cooldown ? c.json(neutral()) : tooMany(c);
+    }
 
     // The whole request path (#379): seal the normalized address and insert one durable row. There
     // is no account lookup, token mint, tenant KEK or provider call here, so known, unknown and
@@ -108,7 +120,9 @@ export function passwordResetRoutes(app: Hono, deps: PasswordResetRoutesDeps) {
 
   async function resetPassword(c: Context) {
     const ip = clientIp(c);
-    if (!(await take(`pwreset:submit:ip:${ip}`, RESET_SUBMIT_IP_BUCKET))) return tooMany(c);
+    const allowed = await take(`pwreset:submit:ip:${ip}`, RESET_SUBMIT_IP_BUCKET);
+    if (allowed === null) return unavailable(c);
+    if (!allowed) return tooMany(c);
     const input = await body(c);
     const token = typeof input.token === 'string' ? input.token : '';
     const newPassword = typeof input.newPassword === 'string' ? input.newPassword : '';
