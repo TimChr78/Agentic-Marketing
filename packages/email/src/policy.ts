@@ -116,6 +116,13 @@ export function quietUntil(now: Date, window: { start: string; end: string }, ti
       }
       at = hi;
       offset = offsetMinutes(new Date(at), timeZone);
+      // The rollback may remain quiet but make today's end reachable again (01:45 ->
+      // 01:00 in a 01:30–01:15 overnight window). Recompute rather than keeping tomorrow.
+      const q = zonedParts(new Date(at), timeZone);
+      const minute = q.h * 60 + q.min;
+      const day = new Date(Date.UTC(q.y, q.m - 1, q.d) + (minute < e ? 0 : DAY));
+      const nearer = wallClockEnd(day.getUTCFullYear(), day.getUTCMonth() + 1, day.getUTCDate(), e, timeZone, new Date(at));
+      if (nearer.getTime() < until.getTime()) until = nearer;
     } else at = stop;
   }
   // A date-line jump can skip the entire local end date and land inside the next quiet

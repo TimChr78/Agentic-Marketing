@@ -23,6 +23,11 @@ describe('#367 quiet hours resolve the real window end across a DST transition',
       '2026-11-01T06:00:00.000Z',
     );
   });
+  it("uses today's end when a rollback remains in the overnight quiet tail", () => {
+    expect(quietUntil(new Date('2026-11-01T05:45:00Z'), { start: '01:30', end: '01:15' }, 'America/New_York')?.toISOString()).toBe(
+      '2026-11-01T06:15:00.000Z',
+    );
+  });
 });
 
 describe('#406 the production e-mail chain no longer uses the unpatched deepmerge', () => {

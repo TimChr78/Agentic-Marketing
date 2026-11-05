@@ -74,6 +74,15 @@ describe('quiet hours across daylight-saving transitions', () => {
     );
   });
 
+  it("re-resolves today's overnight end after a rollback stays inside quiet hours", () => {
+    expect(iso(quietUntil(new Date('2026-11-01T05:45:00Z'), { start: '01:30', end: '01:15' }, 'America/New_York'))).toBe(
+      '2026-11-01T06:15:00.000Z',
+    );
+    expect(iso(quietUntil(new Date('2026-04-04T14:50:00Z'), { start: '01:45', end: '01:40' }, 'Australia/Lord_Howe'))).toBe(
+      '2026-04-04T15:10:00.000Z',
+    );
+  });
+
   it('does not end inside quiet hours when a date-line jump skips the end date', () => {
     expect(iso(quietUntil(new Date('2011-12-30T09:00:00Z'), overnight, 'Pacific/Apia'))).toBe('2011-12-30T18:00:00.000Z');
   });

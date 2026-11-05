@@ -6,6 +6,9 @@ import { z } from 'zod';
 
 const ISO_DATE_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})$/i;
 
+// Formatters are immutable and expensive to construct; bound the cache for caller-supplied zones.
+const zonedFormatters = new Map<string, Intl.DateTimeFormat>();
+
 /** Wall-clock parts of an instant in an IANA time zone. */
 export interface ZonedTime {
   y: number;
@@ -17,15 +20,21 @@ export interface ZonedTime {
 
 /** Wall-clock parts of an instant in a time zone (no dependency: Intl has the zone data). */
 export function zonedParts(at: Date, timeZone: string): ZonedTime {
-  const parts = new Intl.DateTimeFormat('en-GB', {
-    timeZone,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    hourCycle: 'h23',
-  }).formatToParts(at);
+  let formatter = zonedFormatters.get(timeZone);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat('en-GB', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    });
+    if (zonedFormatters.size >= 128) zonedFormatters.delete(zonedFormatters.keys().next().value!);
+    zonedFormatters.set(timeZone, formatter);
+  }
+  const parts = formatter.formatToParts(at);
   const get = (t: string) => Number(parts.find((p) => p.type === t)?.value ?? 0);
   return { y: get('year'), m: get('month'), d: get('day'), h: get('hour'), min: get('minute') };
 }
