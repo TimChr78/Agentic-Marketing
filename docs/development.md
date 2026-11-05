@@ -159,6 +159,14 @@ People: `alex@example.com` (owner), `sam@example.com` (builder), `jo@example.com
 `vic@example.com` (viewer); password `correct-horse-battery-staple`. Set `TRUSTED_ORIGINS` if you use another
 origin.
 
+The seed (`apps/server/test/e2e/seed.ts`) also writes weeks of deterministic activity, so analytics, journey stats,
+deliverability and agent reports are not empty: about 520 people with consent history, eight sent weekly issues with
+delivery events, a scheduled and a stopped send, a live journey, a web-experience experiment, campaign conversions,
+agent actions and a guardian episode, alerts with history and an import. It is generated from a seeded PRNG and a
+fixed clock — `seed(t, { now })`, defaulting to `2026-11-02T09:00:00Z` — so the counts, rates and names are stable
+across runs. Pass another `now` to move the history; the UI's date pickers are real time, so screenshots use the
+default. Seeding takes about 15 seconds on a normal test machine.
+
 Tests for the UI:
 
 ```bash
