@@ -16,12 +16,19 @@ export default defineConfig({
   timeout: 60_000,
   expect: { timeout: 10_000 },
   reporter: [['list']],
+  // The functional suite is the default; the axe checks (#206) are its own project so they can run
+  // alone (`pnpm e2e --project axe`). Visual regression has its own config (playwright.visual.config.ts).
+  projects: [
+    { name: 'functional', testIgnore: /(?:visual|axe)\.spec\.ts/ },
+    { name: 'axe', testMatch: '**/axe.spec.ts' },
+  ],
   use: {
     baseURL: base,
     trace: 'retain-on-failure',
     ...devices['Desktop Chrome'],
     viewport: { width: 1440, height: 900 },
-    launchOptions: { executablePath },
+    // Chromium needs this where /dev/shm is the container default of 64 MB (axe opens a second tab).
+    launchOptions: { executablePath, args: ['--disable-dev-shm-usage'] },
   },
   webServer: process.env.E2E_BASE
     ? undefined

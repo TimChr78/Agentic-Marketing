@@ -82,7 +82,9 @@ export function Tabs<K extends string>({
               role="tab"
               id={`${id}-tab-${t.key}`}
               aria-selected={value === t.key}
-              aria-controls={`${id}-panel`}
+              // Only the selected panel is rendered, and only when the page passes children: a tab
+              // must not point at an id that does not exist.
+              aria-controls={children !== undefined ? `${id}-panel` : undefined}
               tabIndex={value === t.key ? 0 : -1}
               onClick={() => onChange(t.key)}
               onKeyDown={(e) => onKey(e, i)}

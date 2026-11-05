@@ -74,10 +74,11 @@ accessibility); calls made while building it are in
 
 ```bash
 pnpm vitest run --project web                     # unit and component tests (jsdom)
-pnpm e2e                                          # Playwright: builds the UI, starts the seeded server, runs e2e/*.spec.ts
+pnpm e2e                                          # Playwright: builds the UI, starts the seeded server, runs the specs and the axe checks
 E2E_BASE=http://localhost:5173 pnpm e2e:dev       # against a running dev UI and seeded server instead
 CHROMIUM=/usr/bin/chromium pnpm e2e               # use a system Chromium instead of Playwright's download
-node e2e/screenshots.mjs docs/design/screenshots  # screenshots of every screen, light and dark, 1440 and 768 px
+pnpm shots                                        # screenshots of every admin route, light and dark, 1440/768/390 px
+pnpm e2e:visual                                   # visual regression against the committed baselines
 ```
 
 The web tests live in `apps/web/test`; the Playwright specs in `e2e/`. See

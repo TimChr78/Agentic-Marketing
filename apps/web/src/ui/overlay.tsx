@@ -56,7 +56,8 @@ export function Drawer({ open, onClose, title, meta, children, footer, width = '
           width === 'xl' && 'sm:max-w-[min(1080px,92vw)]',
         )}
       >
-        <header className="flex items-start gap-3 border-b border-line px-5 py-3.5">
+        {/* A div, not <header>: a <header> inside a dialog is a second banner landmark. */}
+        <div className="flex items-start gap-3 border-b border-line px-5 py-3.5">
           <div className="min-w-0 flex-1">
             <h2 id={titleId} className="text-[15px] leading-[22px] font-semibold break-words">
               {title}
@@ -65,9 +66,9 @@ export function Drawer({ open, onClose, title, meta, children, footer, width = '
           </div>
           {actions}
           <IconButton label="Close" icon={<X size={16} />} onClick={onClose} className="-mr-1.5" />
-        </header>
+        </div>
         <div className="min-h-0 flex-1 overflow-y-auto">{children}</div>
-        {footer && <footer className="flex flex-wrap items-center gap-2 border-t border-line bg-surface px-5 py-3">{footer}</footer>}
+        {footer && <div className="flex flex-wrap items-center gap-2 border-t border-line bg-surface px-5 py-3">{footer}</div>}
       </div>
     </div>,
     document.body,

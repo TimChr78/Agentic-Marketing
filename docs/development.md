@@ -163,11 +163,57 @@ Tests for the UI:
 
 ```bash
 pnpm vitest run --project web                 # unit and component tests (jsdom)
-pnpm e2e                                      # Playwright: builds the UI, starts the seeded server, runs e2e/*.spec.ts
+pnpm e2e                                      # Playwright: builds the UI, starts the seeded server, runs the functional specs and the axe checks
+pnpm e2e --project functional                 # only the functional specs
+pnpm e2e --project axe                        # only the accessibility checks (WCAG 2.1/2.2 A and AA, every route)
+pnpm e2e:visual                               # visual regression against the committed baselines
 E2E_BASE=http://localhost:5173 pnpm e2e       # against a running dev UI and seeded server instead
 CHROMIUM=/usr/bin/chromium pnpm e2e           # use a system Chromium instead of Playwright's download
-node e2e/screenshots.mjs docs/design/screenshots   # screenshots of every screen, light and dark, 1440 and 768 px
+pnpm shots                                    # screenshots of every admin route, light and dark, 1440/768/390 px
 ```
+
+#### Screenshots, visual regression and accessibility
+
+The route matrix is one list, `e2e/matrix.mjs`: every entry in `apps/web/src/app/nav.ts` (read from
+source, so a new nav item is covered without touching the script), the detail pages the seed
+provides (one of each artifact type, a person, an agent, a token, every approval type), the signed-out
+sign-in page and `/`. Everything below uses it.
+
+- `e2e/screenshots.mjs` (or `pnpm shots`) writes the full matrix as PNGs:
+  `node e2e/screenshots.mjs <outDir> [--only name,name] [--widths 1440,768,390] [--themes light,dark]`.
+  Captures are deterministic: the clock is fixed at the seed's date, motion and carets are disabled,
+  fonts and images are loaded and skeletons gone before the shot, and relative times, dates and raw
+  ids are masked with Playwright (their text is replaced first, so a mask keeps its size when "9 min
+  ago" becomes "1 d ago"). Pass `--no-mask` when the images are for people rather than for
+  comparison: the masks are pink boxes.
+- `e2e/visual.spec.ts` compares a stable subset (sign-in, approvals and a broadcast approval, the
+  journey list and builder, a broadcast, a template, people, analytics, agents and an agent, the
+  workspace settings) at 1440 and 390 px in both themes against the baselines in
+  `e2e/visual.spec.ts-snapshots`. A diff above `maxDiffPixelRatio: 0.002` fails. It expects a freshly
+  seeded server: its config starts one, and with `E2E_BASE` point it at a server you have just
+  started, because the functional suite changes the seeded data.
+- `e2e/axe.spec.ts` runs axe-core over the whole matrix, light and dark at 1440 px, and fails on any
+  violation that is not in `e2e/axe-known-issues.json`. Each entry names the axe rule, the route and
+  why it is deferred; the wave's done criterion is an empty list. The run prints every violation by
+  rule, including the known ones, so the list can shrink.
+
+Baselines are Linux screenshots, so record and update them in the official Playwright container
+(the same image CI uses) with the repository mounted at its own path and the seeded server running
+on `localhost:3100`:
+
+```bash
+CH=$(docker run --rm mcr.microsoft.com/playwright:v1.64.1-noble sh -c 'ls -d /ms-playwright/chromium-*/chrome-linux*/chrome | head -1')
+docker run --rm --network host -v "$PWD":"$PWD" -w "$PWD" -e CHROMIUM="$CH" -e E2E_BASE=http://localhost:3100 \
+  mcr.microsoft.com/playwright:v1.64.1-noble npx playwright test -c playwright.visual.config.ts --update-snapshots
+```
+
+The same command runs the checks without `--update-snapshots`; swap the last argument for
+`npx playwright test` (functional and axe) or `node e2e/screenshots.mjs reports/shots` to run those in
+the container too, so a machine without a usable Chromium still gets the CI result.
+
+Updating a baseline is a reviewed commit, never something CI does: look at the expected/actual/diff
+images the failed job uploads as `visual-diffs`, decide whether the change is intended, and only then
+re-record that route (`... --update-snapshots visual.spec.ts -g people`) and commit the new PNG.
 
 ### Collecting events
 
@@ -252,7 +298,7 @@ Biome checks every directory unless `biome.json` excludes it; add generated outp
 
 The `server` project runs its files in parallel, four at a time (`TEST_WORKERS=1` runs them one by one). Each file gets its own Postgres and ClickHouse database, NATS namespace and Valkey prefix; `apps/server/test/setup.ts` migrates one template database first and every file starts from a copy of it. A file keeps its database after the run so a failure can be inspected; `pnpm test:clean` removes them. Ports come from `testPort()` in `apps/server/test/harness.ts`, which gives each worker its own block; set `TEST_PORT_OFFSET=10000` to run a second checkout's suite at the same time.
 
-CI (`.github/workflows/ci.yml`) runs lint, typecheck, the version check, the audit and the documentation tests in a `static` job, the suite in `test`, and the browser, image and chart checks in `e2e`, `docker-smoke` and `helm`. Pull requests that only change Markdown, `docs/` or `.claude/` skip the slow jobs. The release workflow calls the same file for the tagged commit.
+CI (`.github/workflows/ci.yml`) runs lint, typecheck, the version check, the audit and the documentation tests in a `static` job, the suite in `test`, and the browser, image and chart checks in `e2e`, `docker-smoke` and `helm`. The `e2e` job runs the functional specs and the axe checks; `visual` compares the committed baselines and uploads the diff images on failure, on pull requests that touch `apps/web` or `e2e`; `screenshots` captures the full matrix as an artifact when a manual run asks for it. Pull requests that only change Markdown, `docs/` or `.claude/` skip the slow jobs. The release workflow calls the same file for the tagged commit.
 
 ### Migrations
 
