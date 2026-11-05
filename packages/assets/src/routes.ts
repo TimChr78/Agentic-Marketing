@@ -1,3 +1,4 @@
+import type { PublicRequest } from '@agentic-marketing/commands';
 import type { Db } from '@agentic-marketing/db';
 import { Hono } from 'hono';
 import { renditionFileName } from './media';
@@ -7,6 +8,7 @@ import { renditionFileName } from './media';
 // For an SVG, the same id with a .png name serves the stored PNG rendition e-mail can use.
 
 type AssetRow = {
+  workspace_id: string;
   file_name: string;
   content_type: string;
   sha256: string;
@@ -42,16 +44,20 @@ function matches(ifNoneMatch: string | undefined, etag: string): boolean {
 }
 
 export function assetRoutes(deps: { db: Db }) {
-  const app = new Hono();
+  const app = new Hono<{ Variables: { publicRequest?: PublicRequest } }>();
 
   app.get('/a/:id/:fileName?', async (c) => {
     const id = c.req.param('id');
     if (!/^ast_[0-9a-f]{32}$/.test(id)) return c.json(NOT_FOUND, 404);
-    const { rows } = await deps.db.admin.query<AssetRow>('SELECT file_name, content_type, sha256, deleted_at FROM assets WHERE id = $1', [
-      id,
-    ]);
+    const { rows } = await deps.db.admin.query<AssetRow>(
+      'SELECT workspace_id, file_name, content_type, sha256, deleted_at FROM assets WHERE id = $1',
+      [id],
+    );
     const asset = rows[0];
     if (!asset) return c.json(NOT_FOUND, 404);
+    // An asset URL is public and immutable, but only on its own brand's host (#185).
+    const request = c.get('publicRequest');
+    if (request?.workspaceId && request.workspaceId !== asset.workspace_id) return c.json(NOT_FOUND, 404);
     if (asset.deleted_at) return c.text('This asset was deleted.', 410);
 
     // A .png name on an SVG asset means "the e-mail rendition"; anything else is the original file.

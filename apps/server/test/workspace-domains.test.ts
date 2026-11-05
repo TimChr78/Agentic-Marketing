@@ -48,7 +48,7 @@ describe('brand domains', () => {
     expect((await t.api(owner, wsA).call('workspace.domains.list', {})).linksUrl).toBe(LINKS_URL);
   });
 
-  it('registers two domains for two workspaces and resolves each by Host and path', async () => {
+  it('registers two domains for two workspaces and resolves each by Host and path once verified', async () => {
     const a = await t.api(owner, wsA).call('workspace.domains.add', { host: 'MartechSignal.COM', isPrimary: true });
     martechId = a.domain.id;
     expect(a.domain).toMatchObject({
@@ -70,6 +70,23 @@ describe('brand domains', () => {
       isPrimary: true,
       url: 'https://second.example/am',
     });
+
+    // Only a verified domain is a brand host: pending rows are listed but inactive (#185).
+    expect(await t.srv.domains.resolveWorkspaceForRequest('MartechSignal.com:443', '/u/abc')).toBeNull();
+    expect(await t.srv.domains.resolveWorkspaceForRequest('second.example', '/am/f/form')).toBeNull();
+    expect((await t.api(owner, wsA).call('workspace.get', {})).linksUrl).toBe(LINKS_URL);
+
+    // Verification fetches the challenge the public listener serves; the test replaces the fetch.
+    const fetched: string[] = [];
+    t.srv.services.fetchDomainChallenge = async (url) => {
+      fetched.push(url);
+      return { status: 200, body: decodeURIComponent(new URL(url).pathname.split('/').pop() ?? '') };
+    };
+    const verifiedA = await t.api(owner, wsA).call('workspace.domains.verify', { id: martechId });
+    expect(verifiedA.domain.status).toBe('verified');
+    expect(verifiedA.domain.verifiedAt).not.toBeNull();
+    expect(fetched[0]).toBe(`https://martechsignal.com/.well-known/am-domain/${verifiedA.domain.verificationToken}`);
+    await t.api(otherOwner, wsB).call('workspace.domains.verify', { id: b.domain.id });
 
     // The first lookup may have cached an empty registry; the writes must invalidate it.
     const hitA = await t.srv.domains.resolveWorkspaceForRequest('MartechSignal.com:443', '/u/abc');
@@ -99,6 +116,9 @@ describe('brand domains', () => {
     sharedAId = a.domain.id;
     const b = await t.api(otherOwner, wsB).call('workspace.domains.add', { host: 'shared.example', pathPrefix: '/am2' });
     sharedBId = b.domain.id;
+    expect(await t.srv.domains.resolveWorkspaceForRequest('shared.example', '/am/f/form')).toBeNull();
+    await t.api(owner, wsA).call('workspace.domains.verify', { id: sharedAId });
+    await t.api(otherOwner, wsB).call('workspace.domains.verify', { id: sharedBId });
 
     expect((await t.srv.domains.resolveWorkspaceForRequest('shared.example', '/am/f/form'))?.domain.workspaceId).toBe(wsA);
     expect((await t.srv.domains.resolveWorkspaceForRequest('shared.example', '/am2/f/form'))?.domain.workspaceId).toBe(wsB);
@@ -139,8 +159,24 @@ describe('brand domains', () => {
     expect(traversal.message).toMatch(/\.\./);
   });
 
+  it('refuses a verification answer that is not the domain token', async () => {
+    const added = await t.api(owner, wsA).call('workspace.domains.add', { host: 'wrong-answer.example' });
+    t.srv.services.fetchDomainChallenge = async () => ({ status: 200, body: 'some-other-site' });
+    const err = await rejects(t.api(owner, wsA).call('workspace.domains.verify', { id: added.domain.id }));
+    expect(err.status).toBe(400);
+    expect(err.message).toContain('did not return this domain');
+    expect(
+      (await t.api(owner, wsA).call('workspace.domains.list', {})).domains.find((d: { id: string }) => d.id === added.domain.id),
+    ).toMatchObject({ status: 'pending' });
+    expect(await t.srv.domains.resolveWorkspaceForRequest('wrong-answer.example', '/f/x')).toBeNull();
+  });
+
   it('updates a domain, resetting verification when the host moves', async () => {
-    const verified = await t.api(owner, wsA).call('workspace.domains.update', { id: sharedAId, status: 'verified' });
+    t.srv.services.fetchDomainChallenge = async (url) => ({
+      status: 200,
+      body: decodeURIComponent(new URL(url).pathname.split('/').pop() ?? ''),
+    });
+    const verified = await t.api(owner, wsA).call('workspace.domains.verify', { id: sharedAId });
     expect(verified.domain.status).toBe('verified');
     expect(verified.domain.verifiedAt).not.toBeNull();
     const token = verified.domain.verificationToken;
@@ -151,6 +187,8 @@ describe('brand domains', () => {
     });
     expect(moved.domain).toMatchObject({ host: 'shared-two.example', pathPrefix: '/am', status: 'pending', verifiedAt: null });
     expect(moved.domain.verificationToken).not.toBe(token);
+    expect(await t.srv.domains.resolveWorkspaceForRequest('shared-two.example', '/am/f/x')).toBeNull();
+    await t.api(owner, wsA).call('workspace.domains.verify', { id: sharedAId });
     expect((await t.srv.domains.resolveWorkspaceForRequest('shared-two.example', '/am/f/x'))?.domain.workspaceId).toBe(wsA);
   });
 
@@ -191,6 +229,7 @@ describe('brand domains', () => {
       const names = (await connected.client.listTools()).tools.map((tool) => tool.name);
       expect(names).not.toContain('workspace.domains.add');
       expect(names).not.toContain('workspace.domains.list');
+      expect(names).not.toContain('workspace.domains.verify');
     } finally {
       await connected.client.close();
     }
@@ -198,7 +237,13 @@ describe('brand domains', () => {
 
   it('audits adds, updates, removes and the list read', async () => {
     const { entries } = await t.api(owner, wsA).call('audit.list', { limit: 200 });
-    for (const command of ['workspace.domains.add', 'workspace.domains.update', 'workspace.domains.remove', 'workspace.domains.list'])
+    for (const command of [
+      'workspace.domains.add',
+      'workspace.domains.update',
+      'workspace.domains.verify',
+      'workspace.domains.remove',
+      'workspace.domains.list',
+    ])
       expect(
         entries.some((entry: { command: string; ok: boolean }) => entry.command === command && entry.ok),
         command,

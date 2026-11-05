@@ -25,6 +25,16 @@ import { findUnknownInputKeys, type UnknownInputKey, unknownKeyMessages } from '
 export type Effect = 'read' | 'write' | 'publish' | 'destructive';
 export type Surface = 'rest' | 'mcp' | 'scim' | 'internal';
 
+/** A public request's brand context (#185), attached by the server's public middleware. */
+export interface PublicRequest {
+  /** The workspace whose verified domain matched, or null on the PUBLIC_LINKS_URL fallback host. */
+  workspaceId: string | null;
+  /** The origin and path prefix this request is served on: its links base. */
+  linksUrl: string;
+  /** True when a registered domain matched; false on the installation fallback. */
+  matched: boolean;
+}
+
 /** Extension point for dependencies commands need (key providers, clocks…). Packages augment it. */
 export interface Services {
   /** Public URL of the server, e.g. for admin UI deep links in command output. */
@@ -32,10 +42,16 @@ export interface Services {
   /** Links host (PUBLIC_LINKS_URL), for shareable unsubscribe, form, web-version and archive URLs. */
   linksUrl?: string;
   /**
-   * The links URL for one workspace: its primary brand domain, else `linksUrl` (#186). Wired by the
-   * server; commands that build links for a specific workspace use this instead of the global value.
+   * The links URL for one workspace: its verified primary brand domain, else `linksUrl` (#186).
+   * Wired by the server; commands that build links for a specific workspace use this instead of the
+   * global value.
    */
   linksUrlFor?: (workspaceId: string) => Promise<string>;
+  /**
+   * One outbound GET under the server's egress policy, used to check a brand domain's verification
+   * challenge (#185). Timeboxed by the caller; tests may replace it.
+   */
+  fetchDomainChallenge?: (url: string) => Promise<{ status: number; body: string }>;
   /** Drop the host-resolver cache after a domain write (#186). */
   invalidateDomainCache?: () => void;
   /** Version of the running server, so command output can show it (workspace.get). */

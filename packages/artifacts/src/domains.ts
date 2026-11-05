@@ -17,8 +17,11 @@ export const DomainViewSchema = z.object({
   host: z.string(),
   pathPrefix: z.string().nullable().describe('Path prefix the domain serves, or null for the whole host'),
   isPrimary: z.boolean().describe('The primary domain supplies the workspace links URL'),
-  status: DomainStatus,
-  verificationToken: z.string().nullable().describe('Advisory DNS verification token; not a security gate'),
+  status: DomainStatus.describe('Only verified domains resolve requests and supply links'),
+  verificationToken: z
+    .string()
+    .nullable()
+    .describe('Token the public listener serves at /.well-known/am-domain/<token>; workspace.domains.verify checks it'),
   verifiedAt: z.string().nullable(),
   createdAt: z.string(),
   url: z.string().describe('Origin and prefix this domain serves, for example https://example.com/am'),
@@ -49,7 +52,7 @@ function invalidInput(err: unknown): never {
 export async function effectiveLinksUrl(ctx: CommandContext, domains?: DomainRow[]): Promise<string> {
   if (ctx.services.linksUrlFor) return ctx.services.linksUrlFor(ctx.principal.workspaceId);
   const rows = domains ?? (await ctx.tx.select().from(schema.workspaceDomains));
-  const primary = rows.find((row) => row.isPrimary);
+  const primary = rows.find((row) => row.isPrimary && row.status === 'verified');
   return primary ? `${originForHost(primary.host)}${primary.pathPrefix ?? ''}` : (ctx.services.linksUrl ?? ctx.services.publicUrl ?? '');
 }
 
@@ -135,13 +138,13 @@ export const addWorkspaceDomain = defineCommand({
   name: 'workspace.domains.add',
   title: 'Add a brand domain',
   description:
-    'Admins: register a hostname (and optional path prefix such as /am) that serves this workspace’s public links. Use https, or http only on localhost. A hostname or prefix already registered by another workspace is rejected; one domain per workspace may be primary.',
+    'Admins: register a hostname (and optional path prefix such as /am) that serves this workspace’s public links. Use https, or http only on localhost. A hostname or prefix already registered by another workspace is rejected; one domain per workspace may be primary. A new domain starts pending and is not used until workspace.domains.verify succeeds.',
   input: z
     .object({
       host: z.string().trim().min(1).describe('Hostname, e.g. links.example.com or https://links.example.com'),
       pathPrefix: z.string().nullable().optional().describe('Optional path prefix such as /am; null or "/" means the whole host'),
-      isPrimary: z.boolean().optional().describe('Make this the workspace’s primary domain (links URL)'),
-      status: DomainStatus.optional().describe('pending (default) or verified; verification is advisory'),
+      isPrimary: z.boolean().optional().describe('Make this the workspace’s primary domain (links URL once verified)'),
+      status: DomainStatus.optional().describe('pending (default) or verified; prefer workspace.domains.verify'),
     })
     .strict(),
   output: z.object({ domain: DomainViewSchema }),
@@ -181,14 +184,14 @@ export const updateWorkspaceDomain = defineCommand({
   name: 'workspace.domains.update',
   title: 'Update a brand domain',
   description:
-    'Admins: change a registered domain’s hostname, path prefix, primary flag or advisory verification status. Changing the host or prefix resets a verified domain to pending. Only one primary domain is allowed.',
+    'Admins: change a registered domain’s hostname, path prefix, primary flag or verification status. Changing the host or prefix resets a verified domain to pending, so verify it again. Only one primary domain is allowed; pending domains do not serve links.',
   input: z
     .object({
       id: z.string().min(1),
       host: z.string().trim().min(1).optional(),
       pathPrefix: z.string().nullable().optional().describe('null clears the prefix; omit to keep it'),
       isPrimary: z.boolean().optional(),
-      status: DomainStatus.optional(),
+      status: DomainStatus.optional().describe('pending or verified; prefer workspace.domains.verify'),
     })
     .strict()
     .refine(
@@ -239,6 +242,55 @@ export const updateWorkspaceDomain = defineCommand({
   },
 });
 
+export const verifyWorkspaceDomain = defineCommand({
+  name: 'workspace.domains.verify',
+  title: 'Verify a brand domain',
+  description:
+    'Admins: prove a registered hostname reaches this installation, then use it for links and public pages. The server fetches https://<host><prefix>/.well-known/am-domain/<token> (http on localhost) and expects the token back; only verified domains are used for request resolution and links.',
+  input: z.object({ id: z.string().min(1) }).strict(),
+  output: z.object({ domain: DomainViewSchema, checkedUrl: z.string().describe('The challenge URL that was fetched') }),
+  permission: 'workspace:admin',
+  effect: 'write',
+  humansOnly: true,
+  target: (input) => input.id,
+  handler: async (input, ctx) => {
+    const [existing] = await ctx.tx.select().from(schema.workspaceDomains).where(eq(schema.workspaceDomains.id, input.id)).limit(1);
+    if (!existing) throw new AppError('not_found', 'This domain is not registered in this workspace.');
+    const token = existing.verificationToken ?? newId('wdv');
+    const url = `${originForHost(existing.host)}${existing.pathPrefix ?? ''}/.well-known/am-domain/${encodeURIComponent(token)}`;
+    const fetchChallenge =
+      ctx.services.fetchDomainChallenge ??
+      (async (challenge: string) => {
+        const res = await fetch(challenge, { signal: AbortSignal.timeout(5000), redirect: 'manual' });
+        return { status: res.status, body: await res.text() };
+      });
+    let checked: { status: number; body: string };
+    try {
+      checked = await fetchChallenge(url);
+    } catch (err) {
+      throw new AppError(
+        'invalid_input',
+        `Could not reach ${url}: ${(err as Error).message}. Point the hostname at this installation (and its public listener) and try again.`,
+      );
+    }
+    if (checked.status !== 200)
+      throw new AppError(
+        'invalid_input',
+        `${url} answered HTTP ${checked.status} instead of returning the verification token. Check that the hostname reaches this installation.`,
+      );
+    if (checked.body.trim() !== token)
+      throw new AppError('invalid_input', `${url} did not return this domain’s verification token. Another site may answer that host.`);
+    const [row] = await ctx.tx
+      .update(schema.workspaceDomains)
+      .set({ status: 'verified', verifiedAt: new Date(), verificationToken: token })
+      .where(eq(schema.workspaceDomains.id, input.id))
+      .returning();
+    if (!row) throw new AppError('not_found', 'This domain is not registered in this workspace.');
+    invalidateResolver(ctx);
+    return { domain: domainView(row), checkedUrl: url };
+  },
+});
+
 export const removeWorkspaceDomain = defineCommand({
   name: 'workspace.domains.remove',
   title: 'Remove a brand domain',
@@ -258,4 +310,10 @@ export const removeWorkspaceDomain = defineCommand({
   },
 });
 
-export const workspaceDomainCommands = [listWorkspaceDomains, addWorkspaceDomain, updateWorkspaceDomain, removeWorkspaceDomain] as const;
+export const workspaceDomainCommands = [
+  listWorkspaceDomains,
+  addWorkspaceDomain,
+  updateWorkspaceDomain,
+  verifyWorkspaceDomain,
+  removeWorkspaceDomain,
+] as const;

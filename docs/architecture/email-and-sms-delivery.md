@@ -44,6 +44,62 @@ The workspace setting `EMAIL_TRACK_CLICKS` only controls the platform's own link
 
 The workspace already routes **transactional** and **marketing** messages to different providers, by purpose. **The MarTechSignal pilot can use SES or Postmark from day one instead of the SMTP relay**; nothing new is needed for that.
 
+### Per-brand e-mail identity and link hosts (#188)
+
+A brand's e-mail identity is its workspace: each workspace has its own providers, from addresses,
+reply-to, sending domain and links host. There is no installation-wide sender, and no separate
+workspace-level from address that duplicates what the provider already stores.
+
+**Recommended layout per brand.** Use two names under the brand's registrable domain:
+
+| Purpose | Example | Why |
+|---|---|---|
+| Sending | `news.brand.com` | SPF, DKIM and DMARC belong to this host; its reputation stays separate from the main site |
+| Links (confirm, unsubscribe, preferences, web version, archive) | `am.brand.com` | A dedicated public listener host, registered as the workspace's primary domain |
+
+The public link host is shared by every message the brand sends. With that layout:
+
+- the `From` domain is `news.brand.com`;
+- `List-Unsubscribe`, `confirm_url`, `unsubscribe_url`, `preferences_url` and `web_url` point at
+  `https://am.brand.com/...`;
+- `am.brand.com` is registered and **verified** with `workspace.domains.add` /
+  `workspace.domains.verify` (see [identity.md](../identity.md#brands-and-domains-186));
+- both names resolve to the same installation, so the provider's delivery webhook also lands on the
+  brand host.
+
+**DNS per brand.** Publish, for each sending domain:
+
+- SPF at `news.brand.com`: `v=spf1 include:<provider> ~all` (the exact include is provider-specific:
+  `amazonses.com`, `spf.mtasv.net`, `spf.brevo.com`, `_spf.mx.cloudflare.net`);
+- DKIM selectors from the provider's DNS page at `<selector>._domainkey.news.brand.com`;
+- DMARC at `_dmarc.brand.com` (inherited by both subdomains) or `_dmarc.news.brand.com`, starting at
+  `p=none` and moving to `quarantine` then `reject`.
+
+DMARC alignment looks at the registrable domain: `news.brand.com` (From) and `am.brand.com` (links)
+are aligned because both sit under `brand.com`. A link host on a different registrable domain still
+works, but mailbox providers may weigh it; `am doctor` warns about it.
+
+**What the commands show.** `emailProviders.checkDomain` and `deliverability.health` return the
+brand's `linksUrl` and its host, next to the SPF/DKIM/DMARC report, so an operator can see the From
+domain and link domain together. `workspace.get` / `workspace.domains.list` return the effective
+links URL. `am doctor` prints the link host per sending domain and warns when the registrable domains
+differ.
+
+**Provider webhooks.** `emailProviders.create` returns `webhookPath` and `webhookUrl` built from the
+workspace's verified primary domain (or `PUBLIC_LINKS_URL` when it has none). After a domain change,
+`emailProviders.refreshWebhookUrl {id}` (or `emailProviders.rotateWebhook`) issues a fresh URL on the
+new host; the old URL stops working at once, so replace it with the provider. Delivery events are
+workspace-scoped, and a webhook presented on another brand's host is refused.
+
+**No domain yet.** A workspace without a verified primary domain keeps using `PUBLIC_LINKS_URL` for
+every link and webhook, exactly as a single-brand install did before brands existed. Adding a domain
+is additive: once it is verified, new messages and refreshed webhooks use it; nothing needs a SQL
+backfill.
+
+**Unsubscribe scope.** One-click unsubscribe stays per workspace and purpose. A brand's unsubscribe
+link changes only that brand's consent and never another workspace's, even when the same person
+belongs to both.
+
 ## Cloudflare Email Service
 
 Cloudflare's sending service is in **public beta** (since April 2026). It offers:

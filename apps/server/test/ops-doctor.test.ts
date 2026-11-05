@@ -244,6 +244,31 @@ describe('am doctor sending-domain checks', () => {
     expect(check.status).toBe('warn');
     expect(check.message).toContain('p=none');
   });
+
+  it('warns when the List-Unsubscribe host is not DMARC-aligned with the sending domain (#188)', async () => {
+    const lookup = async (name: string) => {
+      if (name === 'news.a.example') return ['v=spf1 -all'];
+      if (name === '_dmarc.a.example') return ['v=DMARC1; p=quarantine'];
+      return [];
+    };
+    const checks = await checkSendingDomains(
+      [{ adapter: 'log', from_email: 'news@news.a.example', config: null, links_host: 'links.b.example' }],
+      lookup,
+    );
+    const dns = checks.find((check) => check.id === 'dns.news.a.example');
+    expect(dns?.message).toContain('links use links.b.example');
+    const alignment = checks.find((check) => check.id === 'brand-domains.alignment.news.a.example');
+    expect(alignment).toMatchObject({ status: 'warn' });
+    expect(alignment?.message).toContain('links.b.example');
+    expect(alignment?.hint).toContain('am.a.example');
+    expect(alignment?.hint).toContain('news.a.example');
+
+    const aligned = await checkSendingDomains(
+      [{ adapter: 'log', from_email: 'news@news.a.example', config: null, links_host: 'am.a.example' }],
+      lookup,
+    );
+    expect(aligned.some((check) => check.id.startsWith('brand-domains.alignment'))).toBe(false);
+  });
 });
 
 describe('am doctor brand-domain checks', () => {

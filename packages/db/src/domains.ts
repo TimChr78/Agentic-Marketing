@@ -191,14 +191,16 @@ export function createWorkspaceDomainResolver(db: Db, options: DomainResolverOpt
         return null;
       }
       const requestPath = normalizeRequestPath(path);
+      // Only a verified domain serves traffic (#185): a pending row is listed for the operator but
+      // is not yet a brand host, so it can never take over another workspace's links.
       const matches = (await load())
-        .filter((row) => row.host === normalizedHost && pathMatchesPrefix(requestPath, row.pathPrefix))
+        .filter((row) => row.status === 'verified' && row.host === normalizedHost && pathMatchesPrefix(requestPath, row.pathPrefix))
         .sort((a, b) => (b.pathPrefix?.length ?? 0) - (a.pathPrefix?.length ?? 0));
       const domain = matches[0];
       return domain ? { domain, matchedPrefix: domain.pathPrefix } : null;
     },
     async linksUrlFor(workspaceId) {
-      const domain = (await load()).find((row) => row.workspaceId === workspaceId && row.isPrimary);
+      const domain = (await load()).find((row) => row.workspaceId === workspaceId && row.isPrimary && row.status === 'verified');
       return domain ? `${originForHost(domain.host)}${domain.pathPrefix ?? ''}` : null;
     },
     invalidate() {

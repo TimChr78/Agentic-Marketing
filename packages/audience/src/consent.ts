@@ -19,6 +19,8 @@ export interface ConsentHookDeps {
   links: LinkSigner;
   /** Base URL for the confirmation link (the links URL). */
   linksUrl: string;
+  /** The workspace's verified brand links URL, when the install has a registry (#185). */
+  linksUrlFor?: (workspaceId: string) => Promise<string>;
 }
 
 const purposesOf = async (tx: Tx) => (await publishedSingleton(tx, 'purposes'))?.purposes ?? DEFAULT_PURPOSES;
@@ -61,11 +63,12 @@ async function handle(tx: Tx, ws: string, { event: e, profileId }: ResolvedEvent
       s: e.timestamp,
       x: Date.now() + DOI_DAYS * 86_400_000,
     };
+    const linksUrl = (await deps.linksUrlFor?.(ws)) ?? deps.linksUrl;
     const d = await requestEmail(tx, ws, deps.kp, deps.events, {
       profileId,
       templateId: form.def.confirmationTemplate,
       idempotencyKey: `doi:${e.messageId}`,
-      data: { confirm_url: `${deps.linksUrl}/f/confirm/${deps.links.sign(token)}` },
+      data: { confirm_url: `${linksUrl}/f/confirm/${deps.links.sign(token)}` },
     });
     if (d.status !== 'queued') logger.warn({ form: p.form_id, status: d.status, reason: d.reason }, 'confirmation e-mail not queued');
     return;

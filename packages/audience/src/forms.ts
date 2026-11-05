@@ -13,6 +13,7 @@ import {
   renderHostedPage,
   resolveBrand,
 } from '@agentic-marketing/artifacts';
+import type { PublicRequest } from '@agentic-marketing/commands';
 import { remoteAddressFromEnv, resolveClientIp } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import type { LinkSigner } from '@agentic-marketing/email';
@@ -160,7 +161,12 @@ export function formOrigin(def: Pick<FormDefinition, 'allowedOrigins' | 'success
 export function formsApi(deps: FormsDeps) {
   const { loadPolicy } = sourceLookups(deps.db);
   const ratePerMinute = deps.ratePerMinute ?? 5;
-  const app = new Hono();
+  const app = new Hono<{ Variables: { publicRequest?: PublicRequest } }>();
+  // A form lives in one workspace; a host registered to another brand must not serve or accept it.
+  const crossBrand = (c: Context, workspaceId: string) => {
+    const request = c.get('publicRequest');
+    return !!request?.workspaceId && request.workspaceId !== workspaceId;
+  };
 
   const formOf = async (formId: string) => {
     if (!/^frm_[0-9a-f]{32}$/.test(formId)) return null;
@@ -234,6 +240,7 @@ export function formsApi(deps: FormsDeps) {
         return c.redirect(ok ? target : `${target}${target.includes('?') ? '&' : '?'}error=${encodeURIComponent(error ?? 'invalid')}`, 303);
       };
       if (!form) return c.json({ ok: false, error: 'unknown_form' }, 404, cors);
+      if (crossBrand(c, form.ws)) return c.json({ ok: false, error: 'unknown_form' }, 404, cors);
       if (origin && form.def.allowedOrigins.length && !form.def.allowedOrigins.includes(origin.toLowerCase()))
         return done(false, 'origin_not_allowed', 403);
 
@@ -312,12 +319,12 @@ export function formsApi(deps: FormsDeps) {
   };
   app.get('/f/confirm/:token', async (c) => {
     const t = tokenOf(c.req.param('token'));
-    if (!verified(c.req.param('token'))) return hosted(c, await hostedPage('expired', t), 410);
+    if (!verified(c.req.param('token')) || (t && crossBrand(c, t.w))) return hosted(c, await hostedPage('expired', t), 404);
     return hosted(c, await hostedPage('confirm', t), 200);
   });
   app.post('/f/confirm/:token', async (c) => {
     const t = verified(c.req.param('token'));
-    if (!t) return hosted(c, await hostedPage('expired', tokenOf(c.req.param('token'))), 410);
+    if (!t || crossBrand(c, t.w)) return hosted(c, await hostedPage('expired', tokenOf(c.req.param('token'))), 404);
     const form = await deps.db.withWorkspace(t.w, (tx) => publishedForm(tx, t.f, t.v));
     if (!form)
       return hosted(

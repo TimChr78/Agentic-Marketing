@@ -40,7 +40,10 @@ import { deliverSms } from './sms/gateway';
 // "not sent because …", is in the message log and in ClickHouse.
 
 export interface EmailServices {
+  /** Installation links base (PUBLIC_LINKS_URL); a workspace without a verified domain uses it. */
   publicUrl: string;
+  /** The links base for one workspace: its verified primary brand domain, else `publicUrl` (#185). */
+  publicUrlFor?: (workspaceId: string) => Promise<string>;
   links: LinkSigner;
   adapterDeps: AdapterDeps;
   /** Click tracking (on by default, ADR: clicks on, open pixels off). */
@@ -301,19 +304,20 @@ async function deliverOne(
     const provider = providers.find((p) => p.useFor.includes(stream));
     if (!provider) return finish('failed', `no_provider: no enabled e-mail provider is set up for ${stream} messages`);
 
+    const publicUrl = (await deps.email.publicUrlFor?.(ws)) ?? deps.email.publicUrl;
     const unsubscribePayload = { w: ws, p: v.profileId, u: m.purpose, m: m.id } satisfies UnsubscribeLink;
     const unsubscribeToken = deps.email.links.sign(unsubscribePayload);
-    const unsubscribe = `${deps.email.publicUrl}/u/${unsubscribeToken}`;
-    const preferences = `${deps.email.publicUrl}/u/p/${unsubscribeToken}`;
+    const unsubscribe = `${publicUrl}/u/${unsubscribeToken}`;
+    const preferences = `${publicUrl}/u/p/${unsubscribeToken}`;
     const effectiveTopic = m.topic ?? tpl.topic ?? null;
     // A topic link never withdraws the purpose; it only turns that finer choice off.
     const topicUnsubscribe = effectiveTopic
-      ? `${deps.email.publicUrl}/u/t/${deps.email.links.sign({ ...unsubscribePayload, topic: effectiveTopic } satisfies TopicLink)}`
+      ? `${publicUrl}/u/t/${deps.email.links.sign({ ...unsubscribePayload, topic: effectiveTopic } satisfies TopicLink)}`
       : null;
     // "View in browser" is signed per message and recipient; it re-renders this exact e-mail for
     // this person on the links host (#100). Like the unsubscribe link, it lasts as long as the
     // message is kept; the route also understands an optional expiry (`x`) for future use.
-    const web = `${deps.email.publicUrl}/n/w/${deps.email.links.sign({ w: ws, m: m.id } satisfies WebLink)}`;
+    const web = `${publicUrl}/n/w/${deps.email.links.sign({ w: ws, m: m.id } satisfies WebLink)}`;
     const vars = {
       ...m.data,
       profile: v.vars,
@@ -331,7 +335,7 @@ async function deliverOne(
     } catch (e) {
       return finish('failed', `render_error: ${(e as Error).message.split('\n')[0]}`);
     }
-    const skipUtm = [deps.email.publicUrl];
+    const skipUtm = [publicUrl];
     // Shared UTM campaign: the campaign supplies utm_campaign unless the template sets its own
     // (explicit beats inherited). The message carries the broadcast or journey id, which is the
     // member the campaign lists. Only templates that tag links (their own utm settings: source,
@@ -345,11 +349,7 @@ async function deliverOne(
     const text = utm ? tagTextLinks(rendered.text, utm, skipUtm) : rendered.text;
     const ownLinks = [unsubscribe, preferences, web, ...(topicUnsubscribe ? [topicUnsubscribe] : [])];
     const html = deps.email.trackClicks
-      ? trackLinks(
-          tagged,
-          (url) => `${deps.email.publicUrl}/c/${deps.email.links.sign({ w: ws, m: m.id, url } satisfies ClickLink)}`,
-          ownLinks,
-        )
+      ? trackLinks(tagged, (url) => `${publicUrl}/c/${deps.email.links.sign({ w: ws, m: m.id, url } satisfies ClickLink)}`, ownLinks)
       : tagged;
     const headers: Record<string, string> = { [MESSAGE_ID_HEADER]: m.id };
     if (stream === 'marketing') {

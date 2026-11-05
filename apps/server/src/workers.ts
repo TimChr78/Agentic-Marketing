@@ -157,7 +157,14 @@ export function startWorkers(
         erasureGraceHours: srv.erasureGraceHours,
         after: [
           // Consent first: segments and journeys that react to a signup need it recorded.
-          consentHook({ db: srv.db, kp: srv.keyProvider, events: srv.events, links: srv.email.links, linksUrl: srv.linksUrl }),
+          consentHook({
+            db: srv.db,
+            kp: srv.keyProvider,
+            events: srv.events,
+            links: srv.email.links,
+            linksUrl: srv.linksUrl,
+            linksUrlFor: (workspaceId) => srv.domains.linksUrlFor(workspaceId),
+          }),
           // Click ids before conversions, so a landing and its conversion in one batch match.
           clickIdHook({ db: srv.db }),
           conversionHook({ db: srv.db }),

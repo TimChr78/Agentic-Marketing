@@ -9,6 +9,7 @@ import {
   renderPreferencesPage,
   resolveBrand,
 } from '@agentic-marketing/artifacts';
+import type { PublicRequest } from '@agentic-marketing/commands';
 import { type Db, schema } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
 import { bodyLimit } from '@agentic-marketing/ingest';
@@ -49,7 +50,15 @@ export interface EmailRouteDeps {
 }
 
 export function emailRoutes(deps: EmailRouteDeps) {
-  const app = new Hono();
+  const app = new Hono<{ Variables: { publicRequest?: PublicRequest } }>();
+  // The brand host this request arrived on (#185): generated links stay on it, and a token for
+  // another workspace is refused rather than acted on here.
+  const requestOf = (c: Context) => c.get('publicRequest');
+  const linksBase = (c: Context) => requestOf(c)?.linksUrl ?? deps.email.publicUrl;
+  const crossBrand = (c: Context, workspaceId: string) => {
+    const request = requestOf(c);
+    return !!request?.workspaceId && request.workspaceId !== workspaceId;
+  };
   // Best effort: the unsubscribe is recorded either way, and the segment scheduler catches up.
   const consentChanged = async (ws: string, people: string[], cause: string) => {
     if (!deps.consentChanged || !people.length) return;
@@ -67,6 +76,8 @@ export function emailRoutes(deps: EmailRouteDeps) {
     );
     if (!rows[0]) return c.json({ error: 'not_found' }, 404);
     const ws = rows[0].workspace_id;
+    // A provider webhook URL belongs to its brand: another brand's host must not deliver it.
+    if (crossBrand(c, ws)) return c.json({ error: 'not_found' }, 404);
     const req = { headers: Object.fromEntries(c.req.raw.headers), body: await c.req.text() };
     const result = await deps.db.withWorkspace(ws, async (tx) => {
       const [provider] = await tx.select().from(schema.emailProviders).where(eq(schema.emailProviders.id, id));
@@ -192,15 +203,17 @@ export function emailRoutes(deps: EmailRouteDeps) {
 
   app.get('/u/:token', async (c) => {
     const link = deps.email.links.verify<UnsubscribeLink>(c.req.param('token'));
-    if (!link) return hosted(c, await hostedPage('expired', null, invalidLink), 404);
+    if (!link || crossBrand(c, link.w)) return hosted(c, await hostedPage('expired', null, invalidLink), 404);
     return hosted(c, await hostedPage('unsubscribe', link.w), 200);
   });
   // Mail clients POST here directly (RFC 8058 one-click); the page's button does the same.
   app.post('/u/:token', async (c) => {
     const token = c.req.param('token');
+    const peek = deps.email.links.verify<UnsubscribeLink>(token);
+    if (!peek || crossBrand(c, peek.w)) return hosted(c, await hostedPage('expired', null, invalidLink), 404);
     const link = await unsubscribe(token);
     if (!link) return hosted(c, await hostedPage('expired', null, invalidLink), 404);
-    return hosted(c, await hostedPage('unsubscribed', link.w, { manageUrl: `${deps.email.publicUrl}/u/p/${token}` }), 200);
+    return hosted(c, await hostedPage('unsubscribed', link.w, { manageUrl: `${linksBase(c)}/u/p/${token}` }), 200);
   });
 
   // The preference centre (#84): a GET only shows choices; the POST is the only thing that saves.
@@ -208,7 +221,8 @@ export function emailRoutes(deps: EmailRouteDeps) {
   // links cannot change anything.
   app.get('/u/p/:token', async (c) => {
     const link = await preferenceToken(c.req.param('token'));
-    if (!link || !(await profileExists(link.w, link.p))) return hosted(c, await hostedPage('expired', null, invalidLink), 404);
+    if (!link || crossBrand(c, link.w) || !(await profileExists(link.w, link.p)))
+      return hosted(c, await hostedPage('expired', null, invalidLink), 404);
     const brand = await deps.db.withWorkspace(link.w, (tx) => publishedSingleton(tx, 'brand'));
     const purposes = await preferencePurposes(link.w, link.p);
     const leavePurposeName = (await purposesOf(link.w)).find((p) => p.key === link.u)?.name;
@@ -217,14 +231,15 @@ export function emailRoutes(deps: EmailRouteDeps) {
   app.post('/u/p/:token', bodyLimit(PREFERENCES_MAX_BODY, PREFERENCES_TOO_LARGE), async (c) => {
     const token = c.req.param('token');
     const link = await preferenceToken(token);
-    if (!link || !(await profileExists(link.w, link.p))) return hosted(c, await hostedPage('expired', null, invalidLink), 404);
+    if (!link || crossBrand(c, link.w) || !(await profileExists(link.w, link.p)))
+      return hosted(c, await hostedPage('expired', null, invalidLink), 404);
     const body = await c.req.parseBody();
     const action = typeof body.action === 'string' ? body.action : '';
     // "Unsubscribe from <purpose>" is the one-click unsubscribe link's own behaviour.
     if (action === 'unsubscribe_all') {
       const done = await unsubscribe(token);
       if (!done) return hosted(c, await hostedPage('expired', null, invalidLink), 404);
-      return hosted(c, await hostedPage('unsubscribed', done.w, { manageUrl: `${deps.email.publicUrl}/u/p/${token}` }), 200);
+      return hosted(c, await hostedPage('unsubscribed', done.w, { manageUrl: `${linksBase(c)}/u/p/${token}` }), 200);
     }
     const purposes = (await purposesOf(link.w)).filter(
       (p) => p.basis !== 'contract' && p.basis !== 'legal_obligation' && (p.topics ?? []).length > 0,
@@ -262,7 +277,8 @@ export function emailRoutes(deps: EmailRouteDeps) {
   // A topic link only turns that finer choice off; the purpose's consent is untouched.
   app.get('/u/t/:token', async (c) => {
     const link = await topicToken(c.req.param('token'));
-    if (!link || !(await profileExists(link.w, link.p))) return hosted(c, await hostedPage('expired', null, invalidLink), 404);
+    if (!link || crossBrand(c, link.w) || !(await profileExists(link.w, link.p)))
+      return hosted(c, await hostedPage('expired', null, invalidLink), 404);
     const topic = await topicOf(link.w, link.u, link.topic);
     if (!topic) return hosted(c, await hostedPage('expired', null, invalidLink), 404);
     return hosted(
@@ -280,7 +296,8 @@ export function emailRoutes(deps: EmailRouteDeps) {
   app.post('/u/t/:token', bodyLimit(PREFERENCES_MAX_BODY, PREFERENCES_TOO_LARGE), async (c) => {
     const token = c.req.param('token');
     const link = await topicToken(token);
-    if (!link || !(await profileExists(link.w, link.p))) return hosted(c, await hostedPage('expired', null, invalidLink), 404);
+    if (!link || crossBrand(c, link.w) || !(await profileExists(link.w, link.p)))
+      return hosted(c, await hostedPage('expired', null, invalidLink), 404);
     const topic = await topicOf(link.w, link.u, link.topic);
     if (!topic) return hosted(c, await hostedPage('expired', null, invalidLink), 404);
     await deps.db.withWorkspace(link.w, (tx) =>
@@ -296,7 +313,7 @@ export function emailRoutes(deps: EmailRouteDeps) {
           unsubscribedTitle: `Unsubscribed from ${topic.name}`,
           unsubscribedBody: `You will no longer receive e-mails about ${topic.name}.`,
         },
-        manageUrl: `${deps.email.publicUrl}/u/p/${token}`,
+        manageUrl: `${linksBase(c)}/u/p/${token}`,
       }),
       200,
     );
@@ -304,7 +321,7 @@ export function emailRoutes(deps: EmailRouteDeps) {
 
   app.get('/c/:token', async (c) => {
     const link = deps.email.links.verify<ClickLink>(c.req.param('token'));
-    if (!link || !/^https?:\/\//.test(link.url)) return c.text('This link is not valid.', 404);
+    if (!link || crossBrand(c, link.w) || !/^https?:\/\//.test(link.url)) return c.text('This link is not valid.', 404);
     try {
       const ev = await deps.db.withWorkspace(link.w, async (tx) => {
         const [m] = await tx.select().from(schema.messages).where(eq(schema.messages.id, link.m));
