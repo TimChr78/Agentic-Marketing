@@ -146,7 +146,7 @@ describe('per-brand e-mail links', () => {
       [mailA, 'a.example'],
       [mailB, 'b.example'],
     ] as const) {
-      expect(mail).toMatch(new RegExp(`^List-Unsubscribe:\\s*<https://${host.replace(/\./g, '\\.')}/u/`, 'm'));
+      expect(mail).toMatch(new RegExp(`^List-Unsubscribe:\\s*<https://${host.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/u/`, 'm'));
       expect(mail).toMatch(/^List-Unsubscribe-Post: List-Unsubscribe=One-Click/m);
       expect(mail).toContain(`https://${host}/u/`);
       expect(mail).toContain(`https://${host}/u/p/`);

@@ -111,7 +111,8 @@ export function normalizePathPrefix(input?: string | null): string | null {
   if (value.includes('?') || value.includes('#')) throw new DomainError('A path prefix must not include a query or fragment.');
   if (!value.startsWith('/')) value = `/${value}`;
   value = value.replace(/\/{2,}/g, '/');
-  if (value.length > 1) value = value.replace(/\/+$/, '');
+  // A loop, not /\/+$/, so a long run of slashes cannot make the match polynomial (CodeQL).
+  while (value.length > 1 && value.endsWith('/')) value = value.slice(0, -1);
   const segments = value.slice(1).split('/');
   if (segments.some((segment) => !segment || segment === '.' || segment === '..'))
     throw new DomainError('A path prefix may not contain empty, "." or ".." segments.');

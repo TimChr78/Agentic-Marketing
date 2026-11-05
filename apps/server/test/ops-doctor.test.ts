@@ -311,7 +311,7 @@ describe('am doctor brand-domain checks', () => {
       },
     });
     expect(probed).toEqual(['https://links.example.com/am/healthz']);
-    expect(checks.find((check) => check.id.startsWith('brand-domains.links.example.com'))?.status).toBe('ok');
+    expect(checks.find((check) => check.id === 'brand-domains.links.example.com/am')?.status).toBe('ok');
   });
 
   it('reports missing DNS, an invalid certificate and an unreachable listener', async () => {
@@ -352,7 +352,7 @@ describe('am doctor brand-domain checks', () => {
       config,
       { lookup: okLookup, probe: async () => 200 },
     );
-    expect(checks.find((check) => check.id.startsWith('brand-domains.admin.example.com'))?.status).toBe('warn');
+    expect(checks.find((check) => check.id === 'brand-domains.admin.example.com')?.status).toBe('warn');
     expect(checks.find((check) => check.id === 'brand-domains.primary')?.status).toBe('warn');
     expect(checks.find((check) => check.id === 'brand-domains.primary')?.message).toContain('Brand B');
   });

@@ -19,7 +19,8 @@ test('pause an agent with a reason, resume it, and switch the workspace to propo
   expect(used.ok(), `the token's first call: ${await used.text()}`).toBeTruthy();
 
   await page.goto('/settings/agents');
-  const row = page.getByRole('row').filter({ hasText: name });
+  // The agents table, not the comparison card below it, which also has a row per agent.
+  const row = page.getByRole('row').filter({ has: page.getByRole('button', { name: `Actions for ${name}` }) });
   await expect(row).toContainText('Active');
 
   // Pause with a reason: the status and the reason show at once.

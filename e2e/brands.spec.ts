@@ -8,9 +8,10 @@ import { PEOPLE, signIn } from './helpers';
 test('switch brand without a reload and keep it after reloading (#190)', async ({ page }) => {
   await signIn(page, PEOPLE.owner);
   await page.goto('/');
-  const switcher = page.getByRole('button', { name: /^Brand: Martech Signal/ });
+  // The seed's main workspace and its published brand are both named MartechSignal.
+  const switcher = page.getByRole('button', { name: /^Brand: MartechSignal/ });
   await expect(switcher).toBeVisible();
-  await expect(switcher).toContainText('Martech Signal');
+  await expect(switcher).toContainText('MartechSignal');
 
   await switcher.click();
   await page.getByRole('menuitem', { name: /Sandbox/ }).click();
@@ -37,7 +38,8 @@ test('an owner creates a brand and lands in it (#190)', async ({ page }) => {
   await dialog.getByRole('button', { name: 'Create brand' }).click();
 
   await expect(page.getByRole('button', { name: new RegExp(`^Brand: E2E brand ${suffix}`) })).toBeVisible();
-  await expect(page.getByRole('button', { name: /^Brand: .*Switch brand/ })).toContainText(`E2E site ${suffix}`);
+  // The new brand artifact is a draft, so the switcher shows the workspace name and the pending domain.
+  await expect(page.getByRole('button', { name: /^Brand: .*Switch brand/ })).toContainText(`e2e-${suffix}.example`);
 });
 
 test('the desktop nav collapses to a rail and the mobile drawer is unchanged (#180)', async ({ page }) => {
