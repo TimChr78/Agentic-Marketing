@@ -238,7 +238,7 @@ Set `independentCheck: true` to have a second model review each level-2+ action 
 
 ### Learning rules
 
-`learning` keeps what an agent publishes measurable. `journeyControlPercent` requires its journeys to hold out at least that share of entrants (`controlGroup.percent`, or the control group of the campaign the journey belongs to); `broadcastHoldout: true` requires its broadcasts to have a holdout (their campaign's control group) or a subject test; `experienceHoldoutPercent` requires its experiences to hold out at least that share of visitors (`holdoutPercent`). A change without the required holdout is not refused: it goes to a person, with the reason, whatever the level. A member published in one bundle with its campaign counts the campaign's control group.
+`learning` keeps what an agent publishes measurable. `journeyControlPercent` requires its journeys to hold out at least that share of entrants (`controlGroup.percent`, or the control group of the campaign the journey belongs to); `broadcastHoldout: true` requires its broadcasts to have a holdout (their campaign's control group) or a subject test; `experienceHoldoutPercent` requires its experiences to hold out at least that share of visitors (`holdoutPercent`); `experienceRamp: true` (or a minimum first step, e.g. `10`) requires its experiences to carry a ramp (`rollout.steps`, starting at that share or higher). A change without the required holdout or ramp is not refused: it goes to a person, with the reason, whatever the level. A member published in one bundle with its campaign counts the campaign's control group.
 
 ### Shadow mode
 
@@ -473,7 +473,7 @@ A programme (#314) for web experiences: it follows `experiences.results` and eac
   "purpose": "Run and conclude web experiments on the pricing and signup placements.",
   "scope": { "segments": [], "purposes": [], "topics": [], "channels": [], "artifactTypes": ["experience"], "artifacts": ["exp_0123456789abcdef0123456789abcdef"], "brand": null },
   "levels": { "experience.live": 3 },
-  "learning": { "experienceHoldoutPercent": 10 },
+  "learning": { "experienceHoldoutPercent": 10, "experienceRamp": true },
   "limits": { "changesPerDay": 5 },
   "validUntil": "2026-11-27T07:00:00Z",
   "holdWindow": "PT2H",

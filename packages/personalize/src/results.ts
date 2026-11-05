@@ -210,4 +210,6 @@ export const experienceResults = defineCommand({
   },
 });
 
-export const experienceCommands = [experienceResults] as const;
+import { rolloutCommands } from './rollout';
+
+export const experienceCommands = [experienceResults, ...rolloutCommands] as const;

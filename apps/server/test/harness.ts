@@ -286,6 +286,8 @@ export async function startTestServer(
       enrollmentTickMs: 86_400_000,
       guardianTickMs: 86_400_000,
       holdTickMs: 300,
+      // Experience rollout tests drive the sweep directly with a fixed clock.
+      rolloutTickMs: 86_400_000,
     }),
   ];
 

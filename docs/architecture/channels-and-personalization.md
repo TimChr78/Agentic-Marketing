@@ -75,6 +75,16 @@ POST /v1/decide
 - Exposures and conversions come back as events → ClickHouse → experiment analysis (frequentist, sequential and Bayesian; `experiences.results`).
 - Respects consent: without personalization consent, only non-personal (contextual: page, geo-country, device) targeting is allowed.
 
+### 3.3a Progressive rollout
+
+An experience publish may carry a **ramp** in its content:
+
+```json
+{ "rollout": { "steps": [5, 25, 50, 100], "stepHours": 24, "guardrail": { "measure": "email.click_rate", "maxDropPercent": 20 } } }
+```
+
+The first step is live at once and the scheduler widens the ramp one step every `stepHours` while the metric-layer guardrail holds. Admission is a sticky hash of the subject with its own salt, so a visitor admitted at 5% stays admitted at 25%; the share is carried in the edge bundle, so the worker applies it without a server round trip. When the guardrail falls further than `maxDropPercent` below the previous window the ramp pauses at its current step, records the reading and emits the `experience.rollout_paused` agent event (and tells the workspace owners). `experiences.stopRollout` sets the share to 0 at once, without republishing, for people and for agents whose mandate allows `experience.live`; only a person can `experiences.resumeRollout`. `experiences.rolloutStatus` shows the step, share, next step time and guardrail readings.
+
 ### 3.4 JS SDK (`sdk-js`)
 
 - Small (<15 kB gz target), Segment-compatible tracking API (`track/page/identify`), consent API, `decide`/render helpers, anti-flicker snippet, SPA route detection.

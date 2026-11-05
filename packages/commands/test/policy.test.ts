@@ -350,6 +350,26 @@ describe('learning rules (#257)', () => {
       ).decision,
     ).toBe('allow');
   });
+
+  it('an experience needs a ramp when the mandate requires one (#427)', () => {
+    const ramped = (learning: MandateView['learning'], rampFirstStep?: number) =>
+      decide(
+        base({
+          settings,
+          actionClass: 'experience.live',
+          mandate: view(learning),
+          impact: {
+            people: 10,
+            learning: [{ id: 'exp_1', type: 'experience', controlPercent: 0, ...(rampFirstStep === undefined ? {} : { rampFirstStep }) }],
+          },
+        }),
+      );
+    expect(ramped({ experienceRamp: true }).decision).toBe('ask');
+    expect(ramped({ experienceRamp: true }).reasons.join(' ')).toContain('ramp');
+    expect(ramped({ experienceRamp: true }, 5).decision).toBe('allow');
+    expect(ramped({ experienceRamp: 10 }, 5).decision).toBe('ask');
+    expect(ramped({ experienceRamp: 10 }, 10).decision).toBe('allow');
+  });
 });
 
 describe('level 4, run the loop (#309)', () => {

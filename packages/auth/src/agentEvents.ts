@@ -16,6 +16,7 @@ export const AGENT_EVENT_TYPES = [
   'guardian.episode',
   'guardrail.breach',
   'experiment.significant',
+  'experience.rollout_paused',
   'alert.fired',
 ] as const satisfies readonly AgentEventType[];
 

@@ -55,7 +55,14 @@ export interface Impact {
    * The holdouts of what is published (#257): per journey, broadcast or experience, the share held
    * out (its own control group, or its campaign's) and whether a broadcast tests subject lines.
    */
-  learning?: { id: string; type: string; controlPercent: number; subjectTest?: boolean }[];
+  learning?: {
+    id: string;
+    type: string;
+    controlPercent: number;
+    subjectTest?: boolean;
+    /** For an experience with a rollout: its first step share, or null when it has no ramp (#427). */
+    rampFirstStep?: number | null;
+  }[];
 }
 
 export const AutonomySwitch = z.enum(['on', 'propose_only', 'off']);
@@ -143,7 +150,13 @@ export interface MandateView {
   /** Goals on metric-layer measures, reported by agents.report (#310). */
   goals?: { measure: string; target?: number; direction: 'up' | 'down' }[];
   /** Learning rules (#257): holdouts the agent's journeys, broadcasts and experiences must have. */
-  learning?: { journeyControlPercent?: number; broadcastHoldout?: boolean; experienceHoldoutPercent?: number };
+  learning?: {
+    journeyControlPercent?: number;
+    broadcastHoldout?: boolean;
+    experienceHoldoutPercent?: number;
+    /** A ramp (#427): true for any ramp, or the minimum first step share. */
+    experienceRamp?: boolean | number;
+  };
   /**
    * Shadow mode (#256): for these classes (or all, when true) the mandate's decision is only
    * recorded; the action is decided as if there were no mandate, so a person decides as before.
@@ -345,6 +358,11 @@ function learningGaps(impact: Impact, rules: MandateView['learning']): string[] 
       out.push(
         `Experience ${l.id} holds out ${l.controlPercent}% of visitors; the mandate requires at least ${rules.experienceHoldoutPercent}% (holdoutPercent).`,
       );
+    if (l.type === 'experience' && rules.experienceRamp) {
+      const required = rules.experienceRamp === true ? 1 : rules.experienceRamp;
+      if ((l.rampFirstStep ?? 0) < required)
+        out.push(`Experience ${l.id} has no ramp starting at ${required}% of visitors; the mandate requires one (rollout.steps).`);
+    }
   }
   return out;
 }

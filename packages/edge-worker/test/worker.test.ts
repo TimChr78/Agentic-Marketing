@@ -18,7 +18,7 @@ const def = (over: Record<string, unknown>) => ({
   ...over,
 });
 
-function env(): Env {
+function env(share?: number): Env {
   const kv = new Map<string, unknown>([
     [
       `am:key:${writeKeyHash('wk_site')}`,
@@ -32,6 +32,7 @@ function env(): Env {
           {
             id: 'exp_fans',
             version: 2,
+            ...(share === undefined ? {} : { share }),
             def: def({
               priority: 200,
               targeting: { segment: seg },
@@ -50,14 +51,14 @@ function env(): Env {
   return { AM_KV: { get: async (k) => kv.get(k) ?? null }, AM_CACHE_SECONDS: '0' };
 }
 
-const decide = (body: Record<string, unknown>, headers: Record<string, string> = { origin: 'https://shop.example.com' }) =>
+const decide = (body: Record<string, unknown>, headers: Record<string, string> = { origin: 'https://shop.example.com' }, e = env()) =>
   worker.fetch(
     new Request('https://shop.example.com/am/v1/decide', {
       method: 'POST',
       headers: { 'content-type': 'application/json', ...headers },
       body: JSON.stringify({ writeKey: 'wk_site', placements: ['hero'], ...body }),
     }),
-    env(),
+    e,
   );
 const consent = { consent: { categoryPreferences: { web_personalization: true } } };
 
@@ -78,6 +79,17 @@ describe('edge worker', () => {
     expect(preview).toMatchObject({
       decisions: [{ experienceId: 'exp_fans', variantId: other, content: { html: `<p>Fans ${other.toUpperCase()}</p>` } }],
     });
+  });
+
+  it('applies the rollout share carried in the bundle', async () => {
+    const stopped = (await (await decide({ userId: 'u-1', context: consent }, undefined, env(0))).json()) as {
+      decisions: { experienceId: string }[];
+    };
+    expect(stopped.decisions).toMatchObject([{ experienceId: 'exp_generic' }]);
+    const open = (await (await decide({ userId: 'u-1', context: consent }, undefined, env(100))).json()) as {
+      decisions: { experienceId: string }[];
+    };
+    expect(open.decisions).toMatchObject([{ experienceId: 'exp_fans' }]);
   });
 
   it('refuses unknown keys, other origins and bad input, and answers preflight', async () => {

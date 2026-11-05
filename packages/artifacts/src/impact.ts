@@ -97,6 +97,7 @@ interface HoldoutFields {
   controlGroup?: { percent?: number };
   subjectTest?: unknown;
   holdoutPercent?: number;
+  rollout?: { steps?: number[] };
   members?: { artifactId: string }[];
 }
 
@@ -148,7 +149,13 @@ async function learningOf(tx: Tx, members: { id: string; type: string; version: 
     const fromCampaign = campaignControl.get(m.id) ?? 0;
     if (m.type === 'journey') out.push({ id: m.id, type: m.type, controlPercent: Math.max(c.controlGroup?.percent ?? 0, fromCampaign) });
     if (m.type === 'broadcast') out.push({ id: m.id, type: m.type, controlPercent: fromCampaign, subjectTest: !!c.subjectTest });
-    if (m.type === 'experience') out.push({ id: m.id, type: m.type, controlPercent: c.holdoutPercent ?? 0 });
+    if (m.type === 'experience')
+      out.push({
+        id: m.id,
+        type: m.type,
+        controlPercent: c.holdoutPercent ?? 0,
+        rampFirstStep: c.rollout?.steps?.[0] ?? null,
+      });
   }
   return out;
 }

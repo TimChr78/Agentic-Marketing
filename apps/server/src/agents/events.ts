@@ -73,6 +73,7 @@ interface Derived {
     lastGuardianAt: Date | null;
     lastAlertAt: Date | null;
     lastExperimentAt: Date | null;
+    lastRolloutAt: Date | null;
   };
 }
 
@@ -248,6 +249,47 @@ async function derive(tx: Tx, workspaceId: string, cursor: typeof schema.agentEv
     });
   }
 
+  // A ramp the guardrail paused (#427): the workspace-wide event an experimentation agent reacts to.
+  const rollouts = await tx
+    .select({
+      artifactId: schema.experienceRollouts.artifactId,
+      version: schema.experienceRollouts.version,
+      stepIndex: schema.experienceRollouts.stepIndex,
+      share: schema.experienceRollouts.share,
+      reason: schema.experienceRollouts.reason,
+      pausedAt: schema.experienceRollouts.pausedAt,
+      name: schema.artifacts.name,
+    })
+    .from(schema.experienceRollouts)
+    .innerJoin(
+      schema.artifacts,
+      and(
+        eq(schema.artifacts.workspaceId, schema.experienceRollouts.workspaceId),
+        eq(schema.artifacts.id, schema.experienceRollouts.artifactId),
+      ),
+    )
+    .where(
+      and(
+        eq(schema.experienceRollouts.workspaceId, workspaceId),
+        eq(schema.experienceRollouts.status, 'paused'),
+        isNotNull(schema.experienceRollouts.pausedAt),
+        gte(schema.experienceRollouts.pausedAt, cursor.lastRolloutAt ?? new Date(0)),
+      ),
+    )
+    .orderBy(asc(schema.experienceRollouts.pausedAt))
+    .limit(MAX_PER_RUN);
+  for (const row of rollouts) {
+    const at = row.pausedAt!;
+    events.push({
+      key: `rollout:${row.artifactId}:${at.toISOString()}`,
+      type: 'experience.rollout_paused',
+      agentId: null,
+      at,
+      summary: clip(`The ramp on “${row.name}” paused at ${row.share}%: ${row.reason ?? 'guardrail failed'}`),
+      subject: { artifactId: row.artifactId, version: row.version, stepIndex: row.stepIndex, share: row.share },
+    });
+  }
+
   return {
     events,
     next: {
@@ -256,6 +298,7 @@ async function derive(tx: Tx, workspaceId: string, cursor: typeof schema.agentEv
       lastGuardianAt: episodes.reduce<Date | null>((max, row) => later(max, row.at), cursor.lastGuardianAt ?? null),
       lastAlertAt: alerts.reduce<Date | null>((max, row) => later(max, row.firedAt), cursor.lastAlertAt ?? null),
       lastExperimentAt: tests.reduce<Date | null>((max, row) => later(max, row.decidedAt), cursor.lastExperimentAt ?? null),
+      lastRolloutAt: rollouts.reduce<Date | null>((max, row) => later(max, row.pausedAt), cursor.lastRolloutAt ?? null),
     },
   };
 }
@@ -285,6 +328,7 @@ async function sweepWorkspace(deps: AgentEventDeps, workspaceId: string, now: Da
           lastGuardianAt: since,
           lastAlertAt: since,
           lastExperimentAt: since,
+          lastRolloutAt: since,
         })
         .onConflictDoNothing();
       [cursor] = await tx.select().from(schema.agentEventCursor).where(eq(schema.agentEventCursor.workspaceId, workspaceId));
@@ -356,6 +400,7 @@ async function sweepWorkspace(deps: AgentEventDeps, workspaceId: string, now: Da
         lastGuardianAt: next.lastGuardianAt,
         lastAlertAt: next.lastAlertAt,
         lastExperimentAt: next.lastExperimentAt,
+        lastRolloutAt: next.lastRolloutAt,
       })
       .where(eq(schema.agentEventCursor.workspaceId, workspaceId));
     return { delivered, webhooks };
