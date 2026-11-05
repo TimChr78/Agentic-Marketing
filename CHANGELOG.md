@@ -2,7 +2,7 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
-## [Unreleased]
+## [0.8.0] - 2026-11-05
 
 ### Added
 
@@ -21,6 +21,14 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 ### Fixed
 
 - `X-Workspace-Id` no longer affects a token or OAuth connection: a request that sends a different workspace is refused with `403` instead of silently acting in it, so a credential for one brand cannot read or write another (#187).
+
+### Upgrading from 0.7.6
+
+- **Migrations:** `0075_workspace_domains.sql`, `0076_agent_coordination.sql`, `0077_oauth_workspace.sql`, `0078_experience_rollouts.sql` and `0079_workspace_create.sql`. All additive; they run on start. 0079 grants the app role `INSERT` on `workspaces` so `workspace.create` runs in the caller's transaction, still under row-level security.
+- **Configuration:** no new environment variables. `PUBLIC_LINKS_URL` stays the links host for every workspace without a verified brand domain. Public pages keep answering on any `Host` until the first brand domain is verified with `workspace.domains.verify`; from then on, a host that is neither a verified brand domain nor `PUBLIC_LINKS_URL`'s host gets 404 on public paths, so add every public hostname your proxy or tunnel uses before verifying one.
+- **Breaking changes:** a token or OAuth connection that sends `X-Workspace-Id` naming another workspace is refused with 403 instead of acting in it. OAuth/MCP connections made before 0.8.0 keep working for people with one workspace; a person with several must reconnect and choose the brand on the consent page. Conversion maps now publish as `audience.publish` with the `ads` channel: an agent needs `ads` in its mandate's channels to publish one or an audience sync autonomously, and without a mandate the workspace's approval policy decides as before.
+- **Manual steps:** none for a single-brand install. For a second brand: create it under the brand switcher (New brand, owners only), add its domain, point a tunnel hostname at the public listener and verify the domain, then refresh existing e-mail provider webhook URLs with `emailProviders.refreshWebhookUrl`.
+- **Upgrade:** download `agentic-marketing-compose-0.8.0.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.8.0 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.8.0` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.8.0). Run `docker compose exec app am doctor`.
 
 ## [0.7.6] - 2026-11-05
 
