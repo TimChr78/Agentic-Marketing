@@ -23,10 +23,11 @@ const DAYS: { value: Day; label: string }[] = [
   { value: 'sun', label: 'Sun' },
 ];
 
-const CHANNELS: { value: 'email' | 'sms' | 'push'; label: string }[] = [
+const CHANNELS: { value: 'email' | 'sms' | 'push' | 'ads'; label: string }[] = [
   { value: 'email', label: 'E-mail' },
   { value: 'sms', label: 'SMS' },
   { value: 'push', label: 'Push' },
+  { value: 'ads', label: 'Ads' },
 ];
 
 /** Artifact types a mandate can name; empty means any type the levels allow. */
@@ -66,7 +67,7 @@ export interface MandateScope {
   segments: string[];
   purposes: string[];
   topics: string[];
-  channels: ('email' | 'sms' | 'push')[];
+  channels: ('email' | 'sms' | 'push' | 'ads')[];
   artifactTypes: string[];
   artifacts: string[];
   brand: string | null;

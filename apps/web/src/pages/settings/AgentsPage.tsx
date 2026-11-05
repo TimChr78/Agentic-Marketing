@@ -10,6 +10,7 @@ import { AgentControls } from '../../features/agents/AgentControls';
 import { AgentStatusPill } from '../../features/agents/AgentStatus';
 import { AutonomyCard } from '../../features/agents/AutonomyCard';
 import { useAutonomy } from '../../features/agents/AutonomyProvider';
+import { CompareAgentsCard } from '../../features/agents/CompareAgentsCard';
 import { HostedAgentDialog } from '../../features/agents/HostedAgentDialog';
 import { type Agent, credentialKinds } from '../../features/agents/labels';
 import { Alert, Button, Card, EmptyState, LoadingBlock, PageHeader, Table, TableFrame, Td, THead, Th, Tr, useToast } from '../../ui';
@@ -122,6 +123,8 @@ export default function AgentsPage() {
           </tbody>
         </Table>
       </TableFrame>
+
+      <CompareAgentsCard />
 
       {autonomy.loading && !autonomy.settings ? (
         <Card title="Autonomy">

@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { audienceSyncImpact } from '@agentic-marketing/ads';
+import { audienceSyncImpact, conversionMapImpact } from '@agentic-marketing/ads';
 import { independentCheck } from '@agentic-marketing/ai';
 import { activeMandate, checkSubjectOf } from '@agentic-marketing/artifacts';
 import { assetRoutes } from '@agentic-marketing/assets';
@@ -142,6 +142,7 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
       broadcast: (tx, id, version) => broadcastImpact(tx, id, version),
       journey: (tx, id, version) => journeyImpact(tx, id, version),
       audience_sync: (tx, id, version) => audienceSyncImpact(tx, id, version),
+      conversion_map: () => conversionMapImpact(),
     },
     stepUpLimiter: {
       lockedUntil: (userId) => hot.failureLock(`stepup:${userId}`),

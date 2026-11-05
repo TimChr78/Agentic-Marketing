@@ -50,6 +50,8 @@ Re-verify each API version when building: all three platforms change these APIs 
   ```
 - **`audience_sync` artifact**: segment → platform audience (create or attach), with identifiers e-mail, phone, address and mobile id, and whether removals are synced.
 
+Both artifacts can be published by an agent, but only inside a mandate that grants `audience.publish` and the `ads` channel: publishing a conversion map touches `channels: ["ads"]` and the `ad_measurement` purpose, and publishing an audience sync touches the synced segment and `channels: ["ads"]`. A mandate without the channel holds the publish for a person; `agents.report` then shows the agent's audience syncs and its conversion uploads. Ad budgets and bids stay outside agent autonomy (#212).
+
 ## Flows
 
 1. **Conversion upload** (post-resolve hook):

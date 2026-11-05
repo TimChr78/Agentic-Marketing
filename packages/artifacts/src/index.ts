@@ -9,6 +9,7 @@ export * from './impact';
 export * from './learnings';
 export * from './mandates';
 export * from './recipes';
+export * from './renewals';
 export * from './topics';
 export * from './types';
 export * from './undo';

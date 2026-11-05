@@ -1429,7 +1429,7 @@ const agentMandate = z.object({
         .describe('Audiences the agent may send to; empty: none'),
       purposes: z.array(z.string()).max(20).default([]).describe('Purposes its messages may use; empty: any the segment allows'),
       topics: z.array(z.string()).max(20).default([]).describe('Topics its messages may use; empty: any'),
-      channels: z.array(z.enum(['email', 'sms', 'push'])).default(['email']),
+      channels: z.array(z.enum(['email', 'sms', 'push', 'ads'])).default(['email']),
       artifactTypes: z.array(z.string()).max(30).default([]).describe('Artifact types it may publish; empty: any within the levels'),
       artifacts: z.array(z.string()).max(100).default([]).describe('Specific artifacts it may change; empty: any of the allowed types'),
       brand: z.string().nullable().default(null).describe('Reserved for multi-brand; null: the whole workspace'),

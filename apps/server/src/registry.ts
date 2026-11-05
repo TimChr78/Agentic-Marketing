@@ -7,6 +7,7 @@ import {
   configCommands,
   contentTopicCommands,
   learningsCommands,
+  mandateRenewalCommands,
   recipeCommands,
   workspaceCommands,
 } from '@agentic-marketing/artifacts';
@@ -47,6 +48,7 @@ import { warehouseCommands } from '@agentic-marketing/warehouse';
 /** Every command the server exposes. REST routes, OpenAPI, MCP tools and the UI client derive from this list. */
 export const commands = [
   ...artifactCommands,
+  ...mandateRenewalCommands,
   ...recipeCommands,
   ...contentTopicCommands,
   ...learningsCommands,
