@@ -617,6 +617,7 @@ export const exportProfile = defineCommand({
       .describe('Current choices per topic, from the preference centre and elsewhere (#84)'),
     topicHistory: z.array(z.record(z.string(), z.unknown())).describe('Every topic choice with its source and evidence, oldest first'),
     events: z.array(z.record(z.string(), z.unknown())),
+    eventsTruncated: z.boolean().describe('More retained events exist beyond maxEvents; use profiles.events or a larger bound to continue'),
     aiDecisions: z
       .array(z.record(z.string(), z.unknown()))
       .describe('Automated decisions and texts made for the person by AI steps, with the rationale (GDPR Art. 15 and 22)'),
@@ -636,6 +637,8 @@ export const exportProfile = defineCommand({
     const profile = await getProfile.handler({ profileId: input.profileId }, ctx);
     const { records } = await consentHistory.handler({ profileId: profile.id }, ctx);
     const events: Record<string, unknown>[] = [];
+    let eventsTruncated = false;
+    if (input.maxEvents === 0) eventsTruncated = (await profileEvents.handler({ profileId: profile.id, limit: 1 }, ctx)).events.length > 0;
     // Page with the composite (timestamp, event_id) cursor so a burst of tied events is exported
     // in full instead of ending the loop at the first page boundary (#397). maxEvents remains the
     // honest upper bound; we never silently stop below it while a next page exists.
@@ -650,6 +653,7 @@ export const exportProfile = defineCommand({
         ctx,
       );
       events.push(...page.events);
+      if (events.length === input.maxEvents) eventsTruncated = page.nextCursor !== null;
       if (!page.nextCursor || !page.events.length) break;
       cursor = page.nextCursor;
     }
@@ -735,6 +739,7 @@ export const exportProfile = defineCommand({
       topicChoices,
       topicHistory,
       events,
+      eventsTruncated,
       aiDecisions,
       adUploads,
       pushDevices,

@@ -266,6 +266,8 @@ export function clickHouseStore(opts: { url: string; database: string }): EventS
   const client = createClient({
     url: opts.url,
     database: opts.database,
+    // Large identity scopes exceed the server URI limit when encoded as URL parameters.
+    use_multipart_params_auto: true,
     clickhouse_settings: { date_time_input_format: 'best_effort', output_format_json_quote_64bit_integers: 0 },
   });
   const idFilter = 'workspace_id = {ws:UUID} AND (anonymous_id IN {anon:Array(String)} OR user_id IN {users:Array(String)})';
@@ -503,13 +505,15 @@ export function clickHouseStore(opts: { url: string; database: string }): EventS
       // participant that loops back through the same split keeps that first arm, so its outcomes
       // cannot be counted twice or attributed to two arms (#369).
       const rows = await query(workspaceId, {
-        query: `SELECT participant_id, profile_id, detail AS variant, at FROM journey_events FINAL
-                WHERE workspace_id = {ws:UUID} AND journey_id = {j:String} AND node = {n:String} AND type = 'step'
-                  AND startsWith(detail, 'variant ')
+        query: `SELECT participant_id, profile_id, variant, at FROM (
+                  SELECT participant_id, profile_id, detail AS variant, at FROM journey_events FINAL
+                  WHERE workspace_id = {ws:UUID} AND journey_id = {j:String} AND node = {n:String} AND type = 'step'
+                    AND startsWith(detail, 'variant ')
+                  ORDER BY at ASC, seq ASC, detail ASC LIMIT 1 BY participant_id
+                ) WHERE 1
                 ${from ? "AND at >= {from:DateTime64(3, 'UTC')}" : ''}
                 ${to ? "AND at <= {to:DateTime64(3, 'UTC')}" : ''}
-                ORDER BY at ASC, seq ASC, detail ASC
-                LIMIT 1 BY participant_id`,
+                ORDER BY at ASC, participant_id ASC`,
         query_params: { ws: workspaceId, j: q.journeyId, n: q.node, ...(from ? { from } : {}), ...(to ? { to } : {}) },
         format: 'JSONEachRow',
       });
@@ -556,28 +560,44 @@ export function clickHouseStore(opts: { url: string; database: string }): EventS
     },
     async conversionEvents(workspaceId, q) {
       if (!q.names.length) return [];
+      if (
+        (q.profileIds !== undefined || q.identifiers !== undefined) &&
+        !q.profileIds?.length &&
+        !q.identifiers?.anonymousIds.length &&
+        !q.identifiers?.userIds.length
+      )
+        return [];
       // No workspace-wide row cap: the old LIMIT 100_000 silently dropped later conversions
       // (#366). Walk the window with a bounded, stable (timestamp, event_id) keyset instead, so
       // the caller sees every matching event. Scope by profile/identifier where the caller knows
       // the measured people, which also keeps the scan small.
       const scopes: string[] = [];
       const scopeParams: Record<string, unknown> = {};
-      if (q.profileIds?.length) {
-        scopes.push('profile_id IN {profiles:Array(String)}');
-        scopeParams.profiles = q.profileIds;
-      }
-      if (q.identifiers) {
-        const identifiers: string[] = [];
-        if (q.identifiers.anonymousIds.length) {
-          identifiers.push('anonymous_id IN {anon:Array(String)}');
-          scopeParams.anon = q.identifiers.anonymousIds;
+      // Multipart still limits each form field (128 KiB by default). Keep arrays below
+      // 64 KiB, allowing for ClickHouse string escaping, and OR their predicates together.
+      const addScope = (column: string, values: string[]) => {
+        let chunk: string[] = [];
+        let bytes = 2;
+        const flush = () => {
+          if (!chunk.length) return;
+          const name = `scope${scopes.length}`;
+          scopes.push(`${column} IN {${name}:Array(String)}`);
+          scopeParams[name] = chunk;
+          chunk = [];
+          bytes = 2;
+        };
+        for (const value of values) {
+          const size = Buffer.byteLength(JSON.stringify(value)) * 2 + 3;
+          if (size > 64 * 1024) throw new Error('Measurement identifier exceeds the query parameter size limit');
+          if (bytes + size > 64 * 1024) flush();
+          chunk.push(value);
+          bytes += size;
         }
-        if (q.identifiers.userIds.length) {
-          identifiers.push('user_id IN {users:Array(String)}');
-          scopeParams.users = q.identifiers.userIds;
-        }
-        if (identifiers.length) scopes.push(`(${identifiers.join(' OR ')})`);
-      }
+        flush();
+      };
+      addScope('profile_id', q.profileIds ?? []);
+      addScope('anonymous_id', q.identifiers?.anonymousIds ?? []);
+      addScope('user_id', q.identifiers?.userIds ?? []);
       const scope = scopes.length ? `AND (${scopes.join(' OR ')})` : '';
       const pageSize = 10_000;
       const events: {

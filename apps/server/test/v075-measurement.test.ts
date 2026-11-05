@@ -115,7 +115,7 @@ describe('campaign conversion measurement (#366)', () => {
                      {at:DateTime64(3, 'UTC')}, {at:DateTime64(3, 'UTC')},
                      'track', 'Campaign Purchase', '', {user:String}, {profile:String},
                      CAST('{}' AS JSON), CAST('{}' AS JSON), CAST('{}' AS JSON), map()`,
-      query_params: { ws, at: lateAt.toISOString().replace('Z', ''), user: 'cap-late', profile: profileId },
+      query_params: { ws, at: lateAt.toISOString().replace('Z', ''), user: 'cap-late', profile: 'prf_merged_away' },
       clickhouse_settings: settings as never,
     });
 
@@ -128,6 +128,15 @@ describe('campaign conversion measurement (#366)', () => {
     expect(all).toHaveLength(100_001);
     expect(all.at(-1)?.userId).toBe('cap-late');
 
+    // Historical CH profile ids remain on pre-merge events; current identifiers point at the survivor.
+    const empty = await t.srv.events.conversionEvents(ws, {
+      names: ['Campaign Purchase'],
+      from: assignedAt,
+      to: lateAt,
+      profileIds: [],
+      identifiers: { anonymousIds: [], userIds: [] },
+    });
+    expect(empty).toEqual([]);
     const result = await api.call('campaigns.holdoutResult', { campaignId });
     expect(result.treatment).toMatchObject({ entered: 1, converted: 1 });
     expect(result.control).toMatchObject({ entered: 0, converted: 0 });
@@ -179,7 +188,7 @@ describe('campaign conversion measurement (#366)', () => {
                  anonymous_id, user_id, profile_id, properties, traits, context, consent)
               SELECT {ws:UUID}, 'cal-late', 'src_cal',
                      {at:DateTime64(3, 'UTC')}, {at:DateTime64(3, 'UTC')},
-                     'track', 'Calibration Goal', '', 'cal-late', '',
+                     'track', 'Calibration Goal', '', 'cal-late', 'prf_merged_away',
                      CAST('{}' AS JSON), CAST('{}' AS JSON), CAST('{}' AS JSON), map()`,
       query_params: { ws, at: '2026-10-01 08:00:02.000' },
       clickhouse_settings: settings as never,
@@ -189,6 +198,20 @@ describe('campaign conversion measurement (#366)', () => {
     expect(result).toMatchObject({ predictions: 2, positives: 2, baseRate: 1 });
   }, 180_000);
 });
+
+it('sends large measurement scopes without exceeding the ClickHouse URI limit', async () => {
+  const ids = Array.from({ length: 20_000 }, (_, i) => `prf_large_scope_${String(i).padStart(20, '0')}`);
+  const anonymousIds = ids.map((id) => `anon_${id}`);
+  const rows = await t.srv.events.conversionEvents(ws, {
+    names: ['Campaign Purchase'],
+    from: new Date('2026-10-01T00:00:00Z'),
+    to: new Date('2026-11-06T00:00:00Z'),
+    profileIds: ids,
+    identifiers: { anonymousIds, userIds: [...ids.slice(0, -1), 'cap-late'] },
+  });
+  expect(rows).toHaveLength(1);
+  expect(rows[0]?.userId).toBe('cap-late');
+}, 120_000);
 
 describe('journey split attribution (#369)', () => {
   it('attributes each outcome once, including re-entry, ties, before-entry and out-of-window events', async () => {
@@ -306,6 +329,14 @@ describe('journey split attribution (#369)', () => {
     expect(arms).toHaveLength(7);
     expect(arms.find((a) => a.participantId === 107)?.arm).toBe(0);
     expect(arms.find((a) => a.participantId === 106)?.arm).toBe(1);
+    const later = await t.srv.events.journeySplitArms(ws, {
+      journeyId,
+      node: 'split',
+      from: new Date(base + 500),
+      to: new Date(base + 5_000),
+    });
+    // Filtering cannot turn participant 107's later loop into its first split take.
+    expect(later.map((a) => a.participantId).sort()).toEqual([102, 108]);
 
     const result = await api.call('journeys.splitResult', {
       journeyId,
@@ -403,6 +434,13 @@ describe('profile pagination and export (#397)', () => {
     expect(new Set(exported.map((e) => e.eventId)).size).toBe(501);
     const capped = await pagesApi.call('profiles.export', { profileId: firstProfile, maxEvents: 250 });
     expect(capped.events).toHaveLength(250);
+    expect(capped.eventsTruncated).toBe(true);
+    expect(full.eventsTruncated).toBe(false);
+    const exact = await pagesApi.call('profiles.export', { profileId: firstProfile, maxEvents: full.events.length });
+    expect(exact.eventsTruncated).toBe(false);
+    const none = await pagesApi.call('profiles.export', { profileId: firstProfile, maxEvents: 0 });
+    expect(none.events).toEqual([]);
+    expect(none.eventsTruncated).toBe(true);
   }, 120_000);
 
   it('pages profiles.list through many tied lastSeen values without skipping or repeating', async () => {

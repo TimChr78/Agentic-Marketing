@@ -384,7 +384,9 @@ export const calibration = defineCommand({
           inArray(schema.identifiers.type, ['anonymous_id', 'user_id']),
         ),
       );
-    const profileOf = new Map(ids.map((i) => [i.value, i.profileId]));
+    // Event profile ids are historical; current identifiers follow the canonical merge survivor.
+    const userProfiles = new Map(ids.filter((i) => i.type === 'user_id').map((i) => [i.value, i.profileId]));
+    const anonymousProfiles = new Map(ids.filter((i) => i.type === 'anonymous_id').map((i) => [i.value, i.profileId]));
     let events: Awaited<ReturnType<typeof ctx.services.events.conversionEvents>>;
     try {
       events = await ctx.services.events.conversionEvents(ws, {
@@ -400,9 +402,11 @@ export const calibration = defineCommand({
     } catch (err) {
       throw new AppError('conflict', `ai.calibration could not read outcome events: ${(err as Error).message}`);
     }
+    const measuredProfiles = new Set(profileIds);
     const outcomes = new Map<string, number[]>();
     for (const e of events) {
-      const profileId = e.profileId || profileOf.get(e.userId) || profileOf.get(e.anonymousId);
+      const profileId =
+        userProfiles.get(e.userId) ?? anonymousProfiles.get(e.anonymousId) ?? (measuredProfiles.has(e.profileId) ? e.profileId : undefined);
       if (!profileId) continue;
       outcomes.set(profileId, [...(outcomes.get(profileId) ?? []), e.timestamp]);
     }
