@@ -41,7 +41,9 @@ export function isLoopbackHost(host: string): boolean {
 
 /** The origin a registered host serves: https everywhere, plain http only on localhost. */
 export function originForHost(host: string): string {
-  return `${isLoopbackHost(host) ? 'http' : 'https'}://${host}`;
+  // A literal IPv6 address needs brackets inside a URL.
+  const authority = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host;
+  return `${isLoopbackHost(host) ? 'http' : 'https'}://${authority}`;
 }
 
 const HOST_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;

@@ -90,5 +90,6 @@ describe('domain inputs and request paths', () => {
     expect(originForHost('links.example.com')).toBe('https://links.example.com');
     expect(originForHost('localhost')).toBe('http://localhost');
     expect(originForHost('127.0.0.1')).toBe('http://127.0.0.1');
+    expect(originForHost('2001:db8::1')).toBe('https://[2001:db8::1]');
   });
 });

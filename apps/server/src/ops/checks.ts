@@ -818,7 +818,8 @@ const NON_PUBLIC_TLDS = new Set(['localhost', 'internal', 'invalid', 'test', 'ex
 
 function brandOrigin(host: string): string {
   const local = host === 'localhost' || host === '127.0.0.1' || host === '::1' || host.endsWith('.localhost');
-  return `${local ? 'http' : 'https'}://${host}`;
+  const authority = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host;
+  return `${local ? 'http' : 'https'}://${authority}`;
 }
 
 function looksLikeTlsError(err: unknown): boolean {
