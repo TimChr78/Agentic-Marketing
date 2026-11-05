@@ -11,6 +11,7 @@ const autonomy: Autonomy = {
   allowLoops: false,
   audienceThreshold: 1000,
   limits: { changesPerDay: 500, messagesPerDay: 1000 },
+  contactPressure: [],
 };
 
 vi.mock('../src/app/api', () => ({

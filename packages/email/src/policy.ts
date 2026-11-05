@@ -1,7 +1,8 @@
 import { DEFAULT_DELIVERY_POLICY, type DeliveryPolicy, type Purposes, publishedSingleton } from '@agentic-marketing/artifacts';
+import { autonomySettings } from '@agentic-marketing/commands';
 import { zonedInstant, zonedParts } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
-import { and, eq, gte, inArray, lt, ne, or, sql } from 'drizzle-orm';
+import { and, eq, gte, inArray, isNotNull, lt, ne, or, sql } from 'drizzle-orm';
 
 // The delivery policy (Phase 7) applies to every marketing message at the moment it would be
 // sent, whoever asked for it (journey, broadcast, API, agent): frequency caps, quiet hours, and a
@@ -210,7 +211,17 @@ const rateCache = new Map<string, { at: number; rates: Rates }>();
 export async function checkPolicy(
   tx: Tx,
   workspaceId: string,
-  message: { id: string; createdAt: Date; profileId: string; channel: Channel; purpose: string; basis: string; timezone?: unknown },
+  message: {
+    id: string;
+    createdAt: Date;
+    profileId: string;
+    channel: Channel;
+    purpose: string;
+    basis: string;
+    timezone?: unknown;
+    /** The agent behind this message (#426); human-originated messages have none. */
+    agentId?: string | null;
+  },
   purposes: Purposes,
   now = new Date(),
 ): Promise<Hold> {
@@ -245,6 +256,40 @@ export async function checkPolicy(
         ok: false,
         reason: `frequency_cap: ${n} ${{ email: 'e-mails', sms: 'texts', push: 'notifications' }[message.channel]} in ${cap.days} days (at most ${cap.max})`,
       };
+  }
+
+  // Cross-agent contact pressure (#426): one person's agent-originated marketing messages, across
+  // every agent, count towards the same window. Human-originated messages have no agent id.
+  if (message.agentId) {
+    const [workspace] = await tx.select({ autonomy: schema.workspaces.autonomy }).from(schema.workspaces);
+    const settings = autonomySettings(workspace?.autonomy);
+    for (const cap of settings.contactPressure) {
+      if (cap.channels && !cap.channels.includes(message.channel)) continue;
+      const [{ n }] = await tx
+        .select({ n: sql<number>`count(*)::int` })
+        .from(schema.messages)
+        .where(
+          and(
+            eq(schema.messages.profileId, message.profileId),
+            eq(schema.messages.test, false),
+            isNotNull(schema.messages.agentId),
+            inArray(schema.messages.purpose, marketingKeys),
+            cap.channels ? inArray(schema.messages.channel, cap.channels) : undefined,
+            ne(schema.messages.id, message.id),
+            gte(schema.messages.createdAt, new Date(now.getTime() - cap.days * 86_400_000)),
+            // Earlier messages still being sent count too, so a batch cannot slip past the cap.
+            or(
+              inArray(schema.messages.status, ['sent', 'delivered', 'bounced', 'complained']),
+              and(inArray(schema.messages.status, [...SENT]), lt(schema.messages.createdAt, message.createdAt)),
+            ),
+          ),
+        );
+      if (n >= cap.max)
+        return {
+          ok: false,
+          reason: `agent_contact_pressure: ${n} agent messages in ${cap.days} days (at most ${cap.max})`,
+        };
+    }
   }
 
   for (const q of policy.quietHours) {

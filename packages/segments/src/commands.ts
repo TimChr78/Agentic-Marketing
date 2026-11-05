@@ -186,6 +186,11 @@ export const refreshSegmentCommand = defineCommand({
   permission: 'artifacts:publish',
   effect: 'write',
   actionClass: 'audience.publish',
+  impact: async (input) => ({
+    people: 0,
+    summary: `recompute segment ${input.artifactId}`,
+    touches: { artifacts: [{ id: input.artifactId, type: 'segment' }] },
+  }),
   target: (i) => i.artifactId,
   handler: async (input, ctx) => {
     const all = await publishedSegments(ctx.tx);

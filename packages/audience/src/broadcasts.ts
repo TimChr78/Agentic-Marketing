@@ -283,6 +283,7 @@ async function suppressForControl(
   profileId: string,
   variant: string | undefined,
   campaignId: string,
+  agentId: string | null,
 ): Promise<void> {
   const channel = def.template.startsWith('sms_') ? 'sms' : def.template.startsWith('psh_') ? 'push' : 'email';
   const reason = `holdout_control: campaign ${campaignId} holds this person out of every sending member`;
@@ -301,6 +302,7 @@ async function suppressForControl(
       status: 'suppressed',
       reason,
       variant: variant ?? null,
+      agentId,
     })
     .onConflictDoNothing()
     .returning({ id: schema.messages.id });
@@ -917,7 +919,7 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
       .where(and(eq(schema.broadcastRuns.broadcastId, broadcastId), inArray(schema.broadcastRuns.status, ['scheduled', 'running'])))
       .for('update', { skipLocked: true });
     if (!run) return { more: false, holdout: [] as JourneyEvent[] };
-    const { def } = await definition(tx, broadcastId, run.version);
+    const { artifact, def } = await definition(tx, broadcastId, run.version);
     // A broadcast sends for at most one published campaign. When that campaign has a control
     // group, the arm belongs to the campaign, so a second member cannot randomise the person again.
     const campaign = await campaignWithControlForMember(tx, broadcastId);
@@ -1166,7 +1168,7 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
       // Control gets no message from any of the campaign's sending members. A suppression with
       // its own reason keeps the decision visible without counting it as a failed send.
       if (campaign && controlTemplate && holdout?.assignment.arm === 'control') {
-        await suppressForControl(tx, deps, ws, broadcastId, def, controlTemplate, m.profileId, variant, campaign.id);
+        await suppressForControl(tx, deps, ws, broadcastId, def, controlTemplate, m.profileId, variant, campaign.id, artifact.ownerAgentId);
         skipped++;
         continue;
       }
@@ -1196,6 +1198,7 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
         variant,
         subject,
         notBefore,
+        agentId: artifact.ownerAgentId,
       });
       if (test?.state === 'sampling' && d.status === 'queued' && !windowSkip) {
         const at = notBefore ?? now;

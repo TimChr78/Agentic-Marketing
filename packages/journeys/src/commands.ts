@@ -352,7 +352,12 @@ export const enrollProfiles = defineCommand({
   impact: async (input, ctx) => {
     const people = new Set(input.profileIds).size;
     const touches = await journeyTouches(ctx.tx, input.artifactId);
-    return { people, summary: `enrol ${people} people`, ...(touches ? { touches } : {}) };
+    return {
+      people,
+      summary: `enrol ${people} people`,
+      // The journey artifact itself is the target of a journey control action (#426).
+      touches: { ...(touches ?? {}), artifacts: [{ id: input.artifactId, type: 'journey' }] },
+    };
   },
   target: (i) => i.artifactId,
   handler: async (input, ctx) => {
@@ -472,7 +477,7 @@ export const enrollSegment = defineCommand({
         purposes: touches?.purposes ?? [],
         topics: touches?.topics ?? [],
         channels: touches?.channels ?? [],
-        artifacts: touches?.artifacts ?? [],
+        artifacts: [{ id: input.artifactId, type: 'journey' }, ...(touches?.artifacts ?? [])],
       },
     };
   },
@@ -602,7 +607,7 @@ export const cancelEnrollment = defineCommand({
               purposes: touches?.purposes ?? [],
               topics: touches?.topics ?? [],
               channels: touches?.channels ?? [],
-              artifacts: touches?.artifacts ?? [],
+              artifacts: [{ id: job.journeyId, type: 'journey' }, ...(touches?.artifacts ?? [])],
             },
           }
         : {}),
@@ -937,6 +942,11 @@ export const migrateJourney = defineCommand({
   permission: 'artifacts:publish',
   effect: 'publish',
   actionClass: 'journey.live',
+  impact: async (input) => ({
+    people: 0,
+    summary: `move participants to the published version of ${input.artifactId}`,
+    touches: { artifacts: [{ id: input.artifactId, type: 'journey' }] },
+  }),
   target: (i) => i.artifactId,
   handler: async (input, ctx) => {
     const [a] = await ctx.tx.select().from(schema.artifacts).where(eq(schema.artifacts.id, input.artifactId));

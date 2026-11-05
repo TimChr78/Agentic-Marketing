@@ -72,6 +72,8 @@ export interface EmailRequest {
   subject?: string;
   /** Hold the message until then (a recipient-local send window). */
   notBefore?: Date;
+  /** The agent behind this message (#426): a direct send, or the owner of the broadcast or journey. */
+  agentId?: string | null;
 }
 
 export interface Decision {
@@ -198,6 +200,7 @@ export async function requestEmail(tx: Tx, workspaceId: string, kp: KeyProvider,
       recipientHash,
       variant: req.variant ?? null,
       notBefore: req.notBefore ?? null,
+      agentId: req.agentId ?? null,
       data: req.subject ? { ...(req.data ?? {}), __subject: req.subject } : (req.data ?? {}),
     })
     .returning();

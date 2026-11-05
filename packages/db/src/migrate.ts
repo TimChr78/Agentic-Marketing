@@ -104,6 +104,7 @@ const MIGRATION_RELEASES: Record<string, string> = {
   '0073_ops_reliability.sql': '0.7.4',
   '0074_password_reset_queue.sql': '0.7.5',
   '0075_workspace_domains.sql': '0.8.0',
+  '0076_agent_coordination.sql': '0.8.0',
   '0077_oauth_workspace.sql': '0.8.0',
 };
 

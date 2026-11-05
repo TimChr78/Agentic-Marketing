@@ -115,10 +115,15 @@ export const artifacts = pgTable(
     latestVersion: integer('latest_version').notNull(),
     publishedVersion: integer('published_version'),
     archived: boolean('archived').notNull().default(false),
+    /** The agent that owns this artifact (#426); null when a person or no one owns it. */
+    ownerAgentId: text('owner_agent_id'),
     createdAt: ts('created_at').notNull().defaultNow(),
     updatedAt: ts('updated_at').notNull().defaultNow(),
   },
-  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.id] }),
+    index('artifacts_owner_agent').on(t.workspaceId, t.ownerAgentId).where(sql`owner_agent_id IS NOT NULL`),
+  ],
 );
 
 export const artifactVersions = pgTable(
@@ -533,10 +538,15 @@ export const messages = pgTable(
     segments: integer('segments'),
     /** A test send: sent for checking, never counted in reporting or delivery policy. */
     test: boolean('test').notNull().default(false),
+    /** The agent behind this message (#426): a direct send by an agent, or an agent-owned broadcast or journey. */
+    agentId: text('agent_id'),
     createdAt: ts('created_at').notNull().defaultNow(),
     updatedAt: ts('updated_at').notNull().defaultNow(),
   },
-  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.id] }),
+    index('messages_agent_contact').on(t.workspaceId, t.profileId, t.createdAt).where(sql`agent_id IS NOT NULL`),
+  ],
 );
 
 export const smsProviders = pgTable(
@@ -1440,7 +1450,7 @@ export const agents = pgTable(
     statusReason: text('status_reason'),
     statusChangedBy: text('status_changed_by'),
     statusChangedAt: ts('status_changed_at'),
-    /** Reserved for multi-brand (#184): null means the whole workspace. */
+    /** Reserved for multi-brand (#184). A brand is a workspace; nothing may use this column. */
     brand: text('brand'),
     /** The guardian's cap on the agent until a person clears it (#253); null when it has not acted. */
     guard: jsonb('guard').$type<AgentGuardState>(),

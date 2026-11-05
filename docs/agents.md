@@ -173,6 +173,7 @@ The workspace's limits apply to every agent, with or without a mandate. Read the
 | `limits.messagesPerDay` | `1000` | Messages an agent may send itself per 24 hours. |
 | `maxLevel` | `1` for every class | The highest autonomy level a mandate may grant per action class. Missing classes are 1. |
 | `allowLoops` | `false` | Whether any mandate may grant level 4 (run the loop). Level 4 must also be earned per agent and class; see Autonomy levels. |
+| `contactPressure` | `[]` | Cross-agent contact pressure: `{ max, days, channels? }` caps how many agent-originated marketing messages one person gets in the window, across every agent. See Several agents in one workspace. |
 
 At run time the engine uses the **lower** of the mandate's level and the workspace ceiling. Raising a ceiling takes effect for existing mandates; lowering one takes effect at once.
 
@@ -181,6 +182,22 @@ To let the weekly newsletter agent send at level 3, a person raises that one cei
 ```text
 workspace.setAutonomy {"maxLevel":{"send.broadcast":3}}
 ```
+
+## Several agents in one workspace
+
+Agents share a workspace, its artifacts and its people. Three rules stop them from stepping on each other; none of them applies to people.
+
+**Artifact ownership.** An artifact created by an agent belongs to that agent (`owner_agent_id`), and a person can assign, transfer or clear the owner with `artifacts.setOwner` (people only, audited). `artifacts.get` and `artifacts.list` show `ownerAgentId`. When an agent tries to go beyond a draft on an artifact owned by **another active agent** — publish, request publish, publish a bundle, a live edit or journey control — the change is capped at level 1: with a mandate it becomes a proposal a person decides; without one it asks a person. The reason names the owner, for example "“Weekly newsletter” is owned by agent Newsletter agent." The agent that owns the artifact is not blocked. Ownership by a paused or retired agent does not block either; the policy records it and carries on. A deleted agent's id stays on the artifact so the report can still show it as retired.
+
+**Conflict holds.** When another agent already has a pending change on the same artifact, a second agent's change is capped the same way. A pending change is an open hold still inside its veto window, or an open approval request from a different agent. The reason names the other agent and its pending change, so the person reviewing knows what to decide first. This is per artifact: two agents may work on different artifacts in the same bundle without waiting for each other, though a bundle that contains the conflicting artifact still waits.
+
+**Cross-agent contact pressure.** Every message records the agent behind it (`messages.agent_id`): a direct send by an agent, or a broadcast or journey message whose artifact is agent-owned. A workspace cap, `contactPressure` under `workspace.autonomy`, then limits how many agent-originated marketing messages one person gets in a window, counted across agents on top of the delivery policy's own frequency caps. Human-originated messages have no agent id and are never counted. The delivery worker checks the cap when it would send; a message over it is suppressed with `agent_contact_pressure: …` in its reason.
+
+```text
+workspace.setAutonomy {"contactPressure":[{"max":4,"days":7}]}
+```
+
+`agents.activity` and `agents.report` show the artifacts an agent owns, the pending changes other agents have on them (`heldConflicts`) and how many of its messages the contact-pressure cap skipped (`contactPressureSkipped`). Pausing an agent still stops its credentials; pausing an owner only removes the ownership block, it does not resume its pending changes.
 
 ## Mandates
 

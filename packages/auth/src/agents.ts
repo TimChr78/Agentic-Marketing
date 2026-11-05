@@ -23,6 +23,82 @@ type AgentRef = NonNullable<Principal['agent']>;
 const AGENT_ID = z.string().regex(/^agt_[0-9a-f]{32}$/, 'An agent id looks like agt_…');
 
 /**
+ * What one agent's coordination looks like (#426): the artifacts it owns and the pending changes
+ * other agents have on them (a hold inside its veto window, or an open approval request). People
+ * and this agent's own requests are left out.
+ */
+async function coordinationOf(tx: Tx, agentId: string) {
+  const owned = await tx
+    .select({ id: schema.artifacts.id, name: schema.artifacts.name })
+    .from(schema.artifacts)
+    .where(eq(schema.artifacts.ownerAgentId, agentId));
+  const ids = owned.map((a) => a.id);
+  if (!ids.length) return { ownedArtifacts: [] as string[], heldConflicts: [] };
+  const names = new Map(owned.map((a) => [a.id, a.name]));
+  const pending = await tx.execute<{
+    artifact_id: string;
+    hold_until: Date | string | null;
+    agent_id: string;
+    agent_name: string;
+  }>(sql`
+    SELECT ar.artifact_id, ar.hold_until, a.id AS agent_id, a.name AS agent_name
+    FROM approval_requests ar
+    JOIN agent_credentials c ON c.workspace_id = ar.workspace_id AND (
+      (c.kind = 'api_token' AND ar.requested_by_client = 'token:' || c.credential_id)
+      OR (c.kind = 'hosted' AND ar.requested_by_client = 'hosted:' || c.credential_id)
+      OR (c.kind = 'copilot' AND ar.requested_by_client = 'copilot:' || c.credential_id)
+      OR (c.kind = 'oauth_client' AND ar.requested_by_client = c.credential_id))
+    JOIN agents a ON a.workspace_id = c.workspace_id AND a.id = c.agent_id
+    WHERE ar.status = 'pending' AND ar.requested_by_type = 'agent'
+      AND ar.artifact_id IN (${sql.join(
+        ids.map((id) => sql`${id}`),
+        sql`, `,
+      )})
+      AND a.id <> ${agentId}
+    ORDER BY ar.created_at`);
+  const seen = new Set<string>();
+  const heldConflicts: {
+    artifactId: string;
+    artifactName: string;
+    agentId: string;
+    agentName: string;
+    kind: 'hold' | 'approval';
+    until: string | null;
+  }[] = [];
+  for (const row of pending.rows) {
+    const key = `${row.artifact_id}:${row.agent_id}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const until = row.hold_until ? new Date(row.hold_until) : null;
+    heldConflicts.push({
+      artifactId: row.artifact_id,
+      artifactName: names.get(row.artifact_id) ?? row.artifact_id,
+      agentId: row.agent_id,
+      agentName: row.agent_name,
+      kind: until && until > new Date() ? 'hold' : 'approval',
+      until: until && until > new Date() ? until.toISOString() : null,
+    });
+  }
+  return { ownedArtifacts: ids, heldConflicts };
+}
+
+/** Marketing messages this agent sent that the contact-pressure cap skipped (#426). */
+async function contactPressureSkipped(tx: Tx, agentId: string, range?: { from: Date; to: Date }): Promise<number> {
+  const [{ n }] = await tx
+    .select({ n: sql<number>`count(*)::int` })
+    .from(schema.messages)
+    .where(
+      and(
+        eq(schema.messages.agentId, agentId),
+        sql`${schema.messages.reason} LIKE 'agent_contact_pressure:%'`,
+        range ? gte(schema.messages.createdAt, range.from) : undefined,
+        range ? lt(schema.messages.createdAt, range.to) : undefined,
+      ),
+    );
+  return n;
+}
+
+/**
  * The agent behind a credential, created on first use. Runs on the admin pool, like the token
  * lookup it follows: the workspace is not known before the credential is resolved.
  */
@@ -322,11 +398,21 @@ const Action = z.object({
   undoResult: z.string().nullable().describe('What the undo did'),
 });
 
+/** Another agent's pending change on an artifact this agent owns (#426). */
+const HeldConflict = z.object({
+  artifactId: z.string(),
+  artifactName: z.string(),
+  agentId: z.string(),
+  agentName: z.string(),
+  kind: z.enum(['hold', 'approval']).describe('hold: inside its veto window; approval: waiting for a person'),
+  until: z.string().nullable().describe('For a hold, when its veto window ends'),
+});
+
 export const agentActivity = defineCommand({
   name: 'agents.activity',
   title: 'Agent activity',
   description:
-    'The action ledger: every agent write with the policy decision (allow, ask = waited for a person, deny = refused) and its reasons, the impact estimate (e.g. people reached) and whether it succeeded. Newest first; page with `before`.',
+    'The action ledger: every agent write with the policy decision (allow, ask = waited for a person, deny = refused) and its reasons, the impact estimate (e.g. people reached) and whether it succeeded. Newest first; page with `before`. With an agent id it also shows the artifacts that agent owns, the pending changes other agents have on them, and how many of its messages the contact-pressure cap skipped.',
   input: z.object({
     agentId: AGENT_ID.optional(),
     decision: z.enum(['allow', 'hold', 'ask', 'deny']).optional(),
@@ -335,7 +421,20 @@ export const agentActivity = defineCommand({
     before: z.number().int().optional().describe('Return entries with a smaller id (the last id of the previous page)'),
     limit: z.number().int().min(1).max(200).default(50),
   }),
-  output: z.object({ actions: z.array(Action), next: z.number().int().nullable() }),
+  output: z.object({
+    actions: z.array(Action),
+    next: z.number().int().nullable(),
+    ownedArtifacts: z.array(z.string()).optional().describe('Artifacts this agent owns (#426); only with an agent id'),
+    heldConflicts: z
+      .array(HeldConflict)
+      .optional()
+      .describe('Other agents’ pending changes on the artifacts it owns; only with an agent id'),
+    contactPressureSkipped: z
+      .number()
+      .int()
+      .optional()
+      .describe('Marketing messages of this agent that the contact-pressure cap skipped (#426); only with an agent id'),
+  }),
   permission: 'audit:read',
   effect: 'read',
   handler: async (input, ctx) => {
@@ -372,6 +471,12 @@ export const agentActivity = defineCommand({
     return {
       actions,
       next: rows.length > input.limit ? (page.at(-1)?.id ?? null) : null,
+      ...(input.agentId
+        ? {
+            ...(await coordinationOf(ctx.tx, input.agentId)),
+            contactPressureSkipped: await contactPressureSkipped(ctx.tx, input.agentId),
+          }
+        : {}),
     };
   },
 });
@@ -656,6 +761,13 @@ export const agentReport = defineCommand({
     ),
     undone: z.number().int(),
     guardian: z.record(z.string(), z.number().int()).describe('Guardian episodes by kind'),
+    ownedArtifacts: z.array(z.string()).optional().describe('Artifacts this agent owns (#426)'),
+    heldConflicts: z.array(HeldConflict).optional().describe('Other agents’ pending changes on the artifacts it owns (#426)'),
+    contactPressureSkipped: z
+      .number()
+      .int()
+      .optional()
+      .describe('Marketing messages of this agent that the contact-pressure cap skipped in the period (#426)'),
     outcomes: z
       .object({
         broadcasts: EmailOutcome,
@@ -725,6 +837,8 @@ export const agentReport = defineCommand({
       actions,
       undone,
       guardian: Object.fromEntries(episodes.map((e) => [e.kind, e.n])),
+      ...(await coordinationOf(ctx.tx, agentId)),
+      contactPressureSkipped: await contactPressureSkipped(ctx.tx, agentId, { from, to }),
       outcomes,
     };
   },
@@ -736,7 +850,7 @@ export const getAutonomy = defineCommand({
   name: 'workspace.autonomy',
   title: 'Autonomy settings',
   description:
-    'The workspace’s limits for agents: the autonomy switch (on, propose_only, off), the audience threshold above which an agent action needs a person, per-agent limits per 24 hours, and the highest level a mandate may grant per action class (the default is a person: level 1, propose). Agents read this to plan within it.',
+    'The workspace’s limits for agents: the autonomy switch (on, propose_only, off), the audience threshold above which an agent action needs a person, per-agent limits per 24 hours, the highest level a mandate may grant per action class (the default is a person: level 1, propose), and the cross-agent contact-pressure caps. Agents read this to plan within it.',
   input: z.object({}),
   output: AutonomySettings,
   permission: 'artifacts:read',
