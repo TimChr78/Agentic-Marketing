@@ -291,7 +291,7 @@ export const journeySplitResult = defineCommand({
     const range = { ...(input.from ? { from: new Date(input.from) } : {}), ...(input.to ? { to: new Date(input.to) } : {}) };
     const ws = ctx.principal.workspaceId;
     const taken = await ctx.services.events.journeySplitArms(ws, { journeyId: input.journeyId, node: input.node, ...range });
-    // Goal conversions and unsubscribes per event, as journeys.holdoutResult counts them. Each event
+    // Each entry contributes at most one conversion and unsubscribe. Each outcome event
     // is attributed to exactly one eligible split entry/arm (#369); the previous profile-level sets
     // were re-applied to every entry a re-entrant had, which counted one conversion in both arms.
     const outcomes = await ctx.services.events.journeyHoldoutOutcomes(ws, { journeyId: input.journeyId, ...range });

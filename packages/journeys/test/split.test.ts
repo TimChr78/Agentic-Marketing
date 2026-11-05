@@ -34,6 +34,31 @@ describe('split outcome attribution', () => {
     ]);
   });
 
+  it('counts each entry at most once for repeated conversion and unsubscribe events', () => {
+    const result = attributeSplitOutcomes(
+      [entry(1, 'prf_repeat', 0, 1_000), entry(2, 'prf_repeat', 1, 3_000)],
+      {
+        converted: [
+          outcome('prf_repeat', 1_100, 1),
+          outcome('prf_repeat', 1_200, 1),
+          outcome('prf_repeat', 3_100, 2),
+          outcome('prf_repeat', 3_200, 2),
+        ],
+        unsubscribed: [
+          outcome('prf_repeat', 1_100),
+          outcome('prf_repeat', 1_200),
+          outcome('prf_repeat', 3_100),
+          outcome('prf_repeat', 3_200),
+        ],
+      },
+      2,
+    );
+    expect(result).toEqual([
+      { entered: 1, converted: 1, unsubscribed: 1 },
+      { entered: 1, converted: 1, unsubscribed: 1 },
+    ]);
+  });
+
   it('ignores outcomes before the first eligible entry', () => {
     const counts = attributeSplitOutcomes(
       [entry(1, 'prf_a', 0, 1_000)],

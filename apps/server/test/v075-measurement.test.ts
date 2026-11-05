@@ -257,6 +257,7 @@ describe('journey split attribution (#369)', () => {
     ]);
     await t.srv.events.insertJourneyEvents([
       converted(101, 'prf_reentry', base + 1_000),
+      { ...converted(101, 'prf_reentry', base + 1_500), seq: 10 },
       converted(102, 'prf_reentry', base + 3_000),
       converted(103, 'prf_before', base - 1_000),
       // Participant 0 does not match an entry, so this exercises the equal-time profile rule.
@@ -302,7 +303,7 @@ describe('journey split attribution (#369)', () => {
     ]);
 
     const arms = await t.srv.events.journeySplitArms(ws, { journeyId, node: 'split' });
-    expect(arms).toHaveLength(6);
+    expect(arms).toHaveLength(7);
     expect(arms.find((a) => a.participantId === 107)?.arm).toBe(0);
     expect(arms.find((a) => a.participantId === 106)?.arm).toBe(1);
 

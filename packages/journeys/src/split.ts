@@ -71,13 +71,23 @@ export function attributeSplitOutcomes(
     return chosen;
   };
 
+  // Rates use entrant entries as their denominator, so repeated outcome events for the
+  // same entry count once. Re-entry can still contribute once for each distinct participant.
+  const converted = new Set<number>();
   for (const outcome of outcomes.converted) {
     const entry = eligible(outcome);
-    if (entry) counts[entry.arm].converted++;
+    if (entry && !converted.has(entry.participantId)) {
+      converted.add(entry.participantId);
+      counts[entry.arm].converted++;
+    }
   }
+  const unsubscribed = new Set<number>();
   for (const outcome of outcomes.unsubscribed) {
     const entry = eligible(outcome);
-    if (entry) counts[entry.arm].unsubscribed++;
+    if (entry && !unsubscribed.has(entry.participantId)) {
+      unsubscribed.add(entry.participantId);
+      counts[entry.arm].unsubscribed++;
+    }
   }
   return counts;
 }
