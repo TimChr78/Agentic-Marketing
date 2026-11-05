@@ -13,7 +13,7 @@
 //      the choice is deterministic.
 //
 // An explicit participant never falls back to another participant's take. If its own take is
-// missing, before the outcome, or otherwise not eligible, the outcome is not attributed. Only a
+// missing, after the outcome, or otherwise not eligible, the outcome is not attributed. Only a
 // genuinely participant-less outcome uses the temporal profile fallback (#419).
 //
 // Entries are already one row per participant: `journeySplitArms` keeps the first split take by
