@@ -1,10 +1,12 @@
-import { hashedResetTokenIdentifier } from '@agentic-marketing/auth';
+import { hashedResetTokenIdentifier, RESET_PASSWORD_TTL_SECONDS } from '@agentic-marketing/auth';
 import { outbox } from '@agentic-marketing/email';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { runPasswordResetDeliveriesOnce, sendPasswordResetEmail } from '../src/passwordReset';
 import { cookieOf, startTestServer, testPort, type User } from './harness';
 
 // Self-service password reset (#191): the neutral answer, the mailed link, the password change,
 // single use and expiry, session revocation, the rate limits, single sign-on people and the audit.
+// #379: the answer is queued, so it never waits for the provider or depends on account existence.
 
 const PORT = testPort(2600);
 const BASE = `http://localhost:${PORT}`;
@@ -37,6 +39,25 @@ const signIn = (email: string, password: string) =>
 
 const mailsTo = (email: string) => outbox.filter((m) => m.to === email && m.subject === MAIL_SUBJECT);
 
+/** The test server runs the reset worker on an all-but-infinite tick; drive one round here. */
+const deliver = (send?: Parameters<typeof runPasswordResetDeliveriesOnce>[0]['send']) =>
+  runPasswordResetDeliveriesOnce({
+    db: t.srv.db,
+    kp: t.srv.keyProvider,
+    email: t.srv.email,
+    directory: t.srv.directory,
+    publicUrl: t.base,
+    ttlSeconds: RESET_PASSWORD_TTL_SECONDS,
+    ...(send ? { send } : {}),
+  });
+
+/** A request plus the delivery round it queued (the response itself never sends). */
+async function requestLink(email: string, ip = nextIp()) {
+  const res = await forgot(email, ip);
+  await deliver();
+  return res;
+}
+
 /** The token in the one link the reset mail carries. */
 function linkToken(mail: { text: string }): string {
   const url = /https?:\/\/\S+/.exec(mail.text)?.[0];
@@ -50,6 +71,26 @@ async function newAccount(): Promise<User> {
   await t.srv.db.admin.query(`INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'marketer')`, [ws, u.id]);
   return u;
 }
+
+/** The sender the second test creates; a test that needs mail on its own creates one if absent. */
+async function ensureTransactionalProvider() {
+  const { rows } = await t.srv.db.admin.query<{ n: string }>('SELECT count(*) AS n FROM email_providers WHERE enabled');
+  if (Number(rows[0]?.n ?? 0) > 0) return;
+  await t.api(owner, ws).call('emailProviders.create', {
+    name: 'Security mail',
+    adapter: 'log',
+    fromEmail: 'security@example.com',
+    useFor: ['transactional'],
+  });
+}
+
+const queueRows = async (userId: string) =>
+  (
+    await t.srv.db.admin.query<{ status: string; attempts: number; token_sealed: Buffer | null; next_attempt_at: string | null }>(
+      'SELECT status, attempts, token_sealed, next_attempt_at FROM password_reset_deliveries WHERE user_id = $1 ORDER BY created_at',
+      [userId],
+    )
+  ).rows;
 
 beforeAll(async () => {
   // The test client connects over loopback and passes a distinct x-forwarded-for per call, so the
@@ -71,8 +112,10 @@ describe('requesting a reset link (#191)', () => {
       status: true,
       message: 'If an account exists for that address, we sent a link to reset the password.',
     });
-    // No sender: no mail, no crash, and the same answer a person with mail would see.
+    await deliver();
+    // No sender: no queue row, no mail, no crash, and the same answer a person with mail would see.
     expect(mailsTo(owner.email)).toHaveLength(0);
+    expect(await queueRows(owner.id)).toHaveLength(0);
   });
 
   it('answers the same for a known and an unknown address, and only the known one gets mail', async () => {
@@ -89,13 +132,14 @@ describe('requesting a reset link (#191)', () => {
     expect(knownRes.status).toBe(200);
     expect(unknownRes.status).toBe(200);
     expect(await unknownRes.json()).toEqual(await knownRes.json());
+    await deliver();
     expect(mailsTo(known.email)).toHaveLength(1);
     expect(mailsTo(unknown)).toHaveLength(0);
   });
 
   it('mails a single-use link to PUBLIC_URL that sets the new password', async () => {
     const account = await newAccount();
-    expect((await forgot(account.email)).status).toBe(200);
+    expect((await requestLink(account.email)).status).toBe(200);
     const mail = mailsTo(account.email)[0];
     expect(mail).toBeTruthy();
     expect(mail.from.email).toBe('security@example.com');
@@ -130,7 +174,7 @@ describe('requesting a reset link (#191)', () => {
 
   it('refuses an expired token with the same clear error', async () => {
     const account = await newAccount();
-    await forgot(account.email);
+    await requestLink(account.email);
     const token = linkToken(mailsTo(account.email)[0]);
     await t.srv.db.admin.query(`UPDATE "verification" SET "expiresAt" = now() - interval '1 minute' WHERE identifier = $1`, [
       hashedResetTokenIdentifier(token),
@@ -155,7 +199,7 @@ describe('requesting a reset link (#191)', () => {
     expect((await sessionOf(cookieOf(first)))?.user?.id).toBe(account.id);
     expect((await sessionOf(cookieOf(second)))?.user?.id).toBe(account.id);
 
-    await forgot(account.email);
+    await requestLink(account.email);
     expect((await reset(linkToken(mailsTo(account.email)[0]), NEW_PASSWORD)).status).toBe(200);
 
     expect(await sessionOf(cookieOf(first))).toBeNull();
@@ -166,16 +210,18 @@ describe('requesting a reset link (#191)', () => {
     const account = await newAccount();
     // What an SSO/SCIM-provisioned person looks like: an account with no password credential.
     await t.srv.db.admin.query(`DELETE FROM "account" WHERE "userId" = $1`, [account.id]);
-    const res = await forgot(account.email);
+    const res = await requestLink(account.email);
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ status: true });
     expect(mailsTo(account.email)).toHaveLength(0);
+    expect(await queueRows(account.id)).toHaveLength(0);
   });
 
   it('does not send a second link inside the cooldown', async () => {
     const account = await newAccount();
     await forgot(account.email);
     await forgot(account.email);
+    await deliver();
     expect(mailsTo(account.email)).toHaveLength(1);
   });
 
@@ -198,7 +244,7 @@ describe('requesting a reset link (#191)', () => {
       [ws, account.id],
     );
 
-    expect((await forgot(account.email)).status).toBe(200);
+    expect((await requestLink(account.email)).status).toBe(200);
     const mails = mailsTo(account.email);
     expect(mails).toHaveLength(1);
     // `ws` carries the sender created earlier in this file.
@@ -230,11 +276,120 @@ describe('requesting a reset link (#191)', () => {
   });
 });
 
+describe('the answer does not wait for the provider (#379)', () => {
+  it('returns before a slow provider runs, and the worker delivers the link afterwards', async () => {
+    await ensureTransactionalProvider();
+    // Drain anything the earlier tests left queued, so this round handles only this request.
+    await deliver();
+    const account = await newAccount();
+
+    const started = Date.now();
+    const res = await forgot(account.email);
+    const elapsed = Date.now() - started;
+    expect(res.status).toBe(200);
+    expect(elapsed).toBeLessThan(1000);
+    // Nothing has been mailed yet: the request only queued a row.
+    expect(mailsTo(account.email)).toHaveLength(0);
+    expect((await queueRows(account.id))[0]).toMatchObject({ status: 'queued', attempts: 0 });
+
+    const calls: string[] = [];
+    const slowSender = async (
+      deps: Parameters<typeof sendPasswordResetEmail>[0],
+      person: Parameters<typeof sendPasswordResetEmail>[1],
+      token: string,
+      ttl: number,
+    ) => {
+      calls.push(person.id);
+      // A provider that takes 1.5 seconds: the HTTP response above must not have waited for this.
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      return sendPasswordResetEmail(deps, person, token, ttl);
+    };
+    const workerStarted = Date.now();
+    const summary = await deliver(slowSender);
+    expect(Date.now() - workerStarted).toBeGreaterThanOrEqual(1400);
+    expect(summary.sent).toBe(1);
+    expect(calls).toEqual([account.id]);
+    expect(mailsTo(account.email)).toHaveLength(1);
+    expect((await queueRows(account.id))[0]).toMatchObject({ status: 'sent', token_sealed: null });
+  }, 30_000);
+
+  it('does the same dummy lookup for unknown and single sign-on addresses', async () => {
+    await ensureTransactionalProvider();
+    await deliver();
+    const unknown = `timing-unknown-${runId}@example.com`;
+    const sso = await newAccount();
+    await t.srv.db.admin.query(`DELETE FROM "account" WHERE "userId" = $1`, [sso.id]);
+
+    const unknownRes = await forgot(unknown);
+    const ssoRes = await forgot(sso.email);
+    expect(await unknownRes.json()).toEqual(await ssoRes.json());
+    await deliver();
+    expect(mailsTo(unknown)).toHaveLength(0);
+    expect(mailsTo(sso.email)).toHaveLength(0);
+    expect(await queueRows(sso.id)).toHaveLength(0);
+    const { rows } = await t.srv.db.admin.query<{ n: string }>('SELECT count(*) AS n FROM password_reset_deliveries WHERE user_id = $1', [
+      sso.id,
+    ]);
+    expect(Number(rows[0]?.n)).toBe(0);
+  });
+});
+
+describe('the reset delivery queue (#379)', () => {
+  const failingSender = async () => 'failed' as const;
+
+  it('retries a provider failure with backoff and stops at the attempt bound', async () => {
+    await ensureTransactionalProvider();
+    await deliver();
+    const account = await newAccount();
+    expect((await forgot(account.email)).status).toBe(200);
+
+    let summary = await deliver(failingSender);
+    expect(summary).toMatchObject({ handled: 1, retried: 1, failed: 0 });
+    let [row] = await queueRows(account.id);
+    expect(row).toMatchObject({ status: 'queued', attempts: 1 });
+    expect(row!.next_attempt_at).toBeTruthy();
+    expect(row!.token_sealed).toBeTruthy();
+
+    // Not due yet: the backoff holds it even though the worker runs again.
+    summary = await deliver(failingSender);
+    expect(summary.handled).toBe(0);
+
+    for (let attempt = 2; attempt <= 4; attempt++) {
+      await t.srv.db.admin.query('UPDATE password_reset_deliveries SET next_attempt_at = now() WHERE user_id = $1', [account.id]);
+      await deliver(failingSender);
+    }
+    [row] = await queueRows(account.id);
+    // Four attempts is the bound; the token is gone and the failure is audited.
+    expect(row).toMatchObject({ status: 'failed', attempts: 4, token_sealed: null });
+    const { rows } = await t.srv.db.admin.query<{ error: string | null }>(
+      `SELECT error FROM audit_log WHERE principal_id = $1 AND command = 'auth.passwordResetRequest' ORDER BY seq`,
+      [account.id],
+    );
+    expect(rows.at(-1)?.error).toContain('delivery_failed');
+  }, 30_000);
+
+  it('recovers a row a stopped worker left sending', async () => {
+    await ensureTransactionalProvider();
+    await deliver();
+    const account = await newAccount();
+    await forgot(account.email);
+    await t.srv.db.admin.query(
+      `UPDATE password_reset_deliveries
+          SET status = 'sending', updated_at = now() - interval '20 minutes'
+        WHERE user_id = $1`,
+      [account.id],
+    );
+    const summary = await deliver();
+    expect(summary).toMatchObject({ handled: 1, sent: 1 });
+    expect(mailsTo(account.email)).toHaveLength(1);
+  }, 30_000);
+});
+
 describe('the audit trail (#191)', () => {
   it('records the request and the reset with the person and IP, never the token', async () => {
     const account = await newAccount();
     const ip = `203.0.113.${Math.floor(Math.random() * 254) + 1}`;
-    await forgot(account.email, ip);
+    await requestLink(account.email, ip);
     const token = linkToken(mailsTo(account.email)[0]);
     expect((await reset(token, NEW_PASSWORD, ip)).status).toBe(200);
 

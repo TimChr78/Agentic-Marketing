@@ -2,6 +2,7 @@ import { clickIdHook, conversionHook, runAudienceSyncs, runSpendImport } from '@
 import { runAiWorker } from '@agentic-marketing/ai';
 import { runAlertEvaluator } from '@agentic-marketing/alerts';
 import { consentHook, runBroadcasts, runRetention } from '@agentic-marketing/audience';
+import { RESET_PASSWORD_TTL_SECONDS } from '@agentic-marketing/auth';
 import { runContentFetches } from '@agentic-marketing/content';
 import { runDeliveryWorker } from '@agentic-marketing/email';
 import { runSink } from '@agentic-marketing/events';
@@ -18,6 +19,7 @@ import { runHolds } from './agents/holds';
 import { runHostedAgents } from './agents/hosted';
 import { runAgentNotifications } from './agents/notifications';
 import type { createServer } from './app';
+import { runPasswordResetDeliveries } from './passwordReset';
 
 /** Periodic jobs of the scheduler role. */
 export function startScheduler(
@@ -116,7 +118,7 @@ export function startScheduler(
 export function startWorkers(
   srv: ReturnType<typeof createServer>,
   signal: AbortSignal,
-  opts: { deliveries?: Pick<DeliveryDeps, 'webhookBackoffMs' | 'actionBackoffMs'> } = {},
+  opts: { deliveries?: Pick<DeliveryDeps, 'webhookBackoffMs' | 'actionBackoffMs'>; passwordResetTickMs?: number } = {},
 ): Promise<void>[] {
   const run = (name: string, p: Promise<void>) =>
     p.catch((err) => {
@@ -130,6 +132,21 @@ export function startWorkers(
     run('ai-steps', runAiWorker(srv.db, { kp: srv.keyProvider, events: srv.events, egress: srv.egress }, signal)),
     run('deliveries', runDeliveries(srv.db, { kp: srv.keyProvider, egress: srv.egress, hot: srv.hot, ...opts.deliveries }, signal)),
     run('email-delivery', runDeliveryWorker(srv.db, { kp: srv.keyProvider, events: srv.events, email: srv.email }, signal)),
+    run(
+      'password-reset-delivery',
+      runPasswordResetDeliveries(
+        {
+          db: srv.db,
+          kp: srv.keyProvider,
+          email: srv.email,
+          directory: srv.directory,
+          publicUrl: srv.publicUrl,
+          ttlSeconds: RESET_PASSWORD_TTL_SECONDS,
+        },
+        signal,
+        { tickMs: opts.passwordResetTickMs },
+      ),
+    ),
     ...runProfileWorkers(
       {
         bus: srv.bus,

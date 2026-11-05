@@ -174,6 +174,32 @@ export const auditLog = pgTable('audit_log', {
   ip: text('ip'),
 });
 
+/**
+ * The password reset delivery queue (#379): the request records the link and answers at once, so
+ * its timing never depends on a provider call or on whether the account exists. The worker sends
+ * with bounded retries. The token is sealed with the sender workspace's data key and wiped when
+ * the row settles, so the queue never keeps a usable link.
+ */
+export const passwordResetDeliveries = pgTable(
+  'password_reset_deliveries',
+  {
+    id: text('id').notNull(),
+    userId: text('user_id').notNull(),
+    workspaceId: uuid('workspace_id').notNull(),
+    /** The client IP of the request, for the audit entry the worker appends. */
+    ip: text('ip').notNull(),
+    tokenSealed: bytea('token_sealed'),
+    tokenKeyId: text('token_key_id'),
+    status: text('status').$type<'queued' | 'sending' | 'sent' | 'failed'>().notNull().default('queued'),
+    attempts: integer('attempts').notNull().default(0),
+    nextAttemptAt: ts('next_attempt_at'),
+    lastError: text('last_error'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.id] })],
+);
+
 export const idempotencyKeys = pgTable(
   'idempotency_keys',
   {
