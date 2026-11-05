@@ -135,13 +135,16 @@ export const listMemberships = defineCommand({
   name: 'workspace.memberships',
   title: 'Your workspaces',
   description:
-    'The workspaces you belong to and your role in each. Switch workspace by sending the chosen id in the X-Workspace-Id header on REST calls (the admin UI stores it after you pick one).',
+    'The workspaces you belong to and your role in each. A person switches workspace by sending the chosen id in the X-Workspace-Id header on REST calls (the admin UI stores it after they pick one). A token or connected client is bound to one brand and sees only that workspace.',
   input: z.object({}),
   output: z.object({ workspaces: z.array(z.object({ id: z.string(), name: z.string(), role: RoleSchema })) }),
-  permission: null,
+  permission: 'artifacts:read',
   effect: 'read',
-  humansOnly: true,
-  handler: async (_input, ctx) => ({ workspaces: await ctx.services.directory.memberships(ctx.principal.userId) }),
+  handler: async (_input, ctx) => {
+    const all = await ctx.services.directory.memberships(ctx.principal.userId);
+    // A credential acts in one brand (#187); only a person may enumerate the brands they belong to.
+    return { workspaces: ctx.principal.type === 'agent' ? all.filter((w) => w.id === ctx.principal.workspaceId) : all };
+  },
 });
 
 export const listMembers = defineCommand({

@@ -45,7 +45,7 @@ beforeAll(async () => {
   otherWs = await t.workspaceWith([[owner, 'marketer']], 'none');
   otherWsName = (await t.api(owner, otherWs).call('workspace.get', {})).name;
   await variants.workspaceWith([[variantOwner, 'owner']], 'agent_changes');
-  agent = await connectAgent(t.base, owner, [...ROLE_PERMISSIONS.owner]);
+  agent = await connectAgent(t.base, owner, [...ROLE_PERMISSIONS.owner], undefined, ws);
   variantAgent = await connectAgent(variants.base, variantOwner, [...ROLE_PERMISSIONS.owner]);
 }, 120_000);
 

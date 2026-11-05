@@ -1,4 +1,4 @@
-import { type Auth, principalFromApiToken, principalFromSession } from '@agentic-marketing/auth';
+import { type Auth, assertWorkspaceHeader, principalFromApiToken, principalFromSession } from '@agentic-marketing/auth';
 import type { Executor } from '@agentic-marketing/commands';
 import { AppError } from '@agentic-marketing/core';
 import type { Db } from '@agentic-marketing/db';
@@ -111,6 +111,9 @@ export function restApi(deps: { auth: Auth; db: Db; executor: Executor; assetMax
             ? 'This API token is unknown, revoked or expired.'
             : 'Sign in first, or pick a workspace you are a member of with X-Workspace-Id.',
         );
+      // Tokens and OAuth connections act in the brand they were created for; the header may pick
+      // a workspace only for a session (#187).
+      assertWorkspaceHeader(principal, c.req.raw.headers);
       const body = await c.req.json().catch(() => ({}));
       const out = await deps.executor.execute(cmd, body, principal, { surface: 'rest', idempotencyKey: c.req.header('idempotency-key') });
       return c.json(out as object, 200);

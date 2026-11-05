@@ -1,5 +1,5 @@
 import { getBusinessContext, listLearnings } from '@agentic-marketing/artifacts';
-import { type Auth, principalFromAccessToken, principalFromApiToken } from '@agentic-marketing/auth';
+import { type Auth, principalFromAccessToken, principalFromApiToken, workspaceHeaderConflict } from '@agentic-marketing/auth';
 import { type CommandDef, type Executor, type Principal, ROLE_PERMISSIONS } from '@agentic-marketing/commands';
 import { AppError } from '@agentic-marketing/core';
 import type { Db } from '@agentic-marketing/db';
@@ -252,7 +252,15 @@ export function mcpEndpoint(deps: {
     async (request, claims) => {
       const principal = await principalFromAccessToken(deps.db, claims);
       if (!principal)
-        return Response.json({ error: 'no_workspace', message: 'The signed-in person is not a member of any workspace.' }, { status: 403 });
+        return Response.json(
+          {
+            error: 'no_workspace',
+            message: 'This connection is not bound to a brand. Reconnect and choose the brand it acts in, or ask for membership of one.',
+          },
+          { status: 403 },
+        );
+      const conflict = workspaceHeaderConflict(principal, request.headers);
+      if (conflict) return Response.json({ error: 'workspace_mismatch', message: conflict }, { status: 403 });
       const authInfo: AuthInfo = {
         token: '',
         clientId: principal.clientId!,
@@ -272,6 +280,8 @@ export function mcpEndpoint(deps: {
     const principal = await principalFromApiToken(deps.db, bearer);
     if (!principal)
       return Response.json({ error: 'invalid_token', message: 'This API token is unknown, revoked or expired.' }, { status: 401 });
+    const conflict = workspaceHeaderConflict(principal, request.headers);
+    if (conflict) return Response.json({ error: 'workspace_mismatch', message: conflict }, { status: 403 });
     // The server (and its tool list) is built per request from this principal, so a narrowed token
     // loses tools at once rather than keeping a cached server from an earlier request.
     const denial = await apiTokenDenial(request, principal);
