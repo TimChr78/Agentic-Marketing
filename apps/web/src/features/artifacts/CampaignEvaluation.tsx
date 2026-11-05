@@ -167,7 +167,9 @@ export function CampaignEvaluation({ campaignId }: { campaignId: string }) {
 
       <p className="text-[12px] text-muted">
         {s.meta.notes.join(' ')} Time zone {s.meta.timeZone}
-        {s.meta.freshness ? ` · newest event ${new Date(s.meta.freshness).toLocaleString()}` : ''}
+        {s.meta.freshness && new Date(s.meta.freshness).getFullYear() > 2000
+          ? ` · newest event ${new Date(s.meta.freshness).toLocaleString()}`
+          : ''}
         {s.meta.suppressed ? ` · ${s.meta.suppressed} group${s.meta.suppressed === 1 ? '' : 's'} suppressed (k=${s.meta.k})` : ''}.
       </p>
     </div>

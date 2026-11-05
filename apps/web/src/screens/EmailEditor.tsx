@@ -158,7 +158,7 @@ export default function EmailEditor() {
       <div className="relative min-h-0 flex-1">
         {/* GrapesJS stays mounted so its state survives tab switches */}
         <div className={cx('absolute inset-0', mode !== 'visual' && 'invisible')}>
-          <div ref={host} className="h-full" />
+          <div ref={host} className="am-gjs h-full" />
         </div>
 
         {mode === 'code' && (

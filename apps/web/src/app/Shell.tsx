@@ -81,20 +81,23 @@ export function Shell({ children }: { children: ReactNode }) {
       {navOpen && <MobileNav onClose={() => setNavOpen(false)} />}
       <div
         className={cx(
-          'transition-[padding-left] duration-[180ms] ease-[cubic-bezier(.2,.8,.2,1)]',
+          'min-w-0 transition-[padding-left] duration-[180ms] ease-[cubic-bezier(.2,.8,.2,1)]',
           collapsed ? 'lg:pl-16' : 'lg:pl-[232px]',
         )}
       >
-        <header className="sticky top-0 z-20 flex h-12 items-center gap-2 border-b border-line bg-surface/95 px-3 backdrop-blur-sm sm:px-5">
-          <IconButton className="lg:hidden" label="Open navigation" icon={<MenuIcon size={18} />} onClick={() => setNavOpen(true)} />
-          <IconButton
-            className="hidden lg:inline-flex"
-            label={collapsed ? 'Expand navigation' : 'Collapse navigation'}
-            aria-expanded={!collapsed}
-            aria-controls="app-sidebar"
-            icon={collapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}
-            onClick={() => setNavPref(collapsed ? 'expanded' : 'collapsed')}
-          />
+        <header className="sticky top-0 z-20 flex h-14 items-center gap-2 border-b border-line bg-surface/95 px-4 backdrop-blur-sm md:px-6 lg:px-8">
+          <div className="lg:hidden">
+            <IconButton label="Open navigation" icon={<MenuIcon size={18} />} onClick={() => setNavOpen(true)} />
+          </div>
+          <div className="hidden lg:block">
+            <IconButton
+              label={collapsed ? 'Expand navigation' : 'Collapse navigation'}
+              aria-expanded={!collapsed}
+              aria-controls="app-sidebar"
+              icon={collapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}
+              onClick={() => setNavPref(collapsed ? 'expanded' : 'collapsed')}
+            />
+          </div>
           <nav aria-label="Breadcrumb" className="min-w-0 flex-1">
             <ol className="flex min-w-0 items-center gap-1 text-[13px]">
               {group && !group.path && <li className="hidden shrink-0 text-muted sm:block">{group.label}</li>}
@@ -120,7 +123,7 @@ export function Shell({ children }: { children: ReactNode }) {
           <button
             type="button"
             onClick={() => setSearchOpen(true)}
-            className="hidden h-8 w-[240px] items-center gap-2 rounded-md border border-line-strong bg-surface-2 px-2.5 text-[13px] text-muted hover:border-control md:flex"
+            className="hidden h-8 w-[240px] items-center gap-2 rounded-md border border-line-strong bg-surface-2 px-2.5 text-[13px] text-muted hover:border-control md:flex xl:w-[280px]"
           >
             <Search size={14} aria-hidden />
             <span className="flex-1 text-left">Search</span>
@@ -132,7 +135,7 @@ export function Shell({ children }: { children: ReactNode }) {
           <UserMenu />
         </header>
         {/* The page, not the shell, decides its width (#114): see ui/layout.ts pageWidth(). */}
-        <main id="main" tabIndex={-1} className="w-full px-4 py-6 outline-none sm:px-6 lg:px-8">
+        <main id="main" tabIndex={-1} className="min-w-0 px-4 pt-6 pb-6 outline-none md:px-6 lg:px-8 lg:pt-8 lg:pb-8">
           <CrumbsProvider onChange={setCrumbs}>{children}</CrumbsProvider>
         </main>
       </div>
@@ -156,7 +159,7 @@ function AgentModeBadge() {
       aria-label={`${notice.label}. Change agent autonomy`}
       title={notice.label}
       className={cx(
-        'inline-flex h-7 shrink-0 items-center gap-1.5 rounded-full px-2 text-[11px] font-medium whitespace-nowrap',
+        'inline-flex h-10 shrink-0 items-center gap-1.5 rounded-full px-2.5 text-[11px] font-medium whitespace-nowrap md:h-7 md:px-2',
         notice.tone === 'warn' ? 'bg-warn-soft text-warn' : 'bg-bad-soft text-bad',
       )}
     >
@@ -177,7 +180,7 @@ function MobileNav({ onClose }: { onClose: () => void }) {
         role="dialog"
         aria-modal="true"
         aria-label="Navigation"
-        className="am-drawer-in absolute inset-y-0 left-0 w-[272px] max-w-[85vw] border-r border-line bg-surface shadow-2"
+        className="am-drawer-in absolute inset-y-0 left-0 w-[280px] max-w-[calc(100vw-48px)] border-r border-line bg-surface shadow-2"
       >
         <div className="absolute top-2 right-2">
           <IconButton label="Close navigation" icon={<X size={16} />} onClick={onClose} />
@@ -209,7 +212,7 @@ function Sidebar({ rail = false }: { rail?: boolean }) {
                     to={g.path}
                     aria-current={active ? 'page' : undefined}
                     className={cx(
-                      'flex h-8 items-center gap-2 rounded-md px-2 text-[13px] font-medium',
+                      'flex h-10 items-center gap-2 rounded-md px-2 text-[13px] font-medium pointer-coarse:h-10 lg:h-8',
                       active ? 'bg-accent-soft text-accent' : 'text-fg-2 hover:bg-surface-2 hover:text-fg',
                     )}
                   >
@@ -226,7 +229,7 @@ function Sidebar({ rail = false }: { rail?: boolean }) {
             }
             return (
               <div key={g.key} className="mt-4">
-                <div className="flex h-7 items-center gap-2 px-2 text-[12px] font-medium text-muted">
+                <div className="flex h-10 items-center gap-2 px-2 text-[12px] leading-[18px] font-medium text-muted lg:h-7">
                   <Icon size={14} aria-hidden />
                   {g.label}
                 </div>
@@ -239,7 +242,7 @@ function Sidebar({ rail = false }: { rail?: boolean }) {
                           to={i.path}
                           aria-current={active ? 'page' : undefined}
                           className={cx(
-                            'flex h-8 items-center rounded-md pr-2 pl-[30px] text-[13px]',
+                            'flex h-10 items-center rounded-md pr-2 pl-[30px] text-[13px] pointer-coarse:h-10 lg:h-8',
                             active ? 'bg-accent-soft font-medium text-accent' : 'text-fg-2 hover:bg-surface-2 hover:text-fg',
                           )}
                         >
@@ -320,19 +323,23 @@ function RailNav({ groups, path, pending }: { groups: ReturnType<typeof visibleN
 const roleLabel: Record<string, string> = { owner: 'Owner', admin: 'Admin', marketer: 'Builder', approver: 'Approver', viewer: 'Viewer' };
 export const roleName = (r: string) => roleLabel[r] ?? r;
 
-/** The current brand's logo, or its initial when no logo is published. */
+/**
+ * The current brand's logo, contained in a fixed square (never stretched into a bar), or its
+ * initial when no logo is published or the image fails to load (#438).
+ */
 function BrandMark({ logoUrl, name, className }: { logoUrl: string | null; name: string; className?: string }) {
-  if (logoUrl)
+  const [failed, setFailed] = useState(false);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a new logo URL must get a fresh chance to load
+  useEffect(() => setFailed(false), [logoUrl]);
+  const box = cx('flex aspect-square shrink-0 items-center justify-center overflow-hidden rounded-md border border-line', className);
+  if (logoUrl && !failed)
     return (
-      <span className={cx('flex shrink-0 items-center justify-center overflow-hidden rounded-md bg-surface-2', className)}>
-        <img src={logoUrl} alt="" className="max-h-full max-w-full object-contain" />
+      <span className={cx(box, 'bg-surface-2')}>
+        <img src={logoUrl} alt="" className="size-full object-contain" onError={() => setFailed(true)} />
       </span>
     );
   return (
-    <span
-      aria-hidden
-      className={cx('flex shrink-0 items-center justify-center rounded-md bg-fg text-[12px] font-semibold text-bg', className)}
-    >
+    <span aria-hidden className={cx(box, 'bg-surface-2 text-[12px] font-semibold text-fg-2')}>
       {name.slice(0, 1).toUpperCase()}
     </span>
   );
@@ -440,7 +447,7 @@ export function ThemeMenu() {
           type="button"
           aria-label={`Theme: ${current.label}`}
           title={`Theme: ${current.label}`}
-          className="inline-flex size-8 items-center justify-center rounded-md text-fg-2 hover:bg-surface-2 hover:text-fg [&_svg]:size-4"
+          className="inline-flex size-10 items-center justify-center rounded-md text-fg-2 pointer-coarse:size-10 hover:bg-surface-2 hover:text-fg md:size-8 [&_svg]:size-4"
         >
           {current.icon}
         </button>
@@ -485,7 +492,7 @@ function UserMenu() {
           {...p}
           type="button"
           aria-label={`Account: ${user?.name || user?.email}`}
-          className="ml-1 inline-flex size-8 items-center justify-center rounded-full bg-surface-3 text-[12px] font-semibold text-fg-2 hover:bg-line-strong"
+          className="ml-1 inline-flex size-10 items-center justify-center rounded-full bg-surface-3 text-[12px] font-semibold text-fg-2 pointer-coarse:size-10 hover:bg-line-strong md:size-8"
         >
           {initials}
         </button>

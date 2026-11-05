@@ -56,7 +56,7 @@ const VisualMjml = forwardRef<VisualMjmlHandle, { mjml: string; onChange: (mjml:
       for (const panel of ed.Panels.getPanels().models)
         for (const b of panel.buttons.models) {
           const label = labels[b.id];
-          if (label) b.set({ label: `<span style="font:500 11px var(--font-sans);padding:0 2px">${label}</span>`, className: '' });
+          if (label) b.set({ label: `<span style="font:500 12px/18px var(--font-sans);padding:0 2px">${label}</span>`, className: '' });
         }
       ed.Panels.getButton('views', 'open-blocks')?.set('active', true);
     });
@@ -74,6 +74,6 @@ const VisualMjml = forwardRef<VisualMjmlHandle, { mjml: string; onChange: (mjml:
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  return <div ref={host} className="h-full" />;
+  return <div ref={host} className="am-gjs h-full" />;
 });
 export default VisualMjml;
