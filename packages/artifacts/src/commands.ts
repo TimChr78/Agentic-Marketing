@@ -400,7 +400,14 @@ export const createArtifact = defineCommand({
       if (existing)
         throw new AppError('conflict', `A workspace has one ${input.type}; it is ${existing.id}. Edit it with artifacts.updateDraft.`);
     }
-    await ctx.tx.insert(schema.artifacts).values({ workspaceId: ws, id, type: input.type, name: input.name, latestVersion: 1 });
+    await ctx.tx.insert(schema.artifacts).values({
+      workspaceId: ws,
+      id,
+      type: input.type,
+      name: input.name,
+      latestVersion: 1,
+      ownerAgentId: ctx.principal.type === 'agent' ? (ctx.principal.agent?.id ?? null) : null,
+    });
     await ctx.tx.insert(schema.artifactVersions).values({
       workspaceId: ws,
       artifactId: id,
@@ -416,6 +423,45 @@ export const createArtifact = defineCommand({
 });
 
 type Positions = Record<string, { x: number; y: number }>;
+
+export const setOwner = defineCommand({
+  name: 'artifacts.setOwner',
+  title: 'Set an artifact’s owning agent',
+  description:
+    'Assign, transfer or clear the agent that owns an artifact (#426). An active owner’s artifact cannot be changed beyond a draft by another agent without a person; a paused or retired owner does not block. Pass `ownerAgentId: null` to clear it. People only, and audited.',
+  input: z.object({
+    artifactId: ArtifactId,
+    ownerAgentId: z
+      .string()
+      .regex(/^agt_[0-9a-f]{32}$/, 'An agent id looks like agt_…')
+      .nullable()
+      .describe('The agent that owns it; null clears the owner'),
+  }),
+  output: z.object({
+    artifactId: z.string(),
+    ownerAgentId: z.string().nullable(),
+  }),
+  permission: 'artifacts:write',
+  effect: 'write',
+  actionClass: 'settings',
+  humansOnly: true,
+  target: (i) => i.artifactId,
+  handler: async (input, ctx) => {
+    const a = await loadArtifact(ctx, input.artifactId);
+    if (input.ownerAgentId) {
+      const [agent] = await ctx.tx
+        .select({ id: schema.agents.id })
+        .from(schema.agents)
+        .where(and(eq(schema.agents.workspaceId, ctx.principal.workspaceId), eq(schema.agents.id, input.ownerAgentId)));
+      if (!agent) throw new AppError('not_found', `Agent ${input.ownerAgentId} not found in this workspace.`);
+    }
+    await ctx.tx
+      .update(schema.artifacts)
+      .set({ ownerAgentId: input.ownerAgentId, updatedAt: new Date() })
+      .where(and(eq(schema.artifacts.workspaceId, ctx.principal.workspaceId), eq(schema.artifacts.id, a.id)));
+    return { artifactId: a.id, ownerAgentId: input.ownerAgentId };
+  },
+});
 
 const LayoutSchema = z.object({
   positions: z.record(z.string(), z.object({ x: z.number(), y: z.number() })).describe('Canvas position per step id'),
@@ -575,6 +621,7 @@ export const getArtifact = defineCommand({
     name: z.string(),
     latestVersion: z.number().int(),
     publishedVersion: z.number().int().nullable(),
+    ownerAgentId: z.string().nullable().optional().describe('The agent that owns this artifact, if any (#426)'),
     version: VersionSummary.extend({ content: z.unknown() }),
     layout: LayoutSchema.nullable().describe('Saved canvas layout, when a person has moved steps; otherwise null'),
     references: z
@@ -596,6 +643,7 @@ export const getArtifact = defineCommand({
       name: a.name,
       latestVersion: a.latestVersion,
       publishedVersion: a.publishedVersion,
+      ownerAgentId: a.ownerAgentId,
       version: { ...(await withAuthorNames(ctx, [toSummary(v)]))[0]!, content: v.content },
       layout: layout
         ? {
@@ -627,6 +675,7 @@ export const listArtifacts = defineCommand({
         latestVersion: z.number().int(),
         latestState: VersionStateSchema,
         publishedVersion: z.number().int().nullable(),
+        ownerAgentId: z.string().nullable().optional().describe('The agent that owns this artifact, if any (#426)'),
         updatedAt: z.string(),
       }),
     ),
@@ -682,6 +731,7 @@ export const listArtifacts = defineCommand({
         latestVersion: a.latestVersion,
         latestState: state,
         publishedVersion: a.publishedVersion,
+        ownerAgentId: a.ownerAgentId,
         updatedAt: a.updatedAt.toISOString(),
       })),
       total: Number(n),
@@ -1717,6 +1767,7 @@ export const reject = defineCommand({
 export const artifactCommands = [
   listTypes,
   createArtifact,
+  setOwner,
   updateDraft,
   getArtifact,
   listArtifacts,

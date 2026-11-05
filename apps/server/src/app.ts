@@ -1,5 +1,6 @@
+import { createHmac, timingSafeEqual } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { audienceSyncImpact } from '@agentic-marketing/ads';
+import { audienceSyncImpact, conversionMapImpact } from '@agentic-marketing/ads';
 import { independentCheck } from '@agentic-marketing/ai';
 import { activeMandate, checkSubjectOf } from '@agentic-marketing/artifacts';
 import { assetRoutes } from '@agentic-marketing/assets';
@@ -8,6 +9,7 @@ import {
   type AuthConfig,
   acceptInvitation,
   authDirectory,
+  chooseOAuthWorkspace,
   createAuth,
   invitationWorkspace,
   isMcpResourceUrlAllowed,
@@ -15,7 +17,7 @@ import {
 } from '@agentic-marketing/auth';
 import { createExecutor, type Services, userPrincipal } from '@agentic-marketing/commands';
 import { AppError, newUuid, RESOLVED_CLIENT_IP_HEADER, remoteAddressFromEnv, resolveClientIp } from '@agentic-marketing/core';
-import { createDb } from '@agentic-marketing/db';
+import { createDb, normalizeHost, normalizePathPrefix } from '@agentic-marketing/db';
 import { emailRoutes, linkSigner, pushRoutes } from '@agentic-marketing/email';
 import { clickHouseStore, lazyNatsBus } from '@agentic-marketing/events';
 import { valkeyHotState } from '@agentic-marketing/hotstate';
@@ -26,15 +28,17 @@ import { decideApi, edgeMirror } from '@agentic-marketing/personalize';
 import { refreshPeople } from '@agentic-marketing/segments';
 import { logger } from '@agentic-marketing/telemetry';
 import { oauthProviderAuthServerMetadata, oauthProviderOpenIdConfigMetadata } from '@better-auth/oauth-provider';
-import { Hono } from 'hono';
+import { type Context, Hono } from 'hono';
 import { mandateGuardrailBreach } from './agents/guardrails';
 import { agentOutcomes } from './agents/report';
 import type { Config } from './config';
+import { createDomainService, type PublicRequest } from './domains';
 import { copilotApi } from './http/copilot';
 import { MCP_MAX_BODY, mcpEndpoint } from './http/mcp';
 import { metricsHandler } from './http/metrics';
 import { consentPage, invitePage, loginPage } from './http/pages';
 import { passwordResetRoutes } from './http/password-reset';
+import { DOMAIN_CHALLENGE, isBrandPath } from './http/public-only';
 import { rejectUnsafeRawPath } from './http/raw-path';
 import { restApi } from './http/rest';
 import { scimApi } from './http/scim';
@@ -49,8 +53,16 @@ import { COMMIT, VERSION } from './version';
 const INVITATION_MAX_BODY = 8 * 1024;
 
 /** `overrides` exist for tests, e.g. a stub transport for Client ID Metadata Documents. */
-export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'> = {}) {
+export interface ServerOverrides {
+  cimd?: AuthConfig['cimd'];
+  /** Replaces the outbound challenge fetch in tests; the server uses the egress guard. */
+  fetchDomainChallenge?: (url: string) => Promise<{ status: number; body: string }>;
+}
+
+export function createServer(config: Config, overrides: ServerOverrides = {}) {
   const db = createDb({ adminUrl: config.adminDatabaseUrl, appUrl: config.appDatabaseUrl });
+  // Brand hostnames, read across workspaces before the session is known (#186).
+  const domains = createDomainService(db, config.linksUrl);
   const mcpEnabled = isMcpResourceUrlAllowed(config.publicUrl);
   if (!mcpEnabled) {
     logger.warn(
@@ -73,7 +85,7 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
       ttlSeconds: RESET_PASSWORD_TTL_SECONDS,
       send: async () => {},
     },
-    ...overrides,
+    cimd: overrides.cimd,
   });
   const keyProvider = keyProviderFor(config);
   const directory = authDirectory(db);
@@ -86,6 +98,7 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
   const metrics = createMetricsRegistry();
   const email = {
     publicUrl: config.linksUrl,
+    publicUrlFor: (workspaceId: string) => domains.linksUrlFor(workspaceId),
     links: linkSigner(config.authSecret),
     // Provider adapters reach the outside world through the egress guard too.
     adapterDeps: { fetch: egressFetch(config.egress), http2: egressHttp2(config.egress) },
@@ -113,14 +126,24 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
     egress: config.egress,
     publicUrl: config.publicUrl,
     linksUrl: config.linksUrl,
+    linksUrlFor: (workspaceId) => domains.linksUrlFor(workspaceId),
+    fetchDomainChallenge:
+      overrides.fetchDomainChallenge ??
+      (async (url) => {
+        const res = await safeRequest(url, { method: 'GET', timeoutMs: 5000, maxBytes: 4096 }, config.egress);
+        return { status: res.status, body: res.body };
+      }),
+    invalidateDomainCache: () => domains.invalidate(),
     db,
     serverVersion: VERSION,
+    ownsAnyWorkspace: async (userId) => (await directory.memberships(userId)).some((membership) => membership.role === 'owner'),
     strictInputs: config.strictInputs,
     // Reach of publishing, for the agent policy engine (ADR-0016).
     artifactImpact: {
       broadcast: (tx, id, version) => broadcastImpact(tx, id, version),
       journey: (tx, id, version) => journeyImpact(tx, id, version),
       audience_sync: (tx, id, version) => audienceSyncImpact(tx, id, version),
+      conversion_map: () => conversionMapImpact(),
     },
     stepUpLimiter: {
       lockedUntil: (userId) => hot.failureLock(`stepup:${userId}`),
@@ -182,6 +205,103 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
   app.use('*', securityHeaders({ https: config.publicUrl.startsWith('https://'), noReferrerPaths: ['/reset-password'] }));
   // Defence in depth for a proxy that forwards raw paths: never route a traversal target.
   app.use('*', rejectUnsafeRawPath);
+
+  // Brand-domain verification challenge (#185). It is answered before Host resolution because the
+  // domain is deliberately still pending: this proves the host reaches this installation.
+  app.get('*', async (c, next) => {
+    const match = DOMAIN_CHALLENGE.exec(c.req.path);
+    if (!match) return next();
+    let host: string;
+    try {
+      host = normalizeHost(c.req.header('host') ?? '');
+    } catch {
+      return c.text('Not found.', 404);
+    }
+    let prefix: string | null;
+    try {
+      prefix = normalizePathPrefix(match[1] ?? '');
+    } catch {
+      return c.text('Not found.', 404);
+    }
+    const token = decodeURIComponent(match[2] ?? '');
+    const { rows } = await db.admin.query<{ verification_token: string }>(
+      `SELECT verification_token FROM workspace_domains
+        WHERE host = $1 AND COALESCE(path_prefix, '') = COALESCE($2, '') AND verification_token = $3
+        LIMIT 1`,
+      [host, prefix, token],
+    );
+    if (!rows[0]) return c.text('Not found.', 404);
+    return c.text(rows[0].verification_token, 200, {
+      'content-type': 'text/plain; charset=utf-8',
+      'cache-control': 'no-store',
+    });
+  });
+
+  // Brand resolution for every public route (#185): a verified domain selects its workspace, the
+  // PUBLIC_LINKS_URL host keeps today's behaviour, and any other Host is a 404. Health probes and
+  // the verification challenge above are not brand paths and stay reachable on any host.
+  //
+  // A registered path prefix (/am) is stripped before routing by forwarding the request through
+  // this app once more. The forwarded request carries a signed context so the inner pass trusts the
+  // resolution without looking it up again, and a caller cannot forge it.
+  const BRAND_CONTEXT_HEADER = 'x-am-brand-context';
+  const brandContextKey = createHmac('sha256', config.authSecret).update('public-brand-context').digest();
+  const contextMac = (body: string) => createHmac('sha256', brandContextKey).update(body).digest('base64url');
+  const signBrandContext = (request: PublicRequest, host: string) => {
+    const body = Buffer.from(JSON.stringify({ request, host })).toString('base64url');
+    return `${body}.${contextMac(body)}`;
+  };
+  const verifyBrandContext = (value: string | undefined, host: string): PublicRequest | null => {
+    const [body, signature] = value?.split('.') ?? [];
+    if (!body || !signature) return null;
+    const expected = contextMac(body);
+    if (signature.length !== expected.length || !timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) return null;
+    try {
+      const parsed = JSON.parse(Buffer.from(body, 'base64url').toString('utf8')) as { request?: PublicRequest; host?: string };
+      return parsed.host === host && parsed.request ? parsed.request : null;
+    } catch {
+      return null;
+    }
+  };
+  const exactProbe = (path: string) => path === '/healthz' || path === '/readyz';
+
+  app.use('*', async (c, next) => {
+    const path = c.req.path;
+    const host = c.req.header('host') ?? '';
+    const forwarded = verifyBrandContext(c.req.header(BRAND_CONTEXT_HEADER), host);
+    if (forwarded) {
+      if (!isBrandPath(path) && !exactProbe(path)) return c.json({ error: 'not_found', message: 'Not found.' }, 404);
+      (c as unknown as Context<{ Variables: { publicRequest: PublicRequest } }>).set('publicRequest', forwarded);
+      return next();
+    }
+
+    const brandPath = isBrandPath(path);
+    const resolved = await domains.resolvePublicRequest(host, path);
+    if (!resolved) {
+      if (brandPath) return c.json({ error: 'not_found', message: 'Not found.' }, 404);
+      return next();
+    }
+
+    if (resolved.pathPrefix && path.startsWith(resolved.pathPrefix)) {
+      const stripped = path.slice(resolved.pathPrefix.length) || '/';
+      // A brand host serves only public paths; never the admin UI or REST through a prefix.
+      if (!isBrandPath(stripped) && !exactProbe(stripped)) return c.json({ error: 'not_found', message: 'Not found.' }, 404);
+      const url = new URL(c.req.url);
+      url.pathname = stripped;
+      const headers = new Headers(c.req.raw.headers);
+      headers.set(BRAND_CONTEXT_HEADER, signBrandContext(resolved, host));
+      const init: RequestInit & { duplex?: string } = { method: c.req.method, headers, redirect: 'manual' };
+      if (c.req.method !== 'GET' && c.req.method !== 'HEAD') {
+        init.body = c.req.raw.body;
+        init.duplex = 'half';
+      }
+      return app.fetch(new Request(url, init));
+    }
+
+    if (!brandPath) return next();
+    (c as unknown as Context<{ Variables: { publicRequest: PublicRequest } }>).set('publicRequest', resolved);
+    await next();
+  });
 
   /**
    * Resolves the client IP once, then replaces any caller-supplied value of the resolved header.
@@ -253,6 +373,30 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
   app.get('/login', (c) => c.html(loginPage));
   app.get('/consent', (c) => c.html(consentPage));
   app.get('/invite', (c) => c.html(invitePage));
+
+  // The consent page chooses the brand an OAuth client acts in (#187). The choice is checked
+  // against the person's memberships and role here, then stored for the pending consent; the
+  // OAuth provider reads it as the grant's reference id.
+  app.post(
+    '/api/oauth/workspace',
+    bodyLimit(INVITATION_MAX_BODY, (c) =>
+      c.json({ error: 'payload_too_large', message: `Requests are limited to ${INVITATION_MAX_BODY / 1024} KB.` }, 413),
+    ),
+    async (c) => {
+      const session = await auth.api.getSession({ headers: c.req.raw.headers });
+      if (!session) throw new AppError('unauthorized', 'Sign in first, then choose the brand this connection acts in.');
+      const body = (await c.req.json().catch(() => ({}))) as { workspaceId?: unknown; scope?: unknown };
+      if (typeof body.workspaceId !== 'string')
+        throw new AppError('invalid_input', 'Choose the brand (workspaceId) this connection acts in.');
+      const choice = await chooseOAuthWorkspace(db, {
+        sessionId: session.session.id,
+        userId: session.user.id,
+        workspaceId: body.workspaceId,
+        scope: typeof body.scope === 'string' ? body.scope : undefined,
+      });
+      return c.json({ workspaceId: choice.id, name: choice.name });
+    },
+  );
 
   // Accepting an invitation: the person is signed in but not yet a member, so the workspace comes
   // from the token rather than from their memberships.
@@ -358,6 +502,7 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
     publicUrl: config.publicUrl,
     authSecret: config.authSecret,
     linksUrl: config.linksUrl,
+    domains,
     retention: config.retention,
     erasureGraceHours: config.erasureGraceHours,
     services,

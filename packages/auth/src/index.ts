@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { agentPrincipal, PERMISSIONS, type Principal, userPrincipal } from '@agentic-marketing/commands';
+import { AppError } from '@agentic-marketing/core';
 import type { Db, Role } from '@agentic-marketing/db';
 import { type CimdOptions, cimd } from '@better-auth/cimd';
 import { fetchClientMetadataResource } from '@better-auth/cimd/node';
@@ -9,6 +10,7 @@ import { getMigrations } from 'better-auth/db/migration';
 import { jwt } from 'better-auth/plugins';
 import type { JWTPayload } from 'jose';
 import { agentForCredential, oauthClientName } from './agents';
+import { boundMembership, consentWorkspaceId } from './oauthWorkspace';
 import { type SsoConfig, ssoGuard, ssoPlugin } from './sso';
 
 /** Better Auth stores reset tokens under this prefix in its `verification` table. */
@@ -157,6 +159,17 @@ export function authOptions(config: AuthConfig) {
               allowUnauthenticatedClientRegistration: true,
               clientRegistrationDefaultScopes: AGENT_DEFAULT_SCOPES,
               clientRegistrationAllowedScopes: ['openid', 'profile', 'email', 'offline_access', ...PERMISSIONS],
+              postLogin: {
+                // The consent page itself asks which brand, so this hook never redirects. The
+                // reference id is the workspace the grant acts in (#187); the consent page writes
+                // the choice for the session, and a single-membership person needs no choice.
+                page: '/consent',
+                shouldRedirect: async () => false,
+                consentReferenceId: async ({ user, session }) => consentWorkspaceId(config.db, user.id, session.id),
+              },
+              // The access token carries the brand, so a later request cannot change it with a
+              // header. Refresh tokens keep the reference id and issue the same claim again.
+              customAccessTokenClaims: ({ referenceId }) => (referenceId ? { workspace_id: referenceId } : {}),
             }),
             // Client ID Metadata Documents: clients that identify themselves with an HTTPS URL instead of
             // registering (the MCP 2026-07-28 preference). The Node transport pins DNS to public addresses.
@@ -198,7 +211,10 @@ export async function principalFromSession(auth: Auth, db: Db, headers: Headers)
 /** An MCP client acting for a person: role permissions ∩ scopes the person granted to the client. */
 export async function principalFromAccessToken(db: Db, claims: JWTPayload): Promise<Principal | null> {
   if (!claims.sub) return null;
-  const m = await membership(db, claims.sub);
+  const bound = typeof claims.workspace_id === 'string' ? claims.workspace_id : undefined;
+  // A connection issued before #187 has no workspace claim: it stays usable only for a person with
+  // one membership, so a multi-brand person must reconnect and choose a brand.
+  const m = bound ? await boundMembership(db, claims.sub, bound) : await singleMembership(db, claims.sub);
   if (!m) return null;
   const scopes = String(claims.scope ?? '')
     .split(' ')
@@ -207,11 +223,38 @@ export async function principalFromAccessToken(db: Db, claims: JWTPayload): Prom
   const agent = await agentForCredential(db, m.workspace_id, 'oauth_client', clientId, claims.sub, () => oauthClientName(db, clientId));
   return { ...agentPrincipal(claims.sub, clientId, m.workspace_id, m.role, scopes), agent };
 }
+
+async function singleMembership(db: Db, userId: string): Promise<{ workspace_id: string; role: Role } | undefined> {
+  const { rows } = await db.admin.query<{ workspace_id: string; role: Role }>(
+    'SELECT workspace_id, role FROM workspace_members WHERE user_id = $1 ORDER BY created_at LIMIT 2',
+    [userId],
+  );
+  return rows.length === 1 ? rows[0] : undefined;
+}
+
+/**
+ * A token or OAuth connection is bound to one brand: `X-Workspace-Id` cannot move it. Sessions are
+ * the only principals that may use the header, so a mismatch here is a clear refusal rather than a
+ * silently ignored header.
+ */
+export function workspaceHeaderConflict(principal: Principal, headers: Headers): string | null {
+  if (principal.type !== 'agent') return null;
+  const requested = headers.get('x-workspace-id');
+  if (!requested || requested === principal.workspaceId) return null;
+  return 'This credential is bound to one brand. X-Workspace-Id cannot switch it; create a separate token or connection for the other brand.';
+}
+
+/** Throws the refusal above, for surfaces that already turn AppErrors into responses. */
+export function assertWorkspaceHeader(principal: Principal, headers: Headers): void {
+  const conflict = workspaceHeaderConflict(principal, headers);
+  if (conflict) throw new AppError('forbidden', conflict);
+}
 export * from './agentEvents';
 export * from './agents';
 export * from './hostedAgents';
 export * from './hostedSchedule';
 export * from './members';
+export * from './oauthWorkspace';
 export * from './scim';
 export * from './sso';
 export * from './tokens';

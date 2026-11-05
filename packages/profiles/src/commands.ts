@@ -610,6 +610,10 @@ export const exportProfile = defineCommand({
   input: z.object({ profileId: ProfileId, maxEvents: z.number().int().min(0).max(100_000).default(10_000) }),
   output: z.object({
     exportedAt: z.string(),
+    workspaceId: z
+      .string()
+      .optional()
+      .describe('The workspace (brand) this export belongs to; an access or erasure request covering several brands is repeated per brand'),
     profile: ProfileOut,
     consentRecords: z.array(z.record(z.string(), z.unknown())),
     topicChoices: z
@@ -734,6 +738,7 @@ export const exportProfile = defineCommand({
     }));
     return {
       exportedAt: new Date().toISOString(),
+      workspaceId: ctx.principal.workspaceId,
       profile,
       consentRecords: records,
       topicChoices,

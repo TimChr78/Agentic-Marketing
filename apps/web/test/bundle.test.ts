@@ -26,7 +26,9 @@ const ENTRY_BUDGET = 240_000;
 const ROUTES: { name: string; entries: string[]; budget: number }[] = [
   { name: 'entry', entries: ['index.html'], budget: ENTRY_BUDGET },
   { name: 'sign-in', entries: ['index.html', 'src/app/Root.tsx'], budget: 330_000 },
-  { name: 'Approvals list', entries: ['src/pages/approvals/ApprovalsPage.tsx'], budget: 370_000 },
+  // The brand switcher and the desktop rail (#180, #190) add a little shell code; the budget keeps
+  // the approvals page from drifting into heavy editor territory, not byte-for-byte shell parity.
+  { name: 'Approvals list', entries: ['src/pages/approvals/ApprovalsPage.tsx'], budget: 375_000 },
   { name: 'People list', entries: ['src/pages/audience/PeoplePage.tsx'], budget: 340_000 },
   { name: 'Messages list', entries: ['src/pages/insights/MessagesPage.tsx'], budget: 340_000 },
 ];

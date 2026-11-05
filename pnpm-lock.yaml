@@ -907,6 +907,9 @@ importers:
 
   packages/personalize:
     dependencies:
+      '@agentic-marketing/analytics':
+        specifier: workspace:*
+        version: link:../analytics
       '@agentic-marketing/artifacts':
         specifier: workspace:*
         version: link:../artifacts

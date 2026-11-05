@@ -23,6 +23,8 @@ export const apiTokenHash = (token: string) => sha256(`api-token:${token}`);
 
 const Token = z.object({
   id: z.string(),
+  workspaceId: z.string().describe('The brand (workspace) this token acts in'),
+  workspaceName: z.string().describe('The brand’s name, for the list and the create confirmation'),
   name: z.string(),
   userId: z.string(),
   ownerName: z.string(),
@@ -33,8 +35,10 @@ const Token = z.object({
   lastUsedAt: z.string().nullable(),
   revoked: z.boolean(),
 });
-const tokenOut = (r: typeof schema.apiTokens.$inferSelect, ownerName: string) => ({
+const tokenOut = (r: typeof schema.apiTokens.$inferSelect, ownerName: string, workspaceName: string) => ({
   id: r.id,
+  workspaceId: r.workspaceId,
+  workspaceName,
   name: r.name,
   userId: r.userId,
   ownerName,
@@ -63,6 +67,15 @@ async function ownerNames(ctx: CommandContext, userIds: string[]) {
 
 async function ownerName(ctx: CommandContext, userId: string): Promise<string> {
   return (await ownerNames(ctx, [userId])).get(userId) ?? userId;
+}
+
+/** The brand name for the token list; RLS scopes this to the workspace the command runs in. */
+async function workspaceName(ctx: CommandContext): Promise<string> {
+  const [w] = await ctx.tx
+    .select({ name: schema.workspaces.name })
+    .from(schema.workspaces)
+    .where(eq(schema.workspaces.id, ctx.principal.workspaceId));
+  return w?.name ?? ctx.principal.workspaceId;
 }
 
 /** The scopes a role may grant, in the same words as apiTokens.create. */
@@ -129,7 +142,7 @@ export const createApiToken = defineCommand({
   name: 'apiTokens.create',
   title: 'Create an API token',
   description:
-    'A token for scripts and automation tools (Authorization: Bearer amk_…), acting as an agent for you with the scopes you choose (never more than your role allows). Shown once.',
+    'A token for scripts and automation tools (Authorization: Bearer amk_…), acting as an agent for you with the scopes you choose (never more than your role allows). It acts in one brand only: the workspace you are in when you create it. Shown once.',
   input: z.object({
     name: z.string().min(1).max(120).describe('What uses it, e.g. "n8n"'),
     scopes: z.array(z.enum(PERMISSIONS)).min(1),
@@ -140,6 +153,7 @@ export const createApiToken = defineCommand({
   effect: 'write',
   humansOnly: true,
   sensitiveOutput: ['token'],
+  auditTarget: (out) => out.id,
   handler: async (input, ctx) => {
     assertEditorScopes(ctx.principal.role, input.scopes);
     const token = `${TOKEN_PREFIX}${randomBytes(32).toString('base64url')}`;
@@ -165,7 +179,7 @@ export const createApiToken = defineCommand({
       changedBy: ctx.principal.userId,
       changes: { created: { name: row.name, scopes: row.scopes, expiresAt: expiresAt?.toISOString() ?? null } },
     });
-    return { ...tokenOut(row, await ownerName(ctx, row.userId)), token };
+    return { ...tokenOut(row, await ownerName(ctx, row.userId), await workspaceName(ctx)), token };
   },
 });
 
@@ -188,7 +202,8 @@ export const listApiTokens = defineCommand({
       ctx,
       rows.map((r) => r.userId),
     );
-    return { tokens: rows.map((r) => tokenOut(r, names.get(r.userId) ?? r.userId)) };
+    const wsName = await workspaceName(ctx);
+    return { tokens: rows.map((r) => tokenOut(r, names.get(r.userId) ?? r.userId, wsName)) };
   },
 });
 
@@ -215,7 +230,7 @@ export const getApiToken = defineCommand({
     const people = await ctx.services.directory.users([row.userId]);
     const owner = people.get(row.userId);
     return {
-      ...tokenOut(row, owner?.name || owner?.email || row.userId),
+      ...tokenOut(row, owner?.name || owner?.email || row.userId, await workspaceName(ctx)),
       owner: { id: row.userId, name: owner?.name ?? '', email: owner?.email ?? '' },
       history: await tokenHistory(ctx, row.id, [row.userId]),
     };
@@ -339,7 +354,7 @@ export const updateApiToken = defineCommand({
       });
 
     return {
-      ...tokenOut(row, await ownerName(ctx, row.userId)),
+      ...tokenOut(row, await ownerName(ctx, row.userId), await workspaceName(ctx)),
       added,
       removed,
       steppedUp,

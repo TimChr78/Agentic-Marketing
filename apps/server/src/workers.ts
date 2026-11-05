@@ -18,6 +18,7 @@ import { runGuardian } from './agents/guardian';
 import { runHolds } from './agents/holds';
 import { runHostedAgents } from './agents/hosted';
 import { runAgentNotifications } from './agents/notifications';
+import { runExperienceRollouts } from './agents/rollouts';
 import type { createServer } from './app';
 import { runPasswordResetDeliveries } from './passwordReset';
 
@@ -39,10 +40,11 @@ export function startScheduler(
     guardianTickMs?: number;
     contentTickMs?: number;
     enrollmentTickMs?: number;
+    rolloutTickMs?: number;
   } = {},
 ): Promise<void>[] {
   logger.info(
-    'scheduler role: segment recomputation, broadcasts, retention, OAuth token refresh, audience sync, ad spend import, warehouse exports, edge sync, threshold alerts, held agent changes, agent notifications, agent events, hosted agents, content sources, segment enrollment jobs',
+    'scheduler role: segment recomputation, broadcasts, retention, OAuth token refresh, audience sync, ad spend import, warehouse exports, edge sync, threshold alerts, held agent changes, agent notifications, agent events, hosted agents, content sources, segment enrollment jobs, experience rollouts',
   );
   return [
     runSegmentScheduler(
@@ -99,6 +101,19 @@ export function startScheduler(
     runAgentEvents({ db: srv.db }, signal, { tickMs: opts.agentEventTickMs }),
     runContentFetches({ db: srv.db, egress: srv.egress }, signal, { tickMs: opts.contentTickMs }),
     runEnrollmentJobs({ db: srv.db, kp: srv.keyProvider, events: srv.events }, signal, { tickMs: opts.enrollmentTickMs }),
+    runExperienceRollouts(
+      {
+        db: srv.db,
+        events: srv.events,
+        hot: srv.hot,
+        kp: srv.keyProvider,
+        email: srv.email,
+        directory: srv.directory,
+        publicUrl: srv.publicUrl,
+      },
+      signal,
+      { tickMs: opts.rolloutTickMs },
+    ),
     runHostedAgents(
       {
         db: srv.db,
@@ -157,7 +172,14 @@ export function startWorkers(
         erasureGraceHours: srv.erasureGraceHours,
         after: [
           // Consent first: segments and journeys that react to a signup need it recorded.
-          consentHook({ db: srv.db, kp: srv.keyProvider, events: srv.events, links: srv.email.links, linksUrl: srv.linksUrl }),
+          consentHook({
+            db: srv.db,
+            kp: srv.keyProvider,
+            events: srv.events,
+            links: srv.email.links,
+            linksUrl: srv.linksUrl,
+            linksUrlFor: (workspaceId) => srv.domains.linksUrlFor(workspaceId),
+          }),
           // Click ids before conversions, so a landing and its conversion in one batch match.
           clickIdHook({ db: srv.db }),
           conversionHook({ db: srv.db }),

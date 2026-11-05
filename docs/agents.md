@@ -173,6 +173,7 @@ The workspace's limits apply to every agent, with or without a mandate. Read the
 | `limits.messagesPerDay` | `1000` | Messages an agent may send itself per 24 hours. |
 | `maxLevel` | `1` for every class | The highest autonomy level a mandate may grant per action class. Missing classes are 1. |
 | `allowLoops` | `false` | Whether any mandate may grant level 4 (run the loop). Level 4 must also be earned per agent and class; see Autonomy levels. |
+| `contactPressure` | `[]` | Cross-agent contact pressure: `{ max, days, channels? }` caps how many agent-originated marketing messages one person gets in the window, across every agent. See Several agents in one workspace. |
 
 At run time the engine uses the **lower** of the mandate's level and the workspace ceiling. Raising a ceiling takes effect for existing mandates; lowering one takes effect at once.
 
@@ -181,6 +182,22 @@ To let the weekly newsletter agent send at level 3, a person raises that one cei
 ```text
 workspace.setAutonomy {"maxLevel":{"send.broadcast":3}}
 ```
+
+## Several agents in one workspace
+
+Agents share a workspace, its artifacts and its people. Three rules stop them from stepping on each other; none of them applies to people.
+
+**Artifact ownership.** An artifact created by an agent belongs to that agent (`owner_agent_id`), and a person can assign, transfer or clear the owner with `artifacts.setOwner` (people only, audited). `artifacts.get` and `artifacts.list` show `ownerAgentId`. When an agent tries to go beyond a draft on an artifact owned by **another active agent** — publish, request publish, publish a bundle, a live edit or journey control — the change is capped at level 1: with a mandate it becomes a proposal a person decides; without one it asks a person. The reason names the owner, for example "“Weekly newsletter” is owned by agent Newsletter agent." The agent that owns the artifact is not blocked. Ownership by a paused or retired agent does not block either; the policy records it and carries on. A deleted agent's id stays on the artifact so the report can still show it as retired.
+
+**Conflict holds.** When another agent already has a pending change on the same artifact, a second agent's change is capped the same way. A pending change is an open hold still inside its veto window, or an open approval request from a different agent. The reason names the other agent and its pending change, so the person reviewing knows what to decide first. This is per artifact: two agents may work on different artifacts in the same bundle without waiting for each other, though a bundle that contains the conflicting artifact still waits.
+
+**Cross-agent contact pressure.** Every message records the agent behind it (`messages.agent_id`): a direct send by an agent, or a broadcast or journey message whose artifact is agent-owned. A workspace cap, `contactPressure` under `workspace.autonomy`, then limits how many agent-originated marketing messages one person gets in a window, counted across agents on top of the delivery policy's own frequency caps. Human-originated messages have no agent id and are never counted. The delivery worker checks the cap when it would send; a message over it is suppressed with `agent_contact_pressure: …` in its reason.
+
+```text
+workspace.setAutonomy {"contactPressure":[{"max":4,"days":7}]}
+```
+
+`agents.activity` and `agents.report` show the artifacts an agent owns, the pending changes other agents have on them (`heldConflicts`) and how many of its messages the contact-pressure cap skipped (`contactPressureSkipped`). Pausing an agent still stops its credentials; pausing an owner only removes the ownership block, it does not resume its pending changes.
 
 ## Mandates
 
@@ -200,11 +217,11 @@ Only people can create, change or publish a mandate. An agent that tries gets `4
 
 **Earning level 4.** A mandate may grant level 4 for a class only when the workspace allows it (`allowLoops` and a ceiling of 4) and the agent has earned it: it ran that class at level 3 (autonomously, decided by its mandate) for at least 28 days with no guardian episode in that time and no guardian cap in force, or its mandate recorded the class in shadow mode for 28 days without a would-have-run decision that a person rejected. Publishing a mandate that grants level 4 without that record is refused with what is missing. The ledger records the level the policy engine decided, so a held change that ran after its veto window counts as level 2. Entries from before 0.6.1 have no level, so **earning starts again from 0.6.1**; only entries recorded at level 3 or above count. A class in shadow may record level 4 at any time; that is how the record is built. A guardian cap lowers level 4 like any other level. At level 4 a new artifact is the agent's own creation only when its first version was drafted by the same agent credential; a draft started by a person or another agent stays inside the mandate's `scope.artifacts` list (#325).
 
-A class that is not listed in `levels` counts as 1. Two classes can never be made autonomous, whatever the mandate says: `settings` and `destructive` always need a person, as do changes to purposes, the delivery policy, the tracking plan, a conversion map and the mandate itself. Above one of the mandate's limits an action drops one level: an L3 send becomes an L2 hold, an L2 action a proposal, with the reason. Anything outside the mandate's scope (another audience, purpose, topic, channel or artifact type) is only ever proposed.
+A class that is not listed in `levels` counts as 1. Two classes can never be made autonomous, whatever the mandate says: `settings` and `destructive` always need a person, as do changes to purposes, the delivery policy, the tracking plan and the mandate itself. A conversion map is an `audience.publish`: an agent may publish one only when its mandate grants that level and the `ads` channel (with the `ad_measurement` purpose in scope), because the mapped events leave the workspace for the ad platforms. Above one of the mandate's limits an action drops one level: an L3 send becomes an L2 hold, an L2 action a proposal, with the reason. Anything outside the mandate's scope (another audience, purpose, topic, channel or artifact type) is only ever proposed.
 
 ### Scope, limits and guardrails
 
-- **Scope.** `segments` are the audiences it may address (empty means none), `purposes` and `topics` what its messages may use (empty means any the audience allows), `channels` defaults to `["email"]`, `artifactTypes` and `artifacts` what it may change (empty means any within the levels), and `brand` is reserved for multi-brand.
+- **Scope.** `segments` are the audiences it may address (empty means none), `purposes` and `topics` what its messages may use (empty means any the audience allows), `channels` defaults to `["email"]` and also accepts `ads` for conversion maps and audience syncs, `artifactTypes` and `artifacts` what it may change (empty means any within the levels), and `brand` is reserved for multi-brand.
 - **Limits.** `recipientsPerSend`, `recipientGrowth` (a send may reach at most this multiple of the agent's previous send, for example `1.2`), `sendsPerDay`, `changesPerDay` and `messagesPerDay`. These are counters the platform keeps, not numbers the agent reports.
 - **Guardrails.** `unsubscribeRate`, `complaintRate` and `bounceRate` are fractions (`0.005` is 0.5%), judged over `window` (`P7D`, `P14D` or `P30D`) once the agent's sends reached `minSent` people. Before a send, the platform checks the agent's own recent sends; a breach caps the action at propose.
 - **Escalation.** `escalation.userIds` names who, besides the sponsor, is told about holds, refusals and guardrail hits.
@@ -221,7 +238,7 @@ Set `independentCheck: true` to have a second model review each level-2+ action 
 
 ### Learning rules
 
-`learning` keeps what an agent publishes measurable. `journeyControlPercent` requires its journeys to hold out at least that share of entrants (`controlGroup.percent`, or the control group of the campaign the journey belongs to); `broadcastHoldout: true` requires its broadcasts to have a holdout (their campaign's control group) or a subject test; `experienceHoldoutPercent` requires its experiences to hold out at least that share of visitors (`holdoutPercent`). A change without the required holdout is not refused: it goes to a person, with the reason, whatever the level. A member published in one bundle with its campaign counts the campaign's control group.
+`learning` keeps what an agent publishes measurable. `journeyControlPercent` requires its journeys to hold out at least that share of entrants (`controlGroup.percent`, or the control group of the campaign the journey belongs to); `broadcastHoldout: true` requires its broadcasts to have a holdout (their campaign's control group) or a subject test; `experienceHoldoutPercent` requires its experiences to hold out at least that share of visitors (`holdoutPercent`); `experienceRamp: true` (or a minimum first step, e.g. `10`) requires its experiences to carry a ramp (`rollout.steps`, starting at that share or higher). A change without the required holdout or ramp is not refused: it goes to a person, with the reason, whatever the level. A member published in one bundle with its campaign counts the campaign's control group.
 
 ### Shadow mode
 
@@ -238,7 +255,9 @@ A high agreement rate with no `too_bold` changes over a few weeks is the evidenc
 
 ## Reports
 
-`agents.report` (and the **Last 30 days** card on the agent page) shows what an agent did and what it led to in a period (default the last 30 days, `from`/`to` for any other): its actions by class and decision (ran, held, sent to a person, refused, failed), undos and guardian episodes, the outcome of the broadcasts it published and the direct messages it sent (sent, opens, clicks, unsubscribes, complaints, bounces), the journeys it published against their control groups, and its mandate's `goals` measured on its own broadcasts (value, and whether the target was met). An agent can read its own report by omitting `agentId`. Use it to review an agent and when you renew its mandate.
+`agents.report` (and the **Last 30 days** card on the agent page) shows what an agent did and what it led to in a period (default the last 30 days, `from`/`to` for any other): its actions by class and decision (ran, held, sent to a person, refused, failed), undos and guardian episodes, the outcome of the broadcasts it published and the direct messages it sent (sent, opens, clicks, unsubscribes, complaints, bounces), the journeys it published against their control groups, and its mandate's `goals` measured on its own broadcasts (value, and whether the target was met). It also lists the audience syncs the agent published (size, last run and platforms) and, when it published the conversion map, how many ad conversions were uploaded in the period. An agent can read its own report by omitting `agentId`. Use it to review an agent and when you renew its mandate.
+
+`agents.compare` (and the **Compare agents** section on the agents page) puts several agents side by side over one period (default the last 30 days): per mandate version, actions by class and decision, undos, holds vetoed and holds that ran; per agent, the same outcomes as `agents.report`, goals met, guardian caps and its hosted AI usage and estimated cost. Pass `agentIds` to choose the agents; omit it to compare every agent in the workspace. The comparison is read-only and uses the same ledger and metric layer as the report.
 
 ## Learnings
 
@@ -268,6 +287,8 @@ Each time it acts the guardian records an **episode** with its evidence, turns t
 ### Expiry and renewal
 
 `validUntil` is required, must be in the future and may be at most a year away; 30 days is a good default. After it passes the mandate stops applying and the agent falls back to the approval policy. Renewal is a person's decision: update the same mandate artifact with a new version (`artifacts.updateDraft`) and publish it, with the agent's activity and results in front of you. An agent can have only one active mandate; a second one is refused until the first is archived or expires.
+
+At scale, `agents.renewals` lists the published mandates whose agent is still active and whose `validUntil` is within `withinDays` (default 30), including mandates that already expired while their agent stayed active. `agents.renewMandates` renews several at once: for each id it publishes a new version with the new `validUntil`, the same levels, scope and limits, and the one note. People only. Each mandate is renewed in its own savepoint, so one failure does not undo the others; the result says what happened per id, and the audit log records one entry per mandate.
 
 ## What an agent sees when it is held or refused
 
@@ -456,7 +477,7 @@ A programme (#314) for web experiences: it follows `experiences.results` and eac
   "purpose": "Run and conclude web experiments on the pricing and signup placements.",
   "scope": { "segments": [], "purposes": [], "topics": [], "channels": [], "artifactTypes": ["experience"], "artifacts": ["exp_0123456789abcdef0123456789abcdef"], "brand": null },
   "levels": { "experience.live": 3 },
-  "learning": { "experienceHoldoutPercent": 10 },
+  "learning": { "experienceHoldoutPercent": 10, "experienceRamp": true },
   "limits": { "changesPerDay": 5 },
   "validUntil": "2026-11-27T07:00:00Z",
   "holdWindow": "PT2H",

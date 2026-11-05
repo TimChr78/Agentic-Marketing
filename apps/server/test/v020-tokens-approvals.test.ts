@@ -10,7 +10,7 @@ let viewer: User;
 let ownerName: string;
 
 beforeAll(async () => {
-  t = await startTestServer('test_tokens02', testPort(3402));
+  t = await startTestServer('test_tokens02', testPort(3701));
   owner = await t.signUp(`owner-tokens-${Date.now()}@example.com`);
   viewer = await t.signUp(`viewer-tokens-${Date.now()}@example.com`);
   ownerName = owner.email.split('@')[0];

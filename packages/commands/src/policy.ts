@@ -55,7 +55,14 @@ export interface Impact {
    * The holdouts of what is published (#257): per journey, broadcast or experience, the share held
    * out (its own control group, or its campaign's) and whether a broadcast tests subject lines.
    */
-  learning?: { id: string; type: string; controlPercent: number; subjectTest?: boolean }[];
+  learning?: {
+    id: string;
+    type: string;
+    controlPercent: number;
+    subjectTest?: boolean;
+    /** For an experience with a rollout: its first step share, or null when it has no ramp (#427). */
+    rampFirstStep?: number | null;
+  }[];
 }
 
 export const AutonomySwitch = z.enum(['on', 'propose_only', 'off']);
@@ -85,6 +92,19 @@ export const AutonomySettings = z.object({
       messagesPerDay: z.number().int().min(0).default(1000).describe('Messages an agent may send itself per 24 hours'),
     })
     .default({ changesPerDay: 500, messagesPerDay: 1000 }),
+  contactPressure: z
+    .array(
+      z.object({
+        max: z.number().int().min(1).describe('Agent-originated marketing messages one person may get in the window'),
+        days: z.number().int().min(1).describe('Window length in days'),
+        channels: z
+          .array(z.enum(['email', 'sms', 'push']))
+          .optional()
+          .describe('Channels this cap covers; omit for all marketing channels'),
+      }),
+    )
+    .default([])
+    .describe('Cross-agent contact pressure (#426): caps how many agent-originated marketing messages one person gets in a window'),
 });
 export type AutonomySettings = z.output<typeof AutonomySettings>;
 
@@ -130,7 +150,13 @@ export interface MandateView {
   /** Goals on metric-layer measures, reported by agents.report (#310). */
   goals?: { measure: string; target?: number; direction: 'up' | 'down' }[];
   /** Learning rules (#257): holdouts the agent's journeys, broadcasts and experiences must have. */
-  learning?: { journeyControlPercent?: number; broadcastHoldout?: boolean; experienceHoldoutPercent?: number };
+  learning?: {
+    journeyControlPercent?: number;
+    broadcastHoldout?: boolean;
+    experienceHoldoutPercent?: number;
+    /** A ramp (#427): true for any ramp, or the minimum first step share. */
+    experienceRamp?: boolean | number;
+  };
   /**
    * Shadow mode (#256): for these classes (or all, when true) the mandate's decision is only
    * recorded; the action is decided as if there were no mandate, so a person decides as before.
@@ -178,6 +204,20 @@ export interface PolicyInput {
   outsideHours?: string | null;
   /** The guardian's cap on this agent, if it has acted and no person has cleared it yet (#253). */
   guard?: AgentGuard | null;
+  /**
+   * Another agent's ownership of an artifact this action changes (#426), computed by the executor.
+   * An active owner caps the action at level 1 (or asks, without a mandate); a paused or retired
+   * owner is reported but does not block.
+   */
+  ownership?: {
+    agentId: string;
+    agentName: string;
+    active: boolean;
+    artifactId?: string;
+    artifactName?: string;
+  } | null;
+  /** Other agents' pending changes (holds or approval requests) on the same artifacts (#426). */
+  conflicts?: string[];
 }
 
 export interface PolicyOutcome {
@@ -200,6 +240,21 @@ export function inShadow(mandate: Pick<MandateView, 'shadow'>, actionClass: Acti
 }
 
 const fmt = (n: number) => n.toLocaleString('en-US');
+
+/** How an owned artifact is named in a reason: its name when the executor supplied it, else its id. */
+const ownedLabel = (o: NonNullable<PolicyInput['ownership']>) =>
+  o.artifactName ? `“${o.artifactName}”` : (o.artifactId ?? 'This artifact');
+
+/** The reason an active owner blocks another agent, and the note when the owner is paused or retired. */
+function ownershipReasons(o: NonNullable<PolicyInput['ownership']>) {
+  const reason = `${ownedLabel(o)} is owned by agent ${o.agentName}.`;
+  return o.active
+    ? { block: reason, note: null }
+    : {
+        block: null,
+        note: `${ownedLabel(o)} is owned by agent ${o.agentName}, which is not active; ownership does not block this change.`,
+      };
+}
 
 export function decide(input: PolicyInput): PolicyOutcome {
   const { actionClass, impact, settings, counters, mandate } = input;
@@ -228,10 +283,18 @@ export function decide(input: PolicyInput): PolicyOutcome {
   if (mandate) return decideWithMandate(input, mandate, out);
 
   const ask: string[] = [];
+  const notes: string[] = [];
   // Without a mandate there is no veto window: any guardian cap below 3 sends the change to a person.
   const guard = input.guard;
   if (guard && (guard.cap < 3 || (guard.irreversibleCap !== undefined && guard.irreversibleCap < 3 && IRREVERSIBLE.includes(actionClass))))
     ask.push(guard.reason);
+  // Several agents in one workspace (#426): an active owner or another agent's pending change asks a person.
+  if (input.ownership) {
+    const own = ownershipReasons(input.ownership);
+    if (own.block) ask.push(own.block);
+    if (own.note) notes.push(own.note);
+  }
+  if (input.conflicts?.length) ask.push(...input.conflicts);
   if (settings.switch === 'propose_only')
     ask.push('This workspace is set to propose-only: every agent change beyond a draft needs a person.');
   if (counters.changes >= settings.limits.changesPerDay)
@@ -244,11 +307,12 @@ export function decide(input: PolicyInput): PolicyOutcome {
       `This agent sent ${fmt(counters.messages)} messages in the last 24 hours; ${fmt(people)} more would pass its limit of ${fmt(settings.limits.messagesPerDay)}.`,
     );
 
-  if (!ask.length) return out('allow', []);
-  if (input.approvable) return out('ask', ask);
+  if (!ask.length) return out('allow', notes);
+  if (input.approvable) return out('ask', [...ask, ...notes]);
   return out('deny', [
     ...ask,
     `${input.command} cannot wait for an approval, so a person has to do it, or raise the limit in Settings → Agents.`,
+    ...notes,
   ]);
 }
 
@@ -294,6 +358,11 @@ function learningGaps(impact: Impact, rules: MandateView['learning']): string[] 
       out.push(
         `Experience ${l.id} holds out ${l.controlPercent}% of visitors; the mandate requires at least ${rules.experienceHoldoutPercent}% (holdoutPercent).`,
       );
+    if (l.type === 'experience' && rules.experienceRamp) {
+      const required = rules.experienceRamp === true ? 1 : rules.experienceRamp;
+      if ((l.rampFirstStep ?? 0) < required)
+        out.push(`Experience ${l.id} has no ramp starting at ${required}% of visitors; the mandate requires one (rollout.steps).`);
+    }
   }
   return out;
 }
@@ -366,6 +435,14 @@ function decideWithMandate(
     if (max < 4) capAt(max, guard.reason);
   }
   if (input.outsideHours && IRREVERSIBLE.includes(actionClass)) capAt(2, input.outsideHours);
+
+  // Several agents in one workspace (#426): an active owner or another agent's pending change caps at propose.
+  if (input.ownership) {
+    const own = ownershipReasons(input.ownership);
+    if (own.block) capAt(1, own.block);
+    if (own.note) reasons.push(own.note);
+  }
+  for (const conflict of input.conflicts ?? []) capAt(1, conflict);
 
   if (level <= 0) return out('deny', [...reasons, `The mandate gives this agent level 0 (observe) for ${actionClass}.`], { level });
   if (level === 1) {

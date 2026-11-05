@@ -22,11 +22,12 @@ const CLASS_BY_TYPE: Record<string, ActionClass> = {
   purposes: 'settings',
   delivery_policy: 'settings',
   tracking_plan: 'settings',
-  conversion_map: 'settings',
+  // A conversion map sends events to ad platforms: an audience publish under the `ads` channel (#428).
+  conversion_map: 'audience.publish',
 };
 
 /** Types whose publishing a mandate can never make autonomous (design §3.2, the fixed rule). */
-const NEEDS_PERSON = ['purposes', 'delivery_policy', 'tracking_plan', 'conversion_map', 'agent_mandate'];
+const NEEDS_PERSON = ['purposes', 'delivery_policy', 'tracking_plan', 'agent_mandate'];
 
 /** The class of publishing an artifact of this type. */
 export const publishClass = (type: string): ActionClass => CLASS_BY_TYPE[type] ?? 'content.publish';
@@ -97,6 +98,7 @@ interface HoldoutFields {
   controlGroup?: { percent?: number };
   subjectTest?: unknown;
   holdoutPercent?: number;
+  rollout?: { steps?: number[] };
   members?: { artifactId: string }[];
 }
 
@@ -148,7 +150,13 @@ async function learningOf(tx: Tx, members: { id: string; type: string; version: 
     const fromCampaign = campaignControl.get(m.id) ?? 0;
     if (m.type === 'journey') out.push({ id: m.id, type: m.type, controlPercent: Math.max(c.controlGroup?.percent ?? 0, fromCampaign) });
     if (m.type === 'broadcast') out.push({ id: m.id, type: m.type, controlPercent: fromCampaign, subjectTest: !!c.subjectTest });
-    if (m.type === 'experience') out.push({ id: m.id, type: m.type, controlPercent: c.holdoutPercent ?? 0 });
+    if (m.type === 'experience')
+      out.push({
+        id: m.id,
+        type: m.type,
+        controlPercent: c.holdoutPercent ?? 0,
+        rampFirstStep: c.rollout?.steps?.[0] ?? null,
+      });
   }
   return out;
 }

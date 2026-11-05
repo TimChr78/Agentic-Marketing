@@ -36,6 +36,17 @@ Supported: `Users` and `Groups` with list (`filter=userName eq "…"`, `external
 
 An MCP client gets the permissions the person granted when connecting, at most what the person's role allows. Tools the role allows but the connection lacks are still listed, marked "Needs the … permission". Calling one answers HTTP 403 with `WWW-Authenticate: Bearer error="insufficient_scope", scope="…"`, which MCP clients answer by sending the person through authorization again for the larger set of scopes. API tokens have fixed scopes and do not step up.
 
+## One brand per token or connection (#187)
+
+A brand is a workspace. A person can belong to several and switch between them in the admin UI, because their **session** carries a workspace chosen with `X-Workspace-Id`. Credentials are different: an API token and an OAuth/MCP connection each belong to exactly one brand.
+
+- **API tokens.** `apiTokens.create` stores the workspace in the token row. Every request acts in that workspace; the token list shows the brand, and the create dialog offers each brand whose role can grant the chosen scopes. To let a tool work in a second brand, create a second token there. The UI offers that as one step: choose the brand in the create dialog.
+- **OAuth consent.** When the person belongs to several brands, the consent page asks which brand the client acts in. The choice is checked against their membership and role (the role must be able to grant the requested scopes), then stored on the grant as its reference id. The issued access token carries a `workspace_id` claim; refresh tokens keep it. A connection issued before this change, or a direct consent that made no choice, has no claim and is refused when the person belongs to more than one brand: reconnect and choose.
+- **The header.** `X-Workspace-Id` switches a person's session and nothing else. Sending it on a request authenticated with an API token or an OAuth connection that belongs to another brand answers `403` with a clear message rather than silently ignoring the header. A token or MCP client therefore cannot read or write another brand, with or without the header.
+- **Commands and audit.** `workspace.get` returns the bound brand, and `workspace.memberships` returns only that brand to a credential; a person still sees all their memberships. Token creation, edits and revocation are in the audit log under the token's workspace with the token id as the target (`token:<id>` identifies the caller on every subsequent call).
+
+Agents and MCP clients are described in [agents.md](agents.md); the connection steps are in [integrations.md](integrations.md).
+
 ## Password reset (#191)
 
 Anyone who signs in with a password can reset it from the sign-in page ("Forgot password?"), without shell access:
@@ -55,3 +66,152 @@ Anyone who signs in with a password can reset it from the sign-in page ("Forgot 
 **Rate limits and audit.** Per IP, 5 link requests per 15 minutes; per address, 3 per hour plus the 60-second cooldown; per IP, 10 reset submissions per 15 minutes. All buckets live in Valkey and are shared by every server process. If any required bucket is unavailable, reset requests and submissions return the same generic `503 RATE_LIMIT_UNAVAILABLE` for every account class; no request is queued and no reset is forwarded while the shared limits are unavailable. The worker appends the request outcome to the workspace audit log (surface `internal`, command `auth.passwordResetRequest` / `auth.passwordReset`) with the person, the time, the outcome and the IP in the audit log's `ip` column (migration `0066_password_reset.sql`) — never the address, token or password. A person without a workspace is only in the server log (the audit log is per workspace); an unknown address has no account to attribute, so it appears only as a queue outcome. Without a running worker there is no delivery outcome and no request audit entry.
 
 **Break-glass.** `am reset-password --email you@example.com` (with `AM_RESET_PASSWORD`, a hidden prompt or stdin) still sets a password from the server, for owners with container access and when mail is broken. It is not a user-facing path.
+
+## Brands and domains (#186)
+
+A **brand is a workspace**. Memberships, the `X-Workspace-Id` header, row-level security and the
+workspace switcher already separate brands; a domain only decides which workspace a public request
+belongs to. One installation keeps **one admin host** (`PUBLIC_URL`) where people sign in and switch
+brand; each brand may have its own public links hostname.
+
+Data follows the same boundary: the same e-mail address can be two profiles, an unsubscribe or
+suppression applies only inside its brand, and erasure and export are repeated per brand. The full
+list is in [Multiple brands on one instance](architecture/security-and-privacy.md#7-multiple-brands-on-one-instance).
+
+### Create a brand from the admin UI (#190)
+
+`workspace.create` makes another brand in the same installation. It is **people-only and audited**,
+and a person may call it only when they are **owner of at least one workspace**. Being an admin or
+member of the workspace they are currently viewing is not enough; the rule is about ownership
+anywhere in the installation, because the new brand is theirs, not the current brand's. Owners,
+admins, marketers and viewers who own no brand get `403`.
+
+The call takes a name and optional brand basics:
+
+```json
+{
+  "name": "Second site",
+  "primaryDomain": "links.second.example",
+  "pathPrefix": "/am",
+  "siteName": "Second site",
+  "logoUrl": "https://cdn.second.example/logo.svg"
+}
+```
+
+In **one transaction** it creates:
+
+- the workspace row, with the same database defaults as `am bootstrap` (approval policy
+  `agent_changes`, UTC, an empty seed list and the default autonomy), so a brand created in the UI
+  and one created from the CLI cannot drift;
+- the caller's `owner` membership;
+- a **draft** `brand` artifact with the site name and logo (publish it under Design → Brand when it
+  is ready; the switcher shows the workspace name until then);
+- when a host is given, a **pending** primary `workspace_domains` row with its verification token.
+
+A duplicate hostname, an invalid logo URL or any other failure rolls all of it back; no half-created
+brand is left. The domain is not used for links until `workspace.domains.verify` succeeds, exactly
+like one added with `workspace.domains.add`. Nothing is copied from the brand the person came from:
+content, audiences, providers and secrets are all new and empty (cloning is a separate decision).
+
+API tokens and OAuth/MCP connections are agents, so they can never call `workspace.create`. The
+admin UI shows **New brand** in the switcher only when at least one of the person's memberships is
+an owner.
+
+### Register a domain
+
+`workspace.domains.add/update/remove/verify/list` are people-only (`workspace:admin`) and audited. A
+domain is a normalised hostname plus an optional path prefix:
+
+- lowercase IDNA hostname, without scheme, port or trailing dot; wildcards, userinfo, queries and
+  fragments are refused;
+- `https` everywhere, or `http` only on localhost;
+- an optional leading-slash prefix such as `/am`, for a site that proxies `/am` to this instance;
+- one hostname/prefix may belong to only one workspace, and one workspace may have one **primary**
+  domain. `workspace.get` returns the workspace's `domains` and its effective `linksUrl`.
+
+Normalisation runs before the row is written, so `MartechSignal.COM` and `martechsignal.com` are the
+same host, and `/am/` and `am` are the same prefix. Host resolution for a request (before any
+workspace is known) reads the registry installation-wide and picks the **longest matching path
+prefix**, so `example.com/am` and `example.com/am2` can coexist. Once any domain is verified, an unknown host on a public path
+is answered with 404; admin routes keep using the session and `X-Workspace-Id`.
+
+### Verify a domain
+
+A new domain starts **pending** and is listed but inactive: it resolves no requests and supplies no
+links until it is verified. This stops a typo, or a hostname someone else controls, from taking
+another brand's traffic.
+
+1. Register it: `workspace.domains.add {host, pathPrefix?, isPrimary?}`. The returned row carries a
+   `verificationToken`.
+2. Point the hostname at the tunnel or ingress, and confirm the public listener serves the challenge:
+   `GET https://<host><prefix>/.well-known/am-domain/<verificationToken>` must answer `200` with the
+   token. The challenge is answered even while the domain is pending, and on any Host.
+3. Run `workspace.domains.verify {id}`. The server fetches the same URL over the egress guard
+   (timeboxed; plain http only on localhost), compares the body with the token, and sets
+   `status: "verified"` and `verifiedAt`. A wrong token, a non-200 answer or an unreachable host is
+   refused with a message that names the URL that failed. A hostname that resolves to a private
+   address must be listed in `EGRESS_ALLOWED_HOSTS`, like any other outbound target.
+
+Only verified domains are used for request resolution and `linksUrlFor`. Changing a domain's host or
+prefix resets it to pending, so verify it again before it serves. Removing the primary domain makes
+the workspace fall back to `PUBLIC_LINKS_URL`.
+
+### One tunnel hostname per brand
+
+Point each brand's DNS at the tunnel or ingress, and give the tunnel one hostname per brand:
+
+| Brand | Public host | Path prefix | Primary |
+|---|---|---|---|
+| Martech Signal | `links.martechsignal.com` | — | yes |
+| Second site | `second.example.com` | `/am` | yes |
+
+The certificate must cover every registered hostname. A wildcard certificate (`*.example.com`) can
+cover several brands under one parent, but a brand on another domain needs its own name on the
+certificate. The public listener (`PUBLIC_PORT`) is the safe target for these hostnames; it serves
+only `/f`, `/u`, `/c`, `/a`, `/n`, `/hooks`, `/healthz` and `/readyz`.
+
+With a path prefix, the proxy forwards `/am/*` unchanged, so the public paths are
+`https://second.example.com/am/f/<form id>`, `/am/u/...`, `/am/n/...`. Health checks move with it:
+`https://second.example.com/am/healthz`.
+
+### What a brand host serves
+
+Every public request resolves its `Host` and path prefix to one workspace before routing:
+
+- a verified registered domain → that workspace;
+- the host (and prefix) of `PUBLIC_LINKS_URL` → the installation fallback, exactly as before;
+- any other host → `404`, never the admin UI and never another brand's page.
+
+Until the first domain is verified, the installation keeps its old behaviour: public paths answer on
+any `Host`, so an upgrade does not break a proxy that rewrites `Host` or a LAN address used for
+testing. Verifying a domain switches the check on for every host.
+
+`/f`, `/u` (including `/u/p`), `/c`, `/a`, `/n` and `/hooks` all obey this. A signed token, form,
+archive slug, asset id or provider webhook belongs to a workspace, so presenting it on another
+brand's host is refused with `404` — never redirected to the brand that owns it. The archive resolves
+the brand by host first, then the slug inside that workspace; RSS, sitemap and issue URLs use the
+brand's host. Path prefixes are stripped before routing and A's `/am` links stay under
+`https://host/am/...`.
+
+The same rule builds links: confirm, unsubscribe, preference centre, `List-Unsubscribe`, the
+`/n/w/…` web version, archive pages, form actions, asset URLs and provider webhook URLs use
+`linksUrlFor(workspaceId)` — the workspace's verified primary domain, else `PUBLIC_LINKS_URL`. The
+signed token format is unchanged; only the base URL follows the brand.
+
+### Fallback and upgrades
+
+`PUBLIC_LINKS_URL` remains the fallback and is not removed. A workspace with no primary domain uses
+it exactly as before, which keeps a single-brand install byte-for-byte identical after upgrading:
+there is no SQL backfill, because the current URL is configuration rather than data. Assign the
+existing `PUBLIC_LINKS_URL` origin+prefix to the default brand only if you want it visible as a
+registered domain. If several workspaces exist and some have no primary domain, `am doctor` warns
+that their links still use `PUBLIC_LINKS_URL`.
+
+### `am doctor`
+
+For each registered domain, `am doctor` checks that DNS resolves, that `https://<host><prefix>/healthz`
+(or the public listener's path) answers, and that the TLS certificate is valid. A pending domain is
+reported as inactive with the verification step. It warns when a registered host is the admin host,
+when a multi-brand install has brands without a verified primary domain, and when a host uses a
+reserved or private suffix. The checks are short and timeboxed like the other network checks; a fresh
+install with no domains reports that links use `PUBLIC_LINKS_URL`.

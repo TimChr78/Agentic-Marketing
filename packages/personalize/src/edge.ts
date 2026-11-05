@@ -58,7 +58,12 @@ export interface EdgeBundle {
 
 export async function loadPublishedExperiences(tx: Tx): Promise<PublishedExperience[]> {
   const rows = await tx
-    .select({ id: schema.artifacts.id, version: schema.artifacts.publishedVersion, content: schema.artifactVersions.content })
+    .select({
+      id: schema.artifacts.id,
+      version: schema.artifacts.publishedVersion,
+      content: schema.artifactVersions.content,
+      share: schema.experienceRollouts.share,
+    })
     .from(schema.artifacts)
     .innerJoin(
       schema.artifactVersions,
@@ -68,11 +73,24 @@ export async function loadPublishedExperiences(tx: Tx): Promise<PublishedExperie
         eq(schema.artifactVersions.number, schema.artifacts.publishedVersion),
       ),
     )
+    .leftJoin(
+      schema.experienceRollouts,
+      and(
+        eq(schema.experienceRollouts.workspaceId, schema.artifacts.workspaceId),
+        eq(schema.experienceRollouts.artifactId, schema.artifacts.id),
+        eq(schema.experienceRollouts.version, schema.artifacts.publishedVersion),
+      ),
+    )
     .where(
       and(eq(schema.artifacts.type, 'experience'), isNotNull(schema.artifacts.publishedVersion), eq(schema.artifacts.archived, false)),
     );
   return rows
-    .map((r) => ({ id: r.id, version: r.version ?? 0, def: artifactTypes.experience.content.parse(r.content) }))
+    .map((r) => ({
+      id: r.id,
+      version: r.version ?? 0,
+      def: artifactTypes.experience.content.parse(r.content),
+      share: r.share ?? null,
+    }))
     .sort((a, b) => b.def.priority - a.def.priority);
 }
 

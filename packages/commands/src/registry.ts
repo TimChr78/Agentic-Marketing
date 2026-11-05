@@ -1,7 +1,7 @@
 import { AppError, canonicalJson, hashValue, sha256 } from '@agentic-marketing/core';
 import { type AgentUndo, type Db, schema, type Tx } from '@agentic-marketing/db';
 import { SpanStatusCode, trace } from '@opentelemetry/api';
-import { and, desc, eq, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import {
   type ActionClass,
@@ -10,6 +10,7 @@ import {
   decide,
   type Impact,
   type MandateView,
+  type PolicyInput,
   type PolicyOutcome,
   REACH_CLASSES,
 } from './policy';
@@ -24,14 +25,39 @@ import { findUnknownInputKeys, type UnknownInputKey, unknownKeyMessages } from '
 export type Effect = 'read' | 'write' | 'publish' | 'destructive';
 export type Surface = 'rest' | 'mcp' | 'scim' | 'internal';
 
+/** A public request's brand context (#185), attached by the server's public middleware. */
+export interface PublicRequest {
+  /** The workspace whose verified domain matched, or null on the PUBLIC_LINKS_URL fallback host. */
+  workspaceId: string | null;
+  /** The origin and path prefix this request is served on: its links base. */
+  linksUrl: string;
+  /** True when a registered domain matched; false on the installation fallback. */
+  matched: boolean;
+}
+
 /** Extension point for dependencies commands need (key providers, clocks…). Packages augment it. */
 export interface Services {
   /** Public URL of the server, e.g. for admin UI deep links in command output. */
   publicUrl?: string;
   /** Links host (PUBLIC_LINKS_URL), for shareable unsubscribe, form, web-version and archive URLs. */
   linksUrl?: string;
+  /**
+   * The links URL for one workspace: its verified primary brand domain, else `linksUrl` (#186).
+   * Wired by the server; commands that build links for a specific workspace use this instead of the
+   * global value.
+   */
+  linksUrlFor?: (workspaceId: string) => Promise<string>;
+  /**
+   * One outbound GET under the server's egress policy, used to check a brand domain's verification
+   * challenge (#185). Timeboxed by the caller; tests may replace it.
+   */
+  fetchDomainChallenge?: (url: string) => Promise<{ status: number; body: string }>;
+  /** Drop the host-resolver cache after a domain write (#186). */
+  invalidateDomainCache?: () => void;
   /** Version of the running server, so command output can show it (workspace.get). */
   serverVersion: string;
+  /** True when the person owns at least one workspace (#190); wired by the server's directory. */
+  ownsAnyWorkspace?: (userId: string) => Promise<boolean>;
   /** Whether unknown input keys are rejected rather than warned about (STRICT_INPUTS). */
   strictInputs: boolean;
   /** Shared counter for wrong passwords on token widening (#61), so every process sees the lockout. */
@@ -90,6 +116,8 @@ export interface CommandContext {
   principal: Principal;
   tx: Tx;
   services: Services;
+  /** The surface the command came in on, for commands that append their own audit entries. */
+  surface?: Surface;
   /** Runs `fn` once the command's transaction has committed (e.g. to invalidate caches); errors are logged, not thrown. */
   afterCommit?: (fn: () => Promise<void>) => void;
   /** The policy engine's decision for an agent write (ADR-0016). "ask" means the change must wait for a person. */
@@ -135,8 +163,19 @@ export interface CommandDef<I extends z.ZodType = z.ZodType, O extends z.ZodType
   sensitiveOutput?: readonly string[];
   /** Audit successful calls of a read command too (e.g. reads of personal data). Writes and all failures are always audited. */
   auditReads?: boolean;
+  /**
+   * The handler appends its own audit entries (one per item it changed) instead of the executor
+   * appending one for the whole call, e.g. agents.renewMandates (#428). A call that throws is still
+   * audited by the executor.
+   */
+  auditsItself?: boolean;
   /** What the command acts on, for the audit log (e.g. an artifact id). */
   target?: (input: z.output<I>) => string | undefined;
+  /**
+   * What the audit log records as the target when the id is only known after the handler ran, e.g.
+   * a freshly created token or invitation. Falls back to `target` when it returns undefined.
+   */
+  auditTarget?: (output: z.output<O>) => string | undefined;
   /**
    * Facts about what the handler created, merged into the agent ledger's impact (#265). The
    * ledger is written after the handler so it can link the action to the rows it produced, e.g.
@@ -210,8 +249,49 @@ function redact(input: unknown, fields?: readonly string[]) {
   return Object.fromEntries(Object.entries(input).map(([k, v]) => [k, fields.includes(k) ? '[redacted]' : v]));
 }
 
+/**
+ * Appends one entry to a workspace's audit log, keeping its hash chain. The executor calls this for
+ * every command; a command that records several items itself (agents.renewMandates, one per
+ * mandate) calls it directly and declares `auditsItself`.
+ */
+export async function appendAuditEntry(
+  tx: Tx,
+  p: Principal,
+  surface: Surface,
+  cmd: { name: string; effect: string },
+  inputHash: string,
+  target: string | undefined,
+  error?: AppError,
+  ip?: string | null,
+) {
+  // Serialise appends per workspace so the hash chain never forks under concurrency.
+  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`audit:${p.workspaceId}`}, 0))`);
+  const [prev] = await tx
+    .select({ hash: schema.auditLog.hash })
+    .from(schema.auditLog)
+    .where(eq(schema.auditLog.workspaceId, p.workspaceId))
+    .orderBy(desc(schema.auditLog.seq))
+    .limit(1);
+  const entry = {
+    workspaceId: p.workspaceId,
+    principalType: p.type,
+    principalId: p.userId,
+    clientId: p.clientId ?? null,
+    surface,
+    command: cmd.name,
+    effect: cmd.effect,
+    target: target ?? null,
+    inputHash,
+    ok: !error,
+    error: error ? `${error.code}: ${error.message}` : null,
+    prevHash: prev?.hash ?? null,
+    ...(ip ? { ip } : {}),
+  };
+  await tx.insert(schema.auditLog).values({ ...entry, hash: sha256(canonicalJson(entry)) });
+}
+
 export function createExecutor(db: Db, services: Services, options: ExecutorOptions = {}) {
-  async function appendAudit(
+  const appendAudit = (
     tx: Tx,
     p: Principal,
     surface: Surface,
@@ -219,31 +299,7 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
     inputHash: string,
     target: string | undefined,
     error?: AppError,
-  ) {
-    // Serialise appends per workspace so the hash chain never forks under concurrency.
-    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`audit:${p.workspaceId}`}, 0))`);
-    const [prev] = await tx
-      .select({ hash: schema.auditLog.hash })
-      .from(schema.auditLog)
-      .where(eq(schema.auditLog.workspaceId, p.workspaceId))
-      .orderBy(desc(schema.auditLog.seq))
-      .limit(1);
-    const entry = {
-      workspaceId: p.workspaceId,
-      principalType: p.type,
-      principalId: p.userId,
-      clientId: p.clientId ?? null,
-      surface,
-      command: cmd.name,
-      effect: cmd.effect,
-      target: target ?? null,
-      inputHash,
-      ok: !error,
-      error: error ? `${error.code}: ${error.message}` : null,
-      prevHash: prev?.hash ?? null,
-    };
-    await tx.insert(schema.auditLog).values({ ...entry, hash: sha256(canonicalJson(entry)) });
-  }
+  ) => appendAuditEntry(tx, p, surface, cmd, inputHash, target, error);
 
   /** Validate → authorize → idempotency → handler → validate output → audit (writes and failures), in one transaction. */
   async function execute<C extends AnyCommand>(
@@ -373,7 +429,15 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
               const undo = createUndoCollector();
               const out = withInputWarnings(
                 cmd.output.parse(
-                  await cmd.handler(parsed.data, { principal, tx, services, policy, undo, afterCommit: (fn) => committed.push(fn) }),
+                  await cmd.handler(parsed.data, {
+                    principal,
+                    tx,
+                    services,
+                    surface: opts.surface,
+                    policy,
+                    undo,
+                    afterCommit: (fn) => committed.push(fn),
+                  }),
                 ),
                 unknownMessages,
               ) as z.output<C['output']>;
@@ -391,7 +455,8 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
                   inputHash,
                   response: redact(out, cmd.sensitiveOutput) as object,
                 });
-              if (cmd.effect !== 'read') await appendAudit(tx, principal, opts.surface, cmd, inputHash, target);
+              if (cmd.effect !== 'read') target = cmd.auditTarget?.(out) ?? target;
+              if (cmd.effect !== 'read' && !cmd.auditsItself) await appendAudit(tx, principal, opts.surface, cmd, inputHash, target);
               if (agent && policy)
                 await recordAgentAction(tx, agent.id, cmd, policy, opts.surface, target, null, intentOf(parsed.data), undo.get());
               return out;
@@ -442,6 +507,87 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
 export type Executor = ReturnType<typeof createExecutor>;
 
 /**
+ * What the other agents have on the artifacts this action changes (#426), before the policy
+ * engine decides: the owner of an artifact when it belongs to another agent, and any pending
+ * change (a hold inside its veto window, or an open approval request) from a different agent.
+ * The executor only calls this for changes beyond a draft; people never reach it.
+ */
+async function coordinationFor(
+  tx: Tx,
+  workspaceId: string,
+  agentId: string,
+  actionClass: ActionClass,
+  impact: Impact,
+): Promise<{ ownership: NonNullable<PolicyInput['ownership']> | null; conflicts: string[] }> {
+  const touched = impact.touches?.artifacts ?? [];
+  if (!touched.length || actionClass === 'draft' || actionClass === 'read') return { ownership: null, conflicts: [] };
+  const ids = [...new Set(touched.map((a) => a.id))];
+  const rows = await tx
+    .select({ id: schema.artifacts.id, name: schema.artifacts.name, ownerAgentId: schema.artifacts.ownerAgentId })
+    .from(schema.artifacts)
+    .where(and(eq(schema.artifacts.workspaceId, workspaceId), inArray(schema.artifacts.id, ids)));
+  const names = new Map(rows.map((a) => [a.id, a.name]));
+
+  let ownership: NonNullable<PolicyInput['ownership']> | null = null;
+  for (const a of rows) {
+    if (!a.ownerAgentId || a.ownerAgentId === agentId) continue;
+    const [owner] = await tx
+      .select({ id: schema.agents.id, name: schema.agents.name, status: schema.agents.status })
+      .from(schema.agents)
+      .where(and(eq(schema.agents.workspaceId, workspaceId), eq(schema.agents.id, a.ownerAgentId)));
+    const candidate: NonNullable<PolicyInput['ownership']> = {
+      agentId: a.ownerAgentId,
+      // A deleted owner is reported as retired; it never blocks.
+      agentName: owner?.name ?? 'a retired agent',
+      active: owner?.status === 'active',
+      artifactId: a.id,
+      artifactName: a.name,
+    };
+    // An active owner anywhere is the one worth explaining; keep the first if all are inactive.
+    if (!ownership || (candidate.active && !ownership.active)) ownership = candidate;
+    if (ownership.active) break;
+  }
+
+  // Pending approvals from another agent on the same artifacts: a hold still inside its veto
+  // window, or an ordinary approval request. The requesting agent comes from the credential the
+  // request recorded, exactly as resume/approval look it up.
+  const pending = await tx.execute<{ artifact_id: string; hold_until: Date | string | null; agent_name: string }>(sql`
+    SELECT ar.artifact_id, ar.hold_until, a.name AS agent_name
+    FROM approval_requests ar
+    JOIN agent_credentials c ON c.workspace_id = ar.workspace_id AND (
+      (c.kind = 'api_token' AND ar.requested_by_client = 'token:' || c.credential_id)
+      OR (c.kind = 'hosted' AND ar.requested_by_client = 'hosted:' || c.credential_id)
+      OR (c.kind = 'copilot' AND ar.requested_by_client = 'copilot:' || c.credential_id)
+      OR (c.kind = 'oauth_client' AND ar.requested_by_client = c.credential_id))
+    JOIN agents a ON a.workspace_id = c.workspace_id AND a.id = c.agent_id
+    WHERE ar.workspace_id = ${workspaceId}
+      AND ar.status = 'pending' AND ar.requested_by_type = 'agent'
+      AND ar.artifact_id IN (${sql.join(
+        ids.map((id) => sql`${id}`),
+        sql`, `,
+      )})
+      AND a.id <> ${agentId}
+    ORDER BY ar.created_at`);
+  const conflicts: string[] = [];
+  const seen = new Set<string>();
+  for (const row of pending.rows) {
+    const key = `${row.artifact_id}:${row.agent_name}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const label = names.get(row.artifact_id) ? `“${names.get(row.artifact_id)}”` : row.artifact_id;
+    const until = row.hold_until ? new Date(row.hold_until) : null;
+    const what =
+      until && until > new Date()
+        ? `a hold until ${until.toISOString()}`
+        : until
+          ? 'a hold whose veto window has ended and now waits for a person'
+          : 'an open approval request';
+    conflicts.push(`${label} already has ${what} from agent ${row.agent_name}.`);
+  }
+  return { ownership, conflicts };
+}
+
+/**
  * The policy decision for one agent write (ADR-0016): the workspace settings, the agent's active
  * mandate, its guardrails and counters, then the independent check. Used by the executor for
  * every command and by commands that publish on an agent's behalf (config.import, #239).
@@ -478,6 +624,8 @@ export async function agentPolicy(
     mandate && REACH_CLASSES.includes(req.actionClass) && services.mandateGuardrails
       ? await services.mandateGuardrails(tx, principal.workspaceId, agent.id, mandate.view)
       : null;
+  // Several agents in one workspace (#426): who owns the artifact, and what other agents have pending.
+  const coordination = await coordinationFor(tx, principal.workspaceId, agent.id, req.actionClass, req.impact);
   let policy = decide({
     command: req.command,
     actionClass: req.actionClass,
@@ -486,6 +634,8 @@ export async function agentPolicy(
     counters: await agentCounters(tx, agent.id),
     approvable: req.approvable,
     guard: row?.guard ?? null,
+    ...(coordination.ownership ? { ownership: coordination.ownership } : {}),
+    ...(coordination.conflicts.length ? { conflicts: coordination.conflicts } : {}),
     ...(mandate ? { mandate: mandate.view, outsideHours: mandate.outsideHours, guardrailBreach } : {}),
   });
   // Only what the mandate lets run by itself (level 2+) is checked; drafts and proposals are not (#260).

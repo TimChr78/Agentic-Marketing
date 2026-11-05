@@ -1,9 +1,10 @@
-import { type CommandContext, defineCommand, type Permission } from '@agentic-marketing/commands';
-import { AppError, canonicalJson, newId, sha256 } from '@agentic-marketing/core';
-import { schema } from '@agentic-marketing/db';
-import { and, desc, eq, gte, inArray, isNotNull, lt, or, sql } from 'drizzle-orm';
+import { BrandSummarySchema, type CommandContext, defineCommand, type Permission } from '@agentic-marketing/commands';
+import { AppError, canonicalJson, hashValue, newId, newUuid, sha256 } from '@agentic-marketing/core';
+import { normalizeDomainInput, schema } from '@agentic-marketing/db';
+import { and, asc, desc, eq, gte, inArray, isNotNull, lt, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
-import { Requester, resolveActors } from './commands';
+import { author, Requester, resolveActors, validateContent } from './commands';
+import { DomainViewSchema, domainView, effectiveLinksUrl, mapUniqueViolation, workspaceDomainCommands } from './domains';
 import { artifactTypes } from './types';
 
 const Policy = z.enum(['none', 'agent_changes', 'all_publishes']);
@@ -61,6 +62,9 @@ export const getWorkspace = defineCommand({
     approvalPolicy: Policy,
     timeZone: z.string().describe('IANA time zone of the workspace, e.g. Europe/Copenhagen'),
     seedList: z.array(z.string()).describe('Addresses (besides members) that test sends may go to'),
+    domains: z.array(DomainViewSchema).describe('Public hostnames this brand’s links answer on'),
+    linksUrl: z.string().describe('Origin and prefix public links use: this workspace’s primary domain, else PUBLIC_LINKS_URL'),
+    brand: BrandSummarySchema.describe('Name, logo and primary domain for the admin shell'),
     serverVersion: z.string().describe('Version of the running server, e.g. 0.2.9'),
     you: z.object({ type: z.enum(['user', 'agent']), userId: z.string(), role: z.string(), permissions: z.array(z.string()) }),
     permissionsExplained: z
@@ -71,20 +75,197 @@ export const getWorkspace = defineCommand({
   effect: 'read',
   handler: async (_input, ctx) => {
     const [w] = await ctx.tx.select().from(schema.workspaces).where(eq(schema.workspaces.id, ctx.principal.workspaceId));
+    const domains = await ctx.tx
+      .select()
+      .from(schema.workspaceDomains)
+      .orderBy(desc(schema.workspaceDomains.isPrimary), asc(schema.workspaceDomains.host));
     const p = ctx.principal;
     const permissions = [...p.permissions].sort();
+    // Only a published brand artifact is public; draft changes stay in the editor.
+    const [brandVersion] = await ctx.tx
+      .select({ content: schema.artifactVersions.content })
+      .from(schema.artifacts)
+      .innerJoin(
+        schema.artifactVersions,
+        and(
+          eq(schema.artifactVersions.workspaceId, schema.artifacts.workspaceId),
+          eq(schema.artifactVersions.artifactId, schema.artifacts.id),
+          eq(schema.artifactVersions.number, schema.artifacts.publishedVersion),
+        ),
+      )
+      .where(
+        and(
+          eq(schema.artifacts.workspaceId, ctx.principal.workspaceId),
+          eq(schema.artifacts.type, 'brand'),
+          isNotNull(schema.artifacts.publishedVersion),
+        ),
+      )
+      .orderBy(desc(schema.artifacts.updatedAt))
+      .limit(1);
+    const brandContent = brandVersion ? artifactTypes.brand.content.safeParse(brandVersion.content) : null;
+    const brand = {
+      siteName: (brandContent?.success ? brandContent.data.siteName : undefined) ?? w.name,
+      logoUrl: (brandContent?.success ? brandContent.data.logoUrl : undefined) ?? null,
+      primaryDomain: domains.find((domain) => domain.isPrimary)?.host ?? null,
+    };
     return {
       id: w.id,
       name: w.name,
       approvalPolicy: w.approvalPolicy,
       timeZone: w.timeZone,
       seedList: w.seedList,
+      domains: domains.map(domainView),
+      linksUrl: await effectiveLinksUrl(ctx, domains),
+      brand,
       serverVersion: ctx.services.serverVersion,
       you: { type: p.type, userId: p.userId, role: p.role, permissions },
       permissionsExplained: permissions.map((permission) => ({
         permission,
         meaning: explainPermission(permission, w.approvalPolicy, p.type),
       })),
+    };
+  },
+});
+
+/** Owner of at least one brand: the only people who may create another (see docs/identity.md). */
+async function assertOwnsABrand(ctx: CommandContext) {
+  const owns = (await ctx.services.ownsAnyWorkspace?.(ctx.principal.userId)) ?? false;
+  if (!owns)
+    throw new AppError(
+      'forbidden',
+      'Only a person who owns a brand can create another one. Ask an owner to create it or make you an owner.',
+    );
+}
+
+/**
+ * Runs `fn` with RLS scoped to a workspace that does not exist yet. The command's transaction
+ * stays the same, so a failed insert (for example a duplicate domain) rolls the workspace back
+ * together with everything else.
+ */
+async function scopedTo<T>(ctx: CommandContext, workspaceId: string, fn: () => Promise<T>): Promise<T> {
+  await ctx.tx.execute(sql`SELECT set_config('app.workspace_id', ${workspaceId}, true)`);
+  let completed = false;
+  try {
+    const result = await fn();
+    completed = true;
+    return result;
+  } finally {
+    // A failed statement aborts the transaction; the executor rolls the whole brand back, so the
+    // setting is only restored on the success path where the caller (and the audit log) still run.
+    if (completed) await ctx.tx.execute(sql`SELECT set_config('app.workspace_id', ${ctx.principal.workspaceId}, true)`);
+  }
+}
+
+export const createWorkspace = defineCommand({
+  name: 'workspace.create',
+  title: 'Create a brand',
+  description:
+    'People only, and only for a person who owns at least one brand: create another brand (workspace) in this installation. In one transaction it creates the workspace with the same defaults as `am bootstrap`, your owner membership, a draft brand artifact and, when a host is given, a pending primary domain. Verify the domain with workspace.domains.verify before it serves links. Nothing is copied from another brand.',
+  input: z
+    .object({
+      name: z.string().trim().min(1).max(120).describe('Brand name, shown in the workspace switcher'),
+      primaryDomain: z
+        .string()
+        .trim()
+        .min(1)
+        .max(253)
+        .optional()
+        .describe('Primary domain hostname, e.g. links.example.com; it starts pending'),
+      pathPrefix: z.string().trim().max(200).optional().describe('Optional leading-slash prefix such as /am'),
+      siteName: z.string().trim().min(1).max(120).optional().describe('Brand site name for hosted pages; defaults to the brand name'),
+      logoUrl: z.string().trim().max(2000).optional().describe('Logo URL for hosted pages; https (http only on localhost)'),
+    })
+    .strict()
+    .refine((input) => !input.pathPrefix || !!input.primaryDomain, 'Give a primary domain with a path prefix.'),
+  output: z.object({
+    workspaceId: z.string().describe('The new workspace id; switch to it with X-Workspace-Id'),
+    name: z.string(),
+    brand: BrandSummarySchema,
+    domain: DomainViewSchema.nullable().describe('The pending primary domain, or null when none was given'),
+  }),
+  permission: 'artifacts:read',
+  effect: 'write',
+  humansOnly: true,
+  actionClass: 'settings',
+  auditTarget: (output) => output.workspaceId,
+  handler: async (input, ctx) => {
+    await assertOwnsABrand(ctx);
+    // Validate the brand basics before writing anything, so a bad logo URL cannot leave a brand behind.
+    const content = await validateContent(
+      'brand',
+      { siteName: input.siteName ?? input.name, ...(input.logoUrl ? { logoUrl: input.logoUrl } : {}) },
+      'draft',
+    );
+    let domain: z.output<typeof DomainViewSchema> | null = null;
+    const normalized = input.primaryDomain
+      ? (() => {
+          try {
+            return normalizeDomainInput({ host: input.primaryDomain, pathPrefix: input.pathPrefix ?? null });
+          } catch (err) {
+            // normalizeDomainInput throws db DomainError with a person-readable message.
+            throw new AppError('invalid_input', (err as Error).message);
+          }
+        })()
+      : null;
+
+    const workspaceId = newUuid();
+
+    try {
+      await scopedTo(ctx, workspaceId, async () => {
+        // Same column list as `am bootstrap`: approval policy, time zone, seed list and autonomy
+        // come from the table defaults, so the two creation paths cannot drift.
+        await ctx.tx.execute(sql`INSERT INTO workspaces (id, name) VALUES (${workspaceId}, ${input.name})`);
+        await ctx.tx.insert(schema.workspaceMembers).values({ workspaceId, userId: ctx.principal.userId, role: 'owner' });
+
+        const brandId = newId(artifactTypes.brand.prefix);
+        await ctx.tx.insert(schema.artifacts).values({
+          workspaceId,
+          id: brandId,
+          type: 'brand',
+          name: `${input.name} brand`.slice(0, 120),
+          latestVersion: 1,
+        });
+        await ctx.tx.insert(schema.artifactVersions).values({
+          workspaceId,
+          artifactId: brandId,
+          number: 1,
+          state: 'draft',
+          content,
+          contentHash: hashValue(content),
+          note: 'Created with the brand',
+          ...author(ctx),
+        });
+
+        if (normalized) {
+          const [row] = await ctx.tx
+            .insert(schema.workspaceDomains)
+            .values({
+              id: newId('wdo'),
+              workspaceId,
+              host: normalized.host,
+              pathPrefix: normalized.pathPrefix,
+              isPrimary: true,
+              status: 'pending',
+              verificationToken: newId('wdv'),
+              createdBy: ctx.principal.userId,
+            })
+            .returning();
+          domain = domainView(row);
+        }
+      });
+    } catch (err) {
+      return mapUniqueViolation(err);
+    }
+
+    const invalidate = () => ctx.services.invalidateDomainCache?.();
+    if (ctx.afterCommit) ctx.afterCommit(async () => invalidate());
+    else invalidate();
+
+    return {
+      workspaceId,
+      name: input.name,
+      brand: { siteName: input.siteName ?? input.name, logoUrl: input.logoUrl ?? null, primaryDomain: normalized?.host ?? null },
+      domain,
     };
   },
 });
@@ -732,6 +913,8 @@ export const verifyAudit = defineCommand({
 
 export const workspaceCommands = [
   getWorkspace,
+  createWorkspace,
+  ...workspaceDomainCommands,
   getBusinessContext,
   getStatus,
   inputWarnings,

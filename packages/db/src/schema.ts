@@ -1,3 +1,4 @@
+import { sql } from 'drizzle-orm';
 import {
   bigint,
   bigserial,
@@ -5,6 +6,7 @@ import {
   customType,
   date,
   doublePrecision,
+  index,
   integer,
   jsonb,
   pgTable,
@@ -43,6 +45,48 @@ export const workspaceMembers = pgTable(
   (t) => [primaryKey({ columns: [t.workspaceId, t.userId] })],
 );
 
+export type WorkspaceDomainStatus = 'pending' | 'verified';
+
+/**
+ * A public hostname (and optional path prefix) that serves one workspace's links (#186). Resolution
+ * happens before a workspace is known, so the server reads this table on the owner connection; the
+ * row is still tenant data for the commands that edit it.
+ */
+export const workspaceDomains = pgTable(
+  'workspace_domains',
+  {
+    id: text('id').primaryKey(),
+    workspaceId: uuid('workspace_id').notNull(),
+    /** Lowercase IDNA hostname, without scheme, port or trailing dot. */
+    host: text('host').notNull(),
+    /** Leading-slash prefix such as `/am`, or null for the whole host. */
+    pathPrefix: text('path_prefix'),
+    isPrimary: boolean('is_primary').notNull().default(false),
+    status: text('status').$type<WorkspaceDomainStatus>().notNull().default('pending'),
+    verificationToken: text('verification_token'),
+    verifiedAt: ts('verified_at'),
+    createdBy: text('created_by').notNull(),
+    createdAt: ts('created_at').notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('workspace_domains_host_prefix').on(t.host, sql`coalesce(${t.pathPrefix}, '')`),
+    uniqueIndex('workspace_domains_primary').on(t.workspaceId).where(sql`${t.isPrimary}`),
+    index('workspace_domains_host').on(t.host),
+  ],
+);
+
+/**
+ * The workspace a person picked on the OAuth consent page, while the flow is in progress (#187).
+ * The OAuth provider reads it through `consentReferenceId` and stores the workspace on the grant;
+ * the row is keyed by the Better Auth session and never authorises anything by itself.
+ */
+export const oauthWorkspaceSelections = pgTable('oauth_workspace_selections', {
+  sessionId: text('session_id').primaryKey(),
+  workspaceId: uuid('workspace_id').notNull(),
+  createdAt: ts('created_at').notNull().defaultNow(),
+  updatedAt: ts('updated_at').notNull().defaultNow(),
+});
+
 export const invitations = pgTable(
   'invitations',
   {
@@ -71,10 +115,15 @@ export const artifacts = pgTable(
     latestVersion: integer('latest_version').notNull(),
     publishedVersion: integer('published_version'),
     archived: boolean('archived').notNull().default(false),
+    /** The agent that owns this artifact (#426); null when a person or no one owns it. */
+    ownerAgentId: text('owner_agent_id'),
     createdAt: ts('created_at').notNull().defaultNow(),
     updatedAt: ts('updated_at').notNull().defaultNow(),
   },
-  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.id] }),
+    index('artifacts_owner_agent').on(t.workspaceId, t.ownerAgentId).where(sql`owner_agent_id IS NOT NULL`),
+  ],
 );
 
 export const artifactVersions = pgTable(
@@ -489,10 +538,15 @@ export const messages = pgTable(
     segments: integer('segments'),
     /** A test send: sent for checking, never counted in reporting or delivery policy. */
     test: boolean('test').notNull().default(false),
+    /** The agent behind this message (#426): a direct send by an agent, or an agent-owned broadcast or journey. */
+    agentId: text('agent_id'),
     createdAt: ts('created_at').notNull().defaultNow(),
     updatedAt: ts('updated_at').notNull().defaultNow(),
   },
-  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.id] }),
+    index('messages_agent_contact').on(t.workspaceId, t.profileId, t.createdAt).where(sql`agent_id IS NOT NULL`),
+  ],
 );
 
 export const smsProviders = pgTable(
@@ -1378,6 +1432,41 @@ export const edgeTargets = pgTable('edge_targets', {
   updatedAt: ts('updated_at').notNull().defaultNow(),
 });
 
+/** The rollout state of a published experience (#427): its step, share and guardrail reading. */
+export const experienceRollouts = pgTable(
+  'experience_rollouts',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    artifactId: text('artifact_id').notNull(),
+    version: integer('version').notNull(),
+    steps: integer('steps').array().$type<number[]>().notNull(),
+    stepHours: integer('step_hours').notNull(),
+    stepIndex: integer('step_index').notNull().default(0),
+    share: integer('share').notNull().default(0),
+    status: text('status').$type<'running' | 'paused' | 'stopped' | 'complete'>().notNull().default('running'),
+    /** The ramp's guardrail definition from the experience content, if it has one. */
+    guardrail: jsonb('guardrail').$type<{ measure: string; maxDropPercent: number } | null>(),
+    /** The latest metric-layer reading, kept even after the ramp stops for the record. */
+    lastGuardrail: jsonb('last_guardrail').$type<{
+      at: string;
+      measure: string;
+      value: number;
+      baseline: number;
+      dropPercent: number;
+      ok: boolean;
+    } | null>(),
+    startedAt: ts('started_at').notNull().defaultNow(),
+    advancedAt: ts('advanced_at').notNull().defaultNow(),
+    nextStepAt: ts('next_step_at'),
+    pausedAt: ts('paused_at'),
+    stoppedAt: ts('stopped_at'),
+    reason: text('reason'),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+    updatedBy: text('updated_by'),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.artifactId] })],
+);
+
 export type AgentStatus = 'active' | 'paused' | 'revoked';
 export type AgentCredentialKind = 'api_token' | 'oauth_client' | 'hosted' | 'copilot';
 export type HostedAgentRunStatus = 'ok' | 'failed' | 'skipped';
@@ -1396,7 +1485,7 @@ export const agents = pgTable(
     statusReason: text('status_reason'),
     statusChangedBy: text('status_changed_by'),
     statusChangedAt: ts('status_changed_at'),
-    /** Reserved for multi-brand (#184): null means the whole workspace. */
+    /** Reserved for multi-brand (#184). A brand is a workspace; nothing may use this column. */
     brand: text('brand'),
     /** The guardian's cap on the agent until a person clears it (#253); null when it has not acted. */
     guard: jsonb('guard').$type<AgentGuardState>(),
@@ -1709,6 +1798,7 @@ export type AgentEventType =
   | 'guardian.episode'
   | 'guardrail.breach'
   | 'experiment.significant'
+  | 'experience.rollout_paused'
   | 'alert.fired';
 
 /**
@@ -1738,6 +1828,7 @@ export const agentEventCursor = pgTable('agent_event_cursor', {
   lastGuardianAt: ts('last_guardian_at'),
   lastAlertAt: ts('last_alert_at'),
   lastExperimentAt: ts('last_experiment_at'),
+  lastRolloutAt: ts('last_rollout_at'),
 });
 
 /** One delivered event per subscription: what `agents.events` pages through and what keeps a re-derived event silent. */

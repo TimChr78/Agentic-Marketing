@@ -1,5 +1,21 @@
-import { Bot, Check, ChevronDown, ChevronRight, LogOut, Menu as MenuIcon, Monitor, Moon, Search, Settings2, Sun, X } from 'lucide-react';
-import { type ReactNode, useEffect, useRef, useState } from 'react';
+import {
+  Bot,
+  Check,
+  ChevronDown,
+  ChevronRight,
+  LogOut,
+  Menu as MenuIcon,
+  Monitor,
+  Moon,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Plus,
+  Search,
+  Settings2,
+  Sun,
+  X,
+} from 'lucide-react';
+import { lazy, type ReactNode, Suspense, useEffect, useRef, useState } from 'react';
 import { useAutonomy } from '../features/agents/AutonomyProvider';
 import { switchNotice } from '../features/agents/labels';
 import { CopilotDrawer } from '../features/copilot/CopilotDrawer';
@@ -7,20 +23,26 @@ import { Badge, cx, IconButton, Kbd, Menu } from '../ui';
 import { useFocusTrap } from '../ui/focus';
 import { navFor, visibleNav } from './nav';
 import { type Crumb, CrumbsProvider } from './page';
+import { useNavPref } from './prefs';
 import { Link, navigate, useLocation } from './router';
 import { SearchPalette } from './SearchPalette';
 import { useSession } from './session';
 import { setThemePref, type ThemePref, useThemePref } from './theme';
 
-// The signed-in shell (DESIGN.md → Layout): sidebar with the workspace switcher and nav, top bar
-// with breadcrumbs, search, theme and the user menu. Under 1024 px the sidebar becomes a drawer.
+// The New brand wizard is only needed when someone opens it, so it stays out of the shell bundle.
+const NewBrandDrawer = lazy(async () => ({ default: (await import('../features/brand/NewBrandDrawer')).NewBrandDrawer }));
 
+// The signed-in shell (DESIGN.md → Layout): sidebar with the brand switcher and nav, top bar with
+// breadcrumbs, search, theme and the user menu. Under 1024 px the sidebar becomes a drawer; on
+// desktop it can collapse to a 64 px rail, remembered per person and device (#180).
 export function Shell({ children }: { children: ReactNode }) {
   const { path } = useLocation();
   const [crumbs, setCrumbs] = useState<Crumb[]>([]);
   const [navOpen, setNavOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [copilotOpen, setCopilotOpen] = useState(false);
+  const [navPref, setNavPref] = useNavPref();
+  const collapsed = navPref === 'collapsed';
   const { can } = useSession();
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: the mobile drawer closes on navigation, which the body does not read
@@ -47,13 +69,32 @@ export function Shell({ children }: { children: ReactNode }) {
       >
         Skip to content
       </a>
-      <aside className="fixed inset-y-0 left-0 z-30 hidden w-[232px] border-r border-line bg-surface lg:block">
-        <Sidebar />
+      <aside
+        id="app-sidebar"
+        className={cx(
+          'fixed inset-y-0 left-0 z-30 hidden border-r border-line bg-surface transition-[width] duration-[180ms] ease-[cubic-bezier(.2,.8,.2,1)] lg:block',
+          collapsed ? 'w-16' : 'w-[232px]',
+        )}
+      >
+        <Sidebar rail={collapsed} />
       </aside>
       {navOpen && <MobileNav onClose={() => setNavOpen(false)} />}
-      <div className="lg:pl-[232px]">
+      <div
+        className={cx(
+          'transition-[padding-left] duration-[180ms] ease-[cubic-bezier(.2,.8,.2,1)]',
+          collapsed ? 'lg:pl-16' : 'lg:pl-[232px]',
+        )}
+      >
         <header className="sticky top-0 z-20 flex h-12 items-center gap-2 border-b border-line bg-surface/95 px-3 backdrop-blur-sm sm:px-5">
           <IconButton className="lg:hidden" label="Open navigation" icon={<MenuIcon size={18} />} onClick={() => setNavOpen(true)} />
+          <IconButton
+            className="hidden lg:inline-flex"
+            label={collapsed ? 'Expand navigation' : 'Collapse navigation'}
+            aria-expanded={!collapsed}
+            aria-controls="app-sidebar"
+            icon={collapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}
+            onClick={() => setNavPref(collapsed ? 'expanded' : 'collapsed')}
+          />
           <nav aria-label="Breadcrumb" className="min-w-0 flex-1">
             <ol className="flex min-w-0 items-center gap-1 text-[13px]">
               {group && !group.path && <li className="hidden shrink-0 text-muted sm:block">{group.label}</li>}
@@ -147,117 +188,230 @@ function MobileNav({ onClose }: { onClose: () => void }) {
   );
 }
 
-function Sidebar() {
+function Sidebar({ rail = false }: { rail?: boolean }) {
   const { can, pending } = useSession();
   const { path } = useLocation();
   const groups = visibleNav(can);
   return (
     <div className="flex h-full flex-col">
-      <WorkspaceSwitcher />
-      <nav aria-label="Main" className="flex-1 overflow-y-auto px-2 pb-4">
-        {groups.map((g) => {
-          const Icon = g.icon;
-          if (g.path) {
-            const active = path === g.path || path.startsWith(`${g.path}/`);
+      <WorkspaceSwitcher rail={rail} />
+      <nav aria-label="Main" className={cx('flex-1 overflow-y-auto pb-4', rail ? 'px-1.5' : 'px-2')}>
+        {rail ? (
+          <RailNav groups={groups} path={path} pending={pending} />
+        ) : (
+          groups.map((g) => {
+            const Icon = g.icon;
+            if (g.path) {
+              const active = path === g.path || path.startsWith(`${g.path}/`);
+              return (
+                <div key={g.key} className="mt-4">
+                  <Link
+                    to={g.path}
+                    aria-current={active ? 'page' : undefined}
+                    className={cx(
+                      'flex h-8 items-center gap-2 rounded-md px-2 text-[13px] font-medium',
+                      active ? 'bg-accent-soft text-accent' : 'text-fg-2 hover:bg-surface-2 hover:text-fg',
+                    )}
+                  >
+                    <Icon size={16} aria-hidden className={active ? '' : 'text-muted'} />
+                    <span className="flex-1">{g.label}</span>
+                    {pending > 0 && (
+                      <Badge tone="accent" label={`${pending} pending`}>
+                        {pending}
+                      </Badge>
+                    )}
+                  </Link>
+                </div>
+              );
+            }
             return (
               <div key={g.key} className="mt-4">
-                <Link
-                  to={g.path}
-                  aria-current={active ? 'page' : undefined}
-                  className={cx(
-                    'flex h-8 items-center gap-2 rounded-md px-2 text-[13px] font-medium',
-                    active ? 'bg-accent-soft text-accent' : 'text-fg-2 hover:bg-surface-2 hover:text-fg',
-                  )}
-                >
-                  <Icon size={16} aria-hidden className={active ? '' : 'text-muted'} />
-                  <span className="flex-1">{g.label}</span>
-                  {pending > 0 && (
-                    <Badge tone="accent" label={`${pending} pending`}>
-                      {pending}
-                    </Badge>
-                  )}
-                </Link>
+                <div className="flex h-7 items-center gap-2 px-2 text-[12px] font-medium text-muted">
+                  <Icon size={14} aria-hidden />
+                  {g.label}
+                </div>
+                <ul>
+                  {g.items.map((i) => {
+                    const active = path === i.path || path.startsWith(`${i.path}/`);
+                    return (
+                      <li key={i.path}>
+                        <Link
+                          to={i.path}
+                          aria-current={active ? 'page' : undefined}
+                          className={cx(
+                            'flex h-8 items-center rounded-md pr-2 pl-[30px] text-[13px]',
+                            active ? 'bg-accent-soft font-medium text-accent' : 'text-fg-2 hover:bg-surface-2 hover:text-fg',
+                          )}
+                        >
+                          {i.label}
+                        </Link>
+                      </li>
+                    );
+                  })}
+                </ul>
               </div>
             );
-          }
-          return (
-            <div key={g.key} className="mt-4">
-              <div className="flex h-7 items-center gap-2 px-2 text-[12px] font-medium text-muted">
-                <Icon size={14} aria-hidden />
-                {g.label}
-              </div>
-              <ul>
-                {g.items.map((i) => {
-                  const active = path === i.path || path.startsWith(`${i.path}/`);
-                  return (
-                    <li key={i.path}>
-                      <Link
-                        to={i.path}
-                        aria-current={active ? 'page' : undefined}
-                        className={cx(
-                          'flex h-8 items-center rounded-md pr-2 pl-[30px] text-[13px]',
-                          active ? 'bg-accent-soft font-medium text-accent' : 'text-fg-2 hover:bg-surface-2 hover:text-fg',
-                        )}
-                      >
-                        {i.label}
-                      </Link>
-                    </li>
-                  );
-                })}
-              </ul>
-            </div>
-          );
-        })}
+          })
+        )}
       </nav>
     </div>
+  );
+}
+
+/**
+ * The collapsed desktop navigation (#180): group icons with a tooltip and accessible name, the
+ * pending-approvals badge, and a menu with the group's pages so everything stays reachable without
+ * expanding the rail. Under 1024 px the full sidebar is used instead.
+ */
+function RailNav({ groups, path, pending }: { groups: ReturnType<typeof visibleNav>; path: string; pending: number }) {
+  return (
+    <ul className="mt-2 space-y-1">
+      {groups.map((g) => {
+        const Icon = g.icon;
+        const active = g.path
+          ? path === g.path || path.startsWith(`${g.path}/`)
+          : g.items.some((item) => path === item.path || path.startsWith(`${item.path}/`));
+        const itemClass = cx(
+          'relative flex h-10 w-full items-center justify-center rounded-md',
+          active ? 'bg-accent-soft text-accent' : 'text-fg-2 hover:bg-surface-2 hover:text-fg',
+        );
+        const badge =
+          g.path === '/approvals' && pending > 0 ? (
+            <span className="absolute top-1 right-1 inline-flex min-w-4 items-center justify-center rounded-full bg-accent px-1 text-[10px] leading-4 font-semibold text-accent-fg">
+              {pending}
+            </span>
+          ) : null;
+        return (
+          <li key={g.key}>
+            {g.path ? (
+              <Link
+                to={g.path}
+                aria-label={pending > 0 && g.path === '/approvals' ? `${g.label}, ${pending} pending` : g.label}
+                title={g.label}
+                aria-current={active ? 'page' : undefined}
+                className={itemClass}
+              >
+                <Icon size={18} aria-hidden />
+                {badge}
+              </Link>
+            ) : (
+              <Menu
+                label={g.label}
+                align="start"
+                items={g.items.map((item) => ({
+                  label: item.label,
+                  icon: path === item.path || path.startsWith(`${item.path}/`) ? <Check /> : undefined,
+                  onSelect: () => navigate(item.path),
+                }))}
+                trigger={(p) => (
+                  <button {...p} type="button" aria-label={`${g.label} navigation`} title={g.label} className={itemClass}>
+                    <Icon size={18} aria-hidden />
+                  </button>
+                )}
+              />
+            )}
+          </li>
+        );
+      })}
+    </ul>
   );
 }
 
 const roleLabel: Record<string, string> = { owner: 'Owner', admin: 'Admin', marketer: 'Builder', approver: 'Approver', viewer: 'Viewer' };
 export const roleName = (r: string) => roleLabel[r] ?? r;
 
-function WorkspaceSwitcher() {
+/** The current brand's logo, or its initial when no logo is published. */
+function BrandMark({ logoUrl, name, className }: { logoUrl: string | null; name: string; className?: string }) {
+  if (logoUrl)
+    return (
+      <span className={cx('flex shrink-0 items-center justify-center overflow-hidden rounded-md bg-surface-2', className)}>
+        <img src={logoUrl} alt="" className="max-h-full max-w-full object-contain" />
+      </span>
+    );
+  return (
+    <span
+      aria-hidden
+      className={cx('flex shrink-0 items-center justify-center rounded-md bg-fg text-[12px] font-semibold text-bg', className)}
+    >
+      {name.slice(0, 1).toUpperCase()}
+    </span>
+  );
+}
+
+export function WorkspaceSwitcher({ rail = false }: { rail?: boolean }) {
   const { workspace, memberships, switchWorkspace } = useSession();
+  const [newBrandOpen, setNewBrandOpen] = useState(false);
+  const brand = workspace?.brand;
+  const name = brand?.siteName ?? workspace?.name ?? '?';
+  const domain = brand?.primaryDomain ?? null;
+  // Anyone who owns at least one brand may create another; the server enforces the same rule.
+  const canCreate = memberships.some((m) => m.role === 'owner');
   const others = memberships.filter((m) => m.id !== workspace?.id);
   const label = (
     <>
-      <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-fg text-[12px] font-semibold text-bg" aria-hidden>
-        {(workspace?.name ?? '?').slice(0, 1).toUpperCase()}
-      </span>
+      <BrandMark logoUrl={brand?.logoUrl ?? null} name={name} className="size-7" />
       <span className="min-w-0 flex-1 text-left">
-        <span className="block truncate text-[13px] font-semibold text-fg">{workspace?.name}</span>
-        <span className="block truncate text-[11px] text-muted">{roleName(workspace?.you.role ?? '')}</span>
+        <span className="block truncate text-[13px] font-semibold text-fg">{name}</span>
+        <span className="block truncate text-[11px] text-muted">{domain ?? roleName(workspace?.you.role ?? '')}</span>
       </span>
     </>
   );
-  if (!others.length) return <div className="flex h-14 items-center gap-2.5 border-b border-line px-3.5">{label}</div>;
+  const railLabel = <BrandMark logoUrl={brand?.logoUrl ?? null} name={name} className="size-8" />;
+  const switcherItems = memberships.map((m) => ({
+    label: (
+      <span className="block min-w-0">
+        <span className="block truncate font-medium text-fg">{m.brand.siteName}</span>
+        <span className="block truncate text-[11px] text-muted">{m.brand.primaryDomain ?? roleName(m.role)}</span>
+      </span>
+    ),
+    icon: m.id === workspace?.id ? <Check /> : <span className="inline-block size-4" />,
+    onSelect: () => {
+      if (m.id !== workspace?.id) {
+        navigate('/');
+        void switchWorkspace(m.id);
+      }
+    },
+  }));
+  const items = [
+    ...switcherItems,
+    ...(canCreate ? ['separator' as const, { label: 'New brand…', icon: <Plus />, onSelect: () => setNewBrandOpen(true) }] : []),
+  ];
+  if (!others.length && !canCreate)
+    return (
+      <div
+        className={cx('flex items-center gap-2.5 border-b border-line', rail ? 'h-14 justify-center px-2' : 'h-14 px-3.5')}
+        title={rail ? name : undefined}
+      >
+        {rail ? railLabel : label}
+      </div>
+    );
   return (
-    <div className="border-b border-line p-2">
+    <div className={cx('border-b border-line', rail ? 'flex h-14 items-center justify-center px-2' : 'p-2')}>
       <Menu
         align="start"
-        label="Switch workspace"
-        items={memberships.map((m) => ({
-          label: `${m.name} · ${roleName(m.role)}`,
-          icon: m.id === workspace?.id ? <Check /> : <span className="inline-block size-4" />,
-          onSelect: () => {
-            if (m.id !== workspace?.id) {
-              navigate('/');
-              void switchWorkspace(m.id);
-            }
-          },
-        }))}
+        label="Switch brand"
+        items={items}
         trigger={(p) => (
           <button
             {...p}
             type="button"
-            className="flex h-10 w-full items-center gap-2.5 rounded-md px-1.5 hover:bg-surface-2"
-            aria-label={`Workspace: ${workspace?.name}. Switch workspace`}
+            className={cx(
+              'flex items-center rounded-md hover:bg-surface-2',
+              rail ? 'size-10 justify-center' : 'h-10 w-full gap-2.5 px-1.5',
+            )}
+            aria-label={`Brand: ${name}${domain ? ` (${domain})` : ''}. Switch brand`}
+            title={rail ? name : undefined}
           >
-            {label}
-            <ChevronDown size={14} className="shrink-0 text-muted" aria-hidden />
+            {rail ? railLabel : label}
+            {!rail && <ChevronDown size={14} className="shrink-0 text-muted" aria-hidden />}
           </button>
         )}
       />
+      {newBrandOpen && (
+        <Suspense fallback={null}>
+          <NewBrandDrawer open onClose={() => setNewBrandOpen(false)} />
+        </Suspense>
+      )}
     </div>
   );
 }

@@ -7,6 +7,7 @@ import {
   type ResolvedBrand,
   resolveBrand,
 } from '@agentic-marketing/artifacts';
+import type { PublicRequest } from '@agentic-marketing/commands';
 import { defineCommand } from '@agentic-marketing/commands';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import { renderTemplate, type UnsubscribeLink, type WebLink } from '@agentic-marketing/email';
@@ -59,8 +60,10 @@ async function publishedBrands(db: Db): Promise<{ workspaceId: string; brand: Br
   return brands;
 }
 
-export async function archiveForSlug(db: Db, slug: string) {
-  const hit = (await publishedBrands(db)).find((b) => b.brand.archive.enabled && b.brand.archive.slug === slug);
+export async function archiveForSlug(db: Db, slug: string, workspaceId?: string) {
+  const hit = (await publishedBrands(db)).find(
+    (b) => (!workspaceId || b.workspaceId === workspaceId) && b.brand.archive.enabled && b.brand.archive.slug === slug,
+  );
   return hit ?? null;
 }
 
@@ -529,20 +532,30 @@ export interface ArchiveRouteDeps {
 
 /** Public archive and web-version routes, mounted on the links host next to /u and /f. */
 export function archiveRoutes(deps: ArchiveRouteDeps) {
-  const app = new Hono();
+  const app = new Hono<{ Variables: { publicRequest?: PublicRequest } }>();
   const notFound = (c: Context) => c.text('Not found.', 404);
+  // The brand host this request arrived on (#185): its links stay on that host, and an archive
+  // slug or web token from another workspace is not served here.
+  const requestOf = (c: Context) => c.get('publicRequest');
+  const linksBase = (c: Context) => requestOf(c)?.linksUrl ?? deps.linksUrl;
+  const workspaceOf = (c: Context) => requestOf(c)?.workspaceId ?? undefined;
+  const crossBrand = (c: Context, workspaceId: string) => {
+    const request = requestOf(c);
+    return !!request?.workspaceId && request.workspaceId !== workspaceId;
+  };
 
-  const load = async (slug: string) => {
-    const hit = await archiveForSlug(deps.db, slug);
+  const load = async (c: Context, slug: string) => {
+    const hit = await archiveForSlug(deps.db, slug, workspaceOf(c));
     if (!hit) return null;
-    const issues = await deps.db.withWorkspace(hit.workspaceId, (tx) => listArchiveIssues(tx, hit.brand, deps.linksUrl));
-    return { ...hit, issues, settings: settingsView(hit.brand, deps.linksUrl) };
+    const base = linksBase(c);
+    const issues = await deps.db.withWorkspace(hit.workspaceId, (tx) => listArchiveIssues(tx, hit.brand, base));
+    return { ...hit, issues, settings: settingsView(hit.brand, base) };
   };
 
   app.get('/n/:slug/feed.xml', async (c) => {
-    const archive = await load(c.req.param('slug'));
+    const archive = await load(c, c.req.param('slug'));
     if (!archive) return notFound(c);
-    const base = `${deps.linksUrl}/n/${archive.settings.slug ?? ''}`;
+    const base = `${linksBase(c)}/n/${archive.settings.slug ?? ''}`;
     return c.body(renderFeed(archive.brand, resolveBrand(archive.brand), archive.settings, archive.issues, base), 200, {
       'content-type': 'application/rss+xml; charset=utf-8',
       ...archiveHeaders(PUBLIC_CACHE),
@@ -550,9 +563,9 @@ export function archiveRoutes(deps: ArchiveRouteDeps) {
   });
 
   app.get('/n/:slug/sitemap.xml', async (c) => {
-    const archive = await load(c.req.param('slug'));
+    const archive = await load(c, c.req.param('slug'));
     if (!archive) return notFound(c);
-    const base = `${deps.linksUrl}/n/${archive.settings.slug ?? ''}`;
+    const base = `${linksBase(c)}/n/${archive.settings.slug ?? ''}`;
     return c.body(renderSitemap(archive.issues, base), 200, {
       'content-type': 'application/xml; charset=utf-8',
       ...archiveHeaders(PUBLIC_CACHE),
@@ -560,15 +573,15 @@ export function archiveRoutes(deps: ArchiveRouteDeps) {
   });
 
   app.get('/n/:slug', async (c) => {
-    const archive = await archiveForSlug(deps.db, c.req.param('slug'));
+    const archive = await archiveForSlug(deps.db, c.req.param('slug'), workspaceOf(c));
     if (!archive) return notFound(c);
-    return c.redirect(`${deps.linksUrl}/n/${archive.brand.archive.slug ?? ''}/`, 301);
+    return c.redirect(`${linksBase(c)}/n/${archive.brand.archive.slug ?? ''}/`, 301);
   });
 
   app.get('/n/:slug/', async (c) => {
-    const archive = await load(c.req.param('slug'));
+    const archive = await load(c, c.req.param('slug'));
     if (!archive) return notFound(c);
-    const base = `${deps.linksUrl}/n/${archive.settings.slug ?? ''}`;
+    const base = `${linksBase(c)}/n/${archive.settings.slug ?? ''}`;
     const page = Math.max(1, Number.parseInt(c.req.query('page') ?? '1', 10) || 1);
     const html = renderArchiveIndex(archive.brand, resolveBrand(archive.brand), archive.settings, archive.issues, base, page);
     return c.html(html, 200, archiveHeaders(PUBLIC_CACHE));
@@ -579,7 +592,7 @@ export function archiveRoutes(deps: ArchiveRouteDeps) {
     const issueSlug = c.req.param('issue');
     // /n/w/<token> is the signed web version. A workspace archive slug "w" is rejected on publish.
     if (slug === 'w') return webVersion(c, issueSlug);
-    const archive = await load(slug);
+    const archive = await load(c, slug);
     if (!archive) return notFound(c);
     const issue = archive.issues.find((i) => i.slug === issueSlug);
     if (!issue) return notFound(c);
@@ -590,7 +603,9 @@ export function archiveRoutes(deps: ArchiveRouteDeps) {
   async function webVersion(c: Context, token: string) {
     const link = deps.links.verify<WebLink>(token);
     if (!link || typeof link.w !== 'string' || typeof link.m !== 'string') return notFound(c);
+    if (crossBrand(c, link.w)) return notFound(c);
     if (link.x !== undefined && link.x < Date.now()) return c.text('This link has expired.', 410);
+    const base = linksBase(c);
     const page = await deps.db.withWorkspace(link.w, async (tx) => {
       const [message] = await tx.select().from(schema.messages).where(eq(schema.messages.id, link.m));
       if (!message) return null;
@@ -600,7 +615,7 @@ export function archiveRoutes(deps: ArchiveRouteDeps) {
       );
       if (!template.success) return null;
       const profile = message.profileId ? await profileForMessage(tx, link.w, message.profileId, deps.kp) : null;
-      const unsubscribe = `${deps.linksUrl}/u/${deps.links.sign({
+      const unsubscribe = `${base}/u/${deps.links.sign({
         w: link.w,
         p: message.profileId ?? '',
         u: message.purpose,
@@ -613,7 +628,7 @@ export function archiveRoutes(deps: ArchiveRouteDeps) {
           profile: profile?.vars ?? {},
           unsubscribe_url: unsubscribe,
           preferences_url: unsubscribe,
-          web_url: `${deps.linksUrl}/n/w/${token}`,
+          web_url: `${base}/n/w/${token}`,
         });
       } catch {
         return null;
@@ -621,7 +636,7 @@ export function archiveRoutes(deps: ArchiveRouteDeps) {
       const brand = await publishedSingleton(tx, 'brand');
       let archive: string | null = null;
       if (brand?.archive.enabled && message.journeyId) {
-        archive = (await listArchiveIssues(tx, brand, deps.linksUrl)).find((i) => i.artifactId === message.journeyId)?.url ?? null;
+        archive = (await listArchiveIssues(tx, brand, base)).find((i) => i.artifactId === message.journeyId)?.url ?? null;
       }
       return { brand: resolveBrand(brand), subject: rendered.subject, html: rendered.html, archive };
     });
@@ -672,7 +687,7 @@ export function archiveRoutes(deps: ArchiveRouteDeps) {
       }
     });
     if (!html) return notFound(c);
-    const base = `${deps.linksUrl}/n/${archive.settings.slug ?? ''}`;
+    const base = `${linksBase(c)}/n/${archive.settings.slug ?? ''}`;
     return c.html(
       renderArchiveIssue(archive.brand, resolveBrand(archive.brand), archive.settings, issue, html, base),
       200,
@@ -735,7 +750,9 @@ export const listArchiveIssuesCommand = defineCommand({
   effect: 'read',
   handler: async (_input, ctx) => {
     const brand = await publishedSingleton(ctx.tx, 'brand');
-    const linksUrl = ctx.services.linksUrl ?? ctx.services.publicUrl ?? '';
+    const linksUrl = ctx.services.linksUrlFor
+      ? await ctx.services.linksUrlFor(ctx.principal.workspaceId)
+      : (ctx.services.linksUrl ?? ctx.services.publicUrl ?? '');
     return {
       settings: settingsView(brand, linksUrl),
       issues: brand ? await listArchiveIssues(ctx.tx, brand, linksUrl) : [],

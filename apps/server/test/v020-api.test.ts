@@ -45,7 +45,7 @@ beforeAll(async () => {
   otherWs = await t.workspaceWith([[owner, 'marketer']], 'none');
   otherWsName = (await t.api(owner, otherWs).call('workspace.get', {})).name;
   await variants.workspaceWith([[variantOwner, 'owner']], 'agent_changes');
-  agent = await connectAgent(t.base, owner, [...ROLE_PERMISSIONS.owner]);
+  agent = await connectAgent(t.base, owner, [...ROLE_PERMISSIONS.owner], undefined, ws);
   variantAgent = await connectAgent(variants.base, variantOwner, [...ROLE_PERMISSIONS.owner]);
 }, 120_000);
 
@@ -87,8 +87,8 @@ describe('workspace settings and membership', () => {
     const list = await api.call('workspace.memberships', {});
     expect(list.workspaces).toEqual(
       expect.arrayContaining([
-        { id: ws, name: 'Signal Studio', role: 'owner' },
-        { id: otherWs, name: otherWsName, role: 'marketer' },
+        expect.objectContaining({ id: ws, name: 'Signal Studio', role: 'owner' }),
+        expect.objectContaining({ id: otherWs, name: otherWsName, role: 'marketer' }),
       ]),
     );
     expect((await t.api(owner, otherWs).call('workspace.get', {})).id).toBe(otherWs);

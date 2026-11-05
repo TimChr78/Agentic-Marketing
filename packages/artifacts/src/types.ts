@@ -854,6 +854,35 @@ const experience = z
       .min(1)
       .max(5),
     holdoutPercent: z.number().int().min(0).max(50).default(0).describe('Share of eligible visitors who see nothing (control group)'),
+    rollout: z
+      .object({
+        steps: z
+          .array(z.number().int().min(1).max(100))
+          .min(1)
+          .max(10)
+          .describe('Share of eligible visitors at each step, strictly increasing and ending at 100, e.g. [5, 25, 50, 100]'),
+        stepHours: z.number().int().min(1).max(720).describe('Hours each step runs before the next, when the guardrail holds'),
+        guardrail: z
+          .object({
+            measure: z
+              .string()
+              .regex(/^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$/, 'A metric-layer measure, e.g. email.click_rate or conversions'),
+            maxDropPercent: z.number().gt(0).max(100).describe('Pause the ramp when the measure falls this far below the previous window'),
+          })
+          .strict()
+          .optional()
+          .describe('Stop the ramp automatically when a metric-layer measure drops while it runs'),
+      })
+      .strict()
+      .superRefine((r, ctx) => {
+        if (r.steps[r.steps.length - 1] !== 100) ctx.addIssue({ code: 'custom', path: ['steps'], message: 'The last step must be 100' });
+        for (let i = 1; i < r.steps.length; i++)
+          if (r.steps[i] <= r.steps[i - 1]) ctx.addIssue({ code: 'custom', path: ['steps'], message: 'Steps must be strictly increasing' });
+      })
+      .optional()
+      .describe(
+        'Progressive rollout: start at the first step and widen on a schedule, with an optional metric guardrail. A person can stop it at once with experiences.stopRollout',
+      ),
     goal: z
       .object({ event: z.string().min(1).max(200) })
       .optional()
@@ -1400,7 +1429,7 @@ const agentMandate = z.object({
         .describe('Audiences the agent may send to; empty: none'),
       purposes: z.array(z.string()).max(20).default([]).describe('Purposes its messages may use; empty: any the segment allows'),
       topics: z.array(z.string()).max(20).default([]).describe('Topics its messages may use; empty: any'),
-      channels: z.array(z.enum(['email', 'sms', 'push'])).default(['email']),
+      channels: z.array(z.enum(['email', 'sms', 'push', 'ads'])).default(['email']),
       artifactTypes: z.array(z.string()).max(30).default([]).describe('Artifact types it may publish; empty: any within the levels'),
       artifacts: z.array(z.string()).max(100).default([]).describe('Specific artifacts it may change; empty: any of the allowed types'),
       brand: z.string().nullable().default(null).describe('Reserved for multi-brand; null: the whole workspace'),
@@ -1475,6 +1504,10 @@ const agentMandate = z.object({
         .max(50)
         .optional()
         .describe('Experiences it publishes need holdoutPercent of at least this'),
+      experienceRamp: z
+        .union([z.boolean(), z.number().int().min(1).max(100)])
+        .optional()
+        .describe('Experiences it publishes need a rollout: true for any ramp, or the minimum first step share (rollout.steps[0])'),
     })
     .default({})
     .describe(

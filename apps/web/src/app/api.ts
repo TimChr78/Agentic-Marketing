@@ -19,6 +19,19 @@ const fetchWithWorkspace: typeof fetch = (input, init = {}) => {
 };
 
 export const api = createClient<Commands>({ credentials: 'include', fetch: fetchWithWorkspace });
+
+/**
+ * A client that acts in one chosen brand for a single call, without switching the shell. Used when
+ * creating a token for another brand (#187); the server still checks the person's role there.
+ */
+export function apiForWorkspace(id: string) {
+  const fetchForWorkspace: typeof fetch = (input, init = {}) => {
+    const headers = new Headers(init.headers);
+    headers.set('x-workspace-id', id);
+    return fetch(input, { ...init, headers });
+  };
+  return createClient<Commands>({ credentials: 'include', fetch: fetchForWorkspace });
+}
 export type CommandName = Commands[number]['name'];
 export type Out<N extends CommandName> = CommandOutput<Commands, N>;
 export type In<N extends CommandName> = CommandInput<Commands, N>;

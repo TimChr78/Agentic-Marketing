@@ -9,6 +9,7 @@ import { Client, type OAuthClientProvider, StreamableHTTPClientTransport, Unauth
 import pg from 'pg';
 import { createServer } from '../src/app';
 import { loadConfig } from '../src/config';
+import { prefixOf } from '../src/domains';
 import { publicOnly } from '../src/http/public-only';
 import type { Commands } from '../src/registry';
 import { startScheduler, startWorkers } from '../src/workers';
@@ -97,7 +98,7 @@ export const grantFrom = (requested: string, permissions: string[]) =>
     .join(' ');
 
 /** Plays the person in the browser: authorize → sign in → consent with the chosen permissions. */
-export async function connectAgent(BASE: string, u: User, permissions: string[], clientMetadataUrl?: string) {
+export async function connectAgent(BASE: string, u: User, permissions: string[], clientMetadataUrl?: string, workspaceId?: string) {
   const provider = new TestOAuthProvider(clientMetadataUrl);
   const first = new StreamableHTTPClientTransport(new URL(`${BASE}/mcp`), { authProvider: provider });
   const unauthorized = await new Client({ name: 't', version: '0' }).connect(first).then(
@@ -115,6 +116,15 @@ export async function connectAgent(BASE: string, u: User, permissions: string[],
   });
   let next = new URL((await signIn.json()).url, BASE);
   if (next.pathname === '/consent') {
+    // Like the consent page, choose the brand before accepting when the person belongs to several.
+    if (workspaceId) {
+      const chosen = await fetch(`${BASE}/api/oauth/workspace`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', origin: BASE, cookie: cookieOf(signIn) },
+        body: JSON.stringify({ workspaceId, scope: grantFrom(next.searchParams.get('scope') ?? '', permissions) }),
+      });
+      if (!chosen.ok) throw new Error(`workspace choice failed: ${await chosen.text()}`);
+    }
     const consent = await fetch(`${BASE}/api/auth/oauth2/consent`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', origin: BASE, cookie: cookieOf(signIn) },
@@ -247,7 +257,9 @@ export async function startTestServer(
   let publicHttp: { close: () => void } | undefined;
   if (config.publicPort) {
     await new Promise<void>((resolve) => {
-      publicHttp = serve({ fetch: publicOnly(srv.app).fetch, port: config.publicPort! }, (_i: AddressInfo) => resolve());
+      publicHttp = serve({ fetch: publicOnly(srv.app, prefixOf(srv.domains)).fetch, port: config.publicPort! }, (_i: AddressInfo) =>
+        resolve(),
+      );
     });
   }
   const stop = new AbortController();
@@ -277,6 +289,8 @@ export async function startTestServer(
       enrollmentTickMs: 86_400_000,
       guardianTickMs: 86_400_000,
       holdTickMs: 300,
+      // Experience rollout tests drive the sweep directly with a fixed clock.
+      rolloutTickMs: 86_400_000,
     }),
   ];
 

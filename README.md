@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="apps/web/public/brand/mark-wordmark-mono-dark.svg">
+    <img src="apps/web/public/brand/mark-wordmark-mono-light.svg" alt="Agentic Marketing" width="320">
+  </picture>
+</p>
+
 # Agentic Marketing
 
 An open-source, self-hostable marketing platform built **agent-first**: every capability is a command that works the same over REST, MCP (for AI agents) and the web UI, under the same permissions, approvals and audit log. Underneath is an event-based customer data platform with GDPR-grade consent handling. You bring your own LLM keys.
@@ -167,7 +174,7 @@ Wave 1 (Phases −1 to 5) is complete: foundations, data platform, e-mail, segme
 | 19 | The safety net | Built in 0.5.0: the guardian, staged sends, undo, shadow mode, learning rules and thin hosted agents, plus Prometheus metrics, workspace portability and erasure-safe restores. The test-workspace and pilot checks are pending |
 | 20 | Closed loops | Built in 0.6.0: level 4, agent reports, learnings, agent events, the campaign agent and briefs, the newsletter, lifecycle, experimentation and audience programmes, content sources and briefs, recipes and bulk enrollment. The month-long programme runs are pending |
 | 21 | Hosted agents and decision models | Built in 0.7.0: event-triggered hosted runs, the copilot acting as an agent, hosted-agent memory and skills, decision models (JEV through System One: `ai.score`, stored scores, a journey decision step, calibration), password reset, backup key checks and verification, mjml 5. The thin runtime shipped in 0.5.0. The live decision-model gate is pending |
-| 22 | Many agents, many brands | Planned: coordination, brand scoping, progressive rollout, ad audiences (agent-managed spend needs its own design, #212) |
+| 22 | Many agents, many brands | Built in 0.8.0: several brands on one installation (verified brand domains, per-brand links and e-mail hosts, one brand per token, a New brand flow), agent coordination (artifact ownership, conflict holds, a cross-agent contact cap), ramped experience rollouts with an automatic stop, agent comparison and bulk mandate renewal, ad audiences and conversion maps under mandates. Agent-managed ad spend still needs its own design (#212) |
 
 ## Development
 

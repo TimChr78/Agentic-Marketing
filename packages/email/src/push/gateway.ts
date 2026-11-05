@@ -29,6 +29,8 @@ export interface PushRequest {
   data?: Record<string, unknown>;
   /** Hold the message until then (a recipient-local send window). */
   notBefore?: Date;
+  /** The agent behind this message (#426): a direct send, or the owner of the journey. */
+  agentId?: string | null;
 }
 
 type Verdict =
@@ -138,6 +140,7 @@ export async function requestPush(tx: Tx, workspaceId: string, kp: KeyProvider, 
       reason,
       data: req.data ?? {},
       notBefore: req.notBefore ?? null,
+      agentId: req.agentId ?? null,
     })
     .returning();
   await events.insertMessageEvents([decisionEvent(m, status, reason ?? '')]);
@@ -191,7 +194,7 @@ export async function deliverPush(db: Db, ws: string, id: string, deps: { kp: Ke
       return finish('failed', `no_provider: no enabled push provider is set up for ${stream} messages to this person's devices`);
     const url = text.url
       ? deps.email.trackClicks
-        ? `${deps.email.publicUrl}/c/${deps.email.links.sign({ w: ws, m: m.id, url: text.url } satisfies ClickLink)}`
+        ? `${(await deps.email.publicUrlFor?.(ws)) ?? deps.email.publicUrl}/c/${deps.email.links.sign({ w: ws, m: m.id, url: text.url } satisfies ClickLink)}`
         : text.url
       : null;
     return {

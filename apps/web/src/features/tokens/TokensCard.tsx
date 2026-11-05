@@ -1,6 +1,6 @@
-import { KeyRound, Plus } from 'lucide-react';
+import { Plus } from 'lucide-react';
 import { useState } from 'react';
-import { api, errText, type Out } from '../../app/api';
+import { api, type Out } from '../../app/api';
 import { navigate } from '../../app/router';
 import { useWorkspace } from '../../app/session';
 import { useApi } from '../../app/useApi';
@@ -9,14 +9,10 @@ import {
   Button,
   Card,
   CodeView,
-  Drawer,
   EmptyState,
-  Field,
   formatDate,
-  Input,
   Modal,
   Mono,
-  Select,
   Table,
   TableFrame,
   Tag,
@@ -25,10 +21,8 @@ import {
   Th,
   Tr,
   timeAgo,
-  useToast,
 } from '../../ui';
-import { ScopePicker } from './ScopePicker';
-import type { Scope } from './scopes';
+import { CreateTokenDrawer } from './CreateTokenDrawer';
 import { TokenDrawer } from './TokenDrawer';
 import { TokenStatus } from './TokenStatus';
 
@@ -36,11 +30,11 @@ type Token = Out<'apiTokens.list'>['tokens'][number];
 
 /** API tokens (#44): list, create (shown once), open a token to see its history and edit it. */
 export function TokensCard({ openId }: { openId?: string }) {
-  const { can, workspace } = useWorkspace();
+  const { can, workspace, memberships } = useWorkspace();
   const list = useApi(() => api.call('apiTokens.list', {}), []);
   const warnings = useApi(() => api.call('system.inputWarnings', {}), []);
   const [creating, setCreating] = useState(false);
-  const [created, setCreated] = useState<{ name: string; token: string } | null>(null);
+  const [created, setCreated] = useState<{ name: string; token: string; workspaceName: string } | null>(null);
   const tokens = list.data?.tokens ?? [];
   const admin = can('workspace:admin');
   const ignored = new Map((warnings.data?.clients ?? []).filter((c) => c.principalType === 'token').map((c) => [c.principalId, c]));
@@ -90,6 +84,7 @@ export function TokensCard({ openId }: { openId?: string }) {
           <THead>
             <tr>
               <Th>Name</Th>
+              <Th>Brand</Th>
               {admin && <Th>Owner</Th>}
               <Th className="hidden lg:table-cell">Scopes</Th>
               <Th>Last used</Th>
@@ -129,6 +124,7 @@ export function TokensCard({ openId }: { openId?: string }) {
                     </details>
                   )}
                 </Td>
+                <Td className="whitespace-nowrap">{t.workspaceName}</Td>
                 {admin && <Td>{t.ownerName}</Td>}
                 <Td className="hidden max-w-[360px] lg:table-cell">
                   <span className="flex flex-wrap gap-1">
@@ -150,6 +146,8 @@ export function TokensCard({ openId }: { openId?: string }) {
       {creating && (
         <CreateTokenDrawer
           allowed={workspace.you.permissions}
+          memberships={memberships}
+          currentWorkspaceId={workspace.id}
           onClose={() => setCreating(false)}
           onCreated={(c) => {
             setCreating(false);
@@ -172,6 +170,9 @@ export function TokensCard({ openId }: { openId?: string }) {
           <p className="mb-3">
             Copy it now and store it in the tool that uses it. It is shown only once; if you lose it, revoke it and create a new one.
           </p>
+          <p className="mb-3 text-[13px] text-muted">
+            It acts in <strong>{created.workspaceName}</strong> only. To let a tool work in another brand, create a second token there.
+          </p>
           <CodeView value={created.token} />
           <p className="mt-3 text-[13px] text-muted">
             REST: <Mono>Authorization: Bearer {created.token.slice(0, 8)}…</Mono> on <Mono>{location.origin}/v1/&lt;command&gt;</Mono>. MCP:{' '}
@@ -181,93 +182,5 @@ export function TokensCard({ openId }: { openId?: string }) {
       )}
       {openId && <TokenDrawer id={openId} onClose={() => navigate('/settings/integrations')} onChanged={() => void list.reload()} />}
     </Card>
-  );
-}
-
-function CreateTokenDrawer({
-  allowed,
-  onClose,
-  onCreated,
-}: {
-  allowed: string[];
-  onClose: () => void;
-  onCreated: (c: { name: string; token: string }) => void;
-}) {
-  const toast = useToast();
-  const [name, setName] = useState('');
-  const [nameError, setNameError] = useState<string | null>(null);
-  const [scopes, setScopes] = useState<string[]>(['artifacts:read']);
-  const [days, setDays] = useState('90');
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const submit = async () => {
-    if (!name.trim()) return setNameError('Name it after what uses it, e.g. “Hermes”.');
-    if (!scopes.length) return setError('Choose at least one scope.');
-    setBusy(true);
-    setError(null);
-    try {
-      const r = await api.call('apiTokens.create', {
-        name: name.trim(),
-        scopes: scopes as Scope[],
-        ...(days ? { expiresInDays: Number(days) } : {}),
-      });
-      toast.success(`Created “${r.name}”.`);
-      onCreated({ name: r.name, token: r.token });
-    } catch (e) {
-      setError(errText(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-  return (
-    <Drawer
-      open
-      onClose={onClose}
-      width="lg"
-      title="Create an API token"
-      meta="For an agent, n8n or a script. It is shown once."
-      footer={
-        <>
-          <Button variant="ghost" onClick={onClose}>
-            Cancel
-          </Button>
-          <Button variant="primary" className="ml-auto" icon={<KeyRound size={14} />} loading={busy} onClick={submit}>
-            Create token
-          </Button>
-        </>
-      }
-    >
-      <form
-        className="space-y-6 p-5"
-        onSubmit={(e) => {
-          e.preventDefault();
-          void submit();
-        }}
-      >
-        <Field label="Name" hint="What uses it, e.g. “Hermes” or “n8n reporting”." error={nameError} required>
-          <Input
-            value={name}
-            data-autofocus
-            maxLength={120}
-            onChange={(e) => {
-              setName(e.target.value);
-              setNameError(null);
-            }}
-            onBlur={() => !name.trim() && setNameError('Name it after what uses it, e.g. “Hermes”.')}
-          />
-        </Field>
-        <ScopePicker value={scopes} onChange={setScopes} allowed={allowed} />
-        <Field label="Expires" hint="Shorter is safer; an admin can extend it later with their password.">
-          <Select value={days} onChange={(e) => setDays(e.target.value)}>
-            <option value="30">In 30 days</option>
-            <option value="90">In 90 days</option>
-            <option value="365">In a year</option>
-            <option value="">Never</option>
-          </Select>
-        </Field>
-        {error && <Alert tone="bad">{error}</Alert>}
-        <button type="submit" hidden />
-      </form>
-    </Drawer>
   );
 }

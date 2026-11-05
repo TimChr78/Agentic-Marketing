@@ -261,13 +261,14 @@ export const checkTemplate = defineCommand({
     const t = v.content as EmailTemplate;
     const purposes = (await publishedSingleton(ctx.tx, 'purposes'))?.purposes ?? DEFAULT_PURPOSES;
     const purpose = purposes.find((p) => p.key === t.purpose);
+    const linksUrl = (await ctx.services.linksUrlFor?.(ctx.principal.workspaceId)) ?? ctx.services.email.publicUrl;
     let result: Awaited<ReturnType<typeof checkEmailTemplate>>;
     try {
       result = await checkEmailTemplate(t, {
         marketing: isMarketing(purpose?.basis ?? 'consent'),
         purposeChannels: purpose?.channels,
         checkLinks: input.checkLinks ?? false,
-        platformUrl: platformUrl(ctx.services.email.publicUrl),
+        platformUrl: platformUrl(linksUrl),
         request: ctx.services.email.checkLinks,
         assets: (ids) => assetInfo(ctx.tx, ids),
         cache: linkCache(ctx.services.hot),

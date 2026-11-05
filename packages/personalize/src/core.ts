@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { ExperienceDefinition } from '@agentic-marketing/artifacts';
-import { allocate, type DecideContext, matches } from './targeting';
+import { allocate, type DecideContext, matches, rampAdmits } from './targeting';
 
 // The decision itself, as pure functions shared by the decision API on the server and the edge
 // worker on Cloudflare: which experience each placement shows, and which variant. Nothing here
@@ -10,6 +10,11 @@ export interface PublishedExperience {
   id: string;
   version: number;
   def: ExperienceDefinition;
+  /**
+   * The current rollout share (0–100) from experience_rollouts, or null when the experience has no
+   * ramp. The edge bundle carries it so the worker admits visitors without a server round trip.
+   */
+  share?: number | null;
 }
 
 export interface Decision {
@@ -72,7 +77,14 @@ export function decideAll(
   const decisions: Decision[] = [];
   for (const placement of placements) {
     const forced = preview ? wanted.find((x) => x.id === preview.experienceId && x.def.placement === placement) : undefined;
-    const e = forced ?? wanted.find((x) => x.def.placement === placement && (!x.def.targeting || matches(x.def.targeting, ctx)));
+    const e =
+      forced ??
+      wanted.find(
+        (x) =>
+          x.def.placement === placement &&
+          (x.share == null || rampAdmits(x.id, stableId, x.share)) &&
+          (!x.def.targeting || matches(x.def.targeting, ctx)),
+      );
     if (!e) continue;
     const pinned = forced ? e.def.variants.find((v) => v.id === preview?.variantId) : undefined;
     const v = pinned ?? (stableId ? allocate(e.id, stableId, e.def) : e.def.variants[0]);
