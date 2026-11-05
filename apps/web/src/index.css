@@ -3,16 +3,17 @@
 /* Design tokens (docs/design/DESIGN.md). Light is the default; `data-theme="dark"` on <html> switches,
    and an inline script in index.html sets it before first paint (system / light / dark). */
 :root {
-  --bg: #f7f8fa;
+  /* v2 warm stone neutrals and the blue interaction accent (DESIGN.md → Colour tokens). */
+  --bg: #f7f6f2;
   --surface: #ffffff;
-  --surface-2: #f2f4f7;
-  --surface-3: #e9ecf1;
-  --line: #e2e5ea;
-  --line-strong: #c9ced6;
-  --control: #868d99;
-  --fg: #14171c;
-  --fg-2: #454c59;
-  --muted: #646c79;
+  --surface-2: #f0efeb;
+  --surface-3: #e6e5df;
+  --line: #deded7;
+  --line-strong: #c5c6bf;
+  --control: #7c807a;
+  --fg: #202521;
+  --fg-2: #4c554e;
+  --muted: #606860;
   --accent: #2457d6;
   --accent-hover: #1e4bbb;
   --accent-fg: #ffffff;
@@ -27,7 +28,27 @@
   --shadow-1: 0 1px 2px rgb(0 0 0 / 0.06), 0 4px 16px rgb(0 0 0 / 0.08);
   --shadow-2: 0 12px 40px rgb(0 0 0 / 0.18);
 
-  /* Journey node categories: the only categorical palette (always with icon + label + legend). */
+  /* Data visualisation: categorical (stable order), sequential and diverging ramps. Never state colours. */
+  --viz-1: #2457a7;
+  --viz-2: #087d80;
+  --viz-3: #996000;
+  --viz-4: #8256a8;
+  --viz-5: #ba472b;
+  --viz-6: #59636e;
+  --seq-1: #e2f3f1;
+  --seq-2: #acd9d6;
+  --seq-3: #6bb8b4;
+  --seq-4: #268e8e;
+  --seq-5: #09666c;
+  --div-1: #9a4c0c;
+  --div-2: #cb8b48;
+  --div-3: #f0d0aa;
+  --div-4: #f0efeb;
+  --div-5: #b6d9d7;
+  --div-6: #5faaa9;
+  --div-7: #086f73;
+
+  /* Journey node categories (v1 values): always icon + label + legend, never chart series. */
   --cat-trigger: #0f7a83;
   --cat-message: #3a5bd0;
   --cat-wait: #626a77;
@@ -46,38 +67,99 @@
   --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono", Menlo, Consolas, monospace;
   --font-display: var(--font-sans);
+
+  /* Type roles: size / line height / weight (DESIGN.md → Typography and geometry). */
+  --text-page: 24px;
+  --text-page--line-height: 32px;
+  --text-title: 16px;
+  --text-title--line-height: 24px;
+  --text-display: 32px;
+  --text-display--line-height: 40px;
+  --text-body: 14px;
+  --text-body--line-height: 22px;
+  --text-ui: 13px;
+  --text-ui--line-height: 20px;
+  --text-table: 13px;
+  --text-table--line-height: 20px;
+  --text-sm: 12px;
+  --text-sm--line-height: 18px;
+  --text-xs: 11px;
+  --text-xs--line-height: 16px;
+  --weight-normal: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+
   --radius-sm: 4px;
-  --radius: 6px;
-  --radius-lg: 8px;
+  --radius: 8px;
+  --radius-lg: 12px;
   --radius-xl: 12px;
+  --radius-pill: 999px;
+
+  --duration-fast: 120ms;
+  --duration-enter: 180ms;
   --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+
+  /* Spacing increments; no other values. */
+  --space-2: 2px;
+  --space-4: 4px;
+  --space-6: 6px;
+  --space-8: 8px;
+  --space-12: 12px;
+  --space-16: 16px;
+  --space-20: 20px;
+  --space-24: 24px;
+  --space-32: 32px;
+  --space-40: 40px;
+  --space-48: 48px;
+  --space-64: 64px;
+
   color-scheme: light;
 }
 
 :root[data-theme="dark"] {
-  --bg: #0e1013;
-  --surface: #15181d;
-  --surface-2: #1b1f26;
-  --surface-3: #232831;
-  --line: #272b33;
-  --line-strong: #3a404b;
-  --control: #5f6775;
-  --fg: #e7e9ed;
-  --fg-2: #b4bac5;
-  --muted: #8d95a3;
-  --accent: #7097f5;
-  --accent-hover: #88a9f7;
-  --accent-fg: #0e1013;
-  --accent-soft: #1a2541;
-  --good: #4dbd7d;
-  --good-soft: #132a1d;
-  --warn: #e3a24c;
-  --warn-soft: #2d2211;
-  --bad: #f27474;
-  --bad-soft: #331718;
+  /* Tonal fills separate content: canvas → surface → inset/hover → pressed. */
+  --bg: #111512;
+  --surface: #191f1b;
+  --surface-2: #222a24;
+  --surface-3: #2c352e;
+  --line: #343e36;
+  --line-strong: #49554b;
+  --control: #87958a;
+  --fg: #edf0e9;
+  --fg-2: #c0c9bf;
+  --muted: #a0aca1;
+  --accent: #8baafa;
+  --accent-hover: #a5bdfb;
+  --accent-fg: #111512;
+  --accent-soft: #222f4a;
+  --good: #70d29b;
+  --good-soft: #193526;
+  --warn: #f0b665;
+  --warn-soft: #392c18;
+  --bad: #ff9292;
+  --bad-soft: #422427;
   --scrim: rgb(0 0 0 / 0.6);
   --shadow-1: 0 1px 2px rgb(0 0 0 / 0.4), 0 6px 20px rgb(0 0 0 / 0.35);
   --shadow-2: 0 16px 48px rgb(0 0 0 / 0.55);
+
+  --viz-1: #8eb5ff;
+  --viz-2: #59c8c6;
+  --viz-3: #e8b653;
+  --viz-4: #c3a1e5;
+  --viz-5: #ff9d80;
+  --viz-6: #b6c1cc;
+  --seq-1: #213c3c;
+  --seq-2: #2b5e5d;
+  --seq-3: #378782;
+  --seq-4: #55b2aa;
+  --seq-5: #8cddd0;
+  --div-1: #f5c48a;
+  --div-2: #ce985e;
+  --div-3: #7c5a35;
+  --div-4: #2c352e;
+  --div-5: #305c5a;
+  --div-6: #52a09a;
+  --div-7: #8cddd0;
 
   --cat-trigger: #41b8c3;
   --cat-message: #8aa2f2;
@@ -116,6 +198,24 @@
   --color-warn-soft: var(--warn-soft);
   --color-bad: var(--bad);
   --color-bad-soft: var(--bad-soft);
+  --color-viz-1: var(--viz-1);
+  --color-viz-2: var(--viz-2);
+  --color-viz-3: var(--viz-3);
+  --color-viz-4: var(--viz-4);
+  --color-viz-5: var(--viz-5);
+  --color-viz-6: var(--viz-6);
+  --color-seq-1: var(--seq-1);
+  --color-seq-2: var(--seq-2);
+  --color-seq-3: var(--seq-3);
+  --color-seq-4: var(--seq-4);
+  --color-seq-5: var(--seq-5);
+  --color-div-1: var(--div-1);
+  --color-div-2: var(--div-2);
+  --color-div-3: var(--div-3);
+  --color-div-4: var(--div-4);
+  --color-div-5: var(--div-5);
+  --color-div-6: var(--div-6);
+  --color-div-7: var(--div-7);
   --color-agent: var(--agent);
   --color-agent-soft: var(--agent-soft);
   --color-shop-bg: var(--shop-bg);
@@ -131,26 +231,29 @@
   --font-sans: var(--font-sans);
   --font-mono: var(--font-mono);
   --font-display: var(--font-display);
-  --radius-sm: var(--radius-sm);
-  --radius-md: var(--radius);
-  --radius-lg: var(--radius-lg);
-  --radius-xl: var(--radius-xl);
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 12px;
+  --radius-pill: 999px;
   --shadow-1: var(--shadow-1);
   --shadow-2: var(--shadow-2);
   --text-xs: 11px;
   --text-xs--line-height: 16px;
   --text-sm: 12px;
-  --text-sm--line-height: 16px;
+  --text-sm--line-height: 18px;
   --text-ui: 13px;
   --text-ui--line-height: 20px;
+  --text-table: 13px;
+  --text-table--line-height: 20px;
   --text-body: 14px;
   --text-body--line-height: 22px;
-  --text-title: 15px;
-  --text-title--line-height: 22px;
-  --text-page: 20px;
-  --text-page--line-height: 28px;
-  --text-display: 24px;
-  --text-display--line-height: 32px;
+  --text-title: 16px;
+  --text-title--line-height: 24px;
+  --text-page: 24px;
+  --text-page--line-height: 32px;
+  --text-display: 32px;
+  --text-display--line-height: 40px;
 }
 
 /* Element defaults sit in the base layer so utilities (text-accent, outline-…) win. */
@@ -161,6 +264,8 @@
     height: 100%;
   }
   body {
+    max-width: 100%;
+    overflow-x: clip;
     background: var(--bg);
     color: var(--fg);
     font-family: var(--font-sans);
@@ -170,11 +275,14 @@
     -moz-osx-font-smoothing: grayscale;
     text-rendering: optimizeLegibility;
   }
-  h1,
+  h1 {
+    text-wrap: balance;
+    letter-spacing: -0.02em;
+  }
   h2,
   h3 {
     text-wrap: balance;
-    letter-spacing: -0.005em;
+    letter-spacing: 0;
   }
   a {
     color: inherit;
@@ -317,29 +425,170 @@
   border-radius: var(--radius-lg);
 }
 
-/* GrapesJS panel tweaks so the editor sits inside our console */
-.gjs-one-bg {
-  background-color: var(--surface-2);
+/* Touch layouts (DESIGN.md → Typography and geometry): every button is at least 40 px high below
+   768 px and on coarse pointers, including one-off buttons that are not the Button component. */
+@media (max-width: 767px), (pointer: coarse) {
+  button {
+    min-height: 40px;
+    min-width: 40px;
+  }
 }
-.gjs-two-color {
+
+/* GrapesJS (the e-mail editor) is themed to the app tokens, scoped to its container. The canvas
+   iframe is the recipient's e-mail and keeps its own (light) styles. */
+.am-gjs {
+  --gjs-primary-color: var(--surface);
+  --gjs-secondary-color: var(--fg-2);
+  --gjs-tertiary-color: var(--accent);
+  --gjs-quaternary-color: var(--accent);
+  --gjs-canvas-top: 40px;
+  --gjs-left-width: 15%;
+  background: var(--surface-2);
   color: var(--fg);
+  font-family: var(--font-sans);
 }
-.gjs-three-bg {
+.am-gjs .gjs-one-bg {
+  background-color: var(--surface);
+}
+.am-gjs .gjs-two-color {
+  color: var(--fg-2);
+}
+.am-gjs .gjs-three-bg {
   background-color: var(--accent);
   color: var(--accent-fg);
 }
-.gjs-four-color,
-.gjs-four-color-h:hover {
+.am-gjs .gjs-four-color,
+.am-gjs .gjs-four-color-h:hover {
   color: var(--accent);
 }
-
-/* GrapesJS: use the app's accent instead of its pink highlight. */
-.gjs-four-color,
-.gjs-four-color-h:hover {
-  /* biome-ignore lint/complexity/noImportantStyles: GrapesJS injects its own high-specificity theme rules that this must override */
-  color: #88a9f7 !important;
+.am-gjs .gjs-pn-panel {
+  background: var(--surface);
+  border-color: var(--line);
+  color: var(--fg);
 }
-.gjs-selected {
+.am-gjs .gjs-pn-btn {
+  border-radius: var(--radius);
+  color: var(--fg-2);
+}
+.am-gjs .gjs-pn-btn:hover {
+  background: var(--surface-2);
+  color: var(--fg);
+}
+.am-gjs .gjs-pn-btn.gjs-pn-active {
+  background: var(--accent-soft);
+  box-shadow: none;
+  color: var(--accent);
+}
+.am-gjs .gjs-pn-btn svg {
+  fill: currentColor;
+}
+.am-gjs .gjs-cv-canvas,
+.am-gjs .gjs-frame-wrapper {
+  background: var(--surface-2);
+}
+.am-gjs .gjs-cv-canvas__frames {
+  background: var(--surface-2);
+}
+.am-gjs .gjs-blocks-c {
+  background: var(--surface);
+}
+.am-gjs .gjs-block {
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: none;
+  color: var(--fg-2);
+}
+.am-gjs .gjs-block:hover {
+  border-color: var(--control);
+  color: var(--fg);
+}
+.am-gjs .gjs-block-label {
+  color: var(--fg-2);
+  font-family: var(--font-sans);
+}
+.am-gjs .gjs-sm-sector,
+.am-gjs .gjs-sm-properties,
+.am-gjs .gjs-trt-traits,
+.am-gjs .gjs-trt-trait,
+.am-gjs .gjs-layer,
+.am-gjs .gjs-layers {
+  background: var(--surface);
+  border-color: var(--line);
+  color: var(--fg);
+}
+.am-gjs .gjs-sm-sector-title,
+.am-gjs .gjs-sm-property,
+.am-gjs .gjs-trt-trait__wrp,
+.am-gjs .gjs-layer-title {
+  background: var(--surface-2);
+  border-color: var(--line);
+  color: var(--fg-2);
+}
+.am-gjs .gjs-field {
+  background: var(--surface);
+  border: 1px solid var(--control);
+  border-radius: var(--radius-sm);
+  color: var(--fg);
+}
+.am-gjs .gjs-field input,
+.am-gjs .gjs-field select,
+.am-gjs .gjs-field textarea {
+  background: transparent;
+  border: 0;
+  color: var(--fg);
+  font-family: var(--font-sans);
+}
+.am-gjs .gjs-label,
+.am-gjs .gjs-sm-label {
+  color: var(--muted);
+}
+.am-gjs .gjs-toolbar {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-1);
+}
+.am-gjs .gjs-toolbar-item {
+  color: var(--fg-2);
+}
+.am-gjs .gjs-badge {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+.am-gjs .gjs-selected {
   /* biome-ignore lint/complexity/noImportantStyles: GrapesJS injects its own high-specificity selection rules that this must override */
-  outline-color: #2457d6 !important;
+  outline-color: var(--accent) !important;
+}
+.am-gjs .gjs-hovered {
+  /* biome-ignore lint/complexity/noImportantStyles: GrapesJS injects its own high-specificity hover rules that this must override */
+  outline-color: var(--line-strong) !important;
+}
+.am-gjs .gjs-resizer-h {
+  background: var(--accent);
+  border-color: var(--surface);
+}
+.am-gjs .gjs-placeholder {
+  border-color: var(--accent);
+}
+.am-gjs .gjs-com-selected,
+.am-gjs .gjs-com-hovered {
+  background-color: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.am-gjs .gjs-mdl-container {
+  background: var(--scrim);
+}
+.am-gjs .gjs-mdl-dialog {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-2);
+  color: var(--fg);
+}
+.am-gjs .gjs-mdl-header,
+.am-gjs .gjs-mdl-content,
+.am-gjs .gjs-mdl-btn-close {
+  background: var(--surface);
+  border-color: var(--line);
+  color: var(--fg);
 }

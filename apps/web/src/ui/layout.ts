@@ -11,8 +11,8 @@ import { cx } from './cx';
 export const PAGE_WIDTHS = {
   /** Prose and forms: a comfortable line length, left-aligned. */
   reading: 'xl:max-w-[760px]',
-  /** Lists and data pages: use most of a wide window. */
-  default: 'xl:max-w-[1600px]',
+  /** Lists and data pages: the v2 content cap, centred within the shell. */
+  default: 'mx-auto max-w-[1280px]',
   /** Editors and canvases: no cap at all. */
   full: 'max-w-none',
 } as const;
