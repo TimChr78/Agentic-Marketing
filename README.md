@@ -176,6 +176,8 @@ Wave 1 (Phases −1 to 5) is complete: foundations, data platform, e-mail, segme
 | 21 | Hosted agents and decision models | Built in 0.7.0: event-triggered hosted runs, the copilot acting as an agent, hosted-agent memory and skills, decision models (JEV through System One: `ai.score`, stored scores, a journey decision step, calibration), password reset, backup key checks and verification, mjml 5. The thin runtime shipped in 0.5.0. The live decision-model gate is pending |
 | 22 | Many agents, many brands | Built in 0.8.0: several brands on one installation (verified brand domains, per-brand links and e-mail hosts, one brand per token, a New brand flow), agent coordination (artifact ownership, conflict holds, a cross-agent contact cap), ramped experience rollouts with an automatic stop, agent comparison and bulk mandate renewal, ad audiences and conversion maps under mandates. Agent-managed ad spend still needs its own design (#212) |
 
+[Wave 5](docs/architecture/roadmap-wave-5.md), polish: a more intuitive, more visual and more polished product, with no new scope (Phases 23–28, planned).
+
 ## Development
 
 ```bash
