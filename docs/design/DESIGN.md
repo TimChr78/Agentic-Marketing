@@ -391,6 +391,10 @@ Each component lives in `apps/web/src/ui/` and is the only way that pattern is b
   focus moves to the first invalid field on submit.
 - Page titles: `<title>` = "Page · Workspace · Agentic Marketing"; one `<h1>` per page; landmark regions
   (`nav`, `main`, `header`).
+- Automated: `e2e/axe.spec.ts` runs axe-core with the WCAG 2.1/2.2 A and AA rules over every route in
+  the screenshot matrix, in both themes, and fails on any violation that is not listed with a reason
+  in `e2e/axe-known-issues.json`. That list is empty at the end of the wave; the manual checks above
+  (keyboard, focus return, 200% zoom, a screen reader) still cover what axe cannot.
 
 ## Roles and what they see
 

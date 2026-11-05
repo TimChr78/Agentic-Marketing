@@ -71,6 +71,7 @@ export function Shell({ children }: { children: ReactNode }) {
       </a>
       <aside
         id="app-sidebar"
+        aria-label="Workspace"
         className={cx(
           'fixed inset-y-0 left-0 z-30 hidden border-r border-line bg-surface transition-[width] duration-[180ms] ease-[cubic-bezier(.2,.8,.2,1)] lg:block',
           collapsed ? 'w-16' : 'w-[232px]',
@@ -351,7 +352,7 @@ export function WorkspaceSwitcher({ rail = false }: { rail?: boolean }) {
     <>
       <BrandMark logoUrl={brand?.logoUrl ?? null} name={name} className="size-7" />
       <span className="min-w-0 flex-1 text-left">
-        <span className="block truncate text-[13px] font-semibold text-fg">{name}</span>
+        <span className="block truncate text-[13px] font-semibold text-fg">{name}</span>{' '}
         <span className="block truncate text-[11px] text-muted">{domain ?? roleName(workspace?.you.role ?? '')}</span>
       </span>
     </>
@@ -399,11 +400,20 @@ export function WorkspaceSwitcher({ rail = false }: { rail?: boolean }) {
               'flex items-center rounded-md hover:bg-surface-2',
               rail ? 'size-10 justify-center' : 'h-10 w-full gap-2.5 px-1.5',
             )}
-            aria-label={`Brand: ${name}${domain ? ` (${domain})` : ''}. Switch brand`}
+            // The visible brand name and role stay part of the accessible name (WCAG 2.5.3); the
+            // hidden words add what the button does without replacing them.
+            aria-label={rail ? `Brand: ${name}${domain ? ` (${domain})` : ''}. Switch brand` : undefined}
             title={rail ? name : undefined}
           >
-            {rail ? railLabel : label}
-            {!rail && <ChevronDown size={14} className="shrink-0 text-muted" aria-hidden />}
+            {rail ? (
+              railLabel
+            ) : (
+              <>
+                <span className="sr-only">Brand:</span> {label}
+                <ChevronDown size={14} className="shrink-0 text-muted" aria-hidden />
+                <span className="sr-only">{'. Switch brand'}</span>
+              </>
+            )}
           </button>
         )}
       />
@@ -484,9 +494,11 @@ function UserMenu() {
         <button
           {...p}
           type="button"
-          aria-label={`Account: ${user?.name || user?.email}`}
           className="ml-1 inline-flex size-8 items-center justify-center rounded-full bg-surface-3 text-[12px] font-semibold text-fg-2 hover:bg-line-strong"
         >
+          {/* The initials stay visible; the full name is added as hidden text, so the accessible
+              name contains the visible label (WCAG 2.5.3). */}
+          <span className="sr-only">Account menu for {user?.name || user?.email}: </span>
           {initials}
         </button>
       )}

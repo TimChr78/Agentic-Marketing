@@ -78,7 +78,7 @@ afterEach(() => cleanup());
 describe('brand-aware shell (#190)', () => {
   it('shows the brand name, logo and primary domain in the switcher', () => {
     const { container } = render(<WorkspaceSwitcher />);
-    const trigger = screen.getByRole('button', { name: /Brand: Martech Signal \(links\.martechsignal\.com\)/ });
+    const trigger = screen.getByRole('button', { name: /Brand:\sMartech Signal links\.martechsignal\.com\. Switch brand/ });
     expect(trigger).toBeTruthy();
     expect(screen.getByText('links.martechsignal.com')).toBeTruthy();
     expect(container.querySelector('img')?.getAttribute('src')).toBe('https://cdn.example/martech.svg');

@@ -7,6 +7,14 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 ### Added
 
 - Deterministic, rich demo fixtures for UI work, Playwright and screenshots (#434). The e2e seed now generates weeks of believable activity from a seeded PRNG and a fixed clock: about 520 people with consent history, eight sent weekly issues with delivered, opened, clicked, bounced, complained and unsubscribed message events, a scheduled send and a stopped canary send, a live journey with participants on every step, a web-experience experiment, campaign conversions with UTM tags, backdated agent actions, a guardian episode, learnings, a mandate with goals, alerts that fired and resolved, and an import history entry. Counts, rates and names are stable across runs; `seed` takes a `now` option for other dates.
+- A screenshot matrix for design review (#433). `e2e/screenshots.mjs` (also `pnpm shots`) captures every admin route — derived from `apps/web/src/app/nav.ts` plus the seeded detail pages (one of each artifact type, a person, an agent, a token, every approval type, the signed-out sign-in page and `/`) — at 1440, 768 and 390 px in light and dark. Captures are deterministic: the clock is fixed, motion and carets are disabled, fonts and images are loaded and skeletons gone before the shot, and relative times, dates and raw ids are masked. A manual CI run (`workflow_dispatch` → `screenshots`) produces the whole matrix as an artifact.
+- Visual regression in CI (#433). `e2e/visual.spec.ts` compares a stable subset (sign-in, approvals and a broadcast approval, the journey list and builder, a broadcast, a template, people, analytics, agents and an agent, the workspace settings) at 1440 and 390 px in both themes against Linux baselines committed in `e2e/visual.spec.ts-snapshots`. Its own Playwright project keeps the functional suite fast; the `visual` CI job runs on pull requests that touch `apps/web` or `e2e` and uploads the expected/actual/diff images when a baseline fails. Baselines are only ever updated by a reviewed commit.
+- Automated accessibility checks (#206). `e2e/axe.spec.ts` runs `@axe-core/playwright` with the WCAG 2.1/2.2 A and AA rules over every route in the matrix, light and dark, fails on any violation not listed in `e2e/axe-known-issues.json`, and prints the violations by rule. The list starts empty; the wave's done criterion is that it stays empty.
+
+### Fixed
+
+- The brand switcher and the account menu no longer override their visible text with an `aria-label`, so the accessible name contains the visible label (WCAG 2.5.3).
+- Tabs only point `aria-controls` at a panel that is rendered, and the OpenAPI link in Settings → Integrations is underlined rather than distinguished by colour alone (WCAG 1.4.1) (#206).
 
 ## [0.8.0] - 2026-11-05
 

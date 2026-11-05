@@ -49,10 +49,10 @@ export function JourneyGraph({
   );
   return (
     <div className="space-y-2">
-      <div
+      {/* A section, not role="img": the read-only nodes and the zoom controls inside it are focusable. */}
+      <section
         className="overflow-hidden rounded-md border border-line bg-surface-2"
         style={{ height }}
-        role="img"
         aria-label={`Journey graph with ${nodes.length} steps; the list below describes it`}
       >
         <ReactFlowProvider>
@@ -73,7 +73,7 @@ export function JourneyGraph({
             <Controls showInteractive={false} />
           </ReactFlow>
         </ReactFlowProvider>
-      </div>
+      </section>
       <Legend />
       <details className="text-[13px]">
         <summary className="cursor-pointer text-muted hover:text-fg">Steps as a list</summary>
