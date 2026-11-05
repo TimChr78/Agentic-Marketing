@@ -30,6 +30,14 @@ const txt = async (r: TxtResolver, name: string) => {
   }
 };
 
+function hostOfUrl(value: string): string {
+  try {
+    return new URL(value).hostname.toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
 const Check = z.object({ ok: z.boolean(), record: z.string().nullable(), advice: z.string().nullable() });
 const DomainReport = z.object({
   domain: z.string(),
@@ -87,14 +95,24 @@ export const checkDomain = defineCommand({
       .max(5)
       .default([]),
   }),
-  output: DomainReport,
+  output: DomainReport.extend({
+    linksUrl: z.string().describe('Where this brand’s e-mail links (confirm, unsubscribe, preferences, web version) point'),
+    linksHost: z.string().describe('The host of linksUrl, for checking DMARC alignment with the from-domain'),
+  }),
   permission: 'artifacts:read',
   effect: 'read',
   target: (i) => i.id,
   handler: async (input, ctx) => {
     const [p] = await ctx.tx.select().from(schema.emailProviders).where(eq(schema.emailProviders.id, input.id));
     if (!p) throw new AppError('not_found', `No e-mail provider ${input.id}. List them with emailProviders.list.`);
-    return checkDomainRecords(p.fromEmail.split('@')[1].toLowerCase(), p.adapter, input.dkimSelectors, new Resolver({ timeout: 3000 }));
+    const linksUrl = (await ctx.services.linksUrlFor?.(ctx.principal.workspaceId)) ?? ctx.services.linksUrl ?? '';
+    const report = await checkDomainRecords(
+      p.fromEmail.split('@')[1].toLowerCase(),
+      p.adapter,
+      input.dkimSelectors,
+      new Resolver({ timeout: 3000 }),
+    );
+    return { ...report, linksUrl, linksHost: hostOfUrl(linksUrl) };
   },
 });
 
@@ -175,6 +193,10 @@ export const deliverabilityHealth = defineCommand({
     autoPause: z.boolean(),
     email: z.object({ marketing: Rates, transactional: Rates }),
     sms: z.object({ marketing: Rates, transactional: Rates }),
+    brand: z.object({
+      linksUrl: z.string().describe('Where this brand’s e-mail links point'),
+      linksHost: z.string().describe('Host of linksUrl, for DMARC alignment with the from-domain'),
+    }),
   }),
   permission: 'artifacts:read',
   effect: 'read',
@@ -183,12 +205,14 @@ export const deliverabilityHealth = defineCommand({
     const purposes = (await publishedSingleton(ctx.tx, 'purposes'))?.purposes ?? DEFAULT_PURPOSES;
     const rates = (channel: 'email' | 'sms', marketing: boolean) => streamRates(ctx.tx, policy, purposes, channel, marketing);
     const { autoPause, windowDays, ...thresholds } = policy.health;
+    const linksUrl = (await ctx.services.linksUrlFor?.(ctx.principal.workspaceId)) ?? ctx.services.linksUrl ?? '';
     return {
       windowDays,
       thresholds,
       autoPause,
       email: { marketing: await rates('email', true), transactional: await rates('email', false) },
       sms: { marketing: await rates('sms', true), transactional: await rates('sms', false) },
+      brand: { linksUrl, linksHost: hostOfUrl(linksUrl) },
     };
   },
 });

@@ -444,6 +444,8 @@ interface ProviderRow {
   adapter: string;
   from_email: string;
   config: Record<string, unknown> | null;
+  /** The workspace's verified primary brand host, when it has one (#188). */
+  links_host?: string | null;
 }
 
 async function migrationFiles(): Promise<string[]> {
@@ -849,6 +851,13 @@ export async function checkBrandDomains(
       domains.map(async (domain) => {
         const id = `brand-domains.${domain.host}${domain.pathPrefix ?? ''}`;
         const label = `${domain.host}${domain.pathPrefix ?? ''}`;
+        if (domain.status !== 'verified')
+          return {
+            id,
+            status: 'warn' as const,
+            message: `${label} is pending verification; links and public pages do not use it yet`,
+            hint: 'Run workspace.domains.verify once the hostname reaches this installation (the challenge is served at /.well-known/am-domain/<token>).',
+          };
         if (domain.host === adminHost)
           return {
             id,
@@ -919,7 +928,9 @@ export async function checkBrandDomains(
   }
 
   if (workspaces.length > 1) {
-    const withPrimary = new Set(domains.filter((domain) => domain.isPrimary).map((domain) => domain.workspaceId));
+    const withPrimary = new Set(
+      domains.filter((domain) => domain.isPrimary && domain.status === 'verified').map((domain) => domain.workspaceId),
+    );
     const missing = workspaces.filter((workspace) => !withPrimary.has(workspace.id));
     if (missing.length)
       checks.push({
@@ -948,7 +959,14 @@ export async function checkBrandDomains(
 async function readProviders(db: Db): Promise<ProviderRow[] | null> {
   try {
     const { rows } = await withTimeout(
-      db.admin.query<ProviderRow>('SELECT adapter, from_email, config FROM email_providers WHERE enabled = true'),
+      db.admin.query<ProviderRow>(
+        `SELECT p.adapter, p.from_email, p.config,
+                (SELECT d.host FROM workspace_domains d
+                  WHERE d.workspace_id = p.workspace_id AND d.is_primary AND d.status = 'verified'
+                  ORDER BY d.created_at LIMIT 1) AS links_host
+           FROM email_providers p
+          WHERE p.enabled = true`,
+      ),
       'email providers',
     );
     return rows;
@@ -1010,6 +1028,14 @@ async function findDmarc(domain: string, lookup: TxtLookup): Promise<DmarcRecord
   return {};
 }
 
+/** The registrable domain used for DMARC alignment, without a full public-suffix list. */
+function organizationalDomain(host: string): string {
+  const labels = host.replace(/\.$/, '').toLowerCase().split('.').filter(Boolean);
+  if (labels.length < 2) return labels.join('.');
+  const suffixLength = TWO_LABEL_SUFFIXES.has(labels.slice(-2).join('.')) ? 3 : 2;
+  return labels.slice(-suffixLength).join('.');
+}
+
 export async function checkSendingDomains(providers: ProviderRow[], lookup: TxtLookup = txtRecords): Promise<Check[]> {
   const domains = [
     ...new Set(
@@ -1028,43 +1054,70 @@ export async function checkSendingDomains(providers: ProviderRow[], lookup: TxtL
         : { id: 'dns', status: 'ok', message: 'no e-mail providers configured' },
     ];
 
-  return Promise.all(
+  // Brand link hosts per from-domain, for the DMARC alignment hint (#188).
+  const linksByDomain = new Map<string, Set<string>>();
+  for (const provider of providers) {
+    const domain = provider.from_email?.split('@')[1]?.trim().toLowerCase();
+    if (!domain || !provider.links_host) continue;
+    const set = linksByDomain.get(domain) ?? new Set<string>();
+    set.add(provider.links_host.toLowerCase());
+    linksByDomain.set(domain, set);
+  }
+
+  const checks = await Promise.all(
     domains.map(async (domain) => {
       const [spf, dmarc] = await Promise.all([lookup(domain), findDmarc(domain, lookup)]);
       const hasSpf = spf.some((record) => /^v=spf1(?:\s|$)/i.test(record));
       const inherited = dmarc.foundAt && dmarc.foundAt !== domain;
       const inheritedFrom = inherited ? ` (inherited from ${dmarc.foundAt} (p=${dmarc.policy ?? 'none'}))` : '';
+      const links = [...(linksByDomain.get(domain) ?? [])];
+      const linkNote = links.length ? `; links use ${links.join(', ')}` : '';
 
       if (!dmarc.foundAt)
         return {
           id: `dns.${domain}`,
           status: 'warn' as const,
-          message: `${domain} is missing ${[hasSpf ? null : 'SPF', 'DMARC'].filter(Boolean).join(' and ')}`,
+          message: `${domain} is missing ${[hasSpf ? null : 'SPF', 'DMARC'].filter(Boolean).join(' and ')}${linkNote}`,
           hint: 'Publish an SPF TXT record (`v=spf1 ...`) and a DMARC TXT record at `_dmarc.<domain>` (or at the organizational domain). DKIM selectors depend on the provider; enable DKIM there.',
         };
       if (dmarc.policy === 'none')
         return {
           id: `dns.${domain}`,
           status: 'warn' as const,
-          message: `${domain} has DMARC p=none${inherited ? ` (inherited from ${dmarc.foundAt})` : ''}; it only monitors`,
+          message: `${domain} has DMARC p=none${inherited ? ` (inherited from ${dmarc.foundAt})` : ''}; it only monitors${linkNote}`,
           hint: 'Move to p=quarantine (then p=reject) once the reports show your legitimate mail passes SPF and DKIM.',
         };
       if (!hasSpf)
         return {
           id: `dns.${domain}`,
           status: 'warn' as const,
-          message: `${domain} is missing SPF${inheritedFrom}`,
+          message: `${domain} is missing SPF${inheritedFrom}${linkNote}`,
           hint: 'Publish an SPF TXT record (`v=spf1 ...`). DKIM selectors depend on the provider; enable DKIM there.',
         };
       return {
         id: `dns.${domain}`,
         status: 'ok' as const,
         message: inherited
-          ? `SPF found; DMARC for ${domain} inherited from ${dmarc.foundAt} (p=${dmarc.policy ?? 'none'})`
-          : `SPF and DMARC records found for ${domain}`,
+          ? `SPF found; DMARC for ${domain} inherited from ${dmarc.foundAt} (p=${dmarc.policy ?? 'none'})${linkNote}`
+          : `SPF and DMARC records found for ${domain}${linkNote}`,
       };
     }),
   );
+
+  // A List-Unsubscribe link on a different registrable domain is not DMARC-aligned with the From
+  // domain. It still works; mailbox providers may weigh it, so warn rather than fail (#188).
+  for (const [domain, links] of linksByDomain) {
+    const misaligned = [...links].filter((host) => organizationalDomain(host) !== organizationalDomain(domain));
+    if (!misaligned.length) continue;
+    checks.push({
+      id: `brand-domains.alignment.${domain}`,
+      status: 'warn',
+      message: `${domain} sends, but List-Unsubscribe links use ${misaligned.join(', ')} (a different registrable domain)`,
+      hint: `DMARC alignment is stronger when the link host shares the sending domain; use am.${organizationalDomain(domain)} for links and news.${organizationalDomain(domain)} for sending. This is a warning only.`,
+    });
+  }
+
+  return checks;
 }
 
 type EgressTarget = { kind: 'http'; url: string } | { kind: 'tcp'; host: string; port: number };

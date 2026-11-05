@@ -1,3 +1,4 @@
+import http from 'node:http';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { startTestServer, testPort, type User } from './harness';
 
@@ -6,11 +7,30 @@ import { startTestServer, testPort, type User } from './harness';
 
 let t: Awaited<ReturnType<typeof startTestServer>>;
 let owner: User;
-const ADMIN = 'http://localhost:3299';
+const MAIN_PORT = testPort(3299);
+const ADMIN = `http://localhost:${MAIN_PORT}`;
 const LINKS = 'https://links.pilot.example';
+const LINKS_HOST = new URL(LINKS).hostname;
+
+/** Posts to the local server with the brand Host header the webhook URL names. */
+const postAsLinks = (path: string, body: string) =>
+  new Promise<{ status: number; json: unknown }>((resolve, reject) => {
+    const req = http.request(
+      { host: '127.0.0.1', port: new URL(ADMIN).port, path, method: 'POST', headers: { host: LINKS_HOST } },
+      (res) => {
+        let text = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => (text += chunk));
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, json: text ? JSON.parse(text) : null }));
+      },
+    );
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
 
 beforeAll(async () => {
-  t = await startTestServer('test_pilot_providers', testPort(3299), { PUBLIC_URL: ADMIN, PUBLIC_LINKS_URL: LINKS });
+  t = await startTestServer('test_pilot_providers', MAIN_PORT, { PUBLIC_URL: ADMIN, PUBLIC_LINKS_URL: LINKS });
   owner = await t.signUp(`owner-${Date.now()}@example.com`);
   await t.workspaceWith([[owner, 'owner']]);
 }, 60_000);
@@ -58,11 +78,11 @@ describe('e-mail provider credentials and webhook URLs', () => {
       BouncedAt: '2026-10-23T09:00:00Z',
       Metadata: { am_message_id: 'msg_missing' },
     };
-    const old = await fetch(`${t.base}${created.webhookPath}`, { method: 'POST', body: JSON.stringify(bounce) });
+    const old = await postAsLinks(created.webhookPath, JSON.stringify(bounce));
     expect(old.status).toBe(404);
-    const fresh = await fetch(`${t.base}${rotated.webhookPath}`, { method: 'POST', body: JSON.stringify(bounce) });
+    const fresh = await postAsLinks(rotated.webhookPath, JSON.stringify(bounce));
     expect(fresh.status).toBe(200);
-    expect(await fresh.json()).toEqual({ ok: true, events: 0 });
+    expect(fresh.json).toEqual({ ok: true, events: 0 });
   });
 });
 

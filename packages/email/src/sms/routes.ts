@@ -1,4 +1,5 @@
 import { DEFAULT_PURPOSES, publishedSingleton } from '@agentic-marketing/artifacts';
+import type { PublicRequest } from '@agentic-marketing/commands';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
 import { bodyLimit } from '@agentic-marketing/ingest';
@@ -42,7 +43,7 @@ async function profilesWithPhone(tx: Tx, ws: string, kp: KeyProvider, phone: str
 }
 
 export function smsRoutes(deps: Deps) {
-  const app = new Hono();
+  const app = new Hono<{ Variables: { publicRequest?: PublicRequest } }>();
 
   const load = async (token: string) => {
     const t = deps.email.links.verify<{ w: string; sms: string }>(token);
@@ -56,8 +57,15 @@ export function smsRoutes(deps: Deps) {
     async (c) => {
       const target = await load(c.req.param('token'));
       if (!target) return c.json({ error: 'not_found' }, 404);
+      // The callback URL belongs to its brand; another brand's host must not deliver it.
+      const request = c.get('publicRequest');
+      if (request?.workspaceId && request.workspaceId !== target.ws) return c.json({ error: 'not_found' }, 404);
       const kind = c.req.param('kind');
-      const req = { url: `${deps.email.publicUrl}${c.req.path}`, headers: Object.fromEntries(c.req.raw.headers), body: await c.req.text() };
+      const req = {
+        url: `${(await deps.email.publicUrlFor?.(target.ws)) ?? deps.email.publicUrl}${c.req.path}`,
+        headers: Object.fromEntries(c.req.raw.headers),
+        body: await c.req.text(),
+      };
       const result = await deps.db.withWorkspace(target.ws, async (tx) => {
         const [provider] = await tx.select().from(schema.smsProviders).where(eq(schema.smsProviders.id, target.id));
         if (!provider) return { status: 404 as const };

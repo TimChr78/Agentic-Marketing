@@ -65,8 +65,8 @@ brand; each brand may have its own public links hostname.
 
 ### Register a domain
 
-`workspace.domains.add/update/remove/list` are people-only (`workspace:admin`) and audited. A domain
-is a normalised hostname plus an optional path prefix:
+`workspace.domains.add/update/remove/verify/list` are people-only (`workspace:admin`) and audited. A
+domain is a normalised hostname plus an optional path prefix:
 
 - lowercase IDNA hostname, without scheme, port or trailing dot; wildcards, userinfo, queries and
   fragments are refused;
@@ -80,6 +80,27 @@ same host, and `/am/` and `am` are the same prefix. Host resolution for a reques
 workspace is known) reads the registry installation-wide and picks the **longest matching path
 prefix**, so `example.com/am` and `example.com/am2` can coexist. An unknown host on a public path is
 answered with 404; admin routes keep using the session and `X-Workspace-Id`.
+
+### Verify a domain
+
+A new domain starts **pending** and is listed but inactive: it resolves no requests and supplies no
+links until it is verified. This stops a typo, or a hostname someone else controls, from taking
+another brand's traffic.
+
+1. Register it: `workspace.domains.add {host, pathPrefix?, isPrimary?}`. The returned row carries a
+   `verificationToken`.
+2. Point the hostname at the tunnel or ingress, and confirm the public listener serves the challenge:
+   `GET https://<host><prefix>/.well-known/am-domain/<verificationToken>` must answer `200` with the
+   token. The challenge is answered even while the domain is pending, and on any Host.
+3. Run `workspace.domains.verify {id}`. The server fetches the same URL over the egress guard
+   (timeboxed; plain http only on localhost), compares the body with the token, and sets
+   `status: "verified"` and `verifiedAt`. A wrong token, a non-200 answer or an unreachable host is
+   refused with a message that names the URL that failed. A hostname that resolves to a private
+   address must be listed in `EGRESS_ALLOWED_HOSTS`, like any other outbound target.
+
+Only verified domains are used for request resolution and `linksUrlFor`. Changing a domain's host or
+prefix resets it to pending, so verify it again before it serves. Removing the primary domain makes
+the workspace fall back to `PUBLIC_LINKS_URL`.
 
 ### One tunnel hostname per brand
 
@@ -99,6 +120,26 @@ With a path prefix, the proxy forwards `/am/*` unchanged, so the public paths ar
 `https://second.example.com/am/f/<form id>`, `/am/u/...`, `/am/n/...`. Health checks move with it:
 `https://second.example.com/am/healthz`.
 
+### What a brand host serves
+
+Every public request resolves its `Host` and path prefix to one workspace before routing:
+
+- a verified registered domain → that workspace;
+- the host (and prefix) of `PUBLIC_LINKS_URL` → the installation fallback, exactly as before;
+- any other host → `404`, never the admin UI and never another brand's page.
+
+`/f`, `/u` (including `/u/p`), `/c`, `/a`, `/n` and `/hooks` all obey this. A signed token, form,
+archive slug, asset id or provider webhook belongs to a workspace, so presenting it on another
+brand's host is refused with `404` — never redirected to the brand that owns it. The archive resolves
+the brand by host first, then the slug inside that workspace; RSS, sitemap and issue URLs use the
+brand's host. Path prefixes are stripped before routing and A's `/am` links stay under
+`https://host/am/...`.
+
+The same rule builds links: confirm, unsubscribe, preference centre, `List-Unsubscribe`, the
+`/n/w/…` web version, archive pages, form actions, asset URLs and provider webhook URLs use
+`linksUrlFor(workspaceId)` — the workspace's verified primary domain, else `PUBLIC_LINKS_URL`. The
+signed token format is unchanged; only the base URL follows the brand.
+
 ### Fallback and upgrades
 
 `PUBLIC_LINKS_URL` remains the fallback and is not removed. A workspace with no primary domain uses
@@ -111,7 +152,8 @@ that their links still use `PUBLIC_LINKS_URL`.
 ### `am doctor`
 
 For each registered domain, `am doctor` checks that DNS resolves, that `https://<host><prefix>/healthz`
-(or the public listener's path) answers, and that the TLS certificate is valid. It warns when a
-registered host is the admin host, when a multi-brand install has brands without a primary domain,
-and when a host uses a reserved or private suffix. The checks are short and timeboxed like the other
-network checks; a fresh install with no domains reports that links use `PUBLIC_LINKS_URL`.
+(or the public listener's path) answers, and that the TLS certificate is valid. A pending domain is
+reported as inactive with the verification step. It warns when a registered host is the admin host,
+when a multi-brand install has brands without a verified primary domain, and when a host uses a
+reserved or private suffix. The checks are short and timeboxed like the other network checks; a fresh
+install with no domains reports that links use `PUBLIC_LINKS_URL`.

@@ -106,7 +106,8 @@ export async function sendTestMessages(ctx: CommandContext, opts: TestSendOption
 
   // Inert links: the /u/ route refuses a token it did not sign, so a test can never unsubscribe
   // anyone. No click tracking is added either.
-  const noop = `${ctx.services.email.publicUrl}/u/test`;
+  const linksUrl = (await ctx.services.linksUrlFor?.(ws)) ?? ctx.services.email.publicUrl;
+  const noop = `${linksUrl}/u/test`;
   const crypto = personCrypto(ctx.tx, ws, ctx.services.keyProvider);
   const transport = await transportFor(ctx.tx, provider, ctx.services.keyProvider, ctx.services.email.adapterDeps);
 
@@ -180,8 +181,8 @@ export async function sendTestMessages(ctx: CommandContext, opts: TestSendOption
             unsubscribe_url: noop,
             preferences_url: noop,
             topic_unsubscribe_url: noop,
-            web_url: `${ctx.services.email.publicUrl}/n/w/${ctx.services.email.links.sign({ w: ctx.principal.workspaceId, m: message.id })}`,
-            confirm_url: `${ctx.services.email.publicUrl}/f/confirm/test`,
+            web_url: `${linksUrl}/n/w/${ctx.services.email.links.sign({ w: ctx.principal.workspaceId, m: message.id })}`,
+            confirm_url: `${linksUrl}/f/confirm/test`,
           },
           { blocks: blockResolver(ctx.tx) },
         );

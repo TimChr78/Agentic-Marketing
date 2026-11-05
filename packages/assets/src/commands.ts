@@ -123,6 +123,11 @@ function usageCounts(rows: UsageRow[]): Map<string, number> {
 
 type RenditionRow = Pick<typeof schema.assetRenditions.$inferSelect, 'assetId' | 'contentType' | 'byteSize' | 'width' | 'height'>;
 
+/** Public base for asset links: the workspace's verified brand host, else the installation links host. */
+async function assetBase(ctx: CommandContext): Promise<string> {
+  return (await ctx.services.linksUrlFor?.(ctx.principal.workspaceId)) ?? ctx.services.assets.publicUrl;
+}
+
 function toAsset(row: AssetRow, publicUrl: string, usageCount: number, rendition?: RenditionRow | null, sanitized: string[] = []) {
   return {
     id: row.id,
@@ -253,7 +258,8 @@ export const uploadAsset = defineCommand({
   sensitive: ['dataBase64'],
   target: (input) => input.fileName,
   handler: async (input, ctx) => {
-    const { publicUrl, maxBytes } = ctx.services.assets;
+    const { maxBytes } = ctx.services.assets;
+    const publicUrl = await assetBase(ctx);
     let data = checkedBytes(decodeBase64(input.dataBase64, maxBytes), input.contentType);
     let sanitized: string[] = [];
     let rendition: ReturnType<typeof rasteriseSvg> | null = null;
@@ -333,7 +339,7 @@ export const listAssets = defineCommand({
   permission: 'artifacts:read',
   effect: 'read',
   handler: async (input, ctx) => {
-    const { publicUrl } = ctx.services.assets;
+    const publicUrl = await assetBase(ctx);
     const cursor = input.cursor ? decodeCursor(input.cursor) : null;
     const query = input.query?.trim();
     const pattern = query ? `%${escapeLike(query)}%` : null;
@@ -384,7 +390,7 @@ export const getAsset = defineCommand({
   effect: 'read',
   target: (input) => input.id,
   handler: async (input, ctx) => {
-    const { publicUrl } = ctx.services.assets;
+    const publicUrl = await assetBase(ctx);
     const row = await loadAsset(ctx, input.id);
     const usage = usageByAsset(await usageRows(ctx.tx, [row.id])).get(row.id);
     const entries = usage ? [...usage.values()] : [];
@@ -413,7 +419,7 @@ export const updateAsset = defineCommand({
   actionClass: 'content.publish',
   target: (input) => input.id,
   handler: async (input, ctx) => {
-    const { publicUrl } = ctx.services.assets;
+    const publicUrl = await assetBase(ctx);
     const [row] = await ctx.tx
       .update(schema.assets)
       .set({

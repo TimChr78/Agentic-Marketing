@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { defineCommand } from '@agentic-marketing/commands';
+import { type CommandContext, defineCommand } from '@agentic-marketing/commands';
 import { AppError, newId, sha256 } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
 import { activeDataKey, dataKeyById, type KeyProvider, open, seal } from '@agentic-marketing/secrets';
@@ -111,6 +111,11 @@ async function claimUses(tx: Tx, id: string, uses: ('transactional' | 'marketing
         .where(and(eq(schema.emailProviders.workspaceId, o.workspaceId), eq(schema.emailProviders.id, o.id)));
 }
 
+/** The links base for a workspace's webhook URL: its verified primary brand domain, else the install host. */
+async function webhookBase(ctx: CommandContext, workspaceId: string): Promise<string> {
+  return (await ctx.services.linksUrlFor?.(workspaceId)) ?? ctx.services.email.publicUrl;
+}
+
 export const listProviders = defineCommand({
   name: 'emailProviders.list',
   title: 'List e-mail providers',
@@ -170,8 +175,8 @@ export const createProvider = defineCommand({
     useFor: z.array(Use).max(2).default([]),
   }),
   output: Provider.extend({
-    webhookPath: z.string().describe('POST delivery events here (prefix with your public links URL)'),
-    webhookUrl: z.string().describe('Full URL for provider delivery events, built from PUBLIC_LINKS_URL'),
+    webhookPath: z.string().describe('POST delivery events here (prefix with the workspace’s links URL)'),
+    webhookUrl: z.string().describe('Full URL for provider delivery events, on the workspace’s brand host or PUBLIC_LINKS_URL'),
     warnings: z.array(z.string()).describe('Provider settings that contradict the workspace privacy settings'),
   }),
   permission: 'workspace:admin',
@@ -206,7 +211,7 @@ export const createProvider = defineCommand({
     return {
       ...providerOut(row),
       webhookPath,
-      webhookUrl: `${ctx.services.email.publicUrl}${webhookPath}`,
+      webhookUrl: `${await webhookBase(ctx, ctx.principal.workspaceId)}${webhookPath}`,
       warnings: trackingWarnings([row], ctx.services.email.trackClicks),
     };
   },
@@ -260,8 +265,8 @@ export const rotateProviderWebhook = defineCommand({
   description: 'Issue a new webhook URL for delivery events. The old URL stops working immediately; replace it with the provider.',
   input: z.object({ id: z.string().regex(/^epr_[0-9a-f]{32}$/) }),
   output: z.object({
-    webhookPath: z.string().describe('POST delivery events here (prefix with your public links URL)'),
-    webhookUrl: z.string().describe('Full URL for provider delivery events, built from PUBLIC_LINKS_URL'),
+    webhookPath: z.string().describe('POST delivery events here (prefix with the workspace’s links URL)'),
+    webhookUrl: z.string().describe('Full URL for provider delivery events, on the workspace’s brand host or PUBLIC_LINKS_URL'),
   }),
   permission: 'workspace:admin',
   effect: 'write',
@@ -277,7 +282,40 @@ export const rotateProviderWebhook = defineCommand({
       .returning({ id: schema.emailProviders.id });
     if (!row) throw new AppError('not_found', `No e-mail provider ${id}. List them with emailProviders.list.`);
     const webhookPath = `/hooks/email/${id}/${token}`;
-    return { webhookPath, webhookUrl: `${ctx.services.email.publicUrl}${webhookPath}` };
+    return { webhookPath, webhookUrl: `${await webhookBase(ctx, ctx.principal.workspaceId)}${webhookPath}` };
+  },
+});
+
+/**
+ * Re-issue a provider's webhook URL on its workspace's current brand host (#188). The token is
+ * stored only as a hash, so a new URL means a new token; register it with the provider, and the
+ * old URL stops working at once. This is the explicit "our brand domain changed" path.
+ */
+export const refreshProviderWebhookUrl = defineCommand({
+  name: 'emailProviders.refreshWebhookUrl',
+  title: 'Move an e-mail provider webhook to the brand host',
+  description:
+    'Issue a fresh webhook URL for delivery events on the workspace’s current brand host (its verified primary domain, else PUBLIC_LINKS_URL). The old URL stops working immediately; replace it with the provider. Use this after adding or changing a brand domain.',
+  input: z.object({ id: z.string().regex(/^epr_[0-9a-f]{32}$/) }),
+  output: z.object({
+    webhookPath: z.string().describe('POST delivery events here (prefix with the workspace’s links URL)'),
+    webhookUrl: z.string().describe('Full URL for provider delivery events, on the workspace’s brand host or PUBLIC_LINKS_URL'),
+  }),
+  permission: 'workspace:admin',
+  effect: 'write',
+  humansOnly: true,
+  sensitiveOutput: ['webhookPath', 'webhookUrl'],
+  target: (i) => i.id,
+  handler: async ({ id }, ctx) => {
+    const token = randomBytes(24).toString('base64url');
+    const [row] = await ctx.tx
+      .update(schema.emailProviders)
+      .set({ webhookTokenHash: webhookTokenHash(token), updatedAt: new Date() })
+      .where(eq(schema.emailProviders.id, id))
+      .returning({ id: schema.emailProviders.id });
+    if (!row) throw new AppError('not_found', `No e-mail provider ${id}. List them with emailProviders.list.`);
+    const webhookPath = `/hooks/email/${id}/${token}`;
+    return { webhookPath, webhookUrl: `${await webhookBase(ctx, ctx.principal.workspaceId)}${webhookPath}` };
   },
 });
 
@@ -301,4 +339,11 @@ export const deleteProvider = defineCommand({
   },
 });
 
-export const providerCommands = [listProviders, createProvider, updateProvider, rotateProviderWebhook, deleteProvider] as const;
+export const providerCommands = [
+  listProviders,
+  createProvider,
+  updateProvider,
+  rotateProviderWebhook,
+  refreshProviderWebhookUrl,
+  deleteProvider,
+] as const;

@@ -198,7 +198,7 @@ export async function deliverSms(db: Db, ws: string, id: string, deps: { kp: Key
         to: v.phone,
         from: provider.sender,
         body: text.body,
-        statusUrl: `${deps.email.publicUrl}${smsWebhookPath(deps.email.links, ws, provider.id)}/status`,
+        statusUrl: `${(await deps.email.publicUrlFor?.(ws)) ?? deps.email.publicUrl}${smsWebhookPath(deps.email.links, ws, provider.id)}/status`,
       },
     };
   });

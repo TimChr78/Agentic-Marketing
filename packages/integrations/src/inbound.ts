@@ -1,4 +1,5 @@
 import { timingSafeEqual } from 'node:crypto';
+import type { PublicRequest } from '@agentic-marketing/commands';
 import { type Db, schema } from '@agentic-marketing/db';
 import type { EventBus } from '@agentic-marketing/events';
 import { acceptItems, bodyLimit, sourceLookups } from '@agentic-marketing/ingest';
@@ -18,7 +19,7 @@ const MAX_BODY = 1024 * 1024;
 
 export function inboundApi(deps: { db: Db; bus: EventBus; kp: KeyProvider }) {
   const { loadPolicy } = sourceLookups(deps.db);
-  const app = new Hono();
+  const app = new Hono<{ Variables: { publicRequest?: PublicRequest } }>();
   app.post(
     '/hooks/in/:id/:token',
     // Refuse an oversized delivery before the body is read or the secret URL is authenticated.
@@ -31,6 +32,10 @@ export function inboundApi(deps: { db: Db; bus: EventBus; kp: KeyProvider }) {
       const r = rows[0];
       const given = Buffer.from(inboundTokenHash(c.req.param('token')));
       if (!r?.enabled || !r.token_hash || given.length !== r.token_hash.length || !timingSafeEqual(given, Buffer.from(r.token_hash)))
+        return c.json({ error: 'not_found', message: 'Unknown or disabled webhook URL.' }, 404);
+      // A connection's webhook belongs to its workspace's brand host (#185).
+      const request = c.get('publicRequest');
+      if (request?.workspaceId && request.workspaceId !== r.workspace_id)
         return c.json({ error: 'not_found', message: 'Unknown or disabled webhook URL.' }, 404);
 
       const raw = await c.req.text();
