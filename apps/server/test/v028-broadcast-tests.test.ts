@@ -231,7 +231,10 @@ describe('subject A/B test', () => {
     withdrawnEmail = `p${outside!.value.slice(1)}@example.com`;
     await api().call('consent.record', { profileId: outside!.profile_id, purpose: 'marketing_email', status: 'withdrawn' });
 
-    // Clicks for variant B decide it: every sample message of B gets one.
+    // Every B sample message gets a click. B wins only when both variants have the
+    // documented minimum of 20 sends; random runtime ids can produce a smaller arm.
+    const a = sampleMessages.filter((m) => m.variant === 'A');
+    const expectedWinner = Math.min(a.length, sampleMessages.length - a.length) >= 20 ? 'B' : 'A';
     const b = sampleMessages.filter((m) => m.variant === 'B');
     await t.srv.events.insertMessageEvents(b.map((m, i) => click(m, winnerId, i)));
     await decideNow(winnerId);
@@ -241,20 +244,20 @@ describe('subject A/B test', () => {
       (s) => s.test?.state === 'winner_sent' && s.run.status === 'done' && (s.messages.sent ?? 0) >= PEOPLE,
       20_000,
     );
-    expect(done.test?.winner).toBe('B');
-    expect(done.test?.reason).toContain('won on click');
+    expect(done.test?.winner).toBe(expectedWinner);
+    expect(done.test?.reason).toContain(expectedWinner === 'B' ? 'won on click' : 'fewer than 20 sends');
     expect(done.run.recipients).toBeGreaterThanOrEqual(PEOPLE);
     expect(done.run.queued).toBe(PEOPLE + 1);
     // The status lists every variant with its counts and rates.
     expect(done.test?.variants.map((v) => v.variant)).toEqual(['A', 'B']);
     expect(done.test?.variants[1].clickRate).toBeGreaterThan(0);
 
-    // The winner went to the rest: every later message is variant B, every person has at most one.
+    // The actual winner went to the rest; every person has at most one message.
     const all = await messagesOf(winnerId);
     const sampleIdSet = new Set(sampleMessages.map((m) => m.id));
     const rest = all.filter((m) => !sampleIdSet.has(m.id));
     expect(rest.length).toBeGreaterThan(0);
-    expect(rest.every((m) => m.variant === 'B')).toBe(true);
+    expect(rest.every((m) => m.variant === expectedWinner)).toBe(true);
     const perProfile = new Map<string, number>();
     for (const m of all) perProfile.set(m.profile_id, (perProfile.get(m.profile_id) ?? 0) + 1);
     expect([...perProfile.values()].every((n) => n === 1)).toBe(true);
@@ -265,11 +268,11 @@ describe('subject A/B test', () => {
     const sentIds = new Set(rest.map((m) => m.id));
     const restSent = await eventually(
       async () => (await messagesOf(winnerId)).filter((m) => sentIds.has(m.id) && (m.status === 'sent' || m.status === 'delivered')).length,
-      (n) => n === bMails.length - b.length,
+      (n) => n === (expectedWinner === 'B' ? bMails.length - b.length : aMails.length - a.length),
       15_000,
     );
-    expect(bMails.length).toBe(b.length + restSent);
-    expect(aMails.length).toBe(sampleMessages.length - b.length);
+    expect(bMails.length).toBe(b.length + (expectedWinner === 'B' ? restSent : 0));
+    expect(aMails.length).toBe(a.length + (expectedWinner === 'A' ? restSent : 0));
     expect(mailTo(withdrawnEmail)).toHaveLength(0);
 
     // messages.stats can narrow to a variant.
