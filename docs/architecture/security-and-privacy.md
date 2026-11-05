@@ -84,3 +84,49 @@ The egress guard normalises the IPv6 forms that embed an IPv4 address (IPv4-mapp
 - Security headers, CSRF protection for cookie sessions, session revocation.
 - Vulnerability disclosure policy (`SECURITY.md`) from the first public release.
 - Target compliance frameworks for a future SaaS: SOC 2 / ISO 27001 — the audit log, RBAC, encryption and change management (artifact approvals) are designed to support them.
+
+## 7. Multiple brands on one instance
+
+A **brand is a workspace**. One installation can run several brands behind one login and one admin
+host; people switch brand with the workspace switcher (`X-Workspace-Id`) and each brand may have its
+own public link hostname ([identity.md](../identity.md#brands-and-domains-186)). The workspace is a
+**brand and content boundary**, not a separate legal entity: the installation, encryption keys,
+backups and billing are shared.
+
+Everything a person or an agent reads or writes carries the workspace, so these are per brand:
+
+- **Profiles.** Identity resolution is workspace-scoped. A person who subscribes to brand A and
+  brand B has two profiles (`prf_…`), two event histories and two consent ledgers. Nothing merges
+  across brands; the same e-mail address is two people, and `profiles.find` only searches the
+  caller's brand.
+- **Consent and topics.** Consent records, objections and topic choices belong to one brand. A
+  `marketing_email` unsubscribe from A leaves B's consent untouched, and a preference-centre link
+  (including a topic link) acts only on the brand named in its signed token and host.
+- **Suppression.** Bounces, complaints and unsubscribes suppress within the brand that recorded
+  them. A hard bounce on A does not suppress B. That is intended: each brand has its own sending
+  identity and reputation. Sharing hard-bounce suppression across brands is a follow-up design, not
+  current behaviour; the trade-off is tracked in
+  [#430](https://github.com/TimChr78/Agentic-Marketing/issues/430).
+- **Erasure and DSR.** `profiles.erase` deletes the person in one workspace: profile rows,
+  identifiers, events, consent and topic history, and it destroys the per-profile key so copies in
+  backups become unreadable. An erasure request that covers several brands must be **repeated per
+  brand**; there is no cross-brand erase. The erasure log, tombstones and the suppression hash left
+  behind are also per brand.
+- **Exports.** `profiles.export` returns what one brand holds (profile, personal data, identifiers,
+  consent, topics, events, AI decisions, ad uploads and push devices) and names that brand in
+  `workspaceId`. An access or portability request covering several brands is one export per brand.
+- **Sending.** Each brand has its own provider, From identity and sending domain, so reputation,
+  deliverability, bounces and complaints are measured per brand. A brand without a verified primary
+  domain falls back to `PUBLIC_LINKS_URL` ([email-and-sms-delivery.md](email-and-sms-delivery.md)).
+- **Analytics and webhooks.** Metrics, campaigns, journeys, segments, outbound webhooks and their
+  deliveries are workspace-scoped. There is no cross-brand report, and a query in A cannot see B's
+  events; ClickHouse row policies enforce the same boundary as the command layer.
+- **Agents.** An API token or OAuth/MCP connection belongs to exactly one brand; working in two
+  brands needs two credentials. `X-Workspace-Id` switches a person's session, never a token or
+  connection ([identity.md](../identity.md#one-brand-per-token-or-connection-187)).
+- **Legal.** This is not a multi-entity tenancy model. Workspaces share the installation, encryption
+  keys, backups and billing; the boundary separates brand content and audience data, not legal
+  entities or data-protection regimes.
+
+A DSR therefore starts from the person's profile in one brand: export and erase it there, then repeat
+in every other brand that may hold the same person.

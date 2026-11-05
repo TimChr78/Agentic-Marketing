@@ -30,6 +30,7 @@ A brand is a workspace. A token or MCP connection belongs to exactly one brand, 
 - An API token is created in one brand. The token list and the create dialog show it; to work in another brand, ask the person for a second token there.
 - `workspace.get` returns the bound brand, and `workspace.memberships` returns only that brand. Do not try to enumerate other brands.
 - `X-Workspace-Id` switches a person's browser session, not your connection. Sending it with a different workspace is refused with `403`, with or without the header. Do not set the header; act in the brand the connection was made for.
+- Data is per brand too: the same e-mail address can be two profiles, an unsubscribe or suppression applies only inside its brand, and erasure and export are repeated per brand. `profiles.export` names its workspace in `workspaceId`. See [Multiple brands on one instance](../../../docs/architecture/security-and-privacy.md#7-multiple-brands-on-one-instance).
 
 ## The workflow for any change
 
