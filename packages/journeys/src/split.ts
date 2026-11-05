@@ -4,10 +4,17 @@
 // that profile. The rule is:
 //
 //   1. A conversion recorded for a participant belongs to that participant's (first) split take,
-//      provided the take happened at or before the conversion.
+//      provided the take happened at or before the conversion. The participant id is the
+//      canonical identity across profile merges: a profile merged after the take keeps the same
+//      `journey_participants` row, so the conversion may carry a different (historical or
+//      survivor) profile id than the split entry and still belongs to that participant (#419).
 //   2. Any outcome without a participant (an e-mail unsubscribe) belongs to the profile's latest
 //      split entry at or before the outcome. Equal timestamps are broken by participant id, so
 //      the choice is deterministic.
+//
+// An explicit participant never falls back to another participant's take. If its own take is
+// missing, before the outcome, or otherwise not eligible, the outcome is not attributed. Only a
+// genuinely participant-less outcome uses the temporal profile fallback (#419).
 //
 // Entries are already one row per participant: `journeySplitArms` keeps the first split take by
 // (at, seq, detail), so a repeated take cannot add a second arm.
@@ -58,8 +65,10 @@ export function attributeSplitOutcomes(
 
   const eligible = (outcome: SplitOutcome): SplitEntry | undefined => {
     if (outcome.participantId != null) {
+      // The participant id, not the event's historical profile id, is the canonical identity.
+      // Never let a missing or too-late own take fall through to a different participant (#419).
       const direct = byParticipant.get(outcome.participantId);
-      if (direct && direct.profileId === outcome.profileId && direct.at <= outcome.at) return direct;
+      return direct && direct.at <= outcome.at ? direct : undefined;
     }
     // Latest entry at or before the outcome; the loop keeps the last one, which is the highest
     // participant id at an equal timestamp after sorting.
