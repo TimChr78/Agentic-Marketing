@@ -1,5 +1,8 @@
+import { recordAiCall } from '@agentic-marketing/ai';
 import { type FakeRequest, fakeLlm } from '@agentic-marketing/ai/testing';
 import { agentPrincipal } from '@agentic-marketing/commands';
+import { newId } from '@agentic-marketing/core';
+import type { Db } from '@agentic-marketing/db';
 import { outbox } from '@agentic-marketing/email';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { runHostedAgentsOnce } from '../src/agents/hosted';
@@ -123,6 +126,8 @@ let shrinking: Setup;
 let tooBigBudget: Setup;
 let failing: Setup;
 let stepFailed: Setup;
+let billingHeld: Setup;
+let billingFallback: Setup;
 let overlapping: Setup;
 
 beforeAll(async () => {
@@ -146,6 +151,16 @@ beforeAll(async () => {
   });
   failing = await setup('[fail] This run always fails.');
   stepFailed = await setup('[stepfail] This run fails after its first step.', { maxTokensPerRun: 20_000 });
+  // The whole monthly allowance is the run's reservation, so a retained hold really does make the
+  // rest of the month unavailable.
+  billingHeld = await setup('[billing-hold] A run whose usage cannot be recorded.', {
+    maxTokensPerRun: 1000,
+    monthlyTokenBudget: 1000,
+  });
+  billingFallback = await setup('[billing-fallback] A run whose first usage write fails.', {
+    maxTokensPerRun: 1000,
+    monthlyTokenBudget: 1000,
+  });
   overlapping = await setup('[overlap] A slow run.');
 }, 120_000);
 
@@ -294,6 +309,147 @@ describe('hosted agents (#258)', () => {
     const providers = await stepFailed.api.call('aiProviders.list', {});
     expect(providers.providers[0]!.usedThisMonth).toBe(STEP_TOKENS);
   }, 60_000);
+
+  // #420: the old finally block swallowed a failed ai_calls insert and then released the hold, so
+  // a billed run was counted nowhere and the month could spend the same allowance again.
+  it('keeps billed usage covered when the usage write fails, instead of releasing the hold', async () => {
+    const providerId = (await billingHeld.api.call('aiProviders.list', {})).providers[0]!.id;
+    await t.srv.db.admin.query(`CREATE OR REPLACE FUNCTION hosted_ai_call_fail_fn() RETURNS trigger AS $$
+      BEGIN
+        IF NEW.input->>'hostedAgentId' = '${billingHeld.agentId}' THEN RAISE EXCEPTION 'injected ai_calls failure'; END IF;
+        RETURN NEW;
+      END $$ LANGUAGE plpgsql`);
+    await t.srv.db.admin.query('DROP TRIGGER IF EXISTS hosted_ai_call_fail_trg ON ai_calls');
+    await t.srv.db.admin.query(
+      'CREATE TRIGGER hosted_ai_call_fail_trg BEFORE INSERT ON ai_calls FOR EACH ROW EXECUTE FUNCTION hosted_ai_call_fail_fn()',
+    );
+    try {
+      await onlyDue(billingHeld.agentId);
+      const summary = await runAt(DUE());
+      expect(summary).toMatchObject({ due: 1, ok: 1 });
+
+      // The provider was billed, but neither the settling insert nor its fallback could land.
+      const calls = await billingHeld.api.call('ai.calls', { kind: 'hosted' });
+      expect(calls.calls).toHaveLength(0);
+      const providers = await billingHeld.api.call('aiProviders.list', {});
+      expect(providers.providers[0]!.usedThisMonth).toBe(1000);
+      const held = await t.srv.db.admin.query<{ tokens: number; expires_at: Date }>(
+        'SELECT tokens, expires_at FROM ai_token_reservations WHERE provider_id = $1',
+        [providerId],
+      );
+      expect(held.rows).toHaveLength(1);
+      expect(held.rows[0]!.tokens).toBe(1000);
+      // Not the old five-minute default: the only record of billed usage survives the month.
+      const now = new Date();
+      expect(held.rows[0]!.expires_at.getTime()).toBeGreaterThanOrEqual(
+        new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1)).getTime(),
+      );
+
+      // The allowance is genuinely unavailable: the next due run is refused before the model.
+      const requestsBefore = llm.requests.length;
+      for (let i = 0; i < 3; i++) {
+        await onlyDue(billingHeld.agentId);
+        const retry = await runAt(new Date(DUE().getTime() + (i + 1) * 1000));
+        expect(retry).toMatchObject({ due: 1, failed: 1, disabled: 0 });
+      }
+      expect(llm.requests.length).toBe(requestsBefore);
+      const runs = await billingHeld.api.call('agents.hostedRuns', { agentId: billingHeld.agentId });
+      expect(runs.runs[0]!.error).toContain('budget');
+      expect(runs.hosted).toMatchObject({ enabled: true, consecutiveFailures: 0 });
+    } finally {
+      await t.srv.db.admin.query('DROP TRIGGER IF EXISTS hosted_ai_call_fail_trg ON ai_calls');
+      await t.srv.db.admin.query('DROP FUNCTION IF EXISTS hosted_ai_call_fail_fn()');
+    }
+  }, 90_000);
+
+  it('retries usage once through the fallback and releases the hold after the first write fails', async () => {
+    const providerId = (await billingFallback.api.call('aiProviders.list', {})).providers[0]!.id;
+    await t.srv.db.admin.query('DROP SEQUENCE IF EXISTS hosted_ai_call_fail_once');
+    await t.srv.db.admin.query('CREATE SEQUENCE hosted_ai_call_fail_once START 1');
+    await t.srv.db.admin.query(`CREATE OR REPLACE FUNCTION hosted_ai_call_fail_once_fn() RETURNS trigger
+      LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+      BEGIN
+        IF NEW.input->>'hostedAgentId' = '${billingFallback.agentId}' AND nextval('hosted_ai_call_fail_once') = 1
+          THEN RAISE EXCEPTION 'injected ai_calls failure';
+        END IF;
+        RETURN NEW;
+      END $$`);
+    await t.srv.db.admin.query('DROP TRIGGER IF EXISTS hosted_ai_call_fail_once_trg ON ai_calls');
+    await t.srv.db.admin.query(
+      'CREATE TRIGGER hosted_ai_call_fail_once_trg BEFORE INSERT ON ai_calls FOR EACH ROW EXECUTE FUNCTION hosted_ai_call_fail_once_fn()',
+    );
+    try {
+      await onlyDue(billingFallback.agentId);
+      const summary = await runAt(DUE());
+      expect(summary).toMatchObject({ due: 1, ok: 1 });
+
+      // The fallback writes the same call id, so the retried usage is one row and one charge.
+      const calls = await billingFallback.api.call('ai.calls', { kind: 'hosted' });
+      expect(calls.calls).toHaveLength(1);
+      expect(calls.calls[0]).toMatchObject({
+        status: 'done',
+        inputTokens: 2 * STEP_INPUT,
+        outputTokens: 2 * STEP_OUTPUT,
+      });
+      const providers = await billingFallback.api.call('aiProviders.list', {});
+      expect(providers.providers[0]!.usedThisMonth).toBe(2 * STEP_TOKENS);
+      const held = await t.srv.db.admin.query('SELECT tokens FROM ai_token_reservations WHERE provider_id = $1', [providerId]);
+      expect(held.rows).toHaveLength(0);
+    } finally {
+      await t.srv.db.admin.query('DROP TRIGGER IF EXISTS hosted_ai_call_fail_once_trg ON ai_calls');
+      await t.srv.db.admin.query('DROP FUNCTION IF EXISTS hosted_ai_call_fail_once_fn()');
+      await t.srv.db.admin.query('DROP SEQUENCE IF EXISTS hosted_ai_call_fail_once');
+    }
+  }, 90_000);
+
+  it('does not bill an idempotent usage retry twice when its row already exists', async () => {
+    const s = await setup('No run needed.', { name: 'Idempotent usage' });
+    const providerId = (await s.api.call('aiProviders.list', {})).providers[0]!.id;
+    const call = {
+      id: newId('aic'),
+      kind: 'hosted' as const,
+      status: 'done' as const,
+      providerId,
+      model: 'test',
+      inputTokens: 100,
+      outputTokens: 20,
+    };
+    await recordAiCall(t.srv.db, s.ws, call);
+    await recordAiCall(t.srv.db, s.ws, call, { idempotent: true });
+    expect((await s.api.call('ai.calls', { kind: 'hosted' })).calls).toHaveLength(1);
+    expect((await s.api.call('aiProviders.list', {})).providers[0]!.usedThisMonth).toBe(120);
+  });
+
+  it('releases an unbilled reservation when context loading fails before the provider', async () => {
+    const s = await setup('No model call.', { name: 'Context failure' });
+    await onlyDue(s.agentId);
+    const original = t.srv.db.withWorkspace.bind(t.srv.db);
+    let failNextContext = false;
+    let injected = false;
+    const db: Db = {
+      ...t.srv.db,
+      withWorkspace: async (workspaceId, fn, opts) => {
+        if (failNextContext) {
+          failNextContext = false;
+          injected = true;
+          throw new Error('injected context loading failure');
+        }
+        const result = await original(workspaceId, fn, opts);
+        // reserveTokens returns its committed rsv id; the next transaction loads the run context.
+        if (typeof result === 'string' && result.startsWith('rsv_')) failNextContext = true;
+        return result;
+      },
+    };
+    const before = llm.requests.length;
+    const result = await runHostedAgentsOnce({ ...deps(), db }, DUE());
+    expect(injected).toBe(true);
+    expect(result).toMatchObject({ due: 1, failed: 1 });
+    expect(llm.requests.length).toBe(before);
+    expect((await s.api.call('aiProviders.list', {})).providers[0]!.usedThisMonth).toBe(0);
+    const held = await t.srv.db.admin.query('SELECT id FROM ai_token_reservations WHERE workspace_id = $1', [s.ws]);
+    expect(held.rows).toHaveLength(0);
+    expect((await s.api.call('ai.calls', { kind: 'hosted' })).calls).toHaveLength(1);
+  });
 
   it('refuses a run whose full token allowance does not fit the monthly budget, before calling the model', async () => {
     await onlyDue(tooBigBudget.agentId);

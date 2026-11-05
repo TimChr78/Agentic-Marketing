@@ -1,4 +1,13 @@
-import { AiUnavailable, languageModel, modelFor, recordAiCall, releaseTokens, reserveTokens } from '@agentic-marketing/ai';
+import {
+  AiUnavailable,
+  billingReservationTtlMs,
+  languageModel,
+  modelFor,
+  recordAiCall,
+  releaseTokens,
+  reserveTokens,
+  settleReservation,
+} from '@agentic-marketing/ai';
 import type { NotifyDeps } from '@agentic-marketing/alerts';
 import { sendMemberEmails } from '@agentic-marketing/alerts';
 import { artifactTypes, publishedSingleton } from '@agentic-marketing/artifacts';
@@ -250,6 +259,8 @@ async function runHostedTurn(opts: {
   maxToolCalls: number;
   /** Accumulated by the steps that finish; the caller records it even if the turn throws. */
   usage: TurnUsage;
+  /** Called just before the provider is asked: from then on, tokens may be billed. */
+  onProviderCall?: () => void;
 }): Promise<TurnResult> {
   // A hosted run has no OAuth step-up and no person to ask, so only granted tools are offered
   // (#364); the executor still refuses any direct call outside the principal's scopes.
@@ -292,6 +303,7 @@ async function runHostedTurn(opts: {
       ...(opts.context ? [opts.context, ''] : []),
       `Budgets for this run: at most ${opts.maxToolCalls} tool calls and at most ${opts.maxTokens} tokens. Stop and summarise what you found when either is used up.`,
     ].join('\n');
+    opts.onProviderCall?.();
     const result = await generateText({
       model: opts.model.model,
       system: SYSTEM,
@@ -378,7 +390,16 @@ ${outcome.disabled ? '<p><strong>The agent failed three times in a row and is no
 async function finishRun(
   deps: HostedAgentDeps,
   loaded: LoadedHosted,
-  run: { id: string; startedAt: Date; status: 'ok' | 'failed'; summary: string; toolCalls: number; tokens: number; error: string | null },
+  run: {
+    id: string;
+    startedAt: Date;
+    status: 'ok' | 'failed';
+    summary: string;
+    toolCalls: number;
+    tokens: number;
+    error: string | null;
+    countsAsFailure?: boolean;
+  },
   origin: RunOrigin = SCHEDULED,
 ): Promise<{ disabled: boolean }> {
   const finishedAt = new Date();
@@ -388,8 +409,13 @@ async function finishRun(
     // advance the failure streak, disable the agent, or mark events read. The guarded update below
     // matches only while this run still owns the claim, so a late completion changes none of the
     // agent's state. Its own outcome is still recorded below: what it did stays auditable.
-    const failures = run.status === 'ok' ? sql`0` : sql`${schema.hostedAgents.consecutiveFailures} + 1`;
-    const disables = sql`${failures} >= ${MAX_CONSECUTIVE_FAILURES}`;
+    const failures =
+      run.countsAsFailure === false
+        ? sql`${schema.hostedAgents.consecutiveFailures}`
+        : run.status === 'ok'
+          ? sql`0`
+          : sql`${schema.hostedAgents.consecutiveFailures} + 1`;
+    const disables = run.countsAsFailure === false ? sql`false` : sql`${failures} >= ${MAX_CONSECUTIVE_FAILURES}`;
     const [owned] = await tx
       .update(schema.hostedAgents)
       .set({
@@ -407,7 +433,7 @@ async function finishRun(
       })
       .where(and(eq(schema.hostedAgents.agentId, loaded.agent.id), eq(schema.hostedAgents.runningRunId, run.id)))
       .returning({ consecutiveFailures: schema.hostedAgents.consecutiveFailures });
-    const disabled = owned !== undefined && owned.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES;
+    const disabled = run.countsAsFailure !== false && owned !== undefined && owned.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES;
     // A run whose agent was deleted meanwhile (its stale claim allowed deletion, #362) has nowhere
     // to record its outcome: the agent and its run history are gone, so it writes no run and mails
     // nobody. A run that merely lost its claim to a successor keeps its own history below.
@@ -563,6 +589,7 @@ async function runOne(deps: HostedAgentDeps, workspaceId: string, agentId: strin
         toolCalls: 0,
         tokens: 0,
         error,
+        countsAsFailure: !(err instanceof AiUnavailable && err.reason === 'budget'),
       },
       origin,
     );
@@ -573,7 +600,7 @@ async function runOne(deps: HostedAgentDeps, workspaceId: string, agentId: strin
   try {
     // The run may use its whole allowance, so the reservation covers all of it: a budget that
     // cannot hold the run refuses it before any model call.
-    reservation = await reserveTokens(deps.db, workspaceId, model.providerId, loaded.hosted.maxTokensPerRun);
+    reservation = await reserveTokens(deps.db, workspaceId, model.providerId, loaded.hosted.maxTokensPerRun, billingReservationTtlMs());
   } catch (err) {
     const error =
       err instanceof AiUnavailable
@@ -590,6 +617,7 @@ async function runOne(deps: HostedAgentDeps, workspaceId: string, agentId: strin
         toolCalls: 0,
         tokens: 0,
         error,
+        countsAsFailure: !(err instanceof AiUnavailable && err.reason === 'budget'),
       },
       origin,
     );
@@ -609,6 +637,8 @@ async function runOne(deps: HostedAgentDeps, workspaceId: string, agentId: strin
   const attemptStarted = Date.now();
   const usage: TurnUsage = { inputTokens: 0, outputTokens: 0 };
   let error: string | null = null;
+  /** Whether the provider may have billed this run: false means no request left the server. */
+  let providerCalled = false;
 
   try {
     const context = await deps.db.withWorkspace(workspaceId, (tx) => loadRunContext(tx, loaded));
@@ -624,6 +654,9 @@ async function runOne(deps: HostedAgentDeps, workspaceId: string, agentId: strin
       maxTokens: loaded.hosted.maxTokensPerRun,
       maxToolCalls: loaded.hosted.maxToolCallsPerRun,
       usage,
+      onProviderCall: () => {
+        providerCalled = true;
+      },
     });
     const summary =
       turn.text ||
@@ -664,23 +697,59 @@ async function runOne(deps: HostedAgentDeps, workspaceId: string, agentId: strin
     );
     return disabled ? ('disabled' as const) : ('failed' as const);
   } finally {
-    // One ai_calls row per run, written while the reservation still covers it, so the provider's
-    // monthly usage never dips between the model call and its record. The `usage` accumulator is
-    // filled by onStepEnd, so a run that throws after a step still records that step's tokens.
-    await recordAiCall(deps.db, workspaceId, {
-      kind: 'hosted',
-      status: error ? 'failed' : 'done',
-      providerId: model.providerId,
-      model: model.modelId,
-      input: { hostedAgentId: loaded.agent.id, runId },
-      error,
-      inputTokens: usage.inputTokens,
-      outputTokens: usage.outputTokens,
-      latencyMs: Date.now() - attemptStarted,
-      principalId: loaded.agent.sponsorUserId,
-      finishedAt: new Date(),
-    }).catch((err) => logger.error({ err, workspaceId, agentId }, 'hosted agent AI call not recorded'));
-    if (reservation) await releaseTokens(deps.db, workspaceId, reservation).catch(() => {});
+    if (reservation) {
+      // One ai_calls row per run, written in the same transaction that deletes the hold, so the
+      // provider's monthly usage never dips between the model call and its record. The `usage`
+      // accumulator is filled by onStepEnd, so a run that throws after a step still records that
+      // step's tokens.
+      const call = {
+        // Stable across both writers: a retry after an uncertain commit cannot write a second row.
+        id: newId('aic'),
+        kind: 'hosted' as const,
+        status: error ? ('failed' as const) : ('done' as const),
+        providerId: model.providerId,
+        model: model.modelId,
+        input: { hostedAgentId: loaded.agent.id, runId },
+        error,
+        inputTokens: usage.inputTokens,
+        outputTokens: usage.outputTokens,
+        latencyMs: Date.now() - attemptStarted,
+        principalId: loaded.agent.sponsorUserId,
+        finishedAt: new Date(),
+      };
+      if (!providerCalled) {
+        // No request reached the provider, so nothing can have been billed. Keep the audit row,
+        // but free the hold even when that write fails: retaining it would block unspent budget.
+        await recordAiCall(deps.db, workspaceId, call).catch((err) =>
+          logger.error({ err, workspaceId, agentId }, 'hosted agent AI call not recorded'),
+        );
+        await releaseTokens(deps.db, workspaceId, reservation).catch((err) =>
+          logger.error({ err, workspaceId, agentId }, 'hosted agent budget reservation could not be released'),
+        );
+      } else {
+        // A call that may have been billed is settled atomically. If its usage cannot be written,
+        // the durable hold stays (or is extended) rather than freeing allowance the provider charged.
+        const outcome = await settleReservation(
+          deps.db,
+          workspaceId,
+          reservation,
+          async (tx) => {
+            await tx.insert(schema.aiCalls).values({ workspaceId, ...call });
+          },
+          {
+            fallback: async () => {
+              await recordAiCall(deps.db, workspaceId, call, { idempotent: true });
+            },
+            label: 'hosted run',
+          },
+        );
+        if (outcome === 'held')
+          logger.error(
+            { workspaceId, agentId, runId, callId: call.id },
+            'hosted agent AI settlement could not be confirmed; retaining any outstanding billing reservation',
+          );
+      }
+    }
   }
 }
 
