@@ -106,7 +106,8 @@ const MIGRATION_RELEASES: Record<string, string> = {
   '0075_workspace_domains.sql': '0.8.0',
   '0076_agent_coordination.sql': '0.8.0',
   '0077_oauth_workspace.sql': '0.8.0',
-  '0079_experience_rollouts.sql': '0.8.0',
+  '0078_experience_rollouts.sql': '0.8.0',
+  '0079_workspace_create.sql': '0.8.0',
 };
 
 export function releaseForMigrationHead(head: string | null): string | null {

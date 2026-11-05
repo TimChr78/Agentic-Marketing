@@ -2,6 +2,8 @@
 // no build step, no framework. The consent page lets the person choose what the agent may do;
 // MCP clients request every advertised scope, so this is where least privilege happens.
 
+import { brandWordmarkSvg } from '@agentic-marketing/core';
+
 const scopeText: Record<string, string> = {
   'artifacts:read': 'Read journeys, templates and other artifacts',
   'artifacts:write': 'Create and edit drafts',
@@ -19,6 +21,9 @@ const scopeText: Record<string, string> = {
 };
 const defaultOn = new Set(['openid', 'profile', 'email', 'offline_access', 'artifacts:read', 'artifacts:write', 'artifacts:publish']);
 
+/** The product mark on every server-rendered page, so OAuth sign-in and consent look like the app. */
+const brandHeader = `<a class="brand" href="/" aria-label="Agentic Marketing">${brandWordmarkSvg({ width: 180, title: '' })}</a>`;
+
 const layout = (title: string, body: string) => `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${title} · Agentic Marketing</title>
@@ -34,8 +39,10 @@ const layout = (title: string, body: string) => `<!doctype html>
   button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); font-weight: 500; }
   :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .scope { display:flex; gap:10px; align-items:flex-start; } .scope code { font-size: 12px; color: var(--muted); }
+  .brand { display:inline-flex; margin-bottom: 18px; color: var(--fg); text-decoration: none; }
+  .brand svg { height: 30px; width: auto; }
   #err { color: #c42b2b; min-height: 1.5em; }
-</style></head><body><main>${body}</main></body></html>`;
+</style></head><body><main>${brandHeader}${body}</main></body></html>`;
 
 export const loginPage = layout(
   'Sign in',

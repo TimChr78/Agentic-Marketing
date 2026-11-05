@@ -4,21 +4,55 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#f7f8fa" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#0e1013" media="(prefers-color-scheme: dark)" />
+    <meta
+      name="description"
+      content="Agentic Marketing is an open-source, self-hostable, agent-first marketing platform: every capability is a command under the same permissions, approvals and audit log."
+    />
+    <link rel="icon" href="/favicon.ico" sizes="any" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/brand/apple-touch-icon.png" />
+    <link rel="manifest" href="/site.webmanifest" />
+    <!-- Relative URLs keep self-hosted installs working; crawlers that need an absolute image fall
+         back to the title and description, and operators can set a public base URL at the proxy. -->
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Agentic Marketing" />
+    <meta property="og:title" content="Agentic Marketing" />
+    <meta
+      property="og:description"
+      content="Agent-first marketing, with people in control. Drafts are reviewed, sends respect consent, and every action is audited."
+    />
+    <meta property="og:image" content="/brand/social-preview.png" />
+    <meta property="og:image:width" content="1280" />
+    <meta property="og:image:height" content="640" />
+    <meta property="og:image:alt" content="The Agentic Marketing mark and wordmark" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Agentic Marketing" />
+    <meta
+      name="twitter:description"
+      content="Agent-first marketing, with people in control. Drafts are reviewed, sends respect consent, and every action is audited."
+    />
+    <meta name="twitter:image" content="/brand/social-preview.png" />
     <title>Agentic Marketing</title>
     <script>
-      // Theme before first paint (docs/design/DESIGN.md → Themes): the signed-in person's choice on this
-      // device, else the last choice made here, else the OS preference. Kept in sync by src/app/theme.ts.
+      // Theme and desktop-navigation preference before first paint (docs/design/DESIGN.md → Themes,
+      // Layout): the signed-in person's choice on this device, else the last choice made here, else
+      // the OS preference. Kept in sync by src/app/theme.ts and src/app/prefs.ts.
       (() => {
         var u;
         var pref;
         var dark;
+        var nav;
         try {
           u = localStorage.getItem('am.theme.user');
           pref = (u && localStorage.getItem(`am.theme.${u}`)) || localStorage.getItem('am.theme') || 'system';
           dark = pref === 'dark' || (pref === 'system' && matchMedia('(prefers-color-scheme: dark)').matches);
           document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
+          nav = (u && localStorage.getItem(`am.nav.${u}`)) || 'expanded';
+          document.documentElement.setAttribute('data-nav', nav === 'collapsed' ? 'collapsed' : 'expanded');
         } catch {
-          // Storage can be unavailable (private mode, blocked cookies); fall back to the default theme.
+          // Storage can be unavailable (private mode, blocked cookies); fall back to the defaults.
         }
       })();
     </script>

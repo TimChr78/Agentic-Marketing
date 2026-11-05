@@ -1,3 +1,4 @@
+export * from './brand';
 export * from './policy';
 export * from './principal';
 export * from './registry';

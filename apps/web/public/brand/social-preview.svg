@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img">
+  <title>Agentic Marketing: agent-first marketing, with people in control</title>
+  <rect width="1280" height="640" fill="#f7f8fa"/>
+  <rect x="0" y="0" width="1280" height="8" fill="#2457d6"/>
+  <g transform="translate(400 168) scale(7.5)"><rect width="64" height="64" rx="14" fill="#2457d6"/>
+    <path d="M17 46 32 18 47 46" fill="none" stroke="#ffffff" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M24.5 36H39.5" fill="none" stroke="#ffffff" stroke-width="6" stroke-linecap="round"/></g>
+  <text x="640" y="440" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="96" font-weight="600" letter-spacing="-2" fill="#14171c">Agentic Marketing</text>
+  <text x="640" y="504" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="30" fill="#646c79">Agent-first marketing, with people in control</text>
+</svg>

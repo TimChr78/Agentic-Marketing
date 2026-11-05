@@ -111,6 +111,11 @@ first paint**, so there is no flash. System follows `prefers-color-scheme` live.
 e-mails and hosted pages always render as the recipient will see them (light, their own styles); only the
 frame around them follows the theme.
 
+The desktop navigation rail uses the same per-person, per-device store (`am.nav.<userId>`, values
+`expanded` and `collapsed`) and is also read by the inline script before first paint. A small `usePref`
+helper in `apps/web/src/app/prefs.ts` owns the read, write and subscription, so a third copy of this
+logic does not grow. Under 1024 px the mobile drawer does not read the preference.
+
 ## Layout
 
 ```
@@ -129,10 +134,19 @@ frame around them follows the theme.
 └────────────┴──────────────────────────────────────────────────────────────┘
 ```
 
-- **Sidebar** 232 px, collapsible to a drawer under 1024 px (a menu button opens it). Groups: Build, Design,
-  Audience, Insights, Approvals (with pending count), Settings. Items a role can't use are hidden; a group
-  with no visible items is hidden.
-- **Top bar:** breadcrumbs, global search (`/` or `⌘K`/`Ctrl K`), theme toggle, user menu.
+- **Sidebar** 232 px, collapsible on desktop to a 64 px icon rail from a top-bar toggle
+  (`aria-expanded`/`aria-controls`, tooltip); the choice is per person and device (`am.nav.<userId>`)
+  and read before first paint. The rail shows the brand, the group icons with a menu of their pages,
+  accessible names and the pending-approvals badge. Under 1024 px the sidebar is a drawer opened by a
+  menu button, and the desktop rail preference is ignored. Groups: Build, Design, Audience, Insights,
+  Approvals (with pending count), Settings. Items a role can't use are hidden; a group with no visible
+  items is hidden.
+- **Brand switcher:** the top of the sidebar shows the current brand's logo, name and primary domain;
+  the menu lists every membership with the same brand context. **New brand** appears only for a person
+  who owns at least one brand and opens a short wizard (name, domain, site name, logo). Brand accent
+  colours stay on hosted pages; the admin chrome keeps the design-system tokens.
+- **Top bar:** the desktop nav toggle, breadcrumbs, global search (`/` or `⌘K`/`Ctrl K`), theme toggle,
+  user menu.
 - **Page:** title (`text-page`), optional one-line description, **primary action top right**, then filters,
   then the table or cards. Max content width 1280 px; editors (journey canvas, e-mail editor) are full width.
 - **Detail pages** share one structure: header with name, type, state pill and the actions the role allows;
@@ -143,6 +157,10 @@ frame around them follows the theme.
 - **Responsive:** 1440 px is the design width; everything works at 768 px (tablet: sidebar collapses, tables
   drop secondary columns into a second line). At 390 px the approvals list and review drawer are fully usable;
   other screens are readable.
+
+The product's own mark, wordmark, icons and link-preview assets are documented in
+[brand-assets.md](brand-assets.md); the mark is generated from `packages/core/src/brand.ts`, not redrawn per
+surface.
 
 ## Components
 

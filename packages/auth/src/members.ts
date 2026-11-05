@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { type CommandContext, defineCommand } from '@agentic-marketing/commands';
+import { type BrandSummary, BrandSummarySchema, type CommandContext, defineCommand } from '@agentic-marketing/commands';
 import { AppError, newId, sha256 } from '@agentic-marketing/core';
 import { type Db, type Role, schema } from '@agentic-marketing/db';
 import { verifyPassword as verifyBetterAuthPassword } from 'better-auth/crypto';
@@ -13,8 +13,8 @@ import { z } from 'zod';
 /** Names and e-mail addresses of people, which live in the auth tables rather than in a workspace. */
 export interface Directory {
   users(ids: string[]): Promise<Map<string, { email: string; name: string }>>;
-  /** Workspaces a person belongs to, for the workspace switcher. */
-  memberships(userId: string): Promise<{ id: string; name: string; role: Role }[]>;
+  /** Workspaces a person belongs to, with the brand summary the switcher shows (#190). */
+  memberships(userId: string): Promise<{ id: string; name: string; role: Role; brand: BrandSummary }[]>;
   /** Display names of registered OAuth clients, by client id. */
   oauthClients(clientIds: string[]): Promise<Map<string, string>>;
   /**
@@ -54,15 +54,43 @@ export function authDirectory(db: Db): Directory {
     },
     async memberships(userId) {
       // Cross-workspace by nature: the command runs inside the current workspace's RLS scope.
-      const { rows } = await db.admin.query<{ id: string; name: string; role: Role }>(
-        `SELECT w.id, w.name, m.role
+      const { rows } = await db.admin.query<{
+        id: string;
+        name: string;
+        role: Role;
+        site_name: string | null;
+        logo_url: string | null;
+        primary_domain: string | null;
+      }>(
+        `SELECT w.id, w.name, m.role,
+                b.site_name, b.logo_url, d.host AS primary_domain
            FROM workspace_members m
            JOIN workspaces w ON w.id = m.workspace_id
+           LEFT JOIN LATERAL (
+             SELECT v.content->>'siteName' AS site_name, v.content->>'logoUrl' AS logo_url
+               FROM artifacts a
+               JOIN artifact_versions v
+                 ON v.workspace_id = a.workspace_id AND v.artifact_id = a.id AND v.number = a.published_version
+              WHERE a.workspace_id = w.id AND a.type = 'brand' AND a.published_version IS NOT NULL
+              ORDER BY a.updated_at DESC
+              LIMIT 1
+           ) b ON true
+           LEFT JOIN LATERAL (
+             SELECT host FROM workspace_domains
+              WHERE workspace_id = w.id AND is_primary
+              ORDER BY created_at
+              LIMIT 1
+           ) d ON true
           WHERE m.user_id = $1
           ORDER BY w.name, w.created_at`,
         [userId],
       );
-      return rows;
+      return rows.map((r) => ({
+        id: r.id,
+        name: r.name,
+        role: r.role,
+        brand: { siteName: r.site_name ?? r.name, logoUrl: r.logo_url ?? null, primaryDomain: r.primary_domain ?? null },
+      }));
     },
     async oauthClients(clientIds) {
       if (!clientIds.length) return new Map();
@@ -135,9 +163,11 @@ export const listMemberships = defineCommand({
   name: 'workspace.memberships',
   title: 'Your workspaces',
   description:
-    'The workspaces you belong to and your role in each. A person switches workspace by sending the chosen id in the X-Workspace-Id header on REST calls (the admin UI stores it after they pick one). A token or connected client is bound to one brand and sees only that workspace.',
+    'The brands (workspaces) you belong to, with your role and the brand summary the switcher shows (site name, logo, primary domain). A person switches workspace by sending the chosen id in the X-Workspace-Id header on REST calls (the admin UI stores it after they pick one). A token or connected client is bound to one brand and sees only that workspace.',
   input: z.object({}),
-  output: z.object({ workspaces: z.array(z.object({ id: z.string(), name: z.string(), role: RoleSchema })) }),
+  output: z.object({
+    workspaces: z.array(z.object({ id: z.string(), name: z.string(), role: RoleSchema, brand: BrandSummarySchema })),
+  }),
   permission: 'artifacts:read',
   effect: 'read',
   handler: async (_input, ctx) => {

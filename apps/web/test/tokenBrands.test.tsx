@@ -36,8 +36,8 @@ afterEach(() => {
 });
 
 const memberships: Membership[] = [
-  { id: 'a', name: 'Brand A', role: 'owner' },
-  { id: 'b', name: 'Brand B', role: 'viewer' },
+  { id: 'a', name: 'Brand A', role: 'owner', brand: { siteName: 'Brand A', logoUrl: null, primaryDomain: null } },
+  { id: 'b', name: 'Brand B', role: 'viewer', brand: { siteName: 'Brand B', logoUrl: null, primaryDomain: 'brand-b.example' } },
 ];
 
 const renderDrawer = (onCreated = vi.fn()) =>
