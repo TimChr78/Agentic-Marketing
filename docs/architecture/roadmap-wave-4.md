@@ -1,6 +1,6 @@
 # Roadmap, wave 4: agentic marketing (plan 2026-10-30; Phases 17–20 built)
 
-> **Status at 0.6.1:** Phases 17–20 are built. Phase 17 shipped in 0.3.0 (tracker #219), Phase 18 in 0.4.0 (#230), Phase 19 in 0.5.0 (#259) and Phase 20 in 0.6.0 (#317), with fixes in 0.4.1, 0.5.1–0.5.5 and 0.6.1. The pilot done-criteria — four weekly issues without a person in the send path, a month of the newsletter programme, and a promoted lifecycle variant — are remaining work, not missing code. Phases 21–22 are planned. The text below keeps the original plan; the status lines say what happened.
+> **Status at 0.8.0:** Phases 17–22 are built. Phase 17 shipped in 0.3.0 (tracker #219), Phase 18 in 0.4.0 (#230), Phase 19 in 0.5.0 (#259), Phase 20 in 0.6.0 (#317), Phase 21 in 0.7.0 (#341) and Phase 22 in 0.8.0 (#429), with fixes in 0.4.1, 0.5.1–0.5.5, 0.6.1 and 0.7.1–0.7.6. The pilot done-criteria — four weekly issues without a person in the send path, a month of the newsletter programme, and a promoted lifecycle variant — are remaining work, not missing code. The multi-agent and multi-brand done-criterion of Phase 22 is measured in the pilot too. The text below keeps the original plan; the status lines say what happened.
 
 Wave 3 (Phases 12 to 16) is built, and 0.2.10 hardened the build, the release path and the docs. The platform now has everything an agent needs to see and do marketing: one command layer for REST and MCP, drafts and approvals, a send gateway that enforces consent, a metric layer, campaigns, holdouts and alerts.
 
@@ -24,7 +24,7 @@ Wave 3's four questions still apply (unblocks real use, prerequisite, value per 
 | **19** ✅ | **The safety net** (built in 0.5.0; fixes in 0.5.1–0.5.5) | The guardian (guardrails and anomaly checks, automatic downgrade and pause); staged sends and canaries; undo for reversible actions; shadow mode; required holdouts for autonomous experiments; loop and probing detection; thin hosted agents (scheduled reports, the deliverability guardian) | 18 | L | A tripped guardrail downgrades an agent within minutes without a person, an unsafe send stops after its canary stage, and a person undoes an agent's change in one action |
 | **20** ✅ | **Closed loops** (built in 0.6.0; fixes in 0.6.1; the pilot runs are still open) | Level L4; goals in mandates; outcome attribution per agent; learnings store; events for agents (webhooks and MCP polling); the campaign agent (#64); lifecycle optimiser and experimentation programmes; editorial backlog and sources for the newsletter agent (#140, #141); recipes (#150); bulk enrollment (#148) | 19 | XL | An agent runs the newsletter programme end to end for a month (topics, issues, subject tests, sends, report, learnings) and a lifecycle agent ships and promotes a journey variant against a holdout, both within their mandates |
 | **21** | **Hosted agents** ✅ (0.7.0) | The full hosted runtime (the thin version shipped in Phase 19): event-triggered runs, templates for every programme, the copilot attached to an agent, decision models in journeys (#192–#194), memory and skills for hosted agents | 20 | L | A self-hoster with no agent runtime runs the newsletter programme inside the platform, under a mandate |
-| **22** | **Many agents, many brands** (planned) | Coordination between agents (artifact ownership, contact pressure across agents, conflicts); brand scoping (#184, #187); progressive rollout for agent changes (#102); ad audiences and conversions under mandates (budgets: #212); agent performance comparison and renewal at scale | 21, multi-brand track | XL | Three agents run side by side in one workspace, or across two brands, without stepping on each other or exceeding the workspace's limits |
+| **22** | **Many agents, many brands** ✅ (0.8.0) | Coordination between agents (artifact ownership, contact pressure across agents, conflicts); brand scoping (#184, #187); progressive rollout for agent changes (#102); ad audiences and conversions under mandates (budgets: #212); agent performance comparison and renewal at scale | 21, multi-brand track | XL | Three agents run side by side in one workspace, or across two brands, without stepping on each other or exceeding the workspace's limits |
 
 \*Size in working sessions of the current kind: S ≈ 1, M ≈ 2–3, L ≈ 4+, XL ≈ 8+.
 
@@ -125,7 +125,7 @@ Done when a self-hoster turns on a deliverability guardian and a weekly report a
 
 ## Phase 22: many agents, many brands
 
-**Status: planned.** The brand field on agents and mandates exists as a reserved placeholder; multi-brand (#184, #187), progressive rollout (#102) and agent-managed ad budgets (#212) are open.
+**Status: built in 0.8.0 (tracker #429).** A brand is a workspace (#184): verified brand domains and per-brand links (#186, #185, #188), one brand per token (#187), per-brand data semantics (#189), a New brand flow and brand-aware shell (#190, #195). Agents: ownership, conflict holds and a cross-agent contact cap (#426); ramped experience rollouts with an automatic stop (#427, the part of #102 this wave needed; full feature flags stay in #102); comparison, bulk renewal and ads under mandates (#428). The reserved `brand` column on agents stays unused, since the workspace is the brand. Agent-managed ad budgets remain a separate design (#212).
 
 Goal: several agents and several brands in one instance without conflicts.
 
@@ -164,11 +164,13 @@ Scheduled with the phases, not as a separate release. Bugs first.
 
 Multi-brand and multi-domain on one instance (#184 with #185, #186, #188, #189, #190, #195) is not agentic, but agents across brands (#187) depend on it, and the per-brand privacy semantics (#189) affect what a mandate's scope means. It runs as its own track: designed during Phases 18–19, built when a second brand needs it, and in any case before Phase 22. Branding (#195) and the navigation collapse (#180) are small UI items that can land with any phase.
 
+**Status: built in 0.8.0** together with Phase 22, including branding (#195) and the navigation collapse (#180). Shared hard-bounce suppression across brands is a follow-up (#430).
+
 ## What stays from wave 3
 
 The "Later, when a pilot needs it" and "Parked" lists in [wave 3](roadmap-wave-3.md#later-when-a-pilot-needs-it) still hold, with three changes:
 
-- **Feature flags and progressive rollout (#102)** moves into Phase 22 (and the staged sends of Phase 19 cover broadcasts earlier). Still open.
+- **Feature flags and progressive rollout (#102)** moves into Phase 22 (and the staged sends of Phase 19 cover broadcasts earlier). Ramped experience rollouts shipped in 0.8.0 (#427); the flag artifact, SDK evaluation and flag dependencies are still open in #102.
 - **Scheduled agent routines (#86)** shipped in a thin, scheduled form with hosted agents in 0.5.0; event-triggered runs and **agent memory and skills (the rest of #85)** remain in Phase 21.
 - **Predictive scores (#69)** stays parked, but the decision-model work in Phase 21 (#192–#194) is its likely entry point.
 

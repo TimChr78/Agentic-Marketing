@@ -25,7 +25,7 @@ const SMTP_PORT = testPort(2527);
 
 beforeAll(async () => {
   await new Promise<void>((r) => smtp.listen(SMTP_PORT, '127.0.0.1', () => r()));
-  t = await startTestServer('test_p2', testPort(3296));
+  t = await startTestServer('test_p2', testPort(3700));
   owner = await t.signUp(`owner-${Date.now()}@example.com`);
   ws = await t.workspaceWith([[owner, 'owner']]);
 }, 60_000);
