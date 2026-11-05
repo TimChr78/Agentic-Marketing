@@ -1,4 +1,5 @@
 import { DEFAULT_DELIVERY_POLICY, type DeliveryPolicy, type Purposes, publishedSingleton } from '@agentic-marketing/artifacts';
+import { zonedInstant, zonedParts } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
 import { and, eq, gte, inArray, lt, ne, or, sql } from 'drizzle-orm';
 
@@ -19,21 +20,76 @@ export async function deliveryPolicy(tx: Tx): Promise<DeliveryPolicy> {
 
 const minutes = (hhmm: string) => Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3));
 
-/** Minutes past midnight in a time zone. */
-function localMinutes(now: Date, timeZone: string) {
-  const parts = new Intl.DateTimeFormat('en-GB', { timeZone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(now);
-  const get = (t: string) => Number(parts.find((p) => p.type === t)?.value ?? 0);
-  return get('hour') * 60 + get('minute');
+const MINUTE = 60_000;
+const DAY = 86_400_000;
+
+/** A local wall-clock reading as minutes on the local calendar (a "pseudo-UTC" key, not an instant). */
+function localClock(at: Date, timeZone: string): number {
+  const p = zonedParts(at, timeZone);
+  return Date.UTC(p.y, p.m - 1, p.d) / MINUTE + p.h * 60 + p.min;
+}
+
+/** Whole minutes east of UTC at an instant. */
+function offsetMinutes(at: Date, timeZone: string): number {
+  const rounded = Math.floor(at.getTime() / MINUTE) * MINUTE;
+  const p = zonedParts(new Date(rounded), timeZone);
+  return (Date.UTC(p.y, p.m - 1, p.d, p.h, p.min) - rounded) / MINUTE;
+}
+
+/**
+ * The earliest actual instant at which the local clock reaches a wall-clock time on a date.
+ * A fall-back fold has two instants with that reading; the earlier one wins. A spring-forward
+ * gap has none; the transition itself is then the first instant past the skipped reading.
+ */
+function wallClockEnd(y: number, m: number, d: number, minuteOfDay: number, timeZone: string, after: Date): Date {
+  const wall = Date.UTC(y, m - 1, d) + minuteOfDay * MINUTE;
+  const target = wall / MINUTE;
+  // Offsets on both sides of any transition near this date; a transition shifts the offset by
+  // 30, 60 or 120 minutes in current tzdata, and ±36h covers date-line jumps too.
+  const offsets = new Set<number>();
+  for (const hours of [-36, -12, 0, 12, 36]) offsets.add(offsetMinutes(new Date(wall + hours * 3_600_000), timeZone));
+  const exact = [...offsets]
+    .map((offset) => wall - offset * MINUTE)
+    .filter((ts) => ts > after.getTime() && localClock(new Date(ts), timeZone) === target)
+    .sort((a, b) => a - b);
+  if (exact.length) return new Date(exact[0] as number);
+
+  let below = Number.NEGATIVE_INFINITY;
+  let above = Number.POSITIVE_INFINITY;
+  for (const offset of offsets) {
+    const ts = wall - offset * MINUTE;
+    const clock = localClock(new Date(ts), timeZone);
+    if (clock < target) below = Math.max(below, ts);
+    else if (clock > target) above = Math.min(above, ts);
+  }
+  if (!Number.isFinite(below) || !Number.isFinite(above)) {
+    // Defensive: no transition explains the missing reading. Keep the old zoned-instant guess.
+    return zonedInstant(y, m, d, Math.floor(minuteOfDay / 60), minuteOfDay % 60, timeZone);
+  }
+  // The skipped reading is in a spring-forward gap. Find the first minute at or after the jump.
+  let lo = below;
+  let hi = above;
+  while (hi - lo > MINUTE) {
+    const mid = lo + Math.floor((hi - lo) / 2 / MINUTE) * MINUTE;
+    if (localClock(new Date(mid), timeZone) >= target) hi = mid;
+    else lo = mid;
+  }
+  return new Date(hi);
 }
 
 /** When quiet hours (local time) end, or null when it is not quiet now. */
 export function quietUntil(now: Date, window: { start: string; end: string }, timeZone: string): Date | null {
-  const t = localMinutes(now, timeZone);
+  const p = zonedParts(now, timeZone);
+  const t = p.h * 60 + p.min;
   const [s, e] = [minutes(window.start), minutes(window.end)];
   const quiet = s <= e ? t >= s && t < e : t >= s || t < e;
   if (!quiet) return null;
-  const wait = (e - t + 1440) % 1440;
-  return new Date(Math.ceil((now.getTime() + wait * 60_000) / 60_000) * 60_000);
+  // The instant of the end reading, not a wall-clock minute count: a transition between now and
+  // the end changes the elapsed real time. The end is today when it is still ahead today (also
+  // for the after-midnight part of an overnight window), otherwise tomorrow.
+  const date = new Date(Date.UTC(p.y, p.m - 1, p.d) + (t < e ? 0 : DAY));
+  const until = wallClockEnd(date.getUTCFullYear(), date.getUTCMonth() + 1, date.getUTCDate(), e, timeZone, now);
+  return new Date(Math.ceil(until.getTime() / MINUTE) * MINUTE);
 }
 
 const validZone = (tz: unknown): tz is string => {

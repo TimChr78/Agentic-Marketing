@@ -31,6 +31,32 @@ describe('template rendering', () => {
     expect(r.warnings).toEqual([]);
   });
 
+  it('converts text with the fixed options: skip images, hide same-text hrefs, wrap at 78', async () => {
+    // #406: pins the html-to-text surface used by render.ts after the 9 -> 10 dependency bump.
+    const words = Array.from({ length: 40 }, (_, i) => `word${i}`).join(' ');
+    const r = await renderTemplate(
+      {
+        ...welcome,
+        mjml: `<mjml><mj-body><mj-section><mj-column>
+          <mj-image src="https://example.com/logo.png" alt="LOGO-ALT-TEXT" />
+          <mj-text>${words}</mj-text>
+          <mj-text><a href="https://example.com/same">https://example.com/same</a></mj-text>
+          <mj-text><a href="{{ unsubscribe_url }}">Unsubscribe</a></mj-text>
+        </mj-column></mj-section></mj-body></mjml>`,
+      },
+      { unsubscribe_url: 'https://m.example.com/u/abc' },
+    );
+    expect(r.text).not.toContain('LOGO-ALT-TEXT');
+    expect(r.text.match(/https:\/\/example\.com\/same/g) ?? []).toHaveLength(1);
+    expect(r.text).toContain('https://m.example.com/u/abc');
+    const wrapped = r.text
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line.includes('word'));
+    expect(wrapped.length).toBeGreaterThan(1);
+    expect(Math.max(...wrapped.map((line) => line.length))).toBeLessThanOrEqual(78);
+  });
+
   it('escapes personal data so it cannot inject markup', async () => {
     const r = await renderTemplate(welcome, { profile: { firstName: '<script>alert(1)</script>' } });
     expect(r.html).not.toContain('<script>alert(1)');
