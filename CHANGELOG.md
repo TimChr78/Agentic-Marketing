@@ -2,6 +2,27 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [0.7.5] - 2026-11-05
+
+### Fixed
+
+- Keep hosted-run MCP catalogues within granted scopes and remove invitations to call tools requiring unavailable escalation (#364).
+- Read complete campaign and AI-calibration conversion windows beyond the former 100k cap, resolve historical events through current merged identities, and bound large identity query parameters (#366).
+- Attribute journey split outcomes to one eligible entry and its deterministic first arm, independent of report-window boundaries; repeated outcomes count once per entry (#369).
+- Page profile events, lists and exports with full-precision timestamp/id keysets through tied timestamps; exports explicitly report when `maxEvents` truncates retained events (#397).
+- Resume quiet-hour holds at the earliest actual exit across DST gaps, repeated hours, overnight folds and date-line changes (#367).
+- Queue every valid password-reset address through the same account-independent request path. Workers mint Better Auth verification tokens, re-check eligibility, fence claims and token revocation, bound retries and clean up payloads (#379).
+- Apply public-form rate limits across replicas through shared hot state, with no local-map reset. Forms and password reset fail closed when their shared limit store is unavailable (#380 and reset-queue hardening).
+- Remove the vulnerable deepmerge dependency from production email rendering by upgrading html-to-text to 10.0.1, with fixed-option rendering regressions and an explicit advisory disposition (#406).
+
+### Upgrading from 0.7.4
+
+- **Migrations:** `0074_password_reset_queue.sql` adds the installation-level sealed reset-request queue. It runs on startup; released migrations are unchanged. Databases upgrading released 0.7.4 end at 0073 and apply the final 0074 normally. Developers who applied an intermediate PR417 migration must recreate disposable test databases or prepare a reviewed transition for non-disposable data; never bypass checksum validation.
+- **Configuration:** no new environment variables. Keep at least one worker replica running for reset mail and cleanup, keep Valkey available for public rate limits, and retain a stable `AUTH_SECRET` for pending sealed requests.
+- **Breaking changes:** no removed command or artifact fields. `profiles.events` and `profiles.list` add composite cursors; legacy timestamp-only `before` requests keep their historical boundary behavior, so tie-safe traversal must use the paired id from `nextCursor`. `profiles.export` adds `eventsTruncated`. Hosted runs no longer list ungranted tools. Public forms and password-reset endpoints return a generic 503 when their shared rate limiter is unavailable; reset mail is asynchronous.
+- **Manual steps:** verify worker health and transactional email configuration. Reset delivery is at least once; a crash after provider acceptance can resend a link. Worker cleanup expires unprocessed payloads after 24 hours and prunes terminal rows after seven days; neither sending nor physical cleanup runs without a worker. Rotating `AUTH_SECRET` makes pending sealed requests unreadable, and older minted verification tokens remain subject to their existing 45-minute expiry and single-use rule. Email conversion preserves the application's fixed options; raw-text `textarea`/`xmp` content follows html-to-text v10's more literal output. See `docs/deployment/operations.md` for development-snapshot handling and `docs/triage/0.7.5-bugfix-plan.md` for validation evidence.
+- **Upgrade:** download `agentic-marketing-compose-0.7.5.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.7.5 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.7.5` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.7.5). Run `docker compose exec app am doctor`.
+
 ## [0.7.4] - 2026-11-05
 
 ### Fixed
