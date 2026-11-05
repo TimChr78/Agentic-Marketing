@@ -1,6 +1,6 @@
 import { DEFAULT_PURPOSES, publishedSingleton, type TrackingPlan } from '@agentic-marketing/artifacts';
 import { type CommandContext, defineCommand } from '@agentic-marketing/commands';
-import { AppError, isoDateTime, newId } from '@agentic-marketing/core';
+import { AppError, newId } from '@agentic-marketing/core';
 import { type IdentifierType, schema, type Tx } from '@agentic-marketing/db';
 import type {} from '@agentic-marketing/hotstate';
 import { and, desc, eq, inArray, isNull, lt, or, sql } from 'drizzle-orm';
@@ -20,6 +20,7 @@ import {
   topicSummary,
 } from './consent';
 import { personCrypto } from './crypto';
+import { isProfileCursorTimestamp } from './cursor';
 
 // Profile, consent and data-subject-request commands. Personal data is decrypted only for
 // principals with profiles:pii; agents additionally see only traits the attribute schema marks
@@ -27,6 +28,14 @@ import { personCrypto } from './crypto';
 
 const ProfileId = z.string().regex(/^prf_[0-9a-f]{32}$/);
 const HIDDEN = '[hidden]';
+
+/** A cursor timestamp keeps the database's full precision; see `cursor.ts` for why. */
+const cursorTimestamp = (field: string) =>
+  z
+    .string()
+    .max(40)
+    .refine(isProfileCursorTimestamp, `${field} must be an ISO 8601 timestamp with a time zone and valid date fields.`)
+    .describe(`ISO 8601 with a time zone, e.g. 2026-10-30T07:00:00Z; pass nextCursor.${field} unchanged for the next page`);
 
 async function canonical(ctx: CommandContext, profileId: string) {
   let id = profileId;
@@ -117,8 +126,14 @@ export const listProfiles = defineCommand({
   name: 'profiles.list',
   title: 'Recently active profiles',
   description:
-    'People (known and anonymous) by most recent activity, with their current consent per purpose and, with profiles:pii, their e-mail. Page with `before` (a lastSeen value).',
-  input: z.object({ limit: z.number().int().min(1).max(200).default(50), before: isoDateTime('before').optional() }),
+    'People (known and anonymous) by most recent activity, with their current consent per purpose and, with profiles:pii, their e-mail. Page with `before` + `beforeId` from nextCursor; `before` alone is the legacy timestamp-only cursor and keeps its old strictly-before behavior.',
+  input: z.object({
+    limit: z.number().int().min(1).max(200).default(50),
+    before: cursorTimestamp('before')
+      .optional()
+      .describe('Legacy timestamp-only cursor (lastSeen); pair with beforeId for a stable keyset'),
+    beforeId: ProfileId.optional().describe('The last profile id of the previous page, from nextCursor.id'),
+  }),
   output: z.object({
     profiles: z.array(
       z.object({
@@ -133,6 +148,10 @@ export const listProfiles = defineCommand({
         email: z.string().nullable().describe('The person’s e-mail; always null without profiles:pii'),
       }),
     ),
+    nextCursor: z
+      .object({ lastSeen: z.string(), id: z.string() })
+      .nullable()
+      .describe('Pass lastSeen as `before` and id as `beforeId` for the next page; null on the last page'),
   }),
   permission: 'profiles:read',
   effect: 'read',
@@ -146,6 +165,17 @@ export const listProfiles = defineCommand({
           sql`, `,
         )})`
       : sql<Record<string, string | null>>`'{}'::jsonb`;
+    // Compare in the database's timestamp type so microseconds survive the round trip. The composite
+    // (lastSeen, id) keyset makes rows sharing a timestamp reachable; `before` alone is the legacy
+    // timestamp-only cursor and keeps its strictly-before semantics (#397).
+    const pageFilter = input.before
+      ? input.beforeId
+        ? or(
+            lt(schema.profiles.lastSeen, sql`${input.before}::timestamptz`),
+            and(eq(schema.profiles.lastSeen, sql`${input.before}::timestamptz`), lt(schema.profiles.id, input.beforeId)),
+          )
+        : lt(schema.profiles.lastSeen, sql`${input.before}::timestamptz`)
+      : undefined;
     const rows = await ctx.tx
       .select({
         id: schema.profiles.id,
@@ -153,12 +183,15 @@ export const listProfiles = defineCommand({
         lastSeen: schema.profiles.lastSeen,
         firstSeen: schema.profiles.firstSeen,
         consent,
+        cursorAt: sql<string>`to_char(${schema.profiles.lastSeen} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
       })
       .from(schema.profiles)
-      .where(and(isNull(schema.profiles.mergedInto), input.before ? lt(schema.profiles.lastSeen, new Date(input.before)) : undefined))
-      .orderBy(desc(schema.profiles.lastSeen))
-      .limit(input.limit);
-    const identifierRows = rows.length
+      .where(and(isNull(schema.profiles.mergedInto), pageFilter))
+      .orderBy(desc(schema.profiles.lastSeen), desc(schema.profiles.id))
+      .limit(input.limit + 1);
+    const page = rows.slice(0, input.limit);
+    const last = page[page.length - 1];
+    const identifierRows = page.length
       ? await ctx.tx
           .select({ profileId: schema.identifiers.profileId, type: schema.identifiers.type, valueEnc: schema.identifiers.valueEnc })
           .from(schema.identifiers)
@@ -166,7 +199,7 @@ export const listProfiles = defineCommand({
             and(
               inArray(
                 schema.identifiers.profileId,
-                rows.map((r) => r.id),
+                page.map((r) => r.id),
               ),
               inArray(schema.identifiers.type, ['user_id', 'email', 'phone']),
             ),
@@ -185,7 +218,7 @@ export const listProfiles = defineCommand({
         : [];
     const emailOf = new Map(emails.map((r, i) => [r.profileId, opened[i] ?? null]));
     return {
-      profiles: rows.map((r) => ({
+      profiles: page.map((r) => ({
         id: r.id,
         traits: r.traits,
         known: knownIds.has(r.id),
@@ -194,6 +227,7 @@ export const listProfiles = defineCommand({
         consent: purposes.map((p) => ({ purpose: p.key, status: r.consent?.[p.key] ?? null })),
         email: showEmail ? (emailOf.get(r.id) ?? null) : null,
       })),
+      nextCursor: rows.length > input.limit && last ? { lastSeen: last.cursorAt, id: last.id } : null,
     };
   },
 });
@@ -236,8 +270,14 @@ export const getProfile = defineCommand({
 export const profileEvents = defineCommand({
   name: 'profiles.events',
   title: 'A person’s events',
-  description: 'Events of a person across all their anonymous and user ids, newest first. Page with `before` (a timestamp).',
-  input: z.object({ profileId: ProfileId, limit: z.number().int().min(1).max(500).default(100), before: isoDateTime('before').optional() }),
+  description:
+    'Events of a person across all their anonymous and user ids, newest first. Page with `before` + `beforeId` from nextCursor; `before` alone is the legacy timestamp-only cursor and keeps its old strictly-before behavior.',
+  input: z.object({
+    profileId: ProfileId,
+    limit: z.number().int().min(1).max(500).default(100),
+    before: cursorTimestamp('before').optional().describe('Legacy timestamp-only cursor; pair with beforeId for a stable keyset'),
+    beforeId: z.string().min(1).max(200).optional().describe('The last event id of the previous page, from nextCursor.eventId'),
+  }),
   output: z.object({
     events: z.array(
       z.object({
@@ -249,6 +289,10 @@ export const profileEvents = defineCommand({
         context: z.record(z.string(), z.unknown()),
       }),
     ),
+    nextCursor: z
+      .object({ timestamp: z.string(), eventId: z.string() })
+      .nullable()
+      .describe('Pass timestamp as `before` and eventId as `beforeId` for the next page; null on the last page'),
   }),
   permission: 'profiles:read',
   effect: 'read',
@@ -256,16 +300,23 @@ export const profileEvents = defineCommand({
   handler: async (input, ctx) => {
     const p = await canonical(ctx, input.profileId);
     const ids = await identifiersOf(ctx, p.id);
-    const events = await ctx.services.events.eventsOf(
+    // One extra row tells us whether another page exists, without a second query.
+    const rows = await ctx.services.events.eventsOf(
       ctx.principal.workspaceId,
       {
         anonymousIds: ids.filter((i) => i.type === 'anonymous_id').map((i) => i.value),
         userIds: ids.filter((i) => i.type === 'user_id').map((i) => i.value),
       },
-      { limit: input.limit, before: input.before },
+      {
+        limit: input.limit + 1,
+        ...(input.before ? { before: input.before } : {}),
+        ...(input.before && input.beforeId ? { beforeId: input.beforeId } : {}),
+      },
     );
+    const page = rows.slice(0, input.limit);
+    const last = page[page.length - 1];
     return {
-      events: events.map(({ eventId, type, name, timestamp, properties, context }) => ({
+      events: page.map(({ eventId, type, name, timestamp, properties, context }) => ({
         eventId,
         type,
         name,
@@ -273,6 +324,7 @@ export const profileEvents = defineCommand({
         properties,
         context,
       })),
+      nextCursor: rows.length > input.limit && last ? { timestamp: last.timestamp, eventId: last.eventId } : null,
     };
   },
 });
@@ -583,17 +635,23 @@ export const exportProfile = defineCommand({
   handler: async (input, ctx) => {
     const profile = await getProfile.handler({ profileId: input.profileId }, ctx);
     const { records } = await consentHistory.handler({ profileId: profile.id }, ctx);
-    const { events } = input.maxEvents
-      ? await profileEvents.handler({ profileId: profile.id, limit: Math.min(input.maxEvents, 500) }, ctx)
-      : { events: [] };
-    // Page through the rest.
-    while (events.length < input.maxEvents && events.length % 500 === 0 && events.length) {
-      const more = await profileEvents.handler(
-        { profileId: profile.id, limit: Math.min(500, input.maxEvents - events.length), before: events[events.length - 1].timestamp },
+    const events: Record<string, unknown>[] = [];
+    // Page with the composite (timestamp, event_id) cursor so a burst of tied events is exported
+    // in full instead of ending the loop at the first page boundary (#397). maxEvents remains the
+    // honest upper bound; we never silently stop below it while a next page exists.
+    let cursor: { timestamp: string; eventId: string } | null = null;
+    while (events.length < input.maxEvents) {
+      const page = await profileEvents.handler(
+        {
+          profileId: profile.id,
+          limit: Math.min(500, input.maxEvents - events.length),
+          ...(cursor ? { before: cursor.timestamp, beforeId: cursor.eventId } : {}),
+        },
         ctx,
       );
-      if (!more.events.length) break;
-      events.push(...more.events);
+      events.push(...page.events);
+      if (!page.nextCursor || !page.events.length) break;
+      cursor = page.nextCursor;
     }
     const family = [profile.id, ...profile.mergedFrom];
     const aiDecisions = (

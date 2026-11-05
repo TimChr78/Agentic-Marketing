@@ -368,31 +368,41 @@ export const calibration = defineCommand({
     const windowMs = input.withinDays * 86_400_000;
     const from = new Date(Math.min(...rows.map((r) => r.createdAt.getTime())));
     const to = new Date(Math.max(...rows.map((r) => r.createdAt.getTime())) + windowMs);
-    // One ClickHouse query for the outcome events in the whole window, then map identifiers to profiles.
-    // A failed read is not "nobody converted": report it rather than a zero report (#360).
+    // Scope the read to the scored profiles and their current identifiers: an outcome that cannot
+    // map to one of them cannot affect the calibration anyway. conversionEvents pages the whole
+    // window by (timestamp, event_id) with no 100k workspace cap (#366), so a busy workspace cannot
+    // silently drop outcomes. A failed read is not "nobody converted": report it rather than a zero
+    // report (#360).
+    const profileIds = [...new Set(rows.map((r) => r.profileId))];
+    const ids = await ctx.tx
+      .select({ profileId: schema.identifiers.profileId, type: schema.identifiers.type, value: schema.identifiers.value })
+      .from(schema.identifiers)
+      .where(
+        and(
+          eq(schema.identifiers.workspaceId, ws),
+          inArray(schema.identifiers.profileId, profileIds),
+          inArray(schema.identifiers.type, ['anonymous_id', 'user_id']),
+        ),
+      );
+    const profileOf = new Map(ids.map((i) => [i.value, i.profileId]));
     let events: Awaited<ReturnType<typeof ctx.services.events.conversionEvents>>;
     try {
-      events = await ctx.services.events.conversionEvents(ws, { names: [input.event], from, to });
+      events = await ctx.services.events.conversionEvents(ws, {
+        names: [input.event],
+        from,
+        to,
+        profileIds,
+        identifiers: {
+          anonymousIds: ids.filter((i) => i.type === 'anonymous_id').map((i) => i.value),
+          userIds: ids.filter((i) => i.type === 'user_id').map((i) => i.value),
+        },
+      });
     } catch (err) {
       throw new AppError('conflict', `ai.calibration could not read outcome events: ${(err as Error).message}`);
     }
-    const values = [...new Set(events.flatMap((e) => [e.anonymousId, e.userId]).filter(Boolean))];
-    const ids = values.length
-      ? await ctx.tx
-          .select({ profileId: schema.identifiers.profileId, value: schema.identifiers.value })
-          .from(schema.identifiers)
-          .where(
-            and(
-              eq(schema.identifiers.workspaceId, ws),
-              inArray(schema.identifiers.type, ['anonymous_id', 'user_id']),
-              inArray(schema.identifiers.value, values),
-            ),
-          )
-      : [];
-    const profileOf = new Map(ids.map((i) => [i.value, i.profileId]));
     const outcomes = new Map<string, number[]>();
     for (const e of events) {
-      const profileId = profileOf.get(e.userId) ?? profileOf.get(e.anonymousId);
+      const profileId = e.profileId || profileOf.get(e.userId) || profileOf.get(e.anonymousId);
       if (!profileId) continue;
       outcomes.set(profileId, [...(outcomes.get(profileId) ?? []), e.timestamp]);
     }

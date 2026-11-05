@@ -16,7 +16,7 @@ export interface EventStore {
   eventsOf(
     workspaceId: string,
     ids: { anonymousIds: string[]; userIds: string[] },
-    opts?: { limit?: number; before?: string },
+    opts?: { limit?: number; before?: string; beforeId?: string },
   ): Promise<StoredEvent[]>;
   /** Deletes a person's events (erasure). */
   deleteEventsOf(workspaceId: string, ids: { anonymousIds: string[]; userIds: string[]; profileIds?: string[] }): Promise<void>;
@@ -55,17 +55,43 @@ export interface EventStore {
   journeyHoldoutOutcomes(
     workspaceId: string,
     q: { journeyId: string; from?: Date; to?: Date },
-  ): Promise<{ converted: string[]; unsubscribed: string[] }>;
+  ): Promise<{
+    converted: string[];
+    unsubscribed: string[];
+    /** The same outcomes with their timestamps, so a split result can attribute each one once. */
+    convertedAt: { profileId: string; participantId: number | null; at: number }[];
+    unsubscribedAt: { profileId: string; at: number }[];
+  }>;
   /** Which arm of a split node each participant took (the step's detail, "variant N"), for split results (#313). */
   journeySplitArms(
     workspaceId: string,
     q: { journeyId: string; node: string; from?: Date; to?: Date },
-  ): Promise<{ participantId: number; profileId: string; arm: number }[]>;
-  /** Goal events by name in a time window, with the identifiers that tie them to a profile. */
+  ): Promise<{ participantId: number; profileId: string; arm: number; at: number }[]>;
+  /**
+   * Goal events by name in a time window, with the identifiers that tie them to a profile. Every
+   * matching event is returned: the query pages with a stable (timestamp, event_id) keyset instead
+   * of applying a workspace-wide limit (#366). Pass profileIds/identifiers to scope it to the
+   * people being measured.
+   */
   conversionEvents(
     workspaceId: string,
-    q: { names: string[]; from: Date; to: Date; limit?: number },
-  ): Promise<{ anonymousId: string; userId: string; name: string; timestamp: number; properties: Record<string, unknown> }[]>;
+    q: {
+      names: string[];
+      from: Date;
+      to: Date;
+      profileIds?: string[];
+      identifiers?: { anonymousIds: string[]; userIds: string[] };
+    },
+  ): Promise<
+    {
+      profileId: string;
+      anonymousId: string;
+      userId: string;
+      name: string;
+      timestamp: number;
+      properties: Record<string, unknown>;
+    }[]
+  >;
   /** People who unsubscribed from any message sent by these journeys or broadcasts, in a time window. */
   unsubscribedProfiles(workspaceId: string, q: { journeyIds: string[]; from?: Date; to?: Date }): Promise<string[]>;
   messageEventsOf(workspaceId: string, filter: { messageIds?: string[]; profileId?: string }, limit?: number): Promise<MessageEvent[]>;
@@ -303,12 +329,25 @@ export function clickHouseStore(opts: { url: string; database: string }): EventS
     },
     async eventsOf(workspaceId, ids, o = {}) {
       if (!ids.anonymousIds.length && !ids.userIds.length) return [];
+      // A composite (timestamp, event_id) cursor keeps tied events from being skipped at a page
+      // boundary. `before` alone is the legacy timestamp-only cursor and deliberately keeps its
+      // old strictly-before semantics (#397).
+      const after = o.before
+        ? o.beforeId
+          ? "AND (timestamp < {before:DateTime64(3, 'UTC')} OR (timestamp = {before:DateTime64(3, 'UTC')} AND event_id < {beforeId:String}))"
+          : "AND timestamp < {before:DateTime64(3, 'UTC')}"
+        : '';
       const rs = await query(workspaceId, {
         query: `SELECT event_id, type, name, timestamp, received_at, anonymous_id, user_id, properties, context
                 FROM events FINAL
-                WHERE ${idFilter} ${o.before ? "AND timestamp < {before:DateTime64(3, 'UTC')}" : ''}
-                ORDER BY timestamp DESC LIMIT {limit:UInt32}`,
-        query_params: { ...params(workspaceId, ids), limit: o.limit ?? 100, before: o.before?.replace('Z', '') },
+                WHERE ${idFilter} ${after}
+                ORDER BY timestamp DESC, event_id DESC LIMIT {limit:UInt32}`,
+        query_params: {
+          ...params(workspaceId, ids),
+          limit: o.limit ?? 100,
+          ...(o.before ? { before: o.before.replace('Z', '') } : {}),
+          ...(o.before && o.beforeId ? { beforeId: o.beforeId } : {}),
+        },
         format: 'JSONEachRow',
       });
       const rows = await rs.json<Record<string, never>>();
@@ -460,20 +499,25 @@ export function clickHouseStore(opts: { url: string; database: string }): EventS
     async journeySplitArms(workspaceId, q) {
       const from = q.from?.toISOString().replace('Z', '');
       const to = q.to?.toISOString().replace('Z', '');
+      // One deterministic take per participant: the first split step by (at, seq, detail). A
+      // participant that loops back through the same split keeps that first arm, so its outcomes
+      // cannot be counted twice or attributed to two arms (#369).
       const rows = await query(workspaceId, {
-        query: `SELECT participant_id, any(profile_id) AS profile, any(detail) AS variant FROM journey_events FINAL
+        query: `SELECT participant_id, profile_id, detail AS variant, at FROM journey_events FINAL
                 WHERE workspace_id = {ws:UUID} AND journey_id = {j:String} AND node = {n:String} AND type = 'step'
                   AND startsWith(detail, 'variant ')
                 ${from ? "AND at >= {from:DateTime64(3, 'UTC')}" : ''}
                 ${to ? "AND at <= {to:DateTime64(3, 'UTC')}" : ''}
-                GROUP BY participant_id`,
+                ORDER BY at ASC, seq ASC, detail ASC
+                LIMIT 1 BY participant_id`,
         query_params: { ws: workspaceId, j: q.journeyId, n: q.node, ...(from ? { from } : {}), ...(to ? { to } : {}) },
         format: 'JSONEachRow',
       });
-      return (await rows.json<{ participant_id: number | string; profile: string; variant: string }>()).map((r) => ({
+      return (await rows.json<{ participant_id: number | string; profile_id: string; variant: string; at: string }>()).map((r) => ({
         participantId: Number(r.participant_id),
-        profileId: r.profile,
+        profileId: r.profile_id,
         arm: Number(r.variant.slice('variant '.length)) - 1,
+        at: Date.parse(`${String(r.at).replace(' ', 'T')}Z`),
       }));
     },
 
@@ -481,7 +525,7 @@ export function clickHouseStore(opts: { url: string; database: string }): EventS
       const from = q.from?.toISOString().replace('Z', '');
       const to = q.to?.toISOString().replace('Z', '');
       const converted = await query(workspaceId, {
-        query: `SELECT DISTINCT profile_id FROM journey_events FINAL
+        query: `SELECT DISTINCT profile_id, participant_id, at FROM journey_events FINAL
                 WHERE workspace_id = {ws:UUID} AND journey_id = {j:String} AND type = 'converted'
                 ${from ? "AND at >= {from:DateTime64(3, 'UTC')}" : ''}
                 ${to ? "AND at <= {to:DateTime64(3, 'UTC')}" : ''}`,
@@ -489,41 +533,100 @@ export function clickHouseStore(opts: { url: string; database: string }): EventS
         format: 'JSONEachRow',
       });
       const unsubscribed = await query(workspaceId, {
-        query: `SELECT DISTINCT profile_id FROM message_events FINAL
+        query: `SELECT DISTINCT profile_id, at FROM message_events FINAL
                 WHERE workspace_id = {ws:UUID} AND journey_id = {j:String} AND type = 'unsubscribed' AND channel = 'email'
                 ${from ? "AND at >= {from:DateTime64(3, 'UTC')}" : ''}
                 ${to ? "AND at <= {to:DateTime64(3, 'UTC')}" : ''}`,
         query_params: { ws: workspaceId, j: q.journeyId, ...(from ? { from } : {}), ...(to ? { to } : {}) },
         format: 'JSONEachRow',
       });
+      const convertedRows = await converted.json<{ profile_id: string; participant_id: number | string; at: string }>();
+      const unsubscribedRows = await unsubscribed.json<{ profile_id: string; at: string }>();
+      const at = (value: string) => Date.parse(`${String(value).replace(' ', 'T')}Z`);
       return {
-        converted: (await converted.json<{ profile_id: string }>()).map((r) => r.profile_id),
-        unsubscribed: (await unsubscribed.json<{ profile_id: string }>()).map((r) => r.profile_id),
+        converted: [...new Set(convertedRows.map((r) => r.profile_id))],
+        unsubscribed: [...new Set(unsubscribedRows.map((r) => r.profile_id))],
+        convertedAt: convertedRows.map((r) => ({
+          profileId: r.profile_id,
+          participantId: Number(r.participant_id),
+          at: at(r.at),
+        })),
+        unsubscribedAt: unsubscribedRows.map((r) => ({ profileId: r.profile_id, at: at(r.at) })),
       };
     },
     async conversionEvents(workspaceId, q) {
       if (!q.names.length) return [];
-      const rs = await query(workspaceId, {
-        query: `SELECT anonymous_id, user_id, name, timestamp, properties FROM events FINAL
-                WHERE workspace_id = {ws:UUID} AND name IN {names:Array(String)}
-                  AND timestamp >= {from:DateTime64(3, 'UTC')} AND timestamp <= {to:DateTime64(3, 'UTC')}
-                ORDER BY timestamp LIMIT {limit:UInt32}`,
-        query_params: {
-          ws: workspaceId,
-          names: q.names,
-          from: q.from.toISOString().replace('Z', ''),
-          to: q.to.toISOString().replace('Z', ''),
-          limit: q.limit ?? 100_000,
-        },
-        format: 'JSONEachRow',
-      });
-      return (await rs.json<Record<string, never>>()).map((r) => ({
-        anonymousId: r.anonymous_id,
-        userId: r.user_id,
-        name: r.name,
-        timestamp: Date.parse(`${String(r.timestamp).replace(' ', 'T')}Z`),
-        properties: typeof r.properties === 'string' ? JSON.parse(r.properties) : (r.properties as Record<string, unknown>),
-      }));
+      // No workspace-wide row cap: the old LIMIT 100_000 silently dropped later conversions
+      // (#366). Walk the window with a bounded, stable (timestamp, event_id) keyset instead, so
+      // the caller sees every matching event. Scope by profile/identifier where the caller knows
+      // the measured people, which also keeps the scan small.
+      const scopes: string[] = [];
+      const scopeParams: Record<string, unknown> = {};
+      if (q.profileIds?.length) {
+        scopes.push('profile_id IN {profiles:Array(String)}');
+        scopeParams.profiles = q.profileIds;
+      }
+      if (q.identifiers) {
+        const identifiers: string[] = [];
+        if (q.identifiers.anonymousIds.length) {
+          identifiers.push('anonymous_id IN {anon:Array(String)}');
+          scopeParams.anon = q.identifiers.anonymousIds;
+        }
+        if (q.identifiers.userIds.length) {
+          identifiers.push('user_id IN {users:Array(String)}');
+          scopeParams.users = q.identifiers.userIds;
+        }
+        if (identifiers.length) scopes.push(`(${identifiers.join(' OR ')})`);
+      }
+      const scope = scopes.length ? `AND (${scopes.join(' OR ')})` : '';
+      const pageSize = 10_000;
+      const events: {
+        profileId: string;
+        anonymousId: string;
+        userId: string;
+        name: string;
+        timestamp: number;
+        properties: Record<string, unknown>;
+      }[] = [];
+      let after: { timestamp: string; eventId: string } | undefined;
+      for (;;) {
+        const rs = await query(workspaceId, {
+          query: `SELECT event_id, profile_id, anonymous_id, user_id, name, timestamp, properties FROM events FINAL
+                  WHERE workspace_id = {ws:UUID} AND name IN {names:Array(String)}
+                    AND timestamp >= {from:DateTime64(3, 'UTC')} AND timestamp <= {to:DateTime64(3, 'UTC')}
+                    ${scope}
+                    ${
+                      after
+                        ? "AND (timestamp > {after:DateTime64(3, 'UTC')} OR (timestamp = {after:DateTime64(3, 'UTC')} AND event_id > {afterId:String}))"
+                        : ''
+                    }
+                  ORDER BY timestamp ASC, event_id ASC LIMIT {pageSize:UInt32}`,
+          query_params: {
+            ws: workspaceId,
+            names: q.names,
+            from: q.from.toISOString().replace('Z', ''),
+            to: q.to.toISOString().replace('Z', ''),
+            pageSize,
+            ...scopeParams,
+            ...(after ? { after: after.timestamp, afterId: after.eventId } : {}),
+          },
+          format: 'JSONEachRow',
+        });
+        const rows = await rs.json<Record<string, never>>();
+        for (const r of rows)
+          events.push({
+            profileId: r.profile_id,
+            anonymousId: r.anonymous_id,
+            userId: r.user_id,
+            name: r.name,
+            timestamp: Date.parse(`${String(r.timestamp).replace(' ', 'T')}Z`),
+            properties: typeof r.properties === 'string' ? JSON.parse(r.properties) : (r.properties as Record<string, unknown>),
+          });
+        if (rows.length < pageSize) break;
+        const last = rows[rows.length - 1]!;
+        after = { timestamp: String(last.timestamp), eventId: String(last.event_id) };
+      }
+      return events;
     },
     async unsubscribedProfiles(workspaceId, q) {
       if (!q.journeyIds.length) return [];

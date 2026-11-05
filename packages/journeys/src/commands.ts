@@ -23,6 +23,7 @@ import { compile, unsupported } from './graph';
 import { assignHoldout, computeJourneyHoldout, holdoutDetail, holdoutHashVersion } from './holdout';
 import { conditionSegments, journeyTouches } from './impact';
 import { advance, type ParticipantState } from './interpreter';
+import { attributeSplitOutcomes } from './split';
 
 const JourneyId = z.string().regex(/^jrn_[0-9a-f]{32}$/);
 const SegmentId = z.string().regex(/^seg_[0-9a-f]{32}$/);
@@ -244,7 +245,7 @@ export const journeySplitResult = defineCommand({
   name: 'journeys.splitResult',
   title: 'Results per arm of a journey split',
   description:
-    "For a split node in a published journey: how many people took each arm, their goal conversions and e-mail unsubscribes, and each arm compared with the first (variant 1) — absolute and relative lift, Newcombe's 95% interval and a verdict that needs the minimum sample in both arms and an interval excluding zero. The lifecycle optimiser uses it to promote or retire a variant (#313).",
+    "For a split node in a published journey: how many people took each arm, their goal conversions and e-mail unsubscribes, and each arm compared with the first (variant 1) — absolute and relative lift, Newcombe's 95% interval and a verdict that needs the minimum sample in both arms and an interval excluding zero. Each outcome is attributed once, to the split entry active at the outcome (a recorded participant wins; otherwise the latest entry at or before it), so a re-entrant cannot count for every arm. The lifecycle optimiser uses it to promote or retire a variant (#313).",
   input: z.object({
     journeyId: JourneyId,
     node: z.string().min(1).describe('The split node id'),
@@ -290,18 +291,15 @@ export const journeySplitResult = defineCommand({
     const range = { ...(input.from ? { from: new Date(input.from) } : {}), ...(input.to ? { to: new Date(input.to) } : {}) };
     const ws = ctx.principal.workspaceId;
     const taken = await ctx.services.events.journeySplitArms(ws, { journeyId: input.journeyId, node: input.node, ...range });
-    // Goal conversions and unsubscribes per person, as journeys.holdoutResult counts them.
+    // Goal conversions and unsubscribes per event, as journeys.holdoutResult counts them. Each event
+    // is attributed to exactly one eligible split entry/arm (#369); the previous profile-level sets
+    // were re-applied to every entry a re-entrant had, which counted one conversion in both arms.
     const outcomes = await ctx.services.events.journeyHoldoutOutcomes(ws, { journeyId: input.journeyId, ...range });
-    const converted = new Set(outcomes.converted);
-    const unsubscribed = new Set(outcomes.unsubscribed);
-    const counts = weights.map(() => ({ entered: 0, converted: 0, unsubscribed: 0 }));
-    for (const t of taken) {
-      const c = counts[t.arm];
-      if (!c) continue;
-      c.entered++;
-      if (converted.has(t.profileId)) c.converted++;
-      if (unsubscribed.has(t.profileId)) c.unsubscribed++;
-    }
+    const counts = attributeSplitOutcomes(
+      taken,
+      { converted: outcomes.convertedAt, unsubscribed: outcomes.unsubscribedAt },
+      weights.length,
+    );
     const rate = (n: number, of: number) => (of ? n / of : 0);
     const arms = counts.map((c, i) => ({
       arm: i,

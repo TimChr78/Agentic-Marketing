@@ -470,11 +470,23 @@ export const campaignHoldoutResult = defineCommand({
           and(inArray(schema.identifiers.profileId, [...people.keys()]), inArray(schema.identifiers.type, ['anonymous_id', 'user_id'])),
         );
       const profileOf = new Map(identifiers.map((i) => [i.value, i.profileId]));
-      const events = await ctx.services.events.conversionEvents(ws, { names, from: first, to: windowTo });
+      // The event query is scoped to the campaign's people (profile ids plus their identifiers) and
+      // pages the whole attribution window, so a busy workspace cannot hide a late conversion behind
+      // an unrelated 100k-event cap (#366).
+      const events = await ctx.services.events.conversionEvents(ws, {
+        names,
+        from: first,
+        to: windowTo,
+        profileIds: [...people.keys()],
+        identifiers: {
+          anonymousIds: identifiers.filter((i) => i.type === 'anonymous_id').map((i) => i.value),
+          userIds: identifiers.filter((i) => i.type === 'user_id').map((i) => i.value),
+        },
+      });
       const conversions = new Map<string, { timestamp: number; name: string; properties: Record<string, unknown> }[]>();
       for (const e of events) {
-        const profileId = profileOf.get(e.userId) ?? profileOf.get(e.anonymousId);
-        if (!profileId) continue;
+        const profileId = e.profileId || profileOf.get(e.userId) || profileOf.get(e.anonymousId);
+        if (!profileId || !people.has(profileId)) continue;
         const list = conversions.get(profileId) ?? [];
         list.push(e);
         conversions.set(profileId, list);
