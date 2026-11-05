@@ -47,3 +47,17 @@ export function scopeSentence(scopes: string[]): string {
   if (parts.length <= 1) return parts[0] ?? '';
   return `${parts.slice(0, -1).join('; ')}; and ${parts.at(-1)}`;
 }
+
+/** The scopes each role may grant, mirroring ROLE_PERMISSIONS on the server. */
+export const ROLE_SCOPES: Record<string, readonly Scope[]> = {
+  owner: SCOPES,
+  admin: SCOPES,
+  marketer: ['artifacts:read', 'artifacts:write', 'artifacts:publish', 'messages:send', 'audit:read', 'profiles:read', 'profiles:write'],
+  approver: ['artifacts:read', 'artifacts:approve', 'audit:read', 'profiles:read'],
+  viewer: ['artifacts:read'],
+};
+
+/** Memberships whose role can grant every chosen scope, for the brand picker (#187). */
+export function membershipsThatCanGrant<T extends { role: string }>(memberships: T[], scopes: string[]): T[] {
+  return memberships.filter((m) => scopes.every((s) => ROLE_SCOPES[m.role]?.includes(s as Scope)));
+}
