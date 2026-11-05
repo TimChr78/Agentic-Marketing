@@ -268,6 +268,8 @@ describe('journey split attribution (#369)', () => {
 
     // P1 re-enters: arm 0 first, arm 1 later; P3 has two entries at the same millisecond; P4 loops
     // through the split twice under one participant; P7 enters but its conversion is out of range.
+    // The last three entries cover #419: a second entry that bypassed the split (109/110), and a
+    // participant that converts before its own later take (111/112).
     await t.srv.events.insertJourneyEvents([
       step(101, 'prf_reentry', 1, base),
       step(102, 'prf_reentry', 2, base + 2_000, 2),
@@ -277,16 +279,23 @@ describe('journey split attribution (#369)', () => {
       step(107, 'prf_loop', 1, base),
       step(107, 'prf_loop', 2, base + 1_000, 2),
       step(108, 'prf_outside', 1, base + 500),
+      step(109, 'prf_bypass', 1, base),
+      step(111, 'prf_before2', 1, base),
+      step(112, 'prf_before2', 2, base + 3_000, 2),
     ]);
     await t.srv.events.insertJourneyEvents([
       converted(101, 'prf_reentry', base + 1_000),
       { ...converted(101, 'prf_reentry', base + 1_500), seq: 10 },
       converted(102, 'prf_reentry', base + 3_000),
       converted(103, 'prf_before', base - 1_000),
-      // Participant 0 does not match an entry, so this exercises the equal-time profile rule.
+      // Participant 0 is not a real participant (journey ids start at 1) and no storage sentinel
+      // defines it as absent. Its conversion must not borrow the profile's equal-time take (#419).
       converted(0, 'prf_tie', base),
       converted(107, 'prf_loop', base + 3_000),
       converted(108, 'prf_outside', base + 20_000),
+      // Participant 110 never reached the split; participant 112 converts before its own take.
+      converted(110, 'prf_bypass', base + 1_000),
+      converted(112, 'prf_before2', base + 2_000),
     ]);
     await t.srv.events.insertMessageEvents([
       {
@@ -323,10 +332,27 @@ describe('journey split attribution (#369)', () => {
         reason: '',
         url: '',
       },
+      {
+        workspaceId: ws,
+        messageId: 'msg_split_3',
+        eventId: 'msg_split_3',
+        type: 'unsubscribed',
+        at: at(base),
+        profileId: 'prf_tie',
+        channel: 'email',
+        purpose: 'marketing_email',
+        provider: 'log',
+        templateId: 'eml_split',
+        templateVersion: 1,
+        journeyId,
+        variant: '',
+        reason: '',
+        url: '',
+      },
     ]);
 
     const arms = await t.srv.events.journeySplitArms(ws, { journeyId, node: 'split' });
-    expect(arms).toHaveLength(7);
+    expect(arms).toHaveLength(10);
     expect(arms.find((a) => a.participantId === 107)?.arm).toBe(0);
     expect(arms.find((a) => a.participantId === 106)?.arm).toBe(1);
     const later = await t.srv.events.journeySplitArms(ws, {
@@ -336,7 +362,7 @@ describe('journey split attribution (#369)', () => {
       to: new Date(base + 5_000),
     });
     // Filtering cannot turn participant 107's later loop into its first split take.
-    expect(later.map((a) => a.participantId).sort()).toEqual([102, 108]);
+    expect(later.map((a) => a.participantId).sort()).toEqual([102, 108, 112]);
 
     const result = await api.call('journeys.splitResult', {
       journeyId,
@@ -345,14 +371,17 @@ describe('journey split attribution (#369)', () => {
       to: at(base + 5_000),
       minSampleSize: 1,
     });
-    // Entrants: arm0 = P1/P3/P4/P7 (4), arm1 = P1/P2/P3 (3). Conversions: P1 once per entry,
-    // P3 once in the higher-participant tie arm, P4 once for its first take; before-entry and
-    // out-of-window conversions do not count.
+    // Entrants: arm0 = 101/105/107/108/109/111 (6), arm1 = 102/103/106/112 (4). Conversions:
+    // 101 once for its first entry, 107 once for its first take, 102 for its own take. 103 and 112
+    // converted before their own take, 110 never took the split and 0 is not a participant, so none
+    // may borrow an earlier profile entry (#419). 108's conversion is out of the report window.
+    // Unsubscribes have no participant: prf_reentry at +500/+2500 go to 101/102 by time, and the
+    // equal-time prf_tie unsubscribe goes to the higher participant id (106, arm 1).
     expect(result.arms).toMatchObject([
-      { arm: 0, entered: 4, converted: 2, unsubscribed: 1 },
-      { arm: 1, entered: 3, converted: 2, unsubscribed: 1 },
+      { arm: 0, entered: 6, converted: 2, unsubscribed: 1 },
+      { arm: 1, entered: 4, converted: 1, unsubscribed: 2 },
     ]);
-    expect(result.arms.reduce((n, a) => n + a.converted, 0)).toBe(4);
+    expect(result.arms.reduce((n, a) => n + a.converted, 0)).toBe(3);
   }, 120_000);
 });
 

@@ -102,12 +102,67 @@ describe('split outcome attribution', () => {
     expect(counts.map((c) => c.unsubscribed)).toEqual([1, 0]);
   });
 
-  it('does not attribute a participant outcome to another profile entry', () => {
+  it('does not credit a conversion from an entry that bypassed the split (#419)', () => {
+    // Participant 2 re-entered the journey and took a branch that skipped the split. Its
+    // conversion still arrives because splitResult reads conversions for the whole journey.
     const counts = attributeSplitOutcomes(
-      [entry(1, 'prf_other', 0, 1_000), entry(2, 'prf_target', 1, 1_000)],
-      { converted: [outcome('prf_target', 2_000, 1)], unsubscribed: [] },
+      [entry(1, 'prf_bypass', 0, 1_000)],
+      { converted: [outcome('prf_bypass', 3_000, 2)], unsubscribed: [] },
       2,
     );
-    expect(counts.map((c) => c.converted)).toEqual([0, 1]);
+    expect(counts).toEqual([
+      { entered: 1, converted: 0, unsubscribed: 0 },
+      { entered: 0, converted: 0, unsubscribed: 0 },
+    ]);
+  });
+
+  it('does not credit a conversion before that participant reached the split', () => {
+    const counts = attributeSplitOutcomes(
+      [entry(1, 'prf_before', 0, 1_000), entry(2, 'prf_before', 1, 3_000)],
+      { converted: [outcome('prf_before', 2_000, 2)], unsubscribed: [] },
+      2,
+    );
+    expect(counts.map((c) => c.converted)).toEqual([0, 0]);
+  });
+
+  it('does not credit a participant with no split take', () => {
+    const counts = attributeSplitOutcomes(
+      [entry(1, 'prf_missing', 0, 1_000)],
+      { converted: [outcome('prf_missing', 3_000, 9)], unsubscribed: [] },
+      2,
+    );
+    expect(counts.map((c) => c.converted)).toEqual([0, 0]);
+  });
+
+  it('does not treat participant 0 as absent, because no storage sentinel exists', () => {
+    // journey_participants.id is a positive bigserial and every journey-event writer passes it.
+    // A 0 from storage is invalid data, never a reason to borrow the profile's latest take.
+    const counts = attributeSplitOutcomes(
+      [entry(1, 'prf_zero', 0, 1_000)],
+      { converted: [outcome('prf_zero', 3_000, 0)], unsubscribed: [] },
+      2,
+    );
+    expect(counts.map((c) => c.converted)).toEqual([0, 0]);
+  });
+
+  it('credits a valid direct participant take', () => {
+    const counts = attributeSplitOutcomes(
+      [entry(1, 'prf_direct', 0, 1_000), entry(2, 'prf_direct', 1, 3_000)],
+      { converted: [outcome('prf_direct', 2_000, 1)], unsubscribed: [] },
+      2,
+    );
+    expect(counts.map((c) => c.converted)).toEqual([1, 0]);
+  });
+
+  it('keeps a merged participant on its own take instead of another profile entry', () => {
+    // A merge changes the profile id recorded on later events but not the journey participant.
+    // Participant 1's own take remains the only eligible entry, even when the conversion carries
+    // the survivor profile id (so per-profile fallback would have credited participant 2).
+    const counts = attributeSplitOutcomes(
+      [entry(1, 'prf_merged', 0, 1_000), entry(2, 'prf_survivor', 1, 1_000)],
+      { converted: [outcome('prf_survivor', 2_000, 1)], unsubscribed: [] },
+      2,
+    );
+    expect(counts.map((c) => c.converted)).toEqual([1, 0]);
   });
 });
