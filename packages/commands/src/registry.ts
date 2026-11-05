@@ -145,6 +145,11 @@ export interface CommandDef<I extends z.ZodType = z.ZodType, O extends z.ZodType
   /** What the command acts on, for the audit log (e.g. an artifact id). */
   target?: (input: z.output<I>) => string | undefined;
   /**
+   * What the audit log records as the target when the id is only known after the handler ran, e.g.
+   * a freshly created token or invitation. Falls back to `target` when it returns undefined.
+   */
+  auditTarget?: (output: z.output<O>) => string | undefined;
+  /**
    * Facts about what the handler created, merged into the agent ledger's impact (#265). The
    * ledger is written after the handler so it can link the action to the rows it produced, e.g.
    * the message a direct send created, which guardrails need to find the agent's own sends.
@@ -398,6 +403,7 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
                   inputHash,
                   response: redact(out, cmd.sensitiveOutput) as object,
                 });
+              if (cmd.effect !== 'read') target = cmd.auditTarget?.(out) ?? target;
               if (cmd.effect !== 'read') await appendAudit(tx, principal, opts.surface, cmd, inputHash, target);
               if (agent && policy)
                 await recordAgentAction(tx, agent.id, cmd, policy, opts.surface, target, null, intentOf(parsed.data), undo.get());

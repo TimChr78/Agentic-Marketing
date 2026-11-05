@@ -8,6 +8,7 @@ import {
   type AuthConfig,
   acceptInvitation,
   authDirectory,
+  chooseOAuthWorkspace,
   createAuth,
   invitationWorkspace,
   isMcpResourceUrlAllowed,
@@ -258,6 +259,30 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
   app.get('/login', (c) => c.html(loginPage));
   app.get('/consent', (c) => c.html(consentPage));
   app.get('/invite', (c) => c.html(invitePage));
+
+  // The consent page chooses the brand an OAuth client acts in (#187). The choice is checked
+  // against the person's memberships and role here, then stored for the pending consent; the
+  // OAuth provider reads it as the grant's reference id.
+  app.post(
+    '/api/oauth/workspace',
+    bodyLimit(INVITATION_MAX_BODY, (c) =>
+      c.json({ error: 'payload_too_large', message: `Requests are limited to ${INVITATION_MAX_BODY / 1024} KB.` }, 413),
+    ),
+    async (c) => {
+      const session = await auth.api.getSession({ headers: c.req.raw.headers });
+      if (!session) throw new AppError('unauthorized', 'Sign in first, then choose the brand this connection acts in.');
+      const body = (await c.req.json().catch(() => ({}))) as { workspaceId?: unknown; scope?: unknown };
+      if (typeof body.workspaceId !== 'string')
+        throw new AppError('invalid_input', 'Choose the brand (workspaceId) this connection acts in.');
+      const choice = await chooseOAuthWorkspace(db, {
+        sessionId: session.session.id,
+        userId: session.user.id,
+        workspaceId: body.workspaceId,
+        scope: typeof body.scope === 'string' ? body.scope : undefined,
+      });
+      return c.json({ workspaceId: choice.id, name: choice.name });
+    },
+  );
 
   // Accepting an invitation: the person is signed in but not yet a member, so the workspace comes
   // from the token rather than from their memberships.

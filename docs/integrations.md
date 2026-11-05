@@ -6,8 +6,12 @@ How other systems talk to the platform and back. Design: [ADR-0013](architecture
 
 `apiTokens.create` (UI: Settings → Integrations and API tokens) makes a token `amk_…`, shown once. Admins can later rename it, narrow its scopes (applies on its next request) or widen them with their password (`apiTokens.update`); `apiTokens.get` shows its owner, last use and change history.
 - It acts as an **agent** for the person who made it. Its permissions are their current role's, limited to the scopes chosen.
+- **One brand per token.** The token is created in the workspace (brand) the person is in, and the response and the token list show that brand. It cannot act in another brand; to use a second brand, create a second token there. The create dialog has a brand selector, limited to brands where the person's role can grant the chosen scopes.
+- **`X-Workspace-Id` does not switch a token.** The header chooses a workspace for a signed-in person's session only. A token request that sends a different workspace is refused with `403`; the token cannot read or write another brand with or without the header.
 - An agent cannot run humans-only commands (approving, members, secrets, settings). Revoked or expired tokens, or tokens of someone who left the workspace, stop working at once.
-- Every call is in the audit log as `token:<id>`.
+- Every call is in the audit log as `token:<id>`, under the token's workspace; creating, editing and revoking a token records the token id as the audit target.
+
+For OAuth/MCP connections, the consent page asks which brand the client acts in when the person belongs to several; the grant and its access tokens are bound to that brand. See [identity.md](identity.md#one-brand-per-token-or-connection-187).
 
 ```sh
 curl -X POST https://marketing.example.com/v1/journeys.enroll \

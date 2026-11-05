@@ -75,6 +75,18 @@ export const workspaceDomains = pgTable(
   ],
 );
 
+/**
+ * The workspace a person picked on the OAuth consent page, while the flow is in progress (#187).
+ * The OAuth provider reads it through `consentReferenceId` and stores the workspace on the grant;
+ * the row is keyed by the Better Auth session and never authorises anything by itself.
+ */
+export const oauthWorkspaceSelections = pgTable('oauth_workspace_selections', {
+  sessionId: text('session_id').primaryKey(),
+  workspaceId: uuid('workspace_id').notNull(),
+  createdAt: ts('created_at').notNull().defaultNow(),
+  updatedAt: ts('updated_at').notNull().defaultNow(),
+});
+
 export const invitations = pgTable(
   'invitations',
   {

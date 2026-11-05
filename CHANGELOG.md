@@ -7,6 +7,11 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 ### Added
 
 - Add a workspace domain registry (`workspace_domains`) and host resolver for multi-brand installs. A brand is a workspace, and each may register one or more public hostnames with an optional path prefix and one primary domain; the resolver picks the longest matching prefix across workspaces. `workspace.domains.list/add/update/remove` are people-only (`workspace:admin`) and audited, `workspace.get` reports a workspace's domains and effective `linksUrl`, and `am doctor` checks DNS, `/healthz` and TLS for every registered domain. `PUBLIC_LINKS_URL` remains the unchanged fallback for workspaces without a domain, and there is no SQL backfill (#186).
+- API tokens and OAuth/MCP connections are bound to one brand (workspace). The consent page lets a person with several memberships choose the brand, and the grant carries it; the token UI shows the brand and offers a brand selector when creating a token; `workspace.memberships` returns only the bound brand to a credential, and its audit entries record both the token id and the workspace (#187).
+
+### Fixed
+
+- `X-Workspace-Id` no longer affects a token or OAuth connection: a request that sends a different workspace is refused with `403` instead of silently acting in it, so a credential for one brand cannot read or write another (#187).
 
 ## [0.7.6] - 2026-11-05
 

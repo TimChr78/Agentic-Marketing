@@ -28,7 +28,8 @@ const layout = (title: string, body: string) => `<!doctype html>
   body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.55 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; padding:48px max(16px, env(safe-area-inset-left)); }
   main { max-width: 420px; margin: 0 auto; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 28px; }
   h1 { font-size: 20px; line-height: 28px; margin: 0 0 4px; } p { color: var(--muted); margin: 0 0 18px; }
-  label { display:block; margin: 10px 0; } input[type=email], input[type=password], input[type=text] { width:100%; box-sizing:border-box; padding:9px 10px; border:1px solid var(--line); border-radius:6px; background:transparent; color:inherit; font:inherit; }
+  label { display:block; margin: 10px 0; } input[type=email], input[type=password], input[type=text], select { width:100%; box-sizing:border-box; padding:9px 10px; border:1px solid var(--line); border-radius:6px; background:transparent; color:inherit; font:inherit; }
+  .hint { font-size: 12px; margin: 4px 0 14px; }
   button { padding: 9px 16px; border-radius: 6px; border: 1px solid var(--line); background: transparent; color: inherit; font: inherit; cursor: pointer; }
   button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); font-weight: 500; }
   :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -59,24 +60,48 @@ f.onsubmit = async (e) => {
 export const consentPage = layout(
   'Allow access',
   `<h1>Allow access?</h1><p id="who"></p>
-<form id="f"><div id="scopes"></div><p id="err" role="alert"></p>
+<form id="f">
+<div id="brand"><label>Brand this connection acts in<select id="workspace" required><option value="">Loading your brands…</option></select></label>
+<p class="hint">One connection acts in one brand. To let an agent work in another brand, connect it again and choose that brand.</p></div>
+<div id="scopes"></div><p id="err" role="alert"></p>
 <button class="primary" id="yes">Allow selected</button> <button type="button" id="no">Deny</button></form>
 <script>
 const text = ${JSON.stringify(scopeText)};
 const on = new Set(${JSON.stringify([...defaultOn])});
 const q = new URLSearchParams(location.search);
-who.textContent = 'An app (' + (q.get('client_id') || 'unknown') + ') wants to act on your behalf. Choose what it may do:';
+const brandSelect = document.getElementById('workspace');
+who.textContent = 'An app (' + (q.get('client_id') || 'unknown') + ') wants to act on your behalf. Choose the brand it may act in and what it may do:';
 const requested = (q.get('scope') || '').split(' ').filter(Boolean);
 for (const s of requested) {
   if (!text[s]) continue;
   const id = 'scope-' + s.replace(/[^a-z]/g, '-');
   scopes.insertAdjacentHTML('beforeend', '<label class="scope"><input type="checkbox" id="' + id + '" value="' + s + '"' + (on.has(s) ? ' checked' : '') + '><span>' + text[s] + '<br><code>' + s + '</code></span></label>');
 }
+const chosenScopes = () => [...scopes.querySelectorAll('input:checked')].map((i) => i.value);
+const loadBrands = async () => {
+  const r = await fetch('/v1/workspace.memberships', { method: 'POST', credentials: 'include',
+    headers: { 'content-type': 'application/json' }, body: '{}' });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.message || 'Could not load your brands.');
+  const list = j.workspaces || [];
+  if (!list.length) throw new Error('You do not belong to a brand yet. Ask someone to invite you first.');
+  brandSelect.innerHTML = list.map((w) => '<option value="' + w.id + '">' + w.name + ' (' + w.role + ')</option>').join('');
+};
+loadBrands().catch((e) => { err.textContent = e.message; yes.disabled = true; });
 const send = async (accept) => {
-  const chosen = [...scopes.querySelectorAll('input:checked')].map((i) => i.value);
+  err.textContent = '';
+  const chosen = chosenScopes();
   const identity = requested.filter((s) => !text[s]);
+  const scope = [...identity, ...chosen].join(' ');
+  if (accept) {
+    if (!brandSelect.value) { err.textContent = 'Choose the brand this connection acts in.'; return; }
+    const brand = await fetch('/api/oauth/workspace', { method: 'POST', credentials: 'include',
+      headers: { 'content-type': 'application/json' }, body: JSON.stringify({ workspaceId: brandSelect.value, scope }) });
+    const b = await brand.json().catch(() => ({}));
+    if (!brand.ok) { err.textContent = b.message || 'That brand cannot be chosen.'; return; }
+  }
   const r = await fetch('/api/auth/oauth2/consent', { method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ accept, scope: [...identity, ...chosen].join(' '), oauth_query: location.search.slice(1) }) });
+    body: JSON.stringify({ accept, scope, oauth_query: location.search.slice(1) }) });
   const j = await r.json().catch(() => ({}));
   if (j.url) location.href = j.url; else err.textContent = j.message || 'Something went wrong.';
 };

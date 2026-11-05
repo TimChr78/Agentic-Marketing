@@ -36,6 +36,17 @@ Supported: `Users` and `Groups` with list (`filter=userName eq "…"`, `external
 
 An MCP client gets the permissions the person granted when connecting, at most what the person's role allows. Tools the role allows but the connection lacks are still listed, marked "Needs the … permission". Calling one answers HTTP 403 with `WWW-Authenticate: Bearer error="insufficient_scope", scope="…"`, which MCP clients answer by sending the person through authorization again for the larger set of scopes. API tokens have fixed scopes and do not step up.
 
+## One brand per token or connection (#187)
+
+A brand is a workspace. A person can belong to several and switch between them in the admin UI, because their **session** carries a workspace chosen with `X-Workspace-Id`. Credentials are different: an API token and an OAuth/MCP connection each belong to exactly one brand.
+
+- **API tokens.** `apiTokens.create` stores the workspace in the token row. Every request acts in that workspace; the token list shows the brand, and the create dialog offers each brand whose role can grant the chosen scopes. To let a tool work in a second brand, create a second token there. The UI offers that as one step: choose the brand in the create dialog.
+- **OAuth consent.** When the person belongs to several brands, the consent page asks which brand the client acts in. The choice is checked against their membership and role (the role must be able to grant the requested scopes), then stored on the grant as its reference id. The issued access token carries a `workspace_id` claim; refresh tokens keep it. A connection issued before this change, or a direct consent that made no choice, has no claim and is refused when the person belongs to more than one brand: reconnect and choose.
+- **The header.** `X-Workspace-Id` switches a person's session and nothing else. Sending it on a request authenticated with an API token or an OAuth connection that belongs to another brand answers `403` with a clear message rather than silently ignoring the header. A token or MCP client therefore cannot read or write another brand, with or without the header.
+- **Commands and audit.** `workspace.get` returns the bound brand, and `workspace.memberships` returns only that brand to a credential; a person still sees all their memberships. Token creation, edits and revocation are in the audit log under the token's workspace with the token id as the target (`token:<id>` identifies the caller on every subsequent call).
+
+Agents and MCP clients are described in [agents.md](agents.md); the connection steps are in [integrations.md](integrations.md).
+
 ## Password reset (#191)
 
 Anyone who signs in with a password can reset it from the sign-in page ("Forgot password?"), without shell access:
