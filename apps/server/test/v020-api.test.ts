@@ -87,8 +87,8 @@ describe('workspace settings and membership', () => {
     const list = await api.call('workspace.memberships', {});
     expect(list.workspaces).toEqual(
       expect.arrayContaining([
-        { id: ws, name: 'Signal Studio', role: 'owner' },
-        { id: otherWs, name: otherWsName, role: 'marketer' },
+        expect.objectContaining({ id: ws, name: 'Signal Studio', role: 'owner' }),
+        expect.objectContaining({ id: otherWs, name: otherWsName, role: 'marketer' }),
       ]),
     );
     expect((await t.api(owner, otherWs).call('workspace.get', {})).id).toBe(otherWs);

@@ -21,9 +21,7 @@ export function AuthShell({
       <main className="flex flex-1 items-start justify-center px-4 pt-[8vh] pb-16">
         <div className="w-full max-w-[380px]">
           <div className="mb-6 flex items-center gap-2.5">
-            <span className="flex size-8 items-center justify-center rounded-md bg-fg text-[13px] font-semibold text-bg" aria-hidden>
-              A
-            </span>
+            <img src="/brand/mark.svg" alt="" className="size-8" />
             <span className="text-[15px] font-semibold">Agentic Marketing</span>
           </div>
           <h1 className="text-[20px] leading-7 font-semibold">{title}</h1>

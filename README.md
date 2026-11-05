@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="apps/web/public/brand/mark-wordmark-mono-dark.svg">
+    <img src="apps/web/public/brand/mark-wordmark-mono-light.svg" alt="Agentic Marketing" width="320">
+  </picture>
+</p>
+
 # Agentic Marketing
 
 An open-source, self-hostable marketing platform built **agent-first**: every capability is a command that works the same over REST, MCP (for AI agents) and the web UI, under the same permissions, approvals and audit log. Underneath is an event-based customer data platform with GDPR-grade consent handling. You bring your own LLM keys.

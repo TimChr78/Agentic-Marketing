@@ -1,3 +1,4 @@
+export * from './brand';
 export * from './datetime';
 export * from './errors';
 export * from './hash';

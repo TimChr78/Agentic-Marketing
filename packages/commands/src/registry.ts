@@ -56,6 +56,8 @@ export interface Services {
   invalidateDomainCache?: () => void;
   /** Version of the running server, so command output can show it (workspace.get). */
   serverVersion: string;
+  /** True when the person owns at least one workspace (#190); wired by the server's directory. */
+  ownsAnyWorkspace?: (userId: string) => Promise<boolean>;
   /** Whether unknown input keys are rejected rather than warned about (STRICT_INPUTS). */
   strictInputs: boolean;
   /** Shared counter for wrong passwords on token widening (#61), so every process sees the lockout. */

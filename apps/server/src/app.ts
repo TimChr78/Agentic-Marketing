@@ -136,6 +136,7 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
     invalidateDomainCache: () => domains.invalidate(),
     db,
     serverVersion: VERSION,
+    ownsAnyWorkspace: async (userId) => (await directory.memberships(userId)).some((membership) => membership.role === 'owner'),
     strictInputs: config.strictInputs,
     // Reach of publishing, for the agent policy engine (ADR-0016).
     artifactImpact: {

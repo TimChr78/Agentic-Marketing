@@ -78,7 +78,7 @@ function postgresError(err: unknown): { code?: string; constraint?: string } {
 }
 
 /** Turns the two unique indexes into messages that say what to change. */
-function mapUniqueViolation(err: unknown): never {
+export function mapUniqueViolation(err: unknown): never {
   const { code, constraint } = postgresError(err);
   if (code === '23505') {
     if (constraint === 'workspace_domains_primary')

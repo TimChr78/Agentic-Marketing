@@ -74,6 +74,45 @@ workspace switcher already separate brands; a domain only decides which workspac
 belongs to. One installation keeps **one admin host** (`PUBLIC_URL`) where people sign in and switch
 brand; each brand may have its own public links hostname.
 
+### Create a brand from the admin UI (#190)
+
+`workspace.create` makes another brand in the same installation. It is **people-only and audited**,
+and a person may call it only when they are **owner of at least one workspace**. Being an admin or
+member of the workspace they are currently viewing is not enough; the rule is about ownership
+anywhere in the installation, because the new brand is theirs, not the current brand's. Owners,
+admins, marketers and viewers who own no brand get `403`.
+
+The call takes a name and optional brand basics:
+
+```json
+{
+  "name": "Second site",
+  "primaryDomain": "links.second.example",
+  "pathPrefix": "/am",
+  "siteName": "Second site",
+  "logoUrl": "https://cdn.second.example/logo.svg"
+}
+```
+
+In **one transaction** it creates:
+
+- the workspace row, with the same database defaults as `am bootstrap` (approval policy
+  `agent_changes`, UTC, an empty seed list and the default autonomy), so a brand created in the UI
+  and one created from the CLI cannot drift;
+- the caller's `owner` membership;
+- a **draft** `brand` artifact with the site name and logo (publish it under Design → Brand when it
+  is ready; the switcher shows the workspace name until then);
+- when a host is given, a **pending** primary `workspace_domains` row with its verification token.
+
+A duplicate hostname, an invalid logo URL or any other failure rolls all of it back; no half-created
+brand is left. The domain is not used for links until `workspace.domains.verify` succeeds, exactly
+like one added with `workspace.domains.add`. Nothing is copied from the brand the person came from:
+content, audiences, providers and secrets are all new and empty (cloning is a separate decision).
+
+API tokens and OAuth/MCP connections are agents, so they can never call `workspace.create`. The
+admin UI shows **New brand** in the switcher only when at least one of the person's memberships is
+an owner.
+
 ### Register a domain
 
 `workspace.domains.add/update/remove/verify/list` are people-only (`workspace:admin`) and audited. A
