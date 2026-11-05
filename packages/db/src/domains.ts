@@ -151,6 +151,8 @@ export interface WorkspaceDomainResolver {
   resolveWorkspaceForRequest(host: string, path: string): Promise<ResolvedWorkspaceDomain | null>;
   /** The origin+prefix a workspace's primary domain serves, or null when it has no primary. */
   linksUrlFor(workspaceId: string): Promise<string | null>;
+  /** Whether any workspace has a verified domain; until one does, public routes ignore the Host. */
+  hasVerifiedDomains(): Promise<boolean>;
   /** Drop cached rows after a write; the next lookup reads the table again. */
   invalidate(): void;
 }
@@ -202,6 +204,9 @@ export function createWorkspaceDomainResolver(db: Db, options: DomainResolverOpt
     async linksUrlFor(workspaceId) {
       const domain = (await load()).find((row) => row.workspaceId === workspaceId && row.isPrimary && row.status === 'verified');
       return domain ? `${originForHost(domain.host)}${domain.pathPrefix ?? ''}` : null;
+    },
+    async hasVerifiedDomains() {
+      return (await load()).some((row) => row.status === 'verified');
     },
     invalidate() {
       cache = null;

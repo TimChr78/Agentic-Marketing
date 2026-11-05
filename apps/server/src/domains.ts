@@ -70,7 +70,11 @@ export function createDomainService(db: Db, fallbackLinksUrl: string): DomainSer
         };
       }
       // No registered match: only the installation's fallback host is still served. Any other
-      // Host is not a brand and must not reach another brand's pages.
+      // Host is not a brand and must not reach another brand's pages. An installation without a
+      // verified brand domain keeps its old behaviour and serves public paths on any Host, so an
+      // upgrade does not break a proxy that rewrites Host or a LAN address used for testing.
+      if (!(await resolver.hasVerifiedDomains()))
+        return { workspaceId: null, linksUrl: fallbackLinksUrl, matched: false, pathPrefix: fallback?.prefix ?? null };
       if (!fallback) return null;
       let normalized: string;
       try {
