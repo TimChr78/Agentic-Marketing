@@ -1,12 +1,22 @@
 import { hashedResetTokenIdentifier, RESET_PASSWORD_TTL_SECONDS } from '@agentic-marketing/auth';
+import type { Db } from '@agentic-marketing/db';
 import { outbox } from '@agentic-marketing/email';
+import { Hono } from 'hono';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { runPasswordResetDeliveriesOnce, sendPasswordResetEmail } from '../src/passwordReset';
+import { passwordResetRoutes } from '../src/http/password-reset';
+import {
+  enqueueResetRequest,
+  openResetEmail,
+  openResetToken,
+  runPasswordResetDeliveriesOnce,
+  sendPasswordResetEmail,
+} from '../src/passwordReset';
 import { cookieOf, startTestServer, testPort, type User } from './harness';
 
 // Self-service password reset (#191): the neutral answer, the mailed link, the password change,
 // single use and expiry, session revocation, the rate limits, single sign-on people and the audit.
-// #379: the answer is queued, so it never waits for the provider or depends on account existence.
+// #379: the request path is account-agnostic (seal + enqueue); the worker does account lookup,
+// eligibility, token minting and delivery with a fenced lease.
 
 const PORT = testPort(2600);
 const BASE = `http://localhost:${PORT}`;
@@ -40,16 +50,63 @@ const signIn = (email: string, password: string) =>
 const mailsTo = (email: string) => outbox.filter((m) => m.to === email && m.subject === MAIL_SUBJECT);
 
 /** The test server runs the reset worker on an all-but-infinite tick; drive one round here. */
-const deliver = (send?: Parameters<typeof runPasswordResetDeliveriesOnce>[0]['send']) =>
-  runPasswordResetDeliveriesOnce({
-    db: t.srv.db,
-    kp: t.srv.keyProvider,
-    email: t.srv.email,
-    directory: t.srv.directory,
-    publicUrl: t.base,
-    ttlSeconds: RESET_PASSWORD_TTL_SECONDS,
-    ...(send ? { send } : {}),
-  });
+const deliver = (send?: Parameters<typeof runPasswordResetDeliveriesOnce>[0]['send'], opts: { batch?: number; cleanup?: boolean } = {}) =>
+  runPasswordResetDeliveriesOnce(
+    {
+      db: t.srv.db,
+      kp: t.srv.keyProvider,
+      email: t.srv.email,
+      directory: t.srv.directory,
+      publicUrl: t.base,
+      ttlSeconds: RESET_PASSWORD_TTL_SECONDS,
+      secret: t.srv.authSecret,
+      auth: t.srv.auth,
+      ...(send ? { send } : {}),
+    },
+    opts,
+  );
+
+interface QueueRow {
+  id: string;
+  email_sealed: Buffer | null;
+  ip: string;
+  user_id: string | null;
+  token_sealed: Buffer | null;
+  status: 'queued' | 'sending' | 'sent' | 'failed' | 'skipped';
+  outcome: string | null;
+  attempts: number;
+  claim_id: string | null;
+  next_attempt_at: Date | null;
+  last_error: string | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
+const allRows = async () => (await t.srv.db.admin.query<QueueRow>('SELECT * FROM password_reset_deliveries ORDER BY created_at')).rows;
+const queueRows = async (userId: string) =>
+  (await t.srv.db.admin.query<QueueRow>('SELECT * FROM password_reset_deliveries WHERE user_id = $1 ORDER BY created_at', [userId])).rows;
+const queuedRows = async () =>
+  (
+    await t.srv.db.admin.query<QueueRow>(
+      `SELECT * FROM password_reset_deliveries WHERE status IN ('queued', 'sending') ORDER BY created_at`,
+    )
+  ).rows;
+const rowFor = async (email: string) =>
+  (await queuedRows()).find((row) => row.email_sealed && openResetEmail(t.srv.authSecret, row.email_sealed) === email);
+const verificationRows = async (userId: string) =>
+  (
+    await t.srv.db.admin.query<{ identifier: string; value: string; expiresAt: Date }>(
+      'SELECT identifier, value, "expiresAt" FROM "verification" WHERE value = $1',
+      [userId],
+    )
+  ).rows;
+const auditRows = async (userId: string) =>
+  (
+    await t.srv.db.admin.query<{ ok: boolean; error: string | null; ip: string | null }>(
+      `SELECT ok, error, ip FROM audit_log WHERE principal_id = $1 AND command = 'auth.passwordResetRequest' ORDER BY seq`,
+      [userId],
+    )
+  ).rows;
 
 /** A request plus the delivery round it queued (the response itself never sends). */
 async function requestLink(email: string, ip = nextIp()) {
@@ -66,10 +123,14 @@ function linkToken(mail: { text: string }): string {
   return token;
 }
 
-async function newAccount(): Promise<User> {
-  const u = await t.signUp(`reset-${Date.now()}-${Math.random().toString(36).slice(2, 8)}@example.com`);
+async function newAccountAt(email: string): Promise<User> {
+  const u = await t.signUp(email);
   await t.srv.db.admin.query(`INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'marketer')`, [ws, u.id]);
   return u;
+}
+
+async function newAccount(): Promise<User> {
+  return newAccountAt(`reset-${Date.now()}-${Math.random().toString(36).slice(2, 8)}@example.com`);
 }
 
 /** The sender the second test creates; a test that needs mail on its own creates one if absent. */
@@ -84,14 +145,6 @@ async function ensureTransactionalProvider() {
   });
 }
 
-const queueRows = async (userId: string) =>
-  (
-    await t.srv.db.admin.query<{ status: string; attempts: number; token_sealed: Buffer | null; next_attempt_at: string | null }>(
-      'SELECT status, attempts, token_sealed, next_attempt_at FROM password_reset_deliveries WHERE user_id = $1 ORDER BY created_at',
-      [userId],
-    )
-  ).rows;
-
 beforeAll(async () => {
   // The test client connects over loopback and passes a distinct x-forwarded-for per call, so the
   // loopback peer must be a trusted proxy for the per-IP buckets (#378 made the default ignore it).
@@ -100,7 +153,10 @@ beforeAll(async () => {
   ws = await t.workspaceWith([[owner, 'owner']]);
 }, 90_000);
 afterAll(() => t?.close());
-beforeEach(() => {
+beforeEach(async () => {
+  outbox.length = 0;
+  // Start every test with no leftover queued rows or mail, so delivery summaries are exact.
+  await deliver();
   outbox.length = 0;
 });
 
@@ -112,10 +168,17 @@ describe('requesting a reset link (#191)', () => {
       status: true,
       message: 'If an account exists for that address, we sent a link to reset the password.',
     });
-    await deliver();
-    // No sender: no queue row, no mail, no crash, and the same answer a person with mail would see.
+    // The request itself only queues a sealed address; the worker discovers the missing sender.
+    const queued = await rowFor(owner.email);
+    expect(queued).toMatchObject({ status: 'queued', attempts: 0, user_id: null, token_sealed: null });
+    expect(await verificationRows(owner.id)).toHaveLength(0);
     expect(mailsTo(owner.email)).toHaveLength(0);
-    expect(await queueRows(owner.id)).toHaveLength(0);
+
+    const summary = await deliver();
+    expect(summary).toMatchObject({ handled: 1, sent: 0, failed: 1, skipped: 0 });
+    const [row] = await queueRows(owner.id);
+    expect(row).toMatchObject({ status: 'failed', outcome: 'no_sender', email_sealed: null, token_sealed: null });
+    expect(mailsTo(owner.email)).toHaveLength(0);
   });
 
   it('answers the same for a known and an unknown address, and only the known one gets mail', async () => {
@@ -132,9 +195,23 @@ describe('requesting a reset link (#191)', () => {
     expect(knownRes.status).toBe(200);
     expect(unknownRes.status).toBe(200);
     expect(await unknownRes.json()).toEqual(await knownRes.json());
-    await deliver();
+
+    // Both requests did exactly the same work: one sealed row, no account id, no token, no mail.
+    const knownRow = await rowFor(known.email);
+    const unknownRow = await rowFor(unknown);
+    expect(knownRow).toMatchObject({ status: 'queued', attempts: 0, user_id: null, token_sealed: null });
+    expect(unknownRow).toMatchObject({ status: 'queued', attempts: 0, user_id: null, token_sealed: null });
+    expect(await verificationRows(known.id)).toHaveLength(0);
+    expect(mailsTo(known.email)).toHaveLength(0);
+    expect(mailsTo(unknown)).toHaveLength(0);
+
+    const summary = await deliver();
+    expect(summary).toMatchObject({ handled: 2, sent: 1, failed: 0, skipped: 1 });
     expect(mailsTo(known.email)).toHaveLength(1);
     expect(mailsTo(unknown)).toHaveLength(0);
+    expect((await queueRows(known.id))[0]).toMatchObject({ status: 'sent', outcome: 'sent', email_sealed: null, token_sealed: null });
+    const unknownAfter = (await allRows()).find((row) => row.id === unknownRow?.id);
+    expect(unknownAfter).toMatchObject({ status: 'skipped', outcome: 'unknown', email_sealed: null, token_sealed: null });
   });
 
   it('mails a single-use link to PUBLIC_URL that sets the new password', async () => {
@@ -150,9 +227,7 @@ describe('requesting a reset link (#191)', () => {
     const token = linkToken(mail);
 
     // The token is stored hashed: a dump of the table never yields a usable link.
-    const { rows } = await t.srv.db.admin.query<{ identifier: string }>('SELECT identifier FROM "verification" WHERE value = $1', [
-      account.id,
-    ]);
+    const rows = await verificationRows(account.id);
     expect(rows.map((r) => r.identifier)).toContain(hashedResetTokenIdentifier(token));
     expect(rows.some((r) => r.identifier.includes(token))).toBe(false);
 
@@ -214,13 +289,22 @@ describe('requesting a reset link (#191)', () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ status: true });
     expect(mailsTo(account.email)).toHaveLength(0);
-    expect(await queueRows(account.id)).toHaveLength(0);
+    // The request was queued uniformly; the worker terminalizes it as no_password.
+    expect((await queueRows(account.id))[0]).toMatchObject({
+      status: 'skipped',
+      outcome: 'no_password',
+      email_sealed: null,
+      token_sealed: null,
+    });
+    expect((await auditRows(account.id)).at(-1)?.error).toContain('no_password');
   });
 
   it('does not send a second link inside the cooldown', async () => {
     const account = await newAccount();
     await forgot(account.email);
     await forgot(account.email);
+    // Only the first request queued a row; the cooldown answer is neutral but does no work.
+    expect(await queuedRows()).toHaveLength(1);
     await deliver();
     expect(mailsTo(account.email)).toHaveLength(1);
   });
@@ -276,11 +360,9 @@ describe('requesting a reset link (#191)', () => {
   });
 });
 
-describe('the answer does not wait for the provider (#379)', () => {
+describe('the answer does not depend on the account (#379)', () => {
   it('returns before a slow provider runs, and the worker delivers the link afterwards', async () => {
     await ensureTransactionalProvider();
-    // Drain anything the earlier tests left queued, so this round handles only this request.
-    await deliver();
     const account = await newAccount();
 
     const started = Date.now();
@@ -288,9 +370,9 @@ describe('the answer does not wait for the provider (#379)', () => {
     const elapsed = Date.now() - started;
     expect(res.status).toBe(200);
     expect(elapsed).toBeLessThan(1000);
-    // Nothing has been mailed yet: the request only queued a row.
+    // Nothing has been mailed yet: the request only queued a sealed address.
     expect(mailsTo(account.email)).toHaveLength(0);
-    expect((await queueRows(account.id))[0]).toMatchObject({ status: 'queued', attempts: 0 });
+    expect(await rowFor(account.email)).toMatchObject({ status: 'queued', attempts: 0, user_id: null, token_sealed: null });
 
     const calls: string[] = [];
     const slowSender = async (
@@ -307,30 +389,83 @@ describe('the answer does not wait for the provider (#379)', () => {
     const workerStarted = Date.now();
     const summary = await deliver(slowSender);
     expect(Date.now() - workerStarted).toBeGreaterThanOrEqual(1400);
-    expect(summary.sent).toBe(1);
+    expect(summary).toMatchObject({ handled: 1, sent: 1 });
     expect(calls).toEqual([account.id]);
     expect(mailsTo(account.email)).toHaveLength(1);
     expect((await queueRows(account.id))[0]).toMatchObject({ status: 'sent', token_sealed: null });
   }, 30_000);
 
-  it('does the same dummy lookup for unknown and single sign-on addresses', async () => {
+  it('queues the same sealed row for known, unknown and single sign-on addresses before any account lookup', async () => {
     await ensureTransactionalProvider();
-    await deliver();
-    const unknown = `timing-unknown-${runId}@example.com`;
+    const known = await newAccount();
+    const unknown = `uniform-unknown-${runId}@example.com`;
     const sso = await newAccount();
     await t.srv.db.admin.query(`DELETE FROM "account" WHERE "userId" = $1`, [sso.id]);
 
-    const unknownRes = await forgot(unknown);
-    const ssoRes = await forgot(sso.email);
-    expect(await unknownRes.json()).toEqual(await ssoRes.json());
-    await deliver();
+    const responses = await Promise.all([forgot(known.email), forgot(unknown), forgot(sso.email)]);
+    expect(responses.map((r) => r.status)).toEqual([200, 200, 200]);
+    const bodies = await Promise.all(responses.map((r) => r.json()));
+    expect(bodies[0]).toEqual(bodies[1]);
+    expect(bodies[0]).toEqual(bodies[2]);
+
+    // Every address produced the same shape of row: sealed address, no account id, no token.
+    const rows = await queuedRows();
+    expect(rows).toHaveLength(3);
+    for (const row of rows) {
+      expect(row).toMatchObject({ status: 'queued', attempts: 0, user_id: null, token_sealed: null, claim_id: null });
+      expect(row.email_sealed).toBeTruthy();
+      expect(row.email_sealed?.includes(Buffer.from(known.email))).toBe(false);
+    }
+    const opened = rows.map((row) => ({ row, email: openResetEmail(t.srv.authSecret, row.email_sealed!) }));
+    expect(opened.map((entry) => entry.email).sort()).toEqual([known.email, sso.email, unknown].sort());
+    const unknownQueued = opened.find((entry) => entry.email === unknown)!.row;
+    // No Better Auth token was minted and no provider was called on the request path.
+    expect(await verificationRows(known.id)).toHaveLength(0);
+    expect(await verificationRows(sso.id)).toHaveLength(0);
+    expect(outbox).toHaveLength(0);
+
+    const summary = await deliver();
+    expect(summary).toMatchObject({ handled: 3, sent: 1, failed: 0, skipped: 2 });
+    expect(mailsTo(known.email)).toHaveLength(1);
     expect(mailsTo(unknown)).toHaveLength(0);
     expect(mailsTo(sso.email)).toHaveLength(0);
-    expect(await queueRows(sso.id)).toHaveLength(0);
-    const { rows } = await t.srv.db.admin.query<{ n: string }>('SELECT count(*) AS n FROM password_reset_deliveries WHERE user_id = $1', [
-      sso.id,
-    ]);
-    expect(Number(rows[0]?.n)).toBe(0);
+    expect((await queueRows(known.id))[0]).toMatchObject({ status: 'sent', outcome: 'sent' });
+    expect((await queueRows(sso.id))[0]).toMatchObject({ status: 'skipped', outcome: 'no_password' });
+    const unknownAfter = (await allRows()).find((row) => row.id === unknownQueued.id);
+    expect(unknownAfter).toMatchObject({ status: 'skipped', outcome: 'unknown', email_sealed: null, token_sealed: null });
+  });
+
+  it('answers neutrally even when the durable insert fails, regardless of the address', async () => {
+    const fake = { admin: { query: async () => Promise.reject(new Error('database unavailable')) } } as unknown as Db;
+    await expect(enqueueResetRequest({ db: fake, secret: 's'.repeat(32) }, 'known@example.com', '203.0.113.9')).rejects.toThrow(
+      'database unavailable',
+    );
+    await expect(enqueueResetRequest({ db: fake, secret: 's'.repeat(32) }, 'unknown@example.com', '203.0.113.9')).rejects.toThrow(
+      'database unavailable',
+    );
+
+    // The route answers the same neutral body for both when the insert fails.
+    const app = new Hono();
+    passwordResetRoutes(app, {
+      auth: {} as never,
+      db: fake,
+      hot: { take: async () => true } as never,
+      publicUrl: BASE,
+      authSecret: 's'.repeat(32),
+      clientIpHeaders: ['x-forwarded-for'],
+      trustedProxyCidrs: ['0.0.0.0/0', '::/0'],
+    });
+    const call = (email: string, ip: string) =>
+      app.request('/api/auth/forgot-password', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-forwarded-for': ip, origin: BASE },
+        body: JSON.stringify({ email }),
+      });
+    const known = await call('known@example.com', '198.51.100.20');
+    const unknown = await call('unknown@example.com', '198.51.100.21');
+    expect(known.status).toBe(200);
+    expect(unknown.status).toBe(200);
+    expect(await known.json()).toEqual(await unknown.json());
   });
 });
 
@@ -339,7 +474,6 @@ describe('the reset delivery queue (#379)', () => {
 
   it('retries a provider failure with backoff and stops at the attempt bound', async () => {
     await ensureTransactionalProvider();
-    await deliver();
     const account = await newAccount();
     expect((await forgot(account.email)).status).toBe(200);
 
@@ -349,6 +483,7 @@ describe('the reset delivery queue (#379)', () => {
     expect(row).toMatchObject({ status: 'queued', attempts: 1 });
     expect(row!.next_attempt_at).toBeTruthy();
     expect(row!.token_sealed).toBeTruthy();
+    const pendingToken = openResetToken(t.srv.authSecret, row!.token_sealed!);
 
     // Not due yet: the backoff holds it even though the worker runs again.
     summary = await deliver(failingSender);
@@ -356,29 +491,154 @@ describe('the reset delivery queue (#379)', () => {
 
     for (let attempt = 2; attempt <= 4; attempt++) {
       await t.srv.db.admin.query('UPDATE password_reset_deliveries SET next_attempt_at = now() WHERE user_id = $1', [account.id]);
-      await deliver(failingSender);
+      summary = await deliver(failingSender);
     }
+    expect(summary).toMatchObject({ handled: 1, retried: 0, failed: 1 });
     [row] = await queueRows(account.id);
-    // Four attempts is the bound; the token is gone and the failure is audited.
-    expect(row).toMatchObject({ status: 'failed', attempts: 4, token_sealed: null });
-    const { rows } = await t.srv.db.admin.query<{ error: string | null }>(
-      `SELECT error FROM audit_log WHERE principal_id = $1 AND command = 'auth.passwordResetRequest' ORDER BY seq`,
+    // Four attempts is the bound; the payload is gone and the failure is audited.
+    expect(row).toMatchObject({ status: 'failed', outcome: 'delivery_failed', attempts: 4, token_sealed: null, email_sealed: null });
+    expect(row!.last_error).toBe('delivery_failed');
+    const audits = await auditRows(account.id);
+    expect(audits.at(-1)?.error).toContain('delivery_failed');
+    const serialised = JSON.stringify({ row, audits });
+    expect(serialised).not.toContain(pendingToken);
+    expect(serialised).not.toContain(account.email);
+  }, 30_000);
+
+  it('takes over a stale claim without letting the late worker rewrite the successor outcome', async () => {
+    await ensureTransactionalProvider();
+    const account = await newAccount();
+    await forgot(account.email);
+
+    let releaseLate!: () => void;
+    const lateMayFinish = new Promise<void>((resolve) => {
+      releaseLate = resolve;
+    });
+    let lateStarted!: () => void;
+    const lateIsSending = new Promise<void>((resolve) => {
+      lateStarted = resolve;
+    });
+    // Worker A claims the row, mints the token and blocks inside the provider call.
+    const lateWorker = deliver(async () => {
+      lateStarted();
+      await lateMayFinish;
+      return 'failed' as const;
+    });
+    await lateIsSending;
+
+    // The lease looks stale (a 20-minute-old claim), so worker B may take it over.
+    await t.srv.db.admin.query(
+      `UPDATE password_reset_deliveries SET updated_at = now() - interval '20 minutes' WHERE user_id = $1 AND status = 'sending'`,
       [account.id],
     );
-    expect(rows.at(-1)?.error).toContain('delivery_failed');
+    const successor = await deliver();
+    expect(successor).toMatchObject({ handled: 1, sent: 1, failed: 0 });
+
+    // A finishes late with a failure. Its retry/settle writes are fenced by the old claim id.
+    releaseLate();
+    const late = await lateWorker;
+    expect(late).toMatchObject({ handled: 1, sent: 0, failed: 0, retried: 0, superseded: 1 });
+
+    const [row] = await queueRows(account.id);
+    expect(row).toMatchObject({ status: 'sent', outcome: 'sent', email_sealed: null, token_sealed: null });
+    expect(mailsTo(account.email)).toHaveLength(1);
+    // One durable outcome only: the late failure appended no contradictory audit entry.
+    expect(await auditRows(account.id)).toEqual([{ ok: true, error: null, ip: expect.any(String) }]);
   }, 30_000);
+
+  it('re-checks eligibility after enqueue and does not mail a removed credential', async () => {
+    await ensureTransactionalProvider();
+    const account = await newAccount();
+    await forgot(account.email);
+    // The person becomes SSO-only while the request waits in the queue.
+    await t.srv.db.admin.query(`DELETE FROM "account" WHERE "userId" = $1`, [account.id]);
+
+    const summary = await deliver();
+    expect(summary).toMatchObject({ handled: 1, sent: 0, skipped: 1 });
+    expect(mailsTo(account.email)).toHaveLength(0);
+    expect((await queueRows(account.id))[0]).toMatchObject({ status: 'skipped', outcome: 'no_password', token_sealed: null });
+    expect((await auditRows(account.id)).at(-1)?.error).toContain('no_password');
+  });
+
+  it('re-checks enforced single sign-on after enqueue', async () => {
+    await ensureTransactionalProvider();
+    const domain = `sso-${runId}.test`;
+    const account = await newAccountAt(`person-${Date.now()}@${domain}`);
+    await forgot(account.email);
+    // The domain becomes enforced single sign-on while the request waits in the queue.
+    await t.srv.db.admin.query(
+      `INSERT INTO "ssoProvider" (id, issuer, "userId", "providerId", domain, "workspaceId", "domainVerified", enforced)
+       VALUES ($1, $2, $3, $4, $5, $6, true, true)`,
+      [`sso-${runId}`, 'https://idp.example', owner.id, `provider-${runId}`, domain, ws],
+    );
+
+    const summary = await deliver();
+    expect(summary).toMatchObject({ handled: 1, sent: 0, skipped: 1 });
+    expect(mailsTo(account.email)).toHaveLength(0);
+    expect((await queueRows(account.id))[0]).toMatchObject({ status: 'skipped', outcome: 'sso_only', token_sealed: null });
+    expect((await auditRows(account.id)).at(-1)?.error).toContain('sso_only');
+  });
+
+  it('does not mail an expired or consumed queued token', async () => {
+    await ensureTransactionalProvider();
+    const expired = await newAccount();
+    await forgot(expired.email);
+    expect(await deliver(failingSender)).toMatchObject({ handled: 1, retried: 1 });
+    const [expiredRow] = await queueRows(expired.id);
+    const expiredToken = openResetToken(t.srv.authSecret, expiredRow!.token_sealed!);
+    await t.srv.db.admin.query(`UPDATE "verification" SET "expiresAt" = now() - interval '1 minute' WHERE identifier = $1`, [
+      hashedResetTokenIdentifier(expiredToken),
+    ]);
+    await t.srv.db.admin.query('UPDATE password_reset_deliveries SET next_attempt_at = now() WHERE user_id = $1', [expired.id]);
+    expect(await deliver()).toMatchObject({ handled: 1, failed: 1 });
+    expect(mailsTo(expired.email)).toHaveLength(0);
+    expect((await queueRows(expired.id))[0]).toMatchObject({ status: 'failed', outcome: 'expired', token_sealed: null });
+    expect(await verificationRows(expired.id)).toHaveLength(0);
+
+    const consumed = await newAccount();
+    await forgot(consumed.email);
+    expect(await deliver(failingSender)).toMatchObject({ handled: 1, retried: 1 });
+    // A link used elsewhere disappears from Better Auth's verification table.
+    await t.srv.db.admin.query('DELETE FROM "verification" WHERE value = $1', [consumed.id]);
+    await t.srv.db.admin.query('UPDATE password_reset_deliveries SET next_attempt_at = now() WHERE user_id = $1', [consumed.id]);
+    expect(await deliver()).toMatchObject({ handled: 1, failed: 1 });
+    expect(mailsTo(consumed.email)).toHaveLength(0);
+    expect((await queueRows(consumed.id))[0]).toMatchObject({ status: 'failed', outcome: 'consumed', token_sealed: null });
+  }, 30_000);
+
+  it('bounds retention for unprocessed requests and prunes settled rows', async () => {
+    await ensureTransactionalProvider();
+    const account = await newAccount();
+    await forgot(account.email);
+    const queued = await rowFor(account.email);
+    expect(queued).toBeTruthy();
+    // A deployment that never ran the worker for a day: the sealed address is expired and wiped.
+    await t.srv.db.admin.query(
+      `UPDATE password_reset_deliveries SET created_at = now() - interval '25 hours', updated_at = now() - interval '25 hours' WHERE id = $1`,
+      [queued!.id],
+    );
+    expect(await deliver()).toMatchObject({ handled: 0 });
+    const expired = (await allRows()).find((row) => row.id === queued!.id);
+    expect(expired).toMatchObject({ status: 'failed', outcome: 'expired', email_sealed: null, token_sealed: null });
+    // The cleanup resolves the address only to record the durable outcome.
+    expect((await auditRows(account.id)).at(-1)?.error).toContain('expired');
+
+    // Terminal rows are pruned after the seven-day retention window.
+    await t.srv.db.admin.query(`UPDATE password_reset_deliveries SET updated_at = now() - interval '8 days' WHERE id = $1`, [queued!.id]);
+    await deliver();
+    expect((await allRows()).find((row) => row.id === queued!.id)).toBeUndefined();
+  });
 
   it('recovers a row a stopped worker left sending', async () => {
     await ensureTransactionalProvider();
-    await deliver();
     const account = await newAccount();
     await forgot(account.email);
     await t.srv.db.admin.query(
       `UPDATE password_reset_deliveries
-          SET status = 'sending', updated_at = now() - interval '20 minutes'
-        WHERE user_id = $1`,
-      [account.id],
+          SET status = 'sending', claim_id = gen_random_uuid(), attempts = 1, updated_at = now() - interval '20 minutes'
+        WHERE user_id IS NULL`,
     );
+    // The token was never minted by the stopped worker; the takeover mints it and sends.
     const summary = await deliver();
     expect(summary).toMatchObject({ handled: 1, sent: 1 });
     expect(mailsTo(account.email)).toHaveLength(1);

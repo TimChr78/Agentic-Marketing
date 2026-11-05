@@ -1,20 +1,26 @@
+import { hkdfSync } from 'node:crypto';
 import { type NotifyDeps, sendMemberEmails } from '@agentic-marketing/alerts';
-import { hashedResetTokenIdentifier } from '@agentic-marketing/auth';
+import { type Auth, createPasswordResetToken, hashedResetTokenIdentifier } from '@agentic-marketing/auth';
 import { canonicalJson, newId, sha256 } from '@agentic-marketing/core';
 import { type Db, schema } from '@agentic-marketing/db';
-import { openJson, sealJson } from '@agentic-marketing/secrets';
+import { open, seal } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { desc, eq, sql } from 'drizzle-orm';
 
 // Self-service password reset (#191), the server side of Better Auth's reset flow:
 //
-//   request → rate limit → account checks → token + mail through a transactional provider
+//   request → rate limit → seal the address → durable queue (no account lookup, no token, no I/O)
+//   worker  → decrypt → account/eligibility checks → Better Auth token → send → bounded retries
 //   reset   → rate limit → token lookup (for the audit entry) → Better Auth sets the password
 //           and revokes every session of that person.
 //
-// The flow is installation-level: the link points at PUBLIC_URL, never at a brand's domain. A
-// person who belongs to several workspaces gets one link, sent through the transactional provider
-// of their oldest workspace, so the sender is one they belong to and never a stranger's brand.
+// The request path is deliberately account-agnostic (#379): every syntactically valid normalized
+// address performs the same bounded local crypto and the same single durable insert. Only the
+// worker looks an address up, so known, unknown and single sign-on addresses cannot be told apart
+// by request work. The flow is installation-level: the link points at PUBLIC_URL, never at a
+// brand's domain. A person who belongs to several workspaces gets one link, sent through the
+// transactional provider of their oldest workspace, so the sender is one they belong to and never
+// a stranger's brand.
 
 /** How long the same address has to wait before another link is sent, in seconds. */
 export const RESET_COOLDOWN_SECONDS = 60;
@@ -30,10 +36,15 @@ export const RESET_REQUEST_MESSAGE = 'If an account exists for that address, we 
 /** The outcome of a reset request or completion, as recorded in the audit log. */
 export type ResetOutcome =
   | 'sent'
+  | 'unknown'
   | 'no_password'
   | 'sso_only'
   | 'no_sender'
   | 'delivery_failed'
+  | 'expired'
+  | 'consumed'
+  | 'account_gone'
+  | 'email_unreadable'
   | 'ok'
   | 'invalid_token'
   | 'password_too_short';
@@ -91,14 +102,92 @@ export async function senderWorkspaceFor(db: Db, userId: string): Promise<string
   return rows[0]?.workspace_id ?? null;
 }
 
-/** The user id a still-valid reset token belongs to, or null. Reads the token's hashed identifier. */
-export async function resetTokenAccount(db: Db, token: string): Promise<{ userId: string } | null> {
+/** The verification row a still-valid reset token belongs to, or null when absent (consumed). */
+export async function resetTokenState(db: Db, token: string): Promise<{ userId: string; expiresAt: Date } | null> {
   if (!token) return null;
-  const { rows } = await db.admin.query<{ value: string }>(
-    'SELECT value FROM "verification" WHERE identifier = $1 AND "expiresAt" > now() LIMIT 1',
+  const { rows } = await db.admin.query<{ value: string; expiresAt: Date }>(
+    'SELECT value, "expiresAt" FROM "verification" WHERE identifier = $1 ORDER BY "createdAt" DESC LIMIT 1',
     [hashedResetTokenIdentifier(token)],
   );
-  return rows[0] ? { userId: rows[0].value } : null;
+  const row = rows[0];
+  return row ? { userId: row.value, expiresAt: new Date(row.expiresAt) } : null;
+}
+
+/** The user id a still-valid reset token belongs to, or null. Reads the token's hashed identifier. */
+export async function resetTokenAccount(db: Db, token: string): Promise<{ userId: string } | null> {
+  const state = await resetTokenState(db, token);
+  return state && state.expiresAt.getTime() > Date.now() ? { userId: state.userId } : null;
+}
+
+/** Removes an expired verification row so it can never be consumed later. */
+async function deleteResetToken(db: Db, token: string): Promise<void> {
+  await db.admin.query('DELETE FROM "verification" WHERE identifier = $1', [hashedResetTokenIdentifier(token)]);
+}
+
+// The request path never touches a tenant data key or a network KEK. Addresses and worker-minted
+// tokens are sealed with purpose-separated keys derived from the installation secret (AUTH_SECRET):
+// HKDF-SHA256 gives each purpose its own 32-byte AES-256-GCM key, so a ciphertext from one purpose
+// cannot be opened as the other. This is local CPU work only, identical for every address.
+const RESET_EMAIL_KEY_INFO = 'agentic-marketing:password-reset-email:v1';
+const RESET_TOKEN_KEY_INFO = 'agentic-marketing:password-reset-token:v1';
+const SEAL_IV = 12;
+const SEAL_TAG = 16;
+
+function purposeKey(secret: string, info: string): Buffer {
+  return Buffer.from(hkdfSync('sha256', Buffer.from(secret, 'utf8'), Buffer.alloc(0), Buffer.from(info, 'utf8'), 32));
+}
+
+function sealPurpose(secret: string, info: string, value: string): Buffer {
+  const sealed = seal(purposeKey(secret, info), Buffer.from(value, 'utf8'));
+  return Buffer.concat([sealed.iv, sealed.authTag, sealed.ciphertext]);
+}
+
+function openPurpose(secret: string, info: string, blob: Buffer): string {
+  return open(purposeKey(secret, info), {
+    iv: blob.subarray(0, SEAL_IV),
+    authTag: blob.subarray(SEAL_IV, SEAL_IV + SEAL_TAG),
+    ciphertext: blob.subarray(SEAL_IV + SEAL_TAG),
+  }).toString('utf8');
+}
+
+/** Seals the normalized address for the durable request queue. */
+export function sealResetEmail(secret: string, email: string): Buffer {
+  return sealPurpose(secret, RESET_EMAIL_KEY_INFO, email);
+}
+
+/** Opens a queued address; a tampered or wrong-secret blob throws. */
+export function openResetEmail(secret: string, blob: Buffer): string {
+  return openPurpose(secret, RESET_EMAIL_KEY_INFO, blob);
+}
+
+/** Seals a worker-minted reset token while a delivery is pending. */
+export function sealResetToken(secret: string, token: string): Buffer {
+  return sealPurpose(secret, RESET_TOKEN_KEY_INFO, token);
+}
+
+/** Opens a pending reset token; a tampered or wrong-secret blob throws. */
+export function openResetToken(secret: string, blob: Buffer): string {
+  return openPurpose(secret, RESET_TOKEN_KEY_INFO, blob);
+}
+
+export interface ResetRequestDeps {
+  db: Db;
+  /** Installation secret (AUTH_SECRET); rotating it makes queued rows unreadable. */
+  secret: string;
+}
+
+/**
+ * The whole public request work (#379): seal the normalized address and insert one row. There is
+ * no account lookup, token generation, tenant KEK use or provider call here, so the work and the
+ * write count are the same for a known, unknown and single sign-on address. A database failure
+ * propagates to the route, which answers neutrally like every other outcome.
+ */
+export async function enqueueResetRequest(deps: ResetRequestDeps, email: string, ip: string): Promise<void> {
+  await deps.db.admin.query(
+    `INSERT INTO password_reset_deliveries (id, email_sealed, ip)
+     VALUES ($1, $2, $3)`,
+    [newId('prd'), sealResetEmail(deps.secret, email), ip],
+  );
 }
 
 const escapeHtml = (value: string) =>
@@ -170,25 +259,31 @@ export async function sendPasswordResetEmail(
     );
     const result = results[0];
     if (result?.status === 'sent') return 'sent';
-    logger.warn({ userId: account.id, workspaceId, error: result?.error }, 'password reset e-mail could not be sent');
+    logger.warn({ userId: account.id, workspaceId }, 'password reset e-mail could not be sent');
     return 'failed';
   } catch (err) {
-    logger.warn({ err, userId: account.id }, 'password reset e-mail could not be sent');
+    // No address or token in the log: only the error class is diagnostic enough here.
+    logger.warn({ error: err instanceof Error ? err.name : 'unknown', userId: account.id }, 'password reset e-mail could not be sent');
     return 'failed';
   }
 }
 
 /** How many deliveries one queued reset gets before it is recorded failed (bounded queue). */
 export const RESET_MAX_ATTEMPTS = 4;
-/** Transactional backoff between provider retries, in seconds (the e-mail outbox's own scale). */
-const RESET_RETRY_SECONDS = [10, 30, 60, 120] as const;
+/** Transactional backoff between provider retries, in seconds. The 4th claim is terminal. */
+const RESET_RETRY_SECONDS = [10, 30, 60] as const;
 /**
  * A worker that stopped mid-send leaves the row "sending". The token is the same, so it is retried
  * after this window rather than failed: a duplicate reset mail is harmless, a lost one is not.
+ * One row is claimed immediately before its own send, so a 25-row batch cannot outlive this.
  */
 const RESET_STALE_SENDING_SECONDS = 600;
-/** Settled rows are kept for operator visibility, then pruned by the worker. */
+/** Queued/sending rows keep their sealed address and token at most this long. */
+const RESET_QUEUE_PAYLOAD_HOURS = 24;
+/** Terminal rows are kept for operator visibility, then pruned by the worker. */
 const RESET_SETTLED_RETENTION_DAYS = 7;
+/** How often the worker loop runs the expiry/prune pass. */
+const RESET_CLEANUP_INTERVAL_MS = 5 * 60_000;
 
 export interface ResetQueueDeps extends NotifyDeps {
   db: Db;
@@ -196,6 +291,10 @@ export interface ResetQueueDeps extends NotifyDeps {
   publicUrl: string;
   /** The token lifetime, used in the mail's expiry text. */
   ttlSeconds: number;
+  /** Installation secret for the sealed address/token; the worker never uses a tenant KEK for them. */
+  secret: string;
+  /** Mints tokens through Better Auth's own verification adapter. */
+  auth: Auth;
 }
 
 export interface ResetDeliveryDeps extends ResetQueueDeps {
@@ -203,61 +302,14 @@ export interface ResetDeliveryDeps extends ResetQueueDeps {
   send?: (deps: ResetQueueDeps, account: ResetAccount, token: string, ttlSeconds: number) => Promise<'sent' | 'no_sender' | 'failed'>;
 }
 
-/**
- * Records a reset link for the delivery worker and returns without touching a mail provider
- * (#379). The request's answer is then independent of provider latency and of the account class.
- */
-export async function queueResetLink(
-  deps: ResetQueueDeps,
-  account: ResetAccount,
-  token: string,
-  ip: string,
-): Promise<'queued' | 'sso_only' | 'no_password' | 'no_sender' | 'failed'> {
-  const eligibility = await resetEligibility(deps.db, account);
-  if (eligibility !== 'ok') {
-    // Another path reached Better Auth's callback for someone this flow never mails.
-    await recordPasswordResetAudit(deps.db, { userId: account.id, ip, command: 'auth.passwordResetRequest', outcome: eligibility });
-    return eligibility;
-  }
-  const workspaceId = await senderWorkspaceFor(deps.db, account.id);
-  if (!workspaceId) {
-    logger.warn(
-      { userId: account.id },
-      'password reset requested but no workspace of this person has an enabled transactional e-mail provider; configure one, or use `am reset-password --email …`',
-    );
-    await recordPasswordResetAudit(deps.db, { userId: account.id, ip, command: 'auth.passwordResetRequest', outcome: 'no_sender' });
-    return 'no_sender';
-  }
-  try {
-    // The queue is the only place besides Better Auth's hashed row that knows the token, and here
-    // it is sealed with the sender workspace's data key. It is wiped when the row settles.
-    await deps.db.withWorkspace(workspaceId, async (tx) => {
-      const sealed = await sealJson(tx, workspaceId, deps.kp, { token });
-      await tx.insert(schema.passwordResetDeliveries).values({
-        id: newId('prd'),
-        userId: account.id,
-        workspaceId,
-        ip,
-        tokenSealed: sealed.blob,
-        tokenKeyId: sealed.keyId,
-      });
-    });
-    return 'queued';
-  } catch (err) {
-    logger.warn({ err, userId: account.id }, 'password reset link could not be queued');
-    await recordPasswordResetAudit(deps.db, { userId: account.id, ip, command: 'auth.passwordResetRequest', outcome: 'delivery_failed' });
-    return 'failed';
-  }
-}
-
 interface QueuedResetRow {
   id: string;
-  user_id: string;
-  workspace_id: string;
+  email_sealed: Buffer | null;
   ip: string;
+  user_id: string | null;
   token_sealed: Buffer | null;
-  token_key_id: string | null;
   attempts: number;
+  claim_id: string;
 }
 
 export interface ResetDeliverySummary {
@@ -266,117 +318,289 @@ export interface ResetDeliverySummary {
   sent: number;
   /** Terminal failures, including a provider that kept failing. */
   failed: number;
+  /** Terminal requests that correctly sent no mail (unknown, single sign-on, no password). */
+  skipped: number;
   /** Provider failures left queued for another attempt. */
   retried: number;
+  /** A late worker lost its lease; its write was fenced out. */
+  superseded: number;
 }
 
-/** Wipes the token and records the terminal outcome; the row stays for operators, bounded by retention. */
+type DeliveryResult = 'sent' | 'failed' | 'skipped' | 'retried' | 'superseded';
+
+/**
+ * Wipes the payload and records the terminal outcome. The write is fenced by the claim id, so a
+ * worker whose lease was taken over cannot rewrite a successor's row or append a contradictory
+ * audit entry. Returns false when the lease is no longer ours.
+ */
 async function settleReset(
   deps: ResetQueueDeps,
   row: QueuedResetRow,
-  status: 'sent' | 'failed',
+  status: 'sent' | 'failed' | 'skipped',
   outcome: ResetOutcome,
   error: string | null,
-) {
-  await deps.db.admin.query(
+): Promise<boolean> {
+  const { rows } = await deps.db.admin.query<{ user_id: string | null; ip: string }>(
     `UPDATE password_reset_deliveries
-        SET status = $2, last_error = $3, token_sealed = NULL, token_key_id = NULL,
-            next_attempt_at = NULL, updated_at = now()
-      WHERE id = $1`,
-    [row.id, status, error],
+        SET status = $3, outcome = $4, last_error = $5, email_sealed = NULL, token_sealed = NULL,
+            claim_id = NULL, next_attempt_at = NULL, updated_at = now()
+      WHERE id = $1 AND status = 'sending' AND claim_id = $2
+      RETURNING user_id, ip`,
+    [row.id, row.claim_id, status, outcome, error],
   );
-  await recordPasswordResetAudit(deps.db, { userId: row.user_id, ip: row.ip, command: 'auth.passwordResetRequest', outcome });
+  const settled = rows[0];
+  if (!settled) return false;
+  if (settled.user_id) {
+    await recordPasswordResetAudit(deps.db, {
+      userId: settled.user_id,
+      ip: settled.ip,
+      command: 'auth.passwordResetRequest',
+      outcome,
+    });
+  }
+  return true;
+}
+
+/** Returns a transient failure to the queue, fenced by the claim id. False means the lease was lost. */
+async function retryReset(deps: ResetQueueDeps, row: QueuedResetRow, reason: string): Promise<boolean> {
+  const delay = RESET_RETRY_SECONDS[row.attempts - 1];
+  if (delay === undefined || row.attempts >= RESET_MAX_ATTEMPTS) return false;
+  const res = await deps.db.admin.query(
+    `UPDATE password_reset_deliveries
+        SET status = 'queued', claim_id = NULL, last_error = $3,
+            next_attempt_at = now() + make_interval(secs => $4), updated_at = now()
+      WHERE id = $1 AND status = 'sending' AND claim_id = $2`,
+    [row.id, row.claim_id, reason, delay],
+  );
+  return (res.rowCount ?? 0) > 0;
 }
 
 /**
- * One delivery round: claims due rows, reopens rows a stopped worker left "sending", sends and
- * records the outcome. Provider failures retry with backoff up to `RESET_MAX_ATTEMPTS`.
+ * Claims one due row immediately before its work, or one whose previous worker went stale. The
+ * attempt count is incremented on every claim, including a stale takeover, so the bound holds
+ * across reclaims. `FOR UPDATE SKIP LOCKED` lets replicas claim different rows without blocking.
+ */
+async function claimReset(deps: ResetQueueDeps): Promise<QueuedResetRow | null> {
+  const { rows } = await deps.db.admin.query<QueuedResetRow>(
+    `UPDATE password_reset_deliveries
+        SET status = 'sending', attempts = attempts + 1, claim_id = gen_random_uuid(), updated_at = now()
+      WHERE id = (
+        SELECT id FROM password_reset_deliveries
+         WHERE attempts < $2
+           AND ((status = 'queued' AND (next_attempt_at IS NULL OR next_attempt_at <= now()))
+             OR (status = 'sending' AND updated_at < now() - make_interval(secs => $1)))
+         ORDER BY created_at
+         LIMIT 1
+         FOR UPDATE SKIP LOCKED)
+      RETURNING id, email_sealed, ip, user_id, token_sealed, attempts, claim_id`,
+    [RESET_STALE_SENDING_SECONDS, RESET_MAX_ATTEMPTS],
+  );
+  return rows[0] ?? null;
+}
+
+/**
+ * Bounded retention and crash recovery. Unprocessed rows are terminalized and wiped after the
+ * payload lifetime; a stale row that already used every attempt is failed; terminal rows are
+ * pruned. This runs in the worker, so a deployment without one neither sends nor cleans up.
+ */
+async function cleanupResetQueue(deps: ResetQueueDeps): Promise<void> {
+  const { rows: exhausted } = await deps.db.admin.query<{ user_id: string | null; ip: string }>(
+    `UPDATE password_reset_deliveries
+        SET status = 'failed', outcome = 'delivery_failed', email_sealed = NULL, token_sealed = NULL,
+            claim_id = NULL, next_attempt_at = NULL, last_error = 'attempt_bound_reached', updated_at = now()
+      WHERE status = 'sending' AND attempts >= $2 AND updated_at < now() - make_interval(secs => $1)
+      RETURNING user_id, ip`,
+    [RESET_STALE_SENDING_SECONDS, RESET_MAX_ATTEMPTS],
+  );
+  for (const row of exhausted) {
+    if (row.user_id)
+      await recordPasswordResetAudit(deps.db, {
+        userId: row.user_id,
+        ip: row.ip,
+        command: 'auth.passwordResetRequest',
+        outcome: 'delivery_failed',
+      });
+  }
+  const { rows: expired } = await deps.db.admin.query<{
+    id: string;
+    email_sealed: Buffer | null;
+    user_id: string | null;
+    ip: string;
+  }>(
+    `WITH candidates AS (
+       SELECT id, email_sealed, user_id, ip
+         FROM password_reset_deliveries
+        WHERE status IN ('queued', 'sending') AND updated_at < now() - make_interval(hours => $1)
+        FOR UPDATE SKIP LOCKED
+     ), updated AS (
+       UPDATE password_reset_deliveries d
+          SET status = 'failed', outcome = 'expired', email_sealed = NULL, token_sealed = NULL,
+              claim_id = NULL, next_attempt_at = NULL, last_error = 'expired_before_delivery', updated_at = now()
+         FROM candidates c
+        WHERE d.id = c.id
+        RETURNING d.id, c.email_sealed, c.user_id, c.ip
+     )
+     SELECT * FROM updated`,
+    [RESET_QUEUE_PAYLOAD_HOURS],
+  );
+  for (const row of expired) {
+    // An unprocessed row has no account id yet; resolve it only to record the durable outcome.
+    let userId = row.user_id;
+    if (!userId && row.email_sealed) {
+      try {
+        userId = (await accountForEmail(deps.db, openResetEmail(deps.secret, row.email_sealed)))?.id ?? null;
+      } catch (err) {
+        logger.warn({ err, id: row.id }, 'expired password reset address could not be opened');
+      }
+    }
+    if (userId)
+      await recordPasswordResetAudit(deps.db, {
+        userId,
+        ip: row.ip,
+        command: 'auth.passwordResetRequest',
+        outcome: 'expired',
+      });
+  }
+  await deps.db.admin.query(
+    `DELETE FROM password_reset_deliveries
+      WHERE status IN ('sent', 'failed', 'skipped') AND updated_at < now() - make_interval(days => $1)`,
+    [RESET_SETTLED_RETENTION_DAYS],
+  );
+}
+
+/**
+ * One claimed delivery. Every account-dependent step (lookup, eligibility, token mint, provider
+ * I/O) is here, never in the public request. Eligibility, account existence and the token's
+ * ownership/expiry/consumption are re-checked immediately before the provider call, so a request
+ * queued before SSO enforcement, credential removal or token use does not mail.
+ */
+async function deliverReset(
+  deps: ResetDeliveryDeps,
+  row: QueuedResetRow,
+  send: NonNullable<ResetDeliveryDeps['send']>,
+): Promise<DeliveryResult> {
+  const settle = async (status: 'sent' | 'failed' | 'skipped', outcome: ResetOutcome, error: string | null): Promise<DeliveryResult> =>
+    (await settleReset(deps, row, status, outcome, error)) ? status : 'superseded';
+  const dropToken = async (token: string) => {
+    await deleteResetToken(deps.db, token).catch((err) => logger.warn({ err, id: row.id }, 'could not remove an unused reset token'));
+  };
+
+  if (!row.email_sealed) return settle('failed', 'email_unreadable', 'email_missing');
+  let email: string;
+  try {
+    email = openResetEmail(deps.secret, row.email_sealed);
+  } catch (err) {
+    logger.warn({ err, id: row.id }, 'queued password reset address could not be opened');
+    return settle('failed', 'email_unreadable', 'email_unreadable');
+  }
+
+  const account = await accountForEmail(deps.db, email);
+  if (!account) {
+    // A previously claimed row has an account id: the account is gone, not merely unknown.
+    return row.user_id ? settle('failed', 'account_gone', 'account_gone') : settle('skipped', 'unknown', null);
+  }
+  if (row.user_id && row.user_id !== account.id) {
+    // The address now belongs to someone else; never mail a token minted for the old account.
+    return settle('failed', 'account_gone', 'account_changed');
+  }
+  if (!row.user_id) {
+    // Persist the resolved account (fenced by the claim) so a skipped outcome is attributable and
+    // auditable, and so a later attempt cannot silently switch to a different account.
+    const { rowCount } = await deps.db.admin.query(
+      `UPDATE password_reset_deliveries
+          SET user_id = $3, updated_at = now()
+        WHERE id = $1 AND status = 'sending' AND claim_id = $2`,
+      [row.id, row.claim_id, account.id],
+    );
+    if (!rowCount) return 'superseded';
+  }
+
+  const eligibility = await resetEligibility(deps.db, account);
+  if (eligibility !== 'ok') return settle('skipped', eligibility, null);
+
+  let token: string;
+  if (row.token_sealed) {
+    try {
+      token = openResetToken(deps.secret, row.token_sealed);
+    } catch (err) {
+      logger.warn({ err, id: row.id }, 'queued password reset token could not be opened');
+      return settle('failed', 'invalid_token', 'token_unreadable');
+    }
+  } else {
+    try {
+      token = await createPasswordResetToken(deps.auth, account.id, deps.ttlSeconds);
+    } catch (err) {
+      // A transient database/auth-context failure is retryable; the attempt bound still applies.
+      logger.warn({ err, id: row.id }, 'password reset token could not be minted');
+      return (await retryReset(deps, row, 'token_mint_failed')) ? 'retried' : settle('failed', 'delivery_failed', 'token_mint_failed');
+    }
+    const { rowCount } = await deps.db.admin.query(
+      `UPDATE password_reset_deliveries
+          SET token_sealed = $3, user_id = $4, updated_at = now()
+        WHERE id = $1 AND status = 'sending' AND claim_id = $2`,
+      [row.id, row.claim_id, sealResetToken(deps.secret, token), account.id],
+    );
+    if (!rowCount) {
+      await dropToken(token);
+      return 'superseded';
+    }
+  }
+
+  // Verification ownership, expiry and consumption immediately before delivery.
+  const tokenState = await resetTokenState(deps.db, token);
+  if (!tokenState) return settle('failed', 'consumed', 'token_consumed');
+  if (tokenState.userId !== account.id) return settle('failed', 'invalid_token', 'token_owner_mismatch');
+  if (tokenState.expiresAt.getTime() <= Date.now()) {
+    await deleteResetToken(deps.db, token).catch((err) => logger.warn({ err, id: row.id }, 'could not remove an expired reset token'));
+    return settle('failed', 'expired', 'token_expired');
+  }
+
+  // The token mint may have taken time, and another request may have changed the account.
+  const current = await accountForEmail(deps.db, email);
+  if (!current || current.id !== account.id) {
+    await dropToken(token);
+    return settle('failed', 'account_gone', 'account_gone');
+  }
+  const currentEligibility = await resetEligibility(deps.db, current);
+  if (currentEligibility !== 'ok') {
+    await dropToken(token);
+    return settle('skipped', currentEligibility, null);
+  }
+
+  let result: 'sent' | 'no_sender' | 'failed';
+  try {
+    result = await send(deps, current, token, deps.ttlSeconds);
+  } catch (err) {
+    logger.warn({ error: err instanceof Error ? err.name : 'unknown', id: row.id }, 'password reset delivery threw');
+    result = 'failed';
+  }
+  if (result === 'sent') return settle('sent', 'sent', null);
+  if (result === 'no_sender') {
+    // Configuration is not a transient provider error: the same row would keep finding no sender.
+    await dropToken(token);
+    return settle('failed', 'no_sender', 'no_sender');
+  }
+  return (await retryReset(deps, row, 'delivery_failed')) ? 'retried' : settle('failed', 'delivery_failed', 'delivery_failed');
+}
+
+/**
+ * One delivery round: cleanup, then claim and process due rows one at a time (so no row waits in
+ * "sending" behind a long batch). Provider failures retry with backoff up to `RESET_MAX_ATTEMPTS`.
  */
 export async function runPasswordResetDeliveriesOnce(
   deps: ResetDeliveryDeps,
-  opts: { batch?: number } = {},
+  opts: { batch?: number; cleanup?: boolean } = {},
 ): Promise<ResetDeliverySummary> {
-  const summary: ResetDeliverySummary = { handled: 0, sent: 0, failed: 0, retried: 0 };
+  const summary: ResetDeliverySummary = { handled: 0, sent: 0, failed: 0, skipped: 0, retried: 0, superseded: 0 };
   const send = deps.send ?? ((d, account, token, ttl) => sendPasswordResetEmail(d, account, token, ttl));
-  // A settled row's evidence is only the outcome; keeping it longer than this is a leak, not an audit.
-  await deps.db.admin.query(
-    `DELETE FROM password_reset_deliveries
-      WHERE status IN ('sent', 'failed') AND updated_at < now() - make_interval(days => $1)`,
-    [RESET_SETTLED_RETENTION_DAYS],
-  );
-  await deps.db.admin.query(
-    `UPDATE password_reset_deliveries
-        SET status = 'queued', last_error = coalesce(last_error, 'worker stopped while sending'), updated_at = now()
-      WHERE status = 'sending' AND updated_at < now() - make_interval(secs => $1)`,
-    [RESET_STALE_SENDING_SECONDS],
-  );
-  const { rows } = await deps.db.admin.query<QueuedResetRow>(
-    `UPDATE password_reset_deliveries
-        SET status = 'sending', attempts = attempts + 1, updated_at = now()
-      WHERE id IN (
-        SELECT id FROM password_reset_deliveries
-         WHERE status = 'queued' AND (next_attempt_at IS NULL OR next_attempt_at <= now())
-         ORDER BY created_at
-         LIMIT $1
-         FOR UPDATE SKIP LOCKED)
-      RETURNING id, user_id, workspace_id, ip, token_sealed, token_key_id, attempts`,
-    [opts.batch ?? 25],
-  );
-  for (const row of rows) {
+  if (opts.cleanup !== false) await cleanupResetQueue(deps);
+  const batch = opts.batch ?? 25;
+  for (let i = 0; i < batch; i++) {
+    const row = await claimReset(deps);
+    if (!row) break;
     summary.handled++;
-    const failed = async (reason: string, permanent = true) => {
-      if (!permanent && row.attempts < RESET_MAX_ATTEMPTS) {
-        const delay = RESET_RETRY_SECONDS[row.attempts - 1] ?? 120;
-        await deps.db.admin.query(
-          `UPDATE password_reset_deliveries
-              SET status = 'queued', last_error = $2, next_attempt_at = now() + make_interval(secs => $3), updated_at = now()
-            WHERE id = $1`,
-          [row.id, reason, delay],
-        );
-        summary.retried++;
-        return;
-      }
-      summary.failed++;
-      await settleReset(deps, row, 'failed', 'delivery_failed', reason);
-    };
-    if (!row.token_sealed || !row.token_key_id) {
-      await failed('token_missing: the queued link has no token');
-      continue;
-    }
-    let token: string;
-    try {
-      token = (
-        await deps.db.withWorkspace(row.workspace_id, (tx) =>
-          openJson<{ token: string }>(tx, row.workspace_id, deps.kp, row.token_sealed!, row.token_key_id!),
-        )
-      ).token;
-    } catch (err) {
-      logger.warn({ err, id: row.id }, 'queued password reset link could not be opened');
-      await failed('token_unreadable: the sealed link could not be opened');
-      continue;
-    }
-    const { rows: people } = await deps.db.admin.query<ResetAccount>('SELECT id, email, name FROM "user" WHERE id = $1', [row.user_id]);
-    const account = people[0];
-    if (!account) {
-      await failed('account_gone: the account no longer exists');
-      continue;
-    }
-    let result: 'sent' | 'no_sender' | 'failed';
-    try {
-      result = await send(deps, account, token, deps.ttlSeconds);
-    } catch (err) {
-      logger.warn({ err, id: row.id }, 'password reset delivery threw');
-      result = 'failed';
-    }
-    if (result === 'sent') {
-      summary.sent++;
-      await settleReset(deps, row, 'sent', 'sent', null);
-    } else if (result === 'no_sender') {
-      // Configuration is not a transient provider error: the same row would keep finding no sender.
-      await failed('no_sender: no enabled transactional e-mail provider');
-    } else {
-      await failed('delivery_failed: the provider did not accept the message', false);
-    }
+    const result = await deliverReset(deps, row, send);
+    summary[result]++;
   }
   return summary;
 }
@@ -388,11 +612,14 @@ export async function runPasswordResetDeliveries(
   opts: { tickMs?: number; batch?: number } = {},
 ) {
   const tickMs = opts.tickMs ?? 1000;
+  let lastCleanup = 0;
   logger.info('worker role: password reset delivery');
   while (!signal.aborted) {
     let handled = 0;
+    const cleanup = Date.now() - lastCleanup >= RESET_CLEANUP_INTERVAL_MS;
+    if (cleanup) lastCleanup = Date.now();
     try {
-      handled = (await runPasswordResetDeliveriesOnce(deps, opts)).handled;
+      handled = (await runPasswordResetDeliveriesOnce(deps, { batch: opts.batch, cleanup })).handled;
     } catch (err) {
       logger.error({ err }, 'password reset delivery round failed');
     }
@@ -414,8 +641,9 @@ export async function runPasswordResetDeliveries(
 
 /**
  * Appends an audit entry for a reset request or completion (#191): person, IP and outcome, never
- * the token. The audit log is per workspace, so the entry lands in the person's oldest workspace;
- * someone without one is only in the server log. The hash chain is kept like a command's entry.
+ * the token or the address. The audit log is per workspace, so the entry lands in the person's
+ * oldest workspace; someone without one is only in the server log. The hash chain is kept like a
+ * command's entry.
  */ export async function recordPasswordResetAudit(
   db: Db,
   entry: { userId: string | null; ip: string; command: 'auth.passwordResetRequest' | 'auth.passwordReset'; outcome: ResetOutcome },

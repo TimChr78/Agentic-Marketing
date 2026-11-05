@@ -1,4 +1,3 @@
-import { randomBytes } from 'node:crypto';
 import type { Auth } from '@agentic-marketing/auth';
 import { RESOLVED_CLIENT_IP_HEADER, remoteAddressFromEnv, resolveClientIp, sha256 } from '@agentic-marketing/core';
 import type { Db } from '@agentic-marketing/db';
@@ -7,20 +6,19 @@ import { bodyLimit } from '@agentic-marketing/ingest';
 import { logger } from '@agentic-marketing/telemetry';
 import type { Context, Hono } from 'hono';
 import {
-  accountForEmail,
+  enqueueResetRequest,
   RESET_COOLDOWN_SECONDS,
   RESET_EMAIL_BUCKET,
   RESET_IP_BUCKET,
   RESET_REQUEST_MESSAGE,
   RESET_SUBMIT_IP_BUCKET,
   recordPasswordResetAudit,
-  resetEligibility,
   resetTokenAccount,
 } from '../passwordReset';
 
 // The self-service password reset endpoints (#191). Better Auth owns the token and the password
 // change; these routes add what it cannot do alone: rate limits shared across workers, the
-// account checks (no mail for single sign-on people) and the audit trail.
+// account-agnostic durable request queue (#379) and the audit trail.
 //
 // Both endpoints answer the same way whether or not the address exists.
 
@@ -29,6 +27,8 @@ export interface PasswordResetRoutesDeps {
   db: Db;
   hot: HotState;
   publicUrl: string;
+  /** Installation secret for the request queue's purpose-separated address encryption. */
+  authSecret: string;
   clientIpHeaders: string[];
   trustedProxyCidrs: string[];
 }
@@ -43,14 +43,6 @@ const RESET_MAX_BODY = 8 * 1024;
 const RESET_TOO_LARGE = (c: Context) => c.json({ status: false, code: 'PAYLOAD_TOO_LARGE', message: 'That request is too large.' }, 413);
 
 const neutral = () => ({ status: true, message: RESET_REQUEST_MESSAGE });
-
-/**
- * The dummy verification lookup Better Auth performs for an unknown address (it generates a token
- * id and looks it up), mirrored here because this route answers unknown and single sign-on
- * addresses itself. It keeps the request's own work close to the known path's; the provider call
- * no longer happens inside any of them (#379).
- */
-const dummyLookup = (db: Db) => resetTokenAccount(db, randomBytes(18).toString('base64url'));
 
 export function passwordResetRoutes(app: Hono, deps: PasswordResetRoutesDeps) {
   /** The same resolution Better Auth gets, so the limits are per real client and shared. */
@@ -101,25 +93,16 @@ export function passwordResetRoutes(app: Hono, deps: PasswordResetRoutesDeps) {
     // A short cooldown keeps one impatient person from filling a mailbox; the answer stays neutral.
     if (!(await take(`pwreset:cooldown:${sha256(email)}`, { rate: 1 / RESET_COOLDOWN_SECONDS, burst: 1 }))) return c.json(neutral());
 
-    const account = await accountForEmail(deps.db, email);
-    // An unknown address gets no token and no mail, and the same answer as a known one. It does
-    // the same dummy verification lookup Better Auth would do, so the branch costs comparable work.
-    if (!account) {
-      await dummyLookup(deps.db);
-      return c.json(neutral());
+    // The whole request path (#379): seal the normalized address and insert one durable row. There
+    // is no account lookup, token mint, tenant KEK or provider call here, so known, unknown and
+    // single sign-on addresses do exactly the same work and the same single write. The worker
+    // decides whether mail is allowed and records the outcome. A database failure is answered
+    // neutrally like every other outcome, so it cannot reveal account existence either.
+    try {
+      await enqueueResetRequest({ db: deps.db, secret: deps.authSecret }, email, ip);
+    } catch (err) {
+      logger.warn({ err }, 'a password reset request could not be queued');
     }
-
-    const eligibility = await resetEligibility(deps.db, account);
-    if (eligibility !== 'ok') {
-      await recordPasswordResetAudit(deps.db, { userId: account.id, ip, command: 'auth.passwordResetRequest', outcome: eligibility });
-      await dummyLookup(deps.db);
-      return c.json(neutral());
-    }
-
-    const response = await forward(c, '/api/auth/request-password-reset', { email }, ip);
-    // Better Auth's callback queues the mail for the delivery worker (see queueResetLink), so this
-    // answer waited for a database insert, never for a provider. The worker records the outcome.
-    if (!response.ok) logger.warn({ status: response.status }, 'a password reset request was refused by the auth layer');
     return c.json(neutral());
   }
 

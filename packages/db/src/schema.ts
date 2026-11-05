@@ -175,24 +175,32 @@ export const auditLog = pgTable('audit_log', {
 });
 
 /**
- * The password reset delivery queue (#379): the request records the link and answers at once, so
- * its timing never depends on a provider call or on whether the account exists. The worker sends
- * with bounded retries. The token is sealed with the sender workspace's data key and wiped when
- * the row settles, so the queue never keeps a usable link.
+ * The password reset request queue (#379). Installation-level: the request seals the normalized
+ * address with a key derived from the installation secret and inserts one row before any account
+ * lookup. The worker resolves the account, re-checks eligibility, mints Better Auth's token, sends
+ * with bounded retries and wipes the sealed address/token on terminal completion. No tenant data
+ * key is used on the request path.
  */
 export const passwordResetDeliveries = pgTable(
   'password_reset_deliveries',
   {
     id: text('id').notNull(),
-    userId: text('user_id').notNull(),
-    workspaceId: uuid('workspace_id').notNull(),
+    /** Sealed normalized address; present only while queued or sending. */
+    emailSealed: bytea('email_sealed'),
     /** The client IP of the request, for the audit entry the worker appends. */
     ip: text('ip').notNull(),
+    /** The account the worker resolved; null before then and wiped on terminal completion. */
+    userId: text('user_id'),
+    /** Worker-minted reset token, sealed with the installation secret. */
     tokenSealed: bytea('token_sealed'),
-    tokenKeyId: text('token_key_id'),
-    status: text('status').$type<'queued' | 'sending' | 'sent' | 'failed'>().notNull().default('queued'),
+    status: text('status').$type<'queued' | 'sending' | 'sent' | 'failed' | 'skipped'>().notNull().default('queued'),
+    /** Terminal outcome code (sent, unknown, sso_only, …); never an address or token. */
+    outcome: text('outcome'),
     attempts: integer('attempts').notNull().default(0),
+    /** Fencing value for the delivery lease; every retry/settle/token write requires it. */
+    claimId: uuid('claim_id'),
     nextAttemptAt: ts('next_attempt_at'),
+    /** Bounded reason code, never an address or token. */
     lastError: text('last_error'),
     createdAt: ts('created_at').notNull().defaultNow(),
     updatedAt: ts('updated_at').notNull().defaultNow(),

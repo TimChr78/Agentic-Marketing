@@ -43,7 +43,6 @@ import { staticSite } from './http/static';
 import { createInputWarningRecorder } from './inputWarnings';
 import { keyProviderFor } from './keys';
 import { createMetricsRegistry, routeGroup, statusClass } from './metrics';
-import { queueResetLink } from './passwordReset';
 import { COMMIT, VERSION } from './version';
 
 // An invitation token is short; the limit runs before the session lookup and the body parse.
@@ -66,19 +65,13 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
     trustedOrigins: config.trustedOrigins,
     clientIpHeaders: [RESOLVED_CLIENT_IP_HEADER],
     sso: config.sso,
-    // Self-service password reset (#191): Better Auth makes and consumes the token; the host
-    // queues the link for the delivery worker and audits the outcome (#379).
+    // Self-service password reset (#191): Better Auth owns token minting/consumption and the
+    // password change. The public route queues every address uniformly and the delivery worker
+    // mints the token and sends it (#379); reaching this callback would bypass that queue, so it
+    // deliberately delivers nothing.
     passwordReset: {
       ttlSeconds: RESET_PASSWORD_TTL_SECONDS,
-      send: async ({ user, token, request }) => {
-        const ip = request?.headers.get(RESOLVED_CLIENT_IP_HEADER) ?? 'unknown';
-        await queueResetLink(
-          { db, kp: keyProvider, email, directory, publicUrl: config.publicUrl, ttlSeconds: RESET_PASSWORD_TTL_SECONDS },
-          user,
-          token,
-          ip,
-        );
-      },
+      send: async () => {},
     },
     ...overrides,
   });
@@ -238,6 +231,7 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
     db,
     hot,
     publicUrl: config.publicUrl,
+    authSecret: config.authSecret,
     clientIpHeaders: config.clientIpHeaders,
     trustedProxyCidrs: config.trustedProxyCidrs,
   });
@@ -362,6 +356,7 @@ export function createServer(config: Config, overrides: Pick<AuthConfig, 'cimd'>
     hot,
     egress: config.egress,
     publicUrl: config.publicUrl,
+    authSecret: config.authSecret,
     linksUrl: config.linksUrl,
     retention: config.retention,
     erasureGraceHours: config.erasureGraceHours,

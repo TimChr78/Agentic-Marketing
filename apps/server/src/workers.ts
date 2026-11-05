@@ -142,6 +142,8 @@ export function startWorkers(
           directory: srv.directory,
           publicUrl: srv.publicUrl,
           ttlSeconds: RESET_PASSWORD_TTL_SECONDS,
+          secret: srv.authSecret,
+          auth: srv.auth,
         },
         signal,
         { tickMs: opts.passwordResetTickMs },
