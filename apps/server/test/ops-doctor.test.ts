@@ -3,7 +3,9 @@ import pg from 'pg';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { loadConfig } from '../src/config';
 import {
+  type BrandDomainRow,
   type Check,
+  checkBrandDomains,
   checkConfig,
   checkEgress,
   checkPublicLinksUrl,
@@ -244,6 +246,93 @@ describe('am doctor sending-domain checks', () => {
   });
 });
 
+describe('am doctor brand-domain checks', () => {
+  const config = { publicUrl: 'https://admin.example.com' };
+  const domain = (over: Partial<BrandDomainRow> = {}): BrandDomainRow => ({
+    workspaceId: 'ws_a',
+    workspaceName: 'Brand A',
+    host: 'links.example.com',
+    pathPrefix: null,
+    isPrimary: true,
+    status: 'verified',
+    ...over,
+  });
+  const okLookup = async () => [{ address: '127.0.0.1', family: 4 }];
+
+  it('says the fallback is in use when no domain is registered', async () => {
+    const [check] = await checkBrandDomains([], [], config);
+    expect(check).toMatchObject({ id: 'brand-domains', status: 'ok' });
+    expect(check.message).toContain('PUBLIC_LINKS_URL');
+
+    const [multi] = await checkBrandDomains(
+      [],
+      [
+        { id: 'ws_a', name: 'A' },
+        { id: 'ws_b', name: 'B' },
+      ],
+      config,
+    );
+    expect(multi.status).toBe('warn');
+    expect(multi.message).toContain('PUBLIC_LINKS_URL');
+  });
+
+  it('reports a domain that resolves and answers /healthz under its prefix', async () => {
+    const probed: string[] = [];
+    const checks = await checkBrandDomains([domain({ pathPrefix: '/am' })], [{ id: 'ws_a', name: 'Brand A' }], config, {
+      lookup: okLookup,
+      probe: async (url) => {
+        probed.push(url);
+        return 200;
+      },
+    });
+    expect(probed).toEqual(['https://links.example.com/am/healthz']);
+    expect(checks.find((check) => check.id.startsWith('brand-domains.links.example.com'))?.status).toBe('ok');
+  });
+
+  it('reports missing DNS, an invalid certificate and an unreachable listener', async () => {
+    const missing = await checkBrandDomains([domain()], [], config, {
+      lookup: async () => {
+        throw new Error('ENOTFOUND');
+      },
+    });
+    expect(missing[0]).toMatchObject({ status: 'fail' });
+    expect(missing[0].message).toContain('does not resolve');
+
+    const tls = await checkBrandDomains([domain()], [], config, {
+      lookup: okLookup,
+      probe: async () => {
+        throw Object.assign(new Error('unable to verify the first certificate'), { code: 'UNABLE_TO_VERIFY_LEAF_SIGNATURE' });
+      },
+    });
+    expect(tls[0]).toMatchObject({ status: 'fail' });
+    expect(tls[0].message).toContain('TLS certificate');
+
+    const unreachable = await checkBrandDomains([domain()], [], config, {
+      lookup: okLookup,
+      probe: async () => {
+        throw new Error('connect ECONNREFUSED');
+      },
+    });
+    expect(unreachable[0]).toMatchObject({ status: 'fail' });
+    expect(unreachable[0].message).toContain('does not answer');
+  });
+
+  it('warns about the admin host and brands without a primary domain', async () => {
+    const checks = await checkBrandDomains(
+      [domain({ host: 'admin.example.com' }), domain({ workspaceId: 'ws_b', workspaceName: 'B', host: 'b.example.com', isPrimary: false })],
+      [
+        { id: 'ws_a', name: 'Brand A' },
+        { id: 'ws_b', name: 'Brand B' },
+      ],
+      config,
+      { lookup: okLookup, probe: async () => 200 },
+    );
+    expect(checks.find((check) => check.id.startsWith('brand-domains.admin.example.com'))?.status).toBe('warn');
+    expect(checks.find((check) => check.id === 'brand-domains.primary')?.status).toBe('warn');
+    expect(checks.find((check) => check.id === 'brand-domains.primary')?.message).toContain('Brand B');
+  });
+});
+
 describe('am doctor live checks', () => {
   const dbName = `am_doctor_${process.pid}_${randomBytes(4).toString('hex')}`;
   const basePgUrl = new URL(process.env.TEST_DATABASE_URL ?? 'postgres://am:am@localhost:5432/am_test');
@@ -283,7 +372,7 @@ describe('am doctor live checks', () => {
 
     const checks = await liveChecks(config);
     const byId = new Map(checks.map((item) => [item.id, item]));
-    for (const id of ['postgres', 'clickhouse', 'nats', 'valkey', 'dns', 'egress'])
+    for (const id of ['postgres', 'clickhouse', 'nats', 'valkey', 'dns', 'egress', 'brand-domains'])
       expect(byId.get(id)?.status, `${id}: ${JSON.stringify(byId.get(id))}`).toBe('ok');
     expect(byId.get('migrations')?.status).toBe('warn');
     expect(

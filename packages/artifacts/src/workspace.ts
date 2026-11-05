@@ -1,9 +1,10 @@
 import { type CommandContext, defineCommand, type Permission } from '@agentic-marketing/commands';
 import { AppError, canonicalJson, newId, sha256 } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
-import { and, desc, eq, gte, inArray, isNotNull, lt, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, isNotNull, lt, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { Requester, resolveActors } from './commands';
+import { DomainViewSchema, domainView, effectiveLinksUrl, workspaceDomainCommands } from './domains';
 import { artifactTypes } from './types';
 
 const Policy = z.enum(['none', 'agent_changes', 'all_publishes']);
@@ -61,6 +62,8 @@ export const getWorkspace = defineCommand({
     approvalPolicy: Policy,
     timeZone: z.string().describe('IANA time zone of the workspace, e.g. Europe/Copenhagen'),
     seedList: z.array(z.string()).describe('Addresses (besides members) that test sends may go to'),
+    domains: z.array(DomainViewSchema).describe('Public hostnames this brand’s links answer on'),
+    linksUrl: z.string().describe('Origin and prefix public links use: this workspace’s primary domain, else PUBLIC_LINKS_URL'),
     serverVersion: z.string().describe('Version of the running server, e.g. 0.2.9'),
     you: z.object({ type: z.enum(['user', 'agent']), userId: z.string(), role: z.string(), permissions: z.array(z.string()) }),
     permissionsExplained: z
@@ -71,6 +74,10 @@ export const getWorkspace = defineCommand({
   effect: 'read',
   handler: async (_input, ctx) => {
     const [w] = await ctx.tx.select().from(schema.workspaces).where(eq(schema.workspaces.id, ctx.principal.workspaceId));
+    const domains = await ctx.tx
+      .select()
+      .from(schema.workspaceDomains)
+      .orderBy(desc(schema.workspaceDomains.isPrimary), asc(schema.workspaceDomains.host));
     const p = ctx.principal;
     const permissions = [...p.permissions].sort();
     return {
@@ -79,6 +86,8 @@ export const getWorkspace = defineCommand({
       approvalPolicy: w.approvalPolicy,
       timeZone: w.timeZone,
       seedList: w.seedList,
+      domains: domains.map(domainView),
+      linksUrl: await effectiveLinksUrl(ctx, domains),
       serverVersion: ctx.services.serverVersion,
       you: { type: p.type, userId: p.userId, role: p.role, permissions },
       permissionsExplained: permissions.map((permission) => ({
@@ -732,6 +741,7 @@ export const verifyAudit = defineCommand({
 
 export const workspaceCommands = [
   getWorkspace,
+  ...workspaceDomainCommands,
   getBusinessContext,
   getStatus,
   inputWarnings,

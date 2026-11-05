@@ -2,6 +2,7 @@ export * from './bundle';
 export * from './checkSubject';
 export * from './commands';
 export * from './diff';
+export * from './domains';
 export * from './holdout';
 export * from './hostedPages';
 export * from './impact';

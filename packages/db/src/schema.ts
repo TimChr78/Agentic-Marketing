@@ -1,3 +1,4 @@
+import { sql } from 'drizzle-orm';
 import {
   bigint,
   bigserial,
@@ -5,6 +6,7 @@ import {
   customType,
   date,
   doublePrecision,
+  index,
   integer,
   jsonb,
   pgTable,
@@ -41,6 +43,36 @@ export const workspaceMembers = pgTable(
     createdAt: ts('created_at').notNull().defaultNow(),
   },
   (t) => [primaryKey({ columns: [t.workspaceId, t.userId] })],
+);
+
+export type WorkspaceDomainStatus = 'pending' | 'verified';
+
+/**
+ * A public hostname (and optional path prefix) that serves one workspace's links (#186). Resolution
+ * happens before a workspace is known, so the server reads this table on the owner connection; the
+ * row is still tenant data for the commands that edit it.
+ */
+export const workspaceDomains = pgTable(
+  'workspace_domains',
+  {
+    id: text('id').primaryKey(),
+    workspaceId: uuid('workspace_id').notNull(),
+    /** Lowercase IDNA hostname, without scheme, port or trailing dot. */
+    host: text('host').notNull(),
+    /** Leading-slash prefix such as `/am`, or null for the whole host. */
+    pathPrefix: text('path_prefix'),
+    isPrimary: boolean('is_primary').notNull().default(false),
+    status: text('status').$type<WorkspaceDomainStatus>().notNull().default('pending'),
+    verificationToken: text('verification_token'),
+    verifiedAt: ts('verified_at'),
+    createdBy: text('created_by').notNull(),
+    createdAt: ts('created_at').notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('workspace_domains_host_prefix').on(t.host, sql`coalesce(${t.pathPrefix}, '')`),
+    uniqueIndex('workspace_domains_primary').on(t.workspaceId).where(sql`${t.isPrimary}`),
+    index('workspace_domains_host').on(t.host),
+  ],
 );
 
 export const invitations = pgTable(

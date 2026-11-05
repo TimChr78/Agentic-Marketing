@@ -55,3 +55,63 @@ Anyone who signs in with a password can reset it from the sign-in page ("Forgot 
 **Rate limits and audit.** Per IP, 5 link requests per 15 minutes; per address, 3 per hour plus the 60-second cooldown; per IP, 10 reset submissions per 15 minutes. All buckets live in Valkey and are shared by every server process. If any required bucket is unavailable, reset requests and submissions return the same generic `503 RATE_LIMIT_UNAVAILABLE` for every account class; no request is queued and no reset is forwarded while the shared limits are unavailable. The worker appends the request outcome to the workspace audit log (surface `internal`, command `auth.passwordResetRequest` / `auth.passwordReset`) with the person, the time, the outcome and the IP in the audit log's `ip` column (migration `0066_password_reset.sql`) — never the address, token or password. A person without a workspace is only in the server log (the audit log is per workspace); an unknown address has no account to attribute, so it appears only as a queue outcome. Without a running worker there is no delivery outcome and no request audit entry.
 
 **Break-glass.** `am reset-password --email you@example.com` (with `AM_RESET_PASSWORD`, a hidden prompt or stdin) still sets a password from the server, for owners with container access and when mail is broken. It is not a user-facing path.
+
+## Brands and domains (#186)
+
+A **brand is a workspace**. Memberships, the `X-Workspace-Id` header, row-level security and the
+workspace switcher already separate brands; a domain only decides which workspace a public request
+belongs to. One installation keeps **one admin host** (`PUBLIC_URL`) where people sign in and switch
+brand; each brand may have its own public links hostname.
+
+### Register a domain
+
+`workspace.domains.add/update/remove/list` are people-only (`workspace:admin`) and audited. A domain
+is a normalised hostname plus an optional path prefix:
+
+- lowercase IDNA hostname, without scheme, port or trailing dot; wildcards, userinfo, queries and
+  fragments are refused;
+- `https` everywhere, or `http` only on localhost;
+- an optional leading-slash prefix such as `/am`, for a site that proxies `/am` to this instance;
+- one hostname/prefix may belong to only one workspace, and one workspace may have one **primary**
+  domain. `workspace.get` returns the workspace's `domains` and its effective `linksUrl`.
+
+Normalisation runs before the row is written, so `MartechSignal.COM` and `martechsignal.com` are the
+same host, and `/am/` and `am` are the same prefix. Host resolution for a request (before any
+workspace is known) reads the registry installation-wide and picks the **longest matching path
+prefix**, so `example.com/am` and `example.com/am2` can coexist. An unknown host on a public path is
+answered with 404; admin routes keep using the session and `X-Workspace-Id`.
+
+### One tunnel hostname per brand
+
+Point each brand's DNS at the tunnel or ingress, and give the tunnel one hostname per brand:
+
+| Brand | Public host | Path prefix | Primary |
+|---|---|---|---|
+| Martech Signal | `links.martechsignal.com` | — | yes |
+| Second site | `second.example.com` | `/am` | yes |
+
+The certificate must cover every registered hostname. A wildcard certificate (`*.example.com`) can
+cover several brands under one parent, but a brand on another domain needs its own name on the
+certificate. The public listener (`PUBLIC_PORT`) is the safe target for these hostnames; it serves
+only `/f`, `/u`, `/c`, `/a`, `/n`, `/hooks`, `/healthz` and `/readyz`.
+
+With a path prefix, the proxy forwards `/am/*` unchanged, so the public paths are
+`https://second.example.com/am/f/<form id>`, `/am/u/...`, `/am/n/...`. Health checks move with it:
+`https://second.example.com/am/healthz`.
+
+### Fallback and upgrades
+
+`PUBLIC_LINKS_URL` remains the fallback and is not removed. A workspace with no primary domain uses
+it exactly as before, which keeps a single-brand install byte-for-byte identical after upgrading:
+there is no SQL backfill, because the current URL is configuration rather than data. Assign the
+existing `PUBLIC_LINKS_URL` origin+prefix to the default brand only if you want it visible as a
+registered domain. If several workspaces exist and some have no primary domain, `am doctor` warns
+that their links still use `PUBLIC_LINKS_URL`.
+
+### `am doctor`
+
+For each registered domain, `am doctor` checks that DNS resolves, that `https://<host><prefix>/healthz`
+(or the public listener's path) answers, and that the TLS certificate is valid. It warns when a
+registered host is the admin host, when a multi-brand install has brands without a primary domain,
+and when a host uses a reserved or private suffix. The checks are short and timeboxed like the other
+network checks; a fresh install with no domains reports that links use `PUBLIC_LINKS_URL`.
