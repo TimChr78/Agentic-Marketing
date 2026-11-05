@@ -13,6 +13,7 @@ const defaults: Autonomy = {
   allowLoops: false,
   audienceThreshold: 1000,
   limits: { changesPerDay: 500, messagesPerDay: 1000 },
+  contactPressure: [],
 };
 
 describe('agent decisions (#213)', () => {

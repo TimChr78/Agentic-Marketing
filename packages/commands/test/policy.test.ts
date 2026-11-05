@@ -383,3 +383,49 @@ describe('level 4, run the loop (#309)', () => {
     expect(publish(4, { id: 'not_new', type: 'note', created: true }, noLoops)).toMatchObject({ decision: 'ask', level: 1 });
   });
 });
+
+describe('several agents in one workspace (#426)', () => {
+  const owned = {
+    agentId: 'agt_other',
+    agentName: 'Newsletter agent',
+    active: true,
+    artifactId: 'not_1',
+    artifactName: 'Weekly issue',
+  };
+  const level3 = autonomySettings({ maxLevel: { 'content.publish': 3 } });
+  const view = (): MandateView => ({
+    id: 'mnd_coord',
+    version: 1,
+    levels: { 'content.publish': 3 },
+    scope: { segments: [], purposes: [], topics: [], channels: ['email'], artifactTypes: [], artifacts: [] },
+    limits: {},
+    holdWindow: 'PT2H',
+    independentCheck: false,
+    guardrails: { window: 'P7D', minSent: 100 },
+    purpose: 'x',
+  });
+
+  it('asks a person, without a mandate, when another active agent owns the artifact', () => {
+    const out = decide(base({ ownership: owned }));
+    expect(out.decision).toBe('ask');
+    expect(out.reasons[0]).toBe('“Weekly issue” is owned by agent Newsletter agent.');
+  });
+
+  it('caps a mandate at level 1 and names the owner', () => {
+    const out = decide(base({ settings: level3, mandate: view(), ownership: owned }));
+    expect(out).toMatchObject({ decision: 'ask', level: 1 });
+    expect(out.reasons).toContain('“Weekly issue” is owned by agent Newsletter agent.');
+  });
+
+  it('reports an inactive owner but does not block', () => {
+    const out = decide(base({ settings: level3, mandate: view(), ownership: { ...owned, active: false } }));
+    expect(out).toMatchObject({ decision: 'allow', level: 3, autonomous: true });
+    expect(out.reasons.join(' ')).toContain('which is not active');
+  });
+
+  it('caps a second agent when another has a pending change, with and without a mandate', () => {
+    const conflict = '“Weekly issue” already has an open approval request from agent Journey agent.';
+    expect(decide(base({ conflicts: [conflict] }))).toMatchObject({ decision: 'ask', reasons: [conflict] });
+    expect(decide(base({ settings: level3, mandate: view(), conflicts: [conflict] }))).toMatchObject({ decision: 'ask', level: 1 });
+  });
+});

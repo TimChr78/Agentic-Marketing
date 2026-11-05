@@ -284,6 +284,15 @@ async function saveContext(tx: Tx, workspaceId: string, p: Participant) {
     .where(and(eq(schema.journeyParticipants.workspaceId, workspaceId), eq(schema.journeyParticipants.id, p.id)));
 }
 
+/** The agent that owns the journey whose step sends this message (#426); null for a person's journey. */
+async function journeyOwnerAgentId(tx: Tx, journeyId: string): Promise<string | null> {
+  const [a] = await tx
+    .select({ ownerAgentId: schema.artifacts.ownerAgentId })
+    .from(schema.artifacts)
+    .where(eq(schema.artifacts.id, journeyId));
+  return a?.ownerAgentId ?? null;
+}
+
 async function webhookAllowed(tx: Tx, workspaceId: string, profileId: string, purpose: string) {
   const purposes = (await publishedSingleton(tx, 'purposes'))?.purposes ?? DEFAULT_PURPOSES;
   const basis = purposes.find((x) => x.key === purpose)?.basis ?? 'consent';
@@ -422,6 +431,7 @@ async function applyEffect(
       idempotencyKey: `jrn:${p.id}:${eff.node}:${eff.seq}`,
       journeyId: p.journeyId,
       data: p.context,
+      agentId: await journeyOwnerAgentId(tx, p.journeyId),
     });
     return `e-mail ${d.status}${d.reason ? `: ${d.reason}` : ''}`;
   }
@@ -433,6 +443,7 @@ async function applyEffect(
       idempotencyKey: `jrn:${p.id}:${eff.node}:${eff.seq}`,
       journeyId: p.journeyId,
       data: p.context,
+      agentId: await journeyOwnerAgentId(tx, p.journeyId),
     });
     return `SMS ${d.status}${d.reason ? `: ${d.reason}` : ''}`;
   }
@@ -444,6 +455,7 @@ async function applyEffect(
       idempotencyKey: `jrn:${p.id}:${eff.node}:${eff.seq}`,
       journeyId: p.journeyId,
       data: p.context,
+      agentId: await journeyOwnerAgentId(tx, p.journeyId),
     });
     return `push ${d.status}${d.reason ? `: ${d.reason}` : ''}`;
   }

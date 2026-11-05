@@ -2,6 +2,12 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+### Added
+
+- Coordinate several agents in one workspace (#426): artifacts record an owning agent (`owner_agent_id`), set when an agent creates one and changed by the people-only, audited `artifacts.setOwner`. A change beyond a draft by another active agent is capped at level 1 with a reason naming the owner; a paused or retired owner does not block. A second agent's change to an artifact with another agent's open hold or approval request is held the same way. Messages record the agent behind them (`messages.agent_id`), and the workspace `agents.contactPressure` setting caps how many agent-originated marketing messages one person gets in a window, counted across agents and enforced by the delivery policy. `agents.activity` and `agents.report` show owned artifacts, held conflicts and contact-pressure skips.
+
 ## [0.7.6] - 2026-11-05
 
 ### Fixed

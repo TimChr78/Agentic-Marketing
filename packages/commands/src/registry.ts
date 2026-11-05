@@ -1,7 +1,7 @@
 import { AppError, canonicalJson, hashValue, sha256 } from '@agentic-marketing/core';
 import { type AgentUndo, type Db, schema, type Tx } from '@agentic-marketing/db';
 import { SpanStatusCode, trace } from '@opentelemetry/api';
-import { and, desc, eq, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import {
   type ActionClass,
@@ -10,6 +10,7 @@ import {
   decide,
   type Impact,
   type MandateView,
+  type PolicyInput,
   type PolicyOutcome,
   REACH_CLASSES,
 } from './policy';
@@ -442,6 +443,87 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
 export type Executor = ReturnType<typeof createExecutor>;
 
 /**
+ * What the other agents have on the artifacts this action changes (#426), before the policy
+ * engine decides: the owner of an artifact when it belongs to another agent, and any pending
+ * change (a hold inside its veto window, or an open approval request) from a different agent.
+ * The executor only calls this for changes beyond a draft; people never reach it.
+ */
+async function coordinationFor(
+  tx: Tx,
+  workspaceId: string,
+  agentId: string,
+  actionClass: ActionClass,
+  impact: Impact,
+): Promise<{ ownership: NonNullable<PolicyInput['ownership']> | null; conflicts: string[] }> {
+  const touched = impact.touches?.artifacts ?? [];
+  if (!touched.length || actionClass === 'draft' || actionClass === 'read') return { ownership: null, conflicts: [] };
+  const ids = [...new Set(touched.map((a) => a.id))];
+  const rows = await tx
+    .select({ id: schema.artifacts.id, name: schema.artifacts.name, ownerAgentId: schema.artifacts.ownerAgentId })
+    .from(schema.artifacts)
+    .where(and(eq(schema.artifacts.workspaceId, workspaceId), inArray(schema.artifacts.id, ids)));
+  const names = new Map(rows.map((a) => [a.id, a.name]));
+
+  let ownership: NonNullable<PolicyInput['ownership']> | null = null;
+  for (const a of rows) {
+    if (!a.ownerAgentId || a.ownerAgentId === agentId) continue;
+    const [owner] = await tx
+      .select({ id: schema.agents.id, name: schema.agents.name, status: schema.agents.status })
+      .from(schema.agents)
+      .where(and(eq(schema.agents.workspaceId, workspaceId), eq(schema.agents.id, a.ownerAgentId)));
+    const candidate: NonNullable<PolicyInput['ownership']> = {
+      agentId: a.ownerAgentId,
+      // A deleted owner is reported as retired; it never blocks.
+      agentName: owner?.name ?? 'a retired agent',
+      active: owner?.status === 'active',
+      artifactId: a.id,
+      artifactName: a.name,
+    };
+    // An active owner anywhere is the one worth explaining; keep the first if all are inactive.
+    if (!ownership || (candidate.active && !ownership.active)) ownership = candidate;
+    if (ownership.active) break;
+  }
+
+  // Pending approvals from another agent on the same artifacts: a hold still inside its veto
+  // window, or an ordinary approval request. The requesting agent comes from the credential the
+  // request recorded, exactly as resume/approval look it up.
+  const pending = await tx.execute<{ artifact_id: string; hold_until: Date | string | null; agent_name: string }>(sql`
+    SELECT ar.artifact_id, ar.hold_until, a.name AS agent_name
+    FROM approval_requests ar
+    JOIN agent_credentials c ON c.workspace_id = ar.workspace_id AND (
+      (c.kind = 'api_token' AND ar.requested_by_client = 'token:' || c.credential_id)
+      OR (c.kind = 'hosted' AND ar.requested_by_client = 'hosted:' || c.credential_id)
+      OR (c.kind = 'copilot' AND ar.requested_by_client = 'copilot:' || c.credential_id)
+      OR (c.kind = 'oauth_client' AND ar.requested_by_client = c.credential_id))
+    JOIN agents a ON a.workspace_id = c.workspace_id AND a.id = c.agent_id
+    WHERE ar.workspace_id = ${workspaceId}
+      AND ar.status = 'pending' AND ar.requested_by_type = 'agent'
+      AND ar.artifact_id IN (${sql.join(
+        ids.map((id) => sql`${id}`),
+        sql`, `,
+      )})
+      AND a.id <> ${agentId}
+    ORDER BY ar.created_at`);
+  const conflicts: string[] = [];
+  const seen = new Set<string>();
+  for (const row of pending.rows) {
+    const key = `${row.artifact_id}:${row.agent_name}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const label = names.get(row.artifact_id) ? `“${names.get(row.artifact_id)}”` : row.artifact_id;
+    const until = row.hold_until ? new Date(row.hold_until) : null;
+    const what =
+      until && until > new Date()
+        ? `a hold until ${until.toISOString()}`
+        : until
+          ? 'a hold whose veto window has ended and now waits for a person'
+          : 'an open approval request';
+    conflicts.push(`${label} already has ${what} from agent ${row.agent_name}.`);
+  }
+  return { ownership, conflicts };
+}
+
+/**
  * The policy decision for one agent write (ADR-0016): the workspace settings, the agent's active
  * mandate, its guardrails and counters, then the independent check. Used by the executor for
  * every command and by commands that publish on an agent's behalf (config.import, #239).
@@ -478,6 +560,8 @@ export async function agentPolicy(
     mandate && REACH_CLASSES.includes(req.actionClass) && services.mandateGuardrails
       ? await services.mandateGuardrails(tx, principal.workspaceId, agent.id, mandate.view)
       : null;
+  // Several agents in one workspace (#426): who owns the artifact, and what other agents have pending.
+  const coordination = await coordinationFor(tx, principal.workspaceId, agent.id, req.actionClass, req.impact);
   let policy = decide({
     command: req.command,
     actionClass: req.actionClass,
@@ -486,6 +570,8 @@ export async function agentPolicy(
     counters: await agentCounters(tx, agent.id),
     approvable: req.approvable,
     guard: row?.guard ?? null,
+    ...(coordination.ownership ? { ownership: coordination.ownership } : {}),
+    ...(coordination.conflicts.length ? { conflicts: coordination.conflicts } : {}),
     ...(mandate ? { mandate: mandate.view, outsideHours: mandate.outsideHours, guardrailBreach } : {}),
   });
   // Only what the mandate lets run by itself (level 2+) is checked; drafts and proposals are not (#260).

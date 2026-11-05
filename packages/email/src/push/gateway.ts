@@ -29,6 +29,8 @@ export interface PushRequest {
   data?: Record<string, unknown>;
   /** Hold the message until then (a recipient-local send window). */
   notBefore?: Date;
+  /** The agent behind this message (#426): a direct send, or the owner of the journey. */
+  agentId?: string | null;
 }
 
 type Verdict =
@@ -138,6 +140,7 @@ export async function requestPush(tx: Tx, workspaceId: string, kp: KeyProvider, 
       reason,
       data: req.data ?? {},
       notBefore: req.notBefore ?? null,
+      agentId: req.agentId ?? null,
     })
     .returning();
   await events.insertMessageEvents([decisionEvent(m, status, reason ?? '')]);
