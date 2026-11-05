@@ -124,6 +124,22 @@ async function deleteResetToken(db: Db, token: string): Promise<void> {
   await db.admin.query('DELETE FROM "verification" WHERE identifier = $1', [hashedResetTokenIdentifier(token)]);
 }
 
+/** Deletes a shared retry token only while this claim still owns the row.
+ * The row lock serializes against takeover, so a stale sender cannot invalidate its successor's link.
+ */
+async function deleteClaimedResetToken(db: Db, token: string, row: QueuedResetRow): Promise<void> {
+  await db.admin.query(
+    `WITH owned AS MATERIALIZED (
+       SELECT id FROM password_reset_deliveries
+        WHERE id = $2 AND status = 'sending' AND claim_id = $3
+        FOR UPDATE
+     )
+     DELETE FROM "verification"
+      WHERE identifier = $1 AND EXISTS (SELECT 1 FROM owned)`,
+    [hashedResetTokenIdentifier(token), row.id, row.claim_id],
+  );
+}
+
 // The request path never touches a tenant data key or a network KEK. Addresses and worker-minted
 // tokens are sealed with purpose-separated keys derived from the installation secret (AUTH_SECRET):
 // HKDF-SHA256 gives each purpose its own 32-byte AES-256-GCM key, so a ciphertext from one purpose
@@ -482,7 +498,9 @@ async function deliverReset(
   const settle = async (status: 'sent' | 'failed' | 'skipped', outcome: ResetOutcome, error: string | null): Promise<DeliveryResult> =>
     (await settleReset(deps, row, status, outcome, error)) ? status : 'superseded';
   const dropToken = async (token: string) => {
-    await deleteResetToken(deps.db, token).catch((err) => logger.warn({ err, id: row.id }, 'could not remove an unused reset token'));
+    await deleteClaimedResetToken(deps.db, token, row).catch((err) =>
+      logger.warn({ err, id: row.id }, 'could not remove an unused reset token'),
+    );
   };
 
   if (!row.email_sealed) return settle('failed', 'email_unreadable', 'email_missing');
@@ -541,7 +559,10 @@ async function deliverReset(
       [row.id, row.claim_id, sealResetToken(deps.secret, token), account.id],
     );
     if (!rowCount) {
-      await dropToken(token);
+      // This fresh token was never published to the queue or a sender; no successor can use it.
+      await deleteResetToken(deps.db, token).catch((err) =>
+        logger.warn({ err, id: row.id }, 'could not remove an unpublished reset token'),
+      );
       return 'superseded';
     }
   }
@@ -551,7 +572,7 @@ async function deliverReset(
   if (!tokenState) return settle('failed', 'consumed', 'token_consumed');
   if (tokenState.userId !== account.id) return settle('failed', 'invalid_token', 'token_owner_mismatch');
   if (tokenState.expiresAt.getTime() <= Date.now()) {
-    await deleteResetToken(deps.db, token).catch((err) => logger.warn({ err, id: row.id }, 'could not remove an expired reset token'));
+    await dropToken(token);
     return settle('failed', 'expired', 'token_expired');
   }
 

@@ -505,46 +505,53 @@ describe('the reset delivery queue (#379)', () => {
     expect(serialised).not.toContain(account.email);
   }, 30_000);
 
-  it('takes over a stale claim without letting the late worker rewrite the successor outcome', async () => {
-    await ensureTransactionalProvider();
-    const account = await newAccount();
-    await forgot(account.email);
+  it.each(['failed', 'no_sender'] as const)(
+    'fences a stale worker returning %s after the successor sends',
+    async (lateResult) => {
+      await ensureTransactionalProvider();
+      const account = await newAccount();
+      await forgot(account.email);
 
-    let releaseLate!: () => void;
-    const lateMayFinish = new Promise<void>((resolve) => {
-      releaseLate = resolve;
-    });
-    let lateStarted!: () => void;
-    const lateIsSending = new Promise<void>((resolve) => {
-      lateStarted = resolve;
-    });
-    // Worker A claims the row, mints the token and blocks inside the provider call.
-    const lateWorker = deliver(async () => {
-      lateStarted();
-      await lateMayFinish;
-      return 'failed' as const;
-    });
-    await lateIsSending;
+      let releaseLate!: () => void;
+      const lateMayFinish = new Promise<void>((resolve) => {
+        releaseLate = resolve;
+      });
+      let lateStarted!: () => void;
+      const lateIsSending = new Promise<void>((resolve) => {
+        lateStarted = resolve;
+      });
+      // Worker A claims the row, mints the token and blocks inside the provider call.
+      const lateWorker = deliver(async () => {
+        lateStarted();
+        await lateMayFinish;
+        return lateResult;
+      });
+      await lateIsSending;
 
-    // The lease looks stale (a 20-minute-old claim), so worker B may take it over.
-    await t.srv.db.admin.query(
-      `UPDATE password_reset_deliveries SET updated_at = now() - interval '20 minutes' WHERE user_id = $1 AND status = 'sending'`,
-      [account.id],
-    );
-    const successor = await deliver();
-    expect(successor).toMatchObject({ handled: 1, sent: 1, failed: 0 });
+      // The lease looks stale (a 20-minute-old claim), so worker B may take it over.
+      await t.srv.db.admin.query(
+        `UPDATE password_reset_deliveries SET updated_at = now() - interval '20 minutes' WHERE user_id = $1 AND status = 'sending'`,
+        [account.id],
+      );
+      const successor = await deliver();
+      expect(successor).toMatchObject({ handled: 1, sent: 1, failed: 0 });
 
-    // A finishes late with a failure. Its retry/settle writes are fenced by the old claim id.
-    releaseLate();
-    const late = await lateWorker;
-    expect(late).toMatchObject({ handled: 1, sent: 0, failed: 0, retried: 0, superseded: 1 });
+      // A finishes late with a failure. Its retry/settle writes are fenced by the old claim id.
+      releaseLate();
+      const late = await lateWorker;
+      expect(late).toMatchObject({ handled: 1, sent: 0, failed: 0, retried: 0, superseded: 1 });
 
-    const [row] = await queueRows(account.id);
-    expect(row).toMatchObject({ status: 'sent', outcome: 'sent', email_sealed: null, token_sealed: null });
-    expect(mailsTo(account.email)).toHaveLength(1);
-    // One durable outcome only: the late failure appended no contradictory audit entry.
-    expect(await auditRows(account.id)).toEqual([{ ok: true, error: null, ip: expect.any(String) }]);
-  }, 30_000);
+      const [row] = await queueRows(account.id);
+      expect(row).toMatchObject({ status: 'sent', outcome: 'sent', email_sealed: null, token_sealed: null });
+      expect(mailsTo(account.email)).toHaveLength(1);
+      // One durable outcome only: the late failure appended no contradictory audit entry.
+      expect(await auditRows(account.id)).toEqual([{ ok: true, error: null, ip: expect.any(String) }]);
+      // In particular, late no_sender must not delete the successor's shared verification token.
+      const deliveredToken = linkToken(mailsTo(account.email)[0]);
+      expect((await reset(deliveredToken, NEW_PASSWORD)).status).toBe(200);
+    },
+    30_000,
+  );
 
   it('re-checks eligibility after enqueue and does not mail a removed credential', async () => {
     await ensureTransactionalProvider();
@@ -633,10 +640,13 @@ describe('the reset delivery queue (#379)', () => {
     await ensureTransactionalProvider();
     const account = await newAccount();
     await forgot(account.email);
+    const queued = await rowFor(account.email);
+    expect(queued).toBeTruthy();
     await t.srv.db.admin.query(
       `UPDATE password_reset_deliveries
           SET status = 'sending', claim_id = gen_random_uuid(), attempts = 1, updated_at = now() - interval '20 minutes'
-        WHERE user_id IS NULL`,
+        WHERE id = $1 AND status = 'queued'`,
+      [queued!.id],
     );
     // The token was never minted by the stopped worker; the takeover mints it and sends.
     const summary = await deliver();
