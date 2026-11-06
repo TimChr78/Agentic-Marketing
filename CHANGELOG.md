@@ -8,6 +8,10 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 
 - The OAuth consent page renders brand names as text instead of HTML, and the sign-in, consent and invitation pages are served under a nonce-based Content-Security-Policy, so a brand name can no longer run script in a member's browser (#478).
 
+### Fixed
+
+- An OAuth brand choice is bound to the authorization request that asked for it instead of the browser session, so consenting in one tab can no longer issue a grant for the brand chosen in another tab, and refresh tokens keep the brand (#456).
+
 ## [0.10.0] - 2026-11-06
 
 ### Added

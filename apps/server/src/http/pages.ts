@@ -135,7 +135,7 @@ const send = async (accept) => {
     if (!brandSelect.value) { err.textContent = 'Choose the brand this connection acts in.'; return; }
     const brand = await fetch('/api/oauth/workspace', { method: 'POST', credentials: 'include',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ workspaceId: brandSelect.value, scope }) });
+      body: JSON.stringify({ workspaceId: brandSelect.value, scope, oauthQuery: location.search.slice(1) }) });
     const b = await brand.json().catch(() => ({}));
     if (!brand.ok) { err.textContent = b.message || 'That brand cannot be chosen.'; return; }
   }
