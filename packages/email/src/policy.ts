@@ -2,7 +2,7 @@ import { DEFAULT_DELIVERY_POLICY, type DeliveryPolicy, type Purposes, publishedS
 import { autonomySettings } from '@agentic-marketing/commands';
 import { zonedInstant, zonedParts } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
-import { and, eq, gte, inArray, isNotNull, ne, or, sql } from 'drizzle-orm';
+import { and, eq, gte, inArray, isNotNull, isNull, ne, or, sql } from 'drizzle-orm';
 
 // The delivery policy (Phase 7) applies to every marketing message at the moment it would be
 // sent, whoever asked for it (journey, broadcast, API, agent): frequency caps, quiet hours, and a
@@ -14,6 +14,8 @@ export type Hold = { ok: true } | { ok: false; reason: string } | { ok: 'later';
 
 /** Statuses of a completed contact: the provider accepted the message and its send time is known. */
 const CONTACTED = ['sent', 'delivered', 'bounced', 'complained'] as const;
+/** A reservation: claimed for sending, or still queued behind the worker. Both count conservatively. */
+const IN_FLIGHT = ['queued', 'sending'] as const;
 export const isMarketing = (basis: string) => basis !== 'contract' && basis !== 'legal_obligation';
 
 /**
@@ -26,17 +28,19 @@ export const isMarketing = (basis: string) => basis !== 'contract' && basis !== 
  * - an in-flight reservation ages from enqueue time, and only counts when it is *before* this
  *   message in `(created_at, id)` order. Two messages queued in one transaction share `created_at`,
  *   so without the id tie-breaker both saw no earlier in-flight peer and passed a max=1 cap (#452).
- *   The later id is the one held back, which is deterministic across workers.
+ *   The later id is the one held back, which is deterministic across workers. Queued rows are
+ *   counted as well as claimed ones: a peer that another worker has not claimed yet must still
+ *   take its place, or two workers could admit one message each before either saw the other.
  */
 function countedContact(message: { id: string; createdAt: Date }, now: Date, days: number) {
   const since = new Date(now.getTime() - days * 86_400_000);
   return or(
     and(
       inArray(schema.messages.status, [...CONTACTED]),
-      gte(sql`coalesce(${schema.messages.sentAt}, ${schema.messages.updatedAt})`, since),
+      or(gte(schema.messages.sentAt, since), and(isNull(schema.messages.sentAt), gte(schema.messages.updatedAt, since))),
     ),
     and(
-      eq(schema.messages.status, 'sending'),
+      inArray(schema.messages.status, [...IN_FLIGHT]),
       gte(schema.messages.createdAt, since),
       sql`(${schema.messages.createdAt}, ${schema.messages.id}) < (${message.createdAt}, ${message.id})`,
     ),

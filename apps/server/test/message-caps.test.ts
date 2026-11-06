@@ -97,12 +97,31 @@ describe('caps are race-free for equal enqueue times (#452)', () => {
     });
   });
 
+  it('reserves the slot for a peer another worker has not claimed yet', async () => {
+    await policy({ frequencyCaps: [{ channel: 'email', max: 1, days: 7 }] });
+    const p = await person('prf_452_queued');
+    const at = new Date('2026-11-06T10:00:00.000Z');
+    // The earlier reservation is still queued when the later one is claimed and checked; if the
+    // queued row did not count, two workers could admit one message each before seeing the other.
+    await message({ id: 'msg_452_q1', profileId: p, createdAt: at, status: 'queued' });
+    const claimed: Msg = { id: 'msg_452_q2', profileId: p, createdAt: at };
+    await message(claimed);
+    expect(await hold(claimed, at)).toMatchObject({ ok: false, reason: expect.stringContaining('frequency_cap') });
+  });
+
   it('admits only the earlier of two in-flight agent messages under contact pressure max=1', async () => {
     await policy({ frequencyCaps: [] });
     await t.api(owner, ws).call('workspace.setAutonomy', { contactPressure: [{ max: 1, days: 7 }] });
     const p = await person('prf_452_pressure');
     const at = new Date('2026-11-06T10:00:00.000Z');
-    const human: Msg = { id: 'msg_452_h', profileId: p, createdAt: new Date(at.getTime() - 60_000), status: 'sent', sentAt: at, agentId: null };
+    const human: Msg = {
+      id: 'msg_452_h',
+      profileId: p,
+      createdAt: new Date(at.getTime() - 60_000),
+      status: 'sent',
+      sentAt: at,
+      agentId: null,
+    };
     const a: Msg = { id: 'msg_452_c', profileId: p, createdAt: at, agentId: 'agt_c' };
     const b: Msg = { id: 'msg_452_d', profileId: p, createdAt: at, agentId: 'agt_d' };
     await message(human);
