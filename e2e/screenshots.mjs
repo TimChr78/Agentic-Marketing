@@ -59,7 +59,7 @@ for (const route of routes) {
       const errors = [];
       page.on('pageerror', (e) => errors.push(e.message));
       try {
-        await primePage(page, { theme, width });
+        await primePage(page, { theme, width, fixedTime: mask ? undefined : null });
         await page.goto(base + route.path);
         await settle(page);
         const file = `${out}/${route.name}-${width}-${theme}.png`;

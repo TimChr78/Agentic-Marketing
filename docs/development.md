@@ -193,7 +193,8 @@ sign-in page and `/`. Everything below uses it.
   fonts and images are loaded and skeletons gone before the shot, and relative times, dates and raw
   ids are masked with Playwright (their text is replaced first, so a mask keeps its size when "9 min
   ago" becomes "1 d ago"). Pass `--no-mask` when the images are for people rather than for
-  comparison: the masks are pink boxes.
+  comparison: the masks are pink boxes, and the real clock is used, since the seeded artifacts carry the
+  time the seed ran.
 - `e2e/visual.spec.ts` compares a stable subset (sign-in, approvals and a broadcast approval, the
   journey list and builder, a broadcast, a template, people, analytics, agents and an agent, the
   workspace settings) at 1440 and 390 px in both themes against the baselines in

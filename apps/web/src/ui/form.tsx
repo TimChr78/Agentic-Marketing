@@ -102,7 +102,10 @@ export const Input = forwardRef<HTMLInputElement, InputHTMLAttributes<HTMLInputE
       {...useField(p)}
       className={cx(
         controlClass,
-        compact ? 'h-10 px-3 pointer-coarse:h-10 md:h-7 md:px-2' : 'h-10 px-3 pointer-coarse:h-10 md:h-8 md:px-2.5',
+        compact ? 'h-10 pointer-coarse:h-10 md:h-7' : 'h-10 pointer-coarse:h-10 md:h-8',
+        // A caller's left padding (room for a search icon) must win at every breakpoint, so the
+        // responsive default only sets the sides the caller leaves alone.
+        /(^|\s)pl-/.test(className ?? '') ? (compact ? 'pr-3 md:pr-2' : 'pr-3 md:pr-2.5') : compact ? 'px-3 md:px-2' : 'px-3 md:px-2.5',
         className,
       )}
     />

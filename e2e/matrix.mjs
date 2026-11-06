@@ -199,11 +199,15 @@ export async function loadFixtureIds(call) {
   return { artifacts, approvals, proposal, person, agent, token };
 }
 
-/** The theme and the frozen clock, before the app's own scripts run. */
+/**
+ * The theme and the frozen clock, before the app's own scripts run. `fixedTime: null` keeps the real
+ * clock: artifacts and approvals carry the time the seed ran, so a frozen clock earlier than that
+ * reads "in 20 h" in images meant for people (masked runs hide those texts anyway).
+ */
 export async function primePage(page, { theme = 'light', width = 1440, fixedTime = FIXED_TIME } = {}) {
   await page.setViewportSize({ width, height: HEIGHT[width] ?? 900 });
   await page.emulateMedia({ colorScheme: theme, reducedMotion: 'reduce' });
-  await page.clock.setFixedTime(new Date(fixedTime));
+  if (fixedTime) await page.clock.setFixedTime(new Date(fixedTime));
   await page.addInitScript(
     ({ theme, css }) => {
       try {
