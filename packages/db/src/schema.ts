@@ -560,6 +560,10 @@ export const messages = pgTable(
     primaryKey({ columns: [t.workspaceId, t.id] }),
     index('messages_agent_contact').on(t.workspaceId, t.profileId, t.createdAt).where(sql`agent_id IS NOT NULL`),
     index('messages_policy_window').on(t.workspaceId, t.profileId, t.sentAt),
+    // The background sent_at backfill and `am doctor` scan only completed rows still missing it.
+    index('messages_sent_at_pending')
+      .on(t.workspaceId, t.id)
+      .where(sql`sent_at IS NULL AND status IN ('sent', 'delivered', 'bounced', 'complained')`),
     // Counts one agent's contact-pressure skips in a period without scanning the workspace (#488).
     index('messages_agent_contact_count').on(t.workspaceId, t.agentId, t.createdAt).where(sql`agent_id IS NOT NULL`),
     index('messages_journey_status').on(t.workspaceId, t.journeyId, t.status).where(sql`journey_id IS NOT NULL`),

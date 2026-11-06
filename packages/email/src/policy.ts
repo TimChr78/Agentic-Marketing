@@ -23,7 +23,8 @@ export const isMarketing = (basis: string) => basis !== 'contract' && basis !== 
  * contact pressure:
  *
  * - a completed contact ages from the moment the provider accepted it (#453), falling back to the
- *   last status change for a row written before `sent_at` existed; a message that waited days for
+ *   last status change for a row written before `sent_at` existed or one the background backfill
+ *   has not reached yet; a message that waited days for
  *   quiet hours, a pause or a retry therefore consumes the window from its real send time;
  * - an in-flight reservation ages from enqueue time, and only counts when it is *before* this
  *   message in `(created_at, id)` order. Two messages queued in one transaction share `created_at`,

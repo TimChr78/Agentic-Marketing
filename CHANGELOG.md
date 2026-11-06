@@ -16,6 +16,8 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 - `agents.renewMandates` rejects a `validUntil` in the past or more than a year away, matching its schema (#472).
 - `agents.renewals` reports a recently expired mandate as a negative number of days and sorts newest expiry first, as documented (#482).
 - `agents.runFailures` and the contact-pressure count have supporting indexes, and finished hosted-agent runs are removed after `RETENTION_HOSTED_AGENT_RUN_DAYS` (default 90) (#488).
+- The 0.10.1 migrations no longer rewrite the message log or hold an ACCESS EXCLUSIVE lock while building indexes: `messages.sent_at` is added metadata-only, its cap index and the agent indexes are built `CONCURRENTLY` by no-transaction migrations, and completed messages are backfilled in batches in the background. `am doctor` shows the remaining backfill and any invalid index left by an interrupted build (#453, #488).
+- The rollout pause backfill reads pre-upgrade paused ramps under the migration role even when the table forces row-level security, so they are kept in the durable pause log; they are marked notified and not e-mailed again (#473).
 - `agents.compare` is bounded to 20 named agents and a 366-day window, and reads the agent ledger, holds, mandates, guardian events and AI usage in grouped queries instead of about eight per agent (#489).
 
 ### Fixed
@@ -44,6 +46,17 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 - An identity merge moves the merged person's message history to the surviving profile in the same transaction, so routine identity resolution no longer resets their frequency and cross-agent contact caps (#460).
 - `workspace.create` enforces a per-person brand quota (`WORKSPACE_QUOTA`, default 10) instead of letting one owner create unbounded brands and pending domain claims; the refusal names the limit (#487).
 - An OAuth brand choice is bound to the authorization request that asked for it instead of the browser session, so consenting in one tab can no longer issue a grant for the brand chosen in another tab, and refresh tokens keep the brand (#456).
+
+### Upgrading from 0.10.0
+
+- **Migrations:** 0081–0086 add the Host-checking state, `messages.sent_at`, the durable rollout pause log and the message-cap and agent indexes. 0082 only adds the column (metadata-only, no table rewrite). 0084 and 0086 are marked `-- am:no-transaction` and build their indexes with `CREATE INDEX CONCURRENTLY`, so sends and other writes continue while they run. A normal migration is still one transaction.
+- **Background backfill:** the migration does not rewrite `messages`. After the scheduler starts, it fills `sent_at` for already-completed messages in batches of 10,000 in short transactions, and resumes after a restart. Until a row is filled, delivery caps count it from `updated_at` exactly as 0.10.0 did, so caps stay correct throughout. `am doctor` reports how many completed messages are left (`migrations.sent-at-backfill`); no manual step is needed.
+- **Interrupted index build:** if a `CREATE INDEX CONCURRENTLY` is interrupted, its index is left invalid. The next `am migrate` (or server start) drops that index and builds it again; `am doctor` reports one that is still present (`migrations.invalid-indexes`).
+- **Rollout pauses:** a ramp paused before 0.10.1 was already e-mailed by the old in-transaction path. It is recorded as notified and is **not re-notified** after the upgrade, so an upgrade does not send a burst of old pause e-mails. Only pauses created after 0.10.1 are delivered from the durable outbox.
+- **Configuration:** no new environment variables.
+- **Breaking changes:** none.
+- **Manual steps:** none.
+- **Upgrade:** download `agentic-marketing-compose-0.10.1.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.10.1 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.10.1` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.10.1). Run `docker compose exec app am doctor`.
 
 
 ## [0.10.0] - 2026-11-06

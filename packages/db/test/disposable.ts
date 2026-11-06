@@ -7,7 +7,7 @@ import { createDb } from '../src/pool';
 // caller gets its own freshly migrated database and drops it afterwards, so package tests can run
 // next to the server project without resetting anyone else's data.
 
-const APP_ROLE = { appRole: 'am_ops_test_app', appRolePassword: 'am_ops_test_password' };
+export const APP_ROLE = { appRole: 'am_ops_test_app', appRolePassword: 'am_ops_test_password' };
 
 export const hasTestDatabase = () => Boolean(process.env.TEST_DATABASE_URL);
 
@@ -24,7 +24,14 @@ export interface DisposableDb {
   close(): Promise<void>;
 }
 
-export async function createDisposableDb(prefix: string): Promise<DisposableDb> {
+export interface DisposableDbOptions {
+  /** Stop at this migration (inclusive), so a test can seed and then apply the newer ones. */
+  upTo?: string;
+  appRole?: string;
+  appRolePassword?: string;
+}
+
+export async function createDisposableDb(prefix: string, opts: DisposableDbOptions = {}): Promise<DisposableDb> {
   if (!process.env.TEST_DATABASE_URL) throw new Error('TEST_DATABASE_URL is not set');
   const name = `am_${prefix}_${process.pid}_${randomBytes(4).toString('hex')}`;
   const maint = new pg.Client({ connectionString: urlOf('postgres').toString() });
@@ -37,7 +44,11 @@ export async function createDisposableDb(prefix: string): Promise<DisposableDb> 
   }
   const url = urlOf(name);
   const db = createDb({ adminUrl: url.toString(), appUrl: url.toString(), poolSize: 2 });
-  await migrate(db.admin, APP_ROLE);
+  await migrate(db.admin, {
+    appRole: opts.appRole ?? APP_ROLE.appRole,
+    appRolePassword: opts.appRolePassword ?? APP_ROLE.appRolePassword,
+    upTo: opts.upTo,
+  });
   const workspace = randomUUID();
   await db.admin.query('INSERT INTO workspaces (id, name, approval_policy) VALUES ($1, $2, $3)', [workspace, `Test ${prefix}`, 'none']);
   return {
