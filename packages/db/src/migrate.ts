@@ -390,6 +390,39 @@ async function applyNoTransaction(client: Pick<pg.Client, 'query'>, sql: string,
   }
 }
 
+/** How long to wait between attempts at the migration lock, and in total. */
+const LOCK_RETRY_MS = 250;
+const LOCK_TIMEOUT_MS = 5 * 60_000;
+
+/**
+ * Take the session-scoped migration lock without ever leaving a statement waiting.
+ *
+ * A blocking `SELECT pg_advisory_lock` is a statement with a live snapshot. While it waits, the
+ * other instance's `CREATE INDEX CONCURRENTLY` waits for that snapshot to end before it can mark
+ * the index valid — and the waiting statement waits for the lock that build holds. The two never
+ * resolve. Short `pg_try_advisory_lock` calls, with the wait in Node between them, let the index
+ * build finish; each attempt commits before the next one, so no old snapshot is left behind.
+ */
+async function acquireMigrationLock(client: Pick<pg.Client, 'query'>, log: (msg: string) => void): Promise<void> {
+  const deadline = Date.now() + LOCK_TIMEOUT_MS;
+  let waiting = false;
+  for (;;) {
+    const { rows } = await client.query<{ locked: boolean }>('SELECT pg_try_advisory_lock($1) AS locked', [LOCK_KEY]);
+    if (rows[0]?.locked) return;
+    if (Date.now() >= deadline)
+      throw new Error(
+        `Could not acquire the migration lock within ${Math.round(LOCK_TIMEOUT_MS / 1000)} s: another instance is still migrating or an interrupted migration left the lock held. Check the other instance, then restart this one.`,
+      );
+    if (!waiting) {
+      log('waiting for the migration lock held by another instance…');
+      waiting = true;
+    }
+    // The sleep stays in Node, outside any database statement: a waiting statement would hold a
+    // snapshot and keep the concurrent index build from finishing.
+    await new Promise<void>((resolve) => setTimeout(resolve, LOCK_RETRY_MS));
+  }
+}
+
 export interface MigrateOptions {
   appRolePassword: string;
   appRole?: string;
@@ -403,7 +436,9 @@ export interface MigrateOptions {
 /**
  * Apply pending SQL migrations in order. A normal file runs in one transaction; a file whose first
  * line is `-- am:no-transaction` runs outside one, statement by statement, for `CREATE INDEX
- * CONCURRENTLY`. Safe to run from several processes at once (advisory lock). Refuses to continue if
+ * CONCURRENTLY`. Safe to run from several processes at once: the session lock is taken with
+ * `pg_try_advisory_lock` in a loop so a waiting instance never holds a snapshot that would stall
+ * the other instance's concurrent index build. Refuses to continue if
  * an applied file was edited. A no-transaction file is recorded only after every statement succeeds.
  *
  * The migrations grant privileges to `am_app`; `appRole` renames it, because roles are shared by
@@ -413,7 +448,7 @@ export async function migrate(admin: pg.Pool, opts: MigrateOptions) {
   const log = opts.log ?? (() => {});
   const client = await admin.connect();
   try {
-    await client.query('SELECT pg_advisory_lock($1)', [LOCK_KEY]);
+    await acquireMigrationLock(client, log);
     // The app role is needed by the GRANTs in the migrations.
     const role = await ensureAppRole(client, opts);
     await client.query(

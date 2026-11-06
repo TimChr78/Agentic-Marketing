@@ -2,7 +2,7 @@ import { type NotifyDeps, sendMemberEmails } from '@agentic-marketing/alerts';
 import { activeMandate, artifactTypes } from '@agentic-marketing/artifacts';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import { logger } from '@agentic-marketing/telemetry';
-import { and, asc, desc, eq, gt, inArray, isNotNull } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, isNotNull, notInArray } from 'drizzle-orm';
 
 // Sponsor notifications and agent digests (#226, ADR-0016). The scheduler reads the agent action
 // ledger from a stored cursor: a hold, a guardrail/limit escalation or a refusal is e-mailed to the
@@ -364,7 +364,8 @@ async function notifyDigest(
   const day = now.toISOString().slice(0, 10);
   const dayKey = (sponsor: string) => `agent-digest:${workspaceId}:${sponsor}:${day}`;
   // A sponsor whose digest already went out today is skipped on a retry after another sponsor
-  // failed. The per-day idempotency key's sent message row is the record of that delivery (#277).
+  // failed. Any message row for the per-day key that is not failed or suppressed is that record: a
+  // `delivered` or `bounced` webhook means the provider accepted it, not that it needs resending.
   const delivered = new Set(
     (
       await tx
@@ -374,7 +375,7 @@ async function notifyDigest(
           and(
             eq(schema.messages.workspaceId, workspaceId),
             inArray(schema.messages.idempotencyKey, [...bySponsor.keys()].map(dayKey)),
-            eq(schema.messages.status, 'sent'),
+            notInArray(schema.messages.status, ['failed', 'suppressed']),
           ),
         )
     ).map((row) => row.idempotencyKey),

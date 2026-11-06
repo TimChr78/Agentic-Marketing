@@ -3,9 +3,9 @@ import { artifactTypes, type ExperienceDefinition, publishHooks, publishValidato
 import { type CommandContext, defineCommand } from '@agentic-marketing/commands';
 import { AppError } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
-import { pushEdgeBundleNow } from './edge';
+import { acquireEdgeSyncLock, pushEdgeBundleNow } from './edge';
 
 // Progressive rollout for agent changes (#427, part of #102). A published experience may carry a
 // ramp: start with a small share of visitors, widen on a schedule while a metric-layer guardrail
@@ -147,7 +147,10 @@ const statusOf = (artifactId: string, row: RolloutRow | null): z.infer<typeof Ro
 
 /** The edge bundle and the decision API cache must see a changed share without waiting for a publish. */
 async function invalidateExperiences(ctx: CommandContext, workspaceId: string) {
-  await ctx.tx.update(schema.edgeTargets).set({ bundleHash: null });
+  // `generation` is the version a sync compares before it writes: bumping it fences a sync that read
+  // the old bundle, so a stop that could not wait for the advisory lock still cannot be overwritten
+  // by the pre-stop share (#477). Clearing the hash makes the next tick publish the new share.
+  await ctx.tx.update(schema.edgeTargets).set({ bundleHash: null, generation: sql`${schema.edgeTargets.generation} + 1` });
   ctx.afterCommit?.(async () => {
     await ctx.services.hot.bump(`experiences:${workspaceId}`);
   });
@@ -198,6 +201,10 @@ export const stopRollout = defineCommand({
   }),
   handler: async (input, ctx) => {
     const ws = ctx.principal.workspaceId;
+    // Order matters (#477): the background sync takes `edge-sync:<ws>` first and only then touches
+    // `edge_targets`, so a stop that updated the edge row before asking for this lock would deadlock
+    // with it. Wait here, before any rollout or edge row lock.
+    const edgeLocked = await acquireEdgeSyncLock(ctx.tx, ws);
     const [row] = await ctx.tx
       .select()
       .from(schema.experienceRollouts)
@@ -206,9 +213,11 @@ export const stopRollout = defineCommand({
     if (!row) throw new AppError('not_found', `Experience ${input.artifactId} has no ramp to stop.`);
     const { db, hot, keyProvider, egress } = ctx.services;
     const pushStopped = () =>
-      db && keyProvider && egress
-        ? pushEdgeBundleNow({ db, hot, kp: keyProvider, egress }, ctx.tx, ws)
-        : Promise.resolve({ pushed: false, reason: 'the edge sync is not configured' as string | null });
+      !edgeLocked
+        ? Promise.resolve({ pushed: false, reason: 'another edge sync was still running after 10 s' as string | null })
+        : db && keyProvider && egress
+          ? pushEdgeBundleNow({ db, hot, kp: keyProvider, egress }, ctx.tx, ws)
+          : Promise.resolve({ pushed: false, reason: 'the edge sync is not configured' as string | null });
     // Repeating the stop is idempotent, but still retries the edge push if the earlier one failed.
     if (row.status === 'stopped') {
       await invalidateExperiences(ctx, ws);

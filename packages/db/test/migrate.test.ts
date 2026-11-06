@@ -223,4 +223,78 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS am_nt_invalid_idx ON am_nt_invalid (id);
       }
     });
   });
+
+  it('a second migrator waits for a concurrent index build without blocking it (#0.10.1 review)', async () => {
+    // The first instance builds an index CONCURRENTLY whose predicate sleeps once, so the build is
+    // still running when the second instance starts. A blocking `pg_advisory_lock` in the second
+    // instance would keep a snapshot alive that this build waits for, and the two would hang
+    // forever: no one can make progress. `pg_try_advisory_lock` plus a sleep in Node lets the build
+    // finish; the second instance then finds every file applied.
+    await withDatabase('nt_lock', async (url) => {
+      const dir = await tempMigrations({
+        '001_items.sql': `CREATE TABLE am_nt_lock (id integer PRIMARY KEY);
+INSERT INTO am_nt_lock SELECT generate_series(1, 5000);
+CREATE FUNCTION am_nt_slow(integer) RETURNS boolean LANGUAGE plpgsql IMMUTABLE AS $body$
+BEGIN
+  IF $1 = 1 THEN PERFORM pg_sleep(3); END IF;
+  RETURN true;
+END
+$body$;
+`,
+        '002_index.sql': `-- am:no-transaction
+CREATE INDEX CONCURRENTLY IF NOT EXISTS am_nt_lock_slow_idx ON am_nt_lock (id) WHERE am_nt_slow(id);
+`,
+      });
+      leftovers.push(dir);
+      const pools = [new pg.Pool({ connectionString: url.toString() }), new pg.Pool({ connectionString: url.toString() })];
+      // Terminating a backend on timeout makes its client emit 'error'; the test is ending anyway.
+      for (const pool of pools) pool.on('error', () => {});
+      let finished = false;
+      try {
+        const logA: string[] = [];
+        const logB: string[] = [];
+        const a = migrate(pools[0]!, { ...APP_ROLE, dir, log: (m) => logA.push(m) });
+        // Wait until the concurrent build is actually on the server before starting the second.
+        for (let i = 0; i < 200; i++) {
+          const { rows } = await pools[0]!.query<{ n: string }>(
+            `SELECT count(*)::text AS n FROM pg_stat_activity
+              WHERE datname = current_database() AND state = 'active'
+                AND query ILIKE '%CREATE INDEX CONCURRENTLY%'`,
+          );
+          if (Number(rows[0]?.n) > 0) break;
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        const b = migrate(pools[1]!, { ...APP_ROLE, dir, log: (m) => logB.push(m) });
+        const timeout = new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('the migrators did not finish; they are waiting on each other')), 30_000),
+        );
+        await Promise.race([Promise.all([a, b]), timeout]);
+        finished = true;
+        // The first instance applied both files; the second found them applied and did nothing.
+        expect(logA).toEqual(['applied 001_items.sql', 'applied 002_index.sql (no transaction)']);
+        expect(logB).toEqual(['waiting for the migration lock held by another instance…']);
+        const { rows } = await pools[0]!.query<{ version: string }>('SELECT version FROM schema_migrations ORDER BY version');
+        expect(rows.map((r) => r.version)).toEqual(['001_items.sql', '002_index.sql']);
+        const valid = await pools[0]!.query<{ valid: boolean }>(
+          `SELECT indisvalid AS valid FROM pg_index WHERE indexrelid = 'am_nt_lock_slow_idx'::regclass`,
+        );
+        expect(valid.rows[0]?.valid).toBe(true);
+      } finally {
+        // If the race timed out (the deadlock this test guards against), the pools still hold
+        // statements that are waiting on each other. End those backends so the database can be
+        // dropped and the suite does not hang.
+        if (!finished) {
+          const maint = new pg.Client({ connectionString: baseUrl().toString() });
+          await maint.connect();
+          await maint
+            .query('SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()', [
+              url.pathname.slice(1),
+            ])
+            .catch(() => {});
+          await maint.end();
+        }
+        await Promise.all(pools.map((p) => p.end().catch(() => {})));
+      }
+    });
+  }, 60_000);
 });

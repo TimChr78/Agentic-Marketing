@@ -371,7 +371,10 @@ export async function sendMemberEmails(tx: Tx, deps: NotifyDeps, workspaceId: st
         .select({ id: schema.messages.id, status: schema.messages.status })
         .from(schema.messages)
         .where(and(eq(schema.messages.workspaceId, workspaceId), eq(schema.messages.idempotencyKey, email.idempotencyKey)));
-      if (existing?.status === 'sent') {
+      // Any row the provider may already have accepted counts as done. Marking `delivered`,
+      // `bounced` or `complained` is a delivery webhook after the send, not a failure: `sent` alone
+      // would resend a mail that was delivered. Only a failed or suppressed row is retried.
+      if (existing && existing.status !== 'failed' && existing.status !== 'suppressed') {
         out.push({ userId: email.userId, status: 'sent' });
         continue;
       }
