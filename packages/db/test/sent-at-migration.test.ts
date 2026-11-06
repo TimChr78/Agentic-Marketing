@@ -191,7 +191,9 @@ describe.skipIf(!hasTestDatabase())('0.10.1 migrations on a populated install', 
       expect(valid.rows[0]?.valid).toBe(true);
     } finally {
       await d.close().catch(() => {});
-      const maint = new pg.Client({ connectionString: new URL(process.env.TEST_DATABASE_URL ?? '').toString() });
+      const maint = new pg.Client({
+        connectionString: Object.assign(new URL(process.env.TEST_DATABASE_URL ?? ''), { pathname: '/postgres' }).toString(),
+      });
       await maint.connect();
       try {
         for (const name of [appRole, role]) await maint.query(`DROP ROLE IF EXISTS ${name}`).catch(() => {});

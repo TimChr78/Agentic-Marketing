@@ -15,10 +15,16 @@ import { hasTestDatabase } from './disposable';
 const APP_ROLE = { appRole: 'am_nt_test_app', appRolePassword: 'am_nt_test_password' };
 
 const baseUrl = () => new URL(process.env.TEST_DATABASE_URL ?? '');
+/** The server's maintenance database: the one in TEST_DATABASE_URL need not exist (CI creates `am`). */
+const maintUrl = () => {
+  const url = baseUrl();
+  url.pathname = '/postgres';
+  return url.toString();
+};
 
 async function createDatabase(prefix: string): Promise<{ url: URL; name: string }> {
   const name = `am_${prefix}_${process.pid}_${randomBytes(4).toString('hex')}`;
-  const maint = new pg.Client({ connectionString: baseUrl().toString() });
+  const maint = new pg.Client({ connectionString: maintUrl() });
   await maint.connect();
   try {
     await maint.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
@@ -32,7 +38,7 @@ async function createDatabase(prefix: string): Promise<{ url: URL; name: string 
 }
 
 async function dropDatabase(name: string) {
-  const maint = new pg.Client({ connectionString: baseUrl().toString() });
+  const maint = new pg.Client({ connectionString: maintUrl() });
   await maint.connect();
   try {
     await maint.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
@@ -284,7 +290,7 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS am_nt_lock_slow_idx ON am_nt_lock (id) W
         // statements that are waiting on each other. End those backends so the database can be
         // dropped and the suite does not hang.
         if (!finished) {
-          const maint = new pg.Client({ connectionString: baseUrl().toString() });
+          const maint = new pg.Client({ connectionString: maintUrl() });
           await maint.connect();
           await maint
             .query('SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()', [
