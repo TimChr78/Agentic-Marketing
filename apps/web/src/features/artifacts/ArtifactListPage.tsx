@@ -5,6 +5,7 @@ import { artifactPath } from '../../app/artifactRoutes';
 import { useCrumbs } from '../../app/page';
 import { Link, navigate } from '../../app/router';
 import { useSession } from '../../app/session';
+import { publicationLabel, stateOfArtifact } from '../../lib/state';
 import {
   Alert,
   Button,
@@ -14,8 +15,6 @@ import {
   Modal,
   PageHeader,
   Select,
-  StatePill,
-  StatusPill,
   Table,
   TableFrame,
   Td,
@@ -26,6 +25,7 @@ import {
   useToast,
 } from '../../ui';
 import { pageWidth } from '../../ui/layout';
+import { OperationalPill } from '../../ui/state';
 import { type ArtifactRow, useAllArtifacts } from './artifactList';
 
 export type { ArtifactRow } from './artifactList';
@@ -58,6 +58,7 @@ export function ArtifactListPage<S = Record<string, never>>({
   emptyTitle,
   emptyText,
   columns,
+  rowState,
 }: {
   type: string;
   title: string;
@@ -68,6 +69,8 @@ export function ArtifactListPage<S = Record<string, never>>({
   emptyText: ReactNode;
   /** Extra columns after the name. */
   columns?: { header: string; cell: (a: ArtifactRow) => ReactNode; className?: string }[];
+  /** A family-specific operational pill (a broadcast reads its run); defaults to the artifact state. */
+  rowState?: (a: ArtifactRow) => ReactNode;
 }) {
   useCrumbs([{ label: crumb ?? title }]);
   const { can } = useSession();
@@ -120,9 +123,9 @@ export function ArtifactListPage<S = Record<string, never>>({
                   className="pl-8"
                 />
               </div>
-              <Select compact aria-label="State" value={state} onChange={(e) => setState(e.target.value)} className="w-auto">
-                <option value="">All states</option>
-                <option value="live">Live</option>
+              <Select compact aria-label="Publication state" value={state} onChange={(e) => setState(e.target.value)} className="w-auto">
+                <option value="">All publications</option>
+                <option value="live">Published</option>
                 <option value="draft">Draft</option>
                 <option value="in_review">In review</option>
                 <option value="rejected">Rejected</option>
@@ -167,8 +170,7 @@ export function ArtifactListPage<S = Record<string, never>>({
                   {c.header}
                 </Th>
               ))}
-              <Th>State</Th>
-              <Th className="hidden md:table-cell">Live</Th>
+              <Th>Operational state</Th>
               <Th>Updated</Th>
             </tr>
           </THead>
@@ -183,6 +185,9 @@ export function ArtifactListPage<S = Record<string, never>>({
                   >
                     {a.name}
                   </Link>
+                  <div className="mt-0.5 text-[12px] leading-[18px] text-muted">
+                    {publicationLabel({ latestVersion: a.latestVersion, publishedVersion: a.publishedVersion })}
+                  </div>
                 </Td>
                 {columns?.map((c) => (
                   <Td key={c.header} className={c.className}>
@@ -190,13 +195,17 @@ export function ArtifactListPage<S = Record<string, never>>({
                   </Td>
                 ))}
                 <Td>
-                  <StatePill state={a.latestState} />
-                </Td>
-                <Td className="hidden md:table-cell">
-                  {a.publishedVersion ? (
-                    <StatusPill tone="good">v{a.publishedVersion}</StatusPill>
+                  {rowState ? (
+                    rowState(a)
                   ) : (
-                    <span className="text-muted">Not live</span>
+                    <OperationalPill
+                      state={stateOfArtifact({
+                        type: a.type,
+                        latestState: a.latestState,
+                        latestVersion: a.latestVersion,
+                        publishedVersion: a.publishedVersion,
+                      })}
+                    />
                   )}
                 </Td>
                 <Td className="whitespace-nowrap">{timeAgo(a.updatedAt)}</Td>

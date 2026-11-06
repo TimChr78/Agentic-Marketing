@@ -257,8 +257,9 @@ const VOLATILE = [
   /\b\d{4}-\d{2}-\d{2}\b/,
   /\b\d{1,2}:\d{2}(?::\d{2})?\s?(?:AM|PM)?\b/,
   // Raw identifiers: a short prefix and a UUIDv7 body, e.g. prf_01a1ac6640c37db886e777537658fa67,
-  // including the shortened form the UI shows (prf_01a1ac6640…).
+  // including the two shortened forms the UI shows (prf_01a1ac6640… and prf_01a1…f6a5).
   /\b[a-z]{2,6}_[0-9a-f]{8,}/,
+  /\b[a-z]{2,6}_[0-9a-f]{4,}…[0-9a-f]{4}\b/,
   /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/,
 ];
 

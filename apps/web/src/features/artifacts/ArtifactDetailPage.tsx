@@ -7,6 +7,7 @@ import { type Crumb, useCrumbs } from '../../app/page';
 import { addNavigationGuard } from '../../app/router';
 import { useWorkspace } from '../../app/session';
 import { useApi } from '../../app/useApi';
+import { publicationLabel, stateOfArtifact } from '../../lib/state';
 import {
   Alert,
   Button,
@@ -17,14 +18,13 @@ import {
   Menu,
   Modal,
   PageHeader,
-  StatePill,
-  StatusPill,
   Tabs,
   Textarea,
   timeAgo,
   useToast,
 } from '../../ui';
 import { pageWidth } from '../../ui/layout';
+import { OperationalPill } from '../../ui/state';
 import { invalidateArtifact } from '../artifactCache';
 import { withLayout } from '../journey/layout';
 import type { JNode } from '../journey/model';
@@ -84,6 +84,7 @@ export function ArtifactDetailPage({
   extraActions,
   autosave,
   extraTabs = [],
+  state,
 }: {
   id: string;
   /** Breadcrumbs before the artifact's name, e.g. [{label:'Journeys', to:'/build/journeys'}]. */
@@ -98,6 +99,8 @@ export function ArtifactDetailPage({
   autosave?: boolean;
   /** Type-specific tabs after Preview, e.g. a broadcast's sending status or a prompt's tests. */
   extraTabs?: { key: string; label: string; render: (a: Artifact) => ReactNode }[];
+  /** The family's operational pill; defaults to the version-derived state. */
+  state?: (a: Artifact) => ReactNode;
 }) {
   const { can, workspace } = useWorkspace();
   const toast = useToast();
@@ -333,8 +336,19 @@ export function ArtifactDetailPage({
         meta={
           <>
             <span>{typeLabel(a.type)}</span>
-            {latest.state !== 'published' && <StatePill state={latest.state} />}
-            {a.publishedVersion ? <StatusPill tone="good">Live v{a.publishedVersion}</StatusPill> : <StatusPill>Not live</StatusPill>}
+            {state ? (
+              state(a)
+            ) : (
+              <OperationalPill
+                state={stateOfArtifact({
+                  type: a.type,
+                  latestState: latest.state,
+                  latestVersion: a.latestVersion,
+                  publishedVersion: a.publishedVersion,
+                })}
+              />
+            )}
+            <span>{publicationLabel({ latestVersion: a.latestVersion, publishedVersion: a.publishedVersion })}</span>
             <span>
               v{latest.number} by {latest.by?.displayName ?? (latest.author.type === 'agent' ? 'an agent' : 'a person')} ·{' '}
               {timeAgo(latest.createdAt)}

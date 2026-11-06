@@ -53,16 +53,35 @@ async function signIn(page: Page) {
 }
 
 /**
- * The seeded people are imported in one batch and share one activity timestamp, so their order is
- * a database tie-break that changes with every seed. Sort the rows by e-mail before the shot: the
- * layout and every row are still compared, only that arbitrary tie order is normalised.
+ * The seeded people are imported in one batch and share one activity timestamp, so both *which*
+ * 50 rows come first and their order are database tie-breaks that change with every seed. Load
+ * every page, then sort the whole population by content: the first screenful is then deterministic
+ * and still exercises the real list rows.
  */
-async function sortRowsByFirstCell(page: Page) {
+async function loadEveryPerson(page: Page) {
+  const rows = page.locator('table tbody tr');
+  for (let i = 0; i < 40; i++) {
+    const more = page.getByRole('button', { name: 'Load more people' });
+    if ((await more.count()) === 0) return;
+    const before = await rows.count();
+    await more.click();
+    try {
+      await expect.poll(() => rows.count(), { timeout: 10_000 }).toBeGreaterThan(before);
+    } catch {
+      return;
+    }
+  }
+}
+
+async function sortRowsByContent(page: Page) {
   await page.evaluate(() => {
     const body = document.querySelector('table tbody');
     if (!body) return;
+    // Sort by e-mail (the second cell), not the first: that cell also carries the random profile
+    // id, so sorting by the row's text still left the id's database order in the baseline.
+    const key = (row: HTMLTableRowElement) => row.cells[1]?.textContent ?? row.cells[0]?.textContent ?? '';
     const rows = [...body.querySelectorAll('tr')];
-    rows.sort((a, b) => (a.cells[0]?.textContent ?? '').localeCompare(b.cells[0]?.textContent ?? ''));
+    rows.sort((a, b) => key(a).localeCompare(key(b)));
     for (const row of rows) body.append(row);
   });
 }
@@ -81,7 +100,10 @@ for (const name of SUBSET) {
         await primePage(page, { theme, width });
         await page.goto(route!.path);
         await settle(page);
-        if (name === 'people') await sortRowsByFirstCell(page);
+        if (name === 'people') {
+          await loadEveryPerson(page);
+          await sortRowsByContent(page);
+        }
         await expect(page).toHaveScreenshot(`${name}-${width}-${theme}.png`, { mask: await volatileMasks(page) });
       }
     }

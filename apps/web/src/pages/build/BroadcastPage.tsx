@@ -1,5 +1,6 @@
 import { ArtifactDetailPage } from '../../features/artifacts/ArtifactDetailPage';
 import { BroadcastEditor } from '../../features/artifacts/BroadcastEditor';
+import { BroadcastStatePill } from '../../features/artifacts/BroadcastState';
 import { BroadcastStatus } from '../../features/artifacts/BroadcastStatus';
 import { CampaignMembership } from '../../features/artifacts/CampaignMembership';
 
@@ -11,6 +12,7 @@ export default function BroadcastPage({ params }: { params: Record<string, strin
       wide
       description={<CampaignMembership artifactId={params.id} />}
       editor={(p) => <BroadcastEditor {...p} />}
+      state={(a) => <BroadcastStatePill artifactId={a.id} latestState={a.version.state} publishedVersion={a.publishedVersion} />}
       extraTabs={[{ key: 'sending', label: 'Sending', render: (a) => <BroadcastStatus artifact={a} /> }]}
     />
   );

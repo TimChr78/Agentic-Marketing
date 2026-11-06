@@ -1,4 +1,10 @@
 import type { Out } from '../../app/api';
+import {
+  AGENT_DECISION_LABEL,
+  actionClassLabel,
+  agentDecisionLabel,
+  ACTION_CLASS_LABEL as REGISTRY_ACTION_CLASS_LABEL,
+} from '../../lib/agentLabels';
 import type { Tone } from '../../ui';
 
 // Words for the agents UI (ADR-0016, #213/#215). Every state and decision reads as a sentence a
@@ -33,10 +39,10 @@ export const AGENT_STATUS: Record<AgentStatus, { label: string; tone: Tone }> = 
 
 /** The badge for one policy decision: allow ran, hold waited for a veto window, ask waited for a person, deny was refused. */
 export const DECISION: Record<AgentDecision, { label: string; tone: Tone }> = {
-  allow: { label: 'Allowed', tone: 'good' },
-  hold: { label: 'Held for a veto', tone: 'warn' },
-  ask: { label: 'Waited for a person', tone: 'warn' },
-  deny: { label: 'Refused', tone: 'bad' },
+  allow: { label: AGENT_DECISION_LABEL.allow, tone: 'good' },
+  hold: { label: AGENT_DECISION_LABEL.hold, tone: 'warn' },
+  ask: { label: AGENT_DECISION_LABEL.ask, tone: 'warn' },
+  deny: { label: AGENT_DECISION_LABEL.deny, tone: 'bad' },
 };
 
 export const decisionBadge = (decision: AgentDecision) => DECISION[decision];
@@ -65,20 +71,9 @@ export function credentialSummary(agent: Agent): string {
   return `${total} credential${total === 1 ? '' : 's'}${kinds ? `: ${kinds}` : ''}`;
 }
 
-export const ACTION_CLASS_LABEL: Record<string, string> = {
-  read: 'Reading',
-  draft: 'Drafting',
-  'content.publish': 'Content publishing',
-  'audience.publish': 'Audience publishing',
-  'send.broadcast': 'Broadcast sends',
-  'send.direct': 'Direct sends',
-  'journey.live': 'Live journeys',
-  'experience.live': 'Live experiences',
-  spend: 'Spend',
-  'data.write': 'Data writes',
-  settings: 'Settings changes',
-  destructive: 'Destructive actions',
-};
+/** Action-class words come from the label registry (#437); keep the export the agents UI imports. */
+export const ACTION_CLASS_LABEL = REGISTRY_ACTION_CLASS_LABEL;
+export { actionClassLabel, agentDecisionLabel };
 
 /** The classes shown in the ceilings table, in the order the design lists them. */
 export const CEILING_CLASSES = Object.keys(ACTION_CLASS_LABEL);
