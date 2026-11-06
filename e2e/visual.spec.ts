@@ -61,8 +61,11 @@ async function sortRowsByFirstCell(page: Page) {
   await page.evaluate(() => {
     const body = document.querySelector('table tbody');
     if (!body) return;
+    // Sort by the whole row, not only the first cell: the seeded people are mostly "Unnamed
+    // person", so the first cell alone leaves their database tie order in the baseline.
+    const key = (row: HTMLTableRowElement) => [...row.cells].map((cell) => cell.textContent ?? '').join('\u0000');
     const rows = [...body.querySelectorAll('tr')];
-    rows.sort((a, b) => (a.cells[0]?.textContent ?? '').localeCompare(b.cells[0]?.textContent ?? ''));
+    rows.sort((a, b) => key(a).localeCompare(key(b)));
     for (const row of rows) body.append(row);
   });
 }
