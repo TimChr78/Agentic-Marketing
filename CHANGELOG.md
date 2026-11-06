@@ -17,6 +17,7 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 
 ### Added
 
+- `broadcasts.status` returns `delivery`: the broadcast's messages by their current status (queued, sending, sent, delivered, failed, suppressed…), next to the event statistics in `messages`, which count every event a message ever had. The broadcast pill uses it to say Delivering, Sent, Failed or Nothing sent truthfully. Migration `0080_messages_journey_status.sql` adds the index that keeps the count cheap.
 - `Identifier` for secondary ids (#437): the short form (first 8 … last 4), a copy button whose accessible name and tooltip carry the full value, polite “ID copied”/“Could not copy ID” feedback, and inline expansion to selectable full text on tap or after a failed copy. Applied to agent, credential, journey and profile ids where an artifact name is not available.
 - An operational state pill (`ui/state.tsx`) with named text and a marker shape, plus the metric data-state helper (`lib/dataState.ts`) for no data, below evaluation volume, healthy, warning, paused and suppressed (#437).
 - A label registry (`lib/labels.ts`) for analytics measures and dimensions, agent action classes and decisions, artifact types, event types and purposes, with a unit test that reads the analytics catalogue and fails on any missing label (#437).
