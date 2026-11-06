@@ -1,6 +1,6 @@
-import { Ban, Clock, ExternalLink, Play, RefreshCw } from 'lucide-react';
-import { useEffect, useState } from 'react';
-import { api, errText } from '../../app/api';
+import { Ban, Clock, ExternalLink, Play } from 'lucide-react';
+import { useState } from 'react';
+import { api, errText, type Out } from '../../app/api';
 import { useWorkspace } from '../../app/session';
 import { useApi } from '../../app/useApi';
 import { Alert, Button, EmptyState, formatDateTime, LoadingBlock, StatusPill, useConfirm, useToast } from '../../ui';
@@ -8,8 +8,17 @@ import { StatCard, StatGrid } from '../insights/Stats';
 import type { Artifact } from './ArtifactDetailPage';
 
 // Where a broadcast is: scheduled, sending, done or cancelled, with how many people it reached and
-// skipped and what became of the e-mails. Sending is a run on the server, so the panel refreshes
-// while it works.
+// skipped and what became of the e-mails. The parent page owns the single `broadcasts.status` read
+// (shared with the pill, summary and context) and its 10-second refresh while sending, so this
+// panel never fetches status itself.
+
+/** The shared status read the broadcast detail page passes into every slot. */
+export interface BroadcastStatusView {
+  data: Out<'broadcasts.status'> | undefined;
+  loading: boolean;
+  error: string | null;
+  reload: () => void;
+}
 
 const runTone = {
   not_scheduled: 'neutral',
@@ -48,30 +57,24 @@ const stageTone = {
 } as const;
 
 const MESSAGE_ORDER = ['sent', 'delivered', 'opened', 'clicked', 'bounced', 'complained', 'unsubscribed', 'failed'];
+const DELIVERY_ORDER = ['queued', 'sending', 'sent', 'delivered', 'bounced', 'complained', 'failed', 'suppressed'];
 
 const label = (key: string) => key.replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase());
 const pct = (n: number | null) => (n === null ? '—' : `${n.toFixed(2).replace(/\.?0+$/, '')}%`);
 
 /** Sending status and results of one broadcast, in its own tab on the artifact page. */
-export function BroadcastStatus({ artifact }: { artifact: Artifact }) {
+export function BroadcastStatus({ artifact, status }: { artifact: Artifact; status: BroadcastStatusView }) {
   const { can } = useWorkspace();
   const toast = useToast();
   const [dialog, confirm] = useConfirm();
   const [cancelError, setCancelError] = useState<string | null>(null);
   const [continueError, setContinueError] = useState<string | null>(null);
   const published = artifact.publishedVersion !== null;
-  const status = useApi(() => api.call('broadcasts.status', { artifactId: artifact.id }), [artifact.id], { skip: !published });
   const archive = useApi(() => api.call('archive.issues', {}), [artifact.id], { skip: !published });
   const run = status.data?.run;
   const archived = archive.data?.issues.find((i) => i.artifactId === artifact.id);
   const cancellable = run?.status === 'scheduled' || run?.status === 'running';
   const sending = run?.status === 'running';
-
-  useEffect(() => {
-    if (!sending) return;
-    const t = setInterval(() => void status.reload(), 10_000);
-    return () => clearInterval(t);
-  }, [sending, status.reload]);
 
   if (!published)
     return (
@@ -84,13 +87,15 @@ export function BroadcastStatus({ artifact }: { artifact: Artifact }) {
   if (status.loading) return <LoadingBlock lines={5} />;
   if (status.error || !status.data || !run)
     return (
-      <Alert tone="bad" title="Couldn't load the sending status" onRetry={status.reload}>
-        {status.error ?? 'The server returned no status.'}
+      <Alert tone="bad" title="Couldn’t load sending status" onRetry={status.reload}>
+        {status.error ?? 'The server returned no status.'} Saved content remains available.
       </Alert>
     );
 
   const messages = status.data.messages;
   const keys = [...MESSAGE_ORDER.filter((k) => k in messages), ...Object.keys(messages).filter((k) => !MESSAGE_ORDER.includes(k))];
+  const delivery = status.data.delivery;
+  const deliveryKeys = delivery ? DELIVERY_ORDER.filter((k) => k in delivery) : [];
   const test = status.data.test;
   const stage = status.data.stage;
 
@@ -107,7 +112,7 @@ export function BroadcastStatus({ artifact }: { artifact: Artifact }) {
     try {
       const r = await api.call('broadcasts.cancel', { artifactId: artifact.id });
       toast.success(`Sending cancelled. ${r.queued.toLocaleString()} queued messages will not be sent.`);
-      void status.reload();
+      status.reload();
     } catch (e) {
       setCancelError(errText(e));
     }
@@ -125,7 +130,7 @@ export function BroadcastStatus({ artifact }: { artifact: Artifact }) {
     try {
       await api.call('broadcasts.continue', { artifactId: artifact.id });
       toast.success('Sending the rest of the audience.');
-      void status.reload();
+      status.reload();
     } catch (e) {
       setContinueError(errText(e));
     }
@@ -137,7 +142,7 @@ export function BroadcastStatus({ artifact }: { artifact: Artifact }) {
       <div className="flex flex-wrap items-center gap-2">
         <StatusPill tone={runTone[run.status]}>{runLabel[run.status]}</StatusPill>
         {run.version !== null && <span className="text-[12px] text-muted">from v{run.version}</span>}
-        <Button size="sm" variant="ghost" icon={<RefreshCw size={14} />} onClick={status.reload}>
+        <Button size="sm" variant="ghost" onClick={status.reload}>
           Refresh
         </Button>
         {archived && (
@@ -164,7 +169,7 @@ export function BroadcastStatus({ artifact }: { artifact: Artifact }) {
       )}
 
       {run.error && (
-        <Alert tone="bad" title="The last send failed">
+        <Alert tone="bad" title={run.status === 'stopped' ? 'The canary check stopped this send' : 'The last send failed'}>
           {run.error}
         </Alert>
       )}
@@ -195,6 +200,22 @@ export function BroadcastStatus({ artifact }: { artifact: Artifact }) {
           <StatCard key={k} label={label(k)} value={(messages[k] ?? 0).toLocaleString()} />
         ))}
       </StatGrid>
+
+      {deliveryKeys.length > 0 && (
+        <div className="rounded-md border border-line bg-surface">
+          <div className="flex flex-wrap items-baseline gap-2 border-b border-line px-4 py-3">
+            <span className="text-[13px] font-semibold text-fg">Current delivery</span>
+            <span className="text-[12px] text-muted">Messages by their current status, separate from the event totals above.</span>
+          </div>
+          <div className="p-4">
+            <StatGrid columns={4}>
+              {deliveryKeys.map((k) => (
+                <StatCard key={k} label={label(k)} value={(delivery?.[k] ?? 0).toLocaleString()} hint="Messages" />
+              ))}
+            </StatGrid>
+          </div>
+        </div>
+      )}
 
       {test && (
         <div className="rounded-md border border-line bg-surface">
