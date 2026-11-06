@@ -76,6 +76,17 @@ export const workspaceDomains = pgTable(
 );
 
 /**
+ * Installation-wide settings that outlive any one workspace. Only the owner connection reads and
+ * writes them; they are not tenant data. `domain_routing_active` remembers that brand Host checking
+ * has been switched on, so removing the last verified domain cannot turn it off again (#463).
+ */
+export const installationSettings = pgTable('installation_settings', {
+  key: text('key').primaryKey(),
+  value: jsonb('value').$type<Record<string, unknown>>().notNull(),
+  updatedAt: ts('updated_at').notNull().defaultNow(),
+});
+
+/**
  * The workspace a person picked on the OAuth consent page, while the flow is in progress (#187).
  * The OAuth provider reads it through `consentReferenceId` and stores the workspace on the grant;
  * the row is keyed by the Better Auth session and never authorises anything by itself.

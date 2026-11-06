@@ -62,7 +62,7 @@ export interface ServerOverrides {
 export function createServer(config: Config, overrides: ServerOverrides = {}) {
   const db = createDb({ adminUrl: config.adminDatabaseUrl, appUrl: config.appDatabaseUrl });
   // Brand hostnames, read across workspaces before the session is known (#186).
-  const domains = createDomainService(db, config.linksUrl);
+  const domains = createDomainService(db, config.linksUrl, config.publicUrl);
   const mcpEnabled = isMcpResourceUrlAllowed(config.publicUrl);
   if (!mcpEnabled) {
     logger.warn(
@@ -127,6 +127,7 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
     publicUrl: config.publicUrl,
     linksUrl: config.linksUrl,
     linksUrlFor: (workspaceId) => domains.linksUrlFor(workspaceId),
+    reservedDomainHosts: domains.reservedHosts,
     fetchDomainChallenge:
       overrides.fetchDomainChallenge ??
       (async (url) => {
@@ -134,6 +135,7 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
         return { status: res.status, body: res.body };
       }),
     invalidateDomainCache: () => domains.invalidate(),
+    activateDomainRouting: () => domains.activateHostChecking(),
     db,
     serverVersion: VERSION,
     ownsAnyWorkspace: async (userId) => (await directory.memberships(userId)).some((membership) => membership.role === 'owner'),
