@@ -2,6 +2,25 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+### Security
+
+- `workspace.domains.add` and `workspace.domains.update` no longer accept `status`: a domain becomes `verified` only through `workspace.domains.verify`, so an admin can no longer activate a hostname without proving that it reaches this installation (#461). This is a breaking input change; callers that sent `status` now get `invalid_input`.
+- A hostname now belongs to one workspace: another workspace cannot register any prefix on a host that is already claimed or verified, and verification re-checks ownership, so a brand can no longer carve a path prefix out of another brand's verified host (#462, including the prefix-shadowing case in #479).
+- The installation's admin host (`PUBLIC_URL`) and fallback links host (`PUBLIC_LINKS_URL`) are reserved and can never be registered or created as a brand domain (#480).
+- Host checking is persisted once it has been switched on: removing the last verified domain no longer reverts the installation to any-Host and re-enables cross-brand public pages (#463).
+- Domain verification fetches through the shared egress guard, so private, link-local and metadata targets are refused, and the caller no longer receives the internal error or HTTP status of the challenge fetch (#466).
+- The domain resolver cannot repopulate its cache from a load that started before an invalidation; writes reach other server processes within the documented 5-second TTL (#464).
+
+### Fixed
+
+- A pending domain claim expires after seven days and can then be reclaimed by another workspace, instead of blocking the hostname forever (#467).
+- A domain hostname with an explicit non-default port is refused with an input error instead of being silently stored without the port; default ports are still accepted (#481).
+- `workspace.get` and `workspace.memberships` report a `primaryDomain` only when the primary domain is verified, matching the links and public pages (#465).
+- Twilio STOP/inbound and delivery-status callbacks validate their signature against the URL that was actually called, so fallback, secondary and prefixed brand hosts keep working after the primary domain changes (#457).
+- The Helm chart renders every host in `ingress.extraHosts`, so Kubernetes installs can route each brand's verified domain, and the Kubernetes guide documents the per-brand Ingress and TLS requirement (#490).
+
 ## [0.10.0] - 2026-11-06
 
 ### Added

@@ -123,17 +123,29 @@ an owner.
 domain is a normalised hostname plus an optional path prefix:
 
 - lowercase IDNA hostname, without scheme, port or trailing dot; wildcards, userinfo, queries and
-  fragments are refused;
+  fragments are refused. A port is refused too rather than silently dropped: links use `https` on
+  443 (`http` on localhost), so `https://example.com:8443` and `http://localhost:3000` are input
+  errors (#481);
 - `https` everywhere, or `http` only on localhost;
 - an optional leading-slash prefix such as `/am`, for a site that proxies `/am` to this instance;
-- one hostname/prefix may belong to only one workspace, and one workspace may have one **primary**
-  domain. `workspace.get` returns the workspace's `domains` and its effective `linksUrl`.
+- **a hostname belongs to one workspace**: another workspace cannot register any prefix on a host
+  that is already claimed or verified, and the same workspace may have one **primary** domain.
+  `workspace.get` returns the workspace's `domains` and its effective `linksUrl`; only a **verified**
+  primary domain appears as `primaryDomain` in `workspace.get` and `workspace.memberships` (#465);
+- an unverified claim holds its hostname for **7 days**. After that another workspace may register
+  the same host and prefix, which replaces the expired claim (#467). Verified domains never expire.
+
+The admin host (`PUBLIC_URL`) and the fallback links host (`PUBLIC_LINKS_URL`) are **reserved
+installation-wide** and can never be registered as a brand domain (#480): they belong to the
+installation, not to one brand.
 
 Normalisation runs before the row is written, so `MartechSignal.COM` and `martechsignal.com` are the
 same host, and `/am/` and `am` are the same prefix. Host resolution for a request (before any
 workspace is known) reads the registry installation-wide and picks the **longest matching path
-prefix**, so `example.com/am` and `example.com/am2` can coexist. Once any domain is verified, an unknown host on a public path
-is answered with 404; admin routes keep using the session and `X-Workspace-Id`.
+prefix**, so several prefixes on one brand's host can coexist. Once any domain has been verified, an
+unknown host on a public path is answered with 404; admin routes keep using the session and
+`X-Workspace-Id`. That switch is an installation policy and stays on even if the last verified domain
+is later removed (#463).
 
 ### Verify a domain
 
@@ -146,15 +158,24 @@ another brand's traffic.
 2. Point the hostname at the tunnel or ingress, and confirm the public listener serves the challenge:
    `GET https://<host><prefix>/.well-known/am-domain/<verificationToken>` must answer `200` with the
    token. The challenge is answered even while the domain is pending, and on any Host.
-3. Run `workspace.domains.verify {id}`. The server fetches the same URL over the egress guard
-   (timeboxed; plain http only on localhost), compares the body with the token, and sets
-   `status: "verified"` and `verifiedAt`. A wrong token, a non-200 answer or an unreachable host is
-   refused with a message that names the URL that failed. A hostname that resolves to a private
-   address must be listed in `EGRESS_ALLOWED_HOSTS`, like any other outbound target.
+3. Run `workspace.domains.verify {id}`. The server fetches the same URL through the shared egress
+   guard (timeboxed, at most 4 KiB read, no redirects; plain http only on localhost), compares the
+   body with the token, and sets `status: "verified"` and `verifiedAt`. A private, link-local or
+   metadata address is refused unless the hostname is listed in `EGRESS_ALLOWED_HOSTS`, like any
+   other outbound target. A wrong token, a non-200 answer or an unreachable host is refused without
+   repeating the internal error or HTTP status: the caller only learns that the challenge could not
+   be reached or did not answer with the token (#466).
 
 Only verified domains are used for request resolution and `linksUrlFor`. Changing a domain's host or
 prefix resets it to pending, so verify it again before it serves. Removing the primary domain makes
 the workspace fall back to `PUBLIC_LINKS_URL`.
+
+### Verification and the resolver cache
+
+Domain writes invalidate the resolver in the process that ran the command. Every other server
+process (api, ingest, worker, replicas) reads its own cache and picks the change up within the
+**5-second TTL**, which is the cross-process bound; an in-flight load cannot repopulate the cache
+with rows read before an invalidation (#464).
 
 ### One tunnel hostname per brand
 
@@ -184,7 +205,8 @@ Every public request resolves its `Host` and path prefix to one workspace before
 
 Until the first domain is verified, the installation keeps its old behaviour: public paths answer on
 any `Host`, so an upgrade does not break a proxy that rewrites `Host` or a LAN address used for
-testing. Verifying a domain switches the check on for every host.
+testing. Verifying a domain switches the check on for every host, and it stays on even after the last
+verified domain is removed (#463).
 
 `/f`, `/u` (including `/u/p`), `/c`, `/a`, `/n` and `/hooks` all obey this. A signed token, form,
 archive slug, asset id or provider webhook belongs to a workspace, so presenting it on another
@@ -202,10 +224,10 @@ signed token format is unchanged; only the base URL follows the brand.
 
 `PUBLIC_LINKS_URL` remains the fallback and is not removed. A workspace with no primary domain uses
 it exactly as before, which keeps a single-brand install byte-for-byte identical after upgrading:
-there is no SQL backfill, because the current URL is configuration rather than data. Assign the
-existing `PUBLIC_LINKS_URL` origin+prefix to the default brand only if you want it visible as a
-registered domain. If several workspaces exist and some have no primary domain, `am doctor` warns
-that their links still use `PUBLIC_LINKS_URL`.
+there is no SQL backfill, because the current URL is configuration rather than data. The fallback
+host is reserved and cannot be registered by a workspace (#480); give the default brand its own
+hostname if it should appear in the registry. If several workspaces exist and some have no primary
+domain, `am doctor` warns that their links still use `PUBLIC_LINKS_URL`.
 
 ### `am doctor`
 
