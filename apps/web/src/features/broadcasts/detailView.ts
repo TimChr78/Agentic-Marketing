@@ -60,6 +60,8 @@ export function broadcastDetailStateOf(input: BroadcastStateInput): OperationalS
 export interface BroadcastConsequence {
   who: string;
   when: string;
+  /** The latest draft's audience and template when they differ from the run's pinned ones. */
+  draft: string | null;
   next: string;
 }
 
@@ -67,8 +69,17 @@ export interface ConsequenceInput extends BroadcastStateInput {
   dirty?: boolean;
   draft?: unknown;
   segmentName?: string | null;
+  templateName?: string | null;
+  /** The names of the segment and template the run is pinned to (status.segmentId/templateId). */
+  runSegmentName?: string | null;
+  runTemplateName?: string | null;
+  /** The latest saved or unsaved draft's segment and template names, labelled separately. */
+  draftSegmentName?: string | null;
+  draftTemplateName?: string | null;
   /** Whether a pending approval request was found for the artifact. */
   hasPending?: boolean;
+  /** Why the pending-approval read failed, when it did. */
+  pendingReadError?: string | null;
 }
 
 const contentOf = (value: unknown): BroadcastContent => (value && typeof value === 'object' ? (value as BroadcastContent) : {});
@@ -79,21 +90,32 @@ const count = (n: number) => n.toLocaleString('en-US');
 export function broadcastConsequenceOf(input: ConsequenceInput): BroadcastConsequence {
   const run = input.run ?? null;
   const state = broadcastDetailStateOf(input);
-  const runStarted = run && run.status !== 'not_scheduled';
-  const segment = input.segmentName ?? 'Segment';
+  const runStarted = !!run && run.status !== 'not_scheduled';
+  // While a run exists, who it reaches comes from the run's pinned version, never from a later
+  // draft that targets another segment (#449 review).
+  const segment = runStarted ? (input.runSegmentName ?? input.segmentName ?? 'Segment') : (input.segmentName ?? 'Segment');
   const who =
-    runStarted && run.recipients > 0
+    runStarted && run && run.recipients > 0
       ? `${segment} · ${count(run.recipients)} reached at preparation`
       : `${segment} · Eligibility not checked`;
 
   const saved = contentOf(input.artifact.version.content);
   const draft = input.dirty ? contentOf(input.draft) : saved;
   let when: string;
-  if (runStarted && run.sendAt) when = formatDateTime(run.sendAt, { zone: true });
+  if (runStarted && run?.sendAt) when = formatDateTime(run.sendAt, { zone: true });
   else if (input.dirty)
     when = draft.sendAt ? `Unsaved draft · ${formatDateTime(draft.sendAt, { zone: true })}` : 'Unsaved draft · On publication';
   else if (saved.sendAt) when = `Saved schedule: ${formatDateTime(saved.sendAt, { zone: true })}`;
   else when = 'On publication';
+
+  // A draft that differs from the pinned run is a separate reference, not the live audience.
+  let draftLine: string | null = null;
+  if (runStarted && run && (input.dirty || (run.version !== null && input.artifact.latestVersion > run.version))) {
+    const label = input.dirty ? 'Unsaved draft' : `Draft v${input.artifact.latestVersion}`;
+    const draftSegment = input.dirty ? (input.draftSegmentName ?? 'Segment') : (input.draftSegmentName ?? input.segmentName ?? 'Segment');
+    const draftTemplate = input.dirty ? input.draftTemplateName : (input.draftTemplateName ?? input.templateName);
+    draftLine = `${label} targets ${draftSegment}${draftTemplate ? ` · ${draftTemplate}` : ''}`;
+  }
 
   let next: string;
   if (input.statusError) {
@@ -107,9 +129,11 @@ export function broadcastConsequenceOf(input: ConsequenceInput): BroadcastConseq
         next = 'Fix the rejected content and submit it again.';
         break;
       case 'in_review':
-        next = input.hasPending
-          ? 'Waiting for a reviewer to decide.'
-          : 'No pending request was found. Check Activity for the review history.';
+        next = input.pendingReadError
+          ? 'Couldn’t check the pending approval request. Retry to load it.'
+          : input.hasPending
+            ? 'Waiting for a reviewer to decide.'
+            : 'No pending request was found. Check Activity for the review history.';
         break;
       case 'scheduled': {
         const sendAt = run?.sendAt ? new Date(run.sendAt) : null;
@@ -161,7 +185,7 @@ export function broadcastConsequenceOf(input: ConsequenceInput): BroadcastConseq
         break;
     }
   }
-  return { who, when, next };
+  return { who, when, draft: draftLine, next };
 }
 
 export type BroadcastPrimaryAction =

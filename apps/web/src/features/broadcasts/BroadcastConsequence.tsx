@@ -19,6 +19,12 @@ export function BroadcastConsequence({ lines, templateName }: { lines: Consequen
           <dt className="w-12 shrink-0 font-medium text-fg">When</dt>
           <dd className="min-w-0 text-fg-2">{lines.when}</dd>
         </div>
+        {lines.draft && (
+          <div className="flex gap-2">
+            <dt className="w-12 shrink-0 font-medium text-fg">Draft</dt>
+            <dd className="min-w-0 text-fg-2">{lines.draft}</dd>
+          </div>
+        )}
         <div className="flex gap-2">
           <dt className="w-12 shrink-0 font-medium text-fg">Next</dt>
           <dd className="min-w-0 text-fg-2">{lines.next}</dd>

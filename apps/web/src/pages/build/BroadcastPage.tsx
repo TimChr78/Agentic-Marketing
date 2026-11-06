@@ -22,7 +22,7 @@ import {
 } from '../../features/broadcasts/detailView';
 import { useArtifactNames } from '../../features/broadcasts/names';
 import { publicationLabel } from '../../lib/state';
-import { Button, Skeleton, timeAgo } from '../../ui';
+import { Alert, Button, Skeleton, timeAgo } from '../../ui';
 import { Identifier } from '../../ui/Identifier';
 
 /**
@@ -43,6 +43,10 @@ export default function BroadcastPage({ params }: { params: Record<string, strin
     () => new Map([...(segmentNames.data ?? new Map()), ...(templateNames.data ?? new Map())]),
     [segmentNames.data, templateNames.data],
   );
+  const run = status.data?.run ?? null;
+  const runStarted = !!run && run.status !== 'not_scheduled';
+  const pinnedSegmentId = runStarted ? (status.data?.segmentId ?? null) : null;
+  const pinnedTemplateId = runStarted ? (status.data?.templateId ?? null) : null;
 
   const urlTab = search.get('tab');
   const [tab, setTab] = useState<string>(() => (isBroadcastTab(urlTab) ? urlTab : 'content'));
@@ -88,13 +92,14 @@ export default function BroadcastPage({ params }: { params: Record<string, strin
 
   const renderPrimary = (ctx: ArtifactDetailActionContext): ReactNode => {
     const state = ctx.artifact.version.state;
+    const pendingBlocked = !!ctx.pendingRead && (ctx.pendingRead.loading || !!ctx.pendingRead.error);
     const action = broadcastPrimaryActionOf({
       artifact: ctx.artifact,
       run: status.data?.run ?? null,
       statusError: status.error,
       dirty: ctx.dirty,
       readOnly: ctx.readOnly,
-      canSubmit: can('artifacts:publish') && (state === 'draft' || state === 'rejected') && !ctx.dirty,
+      canSubmit: can('artifacts:publish') && (state === 'draft' || state === 'rejected') && !ctx.dirty && !pendingBlocked,
       directPublish: ctx.directPublish,
       canApprove: ctx.canApprove,
       pendingId: ctx.pending?.id ?? null,
@@ -181,6 +186,7 @@ export default function BroadcastPage({ params }: { params: Record<string, strin
         metadata: (a) => (
           <>
             <span>{publicationLabel({ latestVersion: a.latestVersion, publishedVersion: a.publishedVersion })}</span>
+            {runStarted && run?.version !== null && run?.version !== undefined && <span>Sending v{run.version}</span>}
             <span>changed by {a.version.by?.displayName ?? (a.version.author.type === 'agent' ? 'an agent' : 'a person')}</span>
             <span>{timeAgo(a.version.createdAt)}</span>
             <Identifier value={a.id} label="Broadcast ID" />
@@ -188,21 +194,37 @@ export default function BroadcastPage({ params }: { params: Record<string, strin
         ),
         consequence: (a, view) => {
           const content = contentOf(a, view.draft, view.dirty);
+          const segmentName = content.segment ? names.get(content.segment)?.name : undefined;
+          const templateName = content.template ? names.get(content.template)?.name : undefined;
+          const pinnedTemplateName = pinnedTemplateId ? names.get(pinnedTemplateId)?.name : undefined;
           return (
-            <BroadcastConsequence
-              lines={broadcastConsequenceOf({
-                artifact: a,
-                run: status.data?.run ?? null,
-                stage: status.data?.stage ?? null,
-                delivery: status.data?.delivery ?? null,
-                statusError: status.error,
-                dirty: view.dirty,
-                draft: view.draft,
-                segmentName: content.segment ? names.get(content.segment)?.name : undefined,
-                hasPending: view.hasPending,
-              })}
-              templateName={content.template ? names.get(content.template)?.name : undefined}
-            />
+            <>
+              {view.pendingRead?.error && (
+                <Alert tone="bad" title="Couldn’t check pending approvals" className="mb-4" onRetry={() => void view.pendingRead?.reload()}>
+                  {view.pendingRead.error} Publishing stays disabled until the request state is known.
+                </Alert>
+              )}
+              <BroadcastConsequence
+                lines={broadcastConsequenceOf({
+                  artifact: a,
+                  run,
+                  stage: status.data?.stage ?? null,
+                  delivery: status.data?.delivery ?? null,
+                  statusError: status.error,
+                  dirty: view.dirty,
+                  draft: view.draft,
+                  segmentName,
+                  templateName,
+                  runSegmentName: pinnedSegmentId ? names.get(pinnedSegmentId)?.name : undefined,
+                  runTemplateName: pinnedTemplateName,
+                  draftSegmentName: segmentName,
+                  draftTemplateName: templateName,
+                  hasPending: view.hasPending,
+                  pendingReadError: view.pendingRead?.error ?? null,
+                })}
+                templateName={runStarted ? pinnedTemplateName : templateName}
+              />
+            </>
           );
         },
         context: (a) => {
@@ -219,13 +241,14 @@ export default function BroadcastPage({ params }: { params: Record<string, strin
         },
         actions: (ctx) => {
           const state = ctx.artifact.version.state;
+          const pendingBlocked = !!ctx.pendingRead && (ctx.pendingRead.loading || !!ctx.pendingRead.error);
           const action = broadcastPrimaryActionOf({
             artifact: ctx.artifact,
             run: status.data?.run ?? null,
             statusError: status.error,
             dirty: ctx.dirty,
             readOnly: ctx.readOnly,
-            canSubmit: can('artifacts:publish') && (state === 'draft' || state === 'rejected') && !ctx.dirty,
+            canSubmit: can('artifacts:publish') && (state === 'draft' || state === 'rejected') && !ctx.dirty && !pendingBlocked,
             directPublish: ctx.directPublish,
             canApprove: ctx.canApprove,
             pendingId: ctx.pending?.id ?? null,

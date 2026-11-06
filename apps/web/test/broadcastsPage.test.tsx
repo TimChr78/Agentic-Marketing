@@ -67,7 +67,8 @@ vi.mock('../src/app/api', async (importOriginal) => {
           };
         }
         if (name === 'broadcasts.list') {
-          if (input.cursor === 'c2') return { broadcasts: [third], total: 30, nextCursor: null, asOf: '2026-11-06T10:20:00.000Z' };
+          if (input.cursor === 'c2') return { broadcasts: [third], total: 30, nextCursor: 'c3', asOf: '2026-11-06T10:20:00.000Z' };
+          if (input.cursor === 'c3') return { broadcasts: [], total: 30, nextCursor: null, asOf: '2026-11-06T10:20:00.000Z' };
           if (input.statuses?.includes('running'))
             return { broadcasts: [second], total: 1, nextCursor: null, asOf: '2026-11-06T10:20:00.000Z' };
           return { broadcasts: [first, second], total: 30, nextCursor: 'c2', asOf: '2026-11-06T10:20:00.000Z' };
@@ -130,6 +131,31 @@ describe('BroadcastsPage (#448)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Previous' }));
     expect((await screen.findAllByText('Signal Weekly · issue 128')).length).toBeGreaterThan(0);
     expect(screen.getByText('1–2 of 30 broadcasts')).toBeTruthy();
+  });
+
+  it('a second Next before the page arrives does not request the same cursor twice', async () => {
+    renderPage();
+    await screen.findAllByText('Signal Weekly · issue 128');
+
+    const next = screen.getByRole('button', { name: 'Next' });
+    fireEvent.click(next);
+    fireEvent.click(next);
+    await screen.findAllByText('Second page issue');
+
+    const calls = h.calls.filter((c) => c.name === 'broadcasts.list');
+    expect(calls).toHaveLength(2);
+    expect(calls.at(-1)!.input).toEqual({ limit: 25, cursor: 'c2' });
+  });
+
+  it('a later empty page says the page is empty, not that no broadcasts exist', async () => {
+    renderPage();
+    await screen.findAllByText('Signal Weekly · issue 128');
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+    await screen.findAllByText('Second page issue');
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+
+    expect(await screen.findByText('This page is empty')).toBeTruthy();
+    expect(screen.queryByText('No broadcasts yet')).toBeNull();
   });
 
   it('changes the status filter, resets paging and stores only the status in the URL', async () => {

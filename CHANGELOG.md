@@ -16,6 +16,15 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 
 - Broadcasts are the first screen family on the Phase 24 v2 list/detail templates (#448). The list reads `broadcasts.list` once per page with the operational state, audience, schedule and result per row, status filters, cursor paging, and honest empty, failure and loading states; it no longer calls `broadcasts.status` once per row. The detail page shares one `broadcasts.status` read across the pill, the who/when/next summary, Sending and the context panel, chooses one primary action from the runtime state, defaults its tabs from that state (`?tab=` wins), and adds the Report summary from the existing analytics read. `ArtifactDetailPage` gains optional detail slots that default to the existing page for every other artifact family.
 
+### Fixed
+
+- Broadcast detail now shows the audience and template of the version that is actually sending, shows that pinned version in its metadata and labels a newer draft as a separate draft reference.
+- “Open in Analytics” from Home and a broadcast Report now opens with its date range and broadcast filter; the filter appears as a removable chip and is kept in the query.
+- A broadcast Report no longer shows suppressed or unavailable data as “No sends”, and its click-rate tile only says “No delivered people to divide by” for an observed zero denominator.
+- Broadcast detail shows a retryable error when pending approvals cannot be read and keeps publish or submit disabled until the read succeeds.
+- The Home setup checklist reads marketing e-mail and link-domain status for every role that can read them; only the settings links ask for an admin.
+- Broadcast paging cannot advance with a stale cursor: Previous, Next and the status filter are disabled while a page loads, and an empty later page says “This page is empty”.
+
 ## [0.9.0] - 2026-11-06
 
 ### Added

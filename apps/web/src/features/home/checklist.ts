@@ -93,7 +93,7 @@ function checkBrand(input: ChecklistInput): ChecklistCheck {
 }
 
 function checkEmail(input: ChecklistInput): ChecklistCheck {
-  if (!input.can('workspace:admin')) return { status: 'restricted', reason: 'Ask an admin to configure e-mail.' };
+  // `system.status` is readable with artifacts:read; the provider settings page is what needs an admin.
   if (!input.can('artifacts:read'))
     return { status: 'restricted', reason: 'Your role cannot read the server status. Ask an admin to configure e-mail.' };
   if (loading(input.status)) return { status: 'checking' };
@@ -104,7 +104,9 @@ function checkEmail(input: ChecklistInput): ChecklistCheck {
 }
 
 function checkDomain(input: ChecklistInput): ChecklistCheck {
-  if (!input.can('workspace:admin')) return { status: 'restricted', reason: 'Ask an admin to verify a link domain.' };
+  // The domain list arrives with the workspace read (artifacts:read); only the editor is admin-gated.
+  if (!input.can('artifacts:read'))
+    return { status: 'restricted', reason: 'Your role cannot read the workspace domains. Ask an admin to verify a link domain.' };
   if (input.domains.some((domain) => domain.status === 'verified' && domain.isPrimary))
     return { status: 'confirmed', detail: 'Primary link domain verified' };
   return { status: 'incomplete' };

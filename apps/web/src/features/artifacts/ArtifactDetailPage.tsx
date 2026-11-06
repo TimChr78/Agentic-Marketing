@@ -62,12 +62,21 @@ export interface EditorProps<C = any> {
   warnings: DraftWarning[];
 }
 
+/** The pending-approval read a detail slot may inspect; absent for families that do not read it. */
+export interface ArtifactPendingRead {
+  loading: boolean;
+  error: string | null;
+  reload: () => Promise<void>;
+}
+
 /** The draft facts the detail slots may read, without exposing the editor's save machinery. */
 export interface ArtifactDetailView {
   dirty: boolean;
   draft: unknown;
   /** Whether the page found a pending approval request for this artifact. */
   hasPending: boolean;
+  /** The pending-approval read's own state, so a slot never acts on a failed read. */
+  pendingRead?: ArtifactPendingRead;
 }
 
 /** What a family's action slots may call; the template never invents an action of its own. */
@@ -81,6 +90,8 @@ export interface ArtifactDetailActionContext {
   canApprove: boolean;
   directPublish: boolean;
   pending: Out<'approvals.list'>['approvals'][number] | undefined;
+  /** The pending-approval read's loading/error state and retry; a slot must not act on a failed read. */
+  pendingRead?: ArtifactPendingRead;
   save: (opts?: { name?: string; quiet?: boolean }) => Promise<boolean>;
   openPublish: () => void;
   openTab: (key: string) => void;
@@ -434,6 +445,11 @@ export function ArtifactDetailPage({
   const latest = a.version;
   const pageEditor = editor ?? DEFAULT_EDITORS[a.type];
   const pending = pendingReq.data?.approvals[0];
+  const pendingRead: ArtifactPendingRead = {
+    loading: pendingReq.loading,
+    error: pendingReq.error,
+    reload: pendingReq.reload,
+  };
   const directPublish =
     workspace.approvalPolicy === 'none' || (workspace.approvalPolicy === 'agent_changes' && latest.author.type === 'user');
   const canPublish = can('artifacts:publish') && latest.state === 'draft' && !dirty;
@@ -461,7 +477,7 @@ export function ArtifactDetailPage({
     }
   };
 
-  const view: ArtifactDetailView = { dirty, draft, hasPending: !!pending };
+  const view: ArtifactDetailView = { dirty, draft, hasPending: !!pending, pendingRead };
   const pill = state?.(a) ?? (
     <OperationalPill
       state={stateOfArtifact({
@@ -657,6 +673,7 @@ export function ArtifactDetailPage({
       canApprove: can('artifacts:approve'),
       directPublish,
       pending,
+      pendingRead,
       save: (opts) => save(opts),
       openPublish: () => setPublishing(true),
       openTab: (key) => changeTab(key),

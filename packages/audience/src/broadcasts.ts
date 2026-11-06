@@ -786,6 +786,8 @@ export const broadcastStatus = defineCommand({
       ),
     test: Test.nullable(),
     stage: Stage.nullable(),
+    segmentId: z.string().optional().describe('The segment the run is pinned to; the latest draft may target another segment'),
+    templateId: z.string().optional().describe('The template the run is pinned to; the latest draft may use another template'),
   }),
   permission: 'artifacts:read',
   effect: 'read',
@@ -828,6 +830,8 @@ export const broadcastStatus = defineCommand({
       messages,
       test,
       stage,
+      segmentId: def.segment,
+      templateId: def.template,
     };
   },
 });

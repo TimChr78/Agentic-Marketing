@@ -37,3 +37,11 @@ export function lastSevenLocalDays(now = new Date(), zone = getWorkspaceTimeZone
     zone,
   };
 }
+
+/** The Analytics link for this period in the shared date-only, inclusive format. */
+export function analyticsHrefFor(period: LocalDayPeriod, broadcastId?: string): string {
+  const lastDay = dateOnly(new Date(Date.parse(`${period.toDate}T00:00:00.000Z`) - 86_400_000));
+  const params = new URLSearchParams({ from: period.fromDate, to: lastDay });
+  if (broadcastId) params.set('broadcast', broadcastId);
+  return `/insights/analytics?${params.toString()}`;
+}
