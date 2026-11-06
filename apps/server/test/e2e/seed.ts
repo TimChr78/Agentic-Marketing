@@ -897,9 +897,10 @@ export async function seed(t: T, opts: { confirmedUrl?: string; now?: Date } = {
 
     await t.srv.db.admin.query(
       `INSERT INTO messages (workspace_id, id, idempotency_key, channel, profile_id, purpose, topic, template_id, template_version,
-         journey_id, status, created_at, updated_at)
+         journey_id, status, created_at, updated_at, sent_at)
        SELECT $1, x.id, x.idempotency_key, 'email', x.profile_id, 'marketing_email', 'newsletter', x.template_id, 1,
-              x.journey_id, x.status, x.created_at, x.updated_at
+              x.journey_id, x.status, x.created_at, x.updated_at,
+              CASE WHEN x.status IN ('sent', 'delivered', 'bounced', 'complained') THEN x.updated_at END
        FROM jsonb_to_recordset($2::jsonb) AS x(id text, idempotency_key text, profile_id text, template_id text, journey_id text,
               status text, created_at timestamptz, updated_at timestamptz)`,
       [ws, JSON.stringify(rows)],

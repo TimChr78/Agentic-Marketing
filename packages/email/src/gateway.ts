@@ -387,7 +387,7 @@ async function deliverOne(
     await db.withWorkspace(ws, (tx) =>
       tx
         .update(schema.messages)
-        .set({ status: 'sent', reason: null, providerId: provider.id, providerMessageId, updatedAt: new Date() })
+        .set({ status: 'sent', reason: null, providerId: provider.id, providerMessageId, sentAt: new Date(), updatedAt: new Date() })
         .where(eq(schema.messages.id, id)),
     );
     event = decisionEvent(m, 'sent', '', provider.adapter);

@@ -139,6 +139,10 @@ As built:
 - one `delivery_policy` artifact per workspace (defaults until published); caps, quiet hours and pauses apply to marketing purposes only, never to contract or legal-obligation messages;
 - a held message stays `queued` with `not_before` and a reason (`quiet_hours: …`, `paused: …`);
 - a capped message becomes `suppressed` with `frequency_cap: …`;
+- a completed contact ages from when the provider accepted it (`messages.sent_at`), not from when
+  it was queued: a message that waited for quiet hours, a pause or a retry consumes the window from
+  its real send time, and an in-flight message reserves its place in `(created_at, id)` order so two
+  messages queued together cannot both pass a `max: 1` cap;
 - rates are counted from the message log over `health.windowDays`;
 - per-provider throttling and warm-up are *later*.
 

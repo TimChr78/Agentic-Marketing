@@ -253,6 +253,7 @@ export async function deliverPush(db: Db, ws: string, id: string, deps: { kp: Ke
           reason: errors.length ? `partly_sent: ${errors.join('; ')}`.slice(0, 500) : null,
           providerId: delivered[0].provider,
           providerMessageId: delivered[0].id,
+          sentAt: new Date(),
           updatedAt: new Date(),
         })
         .where(eq(schema.messages.id, id));
