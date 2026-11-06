@@ -2,7 +2,7 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
-## [Unreleased]
+## [0.10.0] - 2026-11-06
 
 ### Added
 
@@ -24,6 +24,14 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 - Broadcast detail shows a retryable error when pending approvals cannot be read and keeps publish or submit disabled until the read succeeds.
 - The Home setup checklist reads marketing e-mail and link-domain status for every role that can read them; only the settings links ask for an admin.
 - Broadcast paging cannot advance with a stale cursor: Previous, Next and the status filter are disabled while a page loads, and an empty later page says “This page is empty”.
+
+### Upgrading from 0.9.0
+
+- **Migrations:** none.
+- **Configuration:** no new environment variables.
+- **Breaking changes:** none in commands or artifacts: `broadcasts.list` and `agents.runFailures` are new reads, `approvals.list` adds `total` and `nextCursor`, and `broadcasts.status` adds the run's pinned `segmentId` and `templateId`. The admin UI's URLs follow the new navigation (Work · Marketing · Audience · Content · Insights · Settings), for example `/build/broadcasts` → `/marketing/broadcasts` and `/settings/agents` → `/work/agents`; every old URL, bookmark and e-mail link redirects with its ids, query and hash. Pages that moved open as tabs in their new homes (Imports in People, Topics and Purposes in Consent, Blocks in Templates, Hosted pages in Brand, AI usage in Analytics, AI prompts in Agents); `/` is now Home instead of Approvals.
+- **Manual steps:** none.
+- **Upgrade:** download `agentic-marketing-compose-0.10.0.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.10.0 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.10.0` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.10.0). Run `docker compose exec app am doctor`.
 
 ## [0.9.0] - 2026-11-06
 
