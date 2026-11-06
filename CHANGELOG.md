@@ -2,18 +2,7 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
-## [Unreleased]
-
-### Changed
-
-- Adopt the DESIGN.md v2 foundations (#436): warm stone neutrals in light and tonal surfaces in dark, the 24/32 page and 16/24 section scale, 32/40 KPIs, 13/20 UI and tables, 32/24 section rhythm, 8/12 px radii, overlays-only shadows, and the categorical/sequential/diverging data-visualisation palette in `apps/web/src/index.css` and the shared `ui` components.
-- Charts now read the v2 tokens (quiet grids, direct end labels, 12/18 axis and tooltip type, system font, theme re-read without the legacy theme hook), and the new shared primitives in `apps/web/src/ui/charts.tsx` provide the KPI tile with direction-aware deltas and data states, line/area and bar charts, and the “Show data table” fallback (#436).
-- Operational state replaces the publication version as the primary status (#437). List and detail headers show a state pill from the new `lib/state.ts` model (broadcast, journey, agent, experience and form families), and “Published v2” is secondary metadata. The shared artifact list, broadcast list and header, agents and agent detail adopt it; other screens follow in later phases.
-- Analytics names measures and dimensions through the label registry (#437), and counts, rates and money are plotted in separate charts with their own axes instead of sharing one scale; direct end labels keep an 18 px separation and the plot reserves the right inset so they do not sit on the x-axis. Deliverability uses the metric data states: a zero-volume or below-threshold stream shows “No sends” or “Below evaluation volume” with its sample and threshold, never a green 0% health claim.
-
-### Fixed
-
-- Shared UI fixes from the wave 5 screenshot pass (#438): 40 px touch targets below 768 px, one navigation toggle under 1024 px, the brand logo contained in its square with an initial fallback, GrapesJS chrome themed to the app tokens in both themes, no epoch “newest” date on an empty Analytics query, honest People counts with cursor “Load more” and no repeated e-mail column, and page-level horizontal overflow contained to tables and canvases at 390 px.
+## [0.9.0] - 2026-11-06
 
 ### Added
 
@@ -27,10 +16,26 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 - Visual regression in CI (#433). `e2e/visual.spec.ts` compares a stable subset (sign-in, approvals and a broadcast approval, the journey list and builder, a broadcast, a template, people, analytics, agents and an agent, the workspace settings) at 1440 and 390 px in both themes against Linux baselines committed in `e2e/visual.spec.ts-snapshots`. Its own Playwright project keeps the functional suite fast; the `visual` CI job runs on pull requests that touch `apps/web` or `e2e` and uploads the expected/actual/diff images when a baseline fails. Baselines are only ever updated by a reviewed commit.
 - Automated accessibility checks (#206). `e2e/axe.spec.ts` runs `@axe-core/playwright` with the WCAG 2.1/2.2 A and AA rules over every route in the matrix, light and dark, fails on any violation not listed in `e2e/axe-known-issues.json`, and prints the violations by rule. The list starts empty; the wave's done criterion is that it stays empty.
 
+### Changed
+
+- Adopt the DESIGN.md v2 foundations (#436): warm stone neutrals in light and tonal surfaces in dark, the 24/32 page and 16/24 section scale, 32/40 KPIs, 13/20 UI and tables, 32/24 section rhythm, 8/12 px radii, overlays-only shadows, and the categorical/sequential/diverging data-visualisation palette in `apps/web/src/index.css` and the shared `ui` components.
+- Charts now read the v2 tokens (quiet grids, direct end labels, 12/18 axis and tooltip type, system font, theme re-read without the legacy theme hook), and the new shared primitives in `apps/web/src/ui/charts.tsx` provide the KPI tile with direction-aware deltas and data states, line/area and bar charts, and the “Show data table” fallback (#436).
+- Operational state replaces the publication version as the primary status (#437). List and detail headers show a state pill from the new `lib/state.ts` model (broadcast, journey, agent, experience and form families), and “Published v2” is secondary metadata. The shared artifact list, broadcast list and header, agents and agent detail adopt it; other screens follow in later phases.
+- Analytics names measures and dimensions through the label registry (#437), and counts, rates and money are plotted in separate charts with their own axes instead of sharing one scale; direct end labels keep an 18 px separation and the plot reserves the right inset so they do not sit on the x-axis. Deliverability uses the metric data states: a zero-volume or below-threshold stream shows “No sends” or “Below evaluation volume” with its sample and threshold, never a green 0% health claim.
+
 ### Fixed
 
+- Shared UI fixes from the wave 5 screenshot pass (#438): 40 px touch targets below 768 px, one navigation toggle under 1024 px, the brand logo contained in its square with an initial fallback, GrapesJS chrome themed to the app tokens in both themes, no epoch “newest” date on an empty Analytics query, honest People counts with cursor “Load more” and no repeated e-mail column, and page-level horizontal overflow contained to tables and canvases at 390 px.
 - The brand switcher and the account menu no longer override their visible text with an `aria-label`, so the accessible name contains the visible label (WCAG 2.5.3).
 - Tabs only point `aria-controls` at a panel that is rendered, and the OpenAPI link in Settings → Integrations is underlined rather than distinguished by colour alone (WCAG 1.4.1) (#206).
+
+### Upgrading from 0.8.0
+
+- **Migrations:** `0080_messages_journey_status.sql` adds one index on `messages (workspace_id, journey_id, status)` for the current delivery state of a broadcast. Additive; it runs on start and builds in seconds on most installs (larger message tables take longer, while writes to `messages` wait).
+- **Configuration:** no new environment variables.
+- **Breaking changes:** none in commands or artifacts: `broadcasts.status` gains an optional `delivery` field. The admin UI has a new look (DESIGN.md v2): warmer neutrals, larger type, 40 px controls on phones; lists show what a broadcast is doing (Scheduled, Delivering, Sent, Stopped…) instead of its version, and Deliverability says No data instead of a green ok when nothing was sent.
+- **Manual steps:** none.
+- **Upgrade:** download `agentic-marketing-compose-0.9.0.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.9.0 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.9.0` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.9.0). Run `docker compose exec app am doctor`.
 
 ## [0.8.0] - 2026-11-05
 
