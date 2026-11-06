@@ -138,6 +138,8 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
     db,
     serverVersion: VERSION,
     ownsAnyWorkspace: async (userId) => (await directory.memberships(userId)).some((membership) => membership.role === 'owner'),
+    ownedWorkspaceCount: async (userId) => (await directory.memberships(userId)).filter((membership) => membership.role === 'owner').length,
+    workspaceQuota: config.workspaceQuota,
     strictInputs: config.strictInputs,
     // Reach of publishing, for the agent policy engine (ADR-0016).
     artifactImpact: {

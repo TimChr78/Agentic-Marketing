@@ -58,6 +58,10 @@ export interface Services {
   serverVersion: string;
   /** True when the person owns at least one workspace (#190); wired by the server's directory. */
   ownsAnyWorkspace?: (userId: string) => Promise<boolean>;
+  /** How many brands the person owns, for the workspace.create quota (#487). */
+  ownedWorkspaceCount?: (userId: string) => Promise<number>;
+  /** Brands one person may own (#487); wired from WORKSPACE_QUOTA. */
+  workspaceQuota?: number;
   /** Whether unknown input keys are rejected rather than warned about (STRICT_INPUTS). */
   strictInputs: boolean;
   /** Shared counter for wrong passwords on token widening (#61), so every process sees the lockout. */

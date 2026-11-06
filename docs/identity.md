@@ -86,6 +86,11 @@ member of the workspace they are currently viewing is not enough; the rule is ab
 anywhere in the installation, because the new brand is theirs, not the current brand's. Owners,
 admins, marketers and viewers who own no brand get `403`.
 
+One person may own at most `WORKSPACE_QUOTA` brands (default 10), counted across the installation
+by owner memberships; past that, `workspace.create` answers `403` with the limit and the variable to
+raise. The cap keeps one compromised owner session or a runaway script from filling the shared
+tables and the `workspace_domains` registry with pending claims.
+
 The call takes a name and optional brand basics:
 
 ```json

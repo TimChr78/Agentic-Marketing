@@ -155,6 +155,12 @@ const Env = z.object({
     .min(1)
     .default(5_242_880)
     .describe('Largest asset (image or PDF) the library accepts, in bytes; default 5 MB'),
+  WORKSPACE_QUOTA: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .default(10)
+    .describe('Brands one person may own; workspace.create refuses a new one past this limit (default 10)'),
   RETENTION_UNCONFIRMED_DAYS: z.coerce
     .number()
     .int()
@@ -328,6 +334,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     valkey: { url: e.VALKEY_URL, prefix: e.VALKEY_PREFIX },
     trackClicks: e.EMAIL_TRACK_CLICKS === 'true',
     assetMaxBytes: e.ASSET_MAX_BYTES,
+    workspaceQuota: e.WORKSPACE_QUOTA,
     egress: {
       allowedHosts: e.EGRESS_ALLOWED_HOSTS.split(',')
         .map((h) => h.trim())
