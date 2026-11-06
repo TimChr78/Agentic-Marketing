@@ -110,6 +110,7 @@ const MIGRATION_RELEASES: Record<string, string> = {
   '0079_workspace_create.sql': '0.8.0',
   '0080_messages_journey_status.sql': '0.9.0',
   '0081_domain_routing_state.sql': '0.10.1',
+  '0083_rollout_fixes.sql': '0.10.1',
 };
 
 export function releaseForMigrationHead(head: string | null): string | null {

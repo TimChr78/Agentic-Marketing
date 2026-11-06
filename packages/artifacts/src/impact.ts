@@ -98,7 +98,7 @@ interface HoldoutFields {
   controlGroup?: { percent?: number };
   subjectTest?: unknown;
   holdoutPercent?: number;
-  rollout?: { steps?: number[] };
+  rollout?: { steps?: number[]; guardrail?: { measure: string } };
   members?: { artifactId: string }[];
 }
 
@@ -156,6 +156,8 @@ async function learningOf(tx: Tx, members: { id: string; type: string; version: 
         type: m.type,
         controlPercent: c.holdoutPercent ?? 0,
         rampFirstStep: c.rollout?.steps?.[0] ?? null,
+        rampSteps: c.rollout?.steps?.length ?? null,
+        rampGuardrail: !!c.rollout?.guardrail,
       });
   }
   return out;

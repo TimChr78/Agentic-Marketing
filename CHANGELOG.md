@@ -28,6 +28,12 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 - `workspace.get` and `workspace.memberships` report a `primaryDomain` only when the primary domain is verified, matching the links and public pages (#465).
 - Twilio STOP/inbound and delivery-status callbacks validate their signature against the URL that was actually called, so fallback, secondary and prefixed brand hosts keep working after the primary domain changes (#457).
 - The Helm chart renders every host in `ingress.extraHosts`, so Kubernetes installs can route each brand's verified domain, and the Kubernetes guide documents the per-brand Ingress and TLS requirement (#490).
+- An agent can no longer restart a ramp a person stopped by republishing the experience, its metadata or an un-ramped version; only a person’s resume or republish starts it again, and the stop records who made it (#454).
+- A guardrail pause e-mail is sent after the pause commits, from a durable pause row and keyed by that pause, so a later failure no longer rolls the pause back and re-sends it (#473).
+- Each ramp is swept in its own transaction: one ramp’s failing guardrail read records an error on that ramp and freezes only it, instead of aborting every due ramp in the workspace (#474).
+- A mandate’s `learning.experienceRamp` requires at least two steps, a first step below 100% and a guardrail, so a one-step `[100]` rollout no longer satisfies it (#475).
+- `experience.rollout_paused` is delivered from a durable pause row, so a `stopRollout` before the event sweep no longer drops the pause agents were waiting for (#476).
+- `experiences.stopRollout` pushes the stopped bundle to Cloudflare KV before it returns; the remaining delay is the worker’s isolate cache and KV propagation, now stated truthfully in the command and the docs instead of “at once” (#477).
 
 
 ## [0.10.0] - 2026-11-06
