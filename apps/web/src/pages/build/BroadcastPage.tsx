@@ -30,8 +30,16 @@ import { Identifier } from '../../ui/Identifier';
  * pill, consequence summary, Sending panel and context panel; `artifacts.get` and the pending
  * approvals read still come from the artifact page. The primary action is chosen by the runtime
  * state before the latest draft state, and the tabs live in the URL.
+ *
+ * One broadcast's page state (the tab and the retained `broadcasts.status`) belongs to one id:
+ * the route keys by path, not by parameter, so this wrapper remounts on an id change (#485). An
+ * explicit `?tab=` is read again by the fresh instance.
  */
-export default function BroadcastPage({ params }: { params: Record<string, string> }) {
+export default function BroadcastPage(props: { params: Record<string, string> }) {
+  return <BroadcastPageForId key={props.params.id} {...props} />;
+}
+
+function BroadcastPageForId({ params }: { params: Record<string, string> }) {
   const id = params.id;
   const { can } = useWorkspace();
   const canRead = can('artifacts:read');
@@ -246,7 +254,7 @@ export default function BroadcastPage({ params }: { params: Record<string, strin
             artifact: ctx.artifact,
             run: status.data?.run ?? null,
             statusError: status.error,
-            dirty: ctx.dirty,
+                  dirty: ctx.dirty,
             readOnly: ctx.readOnly,
             canSubmit: can('artifacts:publish') && (state === 'draft' || state === 'rejected') && !ctx.dirty && !pendingBlocked,
             directPublish: ctx.directPublish,
