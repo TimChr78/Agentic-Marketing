@@ -54,5 +54,5 @@ RUN apt-get update \
 RUN mkdir -p /backups && chown node:node /backups
 USER node
 EXPOSE 3000
-HEALTHCHECK --interval=15s --timeout=3s CMD node -e "fetch('http://localhost:3000/readyz').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+HEALTHCHECK --interval=15s --timeout=3s --start-period=120s CMD node -e "fetch('http://localhost:3000/readyz').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
 CMD ["pnpm", "--filter", "@agentic-marketing/server", "start"]

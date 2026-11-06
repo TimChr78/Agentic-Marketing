@@ -19,7 +19,7 @@ import {
   broadcastSubtitleOf,
   filterForParam,
 } from '../../features/broadcasts/listView';
-import { useArtifactNames } from '../../features/broadcasts/names';
+import { invalidateArtifactNames, useArtifactNames } from '../../features/broadcasts/names';
 import { Button, formatDateTime, Select, Skeleton } from '../../ui';
 import { Identifier } from '../../ui/Identifier';
 import { ListPage, type PageNotice, type PageReadState } from '../../ui/ListPage';
@@ -108,6 +108,9 @@ export default function BroadcastsPage() {
   const clearFilter = () => changeFilter('all');
 
   const refresh = () => {
+    // Reference names outlive a list response by design; Refresh retries them too (#459).
+    invalidateArtifactNames();
+    void segments.reload();
     if (activePaging.index === 0) void list.reload();
     else setPaging(firstPage(filter.param));
   };

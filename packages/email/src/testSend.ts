@@ -214,7 +214,7 @@ export async function sendTestMessages(ctx: CommandContext, opts: TestSendOption
         });
         await ctx.tx
           .update(schema.messages)
-          .set({ status: 'sent', reason: null, providerMessageId, updatedAt: new Date() })
+          .set({ status: 'sent', reason: null, providerMessageId, sentAt: new Date(), updatedAt: new Date() })
           .where(eq(schema.messages.id, message.id));
         messages.push({ email, messageId: message.id, status: 'sent', reason: null, subject });
       } catch (e) {

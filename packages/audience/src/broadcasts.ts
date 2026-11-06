@@ -1012,8 +1012,19 @@ export const cancelBroadcast = defineCommand({
   output: z.object({ status: z.literal('cancelled'), queued: z.number() }),
   permission: 'messages:send',
   effect: 'write',
-  actionClass: 'draft',
+  // Stopping a live send is an action on that send, not a draft edit (#468): ownership and conflict
+  // coordination, guardian caps and a propose-only workspace all apply, and a person must decide
+  // when they block it because cancelling cannot be undone.
+  actionClass: 'send.broadcast',
   target: (i) => i.artifactId,
+  impact: async (input, ctx) => {
+    const { artifact } = await definition(ctx.tx, input.artifactId);
+    return {
+      reversible: false,
+      summary: `cancel broadcast ${artifact.id}`,
+      touches: { artifacts: [{ id: artifact.id, type: 'broadcast' }] },
+    };
+  },
   handler: async (input, ctx) => {
     const { artifact, version, def } = await definition(ctx.tx, input.artifactId);
     const [r] = await ctx.tx

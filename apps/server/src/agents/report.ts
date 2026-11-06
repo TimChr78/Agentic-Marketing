@@ -4,7 +4,7 @@ import type { AgentOutcomes } from '@agentic-marketing/commands';
 import { schema, type Tx } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
 import { computeJourneyHoldout } from '@agentic-marketing/journeys';
-import { and, eq, gte, lt } from 'drizzle-orm';
+import { and, eq, gte, inArray, lt } from 'drizzle-orm';
 
 // What an agent's actions led to (ADR-0016 §6, #310): the broadcasts it published and the direct
 // messages it sent, measured on the metric layer and the message events, the journeys it
@@ -12,6 +12,8 @@ import { and, eq, gte, lt } from 'drizzle-orm';
 
 type Range = { from: Date; to: Date };
 const EMAIL_MEASURES = ['email.sent', 'email.opened', 'email.clicked', 'email.unsubscribed', 'email.complained', 'email.bounced'] as const;
+
+type RanAction = { actionClass: string; target: string | null; impact: Record<string, unknown> | null };
 
 export async function agentOutcomes(
   deps: { tx: Tx; events: EventStore; workspaceId: string },
@@ -24,6 +26,52 @@ export async function agentOutcomes(
     .select({ actionClass: a.actionClass, target: a.target, impact: a.impact })
     .from(a)
     .where(and(eq(a.agentId, agentId), eq(a.decision, 'allow'), eq(a.ok, true), gte(a.at, range.from), lt(a.at, range.to)));
+  return outcomesFromRan(deps, range, goals, ran);
+}
+
+/**
+ * The outcomes of several agents (#489), reading the action ledger once instead of once per agent.
+ * The metric-layer queries that follow stay per agent: they are bounded by the compare cap.
+ */
+export async function agentOutcomesMany(
+  deps: { tx: Tx; events: EventStore; workspaceId: string },
+  agents: { agentId: string; goals: { measure: string; target?: number; direction: 'up' | 'down' }[] }[],
+  range: Range,
+): Promise<Map<string, AgentOutcomes>> {
+  const out = new Map<string, AgentOutcomes>();
+  if (!agents.length) return out;
+  const a = schema.agentActions;
+  const rows = await deps.tx
+    .select({ agentId: a.agentId, actionClass: a.actionClass, target: a.target, impact: a.impact })
+    .from(a)
+    .where(
+      and(
+        inArray(
+          a.agentId,
+          agents.map((x) => x.agentId),
+        ),
+        eq(a.decision, 'allow'),
+        eq(a.ok, true),
+        gte(a.at, range.from),
+        lt(a.at, range.to),
+      ),
+    );
+  const byAgent = new Map<string, RanAction[]>();
+  for (const r of rows) {
+    const list = byAgent.get(r.agentId) ?? [];
+    list.push({ actionClass: r.actionClass, target: r.target, impact: r.impact });
+    byAgent.set(r.agentId, list);
+  }
+  for (const { agentId, goals } of agents) out.set(agentId, await outcomesFromRan(deps, range, goals, byAgent.get(agentId) ?? []));
+  return out;
+}
+
+async function outcomesFromRan(
+  deps: { tx: Tx; events: EventStore; workspaceId: string },
+  range: Range,
+  goals: { measure: string; target?: number; direction: 'up' | 'down' }[],
+  ran: RanAction[],
+): Promise<AgentOutcomes> {
   const ids = (prefix: string) => [...new Set(ran.flatMap((r) => (r.target ?? '').split(',')).filter((id) => id.startsWith(prefix)))];
   const broadcasts = ids('bct_');
   // Journey ids use the artifact type's prefix (#322).
@@ -32,7 +80,7 @@ export async function agentOutcomes(
     ...new Set(
       ran
         .filter((r) => r.actionClass === 'send.direct' && typeof r.impact?.messageId === 'string')
-        .map((r) => r.impact.messageId as string),
+        .map((r) => r.impact?.messageId as string),
     ),
   ];
 

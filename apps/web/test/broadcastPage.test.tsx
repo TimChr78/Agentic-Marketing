@@ -12,6 +12,7 @@ const h = vi.hoisted(() => ({
 }));
 
 const id = `bct_${'a'.repeat(32)}`;
+const idB = `bct_${'d'.repeat(32)}`;
 const seg = `seg_${'b'.repeat(32)}`;
 const tpl = `eml_${'c'.repeat(32)}`;
 
@@ -65,6 +66,23 @@ const status = {
   stage: null,
 };
 
+const artifactB = {
+  ...artifact,
+  id: idB,
+  name: 'Second broadcast',
+};
+
+const statusB = {
+  ...status,
+  run: {
+    ...status.run,
+    status: 'running',
+    version: 1,
+    finishedAt: null,
+  },
+  delivery: { queued: 100 },
+};
+
 const analytics = {
   columns: [
     { name: 'email.sent', kind: 'measure', unit: 'count' },
@@ -93,6 +111,7 @@ vi.mock('../src/app/api', async (importOriginal) => {
       call: vi.fn(async (name: string, input: { artifactId?: string; status?: string }) => {
         h.calls.push({ name, input });
         if (name === 'artifacts.get') {
+          if (input.artifactId === idB) return artifactB;
           if (input.artifactId === tpl)
             return {
               ...artifact,
@@ -131,7 +150,10 @@ vi.mock('../src/app/api', async (importOriginal) => {
             nextCursor: null,
           };
         }
-        if (name === 'broadcasts.status') return (h.status as typeof status | null) ?? status;
+        if (name === 'broadcasts.status') {
+          if (input.artifactId === idB) return statusB;
+          return (h.status as typeof status | null) ?? status;
+        }
         if (name === 'approvals.list') return (await h.approvals?.()) ?? { approvals: [] };
         if (name === 'campaigns.of') return { campaigns: [] };
         if (name === 'purposes.list') return { purposes: [] };
@@ -225,6 +247,55 @@ describe('BroadcastPage (#448)', () => {
       finishedAt: null,
     },
   };
+
+  it('resets the tab and run state when the broadcast id changes (#485)', async () => {
+    const { rerender } = render(
+      <ToastProvider>
+        <BroadcastPage params={{ id }} />
+      </ToastProvider>,
+    );
+    await screen.findByRole('heading', { level: 1, name: 'Lifecycle playbook' });
+    await waitFor(() => expect(screen.getByRole('tab', { name: 'Report' }).getAttribute('aria-selected')).toBe('true'));
+
+    // A person chooses a tab on A; it must not follow them to B.
+    fireEvent.click(screen.getByRole('tab', { name: 'Content' }));
+    expect(location.search).toBe('?tab=content');
+
+    // Open B from Recents: no ?tab, and B is running, so its default is Sending.
+    history.replaceState(null, '', `/build/broadcasts/${idB}`);
+    window.dispatchEvent(new PopStateEvent('popstate'));
+    rerender(
+      <ToastProvider>
+        <BroadcastPage params={{ id: idB }} />
+      </ToastProvider>,
+    );
+    expect(await screen.findByRole('heading', { level: 1, name: 'Second broadcast' })).toBeTruthy();
+    await waitFor(() => expect(screen.getByRole('tab', { name: 'Sending' }).getAttribute('aria-selected')).toBe('true'));
+
+    // An explicit ?tab= still wins on the new broadcast.
+    fireEvent.click(screen.getByRole('tab', { name: 'Versions' }));
+    expect(location.search).toBe('?tab=versions');
+  });
+
+  it('waits for the send state before offering publish or submit (#484)', async () => {
+    h.artifact = draftArtifact;
+    let release!: (value: unknown) => void;
+    h.status = new Promise((resolve) => {
+      release = resolve;
+    });
+    h.approvals = async () => ({ approvals: [] });
+    renderPage();
+    await screen.findByRole('heading', { level: 1, name: 'Lifecycle playbook' });
+
+    // The status read is in flight: an unknown run is not a draft with no run.
+    expect(screen.queryByRole('button', { name: 'Publish v2' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Submit for review' })).toBeNull();
+    const checking = screen.getByRole('button', { name: 'Checking send state' }) as HTMLButtonElement;
+    expect(checking.disabled).toBe(true);
+
+    await act(async () => release(notRunStatus));
+    expect(await screen.findByRole('button', { name: 'Publish v2' })).toBeTruthy();
+  });
 
   it('shows a retryable error above the tabs and disables submission when the pending read fails', async () => {
     h.artifact = draftArtifact;

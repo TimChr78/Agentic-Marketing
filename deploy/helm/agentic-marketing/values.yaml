@@ -46,6 +46,8 @@ config:
   EMAIL_TRACK_CLICKS: "true"
   RETENTION_UNCONFIRMED_DAYS: "30"
   RETENTION_LOG_DAYS: "180"
+  RETENTION_HOSTED_AGENT_RUN_DAYS: "90"
+  WORKSPACE_QUOTA: "10"
   EGRESS_ALLOWED_HOSTS: ""
   OTEL_EXPORTER_OTLP_ENDPOINT: ""
 
@@ -92,9 +94,15 @@ ingress:
   className: ""
   annotations: {}
   host: marketing.example.com
+  # Every verified brand domain serves subscriber-facing links. Kubernetes only routes a host that
+  # an Ingress names, so list each brand host here (the chart renders the same path split for each).
+  # Add the same hosts to ingress.tls[].hosts so their certificates cover them.
+  extraHosts: []
+  #  - links.martechsignal.com
+  #  - second.example.com
   tls: []
   #  - secretName: marketing-tls
-  #    hosts: [marketing.example.com]
+  #    hosts: [marketing.example.com, links.martechsignal.com]
 
 podDisruptionBudget:
   enabled: true

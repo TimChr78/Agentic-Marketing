@@ -447,6 +447,8 @@ export const setOwner = defineCommand({
   humansOnly: true,
   target: (i) => i.artifactId,
   handler: async (input, ctx) => {
+    // Locked before the read and the write, in the same id order as coordination checks (#471).
+    await lockArtifacts(ctx, [input.artifactId]);
     const a = await loadArtifact(ctx, input.artifactId);
     if (input.ownerAgentId) {
       const [agent] = await ctx.tx
@@ -534,7 +536,14 @@ export const updateDraft = defineCommand({
   actionClass: 'draft',
   target: (i) => i.artifactId,
   handler: async (input, ctx) => {
-    const a = await loadArtifact(ctx, input.artifactId);
+    // Locked for the hash check and the write (#455): two renewals (or a renewal and an edit) that
+    // read the same latest version must not both pass `expectedContentHash` and write over each other.
+    const [a] = await ctx.tx
+      .select()
+      .from(schema.artifacts)
+      .where(and(eq(schema.artifacts.workspaceId, ctx.principal.workspaceId), eq(schema.artifacts.id, input.artifactId)))
+      .for('update');
+    if (!a) throw new AppError('not_found', `Artifact ${input.artifactId} does not exist in this workspace.`);
     refuseAgentsFor(ctx, a.type);
     const content = await validateContent(a.type as ArtifactType, input.content, 'draft');
     const warnings = contentWarnings(a.type as ArtifactType, content);
@@ -809,6 +818,17 @@ export const discardDraft = defineCommand({
   permission: 'artifacts:write',
   effect: 'write',
   actionClass: 'draft',
+  // Discarding its own draft is a draft edit; discarding a draft on an artifact it does not own is
+  // a change another agent must coordinate (#468, #426), so ownership and conflicts apply.
+  impact: async (input, ctx) => {
+    const a = await loadArtifact(ctx, input.artifactId);
+    const foreign = ctx.principal.type === 'agent' && a.ownerAgentId !== ctx.principal.agent?.id;
+    return {
+      actionClass: foreign ? 'content.publish' : 'draft',
+      summary: `discard the draft of ${a.id}`,
+      touches: { artifacts: [{ id: a.id, type: a.type }] },
+    };
+  },
   target: (i) => i.artifactId,
   handler: async (input, ctx) => {
     const a = await loadArtifact(ctx, input.artifactId);
@@ -1746,10 +1766,13 @@ export async function runHeldChange(
     return { status: 'needs_person', reason: problem };
   }
   const published: { id: string; type: string; previousVersion: number | null; version: number }[] = [];
+  // The scheduler is a system user, but this publish is the agent's (#454): publish hooks must see
+  // the original requester so a person's stop on a ramp stays in force.
+  const publishCtx: CommandContext = agent ? { ...ctx, onBehalfOf: { type: 'agent', agentId: agent.id } } : ctx;
   for (const m of members) {
     const artifact = await loadArtifact(ctx, m.artifactId);
     published.push({ id: artifact.id, type: artifact.type, previousVersion: artifact.publishedVersion, version: m.version });
-    await publishVersion(ctx, m.artifactId, m.version);
+    await publishVersion(publishCtx, m.artifactId, m.version);
   }
   // The hold row records the decision; this one row records what ran, for the counters and agents.undo.
   if (agent) await recordHeldExecution(ctx, agent.id, held, published);

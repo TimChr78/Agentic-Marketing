@@ -57,9 +57,9 @@ describe('workspace.create (#190)', () => {
     expect(brand.you.role).toBe('owner');
     expect(brand.domains).toHaveLength(1);
     expect(brand.domains[0]).toMatchObject({ host: 'second.example', status: 'pending', isPrimary: true });
-    // A pending domain does not supply links yet, and a draft brand artifact is not public.
+    // A pending domain does not supply links yet, and is not shown as the brand's live domain (#465).
     expect(brand.linksUrl).toBe('https://links.example');
-    expect(brand.brand).toEqual({ siteName: 'Second brand', logoUrl: null, primaryDomain: 'second.example' });
+    expect(brand.brand).toEqual({ siteName: 'Second brand', logoUrl: null, primaryDomain: null });
 
     // The draft artifact and the membership are there, as the workspace creation promise says.
     const { rows } = await t.srv.db.admin.query<{ type: string; state: string; role: string }>(
@@ -129,7 +129,7 @@ describe('workspace.create (#190)', () => {
       t.api(owner, wsA).call('workspace.create', { name: 'Duplicate brand', primaryDomain: 'second.example', pathPrefix: '/am' }),
     );
     expect(duplicate.status).toBe(400);
-    expect(duplicate.message).toMatch(/already registered/i);
+    expect(duplicate.message).toMatch(/another workspace|already registered/i);
     const after = await t.srv.db.admin.query<{ workspaces: string; memberships: string; brands: string; domains: string }>(
       `SELECT
          (SELECT count(*) FROM workspaces)::text AS workspaces,

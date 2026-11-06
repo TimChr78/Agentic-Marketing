@@ -53,6 +53,8 @@ The app sets baseline headers on every response: `X-Content-Type-Options: nosnif
 
 Every service has `restart: unless-stopped`, so the stack comes back after a host reboot or a Docker daemon restart. NATS is health-checked through its monitoring endpoint on 8222 (the Alpine image, which has `wget`), Valkey through `valkey-cli ping`; the app waits for Postgres, ClickHouse, NATS and Valkey to be healthy before it starts.
 
+The app image's healthcheck probes `/readyz` every 15 s and ignores the first 120 s (`--start-period=120s`): the pre-upgrade backup and migrations run before the server listens, so they must not count as failed probes. An upgrade on a large install can take longer than two minutes; start it with `docker compose up -d` rather than `docker compose up --wait` when you expect slow migrations, then follow `docker compose ps` and `docker compose logs -f app` until the container is healthy.
+
 ## Upgrading
 
 Follow [UPGRADING.md](../../UPGRADING.md). The Compose-specific part: unpack the new bundle and copy its `docker-compose.yml` over yours, keep `.env` and `compose.override.yaml`, and check the configuration before you change `AM_VERSION` in `.env`:

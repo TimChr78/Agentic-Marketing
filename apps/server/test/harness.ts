@@ -121,7 +121,11 @@ export async function connectAgent(BASE: string, u: User, permissions: string[],
       const chosen = await fetch(`${BASE}/api/oauth/workspace`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', origin: BASE, cookie: cookieOf(signIn) },
-        body: JSON.stringify({ workspaceId, scope: grantFrom(next.searchParams.get('scope') ?? '', permissions) }),
+        body: JSON.stringify({
+          workspaceId,
+          scope: grantFrom(next.searchParams.get('scope') ?? '', permissions),
+          oauthQuery: next.search.slice(1),
+        }),
       });
       if (!chosen.ok) throw new Error(`workspace choice failed: ${await chosen.text()}`);
     }

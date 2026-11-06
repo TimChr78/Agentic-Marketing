@@ -1,7 +1,7 @@
 import { type CommandContext, defineCommand } from '@agentic-marketing/commands';
 import { AppError, newId } from '@agentic-marketing/core';
-import { DomainError, normalizeDomainInput, originForHost, schema } from '@agentic-marketing/db';
-import { asc, desc, eq } from 'drizzle-orm';
+import { type Db, DomainError, normalizeDomainInput, normalizeHost, originForHost, schema } from '@agentic-marketing/db';
+import { and, asc, desc, eq, isNull, sql } from 'drizzle-orm';
 import { z } from 'zod';
 
 // Brand domains (#186): the hostnames a workspace's public links answer on. A brand is a
@@ -9,6 +9,18 @@ import { z } from 'zod';
 // table across workspaces, while these commands edit only the caller's rows under RLS.
 
 type DomainRow = typeof schema.workspaceDomains.$inferSelect;
+
+declare module '@agentic-marketing/commands' {
+  interface Services {
+    /**
+     * Normalised hostnames reserved installation-wide: the admin host (PUBLIC_URL) and the fallback
+     * links host (PUBLIC_LINKS_URL). Wired by the server (#480).
+     */
+    reservedDomainHosts?: string[];
+    /** The pool itself, for installation-wide host claims that RLS would hide (#462, #467). */
+    db?: Db;
+  }
+}
 
 const DomainStatus = z.enum(['pending', 'verified']);
 
@@ -67,6 +79,23 @@ function invalidateResolver(ctx: CommandContext) {
   else invalidate();
 }
 
+/**
+ * A successful verification switches Host checking on for the installation and keeps it on (#463).
+ * The setting is written in the verification's own transaction, so a crash can never leave a
+ * verified row without the policy it implies (or the policy without the row). The resolver cache is
+ * dropped once that transaction commits.
+ */
+async function activateDomainRouting(ctx: CommandContext) {
+  await ctx.tx
+    .insert(schema.installationSettings)
+    .values({ key: 'domain_routing_active', value: { active: true } })
+    .onConflictDoUpdate({
+      target: schema.installationSettings.key,
+      set: { value: { active: true }, updatedAt: new Date() },
+    });
+  invalidateResolver(ctx);
+}
+
 /** Drizzle wraps driver errors; the Postgres code and constraint sit on the cause chain. */
 function postgresError(err: unknown): { code?: string; constraint?: string } {
   let current = err as { code?: string; constraint?: string; cause?: unknown } | undefined;
@@ -111,6 +140,125 @@ const normalized = (input: { host: string; pathPrefix?: string | null }) => {
   }
 };
 
+/** The admin host and fallback links host are installation-wide and belong to no workspace (#480). */
+function reservedHosts(ctx: CommandContext): Set<string> {
+  const hosts = new Set<string>(ctx.services.reservedDomainHosts ?? []);
+  for (const value of [ctx.services.linksUrl, ctx.services.publicUrl]) {
+    if (!value) continue;
+    try {
+      hosts.add(normalizeHost(new URL(value).hostname));
+    } catch {
+      // A malformed setting is the server's problem, not this command's: skip it.
+    }
+  }
+  return hosts;
+}
+
+export function assertHostRegistrable(ctx: CommandContext, target: { host: string }) {
+  if (reservedHosts(ctx).has(target.host))
+    throw new AppError(
+      'invalid_input',
+      `The host ${target.host} is reserved for this installation's admin or fallback links and cannot be registered as a brand domain. Use a hostname that serves only this brand.`,
+    );
+}
+
+/** How long an unverified claim holds its hostname before another workspace may reclaim it (#467). */
+export const PENDING_CLAIM_DAYS = 7;
+const PENDING_CLAIM_MS = PENDING_CLAIM_DAYS * 24 * 60 * 60 * 1000;
+
+interface HostClaim {
+  workspaceId: string;
+  status: string;
+  createdAt: Date;
+}
+
+function adminDb(ctx: CommandContext) {
+  const db = ctx.services.db;
+  if (!db) throw new AppError('conflict', 'Domain registration needs the server database service.');
+  return db;
+}
+
+/**
+ * One transaction-scoped advisory lock per normalised hostname (#462, #467). Claims, reclamation
+ * and verification all take it before they read the installation-wide rows or write, so two
+ * workspaces cannot both pass the ownership check at different prefixes and insert, and a claim
+ * cannot land between a verification's ownership check and its update. The lock is released by
+ * COMMIT or ROLLBACK, so a failed command never keeps it.
+ */
+async function lockHostname(ctx: CommandContext, host: string) {
+  await ctx.tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext('am.domain'), hashtext(${host}))`);
+}
+
+/** Every row on a hostname, across workspaces; resolution is installation-wide, so are claims. */
+async function hostClaims(ctx: CommandContext, host: string): Promise<HostClaim[]> {
+  const { rows } = await adminDb(ctx).admin.query<HostClaim>(
+    `SELECT workspace_id AS "workspaceId", status, created_at AS "createdAt" FROM workspace_domains WHERE host = $1`,
+    [host],
+  );
+  return rows;
+}
+
+const claimExpired = (claim: HostClaim) => claim.status === 'pending' && claim.createdAt.getTime() <= Date.now() - PENDING_CLAIM_MS;
+
+/**
+ * A hostname belongs to one workspace (#462, #479): another workspace's verified row blocks it
+ * forever, and another workspace's pending claim blocks it until that claim expires (#467).
+ */
+async function assertHostNotClaimed(ctx: CommandContext, target: { host: string }) {
+  const foreign = (await hostClaims(ctx, target.host)).filter((claim) => claim.workspaceId !== ctx.principal.workspaceId);
+  const verified = foreign.find((claim) => claim.status === 'verified');
+  if (verified)
+    throw new AppError(
+      'invalid_input',
+      `The host ${target.host} is verified by another workspace. A hostname belongs to one brand; choose a different host.`,
+    );
+  const pending = foreign.find((claim) => !claimExpired(claim));
+  if (pending)
+    throw new AppError(
+      'invalid_input',
+      `The host ${target.host} is claimed by another workspace. A pending claim can be reclaimed after ${PENDING_CLAIM_DAYS} days, or choose a different host.`,
+    );
+}
+
+/**
+ * Deletes expired pending claims on the whole hostname, not just one prefix, so a workspace can
+ * take over a hostname that was claimed and abandoned (#467). Deleting every prefix matters: an
+ * expired claim at another prefix would otherwise stay in the table and could be verified later,
+ * after the host has moved to another workspace. Verified rows never expire. `excludeId` keeps the
+ * row an update is about to change, so moving its prefix cannot delete it.
+ */
+export async function reclaimExpiredClaims(ctx: CommandContext, target: { host: string }, excludeId?: string) {
+  const db = adminDb(ctx);
+  const cutoff = new Date(Date.now() - PENDING_CLAIM_MS);
+  await db.admin.query(
+    `DELETE FROM workspace_domains
+      WHERE host = $1 AND status = 'pending' AND created_at <= $2
+        AND ($3::text IS NULL OR id <> $3)`,
+    [target.host, cutoff, excludeId ?? null],
+  );
+}
+
+/** The checks every new or moved domain runs before it can hold a hostname. */
+export async function assertDomainAvailable(
+  ctx: CommandContext,
+  target: { host: string; pathPrefix: string | null },
+  options: { excludeId?: string } = {},
+) {
+  assertHostRegistrable(ctx, target);
+  await lockHostname(ctx, target.host);
+  await reclaimExpiredClaims(ctx, target, options.excludeId);
+  await assertHostNotClaimed(ctx, target);
+}
+
+/** Verification re-checks ownership: the other workspace may have verified the host since (#462). */
+export async function assertDomainVerifiable(ctx: CommandContext, existing: { id: string; host: string; pathPrefix: string | null }) {
+  assertHostRegistrable(ctx, existing);
+  await lockHostname(ctx, existing.host);
+  // Purge other workspaces' abandoned claims on this host before deciding whether it is free.
+  await reclaimExpiredClaims(ctx, existing, existing.id);
+  await assertHostNotClaimed(ctx, existing);
+}
+
 export const listWorkspaceDomains = defineCommand({
   name: 'workspace.domains.list',
   title: 'Brand domains',
@@ -144,7 +292,6 @@ export const addWorkspaceDomain = defineCommand({
       host: z.string().trim().min(1).describe('Hostname, e.g. links.example.com or https://links.example.com'),
       pathPrefix: z.string().nullable().optional().describe('Optional path prefix such as /am; null or "/" means the whole host'),
       isPrimary: z.boolean().optional().describe('Make this the workspace’s primary domain (links URL once verified)'),
-      status: DomainStatus.optional().describe('pending (default) or verified; prefer workspace.domains.verify'),
     })
     .strict(),
   output: z.object({ domain: DomainViewSchema }),
@@ -154,9 +301,8 @@ export const addWorkspaceDomain = defineCommand({
   target: (input) => input.host,
   handler: async (input, ctx) => {
     const target = normalized(input);
+    await assertDomainAvailable(ctx, target);
     if (input.isPrimary) await assertNoOtherPrimary(ctx);
-    const now = new Date();
-    const status = input.status ?? 'pending';
     try {
       const [row] = await ctx.tx
         .insert(schema.workspaceDomains)
@@ -166,9 +312,9 @@ export const addWorkspaceDomain = defineCommand({
           host: target.host,
           pathPrefix: target.pathPrefix,
           isPrimary: input.isPrimary ?? false,
-          status,
-          verificationToken: status === 'verified' ? null : newId('wdv'),
-          verifiedAt: status === 'verified' ? now : null,
+          status: 'pending',
+          verificationToken: newId('wdv'),
+          verifiedAt: null,
           createdBy: ctx.principal.userId,
         })
         .returning();
@@ -184,19 +330,18 @@ export const updateWorkspaceDomain = defineCommand({
   name: 'workspace.domains.update',
   title: 'Update a brand domain',
   description:
-    'Admins: change a registered domain’s hostname, path prefix, primary flag or verification status. Changing the host or prefix resets a verified domain to pending, so verify it again. Only one primary domain is allowed; pending domains do not serve links.',
+    'Admins: change a registered domain’s hostname, path prefix or primary flag. Changing the host or prefix resets a verified domain to pending, so verify it again. Only one primary domain is allowed; pending domains do not serve links. Verification is only ever done with workspace.domains.verify.',
   input: z
     .object({
       id: z.string().min(1),
       host: z.string().trim().min(1).optional(),
       pathPrefix: z.string().nullable().optional().describe('null clears the prefix; omit to keep it'),
       isPrimary: z.boolean().optional(),
-      status: DomainStatus.optional().describe('pending or verified; prefer workspace.domains.verify'),
     })
     .strict()
     .refine(
-      (input) => input.host !== undefined || input.pathPrefix !== undefined || input.isPrimary !== undefined || input.status !== undefined,
-      'Give a host, pathPrefix, isPrimary or status to change.',
+      (input) => input.host !== undefined || input.pathPrefix !== undefined || input.isPrimary !== undefined,
+      'Give a host, pathPrefix or isPrimary to change.',
     ),
   output: z.object({ domain: DomainViewSchema }),
   permission: 'workspace:admin',
@@ -213,6 +358,7 @@ export const updateWorkspaceDomain = defineCommand({
         host: input.host ?? existing.host,
         pathPrefix: input.pathPrefix === undefined ? existing.pathPrefix : input.pathPrefix,
       });
+      await assertDomainAvailable(ctx, target, { excludeId: existing.id });
       changes.host = target.host;
       changes.pathPrefix = target.pathPrefix;
     }
@@ -220,11 +366,7 @@ export const updateWorkspaceDomain = defineCommand({
       if (input.isPrimary) await assertNoOtherPrimary(ctx, existing.id);
       changes.isPrimary = input.isPrimary;
     }
-    if (input.status !== undefined) {
-      changes.status = input.status;
-      changes.verifiedAt = input.status === 'verified' ? new Date() : null;
-      if (input.status === 'pending' && !existing.verificationToken) changes.verificationToken = newId('wdv');
-    } else if (changes.host !== undefined || changes.pathPrefix !== undefined) {
+    if (changes.host !== undefined || changes.pathPrefix !== undefined) {
       // A domain that now points somewhere else is no longer verified at the old name.
       changes.status = 'pending';
       changes.verifiedAt = null;
@@ -256,37 +398,66 @@ export const verifyWorkspaceDomain = defineCommand({
   handler: async (input, ctx) => {
     const [existing] = await ctx.tx.select().from(schema.workspaceDomains).where(eq(schema.workspaceDomains.id, input.id)).limit(1);
     if (!existing) throw new AppError('not_found', 'This domain is not registered in this workspace.');
+    await assertDomainVerifiable(ctx, existing);
     const token = existing.verificationToken ?? newId('wdv');
     const url = `${originForHost(existing.host)}${existing.pathPrefix ?? ''}/.well-known/am-domain/${encodeURIComponent(token)}`;
-    const fetchChallenge =
-      ctx.services.fetchDomainChallenge ??
-      (async (challenge: string) => {
-        const res = await fetch(challenge, { signal: AbortSignal.timeout(5000), redirect: 'manual' });
-        return { status: res.status, body: await res.text() };
-      });
+    // Re-verifying an already verified domain changes nothing; still persist the routing policy,
+    // which also repairs an install that verified under 0.10.0 before the setting existed (#463).
+    if (existing.status === 'verified') {
+      await activateDomainRouting(ctx);
+      return { domain: domainView(existing), checkedUrl: url };
+    }
+    const fetchChallenge = ctx.services.fetchDomainChallenge;
+    if (!fetchChallenge)
+      throw new AppError(
+        'conflict',
+        'Domain verification needs the server’s egress-guarded fetch. Use workspace.domains.verify through the server.',
+      );
     let checked: { status: number; body: string };
     try {
       checked = await fetchChallenge(url);
-    } catch (err) {
+    } catch {
+      // Reachability is deliberately not repeated: a private address, DNS failure or timeout must
+      // not become an oracle against the server's network (#466).
       throw new AppError(
         'invalid_input',
-        `Could not reach ${url}: ${(err as Error).message}. Point the hostname at this installation (and its public listener) and try again.`,
+        'Could not reach the domain’s verification challenge. Point the hostname at this installation (and its public listener) and try again.',
       );
     }
     if (checked.status !== 200)
       throw new AppError(
         'invalid_input',
-        `${url} answered HTTP ${checked.status} instead of returning the verification token. Check that the hostname reaches this installation.`,
+        'The domain’s verification challenge did not return the expected token. Check that the hostname reaches this installation and that public paths are proxied unchanged.',
       );
     if (checked.body.trim() !== token)
-      throw new AppError('invalid_input', `${url} did not return this domain’s verification token. Another site may answer that host.`);
+      throw new AppError('invalid_input', 'The domain did not return this domain’s verification token. Another site may answer that host.');
+    // The challenge fetch can take seconds. Condition the write on the row we checked: if an
+    // update replaced its host, prefix or token meanwhile, this must not verify the replacement.
+    const sameToken =
+      existing.verificationToken === null
+        ? isNull(schema.workspaceDomains.verificationToken)
+        : eq(schema.workspaceDomains.verificationToken, existing.verificationToken);
+    const samePrefix =
+      existing.pathPrefix === null
+        ? isNull(schema.workspaceDomains.pathPrefix)
+        : eq(schema.workspaceDomains.pathPrefix, existing.pathPrefix);
     const [row] = await ctx.tx
       .update(schema.workspaceDomains)
       .set({ status: 'verified', verifiedAt: new Date(), verificationToken: token })
-      .where(eq(schema.workspaceDomains.id, input.id))
+      .where(
+        and(
+          eq(schema.workspaceDomains.id, input.id),
+          eq(schema.workspaceDomains.host, existing.host),
+          samePrefix,
+          sameToken,
+          eq(schema.workspaceDomains.status, 'pending'),
+        ),
+      )
       .returning();
-    if (!row) throw new AppError('not_found', 'This domain is not registered in this workspace.');
-    invalidateResolver(ctx);
+    if (!row) throw new AppError('conflict', 'The domain changed during verification. Reload it and try again.');
+    // Persist the routing policy in this same transaction (#463), so a crash cannot separate it
+    // from the verification that switched it on.
+    await activateDomainRouting(ctx);
     return { domain: domainView(row), checkedUrl: url };
   },
 });

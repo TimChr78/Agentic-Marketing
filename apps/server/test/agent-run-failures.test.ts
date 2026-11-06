@@ -1,3 +1,4 @@
+import { runRetentionOnce } from '@agentic-marketing/audience';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { startTestServer, testPort, type User } from './harness';
 
@@ -116,5 +117,27 @@ describe('agents.runFailures (B2)', () => {
 
   it('rejects a malformed cursor instead of restarting', async () => {
     await expect(failures({ since: '2026-09-01T00:00:00Z', cursor: 'nope' })).rejects.toMatchObject({ code: 'invalid_input' });
+  });
+
+  it('has indexes for the failure queue and contact-pressure count (#488)', async () => {
+    const indexes = await t.srv.db.admin.query<{ indexname: string }>(
+      `SELECT indexname FROM pg_indexes
+       WHERE (tablename = 'hosted_agent_runs' AND indexname = 'hosted_agent_runs_status_started')
+          OR (tablename = 'messages' AND indexname = 'messages_agent_contact_count')`,
+    );
+    expect(indexes.rows.map((r) => r.indexname).sort()).toEqual(['hosted_agent_runs_status_started', 'messages_agent_contact_count']);
+  });
+
+  it('removes finished hosted-agent runs past their retention (#488)', async () => {
+    const day = 86_400_000;
+    await insertRun(ws, 'hrn_00000000000000000000000000000012', digest, new Date(Date.now() - 120 * day).toISOString(), 'ok', null);
+    await insertRun(ws, 'hrn_00000000000000000000000000000013', digest, new Date(Date.now() - 10 * day).toISOString(), 'ok', null);
+    const removed = await runRetentionOnce({ db: t.srv.db, events: t.srv.events, ...t.srv.retention, hostedAgentRunDays: 90 });
+    expect(removed.hostedAgentRuns).toBeGreaterThanOrEqual(1);
+    const rows = await t.srv.db.admin.query<{ id: string }>(
+      `SELECT id FROM hosted_agent_runs WHERE workspace_id = $1 AND id IN ('hrn_00000000000000000000000000000012', 'hrn_00000000000000000000000000000013') ORDER BY id`,
+      [ws],
+    );
+    expect(rows.rows.map((r) => r.id)).toEqual(['hrn_00000000000000000000000000000013']);
   });
 });

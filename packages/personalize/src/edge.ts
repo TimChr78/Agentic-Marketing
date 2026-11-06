@@ -464,7 +464,7 @@ async function deleteWorkspaceCopies(kv: KvClient, ws: string, keys: string[]) {
 }
 
 /** One sync of one workspace: remote cleanup, the bundle if it changed, queued snapshots, and a slice of backfill. */
-export async function syncEdge(deps: EdgeDeps, ws: string) {
+export async function syncEdge(deps: EdgeDeps, ws: string, opts: { bundleOnly?: boolean } = {}) {
   // A session lock serializes replicas without holding a transaction open during HTTP. A fresh
   // configuration can still commit; generation fences below stop the old tick before it acks
   // work or replaces the new state. The next tick cleans any late writes to the old target.
@@ -476,7 +476,13 @@ export async function syncEdge(deps: EdgeDeps, ws: string) {
       `edge-sync:${ws}`,
     ]);
     locked = result.rows[0].locked;
-    if (locked) await syncEdgeLocked(deps, ws);
+    // A stop that gave up waiting for this lock commits its share 0 while our upload may still be
+    // in flight (#477); that upload can land after the stop. Republish to the same destination under
+    // the same lock (at most three attempts in all); if the destination moved or keeps changing, the
+    // next tick corrects it, so a stale bundle can outlive the stop by at most one tick.
+    let retry = locked ? await syncEdgeLocked(deps, ws, opts) : undefined;
+    for (let attempt = 1; retry && attempt < 3; attempt++)
+      retry = await syncEdgeLocked(deps, ws, { bundleOnly: true, expectDestination: retry.republishTo });
   } finally {
     if (locked) {
       try {
@@ -489,7 +495,11 @@ export async function syncEdge(deps: EdgeDeps, ws: string) {
   }
 }
 
-async function syncEdgeLocked(deps: EdgeDeps, ws: string) {
+async function syncEdgeLocked(
+  deps: EdgeDeps,
+  ws: string,
+  opts: { bundleOnly?: boolean; expectDestination?: string } = {},
+): Promise<{ republishTo: string } | undefined> {
   const state = await deps.db.withWorkspace(ws, async (tx) => {
     const [t] = await tx.select().from(schema.edgeTargets);
     if (!t) return null;
@@ -512,6 +522,9 @@ async function syncEdgeLocked(deps: EdgeDeps, ws: string) {
   });
   if (!state) return;
   const { t, bundle, sources, queued } = state;
+  // A republish retry (#477) only proceeds if the destination is still the one the stale upload
+  // went to and nothing is owed there; otherwise the next full tick does cleanup, then publication.
+  if (opts.expectDestination && (destination(t) !== opts.expectDestination || t.cleanupMode || (t.priorTarget ?? []).length)) return;
   const update = async (values: Partial<typeof schema.edgeTargets.$inferInsert>) => {
     const changed = await deps.db.withWorkspace(ws, (tx) =>
       tx
@@ -544,7 +557,11 @@ async function syncEdgeLocked(deps: EdgeDeps, ws: string) {
   const servesSnapshots = t.enabled && t.snapshots;
   const backfills = servesSnapshots && t.backfillCursor !== null;
   const staleReady = stale.some((p) => !p.nextAttemptAt || Date.parse(p.nextAttemptAt) <= Date.now());
-  if (!servesBundle && !queued && !backfills && !t.cleanupMode && !staleReady) return;
+  // A stop pushes only the bundle (#477): the owner is waiting for the kill switch, so skip every
+  // other slice of work this sync would do.
+  if (opts.bundleOnly) {
+    if (!servesBundle) return;
+  } else if (!servesBundle && !queued && !backfills && !t.cleanupMode && !staleReady) return;
   if (!t.secrets || !t.secretsKeyId) {
     await update({ lastError: 'No Cloudflare API token: the edge cannot be updated or cleaned up.', lastSyncAt: new Date() });
     return;
@@ -557,7 +574,7 @@ async function syncEdgeLocked(deps: EdgeDeps, ws: string) {
     // 0. Destinations we left: remove their copies, or keep them listed with the failure. The
     // current token may not reach another account; then only the operator can delete them.
     let staleError: string | null = null;
-    if (stale.length) {
+    if (stale.length && !opts.bundleOnly) {
       const keep: PriorEdgeTarget[] = [];
       for (const old of stale) {
         if (old.nextAttemptAt && Date.parse(old.nextAttemptAt) > Date.now()) {
@@ -584,7 +601,7 @@ async function syncEdgeLocked(deps: EdgeDeps, ws: string) {
     // 1. Finish a cleanup owed after serving was turned off, before any write. Until it succeeds the
     // mode stays set and the next sync retries; the status never reports a cleanup that did not run.
     let removedAll = false;
-    if (t.cleanupMode) {
+    if (t.cleanupMode && !opts.bundleOnly) {
       const mode = t.cleanupMode;
       if (mode === 'all') await deleteWorkspaceCopies(kv, ws, t.pushedKeys);
       else await deleteSnapshots(kv, ws);
@@ -592,19 +609,42 @@ async function syncEdgeLocked(deps: EdgeDeps, ws: string) {
       if (!(await update({ cleanupMode: null, ...(mode === 'all' ? { pushedKeys: [], bundleHash: null } : {}) }))) return;
     }
     // 2. Experiences, purposes and write keys. Never while serving is off.
+    // A stop can commit while this sync is in flight when it could not take the advisory lock in
+    // time. The stop bumps `generation` (and clears `bundleHash`) in the same transaction as the
+    // share, so compare that version under our lock: the bundle read before the stop must not be
+    // published after it (#477). The next tick reads the stopped share and publishes it.
+    const [fence] = await deps.db.withWorkspace(ws, (tx) =>
+      tx.select({ generation: schema.edgeTargets.generation }).from(schema.edgeTargets).where(eq(schema.edgeTargets.workspaceId, ws)),
+    );
+    if (!fence || fence.generation !== t.generation) return;
     if (t.enabled && (hash !== t.bundleHash || removedAll)) {
       const keys = entries.map((e) => e.key);
       // Reserve keys before uploading: configure must retain even a write that finishes after
       // the target moves. Its row lock observes this reservation and queues the old keys.
       if (!(await update({ pushedKeys: [...new Set([...t.pushedKeys, ...keys])] }))) return;
       await kv.put(entries);
+      // The upload is outside any transaction: a stop may have committed while it ran. If the
+      // generation moved but the destination is the same, what we just wrote there is stale and the
+      // caller republishes the current bundle under this lock. A moved destination is handled as
+      // before: this tick stops and the next one cleans up and publishes in order.
+      const [after] = await deps.db.withWorkspace(ws, (tx) =>
+        tx.select().from(schema.edgeTargets).where(eq(schema.edgeTargets.workspaceId, ws)),
+      );
+      if (!after) return;
+      if (after.generation !== t.generation)
+        // Republish only to the very destination we just wrote to (account, namespace and API base)
+        // and only when no cleanup is owed there; a moved destination waits for the next full tick,
+        // which cleans up before it publishes.
+        return destination(after) === destination(t) && !after.cleanupMode && !(after.priorTarget ?? []).length
+          ? { republishTo: destination(t) }
+          : undefined;
       const gone = t.pushedKeys.filter((k) => !keys.includes(k));
       if (gone.length) await kv.delete(gone);
       if (!(await update({ bundleHash: hash, pushedKeys: keys }))) return;
     }
     // 3. Queued snapshot writes and deletions; the latest per key wins. When snapshots are off,
     // every queued entry is deleted rather than uploaded, and erasure tombstones are never dropped.
-    for (;;) {
+    while (!opts.bundleOnly) {
       const { rows } = await deps.db.admin.query<{ id: string; key: string; value: unknown }>(
         'SELECT id, key, value FROM edge_outbox WHERE workspace_id = $1 ORDER BY id LIMIT 5000',
         [ws],
@@ -628,7 +668,7 @@ async function syncEdgeLocked(deps: EdgeDeps, ws: string) {
       if (rows.length < 5000) break;
     }
     // 4. Backfill: everyone's snapshot, a slice per sync (written through the mirror above).
-    if (servesSnapshots && t.backfillCursor !== null) {
+    if (!opts.bundleOnly && servesSnapshots && t.backfillCursor !== null) {
       const people = await deps.db.withWorkspace(ws, (tx) =>
         tx
           .select({ id: schema.profiles.id })
@@ -645,11 +685,124 @@ async function syncEdgeLocked(deps: EdgeDeps, ws: string) {
       const next = people.length === 1000 ? people[people.length - 1].id : null;
       if (!(await update({ backfillCursor: next }))) return;
     }
-    await update({ lastSyncAt: new Date(), lastError: staleError });
+    if (!opts.bundleOnly) await update({ lastSyncAt: new Date(), lastError: staleError });
   } catch (err) {
     const message = (err as Error).message.slice(0, 500);
     logger.warn({ err, workspace: ws }, 'edge sync failed');
     await update({ lastError: message, lastSyncAt: new Date() });
+  }
+}
+
+export interface EdgePushResult {
+  pushed: boolean;
+  /** Why the push did not happen (or failed), for `experiences.stopRollout` to report honestly; null on success. */
+  reason: string | null;
+}
+
+/**
+ * Take the workspace's edge-sync advisory lock inside `tx`, waiting at most `waitMs`. Returns false
+ * when another sync still holds it. The attempt lives in a savepoint because a lock timeout aborts
+ * the transaction; rolling back to the savepoint keeps the caller's stop committable.
+ *
+ * A stop calls this before it locks or updates any rollout or edge row (#477): the background sync
+ * takes this advisory lock first and only then touches `edge_targets`, so the reverse order would
+ * form a deadlock.
+ */
+export async function acquireEdgeSyncLock(tx: Tx, ws: string, waitMs = 10_000): Promise<boolean> {
+  // `pg_advisory_xact_lock` conflicts with the session-scoped `pg_try_advisory_lock` the
+  // background sync takes on the same key, and is released when the caller's transaction ends.
+  // The caller's own lock_timeout is restored afterwards: a leftover 10 s timeout would abort the
+  // very stop this lock exists to protect, and forcing 0 would override a caller that set one.
+  const original =
+    (await tx.execute<{ lock_timeout: string }>(sql`SELECT current_setting('lock_timeout') AS lock_timeout`)).rows[0]?.lock_timeout ?? '0';
+  await tx.execute(sql`SAVEPOINT edge_sync_lock`);
+  let locked = false;
+  try {
+    await tx.execute(sql`SELECT set_config('lock_timeout', ${`${waitMs}ms`}, true)`);
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`edge-sync:${ws}`}, 0))`);
+    locked = true;
+  } catch (err) {
+    // Only the expected lock timeout (55P03 lock_not_available) means "another sync still runs";
+    // cancellation, a statement timeout or a query error is a real failure and propagates.
+    await tx.execute(sql`ROLLBACK TO SAVEPOINT edge_sync_lock`);
+    // Drizzle wraps the driver error; the SQLSTATE is on the cause.
+    const e = err as { code?: string; cause?: { code?: string } };
+    if ((e.code ?? e.cause?.code) !== '55P03') throw err;
+  }
+  if (locked) await tx.execute(sql`RELEASE SAVEPOINT edge_sync_lock`);
+  await tx.execute(sql`SELECT set_config('lock_timeout', ${original}, true)`);
+  return locked;
+}
+
+/**
+ * Pushes the current bundle inside the caller's transaction, for a person's stop (#477). The stop is
+ * an emergency, so this waits for the edge-sync lock instead of skipping when another sync runs,
+ * and it reads through the caller's transaction so the just-written share is included. The wait is
+ * bounded (`waitMs`, 10 s by default); past it the result says the push did not happen and the
+ * normal sync tick will retry. Cloudflare still has to propagate the write to other regions.
+ */
+export async function pushEdgeBundleNow(deps: EdgeDeps, tx: Tx, ws: string, opts: { waitMs?: number } = {}): Promise<EdgePushResult> {
+  const waitMs = opts.waitMs ?? 10_000;
+  if (!(await acquireEdgeSyncLock(tx, ws, waitMs)))
+    return { pushed: false, reason: `another edge sync was still running after ${Math.round(waitMs / 1000)} s` };
+  try {
+    const [t] = await tx.select().from(schema.edgeTargets).for('update');
+    if (!t) return { pushed: false, reason: 'the edge is not configured' };
+    if (!t.enabled) return { pushed: false, reason: 'edge serving is turned off' };
+    if (!t.secrets || !t.secretsKeyId) return { pushed: false, reason: 'no Cloudflare API token: the edge bundle cannot be pushed' };
+    const purposes = ((await publishedSingleton(tx, 'purposes'))?.purposes ?? DEFAULT_PURPOSES).map((p) => ({
+      key: p.key,
+      basis: p.basis,
+    }));
+    const bundle: EdgeBundle = { experiences: await loadPublishedExperiences(tx), purposes };
+    const sources = await tx
+      .select({
+        keyHash: schema.sources.keyHash,
+        kind: schema.sources.kind,
+        requiredPurpose: schema.sources.requiredPurpose,
+        enabled: schema.sources.enabled,
+        allowedOrigins: schema.sources.allowedOrigins,
+      })
+      .from(schema.sources);
+    const entries = [
+      { key: kvKeys.bundle(ws), value: JSON.stringify(bundle) },
+      ...sources.map((s) => ({
+        key: kvKeys.source(s.keyHash),
+        value: JSON.stringify({
+          workspaceId: ws,
+          kind: s.kind,
+          requiredPurpose: s.requiredPurpose,
+          enabled: s.enabled,
+          allowedOrigins: s.allowedOrigins,
+        } satisfies EdgeSource),
+      })),
+    ];
+    const hash = sha256(JSON.stringify(entries));
+    if (hash === t.bundleHash) return { pushed: true, reason: null };
+    const { apiToken } = await openJson<{ apiToken: string }>(tx, ws, deps.kp, t.secrets as Buffer, t.secretsKeyId as string);
+    const kv = cloudflareKv(t, apiToken, deps.egress);
+    const keys = entries.map((e) => e.key);
+    // Reserve the keys before uploading, as the background sync does, then write and record the hash.
+    await tx
+      .update(schema.edgeTargets)
+      .set({ pushedKeys: [...new Set([...t.pushedKeys, ...keys])] })
+      .where(and(eq(schema.edgeTargets.workspaceId, ws), eq(schema.edgeTargets.generation, t.generation)));
+    await kv.put(entries);
+    const gone = t.pushedKeys.filter((k) => !keys.includes(k));
+    if (gone.length) await kv.delete(gone);
+    await tx
+      .update(schema.edgeTargets)
+      .set({ bundleHash: hash, pushedKeys: keys, lastSyncAt: new Date(), lastError: null })
+      .where(and(eq(schema.edgeTargets.workspaceId, ws), eq(schema.edgeTargets.generation, t.generation)));
+    return { pushed: true, reason: null };
+  } catch (err) {
+    const reason = (err instanceof Error ? err.message : String(err)).split('\n')[0].slice(0, 500);
+    await tx
+      .update(schema.edgeTargets)
+      .set({ lastError: reason, lastSyncAt: new Date() })
+      .where(eq(schema.edgeTargets.workspaceId, ws))
+      .catch(() => {});
+    return { pushed: false, reason };
   }
 }
 

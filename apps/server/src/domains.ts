@@ -14,6 +14,16 @@ import {
 // installation-wide, so the resolver reads it on the owner connection; the admin API still
 // resolves the workspace from the session and X-Workspace-Id.
 
+/** The normalised host of a configured URL, or null when it cannot be parsed. */
+function hostOfUrl(value: string | undefined): string | null {
+  if (!value) return null;
+  try {
+    return normalizeHost(new URL(value).hostname);
+  } catch {
+    return null;
+  }
+}
+
 /** What a public request belongs to, once its Host and path are known (#185). */
 export interface PublicRequest {
   /** The matched workspace, or null when the request is on the installation fallback host. */
@@ -36,12 +46,18 @@ export interface DomainService {
   resolvePublicRequest(host: string, path: string): Promise<PublicRequest | null>;
   /** A workspace's verified primary brand origin+prefix, else the installation's PUBLIC_LINKS_URL. */
   linksUrlFor(workspaceId: string): Promise<string>;
+  /** Persist that Host checking is on, so it cannot be switched off by removing the last domain (#463). */
+  activateHostChecking(): Promise<void>;
+  /**
+   * Hostnames reserved installation-wide: the admin host (PUBLIC_URL) and the fallback links host
+   * (PUBLIC_LINKS_URL). A workspace can never register them as a brand domain (#480).
+   */
+  readonly reservedHosts: string[];
   /** Forget cached domains after a command changed them. */
   invalidate(): void;
 }
 
-export function createDomainService(db: Db, fallbackLinksUrl: string): DomainService {
-  const resolver = createWorkspaceDomainResolver(db);
+export function createDomainService(db: Db, fallbackLinksUrl: string, publicUrl?: string): DomainService {
   // The fallback keeps today's behaviour exactly: its host, and its path prefix when it has one.
   let fallback: { host: string; prefix: string | null } | null = null;
   try {
@@ -50,8 +66,14 @@ export function createDomainService(db: Db, fallbackLinksUrl: string): DomainSer
   } catch {
     fallback = null;
   }
+  // The installation's own hosts belong to no workspace (#480). No installed path prefix makes a
+  // brand domain out of the admin host or the shared fallback links host. The resolver quarantines
+  // rows on them, including ones verified before 0.10.1.
+  const reservedHosts = [...new Set([fallback?.host, hostOfUrl(publicUrl)].filter((host): host is string => !!host))];
+  const resolver = createWorkspaceDomainResolver(db, { reservedHosts });
 
   return {
+    reservedHosts,
     resolveWorkspaceForRequest: (host, path) => resolver.resolveWorkspaceForRequest(host, path),
     async resolvePublicRequest(host, path) {
       const resolved = await resolver.resolveWorkspaceForRequest(host, path);
@@ -73,7 +95,7 @@ export function createDomainService(db: Db, fallbackLinksUrl: string): DomainSer
       // Host is not a brand and must not reach another brand's pages. An installation without a
       // verified brand domain keeps its old behaviour and serves public paths on any Host, so an
       // upgrade does not break a proxy that rewrites Host or a LAN address used for testing.
-      if (!(await resolver.hasVerifiedDomains()))
+      if (!(await resolver.hostCheckingActive()))
         return { workspaceId: null, linksUrl: fallbackLinksUrl, matched: false, pathPrefix: fallback?.prefix ?? null };
       if (!fallback) return null;
       let normalized: string;
@@ -87,6 +109,7 @@ export function createDomainService(db: Db, fallbackLinksUrl: string): DomainSer
       return { workspaceId: null, linksUrl: fallbackLinksUrl, matched: false, pathPrefix: fallback.prefix };
     },
     linksUrlFor: async (workspaceId) => (await resolver.linksUrlFor(workspaceId)) ?? fallbackLinksUrl,
+    activateHostChecking: () => resolver.activateHostChecking(),
     invalidate: () => resolver.invalidate(),
   };
 }

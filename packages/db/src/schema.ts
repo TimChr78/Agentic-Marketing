@@ -76,6 +76,18 @@ export const workspaceDomains = pgTable(
 );
 
 /**
+ * Installation-wide settings that outlive any one workspace. They are not tenant data: resolution
+ * reads them on the owner connection, and a command transaction may write one setting itself so it
+ * commits with the change it belongs to. `domain_routing_active` remembers that brand Host checking
+ * has been switched on, so removing the last verified domain cannot turn it off again (#463).
+ */
+export const installationSettings = pgTable('installation_settings', {
+  key: text('key').primaryKey(),
+  value: jsonb('value').$type<Record<string, unknown>>().notNull(),
+  updatedAt: ts('updated_at').notNull().defaultNow(),
+});
+
+/**
  * The workspace a person picked on the OAuth consent page, while the flow is in progress (#187).
  * The OAuth provider reads it through `consentReferenceId` and stores the workspace on the grant;
  * the row is keyed by the Better Auth session and never authorises anything by itself.
@@ -524,6 +536,8 @@ export const messages = pgTable(
     providerId: text('provider_id'),
     providerMessageId: text('provider_message_id'),
     status: text('status').$type<MessageStatus>().notNull(),
+    /** When the provider accepted the message (#453); null while queued, sending, suppressed or failed. */
+    sentAt: ts('sent_at'),
     reason: text('reason'),
     recipientHash: text('recipient_hash'),
     data: jsonb('data').$type<Record<string, unknown>>().notNull().default({}),
@@ -546,6 +560,13 @@ export const messages = pgTable(
   (t) => [
     primaryKey({ columns: [t.workspaceId, t.id] }),
     index('messages_agent_contact').on(t.workspaceId, t.profileId, t.createdAt).where(sql`agent_id IS NOT NULL`),
+    index('messages_policy_window').on(t.workspaceId, t.profileId, t.sentAt),
+    // The background sent_at backfill and `am doctor` scan only completed rows still missing it.
+    index('messages_sent_at_pending')
+      .on(t.workspaceId, t.id)
+      .where(sql`sent_at IS NULL AND status IN ('sent', 'delivered', 'bounced', 'complained')`),
+    // Counts one agent's contact-pressure skips in a period without scanning the workspace (#488).
+    index('messages_agent_contact_count').on(t.workspaceId, t.agentId, t.createdAt).where(sql`agent_id IS NOT NULL`),
     index('messages_journey_status').on(t.workspaceId, t.journeyId, t.status).where(sql`journey_id IS NOT NULL`),
   ],
 );
@@ -1461,11 +1482,54 @@ export const experienceRollouts = pgTable(
     nextStepAt: ts('next_step_at'),
     pausedAt: ts('paused_at'),
     stoppedAt: ts('stopped_at'),
+    /** The person or agent that stopped the ramp; kept while an agent republish leaves it stopped (#454). */
+    stoppedBy: text('stopped_by'),
+    /** True when an agent stopped it: only a person's stop blocks an agent republish from restarting (#454). */
+    stoppedByAgent: boolean('stopped_by_agent').notNull().default(false),
+    /** Why the last sweep could not advance this ramp; cleared by the next successful step (#474). */
+    lastError: text('last_error'),
     reason: text('reason'),
     updatedAt: ts('updated_at').notNull().defaultNow(),
     updatedBy: text('updated_by'),
   },
   (t) => [primaryKey({ columns: [t.workspaceId, t.artifactId] })],
+);
+
+/**
+ * Every guardrail pause, durable (#473, #476): written in the same transaction as the paused ramp,
+ * then delivered to owners (after commit) and to agent event subscribers. A stop cannot erase it.
+ */
+export const experienceRolloutPauses = pgTable(
+  'experience_rollout_pauses',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    artifactId: text('artifact_id').notNull(),
+    version: integer('version').notNull(),
+    pausedAt: ts('paused_at').notNull(),
+    stepIndex: integer('step_index').notNull(),
+    share: integer('share').notNull(),
+    reason: text('reason'),
+    guardrail: jsonb('guardrail').$type<{ measure: string; maxDropPercent: number } | null>(),
+    /** The metric-layer reading that failed, kept for the e-mail and the event after the ramp moves on. */
+    reading: jsonb('reading').$type<{
+      at: string;
+      measure: string;
+      value: number;
+      baseline: number;
+      dropPercent: number;
+      ok: boolean;
+    } | null>(),
+    /** Set once the owner e-mail was delivered; null means the outbox still owes it or is retrying. */
+    notifiedAt: ts('notified_at'),
+    notifyError: text('notify_error'),
+    /** When a worker claimed this pause for the owner e-mail (#473); null when no attempt is in flight. */
+    notifyingAt: ts('notifying_at'),
+    /** How many times the owner e-mail was claimed (#473); bounded so a failing send stops retrying. */
+    notifyAttempts: integer('notify_attempts').notNull().default(0),
+    /** The earliest instant a failed owner e-mail is retried (#473); null for a fresh or delivered pause. */
+    notifyAfter: ts('notify_after'),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.artifactId, t.pausedAt] })],
 );
 
 export type AgentStatus = 'active' | 'paused' | 'revoked';
@@ -1642,7 +1706,11 @@ export const hostedAgentRuns = pgTable(
     trigger: text('trigger').$type<'schedule' | 'event'>().notNull().default('schedule'),
     eventIds: jsonb('event_ids').$type<number[]>().notNull().default([]),
   },
-  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.id] }),
+    // agents.runFailures filters by status across all agents, newest first (#488).
+    index('hosted_agent_runs_status_started').on(t.workspaceId, t.status, t.startedAt.desc(), t.id),
+  ],
 );
 
 /**

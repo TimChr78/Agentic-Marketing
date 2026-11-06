@@ -223,6 +223,7 @@ export async function deliverSms(db: Db, ws: string, id: string, deps: { kp: Key
           providerId: provider.id,
           providerMessageId: sent.providerMessageId,
           segments: sent.segments ?? prepared.segments,
+          sentAt: new Date(),
           updatedAt: new Date(),
         })
         .where(eq(schema.messages.id, id)),

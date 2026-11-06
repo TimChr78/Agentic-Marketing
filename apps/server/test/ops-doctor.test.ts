@@ -272,8 +272,9 @@ describe('am doctor sending-domain checks', () => {
 });
 
 describe('am doctor brand-domain checks', () => {
-  const config = { publicUrl: 'https://admin.example.com' };
+  const config = { publicUrl: 'https://admin.example.com', linksUrl: 'https://fallback.example.com' };
   const domain = (over: Partial<BrandDomainRow> = {}): BrandDomainRow => ({
+    id: 'wdo_test',
     workspaceId: 'ws_a',
     workspaceName: 'Brand A',
     host: 'links.example.com',
@@ -355,6 +356,20 @@ describe('am doctor brand-domain checks', () => {
     expect(checks.find((check) => check.id === 'brand-domains.admin.example.com')?.status).toBe('warn');
     expect(checks.find((check) => check.id === 'brand-domains.primary')?.status).toBe('warn');
     expect(checks.find((check) => check.id === 'brand-domains.primary')?.message).toContain('Brand B');
+  });
+
+  it('reports a row on a reserved installation host with the remediation (#480)', async () => {
+    const checks = await checkBrandDomains(
+      [domain({ id: 'wdo_takeover', host: 'fallback.example.com' })],
+      [{ id: 'ws_a', name: 'Brand A' }],
+      config,
+      { lookup: okLookup, probe: async () => 200 },
+    );
+    const check = checks.find((entry) => entry.id === 'brand-domains.fallback.example.com');
+    expect(check).toMatchObject({ status: 'warn' });
+    expect(check?.message).toMatch(/reserved installation host/i);
+    expect(check?.hint).toContain('workspace.domains.remove {id: "wdo_takeover"}');
+    expect(check?.hint).toContain('DELETE FROM workspace_domains');
   });
 });
 

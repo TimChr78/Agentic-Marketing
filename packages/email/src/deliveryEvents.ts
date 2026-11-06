@@ -82,7 +82,7 @@ export async function applyDeliveryEvents(tx: Tx, events: DeliveryEvent[], provi
     if (next && STATUS_ORDER.indexOf(next) > STATUS_ORDER.indexOf(m.status))
       await tx
         .update(schema.messages)
-        .set({ status: next, reason: e.reason ?? m.reason, updatedAt: new Date() })
+        .set({ status: next, reason: e.reason ?? m.reason, sentAt: m.sentAt ?? new Date(at), updatedAt: new Date() })
         .where(eq(schema.messages.id, m.id));
     if (m.recipientHash && ((e.type === 'bounced' && e.bounce === 'hard') || e.type === 'complained'))
       await tx

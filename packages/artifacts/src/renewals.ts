@@ -1,7 +1,7 @@
 import { appendAuditEntry, defineCommand } from '@agentic-marketing/commands';
 import { AppError, hashValue, isoDateTime } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
-import { and, eq, isNotNull, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { requestPublish, updateDraft } from './commands';
 import { type AgentMandate, artifactTypes } from './types';
@@ -80,6 +80,7 @@ export const listMandateRenewals = defineCommand({
         if (!parsed.success) return [];
         const until = new Date(parsed.data.validUntil);
         if (until > horizon) return [];
+        const left = (until.getTime() - now.getTime()) / 86_400_000;
         return [
           {
             mandateId: r.mandateId,
@@ -90,11 +91,13 @@ export const listMandateRenewals = defineCommand({
             version: r.version!,
             validUntil: until.toISOString(),
             expired: until <= now,
-            daysLeft: Math.ceil((until.getTime() - now.getTime()) / 86_400_000),
+            // Expired rows are at least one day overdue, so "expired" and a negative number agree.
+            daysLeft: until <= now ? -Math.max(1, Math.ceil(-left)) : Math.ceil(left),
           },
         ];
       })
-      .sort((a, b) => a.validUntil.localeCompare(b.validUntil));
+      // Newest expiry first, as the description promises.
+      .sort((a, b) => b.validUntil.localeCompare(a.validUntil));
     return { withinDays: input.withinDays, renewals };
   },
 });
@@ -115,7 +118,10 @@ export const renewMandates = defineCommand({
     'Renew several mandates at once: for each id, publish a new version of the mandate with the new validUntil and the same levels, scope and limits, with one note. People only. Each mandate is renewed in its own savepoint, so one failure does not undo the others; the result says what happened per id and the audit log has one entry per mandate.',
   input: z.object({
     mandateIds: z.array(MandateId).min(1).max(50).describe('Mandates to renew, from agents.renewals'),
-    validUntil: isoDateTime('validUntil').describe('The new end date; must be in the future and at most a year away'),
+    validUntil: isoDateTime('validUntil')
+      .refine((v) => new Date(v).getTime() > Date.now(), 'validUntil must be in the future')
+      .refine((v) => new Date(v).getTime() <= Date.now() + 366 * 86_400_000, 'validUntil must be at most a year away')
+      .describe('The new end date; must be in the future and at most a year away'),
     note: z.string().min(1).max(1000).describe('Why the mandates are renewed; kept on every new version and in the audit log'),
   }),
   output: z.object({ renewed: z.array(Renewed) }),
@@ -128,21 +134,48 @@ export const renewMandates = defineCommand({
   target: (i) => i.mandateIds.join(','),
   handler: async (input, ctx) => {
     const renewed: z.output<typeof Renewed>[] = [];
-    for (const [index, mandateId] of [...new Set(input.mandateIds)].entries()) {
+    const mandateIds = [...new Set(input.mandateIds)];
+    // Lock the whole set before writing anything, in one deterministic order (#455). A renewal
+    // takes the workspace audit lock (transaction-scoped) while it publishes and then moves to the
+    // next mandate; two bulk calls in opposite order, or an edit that holds a mandate and waits for
+    // the audit lock, would otherwise form a cycle. Processing stays in the caller's order so the
+    // per-id result and audit entries read the same as the input.
+    await ctx.tx
+      .select({ id: schema.artifacts.id })
+      .from(schema.artifacts)
+      .where(and(eq(schema.artifacts.workspaceId, ctx.principal.workspaceId), inArray(schema.artifacts.id, mandateIds)))
+      .orderBy(schema.artifacts.id)
+      .for('update');
+    for (const [index, mandateId] of mandateIds.entries()) {
       const inputHash = hashValue({ mandateId, validUntil: input.validUntil, note: input.note });
       // A savepoint per mandate: one failure rolls back only its own version and audit entry.
       const savepoint = `renew_mandate_${index}`;
       await ctx.tx.execute(sql.raw(`SAVEPOINT ${savepoint}`));
       try {
         const [artifact] = await ctx.tx
-          .select({ id: schema.artifacts.id, type: schema.artifacts.type, publishedVersion: schema.artifacts.publishedVersion })
+          .select({
+            id: schema.artifacts.id,
+            type: schema.artifacts.type,
+            publishedVersion: schema.artifacts.publishedVersion,
+            latestVersion: schema.artifacts.latestVersion,
+          })
           .from(schema.artifacts)
-          .where(and(eq(schema.artifacts.workspaceId, ctx.principal.workspaceId), eq(schema.artifacts.id, mandateId)));
+          .where(and(eq(schema.artifacts.workspaceId, ctx.principal.workspaceId), eq(schema.artifacts.id, mandateId)))
+          // The published version, hash and draft write are one decision (#455): a concurrent
+          // renewal or edit waits here instead of reading the same version and overwriting it.
+          .for('update');
         if (!artifact) throw new AppError('not_found', `Mandate ${mandateId} was not found in this workspace.`);
         if (artifact.type !== 'agent_mandate') throw new AppError('invalid_input', `${mandateId} is a ${artifact.type}, not a mandate.`);
         if (artifact.publishedVersion === null) throw new AppError('conflict', `Mandate ${mandateId} has no published version to renew.`);
+        // A renewal changes only validUntil. Anything newer than the published version is someone's
+        // unreviewed work; refuse it rather than replace it with the older published terms (#455).
+        if (artifact.latestVersion !== artifact.publishedVersion)
+          throw new AppError(
+            'conflict',
+            `Mandate ${mandateId} has an unpublished version (v${artifact.latestVersion}). Publish or discard it before renewing, so the renewal does not overwrite it.`,
+          );
         const [version] = await ctx.tx
-          .select({ content: schema.artifactVersions.content })
+          .select({ content: schema.artifactVersions.content, contentHash: schema.artifactVersions.contentHash })
           .from(schema.artifactVersions)
           .where(
             and(
@@ -155,7 +188,16 @@ export const renewMandates = defineCommand({
         if (!parsed.success)
           throw new AppError('conflict', `Mandate ${mandateId}'s published version cannot be read, so it cannot be renewed.`);
         const content: AgentMandate = { ...parsed.data, validUntil: new Date(input.validUntil).toISOString() };
-        const draft = await updateDraft.handler({ artifactId: mandateId, content, note: `Renewed: ${input.note}`.slice(0, 500) }, ctx);
+        const draft = await updateDraft.handler(
+          {
+            artifactId: mandateId,
+            content,
+            note: `Renewed: ${input.note}`.slice(0, 500),
+            // The published version's hash: a draft created by someone else meanwhile fails instead of being replaced.
+            expectedContentHash: version.contentHash,
+          },
+          ctx,
+        );
         const out = await requestPublish.handler({ artifactId: mandateId, note: `Renewal: ${input.note}`.slice(0, 1000) }, ctx);
         await appendAuditEntry(
           ctx.tx,

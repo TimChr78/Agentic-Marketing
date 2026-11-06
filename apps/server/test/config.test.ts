@@ -19,7 +19,7 @@ describe('configuration', () => {
     });
     expect(c.linksUrl).toBe('https://am.example.com');
     expect(c.previousMasterKeys).toEqual([]);
-    expect(c.retention).toEqual({ unconfirmedDays: 30, logDays: 180 });
+    expect(c.retention).toEqual({ unconfirmedDays: 30, logDays: 180, hostedAgentRunDays: 90 });
   });
 
   it('fails fast with the setting that is wrong', () => {

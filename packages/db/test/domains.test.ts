@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  createWorkspaceDomainResolver,
   DomainError,
   normalizeDomainInput,
   normalizeHost,
@@ -7,7 +8,9 @@ import {
   normalizeRequestPath,
   originForHost,
   pathMatchesPrefix,
+  type WorkspaceDomain,
 } from '../src/domains';
+import type { Db } from '../src/pool';
 
 // Host normalisation happens before anything is stored, so a typo or a wildcard is a clear error
 // rather than a row that never matches. No database needed.
@@ -41,6 +44,15 @@ describe('normalizeHost', () => {
     expect(() => normalizeHost('')).toThrow(/hostname/i);
     expect(() => normalizeHost('not a host')).toThrow(/valid hostname/i);
     expect(() => normalizeHost('exa_mple.com')).toThrow(/valid hostname/i);
+  });
+
+  it('refuses an explicit non-default port for registration, but not for a request Host (#481)', () => {
+    expect(() => normalizeDomainInput({ host: 'https://example.com:8443' })).toThrow(/port/i);
+    expect(() => normalizeDomainInput({ host: 'http://localhost:3000' })).toThrow(/port/i);
+    expect(normalizeDomainInput({ host: 'https://example.com:443' })).toEqual({ host: 'example.com', pathPrefix: null });
+    expect(normalizeDomainInput({ host: 'example.com:443' })).toEqual({ host: 'example.com', pathPrefix: null });
+    // Request Host headers may carry any port; it is stripped for matching.
+    expect(normalizeHost('192.168.1.20:8080')).toBe('192.168.1.20');
   });
 });
 
@@ -91,5 +103,96 @@ describe('domain inputs and request paths', () => {
     expect(originForHost('localhost')).toBe('http://localhost');
     expect(originForHost('127.0.0.1')).toBe('http://127.0.0.1');
     expect(originForHost('2001:db8::1')).toBe('https://[2001:db8::1]');
+  });
+});
+
+describe('domain resolver cache', () => {
+  const row = (over: Partial<WorkspaceDomain> = {}): WorkspaceDomain => ({
+    id: 'wdo_1',
+    workspaceId: '11111111-1111-4111-8111-111111111111',
+    host: 'brand.example',
+    pathPrefix: null,
+    isPrimary: true,
+    status: 'verified',
+    verifiedAt: new Date('2026-01-01T00:00:00Z'),
+    createdAt: new Date('2026-01-01T00:00:00Z'),
+    ...over,
+  });
+
+  /** A Db whose domain query can be held open, so a load can span an invalidation. */
+  const fakeDb = (initial: WorkspaceDomain[]) => {
+    let rows = initial;
+    let holdNext = false;
+    let release: () => void = () => {};
+    let gate: Promise<void> = Promise.resolve();
+    let activeSetting = false;
+    const db = {
+      admin: {
+        query: async (text: string) => {
+          if (text.includes('installation_settings')) {
+            if (text.trimStart().startsWith('INSERT')) {
+              activeSetting = true;
+              return { rows: [] };
+            }
+            return { rows: activeSetting ? [{ key: 'domain_routing_active' }] : [] };
+          }
+          if (holdNext) {
+            holdNext = false;
+            const snapshot = rows;
+            await gate;
+            return { rows: snapshot };
+          }
+          return { rows };
+        },
+      },
+    };
+    return {
+      db: db as unknown as Db,
+      holdNext() {
+        holdNext = true;
+        gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+      },
+      setRows(next: WorkspaceDomain[]) {
+        rows = next;
+      },
+      release() {
+        release();
+      },
+    };
+  };
+
+  it('does not let an in-flight load repopulate the cache after invalidate (#464)', async () => {
+    const fake = fakeDb([row()]);
+    const resolver = createWorkspaceDomainResolver(fake.db, { ttlMs: 60_000 });
+    // Hold the first registry load open, invalidate while it is in flight, then let it finish.
+    fake.holdNext();
+    const inFlight = resolver.resolveWorkspaceForRequest('brand.example', '/f/x');
+    resolver.invalidate();
+    fake.setRows([]);
+    fake.release();
+    // The request that started before the invalidation may still see its own answer…
+    expect((await inFlight)?.domain.host).toBe('brand.example');
+    // …but the pre-invalidation rows must not have been cached for the following request.
+    expect(await resolver.resolveWorkspaceForRequest('brand.example', '/f/x')).toBeNull();
+  });
+
+  it('keeps Host checking on after the last verified domain is removed (#463)', async () => {
+    const fake = fakeDb([row()]);
+    const resolver = createWorkspaceDomainResolver(fake.db, { ttlMs: 0 });
+    expect(await resolver.hostCheckingActive()).toBe(true);
+    await resolver.activateHostChecking();
+    fake.setRows([]);
+    expect(await resolver.hostCheckingActive()).toBe(true);
+  });
+
+  it('quarantines rows on an installation-owned host (#480)', async () => {
+    const fake = fakeDb([row({ id: 'wdo_takeover', host: 'links.example.com', workspaceId: 'ws_a' })]);
+    const resolver = createWorkspaceDomainResolver(fake.db, { ttlMs: 0, reservedHosts: ['links.example.com'] });
+    expect(await resolver.resolveWorkspaceForRequest('links.example.com', '/f/x')).toBeNull();
+    expect(await resolver.linksUrlFor('ws_a')).toBeNull();
+    // The quarantined row does not switch Host checking on by itself either.
+    expect(await resolver.hostCheckingActive()).toBe(false);
   });
 });

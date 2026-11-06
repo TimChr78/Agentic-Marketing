@@ -734,4 +734,31 @@ describe('audit fixes (#260, #262, #263, #267, #268)', () => {
     );
     expect((await t.srv.events.messageStats(ws, { since, until: new Date(Date.now() - 60_000), messageIds: [id] })).opened ?? 0).toBe(0);
   });
+
+  it('a held change that finds another active owner at window end goes to a person (#469)', async () => {
+    const a = await freshAgent({ scope: scope(), levels: { 'send.broadcast': 2 } });
+    const id = await a.draft();
+    const held = await a.as('artifacts.requestPublish', { artifactId: id, note: 'held, then transferred' });
+    expect(held.body.status).toBe('on_hold');
+    // A person transfers the artifact while the veto window runs.
+    const ownerApi = t.api(owner);
+    const token = (await ownerApi.call('apiTokens.create', { name: `Late owner ${Date.now()}`, scopes: ['artifacts:read'] })).token;
+    const me = await fetch(`${t.base}/v1/agents.get`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+      body: '{}',
+    });
+    const agentB = ((await me.json()) as { id: string }).id;
+    await ownerApi.call('artifacts.setOwner', { artifactId: id, ownerAgentId: agentB });
+    await due(held.body.approvalId);
+
+    await runHoldsOnce({ db: t.srv.db, services: t.srv.services });
+    const row = await eventually(
+      () => approval(held.body.approvalId),
+      (r) => r.hold_until === null,
+    );
+    expect(row.status).toBe('pending');
+    expect(row.note).toContain('owned by agent');
+    expect((await ownerApi.call('artifacts.get', { artifactId: id })).publishedVersion).toBeNull();
+  });
 });

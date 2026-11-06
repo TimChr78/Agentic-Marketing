@@ -321,6 +321,29 @@ that must not) and `cli migrate` runs the same code. When a release ships a new 
 `am doctor` use that map to name the release a database last ran. Only heads are listed; a release
 whose migrations share a head with another is a range.
 
+#### Non-transactional migrations
+
+A migration whose first line is `-- am:no-transaction` runs outside `BEGIN`/`COMMIT`, one statement
+at a time, so `CREATE INDEX CONCURRENTLY` and other statements Postgres refuses inside a transaction
+block work. The advisory lock, checksum check and `schema_migrations` record are unchanged, but the
+file is recorded only after every statement succeeds. A failure leaves the earlier statements
+committed, so write these files to survive a retry: every statement idempotent (`IF NOT EXISTS`,
+`ON CONFLICT DO NOTHING`, or an update that is harmless twice), and no statement that depends on
+its own previous effect being absent.
+
+Before a `CREATE INDEX CONCURRENTLY`, the runner drops that index if Postgres marked it `INVALID`
+(what an interrupted build leaves behind); it repeats the cleanup after a failure, so the next start
+does not stay stuck on `IF NOT EXISTS`. `am doctor` reports an invalid index that is still present.
+Do not put a statement that needs a transaction in such a file: it commits on its own.
+
+Long data changes do not belong in a migration at all. The 0.10.1 `messages.sent_at` backfill is a
+scheduler job (`runSentAtBackfill` / `backfillSentAtOnce` in
+[`packages/db/src/backfill.ts`](../packages/db/src/backfill.ts)) that fills completed rows in short
+batches after start. It stops when no row is left or a batch fails: there is no continuous retry, so
+a failed pass runs again on the next start. `am doctor` shows how many rows are left.
+The delivery caps count a NULL `sent_at` from `updated_at` until the job reaches the row, so
+correctness does not depend on the backfill finishing first.
+
 ### Releasing
 
 A version bump edits every file `scripts/check-versions.mjs` lists: the root, `apps/server`, `apps/web`, `packages/sdk-js` and `packages/edge-worker` package files, the chart's `version` and `appVersion`, `AM_VERSION` in `.env.example`, its default in `docker-compose.yml` and in the README, and a `## [x.y.z]` section in CHANGELOG.md. A new migration head also goes into `MIGRATION_RELEASES` (see [Migrations](#migrations)). Then push a `vX.Y.Z` tag (or run the Release workflow from main); it runs CI on that commit and publishes only if it passes. Before tagging, check that private vulnerability reporting is still enabled (Settings → Security), since `SECURITY.md` points reporters to it.

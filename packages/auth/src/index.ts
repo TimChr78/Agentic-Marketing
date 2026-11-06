@@ -10,7 +10,7 @@ import { getMigrations } from 'better-auth/db/migration';
 import { jwt } from 'better-auth/plugins';
 import type { JWTPayload } from 'jose';
 import { agentForCredential, oauthClientName } from './agents';
-import { boundMembership, consentWorkspaceId } from './oauthWorkspace';
+import { boundMembership, consentWorkspaceId, isWorkspaceReference } from './oauthWorkspace';
 import { type SsoConfig, ssoGuard, ssoPlugin } from './sso';
 
 /** Better Auth stores reset tokens under this prefix in its `verification` table. */
@@ -168,8 +168,12 @@ export function authOptions(config: AuthConfig) {
                 consentReferenceId: async ({ user, session }) => consentWorkspaceId(config.db, user.id, session.id),
               },
               // The access token carries the brand, so a later request cannot change it with a
-              // header. Refresh tokens keep the reference id and issue the same claim again.
-              customAccessTokenClaims: ({ referenceId }) => (referenceId ? { workspace_id: referenceId } : {}),
+              // header. Refresh tokens keep the reference id and issue the same claim again. An
+              // unbound sentinel (no brand chosen for this request) carries no claim, so the
+              // credential is refused rather than acting in a brand nobody chose (#456).
+              customAccessTokenClaims: ({ referenceId }) => {
+                return isWorkspaceReference(referenceId) ? { workspace_id: referenceId } : {};
+              },
             }),
             // Client ID Metadata Documents: clients that identify themselves with an HTTPS URL instead of
             // registering (the MCP 2026-07-28 preference). The Node transport pins DNS to public addresses.

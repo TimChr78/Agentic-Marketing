@@ -2,6 +2,74 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+### Security
+
+- `workspace.domains.add` and `workspace.domains.update` no longer accept `status`: a domain becomes `verified` only through `workspace.domains.verify`, so an admin can no longer activate a hostname without proving that it reaches this installation (#461). This is a breaking input change; callers that sent `status` now get `invalid_input`.
+- A hostname now belongs to one workspace: another workspace cannot register any prefix on a host that is already claimed or verified, and verification re-checks ownership, so a brand can no longer carve a path prefix out of another brand's verified host (#462, including the prefix-shadowing case in #479).
+- The installation's admin host (`PUBLIC_URL`) and fallback links host (`PUBLIC_LINKS_URL`) are reserved and can never be registered or created as a brand domain (#480).
+- Host checking is persisted once it has been switched on: removing the last verified domain no longer reverts the installation to any-Host and re-enables cross-brand public pages (#463).
+- Domain verification fetches through the shared egress guard, so private, link-local and metadata targets are refused, and the caller no longer receives the internal error or HTTP status of the challenge fetch (#466).
+- The domain resolver cannot repopulate its cache from a load that started before an invalidation; writes reach other server processes within the documented 5-second TTL (#464).
+- The OAuth consent page renders brand names as text instead of HTML, and the sign-in, consent and invitation pages are served under a nonce-based Content-Security-Policy, so a brand name can no longer run script in a member's browser (#478).
+
+### Fixed
+
+- Bulk mandate renewal renews from the published version and refuses a mandate that has an unpublished draft instead of replacing and publishing it; the mandate row is locked for the hash check and draft write, so concurrent renewals become successive versions instead of both reading the same one and overwriting it (#455).
+- Bulk mandate renewal locks every mandate in one deterministic id order before any write or audit entry, so overlapping bulk renewals and an ordinary edit can no longer deadlock on the workspace audit lock; per-id results and audit entries keep the caller's order (#455).
+- Two migrators starting at once no longer lock each other out around a `CREATE INDEX CONCURRENTLY`: the second waits with short `pg_try_advisory_lock` attempts, sleeping in Node between them, instead of a blocking statement whose snapshot the index build waits for, and gives up with a clear message after five minutes.
+- `experiences.stopRollout` takes the edge-sync advisory lock before any rollout or edge row lock, matching the background sync's order; when it still cannot get the lock in ten seconds it commits the stop with the share at 0 and the bundle hash cleared, reports `edgePushed: false` with the reason, and bumps the edge generation so a sync that read the old bundle cannot publish it after the stop.
+- A notification retry no longer resends mail a delivery webhook marked `delivered`, `bounced` or `complained`: any existing message row for the idempotency key counts as done unless it is `failed` or `suppressed`, so only recipients whose send failed are retried.
+- `agents.compare` marks only the mandate version that is published and unarchived now as active, so superseded or archived versions are not shown as still in force (#458).
+- A held agent change re-checks ownership and conflicts when its veto window ends; if another agent now owns the artifact or has a pending change, the hold goes to a person instead of running (#469).
+- `agents.compare` counts a hold once when its working-hours recheck row is also in the period (#470).
+- Coordination checks and `artifacts.setOwner` lock the artifact row before deciding, so a change cannot race an ownership transfer (#471).
+- `agents.renewMandates` rejects a `validUntil` in the past or more than a year away, matching its schema (#472).
+- `agents.renewals` reports a recently expired mandate as a negative number of days and sorts newest expiry first, as documented (#482).
+- `agents.runFailures` and the contact-pressure count have supporting indexes, and finished hosted-agent runs are removed after `RETENTION_HOSTED_AGENT_RUN_DAYS` (default 90) (#488).
+- Broadcast segment and template names refresh after a change instead of keeping the old name for the rest of the session (#459).
+- The shared broadcast name cache is dropped on artifact create, rename, delete and publish, with a short time limit as a backstop (#486).
+- The sidebar pending badge counts decisions, so a bundle counts once, exactly as on Approvals; members are grouped by bundle id even when the bundle’s lead is on another page (#483).
+- Broadcast detail waits for the send state before offering Publish or Submit for review, so an unknown run is never treated as no run (#484).
+- Opening another broadcast resets the tab and run state instead of keeping the previous broadcast's (#485).
+- Corrected the 0.9.0 accessibility note: the axe known-issues list started with two deferred GrapesJS entries, not empty (#491).
+- The scheduled-backup override example honours `CLICKHOUSE_DATABASE` from `.env` instead of pinning `am` (#492).
+- The image healthcheck has a start period, so a slow migration is not reported as an unhealthy container (#493).
+- Domain claims, expired-claim reclamation and verification are serialised per normalised hostname, so two workspaces can no longer both claim one host at different prefixes, and verification refuses with "the domain changed during verification" if the row's host, prefix or token changed during the challenge fetch (#462).
+- A pending domain claim expires after seven days and can then be reclaimed by another workspace, instead of blocking the hostname forever; a new claim removes every expired claim on that host, at any prefix, so an abandoned row cannot be verified after the host has moved (#467).
+- Verification and the installation-wide routing policy it switches on are written in one transaction, so a crash can no longer leave a verified domain without Host checking (or the policy without the verification) (#463).
+- A row already verified on the reserved admin or fallback links host is quarantined by the resolver, so it cannot take the installation's host over, and `am doctor` reports it with the command that removes it (#480).
+- A domain hostname with an explicit non-default port is refused with an input error instead of being silently stored without the port; default ports are still accepted (#481).
+- `workspace.get` and `workspace.memberships` report a `primaryDomain` only when the primary domain is verified, matching the links and public pages (#465).
+- Twilio STOP/inbound and delivery-status callbacks validate their signature against the URL that was actually called, so fallback, secondary and prefixed brand hosts keep working after the primary domain changes (#457).
+- The Helm chart renders every host in `ingress.extraHosts`, so Kubernetes installs can route each brand's verified domain, and the Kubernetes guide documents the per-brand Ingress and TLS requirement (#490).
+- An agent can no longer restart a ramp a person stopped by republishing the experience, its metadata, an un-ramped version or a change that runs automatically after its veto window: the original requester travels with the publish; only a person’s resume or republish starts it again, and the stop records who made it (#454).
+- A guardrail pause e-mail is claimed in one commit, sent, then marked in a second: a later failure leaves it owed and retries with a backoff and a bounded attempt count instead of rolling the pause back or marking a failed send as delivered. Delivery is at least once, with deduplication by the stable key and a bounded number of attempts: a crash after the provider accepted the message can repeat it, while a retry skips a recipient whose message row already exists (#473).
+- Each ramp is swept in its own transaction: one ramp’s failing guardrail read records an error on that ramp and freezes only it, instead of aborting every due ramp in the workspace (#474).
+- A mandate’s `learning.experienceRamp` requires at least two steps, a first step below 100% and a guardrail, so a one-step `[100]` rollout no longer satisfies it (#475).
+- `experience.rollout_paused` is delivered from a durable pause row, so a `stopRollout` before the event sweep no longer drops the pause agents were waiting for (#476).
+- `experiences.stopRollout` waits up to ten seconds for a running edge sync instead of skipping the push, pushes the stopped bundle to Cloudflare KV from the same transaction, and reports `edgePushed` with a reason when it could not; the remaining delay is the worker’s isolate cache and KV propagation, stated truthfully in the command and the docs instead of “at once” (#477).
+- Delivery caps count a completed contact from when the provider actually sent it (`messages.sent_at`) instead of from enqueue time, so a backlog that waited for quiet hours, a pause or a retry consumes the window from its real send time (#453).
+- Two messages queued at the same instant can no longer both pass a `max: 1` frequency or cross-agent contact cap: in-flight reservations are ordered by enqueue time and message id (#452).
+- An in-flight reservation that was queued outside the cap window still consumes it until it completes, and the cap decision is serialized per person with a transaction-scoped lock, so two messages queued eight days ago can no longer both pass a seven-day `max: 1` cap (#452).
+- An identity merge moves the merged person's message history to the surviving profile in the same transaction, so routine identity resolution no longer resets their frequency and cross-agent contact caps (#460).
+- `workspace.create` enforces a per-person brand quota (`WORKSPACE_QUOTA`, default 10) instead of letting one owner create unbounded brands and pending domain claims; the refusal names the limit, and the count and create are serialised per owner so parallel creates at the boundary cannot overshoot it (#487).
+- An OAuth brand choice is bound to the authorization request that asked for it instead of the browser session, so consenting in one tab can no longer issue a grant for the brand chosen in another tab, and refresh tokens keep the brand (#456).
+
+### Upgrading from 0.10.0
+
+- **Migrations:** 0081–0086 add the Host-checking state, `messages.sent_at`, the durable rollout pause log and the message-cap and agent indexes. 0082 only adds the column (metadata-only, no table rewrite). 0084 and 0086 are marked `-- am:no-transaction` and build their indexes with `CREATE INDEX CONCURRENTLY`, so sends and other writes continue while they run. A normal migration is still one transaction.
+- **Background backfill:** the migration does not rewrite `messages`. After the scheduler starts, it fills `sent_at` for already-completed messages in batches of 10,000 in short transactions. It stops when no row is left or a batch fails; there is no continuous retry, so a failed pass runs again on the next start (or restart). Until a row is filled, delivery caps count it from `updated_at` exactly as 0.10.0 did, so caps stay correct throughout. `am doctor` reports how many completed messages are left (`migrations.sent-at-backfill`); no manual step is needed.
+- **Interrupted index build:** if a `CREATE INDEX CONCURRENTLY` is interrupted, its index is left invalid. The next `am migrate` (or server start) drops that index and builds it again; `am doctor` reports one that is still present (`migrations.invalid-indexes`).
+- **Rollout pauses:** a ramp paused before 0.10.1 was already e-mailed by the old in-transaction path. It is recorded as notified and is **not re-notified** after the upgrade, so an upgrade does not send a burst of old pause e-mails. Only pauses created after 0.10.1 are delivered from the durable outbox.
+- **Migrations, reserved hosts:** a domain claim on the installation's own admin host (`PUBLIC_URL`) or fallback links host (`PUBLIC_LINKS_URL`) is now ignored by the resolver, including one verified under 0.10.0; `am doctor` lists any such row with its id; remove it with `workspace.domains.remove` and give that brand its own hostname.
+- **Configuration:** two new optional variables: `WORKSPACE_QUOTA` (default 10, how many brands one person may own) and `RETENTION_HOSTED_AGENT_RUN_DAYS` (default 90, how long finished hosted-agent runs are kept). Both are passed through by the Compose file and the Helm chart.
+- **Breaking changes:** `workspace.domains.add` and `workspace.domains.update` no longer accept `status`; a domain becomes verified only through `workspace.domains.verify`. A hostname with a non-default port is refused. A hostname belongs to one brand; unverified claims expire after seven days and can then be taken by another brand. Once any domain has been verified, Host checking stays on even if the last verified domain is removed. A mandate's `learning.experienceRamp` now requires at least two steps, a first step below 100% and a guardrail. `agents.compare` covers at most 20 agents (the most recently active when none are named) and reports `truncated`. `experiences.stopRollout` reports `edgePushed` and `edgePushReason`; a successful push still needs Cloudflare's propagation time. Rollout pause e-mails are delivered at least once, de-duplicated by key, with bounded retries.
+- **Manual steps:** none.
+- **Upgrade:** download `agentic-marketing-compose-0.10.1.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.10.1 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.10.1` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.10.1). Run `docker compose exec app am doctor`.
+
+
 ## [0.10.0] - 2026-11-06
 
 ### Added
@@ -45,7 +113,7 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 - Deterministic, rich demo fixtures for UI work, Playwright and screenshots (#434). The e2e seed now generates weeks of believable activity from a seeded PRNG and a fixed clock: about 520 people with consent history, eight sent weekly issues with delivered, opened, clicked, bounced, complained and unsubscribed message events, a scheduled send and a stopped canary send, a live journey with participants on every step, a web-experience experiment, campaign conversions with UTM tags, backdated agent actions, a guardian episode, learnings, a mandate with goals, alerts that fired and resolved, and an import history entry. Counts, rates and names are stable across runs; `seed` takes a `now` option for other dates.
 - A screenshot matrix for design review (#433). `e2e/screenshots.mjs` (also `pnpm shots`) captures every admin route — derived from `apps/web/src/app/nav.ts` plus the seeded detail pages (one of each artifact type, a person, an agent, a token, every approval type, the signed-out sign-in page and `/`) — at 1440, 768 and 390 px in light and dark. Captures are deterministic: the clock is fixed, motion and carets are disabled, fonts and images are loaded and skeletons gone before the shot, and relative times, dates and raw ids are masked. A manual CI run (`workflow_dispatch` → `screenshots`) produces the whole matrix as an artifact.
 - Visual regression in CI (#433). `e2e/visual.spec.ts` compares a stable subset (sign-in, approvals and a broadcast approval, the journey list and builder, a broadcast, a template, people, analytics, agents and an agent, the workspace settings) at 1440 and 390 px in both themes against Linux baselines committed in `e2e/visual.spec.ts-snapshots`. Its own Playwright project keeps the functional suite fast; the `visual` CI job runs on pull requests that touch `apps/web` or `e2e` and uploads the expected/actual/diff images when a baseline fails. Baselines are only ever updated by a reviewed commit.
-- Automated accessibility checks (#206). `e2e/axe.spec.ts` runs `@axe-core/playwright` with the WCAG 2.1/2.2 A and AA rules over every route in the matrix, light and dark, fails on any violation not listed in `e2e/axe-known-issues.json`, and prints the violations by rule. The list starts empty; the wave's done criterion is that it stays empty.
+- Automated accessibility checks (#206). `e2e/axe.spec.ts` runs `@axe-core/playwright` with the WCAG 2.1/2.2 A and AA rules over every route in the matrix, light and dark, fails on any violation not listed in `e2e/axe-known-issues.json`, and prints the violations by rule. The list starts with the two deferred GrapesJS violations on the template route (`color-contrast` and `scrollable-region-focusable`); the wave's done criterion is that it becomes empty, and theming the editor to the design system is Phase 25.
 
 ### Changed
 
@@ -57,7 +125,7 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 
 ### Fixed
 
-- Shared UI fixes from the wave 5 screenshot pass (#438): 40 px touch targets below 768 px, one navigation toggle under 1024 px, the brand logo contained in its square with an initial fallback, GrapesJS chrome themed to the app tokens in both themes, no epoch “newest” date on an empty Analytics query, honest People counts with cursor “Load more” and no repeated e-mail column, and page-level horizontal overflow contained to tables and canvases at 390 px.
+- Shared UI fixes from the wave 5 screenshot pass (#438): 40 px touch targets below 768 px, one navigation toggle under 1024 px, the brand logo contained in its square with an initial fallback, no epoch “newest” date on an empty Analytics query, honest People counts with cursor “Load more” and no repeated e-mail column, and page-level horizontal overflow contained to tables and canvases at 390 px.
 - The brand switcher and the account menu no longer override their visible text with an `aria-label`, so the accessible name contains the visible label (WCAG 2.5.3).
 - Tabs only point `aria-controls` at a panel that is rendered, and the OpenAPI link in Settings → Integrations is underlined rather than distinguished by colour alone (WCAG 1.4.1) (#206).
 

@@ -1,7 +1,7 @@
 import { AppError, canonicalJson, hashValue, sha256 } from '@agentic-marketing/core';
 import { type AgentUndo, type Db, schema, type Tx } from '@agentic-marketing/db';
 import { SpanStatusCode, trace } from '@opentelemetry/api';
-import { and, desc, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import {
   type ActionClass,
@@ -58,12 +58,18 @@ export interface Services {
   serverVersion: string;
   /** True when the person owns at least one workspace (#190); wired by the server's directory. */
   ownsAnyWorkspace?: (userId: string) => Promise<boolean>;
+  /** How many brands the person owns, for the workspace.create quota (#487). */
+  ownedWorkspaceCount?: (userId: string) => Promise<number>;
+  /** Brands one person may own (#487); wired from WORKSPACE_QUOTA. */
+  workspaceQuota?: number;
   /** Whether unknown input keys are rejected rather than warned about (STRICT_INPUTS). */
   strictInputs: boolean;
   /** Shared counter for wrong passwords on token widening (#61), so every process sees the lockout. */
   stepUpLimiter?: StepUpLimiter;
   /** The agent's active mandate (ADR-0016); registered by packages/artifacts through the server. */
   activeMandate?: (tx: Tx, agentId: string) => Promise<{ view: MandateView; outsideHours: string | null } | null>;
+  /** The active mandates of several agents in one grouped read, for agents.compare (#489). */
+  activeMandates?: (tx: Tx, agentIds: string[]) => Promise<Map<string, { view: MandateView; outsideHours: string | null }>>;
   /**
    * The independent check (ADR-0016, #231): a second model judges whether an autonomous action
    * matches the agent's intent and mandate. Registered by the server when AI providers exist; a
@@ -81,6 +87,13 @@ export interface Services {
     range: { from: Date; to: Date },
     goals: { measure: string; target?: number; direction: 'up' | 'down' }[],
   ) => Promise<AgentOutcomes>;
+  /** Several agents' outcomes in one grouped ledger read, for agents.compare (#489). */
+  agentOutcomesMany?: (
+    tx: Tx,
+    workspaceId: string,
+    agents: { agentId: string; goals: { measure: string; target?: number; direction: 'up' | 'down' }[] }[],
+    range: { from: Date; to: Date },
+  ) => Promise<Map<string, AgentOutcomes>>;
   /** Why an agent's recent sends breach its mandate's guardrails, or null; registered by the server (metric layer). */
   mandateGuardrails?: (tx: Tx, workspaceId: string, agentId: string, mandate: MandateView) => Promise<string | null>;
 }
@@ -122,6 +135,12 @@ export interface CommandContext {
   afterCommit?: (fn: () => Promise<void>) => void;
   /** The policy engine's decision for an agent write (ADR-0016). "ask" means the change must wait for a person. */
   policy?: PolicyOutcome;
+  /**
+   * The agent a change is being published for when the caller is not the agent itself (#454): a
+   * scheduler running a held agent change uses a system user principal but must still be treated as
+   * that agent by publish hooks (a person's stop is sticky against it).
+   */
+  onBehalfOf?: { type: 'agent'; agentId: string };
   /**
    * How to reverse what this handler does (ADR-0016 §5.4). Set it where the change goes live; the
    * executor records it in the agent ledger. Only agent writes keep it.
@@ -510,9 +529,11 @@ export type Executor = ReturnType<typeof createExecutor>;
  * What the other agents have on the artifacts this action changes (#426), before the policy
  * engine decides: the owner of an artifact when it belongs to another agent, and any pending
  * change (a hold inside its veto window, or an open approval request) from a different agent.
- * The executor only calls this for changes beyond a draft; people never reach it.
+ * The executor only calls this for changes beyond a draft; people never reach it. The artifact
+ * rows are locked for update (in id order) so the decision and the write see the same owner, and
+ * `artifacts.setOwner` cannot slip between them (#471).
  */
-async function coordinationFor(
+export async function coordinationFor(
   tx: Tx,
   workspaceId: string,
   agentId: string,
@@ -525,7 +546,9 @@ async function coordinationFor(
   const rows = await tx
     .select({ id: schema.artifacts.id, name: schema.artifacts.name, ownerAgentId: schema.artifacts.ownerAgentId })
     .from(schema.artifacts)
-    .where(and(eq(schema.artifacts.workspaceId, workspaceId), inArray(schema.artifacts.id, ids)));
+    .where(and(eq(schema.artifacts.workspaceId, workspaceId), inArray(schema.artifacts.id, ids)))
+    .orderBy(asc(schema.artifacts.id))
+    .for('update');
   const names = new Map(rows.map((a) => [a.id, a.name]));
 
   let ownership: NonNullable<PolicyInput['ownership']> | null = null;
@@ -737,17 +760,19 @@ export async function agentCounters(tx: Tx, agentId: string, opts: { excludeId?:
   const counted = sql`(${a.decision} = 'allow' OR ${pendingHold}) AND ${a.command} <> 'artifacts.heldRecheck'`;
   const excluded = opts.excludeId !== undefined ? sql`${a.id} <> ${opts.excludeId}` : undefined;
   // The previous send is the last one that ran: a vetoed send must not raise the growth baseline.
+  // Stopping a send shares its class (#468) but is not a send for the counters.
+  const isSend = sql`(${a.actionClass} = 'send.broadcast' AND ${a.command} <> 'broadcasts.cancel')`;
   const [prev] = await tx
     .select({ people: sql<number | null>`(${a.impact}->>'people')::int` })
     .from(a)
-    .where(and(eq(a.agentId, agentId), eq(a.actionClass, 'send.broadcast'), eq(a.decision, 'allow'), eq(a.ok, true)))
+    .where(and(eq(a.agentId, agentId), isSend, eq(a.decision, 'allow'), eq(a.ok, true)))
     .orderBy(desc(a.id))
     .limit(1);
   const [row] = await tx
     .select({
       changes: sql<number>`count(*) FILTER (WHERE ${a.actionClass} <> 'draft')::int`,
       messages: sql<number>`coalesce(sum((${a.impact}->>'people')::int) FILTER (WHERE ${a.actionClass} = 'send.direct'), 0)::int`,
-      sends: sql<number>`count(*) FILTER (WHERE ${a.actionClass} = 'send.broadcast')::int`,
+      sends: sql<number>`count(*) FILTER (WHERE ${isSend})::int`,
     })
     .from(a)
     .where(and(eq(a.agentId, agentId), counted, eq(a.ok, true), sql`${a.at} > now() - interval '24 hours'`, excluded));

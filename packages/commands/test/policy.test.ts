@@ -351,8 +351,8 @@ describe('learning rules (#257)', () => {
     ).toBe('allow');
   });
 
-  it('an experience needs a ramp when the mandate requires one (#427)', () => {
-    const ramped = (learning: MandateView['learning'], rampFirstStep?: number) =>
+  it('an experience needs a real, guarded ramp when the mandate requires one (#427, #475)', () => {
+    const ramped = (learning: MandateView['learning'], ramp?: { firstStep?: number; steps?: number; guardrail?: boolean }) =>
       decide(
         base({
           settings,
@@ -360,15 +360,35 @@ describe('learning rules (#257)', () => {
           mandate: view(learning),
           impact: {
             people: 10,
-            learning: [{ id: 'exp_1', type: 'experience', controlPercent: 0, ...(rampFirstStep === undefined ? {} : { rampFirstStep }) }],
+            learning: [
+              {
+                id: 'exp_1',
+                type: 'experience',
+                controlPercent: 0,
+                rampFirstStep: ramp?.firstStep ?? null,
+                rampSteps: ramp?.steps ?? null,
+                rampGuardrail: ramp?.guardrail ?? false,
+              },
+            ],
           },
         }),
       );
+    const real = { firstStep: 10, steps: 3, guardrail: true };
     expect(ramped({ experienceRamp: true }).decision).toBe('ask');
     expect(ramped({ experienceRamp: true }).reasons.join(' ')).toContain('ramp');
-    expect(ramped({ experienceRamp: true }, 5).decision).toBe('allow');
-    expect(ramped({ experienceRamp: 10 }, 5).decision).toBe('ask');
-    expect(ramped({ experienceRamp: 10 }, 10).decision).toBe('allow');
+    // A one-step 100% rollout is not a ramp: it serves everyone at once.
+    const oneStep = ramped({ experienceRamp: true }, { firstStep: 100, steps: 1, guardrail: true });
+    expect(oneStep.decision).toBe('ask');
+    expect(oneStep.reasons.join(' ')).toContain('two steps');
+    // Two steps that start at 100% are not gradual either.
+    expect(ramped({ experienceRamp: true }, { firstStep: 100, steps: 2, guardrail: true }).decision).toBe('ask');
+    // A ramp without a guardrail cannot pause itself when the change hurts.
+    const unguarded = ramped({ experienceRamp: true }, { firstStep: 10, steps: 2 });
+    expect(unguarded.decision).toBe('ask');
+    expect(unguarded.reasons.join(' ')).toContain('guardrail');
+    expect(ramped({ experienceRamp: true }, real).decision).toBe('allow');
+    expect(ramped({ experienceRamp: 10 }, { ...real, firstStep: 5 }).decision).toBe('ask');
+    expect(ramped({ experienceRamp: 10 }, real).decision).toBe('allow');
   });
 });
 

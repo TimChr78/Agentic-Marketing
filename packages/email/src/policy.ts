@@ -2,7 +2,7 @@ import { DEFAULT_DELIVERY_POLICY, type DeliveryPolicy, type Purposes, publishedS
 import { autonomySettings } from '@agentic-marketing/commands';
 import { zonedInstant, zonedParts } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
-import { and, eq, gte, inArray, isNotNull, lt, ne, or, sql } from 'drizzle-orm';
+import { and, eq, gte, inArray, isNotNull, isNull, ne, or, sql } from 'drizzle-orm';
 
 // The delivery policy (Phase 7) applies to every marketing message at the moment it would be
 // sent, whoever asked for it (journey, broadcast, API, agent): frequency caps, quiet hours, and a
@@ -12,8 +12,43 @@ import { and, eq, gte, inArray, isNotNull, lt, ne, or, sql } from 'drizzle-orm';
 export type Channel = 'email' | 'sms' | 'push';
 export type Hold = { ok: true } | { ok: false; reason: string } | { ok: 'later'; until: Date; reason: string };
 
-const SENT = ['sending', 'sent', 'delivered', 'bounced', 'complained'] as const;
+/** Statuses of a completed contact: the provider accepted the message and its send time is known. */
+const CONTACTED = ['sent', 'delivered', 'bounced', 'complained'] as const;
+/** A reservation: claimed for sending, or still queued behind the worker. Both count conservatively. */
+const IN_FLIGHT = ['queued', 'sending'] as const;
 export const isMarketing = (basis: string) => basis !== 'contract' && basis !== 'legal_obligation';
+
+/**
+ * One message counted towards a cap, for both the channel frequency cap and the cross-agent
+ * contact pressure:
+ *
+ * - a completed contact ages from the moment the provider accepted it (#453), falling back to the
+ *   last status change for a row written before `sent_at` existed or one the background backfill
+ *   has not reached yet; a message that waited days for
+ *   quiet hours, a pause or a retry therefore consumes the window from its real send time;
+ * - an in-flight reservation counts until it completes, however long ago it was enqueued (#452).
+ *   A message queued eight days ago and still queued or sending has not been sent yet, so it must
+ *   still take its slot in a seven-day window; aging it out at enqueue time let two old queued
+ *   messages both pass a max=1 cap. Within the in-flight set a peer only counts when it is *before*
+ *   this message in `(created_at, id)` order: the later id is the one held back, deterministically.
+ *   Queued rows are counted as well as claimed ones: a peer another worker has not claimed yet must
+ *   still take its place, or two workers could admit one message each before either saw the other.
+ *   The cap decision is also serialized per person by `checkPolicy`, so two workers cannot read a
+ *   stale in-flight set at the same instant.
+ */
+function countedContact(message: { id: string; createdAt: Date }, now: Date, days: number) {
+  const since = new Date(now.getTime() - days * 86_400_000);
+  return or(
+    and(
+      inArray(schema.messages.status, [...CONTACTED]),
+      or(gte(schema.messages.sentAt, since), and(isNull(schema.messages.sentAt), gte(schema.messages.updatedAt, since))),
+    ),
+    and(
+      inArray(schema.messages.status, [...IN_FLIGHT]),
+      sql`(${schema.messages.createdAt}, ${schema.messages.id}) < (${message.createdAt}, ${message.id})`,
+    ),
+  );
+}
 
 export async function deliveryPolicy(tx: Tx): Promise<DeliveryPolicy> {
   return (await publishedSingleton(tx, 'delivery_policy')) ?? DEFAULT_DELIVERY_POLICY;
@@ -226,6 +261,11 @@ export async function checkPolicy(
   now = new Date(),
 ): Promise<Hold> {
   if (!isMarketing(message.basis)) return { ok: true };
+  // Serialize the cap decision for this person (#452). The message is already claimed as `sending`
+  // (a reservation) before this transaction, so holding one advisory lock per workspace+profile
+  // means the next worker sees that reservation before it decides, rather than two workers both
+  // reading the same in-flight set. Transaction-scoped: released at commit or rollback.
+  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`message-cap:${workspaceId}:${message.profileId}`}, 0))`);
   const policy = await deliveryPolicy(tx);
   const marketingKeys = purposes.filter((p) => isMarketing(p.basis)).map((p) => p.key);
 
@@ -243,12 +283,7 @@ export async function checkPolicy(
           eq(schema.messages.test, false),
           inArray(schema.messages.purpose, keys),
           ne(schema.messages.id, message.id),
-          gte(schema.messages.createdAt, new Date(now.getTime() - cap.days * 86_400_000)),
-          // Earlier messages still being sent count too, so a batch cannot slip past the cap.
-          or(
-            inArray(schema.messages.status, ['sent', 'delivered', 'bounced', 'complained']),
-            and(inArray(schema.messages.status, [...SENT]), lt(schema.messages.createdAt, message.createdAt)),
-          ),
+          countedContact(message, now, cap.days),
         ),
       );
     if (n >= cap.max)
@@ -276,12 +311,7 @@ export async function checkPolicy(
             inArray(schema.messages.purpose, marketingKeys),
             cap.channels ? inArray(schema.messages.channel, cap.channels) : undefined,
             ne(schema.messages.id, message.id),
-            gte(schema.messages.createdAt, new Date(now.getTime() - cap.days * 86_400_000)),
-            // Earlier messages still being sent count too, so a batch cannot slip past the cap.
-            or(
-              inArray(schema.messages.status, ['sent', 'delivered', 'bounced', 'complained']),
-              and(inArray(schema.messages.status, [...SENT]), lt(schema.messages.createdAt, message.createdAt)),
-            ),
+            countedContact(message, now, cap.days),
           ),
         );
       if (n >= cap.max)

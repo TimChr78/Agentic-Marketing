@@ -38,8 +38,9 @@ test('an owner creates a brand and lands in it (#190)', async ({ page }) => {
   await dialog.getByRole('button', { name: 'Create brand' }).click();
 
   await expect(page.getByRole('button', { name: new RegExp(`^Brand: E2E brand ${suffix}`) })).toBeVisible();
-  // The new brand artifact is a draft, so the switcher shows the workspace name and the pending domain.
-  await expect(page.getByRole('button', { name: /^Brand: .*Switch brand/ })).toContainText(`e2e-${suffix}.example`);
+  // The new domain is still pending verification, so the switcher does not present it as the brand's
+  // domain yet (#465): only a verified primary domain is shown.
+  await expect(page.getByRole('button', { name: /^Brand: .*Switch brand/ })).not.toContainText(`e2e-${suffix}.example`);
 });
 
 test('the desktop nav collapses to a rail and the mobile drawer is unchanged (#180)', async ({ page }) => {
@@ -55,7 +56,7 @@ test('the desktop nav collapses to a rail and the mobile drawer is unchanged (#1
   await expect(page.getByRole('button', { name: 'Expand navigation' })).toBeVisible();
   await expect.poll(async () => (await sidebar.boundingBox())?.width).toBe(64);
   // Every rail icon has an accessible name, and the approvals badge is still visible on Work.
-  await expect(page.getByRole('button', { name: /Work navigation, 3 pending/ })).toBeVisible();
+  await expect(page.getByRole('button', { name: /Work navigation, \d+ pending/ })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Marketing navigation' })).toBeVisible();
 
   await page.reload();

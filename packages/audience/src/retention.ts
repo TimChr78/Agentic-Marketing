@@ -9,6 +9,8 @@ import { logger } from '@agentic-marketing/telemetry';
 //   consent recorded, are removed after `unconfirmedDays`. Without suppression, so they can
 //   sign up again later.
 // - Operational logs: finished webhook and action deliveries and AI calls after `logDays`.
+// - Finished hosted-agent runs after `hostedAgentRunDays` (default 90): the run history and failure
+//   queue are recent-window reads, so old rows are not kept (#488).
 // - Unknown input-key evidence after 30 days: recent behaviour is what a strict-mode rollout needs.
 
 export interface RetentionDeps {
@@ -17,6 +19,8 @@ export interface RetentionDeps {
   hot?: HotState;
   unconfirmedDays: number;
   logDays: number;
+  /** Days finished hosted-agent runs are kept; defaults to 90 when a caller does not configure it. */
+  hostedAgentRunDays?: number;
   /** Hours after an erasure that identifiers stay blocked (#210); tombstones live this plus 7 days. */
   erasureGraceHours?: number;
 }
@@ -33,6 +37,7 @@ export async function runRetentionOnce(deps: RetentionDeps): Promise<{
   inputWarnings: number;
   erasureTombstones: number;
   profileScores: number;
+  hostedAgentRuns: number;
 }> {
   const { rows } = await deps.db.admin.query<{ workspace_id: string; id: string }>(
     `SELECT p.workspace_id, p.id FROM profiles p
@@ -85,7 +90,20 @@ export async function runRetentionOnce(deps: RetentionDeps): Promise<{
     `DELETE FROM erasure_tombstones WHERE erased_at < now() - make_interval(hours => $1)`,
     [(deps.erasureGraceHours ?? 24) + TOMBSTONE_EXTRA_DAYS * 24],
   );
-  if (profiles || deliveries.rowCount || aiCalls.rowCount || profileScores.rowCount || inputWarnings.rowCount || erasureTombstones.rowCount)
+  // Hosted-agent runs are terminal rows (ok, failed or skipped); the run history and failure queue
+  // read a recent window, so older rows are removed (#488).
+  const hostedAgentRuns = await deps.db.admin.query(`DELETE FROM hosted_agent_runs WHERE started_at < now() - make_interval(days => $1)`, [
+    deps.hostedAgentRunDays ?? 90,
+  ]);
+  if (
+    profiles ||
+    deliveries.rowCount ||
+    aiCalls.rowCount ||
+    profileScores.rowCount ||
+    inputWarnings.rowCount ||
+    erasureTombstones.rowCount ||
+    hostedAgentRuns.rowCount
+  )
     logger.info(
       {
         profiles,
@@ -94,6 +112,7 @@ export async function runRetentionOnce(deps: RetentionDeps): Promise<{
         profileScores: profileScores.rowCount,
         inputWarnings: inputWarnings.rowCount,
         erasureTombstones: erasureTombstones.rowCount,
+        hostedAgentRuns: hostedAgentRuns.rowCount,
       },
       'retention removed old data',
     );
@@ -104,6 +123,7 @@ export async function runRetentionOnce(deps: RetentionDeps): Promise<{
     profileScores: profileScores.rowCount ?? 0,
     inputWarnings: inputWarnings.rowCount ?? 0,
     erasureTombstones: erasureTombstones.rowCount ?? 0,
+    hostedAgentRuns: hostedAgentRuns.rowCount ?? 0,
   };
 }
 

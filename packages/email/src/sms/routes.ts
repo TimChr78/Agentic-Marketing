@@ -61,8 +61,16 @@ export function smsRoutes(deps: Deps) {
       const request = c.get('publicRequest');
       if (request?.workspaceId && request.workspaceId !== target.ws) return c.json({ error: 'not_found' }, 404);
       const kind = c.req.param('kind');
+      // Signature validation must see the URL the provider called, not the workspace's current
+      // primary domain: callbacks configured before a primary change keep working (#457). The
+      // middleware already resolved the host (and stripped a registered path prefix), so rebuild
+      // from the trusted public request context.
+      const called = new URL(c.req.url);
+      const url = request
+        ? `${request.linksUrl}${c.req.path}${called.search}`
+        : `${(await deps.email.publicUrlFor?.(target.ws)) ?? deps.email.publicUrl}${c.req.path}${called.search}`;
       const req = {
-        url: `${(await deps.email.publicUrlFor?.(target.ws)) ?? deps.email.publicUrl}${c.req.path}`,
+        url,
         headers: Object.fromEntries(c.req.raw.headers),
         body: await c.req.text(),
       };

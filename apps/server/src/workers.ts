@@ -4,6 +4,7 @@ import { runAlertEvaluator } from '@agentic-marketing/alerts';
 import { consentHook, runBroadcasts, runRetention } from '@agentic-marketing/audience';
 import { RESET_PASSWORD_TTL_SECONDS } from '@agentic-marketing/auth';
 import { runContentFetches } from '@agentic-marketing/content';
+import { runSentAtBackfill } from '@agentic-marketing/db';
 import { runDeliveryWorker } from '@agentic-marketing/email';
 import { runSink } from '@agentic-marketing/events';
 import { type DeliveryDeps, runDeliveries, runTokenRefresher, webhookHook } from '@agentic-marketing/integrations';
@@ -44,9 +45,15 @@ export function startScheduler(
   } = {},
 ): Promise<void>[] {
   logger.info(
-    'scheduler role: segment recomputation, broadcasts, retention, OAuth token refresh, audience sync, ad spend import, warehouse exports, edge sync, threshold alerts, held agent changes, agent notifications, agent events, hosted agents, content sources, segment enrollment jobs, experience rollouts',
+    'scheduler role: segment recomputation, broadcasts, retention, OAuth token refresh, audience sync, ad spend import, warehouse exports, edge sync, threshold alerts, held agent changes, agent notifications, agent events, hosted agents, content sources, segment enrollment jobs, experience rollouts, sent_at backfill',
   );
   return [
+    // One pass at start: the 0.10.1 migration only adds the column; this fills completed rows in
+    // short batches while sends continue, and stops when every row has its send time (#453).
+    runSentAtBackfill({ db: srv.db }, signal, {
+      log: (message) => logger.info(message),
+      onError: (err) => logger.error({ err }, 'sent_at backfill failed'),
+    }),
     runSegmentScheduler(
       {
         db: srv.db,
