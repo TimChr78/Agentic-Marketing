@@ -182,12 +182,26 @@ export function LineChart({ labels, series, area, height = 240, unit, formatValu
   const format = formatValue ?? ((v: number | null) => withUnit(v, unit));
   const option = (c: ChartColors): EChartsOption => ({
     tooltip: { trigger: 'axis' },
-    xAxis: { type: 'category', data: labels, axisTick: { show: false } },
+    // Reserve the right inset for the direct end labels and keep the x labels inside the plot.
+    grid: { left: 48, right: 112, top: 16, bottom: 32 },
+    xAxis: {
+      type: 'category',
+      data: labels,
+      axisTick: { show: false },
+      axisLabel: {
+        color: c.muted,
+        fontSize: 12,
+        lineHeight: 18,
+        // The last date would sit under the end labels; the period is in the subtitle instead.
+        formatter: (value: string, index: number) => (index === labels.length - 1 ? '' : value),
+      },
+    },
     yAxis: {
       type: 'value',
       splitNumber: 3,
       minInterval: unit === '%' ? undefined : 1,
-      axisLabel: unit === '%' ? { formatter: '{value}%' } : undefined,
+      axisLabel: { color: c.muted, fontSize: 12, lineHeight: 18, ...(unit === '%' ? { formatter: '{value}%' } : {}) },
+      splitLine: { lineStyle: { color: c.line, width: 1 } },
     },
     series: plotted.map((s, i) => {
       const color = c.viz[(s.viz ?? i) % c.viz.length];
@@ -212,6 +226,9 @@ export function LineChart({ labels, series, area, height = 240, unit, formatValu
           fontSize: 12,
           lineHeight: 18,
           distance: 8,
+          // Two series ending on the same value would otherwise draw their labels on top of each
+          // other; keep at least one 18 px line between them (DESIGN.md → Chart contract).
+          offset: plotted.length > 1 ? [0, (i - (plotted.length - 1) / 2) * 18] : [0, 0],
         },
       };
     }),
