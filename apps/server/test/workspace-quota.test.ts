@@ -58,6 +58,37 @@ describe('workspace.create quota (#487)', () => {
     expect(leftover.rows[0].n).toBe('0');
   });
 
+  it('serializes parallel creates at the boundary so exactly one brand is written (#487)', async () => {
+    // This person owns one brand of a quota of two: two creates racing would both read 1 and
+    // overshoot, unless the count and the insert are serialized per owner.
+    const racer = await t.signUp(`quota-racer-${Date.now()}@example.com`);
+    const racerWs = await t.workspaceWith([[racer, 'owner']]);
+    // Hold both inserts after their quota count: without the per-owner lock both read 1 and write.
+    await t.srv.db.admin.query(
+      `CREATE OR REPLACE FUNCTION slow_workspace_insert() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN PERFORM pg_sleep(0.2); RETURN NEW; END $$`,
+    );
+    await t.srv.db.admin.query(
+      'CREATE TRIGGER slow_workspace_insert BEFORE INSERT ON workspaces FOR EACH ROW EXECUTE FUNCTION slow_workspace_insert()',
+    );
+    let results: PromiseSettledResult<unknown>[] = [];
+    try {
+      results = await Promise.allSettled([
+        t.api(racer, racerWs).call('workspace.create', { name: 'Racer one' }),
+        t.api(racer, racerWs).call('workspace.create', { name: 'Racer two' }),
+      ]);
+    } finally {
+      await t.srv.db.admin.query('DROP TRIGGER IF EXISTS slow_workspace_insert ON workspaces');
+      await t.srv.db.admin.query('DROP FUNCTION IF EXISTS slow_workspace_insert()');
+    }
+    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+    expect(await ownedCount(racer)).toBe(2);
+    const written = await t.srv.db.admin.query<{ n: string }>(
+      "SELECT count(*)::text AS n FROM workspaces WHERE name IN ('Racer one', 'Racer two')",
+    );
+    expect(written.rows[0].n).toBe('1');
+  });
+
   it('counts owner memberships only, so another person’s brands do not use the quota', async () => {
     const created = await t.api(other, wsOther).call('workspace.create', { name: 'Other brand' });
     expect(created.workspaceId).toBeTruthy();

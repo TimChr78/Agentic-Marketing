@@ -1,7 +1,7 @@
 import { type CommandContext, defineCommand } from '@agentic-marketing/commands';
 import { AppError, newId } from '@agentic-marketing/core';
 import { type Db, DomainError, normalizeDomainInput, normalizeHost, originForHost, schema } from '@agentic-marketing/db';
-import { asc, desc, eq } from 'drizzle-orm';
+import { and, asc, desc, eq, isNull, sql } from 'drizzle-orm';
 import { z } from 'zod';
 
 // Brand domains (#186): the hostnames a workspace's public links answer on. A brand is a
@@ -17,8 +17,6 @@ declare module '@agentic-marketing/commands' {
      * links host (PUBLIC_LINKS_URL). Wired by the server (#480).
      */
     reservedDomainHosts?: string[];
-    /** Persist that brand Host checking is on (#463); wired by the server's domain service. */
-    activateDomainRouting?: () => Promise<void>;
     /** The pool itself, for installation-wide host claims that RLS would hide (#462, #467). */
     db?: Db;
   }
@@ -83,15 +81,19 @@ function invalidateResolver(ctx: CommandContext) {
 
 /**
  * A successful verification switches Host checking on for the installation and keeps it on (#463).
- * The resolver persists the fact and drops its cache once the transaction commits.
+ * The setting is written in the verification's own transaction, so a crash can never leave a
+ * verified row without the policy it implies (or the policy without the row). The resolver cache is
+ * dropped once that transaction commits.
  */
-function activateDomainRouting(ctx: CommandContext) {
-  const activate = async () => {
-    if (ctx.services.activateDomainRouting) await ctx.services.activateDomainRouting();
-    else ctx.services.invalidateDomainCache?.();
-  };
-  if (ctx.afterCommit) ctx.afterCommit(activate);
-  else void activate();
+async function activateDomainRouting(ctx: CommandContext) {
+  await ctx.tx
+    .insert(schema.installationSettings)
+    .values({ key: 'domain_routing_active', value: { active: true } })
+    .onConflictDoUpdate({
+      target: schema.installationSettings.key,
+      set: { value: { active: true }, updatedAt: new Date() },
+    });
+  invalidateResolver(ctx);
 }
 
 /** Drizzle wraps driver errors; the Postgres code and constraint sit on the cause chain. */
@@ -176,6 +178,17 @@ function adminDb(ctx: CommandContext) {
   return db;
 }
 
+/**
+ * One transaction-scoped advisory lock per normalised hostname (#462, #467). Claims, reclamation
+ * and verification all take it before they read the installation-wide rows or write, so two
+ * workspaces cannot both pass the ownership check at different prefixes and insert, and a claim
+ * cannot land between a verification's ownership check and its update. The lock is released by
+ * COMMIT or ROLLBACK, so a failed command never keeps it.
+ */
+async function lockHostname(ctx: CommandContext, host: string) {
+  await ctx.tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext('am.domain'), hashtext(${host}))`);
+}
+
 /** Every row on a hostname, across workspaces; resolution is installation-wide, so are claims. */
 async function hostClaims(ctx: CommandContext, host: string): Promise<HostClaim[]> {
   const { rows } = await adminDb(ctx).admin.query<HostClaim>(
@@ -208,30 +221,41 @@ async function assertHostNotClaimed(ctx: CommandContext, target: { host: string 
 }
 
 /**
- * Deletes an expired pending claim on the exact host and prefix, so a workspace can take over a
- * hostname that was claimed and abandoned (#467). Verified rows never expire.
+ * Deletes expired pending claims on the whole hostname, not just one prefix, so a workspace can
+ * take over a hostname that was claimed and abandoned (#467). Deleting every prefix matters: an
+ * expired claim at another prefix would otherwise stay in the table and could be verified later,
+ * after the host has moved to another workspace. Verified rows never expire. `excludeId` keeps the
+ * row an update is about to change, so moving its prefix cannot delete it.
  */
-export async function reclaimExpiredClaim(ctx: CommandContext, target: { host: string; pathPrefix: string | null }) {
+export async function reclaimExpiredClaims(ctx: CommandContext, target: { host: string }, excludeId?: string) {
   const db = adminDb(ctx);
   const cutoff = new Date(Date.now() - PENDING_CLAIM_MS);
   await db.admin.query(
     `DELETE FROM workspace_domains
-      WHERE host = $1 AND COALESCE(path_prefix, '') = COALESCE($2, '')
-        AND status = 'pending' AND created_at <= $3`,
-    [target.host, target.pathPrefix, cutoff],
+      WHERE host = $1 AND status = 'pending' AND created_at <= $2
+        AND ($3::text IS NULL OR id <> $3)`,
+    [target.host, cutoff, excludeId ?? null],
   );
 }
 
 /** The checks every new or moved domain runs before it can hold a hostname. */
-export async function assertDomainAvailable(ctx: CommandContext, target: { host: string; pathPrefix: string | null }) {
+export async function assertDomainAvailable(
+  ctx: CommandContext,
+  target: { host: string; pathPrefix: string | null },
+  options: { excludeId?: string } = {},
+) {
   assertHostRegistrable(ctx, target);
-  await reclaimExpiredClaim(ctx, target);
+  await lockHostname(ctx, target.host);
+  await reclaimExpiredClaims(ctx, target, options.excludeId);
   await assertHostNotClaimed(ctx, target);
 }
 
 /** Verification re-checks ownership: the other workspace may have verified the host since (#462). */
-export async function assertDomainVerifiable(ctx: CommandContext, existing: { host: string; pathPrefix: string | null }) {
+export async function assertDomainVerifiable(ctx: CommandContext, existing: { id: string; host: string; pathPrefix: string | null }) {
   assertHostRegistrable(ctx, existing);
+  await lockHostname(ctx, existing.host);
+  // Purge other workspaces' abandoned claims on this host before deciding whether it is free.
+  await reclaimExpiredClaims(ctx, existing, existing.id);
   await assertHostNotClaimed(ctx, existing);
 }
 
@@ -334,7 +358,7 @@ export const updateWorkspaceDomain = defineCommand({
         host: input.host ?? existing.host,
         pathPrefix: input.pathPrefix === undefined ? existing.pathPrefix : input.pathPrefix,
       });
-      await assertDomainAvailable(ctx, target);
+      await assertDomainAvailable(ctx, target, { excludeId: existing.id });
       changes.host = target.host;
       changes.pathPrefix = target.pathPrefix;
     }
@@ -377,6 +401,12 @@ export const verifyWorkspaceDomain = defineCommand({
     await assertDomainVerifiable(ctx, existing);
     const token = existing.verificationToken ?? newId('wdv');
     const url = `${originForHost(existing.host)}${existing.pathPrefix ?? ''}/.well-known/am-domain/${encodeURIComponent(token)}`;
+    // Re-verifying an already verified domain changes nothing; still persist the routing policy,
+    // which also repairs an install that verified under 0.10.0 before the setting existed (#463).
+    if (existing.status === 'verified') {
+      await activateDomainRouting(ctx);
+      return { domain: domainView(existing), checkedUrl: url };
+    }
     const fetchChallenge = ctx.services.fetchDomainChallenge;
     if (!fetchChallenge)
       throw new AppError(
@@ -401,13 +431,33 @@ export const verifyWorkspaceDomain = defineCommand({
       );
     if (checked.body.trim() !== token)
       throw new AppError('invalid_input', 'The domain did not return this domain’s verification token. Another site may answer that host.');
+    // The challenge fetch can take seconds. Condition the write on the row we checked: if an
+    // update replaced its host, prefix or token meanwhile, this must not verify the replacement.
+    const sameToken =
+      existing.verificationToken === null
+        ? isNull(schema.workspaceDomains.verificationToken)
+        : eq(schema.workspaceDomains.verificationToken, existing.verificationToken);
+    const samePrefix =
+      existing.pathPrefix === null
+        ? isNull(schema.workspaceDomains.pathPrefix)
+        : eq(schema.workspaceDomains.pathPrefix, existing.pathPrefix);
     const [row] = await ctx.tx
       .update(schema.workspaceDomains)
       .set({ status: 'verified', verifiedAt: new Date(), verificationToken: token })
-      .where(eq(schema.workspaceDomains.id, input.id))
+      .where(
+        and(
+          eq(schema.workspaceDomains.id, input.id),
+          eq(schema.workspaceDomains.host, existing.host),
+          samePrefix,
+          sameToken,
+          eq(schema.workspaceDomains.status, 'pending'),
+        ),
+      )
       .returning();
-    if (!row) throw new AppError('not_found', 'This domain is not registered in this workspace.');
-    activateDomainRouting(ctx);
+    if (!row) throw new AppError('conflict', 'The domain changed during verification. Reload it and try again.');
+    // Persist the routing policy in this same transaction (#463), so a crash cannot separate it
+    // from the verification that switched it on.
+    await activateDomainRouting(ctx);
     return { domain: domainView(row), checkedUrl: url };
   },
 });

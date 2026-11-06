@@ -58,7 +58,6 @@ export interface DomainService {
 }
 
 export function createDomainService(db: Db, fallbackLinksUrl: string, publicUrl?: string): DomainService {
-  const resolver = createWorkspaceDomainResolver(db);
   // The fallback keeps today's behaviour exactly: its host, and its path prefix when it has one.
   let fallback: { host: string; prefix: string | null } | null = null;
   try {
@@ -68,8 +67,10 @@ export function createDomainService(db: Db, fallbackLinksUrl: string, publicUrl?
     fallback = null;
   }
   // The installation's own hosts belong to no workspace (#480). No installed path prefix makes a
-  // brand domain out of the admin host or the shared fallback links host.
+  // brand domain out of the admin host or the shared fallback links host. The resolver quarantines
+  // rows on them, including ones verified before 0.10.1.
   const reservedHosts = [...new Set([fallback?.host, hostOfUrl(publicUrl)].filter((host): host is string => !!host))];
+  const resolver = createWorkspaceDomainResolver(db, { reservedHosts });
 
   return {
     reservedHosts,

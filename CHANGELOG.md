@@ -28,7 +28,10 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 - Corrected the 0.9.0 accessibility note: the axe known-issues list started with two deferred GrapesJS entries, not empty (#491).
 - The scheduled-backup override example honours `CLICKHOUSE_DATABASE` from `.env` instead of pinning `am` (#492).
 - The image healthcheck has a start period, so a slow migration is not reported as an unhealthy container (#493).
-- A pending domain claim expires after seven days and can then be reclaimed by another workspace, instead of blocking the hostname forever (#467).
+- Domain claims, expired-claim reclamation and verification are serialised per normalised hostname, so two workspaces can no longer both claim one host at different prefixes, and verification refuses with "the domain changed during verification" if the row's host, prefix or token changed during the challenge fetch (#462).
+- A pending domain claim expires after seven days and can then be reclaimed by another workspace, instead of blocking the hostname forever; a new claim removes every expired claim on that host, at any prefix, so an abandoned row cannot be verified after the host has moved (#467).
+- Verification and the installation-wide routing policy it switches on are written in one transaction, so a crash can no longer leave a verified domain without Host checking (or the policy without the verification) (#463).
+- A row already verified on the reserved admin or fallback links host is quarantined by the resolver, so it cannot take the installation's host over, and `am doctor` reports it with the command that removes it (#480).
 - A domain hostname with an explicit non-default port is refused with an input error instead of being silently stored without the port; default ports are still accepted (#481).
 - `workspace.get` and `workspace.memberships` report a `primaryDomain` only when the primary domain is verified, matching the links and public pages (#465).
 - Twilio STOP/inbound and delivery-status callbacks validate their signature against the URL that was actually called, so fallback, secondary and prefixed brand hosts keep working after the primary domain changes (#457).
@@ -42,7 +45,7 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 - Delivery caps count a completed contact from when the provider actually sent it (`messages.sent_at`) instead of from enqueue time, so a backlog that waited for quiet hours, a pause or a retry consumes the window from its real send time (#453).
 - Two messages queued at the same instant can no longer both pass a `max: 1` frequency or cross-agent contact cap: in-flight reservations are ordered by enqueue time and message id (#452).
 - An identity merge moves the merged person's message history to the surviving profile in the same transaction, so routine identity resolution no longer resets their frequency and cross-agent contact caps (#460).
-- `workspace.create` enforces a per-person brand quota (`WORKSPACE_QUOTA`, default 10) instead of letting one owner create unbounded brands and pending domain claims; the refusal names the limit (#487).
+- `workspace.create` enforces a per-person brand quota (`WORKSPACE_QUOTA`, default 10) instead of letting one owner create unbounded brands and pending domain claims; the refusal names the limit, and the count and create are serialised per owner so parallel creates at the boundary cannot overshoot it (#487).
 - An OAuth brand choice is bound to the authorization request that asked for it instead of the browser session, so consenting in one tab can no longer issue a grant for the brand chosen in another tab, and refresh tokens keep the brand (#456).
 
 

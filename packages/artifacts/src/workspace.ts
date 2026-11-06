@@ -151,8 +151,12 @@ async function assertOwnsABrand(ctx: CommandContext) {
  */
 async function assertWithinQuota(ctx: CommandContext) {
   const quota = ctx.services.workspaceQuota;
+  if (quota === undefined) return;
+  // Serialize the count and the create per owner (#487). Without it two parallel creates both read
+  // quota - 1 and insert, overshooting the limit. The lock is held until this transaction commits.
+  await ctx.tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext('am.workspace-quota'), hashtext(${ctx.principal.userId}))`);
   const owned = await ctx.services.ownedWorkspaceCount?.(ctx.principal.userId);
-  if (quota === undefined || owned === undefined || owned < quota) return;
+  if (owned === undefined || owned < quota) return;
   throw new AppError(
     'forbidden',
     `You own ${owned} brands, the limit for one person is ${quota}. Use an existing brand, or ask an operator to raise WORKSPACE_QUOTA.`,

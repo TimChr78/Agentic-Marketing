@@ -186,4 +186,13 @@ describe('domain resolver cache', () => {
     fake.setRows([]);
     expect(await resolver.hostCheckingActive()).toBe(true);
   });
+
+  it('quarantines rows on an installation-owned host (#480)', async () => {
+    const fake = fakeDb([row({ id: 'wdo_takeover', host: 'links.example.com', workspaceId: 'ws_a' })]);
+    const resolver = createWorkspaceDomainResolver(fake.db, { ttlMs: 0, reservedHosts: ['links.example.com'] });
+    expect(await resolver.resolveWorkspaceForRequest('links.example.com', '/f/x')).toBeNull();
+    expect(await resolver.linksUrlFor('ws_a')).toBeNull();
+    // The quarantined row does not switch Host checking on by itself either.
+    expect(await resolver.hostCheckingActive()).toBe(false);
+  });
 });

@@ -136,7 +136,6 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
         return { status: res.status, body: res.body };
       }),
     invalidateDomainCache: () => domains.invalidate(),
-    activateDomainRouting: () => domains.activateHostChecking(),
     db,
     serverVersion: VERSION,
     ownsAnyWorkspace: async (userId) => (await directory.memberships(userId)).some((membership) => membership.role === 'owner'),

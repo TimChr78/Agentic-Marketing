@@ -163,6 +163,12 @@ export interface DomainResolverOptions {
   /** How long cached rows may be reused. Writes also invalidate the cache explicitly. */
   ttlMs?: number;
   now?: () => number;
+  /**
+   * Normalised hostnames owned by the installation (the admin host and the fallback links host).
+   * Rows on them are quarantined: they resolve no traffic and supply no links (#480), which also
+   * neutralises a row someone verified before 0.10.1.
+   */
+  reservedHosts?: string[];
 }
 
 export interface WorkspaceDomainResolver {
@@ -207,6 +213,7 @@ interface DomainRegistry {
 export function createWorkspaceDomainResolver(db: Db, options: DomainResolverOptions = {}): WorkspaceDomainResolver {
   const ttlMs = options.ttlMs ?? 5_000;
   const now = options.now ?? Date.now;
+  const reservedHosts = new Set(options.reservedHosts ?? []);
   let cache: { at: number; registry: DomainRegistry } | null = null;
   let loading: Promise<DomainRegistry> | null = null;
   // A write bumps the generation. A load that started before it must not repopulate the cache with
@@ -221,7 +228,9 @@ export function createWorkspaceDomainResolver(db: Db, options: DomainResolverOpt
       db.admin.query<WorkspaceDomain>(`SELECT ${DOMAIN_COLUMNS} FROM workspace_domains`),
       db.admin.query<{ key: string }>('SELECT key FROM installation_settings WHERE key = $1', [DOMAIN_ROUTING_KEY]),
     ]).then(([domains, setting]) => {
-      const rows = domains.rows;
+      // A row on an installation host is quarantined: the admin and fallback hosts belong to no
+      // workspace, even if someone verified such a row before the registry enforced it (#480).
+      const rows = domains.rows.filter((row) => !reservedHosts.has(row.host));
       // A verified row also activates checking, so an installation upgraded from 0.8–0.10 whose
       // setting is not backfilled yet behaves exactly as before until the next verification.
       const registry = { rows, active: setting.rows.length > 0 || rows.some((row) => row.status === 'verified') };
