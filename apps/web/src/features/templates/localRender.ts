@@ -1,4 +1,4 @@
-import { Liquid } from 'liquidjs';
+import type { Liquid as LiquidEngine } from 'liquidjs';
 
 // Local draft rendering for the template editor (Phase 25, #499). It reuses the browser Liquid +
 // mjml-browser pipeline the legacy mock screen used, with the same scope and preheader convention
@@ -24,7 +24,12 @@ export interface DraftRender {
 const PLACEHOLDER_UNSUBSCRIBE = 'https://example.invalid/unsubscribe';
 const PLACEHOLDER_WEB = 'https://example.invalid/web';
 
-const liquid = new Liquid({ strictVariables: false, strictFilters: false });
+/** The Liquid engine is large; load it only when a draft actually renders. */
+let enginePromise: Promise<LiquidEngine> | undefined;
+function engine() {
+  enginePromise ??= import('liquidjs').then(({ Liquid }) => new Liquid({ strictVariables: false, strictFilters: false }));
+  return enginePromise;
+}
 
 /** A draft that needs the server's block resolver: never strip the tag or render around it. */
 export function draftUsesBlocks(content: Pick<DraftEmailContent, 'mjml' | 'text'>): boolean {
@@ -59,6 +64,7 @@ export function withPreheader(mjml: string, preheader: string | undefined): stri
 export async function renderDraft(content: DraftEmailContent): Promise<DraftRender> {
   if (draftUsesBlocks(content))
     throw new Error('This draft uses a reusable block, which only the server can expand. Save the draft to render it.');
+  const liquid = await engine();
   const scope = draftScope(content.sampleData);
   const [subject, preheader, mjml] = await Promise.all([
     liquid.parseAndRender(content.subject ?? '', scope),

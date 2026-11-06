@@ -96,7 +96,8 @@ export function EmailPreview({
   const [width, setWidth] = useState<'desktop' | 'mobile'>(() => (window.innerWidth < 640 ? 'mobile' : 'desktop'));
   const [tab, setTab] = useState<'html' | 'text'>('html');
   const unsaved = source?.kind === 'unsaved';
-  const pinned = source && source.kind !== 'unsaved' ? source.version : version;
+  // An explicit version always wins; `source` is provenance, not a second way to choose a read.
+  const pinned = version ?? (source && source.kind !== 'unsaved' ? source.version : undefined);
   const draft = unsaved ? draftContent : undefined;
   const local = useDraftEmail(draft, !!draft);
   // With no explicit version, resolve the returned version and the publication pointer before

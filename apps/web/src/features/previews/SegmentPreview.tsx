@@ -29,7 +29,8 @@ export function SegmentPreview({
 }) {
   const { can } = useSession();
   const unsaved = source?.kind === 'unsaved';
-  const pinned = source && source.kind !== 'unsaved' ? source.version : version;
+  // An explicit version always wins; `source` is provenance, not a second way to choose a read.
+  const pinned = version ?? (source && source.kind !== 'unsaved' ? source.version : undefined);
   const size = useApi(() => api.call('segments.preview', { artifactId, version: pinned }), [artifactId, pinned], {
     skip: !can('profiles:read') || unsaved,
   });

@@ -24,7 +24,8 @@ export function BlockPreview({
 }) {
   const [width, setWidth] = useState<'desktop' | 'mobile'>(() => (window.innerWidth < 640 ? 'mobile' : 'desktop'));
   const unsaved = source?.kind === 'unsaved';
-  const pinned = source && source.kind !== 'unsaved' ? source.version : version;
+  // An explicit version always wins; `source` is provenance, not a second way to choose a read.
+  const pinned = version ?? (source && source.kind !== 'unsaved' ? source.version : undefined);
   // A dirty block has no local renderer in the preview host. Never fetch the saved version and
   // show it under an Unsaved label; say what will make it render instead.
   const pointer = useArtifactRef(!source && version == null ? artifactId : null);
