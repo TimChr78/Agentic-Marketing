@@ -82,6 +82,15 @@ export default function AnalyticsPage() {
   const timeIndex = columns.findIndex((c) => TIME_DIMENSIONS.has(c.name));
   const timeDimension = timeIndex >= 0 ? (columns[timeIndex].name as TimeDimension) : null;
   const measureColumns = columns.flatMap((c, index) => (c.kind === 'measure' ? [{ ...c, index }] : []));
+  // At most three lines in one plot (DESIGN.md → Data visualisation); the table keeps every measure.
+  const chartMeasures = measureColumns.slice(0, 3);
+  // An empty result has no meaningful "newest event": never render the epoch as a date (#438).
+  const freshness = data?.rows.length
+    ? (() => {
+        const at = data?.meta.freshness ? new Date(data.meta.freshness) : null;
+        return at && !Number.isNaN(at.getTime()) && at.getFullYear() > 2000 ? at : null;
+      })()
+    : null;
 
   return (
     <div className={pageWidth('default')}>
@@ -144,37 +153,67 @@ export default function AnalyticsPage() {
         <Alert tone="bad" title="Couldn't run the query" onRetry={result.reload} className="mb-5">
           {result.error}
         </Alert>
-      ) : timeDimension && measureColumns.length > 0 && (data?.rows.length ?? 0) > 0 ? (
-        <div className="mb-5 rounded-lg border border-line bg-surface p-3">
-          <div className="mb-1 px-1 text-[12px] text-muted">
+      ) : timeDimension && chartMeasures.length > 0 && (data?.rows.length ?? 0) > 0 ? (
+        <div className="mb-5 rounded-lg bg-surface p-4 md:p-5">
+          <div className="mb-1 text-[12px] leading-[18px] text-muted">
             {timeDimension} · {data?.meta.timeZone}
           </div>
           <Chart
             deps={[data]}
-            height={280}
             option={(c) => ({
-              legend: { top: 0, right: 8, textStyle: { color: c.muted }, itemWidth: 12, itemHeight: 8 },
-              grid: { left: 8, right: 20, top: 30, bottom: 4, containLabel: true },
-              tooltip: { trigger: 'axis', backgroundColor: c.surface, borderColor: c.line, textStyle: { color: c.fg } },
+              tooltip: { trigger: 'axis' },
               xAxis: {
                 type: 'category',
                 data: (data?.rows ?? []).map((r) => String(r[timeIndex])),
                 axisLine: { lineStyle: { color: c.line } },
                 axisTick: { show: false },
+                // The direct end labels occupy the right edge; omit the last date there so the two
+                // do not collide, while the period stays visible above the plot.
+                axisLabel: {
+                  color: c.muted,
+                  fontSize: 12,
+                  lineHeight: 18,
+                  formatter: (value: string, index: number) => (index === (data?.rows.length ?? 0) - 1 ? '' : value),
+                },
               },
-              yAxis: { type: 'value', splitLine: { lineStyle: { color: c.line } } },
-              series: measureColumns.map((m, i) => ({
+              yAxis: {
+                type: 'value',
+                splitNumber: 3,
+                axisLine: { show: false },
+                axisTick: { show: false },
+                axisLabel: { color: c.muted, fontSize: 12, lineHeight: 18 },
+                splitLine: { lineStyle: { color: c.line, width: 1 } },
+              },
+              series: chartMeasures.map((m, i) => ({
                 name: m.name,
                 type: 'line',
-                smooth: true,
-                symbol: 'none',
+                smooth: false,
+                showSymbol: false,
+                symbol: 'circle',
+                symbolSize: 6,
                 connectNulls: false,
                 data: (data?.rows ?? []).map((r) => (typeof r[m.index] === 'number' ? (r[m.index] as number) : null)),
-                lineStyle: { width: 2, color: [c.accent, c.good, c.agent, c.bad][i % 4] },
-                itemStyle: { color: [c.accent, c.good, c.agent, c.bad][i % 4] },
+                lineStyle: { width: 2, color: c.viz[i % c.viz.length] },
+                itemStyle: { color: c.viz[i % c.viz.length] },
+                labelLayout: { moveOverlap: 'shiftY', hideOverlap: false },
+                endLabel: {
+                  show: true,
+                  formatter: '{a}',
+                  color: c.fg,
+                  fontSize: 12,
+                  lineHeight: 18,
+                  distance: 8,
+                  textBorderColor: c.surface,
+                  textBorderWidth: 2,
+                },
               })),
             })}
           />
+          {measureColumns.length > chartMeasures.length && (
+            <p className="mt-2 text-[12px] leading-[18px] text-muted">
+              The first three measures are plotted; the table has all {measureColumns.length}.
+            </p>
+          )}
         </div>
       ) : null}
 
@@ -192,7 +231,7 @@ export default function AnalyticsPage() {
           <span className="text-[12px] text-muted">
             {data ? `${data.rows.length.toLocaleString()} row${data.rows.length === 1 ? '' : 's'}` : 'No result yet'}
             {data?.meta.suppressed ? ` · ${data.meta.suppressed} suppressed (k=${data.meta.k})` : ''}
-            {data?.meta.freshness ? ` · newest ${new Date(data.meta.freshness).toLocaleString()}` : ''}
+            {freshness ? ` · newest ${freshness.toLocaleString()}` : ''}
             {data?.meta.currency ? ` · ${data.meta.currency}` : ''}
           </span>
         }

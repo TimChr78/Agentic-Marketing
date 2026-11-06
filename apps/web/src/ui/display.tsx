@@ -159,8 +159,8 @@ export function EmptyState({
   return (
     <div className={cx('flex flex-col items-center px-6 text-center', compact ? 'py-6' : 'py-12')}>
       {icon && <div className="mb-3 text-muted">{icon}</div>}
-      <p className="text-[14px] font-medium text-fg">{title}</p>
-      {children && <div className="mt-1 max-w-[440px] text-[13px] text-muted">{children}</div>}
+      <p className="text-[16px] leading-6 font-semibold text-fg">{title}</p>
+      {children && <div className="mt-1 max-w-[440px] text-[14px] leading-[22px] text-muted">{children}</div>}
       {action && <div className="mt-4 flex flex-wrap justify-center gap-2">{action}</div>}
     </div>
   );
@@ -202,7 +202,7 @@ export function Alert({
     <div
       role={tone === 'bad' ? 'alert' : undefined}
       className={cx(
-        'flex items-start gap-2.5 rounded-lg border px-3.5 py-2.5 text-[13px]',
+        'flex items-start gap-2.5 rounded-lg border px-4 py-3 text-[13px] leading-5',
         tone === 'info' && 'border-accent/25 bg-accent-soft',
         tone === 'warn' && 'border-warn/30 bg-warn-soft',
         tone === 'bad' && 'border-bad/30 bg-bad-soft',
@@ -255,15 +255,15 @@ export function Card({
       className={cx('min-w-0 rounded-lg border border-line bg-surface [&>.am-frame]:rounded-t-none [&>.am-frame]:border-0', className)}
     >
       {(title || action) && (
-        <header className="flex items-start justify-between gap-3 border-b border-line px-4 py-3">
+        <header className="flex items-start justify-between gap-3 border-b border-line px-4 py-3.5 md:px-5 md:py-4">
           <div className="min-w-0">
-            {title && <h2 className="text-[14px] leading-5 font-semibold">{title}</h2>}
-            {description && <p className="mt-0.5 text-[12px] text-muted">{description}</p>}
+            {title && <h2 className="text-[16px] leading-6 font-semibold">{title}</h2>}
+            {description && <p className="mt-1 text-[12px] leading-[18px] text-muted">{description}</p>}
           </div>
-          {action && <div className="flex shrink-0 items-center gap-2">{action}</div>}
+          {action && <div className="flex shrink-0 flex-wrap items-center gap-2">{action}</div>}
         </header>
       )}
-      {padded ? <div className="p-4">{children}</div> : children}
+      {padded ? <div className="p-4 md:p-5">{children}</div> : children}
     </section>
   );
 }
@@ -281,11 +281,11 @@ export function PageHeader({
   meta?: ReactNode;
 }) {
   return (
-    <div className="mb-5 flex flex-wrap items-start justify-between gap-x-4 gap-y-3">
+    <div className="mb-6 flex flex-wrap items-start justify-between gap-x-4 gap-y-3 lg:mb-8">
       <div className="min-w-0">
-        <h1 className="text-[20px] leading-7 font-semibold break-words">{title}</h1>
-        {meta && <div className="mt-1 flex flex-wrap items-center gap-2 text-[12px] text-muted">{meta}</div>}
-        {description && <p className="mt-1 max-w-[720px] text-[13px] text-muted">{description}</p>}
+        <h1 className="text-[24px] leading-8 font-semibold tracking-[-0.02em] break-words">{title}</h1>
+        {meta && <div className="mt-1 flex flex-wrap items-center gap-2 text-[12px] leading-[18px] text-muted">{meta}</div>}
+        {description && <p className="mt-1 max-w-[760px] text-[14px] leading-[22px] text-muted">{description}</p>}
       </div>
       {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
     </div>

@@ -125,7 +125,7 @@ export function Menu({
             aria-label={label}
             onKeyDown={onListKey}
             style={{ position: 'fixed', top: pos.top, left: pos.left, right: pos.right }}
-            className="am-fade-in z-[70] min-w-[180px] rounded-lg border border-line bg-surface p-1 shadow-2"
+            className="am-fade-in z-[70] min-w-[180px] rounded-lg border border-line bg-surface p-1 shadow-1"
           >
             {items.map((it, i) =>
               it === 'separator' ? (
@@ -147,7 +147,7 @@ export function Menu({
                     it.onSelect();
                   }}
                   className={cx(
-                    'flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] outline-none focus:bg-surface-2 hover:bg-surface-2',
+                    'flex h-10 w-full items-center gap-2 rounded-md px-3 text-left text-[13px] outline-none pointer-coarse:h-10 focus:bg-surface-2 hover:bg-surface-2 md:h-8 md:px-2',
                     it.destructive ? 'text-bad' : 'text-fg',
                     it.disabled && 'cursor-not-allowed opacity-50',
                   )}
@@ -216,7 +216,7 @@ export function ContextMenu({
         top: Math.min(Number.isFinite(at.y) ? at.y : window.innerHeight / 3, window.innerHeight - 220),
         left: Math.min(Number.isFinite(at.x) ? at.x : window.innerWidth / 3, window.innerWidth - 200),
       }}
-      className="am-fade-in z-[70] min-w-[180px] rounded-lg border border-line bg-surface p-1 shadow-2"
+      className="am-fade-in z-[70] min-w-[180px] rounded-lg border border-line bg-surface p-1 shadow-1"
     >
       {items.map((it, i) =>
         it === 'separator' ? (
@@ -238,7 +238,7 @@ export function ContextMenu({
               it.onSelect();
             }}
             className={cx(
-              'flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] outline-none focus:bg-surface-2 hover:bg-surface-2',
+              'flex h-10 w-full items-center gap-2 rounded-md px-3 text-left text-[13px] outline-none pointer-coarse:h-10 focus:bg-surface-2 hover:bg-surface-2 md:h-8 md:px-2',
               it.destructive ? 'text-bad' : 'text-fg',
               it.disabled && 'cursor-not-allowed opacity-50',
             )}

@@ -15,6 +15,7 @@ export function TableFrame({
   columns = 4,
   className,
   toolbar,
+  footer,
 }: {
   children: ReactNode;
   loading?: boolean;
@@ -26,10 +27,12 @@ export function TableFrame({
   columns?: number;
   className?: string;
   toolbar?: ReactNode;
+  /** Paging or summary row after the table, outside the horizontal scroll region. */
+  footer?: ReactNode;
 }) {
   return (
     <div className={cx('am-frame min-w-0 overflow-hidden rounded-lg border border-line bg-surface', className)}>
-      {toolbar && <div className="flex flex-wrap items-center gap-2 border-b border-line px-3 py-2">{toolbar}</div>}
+      {toolbar && <div className="flex flex-wrap items-center gap-2 border-b border-line px-3 py-2.5 md:px-4">{toolbar}</div>}
       {error ? (
         <div className="p-3">
           <Alert tone="bad" title="Couldn't load this list" onRetry={onRetry}>
@@ -53,24 +56,27 @@ export function TableFrame({
       ) : (
         <div className="overflow-x-auto">{children}</div>
       )}
+      {footer && !error && !loading && <div className="border-t border-line px-3 py-2.5 md:px-4">{footer}</div>}
     </div>
   );
 }
 
 export function Table({ children, className, label }: { children: ReactNode; className?: string; label?: string }) {
   return (
-    <table aria-label={label} className={cx('w-full border-collapse text-left text-[13px]', className)}>
+    <table aria-label={label} className={cx('w-full border-collapse text-left text-[13px] leading-5', className)}>
       {children}
     </table>
   );
 }
 
 export function THead({ children }: { children: ReactNode }) {
-  return <thead className="bg-surface-2 text-[12px] text-muted">{children}</thead>;
+  return <thead className="bg-surface-2 text-[13px] leading-5 text-muted">{children}</thead>;
 }
 
 export function Th({ className, align, ...p }: ThHTMLAttributes<HTMLTableCellElement> & { align?: 'right' }) {
-  return <th scope="col" {...p} className={cx('h-9 px-4 font-medium whitespace-nowrap', align === 'right' && 'text-right', className)} />;
+  return (
+    <th scope="col" {...p} className={cx('h-9 px-3 font-medium whitespace-nowrap md:px-4', align === 'right' && 'text-right', className)} />
+  );
 }
 
 export function Tr({
@@ -104,7 +110,12 @@ export function Tr({
 }
 
 export function Td({ className, align, ...p }: TdHTMLAttributes<HTMLTableCellElement> & { align?: 'right' }) {
-  return <td {...p} className={cx('px-4 py-2.5 align-middle text-fg-2', align === 'right' && 'num text-right', className)} />;
+  return (
+    <td
+      {...p}
+      className={cx('px-3 py-3.5 align-middle text-[13px] leading-5 text-fg-2 md:px-4', align === 'right' && 'num text-right', className)}
+    />
+  );
 }
 
 /** The empty state used inside a TableFrame. */

@@ -31,8 +31,8 @@ export function CodeView({
   className?: string;
 }) {
   return (
-    <div className={cx('relative min-w-0 rounded-md border border-line bg-surface-2', className)}>
-      {label && <div className="border-b border-line px-3 py-1.5 text-[12px] font-medium text-muted">{label}</div>}
+    <div className={cx('relative min-w-0 rounded-lg border border-line bg-surface-2', className)}>
+      {label && <div className="border-b border-line px-3 py-2 text-[12px] leading-[18px] font-medium text-muted">{label}</div>}
       <div className="absolute top-1 right-1">
         <CopyButton value={value} />
       </div>

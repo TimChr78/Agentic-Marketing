@@ -151,7 +151,7 @@ export function TemplateEditor({ artifact, content, onChange, readOnly, errors }
         readOnly ? (
           <Alert tone="info">Your role can read this template but not edit it. Open Preview to see it rendered.</Alert>
         ) : (
-          <div className="h-[calc(100vh-300px)] min-h-[560px] overflow-hidden rounded-lg border border-line">
+          <div className="h-[calc(100vh-300px)] min-h-[560px] overflow-x-auto overflow-y-hidden rounded-lg border border-line">
             <Suspense fallback={<LoadingBlock lines={8} label="Loading the visual editor" />}>
               <VisualMjml key={visualKey} ref={visual} mjml={content.mjml} onChange={(mjml) => set({ mjml })} />
             </Suspense>
