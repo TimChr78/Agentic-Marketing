@@ -93,6 +93,8 @@ const RolloutStatus = z.object({
   guardrail: Guardrail.nullable(),
   lastGuardrail: GuardrailReading.nullable(),
   reason: z.string().nullable(),
+  /** Why the last sweep could not advance the ramp (#474); null after a successful step. */
+  lastError: z.string().nullable(),
 });
 
 type RolloutRow = typeof schema.experienceRollouts.$inferSelect;
@@ -115,6 +117,7 @@ const statusOf = (artifactId: string, row: RolloutRow | null): z.infer<typeof Ro
         guardrail: row.guardrail ?? null,
         lastGuardrail: row.lastGuardrail ?? null,
         reason: row.reason,
+        lastError: row.lastError,
       }
     : {
         artifactId,
@@ -132,6 +135,7 @@ const statusOf = (artifactId: string, row: RolloutRow | null): z.infer<typeof Ro
         guardrail: null,
         lastGuardrail: null,
         reason: null,
+        lastError: null,
       };
 
 /** The edge bundle and the decision API cache must see a changed share without waiting for a publish. */
@@ -169,7 +173,7 @@ export const stopRollout = defineCommand({
   name: 'experiences.stopRollout',
   title: 'Stop an experience ramp',
   description:
-    'Stop an experience ramp at once: its share becomes 0 for everyone and the edge bundle is updated without republishing. People and agents with experience.live may stop a ramp; it stays stopped until a person resumes it with experiences.resumeRollout.',
+    'Stop an experience ramp at once: its share becomes 0 for everyone and the edge bundle is updated without republishing. People and agents with experience.live may stop a ramp; it stays stopped until a person resumes it with experiences.resumeRollout, and an agent republishing the experience does not restart it.',
   input: z.object({
     artifactId: z.string().regex(/^exp_[0-9a-f]{32}$/, 'An experience id (exp_…)'),
     reason: z.string().min(1).max(500).describe('Why the ramp is stopped; shown in the rollout status and the agent event'),
@@ -203,6 +207,9 @@ export const stopRollout = defineCommand({
         stoppedAt: now,
         pausedAt: null,
         nextStepAt: null,
+        stoppedBy: ctx.principal.userId,
+        stoppedByAgent: ctx.principal.type === 'agent',
+        lastError: null,
         reason: input.reason,
         updatedAt: now,
         updatedBy: ctx.principal.userId,
@@ -247,6 +254,9 @@ export const resumeRollout = defineCommand({
         status: complete ? 'complete' : 'running',
         pausedAt: null,
         stoppedAt: null,
+        stoppedBy: null,
+        stoppedByAgent: false,
+        lastError: null,
         advancedAt: now,
         nextStepAt: complete ? null : new Date(now.getTime() + row.stepHours * HOUR_MS),
         reason: input.reason ?? null,
@@ -263,7 +273,10 @@ export const resumeRollout = defineCommand({
 export const rolloutCommands = [rolloutStatus, stopRollout, resumeRollout] as const;
 
 // A published experience (re)starts its ramp from the first step; an un-ramped publish clears any
-// previous state so an old ramp cannot keep limiting the new version.
+// previous state so an old ramp cannot keep limiting the new version. A person's stop is the
+// exception (#454): an agent republishing content or metadata must not restart a ramp a person
+// stopped, and cannot clear it by publishing an un-ramped version either. Only a person's resume or
+// a person's republish starts it again.
 publishHooks.push(async (ctx, artifact, version) => {
   if (artifact.type !== 'experience') return;
   const [v] = await ctx.tx
@@ -279,11 +292,41 @@ publishHooks.push(async (ctx, artifact, version) => {
   if (!v) return;
   const def = artifactTypes.experience.content.parse(v.content);
   const where = and(eq(schema.experienceRollouts.workspaceId, artifact.workspaceId), eq(schema.experienceRollouts.artifactId, artifact.id));
+  const [existing] = await ctx.tx.select().from(schema.experienceRollouts).where(where).for('update');
+  const keptStop = existing?.status === 'stopped' && !existing.stoppedByAgent && ctx.principal.type === 'agent' ? existing : null;
+  const now = new Date();
   if (!def.rollout) {
-    await ctx.tx.delete(schema.experienceRollouts).where(where);
+    if (!keptStop) {
+      await ctx.tx.delete(schema.experienceRollouts).where(where);
+      return;
+    }
+    // The new version has no ramp, but the person's stop still holds: keep the row at share 0 so
+    // the un-ramped version cannot serve everyone behind the stop's back.
+    await ctx.tx
+      .update(schema.experienceRollouts)
+      .set({ version, share: 0, status: 'stopped', nextStepAt: null, pausedAt: null, lastError: null, updatedAt: now })
+      .where(where);
     return;
   }
-  const now = new Date();
+  if (keptStop) {
+    await ctx.tx
+      .update(schema.experienceRollouts)
+      .set({
+        version,
+        steps: def.rollout.steps,
+        stepHours: def.rollout.stepHours,
+        guardrail: def.rollout.guardrail ?? null,
+        stepIndex: 0,
+        share: 0,
+        status: 'stopped',
+        nextStepAt: null,
+        pausedAt: null,
+        lastError: null,
+        updatedAt: now,
+      })
+      .where(where);
+    return;
+  }
   const start = initialRollout(def.rollout, now);
   const values = {
     workspaceId: artifact.workspaceId,
@@ -301,6 +344,9 @@ publishHooks.push(async (ctx, artifact, version) => {
     nextStepAt: start.nextStepAt,
     pausedAt: null,
     stoppedAt: null,
+    stoppedBy: null,
+    stoppedByAgent: false,
+    lastError: null,
     reason: null,
     updatedAt: now,
     updatedBy: ctx.principal.userId,

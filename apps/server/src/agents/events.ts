@@ -249,37 +249,37 @@ async function derive(tx: Tx, workspaceId: string, cursor: typeof schema.agentEv
     });
   }
 
-  // A ramp the guardrail paused (#427): the workspace-wide event an experimentation agent reacts to.
+  // A ramp the guardrail paused (#427, #476): the workspace-wide event an experimentation agent
+  // reacts to. It is read from the durable pause row, so a stop that follows quickly cannot erase
+  // the pause before the sweep has delivered it.
   const rollouts = await tx
     .select({
-      artifactId: schema.experienceRollouts.artifactId,
-      version: schema.experienceRollouts.version,
-      stepIndex: schema.experienceRollouts.stepIndex,
-      share: schema.experienceRollouts.share,
-      reason: schema.experienceRollouts.reason,
-      pausedAt: schema.experienceRollouts.pausedAt,
+      artifactId: schema.experienceRolloutPauses.artifactId,
+      version: schema.experienceRolloutPauses.version,
+      stepIndex: schema.experienceRolloutPauses.stepIndex,
+      share: schema.experienceRolloutPauses.share,
+      reason: schema.experienceRolloutPauses.reason,
+      pausedAt: schema.experienceRolloutPauses.pausedAt,
       name: schema.artifacts.name,
     })
-    .from(schema.experienceRollouts)
+    .from(schema.experienceRolloutPauses)
     .innerJoin(
       schema.artifacts,
       and(
-        eq(schema.artifacts.workspaceId, schema.experienceRollouts.workspaceId),
-        eq(schema.artifacts.id, schema.experienceRollouts.artifactId),
+        eq(schema.artifacts.workspaceId, schema.experienceRolloutPauses.workspaceId),
+        eq(schema.artifacts.id, schema.experienceRolloutPauses.artifactId),
       ),
     )
     .where(
       and(
-        eq(schema.experienceRollouts.workspaceId, workspaceId),
-        eq(schema.experienceRollouts.status, 'paused'),
-        isNotNull(schema.experienceRollouts.pausedAt),
-        gte(schema.experienceRollouts.pausedAt, cursor.lastRolloutAt ?? new Date(0)),
+        eq(schema.experienceRolloutPauses.workspaceId, workspaceId),
+        gte(schema.experienceRolloutPauses.pausedAt, cursor.lastRolloutAt ?? new Date(0)),
       ),
     )
-    .orderBy(asc(schema.experienceRollouts.pausedAt))
+    .orderBy(asc(schema.experienceRolloutPauses.pausedAt))
     .limit(MAX_PER_RUN);
   for (const row of rollouts) {
-    const at = row.pausedAt!;
+    const at = row.pausedAt;
     events.push({
       key: `rollout:${row.artifactId}:${at.toISOString()}`,
       type: 'experience.rollout_paused',

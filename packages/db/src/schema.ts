@@ -1461,11 +1461,48 @@ export const experienceRollouts = pgTable(
     nextStepAt: ts('next_step_at'),
     pausedAt: ts('paused_at'),
     stoppedAt: ts('stopped_at'),
+    /** The person or agent that stopped the ramp; kept while an agent republish leaves it stopped (#454). */
+    stoppedBy: text('stopped_by'),
+    /** True when an agent stopped it: only a person's stop blocks an agent republish from restarting (#454). */
+    stoppedByAgent: boolean('stopped_by_agent').notNull().default(false),
+    /** Why the last sweep could not advance this ramp; cleared by the next successful step (#474). */
+    lastError: text('last_error'),
     reason: text('reason'),
     updatedAt: ts('updated_at').notNull().defaultNow(),
     updatedBy: text('updated_by'),
   },
   (t) => [primaryKey({ columns: [t.workspaceId, t.artifactId] })],
+);
+
+/**
+ * Every guardrail pause, durable (#473, #476): written in the same transaction as the paused ramp,
+ * then delivered to owners (after commit) and to agent event subscribers. A stop cannot erase it.
+ */
+export const experienceRolloutPauses = pgTable(
+  'experience_rollout_pauses',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    artifactId: text('artifact_id').notNull(),
+    version: integer('version').notNull(),
+    pausedAt: ts('paused_at').notNull(),
+    stepIndex: integer('step_index').notNull(),
+    share: integer('share').notNull(),
+    reason: text('reason'),
+    guardrail: jsonb('guardrail').$type<{ measure: string; maxDropPercent: number } | null>(),
+    /** The metric-layer reading that failed, kept for the e-mail and the event after the ramp moves on. */
+    reading: jsonb('reading').$type<{
+      at: string;
+      measure: string;
+      value: number;
+      baseline: number;
+      dropPercent: number;
+      ok: boolean;
+    } | null>(),
+    /** Set once the owner e-mail was attempted; null means the outbox still owes it. */
+    notifiedAt: ts('notified_at'),
+    notifyError: text('notify_error'),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.artifactId, t.pausedAt] })],
 );
 
 export type AgentStatus = 'active' | 'paused' | 'revoked';
