@@ -34,7 +34,7 @@ const escapeHtml = (value: string) =>
   value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
 
 const baseUrl = (publicUrl: string) => publicUrl.replace(/\/$/, '');
-const agentUrl = (publicUrl: string, agentId: string) => `${baseUrl(publicUrl)}/settings/agents/${encodeURIComponent(agentId)}`;
+const agentUrl = (publicUrl: string, agentId: string) => `${baseUrl(publicUrl)}/work/agents/${encodeURIComponent(agentId)}`;
 const approvalUrl = (publicUrl: string, approvalId: string) => `${baseUrl(publicUrl)}/approvals/${encodeURIComponent(approvalId)}`;
 
 const actionKey = (action: typeof schema.agentActions.$inferSelect) => `${action.id}:${action.command}`;

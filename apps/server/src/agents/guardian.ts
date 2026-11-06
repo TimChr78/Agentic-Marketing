@@ -282,7 +282,7 @@ async function notify(
 ) {
   const mandate = await activeMandate(tx, agent.id).catch(() => null);
   const recipients = [...new Set([agent.sponsorUserId, ...(mandate?.content.escalation.userIds ?? [])])];
-  const url = `${deps.publicUrl.replace(/\/$/, '')}/settings/agents/${encodeURIComponent(agent.id)}`;
+  const url = `${deps.publicUrl.replace(/\/$/, '')}/work/agents/${encodeURIComponent(agent.id)}`;
   const lines = done.map((f) => `- ${f.reason} ${ACTION_TEXT[f.action]}`);
   const text = [
     `The guardian acted on the agent “${agent.name}”:`,

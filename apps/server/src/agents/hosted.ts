@@ -354,7 +354,7 @@ function runEmail(
   status: 'ok' | 'failed' | 'skipped',
   outcome: { summary: string; error: string | null; toolCalls: number; tokens: number; disabled: boolean },
 ) {
-  const url = `${deps.publicUrl.replace(/\/$/, '')}/settings/agents/${encodeURIComponent(agent.id)}`;
+  const url = `${deps.publicUrl.replace(/\/$/, '')}/work/agents/${encodeURIComponent(agent.id)}`;
   const subject =
     status === 'ok'
       ? `Hosted agent report: “${agent.name}”`
