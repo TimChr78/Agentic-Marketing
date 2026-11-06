@@ -12,7 +12,7 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 - Host checking is persisted once it has been switched on: removing the last verified domain no longer reverts the installation to any-Host and re-enables cross-brand public pages (#463).
 - Domain verification fetches through the shared egress guard, so private, link-local and metadata targets are refused, and the caller no longer receives the internal error or HTTP status of the challenge fetch (#466).
 - The domain resolver cannot repopulate its cache from a load that started before an invalidation; writes reach other server processes within the documented 5-second TTL (#464).
-- `broadcasts.cancel` is an action on the live send, not a draft edit: ownership and conflict coordination, guardian caps and a propose-only workspace apply, so one agent can no longer cancel another agent’s scheduled broadcast without a person (#468).
+- `broadcasts.cancel` is an action on the live send, not a draft edit: ownership and conflict coordination, guardian caps and a propose-only workspace apply, so one agent can no longer cancel another agent’s scheduled broadcast without a person. `artifacts.discardDraft` is coordinated the same way when the artifact belongs to another agent (#468).
 
 ### Fixed
 

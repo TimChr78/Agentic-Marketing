@@ -338,8 +338,8 @@ describe('cancelling a send is a coordinated change (#468)', () => {
     ws = await t.workspaceWith([[owner, 'owner']], 'none');
     api = t.api(owner, ws);
     a = await makeAgent(api, 'Cancelling agent A', ['artifacts:read', 'artifacts:write', 'messages:send']);
-    b = await makeAgent(api, 'Cancelling agent B', ['artifacts:read', 'messages:send']);
-    await api.call('workspace.setAutonomy', { maxLevel: { 'send.broadcast': 3 } });
+    b = await makeAgent(api, 'Cancelling agent B', ['artifacts:read', 'artifacts:write', 'messages:send']);
+    await api.call('workspace.setAutonomy', { maxLevel: { 'send.broadcast': 3, 'content.publish': 3 } });
     for (const [agent, name] of [
       [a, 'Cancel mandate A'],
       [b, 'Cancel mandate B'],
@@ -351,7 +351,7 @@ describe('cancelling a send is a coordinated change (#468)', () => {
           agent: agent.agentId,
           purpose: 'Send the weekly newsletter',
           validUntil: new Date(Date.now() + 30 * 86_400_000).toISOString(),
-          levels: { 'send.broadcast': 3 },
+          levels: { 'send.broadcast': 3, 'content.publish': 3 },
         } as never,
       });
       expect((await api.call('artifacts.requestPublish', { artifactId: mandate.artifactId, note: 'grant' })).status).toBe('published');
@@ -374,6 +374,30 @@ describe('cancelling a send is a coordinated change (#468)', () => {
     const own = await agentCall(a.token, 'broadcasts.cancel', { artifactId: broadcast });
     expect(own.status, own.body.message).toBe(200);
     expect(own.body.status).toBe('cancelled');
+  });
+
+  it('another agent cannot discard a draft on an artifact it does not own (#468)', async () => {
+    const created = await agentCall(a.token, 'artifacts.create', {
+      type: 'note',
+      name: 'Agent A note',
+      content: { title: 'Owned', body: 'First' },
+    });
+    const noteId = created.body.artifactId as string;
+    expect((await api.call('artifacts.requestPublish', { artifactId: noteId, note: 'publish' })).status).toBe('published');
+    expect(
+      (
+        await agentCall(a.token, 'artifacts.updateDraft', {
+          artifactId: noteId,
+          content: { title: 'Owned', body: 'Changed' },
+          note: 'draft',
+        })
+      ).status,
+    ).toBe(200);
+
+    const refused = await agentCall(b.token, 'artifacts.discardDraft', { artifactId: noteId });
+    expect(refused.status).toBe(403);
+    expect(refused.body.message).toContain('owned by agent');
+    expect((await api.call('artifacts.get', { artifactId: noteId })).latestVersion).toBe(2);
   });
 });
 
