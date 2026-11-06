@@ -11,7 +11,7 @@ export function CrumbsProvider({ children, onChange }: { children: ReactNode; on
   return <Ctx.Provider value={onChange}>{children}</Ctx.Provider>;
 }
 
-/** Sets the breadcrumbs after the nav group (e.g. [{label:'Journeys', to:'/build/journeys'}, {label: name}]). */
+/** Sets the breadcrumbs after the nav group (e.g. [{label:'Journeys', to:'/marketing/journeys'}, {label: name}]). */
 export function useCrumbs(crumbs: Crumb[]) {
   const set = useContext(Ctx);
   const key = JSON.stringify(crumbs);

@@ -1,6 +1,17 @@
 import { ApiError, type CommandInput, type CommandOutput, createClient } from '@agentic-marketing/client';
 import type { Commands } from '@agentic-marketing/server/src/registry';
 
+type ReadListener = (name: string, input: unknown, output: unknown) => void;
+let readListener: ReadListener | null = null;
+
+/**
+ * Lets the admin UI observe successful reads (used by recents). It runs after the response is
+ * already a success, so a failed or forbidden read is never reported.
+ */
+export function setReadListener(listener: ReadListener | null) {
+  readListener = listener;
+}
+
 // The real API through the typed client. Every call is the same command an MCP agent would make,
 // under the same rules. The chosen workspace goes in X-Workspace-Id on every call.
 
@@ -18,7 +29,19 @@ const fetchWithWorkspace: typeof fetch = (input, init = {}) => {
   return fetch(input, { ...init, headers });
 };
 
-export const api = createClient<Commands>({ credentials: 'include', fetch: fetchWithWorkspace });
+const base = createClient<Commands>({ credentials: 'include', fetch: fetchWithWorkspace });
+
+export const api = {
+  async call<N extends Commands[number]['name']>(
+    name: N,
+    input: CommandInput<Commands, N>,
+    callOpts: { idempotencyKey?: string } = {},
+  ): Promise<CommandOutput<Commands, N>> {
+    const out = (await base.call(name, input, callOpts)) as CommandOutput<Commands, N>;
+    readListener?.(name, input, out);
+    return out;
+  },
+};
 
 /**
  * A client that acts in one chosen brand for a single call, without switching the shell. Used when

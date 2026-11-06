@@ -22,8 +22,8 @@ type Values = Record<string, ParamValue>;
 const initialValues = (recipe: Recipe): Values =>
   Object.fromEntries(recipe.parameters.filter((p) => p.default !== undefined).map((p) => [p.key, p.default as ParamValue]));
 
-export default function RecipesPage() {
-  useCrumbs([{ label: 'Recipes' }]);
+export default function RecipesPage({ embedded = false }: { embedded?: boolean }) {
+  useCrumbs([{ label: embedded ? 'Starters' : 'Recipes' }]);
   const { can } = useWorkspace();
   const [list, setList] = useState<RecipeSummary[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
@@ -112,17 +112,19 @@ export default function RecipesPage() {
   };
 
   return (
-    <div className={pageWidth('default')}>
-      <PageHeader
-        title="Recipes"
-        description="Installable marketing loops: a welcome journey with double opt-in, a lead-magnet drip, a weekly newsletter and a win-back. A recipe creates version 1 drafts with your parameters filled in. Nothing is sent or published until a person approves it."
-        meta={
-          <>
-            <Tag icon={<Sparkles size={12} />}>{list.length} recipes</Tag>
-            <span>Drafts only; the approval policy decides what goes live.</span>
-          </>
-        }
-      />
+    <div className={embedded ? 'space-y-5' : pageWidth('default')}>
+      {!embedded && (
+        <PageHeader
+          title="Recipes"
+          description="Installable marketing loops: a welcome journey with double opt-in, a lead-magnet drip, a weekly newsletter and a win-back. A recipe creates version 1 drafts with your parameters filled in. Nothing is sent or published until a person approves it."
+          meta={
+            <>
+              <Tag icon={<Sparkles size={12} />}>{list.length} recipes</Tag>
+              <span>Drafts only; the approval policy decides what goes live.</span>
+            </>
+          }
+        />
+      )}
 
       {error && (
         <Alert tone="bad" title="That did not work" className="mb-4">

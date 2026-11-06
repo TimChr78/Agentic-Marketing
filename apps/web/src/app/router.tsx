@@ -48,7 +48,7 @@ export function setSearchParam(key: string, value: string | null) {
   emit();
 }
 
-/** Matches "/build/journeys/:id" against a path; returns params or null. */
+/** Matches "/marketing/journeys/:id" against a path; returns params or null. */
 export function match(pattern: string, path: string): Record<string, string> | null {
   const p = pattern.split('/').filter(Boolean);
   const s = path.split('/').filter(Boolean);
