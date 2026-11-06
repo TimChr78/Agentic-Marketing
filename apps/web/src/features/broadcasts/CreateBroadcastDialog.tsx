@@ -3,6 +3,7 @@ import { api, errText } from '../../app/api';
 import { artifactPath } from '../../app/artifactRoutes';
 import { navigate } from '../../app/router';
 import { Alert, Button, Field, Input, Modal, useToast } from '../../ui';
+import { notifyArtifactsChanged } from '../artifactCache';
 import { ArtifactSelect } from '../artifacts/ArtifactSelect';
 
 // The current broadcast create form (#448): a name, a published e-mail template and a segment.
@@ -39,6 +40,7 @@ export function CreateBroadcastDialog({ onClose }: { onClose: () => void }) {
         name: name.trim(),
         content: { template: state.template, segment: state.segment },
       });
+      notifyArtifactsChanged();
       toast.success(`Created “${name.trim()}” as a draft.`);
       onClose();
       navigate(artifactPath('broadcast', r.artifactId));
