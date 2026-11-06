@@ -44,6 +44,7 @@ import {
   timeAgo,
   useToast,
 } from '../../ui';
+import { Identifier } from '../../ui/Identifier';
 import { pageWidth } from '../../ui/layout';
 
 const LIMIT = 50;
@@ -70,9 +71,9 @@ export default function AgentPage({ params }: { params: Record<string, string> }
         title={a.name}
         meta={
           <>
-            <AgentStatusPill status={a.status} />
+            <AgentStatusPill status={a.status} guard={a.guard} statusReason={a.statusReason} />
             <span>Sponsored by {a.sponsor.name}</span>
-            <Mono>{a.id}</Mono>
+            <Identifier value={a.id} label="Agent ID" />
           </>
         }
         description={a.description || 'An agent acts for this workspace through its API token or MCP client.'}
@@ -108,7 +109,7 @@ export default function AgentPage({ params }: { params: Record<string, string> }
             {a.credentials.map((c) => (
               <li key={`${c.kind}:${c.id}`} className="flex flex-wrap items-center gap-2 px-4 py-2.5">
                 <Tag>{CREDENTIAL_KIND[c.kind] ?? c.kind}</Tag>
-                <Mono className="min-w-0 break-all">{c.id}</Mono>
+                <Identifier value={c.id} label={`${CREDENTIAL_KIND[c.kind] ?? c.kind} ID`} />
                 <span className="ml-auto text-[12px] whitespace-nowrap text-muted">since {formatDate(c.since)}</span>
               </li>
             ))}

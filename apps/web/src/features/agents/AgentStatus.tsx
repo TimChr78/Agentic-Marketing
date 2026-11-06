@@ -1,10 +1,24 @@
+import { stateOfAgent } from '../../lib/state';
 import { StatusPill } from '../../ui';
-import { AGENT_STATUS, type AgentDecision, type AgentStatus, DECISION } from './labels';
+import { OperationalPill } from '../../ui/state';
+import { type Agent, type AgentDecision, DECISION } from './labels';
 
-/** An agent's status: text plus colour, never colour alone. */
-export function AgentStatusPill({ status }: { status: AgentStatus }) {
-  const s = AGENT_STATUS[status] ?? { label: status, tone: 'neutral' as const };
-  return <StatusPill tone={s.tone}>{s.label}</StatusPill>;
+/** An agent's operational state: active, paused, held by the guardian, or revoked. Text plus marker. */
+export function AgentStatusPill({
+  status,
+  guard,
+  statusReason,
+}: {
+  status: Agent['status'];
+  guard?: Agent['guard'];
+  statusReason?: string | null;
+}) {
+  const state = stateOfAgent({ status, guard, statusReason });
+  return (
+    <span title={state.detail}>
+      <OperationalPill state={state} />
+    </span>
+  );
 }
 
 /** One policy decision: allowed, waited for a person, or refused. */

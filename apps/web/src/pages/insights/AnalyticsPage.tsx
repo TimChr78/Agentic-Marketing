@@ -2,31 +2,76 @@ import { useEffect, useMemo, useState } from 'react';
 import { api, type Out } from '../../app/api';
 import { useCrumbs } from '../../app/page';
 import { useApi } from '../../app/useApi';
-import { Chart } from '../../components/Chart';
-import { Alert, Checkbox, EmptyState, Field, Input, LoadingBlock, PageHeader, Table, TableFrame, Td, THead, Th, Tr } from '../../ui';
+import {
+  ANALYTICS_MEASURES,
+  dimensionDescription,
+  dimensionLabel,
+  METRIC_UNIT_LABEL,
+  type MetricUnit,
+  measureDescription,
+  measureLabel,
+  measureUnit,
+  metricLabel,
+} from '../../lib/labels';
+import {
+  Alert,
+  type ChartSeriesInput,
+  Checkbox,
+  EmptyState,
+  Field,
+  Input,
+  LineChart,
+  LoadingBlock,
+  PageHeader,
+  Table,
+  TableFrame,
+  Td,
+  THead,
+  Th,
+  Tr,
+} from '../../ui';
 import { pageWidth } from '../../ui/layout';
 
 type Result = Out<'analytics.query'>;
+type Column = Result['columns'][number];
+type MeasureColumn = Column & { index: number };
 type TimeDimension = 'day' | 'week' | 'month';
 
 const TIME_DIMENSIONS = new Set(['day', 'week', 'month']);
 const DEFAULT_MEASURES = ['email.sent', 'email.delivered', 'email.click_rate'];
+const UNIT_ORDER: MetricUnit[] = ['count', 'ratio', 'currency'];
+const UNIT_TITLE: Record<MetricUnit, string> = {
+  count: 'Counts over time',
+  ratio: 'Rates over time',
+  currency: 'Revenue over time',
+};
 
 /** YYYY-MM-DD, for the date inputs. */
 const dateInput = (date: Date) => date.toISOString().slice(0, 10);
 const dayStart = (date: string) => new Date(`${date}T00:00:00.000Z`).toISOString();
 const dayEnd = (date: string) => new Date(`${date}T23:59:59.999Z`).toISOString();
 
-const number = (value: number | string | null, unit?: string) => {
+/** A ratio is stored as a fraction; every visible rate, chart and table alike, is a percentage. */
+const chartValue = (column: Column, value: number | null): number | null => {
+  if (value === null) return null;
+  return column.unit === 'ratio' ? Math.round(value * 1_000_000) / 10_000 : value;
+};
+
+const number = (value: number | string | null, unit?: string, currency?: string | null) => {
   if (value === null || typeof value === 'string') return value ?? '—';
   if (unit === 'ratio') return `${(value * 100).toFixed(2)}%`;
-  if (unit === 'currency') return value.toLocaleString(undefined, { maximumFractionDigits: 2 });
+  if (unit === 'currency')
+    return currency
+      ? value.toLocaleString(undefined, { style: 'currency', currency, maximumFractionDigits: 2 })
+      : value.toLocaleString(undefined, { maximumFractionDigits: 2 });
   return value.toLocaleString();
 };
 
 /**
  * The same metric layer agents use (#75): pick measures and valid dimensions, choose a range, and
- * read the table or a line chart for a time grain. No mock data and no client-side aggregation.
+ * read the table or a line chart for a time grain. Counts, rates and money each get their own chart
+ * and axis (DESIGN.md → Chart contract), and every measure and dimension is named through the
+ * label registry, never by its raw key (#437).
  */
 export default function AnalyticsPage() {
   useCrumbs([{ label: 'Analytics' }]);
@@ -81,9 +126,13 @@ export default function AnalyticsPage() {
   const columns = data?.columns ?? [];
   const timeIndex = columns.findIndex((c) => TIME_DIMENSIONS.has(c.name));
   const timeDimension = timeIndex >= 0 ? (columns[timeIndex].name as TimeDimension) : null;
-  const measureColumns = columns.flatMap((c, index) => (c.kind === 'measure' ? [{ ...c, index }] : []));
-  // At most three lines in one plot (DESIGN.md → Data visualisation); the table keeps every measure.
-  const chartMeasures = measureColumns.slice(0, 3);
+  const measureColumns: MeasureColumn[] = columns.flatMap((c, index) => (c.kind === 'measure' ? [{ ...c, index }] : []));
+  // Counts and rates never share a y-axis: group by the measure's own unit, and keep at most three
+  // lines per plot (the table carries every selected measure).
+  const groups = UNIT_ORDER.map((unit) => {
+    const chosen = measureColumns.filter((m) => m.unit === unit);
+    return chosen.length ? { unit, all: chosen.length, columns: chosen.slice(0, 3) } : null;
+  }).filter((g): g is { unit: MetricUnit; all: number; columns: MeasureColumn[] } => g !== null);
   // An empty result has no meaningful "newest event": never render the epoch as a date (#438).
   const freshness = data?.rows.length
     ? (() => {
@@ -91,6 +140,7 @@ export default function AnalyticsPage() {
         return at && !Number.isNaN(at.getTime()) && at.getFullYear() > 2000 ? at : null;
       })()
     : null;
+  const xLabels = (data?.rows ?? []).map((row) => String(row[timeIndex]));
 
   return (
     <div className={pageWidth('default')}>
@@ -113,8 +163,9 @@ export default function AnalyticsPage() {
               {(catalog.data?.measures ?? []).map((m) => (
                 <Checkbox
                   key={m.id}
-                  label={m.id}
-                  hint={m.unit === 'ratio' ? 'rate' : m.unit}
+                  label={measureLabel(m.id)}
+                  title={measureDescription(m.id)}
+                  hint={METRIC_UNIT_LABEL[measureUnit(m.id) ?? 'count']}
                   checked={measures.includes(m.id)}
                   onChange={() => toggleMeasure(m.id)}
                 />
@@ -138,8 +189,9 @@ export default function AnalyticsPage() {
           {(catalog.data?.dimensions ?? []).map((d) => (
             <Checkbox
               key={d.id}
-              label={d.id}
-              hint={d.time ? 'time' : undefined}
+              label={dimensionLabel(d.id)}
+              title={dimensionDescription(d.id)}
+              hint={d.time ? 'Time grain' : undefined}
               checked={dimensions.includes(d.id)}
               disabled={!allowed.has(d.id)}
               onChange={() => toggleDimension(d.id)}
@@ -153,67 +205,42 @@ export default function AnalyticsPage() {
         <Alert tone="bad" title="Couldn't run the query" onRetry={result.reload} className="mb-5">
           {result.error}
         </Alert>
-      ) : timeDimension && chartMeasures.length > 0 && (data?.rows.length ?? 0) > 0 ? (
-        <div className="mb-5 rounded-lg bg-surface p-4 md:p-5">
-          <div className="mb-1 text-[12px] leading-[18px] text-muted">
-            {timeDimension} · {data?.meta.timeZone}
-          </div>
-          <Chart
-            deps={[data]}
-            option={(c) => ({
-              tooltip: { trigger: 'axis' },
-              xAxis: {
-                type: 'category',
-                data: (data?.rows ?? []).map((r) => String(r[timeIndex])),
-                axisLine: { lineStyle: { color: c.line } },
-                axisTick: { show: false },
-                // The direct end labels occupy the right edge; omit the last date there so the two
-                // do not collide, while the period stays visible above the plot.
-                axisLabel: {
-                  color: c.muted,
-                  fontSize: 12,
-                  lineHeight: 18,
-                  formatter: (value: string, index: number) => (index === (data?.rows.length ?? 0) - 1 ? '' : value),
-                },
-              },
-              yAxis: {
-                type: 'value',
-                splitNumber: 3,
-                axisLine: { show: false },
-                axisTick: { show: false },
-                axisLabel: { color: c.muted, fontSize: 12, lineHeight: 18 },
-                splitLine: { lineStyle: { color: c.line, width: 1 } },
-              },
-              series: chartMeasures.map((m, i) => ({
-                name: m.name,
-                type: 'line',
-                smooth: false,
-                showSymbol: false,
-                symbol: 'circle',
-                symbolSize: 6,
-                connectNulls: false,
-                data: (data?.rows ?? []).map((r) => (typeof r[m.index] === 'number' ? (r[m.index] as number) : null)),
-                lineStyle: { width: 2, color: c.viz[i % c.viz.length] },
-                itemStyle: { color: c.viz[i % c.viz.length] },
-                labelLayout: { moveOverlap: 'shiftY', hideOverlap: false },
-                endLabel: {
-                  show: true,
-                  formatter: '{a}',
-                  color: c.fg,
-                  fontSize: 12,
-                  lineHeight: 18,
-                  distance: 8,
-                  textBorderColor: c.surface,
-                  textBorderWidth: 2,
-                },
-              })),
-            })}
-          />
-          {measureColumns.length > chartMeasures.length && (
-            <p className="mt-2 text-[12px] leading-[18px] text-muted">
-              The first three measures are plotted; the table has all {measureColumns.length}.
-            </p>
-          )}
+      ) : timeDimension && (data?.rows.length ?? 0) > 0 ? (
+        <div className="mb-5 space-y-8">
+          {/* Each chart is an h3; this keeps the page's heading order h1 → h2 → h3. */}
+          <h2 className="sr-only">Performance over time</h2>
+          {groups.map((group) => {
+            const series: ChartSeriesInput[] = group.columns.map((column, index) => ({
+              label: measureLabel(column.name),
+              values: (data?.rows ?? []).map((row) =>
+                chartValue(column, typeof row[column.index] === 'number' ? (row[column.index] as number) : null),
+              ),
+              viz: index,
+            }));
+            const names = group.columns.map((c) => measureLabel(c.name)).join(' · ');
+            const denominators = [
+              ...new Set(group.columns.map((c) => ANALYTICS_MEASURES[c.name]?.denominator).filter((d): d is string => Boolean(d))),
+            ];
+            const currency = data?.meta.currency ?? 'currency';
+            return (
+              <div key={group.unit} className="rounded-lg bg-surface p-4 md:p-5">
+                <LineChart
+                  title={UNIT_TITLE[group.unit]}
+                  subtitle={`${names}${denominators.length ? ` · per ${denominators.join(', ')}` : ''} · ${from} to ${to} · ${data?.meta.timeZone}`}
+                  labels={xLabels}
+                  series={series}
+                  unit={group.unit === 'ratio' ? '%' : group.unit === 'currency' ? currency : undefined}
+                  formatValue={group.unit === 'currency' ? (value) => number(value, 'currency', data?.meta.currency) : undefined}
+                  dataState="populated"
+                  note={
+                    group.all > group.columns.length
+                      ? `Showing the first three ${group.unit === 'ratio' ? 'rates' : group.unit === 'currency' ? 'money measures' : 'counts'} in this plot; the table has all ${group.all}.`
+                      : undefined
+                  }
+                />
+              </div>
+            );
+          })}
         </div>
       ) : null}
 
@@ -241,7 +268,8 @@ export default function AnalyticsPage() {
             <tr>
               {columns.map((c) => (
                 <Th key={c.name} align={c.kind === 'measure' ? 'right' : undefined}>
-                  {c.name}
+                  <span title={measureDescription(c.name) ?? dimensionDescription(c.name)}>{metricLabel(c.name)}</span>
+                  {c.kind === 'measure' && c.unit === 'ratio' && <span className="ml-1 text-muted">(%)</span>}
                 </Th>
               ))}
             </tr>
@@ -252,7 +280,9 @@ export default function AnalyticsPage() {
               <Tr key={i}>
                 {columns.map((c, index) => (
                   <Td key={c.name} align={c.kind === 'measure' ? 'right' : undefined}>
-                    {c.kind === 'measure' ? number(row[index], c.unit) : (row[index] ?? '—')}
+                    {c.kind === 'measure'
+                      ? number(row[index] as number | null, c.unit, data?.meta.currency)
+                      : ((row[index] as string | number | null) ?? '—')}
                   </Td>
                 ))}
               </Tr>

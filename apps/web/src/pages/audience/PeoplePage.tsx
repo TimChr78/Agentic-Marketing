@@ -14,7 +14,6 @@ import {
   formatDateTime,
   IconButton,
   Input,
-  Mono,
   PageHeader,
   Table,
   TableFrame,
@@ -26,6 +25,7 @@ import {
   timeAgo,
   useToast,
 } from '../../ui';
+import { Identifier } from '../../ui/Identifier';
 import { pageWidth } from '../../ui/layout';
 
 const PROFILE_ID = /^prf_[0-9a-f]{32}$/;
@@ -231,13 +231,13 @@ export default function PeoplePage() {
                       {name ?? (
                         <>
                           {/* At mobile the e-mail column is hidden, so the person cell carries the address. */}
-                          <span className="md:hidden">{email ?? <Mono>{p.id.slice(0, 14)}…</Mono>}</span>
-                          <span className="hidden md:inline">{email ? 'Unnamed person' : <Mono>{p.id.slice(0, 14)}…</Mono>}</span>
+                          <span className="md:hidden">{email ?? 'Unnamed person'}</span>
+                          <span className="hidden md:inline">Unnamed person</span>
                         </>
                       )}
                     </Link>
                     <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[12px] text-muted">
-                      <Mono className="bg-transparent px-0">{p.id.slice(0, 18)}…</Mono>
+                      <Identifier value={p.id} label="Profile ID" />
                       <Tag>{p.known ? 'Known' : 'Anonymous'}</Tag>
                     </div>
                   </Td>

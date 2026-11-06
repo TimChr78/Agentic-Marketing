@@ -98,7 +98,7 @@ export default function AgentsPage() {
                 </Td>
                 <Td className="hidden md:table-cell">{a.sponsor.name}</Td>
                 <Td>
-                  <AgentStatusPill status={a.status} />
+                  <AgentStatusPill status={a.status} guard={a.guard} statusReason={a.statusReason} />
                   {a.status === 'paused' && a.statusReason && (
                     <div className="mt-0.5 max-w-[220px] text-[11px] text-muted">{a.statusReason}</div>
                   )}
