@@ -1,3 +1,4 @@
+export * from './backfill';
 export * from './data-keys';
 export * from './domains';
 export * from './erasures';

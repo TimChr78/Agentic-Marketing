@@ -43,6 +43,7 @@ type Msg = {
   id: string;
   profileId: string;
   createdAt: Date;
+  updatedAt?: Date;
   status?: string;
   sentAt?: Date | null;
   agentId?: string | null;
@@ -56,7 +57,7 @@ async function message(m: Msg) {
   // checked, not delivered. A queued fixture likewise gets a future retry so it is not claimed.
   const status = m.status ?? 'sending';
   const inFlight = status === 'sending' || status === 'queued';
-  const updatedAt = inFlight ? new Date() : m.createdAt;
+  const updatedAt = inFlight ? new Date() : (m.updatedAt ?? m.createdAt);
   const nextAttemptAt = status === 'queued' ? new Date(Date.now() + 86_400_000).toISOString() : null;
   await t.srv.db.withWorkspace(ws, (tx) =>
     tx.execute(sql`INSERT INTO messages (workspace_id, id, idempotency_key, channel, profile_id, purpose, status, test, agent_id, created_at, sent_at, updated_at, next_attempt_at)
@@ -232,5 +233,23 @@ describe('caps age completed contacts from the send time (#453)', () => {
       sentAt: new Date(now.getTime() - 6 * 86_400_000 - 3_600_000),
     });
     expect(await hold({ id: 'msg_453_inside_next', profileId: justInside, createdAt: now }, now)).toMatchObject({ ok: false });
+  });
+
+  it('falls back to updated_at for a completed row whose sent_at the background backfill has not filled yet', async () => {
+    await policy({ frequencyCaps: [{ channel: 'email', max: 1, days: 7 }] });
+    const p = await person('prf_453_backfill');
+    const now = new Date('2026-11-06T12:00:00.000Z');
+    const longAgo = new Date(now.getTime() - 30 * 86_400_000);
+    // 0.10.0 wrote this row, 0082 added the column, and the batch job has not reached it yet:
+    // sent_at is NULL but the last status change (updated_at) is recent, so it must still count.
+    await message({
+      id: 'msg_453_pending_backfill',
+      profileId: p,
+      createdAt: longAgo,
+      updatedAt: new Date(now.getTime() - 60_000),
+      status: 'sent',
+      sentAt: null,
+    });
+    expect(await hold({ id: 'msg_453_backfill_next', profileId: p, createdAt: now }, now)).toMatchObject({ ok: false });
   });
 });

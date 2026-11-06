@@ -8,9 +8,12 @@ const LOCK_KEY = 7_340_001; // arbitrary constant: one migrator at a time across
 
 const roleName = /^[a-z_][a-z0-9_]{0,62}$/;
 
+/** A migration file whose first line is this marker runs outside BEGIN/COMMIT, statement by statement. */
+export const NO_TRANSACTION_MARKER = '-- am:no-transaction';
+
 /** Migration files in apply order. Also used by backups to compare their schema head. */
-export function migrationFiles(): string[] {
-  return readdirSync(MIGRATIONS_DIR)
+export function migrationFiles(dir = MIGRATIONS_DIR): string[] {
+  return readdirSync(dir)
     .filter((f) => f.endsWith('.sql'))
     .sort();
 }
@@ -114,6 +117,7 @@ const MIGRATION_RELEASES: Record<string, string> = {
   '0083_rollout_fixes.sql': '0.10.1',
   '0084_agent_indexes.sql': '0.10.1',
   '0085_rollout_notify_state.sql': '0.10.1',
+  '0086_message_sent_at_index.sql': '0.10.1',
 };
 
 export function releaseForMigrationHead(head: string | null): string | null {
@@ -190,14 +194,209 @@ export async function ensureAppRoleInDatabase(
   }
 }
 
+/** True when a file opts out of the per-migration transaction with its first line. */
+export function isNoTransaction(sql: string): boolean {
+  return sql
+    .replace(/^\uFEFF/, '')
+    .trimStart()
+    .startsWith(NO_TRANSACTION_MARKER);
+}
+
+/** True when a chunk is only whitespace and SQL comments, so it has nothing to execute. */
+function isCommentOnly(sql: string): boolean {
+  let i = 0;
+  while (i < sql.length) {
+    const c = sql[i];
+    if (/\s/.test(c as string)) {
+      i++;
+      continue;
+    }
+    if (c === '-' && sql[i + 1] === '-') {
+      i += 2;
+      while (i < sql.length && sql[i] !== '\n') i++;
+      continue;
+    }
+    if (c === '/' && sql[i + 1] === '*') {
+      // Postgres block comments nest.
+      let depth = 1;
+      i += 2;
+      while (i < sql.length && depth > 0) {
+        if (sql[i] === '/' && sql[i + 1] === '*') {
+          depth++;
+          i += 2;
+        } else if (sql[i] === '*' && sql[i + 1] === '/') {
+          depth--;
+          i += 2;
+        } else i++;
+      }
+      continue;
+    }
+    return false;
+  }
+  return true;
+}
+
+/** The dollar-quote tag at `i` (`$$` or `$name$`), or null for a positional parameter such as `$1`. */
+function dollarTagAt(sql: string, i: number): string | null {
+  return /^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/.exec(sql.slice(i))?.[0] ?? null;
+}
+
 /**
- * Apply pending SQL migrations in order, each in its own transaction. Safe to run from several
- * processes at once (advisory lock). Refuses to continue if an applied file was edited.
+ * Split a migration file into statements without being fooled by semicolons inside strings,
+ * quoted identifiers, dollar-quoted function bodies or comments. A no-transaction migration runs
+ * each statement on its own, because Postgres wraps a multi-statement query string in one implicit
+ * transaction — the thing `CREATE INDEX CONCURRENTLY` refuses.
+ */
+export function splitSqlStatements(sql: string): string[] {
+  const statements: string[] = [];
+  let start = 0;
+  let i = 0;
+  while (i < sql.length) {
+    const c = sql[i];
+    if (c === '-' && sql[i + 1] === '-') {
+      i += 2;
+      while (i < sql.length && sql[i] !== '\n') i++;
+      continue;
+    }
+    if (c === '/' && sql[i + 1] === '*') {
+      let depth = 1;
+      i += 2;
+      while (i < sql.length && depth > 0) {
+        if (sql[i] === '/' && sql[i + 1] === '*') {
+          depth++;
+          i += 2;
+        } else if (sql[i] === '*' && sql[i + 1] === '/') {
+          depth--;
+          i += 2;
+        } else i++;
+      }
+      continue;
+    }
+    if (c === "'") {
+      // An E'...' string uses backslash escapes; a plain string does not (standard_conforming_strings).
+      const before = i > 0 ? sql[i - 1] : '';
+      const backslashEscapes = (before === 'E' || before === 'e') && (i < 2 || !/[A-Za-z0-9_$]/.test(sql[i - 2] as string));
+      i++;
+      while (i < sql.length) {
+        if (backslashEscapes && sql[i] === '\\') {
+          i += 2;
+          continue;
+        }
+        if (sql[i] === "'") {
+          if (sql[i + 1] === "'") {
+            i += 2;
+            continue;
+          }
+          i++;
+          break;
+        }
+        i++;
+      }
+      continue;
+    }
+    if (c === '"') {
+      i++;
+      while (i < sql.length) {
+        if (sql[i] === '"') {
+          if (sql[i + 1] === '"') {
+            i += 2;
+            continue;
+          }
+          i++;
+          break;
+        }
+        i++;
+      }
+      continue;
+    }
+    if (c === '$') {
+      const tag = dollarTagAt(sql, i);
+      if (tag) {
+        const end = sql.indexOf(tag, i + tag.length);
+        i = end < 0 ? sql.length : end + tag.length;
+        continue;
+      }
+    }
+    if (c === ';') {
+      const statement = sql.slice(start, i).trim();
+      if (statement && !isCommentOnly(statement)) statements.push(statement);
+      start = i + 1;
+    }
+    i++;
+  }
+  const tail = sql.slice(start).trim();
+  if (tail && !isCommentOnly(tail)) statements.push(tail);
+  return statements;
+}
+
+const CONCURRENT_INDEX_NAME =
+  /CREATE\s+(?:UNIQUE\s+)?INDEX\s+CONCURRENTLY\s+(?:IF\s+NOT\s+EXISTS\s+)?("(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*)/gi;
+
+const quoteIdent = (name: string) => `"${name.replace(/"/g, '""')}"`;
+
+/** Names of the indexes a file builds with CREATE INDEX CONCURRENTLY, for invalid-index recovery. */
+export function concurrentIndexNames(sql: string): string[] {
+  return [...sql.matchAll(CONCURRENT_INDEX_NAME)].map((match) =>
+    (match[1] as string).startsWith('"') ? (match[1] as string).slice(1, -1).replace(/""/g, '"') : (match[1] as string),
+  );
+}
+
+/**
+ * Drop only indexes that Postgres marked INVALID. An interrupted CREATE INDEX CONCURRENTLY leaves
+ * one behind; `IF NOT EXISTS` would otherwise skip rebuilding it forever.
+ */
+async function dropInvalidIndexes(client: Pick<pg.Client, 'query'>, names: string[]): Promise<void> {
+  if (!names.length) return;
+  const { rows } = await client.query<{ name: string }>(
+    `SELECT c.relname AS name
+       FROM pg_index i
+       JOIN pg_class c ON c.oid = i.indexrelid
+       JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE NOT i.indisvalid AND c.relname = ANY($1::text[])`,
+    [names],
+  );
+  for (const { name } of rows) await client.query(`DROP INDEX CONCURRENTLY IF EXISTS ${quoteIdent(name)}`);
+}
+
+/**
+ * Run a no-transaction migration one statement at a time, so each commits on its own and
+ * `CREATE INDEX CONCURRENTLY` works. The file must be written to survive a retry: every statement
+ * is idempotent. Before the build, an index left INVALID by an earlier attempt is dropped; after a
+ * failure the same cleanup runs so the next start is not stuck on `IF NOT EXISTS`.
+ */
+async function applyNoTransaction(client: Pick<pg.Client, 'query'>, sql: string, role: string): Promise<void> {
+  const indexes = concurrentIndexNames(sql);
+  await dropInvalidIndexes(client, indexes);
+  try {
+    for (const statement of splitSqlStatements(sql)) {
+      await client.query(role === 'am_app' ? statement : statement.replace(/\bam_app\b/g, role));
+    }
+  } catch (err) {
+    await dropInvalidIndexes(client, indexes).catch(() => {});
+    throw err;
+  }
+}
+
+export interface MigrateOptions {
+  appRolePassword: string;
+  appRole?: string;
+  log?: (msg: string) => void;
+  /** Directory of SQL files; tests point this at a temporary directory instead of the checkout. */
+  dir?: string;
+  /** Apply files up to and including this name, for tests that reconstruct an older schema. */
+  upTo?: string;
+}
+
+/**
+ * Apply pending SQL migrations in order. A normal file runs in one transaction; a file whose first
+ * line is `-- am:no-transaction` runs outside one, statement by statement, for `CREATE INDEX
+ * CONCURRENTLY`. Safe to run from several processes at once (advisory lock). Refuses to continue if
+ * an applied file was edited. A no-transaction file is recorded only after every statement succeeds.
  *
  * The migrations grant privileges to `am_app`; `appRole` renames it, because roles are shared by
  * every database on a Postgres server (e.g. tests next to a development database).
  */
-export async function migrate(admin: pg.Pool, opts: { appRolePassword: string; appRole?: string; log?: (msg: string) => void }) {
+export async function migrate(admin: pg.Pool, opts: MigrateOptions) {
   const log = opts.log ?? (() => {});
   const client = await admin.connect();
   try {
@@ -210,12 +409,23 @@ export async function migrate(admin: pg.Pool, opts: { appRolePassword: string; a
     const { rows } = await client.query<{ version: string; checksum: string }>('SELECT version, checksum FROM schema_migrations');
     const applied = new Map(rows.map((r) => [r.version, r.checksum]));
 
-    for (const file of migrationFiles()) {
-      const sql = readFileSync(`${MIGRATIONS_DIR}/${file}`, 'utf8');
+    for (const file of migrationFiles(opts.dir).filter((name) => !opts.upTo || name <= opts.upTo)) {
+      const sql = readFileSync(`${opts.dir ?? MIGRATIONS_DIR}/${file}`, 'utf8');
       const checksum = sha256(sql);
       const done = applied.get(file);
       if (done) {
         if (done !== checksum) throw new Error(`Migration ${file} was changed after it was applied. Add a new migration instead.`);
+        continue;
+      }
+      if (isNoTransaction(sql)) {
+        try {
+          await applyNoTransaction(client, sql, role);
+        } catch (err) {
+          throw new Error(`Migration ${file} failed: ${(err as Error).message}`);
+        }
+        // Recorded only now: a failure above leaves the file pending, and its statements idempotent.
+        await client.query('INSERT INTO schema_migrations (version, checksum) VALUES ($1, $2)', [file, checksum]);
+        log(`applied ${file} (no transaction)`);
         continue;
       }
       await client.query('BEGIN');

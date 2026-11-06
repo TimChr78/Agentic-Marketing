@@ -42,8 +42,14 @@ CREATE INDEX experience_rollout_pauses_pending ON experience_rollout_pauses (wor
 CREATE INDEX experience_rollout_pauses_cursor ON experience_rollout_pauses (workspace_id, paused_at);
 
 -- A ramp that is paused at upgrade keeps its pending pause visible to the sweep and the e-mail
--- outbox; its owners already saw the old in-transaction e-mail, so it is marked as notified. This
--- runs before RLS is enabled, so the migration role is not filtered by a workspace setting.
+-- outbox; 0.10.0 sent that owner e-mail inside the pause transaction, so every pre-upgrade pause
+-- was already attempted. It is marked notified: the new outbox must not re-send old pauses in a
+-- burst after the upgrade. They are not re-notified (stated in the CHANGELOG upgrade notes).
+--
+-- experience_rollouts FORCEs row-level security. A migration role that is not a superuser and has
+-- no BYPASSRLS would see no rows here, silently losing the pre-upgrade pauses, so read as the table
+-- owner with FORCE off for this one statement and turn it back on before the migration commits.
+ALTER TABLE experience_rollouts NO FORCE ROW LEVEL SECURITY;
 INSERT INTO experience_rollout_pauses (
   workspace_id, artifact_id, version, paused_at, step_index, share, reason, guardrail, notified_at
 )
@@ -51,6 +57,7 @@ SELECT workspace_id, artifact_id, version, paused_at, step_index, share, reason,
   FROM experience_rollouts
  WHERE status = 'paused' AND paused_at IS NOT NULL
 ON CONFLICT DO NOTHING;
+ALTER TABLE experience_rollouts FORCE ROW LEVEL SECURITY;
 
 ALTER TABLE experience_rollout_pauses ENABLE ROW LEVEL SECURITY;
 ALTER TABLE experience_rollout_pauses FORCE ROW LEVEL SECURITY;

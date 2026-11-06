@@ -453,6 +453,67 @@ async function migrationFiles(): Promise<string[]> {
   return files.filter((file) => file.endsWith('.sql')).sort();
 }
 
+/**
+ * An interrupted `CREATE INDEX CONCURRENTLY` leaves an INVALID index that `IF NOT EXISTS` would
+ * skip forever, so the next migration run drops and rebuilds it. Report one that is still here.
+ */
+async function invalidIndexCheck(db: Db): Promise<Check> {
+  const { rows } = await withTimeout(
+    db.admin.query<{ name: string }>(
+      `SELECT c.relname AS name
+         FROM pg_index i
+         JOIN pg_class c ON c.oid = i.indexrelid
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE NOT i.indisvalid AND n.nspname = current_schema()
+        ORDER BY c.relname`,
+    ),
+    'invalid indexes',
+  );
+  if (!rows.length)
+    return { id: 'migrations.invalid-indexes', status: 'ok', message: 'no invalid indexes are left from an interrupted build' };
+  return {
+    id: 'migrations.invalid-indexes',
+    status: 'warn',
+    message: `${rows.length} invalid index(es) left by an interrupted concurrent build: ${rows.map((row) => row.name).join(', ')}`,
+    hint: 'Run `am migrate` (or restart the app): the no-transaction migration drops each invalid index and builds it again.',
+  };
+}
+
+/**
+ * The 0.10.1 `sent_at` backfill runs after the migration, in batches, so a large install never
+ * rewrites the message log in one transaction. Until a row is filled, delivery caps count it from
+ * `updated_at`, exactly as 0.10.0 did; this line shows how much is left.
+ */
+async function sentAtBackfillCheck(db: Db): Promise<Check | null> {
+  const { rows } = await withTimeout(
+    db.admin.query<{ present: boolean }>(
+      `SELECT to_regclass('public.messages') IS NOT NULL
+              AND EXISTS (
+                SELECT 1 FROM information_schema.columns
+                 WHERE table_schema = current_schema() AND table_name = 'messages' AND column_name = 'sent_at'
+              ) AS present`,
+    ),
+    'sent_at column',
+  );
+  if (!rows[0]?.present) return null;
+  const counted = await withTimeout(
+    db.admin.query<{ pending: string }>(
+      `SELECT count(*)::text AS pending FROM messages
+        WHERE sent_at IS NULL AND status IN ('sent', 'delivered', 'bounced', 'complained')`,
+    ),
+    'sent_at backfill progress',
+  );
+  const pending = Number(counted.rows[0]?.pending ?? 0);
+  return pending
+    ? {
+        id: 'migrations.sent-at-backfill',
+        status: 'info',
+        message: `${pending} completed message(s) still age from updated_at; the sent_at backfill is running in batches`,
+        hint: 'The scheduler fills up to 10,000 per batch after start and resumes after a restart; delivery caps are correct meanwhile.',
+      }
+    : { id: 'migrations.sent-at-backfill', status: 'ok', message: 'every completed message has its send time' };
+}
+
 async function postgresChecks(db: Db): Promise<{ checks: Check[]; reachable: boolean }> {
   try {
     await withTimeout(db.admin.query('SELECT 1'), 'Postgres');
@@ -497,6 +558,25 @@ async function postgresChecks(db: Db): Promise<{ checks: Check[]; reachable: boo
         ? 'schema_migrations is missing; start the app to migrate'
         : `could not read the migration state: ${messageOf(err)}; start the app to migrate`,
       hint: 'Run `docker compose up -d` (or `am migrate`) and run `am doctor` again.',
+    });
+  }
+  try {
+    checks.push(await invalidIndexCheck(db));
+  } catch (err) {
+    checks.push({
+      id: 'migrations.invalid-indexes',
+      status: 'warn',
+      message: `could not check for invalid indexes: ${messageOf(err)}`,
+    });
+  }
+  try {
+    const backfill = await sentAtBackfillCheck(db);
+    if (backfill) checks.push(backfill);
+  } catch (err) {
+    checks.push({
+      id: 'migrations.sent-at-backfill',
+      status: 'info',
+      message: `could not read the sent_at backfill progress: ${messageOf(err)}`,
     });
   }
   return { checks, reachable: true };
