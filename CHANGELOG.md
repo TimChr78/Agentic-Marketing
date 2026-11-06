@@ -8,7 +8,7 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 
 ### Fixed
 
-- Bulk mandate renewal renews from the published version and refuses a mandate that has an unpublished draft instead of replacing and publishing it; a draft created concurrently fails the renewal with a conflict (#455).
+- Bulk mandate renewal renews from the published version and refuses a mandate that has an unpublished draft instead of replacing and publishing it; the mandate row is locked for the hash check and draft write, so concurrent renewals become successive versions instead of both reading the same one and overwriting it (#455).
 - `agents.compare` marks only the mandate version that is published and unarchived now as active, so superseded or archived versions are not shown as still in force (#458).
 - A held agent change re-checks ownership and conflicts when its veto window ends; if another agent now owns the artifact or has a pending change, the hold goes to a person instead of running (#469).
 - `agents.compare` counts a hold once when its working-hours recheck row is also in the period (#470).
@@ -16,13 +16,13 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 - `agents.renewMandates` rejects a `validUntil` in the past or more than a year away, matching its schema (#472).
 - `agents.renewals` reports a recently expired mandate as a negative number of days and sorts newest expiry first, as documented (#482).
 - `agents.runFailures` and the contact-pressure count have supporting indexes, and finished hosted-agent runs are removed after `RETENTION_HOSTED_AGENT_RUN_DAYS` (default 90) (#488).
-- `agents.compare` is bounded to 20 named agents and a 366-day window, and reads the agent ledger, holds, mandates, guardian events and AI usage in grouped queries instead of about eight per agent (#489).
+- `agents.compare` is bounded to 20 agents and a 366-day window whether ids are named or omitted: without ids it compares the 20 most recently active agents and returns `truncated`, and it reads the agent ledger, holds, mandates, guardian events, AI usage and outcomes in grouped queries instead of about eight per agent (#489).
 
 ### Fixed
 
 - Broadcast segment and template names refresh after a change instead of keeping the old name for the rest of the session (#459).
 - The shared broadcast name cache is dropped on artifact create, rename, delete and publish, with a short time limit as a backstop (#486).
-- The sidebar pending badge counts decisions, so a bundle counts once, exactly as on Approvals (#483).
+- The sidebar pending badge counts decisions, so a bundle counts once, exactly as on Approvals; members are grouped by bundle id even when the bundle’s lead is on another page (#483).
 - Broadcast detail waits for the send state before offering Publish or Submit for review, so an unknown run is never treated as no run (#484).
 - Opening another broadcast resets the tab and run state instead of keeping the previous broadcast's (#485).
 - Corrected the 0.9.0 accessibility note: the axe known-issues list started with two deferred GrapesJS entries, not empty (#491).
@@ -36,14 +36,15 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 - `workspace.get` and `workspace.memberships` report a `primaryDomain` only when the primary domain is verified, matching the links and public pages (#465).
 - Twilio STOP/inbound and delivery-status callbacks validate their signature against the URL that was actually called, so fallback, secondary and prefixed brand hosts keep working after the primary domain changes (#457).
 - The Helm chart renders every host in `ingress.extraHosts`, so Kubernetes installs can route each brand's verified domain, and the Kubernetes guide documents the per-brand Ingress and TLS requirement (#490).
-- An agent can no longer restart a ramp a person stopped by republishing the experience, its metadata or an un-ramped version; only a person’s resume or republish starts it again, and the stop records who made it (#454).
-- A guardrail pause e-mail is sent after the pause commits, from a durable pause row and keyed by that pause, so a later failure no longer rolls the pause back and re-sends it (#473).
+- An agent can no longer restart a ramp a person stopped by republishing the experience, its metadata, an un-ramped version or a change that runs automatically after its veto window: the original requester travels with the publish; only a person’s resume or republish starts it again, and the stop records who made it (#454).
+- A guardrail pause e-mail is claimed in one commit, sent, then marked in a second: a later failure leaves it owed and retries with a backoff and a bounded attempt count instead of rolling the pause back or marking a failed send as delivered, and the pause key keeps a crash after the provider accepted it to at most one duplicate (#473).
 - Each ramp is swept in its own transaction: one ramp’s failing guardrail read records an error on that ramp and freezes only it, instead of aborting every due ramp in the workspace (#474).
 - A mandate’s `learning.experienceRamp` requires at least two steps, a first step below 100% and a guardrail, so a one-step `[100]` rollout no longer satisfies it (#475).
 - `experience.rollout_paused` is delivered from a durable pause row, so a `stopRollout` before the event sweep no longer drops the pause agents were waiting for (#476).
-- `experiences.stopRollout` pushes the stopped bundle to Cloudflare KV before it returns; the remaining delay is the worker’s isolate cache and KV propagation, now stated truthfully in the command and the docs instead of “at once” (#477).
+- `experiences.stopRollout` waits up to ten seconds for a running edge sync instead of skipping the push, pushes the stopped bundle to Cloudflare KV from the same transaction, and reports `edgePushed` with a reason when it could not; the remaining delay is the worker’s isolate cache and KV propagation, stated truthfully in the command and the docs instead of “at once” (#477).
 - Delivery caps count a completed contact from when the provider actually sent it (`messages.sent_at`) instead of from enqueue time, so a backlog that waited for quiet hours, a pause or a retry consumes the window from its real send time (#453).
 - Two messages queued at the same instant can no longer both pass a `max: 1` frequency or cross-agent contact cap: in-flight reservations are ordered by enqueue time and message id (#452).
+- An in-flight reservation that was queued outside the cap window still consumes it until it completes, and the cap decision is serialized per person with a transaction-scoped lock, so two messages queued eight days ago can no longer both pass a seven-day `max: 1` cap (#452).
 - An identity merge moves the merged person's message history to the surviving profile in the same transaction, so routine identity resolution no longer resets their frequency and cross-agent contact caps (#460).
 - `workspace.create` enforces a per-person brand quota (`WORKSPACE_QUOTA`, default 10) instead of letting one owner create unbounded brands and pending domain claims; the refusal names the limit, and the count and create are serialised per owner so parallel creates at the boundary cannot overshoot it (#487).
 - An OAuth brand choice is bound to the authorization request that asked for it instead of the browser session, so consenting in one tab can no longer issue a grant for the brand chosen in another tab, and refresh tokens keep the brand (#456).

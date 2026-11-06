@@ -234,6 +234,51 @@ describe('agents.renewals and agents.renewMandates (#428)', () => {
   });
 });
 
+describe('concurrent mandate renewals (#455)', () => {
+  it('serializes the hash check and draft write instead of overwriting a version', async () => {
+    const ws = await t.workspaceWith([[owner, 'owner']], 'none');
+    const api = t.api(owner, ws);
+    const agent = await makeAgent(api, 'Concurrent renewal agent', ['artifacts:read']);
+    const mandate = await grantMandate(api, agent.agentId, 'Concurrent renewal mandate', { validUntil: inDays(10) });
+    const untilA = inDays(60);
+    const untilB = inDays(90);
+
+    // Hold the artifact row so both renewals reach their read at the same time. With the row lock
+    // they wait here; without it both read v1 and race to create v2.
+    const client = await t.srv.db.admin.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('SELECT 1 FROM artifacts WHERE workspace_id = $1 AND id = $2 FOR UPDATE', [ws, mandate]);
+      const first = api.call('agents.renewMandates', { mandateIds: [mandate], validUntil: untilA, note: 'First' });
+      const second = api.call('agents.renewMandates', { mandateIds: [mandate], validUntil: untilB, note: 'Second' });
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await client.query('COMMIT');
+      const [a, b] = await Promise.all([first, second]);
+      expect(a.renewed[0]).toMatchObject({ ok: true, error: null });
+      expect(b.renewed[0]).toMatchObject({ ok: true, error: null });
+    } finally {
+      client.release();
+    }
+
+    const { rows } = await t.srv.db.admin.query<{ number: number; valid_until: string }>(
+      `SELECT number, content->>'validUntil' AS valid_until FROM artifact_versions
+        WHERE workspace_id = $1 AND artifact_id = $2 ORDER BY number`,
+      [ws, mandate],
+    );
+    expect(rows.map((r) => r.number)).toEqual([1, 2, 3]);
+    expect(new Set(rows.filter((r) => r.number > 1).map((r) => r.valid_until))).toEqual(
+      new Set([new Date(untilA).toISOString(), new Date(untilB).toISOString()]),
+    );
+    const [artifact] = await t.srv.db.admin
+      .query<{ published_version: number; latest_version: number }>(
+        `SELECT published_version, latest_version FROM artifacts WHERE workspace_id = $1 AND id = $2`,
+        [ws, mandate],
+      )
+      .then((r) => r.rows);
+    expect(artifact).toMatchObject({ published_version: 3, latest_version: 3 });
+  });
+});
+
 describe('ad audiences and conversions under a mandate (#428)', () => {
   let api: ReturnType<typeof t.api>;
   let ws = '';
@@ -435,6 +480,41 @@ describe('comparison bounds and hold counting (#470, #489)', () => {
     const bucket = compared.agents[0]!.mandates.find((m) => m.mandateId === mandate);
     expect(bucket?.actions['send.broadcast']).toMatchObject({ hold: 1 });
     expect(bucket?.holds).toEqual({ rejected: 0, ran: 0, pending: 1 });
+  });
+
+  it('caps an unbounded compare to the 20 most recently active agents (#489)', async () => {
+    const compareWs = await t.workspaceWith([[owner, 'owner']], 'none');
+    const compareApi = t.api(owner, compareWs);
+    const ids: string[] = [];
+    for (let i = 0; i < 21; i++) {
+      const id = `agt_${String(i).padStart(32, '0')}`;
+      ids.push(id);
+      // Index 0 is the oldest; index 20 the newest.
+      await t.srv.db.admin.query(
+        `INSERT INTO agents (workspace_id, id, name, sponsor_user_id, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, now() - ($5 || ' minutes')::interval, now())`,
+        [compareWs, id, `Agent ${i}`, owner.id, String(21 - i)],
+      );
+    }
+    // The oldest agent acted just now, so it is the most recently active and must be included; the
+    // next oldest (inactive) is the one the cap leaves out.
+    await t.srv.db.admin.query(
+      `INSERT INTO agent_actions (workspace_id, agent_id, command, action_class, decision, ok, surface, at)
+       VALUES ($1, $2, 'artifacts.get', 'read', 'allow', true, 'api', now())`,
+      [compareWs, ids[0]],
+    );
+    const from = new Date(Date.now() - 3_600_000).toISOString();
+    const to = new Date(Date.now() + 3_600_000).toISOString();
+    const out = await compareApi.call('agents.compare', { from, to });
+    expect(out.truncated).toBe(true);
+    expect(out.agents).toHaveLength(20);
+    expect(out.agents.map((a) => a.agentId)).toContain(ids[0]);
+    expect(out.agents.map((a) => a.agentId)).not.toContain(ids[1]);
+
+    // Explicit ids are not silently truncated (they are already bounded by the input schema).
+    const explicit = await compareApi.call('agents.compare', { agentIds: [ids[1]], from, to });
+    expect(explicit.truncated).toBe(false);
+    expect(explicit.agents.map((a) => a.agentId)).toEqual([ids[1]]);
   });
 
   it('bounds the agent count and the comparison window (#489)', async () => {

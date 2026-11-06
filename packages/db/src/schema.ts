@@ -1515,9 +1515,15 @@ export const experienceRolloutPauses = pgTable(
       dropPercent: number;
       ok: boolean;
     } | null>(),
-    /** Set once the owner e-mail was attempted; null means the outbox still owes it. */
+    /** Set once the owner e-mail was delivered; null means the outbox still owes it or is retrying. */
     notifiedAt: ts('notified_at'),
     notifyError: text('notify_error'),
+    /** When a worker claimed this pause for the owner e-mail (#473); null when no attempt is in flight. */
+    notifyingAt: ts('notifying_at'),
+    /** How many times the owner e-mail was claimed (#473); bounded so a failing send stops retrying. */
+    notifyAttempts: integer('notify_attempts').notNull().default(0),
+    /** The earliest instant a failed owner e-mail is retried (#473); null for a fresh or delivered pause. */
+    notifyAfter: ts('notify_after'),
   },
   (t) => [primaryKey({ columns: [t.workspaceId, t.artifactId, t.pausedAt] })],
 );

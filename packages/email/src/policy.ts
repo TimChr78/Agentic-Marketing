@@ -25,12 +25,15 @@ export const isMarketing = (basis: string) => basis !== 'contract' && basis !== 
  * - a completed contact ages from the moment the provider accepted it (#453), falling back to the
  *   last status change for a row written before `sent_at` existed; a message that waited days for
  *   quiet hours, a pause or a retry therefore consumes the window from its real send time;
- * - an in-flight reservation ages from enqueue time, and only counts when it is *before* this
- *   message in `(created_at, id)` order. Two messages queued in one transaction share `created_at`,
- *   so without the id tie-breaker both saw no earlier in-flight peer and passed a max=1 cap (#452).
- *   The later id is the one held back, which is deterministic across workers. Queued rows are
- *   counted as well as claimed ones: a peer that another worker has not claimed yet must still
- *   take its place, or two workers could admit one message each before either saw the other.
+ * - an in-flight reservation counts until it completes, however long ago it was enqueued (#452).
+ *   A message queued eight days ago and still queued or sending has not been sent yet, so it must
+ *   still take its slot in a seven-day window; aging it out at enqueue time let two old queued
+ *   messages both pass a max=1 cap. Within the in-flight set a peer only counts when it is *before*
+ *   this message in `(created_at, id)` order: the later id is the one held back, deterministically.
+ *   Queued rows are counted as well as claimed ones: a peer another worker has not claimed yet must
+ *   still take its place, or two workers could admit one message each before either saw the other.
+ *   The cap decision is also serialized per person by `checkPolicy`, so two workers cannot read a
+ *   stale in-flight set at the same instant.
  */
 function countedContact(message: { id: string; createdAt: Date }, now: Date, days: number) {
   const since = new Date(now.getTime() - days * 86_400_000);
@@ -41,7 +44,6 @@ function countedContact(message: { id: string; createdAt: Date }, now: Date, day
     ),
     and(
       inArray(schema.messages.status, [...IN_FLIGHT]),
-      gte(schema.messages.createdAt, since),
       sql`(${schema.messages.createdAt}, ${schema.messages.id}) < (${message.createdAt}, ${message.id})`,
     ),
   );
@@ -258,6 +260,11 @@ export async function checkPolicy(
   now = new Date(),
 ): Promise<Hold> {
   if (!isMarketing(message.basis)) return { ok: true };
+  // Serialize the cap decision for this person (#452). The message is already claimed as `sending`
+  // (a reservation) before this transaction, so holding one advisory lock per workspace+profile
+  // means the next worker sees that reservation before it decides, rather than two workers both
+  // reading the same in-flight set. Transaction-scoped: released at commit or rollback.
+  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`message-cap:${workspaceId}:${message.profileId}`}, 0))`);
   const policy = await deliveryPolicy(tx);
   const marketingKeys = purposes.filter((p) => isMarketing(p.basis)).map((p) => p.key);
 

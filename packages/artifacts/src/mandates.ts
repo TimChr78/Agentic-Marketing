@@ -55,10 +55,19 @@ export function outsideWorkingHours(
   return null;
 }
 
-/** The agent's mandate that applies now: published, not archived, for this agent, not expired. */
-export async function activeMandate(tx: Tx, agentId: string, now = new Date()): Promise<ActiveMandate | null> {
+/**
+ * The active mandates of several agents in one grouped read (#489), newest artifact first per agent.
+ * Same terms as `activeMandate`: published, not archived, for the agent, not expired.
+ */
+export async function activeMandates(tx: Tx, agentIds: string[], now = new Date()): Promise<Map<string, ActiveMandate>> {
+  const out = new Map<string, ActiveMandate>();
+  if (!agentIds.length) return out;
   const rows = await tx
-    .select({ id: schema.artifacts.id, version: schema.artifacts.publishedVersion, content: schema.artifactVersions.content })
+    .select({
+      id: schema.artifacts.id,
+      version: schema.artifacts.publishedVersion,
+      content: schema.artifactVersions.content,
+    })
     .from(schema.artifacts)
     .innerJoin(
       schema.artifactVersions,
@@ -73,16 +82,20 @@ export async function activeMandate(tx: Tx, agentId: string, now = new Date()): 
         eq(schema.artifacts.type, 'agent_mandate'),
         eq(schema.artifacts.archived, false),
         isNotNull(schema.artifacts.publishedVersion),
-        sql`${schema.artifactVersions.content}->>'agent' = ${agentId}`,
+        sql`${schema.artifactVersions.content}->>'agent' IN (${sql.join(
+          agentIds.map((id) => sql`${id}`),
+          sql`, `,
+        )})`,
       ),
     )
     .orderBy(desc(schema.artifacts.updatedAt));
+  const [w] = await tx.select({ timeZone: schema.workspaces.timeZone }).from(schema.workspaces);
   for (const r of rows) {
     const parsed = artifactTypes.agent_mandate.content.safeParse(r.content);
     if (!parsed.success || new Date(parsed.data.validUntil) <= now) continue;
     const m = parsed.data;
-    const [w] = await tx.select({ timeZone: schema.workspaces.timeZone }).from(schema.workspaces);
-    return {
+    if (out.has(m.agent)) continue;
+    out.set(m.agent, {
       content: m,
       outsideHours: outsideWorkingHours(m, w?.timeZone ?? 'UTC', now),
       view: {
@@ -99,9 +112,14 @@ export async function activeMandate(tx: Tx, agentId: string, now = new Date()): 
         goals: m.goals,
         shadow: m.shadow as MandateView['shadow'],
       },
-    };
+    });
   }
-  return null;
+  return out;
+}
+
+/** The agent's mandate that applies now: published, not archived, for this agent, not expired. */
+export async function activeMandate(tx: Tx, agentId: string, now = new Date()): Promise<ActiveMandate | null> {
+  return (await activeMandates(tx, [agentId], now)).get(agentId) ?? null;
 }
 
 // Before a mandate is published: the agent exists, the levels fit the workspace ceilings, it does

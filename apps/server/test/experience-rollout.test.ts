@@ -3,9 +3,10 @@ import type { AddressInfo } from 'node:net';
 import { schema } from '@agentic-marketing/db';
 import { decideAll, loadPublishedExperiences, syncEdge } from '@agentic-marketing/personalize';
 import type { DecideContext } from '@agentic-marketing/personalize/targeting';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { runAgentEventsOnce } from '../src/agents/events';
+import { runHoldsOnce } from '../src/agents/holds';
 import { type GuardrailReading, runExperienceRolloutsOnce } from '../src/agents/rollouts';
 import { startTestServer, testPort, type User } from './harness';
 
@@ -365,6 +366,44 @@ describe('a person’s stop is sticky (#454)', () => {
     expect((await snapshotOf(ws)).find((e) => e.id === id)?.share).toBe(0);
   });
 
+  it('a held agent publish after a person’s stop keeps the ramp stopped (#454)', async () => {
+    const { ws, api } = await person();
+    const content = ramp();
+    const id = await publishExperience(api, content);
+    const { token, agentId } = await agentFor(api, 'Held ramp agent');
+    await api.call('workspace.setAutonomy', { maxLevel: { 'experience.live': 3 } });
+    // Level 2 acts with veto: the agent's publish waits in a held approval instead of running.
+    const mandate = await api.call('artifacts.create', {
+      type: 'agent_mandate',
+      name: 'Held ramp mandate',
+      content: {
+        agent: agentId,
+        purpose: 'Roll out experiences gradually',
+        validUntil: inDays(30),
+        levels: { 'experience.live': 2 },
+        scope: { segments: [], purposes: [], topics: [], channels: [], artifactTypes: ['experience'], artifacts: [id], brand: null },
+        learning: {},
+      } as never,
+    });
+    expect((await api.call('artifacts.requestPublish', { artifactId: mandate.artifactId, note: 'grant' })).status).toBe('published');
+
+    expect((await agentCall(token, 'artifacts.updateDraft', { artifactId: id, content: { ...content, priority: 12 } })).status).toBe(200);
+    const held = await agentCall(token, 'artifacts.requestPublish', { artifactId: id, note: 'held republish' });
+    expect(held.body.status).toBe('on_hold');
+
+    // A person stops the live ramp while the veto window is open.
+    expect((await api.call('experiences.stopRollout', { artifactId: id, reason: 'Conversion collapse' })).status).toBe('stopped');
+
+    // The veto window ends and the scheduler publishes the held version on the agent's behalf.
+    await t.srv.db.withWorkspace(ws, (tx) =>
+      tx.execute(sql`UPDATE approval_requests SET hold_until = now() - interval '1 minute'
+        WHERE workspace_id = ${ws} AND artifact_id = ${id}`),
+    );
+    await runHoldsOnce({ db: t.srv.db, services: t.srv.services });
+    expect(await api.call('experiences.rolloutStatus', { artifactId: id })).toMatchObject({ status: 'stopped', share: 0 });
+    expect((await snapshotOf(ws)).find((e) => e.id === id)?.share).toBe(0);
+  });
+
   it('a person’s republish starts a stopped ramp again', async () => {
     const { api } = await person();
     const content = ramp();
@@ -522,6 +561,95 @@ describe('pause delivery is durable and idempotent (#473, #476)', () => {
   });
 });
 
+describe('pause notification state survives failures (#473)', () => {
+  it('keeps a failed owner e-mail owed, backs off, then sends it once', async () => {
+    const { ws, api } = await person();
+    const id = await publishExperience(api, ramp({ guardrail: { measure: 'email.click_rate', maxDropPercent: 20 } }));
+    await setDue(ws, id);
+    const pauseOf = async () =>
+      (
+        await t.srv.db.withWorkspace(ws, (tx) =>
+          tx.select().from(schema.experienceRolloutPauses).where(eq(schema.experienceRolloutPauses.workspaceId, ws)),
+        )
+      )[0];
+    const messageKeys = async () =>
+      (
+        await t.srv.db.admin.query<{ n: number }>(
+          `SELECT count(*)::int AS n FROM messages WHERE workspace_id = $1 AND idempotency_key LIKE $2`,
+          [ws, `experience-rollout:${id}:%`],
+        )
+      ).rows[0]?.n ?? 0;
+
+    // No transactional provider: the send fails, but the pause must not be marked as notified.
+    expect((await runExperienceRolloutsOnce({ ...deps(), measure: async () => failing })).paused).toBeGreaterThanOrEqual(1);
+    const failed = await pauseOf();
+    expect(failed).toMatchObject({ notifiedAt: null, notifyingAt: null, notifyAttempts: 1 });
+    expect(failed?.notifyError).toContain('provider');
+    expect(failed?.notifyAfter?.getTime() ?? 0).toBeGreaterThan(Date.now());
+    expect(await messageKeys()).toBe(0);
+
+    // Inside the backoff, another round does not retry.
+    await runExperienceRolloutsOnce({ ...deps(), measure: async () => failing });
+    expect((await pauseOf())?.notifyAttempts).toBe(1);
+
+    // Once a provider exists and the backoff has passed, the next round delivers and marks it.
+    await api.call('emailProviders.create', { name: 'Outbox', adapter: 'log', fromEmail: 'ops@example.com', useFor: ['transactional'] });
+    await t.srv.db.admin.query(
+      `UPDATE experience_rollout_pauses SET notify_after = now() - interval '1 second' WHERE workspace_id = $1 AND artifact_id = $2`,
+      [ws, id],
+    );
+    await runExperienceRolloutsOnce({ ...deps(), measure: async () => failing });
+    const sent = await pauseOf();
+    expect(sent).toMatchObject({ notifyingAt: null, notifyAttempts: 2, notifyError: null });
+    expect(sent?.notifiedAt).not.toBeNull();
+    expect(sent?.notifyAfter).toBeNull();
+    expect(await messageKeys()).toBe(1);
+  });
+
+  it('does not resend when a crash left a claim, and retries that claim after the lease', async () => {
+    const { ws, api } = await person();
+    await api.call('emailProviders.create', { name: 'Outbox', adapter: 'log', fromEmail: 'ops@example.com', useFor: ['transactional'] });
+    const id = await publishExperience(api, ramp({ guardrail: { measure: 'email.click_rate', maxDropPercent: 20 } }));
+    await setDue(ws, id);
+    const messageKeys = async () =>
+      (
+        await t.srv.db.admin.query<{ n: number }>(
+          `SELECT count(*)::int AS n FROM messages WHERE workspace_id = $1 AND idempotency_key LIKE $2`,
+          [ws, `experience-rollout:${id}:%`],
+        )
+      ).rows[0]?.n ?? 0;
+    await runExperienceRolloutsOnce({ ...deps(), measure: async () => failing });
+    expect(await messageKeys()).toBe(1);
+
+    // The send committed with the provider but the mark did not: simulated by a fresh claim.
+    await t.srv.db.admin.query(
+      `UPDATE experience_rollout_pauses SET notified_at = NULL, notifying_at = now(), notify_attempts = 2
+        WHERE workspace_id = $1 AND artifact_id = $2`,
+      [ws, id],
+    );
+    await runExperienceRolloutsOnce({ ...deps(), measure: async () => failing });
+    const [claimed] = await t.srv.db.withWorkspace(ws, (tx) =>
+      tx.select().from(schema.experienceRolloutPauses).where(eq(schema.experienceRolloutPauses.workspaceId, ws)),
+    );
+    expect(claimed).toMatchObject({ notifiedAt: null, notifyAttempts: 2 });
+    expect(await messageKeys()).toBe(1);
+
+    // The lease expires: the retry sees the earlier message as sent and does not duplicate it.
+    await t.srv.db.admin.query(
+      `UPDATE experience_rollout_pauses SET notifying_at = now() - interval '11 minutes'
+        WHERE workspace_id = $1 AND artifact_id = $2`,
+      [ws, id],
+    );
+    await runExperienceRolloutsOnce({ ...deps(), measure: async () => failing });
+    const [retried] = await t.srv.db.withWorkspace(ws, (tx) =>
+      tx.select().from(schema.experienceRolloutPauses).where(eq(schema.experienceRolloutPauses.workspaceId, ws)),
+    );
+    expect(retried).toMatchObject({ notifyAttempts: 3, notifyError: null });
+    expect(retried?.notifiedAt).not.toBeNull();
+    expect(await messageKeys()).toBe(1);
+  });
+});
+
 describe('the kill switch reaches KV before it returns (#477)', () => {
   it('pushes the stopped bundle to KV without waiting for the sync tick', async () => {
     const { ws, api } = await person();
@@ -538,8 +666,48 @@ describe('the kill switch reaches KV before it returns (#477)', () => {
     const bundle = () => kv.get(`am:exp:${ws}`) as { experiences: { id: string; share: number | null }[] };
     expect(bundle().experiences.find((e) => e.id === id)?.share).toBe(5);
 
-    await api.call('experiences.stopRollout', { artifactId: id, reason: 'Conversion collapse' });
-    // No wait, no tick: the stop pushed the new share before it returned.
+    const stopped = await api.call('experiences.stopRollout', { artifactId: id, reason: 'Conversion collapse' });
+    // No wait, no tick: the stop pushed the new share before it returned, and said so.
+    expect(stopped).toMatchObject({ edgePushed: true, edgePushReason: null });
     expect(bundle().experiences.find((e) => e.id === id)?.share).toBe(0);
+  });
+
+  it('waits for a running edge sync instead of skipping the stop push', async () => {
+    const { ws, api } = await person();
+    await api.call('edge.configure', {
+      accountId: ACCOUNT,
+      namespaceId: NS,
+      apiToken: 'cf-token-0123456789abcdef',
+      apiBase: cfBase,
+      enabled: true,
+    });
+    const id = await publishExperience(api, ramp());
+    await syncEdge({ db: t.srv.db, hot: t.srv.hot, kp: t.srv.keyProvider, egress: t.srv.egress }, ws);
+    const bundle = () => kv.get(`am:exp:${ws}`) as { experiences: { id: string; share: number | null }[] };
+    expect(bundle().experiences.find((e) => e.id === id)?.share).toBe(5);
+
+    // A background sync holds the same advisory key the stop needs.
+    const client = await t.srv.db.admin.connect();
+    try {
+      await client.query('SELECT pg_advisory_lock(hashtextextended($1, 0))', [`edge-sync:${ws}`]);
+      const stopping = api.call('experiences.stopRollout', { artifactId: id, reason: 'Waiting for the lock' });
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      // It has not skipped: the old bundle is still there while the stop waits.
+      expect(bundle().experiences.find((e) => e.id === id)?.share).toBe(5);
+      await client.query('SELECT pg_advisory_unlock(hashtextextended($1, 0))', [`edge-sync:${ws}`]);
+      const stopped = await stopping;
+      expect(stopped.edgePushed).toBe(true);
+      expect(bundle().experiences.find((e) => e.id === id)?.share).toBe(0);
+    } finally {
+      client.release();
+    }
+  });
+
+  it('reports a push it could not make instead of swallowing the failure', async () => {
+    const { api } = await person();
+    const id = await publishExperience(api, ramp());
+    const stopped = await api.call('experiences.stopRollout', { artifactId: id, reason: 'No edge configured' });
+    expect(stopped).toMatchObject({ status: 'stopped', share: 0, edgePushed: false });
+    expect(stopped.edgePushReason).toContain('not configured');
   });
 });

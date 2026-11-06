@@ -1028,13 +1028,21 @@ export const compareAgents = defineCommand({
   name: 'agents.compare',
   title: 'Compare agents',
   description:
-    'Put several agents side by side for a period (default: the last 30 days, at most 366): per mandate version, actions by class and decision (ran, held, sent to a person, refused, failed), undos and holds vetoed or run; per agent, the outcomes of its broadcasts, direct messages and journeys, its mandate goals, guardian caps and its hosted AI usage and estimated cost. Omit agentIds to compare every agent in the workspace, with at most 20 agents named.',
+    'Put several agents side by side for a period (default: the last 30 days, at most 366): per mandate version, actions by class and decision (ran, held, sent to a person, refused, failed), undos and holds vetoed or run; per agent, the outcomes of its broadcasts, direct messages and journeys, its mandate goals, guardian caps and its hosted AI usage and estimated cost. At most 20 agents are compared: pass agentIds, or omit them for the 20 most recently active agents; `truncated` says whether others were left out.',
   input: z.object({
     from: z.string().datetime().optional(),
     to: z.string().datetime().optional(),
-    agentIds: z.array(AGENT_ID).optional().describe(`Agents to compare; at most ${COMPARE_MAX_AGENTS}; omit for all`),
+    agentIds: z
+      .array(AGENT_ID)
+      .optional()
+      .describe(`Agents to compare; at most ${COMPARE_MAX_AGENTS}; omit for the ${COMPARE_MAX_AGENTS} most recently active`),
   }),
-  output: z.object({ from: z.string(), to: z.string(), agents: z.array(AgentComparison) }),
+  output: z.object({
+    from: z.string(),
+    to: z.string(),
+    truncated: z.boolean().describe('True when more agents had activity than the comparison includes; compare explicit ids to see others'),
+    agents: z.array(AgentComparison),
+  }),
   permission: 'audit:read',
   effect: 'read',
   handler: async (input, ctx) => {
@@ -1045,16 +1053,23 @@ export const compareAgents = defineCommand({
     if (from >= to) throw new AppError('invalid_input', '`from` must be before `to`.');
     if (to.getTime() - from.getTime() > COMPARE_MAX_WINDOW_DAYS * 86_400_000)
       throw new AppError('invalid_input', `The comparison window is at most ${COMPARE_MAX_WINDOW_DAYS} days; narrow \`from\` and \`to\`.`);
-    const agents = await ctx.tx
+    // Most recently active first, and the cap applies to the resolved set, not only to explicit ids
+    // (#489): omitting agentIds must not load and compare every agent in the workspace.
+    const lastActive = sql<Date | null>`(SELECT max(aa.at) FROM agent_actions aa
+      WHERE aa.workspace_id = ${schema.agents.workspaceId} AND aa.agent_id = ${schema.agents.id})`;
+    const resolved = await ctx.tx
       .select({ id: schema.agents.id, name: schema.agents.name, status: schema.agents.status })
       .from(schema.agents)
       .where(input.agentIds ? inArray(schema.agents.id, input.agentIds) : undefined)
-      .orderBy(schema.agents.name);
+      .orderBy(desc(sql`coalesce(${lastActive}, ${schema.agents.createdAt})`), schema.agents.name)
+      .limit(COMPARE_MAX_AGENTS + 1);
     if (input.agentIds) {
-      const found = new Set(agents.map((a) => a.id));
+      const found = new Set(resolved.map((a) => a.id));
       const missing = input.agentIds.filter((id) => !found.has(id));
       if (missing.length) throw new AppError('not_found', `Agent ${missing.join(', ')} not found.`);
     }
+    const truncated = !input.agentIds && resolved.length > COMPARE_MAX_AGENTS;
+    const agents = truncated ? resolved.slice(0, COMPARE_MAX_AGENTS) : resolved;
     const t = schema.agentActions;
     const agentIds = agents.map((a) => a.id);
     const now = new Date();
@@ -1203,14 +1218,36 @@ export const compareAgents = defineCommand({
       }
     }
     const aiByAgent = await aiCostsOf(ctx.tx, agentIds, { from, to });
+    // Mandates in one grouped read; outcomes in one grouped ledger read, with the bounded
+    // metric-layer queries that follow. Neither is one database round trip per agent anymore (#489).
+    const mandatesByAgent = ctx.services.activeMandates
+      ? await ctx.services.activeMandates(ctx.tx, agentIds)
+      : new Map(await Promise.all(agents.map(async (a) => [a.id, (await ctx.services.activeMandate?.(ctx.tx, a.id)) ?? null] as const)));
+    const goalsByAgent = new Map(agents.map((a) => [a.id, mandatesByAgent.get(a.id)?.view.goals ?? []]));
+    const outcomesByAgent = ctx.services.agentOutcomesMany
+      ? await ctx.services.agentOutcomesMany(
+          ctx.tx,
+          ctx.principal.workspaceId,
+          agents.map((a) => ({ agentId: a.id, goals: goalsByAgent.get(a.id) ?? [] })),
+          { from, to },
+        )
+      : new Map(
+          await Promise.all(
+            agents.map(
+              async (a) =>
+                [
+                  a.id,
+                  ctx.services.agentOutcomes
+                    ? await ctx.services.agentOutcomes(ctx.tx, ctx.principal.workspaceId, a.id, { from, to }, goalsByAgent.get(a.id) ?? [])
+                    : null,
+                ] as const,
+            ),
+          ),
+        );
     const compared: z.output<typeof AgentComparison>[] = [];
     for (const agent of agents) {
       const episodes = episodesByAgent.get(agent.id) ?? [];
-      const mandate = await ctx.services.activeMandate?.(ctx.tx, agent.id);
-      const goals = mandate?.view.goals ?? [];
-      const outcomes = ctx.services.agentOutcomes
-        ? await ctx.services.agentOutcomes(ctx.tx, ctx.principal.workspaceId, agent.id, { from, to }, goals)
-        : null;
+      const outcomes = outcomesByAgent.get(agent.id) ?? null;
       compared.push({
         agentId: agent.id,
         name: agent.name,
@@ -1231,7 +1268,7 @@ export const compareAgents = defineCommand({
         ),
       });
     }
-    return { from: from.toISOString(), to: to.toISOString(), agents: compared };
+    return { from: from.toISOString(), to: to.toISOString(), truncated, agents: compared };
   },
 });
 

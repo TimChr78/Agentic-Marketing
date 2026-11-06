@@ -2,18 +2,10 @@ import { MEASURES } from '@agentic-marketing/analytics';
 import { artifactTypes, type ExperienceDefinition, publishHooks, publishValidators } from '@agentic-marketing/artifacts';
 import { type CommandContext, defineCommand } from '@agentic-marketing/commands';
 import { AppError } from '@agentic-marketing/core';
-import { type Db, schema } from '@agentic-marketing/db';
-import { logger } from '@agentic-marketing/telemetry';
+import { schema } from '@agentic-marketing/db';
 import { and, eq } from 'drizzle-orm';
 import { z } from 'zod';
-import { syncEdge } from './edge';
-
-declare module '@agentic-marketing/commands' {
-  interface Services {
-    /** The pool, for the immediate edge push a stop makes (#477). */
-    db?: Db;
-  }
-}
+import { pushEdgeBundleNow } from './edge';
 
 // Progressive rollout for agent changes (#427, part of #102). A published experience may carry a
 // ramp: start with a small share of visitors, widen on a schedule while a metric-layer guardrail
@@ -106,6 +98,12 @@ const RolloutStatus = z.object({
   lastError: z.string().nullable(),
 });
 
+/** A stop also says whether its immediate edge push happened (#477), so the caller is not misled. */
+const StopRolloutStatus = RolloutStatus.extend({
+  edgePushed: z.boolean().describe('True when the stopped bundle was written to the edge KV before this returned'),
+  edgePushReason: z.string().nullable().describe('Why the bundle was not pushed; null when edgePushed is true'),
+});
+
 type RolloutRow = typeof schema.experienceRollouts.$inferSelect;
 
 const statusOf = (artifactId: string, row: RolloutRow | null): z.infer<typeof RolloutStatus> =>
@@ -148,18 +146,10 @@ const statusOf = (artifactId: string, row: RolloutRow | null): z.infer<typeof Ro
       };
 
 /** The edge bundle and the decision API cache must see a changed share without waiting for a publish. */
-async function invalidateExperiences(ctx: CommandContext, workspaceId: string, opts: { pushNow?: boolean } = {}) {
+async function invalidateExperiences(ctx: CommandContext, workspaceId: string) {
   await ctx.tx.update(schema.edgeTargets).set({ bundleHash: null });
   ctx.afterCommit?.(async () => {
     await ctx.services.hot.bump(`experiences:${workspaceId}`);
-    if (!opts.pushNow) return;
-    // A stop is an emergency (#477): push the new share to KV now rather than on the next sync
-    // tick. Cloudflare still has to propagate the write to other regions; see the command text.
-    const { db, hot, keyProvider, egress } = ctx.services;
-    if (!db || !keyProvider || !egress) return;
-    await syncEdge({ db, hot, kp: keyProvider, egress }, workspaceId, { bundleOnly: true }).catch((err) =>
-      logger.warn({ err, workspaceId }, 'immediate edge bundle push failed'),
-    );
   });
 }
 
@@ -190,12 +180,12 @@ export const stopRollout = defineCommand({
   name: 'experiences.stopRollout',
   title: 'Stop an experience ramp',
   description:
-    'Stop an experience ramp: its share becomes 0 for the decision API at once, and the edge bundle is pushed with the new share before this returns; Cloudflare has to propagate that write to other regions, so edge-served sites can keep the old share for up to about a minute (the worker’s isolate cache plus KV propagation, see docs/deployment/edge.md). People and agents with experience.live may stop a ramp; it stays stopped until a person resumes it with experiences.resumeRollout, and an agent republishing the experience does not restart it.',
+    'Stop an experience ramp: its share becomes 0 for the decision API at once, and the edge bundle is pushed with the new share before this returns, waiting up to ten seconds for a running edge sync. `edgePushed` says whether that push happened and `edgePushReason` why not; the sync tick retries a failed push. Cloudflare still has to propagate a successful write to other regions, so edge-served sites can keep the old share for up to about a minute (the worker’s isolate cache plus KV propagation, see docs/deployment/edge.md). People and agents with experience.live may stop a ramp; it stays stopped until a person resumes it with experiences.resumeRollout, and an agent republishing the experience, including through a held change that runs after its veto window, does not restart it.',
   input: z.object({
     artifactId: z.string().regex(/^exp_[0-9a-f]{32}$/, 'An experience id (exp_…)'),
     reason: z.string().min(1).max(500).describe('Why the ramp is stopped; shown in the rollout status and the agent event'),
   }),
-  output: RolloutStatus,
+  output: StopRolloutStatus,
   permission: 'artifacts:publish',
   effect: 'write',
   actionClass: 'experience.live',
@@ -214,7 +204,17 @@ export const stopRollout = defineCommand({
       .where(and(eq(schema.experienceRollouts.workspaceId, ws), eq(schema.experienceRollouts.artifactId, input.artifactId)))
       .for('update');
     if (!row) throw new AppError('not_found', `Experience ${input.artifactId} has no ramp to stop.`);
-    if (row.status === 'stopped') return statusOf(input.artifactId, row);
+    const { db, hot, keyProvider, egress } = ctx.services;
+    const pushStopped = () =>
+      db && keyProvider && egress
+        ? pushEdgeBundleNow({ db, hot, kp: keyProvider, egress }, ctx.tx, ws)
+        : Promise.resolve({ pushed: false, reason: 'the edge sync is not configured' as string | null });
+    // Repeating the stop is idempotent, but still retries the edge push if the earlier one failed.
+    if (row.status === 'stopped') {
+      await invalidateExperiences(ctx, ws);
+      const edge = await pushStopped();
+      return { ...statusOf(input.artifactId, row), edgePushed: edge.pushed, edgePushReason: edge.reason };
+    }
     const now = new Date();
     const [updated] = await ctx.tx
       .update(schema.experienceRollouts)
@@ -233,8 +233,12 @@ export const stopRollout = defineCommand({
       })
       .where(and(eq(schema.experienceRollouts.workspaceId, ws), eq(schema.experienceRollouts.artifactId, input.artifactId)))
       .returning();
-    await invalidateExperiences(ctx, ws, { pushNow: true });
-    return statusOf(input.artifactId, updated ?? row);
+    await invalidateExperiences(ctx, ws);
+    // The stop is an emergency (#477): push from this transaction so the share just written is the
+    // one that goes to KV, and wait for the sync lock rather than skipping when a sync is running.
+    // The result is part of the output, so a failed push is visible instead of swallowed.
+    const edge = await pushStopped();
+    return { ...statusOf(input.artifactId, updated ?? row), edgePushed: edge.pushed, edgePushReason: edge.reason };
   },
 });
 
@@ -310,7 +314,10 @@ publishHooks.push(async (ctx, artifact, version) => {
   const def = artifactTypes.experience.content.parse(v.content);
   const where = and(eq(schema.experienceRollouts.workspaceId, artifact.workspaceId), eq(schema.experienceRollouts.artifactId, artifact.id));
   const [existing] = await ctx.tx.select().from(schema.experienceRollouts).where(where).for('update');
-  const keptStop = existing?.status === 'stopped' && !existing.stoppedByAgent && ctx.principal.type === 'agent' ? existing : null;
+  // A held agent change publishes through the scheduler with a system user principal, so the
+  // original requester travels on `onBehalfOf` (#454): the person's stop must still hold.
+  const requestedByAgent = ctx.principal.type === 'agent' || ctx.onBehalfOf?.type === 'agent';
+  const keptStop = existing?.status === 'stopped' && !existing.stoppedByAgent && requestedByAgent ? existing : null;
   const now = new Date();
   if (!def.rollout) {
     if (!keptStop) {

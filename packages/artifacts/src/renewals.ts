@@ -148,7 +148,10 @@ export const renewMandates = defineCommand({
             latestVersion: schema.artifacts.latestVersion,
           })
           .from(schema.artifacts)
-          .where(and(eq(schema.artifacts.workspaceId, ctx.principal.workspaceId), eq(schema.artifacts.id, mandateId)));
+          .where(and(eq(schema.artifacts.workspaceId, ctx.principal.workspaceId), eq(schema.artifacts.id, mandateId)))
+          // The published version, hash and draft write are one decision (#455): a concurrent
+          // renewal or edit waits here instead of reading the same version and overwriting it.
+          .for('update');
         if (!artifact) throw new AppError('not_found', `Mandate ${mandateId} was not found in this workspace.`);
         if (artifact.type !== 'agent_mandate') throw new AppError('invalid_input', `${mandateId} is a ${artifact.type}, not a mandate.`);
         if (artifact.publishedVersion === null) throw new AppError('conflict', `Mandate ${mandateId} has no published version to renew.`);

@@ -57,6 +57,23 @@ describe('approval decisions (#483)', () => {
     expect(pendingDecisionCount([rows[1]!])).toBe(1);
   });
 
+  it('collapses loaded members whose lead is outside the page into one decision (#483)', () => {
+    const bundle = {
+      id: 'bnd_2',
+      members: [
+        { approvalId: 'apr_a', artifactId: 'bct_1' },
+        { approvalId: 'apr_b', artifactId: 'bct_2' },
+        { approvalId: 'apr_lead', artifactId: 'bct_3' },
+      ],
+    };
+    const first = row('apr_a', bundle);
+    const second = row('apr_b', bundle);
+    // The lead (apr_lead) is on the next page: both loaded members still represent the same bundle.
+    const decisions = approvalDecisions([first, second]);
+    expect(decisions.map((a) => a.id)).toEqual(['apr_b']);
+    expect(pendingDecisionCount([first, second])).toBe(1);
+  });
+
   it('counts plain requests with no bundle as one decision each', () => {
     expect(pendingDecisionCount([row('apr_1'), row('apr_2'), row('apr_3')])).toBe(3);
     expect(pendingDecisionCount([])).toBe(0);

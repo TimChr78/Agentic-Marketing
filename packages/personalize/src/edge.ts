@@ -657,6 +657,96 @@ async function syncEdgeLocked(deps: EdgeDeps, ws: string, opts: { bundleOnly?: b
   }
 }
 
+export interface EdgePushResult {
+  pushed: boolean;
+  /** Why the push did not happen (or failed), for `experiences.stopRollout` to report honestly; null on success. */
+  reason: string | null;
+}
+
+/**
+ * Pushes the current bundle inside the caller's transaction, for a person's stop (#477). The stop is
+ * an emergency, so this waits for the edge-sync lock instead of skipping when another sync runs,
+ * and it reads through the caller's transaction so the just-written share is included. The wait is
+ * bounded (`waitMs`, 10 s by default); past it the result says the push did not happen and the
+ * normal sync tick will retry. Cloudflare still has to propagate the write to other regions.
+ */
+export async function pushEdgeBundleNow(deps: EdgeDeps, tx: Tx, ws: string, opts: { waitMs?: number } = {}): Promise<EdgePushResult> {
+  const waitMs = opts.waitMs ?? 10_000;
+  // A lock timeout aborts the transaction, so the attempt lives in a savepoint: on timeout we roll
+  // back to it and still commit the stop itself. `pg_advisory_xact_lock` conflicts with the
+  // session-scoped `pg_try_advisory_lock` the background sync takes on the same key.
+  await tx.execute(sql`SAVEPOINT edge_push_lock`);
+  let locked = true;
+  try {
+    await tx.execute(sql`SELECT set_config('lock_timeout', ${`${waitMs}ms`}, true)`);
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`edge-sync:${ws}`}, 0))`);
+  } catch {
+    locked = false;
+    await tx.execute(sql`ROLLBACK TO SAVEPOINT edge_push_lock`).catch(() => {});
+  }
+  await tx.execute(sql`RELEASE SAVEPOINT edge_push_lock`).catch(() => {});
+  if (!locked) return { pushed: false, reason: `another edge sync was still running after ${Math.round(waitMs / 1000)} s` };
+  try {
+    const [t] = await tx.select().from(schema.edgeTargets).for('update');
+    if (!t) return { pushed: false, reason: 'the edge is not configured' };
+    if (!t.enabled) return { pushed: false, reason: 'edge serving is turned off' };
+    if (!t.secrets || !t.secretsKeyId) return { pushed: false, reason: 'no Cloudflare API token: the edge bundle cannot be pushed' };
+    const purposes = ((await publishedSingleton(tx, 'purposes'))?.purposes ?? DEFAULT_PURPOSES).map((p) => ({
+      key: p.key,
+      basis: p.basis,
+    }));
+    const bundle: EdgeBundle = { experiences: await loadPublishedExperiences(tx), purposes };
+    const sources = await tx
+      .select({
+        keyHash: schema.sources.keyHash,
+        kind: schema.sources.kind,
+        requiredPurpose: schema.sources.requiredPurpose,
+        enabled: schema.sources.enabled,
+        allowedOrigins: schema.sources.allowedOrigins,
+      })
+      .from(schema.sources);
+    const entries = [
+      { key: kvKeys.bundle(ws), value: JSON.stringify(bundle) },
+      ...sources.map((s) => ({
+        key: kvKeys.source(s.keyHash),
+        value: JSON.stringify({
+          workspaceId: ws,
+          kind: s.kind,
+          requiredPurpose: s.requiredPurpose,
+          enabled: s.enabled,
+          allowedOrigins: s.allowedOrigins,
+        } satisfies EdgeSource),
+      })),
+    ];
+    const hash = sha256(JSON.stringify(entries));
+    if (hash === t.bundleHash) return { pushed: true, reason: null };
+    const { apiToken } = await openJson<{ apiToken: string }>(tx, ws, deps.kp, t.secrets as Buffer, t.secretsKeyId as string);
+    const kv = cloudflareKv(t, apiToken, deps.egress);
+    const keys = entries.map((e) => e.key);
+    // Reserve the keys before uploading, as the background sync does, then write and record the hash.
+    await tx
+      .update(schema.edgeTargets)
+      .set({ pushedKeys: [...new Set([...t.pushedKeys, ...keys])] })
+      .where(and(eq(schema.edgeTargets.workspaceId, ws), eq(schema.edgeTargets.generation, t.generation)));
+    await kv.put(entries);
+    const gone = t.pushedKeys.filter((k) => !keys.includes(k));
+    if (gone.length) await kv.delete(gone);
+    await tx
+      .update(schema.edgeTargets)
+      .set({ bundleHash: hash, pushedKeys: keys, lastSyncAt: new Date(), lastError: null })
+      .where(and(eq(schema.edgeTargets.workspaceId, ws), eq(schema.edgeTargets.generation, t.generation)));
+    return { pushed: true, reason: null };
+  } catch (err) {
+    const reason = (err instanceof Error ? err.message : String(err)).split('\n')[0].slice(0, 500);
+    await tx
+      .update(schema.edgeTargets)
+      .set({ lastError: reason, lastSyncAt: new Date() })
+      .where(eq(schema.edgeTargets.workspaceId, ws))
+      .catch(() => {});
+    return { pushed: false, reason };
+  }
+}
+
 /** Scheduler role: keeps every enabled edge target in sync, and finishes cleanup after one is turned off. */
 export async function runEdgeSync(deps: EdgeDeps & { tickMs?: number }, signal: AbortSignal) {
   while (!signal.aborted) {
