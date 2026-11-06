@@ -12,6 +12,10 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 - `agents.runFailures` lists recent failed hosted runs across every agent since a given time, newest first, with each agent's name, summary and error. It is a bounded failure queue, not an incident lifecycle.
 - `approvals.list` adds `total` for the same status and artifact filter (including held rows) and a `nextCursor`, so the approvals destination can page the whole queue. Bundle member resolution and the existing list output are unchanged.
 
+### Changed
+
+- Broadcasts are the first screen family on the Phase 24 v2 list/detail templates (#448). The list reads `broadcasts.list` once per page with the operational state, audience, schedule and result per row, status filters, cursor paging, and honest empty, failure and loading states; it no longer calls `broadcasts.status` once per row. The detail page shares one `broadcasts.status` read across the pill, the who/when/next summary, Sending and the context panel, chooses one primary action from the runtime state, defaults its tabs from that state (`?tab=` wins), and adds the Report summary from the existing analytics read. `ArtifactDetailPage` gains optional detail slots that default to the existing page for every other artifact family.
+
 ## [0.9.0] - 2026-11-06
 
 ### Added

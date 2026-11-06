@@ -23,6 +23,7 @@ import {
   timeAgo,
   useToast,
 } from '../../ui';
+import { DetailPage } from '../../ui/DetailPage';
 import { pageWidth } from '../../ui/layout';
 import { OperationalPill } from '../../ui/state';
 import { invalidateArtifact } from '../artifactCache';
@@ -61,6 +62,56 @@ export interface EditorProps<C = any> {
   warnings: DraftWarning[];
 }
 
+/** The draft facts the detail slots may read, without exposing the editor's save machinery. */
+export interface ArtifactDetailView {
+  dirty: boolean;
+  draft: unknown;
+  /** Whether the page found a pending approval request for this artifact. */
+  hasPending: boolean;
+}
+
+/** What a family's action slots may call; the template never invents an action of its own. */
+export interface ArtifactDetailActionContext {
+  artifact: Artifact;
+  dirty: boolean;
+  saving: boolean;
+  readOnly: boolean;
+  /** artifacts:publish, a draft and no unsaved changes (the existing publish gate). */
+  canPublish: boolean;
+  canApprove: boolean;
+  directPublish: boolean;
+  pending: Out<'approvals.list'>['approvals'][number] | undefined;
+  save: (opts?: { name?: string; quiet?: boolean }) => Promise<boolean>;
+  openPublish: () => void;
+  openTab: (key: string) => void;
+  resetToSaved: () => void;
+}
+
+export interface ArtifactDetailActionSlots {
+  primary: ReactNode;
+  secondary?: ReactNode;
+}
+
+/**
+ * Additive detail slots. When omitted, the artifact page keeps its existing header and tabs
+ * exactly. A family that opts in delegates the geometry to `ui/DetailPage.tsx`; the draft, save,
+ * conflict and publish logic stays here.
+ */
+export interface ArtifactDetailConfig {
+  /** The family's kind words, e.g. "Broadcast"; defaults to the artifact type label. */
+  kind?: string;
+  metadata?: (artifact: Artifact, view: ArtifactDetailView) => ReactNode;
+  consequence?: (artifact: Artifact, view: ArtifactDetailView) => ReactNode;
+  context?: (artifact: Artifact, view: ArtifactDetailView) => ReactNode;
+  actions?: (context: ArtifactDetailActionContext) => ArtifactDetailActionSlots;
+  notFoundTitle?: string;
+  errorTitle?: string;
+  backTo?: string;
+  backLabel?: string;
+  restrictedTitle?: string;
+  restrictedBody?: ReactNode;
+}
+
 /** Types with a structured editor of their own; the rest use the JSON editor. */
 const DEFAULT_EDITORS: Partial<Record<string, (p: EditorProps) => ReactNode>> = {
   experience: (p) => <ExperienceEditor {...p} />,
@@ -85,6 +136,9 @@ export function ArtifactDetailPage({
   autosave,
   extraTabs = [],
   state,
+  detail,
+  tab,
+  onTabChange,
 }: {
   id: string;
   /** Breadcrumbs before the artifact's name, e.g. [{label:'Journeys', to:'/marketing/journeys'}]. */
@@ -101,15 +155,32 @@ export function ArtifactDetailPage({
   extraTabs?: { key: string; label: string; render: (a: Artifact) => ReactNode }[];
   /** The family's operational pill; defaults to the version-derived state. */
   state?: (a: Artifact) => ReactNode;
+  /** Opt in to the v2 detail template; defaults preserve every other family's page. */
+  detail?: ArtifactDetailConfig;
+  /** Controlled tab key, e.g. from `?tab=`; omit for the page's own state. */
+  tab?: string;
+  onTabChange?: (tab: string) => void;
 }) {
   const { can, workspace } = useWorkspace();
   const toast = useToast();
-  const art = useApi(() => api.call('artifacts.get', { artifactId: id }), [id]);
-  const pendingReq = useApi(() => api.call('approvals.list', { status: 'pending', artifactId: id, limit: 5 }), [id]);
+  const canRead = can('artifacts:read');
+  const restricted = !!detail && !canRead;
+  const art = useApi(() => api.call('artifacts.get', { artifactId: id }), [id], { skip: restricted });
+  const pendingReq = useApi(() => api.call('approvals.list', { status: 'pending', artifactId: id, limit: 5 }), [id], {
+    skip: restricted,
+  });
   const a = art.data;
   useCrumbs([...crumbs, { label: a?.name ?? '…' }]);
 
-  const [tab, setTab] = useState<Tab>('content');
+  const [innerTab, setInnerTab] = useState<Tab>('content');
+  const activeTab = tab ?? innerTab;
+  const changeTab = useCallback(
+    (key: string) => {
+      if (onTabChange) onTabChange(key);
+      else setInnerTab(key);
+    },
+    [onTabChange],
+  );
   const [draft, setDraft] = useState<unknown>(undefined);
   const [editorReset, setEditorReset] = useState(0);
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -291,13 +362,74 @@ export function ArtifactDetailPage({
     return () => window.removeEventListener('keydown', onKey);
   }, [dirty, readOnly, save]);
 
-  if (art.loading) return <LoadingBlock lines={8} />;
-  if (art.error || !a)
+  if (restricted) {
     return (
-      <Alert tone="bad" title="Couldn't open this item" onRetry={art.reload}>
-        {art.error}
-      </Alert>
+      <DetailPage
+        title={detail?.kind ?? 'Artifact'}
+        kind={detail?.kind ?? ''}
+        metadata={null}
+        consequence={null}
+        tabs={[]}
+        activeTab=""
+        onTabChange={() => {}}
+        state="restricted"
+        notice={{ title: detail?.restrictedTitle ?? 'Restricted access', body: detail?.restrictedBody }}
+        loadingContent={null}
+      />
     );
+  }
+  if (art.loading) {
+    if (!detail) return <LoadingBlock lines={8} />;
+    return (
+      <DetailPage
+        title=""
+        kind={detail.kind ?? ''}
+        metadata={null}
+        consequence={null}
+        tabs={[]}
+        activeTab=""
+        onTabChange={() => {}}
+        state="loading"
+        loadingContent={<LoadingBlock lines={8} />}
+      />
+    );
+  }
+  if (art.error || !a) {
+    if (!detail)
+      return (
+        <Alert tone="bad" title="Couldn't open this item" onRetry={art.reload}>
+          {art.error}
+        </Alert>
+      );
+    const missing = !!art.error && /does not exist|not found/i.test(art.error);
+    return (
+      <DetailPage
+        title={detail.kind ?? 'Artifact'}
+        kind={detail.kind ?? ''}
+        metadata={null}
+        consequence={null}
+        tabs={[]}
+        activeTab=""
+        onTabChange={() => {}}
+        state="error"
+        notice={{
+          title: missing ? (detail.notFoundTitle ?? 'Not found') : (detail.errorTitle ?? 'Couldn’t open this item'),
+          body: missing ? 'It may have been deleted or belongs to another workspace.' : (art.error ?? 'The server returned no artifact.'),
+          action: (
+            <div className="flex flex-wrap gap-2">
+              {detail.backTo && (
+                <ButtonLink to={detail.backTo} variant="secondary">
+                  {detail.backLabel ?? 'Back'}
+                </ButtonLink>
+              )}
+              <Button onClick={() => void art.reload()}>Retry</Button>
+            </div>
+          ),
+        }}
+        loadingContent={null}
+      />
+    );
+  }
 
   const latest = a.version;
   const pageEditor = editor ?? DEFAULT_EDITORS[a.type];
@@ -329,104 +461,66 @@ export function ArtifactDetailPage({
     }
   };
 
-  return (
-    <div className={pageWidth(wide ? 'full' : 'default')}>
-      <PageHeader
-        title={a.name}
-        meta={
-          <>
-            <span>{typeLabel(a.type)}</span>
-            {state ? (
-              state(a)
-            ) : (
-              <OperationalPill
-                state={stateOfArtifact({
-                  type: a.type,
-                  latestState: latest.state,
-                  latestVersion: a.latestVersion,
-                  publishedVersion: a.publishedVersion,
-                })}
-              />
-            )}
-            <span>{publicationLabel({ latestVersion: a.latestVersion, publishedVersion: a.publishedVersion })}</span>
-            <span>
-              v{latest.number} by {latest.by?.displayName ?? (latest.author.type === 'agent' ? 'an agent' : 'a person')} ·{' '}
-              {timeAgo(latest.createdAt)}
-            </span>
-          </>
-        }
-        description={description}
-        actions={
-          <>
-            {extraActions?.(a)}
-            {autosave && !readOnly && (
-              <span className="text-[12px] text-muted" aria-live="polite">
-                {saving
-                  ? 'Saving…'
-                  : saveError
-                    ? 'Not saved, see below'
-                    : dirty
-                      ? 'Unsaved changes'
-                      : lastSave === 'layout'
-                        ? 'Layout saved'
-                        : savedAt
-                          ? 'All changes saved'
-                          : 'Changes save automatically'}
-              </span>
-            )}
-            {dirty && !readOnly && (!autosave || conflict) && (
-              <>
-                <Button variant="ghost" onClick={resetToSaved}>
-                  Discard changes
-                </Button>
-                <Button variant="primary" loading={saving} onClick={() => void save()}>
-                  Save draft
-                </Button>
-              </>
-            )}
-            {!dirty && pending && (
-              <ButtonLink to={`/approvals/${pending.id}`} variant={can('artifacts:approve') ? 'primary' : 'secondary'}>
-                {can('artifacts:approve') ? 'Review the request' : 'View the approval request'}
-              </ButtonLink>
-            )}
-            {canPublish && (
-              <Button variant="primary" icon={<Send size={14} />} onClick={() => setPublishing(true)}>
-                {directPublish ? 'Publish' : 'Submit for review'}
-              </Button>
-            )}
-            <Menu
-              label="More actions"
-              items={[
-                ...(readOnly ? [] : [{ label: 'Rename', icon: <Pencil />, onSelect: () => setRenaming(true) }]),
-                ...(a.publishedVersion && a.latestVersion > a.publishedVersion && !readOnly
-                  ? [
-                      {
-                        label: `Discard draft (back to live v${a.publishedVersion})`,
-                        icon: <Undo2 />,
-                        destructive: true,
-                        onSelect: () => {
-                          setDiscardError(null);
-                          setDiscardOpen(true);
-                        },
-                      },
-                    ]
-                  : []),
-                { label: 'Copy id', icon: <Copy />, hint: a.id.slice(0, 8), onSelect: () => void navigator.clipboard?.writeText(a.id) },
-              ]}
-              trigger={(p) => (
-                <button
-                  {...p}
-                  type="button"
-                  aria-label="More actions"
-                  className="inline-flex size-8 items-center justify-center rounded-md border border-line-strong bg-surface text-fg-2 hover:bg-surface-2"
-                >
-                  <MoreHorizontal size={16} />
-                </button>
-              )}
-            />
-          </>
-        }
-      />
+  const view: ArtifactDetailView = { dirty, draft, hasPending: !!pending };
+  const pill = state?.(a) ?? (
+    <OperationalPill
+      state={stateOfArtifact({
+        type: a.type,
+        latestState: latest.state,
+        latestVersion: a.latestVersion,
+        publishedVersion: a.publishedVersion,
+      })}
+    />
+  );
+  const autosaveStatus = autosave && !readOnly && (
+    <span className="text-[12px] text-muted" aria-live="polite">
+      {saving
+        ? 'Saving…'
+        : saveError
+          ? 'Not saved, see below'
+          : dirty
+            ? 'Unsaved changes'
+            : lastSave === 'layout'
+              ? 'Layout saved'
+              : savedAt
+                ? 'All changes saved'
+                : 'Changes save automatically'}
+    </span>
+  );
+  const menu = (
+    <Menu
+      label="More actions"
+      items={[
+        ...(readOnly ? [] : [{ label: 'Rename', icon: <Pencil />, onSelect: () => setRenaming(true) }]),
+        ...(a.publishedVersion && a.latestVersion > a.publishedVersion && !readOnly
+          ? [
+              {
+                label: `Discard draft (back to live v${a.publishedVersion})`,
+                icon: <Undo2 />,
+                destructive: true,
+                onSelect: () => {
+                  setDiscardError(null);
+                  setDiscardOpen(true);
+                },
+              },
+            ]
+          : []),
+        { label: 'Copy id', icon: <Copy />, hint: a.id.slice(0, 8), onSelect: () => void navigator.clipboard?.writeText(a.id) },
+      ]}
+      trigger={(p) => (
+        <button
+          {...p}
+          type="button"
+          aria-label="More actions"
+          className="inline-flex size-8 items-center justify-center rounded-md border border-line-strong bg-surface text-fg-2 hover:bg-surface-2"
+        >
+          <MoreHorizontal size={16} />
+        </button>
+      )}
+    />
+  );
+  const alerts = (
+    <>
       {latest.state === 'rejected' && <RejectedNote id={a.id} />}
       {saveError && (
         <Alert tone="bad" title="Not saved" className="mb-4">
@@ -442,30 +536,34 @@ export function ArtifactDetailPage({
           </ul>
         </Alert>
       )}
-      <Tabs
-        label="Sections"
-        value={tab}
-        onChange={(t) => setTab(t)}
-        items={[
-          { key: 'content', label: dirty ? 'Content •' : 'Content' },
-          ...(preview ? [{ key: 'preview', label: 'Preview' }] : []),
-          ...extraTabs.map((t) => ({ key: t.key, label: t.label })),
-          ...(!editor && pageEditor ? [{ key: 'json', label: 'JSON' }] : []),
-          { key: 'versions', label: 'Versions', count: a.latestVersion },
-          { key: 'activity', label: 'Activity' },
-        ]}
-      >
-        <Fragment key={`${a.id}:${editorReset}`}>
-          {tab === 'content' &&
-            draft !== undefined &&
-            (pageEditor ? (
-              pageEditor({ artifact: a, content: draft, onChange: updateDraft, readOnly, errors, warnings })
-            ) : (
-              <div className={wide ? '' : 'max-w-[900px]'}>
-                <JsonEditor value={draft} onChange={updateDraft} readOnly={readOnly} documentKey={a.id} />
-              </div>
-            ))}
-          {tab === 'json' && draft !== undefined && (
+    </>
+  );
+  const tabItems = [
+    { key: 'content', label: dirty ? 'Content •' : 'Content' },
+    ...(preview ? [{ key: 'preview', label: 'Preview' }] : []),
+    ...extraTabs.map((t) => ({ key: t.key, label: t.label })),
+    ...(!editor && pageEditor ? [{ key: 'json', label: 'JSON' }] : []),
+    { key: 'versions', label: 'Versions', count: a.latestVersion },
+    { key: 'activity', label: 'Activity' },
+  ];
+  const renderTab = (key: string) => {
+    switch (key) {
+      case 'content':
+        return (
+          <Fragment key={`${a.id}:${editorReset}`}>
+            {draft !== undefined &&
+              (pageEditor ? (
+                pageEditor({ artifact: a, content: draft, onChange: updateDraft, readOnly, errors, warnings })
+              ) : (
+                <div className={wide ? '' : 'max-w-[900px]'}>
+                  <JsonEditor value={draft} onChange={updateDraft} readOnly={readOnly} documentKey={a.id} />
+                </div>
+              ))}
+          </Fragment>
+        );
+      case 'json':
+        return (
+          draft !== undefined && (
             <div className="max-w-[900px]">
               <JsonEditor
                 value={draft}
@@ -476,18 +574,25 @@ export function ArtifactDetailPage({
                 hint="The same content the editor changes, and what agents read and write. Call artifacts.types for the schema."
               />
             </div>
-          )}
-        </Fragment>
-        {tab === 'preview' && (
+          )
+        );
+      case 'preview':
+        return (
           <div className="max-w-[1100px] space-y-3">
             {dirty && <Alert tone="info">The preview shows the saved version {latest.number}. Save to preview your changes.</Alert>}
             <ArtifactPreview type={a.type} artifactId={a.id} version={latest.number} content={latest.content} />
           </div>
-        )}
-        {extraTabs.map((t) => tab === t.key && <div key={t.key}>{t.render(a)}</div>)}
-        {tab === 'versions' && <VersionsPanel artifact={a} />}
-        {tab === 'activity' && <ActivityPanel artifactId={a.id} />}
-      </Tabs>
+        );
+      case 'versions':
+        return <VersionsPanel artifact={a} />;
+      case 'activity':
+        return <ActivityPanel artifactId={a.id} />;
+      default:
+        return <div key={key}>{extraTabs.find((t) => t.key === key)?.render(a) ?? null}</div>;
+    }
+  };
+  const modals = (
+    <>
       {publishing && (
         <PublishDialog
           artifact={a}
@@ -539,6 +644,150 @@ export function ArtifactDetailPage({
           )}
         </Modal>
       )}
+    </>
+  );
+
+  if (detail) {
+    const slots = detail.actions?.({
+      artifact: a,
+      dirty,
+      saving,
+      readOnly,
+      canPublish,
+      canApprove: can('artifacts:approve'),
+      directPublish,
+      pending,
+      save: (opts) => save(opts),
+      openPublish: () => setPublishing(true),
+      openTab: (key) => changeTab(key),
+      resetToSaved,
+    });
+    const detailTab = tabItems.some((item) => item.key === activeTab) ? activeTab : (tabItems[0]?.key ?? 'content');
+    return (
+      <>
+        <DetailPage
+          title={a.name}
+          kind={detail.kind ?? typeLabel(a.type)}
+          statePill={pill}
+          metadata={
+            detail.metadata?.(a, view) ?? (
+              <>
+                <span>{publicationLabel({ latestVersion: a.latestVersion, publishedVersion: a.publishedVersion })}</span>
+                <span>
+                  v{latest.number} by {latest.by?.displayName ?? (latest.author.type === 'agent' ? 'an agent' : 'a person')} ·{' '}
+                  {timeAgo(latest.createdAt)}
+                </span>
+              </>
+            )
+          }
+          primaryAction={slots ? slots.primary : undefined}
+          secondaryActions={
+            slots ? (
+              <>
+                {extraActions?.(a)}
+                {autosaveStatus}
+                {slots.secondary}
+                {menu}
+              </>
+            ) : (
+              <>
+                {extraActions?.(a)}
+                {autosaveStatus}
+                {dirty && !readOnly && (!autosave || conflict) && (
+                  <>
+                    <Button variant="ghost" onClick={resetToSaved}>
+                      Discard changes
+                    </Button>
+                    <Button variant="primary" loading={saving} onClick={() => void save()}>
+                      Save draft
+                    </Button>
+                  </>
+                )}
+                {!dirty && pending && (
+                  <ButtonLink to={`/approvals/${pending.id}`} variant={can('artifacts:approve') ? 'primary' : 'secondary'}>
+                    {can('artifacts:approve') ? 'Review the request' : 'View the approval request'}
+                  </ButtonLink>
+                )}
+                {canPublish && (
+                  <Button variant="primary" icon={<Send size={14} />} onClick={() => setPublishing(true)}>
+                    {directPublish ? 'Publish' : 'Submit for review'}
+                  </Button>
+                )}
+                {menu}
+              </>
+            )
+          }
+          consequence={
+            <>
+              {alerts}
+              {detail.consequence?.(a, view)}
+            </>
+          }
+          tabs={tabItems.map((item) => ({
+            key: item.key,
+            label: item.label,
+            panel: item.key === detailTab ? renderTab(item.key) : null,
+          }))}
+          activeTab={detailTab}
+          onTabChange={changeTab}
+          context={detail.context?.(a, view)}
+          state="ready"
+          loadingContent={null}
+        />
+        {modals}
+      </>
+    );
+  }
+
+  return (
+    <div className={pageWidth(wide ? 'full' : 'default')}>
+      <PageHeader
+        title={a.name}
+        meta={
+          <>
+            <span>{typeLabel(a.type)}</span>
+            {pill}
+            <span>{publicationLabel({ latestVersion: a.latestVersion, publishedVersion: a.publishedVersion })}</span>
+            <span>
+              v{latest.number} by {latest.by?.displayName ?? (latest.author.type === 'agent' ? 'an agent' : 'a person')} ·{' '}
+              {timeAgo(latest.createdAt)}
+            </span>
+          </>
+        }
+        description={description}
+        actions={
+          <>
+            {extraActions?.(a)}
+            {autosaveStatus}
+            {dirty && !readOnly && (!autosave || conflict) && (
+              <>
+                <Button variant="ghost" onClick={resetToSaved}>
+                  Discard changes
+                </Button>
+                <Button variant="primary" loading={saving} onClick={() => void save()}>
+                  Save draft
+                </Button>
+              </>
+            )}
+            {!dirty && pending && (
+              <ButtonLink to={`/approvals/${pending.id}`} variant={can('artifacts:approve') ? 'primary' : 'secondary'}>
+                {can('artifacts:approve') ? 'Review the request' : 'View the approval request'}
+              </ButtonLink>
+            )}
+            {canPublish && (
+              <Button variant="primary" icon={<Send size={14} />} onClick={() => setPublishing(true)}>
+                {directPublish ? 'Publish' : 'Submit for review'}
+              </Button>
+            )}
+            {menu}
+          </>
+        }
+      />
+      {alerts}
+      <Tabs label="Sections" value={activeTab} onChange={changeTab} items={tabItems}>
+        {renderTab(activeTab)}
+      </Tabs>
+      {modals}
     </div>
   );
 }
