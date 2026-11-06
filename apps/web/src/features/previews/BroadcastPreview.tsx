@@ -6,6 +6,8 @@ import { formatDateTime, getWorkspaceTimeZone } from '../../ui/time';
 import { useArtifactRef } from '../artifactCache';
 import { EmailPreview } from './EmailPreview';
 import { RefName } from './FormPreview';
+import { PreviewLabel } from './PreviewLabel';
+import type { PreviewSource } from './previewSource';
 
 const skipText: Record<string, string> = {
   no_consent: 'No consent for the purpose',
@@ -24,6 +26,9 @@ export function BroadcastPreview({
   version,
   content,
   templateVersion,
+  source,
+  sourceSuffix,
+  eligibility = 'load',
 }: {
   artifactId: string;
   version?: number;
@@ -36,23 +41,35 @@ export function BroadcastPreview({
     sendWindow?: { start: string; end: string; days?: string[]; maxDelay?: string };
   };
   templateVersion?: number;
+  source?: PreviewSource;
+  sourceSuffix?: string;
+  /** `save-required` skips the saved-version audience read for an unsaved broadcast. */
+  eligibility?: 'load' | 'save-required';
 }) {
   const { can } = useSession();
   const reach = useApi(
     () => api.call('broadcasts.preview', { artifactId, version, templateVersion }),
     [artifactId, version, templateVersion],
     {
-      skip: !can('artifacts:read'),
+      skip: !can('artifacts:read') || eligibility === 'save-required',
     },
   );
   const tpl = useArtifactRef(content.template);
   const isEmail = content.template?.startsWith('eml_');
+  const nestedSource: PreviewSource | undefined = templateVersion
+    ? { kind: 'saved', version: templateVersion }
+    : tpl.artifact?.publishedVersion
+      ? { kind: 'published', version: tpl.artifact.publishedVersion }
+      : undefined;
   return (
     <div className="space-y-4">
+      {source && <PreviewLabel source={source} suffix={sourceSuffix} />}
       {content.description && <p className="text-[13px] text-fg-2">{content.description}</p>}
       <div className="grid gap-3 sm:grid-cols-3">
         <Stat label="Would receive it now">
-          {reach.loading ? (
+          {eligibility === 'save-required' ? (
+            <span className="text-[13px] text-muted">Save the draft to estimate</span>
+          ) : reach.loading ? (
             <Skeleton className="h-5 w-16" />
           ) : reach.error ? (
             <span className="text-[13px] text-bad">{reach.error}</span>
@@ -61,7 +78,13 @@ export function BroadcastPreview({
           )}
         </Stat>
         <Stat label="In the segment">
-          {reach.loading ? <Skeleton className="h-5 w-16" /> : (reach.data?.audience.toLocaleString() ?? '—')}
+          {eligibility === 'save-required' ? (
+            <span className="text-[13px] text-muted">Save the draft to estimate</span>
+          ) : reach.loading ? (
+            <Skeleton className="h-5 w-16" />
+          ) : (
+            (reach.data?.audience.toLocaleString() ?? '—')
+          )}
         </Stat>
         <Stat label="Sends">
           <span className="text-[14px]">
@@ -130,7 +153,13 @@ export function BroadcastPreview({
         >
           <div className="p-4">
             {tpl.artifact ? (
-              <EmailPreview compact artifactId={content.template} version={templateVersion ?? tpl.artifact.publishedVersion ?? undefined} />
+              <EmailPreview
+                compact
+                artifactId={content.template}
+                version={templateVersion ?? tpl.artifact.publishedVersion ?? undefined}
+                source={nestedSource}
+                sourceSuffix={templateVersion ? 'In this bundle' : undefined}
+              />
             ) : tpl.error ? (
               <Alert tone="bad">{tpl.error}</Alert>
             ) : (

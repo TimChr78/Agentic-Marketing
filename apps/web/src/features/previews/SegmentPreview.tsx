@@ -4,12 +4,16 @@ import { useSession } from '../../app/session';
 import { useApi } from '../../app/useApi';
 import { Alert, Card, Skeleton } from '../../ui';
 import { ConditionView } from './ConditionView';
+import { PreviewLabel } from './PreviewLabel';
+import { type PreviewSource, resolvePreviewSource } from './previewSource';
 
 /** A segment's condition in words, or its mode, and its estimated size now (#41, #83). */
 export function SegmentPreview({
   artifactId,
   version,
   content,
+  source,
+  sourceSuffix,
 }: {
   artifactId: string;
   version?: number;
@@ -20,18 +24,28 @@ export function SegmentPreview({
     sourceSegment?: string;
     snapshotVersion?: number;
   };
+  source?: PreviewSource;
+  sourceSuffix?: string;
 }) {
   const { can } = useSession();
-  const size = useApi(() => api.call('segments.preview', { artifactId, version }), [artifactId, version], { skip: !can('profiles:read') });
+  const unsaved = source?.kind === 'unsaved';
+  const pinned = source && source.kind !== 'unsaved' ? source.version : version;
+  const size = useApi(() => api.call('segments.preview', { artifactId, version: pinned }), [artifactId, pinned], {
+    skip: !can('profiles:read') || unsaved,
+  });
   const mode = content.mode ?? 'dynamic';
+  const resolved = source ?? (version != null ? { kind: 'saved' as const, version } : resolvePreviewSource({ requestedVersion: version }));
   return (
     <div className="space-y-4">
+      {resolved && <PreviewLabel source={resolved} suffix={sourceSuffix} />}
       {content.description && <p className="text-[13px] text-fg-2">{content.description}</p>}
       <div className="flex items-center gap-3 rounded-md border border-line bg-surface-2 px-3.5 py-3">
         <Users size={18} className="text-muted" aria-hidden />
         <div className="min-w-0 flex-1">
           <p className="text-[12px] text-muted">Estimated size now</p>
-          {!can('profiles:read') ? (
+          {unsaved ? (
+            <p className="text-[13px] text-muted">Save draft to estimate membership</p>
+          ) : !can('profiles:read') ? (
             <p className="text-[13px] text-muted">Your role can't read profiles, so the size isn't shown.</p>
           ) : size.loading ? (
             <Skeleton className="mt-1 h-5 w-24" />
