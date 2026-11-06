@@ -68,6 +68,8 @@ export interface Services {
   stepUpLimiter?: StepUpLimiter;
   /** The agent's active mandate (ADR-0016); registered by packages/artifacts through the server. */
   activeMandate?: (tx: Tx, agentId: string) => Promise<{ view: MandateView; outsideHours: string | null } | null>;
+  /** The active mandates of several agents in one grouped read, for agents.compare (#489). */
+  activeMandates?: (tx: Tx, agentIds: string[]) => Promise<Map<string, { view: MandateView; outsideHours: string | null }>>;
   /**
    * The independent check (ADR-0016, #231): a second model judges whether an autonomous action
    * matches the agent's intent and mandate. Registered by the server when AI providers exist; a
@@ -85,6 +87,13 @@ export interface Services {
     range: { from: Date; to: Date },
     goals: { measure: string; target?: number; direction: 'up' | 'down' }[],
   ) => Promise<AgentOutcomes>;
+  /** Several agents' outcomes in one grouped ledger read, for agents.compare (#489). */
+  agentOutcomesMany?: (
+    tx: Tx,
+    workspaceId: string,
+    agents: { agentId: string; goals: { measure: string; target?: number; direction: 'up' | 'down' }[] }[],
+    range: { from: Date; to: Date },
+  ) => Promise<Map<string, AgentOutcomes>>;
   /** Why an agent's recent sends breach its mandate's guardrails, or null; registered by the server (metric layer). */
   mandateGuardrails?: (tx: Tx, workspaceId: string, agentId: string, mandate: MandateView) => Promise<string | null>;
 }
@@ -126,6 +135,12 @@ export interface CommandContext {
   afterCommit?: (fn: () => Promise<void>) => void;
   /** The policy engine's decision for an agent write (ADR-0016). "ask" means the change must wait for a person. */
   policy?: PolicyOutcome;
+  /**
+   * The agent a change is being published for when the caller is not the agent itself (#454): a
+   * scheduler running a held agent change uses a system user principal but must still be treated as
+   * that agent by publish hooks (a person's stop is sticky against it).
+   */
+  onBehalfOf?: { type: 'agent'; agentId: string };
   /**
    * How to reverse what this handler does (ADR-0016 §5.4). Set it where the change goes live; the
    * executor records it in the agent ledger. Only agent writes keep it.

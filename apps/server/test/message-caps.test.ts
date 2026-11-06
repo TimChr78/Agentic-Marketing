@@ -51,11 +51,18 @@ type Msg = {
 };
 
 async function message(m: Msg) {
+  // An in-flight row is touched now, as a worker that just claimed it would: the background delivery
+  // worker marks a `sending` row older than ten minutes as failed, and these fixtures exist to be
+  // checked, not delivered. A queued fixture likewise gets a future retry so it is not claimed.
+  const status = m.status ?? 'sending';
+  const inFlight = status === 'sending' || status === 'queued';
+  const updatedAt = inFlight ? new Date() : m.createdAt;
+  const nextAttemptAt = status === 'queued' ? new Date(Date.now() + 86_400_000).toISOString() : null;
   await t.srv.db.withWorkspace(ws, (tx) =>
-    tx.execute(sql`INSERT INTO messages (workspace_id, id, idempotency_key, channel, profile_id, purpose, status, test, agent_id, created_at, sent_at, updated_at)
+    tx.execute(sql`INSERT INTO messages (workspace_id, id, idempotency_key, channel, profile_id, purpose, status, test, agent_id, created_at, sent_at, updated_at, next_attempt_at)
       VALUES (${ws}, ${m.id}, ${m.id}, ${m.channel ?? 'email'}, ${m.profileId}, ${m.purpose ?? 'marketing_email'},
-              ${m.status ?? 'sending'}, false, ${m.agentId ?? null}, ${m.createdAt.toISOString()},
-              ${m.sentAt ? m.sentAt.toISOString() : null}, ${m.createdAt.toISOString()})`),
+              ${status}, false, ${m.agentId ?? null}, ${m.createdAt.toISOString()},
+              ${m.sentAt ? m.sentAt.toISOString() : null}, ${updatedAt.toISOString()}, ${nextAttemptAt})`),
   );
 }
 
@@ -133,6 +140,40 @@ describe('caps are race-free for equal enqueue times (#452)', () => {
       ok: false,
       reason: 'agent_contact_pressure: 1 agent messages in 7 days (at most 1)',
     });
+  });
+});
+
+describe('an old queued reservation still consumes the cap (#452)', () => {
+  it('admits exactly one of two messages queued eight days ago under max=1', async () => {
+    await policy({ frequencyCaps: [{ channel: 'email', max: 1, days: 7 }] });
+    const p = await person('prf_452_old_frequency');
+    const now = new Date('2026-11-06T12:00:00.000Z');
+    const eightDaysAgo = new Date(now.getTime() - 8 * 86_400_000);
+    // Both were enqueued outside the seven-day window and are still in flight. Aging an in-flight
+    // reservation from enqueue time let both pass a max=1 cap; the reservation must count until it
+    // completes, and the per-person cap lock makes the two concurrent decisions deterministic.
+    const a: Msg = { id: 'msg_452_old_a', profileId: p, createdAt: eightDaysAgo };
+    const b: Msg = { id: 'msg_452_old_b', profileId: p, createdAt: eightDaysAgo };
+    await message(a);
+    await message(b);
+    const results = await Promise.all([hold(a, now), hold(b, now)]);
+    expect(results.filter((r) => r.ok === true)).toHaveLength(1);
+    expect(results.filter((r) => r.ok === false)).toHaveLength(1);
+  });
+
+  it('does the same for the cross-agent contact pressure cap', async () => {
+    await policy({ frequencyCaps: [] });
+    await t.api(owner, ws).call('workspace.setAutonomy', { contactPressure: [{ max: 1, days: 7 }] });
+    const p = await person('prf_452_old_pressure');
+    const now = new Date('2026-11-06T12:00:00.000Z');
+    const eightDaysAgo = new Date(now.getTime() - 8 * 86_400_000);
+    const a: Msg = { id: 'msg_452_old_c', profileId: p, createdAt: eightDaysAgo, agentId: 'agt_old_c' };
+    const b: Msg = { id: 'msg_452_old_d', profileId: p, createdAt: eightDaysAgo, agentId: 'agt_old_d' };
+    await message(a);
+    await message(b);
+    const results = await Promise.all([hold(a, now), hold(b, now)]);
+    expect(results.filter((r) => r.ok === true)).toHaveLength(1);
+    expect(results.filter((r) => r.ok === false)).toHaveLength(1);
   });
 });
 

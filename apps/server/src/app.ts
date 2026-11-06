@@ -2,7 +2,7 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { audienceSyncImpact, conversionMapImpact } from '@agentic-marketing/ads';
 import { independentCheck } from '@agentic-marketing/ai';
-import { activeMandate, checkSubjectOf } from '@agentic-marketing/artifacts';
+import { activeMandate, activeMandates, checkSubjectOf } from '@agentic-marketing/artifacts';
 import { assetRoutes } from '@agentic-marketing/assets';
 import { archiveRoutes, broadcastImpact, formsApi, withEmailProfileEvents, withResolvedEventProfiles } from '@agentic-marketing/audience';
 import {
@@ -31,7 +31,7 @@ import { logger } from '@agentic-marketing/telemetry';
 import { oauthProviderAuthServerMetadata, oauthProviderOpenIdConfigMetadata } from '@better-auth/oauth-provider';
 import { type Context, Hono } from 'hono';
 import { mandateGuardrailBreach } from './agents/guardrails';
-import { agentOutcomes } from './agents/report';
+import { agentOutcomes, agentOutcomesMany } from './agents/report';
 import type { Config } from './config';
 import { createDomainService, type PublicRequest } from './domains';
 import { copilotApi } from './http/copilot';
@@ -158,9 +158,11 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
     },
     // The agent's active mandate and its guardrails on its own sends (ADR-0016, #224).
     activeMandate: (tx, agentId) => activeMandate(tx, agentId),
+    activeMandates: (tx, agentIds) => activeMandates(tx, agentIds),
     mandateGuardrails: (tx, workspaceId, agentId, mandate) => mandateGuardrailBreach({ tx, events, workspaceId }, agentId, mandate),
     // What an agent's actions led to, for agents.report (#310).
     agentOutcomes: (tx, workspaceId, agentId, range, goals) => agentOutcomes({ tx, events, workspaceId }, agentId, range, goals),
+    agentOutcomesMany: (tx, workspaceId, agents, range) => agentOutcomesMany({ tx, events, workspaceId }, agents, range),
     // A second model check before an autonomous or held action (ADR-0016 §4.5, #231).
     // The check also sees what is published (#261): the version content and its diff, or the
     // template a direct send uses, loaded here so packages/commands stays generic.

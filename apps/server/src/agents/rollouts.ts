@@ -19,6 +19,12 @@ import { and, eq, inArray, isNull, lte } from 'drizzle-orm';
 
 const HOUR_MS = 3_600_000;
 const MAX_PAUSES_PER_RUN = 100;
+/** A pause e-mail is tried at most this many times before it is left for a person (#473). */
+const NOTIFY_MAX_ATTEMPTS = 6;
+/** A claim older than this is treated as a crashed attempt and may be retried (#473). */
+const NOTIFY_LEASE_MS = 10 * 60_000;
+/** Retry delay after a failed attempt, doubling from 15 s up to an hour (#473). */
+const notifyBackoffMs = (attempts: number) => Math.min(HOUR_MS, 15_000 * 2 ** Math.max(0, attempts - 1));
 
 export interface GuardrailReading {
   at: string;
@@ -274,12 +280,18 @@ async function recordRampError(deps: RolloutDeps, workspaceId: string, artifactI
   );
 }
 
+type PauseKey = { workspaceId: string; artifactId: string; pausedAt: Date };
+
 /**
- * Sends the owner e-mail for one pause and marks it notified. Runs in its own transaction after
- * the pause committed, so a send failure cannot roll the pause back (#473). The message key is the
- * pause row, so a retry of the same pause is deduplicated by the messages table.
+ * Claims one pause row for the owner e-mail in its own committed transaction (#473). The claim is
+ * written before any provider call: another replica sees `notifying_at` and leaves it alone, and a
+ * crash during the send leaves the row retryable after the lease. `notify_after` backs off a
+ * failure and `notify_attempts` bounds it so a permanently failing address cannot retry forever.
  */
-async function deliverPause(deps: RolloutDeps, key: { workspaceId: string; artifactId: string; pausedAt: Date }): Promise<boolean> {
+async function claimPause(
+  deps: RolloutDeps,
+  key: PauseKey,
+): Promise<{ pause: typeof schema.experienceRolloutPauses.$inferSelect; name: string } | null> {
   return deps.db.withWorkspace(key.workspaceId, async (tx) => {
     const [found] = await tx
       .select({ pause: schema.experienceRolloutPauses, name: schema.artifacts.name })
@@ -300,44 +312,106 @@ async function deliverPause(deps: RolloutDeps, key: { workspaceId: string; artif
         ),
       )
       .for('update', { of: schema.experienceRolloutPauses });
-    if (!found) return false;
-    let error: string | null = null;
-    try {
-      const results = await notifyPaused(tx, deps, key.workspaceId, found.pause, found.name);
-      const failed = results.find((r) => r.status === 'failed');
-      if (failed?.error) error = failed.error.slice(0, 500);
-      for (const r of results)
-        if (r.status === 'failed') logger.warn({ artifact: key.artifactId, user: r.userId, error: r.error }, 'rollout e-mail failed');
-    } catch (err) {
-      // The e-mail is best effort; the pause itself is committed and the outbox row stays truthful.
-      error = (err instanceof Error ? err.message : String(err)).split('\n')[0].slice(0, 500);
-      logger.warn({ err, artifact: key.artifactId }, 'rollout e-mail could not be sent');
-    }
-    await tx
+    if (!found) return null;
+    const now = new Date();
+    if (found.pause.notifyAttempts >= NOTIFY_MAX_ATTEMPTS) return null;
+    if (found.pause.notifyAfter && found.pause.notifyAfter > now) return null;
+    if (found.pause.notifyingAt && now.getTime() - found.pause.notifyingAt.getTime() < NOTIFY_LEASE_MS) return null;
+    const [claimed] = await tx
       .update(schema.experienceRolloutPauses)
-      .set({ notifiedAt: new Date(), notifyError: error })
+      .set({ notifyingAt: now, notifyAttempts: found.pause.notifyAttempts + 1 })
       .where(
         and(
           eq(schema.experienceRolloutPauses.workspaceId, key.workspaceId),
           eq(schema.experienceRolloutPauses.artifactId, key.artifactId),
           eq(schema.experienceRolloutPauses.pausedAt, key.pausedAt),
         ),
-      );
-    return true;
+      )
+      .returning();
+    return claimed ? { pause: claimed, name: found.name } : null;
   });
 }
 
-/** Everything still owed a pause e-mail: the one committed this round, or one a restart interrupted. */
+/**
+ * Sends the owner e-mail for one pause after claiming it, then records the outcome in a second
+ * commit (#473). A failure leaves the pause unnotified with a backoff and a bounded attempt count,
+ * so it is retried instead of being marked as sent. The message key stays the pause row, so a crash
+ * after the provider accepted the message at most duplicates one send: at least once, de-duplicated
+ * by key where the provider supports it; the messages table also skips a send already recorded.
+ */
+async function deliverPause(deps: RolloutDeps, key: PauseKey): Promise<'sent' | 'failed' | 'skipped'> {
+  const claim = await claimPause(deps, key);
+  if (!claim) return 'skipped';
+  const attempt = claim.pause.notifyAttempts;
+  const recordFailure = (message: string) =>
+    deps.db
+      .withWorkspace(key.workspaceId, (tx) =>
+        tx
+          .update(schema.experienceRolloutPauses)
+          .set({
+            notifyingAt: null,
+            notifyError: message.slice(0, 500),
+            notifyAfter: attempt < NOTIFY_MAX_ATTEMPTS ? new Date(Date.now() + notifyBackoffMs(attempt)) : null,
+          })
+          .where(
+            and(
+              eq(schema.experienceRolloutPauses.workspaceId, key.workspaceId),
+              eq(schema.experienceRolloutPauses.artifactId, key.artifactId),
+              eq(schema.experienceRolloutPauses.pausedAt, key.pausedAt),
+            ),
+          ),
+      )
+      .catch((err) => logger.error({ err, artifact: key.artifactId }, 'could not record a rollout e-mail failure'));
+  try {
+    return await deps.db.withWorkspace(key.workspaceId, async (tx) => {
+      const results = await notifyPaused(tx, deps, key.workspaceId, claim.pause, claim.name);
+      const failed = results.find((r) => r.status === 'failed');
+      const error = failed ? (failed.error ?? 'the e-mail provider refused it').slice(0, 500) : null;
+      for (const r of results)
+        if (r.status === 'failed') logger.warn({ artifact: key.artifactId, user: r.userId, error: r.error }, 'rollout e-mail failed');
+      const now = new Date();
+      await tx
+        .update(schema.experienceRolloutPauses)
+        .set({
+          notifyingAt: null,
+          notifiedAt: error ? null : now,
+          notifyError: error,
+          notifyAfter: error && attempt < NOTIFY_MAX_ATTEMPTS ? new Date(now.getTime() + notifyBackoffMs(attempt)) : null,
+        })
+        .where(
+          and(
+            eq(schema.experienceRolloutPauses.workspaceId, key.workspaceId),
+            eq(schema.experienceRolloutPauses.artifactId, key.artifactId),
+            eq(schema.experienceRolloutPauses.pausedAt, key.pausedAt),
+          ),
+        );
+      return error ? ('failed' as const) : ('sent' as const);
+    });
+  } catch (err) {
+    // Sending errored and the send transaction rolled back; keep the pause owed, with a backoff.
+    logger.warn({ err, artifact: key.artifactId }, 'rollout e-mail could not be sent');
+    await recordFailure((err instanceof Error ? err.message : String(err)).split('\n')[0] ?? 'send failed');
+    return 'failed';
+  }
+}
+
+/**
+ * Everything still owed a pause e-mail: the one committed this round, or one a restart interrupted.
+ * A claimed or backed-off row is skipped here; the claim itself is the final arbiter under lock.
+ */
 async function deliverPendingPauses(deps: RolloutDeps): Promise<number> {
   const { rows } = await deps.db.admin.query<{ workspace_id: string; artifact_id: string; paused_at: Date }>(
     `SELECT workspace_id, artifact_id, paused_at FROM experience_rollout_pauses
-      WHERE notified_at IS NULL ORDER BY paused_at LIMIT $1`,
-    [MAX_PAUSES_PER_RUN],
+      WHERE notified_at IS NULL AND notify_attempts < $2
+        AND (notify_after IS NULL OR notify_after <= now())
+      ORDER BY paused_at LIMIT $1`,
+    [MAX_PAUSES_PER_RUN, NOTIFY_MAX_ATTEMPTS],
   );
   let sent = 0;
   for (const row of rows) {
     try {
-      if (await deliverPause(deps, { workspaceId: row.workspace_id, artifactId: row.artifact_id, pausedAt: row.paused_at })) sent++;
+      if ((await deliverPause(deps, { workspaceId: row.workspace_id, artifactId: row.artifact_id, pausedAt: row.paused_at })) === 'sent')
+        sent++;
     } catch (err) {
       logger.error({ err, workspaceId: row.workspace_id, artifactId: row.artifact_id }, 'rollout pause e-mail failed');
     }
