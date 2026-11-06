@@ -4,7 +4,14 @@ import { normalizeDomainInput, schema } from '@agentic-marketing/db';
 import { and, asc, desc, eq, gte, inArray, isNotNull, lt, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { author, Requester, resolveActors, validateContent } from './commands';
-import { DomainViewSchema, domainView, effectiveLinksUrl, mapUniqueViolation, workspaceDomainCommands } from './domains';
+import {
+  assertDomainAvailable,
+  DomainViewSchema,
+  domainView,
+  effectiveLinksUrl,
+  mapUniqueViolation,
+  workspaceDomainCommands,
+} from './domains';
 import { artifactTypes } from './types';
 
 const Policy = z.enum(['none', 'agent_changes', 'all_publishes']);
@@ -106,7 +113,7 @@ export const getWorkspace = defineCommand({
     const brand = {
       siteName: (brandContent?.success ? brandContent.data.siteName : undefined) ?? w.name,
       logoUrl: (brandContent?.success ? brandContent.data.logoUrl : undefined) ?? null,
-      primaryDomain: domains.find((domain) => domain.isPrimary)?.host ?? null,
+      primaryDomain: domains.find((domain) => domain.isPrimary && domain.status === 'verified')?.host ?? null,
     };
     return {
       id: w.id,
@@ -209,6 +216,7 @@ export const createWorkspace = defineCommand({
       : null;
 
     const workspaceId = newUuid();
+    if (normalized) await assertDomainAvailable(ctx, normalized);
 
     try {
       await scopedTo(ctx, workspaceId, async () => {
