@@ -7,6 +7,7 @@ import { useSession } from '../../app/session';
 import { useApi } from '../../app/useApi';
 import { ConsentHistoryTable } from '../../features/audience/consent';
 import { personLabel, visibleEmail } from '../../features/audience/profile';
+import { eventTypeLabel, purposeLabel } from '../../lib/labels';
 import {
   Alert,
   Button,
@@ -31,6 +32,7 @@ import {
   useConfirm,
   useToast,
 } from '../../ui';
+import { Identifier } from '../../ui/Identifier';
 import { pageWidth } from '../../ui/layout';
 
 type Tab = 'overview' | 'consent' | 'events' | 'segments' | 'messages';
@@ -145,6 +147,8 @@ export default function PersonPage({ params }: { params: Record<string, string> 
 
   const consentRecords = consent.data?.records ?? [];
   const topicRows = topics.data?.topics ?? [];
+  // A purpose's own name is available where this person has a topic preference for it.
+  const purposeNames = topicRows.map((t) => ({ key: t.purpose, name: t.purposeName }));
   const eventRows = events.data?.events ?? [];
   const segmentRows = segments.data?.segments ?? [];
   const messageRows = messages.data?.messages ?? [];
@@ -152,12 +156,7 @@ export default function PersonPage({ params }: { params: Record<string, string> 
   const hidden = !can('profiles:pii') && personal.some(([, v]) => v === '[hidden]');
 
   const overviewMeta: [ReactNode, ReactNode][] = [
-    [
-      'Profile id',
-      <Mono key="id" className="break-all">
-        {p.id}
-      </Mono>,
-    ],
+    ['Profile id', <Identifier key="id" value={p.id} label="Profile ID" />],
     ...personal.map(([k, v]): [ReactNode, ReactNode] => [
       <span key={`k-${k}`} className="flex items-center gap-1.5">
         {k}
@@ -196,7 +195,11 @@ export default function PersonPage({ params }: { params: Record<string, string> 
     <div className={pageWidth('default')}>
       <PageHeader
         title={personLabel(p, p.id)}
-        description={email ? `Person ${p.id}` : 'Personal data is hidden for your role; you can still see traits and consent.'}
+        description={
+          email
+            ? 'Profile, consent, events, segments and messages for this person.'
+            : 'Personal data is hidden for your role; you can still see traits and consent.'
+        }
         actions={
           <>
             {can('profiles:pii') && (
@@ -345,7 +348,7 @@ export default function PersonPage({ params }: { params: Record<string, string> 
                     {formatDateTime(e.timestamp)}
                   </Td>
                   <Td className="font-medium text-fg">{e.name}</Td>
-                  <Td className="hidden md:table-cell">{e.type}</Td>
+                  <Td className="hidden md:table-cell">{eventTypeLabel(e.type)}</Td>
                   <Td className="hidden max-w-[420px] lg:table-cell">
                     <span className="line-clamp-2 font-mono text-[11px] text-muted">{JSON.stringify(e.properties)}</span>
                   </Td>
@@ -426,13 +429,13 @@ export default function PersonPage({ params }: { params: Record<string, string> 
                       <StatusPill tone={messageTone[m.status] ?? 'neutral'}>{m.status}</StatusPill>
                     </Td>
                     <Td>{m.channel}</Td>
-                    <Td className="hidden md:table-cell">{m.purpose.replace(/_/g, ' ')}</Td>
+                    <Td className="hidden md:table-cell">{purposeLabel(m.purpose, purposeNames)}</Td>
                     <Td className="max-w-[320px]">
                       {m.reason ? (
                         <span className="line-clamp-2">{m.reason}</span>
                       ) : last ? (
                         <span className="line-clamp-2">
-                          {last.type}
+                          {eventTypeLabel(last.type)}
                           {last.reason ? ` · ${last.reason}` : ''}
                         </span>
                       ) : (

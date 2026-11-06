@@ -1,13 +1,20 @@
 import { api } from '../../app/api';
+import { artifactPath } from '../../app/artifactRoutes';
+import { Link } from '../../app/router';
 import { useApi } from '../../app/useApi';
+import { measureLabel } from '../../lib/labels';
 import { Card } from '../../ui';
-import { ACTION_CLASS_LABEL } from './labels';
+import { Identifier } from '../../ui/Identifier';
+import { actionClassLabel } from './labels';
 
 const pct = (n: number, of: number) => (of ? `${((n / of) * 100).toFixed(1)}%` : '—');
 
 /** What the agent did and what it led to in the last 30 days (#310). Hidden until it has acted. */
 export function ReportCard({ agentId }: { agentId: string }) {
   const report = useApi(() => api.call('agents.report', { agentId }), [agentId]);
+  // Journey outcomes name the artifact by its id only; resolve the human name when it is readable.
+  const journeys = useApi(() => api.call('artifacts.list', { type: 'journey', limit: 200 }), []);
+  const journeyNames = new Map((journeys.data?.artifacts ?? []).map((j) => [j.id, j.name]));
   const r = report.data;
   if (!r || Object.keys(r.actions).length === 0) return null;
   const b = r.outcomes?.broadcasts;
@@ -20,7 +27,7 @@ export function ReportCard({ agentId }: { agentId: string }) {
           <ul className="space-y-0.5 text-[13px]">
             {Object.entries(r.actions).map(([cls, c]) => (
               <li key={cls}>
-                {ACTION_CLASS_LABEL[cls] ?? cls}: {c.allow} ran
+                {actionClassLabel(cls)}: {c.allow} ran
                 {c.hold ? `, ${c.hold} held` : ''}
                 {c.ask ? `, ${c.ask} to a person` : ''}
                 {c.deny ? `, ${c.deny} refused` : ''}
@@ -48,15 +55,26 @@ export function ReportCard({ agentId }: { agentId: string }) {
           )}
           {r.outcomes?.goals.map((g) => (
             <div key={g.measure}>
-              Goal {g.measure} {g.direction === 'up' ? '≥' : '≤'} {g.target ?? '—'}: {g.value ?? '—'}{' '}
+              Goal {measureLabel(g.measure)} {g.direction === 'up' ? '≥' : '≤'} {g.target ?? '—'}: {g.value ?? '—'}{' '}
               {g.met === true ? '(met)' : g.met === false ? '(not met)' : g.note ? `(${g.note})` : ''}
             </div>
           ))}
-          {r.outcomes?.journeys.map((j) => (
-            <div key={j.id} className="text-[12px] text-muted">
-              Journey {j.id}: {j.note}
-            </div>
-          ))}
+          {r.outcomes?.journeys.map((j) => {
+            const name = journeyNames.get(j.id);
+            return (
+              <div key={j.id} className="text-[12px] text-muted">
+                Journey{' '}
+                {name ? (
+                  <Link to={artifactPath('journey', j.id)} className="font-medium text-fg hover:underline">
+                    {name}
+                  </Link>
+                ) : (
+                  <Identifier value={j.id} label="Journey ID" />
+                )}
+                : {j.note}
+              </div>
+            );
+          })}
         </div>
       </div>
     </Card>

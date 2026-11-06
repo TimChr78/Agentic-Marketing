@@ -5,15 +5,17 @@ import { ButtonLink } from '../../app/links';
 import { useCrumbs } from '../../app/page';
 import { useSession } from '../../app/session';
 import { useApi } from '../../app/useApi';
+import { DATA_STATE, dataState, dataStateCopy } from '../../lib/dataState';
 import { Alert, Button, Card, EmptyState, Field, formatDateTime, Input, LoadingBlock, Mono, PageHeader, StatusPill, Tag } from '../../ui';
 import { pageWidth } from '../../ui/layout';
+import { DataStatePill } from '../../ui/state';
 
 type Health = Out<'deliverability.health'>;
 type Rates = Health['email']['marketing'];
+type Thresholds = Health['thresholds'];
 type Report = Out<'sendingDomains.list'>['domains'][number];
 
 const pct = (x: number) => `${(x * 100).toFixed(2)}%`;
-const rateTone = { ok: 'good', warn: 'warn', paused: 'bad' } as const;
 
 /** Bounce and complaint rates, and the DNS records behind every sending domain. */
 export default function DeliverabilityPage() {
@@ -66,10 +68,36 @@ export default function DeliverabilityPage() {
           ) : h ? (
             <>
               <div className="divide-y divide-line">
-                <Stream label="E-mail · marketing" rates={h.email.marketing} />
-                <Stream label="E-mail · transactional" rates={h.email.transactional} />
-                <Stream label="SMS · marketing" rates={h.sms.marketing} />
-                <Stream label="SMS · transactional" rates={h.sms.transactional} />
+                <Stream
+                  label="E-mail · marketing"
+                  rates={h.email.marketing}
+                  thresholds={h.thresholds}
+                  windowDays={h.windowDays}
+                  autoPause={h.autoPause}
+                  marketing
+                />
+                <Stream
+                  label="E-mail · transactional"
+                  rates={h.email.transactional}
+                  thresholds={h.thresholds}
+                  windowDays={h.windowDays}
+                  autoPause={h.autoPause}
+                />
+                <Stream
+                  label="SMS · marketing"
+                  rates={h.sms.marketing}
+                  thresholds={h.thresholds}
+                  windowDays={h.windowDays}
+                  autoPause={h.autoPause}
+                  marketing
+                />
+                <Stream
+                  label="SMS · transactional"
+                  rates={h.sms.transactional}
+                  thresholds={h.thresholds}
+                  windowDays={h.windowDays}
+                  autoPause={h.autoPause}
+                />
               </div>
               <p className="border-t border-line px-4 py-2.5 text-[12px] text-muted">
                 Marketing messages pause at {pct(h.thresholds.complaintStop)} complaints or {pct(h.thresholds.bounceStop)} bounces, after{' '}
@@ -170,16 +198,61 @@ export default function DeliverabilityPage() {
   );
 }
 
-function Stream({ label, rates }: { label: string; rates: Rates }) {
+/**
+ * One delivery stream. A zero-volume stream never shows a green state or a 0% rate; the sample and
+ * the policy's evaluation threshold stay visible, and "paused" is claimed only when the policy
+ * really pauses this stream (marketing with auto-pause on).
+ */
+function Stream({
+  label,
+  rates,
+  thresholds,
+  windowDays,
+  autoPause,
+  marketing,
+}: {
+  label: string;
+  rates: Rates;
+  thresholds: Thresholds;
+  windowDays: number;
+  autoPause: boolean;
+  marketing?: boolean;
+}) {
+  const paused = marketing === true && autoPause && rates.status === 'paused';
+  const state = dataState({
+    value: rates.sent,
+    sampleSize: rates.sent,
+    minSample: thresholds.minVolume,
+    paused,
+    warning: rates.status !== 'ok' && !paused,
+  });
+  const showRates = state === 'healthy' || state === 'warning' || state === 'paused';
+  const stateCopy =
+    rates.status === 'paused' && !paused
+      ? marketing
+        ? 'Above the stop threshold · auto-pause is off.'
+        : 'Above the stop threshold · transactional sending is not paused.'
+      : dataStateCopy(state, {
+          sampleSize: rates.sent,
+          minSample: thresholds.minVolume,
+          noData: `No sends in the last ${windowDays} days.`,
+        });
   return (
     <div className="px-4 py-2.5 text-[13px]">
       <div className="flex flex-wrap items-center gap-2">
         <span className="min-w-0 flex-1 font-medium">{label}</span>
-        <StatusPill tone={rateTone[rates.status]}>{rates.status}</StatusPill>
+        <DataStatePill state={DATA_STATE[state]} detail={stateCopy} />
       </div>
       <div className="mt-0.5 text-[12px] text-muted tabular-nums">
-        {rates.sent.toLocaleString()} sent · bounces {pct(rates.bounceRate)} · complaints {pct(rates.complaintRate)}
+        {showRates ? (
+          <>
+            {rates.sent.toLocaleString()} sent · bounces {pct(rates.bounceRate)} · complaints {pct(rates.complaintRate)}
+          </>
+        ) : (
+          <>{rates.sent.toLocaleString()} sent</>
+        )}
       </div>
+      <p className="mt-0.5 text-[12px] text-muted">{stateCopy}</p>
       {rates.reason && <p className="mt-0.5 text-[12px] text-warn">{rates.reason}</p>}
     </div>
   );

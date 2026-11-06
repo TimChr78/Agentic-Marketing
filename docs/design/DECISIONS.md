@@ -206,3 +206,66 @@ considered and why. Anything that needed the owner's decision is listed under **
    `broadcasts.sendTest` also accept `artifacts:approve` when `to` is omitted: the caller is the only
    recipient. Passing `to` (even the caller's own address) still needs `artifacts:write`, and agents never
    get the alternative, so an approver's token cannot use it.
+
+## Wave 5 · DESIGN.md v2 (#436, 2026-11-05)
+
+These decisions supersede conflicting v0.2.0 foundation choices. They specify future implementation;
+this commit changes documentation and a standalone mock-up only.
+
+### D29. Warm neutral foundation; blue remains the interaction accent
+- **Options:** retain cool grey; adopt teal as a second accent; warm stone neutrals with existing blue.
+- **Decision:** warm stone light canvas `#f7f6f2`, low-chroma green dark canvas `#111512`, tonal dark
+  surfaces; blue controls, teal chart marks. Tenant colours remain inside recipient content.
+- **Why:** warmth and clearer layering without introducing competing interaction semantics. Dark blue
+  becomes `#8baafa` for text contrast; light muted becomes `#606860` to pass on selected fills.
+
+### D30. Larger hierarchy, quiet structure, bounded depth
+- **Options:** enlarge everything; keep 20px titles and 24px KPIs; enlarge hierarchy while retaining tables.
+- **Decision:** page 24/32, section 16/24, KPI 32/40 (28/36 mobile), reading 14/22, table 13/20;
+  32px desktop / 24px mobile section rhythm; 8px controls, 12px surfaces. Shadows only on overlays and
+  recipient previews. Cards do not nest borders. System font and accessibility contracts persist.
+- **Why:** stronger scan order and breathing room without losing operational comparison density.
+
+### D31. Independent categorical data palette with redundant encodings (supersedes D4 exclusivity)
+- **Options:** reuse success/warning colours; hue-only rainbow; six categorical colours plus labels,
+  unique dash/marker combinations, tables, and ordered sequential/diverging ramps.
+- **Decision:** the latter. Six categories include teal; maximum three line series per plot. Direct
+  labels use fg; pale ramp bins have visible outlines and numeric labels. Journey categories remain.
+- **Evidence:** `showcase/verify_palette.py` checks WCAG contrast, both theme copies, monotonic ramps,
+  and full-severity Machado CVD simulations; measured ratios and potential collisions are committed in
+  `showcase/contrast-report.md`. Simulated hue collisions are disclosed, not called a hue-only pass.
+- **Why:** colour alone cannot guarantee recognition for every deficiency; shapes, dash and labels
+  preserve identity. No new charting dependency or data pipeline is required.
+
+### D32. Truthful metrics and operational states
+- **Options:** shared publication “Live” everywhere; object-specific operational state with publication
+  as metadata. Zero for absent rates; explicit data-state contract.
+- **Decision:** operational pills per broadcast/journey/agent, separate evaluation states, explicit
+  period/denominator/freshness, direction-aware KPI deltas, pp for rate differences. Suppressed data
+  never leaks via tooltip/table; below-volume rates are withheld. No sample means no healthy verdict.
+- **Why:** “Published” does not mean sent, and “0%” with no denominator misleads. State/threshold inputs
+  use existing server semantics; the UI does not create evaluation rules or historical storage.
+
+### D33. Four shared page templates, the Broadcasts reference pair and target IA
+- **Options:** retain feature-by-feature layouts; universal card dashboard; explicit list/detail/settings/
+  editor templates. Retain 1600px default cap in ui/layout.ts; standardise 1280px.
+- **Decision:** four templates, 1280px cap, 760px reading width; 232px sidebar; 320px detail context at
+  ≥1280; list/detail mock-ups at native 1440/390 widths. 768 geometry is specified in DESIGN.md.
+  One Settings entry with secondary navigation; old destinations redirect as the wave plan requires.
+- **Why:** implementers receive exact dimensions and breakpoint behaviour, and content/recipient
+  previews take priority. Existing role gates, exact-version review and API semantics remain.
+
+### D34. Mobile controls are 40px, identifiers are secondary
+- **Options:** retain compact visual controls with invisible padding; enlarge all small-screen controls.
+  Show full identifiers in names; shorten behind an explicit copy affordance.
+- **Decision:** all interactive targets ≥40×40 below 768px and on coarse pointers; visible input 40px,
+  16px input text to avoid iOS zoom. Identifier uses first 8 + ellipsis + last 4, full value on focus/
+  hover and touch expansion; honest clipboard success/failure. One mobile navigation toggle.
+- **Why:** consistent hitboxes and readable object names. Noninteractive state pills remain 20px.
+
+### D35. Standalone reference rather than an application route in the specification phase
+- **Options:** ship tokens/components now; add a demo route; self-contained HTML plus a repeatable audit.
+- **Decision:** `showcase/index.html` contains all CSS/JS/SVG locally, both themes and native-width
+  list/detail frames; tokens.json and the Python report accompany it. No external requests or app edits.
+- **Why:** this brief is specification and mock-up only. The coding pass can implement against a concrete
+  reference without an application bundle or premature behaviour changes.

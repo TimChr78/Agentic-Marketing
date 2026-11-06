@@ -5,7 +5,8 @@ import { defineConfig, devices } from '@playwright/test';
 //   E2E_BASE=http://localhost:5173 pnpm e2e:dev   against a running Vite dev server instead
 //   E2E_PORT=3120 E2E_DB=e2e_mine pnpm e2e   another port and database, so two checkouts can run at once
 // Uses the system Chromium when CHROMIUM (or /usr/bin/chromium) is set, else Playwright's own.
-const base = process.env.E2E_BASE ?? `http://localhost:${process.env.E2E_PORT ?? 3100}`;
+const e2ePort = Number(process.env.E2E_PORT ?? 3100);
+const base = process.env.E2E_BASE ?? `http://localhost:${e2ePort}`;
 const executablePath = process.env.CHROMIUM || undefined;
 
 export default defineConfig({
@@ -16,18 +17,26 @@ export default defineConfig({
   timeout: 60_000,
   expect: { timeout: 10_000 },
   reporter: [['list']],
+  // The functional suite is the default; the axe checks (#206) are its own project so they can run
+  // alone (`pnpm e2e --project axe`). Visual regression has its own config (playwright.visual.config.ts).
+  projects: [
+    { name: 'functional', testIgnore: /(?:visual|axe)\.spec\.ts/ },
+    { name: 'axe', testMatch: '**/axe.spec.ts' },
+  ],
   use: {
     baseURL: base,
     trace: 'retain-on-failure',
     ...devices['Desktop Chrome'],
     viewport: { width: 1440, height: 900 },
-    launchOptions: { executablePath },
+    // Chromium needs this where /dev/shm is the container default of 64 MB (axe opens a second tab).
+    launchOptions: { executablePath, args: ['--disable-dev-shm-usage'] },
   },
   webServer: process.env.E2E_BASE
     ? undefined
     : {
         command: 'pnpm --filter @agentic-marketing/web build:live && npx tsx apps/server/test/e2e/server.ts',
-        url: `${base}/healthz`,
+        // The fixtures port is opened only after the seed finishes; /healthz is up too early.
+        url: `http://127.0.0.1:${e2ePort + 1}/ready`,
         timeout: 240_000,
         reuseExistingServer: !process.env.CI,
       },

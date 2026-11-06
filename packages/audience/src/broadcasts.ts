@@ -682,7 +682,18 @@ export const broadcastStatus = defineCommand({
   description:
     'Where a broadcast is (scheduled, running, done, cancelled, stopped) with how many people it reached and skipped, and what became of the e-mails: sent, delivered, bounced, complained, clicked, unsubscribed. A subject test reports its state, the variants with counts and rates, the winner and when the rest goes out. A staged send reports its stage, the canary’s counts and rates against the thresholds, and why it stopped.',
   input: z.object({ artifactId: BroadcastId }),
-  output: z.object({ run: Run, messages: z.record(z.string(), z.number()), test: Test.nullable(), stage: Stage.nullable() }),
+  output: z.object({
+    run: Run,
+    messages: z.record(z.string(), z.number()),
+    delivery: z
+      .record(z.string(), z.number())
+      .optional()
+      .describe(
+        'This broadcast’s messages by their current status (queued, sending, sent, delivered, bounced, complained, failed, suppressed); `messages` counts every event a message ever had',
+      ),
+    test: Test.nullable(),
+    stage: Stage.nullable(),
+  }),
   permission: 'artifacts:read',
   effect: 'read',
   target: (i) => i.artifactId,
@@ -694,6 +705,15 @@ export const broadcastStatus = defineCommand({
     const messages = r
       ? await ctx.services.events.messageStats(ctx.principal.workspaceId, { since: r.createdAt, journeyId: input.artifactId })
       : {};
+    // The current status of each message (not its event history), for the operational state.
+    const delivery: Record<string, number> = {};
+    if (r)
+      for (const row of await ctx.tx
+        .select({ status: schema.messages.status, n: sql<number>`count(*)::int` })
+        .from(schema.messages)
+        .where(and(eq(schema.messages.journeyId, input.artifactId), eq(schema.messages.test, false)))
+        .groupBy(schema.messages.status))
+        delivery[row.status] = row.n;
     let test: z.output<typeof Test> | null = null;
     if (t) {
       const variants = await variantResults(ctx.tx, ctx.services.events, ctx.principal.workspaceId, input.artifactId, t.subjects);
@@ -746,6 +766,7 @@ export const broadcastStatus = defineCommand({
       };
     }
     return {
+      delivery,
       run: {
         status: r?.status ?? 'not_scheduled',
         version: r?.version ?? null,

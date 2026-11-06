@@ -47,7 +47,7 @@ export function Field({ label, children, hint, error, unit, required, hideLabel,
   const describedBy = [errId, hintId].filter(Boolean).join(' ') || undefined;
   return (
     <div className={cx('min-w-0', className)}>
-      <label htmlFor={id} className={cx('mb-1 block text-[12px] font-medium text-fg-2', hideLabel && 'sr-only')}>
+      <label htmlFor={id} className={cx('mb-1 block text-[12px] leading-[18px] font-medium text-fg-2', hideLabel && 'sr-only')}>
         {label}
         {required && (
           <span className="ml-0.5 text-muted" aria-hidden>
@@ -66,12 +66,12 @@ export function Field({ label, children, hint, error, unit, required, hideLabel,
         )}
       </FieldContext.Provider>
       {error && (
-        <p id={errId} className="mt-1 text-[12px] text-bad">
+        <p id={errId} className="mt-1 text-[12px] leading-[18px] text-bad">
           {error}
         </p>
       )}
       {hint && (
-        <p id={hintId} className="mt-1 text-[12px] text-muted">
+        <p id={hintId} className="mt-1 text-[12px] leading-[18px] text-muted">
           {hint}
         </p>
       )}
@@ -89,13 +89,27 @@ function useField(p: { id?: string; 'aria-describedby'?: string; 'aria-invalid'?
 }
 
 export const controlClass =
-  'w-full rounded-md border border-control bg-surface text-[13px] text-fg placeholder:text-muted transition-colors duration-[120ms] hover:border-fg-2 focus:border-accent focus:outline-none focus-visible:outline-2 focus-visible:outline-offset-0 focus-visible:outline-accent/40 disabled:cursor-not-allowed disabled:bg-surface-2 disabled:text-muted aria-[invalid=true]:border-bad read-only:bg-surface-2';
+  'w-full rounded-md border border-control bg-surface text-[16px] leading-6 text-fg pointer-coarse:text-[16px] pointer-coarse:leading-6 placeholder:text-muted transition-colors duration-[120ms] hover:border-fg-2 focus:border-accent focus:outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:bg-surface-2 disabled:text-muted aria-[invalid=true]:border-bad read-only:bg-surface-2 md:text-[13px] md:leading-5';
 
 export const Input = forwardRef<HTMLInputElement, InputHTMLAttributes<HTMLInputElement> & { compact?: boolean }>(function Input(
   { className, compact, ...p },
   ref,
 ) {
-  return <input ref={ref} {...p} {...useField(p)} className={cx(controlClass, compact ? 'h-7 px-2' : 'h-8 px-2.5', className)} />;
+  return (
+    <input
+      ref={ref}
+      {...p}
+      {...useField(p)}
+      className={cx(
+        controlClass,
+        compact ? 'h-10 pointer-coarse:h-10 md:h-7' : 'h-10 pointer-coarse:h-10 md:h-8',
+        // A caller's left padding (room for a search icon) must win at every breakpoint, so the
+        // responsive default only sets the sides the caller leaves alone.
+        /(^|\s)pl-/.test(className ?? '') ? (compact ? 'pr-3 md:pr-2' : 'pr-3 md:pr-2.5') : compact ? 'px-3 md:px-2' : 'px-3 md:px-2.5',
+        className,
+      )}
+    />
+  );
 });
 
 export const Textarea = forwardRef<HTMLTextAreaElement, TextareaHTMLAttributes<HTMLTextAreaElement> & { mono?: boolean }>(function Textarea(
@@ -108,7 +122,12 @@ export const Textarea = forwardRef<HTMLTextAreaElement, TextareaHTMLAttributes<H
       rows={rows}
       {...p}
       {...useField(p)}
-      className={cx(controlClass, 'px-2.5 py-1.5 leading-5', mono && 'font-mono text-[12px]', className)}
+      className={cx(
+        controlClass,
+        'min-h-[120px] px-3 py-2 leading-6 pointer-coarse:min-h-[120px] pointer-coarse:px-3 pointer-coarse:py-2 md:min-h-[96px] md:px-3 md:py-2.5 md:leading-5',
+        mono && 'font-mono text-[12px] leading-[18px]',
+        className,
+      )}
     />
   );
 });
@@ -123,11 +142,20 @@ export const Select = forwardRef<HTMLSelectElement, SelectHTMLAttributes<HTMLSel
         ref={ref}
         {...p}
         {...useField(p)}
-        className={cx(controlClass, 'appearance-none pr-8', compact ? 'h-7 pl-2' : 'h-8 pl-2.5', className)}
+        className={cx(
+          controlClass,
+          'appearance-none pr-9 md:pr-8',
+          compact ? 'h-10 pl-3 pointer-coarse:h-10 md:h-7 md:pl-2' : 'h-10 pl-3 pointer-coarse:h-10 md:h-8 md:pl-2.5',
+          className,
+        )}
       >
         {children}
       </select>
-      <ChevronDown size={14} className="pointer-events-none absolute top-1/2 right-2.5 -translate-y-1/2 text-muted" aria-hidden />
+      <ChevronDown
+        size={14}
+        className="pointer-events-none absolute top-1/2 right-3 -translate-y-1/2 text-muted md:right-2.5"
+        aria-hidden
+      />
     </div>
   );
 });
@@ -141,20 +169,25 @@ export function Checkbox({
   const auto = useId();
   const id = p.id ?? `c${auto.replace(/:/g, '')}`;
   return (
-    <div className={cx('flex items-start gap-2', className)}>
+    <div className={cx('flex min-w-0 items-start gap-2', className)}>
       <input
         {...p}
         id={id}
         type="checkbox"
         aria-describedby={hint ? `${id}-hint` : undefined}
-        className="mt-0.5 size-4 shrink-0 cursor-pointer rounded-sm border-control accent-[var(--accent)] disabled:cursor-not-allowed"
+        className="mt-2 size-5 shrink-0 cursor-pointer rounded-sm border-control accent-[var(--accent)] pointer-coarse:size-5 disabled:cursor-not-allowed md:mt-0.5 md:size-4"
       />
       <div className="min-w-0">
-        <label htmlFor={id} className="cursor-pointer text-[13px] text-fg">
+        {/* The label itself is a 40 px target on touch layouts; the hint stays outside it, so the
+            accessible name is unchanged and only linked through aria-describedby. */}
+        <label
+          htmlFor={id}
+          className="flex min-h-10 cursor-pointer items-start text-[13px] leading-5 text-fg pointer-coarse:min-h-10 md:min-h-0"
+        >
           {label}
         </label>
         {hint && (
-          <p id={`${id}-hint`} className="text-[12px] text-muted">
+          <p id={`${id}-hint`} className="text-[12px] leading-[18px] text-muted">
             {hint}
           </p>
         )}
@@ -188,18 +221,18 @@ export function Switch({
       aria-label={hideLabel ? label : undefined}
       disabled={disabled}
       onClick={() => onChange(!checked)}
-      className="inline-flex items-center gap-2 text-[13px] disabled:cursor-not-allowed disabled:opacity-50"
+      className="inline-flex min-h-10 min-w-10 items-center gap-2 text-[13px] pointer-coarse:min-h-10 pointer-coarse:min-w-10 disabled:cursor-not-allowed md:min-h-0 md:min-w-0"
     >
       <span
         className={cx(
-          'relative inline-flex h-[18px] w-8 shrink-0 items-center rounded-full border transition-colors duration-[120ms]',
+          'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors duration-[120ms] pointer-coarse:h-5 pointer-coarse:w-9 md:h-[18px] md:w-8',
           checked ? 'border-accent bg-accent' : 'border-control bg-surface-3',
         )}
       >
         <span
           className={cx(
-            'absolute size-3 rounded-full transition-transform duration-[120ms]',
-            checked ? 'translate-x-[15px] bg-accent-fg' : 'translate-x-[2px] bg-fg-2',
+            'absolute size-3.5 rounded-full transition-transform duration-[120ms] pointer-coarse:size-3.5 md:size-3',
+            checked ? 'translate-x-[18px] bg-accent-fg md:translate-x-[15px]' : 'translate-x-[2px] bg-fg-2',
           )}
         />
       </span>

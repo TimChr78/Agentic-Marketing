@@ -1,6 +1,6 @@
 import { RefreshCw, Search, Upload, Users } from 'lucide-react';
-import { useState } from 'react';
-import { api, errText } from '../../app/api';
+import { useEffect, useState } from 'react';
+import { api, errText, type Out } from '../../app/api';
 import { ButtonLink } from '../../app/links';
 import { useCrumbs } from '../../app/page';
 import { Link, navigate } from '../../app/router';
@@ -14,7 +14,6 @@ import {
   formatDateTime,
   IconButton,
   Input,
-  Mono,
   PageHeader,
   Table,
   TableFrame,
@@ -26,9 +25,21 @@ import {
   timeAgo,
   useToast,
 } from '../../ui';
+import { Identifier } from '../../ui/Identifier';
 import { pageWidth } from '../../ui/layout';
 
 const PROFILE_ID = /^prf_[0-9a-f]{32}$/;
+const PAGE_SIZE = 50;
+type ProfilePage = Out<'profiles.list'>;
+
+/** A person's name from their traits, without falling back to the e-mail column's value. */
+function displayName(traits: Record<string, unknown>): string | null {
+  const first = typeof traits.firstName === 'string' ? traits.firstName.trim() : '';
+  const last = typeof traits.lastName === 'string' ? traits.lastName.trim() : '';
+  const full = [first, last].filter(Boolean).join(' ');
+  if (full) return full;
+  return typeof traits.name === 'string' && traits.name.trim() ? traits.name.trim() : null;
+}
 
 /** People known to the workspace, with the consent they have recorded. */
 export default function PeoplePage() {
@@ -40,8 +51,34 @@ export default function PeoplePage() {
   const [searching, setSearching] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
 
-  const list = useApi(() => api.call('profiles.list', { limit: 50 }), []);
-  const rows = list.data?.profiles ?? [];
+  const list = useApi(() => api.call('profiles.list', { limit: PAGE_SIZE }), []);
+  const [extraPages, setExtraPages] = useState<ProfilePage[]>([]);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [moreError, setMoreError] = useState<string | null>(null);
+  // A refresh (or role change) reloads the first page and drops the pages loaded after it.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reset only when the first page itself changes
+  useEffect(() => setExtraPages([]), [list.data]);
+  const rows = [...(list.data?.profiles ?? []), ...extraPages.flatMap((p) => p.profiles)];
+  const next = extraPages.length ? (extraPages[extraPages.length - 1]?.nextCursor ?? null) : (list.data?.nextCursor ?? null);
+  // The API has no total. Until the last page arrives the honest count is "First N"; only a null
+  // cursor proves that the loaded rows are everyone (#438).
+  const countLabel = next
+    ? `First ${rows.length.toLocaleString()}`
+    : `${rows.length.toLocaleString()} ${rows.length === 1 ? 'person' : 'people'}`;
+
+  const loadMore = async () => {
+    if (!next || loadingMore) return;
+    setMoreError(null);
+    setLoadingMore(true);
+    try {
+      const page = await api.call('profiles.list', { limit: PAGE_SIZE, before: next.lastSeen, beforeId: next.id });
+      setExtraPages((current) => [...current, page]);
+    } catch (e) {
+      setMoreError(errText(e));
+    } finally {
+      setLoadingMore(false);
+    }
+  };
 
   const find = async () => {
     const q = query.trim();
@@ -123,10 +160,29 @@ export default function PeoplePage() {
                   Find
                 </Button>
               </form>
-              <span className="ml-auto text-[12px] text-muted">{rows.length.toLocaleString()} people</span>
+              <span className="ml-auto text-[12px] leading-[18px] text-muted">{countLabel}</span>
               <IconButton label="Refresh people" icon={<RefreshCw size={14} />} onClick={list.reload} />
             </>
           )
+        }
+        footer={
+          next || moreError ? (
+            <div className="space-y-2">
+              {moreError && (
+                <Alert tone="bad" onRetry={loadMore}>
+                  {moreError}
+                </Alert>
+              )}
+              {next && (
+                <div className="flex flex-wrap items-center gap-3">
+                  <Button className="h-14 md:h-12" onClick={loadMore} loading={loadingMore}>
+                    Load more people
+                  </Button>
+                  <span className="text-[12px] leading-[18px] text-muted">{countLabel} · load more to see older activity</span>
+                </div>
+              )}
+            </div>
+          ) : undefined
         }
         empty={
           <EmptyState
@@ -162,6 +218,7 @@ export default function PeoplePage() {
             {rows.map((p) => {
               const consent = p.consent.filter((c): c is { purpose: string; status: string } => c.status !== null);
               const email = p.email;
+              const name = displayName(p.traits);
               const traits = Object.entries(p.traits).slice(0, 2);
               return (
                 <Tr key={p.id} href={`/audience/people/${p.id}`} onClick={() => navigate(`/audience/people/${p.id}`)}>
@@ -171,10 +228,16 @@ export default function PeoplePage() {
                       onClick={(e) => e.stopPropagation()}
                       className="font-medium text-fg hover:underline"
                     >
-                      {email ?? <Mono>{p.id.slice(0, 14)}…</Mono>}
+                      {name ?? (
+                        <>
+                          {/* At mobile the e-mail column is hidden, so the person cell carries the address. */}
+                          <span className="md:hidden">{email ?? 'Unnamed person'}</span>
+                          <span className="hidden md:inline">Unnamed person</span>
+                        </>
+                      )}
                     </Link>
                     <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[12px] text-muted">
-                      <Mono className="bg-transparent px-0">{p.id.slice(0, 18)}…</Mono>
+                      <Identifier value={p.id} label="Profile ID" />
                       <Tag>{p.known ? 'Known' : 'Anonymous'}</Tag>
                     </div>
                   </Td>

@@ -9,6 +9,11 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      screenshots:
+        description: Capture the full screenshot matrix (every route, light/dark, 1440/768/390) and upload it
+        type: boolean
+        default: false
   workflow_call:
 
 permissions:
@@ -29,6 +34,7 @@ jobs:
     outputs:
       code: ${{ steps.filter.outputs.code }}
       helm: ${{ steps.filter.outputs.helm }}
+      web: ${{ steps.filter.outputs.web }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -38,14 +44,16 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha }}
         run: |
           if [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then
-            echo "code=true" >> "$GITHUB_OUTPUT"; echo "helm=true" >> "$GITHUB_OUTPUT"; exit 0
+            echo "code=true" >> "$GITHUB_OUTPUT"; echo "helm=true" >> "$GITHUB_OUTPUT"; echo "web=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
           files=$(git diff --name-only "$BASE" HEAD)
           printf '%s\n' "$files"
           # Code is anything but Markdown, docs/ and the agent skills.
           if printf '%s\n' "$files" | grep -Eqv '(\.md$|^docs/|^\.claude/)'; then code=true; else code=false; fi
           if printf '%s\n' "$files" | grep -Eq '^(deploy/helm/|\.github/workflows/)'; then helm=true; else helm=false; fi
-          echo "code=$code" >> "$GITHUB_OUTPUT"; echo "helm=$helm" >> "$GITHUB_OUTPUT"
+          # The visual baselines and the axe matrix only change with the admin UI or the e2e suite.
+          if printf '%s\n' "$files" | grep -Eq '^(apps/web/|e2e/|playwright)'; then web=true; else web=false; fi
+          echo "code=$code" >> "$GITHUB_OUTPUT"; echo "helm=$helm" >> "$GITHUB_OUTPUT"; echo "web=$web" >> "$GITHUB_OUTPUT"
 
   # Lint, typecheck, dependency audit and the documentation checks: fast feedback, no services.
   static:
@@ -159,11 +167,13 @@ jobs:
 
   # The admin UI in a real browser against the production build and a seeded server
   # (apps/server/test/e2e/server.ts), so browser-only regressions such as #115 fail the build.
+  # `pnpm e2e` runs the functional project and the axe project (#206): WCAG 2.1/2.2 A and AA over
+  # every route in the matrix, light and dark.
   e2e:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     services:
       postgres:
         image: postgres:16
@@ -226,6 +236,151 @@ jobs:
           name: playwright-traces
           path: test-results/
           retention-days: 14
+
+  # Visual regression (#433): a stable subset of the admin routes, light and dark, at 1440 and
+  # 390 px, against baselines committed in e2e/visual.spec.ts-snapshots. Runs when the admin UI or
+  # the e2e suite changes; a failure uploads the expected/actual/diff images for review.
+  visual:
+    needs: changes
+    if: needs.changes.outputs.web == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: am
+          POSTGRES_PASSWORD: am
+          POSTGRES_DB: am
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U am"
+          --health-interval 5s
+          --health-retries 10
+      clickhouse:
+        image: clickhouse/clickhouse-server:26.8
+        env:
+          CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+        ports: ["8123:8123"]
+        options: >-
+          --health-cmd "wget -qO- http://127.0.0.1:8123/ping"
+          --health-interval 5s
+          --health-retries 20
+      valkey:
+        image: valkey/valkey:8.1.9
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 5s
+          --health-retries 10
+    env:
+      CI: true
+      VALKEY_URL: redis://localhost:6379
+      TEST_DATABASE_URL: postgres://am:am@localhost:5432/am_test
+      CLICKHOUSE_URL: http://localhost:8123
+      CLICKHOUSE_ROW_POLICIES: required
+      NATS_URL: nats://localhost:4222
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: docker run -d --name nats -p 4222:4222 nats:2.15.0 -js
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile --filter "./packages/**" --filter "./apps/**" --filter "agentic-marketing"
+      # The baselines are recorded in the official Playwright image, so CI compares in the same image:
+      # the runner's own fonts and Chromium render text a few pixels differently on every route.
+      # The seeded server runs on the runner; the browser runs in the image on the host network.
+      - run: pnpm --filter @agentic-marketing/web build:live
+      - run: (npx tsx apps/server/test/e2e/server.ts > e2e-server.log 2>&1 &)
+      - run: |
+          for i in $(seq 1 120); do curl -sf http://localhost:3101/ready && exit 0; sleep 2; done
+          cat e2e-server.log; exit 1
+      - run: >-
+          docker run --rm --network host -v "$PWD":"$PWD" -w "$PWD" -e E2E_BASE=http://localhost:3100
+          mcr.microsoft.com/playwright:v$(node -p "require('@playwright/test/package.json').version")-noble
+          npx playwright test -c playwright.visual.config.ts
+      # Baselines are never updated here: an update is a reviewed commit (`--update-snapshots`).
+      - if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: visual-diffs
+          path: test-results/visual/
+          retention-days: 14
+
+  # The full screenshot matrix (#433): every admin route, light and dark, at 1440, 768 and 390 px.
+  # Manual only (Actions → CI → Run workflow → screenshots), for design review and before a release.
+  screenshots:
+    needs: changes
+    if: github.event_name == 'workflow_dispatch' && inputs.screenshots
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: am
+          POSTGRES_PASSWORD: am
+          POSTGRES_DB: am
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U am"
+          --health-interval 5s
+          --health-retries 10
+      clickhouse:
+        image: clickhouse/clickhouse-server:26.8
+        env:
+          CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+        ports: ["8123:8123"]
+        options: >-
+          --health-cmd "wget -qO- http://127.0.0.1:8123/ping"
+          --health-interval 5s
+          --health-retries 20
+      valkey:
+        image: valkey/valkey:8.1.9
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 5s
+          --health-retries 10
+    env:
+      CI: true
+      VALKEY_URL: redis://localhost:6379
+      TEST_DATABASE_URL: postgres://am:am@localhost:5432/am_test
+      CLICKHOUSE_URL: http://localhost:8123
+      CLICKHOUSE_ROW_POLICIES: required
+      NATS_URL: nats://localhost:4222
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: docker run -d --name nats -p 4222:4222 nats:2.15.0 -js
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile --filter "./packages/**" --filter "./apps/**" --filter "agentic-marketing"
+      - id: playwright
+        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}
+      - run: npx playwright install --with-deps chromium
+      # The script talks to a running seeded server, so build the UI, start it and wait until the
+      # seed has finished (/ready on the fixtures port; /healthz answers before seeding is done).
+      - run: |
+          pnpm --filter @agentic-marketing/web build:live
+          E2E_PORT=3100 E2E_DB=e2e_shots npx tsx apps/server/test/e2e/server.ts > server.log 2>&1 &
+          for i in $(seq 1 120); do curl -sf http://localhost:3101/ready > /dev/null && break; sleep 2; done
+          curl -sf http://localhost:3101/ready || { cat server.log; exit 1; }
+          node e2e/screenshots.mjs reports/screenshots
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: screenshots
+          path: reports/screenshots/
+          retention-days: 30
 
   # The Docker image as a self-hoster runs it: docker compose up, bootstrap, sign in, a signup form
   # that sends its confirmation e-mail.

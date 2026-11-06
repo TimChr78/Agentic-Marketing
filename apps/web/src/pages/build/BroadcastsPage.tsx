@@ -1,5 +1,6 @@
 import { ArtifactListPage } from '../../features/artifacts/ArtifactListPage';
 import { ArtifactSelect } from '../../features/artifacts/ArtifactSelect';
+import { BroadcastStatePill } from '../../features/artifacts/BroadcastState';
 import { Field } from '../../ui';
 
 export default function BroadcastsPage() {
@@ -10,6 +11,7 @@ export default function BroadcastsPage() {
       description="One-off sends to a segment, such as the weekly newsletter. Each one is reviewed before it goes out."
       emptyTitle="No broadcasts yet"
       emptyText="Create one to send a published e-mail template to a segment, now or at a set time. Agents can draft broadcasts too."
+      rowState={(a) => <BroadcastStatePill artifactId={a.id} latestState={a.latestState} publishedVersion={a.publishedVersion} />}
       create={{
         label: 'New broadcast',
         initial: {},

@@ -215,6 +215,21 @@ describe('weekly newsletter as a broadcast', () => {
       15_000,
     );
     expect(done.run).toMatchObject({ recipients: 2, queued: 2, skipped: 0 });
+    // `delivery` is each message's current status (#442 review): sent messages no longer count as
+    // queued there, although the event statistics in `messages` still record their queued event.
+    const sentNow = await eventually(
+      () => api.call('broadcasts.status', { artifactId: ids.newsletter }),
+      (s) => (s.delivery?.queued ?? 0) + (s.delivery?.sending ?? 0) === 0,
+      15_000,
+    );
+    expect((sentNow.delivery?.sent ?? 0) + (sentNow.delivery?.delivered ?? 0)).toBe(2);
+    expect(sentNow.messages.queued ?? 0).toBeGreaterThanOrEqual(2);
+    await t.srv.db.admin.query(`UPDATE messages SET status = 'suppressed' WHERE journey_id = $1 AND status IN ('sent', 'delivered')`, [
+      ids.newsletter,
+    ]);
+    expect((await api.call('broadcasts.status', { artifactId: ids.newsletter })).delivery).toEqual({ suppressed: 2 });
+    // Put them back, so the later tests in this file see the send as it happened.
+    await t.srv.db.admin.query(`UPDATE messages SET status = 'sent' WHERE journey_id = $1 AND status = 'suppressed'`, [ids.newsletter]);
     for (const to of ['ada@example.com', 'bo@example.com'])
       expect(mailTo(to).filter((m) => m.subject.startsWith('Signal #42'))).toHaveLength(1);
     expect(mailTo('cy@example.com').filter((m) => m.subject.startsWith('Signal #42'))).toHaveLength(0);

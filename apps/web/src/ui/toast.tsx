@@ -83,7 +83,7 @@ function ToastView({ t, onClose }: { t: Toast; onClose: () => void }) {
       {t.action && (
         <button
           type="button"
-          className="shrink-0 font-medium text-accent hover:underline"
+          className="inline-flex min-h-10 shrink-0 items-center px-1 font-medium text-accent hover:underline md:min-h-0 md:px-0"
           onClick={() => {
             t.action!.onClick();
             onClose();
@@ -92,7 +92,12 @@ function ToastView({ t, onClose }: { t: Toast; onClose: () => void }) {
           {t.action.label}
         </button>
       )}
-      <button type="button" aria-label="Dismiss" className="-mr-1 shrink-0 rounded p-0.5 text-muted hover:text-fg" onClick={onClose}>
+      <button
+        type="button"
+        aria-label="Dismiss"
+        className="-mr-1 inline-flex size-10 shrink-0 items-center justify-center rounded-md text-muted hover:bg-surface-2 hover:text-fg md:size-6"
+        onClick={onClose}
+      >
         <X size={14} />
       </button>
     </div>

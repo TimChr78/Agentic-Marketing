@@ -2,6 +2,36 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+### Changed
+
+- Adopt the DESIGN.md v2 foundations (#436): warm stone neutrals in light and tonal surfaces in dark, the 24/32 page and 16/24 section scale, 32/40 KPIs, 13/20 UI and tables, 32/24 section rhythm, 8/12 px radii, overlays-only shadows, and the categorical/sequential/diverging data-visualisation palette in `apps/web/src/index.css` and the shared `ui` components.
+- Charts now read the v2 tokens (quiet grids, direct end labels, 12/18 axis and tooltip type, system font, theme re-read without the legacy theme hook), and the new shared primitives in `apps/web/src/ui/charts.tsx` provide the KPI tile with direction-aware deltas and data states, line/area and bar charts, and the “Show data table” fallback (#436).
+- Operational state replaces the publication version as the primary status (#437). List and detail headers show a state pill from the new `lib/state.ts` model (broadcast, journey, agent, experience and form families), and “Published v2” is secondary metadata. The shared artifact list, broadcast list and header, agents and agent detail adopt it; other screens follow in later phases.
+- Analytics names measures and dimensions through the label registry (#437), and counts, rates and money are plotted in separate charts with their own axes instead of sharing one scale; direct end labels keep an 18 px separation and the plot reserves the right inset so they do not sit on the x-axis. Deliverability uses the metric data states: a zero-volume or below-threshold stream shows “No sends” or “Below evaluation volume” with its sample and threshold, never a green 0% health claim.
+
+### Fixed
+
+- Shared UI fixes from the wave 5 screenshot pass (#438): 40 px touch targets below 768 px, one navigation toggle under 1024 px, the brand logo contained in its square with an initial fallback, GrapesJS chrome themed to the app tokens in both themes, no epoch “newest” date on an empty Analytics query, honest People counts with cursor “Load more” and no repeated e-mail column, and page-level horizontal overflow contained to tables and canvases at 390 px.
+
+### Added
+
+- `broadcasts.status` returns `delivery`: the broadcast's messages by their current status (queued, sending, sent, delivered, failed, suppressed…), next to the event statistics in `messages`, which count every event a message ever had. The broadcast pill uses it to say Delivering, Sent, Failed or Nothing sent truthfully. Migration `0080_messages_journey_status.sql` adds the index that keeps the count cheap.
+- `Identifier` for secondary ids (#437): the short form (first 8 … last 4), a copy button whose accessible name and tooltip carry the full value, polite “ID copied”/“Could not copy ID” feedback, and inline expansion to selectable full text on tap or after a failed copy. Applied to agent, credential, journey and profile ids where an artifact name is not available.
+- An operational state pill (`ui/state.tsx`) with named text and a marker shape, plus the metric data-state helper (`lib/dataState.ts`) for no data, below evaluation volume, healthy, warning, paused and suppressed (#437).
+- A label registry (`lib/labels.ts`) for analytics measures and dimensions, agent action classes and decisions, artifact types, event types and purposes, with a unit test that reads the analytics catalogue and fails on any missing label (#437).
+
+- Deterministic, rich demo fixtures for UI work, Playwright and screenshots (#434). The e2e seed now generates weeks of believable activity from a seeded PRNG and a fixed clock: about 520 people with consent history, eight sent weekly issues with delivered, opened, clicked, bounced, complained and unsubscribed message events, a scheduled send and a stopped canary send, a live journey with participants on every step, a web-experience experiment, campaign conversions with UTM tags, backdated agent actions, a guardian episode, learnings, a mandate with goals, alerts that fired and resolved, and an import history entry. Counts, rates and names are stable across runs; `seed` takes a `now` option for other dates.
+- A screenshot matrix for design review (#433). `e2e/screenshots.mjs` (also `pnpm shots`) captures every admin route — derived from `apps/web/src/app/nav.ts` plus the seeded detail pages (one of each artifact type, a person, an agent, a token, every approval type, the signed-out sign-in page and `/`) — at 1440, 768 and 390 px in light and dark. Captures are deterministic: the clock is fixed, motion and carets are disabled, fonts and images are loaded and skeletons gone before the shot, and relative times, dates and raw ids are masked. A manual CI run (`workflow_dispatch` → `screenshots`) produces the whole matrix as an artifact.
+- Visual regression in CI (#433). `e2e/visual.spec.ts` compares a stable subset (sign-in, approvals and a broadcast approval, the journey list and builder, a broadcast, a template, people, analytics, agents and an agent, the workspace settings) at 1440 and 390 px in both themes against Linux baselines committed in `e2e/visual.spec.ts-snapshots`. Its own Playwright project keeps the functional suite fast; the `visual` CI job runs on pull requests that touch `apps/web` or `e2e` and uploads the expected/actual/diff images when a baseline fails. Baselines are only ever updated by a reviewed commit.
+- Automated accessibility checks (#206). `e2e/axe.spec.ts` runs `@axe-core/playwright` with the WCAG 2.1/2.2 A and AA rules over every route in the matrix, light and dark, fails on any violation not listed in `e2e/axe-known-issues.json`, and prints the violations by rule. The list starts empty; the wave's done criterion is that it stays empty.
+
+### Fixed
+
+- The brand switcher and the account menu no longer override their visible text with an `aria-label`, so the accessible name contains the visible label (WCAG 2.5.3).
+- Tabs only point `aria-controls` at a panel that is rendered, and the OpenAPI link in Settings → Integrations is underlined rather than distinguished by colour alone (WCAG 1.4.1) (#206).
+
 ## [0.8.0] - 2026-11-05
 
 ### Added

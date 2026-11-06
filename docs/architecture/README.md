@@ -1,6 +1,6 @@
 # Architecture — Agentic Marketing Platform
 
-> Status: **0.x — release 0.6.1.** Waves 1–3 are built through Phase 16 (0.2.10). Wave 4 (agentic autonomy) has shipped Phases 17–20: agent controls in 0.3.0 (#219), mandates and levels in 0.4.0 (#230), the safety net in 0.5.0 (#259), and closed loops in 0.6.0 (#317), with fixes through 0.6.1. Phases 21–22 (the full hosted runtime, many agents and brands) are planned — see [roadmap-wave-4.md](roadmap-wave-4.md).
+> Status: **0.x — release 0.8.0.** Waves 1–3 are built through Phase 16 (0.2.10). Wave 4 (agentic autonomy) is built: Phases 17–22 shipped in 0.3.0–0.8.0 — see [roadmap-wave-4.md](roadmap-wave-4.md). Wave 5 (polish, UX and UI) is planned in [roadmap-wave-5.md](roadmap-wave-5.md).
 > These pages describe how the platform is built and why, as it ships today. The release history is in the [CHANGELOG](../../CHANGELOG.md); how to run it is in the [README](../../README.md). Decisions are recorded as ADRs in [`adr/`](adr/); a later ADR can overturn an earlier one, and the ADRs keep their original text.
 
 ## What we are building
@@ -43,7 +43,8 @@ An open-source, self-hostable, **event-driven marketing platform built agent-fir
 | [roadmap-wave-3.md](roadmap-wave-3.md) | Wave 3: install and upgrade first, then pilot correctness, the newsletter and measurement; what is parked and why |
 | [agentic-autonomy.md](agentic-autonomy.md) | Design and 0.6.1 state of agents running marketing loops within borders (mandates, autonomy levels, the policy engine, the safety net) |
 | [../recipes.md](../recipes.md) | Installable recipes: the format, the four initial loops, `recipes.*` and the draft-only install path |
-| [roadmap-wave-4.md](roadmap-wave-4.md) | Wave 4: agentic marketing in six phases — Phases 17–20 built (0.3.0–0.6.0), Phases 21–22 planned — with the fundamentals track |
+| [roadmap-wave-4.md](roadmap-wave-4.md) | Wave 4: agentic marketing in six phases, all built (0.3.0–0.8.0), with the fundamentals track |
+| [roadmap-wave-5.md](roadmap-wave-5.md) | Wave 5: polish, UX and UI in six phases (23–28), from baselines to a verified polish pass; no new product scope |
 | [performance-marketing.md](performance-marketing.md) | Google, Meta and Microsoft ads: conversions, audiences, spend and ROAS |
 | [email-and-sms-delivery.md](email-and-sms-delivery.md) | Sending beyond SMTP (SES, Postmark, Cloudflare Email Service) and the SMS channel |
 | [open-questions.md](open-questions.md) | Decisions still needed from the product owner |

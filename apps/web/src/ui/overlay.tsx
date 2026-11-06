@@ -56,18 +56,19 @@ export function Drawer({ open, onClose, title, meta, children, footer, width = '
           width === 'xl' && 'sm:max-w-[min(1080px,92vw)]',
         )}
       >
-        <header className="flex items-start gap-3 border-b border-line px-5 py-3.5">
+        {/* A div, not <header>: a <header> inside a dialog is a second banner landmark. */}
+        <div className="flex items-start gap-3 border-b border-line px-4 py-3.5 md:px-5">
           <div className="min-w-0 flex-1">
-            <h2 id={titleId} className="text-[15px] leading-[22px] font-semibold break-words">
+            <h2 id={titleId} className="text-[16px] leading-6 font-semibold break-words">
               {title}
             </h2>
-            {meta && <div className="mt-0.5 text-[12px] text-muted">{meta}</div>}
+            {meta && <div className="mt-1 text-[12px] leading-[18px] text-muted">{meta}</div>}
           </div>
           {actions}
           <IconButton label="Close" icon={<X size={16} />} onClick={onClose} className="-mr-1.5" />
-        </header>
+        </div>
         <div className="min-h-0 flex-1 overflow-y-auto">{children}</div>
-        {footer && <footer className="flex flex-wrap items-center gap-2 border-t border-line bg-surface px-5 py-3">{footer}</footer>}
+        {footer && <div className="flex flex-wrap items-center gap-2 border-t border-line bg-surface px-4 py-3 md:px-5">{footer}</div>}
       </div>
     </div>,
     document.body,
@@ -106,7 +107,7 @@ export function Modal({ open, onClose, title, children, footer, role = 'dialog',
           size === 'lg' ? 'max-w-[760px]' : 'max-w-[480px]',
         )}
       >
-        <h2 id={titleId} className="px-5 pt-4 text-[15px] leading-[22px] font-semibold">
+        <h2 id={titleId} className="px-5 pt-4 text-[16px] leading-6 font-semibold">
           {title}
         </h2>
         <div className="min-h-0 overflow-y-auto px-5 pt-2 pb-4 text-[14px] leading-[22px] text-fg-2">{children}</div>

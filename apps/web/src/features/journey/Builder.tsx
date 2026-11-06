@@ -412,7 +412,7 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
       )}
     >
       {paletteOpen && (
-        <aside className="hidden border-r border-line lg:block">
+        <aside aria-label="Step palette" className="hidden border-r border-line lg:block">
           {!readOnly ? (
             <Palette onAdd={addAfterSelection} />
           ) : (
@@ -624,7 +624,7 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
       </div>
 
       {inspectorOpen && (
-        <aside className={cx('min-h-0 border-t border-line lg:border-t-0 lg:border-l', 'flex flex-col')}>
+        <aside aria-label="Journey inspector" className={cx('min-h-0 border-t border-line lg:border-t-0 lg:border-l', 'flex flex-col')}>
           <div className="px-3 pt-1">
             <Tabs
               label="Panel"
