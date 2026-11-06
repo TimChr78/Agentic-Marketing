@@ -404,7 +404,7 @@ describe('edge cleanup and destination changes', () => {
       await api.call('edge.configure', { accountId: ACCOUNT, namespaceId: nextNs, apiBase: cfBase });
       const failed = await eventually(
         () => api.call('edge.status', {}),
-        (r) => r.namespaceId === nextNs && r.staleTargets.length === 1 && !r.backfilling,
+        (r) => r.namespaceId === nextNs && r.staleTargets.length === 1 && !r.backfilling && !!r.lastError,
       );
       expect(kvOf(nextNs).has(`am:exp:${ws}`)).toBe(true);
       expect(failed.lastError).toContain('prior edge destination');

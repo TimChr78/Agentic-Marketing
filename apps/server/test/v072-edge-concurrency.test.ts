@@ -148,3 +148,61 @@ describe('edge configuration during an in-flight sync', () => {
     expect((await row()).backfill_cursor).toBeNull();
   });
 });
+
+describe('stopping a ramp during an edge sync (#477, round 3)', () => {
+  const D = 'd'.repeat(32);
+  const E = 'e'.repeat(32);
+  const bundleOf = (ns: string, w: string) => store(ns).get(`am:exp:${w}`) as { experiences: { id: string; share: number }[] } | undefined;
+
+  it('waits for the sync, then publishes the stopped share — no deadlock, no stale bundle', async () => {
+    const u = await t.signUp(`edge-stop-race-${Date.now()}@example.com`);
+    const w = await t.workspaceWith([[u, 'owner']], 'none');
+    const api = t.api(u, w);
+    const created = await api.call('artifacts.create', {
+      type: 'experience',
+      name: 'Stop during a sync',
+      content: {
+        placement: 'hero',
+        variants: [{ id: 'a', name: 'A', weight: 100, content: { html: '<h1>A</h1>' } }],
+        rollout: { steps: [5, 25, 100], stepHours: 1 },
+      },
+    });
+    const id = created.artifactId;
+    expect((await api.call('artifacts.requestPublish', { artifactId: id, note: 'ramp' })).status).toBe('published');
+
+    // First destination: a normal sync writes the bundle with the first step's share.
+    await api.call('edge.configure', { accountId: A, namespaceId: D, apiBase, apiToken: 'test-token-'.repeat(4) });
+    await syncEdge({ db: t.srv.db, hot: t.srv.hot, kp: t.srv.keyProvider, egress: t.srv.egress }, w);
+    expect(bundleOf(D, w)?.experiences.find((e) => e.id === id)?.share).toBe(5);
+
+    // Moving to a second destination leaves the first as a cleanup target. The sync deletes the old
+    // namespace's keys before it updates `edge_targets`, so pausing it here puts it right before
+    // that update while it holds the `edge-sync` advisory lock.
+    await api.call('edge.configure', { accountId: A, namespaceId: E, apiBase });
+    const gate = { path: '/keys', entered: deferred(), release: deferred() };
+    pause = gate;
+    const tick = syncEdge({ db: t.srv.db, hot: t.srv.hot, kp: t.srv.keyProvider, egress: t.srv.egress }, w);
+    await gate.entered.promise;
+    const stop = api.call('experiences.stopRollout', { artifactId: id, reason: 'Stop while the sync runs' });
+    // Let the stop reach the lock, then let the paused sync finish. It holds the advisory lock and
+    // is about to update `edge_targets`; the stop must already be waiting for that lock, not for
+    // the edge row (the reverse order is the deadlock).
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    gate.release.resolve();
+    const [stopped] = await Promise.all([stop, tick]);
+    expect(stopped).toMatchObject({ status: 'stopped', share: 0, edgePushed: true, edgePushReason: null });
+
+    // The sync read the bundle before the stop; it must not survive as the published share.
+    expect(bundleOf(E, w)?.experiences.find((e) => e.id === id)?.share).toBe(0);
+    const [target] = (
+      await t.srv.db.admin.query<{ last_error: string | null; generation: string }>(
+        'SELECT last_error, generation FROM edge_targets WHERE workspace_id = $1',
+        [w],
+      )
+    ).rows;
+    expect(target?.last_error).toBeNull();
+    // A later tick is a no-op: the recorded hash is the stopped bundle's.
+    await syncEdge({ db: t.srv.db, hot: t.srv.hot, kp: t.srv.keyProvider, egress: t.srv.egress }, w);
+    expect(bundleOf(E, w)?.experiences.find((e) => e.id === id)?.share).toBe(0);
+  }, 60_000);
+});

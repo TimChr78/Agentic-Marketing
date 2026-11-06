@@ -331,6 +331,46 @@ describe('agent notifications (#226)', () => {
     expect(await emailRows(s.ws, 'agent-event:')).toHaveLength(1);
   }, 30_000);
 
+  it('a retry after a delivery webhook sends only to the recipient whose mail failed (#round 3)', async () => {
+    // Owner A gets the digest, owner B's send fails. The provider's delivery webhook then marks A's
+    // message `delivered`. A retry must not treat that as a failed send and mail A again.
+    const s = await setup({ level: 3 });
+    const second = await addAgent(s, { name: 'Webhook retry agent', level: 3 });
+    const outsider = await t.signUp(`outsider-webhook-retry-${Date.now()}@example.com`);
+    await t.srv.db.admin.query('UPDATE agents SET sponsor_user_id = $2 WHERE workspace_id = $1 AND id = $3', [
+      s.ws,
+      outsider.id,
+      second.agentId,
+    ]);
+    expect((await publishNote(s, 'Digest for the owner')).body.status).toBe('published');
+    expect((await publishNoteWith(second.token, 'Digest for the outsider')).body.status).toBe('published');
+
+    const ownerDigests = () => outbox.filter((m) => m.to === s.owner.email && m.subject.startsWith('Daily agent digest'));
+    const outsiderDigests = () => outbox.filter((m) => m.to === outsider.email && m.subject.startsWith('Daily agent digest'));
+
+    const t0 = new Date();
+    expect((await run(t0)).digests).toBe(1);
+    expect(ownerDigests()).toHaveLength(1);
+    expect(outsiderDigests()).toHaveLength(0);
+
+    // What a SendGrid/Postmark delivery event does: the message row becomes `delivered`.
+    await t.srv.db.admin.query(`UPDATE messages SET status = 'delivered' WHERE workspace_id = $1 AND idempotency_key LIKE $2`, [
+      s.ws,
+      `agent-digest:${s.ws}:${s.owner.id}:%`,
+    ]);
+    await t.srv.db.admin.query('INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, $3)', [
+      s.ws,
+      outsider.id,
+      'viewer',
+    ]);
+    const retry = await run(new Date(t0.getTime() + 5 * 60_000));
+    expect(retry.digests).toBe(1);
+    expect(ownerDigests()).toHaveLength(1);
+    expect(outsiderDigests()).toHaveLength(1);
+    const rows = await emailRows(s.ws, 'agent-digest:');
+    expect(rows.map((r) => r.status).sort()).toEqual(['delivered', 'sent']);
+  }, 40_000);
+
   it('interleaved agents deliver each action once when one agent cannot be reached (#276)', async () => {
     const s = await setup({ level: 2 });
     await s.api.call('agents.update', { id: s.agentId, name: 'Interleaved X' });

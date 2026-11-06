@@ -279,6 +279,71 @@ describe('concurrent mandate renewals (#455)', () => {
   });
 });
 
+describe('overlapping bulk renewals keep one lock order (#455, round 3)', () => {
+  it('does not deadlock with an ordinary edit that holds one of the mandates', async () => {
+    const w = await t.workspaceWith([[owner, 'owner']], 'none');
+    const api = t.api(owner, w);
+    const agentA = await makeAgent(api, 'Lock order agent A', ['artifacts:read']);
+    const agentB = await makeAgent(api, 'Lock order agent B', ['artifacts:read']);
+    const a = await grantMandate(api, agentA.agentId, 'First lock order mandate', { validUntil: inDays(10) });
+    const b = await grantMandate(api, agentB.agentId, 'Second lock order mandate', { validUntil: inDays(20) });
+    // The renewal locks and processes in id order, so `first` is the one it reaches before `second`.
+    const [first, second] = [a, b].sort();
+
+    const got = await api.call('artifacts.get', { artifactId: second });
+    const edited = { ...(got.version.content as Record<string, unknown>), purpose: 'Edited while the renewals run' };
+
+    const audit = await t.srv.db.admin.connect();
+    const rowLock = await t.srv.db.admin.connect();
+    try {
+      // Hold the workspace audit lock (the renewal takes it while it publishes), and the second
+      // mandate's row (the edit takes it before it asks for the audit lock).
+      await audit.query('BEGIN');
+      await audit.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`audit:${w}`]);
+      await rowLock.query('BEGIN');
+      await rowLock.query('SELECT 1 FROM artifacts WHERE workspace_id = $1 AND id = $2 FOR UPDATE', [w, second]);
+
+      const edit = api.call('artifacts.updateDraft', { artifactId: second, content: edited, note: 'Edit during renewals' });
+      const renewal = api.call('agents.renewMandates', {
+        mandateIds: [first, second],
+        validUntil: inDays(120),
+        note: 'Overlapping bulk renewal',
+      });
+      // The edit waits for the second row, the renewal for the audit lock after it renews the first.
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      await rowLock.query('COMMIT');
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      // Pre-fix this releases the audit lock to the renewal, which then waits for the second row the
+      // edit now holds: the two form a cycle. Locking the set in id order before any write avoids it.
+      await audit.query('COMMIT');
+
+      const [draft, renewed] = await Promise.all([edit, renewal]);
+      expect(draft.version).toBe(2);
+      expect(renewed.renewed.find((r: { mandateId: string }) => r.mandateId === first)).toMatchObject({
+        ok: true,
+        version: 2,
+      });
+      // The edit committed first, so the renewal's second mandate is refused rather than
+      // overwriting the draft; either serial order is consistent, a deadlock is not.
+      expect(renewed.renewed.find((r: { mandateId: string }) => r.mandateId === second)).toMatchObject({ ok: false });
+      const rows = await t.srv.db.admin.query<{ id: string; latest_version: number; published_version: number }>(
+        'SELECT id, latest_version, published_version FROM artifacts WHERE workspace_id = $1 AND id IN ($2, $3) ORDER BY id',
+        [w, a, b],
+      );
+      for (const row of rows.rows) {
+        expect(row.latest_version).toBeGreaterThanOrEqual(row.published_version);
+      }
+      // Both decisions are in the audit chain, whichever order they ran in.
+      const auditRows = await t.srv.db.admin.query('SELECT command FROM audit_log WHERE workspace_id = $1 ORDER BY seq', [w]);
+      expect(auditRows.rows.filter((r: { command: string }) => r.command === 'agents.renewMandates')).toHaveLength(2);
+      expect(auditRows.rows.filter((r: { command: string }) => r.command === 'artifacts.updateDraft')).toHaveLength(1);
+    } finally {
+      audit.release();
+      rowLock.release();
+    }
+  }, 60_000);
+});
+
 describe('ad audiences and conversions under a mandate (#428)', () => {
   let api: ReturnType<typeof t.api>;
   let ws = '';

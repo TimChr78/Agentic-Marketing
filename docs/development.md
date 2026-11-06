@@ -339,7 +339,8 @@ Do not put a statement that needs a transaction in such a file: it commits on it
 Long data changes do not belong in a migration at all. The 0.10.1 `messages.sent_at` backfill is a
 scheduler job (`runSentAtBackfill` / `backfillSentAtOnce` in
 [`packages/db/src/backfill.ts`](../packages/db/src/backfill.ts)) that fills completed rows in short
-batches after start; `am doctor` shows how many rows are left.
+batches after start. It stops when no row is left or a batch fails: there is no continuous retry, so
+a failed pass runs again on the next start. `am doctor` shows how many rows are left.
 The delivery caps count a NULL `sent_at` from `updated_at` until the job reaches the row, so
 correctness does not depend on the backfill finishing first.
 

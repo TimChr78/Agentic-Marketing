@@ -596,6 +596,14 @@ async function syncEdgeLocked(deps: EdgeDeps, ws: string, opts: { bundleOnly?: b
       if (!(await update({ cleanupMode: null, ...(mode === 'all' ? { pushedKeys: [], bundleHash: null } : {}) }))) return;
     }
     // 2. Experiences, purposes and write keys. Never while serving is off.
+    // A stop can commit while this sync is in flight when it could not take the advisory lock in
+    // time. The stop bumps `generation` (and clears `bundleHash`) in the same transaction as the
+    // share, so compare that version under our lock: the bundle read before the stop must not be
+    // published after it (#477). The next tick reads the stopped share and publishes it.
+    const [fence] = await deps.db.withWorkspace(ws, (tx) =>
+      tx.select({ generation: schema.edgeTargets.generation }).from(schema.edgeTargets).where(eq(schema.edgeTargets.workspaceId, ws)),
+    );
+    if (!fence || fence.generation !== t.generation) return;
     if (t.enabled && (hash !== t.bundleHash || removedAll)) {
       const keys = entries.map((e) => e.key);
       // Reserve keys before uploading: configure must retain even a write that finishes after
@@ -664,6 +672,34 @@ export interface EdgePushResult {
 }
 
 /**
+ * Take the workspace's edge-sync advisory lock inside `tx`, waiting at most `waitMs`. Returns false
+ * when another sync still holds it. The attempt lives in a savepoint because a lock timeout aborts
+ * the transaction; rolling back to the savepoint keeps the caller's stop committable.
+ *
+ * A stop calls this before it locks or updates any rollout or edge row (#477): the background sync
+ * takes this advisory lock first and only then touches `edge_targets`, so the reverse order would
+ * form a deadlock.
+ */
+export async function acquireEdgeSyncLock(tx: Tx, ws: string, waitMs = 10_000): Promise<boolean> {
+  // `pg_advisory_xact_lock` conflicts with the session-scoped `pg_try_advisory_lock` the
+  // background sync takes on the same key, and is released when the caller's transaction ends.
+  await tx.execute(sql`SAVEPOINT edge_sync_lock`);
+  let locked = false;
+  try {
+    await tx.execute(sql`SELECT set_config('lock_timeout', ${`${waitMs}ms`}, true)`);
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`edge-sync:${ws}`}, 0))`);
+    locked = true;
+  } catch {
+    await tx.execute(sql`ROLLBACK TO SAVEPOINT edge_sync_lock`).catch(() => {});
+  }
+  if (locked) await tx.execute(sql`RELEASE SAVEPOINT edge_sync_lock`);
+  // The caller still has to take its own row locks and write. A leftover 10 s lock timeout there
+  // would abort the very stop this lock exists to protect.
+  await tx.execute(sql`SELECT set_config('lock_timeout', '0', true)`).catch(() => {});
+  return locked;
+}
+
+/**
  * Pushes the current bundle inside the caller's transaction, for a person's stop (#477). The stop is
  * an emergency, so this waits for the edge-sync lock instead of skipping when another sync runs,
  * and it reads through the caller's transaction so the just-written share is included. The wait is
@@ -672,20 +708,8 @@ export interface EdgePushResult {
  */
 export async function pushEdgeBundleNow(deps: EdgeDeps, tx: Tx, ws: string, opts: { waitMs?: number } = {}): Promise<EdgePushResult> {
   const waitMs = opts.waitMs ?? 10_000;
-  // A lock timeout aborts the transaction, so the attempt lives in a savepoint: on timeout we roll
-  // back to it and still commit the stop itself. `pg_advisory_xact_lock` conflicts with the
-  // session-scoped `pg_try_advisory_lock` the background sync takes on the same key.
-  await tx.execute(sql`SAVEPOINT edge_push_lock`);
-  let locked = true;
-  try {
-    await tx.execute(sql`SELECT set_config('lock_timeout', ${`${waitMs}ms`}, true)`);
-    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`edge-sync:${ws}`}, 0))`);
-  } catch {
-    locked = false;
-    await tx.execute(sql`ROLLBACK TO SAVEPOINT edge_push_lock`).catch(() => {});
-  }
-  await tx.execute(sql`RELEASE SAVEPOINT edge_push_lock`).catch(() => {});
-  if (!locked) return { pushed: false, reason: `another edge sync was still running after ${Math.round(waitMs / 1000)} s` };
+  if (!(await acquireEdgeSyncLock(tx, ws, waitMs)))
+    return { pushed: false, reason: `another edge sync was still running after ${Math.round(waitMs / 1000)} s` };
   try {
     const [t] = await tx.select().from(schema.edgeTargets).for('update');
     if (!t) return { pushed: false, reason: 'the edge is not configured' };

@@ -1,7 +1,7 @@
 import { appendAuditEntry, defineCommand } from '@agentic-marketing/commands';
 import { AppError, hashValue, isoDateTime } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
-import { and, eq, isNotNull, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { requestPublish, updateDraft } from './commands';
 import { type AgentMandate, artifactTypes } from './types';
@@ -134,7 +134,19 @@ export const renewMandates = defineCommand({
   target: (i) => i.mandateIds.join(','),
   handler: async (input, ctx) => {
     const renewed: z.output<typeof Renewed>[] = [];
-    for (const [index, mandateId] of [...new Set(input.mandateIds)].entries()) {
+    const mandateIds = [...new Set(input.mandateIds)];
+    // Lock the whole set before writing anything, in one deterministic order (#455). A renewal
+    // takes the workspace audit lock (transaction-scoped) while it publishes and then moves to the
+    // next mandate; two bulk calls in opposite order, or an edit that holds a mandate and waits for
+    // the audit lock, would otherwise form a cycle. Processing stays in the caller's order so the
+    // per-id result and audit entries read the same as the input.
+    await ctx.tx
+      .select({ id: schema.artifacts.id })
+      .from(schema.artifacts)
+      .where(and(eq(schema.artifacts.workspaceId, ctx.principal.workspaceId), inArray(schema.artifacts.id, mandateIds)))
+      .orderBy(schema.artifacts.id)
+      .for('update');
+    for (const [index, mandateId] of mandateIds.entries()) {
       const inputHash = hashValue({ mandateId, validUntil: input.validUntil, note: input.note });
       // A savepoint per mandate: one failure rolls back only its own version and audit entry.
       const savepoint = `renew_mandate_${index}`;
