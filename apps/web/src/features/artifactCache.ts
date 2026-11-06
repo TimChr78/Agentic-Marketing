@@ -7,6 +7,23 @@ import { api, type Out } from '../app/api';
 type Got = Out<'artifacts.get'>;
 const cache = new Map<string, Promise<Got>>();
 
+type ArtifactChangeListener = () => void;
+const listeners = new Set<ArtifactChangeListener>();
+
+/**
+ * Registers a cache that must be dropped whenever an artifact is created, renamed, saved,
+ * published or deleted. Returns an unsubscribe.
+ */
+export function onArtifactsChanged(listener: ArtifactChangeListener) {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
+/** Tells every registered cache that artifacts changed, e.g. after `artifacts.create`. */
+export function notifyArtifactsChanged() {
+  for (const listener of listeners) listener();
+}
+
 export function getArtifact(id: string): Promise<Got> {
   let p = cache.get(id);
   if (!p) {
@@ -16,7 +33,10 @@ export function getArtifact(id: string): Promise<Got> {
   }
   return p;
 }
-export const invalidateArtifact = (id: string) => cache.delete(id);
+export const invalidateArtifact = (id: string) => {
+  cache.delete(id);
+  notifyArtifactsChanged();
+};
 
 export function useArtifactRef(id: string | undefined | null) {
   const [a, setA] = useState<Got | null>(null);
