@@ -96,6 +96,8 @@ export const ENV_SINCE: Record<string, string> = {
 
   // 0.10.1 (issue #487)
   WORKSPACE_QUOTA: '0.10.1',
+  // 0.10.1 (issue #488)
+  RETENTION_HOSTED_AGENT_RUN_DAYS: '0.10.1',
 };
 
 /**

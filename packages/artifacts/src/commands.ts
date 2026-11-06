@@ -447,6 +447,8 @@ export const setOwner = defineCommand({
   humansOnly: true,
   target: (i) => i.artifactId,
   handler: async (input, ctx) => {
+    // Locked before the read and the write, in the same id order as coordination checks (#471).
+    await lockArtifacts(ctx, [input.artifactId]);
     const a = await loadArtifact(ctx, input.artifactId);
     if (input.ownerAgentId) {
       const [agent] = await ctx.tx
@@ -809,6 +811,17 @@ export const discardDraft = defineCommand({
   permission: 'artifacts:write',
   effect: 'write',
   actionClass: 'draft',
+  // Discarding its own draft is a draft edit; discarding a draft on an artifact it does not own is
+  // a change another agent must coordinate (#468, #426), so ownership and conflicts apply.
+  impact: async (input, ctx) => {
+    const a = await loadArtifact(ctx, input.artifactId);
+    const foreign = ctx.principal.type === 'agent' && a.ownerAgentId !== ctx.principal.agent?.id;
+    return {
+      actionClass: foreign ? 'content.publish' : 'draft',
+      summary: `discard the draft of ${a.id}`,
+      touches: { artifacts: [{ id: a.id, type: a.type }] },
+    };
+  },
   target: (i) => i.artifactId,
   handler: async (input, ctx) => {
     const a = await loadArtifact(ctx, input.artifactId);

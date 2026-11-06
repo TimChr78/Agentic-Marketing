@@ -1,4 +1,4 @@
-import type { Permission } from '@agentic-marketing/commands';
+import { agentPolicy, agentPrincipal, type Permission } from '@agentic-marketing/commands';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { eventually, startTestServer, testPort, type User } from './harness';
 
@@ -323,5 +323,135 @@ describe('migration (#426)', () => {
       `SELECT indexname FROM pg_indexes WHERE tablename = 'messages' AND indexname = 'messages_agent_contact'`,
     );
     expect(index.rows).toHaveLength(1);
+  });
+});
+
+describe('cancelling a send is a coordinated change (#468)', () => {
+  let api: ReturnType<typeof t.api>;
+  let ws = '';
+  let a: Agent;
+  let b: Agent;
+  const template = `eml_${'1'.repeat(32)}`;
+  const segment = `seg_${'2'.repeat(32)}`;
+
+  beforeAll(async () => {
+    ws = await t.workspaceWith([[owner, 'owner']], 'none');
+    api = t.api(owner, ws);
+    a = await makeAgent(api, 'Cancelling agent A', ['artifacts:read', 'artifacts:write', 'messages:send']);
+    b = await makeAgent(api, 'Cancelling agent B', ['artifacts:read', 'artifacts:write', 'messages:send']);
+    await api.call('workspace.setAutonomy', { maxLevel: { 'send.broadcast': 3, 'content.publish': 3 } });
+    for (const [agent, name] of [
+      [a, 'Cancel mandate A'],
+      [b, 'Cancel mandate B'],
+    ] as const) {
+      const mandate = await api.call('artifacts.create', {
+        type: 'agent_mandate',
+        name,
+        content: {
+          agent: agent.agentId,
+          purpose: 'Send the weekly newsletter',
+          validUntil: new Date(Date.now() + 30 * 86_400_000).toISOString(),
+          levels: { 'send.broadcast': 3, 'content.publish': 3 },
+        } as never,
+      });
+      expect((await api.call('artifacts.requestPublish', { artifactId: mandate.artifactId, note: 'grant' })).status).toBe('published');
+    }
+  }, 90_000);
+
+  it('another agent cannot cancel an agent-owned send without a person (#468)', async () => {
+    const created = await agentCall(a.token, 'artifacts.create', {
+      type: 'broadcast',
+      name: 'Agent A send',
+      content: { template, segment },
+    });
+    const broadcast = created.body.artifactId as string;
+
+    const refused = await agentCall(b.token, 'broadcasts.cancel', { artifactId: broadcast });
+    expect(refused.status).toBe(403);
+    expect(refused.body.message).toContain('owned by agent');
+
+    // The owner may still stop its own send.
+    const own = await agentCall(a.token, 'broadcasts.cancel', { artifactId: broadcast });
+    expect(own.status, own.body.message).toBe(200);
+    expect(own.body.status).toBe('cancelled');
+  });
+
+  it('another agent cannot discard a draft on an artifact it does not own (#468)', async () => {
+    const created = await agentCall(a.token, 'artifacts.create', {
+      type: 'note',
+      name: 'Agent A note',
+      content: { title: 'Owned', body: 'First' },
+    });
+    const noteId = created.body.artifactId as string;
+    expect((await api.call('artifacts.requestPublish', { artifactId: noteId, note: 'publish' })).status).toBe('published');
+    expect(
+      (
+        await agentCall(a.token, 'artifacts.updateDraft', {
+          artifactId: noteId,
+          content: { title: 'Owned', body: 'Changed' },
+          note: 'draft',
+        })
+      ).status,
+    ).toBe(200);
+
+    const refused = await agentCall(b.token, 'artifacts.discardDraft', { artifactId: noteId });
+    expect(refused.status).toBe(403);
+    expect(refused.body.message).toContain('owned by agent');
+    expect((await api.call('artifacts.get', { artifactId: noteId })).latestVersion).toBe(2);
+  });
+});
+
+describe('coordination decides under the artifact lock (#471)', () => {
+  it('waits for a competing artifact write before reading the owner', async () => {
+    const lockWs = await t.workspaceWith([[owner, 'owner']], 'none');
+    const api = t.api(owner, lockWs);
+    const agent = await makeAgent(api, 'Locked action agent', ['artifacts:read', 'artifacts:write']);
+    const newOwner = await makeAgent(api, 'Late owner', ['artifacts:read']);
+    const created = await agentCall(agent.token, 'artifacts.create', {
+      type: 'note',
+      name: 'Locked note',
+      content: { title: 'Locked', body: 'Coordination lock test' },
+    });
+    const artifactId = created.body.artifactId as string;
+    const principal = {
+      ...agentPrincipal(owner.id, 'token:locked-action', lockWs, 'owner', ['artifacts:read', 'artifacts:write']),
+      agent: { id: agent.agentId, name: 'Locked action agent', status: 'active' as const, statusReason: null },
+    };
+
+    const lock = await t.srv.db.admin.connect();
+    try {
+      await lock.query('BEGIN');
+      await lock.query('SELECT 1 FROM artifacts WHERE workspace_id = $1 AND id = $2 FOR UPDATE', [lockWs, artifactId]);
+      // The transfer is in flight; a coordination read must not decide on the old owner.
+      await lock.query('UPDATE artifacts SET owner_agent_id = $3 WHERE workspace_id = $1 AND id = $2', [
+        lockWs,
+        artifactId,
+        newOwner.agentId,
+      ]);
+      let settled = false;
+      const decision = t.srv.db
+        .withWorkspace(lockWs, (tx) =>
+          agentPolicy(tx, t.srv.services, principal, {
+            command: 'artifacts.requestPublish',
+            actionClass: 'content.publish',
+            impact: { touches: { artifacts: [{ id: artifactId, type: 'note' }] } },
+            approvable: true,
+            input: {},
+          }),
+        )
+        .then((policy) => {
+          settled = true;
+          return policy;
+        });
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(settled).toBe(false);
+      await lock.query('COMMIT');
+      const policy = await decision;
+      expect(policy.decision).toBe('ask');
+      expect(policy.reasons.join(' ')).toContain('owned by agent');
+    } finally {
+      await lock.query('ROLLBACK').catch(() => {});
+      lock.release();
+    }
   });
 });

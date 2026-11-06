@@ -1,7 +1,7 @@
 import { AppError, canonicalJson, hashValue, sha256 } from '@agentic-marketing/core';
 import { type AgentUndo, type Db, schema, type Tx } from '@agentic-marketing/db';
 import { SpanStatusCode, trace } from '@opentelemetry/api';
-import { and, desc, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import {
   type ActionClass,
@@ -514,9 +514,11 @@ export type Executor = ReturnType<typeof createExecutor>;
  * What the other agents have on the artifacts this action changes (#426), before the policy
  * engine decides: the owner of an artifact when it belongs to another agent, and any pending
  * change (a hold inside its veto window, or an open approval request) from a different agent.
- * The executor only calls this for changes beyond a draft; people never reach it.
+ * The executor only calls this for changes beyond a draft; people never reach it. The artifact
+ * rows are locked for update (in id order) so the decision and the write see the same owner, and
+ * `artifacts.setOwner` cannot slip between them (#471).
  */
-async function coordinationFor(
+export async function coordinationFor(
   tx: Tx,
   workspaceId: string,
   agentId: string,
@@ -529,7 +531,9 @@ async function coordinationFor(
   const rows = await tx
     .select({ id: schema.artifacts.id, name: schema.artifacts.name, ownerAgentId: schema.artifacts.ownerAgentId })
     .from(schema.artifacts)
-    .where(and(eq(schema.artifacts.workspaceId, workspaceId), inArray(schema.artifacts.id, ids)));
+    .where(and(eq(schema.artifacts.workspaceId, workspaceId), inArray(schema.artifacts.id, ids)))
+    .orderBy(asc(schema.artifacts.id))
+    .for('update');
   const names = new Map(rows.map((a) => [a.id, a.name]));
 
   let ownership: NonNullable<PolicyInput['ownership']> | null = null;
@@ -741,17 +745,19 @@ export async function agentCounters(tx: Tx, agentId: string, opts: { excludeId?:
   const counted = sql`(${a.decision} = 'allow' OR ${pendingHold}) AND ${a.command} <> 'artifacts.heldRecheck'`;
   const excluded = opts.excludeId !== undefined ? sql`${a.id} <> ${opts.excludeId}` : undefined;
   // The previous send is the last one that ran: a vetoed send must not raise the growth baseline.
+  // Stopping a send shares its class (#468) but is not a send for the counters.
+  const isSend = sql`(${a.actionClass} = 'send.broadcast' AND ${a.command} <> 'broadcasts.cancel')`;
   const [prev] = await tx
     .select({ people: sql<number | null>`(${a.impact}->>'people')::int` })
     .from(a)
-    .where(and(eq(a.agentId, agentId), eq(a.actionClass, 'send.broadcast'), eq(a.decision, 'allow'), eq(a.ok, true)))
+    .where(and(eq(a.agentId, agentId), isSend, eq(a.decision, 'allow'), eq(a.ok, true)))
     .orderBy(desc(a.id))
     .limit(1);
   const [row] = await tx
     .select({
       changes: sql<number>`count(*) FILTER (WHERE ${a.actionClass} <> 'draft')::int`,
       messages: sql<number>`coalesce(sum((${a.impact}->>'people')::int) FILTER (WHERE ${a.actionClass} = 'send.direct'), 0)::int`,
-      sends: sql<number>`count(*) FILTER (WHERE ${a.actionClass} = 'send.broadcast')::int`,
+      sends: sql<number>`count(*) FILTER (WHERE ${isSend})::int`,
     })
     .from(a)
     .where(and(eq(a.agentId, agentId), counted, eq(a.ok, true), sql`${a.at} > now() - interval '24 hours'`, excluded));

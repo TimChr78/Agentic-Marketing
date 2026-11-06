@@ -51,7 +51,7 @@ Goal: MartechSignal runs on the platform, and everything it needs that is still 
 
 **Done before the pilot run (code only):**
 - e-mail events on profiles: `Email Sent`, `Email Delivered`, `Email Bounced`, `Email Complained`, `Email Link Clicked`, `Email Unsubscribed`, usable by segments, journeys and webhooks;
-- retention job: never-confirmed signups after `RETENTION_UNCONFIRMED_DAYS` (30), finished deliveries and AI calls after `RETENTION_LOG_DAYS` (180);
+- retention job: never-confirmed signups after `RETENTION_UNCONFIRMED_DAYS` (30), finished deliveries and AI calls after `RETENTION_LOG_DAYS` (180), finished hosted-agent runs after `RETENTION_HOSTED_AGENT_RUN_DAYS` (90);
 - UTM tagging per template (`utm` in the template content), skipping the platform's own links and links already tagged;
 - `templates.sendTest` (to workspace members only);
 - a Newsletter screen (broadcast status, audience preview, cancel, test send, form HTML);

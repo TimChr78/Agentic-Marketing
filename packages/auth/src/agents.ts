@@ -832,11 +832,14 @@ async function conversionUploadsOf(tx: Tx, artifactIds: string[], range: { from:
   return row?.n ?? 0;
 }
 
-/** The agent's hosted AI usage and estimated cost in the period (#428). */
-async function aiCostOf(tx: Tx, agentId: string, range: { from: Date; to: Date }) {
+/** The agents' hosted AI usage and estimated cost in the period (#428), in one grouped read (#489). */
+async function aiCostsOf(tx: Tx, agentIds: string[], range: { from: Date; to: Date }) {
+  const out = new Map<string, { calls: number; inputTokens: number; outputTokens: number; cost: number | null }>();
+  if (!agentIds.length) return out;
   const c = schema.aiCalls;
   const rows = await tx
     .select({
+      agentId: sql<string>`${c.input}->>'hostedAgentId'`,
       model: c.model,
       calls: sql<number>`count(*)::int`,
       inputTokens: sql<number>`coalesce(sum(${c.inputTokens}), 0)::int`,
@@ -844,20 +847,27 @@ async function aiCostOf(tx: Tx, agentId: string, range: { from: Date; to: Date }
     })
     .from(c)
     .where(
-      and(eq(c.kind, 'hosted'), sql`${c.input}->>'hostedAgentId' = ${agentId}`, gte(c.createdAt, range.from), lt(c.createdAt, range.to)),
+      and(
+        eq(c.kind, 'hosted'),
+        sql`${c.input}->>'hostedAgentId' IN (${sql.join(
+          agentIds.map((id) => sql`${id}`),
+          sql`, `,
+        )})`,
+        gte(c.createdAt, range.from),
+        lt(c.createdAt, range.to),
+      ),
     )
-    .groupBy(c.model);
-  const totals = rows.reduce(
-    (acc, r) => ({
-      calls: acc.calls + r.calls,
-      inputTokens: acc.inputTokens + r.inputTokens,
-      outputTokens: acc.outputTokens + r.outputTokens,
-    }),
-    { calls: 0, inputTokens: 0, outputTokens: 0 },
-  );
-  const costs = rows.map((r) => estimatedCost(r.model, r.inputTokens, r.outputTokens));
-  const cost = costs.some((v) => v !== null) ? Math.round(costs.reduce<number>((n, v) => n + (v ?? 0), 0) * 1e6) / 1e6 : null;
-  return { ...totals, cost };
+    .groupBy(sql`${c.input}->>'hostedAgentId'`, c.model);
+  for (const r of rows) {
+    const acc = out.get(r.agentId) ?? { calls: 0, inputTokens: 0, outputTokens: 0, cost: null };
+    acc.calls += r.calls;
+    acc.inputTokens += r.inputTokens;
+    acc.outputTokens += r.outputTokens;
+    const cost = estimatedCost(r.model, r.inputTokens, r.outputTokens);
+    if (cost !== null) acc.cost = Math.round(((acc.cost ?? 0) + cost) * 1e6) / 1e6;
+    out.set(r.agentId, acc);
+  }
+  return out;
 }
 
 export const agentReport = defineCommand({
@@ -976,6 +986,10 @@ export const agentReport = defineCommand({
 
 // --- Comparison (#428) ---------------------------------------------------------------------------
 
+/** A comparison is bounded so one call cannot fan out without limit (#489). */
+const COMPARE_MAX_AGENTS = 20;
+const COMPARE_MAX_WINDOW_DAYS = 366;
+
 const MandateComparison = z.object({
   mandateId: z.string().nullable().describe('Null: actions recorded without a mandate'),
   version: z.number().int().nullable(),
@@ -1014,19 +1028,23 @@ export const compareAgents = defineCommand({
   name: 'agents.compare',
   title: 'Compare agents',
   description:
-    'Put several agents side by side for a period (default: the last 30 days): per mandate version, actions by class and decision (ran, held, sent to a person, refused, failed), undos and holds vetoed or run; per agent, the outcomes of its broadcasts, direct messages and journeys, its mandate goals, guardian caps and its hosted AI usage and estimated cost. Omit agentIds to compare every agent in the workspace.',
+    'Put several agents side by side for a period (default: the last 30 days, at most 366): per mandate version, actions by class and decision (ran, held, sent to a person, refused, failed), undos and holds vetoed or run; per agent, the outcomes of its broadcasts, direct messages and journeys, its mandate goals, guardian caps and its hosted AI usage and estimated cost. Omit agentIds to compare every agent in the workspace, with at most 20 agents named.',
   input: z.object({
     from: z.string().datetime().optional(),
     to: z.string().datetime().optional(),
-    agentIds: z.array(AGENT_ID).max(50).optional().describe('Agents to compare; omit for all'),
+    agentIds: z.array(AGENT_ID).optional().describe(`Agents to compare; at most ${COMPARE_MAX_AGENTS}; omit for all`),
   }),
   output: z.object({ from: z.string(), to: z.string(), agents: z.array(AgentComparison) }),
   permission: 'audit:read',
   effect: 'read',
   handler: async (input, ctx) => {
+    if (input.agentIds && input.agentIds.length > COMPARE_MAX_AGENTS)
+      throw new AppError('invalid_input', `Compare at most ${COMPARE_MAX_AGENTS} agents; pass fewer ids.`);
     const to = input.to ? new Date(input.to) : new Date();
     const from = input.from ? new Date(input.from) : new Date(to.getTime() - 30 * 86_400_000);
     if (from >= to) throw new AppError('invalid_input', '`from` must be before `to`.');
+    if (to.getTime() - from.getTime() > COMPARE_MAX_WINDOW_DAYS * 86_400_000)
+      throw new AppError('invalid_input', `The comparison window is at most ${COMPARE_MAX_WINDOW_DAYS} days; narrow \`from\` and \`to\`.`);
     const agents = await ctx.tx
       .select({ id: schema.agents.id, name: schema.agents.name, status: schema.agents.status })
       .from(schema.agents)
@@ -1038,94 +1056,156 @@ export const compareAgents = defineCommand({
       if (missing.length) throw new AppError('not_found', `Agent ${missing.join(', ')} not found.`);
     }
     const t = schema.agentActions;
-    const compared: z.output<typeof AgentComparison>[] = [];
-    for (const agent of agents) {
-      const buckets = new Map<string, z.output<typeof MandateComparison>>();
-      const bucketOf = (mandateId: string | null, version: number | null) => {
-        const key = `${mandateId ?? ''}|${version ?? ''}`;
-        let b = buckets.get(key);
-        if (!b) {
-          b = { mandateId, version, validUntil: null, active: false, actions: {}, undone: 0, holds: { rejected: 0, ran: 0, pending: 0 } };
-          buckets.set(key, b);
-        }
-        return b;
-      };
-      const rows = await ctx.tx
-        .select({
-          mandateId: t.mandateId,
-          mandateVersion: t.mandateVersion,
-          actionClass: t.actionClass,
-          decision: t.decision,
-          // A refusal is recorded with ok = false: it is a deny, not a failure (#321).
-          failed: sql<number>`count(*) FILTER (WHERE NOT ${t.ok} AND ${t.decision} <> 'deny')::int`,
-          n: sql<number>`count(*) FILTER (WHERE ${t.ok} OR ${t.decision} = 'deny')::int`,
-          undone: sql<number>`count(*) FILTER (WHERE ${t.undoneAt} IS NOT NULL)::int`,
-        })
-        .from(t)
-        .where(and(eq(t.agentId, agent.id), gte(t.at, from), lt(t.at, to), sql`${t.command} <> 'artifacts.heldRecheck'`))
-        .groupBy(t.mandateId, t.mandateVersion, t.actionClass, t.decision);
-      for (const r of rows) {
-        const b = bucketOf(r.mandateId, r.mandateVersion);
-        const c = b.actions[r.actionClass] ?? { allow: 0, hold: 0, ask: 0, deny: 0, failed: 0 };
-        b.actions[r.actionClass] = c;
-        c[r.decision as 'allow' | 'hold' | 'ask' | 'deny'] += r.n;
-        c.failed += r.failed;
-        b.undone += r.undone;
+    const agentIds = agents.map((a) => a.id);
+    const now = new Date();
+    type Bucket = z.output<typeof MandateComparison>;
+    const bucketsByAgent = new Map<string, Map<string, Bucket>>();
+    const bucketsOf = (agentId: string) => {
+      let buckets = bucketsByAgent.get(agentId);
+      if (!buckets) {
+        buckets = new Map();
+        bucketsByAgent.set(agentId, buckets);
       }
-      // Holds are approval requests linked from the hold rows; their outcome is a person's veto or the window ending.
-      const holdRows = await ctx.tx
-        .select({
-          mandateId: t.mandateId,
-          mandateVersion: t.mandateVersion,
-          approvalId: sql<string | null>`${t.impact}->>'approvalId'`,
-        })
-        .from(t)
-        .where(and(eq(t.agentId, agent.id), eq(t.decision, 'hold'), gte(t.at, from), lt(t.at, to)));
-      const approvalIds = [...new Set(holdRows.map((r) => r.approvalId).filter((id): id is string => !!id))];
-      const approvals = approvalIds.length
-        ? await ctx.tx
-            .select({
-              id: schema.approvalRequests.id,
-              status: schema.approvalRequests.status,
-              decidedBy: schema.approvalRequests.decidedBy,
-            })
-            .from(schema.approvalRequests)
-            .where(inArray(schema.approvalRequests.id, approvalIds))
-        : [];
-      const approvalById = new Map(approvals.map((a) => [a.id, a]));
-      for (const r of holdRows) {
-        const b = bucketOf(r.mandateId, r.mandateVersion);
-        const a = r.approvalId ? approvalById.get(r.approvalId) : undefined;
-        if (a?.status === 'rejected') b.holds.rejected++;
-        else if (a?.status === 'approved' && a.decidedBy === 'policy:hold') b.holds.ran++;
-        else if (a?.status === 'pending') b.holds.pending++;
+      return buckets;
+    };
+    const bucketOf = (agentId: string, mandateId: string | null, version: number | null) => {
+      const buckets = bucketsOf(agentId);
+      const key = `${mandateId ?? ''}|${version ?? ''}`;
+      let b = buckets.get(key);
+      if (!b) {
+        b = { mandateId, version, validUntil: null, active: false, actions: {}, undone: 0, holds: { rejected: 0, ran: 0, pending: 0 } };
+        buckets.set(key, b);
       }
-      // The version's own validUntil, so a comparison across renewals shows which terms applied.
-      const mandateIds = [...new Set([...buckets.values()].map((b) => b.mandateId).filter((id): id is string => !!id))];
-      if (mandateIds.length) {
-        const versions = await ctx.tx
+      return b;
+    };
+
+    // Actions and holds for every compared agent in one grouped read each, instead of eight per agent (#489).
+    const actionRows = agentIds.length
+      ? await ctx.tx
           .select({
-            artifactId: schema.artifactVersions.artifactId,
-            number: schema.artifactVersions.number,
-            content: schema.artifactVersions.content,
+            agentId: t.agentId,
+            mandateId: t.mandateId,
+            mandateVersion: t.mandateVersion,
+            actionClass: t.actionClass,
+            decision: t.decision,
+            // A refusal is recorded with ok = false: it is a deny, not a failure (#321).
+            failed: sql<number>`count(*) FILTER (WHERE NOT ${t.ok} AND ${t.decision} <> 'deny')::int`,
+            n: sql<number>`count(*) FILTER (WHERE ${t.ok} OR ${t.decision} = 'deny')::int`,
+            undone: sql<number>`count(*) FILTER (WHERE ${t.undoneAt} IS NOT NULL)::int`,
           })
-          .from(schema.artifactVersions)
-          .where(inArray(schema.artifactVersions.artifactId, mandateIds));
-        const byVersion = new Map(versions.map((v) => [`${v.artifactId}|${v.number}`, v.content]));
+          .from(t)
+          .where(and(inArray(t.agentId, agentIds), gte(t.at, from), lt(t.at, to), sql`${t.command} <> 'artifacts.heldRecheck'`))
+          .groupBy(t.agentId, t.mandateId, t.mandateVersion, t.actionClass, t.decision)
+      : [];
+    for (const r of actionRows) {
+      const b = bucketOf(r.agentId, r.mandateId, r.mandateVersion);
+      const c = b.actions[r.actionClass] ?? { allow: 0, hold: 0, ask: 0, deny: 0, failed: 0 };
+      b.actions[r.actionClass] = c;
+      c[r.decision as 'allow' | 'hold' | 'ask' | 'deny'] += r.n;
+      c.failed += r.failed;
+      b.undone += r.undone;
+    }
+    // Holds are approval requests linked from the hold rows; their outcome is a person's veto or the window ending.
+    // A recheck row copies the hold it announces, so it must not count as a second hold (#470).
+    const holdRows = agentIds.length
+      ? await ctx.tx
+          .select({
+            agentId: t.agentId,
+            mandateId: t.mandateId,
+            mandateVersion: t.mandateVersion,
+            approvalId: sql<string | null>`${t.impact}->>'approvalId'`,
+          })
+          .from(t)
+          .where(
+            and(
+              inArray(t.agentId, agentIds),
+              eq(t.decision, 'hold'),
+              sql`${t.command} <> 'artifacts.heldRecheck'`,
+              gte(t.at, from),
+              lt(t.at, to),
+            ),
+          )
+      : [];
+    const approvalIds = [...new Set(holdRows.map((r) => r.approvalId).filter((id): id is string => !!id))];
+    const approvals = approvalIds.length
+      ? await ctx.tx
+          .select({
+            id: schema.approvalRequests.id,
+            status: schema.approvalRequests.status,
+            decidedBy: schema.approvalRequests.decidedBy,
+          })
+          .from(schema.approvalRequests)
+          .where(inArray(schema.approvalRequests.id, approvalIds))
+      : [];
+    const approvalById = new Map(approvals.map((a) => [a.id, a]));
+    for (const r of holdRows) {
+      const b = bucketOf(r.agentId, r.mandateId, r.mandateVersion);
+      const a = r.approvalId ? approvalById.get(r.approvalId) : undefined;
+      if (a?.status === 'rejected') b.holds.rejected++;
+      else if (a?.status === 'approved' && a.decidedBy === 'policy:hold') b.holds.ran++;
+      else if (a?.status === 'pending') b.holds.pending++;
+    }
+    // The version's own validUntil and current state, so a comparison across renewals shows which terms
+    // applied then and which authority is still in force now (#458).
+    const mandateIds = [
+      ...new Set(
+        [...bucketsByAgent.values()].flatMap((buckets) => [...buckets.values()].map((b) => b.mandateId)).filter((id): id is string => !!id),
+      ),
+    ];
+    if (mandateIds.length) {
+      const versions = await ctx.tx
+        .select({
+          artifactId: schema.artifactVersions.artifactId,
+          number: schema.artifactVersions.number,
+          content: schema.artifactVersions.content,
+          state: schema.artifactVersions.state,
+          archived: schema.artifacts.archived,
+          publishedVersion: schema.artifacts.publishedVersion,
+        })
+        .from(schema.artifactVersions)
+        .innerJoin(
+          schema.artifacts,
+          and(
+            eq(schema.artifacts.workspaceId, schema.artifactVersions.workspaceId),
+            eq(schema.artifacts.id, schema.artifactVersions.artifactId),
+          ),
+        )
+        .where(inArray(schema.artifactVersions.artifactId, mandateIds));
+      const byVersion = new Map(versions.map((v) => [`${v.artifactId}|${v.number}`, v]));
+      for (const buckets of bucketsByAgent.values())
         for (const b of buckets.values()) {
           if (!b.mandateId) continue;
-          const content = byVersion.get(`${b.mandateId}|${b.version}`) as { validUntil?: string } | undefined;
+          const version = byVersion.get(`${b.mandateId}|${b.version}`);
+          const content = version?.content as { validUntil?: string } | undefined;
           if (!content?.validUntil) continue;
           const until = new Date(content.validUntil);
           b.validUntil = until.toISOString();
-          b.active = until > new Date();
+          // In force now: the published, unarchived version itself, not merely an unexpired version (#458).
+          b.active = until > now && version?.state === 'published' && version.publishedVersion === b.version && version.archived === false;
         }
-      }
+    }
+    const episodesByAgent = new Map<string, { kind: string; action: string; n: number }[]>();
+    if (agentIds.length) {
       const episodes = await ctx.tx
-        .select({ kind: schema.guardianEvents.kind, action: schema.guardianEvents.action, n: sql<number>`count(*)::int` })
+        .select({
+          agentId: schema.guardianEvents.agentId,
+          kind: schema.guardianEvents.kind,
+          action: schema.guardianEvents.action,
+          n: sql<number>`count(*)::int`,
+        })
         .from(schema.guardianEvents)
-        .where(and(eq(schema.guardianEvents.agentId, agent.id), gte(schema.guardianEvents.at, from), lt(schema.guardianEvents.at, to)))
-        .groupBy(schema.guardianEvents.kind, schema.guardianEvents.action);
+        .where(and(inArray(schema.guardianEvents.agentId, agentIds), gte(schema.guardianEvents.at, from), lt(schema.guardianEvents.at, to)))
+        .groupBy(schema.guardianEvents.agentId, schema.guardianEvents.kind, schema.guardianEvents.action);
+      for (const e of episodes) {
+        const list = episodesByAgent.get(e.agentId) ?? [];
+        list.push({ kind: e.kind, action: e.action, n: e.n });
+        episodesByAgent.set(e.agentId, list);
+      }
+    }
+    const aiByAgent = await aiCostsOf(ctx.tx, agentIds, { from, to });
+    const compared: z.output<typeof AgentComparison>[] = [];
+    for (const agent of agents) {
+      const episodes = episodesByAgent.get(agent.id) ?? [];
       const mandate = await ctx.services.activeMandate?.(ctx.tx, agent.id);
       const goals = mandate?.view.goals ?? [];
       const outcomes = ctx.services.agentOutcomes
@@ -1145,8 +1225,8 @@ export const compareAgents = defineCommand({
             return acc;
           }, {}),
         },
-        ai: await aiCostOf(ctx.tx, agent.id, { from, to }),
-        mandates: [...buckets.values()].sort(
+        ai: aiByAgent.get(agent.id) ?? { calls: 0, inputTokens: 0, outputTokens: 0, cost: null },
+        mandates: [...(bucketsByAgent.get(agent.id)?.values() ?? [])].sort(
           (a, b) => (a.validUntil ?? '').localeCompare(b.validUntil ?? '') || (a.version ?? 0) - (b.version ?? 0),
         ),
       });

@@ -1,7 +1,7 @@
 import { clearAnalyticsCache } from '@agentic-marketing/analytics';
 import type { Permission } from '@agentic-marketing/commands';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { eventually, startTestServer, testPort, type User } from './harness';
+import { eventually, rejects, startTestServer, testPort, type User } from './harness';
 
 // Phase 22 (#428): compare agents side by side, renew mandates in one call, and put ad audiences
 // and conversions under a mandate's `ads` channel.
@@ -328,5 +328,162 @@ describe('ad audiences and conversions under a mandate (#428)', () => {
     expect((await agentCall(agent.token, 'artifacts.requestPublish', { artifactId: syncId, note: 'audience' })).body.status).toBe(
       'published',
     );
+  });
+});
+
+describe('renewal safety and reporting (#455, #472, #482)', () => {
+  let api: ReturnType<typeof t.api>;
+  let ws = '';
+  const mandates: string[] = [];
+
+  beforeAll(async () => {
+    ws = await t.workspaceWith([[owner, 'owner']], 'none');
+    api = t.api(owner, ws);
+    await api.call('workspace.setAutonomy', { maxLevel: { 'send.broadcast': 3 } });
+    for (let i = 0; i < 3; i++) {
+      const agent = await makeAgent(api, `Renewal safety agent ${i + 1}`, ['artifacts:read', 'artifacts:write']);
+      mandates.push(await grantMandate(api, agent.agentId, `Renewal safety mandate ${i + 1}`, { validUntil: inDays(10 + i * 10) }));
+    }
+  }, 90_000);
+
+  it('refuses a mandate with an unpublished draft instead of replacing and publishing it (#455)', async () => {
+    const agent = await makeAgent(api, 'Draft renew agent', ['artifacts:read', 'artifacts:write']);
+    const mandate = await grantMandate(api, agent.agentId, 'Draft renew mandate', {
+      levels: { 'send.broadcast': 3 },
+      validUntil: inDays(20),
+    });
+    const before = await api.call('artifacts.get', { artifactId: mandate });
+    const content = before.version.content as Record<string, unknown> & { levels: Record<string, number> };
+    // A pending safety change: reduce the level; renewal must not discard it.
+    await api.call('artifacts.updateDraft', {
+      artifactId: mandate,
+      content: { ...content, levels: { ...content.levels, 'send.broadcast': 0 } } as never,
+      note: 'Pending safety review',
+    });
+
+    const out = await api.call('agents.renewMandates', { mandateIds: [mandate], validUntil: inDays(200), note: 'Quarterly review' });
+    expect(out.renewed[0]).toMatchObject({ ok: false, status: null, error: expect.stringMatching(/unpublished|discard/i) });
+
+    const after = await api.call('artifacts.get', { artifactId: mandate });
+    expect(after.publishedVersion).toBe(1);
+    expect(after.latestVersion).toBe(2);
+    expect((after.version.content as { levels: Record<string, number> }).levels['send.broadcast']).toBe(0);
+  });
+
+  it('rejects a validUntil in the past or more than a year away (#472)', async () => {
+    const past = await rejects(api.call('agents.renewMandates', { mandateIds: [mandates[0]], validUntil: inDays(-1), note: 'typo' }));
+    expect(past.code).toBe('invalid_input');
+    expect(JSON.stringify(past.details)).toMatch(/future/i);
+    const far = await rejects(api.call('agents.renewMandates', { mandateIds: [mandates[0]], validUntil: inDays(400), note: 'too long' }));
+    expect(far.code).toBe('invalid_input');
+    expect(JSON.stringify(far.details)).toMatch(/year|366/i);
+    // Neither rejected call published anything.
+    expect((await api.call('artifacts.get', { artifactId: mandates[0] })).publishedVersion).toBe(1);
+  });
+
+  it('reports a recently expired mandate as negative and sorts newest expiry first (#482)', async () => {
+    await t.srv.db.admin.query(
+      `UPDATE artifact_versions SET content = jsonb_set(content, '{validUntil}', to_jsonb($2::text))
+       WHERE workspace_id = $1 AND artifact_id = $3 AND number = 1`,
+      [ws, new Date(Date.now() - 3_600_000).toISOString(), mandates[1]],
+    );
+    const listed = await api.call('agents.renewals', { withinDays: 365 });
+    const expired = listed.renewals.find((r) => r.mandateId === mandates[1]);
+    expect(expired).toMatchObject({ expired: true });
+    expect(expired!.daysLeft).toBeLessThan(0);
+    // Newest expiry first, as the description promises.
+    const expiries = listed.renewals.map((r) => r.validUntil);
+    expect(expiries).toEqual([...expiries].sort().reverse());
+  });
+});
+
+describe('comparison bounds and hold counting (#470, #489)', () => {
+  let api: ReturnType<typeof t.api>;
+  let ws = '';
+  let agent: Agent;
+  let mandate = '';
+
+  beforeAll(async () => {
+    ws = await t.workspaceWith([[owner, 'owner']], 'none');
+    api = t.api(owner, ws);
+    await api.call('workspace.setAutonomy', { maxLevel: { 'send.broadcast': 3 } });
+    agent = await makeAgent(api, 'Hold count agent', ['artifacts:read', 'artifacts:write']);
+    mandate = await grantMandate(api, agent.agentId, 'Hold count mandate', { levels: { 'send.broadcast': 2 } });
+  }, 90_000);
+
+  it('counts one hold once when its recheck row is in the window (#470)', async () => {
+    const approvalId = 'apr_00000000000000000000000000000070';
+    const impact = JSON.stringify({ approvalId });
+    await t.srv.db.admin.query(
+      `INSERT INTO approval_requests (workspace_id, id, artifact_id, version, status, requested_by_type, requested_by_id, note)
+       VALUES ($1, $2, $3, 1, 'pending', 'agent', $4, 'held')`,
+      [ws, approvalId, mandate, agent.agentId],
+    );
+    for (const command of ['artifacts.requestPublish', 'artifacts.heldRecheck'])
+      await t.srv.db.admin.query(
+        `INSERT INTO agent_actions (workspace_id, agent_id, command, action_class, decision, impact, ok, target, surface, mandate_id, mandate_version, at)
+         VALUES ($1, $2, $3, 'send.broadcast', 'hold', $4::jsonb, true, $5, 'internal', $6, 1, now())`,
+        [ws, agent.agentId, command, impact, mandate, mandate],
+      );
+
+    const now = new Date();
+    const compared = await api.call('agents.compare', {
+      agentIds: [agent.agentId],
+      from: new Date(now.getTime() - 3_600_000).toISOString(),
+      to: new Date(now.getTime() + 3_600_000).toISOString(),
+    });
+    const bucket = compared.agents[0]!.mandates.find((m) => m.mandateId === mandate);
+    expect(bucket?.actions['send.broadcast']).toMatchObject({ hold: 1 });
+    expect(bucket?.holds).toEqual({ rejected: 0, ran: 0, pending: 1 });
+  });
+
+  it('bounds the agent count and the comparison window (#489)', async () => {
+    const many = Array.from({ length: 21 }, (_, i) => `agt_${String(i).padStart(32, '0')}`);
+    const tooMany = await rejects(api.call('agents.compare', { agentIds: many }));
+    expect(tooMany.message).toMatch(/at most 20/i);
+    const tooLong = await rejects(
+      api.call('agents.compare', {
+        from: new Date(Date.now() - 400 * 86_400_000).toISOString(),
+        to: new Date().toISOString(),
+      }),
+    );
+    expect(tooLong.message).toContain('366');
+  });
+});
+
+describe('comparison active flags across versions (#458)', () => {
+  let api: ReturnType<typeof t.api>;
+  let ws = '';
+  let agent: Agent;
+  let mandate = '';
+
+  beforeAll(async () => {
+    ws = await t.workspaceWith([[owner, 'owner']], 'none');
+    api = t.api(owner, ws);
+    agent = await makeAgent(api, 'Compare versions agent', ['artifacts:read', 'artifacts:write']);
+    mandate = await grantMandate(api, agent.agentId, 'Compare versions mandate', { validUntil: inDays(30) });
+  }, 90_000);
+
+  it('marks only the published version still in force as active (#458)', async () => {
+    const from = new Date(Date.now() - 3_600_000);
+    const to = new Date(Date.now() + 60_000);
+    const draft = (name: string) =>
+      agentCall(agent.token, 'artifacts.create', { type: 'note', name, content: { title: name, body: 'Action' } });
+
+    expect((await draft('Under v1')).status).toBe(200);
+    expect((await api.call('agents.renewMandates', { mandateIds: [mandate], validUntil: inDays(60), note: 'Renew' })).renewed[0]?.ok).toBe(
+      true,
+    );
+    expect((await draft('Under v2')).status).toBe(200);
+
+    const compared = await api.call('agents.compare', { agentIds: [agent.agentId], from: from.toISOString(), to: to.toISOString() });
+    const versions = compared.agents[0]!.mandates;
+    expect(versions.find((v) => v.version === 1)).toMatchObject({ active: false, validUntil: expect.any(String) });
+    expect(versions.find((v) => v.version === 2)).toMatchObject({ active: true });
+
+    // Archiving the artifact takes its published version out of force too.
+    await t.srv.db.admin.query(`UPDATE artifacts SET archived = true WHERE workspace_id = $1 AND id = $2`, [ws, mandate]);
+    const archived = await api.call('agents.compare', { agentIds: [agent.agentId], from: from.toISOString(), to: to.toISOString() });
+    expect(archived.agents[0]!.mandates.find((v) => v.version === 2)?.active).toBe(false);
   });
 });

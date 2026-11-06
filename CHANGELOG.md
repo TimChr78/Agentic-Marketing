@@ -8,6 +8,18 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 
 ### Fixed
 
+- Bulk mandate renewal renews from the published version and refuses a mandate that has an unpublished draft instead of replacing and publishing it; a draft created concurrently fails the renewal with a conflict (#455).
+- `agents.compare` marks only the mandate version that is published and unarchived now as active, so superseded or archived versions are not shown as still in force (#458).
+- A held agent change re-checks ownership and conflicts when its veto window ends; if another agent now owns the artifact or has a pending change, the hold goes to a person instead of running (#469).
+- `agents.compare` counts a hold once when its working-hours recheck row is also in the period (#470).
+- Coordination checks and `artifacts.setOwner` lock the artifact row before deciding, so a change cannot race an ownership transfer (#471).
+- `agents.renewMandates` rejects a `validUntil` in the past or more than a year away, matching its schema (#472).
+- `agents.renewals` reports a recently expired mandate as a negative number of days and sorts newest expiry first, as documented (#482).
+- `agents.runFailures` and the contact-pressure count have supporting indexes, and finished hosted-agent runs are removed after `RETENTION_HOSTED_AGENT_RUN_DAYS` (default 90) (#488).
+- `agents.compare` is bounded to 20 named agents and a 366-day window, and reads the agent ledger, holds, mandates, guardian events and AI usage in grouped queries instead of about eight per agent (#489).
+
+### Fixed
+
 - Broadcast segment and template names refresh after a change instead of keeping the old name for the rest of the session (#459).
 - The shared broadcast name cache is dropped on artifact create, rename, delete and publish, with a short time limit as a backstop (#486).
 - The sidebar pending badge counts decisions, so a bundle counts once, exactly as on Approvals (#483).
