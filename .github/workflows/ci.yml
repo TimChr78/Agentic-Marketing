@@ -289,14 +289,18 @@ jobs:
           package-manager-cache: false
       - run: corepack enable
       - run: pnpm install --frozen-lockfile --filter "./packages/**" --filter "./apps/**" --filter "agentic-marketing"
-      - id: playwright
-        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}
-      - run: npx playwright install --with-deps chromium
-      - run: pnpm e2e:visual
+      # The baselines are recorded in the official Playwright image, so CI compares in the same image:
+      # the runner's own fonts and Chromium render text a few pixels differently on every route.
+      # The seeded server runs on the runner; the browser runs in the image on the host network.
+      - run: pnpm --filter @agentic-marketing/web build:live
+      - run: (npx tsx apps/server/test/e2e/server.ts > e2e-server.log 2>&1 &)
+      - run: |
+          for i in $(seq 1 120); do curl -sf http://localhost:3101/ready && exit 0; sleep 2; done
+          cat e2e-server.log; exit 1
+      - run: >-
+          docker run --rm --network host -v "$PWD":"$PWD" -w "$PWD" -e E2E_BASE=http://localhost:3100
+          mcr.microsoft.com/playwright:v$(node -p "require('@playwright/test/package.json').version")-noble
+          npx playwright test -c playwright.visual.config.ts
       # Baselines are never updated here: an update is a reviewed commit (`--update-snapshots`).
       - if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
