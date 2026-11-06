@@ -6,6 +6,8 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 
 ### Added
 
+- Home at `/` (#447): a role-ordered page of what needs attention (pending reviews and holds from one approvals page, firing alerts, guardian caps and recent failed hosted runs), what is running (scheduled and sending broadcasts, live journeys and active agents) and how e-mail is going (sent, delivered, clicked and click rate for the last seven complete local days, with a same-length comparison). Every block loads and fails independently from bounded reads; restricted roles get no read or block they cannot use. A derived setup checklist for a new brand reads the published brand, marketing provider, verified primary link domain and audience from current state, and can be hidden per person and device. The sending-DNS advisory is separate and never blocks completion.
+
 - `broadcasts.list` returns the operational rows a broadcast list needs in one read: each broadcast's run (status, counts, times and error), the segment and template it is pinned to, the staged send's stage and stop reason, and its messages by current status. Filter by run status before paging, and follow `nextCursor` for the filtered `total`. `broadcasts.status` keeps its output and shares the same run, stage and delivery projection.
 - `agents.runFailures` lists recent failed hosted runs across every agent since a given time, newest first, with each agent's name, summary and error. It is a bounded failure queue, not an incident lifecycle.
 - `approvals.list` adds `total` for the same status and artifact filter (including held rows) and a `nextCursor`, so the approvals destination can page the whole queue. Bundle member resolution and the existing list output are unchanged.
