@@ -181,9 +181,10 @@ export function LineChart({ labels, series, area, height = 240, unit, formatValu
   const plotted = series.slice(0, 3);
   const format = formatValue ?? ((v: number | null) => withUnit(v, unit));
   const option = (c: ChartColors): EChartsOption => ({
-    tooltip: { trigger: 'axis' },
-    // Reserve the right inset for the direct end labels and keep the x labels inside the plot.
-    grid: { left: 48, right: 112, top: 16, bottom: 32 },
+    tooltip: { trigger: 'axis', valueFormatter: (v: unknown) => format(typeof v === 'number' ? v : null) },
+    // The right inset for the direct end labels comes from the chart wrapper (88 px on phones,
+    // 112 px otherwise); merging keeps it.
+    grid: { left: 48, top: 16, bottom: 32 },
     xAxis: {
       type: 'category',
       data: labels,
@@ -211,11 +212,13 @@ export function LineChart({ labels, series, area, height = 240, unit, formatValu
         type: 'line',
         smooth: false,
         showSymbol: points <= 12,
-        symbol: 'circle',
+        // A second and third series differ by dash and marker as well as colour (DESIGN.md → Chart
+        // contract), so the plot reads without colour.
+        symbol: (['circle', 'rect', 'triangle'] as const)[i % 3],
         symbolSize: 6,
         connectNulls: false,
         data: s.values,
-        lineStyle: { width: 2, color, type: s.dashed ? 'dashed' : 'solid' },
+        lineStyle: { width: 2, color, type: s.dashed ? 'dashed' : (['solid', 'dashed', 'dotted'] as const)[i % 3] },
         itemStyle: { color },
         areaStyle: area || s.area ? { color, opacity: 0.08 } : undefined,
         labelLayout: { moveOverlap: 'shiftY', hideOverlap: false },
@@ -237,7 +240,7 @@ export function LineChart({ labels, series, area, height = 240, unit, formatValu
     <ChartBlockShell
       {...p}
       dataState={state}
-      table={<DataTable title={p.title} labels={labels} series={plotted} format={format} unit={unit} state={state} />}
+      table={<DataTable title={p.title} labels={labels} series={series} format={format} unit={unit} state={state} />}
     >
       {state === 'populated' ? (
         <>
@@ -275,7 +278,7 @@ export function BarChart({ data, ordered, height = 240, unit, formatValue, dataS
   const shown = sorted.slice(0, 8);
   const format = formatValue ?? ((v: number | null) => withUnit(v, unit));
   const option = (c: ChartColors): EChartsOption => ({
-    tooltip: { trigger: 'axis' },
+    tooltip: { trigger: 'axis', valueFormatter: (v: unknown) => format(typeof v === 'number' ? v : null) },
     xAxis: {
       type: 'value',
       splitNumber: 3,

@@ -69,6 +69,8 @@ for (const name of matrixNames()) {
       await primePage(page, { theme, width: 1440 });
       await page.goto(route.path);
       await settle(page);
+      // A signed-out route must show its form, not the app (#442 review).
+      if (route.signedOut) await expect(page.getByLabel(/e-mail/i).first()).toBeVisible();
 
       // Preview frames are sandboxed renders of what subscribers see (an e-mail, a hosted page),
       // not admin UI: axe does not scan them. Traversing an opaque-origin frame crashes Chromium in

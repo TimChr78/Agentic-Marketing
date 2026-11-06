@@ -65,7 +65,9 @@ describe('broadcast operational state (#437)', () => {
       icon: 'clock',
     });
     expect(run('running')).toMatchObject({ key: 'sending', label: 'Sending', tone: 'info', icon: 'arrow' });
-    expect(run('done')).toMatchObject({ key: 'sent', label: 'Sent', tone: 'good', icon: 'check' });
+    // Without message counts a finished run only proves the messages were queued (#442 review).
+    expect(run('done')).toMatchObject({ key: 'queued', label: 'Queued', tone: 'info' });
+    expect(run('done', {})).toMatchObject({ key: 'queued' });
     expect(run('cancelled')).toMatchObject({ key: 'cancelled', label: 'Cancelled', tone: 'neutral', icon: 'square' });
     expect(run('stopped', { error: 'The provider refused the run.' })).toMatchObject({
       key: 'stopped',
@@ -139,8 +141,24 @@ describe('journey, experience and form operational states (#437)', () => {
     expect(stateOfJourney(journey('draft', 4))).toMatchObject({ key: 'live', label: 'Live', detail: 'Unpublished changes' });
   });
 
-  it('shows an in-review draft against the live version', () => {
-    expect(stateOfJourney(journey('in_review', 4)).detail).toMatch(/live version is still v4/i);
+  it('keeps a live artifact live while a replacement is in review or was rejected', () => {
+    expect(stateOfJourney(journey('in_review', 4))).toMatchObject({ key: 'live', label: 'Live', tone: 'good' });
+    expect(stateOfJourney(journey('in_review', 4)).detail).toMatch(/v4 stays live/i);
+    expect(stateOfJourney(journey('rejected', 4))).toMatchObject({ key: 'live', label: 'Live' });
+    expect(stateOfJourney(journey('rejected', 4)).detail).toMatch(/rejected; v4 is still live/i);
+    // Never published: the review state is the state.
+    expect(stateOfJourney(journey('in_review', null))).toMatchObject({ key: 'in_review', label: 'In review' });
+    expect(stateOfJourney(journey('rejected', null))).toMatchObject({ key: 'rejected', label: 'Rejected' });
+  });
+
+  it('says sent only when providers accepted messages, and delivering while some wait', () => {
+    const done = (messages: Record<string, number>) =>
+      stateOfBroadcast({ ...artifact('published', 2), run: { status: 'done' }, messages, now: NOW });
+    expect(done({ queued: 5, sent: 95 })).toMatchObject({ key: 'delivering', label: 'Delivering' });
+    expect(done({ sent: 40, delivered: 60 })).toMatchObject({ key: 'sent', label: 'Sent', tone: 'good' });
+    expect(done({ delivered: 90, failed: 10 })).toMatchObject({ key: 'sent', tone: 'warn' });
+    expect(done({ failed: 3 })).toMatchObject({ key: 'failed', label: 'Failed', tone: 'bad' });
+    expect(done({})).toMatchObject({ key: 'sent_none', label: 'Nobody to send to' });
   });
 
   it('maps experiences and forms, including a paused one', () => {

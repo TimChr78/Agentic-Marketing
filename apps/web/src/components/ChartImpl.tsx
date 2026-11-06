@@ -47,7 +47,7 @@ export default function ChartImpl({ option, height = 240, deps = [] }: ChartProp
     const chart = echarts.init(el.current, undefined, { renderer: 'svg' });
     const c = readColors();
     const chartHeight = mobile ? 200 : height;
-    chart.setOption({
+    const base: Record<string, unknown> = {
       animation: false,
       textStyle: { ...label, color: c.muted, fontFamily: FONT },
       // Quiet grid: at most four horizontal lines, no vertical grid and no bounding axis box.
@@ -74,8 +74,18 @@ export default function ChartImpl({ option, height = 240, deps = [] }: ChartProp
         extraCssText: 'box-shadow: var(--shadow-1); border-radius: 8px; max-width: 280px;',
       },
       aria: { enabled: true },
-      ...optionRef.current(c),
-    });
+    };
+    // A caller's option merges into the themed defaults one level deep, so `tooltip: { trigger }`
+    // keeps the tooltip's colours and type instead of replacing them (#442 review).
+    const own = optionRef.current(c) as Record<string, unknown>;
+    for (const [key, value] of Object.entries(own)) {
+      const prev = base[key];
+      base[key] =
+        prev && value && typeof prev === 'object' && typeof value === 'object' && !Array.isArray(prev) && !Array.isArray(value)
+          ? { ...(prev as object), ...(value as object) }
+          : value;
+    }
+    chart.setOption(base);
     chart.resize({ height: chartHeight });
     const ro = new ResizeObserver(() => chart.resize({ height: chartHeight }));
     ro.observe(el.current);

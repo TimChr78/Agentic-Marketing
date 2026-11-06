@@ -38,6 +38,7 @@ export function BroadcastStatePill({
     publishedVersion,
     run: status.data?.run ?? null,
     stage: status.data?.stage ?? null,
+    messages: status.data?.messages ?? null,
   });
   return (
     <span title={state.detail}>

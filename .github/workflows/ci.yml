@@ -367,12 +367,13 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}
       - run: npx playwright install --with-deps chromium
-      # The script talks to a running seeded server, so build the UI, start it and wait for /healthz.
+      # The script talks to a running seeded server, so build the UI, start it and wait until the
+      # seed has finished (/ready on the fixtures port; /healthz answers before seeding is done).
       - run: |
           pnpm --filter @agentic-marketing/web build:live
           E2E_PORT=3100 E2E_DB=e2e_shots npx tsx apps/server/test/e2e/server.ts > server.log 2>&1 &
-          for i in $(seq 1 90); do curl -sf http://localhost:3100/healthz > /dev/null && break; sleep 2; done
-          curl -sf http://localhost:3100/healthz
+          for i in $(seq 1 120); do curl -sf http://localhost:3101/ready > /dev/null && break; sleep 2; done
+          curl -sf http://localhost:3101/ready || { cat server.log; exit 1; }
           node e2e/screenshots.mjs reports/screenshots
       - if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

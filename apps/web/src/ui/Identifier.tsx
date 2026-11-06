@@ -98,7 +98,7 @@ export function Identifier({
         onClick={copy}
         aria-label={`Copy ID ${value}`}
         title={`Copy ID ${value}`}
-        className="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-fg-2 hover:bg-surface-2 hover:text-fg pointer-coarse:size-10"
+        className="inline-flex size-10 shrink-0 items-center justify-center rounded-md text-fg-2 hover:bg-surface-2 hover:text-fg pointer-coarse:size-10 md:size-7"
       >
         {copied ? <Check size={14} strokeWidth={1.75} aria-hidden /> : <Copy size={14} strokeWidth={1.75} aria-hidden />}
       </button>

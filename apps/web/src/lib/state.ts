@@ -41,6 +41,8 @@ export interface BroadcastStageView {
 
 export interface BroadcastStateInput extends ArtifactStateInput {
   run?: BroadcastRunView | null;
+  /** Message counts by status from `broadcasts.status` (queued, sending, sent, delivered, failed…). */
+  messages?: Record<string, number> | null;
   stage?: BroadcastStageView | null;
   /** Injectable for tests and fixed-clock screenshots. */
   now?: Date;
@@ -80,24 +82,23 @@ const parseDate = (value: string | null | undefined): Date | null => {
  */
 function publicationState(input: ArtifactStateInput, live: { key: string; label: string; icon: OperationalIcon }): OperationalState {
   const { latestState, publishedVersion } = input;
+  // A published version keeps serving whatever happens to a newer one, so live wins; the
+  // replacement's review, rejection or draft is secondary detail (#442 review).
+  if (publishedVersion !== null) {
+    const pending =
+      latestState === 'in_review'
+        ? `A new version is in review; v${publishedVersion} stays live until it is approved.`
+        : latestState === 'rejected'
+          ? `A newer version was rejected; v${publishedVersion} is still live.`
+          : latestState === 'draft'
+            ? 'Unpublished changes'
+            : undefined;
+    return { key: live.key, label: live.label, tone: 'good', icon: live.icon, detail: pending };
+  }
   if (latestState === 'rejected') return { key: 'rejected', label: 'Rejected', tone: 'bad', icon: 'octagon' };
-  if (latestState === 'in_review')
-    return {
-      key: 'in_review',
-      label: 'In review',
-      tone: 'warn',
-      icon: 'clock',
-      detail: publishedVersion !== null ? `The live version is still v${publishedVersion} until this is approved.` : undefined,
-    };
+  if (latestState === 'in_review') return { key: 'in_review', label: 'In review', tone: 'warn', icon: 'clock' };
   if (latestState === 'superseded') return { key: 'superseded', label: 'Superseded', tone: 'neutral', icon: 'square' };
-  if (latestState === 'published' || publishedVersion !== null)
-    return {
-      key: live.key,
-      label: live.label,
-      tone: 'good',
-      icon: live.icon,
-      detail: latestState === 'published' ? undefined : 'Unpublished changes',
-    };
+  if (latestState === 'published') return { key: live.key, label: live.label, tone: 'good', icon: live.icon };
   return { key: 'draft', label: 'Draft', tone: 'neutral', icon: 'dot' };
 }
 
@@ -116,10 +117,47 @@ export function stateOfBroadcast(input: BroadcastStateInput): OperationalState {
     switch (run.status) {
       case 'running':
         return { key: 'sending', label: 'Sending', tone: 'info', icon: 'arrow' };
-      case 'done':
-        // `done` means the run was prepared and its messages queued, not that every provider send
-        // and delivery has finished.
-        return { key: 'sent', label: 'Sent', tone: 'good', icon: 'check', detail: 'Messages were queued for this send.' };
+      case 'done': {
+        // `done` means every recipient was processed and its message queued, not that a provider
+        // accepted it. Only the message counts can say "sent"; without them the claim is "queued".
+        const m = input.messages;
+        const n = (k: string) => m?.[k] ?? 0;
+        if (!m)
+          return {
+            key: 'queued',
+            label: 'Queued',
+            tone: 'info',
+            icon: 'clock',
+            detail: 'Every recipient was queued; delivery results are not loaded.',
+          };
+        const pending = n('queued') + n('sending');
+        const accepted = n('sent') + n('delivered') + n('bounced') + n('complained');
+        if (pending > 0)
+          return {
+            key: 'delivering',
+            label: 'Delivering',
+            tone: 'info',
+            icon: 'arrow',
+            detail: `${pending.toLocaleString('en-US')} messages still waiting for the provider.`,
+          };
+        if (accepted > 0)
+          return {
+            key: 'sent',
+            label: 'Sent',
+            tone: n('failed') > 0 ? 'warn' : 'good',
+            icon: 'check',
+            detail: n('failed') > 0 ? `${n('failed').toLocaleString('en-US')} messages failed.` : undefined,
+          };
+        if (n('failed') > 0)
+          return { key: 'failed', label: 'Failed', tone: 'bad', icon: 'octagon', detail: 'No message was accepted by the provider.' };
+        return {
+          key: 'sent_none',
+          label: 'Nobody to send to',
+          tone: 'neutral',
+          icon: 'square',
+          detail: 'The run found no eligible recipients.',
+        };
+      }
       case 'scheduled': {
         const sendAt = parseDate(run.sendAt);
         const now = input.now ?? new Date();

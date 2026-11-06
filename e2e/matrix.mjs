@@ -132,8 +132,8 @@ export function detailRoutes(ids = {}) {
 
 /** Signed-out screens: the sign-in page is `/` without a session, plus the password reset request. */
 export const SIGNED_OUT = [
-  { name: 'signin', path: '/' },
-  { name: 'forgot-password', path: '/forgot-password' },
+  { name: 'signin', path: '/', signedOut: true },
+  { name: 'forgot-password', path: '/forgot-password', signedOut: true },
 ];
 
 /** Every route name, in order, whether or not this seed has a fixture for it. */

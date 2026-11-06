@@ -141,6 +141,10 @@ export default function AnalyticsPage() {
       })()
     : null;
   const xLabels = (data?.rows ?? []).map((row) => String(row[timeIndex]));
+  // A breakdown beside the time grain (Day + Broadcast) returns several rows per day; one line
+  // through them would join different broadcasts as if they were one series. Until grouped
+  // series exist, such a query shows the table only (#442 review).
+  const brokenDown = columns.some((c, i) => i !== timeIndex && !TIME_DIMENSIONS.has(c.name) && dimensions.includes(c.name));
 
   return (
     <div className={pageWidth('default')}>
@@ -205,6 +209,10 @@ export default function AnalyticsPage() {
         <Alert tone="bad" title="Couldn't run the query" onRetry={result.reload} className="mb-5">
           {result.error}
         </Alert>
+      ) : timeDimension && brokenDown && (data?.rows.length ?? 0) > 0 ? (
+        <p className="mb-5 text-[13px] leading-5 text-muted">
+          With a breakdown besides the time grain, the results are in the table below; a chart would join different groups into one line.
+        </p>
       ) : timeDimension && (data?.rows.length ?? 0) > 0 ? (
         <div className="mb-5 space-y-8">
           {/* Each chart is an h3; this keeps the page's heading order h1 → h2 → h3. */}

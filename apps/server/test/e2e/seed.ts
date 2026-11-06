@@ -1788,9 +1788,21 @@ export async function seed(t: T, opts: { confirmedUrl?: string; now?: Date } = {
       addDays(now, -20).toISOString(),
     ]);
 
-  // Make the people page look lived-in: activity times spread across the past month.
+  // Make the people page look lived-in: activity times spread across the past month. The time comes
+  // from the person's e-mail, not the random profile id, and every one is distinct, so the first
+  // page of People (most recent first) is the same rows in the same order on every seed (#442 review).
   const lastSeen = new Map<string, Date>();
-  for (const profileId of audience) lastSeen.set(profileId, addDays(now, -(1 + (Number.parseInt(hashId(profileId).slice(0, 4), 16) % 25))));
+  const byEmail = [...profileOf.entries()].sort(([a], [b]) => a.localeCompare(b));
+  const rank = new Map(byEmail.map(([, profileId], i) => [profileId, i]));
+  for (const profileId of audience) {
+    const i = rank.get(profileId);
+    lastSeen.set(
+      profileId,
+      i === undefined
+        ? addDays(now, -(26 + (Number.parseInt(hashId(profileId).slice(0, 4), 16) % 4)))
+        : addMinutes(now, -(60 + ((i * 7919) % byEmail.length) * 71)),
+    );
+  }
   await t.srv.db.admin.query(
     `UPDATE profiles p SET first_seen = x.first_seen, last_seen = x.last_seen, created_at = x.first_seen, updated_at = x.last_seen
      FROM jsonb_to_recordset($2::jsonb) AS x(id text, first_seen timestamptz, last_seen timestamptz)
