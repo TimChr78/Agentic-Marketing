@@ -2,6 +2,17 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+### Fixed
+
+- An agent can no longer restart a ramp a person stopped by republishing the experience, its metadata or an un-ramped version; only a person’s resume or republish starts it again, and the stop records who made it (#454).
+- A guardrail pause e-mail is sent after the pause commits, from a durable pause row and keyed by that pause, so a later failure no longer rolls the pause back and re-sends it (#473).
+- Each ramp is swept in its own transaction: one ramp’s failing guardrail read records an error on that ramp and freezes only it, instead of aborting every due ramp in the workspace (#474).
+- A mandate’s `learning.experienceRamp` requires at least two steps, a first step below 100% and a guardrail, so a one-step `[100]` rollout no longer satisfies it (#475).
+- `experience.rollout_paused` is delivered from a durable pause row, so a `stopRollout` before the event sweep no longer drops the pause agents were waiting for (#476).
+- `experiences.stopRollout` pushes the stopped bundle to Cloudflare KV before it returns; the remaining delay is the worker’s isolate cache and KV propagation, now stated truthfully in the command and the docs instead of “at once” (#477).
+
 ## [0.10.0] - 2026-11-06
 
 ### Added
