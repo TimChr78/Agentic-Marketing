@@ -1,6 +1,6 @@
 # Roadmap, wave 5: polish (plan 2026-11-05)
 
-> **Status: Phase 23 built in 0.9.0 (epic #439, tracker #440); Phase 24 next.** Reviewed against fresh screenshots of every screen and by a second
+> **Status: Phase 23 built in 0.9.0 (tracker #440), Phase 24 in 0.10.0 (#449); Phase 25 next.** Reviewed against fresh screenshots of every screen and by a second
 > model (GPT-6.1 Sol); its findings are folded in below.
 
 Waves 1–4 built the product: artifacts, channels, journeys, analytics, and agents that work under
@@ -111,7 +111,7 @@ Each phase ships as a release. Sizes are in working sessions (S ≈ 1, M ≈ 2�
 | Phase | Theme | Size | Done means |
 |---|---|---|---|
 | **23** ✅ (0.9.0) | Baselines and foundations | L | Screenshot matrix, visual regression and axe run in CI on deterministic, rich fixtures; state semantics and labels exist as shared code; shared controls meet touch targets; the listed defects are gone |
-| **24** | Shell, navigation and home | L | The target IA with redirects; a minimal actionable Home; Broadcasts list and detail rebuilt as the reference list/detail pair |
+| **24** ✅ (0.10.0) | Shell, navigation and home | L | The target IA with redirects; a minimal actionable Home; Broadcasts list and detail rebuilt as the reference list/detail pair |
 | **25** | Broadcast → review → send | L | One coherent workspace to compose, review and send a broadcast, with the consequence summary first and a report after the send |
 | **26** | Truthful insights | L | Analytics answers preset questions with charts; journeys, deliverability, agents and people show state and trends without raw keys or false "ok" |
 | **27** | Remaining families and recipient surfaces | L | Every remaining screen family on the templates; hosted pages and starter e-mails redesigned; demo parity |
