@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { api, type Out } from '../../app/api';
 import { useCrumbs } from '../../app/page';
 import { useApi } from '../../app/useApi';
+import { hasBreakdown, TIME_DIMENSIONS } from '../../lib/breakdown';
 import {
   ANALYTICS_MEASURES,
   dimensionDescription,
@@ -37,7 +38,6 @@ type Column = Result['columns'][number];
 type MeasureColumn = Column & { index: number };
 type TimeDimension = 'day' | 'week' | 'month';
 
-const TIME_DIMENSIONS = new Set(['day', 'week', 'month']);
 const DEFAULT_MEASURES = ['email.sent', 'email.delivered', 'email.click_rate'];
 const UNIT_ORDER: MetricUnit[] = ['count', 'ratio', 'currency'];
 const UNIT_TITLE: Record<MetricUnit, string> = {
@@ -142,9 +142,11 @@ export default function AnalyticsPage() {
     : null;
   const xLabels = (data?.rows ?? []).map((row) => String(row[timeIndex]));
   // A breakdown beside the time grain (Day + Broadcast) returns several rows per day; one line
-  // through them would join different broadcasts as if they were one series. Until grouped
-  // series exist, such a query shows the table only (#442 review).
-  const brokenDown = columns.some((c, i) => i !== timeIndex && !TIME_DIMENSIONS.has(c.name) && dimensions.includes(c.name));
+  // through them would join different broadcasts as if they were one series. Every returned
+  // dimension counts, including the `currency` the compiler adds to revenue queries, so Day/USD
+  // and Day/EUR are never one line. Until grouped series exist, such a query shows the table only
+  // (#442 review).
+  const brokenDown = hasBreakdown(columns);
 
   return (
     <div className={pageWidth('default')}>

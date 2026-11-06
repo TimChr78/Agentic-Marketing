@@ -152,12 +152,15 @@ describe('journey, experience and form operational states (#437)', () => {
   });
 
   it('says sent only when providers accepted messages, and delivering while some wait', () => {
-    const done = (messages: Record<string, number>) =>
-      stateOfBroadcast({ ...artifact('published', 2), run: { status: 'done' }, messages, now: NOW });
+    // `delivery` holds each message's current status, so the counts add up to the messages.
+    const done = (delivery: Record<string, number>) =>
+      stateOfBroadcast({ ...artifact('published', 2), run: { status: 'done' }, delivery, now: NOW });
     expect(done({ queued: 5, sent: 95 })).toMatchObject({ key: 'delivering', label: 'Delivering' });
     expect(done({ sent: 40, delivered: 60 })).toMatchObject({ key: 'sent', label: 'Sent', tone: 'good' });
     expect(done({ delivered: 90, failed: 10 })).toMatchObject({ key: 'sent', tone: 'warn' });
+    expect(done({ delivered: 70, suppressed: 30 })).toMatchObject({ key: 'sent', tone: 'good' });
     expect(done({ failed: 3 })).toMatchObject({ key: 'failed', label: 'Failed', tone: 'bad' });
+    expect(done({ suppressed: 12 })).toMatchObject({ key: 'suppressed', label: 'Nothing sent' });
     expect(done({})).toMatchObject({ key: 'sent_none', label: 'Nobody to send to' });
   });
 

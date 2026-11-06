@@ -41,8 +41,12 @@ export interface BroadcastStageView {
 
 export interface BroadcastStateInput extends ArtifactStateInput {
   run?: BroadcastRunView | null;
-  /** Message counts by status from `broadcasts.status` (queued, sending, sent, delivered, failed…). */
-  messages?: Record<string, number> | null;
+  /**
+   * The broadcast's messages by their *current* status (`broadcasts.status` → `delivery`). Not the
+   * event counts in `messages`: those count every event a message ever had, so a delivered
+   * message still counts as queued there.
+   */
+  delivery?: Record<string, number> | null;
   stage?: BroadcastStageView | null;
   /** Injectable for tests and fixed-clock screenshots. */
   now?: Date;
@@ -120,7 +124,7 @@ export function stateOfBroadcast(input: BroadcastStateInput): OperationalState {
       case 'done': {
         // `done` means every recipient was processed and its message queued, not that a provider
         // accepted it. Only the message counts can say "sent"; without them the claim is "queued".
-        const m = input.messages;
+        const m = input.delivery;
         const n = (k: string) => m?.[k] ?? 0;
         if (!m)
           return {
@@ -150,6 +154,15 @@ export function stateOfBroadcast(input: BroadcastStateInput): OperationalState {
           };
         if (n('failed') > 0)
           return { key: 'failed', label: 'Failed', tone: 'bad', icon: 'octagon', detail: 'No message was accepted by the provider.' };
+        // Queued, then held back at delivery: consent changed, a frequency cap, or the suppression list.
+        if (n('suppressed') > 0)
+          return {
+            key: 'suppressed',
+            label: 'Nothing sent',
+            tone: 'warn',
+            icon: 'square',
+            detail: `All ${n('suppressed').toLocaleString('en-US')} messages were suppressed at delivery (consent, caps or the suppression list).`,
+          };
         return {
           key: 'sent_none',
           label: 'Nobody to send to',

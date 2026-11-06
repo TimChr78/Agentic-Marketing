@@ -108,6 +108,7 @@ const MIGRATION_RELEASES: Record<string, string> = {
   '0077_oauth_workspace.sql': '0.8.0',
   '0078_experience_rollouts.sql': '0.8.0',
   '0079_workspace_create.sql': '0.8.0',
+  '0080_messages_journey_status.sql': '0.9.0',
 };
 
 export function releaseForMigrationHead(head: string | null): string | null {
