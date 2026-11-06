@@ -1,6 +1,5 @@
 import { type ComponentType, lazy, useEffect } from 'react';
-import { EmptyState, LinkButton, PageHeader } from '../ui';
-import { pageWidth } from '../ui/layout';
+import { EmptyState, LinkButton } from '../ui';
 import { SettingsLayout } from '../ui/SettingsLayout';
 import { useCrumbs } from './page';
 import { redirectTarget } from './redirects';
@@ -10,21 +9,7 @@ import { useSession } from './session';
 type Page = ComponentType<{ params: Record<string, string> }>;
 const p = (load: () => Promise<{ default: Page }>) => lazy(load);
 
-/**
- * Home is task H's page (#447). Loading it through a glob keeps this branch buildable before H
- * lands and picks the real page up automatically once `pages/HomePage.tsx` exists; until then `/`
- * is a calm placeholder rather than a redirect to another destination.
- */
-function HomePlaceholder() {
-  useCrumbs([{ label: 'Home' }]);
-  return (
-    <div className={pageWidth('default')}>
-      <PageHeader title="Home" description="Where your work starts. This workspace's home dashboard arrives with the Home task." />
-    </div>
-  );
-}
-const homeLoaders = import.meta.glob<{ default: Page }>('../pages/HomePage.tsx');
-const HomePage = lazy(homeLoaders['../pages/HomePage.tsx'] ?? (async () => ({ default: HomePlaceholder })));
+const HomePage = p(() => import('../pages/HomePage'));
 
 interface RouteDef {
   path: string;
