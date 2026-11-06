@@ -383,7 +383,7 @@ export default function PersonPage({ params }: { params: Record<string, string> 
               {segmentRows.map((s) => (
                 <Tr key={s.id}>
                   <Td>
-                    <Link to={`/build/segments/${s.id}`} className="font-medium text-fg hover:underline">
+                    <Link to={`/audience/segments/${s.id}`} className="font-medium text-fg hover:underline">
                       {s.name}
                     </Link>
                   </Td>

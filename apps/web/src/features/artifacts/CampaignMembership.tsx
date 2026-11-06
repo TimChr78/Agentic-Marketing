@@ -13,7 +13,7 @@ export function CampaignMembership({ artifactId }: { artifactId: string }) {
       {campaigns.map((c, i) => (
         <span key={c.id}>
           {i > 0 && (i === campaigns.length - 1 ? ' and ' : ', ')}
-          <TextLink to={`/build/campaigns/${c.id}`}>{c.name}</TextLink>
+          <TextLink to={`/marketing/campaigns/${c.id}`}>{c.name}</TextLink>
         </span>
       ))}
     </span>

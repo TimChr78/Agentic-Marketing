@@ -25,7 +25,7 @@ export function BlockUsage({ artifactId }: { artifactId: string }) {
         <ul className="mt-2 space-y-1">
           {templates.map((t) => (
             <li key={t.artifactId} className="text-[13px]">
-              <Link to={`/design/templates/${t.artifactId}`} className="text-fg hover:underline">
+              <Link to={`/content/templates/${t.artifactId}`} className="text-fg hover:underline">
                 {t.name}
               </Link>{' '}
               <span className="text-muted">

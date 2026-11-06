@@ -94,7 +94,7 @@ export function HostedAgentCard({ agentId, onChanged }: { agentId: string; onCha
     try {
       await api.call('agents.deleteHosted', { agentId });
       toast.success(`Deleted “${hosted.name}”.`);
-      navigate('/settings/agents');
+      navigate('/work/agents');
     } catch (e) {
       toast.error(errText(e));
       setBusy(false);

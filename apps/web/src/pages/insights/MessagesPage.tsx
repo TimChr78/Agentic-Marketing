@@ -197,10 +197,10 @@ export default function MessagesPage() {
               action={
                 can('artifacts:read') && (
                   <>
-                    <ButtonLink to="/build/broadcasts" variant="primary">
+                    <ButtonLink to="/marketing/broadcasts" variant="primary">
                       Go to broadcasts
                     </ButtonLink>
-                    <ButtonLink to="/build/journeys">Go to journeys</ButtonLink>
+                    <ButtonLink to="/marketing/journeys">Go to journeys</ButtonLink>
                   </>
                 )
               }

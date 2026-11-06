@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { api, type Out } from '../../app/api';
 import { useCrumbs } from '../../app/page';
 import { useApi } from '../../app/useApi';
+import { usePageTab } from '../../app/useTab';
 import { hasBreakdown, TIME_DIMENSIONS } from '../../lib/breakdown';
 import {
   ANALYTICS_MEASURES,
@@ -26,12 +27,14 @@ import {
   PageHeader,
   Table,
   TableFrame,
+  Tabs,
   Td,
   THead,
   Th,
   Tr,
 } from '../../ui';
 import { pageWidth } from '../../ui/layout';
+import AiUsagePage from './AiUsagePage';
 
 type Result = Out<'analytics.query'>;
 type Column = Result['columns'][number];
@@ -73,7 +76,7 @@ const number = (value: number | string | null, unit?: string, currency?: string 
  * and axis (DESIGN.md → Chart contract), and every measure and dimension is named through the
  * label registry, never by its raw key (#437).
  */
-export default function AnalyticsPage() {
+export function AnalyticsPerformance() {
   useCrumbs([{ label: 'Analytics' }]);
   const catalog = useApi(() => api.call('analytics.metrics.list', {}), []);
   const [measures, setMeasures] = useState<string[]>(DEFAULT_MEASURES);
@@ -308,6 +311,33 @@ export default function AnalyticsPage() {
           ))}
         </ul>
       ) : null}
+    </div>
+  );
+}
+
+const ANALYTICS_TABS = ['performance', 'ai'] as const;
+type AnalyticsTab = (typeof ANALYTICS_TABS)[number];
+
+const ANALYTICS_TAB_ITEMS: { key: AnalyticsTab; label: string }[] = [
+  { key: 'performance', label: 'Performance' },
+  { key: 'ai', label: 'AI usage' },
+];
+
+/** Insights → Analytics (#446): the metric layer and the existing AI usage report as named tabs. */
+export default function AnalyticsPage() {
+  const { active, invalid, select } = usePageTab({ keys: ANALYTICS_TABS, fallback: 'performance' });
+  useCrumbs([{ label: active === 'ai' ? 'AI usage' : 'Analytics' }]);
+
+  return (
+    <div className={pageWidth('default')}>
+      {invalid && (
+        <Alert tone="info" className="mb-4">
+          This tab is unavailable.
+        </Alert>
+      )}
+      <Tabs items={ANALYTICS_TAB_ITEMS} value={active} onChange={select} label="Analytics">
+        {active === 'ai' ? <AiUsagePage /> : <AnalyticsPerformance />}
+      </Tabs>
     </div>
   );
 }

@@ -6,6 +6,7 @@ import { useCrumbs } from '../../app/page';
 import { Link, navigate } from '../../app/router';
 import { useSession } from '../../app/session';
 import { useApi } from '../../app/useApi';
+import { usePageTab } from '../../app/useTab';
 import { ConsentSummary } from '../../features/audience/consent';
 import {
   Alert,
@@ -17,6 +18,7 @@ import {
   PageHeader,
   Table,
   TableFrame,
+  Tabs,
   Tag,
   Td,
   THead,
@@ -27,6 +29,7 @@ import {
 } from '../../ui';
 import { Identifier } from '../../ui/Identifier';
 import { pageWidth } from '../../ui/layout';
+import ImportsPage from './ImportsPage';
 
 const PROFILE_ID = /^prf_[0-9a-f]{32}$/;
 const PAGE_SIZE = 50;
@@ -42,7 +45,7 @@ function displayName(traits: Record<string, unknown>): string | null {
 }
 
 /** People known to the workspace, with the consent they have recorded. */
-export default function PeoplePage() {
+export function PeopleList() {
   useCrumbs([{ label: 'People' }]);
   const { can } = useSession();
   const toast = useToast();
@@ -116,7 +119,7 @@ export default function PeoplePage() {
         description="Everyone this workspace has seen, most recent activity first. Search by e-mail without revealing personal data, open a person for their consent and events."
         actions={
           can('profiles:write') && (
-            <ButtonLink to="/audience/imports" variant="primary" icon={<Upload size={15} />}>
+            <ButtonLink to="/audience/people?tab=imports" variant="primary" icon={<Upload size={15} />}>
               Import people
             </ButtonLink>
           )
@@ -191,11 +194,11 @@ export default function PeoplePage() {
             action={
               <>
                 {can('profiles:write') && (
-                  <ButtonLink to="/audience/imports" variant="primary" icon={<Upload size={15} />}>
+                  <ButtonLink to="/audience/people?tab=imports" variant="primary" icon={<Upload size={15} />}>
                     Import people
                   </ButtonLink>
                 )}
-                {can('artifacts:read') && <ButtonLink to="/build/forms">Create a signup form</ButtonLink>}
+                {can('artifacts:read') && <ButtonLink to="/audience/forms">Create a signup form</ButtonLink>}
               </>
             }
           >
@@ -265,6 +268,52 @@ export default function PeoplePage() {
           </tbody>
         </Table>
       </TableFrame>
+    </div>
+  );
+}
+
+const PEOPLE_TABS = ['people', 'imports'] as const;
+type PeopleTab = (typeof PEOPLE_TABS)[number];
+
+const PEOPLE_TAB_ITEMS: { key: PeopleTab; label: string }[] = [
+  { key: 'people', label: 'People' },
+  { key: 'imports', label: 'Imports' },
+];
+
+/**
+ * People (#446): profiles browsing and the existing import flow as one page with named tabs.
+ * Imports still needs profiles:write; a write-only role may open the explicit tab without being
+ * able to browse people. A forbidden tab renders a restricted state and does not fetch its data.
+ */
+export default function PeoplePage() {
+  const { can } = useSession();
+  const { active, forbidden, invalid, select } = usePageTab({
+    keys: PEOPLE_TABS,
+    fallback: 'people',
+    allowed: (tab) => (tab === 'people' ? can('profiles:read') : can('profiles:write')),
+  });
+  useCrumbs([{ label: active === 'imports' ? 'Imports' : 'People' }]);
+
+  return (
+    <div className={pageWidth('default')}>
+      {invalid && (
+        <Alert tone="info" className="mb-4">
+          This tab is unavailable.
+        </Alert>
+      )}
+      <Tabs items={PEOPLE_TAB_ITEMS} value={active} onChange={select} label="People">
+        {forbidden ? (
+          <EmptyState title="Your role can't open this tab">
+            {forbidden === 'imports'
+              ? 'Importing people needs profiles:write. Ask a workspace admin for it.'
+              : 'Browsing people needs profiles:read. Ask a workspace admin for it.'}
+          </EmptyState>
+        ) : active === 'imports' ? (
+          <ImportsPage />
+        ) : (
+          <PeopleList />
+        )}
+      </Tabs>
     </div>
   );
 }

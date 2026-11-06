@@ -5,7 +5,7 @@ export default function ExperiencePage({ params }: { params: Record<string, stri
   return (
     <ArtifactDetailPage
       id={params.id}
-      crumbs={[{ label: 'Experiences', to: '/build/experiences' }]}
+      crumbs={[{ label: 'Experiences', to: '/marketing/experiences' }]}
       extraTabs={[{ key: 'results', label: 'Results', render: (a) => <ExperienceResults artifact={a} /> }]}
     />
   );

@@ -87,7 +87,7 @@ export function ArtifactDetailPage({
   state,
 }: {
   id: string;
-  /** Breadcrumbs before the artifact's name, e.g. [{label:'Journeys', to:'/build/journeys'}]. */
+  /** Breadcrumbs before the artifact's name, e.g. [{label:'Journeys', to:'/marketing/journeys'}]. */
   crumbs: Crumb[];
   editor?: (p: EditorProps) => ReactNode;
   preview?: boolean;
