@@ -77,7 +77,7 @@ export function authDirectory(db: Db): Directory {
            ) b ON true
            LEFT JOIN LATERAL (
              SELECT host FROM workspace_domains
-              WHERE workspace_id = w.id AND is_primary
+              WHERE workspace_id = w.id AND is_primary AND status = 'verified'
               ORDER BY created_at
               LIMIT 1
            ) d ON true

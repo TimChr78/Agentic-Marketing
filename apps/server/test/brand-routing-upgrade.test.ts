@@ -14,6 +14,7 @@ const signer = linkSigner(SECRET);
 let t: Awaited<ReturnType<typeof startTestServer>>;
 let owner: User;
 let ws = '';
+let domainId = '';
 
 const get = (path: string, host: string) =>
   new Promise<number>((resolve, reject) => {
@@ -48,9 +49,19 @@ describe('public routes before any brand domain is verified', () => {
       body: decodeURIComponent(new URL(url).pathname.split('/').pop() ?? ''),
     });
     const added = await t.api(owner, ws).call('workspace.domains.add', { host: 'brand.example', isPrimary: true });
+    domainId = added.domain.id;
     await t.api(owner, ws).call('workspace.domains.verify', { id: added.domain.id });
     const token = signer.sign({ w: ws, p: newId('prf'), u: 'marketing_email', m: newId('msg') });
     expect(await get(`/u/${token}`, 'brand.example')).toBe(200);
     expect(await get(`/u/${token}`, 'proxy-rewritten.internal')).toBe(404);
+  });
+
+  it('keeps checking the Host after the last verified domain is removed (#463)', async () => {
+    await t.api(owner, ws).call('workspace.domains.remove', { id: domainId });
+    const token = signer.sign({ w: ws, p: newId('prf'), u: 'marketing_email', m: newId('msg') });
+    expect(await get(`/u/${token}`, 'proxy-rewritten.internal')).toBe(404);
+    expect(await get(`/u/${token}`, '192.168.1.20:8080')).toBe(404);
+    // The installation fallback host keeps serving.
+    expect(await get(`/u/${token}`, 'links.example')).toBe(200);
   });
 });

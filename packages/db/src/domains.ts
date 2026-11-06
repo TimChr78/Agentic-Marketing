@@ -48,11 +48,19 @@ export function originForHost(host: string): string {
 
 const HOST_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 
+export interface NormalizeHostOptions {
+  /**
+   * Registration input: refuse an explicit non-default port instead of silently dropping it (#481).
+   * Request `Host` headers keep their port stripped, because a proxy may forward `host:port`.
+   */
+  forRegistration?: boolean;
+}
+
 /**
  * Lowercase, IDNA, no port, no trailing dot. A URL is accepted when it carries a scheme, but its
  * path, query and userinfo are refused: those belong in `pathPrefix`, or nowhere.
  */
-export function normalizeHost(input: string): string {
+export function normalizeHost(input: string, options: NormalizeHostOptions = {}): string {
   const raw = input.trim();
   if (!raw) throw new DomainError('Give a hostname, for example links.example.com.');
   if (raw.includes('@')) throw new DomainError('A hostname must not include a username or password.');
@@ -74,6 +82,16 @@ export function normalizeHost(input: string): string {
   if (url.search || url.hash) throw new DomainError('A hostname must not include a query or fragment.');
   if (url.pathname && url.pathname !== '/')
     throw new DomainError('Put a path in pathPrefix, not in the hostname; the hostname is just the domain.');
+
+  if (options.forRegistration && url.port) {
+    // #481: a port used to be dropped silently, so the stored host, the links and the verification
+    // fetch all used the default port. Refuse it instead of changing what the caller asked for.
+    const defaultPort = hasScheme ? (url.protocol === 'https:' ? '443' : '80') : '443';
+    if (url.port !== defaultPort)
+      throw new DomainError(
+        'A brand domain is a hostname without a port; links use https on 443 (plain http only on localhost). Remove the port and point that hostname at this installation.',
+      );
+  }
 
   // URL already converts IDNs to punycode and separates the port; strip a trailing root dot.
   let host = url.hostname.toLowerCase().replace(/\.$/, '');
@@ -125,7 +143,7 @@ export function normalizeDomainInput(input: { host: string; pathPrefix?: string 
   host: string;
   pathPrefix: string | null;
 } {
-  return { host: normalizeHost(input.host), pathPrefix: normalizePathPrefix(input.pathPrefix) };
+  return { host: normalizeHost(input.host, { forRegistration: true }), pathPrefix: normalizePathPrefix(input.pathPrefix) };
 }
 
 /** A request path as it is matched: leading slash, no query or fragment. */
@@ -152,37 +170,73 @@ export interface WorkspaceDomainResolver {
   resolveWorkspaceForRequest(host: string, path: string): Promise<ResolvedWorkspaceDomain | null>;
   /** The origin+prefix a workspace's primary domain serves, or null when it has no primary. */
   linksUrlFor(workspaceId: string): Promise<string | null>;
-  /** Whether any workspace has a verified domain; until one does, public routes ignore the Host. */
-  hasVerifiedDomains(): Promise<boolean>;
-  /** Drop cached rows after a write; the next lookup reads the table again. */
+  /**
+   * Whether public routes check the Host. This is installation policy, not derived from the current
+   * rows: once a brand domain has been verified it stays on, even if that domain is removed (#463).
+   */
+  hostCheckingActive(): Promise<boolean>;
+  /**
+   * Persist that Host checking is on, so removing the last verified domain cannot switch it off
+   * (#463). Called when a verification succeeds.
+   */
+  activateHostChecking(): Promise<void>;
+  /**
+   * Drop cached rows after a write; the next lookup reads the table again. Other processes converge
+   * within the cache TTL (5 s by default), which is the documented cross-process bound (#464).
+   */
   invalidate(): void;
 }
 
 const DOMAIN_COLUMNS = `id, workspace_id AS "workspaceId", host, path_prefix AS "pathPrefix",
   is_primary AS "isPrimary", status, verified_at AS "verifiedAt", created_at AS "createdAt"`;
 
+const DOMAIN_ROUTING_KEY = 'domain_routing_active';
+
+interface DomainRegistry {
+  rows: WorkspaceDomain[];
+  active: boolean;
+}
+
 /**
  * Reads every registered domain once and answers lookups from a short-lived cache. The table is
  * small (a handful of brands per installation), so one query is cheaper than a query per request.
+ *
+ * The cache is per process. Writes invalidate it in the process that ran the command; every other
+ * process (api, ingest, worker, replicas) sees the change after at most the TTL (#464).
  */
 export function createWorkspaceDomainResolver(db: Db, options: DomainResolverOptions = {}): WorkspaceDomainResolver {
   const ttlMs = options.ttlMs ?? 5_000;
   const now = options.now ?? Date.now;
-  let cache: { at: number; rows: WorkspaceDomain[] } | null = null;
-  let loading: Promise<WorkspaceDomain[]> | null = null;
+  let cache: { at: number; registry: DomainRegistry } | null = null;
+  let loading: Promise<DomainRegistry> | null = null;
+  // A write bumps the generation. A load that started before it must not repopulate the cache with
+  // rows read before the write (#464).
+  let generation = 0;
 
-  const load = async (): Promise<WorkspaceDomain[]> => {
-    if (cache && now() - cache.at < ttlMs) return cache.rows;
-    loading ??= db.admin
-      .query<WorkspaceDomain>(`SELECT ${DOMAIN_COLUMNS} FROM workspace_domains`)
-      .then(({ rows }) => {
-        cache = { at: now(), rows };
-        return rows;
-      })
+  const load = async (): Promise<DomainRegistry> => {
+    if (cache && now() - cache.at < ttlMs) return cache.registry;
+    if (loading) return loading;
+    const startedAt = generation;
+    const run = Promise.all([
+      db.admin.query<WorkspaceDomain>(`SELECT ${DOMAIN_COLUMNS} FROM workspace_domains`),
+      db.admin.query<{ key: string }>('SELECT key FROM installation_settings WHERE key = $1', [DOMAIN_ROUTING_KEY]),
+    ]).then(([domains, setting]) => {
+      const rows = domains.rows;
+      // A verified row also activates checking, so an installation upgraded from 0.8–0.10 whose
+      // setting is not backfilled yet behaves exactly as before until the next verification.
+      const registry = { rows, active: setting.rows.length > 0 || rows.some((row) => row.status === 'verified') };
+      if (startedAt === generation) cache = { at: now(), registry };
+      return registry;
+    });
+    loading = run;
+    run
       .finally(() => {
-        loading = null;
+        if (loading === run) loading = null;
+      })
+      .catch(() => {
+        // The caller sees the original rejection; this only settles the cleanup chain.
       });
-    return loading;
+    return run;
   };
 
   return {
@@ -196,21 +250,34 @@ export function createWorkspaceDomainResolver(db: Db, options: DomainResolverOpt
       const requestPath = normalizeRequestPath(path);
       // Only a verified domain serves traffic (#185): a pending row is listed for the operator but
       // is not yet a brand host, so it can never take over another workspace's links.
-      const matches = (await load())
+      const matches = (await load()).rows
         .filter((row) => row.status === 'verified' && row.host === normalizedHost && pathMatchesPrefix(requestPath, row.pathPrefix))
         .sort((a, b) => (b.pathPrefix?.length ?? 0) - (a.pathPrefix?.length ?? 0));
       const domain = matches[0];
       return domain ? { domain, matchedPrefix: domain.pathPrefix } : null;
     },
     async linksUrlFor(workspaceId) {
-      const domain = (await load()).find((row) => row.workspaceId === workspaceId && row.isPrimary && row.status === 'verified');
+      const domain = (await load()).rows.find((row) => row.workspaceId === workspaceId && row.isPrimary && row.status === 'verified');
       return domain ? `${originForHost(domain.host)}${domain.pathPrefix ?? ''}` : null;
     },
-    async hasVerifiedDomains() {
-      return (await load()).some((row) => row.status === 'verified');
+    async hostCheckingActive() {
+      return (await load()).active;
+    },
+    async activateHostChecking() {
+      await db.admin.query(
+        `INSERT INTO installation_settings (key, value) VALUES ($1, '{"active": true}'::jsonb)
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+        [DOMAIN_ROUTING_KEY],
+      );
+      generation += 1;
+      cache = null;
+      loading = null;
     },
     invalidate() {
+      generation += 1;
       cache = null;
+      // A request that already started keeps its own answer, but the next one loads fresh.
+      loading = null;
     },
   };
 }

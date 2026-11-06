@@ -11,6 +11,29 @@ The Helm chart in [`deploy/helm/agentic-marketing`](../../deploy/helm/agentic-ma
 
 The Ingress sends the public collection paths to `ingest` and everything else to `api`. The Job runs `cli migrate` (Postgres, auth tables, ClickHouse and its row policies) as a **pre-install/pre-upgrade** hook: before any role Deployment exists on a first install and before the new ReplicaSets roll on an upgrade. The roles start with `SKIP_MIGRATIONS=true`, because the hook has already migrated the database before they start.
 
+### Brand domains and multiple Ingress hosts
+
+A brand's public links, signup forms, unsubscribes and provider webhooks use its **verified primary domain** (`workspace.domains.verify`), not `PUBLIC_LINKS_URL`. Kubernetes routes only the hosts an Ingress names; an unlisted brand host reaches no pod and every subscriber link on it is a 404. Register each brand host and add it to `ingress.extraHosts`, then include it in the TLS certificate:
+
+```yaml
+ingress:
+  enabled: true
+  host: marketing.example.com          # the admin host (PUBLIC_URL)
+  extraHosts:
+    - links.martechsignal.com          # brand A's verified primary domain
+    - second.example.com               # brand B's verified primary domain
+  tls:
+    - secretName: marketing-tls
+      hosts:
+        - marketing.example.com
+        - links.martechsignal.com
+        - second.example.com
+```
+
+The chart renders the same `/v1/`, `/f/`, `/hooks/in/` and `/` path split for every host in `host` and `extraHosts`, so each brand host reaches the same `api`/`ingest` Services. A `pathPrefix` such as `/am` needs no special Ingress rule: the proxy forwards `/am/*` unchanged and the app strips the registered prefix. The hostname must also exist in DNS and the certificate must cover every listed host; a wildcard (`*.example.com`) covers several brands under one parent but not a brand on another domain.
+
+Use `config.PUBLIC_LINKS_URL` only as the installation fallback for brands without a verified primary domain. It is not a brand domain: the fallback host and the admin host (`PUBLIC_URL`) are reserved and cannot be registered by a workspace.
+
 The hook cannot rely on the release's ConfigMap and Secret: Helm runs pre-install hooks before it creates them. It therefore takes its configuration from the chart's `config` values and its secret values from `secrets.existingSecret` (which must exist) or from a temporary hook Secret rendered from `secrets.values`. `extraEnv` and `extraVolumes` are also passed to the hook, so any Secret or ConfigMap they reference must already exist in the namespace on a first install. The chart-created ServiceAccount also appears after the hook; the migration uses the namespace's default ServiceAccount and needs no API access (set `serviceAccount.create=false` if a cluster requires a specific existing ServiceAccount for image pulls).
 
 This ordering is what makes `helm install --wait` safe: Helm waits for the migration hook, then creates the roles and waits for them, and never waits on a readiness probe of a pod that is itself waiting for a post-install job. A failed migration fails the install or upgrade before the roles are created or rolled. With `--atomic`, Helm rolls the release back, but the database schema is forward-only: restore a Postgres backup rather than expecting the schema to roll back with the release.
