@@ -239,6 +239,39 @@ describe('stopping a ramp during an edge sync (#477, round 3)', () => {
     expect(bundleOf('f'.repeat(32), w)?.experiences.find((e) => e.id === id)?.share).toBe(0);
   }, 60_000);
 
+  it('does not republish to a destination that moved during the upload, even by API base only (#477 re-check)', async () => {
+    const u = await t.signUp(`edge-move-upload-${Date.now()}@example.com`);
+    const w = await t.workspaceWith([[u, 'owner']], 'none');
+    const api = t.api(u, w);
+    const created = await api.call('artifacts.create', {
+      type: 'experience',
+      name: 'Move during an upload',
+      content: { placement: 'hero', variants: [{ id: 'a', name: 'A', weight: 100, content: { html: '<h1>A</h1>' } }] },
+    });
+    expect((await api.call('artifacts.requestPublish', { artifactId: created.artifactId, note: 'live' })).status).toBe('published');
+    const ns = '9'.repeat(32);
+    await api.call('edge.configure', { accountId: A, namespaceId: ns, apiBase, apiToken: 'test-token-'.repeat(4) });
+
+    const gate = { path: '/bulk', entered: deferred(), release: deferred() };
+    pause = gate;
+    const tick = syncEdge({ db: t.srv.db, hot: t.srv.hot, kp: t.srv.keyProvider, egress: t.srv.egress }, w);
+    await gate.entered.promise;
+    // Only the API base changes: a new destination, which needs its cleanup before any publication.
+    await api.call('edge.configure', { accountId: A, namespaceId: ns, apiBase: `${apiBase}/moved` });
+    gate.release.resolve();
+    await tick;
+    const [target] = (
+      await t.srv.db.admin.query<{ bundle_hash: string | null; cleanup_mode: string | null; prior_target: unknown[] | null }>(
+        'SELECT bundle_hash, cleanup_mode, prior_target FROM edge_targets WHERE workspace_id = $1',
+        [w],
+      )
+    ).rows;
+    // The old tick stopped instead of republishing to the moved destination: nothing was recorded as
+    // published there and its cleanup is still owed to the next full tick.
+    expect(target?.bundle_hash).toBeNull();
+    expect((target?.prior_target ?? []).length + (target?.cleanup_mode ? 1 : 0)).toBeGreaterThan(0);
+  }, 60_000);
+
   it('restores the caller’s lock_timeout after taking the edge lock (#477 final review)', async () => {
     const after = await t.srv.db.withWorkspace(ws, async (tx) => {
       await tx.execute(sql`SELECT set_config('lock_timeout', '7s', true)`);

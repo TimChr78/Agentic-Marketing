@@ -477,10 +477,12 @@ export async function syncEdge(deps: EdgeDeps, ws: string, opts: { bundleOnly?: 
     ]);
     locked = result.rows[0].locked;
     // A stop that gave up waiting for this lock commits its share 0 while our upload may still be
-    // in flight (#477); that upload can land after the stop. Republish under the same lock until
-    // the bundle written last is the current one, so the stale write never stays in KV.
-    for (let attempt = 0; locked && attempt < 3; attempt++)
-      if ((await syncEdgeLocked(deps, ws, attempt === 0 ? opts : { bundleOnly: true })) !== 'republish') break;
+    // in flight (#477); that upload can land after the stop. Republish to the same destination under
+    // the same lock (at most three attempts in all); if the destination moved or keeps changing, the
+    // next tick corrects it, so a stale bundle can outlive the stop by at most one tick.
+    let retry = locked ? await syncEdgeLocked(deps, ws, opts) : undefined;
+    for (let attempt = 1; retry && attempt < 3; attempt++)
+      retry = await syncEdgeLocked(deps, ws, { bundleOnly: true, expectDestination: retry.republishTo });
   } finally {
     if (locked) {
       try {
@@ -493,7 +495,11 @@ export async function syncEdge(deps: EdgeDeps, ws: string, opts: { bundleOnly?: 
   }
 }
 
-async function syncEdgeLocked(deps: EdgeDeps, ws: string, opts: { bundleOnly?: boolean } = {}): Promise<'republish' | undefined> {
+async function syncEdgeLocked(
+  deps: EdgeDeps,
+  ws: string,
+  opts: { bundleOnly?: boolean; expectDestination?: string } = {},
+): Promise<{ republishTo: string } | undefined> {
   const state = await deps.db.withWorkspace(ws, async (tx) => {
     const [t] = await tx.select().from(schema.edgeTargets);
     if (!t) return null;
@@ -516,6 +522,9 @@ async function syncEdgeLocked(deps: EdgeDeps, ws: string, opts: { bundleOnly?: b
   });
   if (!state) return;
   const { t, bundle, sources, queued } = state;
+  // A republish retry (#477) only proceeds if the destination is still the one the stale upload
+  // went to and nothing is owed there; otherwise the next full tick does cleanup, then publication.
+  if (opts.expectDestination && (destination(t) !== opts.expectDestination || t.cleanupMode || (t.priorTarget ?? []).length)) return;
   const update = async (values: Partial<typeof schema.edgeTargets.$inferInsert>) => {
     const changed = await deps.db.withWorkspace(ws, (tx) =>
       tx
@@ -619,18 +628,16 @@ async function syncEdgeLocked(deps: EdgeDeps, ws: string, opts: { bundleOnly?: b
       // caller republishes the current bundle under this lock. A moved destination is handled as
       // before: this tick stops and the next one cleans up and publishes in order.
       const [after] = await deps.db.withWorkspace(ws, (tx) =>
-        tx
-          .select({
-            generation: schema.edgeTargets.generation,
-            accountId: schema.edgeTargets.accountId,
-            namespaceId: schema.edgeTargets.namespaceId,
-          })
-          .from(schema.edgeTargets)
-          .where(eq(schema.edgeTargets.workspaceId, ws)),
+        tx.select().from(schema.edgeTargets).where(eq(schema.edgeTargets.workspaceId, ws)),
       );
       if (!after) return;
       if (after.generation !== t.generation)
-        return after.accountId === t.accountId && after.namespaceId === t.namespaceId ? 'republish' : undefined;
+        // Republish only to the very destination we just wrote to (account, namespace and API base)
+        // and only when no cleanup is owed there; a moved destination waits for the next full tick,
+        // which cleans up before it publishes.
+        return destination(after) === destination(t) && !after.cleanupMode && !(after.priorTarget ?? []).length
+          ? { republishTo: destination(t) }
+          : undefined;
       const gone = t.pushedKeys.filter((k) => !keys.includes(k));
       if (gone.length) await kv.delete(gone);
       if (!(await update({ bundleHash: hash, pushedKeys: keys }))) return;
