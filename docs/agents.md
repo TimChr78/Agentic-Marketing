@@ -98,6 +98,7 @@ Hosted AI usage is settled with its durable billing reservation. If both usage w
 | `agents.runHostedNow` | people only (`workspace:admin`) | Start a run at the scheduler's next tick, without changing the schedule |
 | `agents.deleteHosted` | people only (`workspace:admin`) | Delete it and its run history; the ledger stays |
 | `agents.hostedRuns` | `artifacts:read` | The hosted agent and its runs (status, summary, tool calls, tokens, error) |
+| `agents.runFailures` | `artifacts:read` | Recent failed hosted runs across every agent since a given time, newest first, with the agent’s name |
 | `agents.memory.list` | `artifacts:read` | The agent's notes, newest first; an agent reads only its own |
 | `agents.memory.add` | `artifacts:read` | Add a note; during a run the agent writes its own, people may write any |
 | `agents.memory.update` | people only (`artifacts:write`) | Rewrite a note |

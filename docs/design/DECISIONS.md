@@ -89,7 +89,8 @@ considered and why. Anything that needed the owner's decision is listed under **
 ### D13. The review link is `/approvals/<id>` on `PUBLIC_URL`
 - **Options:** a query parameter on the list; a path.
 - **Why:** A path survives copy/paste in chat tools and works with the SPA fallback. `requestPublish`
-  returns `reviewUrl` and `next`; `approvals.list` returns `reviewUrl` for each request.
+  returns `reviewUrl` and `next`; `approvals.list` returns `reviewUrl` for each request, plus the
+  filtered `total` and a `nextCursor` so a destination can page the whole queue.
 
 ### D14. After a decision, the drawer moves to the next pending request
 - **Why:** Reviewers work through a queue; closing and reopening for each item is friction. The list and

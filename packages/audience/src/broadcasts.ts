@@ -11,7 +11,15 @@ import {
 } from '@agentic-marketing/artifacts';
 import { campaignWithControlForMember } from '@agentic-marketing/campaigns';
 import { defineCommand } from '@agentic-marketing/commands';
-import { AppError, newId, type ZonedTime, zonedInstant, zonedParts } from '@agentic-marketing/core';
+import {
+  AppError,
+  decodeTimestampCursor,
+  encodeTimestampCursor,
+  newId,
+  type ZonedTime,
+  zonedInstant,
+  zonedParts,
+} from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import {
   checkPushRecipient,
@@ -32,7 +40,7 @@ import {
 import type { EventStore, JourneyEvent } from '@agentic-marketing/events';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
-import { and, asc, desc, eq, gt, inArray, isNotNull, sql } from 'drizzle-orm';
+import { and, asc, count, desc, eq, gt, inArray, isNotNull, isNull, lt, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
 
 // Broadcasts: a one-off send of a template to a segment, e.g. the weekly newsletter. Publishing
@@ -676,6 +684,91 @@ const Stage = z.object({
   completedAt: z.string().nullable(),
 });
 
+/** A run's status: the run's own states, or `not_scheduled` when the broadcast has no run yet. */
+type RunStatus = z.output<typeof Run>['status'];
+/** A run's fields as read for `broadcasts.status` and `broadcasts.list`; null status means no run yet. */
+interface RunFields {
+  status: RunStatus | null;
+  version: number | null;
+  sendAt: Date | null;
+  recipients: number | null;
+  queued: number | null;
+  skipped: number | null;
+  windowSkipped: number | null;
+  startedAt: Date | null;
+  finishedAt: Date | null;
+  error: string | null;
+}
+
+/** The operational run both commands report, with defaults for a broadcast that never ran. */
+function runView(r: RunFields | undefined | null): z.output<typeof Run> {
+  return {
+    status: r?.status ?? 'not_scheduled',
+    version: r?.version ?? null,
+    sendAt: r?.sendAt?.toISOString() ?? null,
+    recipients: r?.recipients ?? 0,
+    queued: r?.queued ?? 0,
+    skipped: r?.skipped ?? 0,
+    windowSkipped: r?.windowSkipped ?? 0,
+    startedAt: r?.startedAt?.toISOString() ?? null,
+    finishedAt: r?.finishedAt?.toISOString() ?? null,
+    error: r?.error ?? null,
+  };
+}
+
+/** A staged send's stage, or null when the broadcast has no stage row or its definition does not stage the send. */
+function stageView(s: typeof schema.broadcastStages.$inferSelect | undefined, def: BroadcastDefinition): z.output<typeof Stage> | null {
+  if (!s || !def.stagedSend) return null;
+  const percent = (fraction: number | null) => (fraction === null ? null : Math.round(fraction * 10_000) / 100);
+  return {
+    stage: s.stage,
+    canaryPercent: s.canaryPercent,
+    wait: def.stagedSend.wait,
+    checkAt: s.checkAt?.toISOString() ?? null,
+    checkedAt: s.checkedAt?.toISOString() ?? null,
+    checkSkipped: s.checkSkipped,
+    canary: { recipients: s.canaryRecipients, queued: s.canaryQueued, skipped: s.canarySkipped },
+    sent: s.sent,
+    bounced: s.bounced,
+    complained: s.complained,
+    unsubscribed: s.unsubscribed,
+    bounceRate: percent(s.bounceRate),
+    complaintRate: percent(s.complaintRate),
+    unsubscribeRate: percent(s.unsubscribeRate),
+    thresholds: {
+      bounceRate: Math.round(def.stagedSend.maxBounceRate * 10_000) / 100,
+      complaintRate: Math.round(def.stagedSend.maxComplaintRate * 10_000) / 100,
+      unsubscribeRate: Math.round(def.stagedSend.maxUnsubscribeRate * 10_000) / 100,
+      minCanary: def.stagedSend.minCanary,
+    },
+    stopReason: s.stopReason,
+    stoppedAt: s.stoppedAt?.toISOString() ?? null,
+    resumedAt: s.resumedAt?.toISOString() ?? null,
+    completedAt: s.completedAt?.toISOString() ?? null,
+  };
+}
+
+/**
+ * Each broadcast's messages by their current status, keyed by broadcast id. One grouped query for
+ * the whole page (the `messages_journey_status` index); test sends are never part of a send's state.
+ */
+async function deliveryCounts(tx: Tx, broadcastIds: string[]): Promise<Map<string, Record<string, number>>> {
+  const out = new Map<string, Record<string, number>>();
+  if (!broadcastIds.length) return out;
+  const rows = await tx
+    .select({ broadcastId: schema.messages.journeyId, status: schema.messages.status, n: sql<number>`count(*)::int` })
+    .from(schema.messages)
+    .where(and(inArray(schema.messages.journeyId, broadcastIds), eq(schema.messages.test, false)))
+    .groupBy(schema.messages.journeyId, schema.messages.status);
+  for (const row of rows) {
+    if (!row.broadcastId) continue;
+    const counts = out.get(row.broadcastId) ?? {};
+    counts[row.status] = row.n;
+    out.set(row.broadcastId, counts);
+  }
+  return out;
+}
+
 export const broadcastStatus = defineCommand({
   name: 'broadcasts.status',
   title: 'Broadcast status and results',
@@ -706,14 +799,7 @@ export const broadcastStatus = defineCommand({
       ? await ctx.services.events.messageStats(ctx.principal.workspaceId, { since: r.createdAt, journeyId: input.artifactId })
       : {};
     // The current status of each message (not its event history), for the operational state.
-    const delivery: Record<string, number> = {};
-    if (r)
-      for (const row of await ctx.tx
-        .select({ status: schema.messages.status, n: sql<number>`count(*)::int` })
-        .from(schema.messages)
-        .where(and(eq(schema.messages.journeyId, input.artifactId), eq(schema.messages.test, false)))
-        .groupBy(schema.messages.status))
-        delivery[row.status] = row.n;
+    const delivery = (await deliveryCounts(ctx.tx, r ? [input.artifactId] : [])).get(input.artifactId) ?? {};
     let test: z.output<typeof Test> | null = null;
     if (t) {
       const variants = await variantResults(ctx.tx, ctx.services.events, ctx.principal.workspaceId, input.artifactId, t.subjects);
@@ -735,53 +821,181 @@ export const broadcastStatus = defineCommand({
         })),
       };
     }
-    let stage: z.output<typeof Stage> | null = null;
-    if (s && def.stagedSend) {
-      const percent = (fraction: number | null) => (fraction === null ? null : Math.round(fraction * 10_000) / 100);
-      stage = {
-        stage: s.stage,
-        canaryPercent: s.canaryPercent,
-        wait: def.stagedSend.wait,
-        checkAt: s.checkAt?.toISOString() ?? null,
-        checkedAt: s.checkedAt?.toISOString() ?? null,
-        checkSkipped: s.checkSkipped,
-        canary: { recipients: s.canaryRecipients, queued: s.canaryQueued, skipped: s.canarySkipped },
-        sent: s.sent,
-        bounced: s.bounced,
-        complained: s.complained,
-        unsubscribed: s.unsubscribed,
-        bounceRate: percent(s.bounceRate),
-        complaintRate: percent(s.complaintRate),
-        unsubscribeRate: percent(s.unsubscribeRate),
-        thresholds: {
-          bounceRate: Math.round(def.stagedSend.maxBounceRate * 10_000) / 100,
-          complaintRate: Math.round(def.stagedSend.maxComplaintRate * 10_000) / 100,
-          unsubscribeRate: Math.round(def.stagedSend.maxUnsubscribeRate * 10_000) / 100,
-          minCanary: def.stagedSend.minCanary,
-        },
-        stopReason: s.stopReason,
-        stoppedAt: s.stoppedAt?.toISOString() ?? null,
-        resumedAt: s.resumedAt?.toISOString() ?? null,
-        completedAt: s.completedAt?.toISOString() ?? null,
-      };
-    }
+    const stage = stageView(s, def);
     return {
       delivery,
-      run: {
-        status: r?.status ?? 'not_scheduled',
-        version: r?.version ?? null,
-        sendAt: r?.sendAt.toISOString() ?? null,
-        recipients: r?.recipients ?? 0,
-        queued: r?.queued ?? 0,
-        skipped: r?.skipped ?? 0,
-        windowSkipped: r?.windowSkipped ?? 0,
-        startedAt: r?.startedAt?.toISOString() ?? null,
-        finishedAt: r?.finishedAt?.toISOString() ?? null,
-        error: r?.error ?? null,
-      },
+      run: runView(r),
       messages,
       test,
       stage,
+    };
+  },
+});
+
+const VersionState = z.enum(['draft', 'in_review', 'published', 'superseded', 'rejected']);
+
+export const listBroadcasts = defineCommand({
+  name: 'broadcasts.list',
+  title: 'List broadcasts with where each send stands',
+  description:
+    'Broadcasts in this workspace, newest first, each with its operational send state in one read: the run (scheduled, running, done, cancelled, failed, stopped or not_scheduled) with its counts and times, the staged send’s stage and stop reason when there is one, and the messages by their current status. Filter by run status before paging; `total` counts the filtered broadcasts independent of the cursor. Results and per-variant detail stay in broadcasts.status.',
+  input: z.object({
+    limit: z.number().int().min(1).max(100).default(50),
+    cursor: z.string().max(256).optional().describe('Opaque `nextCursor` from the previous page; omit for the first page'),
+    statuses: z
+      .array(Run.shape.status)
+      .optional()
+      .describe(
+        'Only broadcasts whose run is in one of these states (`not_scheduled` means it was never scheduled); omit or empty for every state',
+      ),
+  }),
+  output: z.object({
+    broadcasts: z.array(
+      z.object({
+        artifactId: z.string(),
+        name: z.string(),
+        latestVersion: z.number().int(),
+        latestState: VersionState,
+        publishedVersion: z.number().int().nullable(),
+        updatedAt: z.string(),
+        run: Run,
+        segmentId: z.string().describe('The segment the send is pinned to'),
+        templateId: z.string().describe('The template the send is pinned to'),
+        stage: z
+          .object({ stage: Stage.shape.stage, stopReason: z.string().nullable() })
+          .nullable()
+          .describe('The staged send’s stage and why it stopped; full canary counts are in broadcasts.status'),
+        delivery: z
+          .record(z.string(), z.number())
+          .describe(
+            'The broadcast’s messages by their current status (queued, sending, sent, delivered, bounced, complained, failed, suppressed)',
+          ),
+      }),
+    ),
+    total: z.number().int().describe('All broadcasts matching the status filter, across every page'),
+    nextCursor: z.string().nullable().describe('Pass as `cursor` for the next page; null on the last page'),
+    asOf: z.string(),
+  }),
+  permission: 'artifacts:read',
+  effect: 'read',
+  // Workspace scoping comes from row-level security; there is deliberately no workspace filter here.
+  handler: async (input, ctx) => {
+    const cursor = input.cursor ? decodeTimestampCursor(input.cursor) : undefined;
+    if (input.cursor && !cursor) {
+      throw new AppError('invalid_input', 'The cursor is not valid. Omit it to start from the first page.');
+    }
+    const wanted = input.statuses?.length ? [...new Set(input.statuses)] : null;
+    const runStatuses = wanted?.filter((s): s is Exclude<RunStatus, 'not_scheduled'> => s !== 'not_scheduled') ?? [];
+    const statusFilter = wanted
+      ? or(
+          runStatuses.length ? inArray(schema.broadcastRuns.status, runStatuses) : undefined,
+          wanted.includes('not_scheduled') ? isNull(schema.broadcastRuns.status) : undefined,
+        )
+      : undefined;
+    const filters = [eq(schema.artifacts.type, 'broadcast'), statusFilter];
+    // Compare in the database's timestamp type so microseconds survive the round trip.
+    const pageFilter = cursor
+      ? and(
+          ...filters,
+          or(
+            lt(schema.artifacts.updatedAt, sql`${cursor.at}::timestamptz`),
+            and(eq(schema.artifacts.updatedAt, sql`${cursor.at}::timestamptz`), lt(schema.artifacts.id, cursor.id)),
+          ),
+        )
+      : and(...filters);
+    const latestVersion = and(
+      eq(schema.artifactVersions.workspaceId, schema.artifacts.workspaceId),
+      eq(schema.artifactVersions.artifactId, schema.artifacts.id),
+      eq(schema.artifactVersions.number, schema.artifacts.latestVersion),
+    );
+    const runJoin = and(
+      eq(schema.broadcastRuns.workspaceId, schema.artifacts.workspaceId),
+      eq(schema.broadcastRuns.broadcastId, schema.artifacts.id),
+    );
+    // One extra row tells us whether another page exists without a second query.
+    const rows = await ctx.tx
+      .select({
+        a: schema.artifacts,
+        state: schema.artifactVersions.state,
+        cursorAt: sql<string>`to_char(${schema.artifacts.updatedAt} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
+        run: {
+          status: schema.broadcastRuns.status,
+          version: schema.broadcastRuns.version,
+          sendAt: schema.broadcastRuns.sendAt,
+          recipients: schema.broadcastRuns.recipients,
+          queued: schema.broadcastRuns.queued,
+          skipped: schema.broadcastRuns.skipped,
+          windowSkipped: schema.broadcastRuns.windowSkipped,
+          startedAt: schema.broadcastRuns.startedAt,
+          finishedAt: schema.broadcastRuns.finishedAt,
+          error: schema.broadcastRuns.error,
+        },
+      })
+      .from(schema.artifacts)
+      .innerJoin(schema.artifactVersions, latestVersion)
+      .leftJoin(schema.broadcastRuns, runJoin)
+      .where(pageFilter)
+      .orderBy(desc(schema.artifacts.updatedAt), desc(schema.artifacts.id))
+      .limit(input.limit + 1);
+    const [{ n }] = await ctx.tx
+      .select({ n: count() })
+      .from(schema.artifacts)
+      .innerJoin(schema.artifactVersions, latestVersion)
+      .leftJoin(schema.broadcastRuns, runJoin)
+      .where(and(...filters));
+    const page = rows.slice(0, input.limit);
+    const ids = page.map(({ a }) => a.id);
+    // Stages and the definitions the status projection needs, both in one query per page.
+    const stages = ids.length
+      ? await ctx.tx.select().from(schema.broadcastStages).where(inArray(schema.broadcastStages.broadcastId, ids))
+      : [];
+    const stageById = new Map(stages.map((s) => [s.broadcastId, s]));
+    const pinned = page.map(({ a, run }) => ({
+      id: a.id,
+      number: run?.status ? (run.version ?? a.publishedVersion ?? a.latestVersion) : (a.publishedVersion ?? a.latestVersion),
+    }));
+    const contents = pinned.length
+      ? await ctx.tx
+          .select({
+            artifactId: schema.artifactVersions.artifactId,
+            number: schema.artifactVersions.number,
+            content: schema.artifactVersions.content,
+          })
+          .from(schema.artifactVersions)
+          .where(or(...pinned.map((p) => and(eq(schema.artifactVersions.artifactId, p.id), eq(schema.artifactVersions.number, p.number)))))
+      : [];
+    const contentByKey = new Map(contents.map((c) => [`${c.artifactId}:${c.number}`, c.content]));
+    const delivery = await deliveryCounts(ctx.tx, ids);
+    const defOf = (row: (typeof page)[number]): BroadcastDefinition => {
+      const version = row.run?.status
+        ? (row.run.version ?? row.a.publishedVersion ?? row.a.latestVersion)
+        : (row.a.publishedVersion ?? row.a.latestVersion);
+      const content = contentByKey.get(`${row.a.id}:${version}`);
+      if (content === undefined) throw new AppError('not_found', `Version ${version} of broadcast ${row.a.id} does not exist.`);
+      return artifactTypes.broadcast.content.parse(content) as BroadcastDefinition;
+    };
+    const last = page[page.length - 1];
+    return {
+      broadcasts: page.map((row) => {
+        const def = defOf(row);
+        const stage = stageView(stageById.get(row.a.id), def);
+        return {
+          artifactId: row.a.id,
+          name: row.a.name,
+          latestVersion: row.a.latestVersion,
+          latestState: row.state,
+          publishedVersion: row.a.publishedVersion,
+          updatedAt: row.a.updatedAt.toISOString(),
+          run: runView(row.run?.status ? row.run : undefined),
+          segmentId: def.segment,
+          templateId: def.template,
+          stage: stage ? { stage: stage.stage, stopReason: stage.stopReason } : null,
+          delivery: delivery.get(row.a.id) ?? {},
+        };
+      }),
+      total: Number(n),
+      nextCursor: rows.length > input.limit && last ? encodeTimestampCursor({ at: last.cursorAt, id: last.a.id }) : null,
+      asOf: new Date().toISOString(),
     };
   },
 });
@@ -873,7 +1087,14 @@ export const continueBroadcast = defineCommand({
   },
 });
 
-export const broadcastCommands = [previewBroadcast, sendTestBroadcast, broadcastStatus, cancelBroadcast, continueBroadcast] as const;
+export const broadcastCommands = [
+  previewBroadcast,
+  sendTestBroadcast,
+  broadcastStatus,
+  listBroadcasts,
+  cancelBroadcast,
+  continueBroadcast,
+] as const;
 
 export interface BroadcastDeps {
   db: Db;
