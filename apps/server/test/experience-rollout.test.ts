@@ -1,5 +1,7 @@
+import { createServer, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { schema } from '@agentic-marketing/db';
-import { decideAll, loadPublishedExperiences } from '@agentic-marketing/personalize';
+import { decideAll, loadPublishedExperiences, syncEdge } from '@agentic-marketing/personalize';
 import type { DecideContext } from '@agentic-marketing/personalize/targeting';
 import { and, eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -10,15 +12,46 @@ import { startTestServer, testPort, type User } from './harness';
 // Progressive rollout (#427): a ramp starts small, widens on schedule, pauses when its guardrail
 // fails and stops at once when a person (or an allowed agent) says so. The edge bundle carries the
 // share, so the worker applies it without a server round trip.
+//
+// The edge sync runs once a day in this file: the kill-switch test proves the stop pushes the
+// bundle itself (#477) rather than waiting for the scheduler.
 
 let t: Awaited<ReturnType<typeof startTestServer>>;
+let cf: Server;
+let cfBase = '';
+const ACCOUNT = 'a'.repeat(32);
+const NS = 'b'.repeat(32);
+/** A fake Cloudflare Workers KV: the same API surface the edge sync writes through. */
+const kv = new Map<string, unknown>();
 
 beforeAll(async () => {
-  t = await startTestServer('test_experience_rollout', testPort(3600));
+  cf = createServer(async (req, res) => {
+    const chunks: Buffer[] = [];
+    for await (const c of req) chunks.push(c as Buffer);
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '[]');
+    const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+    const m = url.pathname.match(/^\/accounts\/([^/]+)\/storage\/kv\/namespaces\/([^/]+)(\/[^?]*)$/);
+    if (!m) return res.writeHead(404, { 'content-type': 'application/json' }).end(JSON.stringify({ success: false }));
+    const path = m[3];
+    if (path === '/bulk' && req.method === 'PUT') for (const e of body) kv.set(e.key, JSON.parse(e.value));
+    else if (path === '/bulk/delete' && req.method === 'POST') for (const k of body) kv.delete(k);
+    else if (path === '/keys' && req.method === 'GET') {
+      const prefix = url.searchParams.get('prefix') ?? '';
+      const names = [...kv.keys()].filter((k) => k.startsWith(prefix));
+      return res
+        .writeHead(200, { 'content-type': 'application/json' })
+        .end(JSON.stringify({ success: true, errors: [], result: names.map((name) => ({ name })) }));
+    }
+    res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ success: true, errors: [] }));
+  });
+  await new Promise<void>((r) => cf.listen(0, '127.0.0.1', r));
+  cfBase = `http://127.0.0.1:${(cf.address() as AddressInfo).port}`;
+  t = await startTestServer('test_experience_rollout', testPort(3600), {}, { edgeTickMs: 86_400_000 });
 }, 90_000);
 
 afterAll(async () => {
   await t?.close();
+  cf?.close();
 });
 
 let n = 0;
@@ -489,3 +522,25 @@ describe('pause delivery is durable and idempotent (#473, #476)', () => {
   });
 });
 
+
+describe('the kill switch reaches KV before it returns (#477)', () => {
+  it('pushes the stopped bundle to KV without waiting for the sync tick', async () => {
+    const { ws, api } = await person();
+    await api.call('edge.configure', {
+      accountId: ACCOUNT,
+      namespaceId: NS,
+      apiToken: 'cf-token-0123456789abcdef',
+      apiBase: cfBase,
+      enabled: true,
+    });
+    const id = await publishExperience(api, ramp());
+    // The background sync runs once a day in this file, so push the live bundle by hand.
+    await syncEdge({ db: t.srv.db, hot: t.srv.hot, kp: t.srv.keyProvider, egress: t.srv.egress }, ws);
+    const bundle = () => kv.get(`am:exp:${ws}`) as { experiences: { id: string; share: number | null }[] };
+    expect(bundle().experiences.find((e) => e.id === id)?.share).toBe(5);
+
+    await api.call('experiences.stopRollout', { artifactId: id, reason: 'Conversion collapse' });
+    // No wait, no tick: the stop pushed the new share before it returned.
+    expect(bundle().experiences.find((e) => e.id === id)?.share).toBe(0);
+  });
+});

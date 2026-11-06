@@ -52,6 +52,6 @@ An earlier destination is cleaned with the current token. The same account is en
 
 ## Freshness
 
-- Experiences and write keys: at most one sync (about a second) plus the worker's isolate cache (`AM_CACHE_SECONDS`, 10 by default) plus KV propagation (up to a minute in far regions).
+- Experiences and write keys: at most one sync (about a second) plus the worker's isolate cache (`AM_CACHE_SECONDS`, 10 by default) plus KV propagation (up to a minute in far regions). `experiences.stopRollout` skips the sync tick and pushes the stopped bundle to KV before it returns, so the remaining bound is the isolate cache plus KV propagation; the dashboard and the server decision API show share 0 at once, the edge follows within that window.
 - Snapshots: written when the server's snapshot changes, then KV propagation. A brand-new visitor has no snapshot anywhere, at the edge or on the server.
 - If the mirror fails (bad token, Cloudflare down), the worker keeps answering from what KV has, and `edge.status` shows the error. Queued snapshot changes and deletions wait in the outbox until the next successful sync.

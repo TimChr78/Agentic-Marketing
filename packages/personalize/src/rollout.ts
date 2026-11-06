@@ -2,9 +2,18 @@ import { MEASURES } from '@agentic-marketing/analytics';
 import { artifactTypes, type ExperienceDefinition, publishHooks, publishValidators } from '@agentic-marketing/artifacts';
 import { type CommandContext, defineCommand } from '@agentic-marketing/commands';
 import { AppError } from '@agentic-marketing/core';
-import { schema } from '@agentic-marketing/db';
+import { type Db, schema } from '@agentic-marketing/db';
+import { logger } from '@agentic-marketing/telemetry';
 import { and, eq } from 'drizzle-orm';
 import { z } from 'zod';
+import { syncEdge } from './edge';
+
+declare module '@agentic-marketing/commands' {
+  interface Services {
+    /** The pool, for the immediate edge push a stop makes (#477). */
+    db?: Db;
+  }
+}
 
 // Progressive rollout for agent changes (#427, part of #102). A published experience may carry a
 // ramp: start with a small share of visitors, widen on a schedule while a metric-layer guardrail
@@ -139,10 +148,18 @@ const statusOf = (artifactId: string, row: RolloutRow | null): z.infer<typeof Ro
       };
 
 /** The edge bundle and the decision API cache must see a changed share without waiting for a publish. */
-async function invalidateExperiences(ctx: CommandContext, workspaceId: string) {
+async function invalidateExperiences(ctx: CommandContext, workspaceId: string, opts: { pushNow?: boolean } = {}) {
   await ctx.tx.update(schema.edgeTargets).set({ bundleHash: null });
   ctx.afterCommit?.(async () => {
     await ctx.services.hot.bump(`experiences:${workspaceId}`);
+    if (!opts.pushNow) return;
+    // A stop is an emergency (#477): push the new share to KV now rather than on the next sync
+    // tick. Cloudflare still has to propagate the write to other regions; see the command text.
+    const { db, hot, keyProvider, egress } = ctx.services;
+    if (!db || !keyProvider || !egress) return;
+    await syncEdge({ db, hot, kp: keyProvider, egress }, workspaceId, { bundleOnly: true }).catch((err) =>
+      logger.warn({ err, workspaceId }, 'immediate edge bundle push failed'),
+    );
   });
 }
 
@@ -173,7 +190,7 @@ export const stopRollout = defineCommand({
   name: 'experiences.stopRollout',
   title: 'Stop an experience ramp',
   description:
-    'Stop an experience ramp at once: its share becomes 0 for everyone and the edge bundle is updated without republishing. People and agents with experience.live may stop a ramp; it stays stopped until a person resumes it with experiences.resumeRollout, and an agent republishing the experience does not restart it.',
+    'Stop an experience ramp: its share becomes 0 for the decision API at once, and the edge bundle is pushed with the new share before this returns; Cloudflare has to propagate that write to other regions, so edge-served sites can keep the old share for up to about a minute (the worker’s isolate cache plus KV propagation, see docs/deployment/edge.md). People and agents with experience.live may stop a ramp; it stays stopped until a person resumes it with experiences.resumeRollout, and an agent republishing the experience does not restart it.',
   input: z.object({
     artifactId: z.string().regex(/^exp_[0-9a-f]{32}$/, 'An experience id (exp_…)'),
     reason: z.string().min(1).max(500).describe('Why the ramp is stopped; shown in the rollout status and the agent event'),
@@ -216,7 +233,7 @@ export const stopRollout = defineCommand({
       })
       .where(and(eq(schema.experienceRollouts.workspaceId, ws), eq(schema.experienceRollouts.artifactId, input.artifactId)))
       .returning();
-    await invalidateExperiences(ctx, ws);
+    await invalidateExperiences(ctx, ws, { pushNow: true });
     return statusOf(input.artifactId, updated ?? row);
   },
 });

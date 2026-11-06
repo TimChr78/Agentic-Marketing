@@ -464,7 +464,7 @@ async function deleteWorkspaceCopies(kv: KvClient, ws: string, keys: string[]) {
 }
 
 /** One sync of one workspace: remote cleanup, the bundle if it changed, queued snapshots, and a slice of backfill. */
-export async function syncEdge(deps: EdgeDeps, ws: string) {
+export async function syncEdge(deps: EdgeDeps, ws: string, opts: { bundleOnly?: boolean } = {}) {
   // A session lock serializes replicas without holding a transaction open during HTTP. A fresh
   // configuration can still commit; generation fences below stop the old tick before it acks
   // work or replaces the new state. The next tick cleans any late writes to the old target.
@@ -476,7 +476,7 @@ export async function syncEdge(deps: EdgeDeps, ws: string) {
       `edge-sync:${ws}`,
     ]);
     locked = result.rows[0].locked;
-    if (locked) await syncEdgeLocked(deps, ws);
+    if (locked) await syncEdgeLocked(deps, ws, opts);
   } finally {
     if (locked) {
       try {
@@ -489,7 +489,7 @@ export async function syncEdge(deps: EdgeDeps, ws: string) {
   }
 }
 
-async function syncEdgeLocked(deps: EdgeDeps, ws: string) {
+async function syncEdgeLocked(deps: EdgeDeps, ws: string, opts: { bundleOnly?: boolean } = {}) {
   const state = await deps.db.withWorkspace(ws, async (tx) => {
     const [t] = await tx.select().from(schema.edgeTargets);
     if (!t) return null;
@@ -544,7 +544,11 @@ async function syncEdgeLocked(deps: EdgeDeps, ws: string) {
   const servesSnapshots = t.enabled && t.snapshots;
   const backfills = servesSnapshots && t.backfillCursor !== null;
   const staleReady = stale.some((p) => !p.nextAttemptAt || Date.parse(p.nextAttemptAt) <= Date.now());
-  if (!servesBundle && !queued && !backfills && !t.cleanupMode && !staleReady) return;
+  // A stop pushes only the bundle (#477): the owner is waiting for the kill switch, so skip every
+  // other slice of work this sync would do.
+  if (opts.bundleOnly) {
+    if (!servesBundle) return;
+  } else if (!servesBundle && !queued && !backfills && !t.cleanupMode && !staleReady) return;
   if (!t.secrets || !t.secretsKeyId) {
     await update({ lastError: 'No Cloudflare API token: the edge cannot be updated or cleaned up.', lastSyncAt: new Date() });
     return;
@@ -557,7 +561,7 @@ async function syncEdgeLocked(deps: EdgeDeps, ws: string) {
     // 0. Destinations we left: remove their copies, or keep them listed with the failure. The
     // current token may not reach another account; then only the operator can delete them.
     let staleError: string | null = null;
-    if (stale.length) {
+    if (stale.length && !opts.bundleOnly) {
       const keep: PriorEdgeTarget[] = [];
       for (const old of stale) {
         if (old.nextAttemptAt && Date.parse(old.nextAttemptAt) > Date.now()) {
@@ -584,7 +588,7 @@ async function syncEdgeLocked(deps: EdgeDeps, ws: string) {
     // 1. Finish a cleanup owed after serving was turned off, before any write. Until it succeeds the
     // mode stays set and the next sync retries; the status never reports a cleanup that did not run.
     let removedAll = false;
-    if (t.cleanupMode) {
+    if (t.cleanupMode && !opts.bundleOnly) {
       const mode = t.cleanupMode;
       if (mode === 'all') await deleteWorkspaceCopies(kv, ws, t.pushedKeys);
       else await deleteSnapshots(kv, ws);
@@ -604,7 +608,7 @@ async function syncEdgeLocked(deps: EdgeDeps, ws: string) {
     }
     // 3. Queued snapshot writes and deletions; the latest per key wins. When snapshots are off,
     // every queued entry is deleted rather than uploaded, and erasure tombstones are never dropped.
-    for (;;) {
+    while (!opts.bundleOnly) {
       const { rows } = await deps.db.admin.query<{ id: string; key: string; value: unknown }>(
         'SELECT id, key, value FROM edge_outbox WHERE workspace_id = $1 ORDER BY id LIMIT 5000',
         [ws],
@@ -628,7 +632,7 @@ async function syncEdgeLocked(deps: EdgeDeps, ws: string) {
       if (rows.length < 5000) break;
     }
     // 4. Backfill: everyone's snapshot, a slice per sync (written through the mirror above).
-    if (servesSnapshots && t.backfillCursor !== null) {
+    if (!opts.bundleOnly && servesSnapshots && t.backfillCursor !== null) {
       const people = await deps.db.withWorkspace(ws, (tx) =>
         tx
           .select({ id: schema.profiles.id })
@@ -645,7 +649,7 @@ async function syncEdgeLocked(deps: EdgeDeps, ws: string) {
       const next = people.length === 1000 ? people[people.length - 1].id : null;
       if (!(await update({ backfillCursor: next }))) return;
     }
-    await update({ lastSyncAt: new Date(), lastError: staleError });
+    if (!opts.bundleOnly) await update({ lastSyncAt: new Date(), lastError: staleError });
   } catch (err) {
     const message = (err as Error).message.slice(0, 500);
     logger.warn({ err, workspace: ws }, 'edge sync failed');
