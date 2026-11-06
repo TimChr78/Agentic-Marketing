@@ -170,7 +170,7 @@ importers:
         specifier: 3.5.13
         version: 3.5.13
       happy-dom:
-        specifier: 21.0.4
+        specifier: ^21.0.4
         version: 21.0.4
       http_ece:
         specifier: 1.2.1
