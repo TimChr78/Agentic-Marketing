@@ -6,6 +6,7 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 
 ### Added
 
+- The Phase 24 navigation and shell (#446): a New menu with the exact creation order and gates, the command palette's Recents (per person and workspace, using successful detail reads only), Create actions and Go-to pages, the `?create=<type>` seam that opens each existing create dialog once, and the `/create` gallery with Blank and Starters tabs.
 - `broadcasts.list` returns the operational rows a broadcast list needs in one read: each broadcast's run (status, counts, times and error), the segment and template it is pinned to, the staged send's stage and stop reason, and its messages by current status. Filter by run status before paging, and follow `nextCursor` for the filtered `total`. `broadcasts.status` keeps its output and shares the same run, stage and delivery projection.
 - `agents.runFailures` lists recent failed hosted runs across every agent since a given time, newest first, with each agent's name, summary and error. It is a bounded failure queue, not an incident lifecycle.
 - `approvals.list` adds `total` for the same status and artifact filter (including held rows) and a `nextCursor`, so the approvals destination can page the whole queue. Bundle member resolution and the existing list output are unchanged.
@@ -26,6 +27,7 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 
 ### Changed
 
+- Navigation is grouped by work (#446): Work, Marketing, Audience, Content and Insights with collapsible groups, Settings pinned at the bottom with its own secondary navigation, Preferences in the account menu, and the desktop rail opening named group menus. Every page has its canonical URL; the old `/build`, `/design`, `/settings/agents`, Imports, Purposes, Preferences, Journey stats and AI usage URLs redirect with their ids, other query values and hash preserved.
 - Adopt the DESIGN.md v2 foundations (#436): warm stone neutrals in light and tonal surfaces in dark, the 24/32 page and 16/24 section scale, 32/40 KPIs, 13/20 UI and tables, 32/24 section rhythm, 8/12 px radii, overlays-only shadows, and the categorical/sequential/diverging data-visualisation palette in `apps/web/src/index.css` and the shared `ui` components.
 - Charts now read the v2 tokens (quiet grids, direct end labels, 12/18 axis and tooltip type, system font, theme re-read without the legacy theme hook), and the new shared primitives in `apps/web/src/ui/charts.tsx` provide the KPI tile with direction-aware deltas and data states, line/area and bar charts, and the “Show data table” fallback (#436).
 - Operational state replaces the publication version as the primary status (#437). List and detail headers show a state pill from the new `lib/state.ts` model (broadcast, journey, agent, experience and form families), and “Published v2” is secondary metadata. The shared artifact list, broadcast list and header, agents and agent detail adopt it; other screens follow in later phases.
