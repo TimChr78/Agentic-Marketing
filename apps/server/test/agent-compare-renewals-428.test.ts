@@ -317,15 +317,22 @@ describe('overlapping bulk renewals keep one lock order (#455, round 3)', () => 
       // edit now holds: the two form a cycle. Locking the set in id order before any write avoids it.
       await audit.query('COMMIT');
 
+      // Both finish (no deadlock). Which one reaches the second mandate first depends on scheduling;
+      // either serial order is consistent, and each is checked for what it implies.
       const [draft, renewed] = await Promise.all([edit, renewal]);
-      expect(draft.version).toBe(2);
       expect(renewed.renewed.find((r: { mandateId: string }) => r.mandateId === first)).toMatchObject({
         ok: true,
         version: 2,
       });
-      // The edit committed first, so the renewal's second mandate is refused rather than
-      // overwriting the draft; either serial order is consistent, a deadlock is not.
-      expect(renewed.renewed.find((r: { mandateId: string }) => r.mandateId === second)).toMatchObject({ ok: false });
+      const secondResult = renewed.renewed.find((r: { mandateId: string }) => r.mandateId === second);
+      if (draft.version === 2) {
+        // The edit ran first: the renewal refuses the mandate with a draft instead of overwriting it.
+        expect(secondResult).toMatchObject({ ok: false });
+      } else {
+        // The renewal ran first: it published v2, and the edit's draft follows it as v3.
+        expect(secondResult).toMatchObject({ ok: true, version: 2 });
+        expect(draft.version).toBe(3);
+      }
       const rows = await t.srv.db.admin.query<{ id: string; latest_version: number; published_version: number }>(
         'SELECT id, latest_version, published_version FROM artifacts WHERE workspace_id = $1 AND id IN ($2, $3) ORDER BY id',
         [w, a, b],
