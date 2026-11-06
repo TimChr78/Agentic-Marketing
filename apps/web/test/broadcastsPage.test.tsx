@@ -7,6 +7,7 @@ import { ToastProvider } from '../src/ui/toast';
 const h = vi.hoisted(() => ({
   calls: [] as { name: string; input: unknown }[],
   failSecondPage: false,
+  segmentName: 'Engaged readers',
 }));
 
 const seg = `seg_${'b'.repeat(32)}`;
@@ -56,7 +57,7 @@ vi.mock('../src/app/api', async (importOriginal) => {
               {
                 id: seg,
                 type: 'segment',
-                name: 'Engaged readers',
+                name: h.segmentName,
                 latestVersion: 1,
                 latestState: 'published',
                 publishedVersion: 1,
@@ -89,6 +90,7 @@ beforeEach(() => {
   cleanup();
   h.calls.length = 0;
   h.failSecondPage = false;
+  h.segmentName = 'Engaged readers';
   clearArtifactNameCache();
   history.replaceState(null, '', '/build/broadcasts');
 });
@@ -118,6 +120,16 @@ describe('BroadcastsPage (#448)', () => {
     const nameCalls = h.calls.filter((c) => c.name === 'artifacts.list');
     expect(nameCalls).toHaveLength(1);
     expect(nameCalls[0]!.input).toEqual({ type: 'segment', limit: 200 });
+  });
+
+  it('Refresh re-reads segment names after a rename outside this tab (#459)', async () => {
+    renderPage();
+    expect((await screen.findAllByText('Engaged readers')).length).toBeGreaterThan(0);
+
+    h.segmentName = 'Engaged readers · November';
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    expect((await screen.findAllByText('Engaged readers · November')).length).toBeGreaterThan(0);
+    expect(h.calls.filter((c) => c.name === 'artifacts.list')).toHaveLength(2);
   });
 
   it('pages with the opaque cursor and allows going back', async () => {

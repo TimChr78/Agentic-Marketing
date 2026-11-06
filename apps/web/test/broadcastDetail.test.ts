@@ -195,6 +195,24 @@ describe('broadcast primary action (#448)', () => {
     expect(broadcastPrimaryActionOf({ artifact: draft, readOnly: true })).toEqual({ kind: 'tab', tab: 'content', label: 'View content' });
   });
 
+  it('offers no publish or submit until the send state is known (#484)', () => {
+    const draft = artifact({ publishedVersion: null, latestVersion: 3, version: { ...artifact().version, state: 'draft', number: 3 } });
+    // A run that is still loading is unknown, not "no run": the server cannot stop the publish
+    // either, so the UI must wait instead of showing the draft action.
+    expect(broadcastPrimaryActionOf({ artifact: draft, canSubmit: true, statusLoading: true })).toEqual({
+      kind: 'loading',
+      label: 'Checking send state',
+    });
+    expect(broadcastPrimaryActionOf({ artifact: draft, canSubmit: true, directPublish: true, statusLoading: true }).kind).toBe('loading');
+    // Local work stays available; only mutations that can replace live content wait.
+    expect(broadcastPrimaryActionOf({ artifact: draft, dirty: true, statusLoading: true })).toEqual({
+      kind: 'save',
+      label: 'Save draft',
+    });
+    // Once loaded, the same draft offers its normal action.
+    expect(broadcastPrimaryActionOf({ artifact: draft, canSubmit: true })).toMatchObject({ kind: 'publish' });
+  });
+
   it('rejected content can be submitted again', () => {
     const rejected = artifact({
       publishedVersion: null,

@@ -2,6 +2,19 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+### Fixed
+
+- Broadcast segment and template names refresh after a change instead of keeping the old name for the rest of the session (#459).
+- The shared broadcast name cache is dropped on artifact create, rename, delete and publish, with a short time limit as a backstop (#486).
+- The sidebar pending badge counts decisions, so a bundle counts once, exactly as on Approvals (#483).
+- Broadcast detail waits for the send state before offering Publish or Submit for review, so an unknown run is never treated as no run (#484).
+- Opening another broadcast resets the tab and run state instead of keeping the previous broadcast's (#485).
+- Corrected the 0.9.0 accessibility note: the axe known-issues list started with two deferred GrapesJS entries, not empty (#491).
+- The scheduled-backup override example honours `CLICKHOUSE_DATABASE` from `.env` instead of pinning `am` (#492).
+- The image healthcheck has a start period, so a slow migration is not reported as an unhealthy container (#493).
+
 ## [0.10.0] - 2026-11-06
 
 ### Added
@@ -45,7 +58,7 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 - Deterministic, rich demo fixtures for UI work, Playwright and screenshots (#434). The e2e seed now generates weeks of believable activity from a seeded PRNG and a fixed clock: about 520 people with consent history, eight sent weekly issues with delivered, opened, clicked, bounced, complained and unsubscribed message events, a scheduled send and a stopped canary send, a live journey with participants on every step, a web-experience experiment, campaign conversions with UTM tags, backdated agent actions, a guardian episode, learnings, a mandate with goals, alerts that fired and resolved, and an import history entry. Counts, rates and names are stable across runs; `seed` takes a `now` option for other dates.
 - A screenshot matrix for design review (#433). `e2e/screenshots.mjs` (also `pnpm shots`) captures every admin route — derived from `apps/web/src/app/nav.ts` plus the seeded detail pages (one of each artifact type, a person, an agent, a token, every approval type, the signed-out sign-in page and `/`) — at 1440, 768 and 390 px in light and dark. Captures are deterministic: the clock is fixed, motion and carets are disabled, fonts and images are loaded and skeletons gone before the shot, and relative times, dates and raw ids are masked. A manual CI run (`workflow_dispatch` → `screenshots`) produces the whole matrix as an artifact.
 - Visual regression in CI (#433). `e2e/visual.spec.ts` compares a stable subset (sign-in, approvals and a broadcast approval, the journey list and builder, a broadcast, a template, people, analytics, agents and an agent, the workspace settings) at 1440 and 390 px in both themes against Linux baselines committed in `e2e/visual.spec.ts-snapshots`. Its own Playwright project keeps the functional suite fast; the `visual` CI job runs on pull requests that touch `apps/web` or `e2e` and uploads the expected/actual/diff images when a baseline fails. Baselines are only ever updated by a reviewed commit.
-- Automated accessibility checks (#206). `e2e/axe.spec.ts` runs `@axe-core/playwright` with the WCAG 2.1/2.2 A and AA rules over every route in the matrix, light and dark, fails on any violation not listed in `e2e/axe-known-issues.json`, and prints the violations by rule. The list starts empty; the wave's done criterion is that it stays empty.
+- Automated accessibility checks (#206). `e2e/axe.spec.ts` runs `@axe-core/playwright` with the WCAG 2.1/2.2 A and AA rules over every route in the matrix, light and dark, fails on any violation not listed in `e2e/axe-known-issues.json`, and prints the violations by rule. The list starts with the two deferred GrapesJS violations on the template route (`color-contrast` and `scrollable-region-focusable`); the wave's done criterion is that it becomes empty, and theming the editor to the design system is Phase 25.
 
 ### Changed
 
@@ -57,7 +70,7 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 
 ### Fixed
 
-- Shared UI fixes from the wave 5 screenshot pass (#438): 40 px touch targets below 768 px, one navigation toggle under 1024 px, the brand logo contained in its square with an initial fallback, GrapesJS chrome themed to the app tokens in both themes, no epoch “newest” date on an empty Analytics query, honest People counts with cursor “Load more” and no repeated e-mail column, and page-level horizontal overflow contained to tables and canvases at 390 px.
+- Shared UI fixes from the wave 5 screenshot pass (#438): 40 px touch targets below 768 px, one navigation toggle under 1024 px, the brand logo contained in its square with an initial fallback, no epoch “newest” date on an empty Analytics query, honest People counts with cursor “Load more” and no repeated e-mail column, and page-level horizontal overflow contained to tables and canvases at 390 px.
 - The brand switcher and the account menu no longer override their visible text with an `aria-label`, so the accessible name contains the visible label (WCAG 2.5.3).
 - Tabs only point `aria-controls` at a panel that is rendered, and the OpenAPI link in Settings → Integrations is underlined rather than distinguished by colour alone (WCAG 1.4.1) (#206).
 

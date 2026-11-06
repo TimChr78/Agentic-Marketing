@@ -191,6 +191,7 @@ export function broadcastConsequenceOf(input: ConsequenceInput): BroadcastConseq
 
 export type BroadcastPrimaryAction =
   | { kind: 'save'; label: 'Save draft' }
+  | { kind: 'loading'; label: string }
   | { kind: 'publish'; label: string }
   | { kind: 'tab'; tab: BroadcastTab; label: string }
   | { kind: 'link'; to: string; label: string }
@@ -201,6 +202,8 @@ export interface PrimaryActionInput {
   artifact: BroadcastDetailArtifact;
   run?: BroadcastRun | null;
   statusError?: string | null;
+  /** The send-state read has not answered yet; an unknown run is never treated as no run (#484). */
+  statusLoading?: boolean;
   dirty?: boolean;
   readOnly?: boolean;
   /** artifacts:publish and a saved draft or rejected version. */
@@ -235,7 +238,10 @@ export function broadcastPrimaryActionOf(input: PrimaryActionInput): BroadcastPr
     }
   }
 
+  // Only a local save is safe before the run is known: a scheduled or sending run decides the
+  // primary action, and offering publish or submit here would let one click replace live content.
   if (input.dirty && !input.readOnly) return { kind: 'save', label: 'Save draft' };
+  if (input.statusLoading) return { kind: 'loading', label: 'Checking send state' };
   const state = input.artifact.version.state;
   if (state === 'draft' || state === 'rejected') {
     if (input.readOnly) return { kind: 'tab', tab: 'content', label: 'View content' };

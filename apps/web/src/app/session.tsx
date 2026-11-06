@@ -1,4 +1,5 @@
 import { createContext, type ReactNode, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import { pendingDecisionCount } from '../features/approvals/decisions';
 import { setWorkspaceTimeZone } from '../ui/time';
 import { ApiError, api, getWorkspaceId, type Out, setWorkspaceId } from './api';
 import { clearRecentsMemory, setRecentsScope } from './recents';
@@ -95,12 +96,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   const refreshPending = useCallback(() => {
     if (status !== 'ready') return;
-    // The nav badge uses the approvals list's own pending total (B7): pending requests, never
-    // “assigned to you”. Older responses without `total` fall back to counting decisions, where a
-    // bundle (#107) is one decision, as in the list.
+    // The nav badge counts decisions, not rows (#483): a bundle (#107) is one decision, exactly as
+    // the Approvals page groups it. Pending requests only, never “assigned to you”.
     api
       .call('approvals.list', { status: 'pending', limit: 200 })
-      .then((r) => (typeof r.total === 'number' ? r.total : new Set(r.approvals.map((a) => a.bundle?.id ?? a.id)).size))
+      .then((r) => pendingDecisionCount(r.approvals))
       .catch(() => 0)
       .then(setPending);
   }, [status]);

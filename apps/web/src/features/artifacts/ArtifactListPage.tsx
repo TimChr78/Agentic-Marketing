@@ -27,6 +27,7 @@ import {
 } from '../../ui';
 import { pageWidth } from '../../ui/layout';
 import { OperationalPill } from '../../ui/state';
+import { notifyArtifactsChanged } from '../artifactCache';
 import { type ArtifactRow, useAllArtifacts } from './artifactList';
 
 export type { ArtifactRow } from './artifactList';
@@ -249,6 +250,7 @@ function CreateDialog<S>({ type, spec, onClose }: { type: string; spec: CreateSp
       const r = spec.create
         ? await spec.create(name.trim(), state)
         : await api.call('artifacts.create', { type: type as never, name: name.trim(), content: spec.content(name.trim(), state) });
+      notifyArtifactsChanged();
       toast.success(`Created “${name.trim()}” as a draft.`);
       onClose();
       navigate(artifactPath(type, r.artifactId));
