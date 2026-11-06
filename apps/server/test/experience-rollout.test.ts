@@ -522,7 +522,6 @@ describe('pause delivery is durable and idempotent (#473, #476)', () => {
   });
 });
 
-
 describe('the kill switch reaches KV before it returns (#477)', () => {
   it('pushes the stopped bundle to KV without waiting for the sync tick', async () => {
     const { ws, api } = await person();
