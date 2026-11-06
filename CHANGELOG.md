@@ -2,6 +2,21 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+### Added
+
+- Every artifact preview now names its source above the output — Unsaved draft (with the saved version it grew from), Saved vN or Published vN — through the shared `PreviewSource` and `PreviewLabel` contract, including hosted-page, template and e-mail previews (#499).
+- The e-mail editor has one Insert palette for the six basic MJML elements and reusable blocks, an in-editor preview with Desktop, Mobile, Dark mail and Text version modes, and a local unsaved-draft renderer that never shows a saved body under an unsaved label (#499).
+
+### Changed
+
+- The e-mail editor's GrapesJS chrome is themed with the design-system tokens in light and dark, replacing the third-party greys; Styles, Settings and Layers remain the named inspector tabs, and the duplicate Code, Import, Blocks, Full screen, Preview and device controls are gone (#499).
+
+### Fixed
+
+- Removed the two deferred template-route axe findings: GrapesJS chrome contrast and scrollable regions without keyboard access. The axe allowlist is empty (#499).
+
 ## [0.10.1] - 2026-11-06
 
 ### Security
