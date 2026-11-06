@@ -9,8 +9,6 @@ const ReportEntry = lazy(() => import('./report/ReportEntry'));
 
 type LegacyMeasure = 'email.sent' | 'email.delivered' | 'email.clicked' | 'email.click_rate';
 
-const LEGACY_COLUMNS = ['email.sent', 'email.delivered', 'email.clicked', 'email.click_rate'] as const;
-
 export interface BroadcastReportView {
   /** Only an observed zero (not a suppressed or unavailable null) means no sends. */
   noSends: boolean;
@@ -59,9 +57,6 @@ export function reportViewOf(values: Record<LegacyMeasure, number | null>, suppr
           : 'Unavailable in this period',
   };
 }
-
-/** Kept for the legacy test import surface; the Phase 25 view has its own period utilities. */
-export const LEGACY_REPORT_MEASURES = LEGACY_COLUMNS;
 
 export function BroadcastReport({ artifactId, active }: { artifactId: string; active: boolean }) {
   if (!active) return null;
