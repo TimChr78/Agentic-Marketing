@@ -2,6 +2,14 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+### Added
+
+- `broadcasts.list` returns the operational rows a broadcast list needs in one read: each broadcast's run (status, counts, times and error), the segment and template it is pinned to, the staged send's stage and stop reason, and its messages by current status. Filter by run status before paging, and follow `nextCursor` for the filtered `total`. `broadcasts.status` keeps its output and shares the same run, stage and delivery projection.
+- `agents.runFailures` lists recent failed hosted runs across every agent since a given time, newest first, with each agent's name, summary and error. It is a bounded failure queue, not an incident lifecycle.
+- `approvals.list` adds `total` for the same status and artifact filter (including held rows) and a `nextCursor`, so the approvals destination can page the whole queue. Bundle member resolution and the existing list output are unchanged.
+
 ## [0.9.0] - 2026-11-06
 
 ### Added
