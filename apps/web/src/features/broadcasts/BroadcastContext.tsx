@@ -54,6 +54,21 @@ export function BroadcastContext({
   const content = (artifact.version.content ?? {}) as BroadcastContent;
   const run = status.data?.run;
   const delivery = status.data?.delivery;
+  const runStarted = !!run && run.status !== 'not_scheduled';
+  const pinnedSegmentId = runStarted ? (status.data?.segmentId ?? null) : null;
+  const pinnedTemplateId = runStarted ? (status.data?.templateId ?? null) : null;
+  const segmentId = pinnedSegmentId ?? content.segment;
+  const templateId = pinnedTemplateId ?? content.template;
+  const segmentLabel = pinnedSegmentId ? names.get(pinnedSegmentId)?.name : segmentName;
+  const templateLabel = pinnedTemplateId ? names.get(pinnedTemplateId)?.name : templateName;
+  const draftDiffers =
+    runStarted &&
+    !!run &&
+    (artifact.latestVersion > (run.version ?? 0) ||
+      (pinnedSegmentId !== null && content.segment !== pinnedSegmentId) ||
+      (pinnedTemplateId !== null && content.template !== pinnedTemplateId));
+  const draftSegmentName = content.segment ? names.get(content.segment)?.name : undefined;
+  const draftTemplateName = content.template ? names.get(content.template)?.name : undefined;
   const author = artifact.version.by?.displayName ?? (artifact.version.author.type === 'agent' ? 'an agent' : 'a person');
 
   const schedule = run?.sendAt
@@ -99,16 +114,17 @@ export function BroadcastContext({
           {artifact.publishedVersion !== null
             ? `Published v${artifact.publishedVersion} · latest v${artifact.latestVersion}`
             : `Not published · latest v${artifact.latestVersion}`}
+          {runStarted && run?.version != null ? ` · sending v${run.version}` : ''}
         </Definition>
         <Definition term="Changed by">{author}</Definition>
         <Definition term="Segment">
-          {content.segment ? (
-            segmentName ? (
-              <TextLink to={artifactPath('segment', content.segment)}>{segmentName}</TextLink>
+          {segmentId ? (
+            segmentLabel ? (
+              <TextLink to={artifactPath('segment', segmentId)}>{segmentLabel}</TextLink>
             ) : (
               <span className="inline-flex flex-wrap items-center gap-1.5">
                 <span className="text-muted">Unavailable reference</span>
-                <Identifier value={content.segment} label="Segment ID" />
+                <Identifier value={segmentId} label="Segment ID" />
               </span>
             )
           ) : (
@@ -116,19 +132,25 @@ export function BroadcastContext({
           )}
         </Definition>
         <Definition term="Template">
-          {content.template ? (
-            templateName ? (
-              <TextLink to={artifactPath('email_template', content.template)}>{templateName}</TextLink>
+          {templateId ? (
+            templateLabel ? (
+              <TextLink to={artifactPath('email_template', templateId)}>{templateLabel}</TextLink>
             ) : (
               <span className="inline-flex flex-wrap items-center gap-1.5">
                 <span className="text-muted">Unavailable reference</span>
-                <Identifier value={content.template} label="Template ID" />
+                <Identifier value={templateId} label="Template ID" />
               </span>
             )
           ) : (
             'Not set'
           )}
         </Definition>
+        {draftDiffers && (
+          <Definition term={`Draft v${artifact.latestVersion} targets`}>
+            {draftSegmentName ?? 'Segment'}
+            {draftTemplateName ? ` · ${draftTemplateName}` : ''}
+          </Definition>
+        )}
         <Definition term="Schedule">{schedule}</Definition>
         <Definition term="Preparation">{preparation}</Definition>
         <Definition term="Current delivery">{currentDelivery}</Definition>

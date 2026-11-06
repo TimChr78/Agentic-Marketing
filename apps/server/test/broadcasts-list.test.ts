@@ -238,4 +238,22 @@ describe('broadcasts.list (B1)', () => {
   it('rejects a malformed cursor instead of restarting from the first page', async () => {
     await expect(api().call('broadcasts.list', { cursor: 'not-a-cursor' })).rejects.toMatchObject({ code: 'invalid_input' });
   });
+
+  it('keeps status pinned to the run version when a later draft targets another segment', async () => {
+    // v1 sends to `segment`; v2 (a draft) targets another segment. The operational status stays on
+    // the pinned definition, so the detail page can never pair v2's audience with v1's recipients.
+    const otherSegment = await create(ws, 'segment', 'Other readers', { condition: { consent: 'marketing_email' } });
+    const pinned = await publish(ws, await create(ws, 'broadcast', 'Pinned issue', { template, segment, sendAt: '2030-02-01T09:00:00Z' }));
+    await runOf(pinned);
+
+    expect(await status(pinned)).toMatchObject({ segmentId: segment, templateId: template });
+    await api().call('artifacts.updateDraft', {
+      artifactId: pinned,
+      content: { template, segment: otherSegment, sendAt: '2030-02-01T09:00:00Z' },
+    });
+    const after = await status(pinned);
+    expect(after.run).toMatchObject({ status: 'scheduled', version: 1 });
+    expect(after.segmentId).toBe(segment);
+    expect(after.templateId).toBe(template);
+  });
 });

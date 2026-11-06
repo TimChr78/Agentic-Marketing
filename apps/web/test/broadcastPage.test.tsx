@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { clearArtifactNameCache } from '../src/features/broadcasts/names';
 import BroadcastPage from '../src/pages/build/BroadcastPage';
@@ -6,6 +6,9 @@ import { ToastProvider } from '../src/ui/toast';
 
 const h = vi.hoisted(() => ({
   calls: [] as { name: string; input: unknown }[],
+  artifact: null as unknown,
+  status: null as unknown,
+  approvals: null as null | (() => Promise<unknown>),
 }));
 
 const id = `bct_${'a'.repeat(32)}`;
@@ -97,7 +100,7 @@ vi.mock('../src/app/api', async (importOriginal) => {
               latestVersion: 5,
               version: { ...artifact.version, number: 5, content: { purpose: 'marketing_email' } },
             };
-          return artifact;
+          return (h.artifact as typeof artifact | null) ?? artifact;
         }
         if (name === 'artifacts.list') {
           return {
@@ -125,8 +128,8 @@ vi.mock('../src/app/api', async (importOriginal) => {
             nextCursor: null,
           };
         }
-        if (name === 'broadcasts.status') return status;
-        if (name === 'approvals.list') return { approvals: [] };
+        if (name === 'broadcasts.status') return (h.status as typeof status | null) ?? status;
+        if (name === 'approvals.list') return (await h.approvals?.()) ?? { approvals: [] };
         if (name === 'campaigns.of') return { campaigns: [] };
         if (name === 'purposes.list') return { purposes: [] };
         if (name === 'analytics.query') return analytics;
@@ -148,6 +151,9 @@ vi.mock('../src/app/session', () => ({
 beforeEach(() => {
   cleanup();
   h.calls.length = 0;
+  h.artifact = null;
+  h.status = null;
+  h.approvals = null;
   clearArtifactNameCache();
   history.replaceState(null, '', `/build/broadcasts/${id}`);
 });
@@ -194,5 +200,60 @@ describe('BroadcastPage (#448)', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'Report' }));
     expect(await screen.findByText('E-mails sent')).toBeTruthy();
     expect(h.calls.filter((c) => c.name === 'analytics.query')).toHaveLength(1);
+  });
+
+  const draftArtifact = {
+    ...artifact,
+    publishedVersion: null,
+    latestVersion: 2,
+    version: { ...artifact.version, number: 2, state: 'draft' },
+  };
+  const notRunStatus = {
+    ...status,
+    run: {
+      ...status.run,
+      status: 'not_scheduled',
+      version: null,
+      sendAt: null,
+      recipients: 0,
+      queued: 0,
+      skipped: 0,
+      startedAt: null,
+      finishedAt: null,
+    },
+  };
+
+  it('shows a retryable error above the tabs and disables submission when the pending read fails', async () => {
+    h.artifact = draftArtifact;
+    h.status = notRunStatus;
+    h.approvals = async () => {
+      throw new Error('Approvals unavailable');
+    };
+    renderPage();
+    await screen.findByRole('heading', { level: 1, name: 'Lifecycle playbook' });
+
+    expect(await screen.findByText('Couldn’t check pending approvals')).toBeTruthy();
+    expect(screen.getByText(/Approvals unavailable/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Publish v2' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'View content' })).toBeTruthy();
+
+    const before = h.calls.filter((c) => c.name === 'approvals.list').length;
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(h.calls.filter((c) => c.name === 'approvals.list')).toHaveLength(before + 1));
+  });
+
+  it('keeps submission disabled while the pending read is loading, then enables it', async () => {
+    h.artifact = draftArtifact;
+    h.status = notRunStatus;
+    let release!: (value: unknown) => void;
+    h.approvals = () => new Promise((resolve) => (release = resolve));
+    renderPage();
+    await screen.findByRole('heading', { level: 1, name: 'Lifecycle playbook' });
+
+    expect(screen.queryByRole('button', { name: 'Publish v2' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'View content' })).toBeTruthy();
+
+    await act(async () => release({ approvals: [] }));
+    expect(await screen.findByRole('button', { name: 'Publish v2' })).toBeTruthy();
   });
 });

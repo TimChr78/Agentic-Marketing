@@ -85,6 +85,20 @@ describe('broadcast detail summary (#448)', () => {
     expect(lines.next).toBe('Starts Nov 6, 2026, 02:00 PM UTC.');
   });
 
+  it('run v1 pinned to segment A: Who uses A while the v2 draft targeting B is labelled separately', () => {
+    const lines = broadcastConsequenceOf({
+      ...base,
+      artifact: artifact({ latestVersion: 2, publishedVersion: 1 }),
+      run: run({ status: 'scheduled', version: 1, sendAt: '2026-11-06T14:00:00Z', recipients: 500 }),
+      segmentName: 'Segment B',
+      draftSegmentName: 'Segment B',
+      runSegmentName: 'Segment A',
+      draftTemplateName: 'Field notes',
+    });
+    expect(lines.who).toBe('Segment A · 500 reached at preparation');
+    expect(lines.draft).toBe('Draft v2 targets Segment B · Field notes');
+  });
+
   it('scheduled overdue: says the time passed instead of a missed failure', () => {
     const lines = broadcastConsequenceOf({
       ...base,

@@ -106,8 +106,6 @@ const verifiedPrimaryDomain = {
   url: 'https://links.martechsignal.com',
 };
 
-const pendingDomain = { ...verifiedPrimaryDomain, id: 'dom2', status: 'pending', isPrimary: false, host: 'links2.example' };
-
 const emptyApprovals = () => ({ approvals: [], total: 0, nextCursor: null });
 const emptyAgents = () => ({ agents: [] });
 const emptyAlerts = () => ({ rules: [] });
@@ -467,18 +465,22 @@ describe('Home reads (#447)', () => {
     expect(names()).not.toContain('profiles.list');
   });
 
-  it('marketer: the checklist checks only what a Builder may read', async () => {
-    renderHome('marketer', (name, input) => {
-      if (name === 'artifacts.list' && input.type === 'brand') return brandDraft();
-      if (name === 'profiles.list') return { profiles: [{ id: 'prs_1' }], nextCursor: null };
-      return defaultResponse(name, input);
-    });
+  it('marketer: reads the configuration with its real permissions and sees a complete setup confirmed', async () => {
+    renderHome(
+      'marketer',
+      (name, input) => {
+        if (name === 'artifacts.list' && input.type === 'brand') return brandPublished(1);
+        if (name === 'profiles.list') return { profiles: [{ id: 'prs_1' }], nextCursor: null };
+        if (name === 'system.status') return configuredStatus();
+        return defaultResponse(name, input);
+      },
+      { domains: [verifiedPrimaryDomain] },
+    );
     await loaded();
-    expect(screen.getByText('1 of 4 confirmed · based on current configuration')).toBeTruthy();
-    expect(screen.getByText('Ask an admin to configure e-mail.')).toBeTruthy();
-    expect(screen.getByText('Ask an admin to verify a link domain.')).toBeTruthy();
-    expect(screen.getAllByText('Ask an admin')).toHaveLength(2);
-    expect(names()).not.toContain('system.status');
+    expect(screen.queryByRole('heading', { name: 'Set up MartechSignal' })).toBeNull();
+    await userEvent.click(screen.getByRole('button', { name: 'Show setup checklist' }));
+    expect(screen.getByText('4 of 4 confirmed · based on current configuration')).toBeTruthy();
+    expect(callsOf('system.status')).toHaveLength(1);
     expect(callsOf('artifacts.list').some((call) => (call.input as { type?: string }).type === 'brand')).toBe(true);
     expect(callsOf('profiles.list')).toHaveLength(1);
   });
@@ -783,19 +785,10 @@ describe('Home checklist (#447)', () => {
   });
 
   it('does not mark a restricted check confirmed and keeps the denominator at four', async () => {
-    renderHome(
-      'marketer',
-      (name, input) => {
-        if (name === 'artifacts.list' && input.type === 'brand') return brandPublished(1);
-        if (name === 'profiles.list') return emptyProfiles();
-        return defaultResponse(name, input);
-      },
-      { domains: [pendingDomain] },
-    );
+    renderHome('marketer', undefined, { permissions: [] });
     await loaded();
-    expect(screen.getByText('1 of 4 confirmed · based on current configuration')).toBeTruthy();
-    expect(screen.getByText('Ask an admin to configure e-mail.')).toBeTruthy();
-    expect(screen.getByText('Ask an admin to verify a link domain.')).toBeTruthy();
+    expect(screen.getByText('0 of 4 confirmed · based on current configuration')).toBeTruthy();
+    expect(screen.getAllByText('Ask an admin')).toHaveLength(4);
   });
 
   it('hides on request, survives a remount for this user and workspace, and the footer restores it', async () => {

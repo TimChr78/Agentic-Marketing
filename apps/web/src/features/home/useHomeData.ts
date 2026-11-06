@@ -224,7 +224,6 @@ export function useHomeData({ workspace, can, checklistActive }: HomeDataOptions
 
   const readArtifacts = can('artifacts:read');
   const readProfiles = can('profiles:read');
-  const admin = can('workspace:admin');
 
   const loadAll = useCallback(async () => {
     const next = homeClock(new Date(), zone);
@@ -236,8 +235,9 @@ export function useHomeData({ workspace, can, checklistActive }: HomeDataOptions
     }
     if (checklistActive) {
       if (readArtifacts) work.push(loadBrand());
-      // The e-mail check is admin-only, so a Builder never pays for a status read it cannot use.
-      if (readArtifacts && admin) work.push(loadStatus());
+      // `system.status` needs artifacts:read, not workspace:admin; the checklist evaluates it for
+      // every role that can read it.
+      if (readArtifacts) work.push(loadStatus());
       if (readProfiles) work.push(loadProfiles());
     }
     await Promise.all(work);
@@ -246,7 +246,6 @@ export function useHomeData({ workspace, can, checklistActive }: HomeDataOptions
     zone,
     readArtifacts,
     readProfiles,
-    admin,
     checklistActive,
     loadApprovals,
     loadAgents,
@@ -272,12 +271,12 @@ export function useHomeData({ workspace, can, checklistActive }: HomeDataOptions
     if (checklistActive && !previousActive.current) {
       const work: Promise<void>[] = [];
       if (readArtifacts) work.push(loadBrand());
-      if (readArtifacts && admin) work.push(loadStatus());
+      if (readArtifacts) work.push(loadStatus());
       if (readProfiles) work.push(loadProfiles());
       void Promise.all(work);
     }
     previousActive.current = checklistActive;
-  }, [checklistActive, readArtifacts, readProfiles, admin, loadBrand, loadStatus, loadProfiles]);
+  }, [checklistActive, readArtifacts, readProfiles, loadBrand, loadStatus, loadProfiles]);
 
   const lastLoadedAt = useMemo(() => {
     const times = Object.values(state)

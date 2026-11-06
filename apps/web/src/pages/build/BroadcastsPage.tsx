@@ -52,12 +52,16 @@ export default function BroadcastsPage() {
   const [creating, setCreating] = useState(false);
 
   const list = useApi(
-    () =>
-      api.call('broadcasts.list', {
+    async () => {
+      const response = await api.call('broadcasts.list', {
         limit: PAGE_SIZE,
         ...(cursor ? { cursor } : {}),
         ...(filter.statuses ? { statuses: filter.statuses } : {}),
-      }),
+      });
+      // Tag the response with the page it answers: a stale response must never advance the cursor
+      // for the page on screen (a second Next before a request completes).
+      return { ...response, cursor, param: filter.param };
+    },
     [cursor, filter.param],
     { skip: !canRead },
   );
@@ -73,10 +77,15 @@ export default function BroadcastsPage() {
   }, [createParam, canRead, canWrite]);
 
   const data = list.data;
-  const rows = data?.broadcasts ?? [];
+  // The page currently on screen is the one whose response carries this cursor and filter. While a
+  // page or filter transition is in flight, `useApi` still holds the previous response, so nothing
+  // may read its `nextCursor` or rows as if they belonged to the requested page.
+  const currentPage = data !== undefined && data.cursor === cursor && data.param === filter.param ? data : undefined;
+  const loadedPage = currentPage !== undefined;
+  const rows = currentPage?.broadcasts ?? [];
   const state: PageReadState = !canRead
     ? 'restricted'
-    : data === undefined
+    : !loadedPage
       ? list.error
         ? 'error'
         : 'loading'
@@ -84,7 +93,8 @@ export default function BroadcastsPage() {
         ? 'empty'
         : 'ready';
   const segmentName = (row: BroadcastListRow) => segments.data?.get(row.segmentId)?.name;
-  const asOf = data ? formatDateTime(data.asOf, { zone: true }) : null;
+  const asOf = currentPage ? formatDateTime(currentPage.asOf, { zone: true }) : null;
+  const pageBusy = list.refreshing || !loadedPage;
 
   const changeFilter = (key: string) => {
     const next = BROADCAST_STATUS_FILTERS.find((f) => f.key === key);
@@ -101,15 +111,16 @@ export default function BroadcastsPage() {
   };
 
   const previous = () => {
-    if (activePaging.index === 0) return;
+    if (pageBusy || activePaging.index === 0) return;
     setPaging({ ...activePaging, index: activePaging.index - 1 });
   };
 
   const next = () => {
-    if (!data?.nextCursor) return;
+    const nextCursor = currentPage?.nextCursor ?? null;
+    if (pageBusy || !nextCursor) return;
     setPaging({
       param: filter.param,
-      stack: [...activePaging.stack.slice(0, activePaging.index + 1), data.nextCursor],
+      stack: [...activePaging.stack.slice(0, activePaging.index + 1), nextCursor],
       index: activePaging.index + 1,
     });
   };
@@ -130,7 +141,7 @@ export default function BroadcastsPage() {
     const hasPrevious = activePaging.index > 0;
     if (hasPrevious) {
       notice = {
-        title: filter.param ? 'No broadcasts match this status' : 'No broadcasts yet',
+        title: 'This page is empty',
         body: 'This page is empty. Go back to the previous page.',
         action: (
           <Button variant="secondary" onClick={previous}>
@@ -175,7 +186,11 @@ export default function BroadcastsPage() {
   }
 
   const countLabel =
-    state === 'restricted' || (state === 'error' && !data) ? undefined : data ? broadcastCountLabel(data.total) : undefined;
+    state === 'restricted' || (state === 'error' && !loadedPage)
+      ? undefined
+      : loadedPage && currentPage
+        ? broadcastCountLabel(currentPage.total)
+        : undefined;
   const start = activePaging.index * PAGE_SIZE + 1;
   const end = start + rows.length - 1;
 
@@ -199,6 +214,7 @@ export default function BroadcastsPage() {
               aria-label="Broadcast status"
               value={filter.key}
               onChange={(e) => changeFilter(e.target.value)}
+              disabled={pageBusy}
               className="w-auto"
             >
               {BROADCAST_STATUS_FILTERS.map((option) => (
@@ -283,10 +299,10 @@ export default function BroadcastsPage() {
             <span className="mr-auto tabular-nums" aria-live="polite">
               {start}–{end} of {data?.total.toLocaleString('en-US')} {data?.total === 1 ? 'broadcast' : 'broadcasts'}
             </span>
-            <Button size="sm" variant="secondary" disabled={activePaging.index === 0} onClick={previous}>
+            <Button size="sm" variant="secondary" disabled={pageBusy || activePaging.index === 0} onClick={previous}>
               Previous
             </Button>
-            <Button size="sm" variant="secondary" disabled={!data?.nextCursor} onClick={next}>
+            <Button size="sm" variant="secondary" disabled={pageBusy || !data?.nextCursor} onClick={next}>
               Next
             </Button>
           </div>
