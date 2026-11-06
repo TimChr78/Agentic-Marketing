@@ -54,9 +54,7 @@ describe('workspace.create quota (#487)', () => {
     );
     expect(after.rows[0]).toEqual(before.rows[0]);
     expect(await ownedCount(owner)).toBe(2);
-    const leftover = await t.srv.db.admin.query<{ n: string }>(
-      "SELECT count(*)::text AS n FROM workspaces WHERE name = 'Third brand'",
-    );
+    const leftover = await t.srv.db.admin.query<{ n: string }>("SELECT count(*)::text AS n FROM workspaces WHERE name = 'Third brand'");
     expect(leftover.rows[0].n).toBe('0');
   });
 

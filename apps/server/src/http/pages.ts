@@ -55,9 +55,10 @@ const layout = (title: string, body: string, nonce: string) => `<!doctype html>
   #err { color: #c42b2b; min-height: 1.5em; }
 </style></head><body><main>${brandHeader}${body}</main></body></html>`;
 
-export const loginPage = (nonce: string) => layout(
-  'Sign in',
-  `<h1>Sign in</h1><p>An app wants to connect to your marketing workspace.</p>
+export const loginPage = (nonce: string) =>
+  layout(
+    'Sign in',
+    `<h1>Sign in</h1><p>An app wants to connect to your marketing workspace.</p>
 <form id="f">
   <label>E-mail<input id="email" name="email" type="email" autocomplete="username" required></label>
   <label>Password<input id="password" name="password" type="password" autocomplete="current-password" required></label>
@@ -73,12 +74,13 @@ f.onsubmit = async (e) => {
   if (j.url) location.href = j.url; else err.textContent = j.message || 'Sign-in failed. Check your e-mail and password.';
 };
 </script>`,
-  nonce,
-);
+    nonce,
+  );
 
-export const consentPage = (nonce: string) => layout(
-  'Allow access',
-  `<h1>Allow access?</h1><p id="who"></p>
+export const consentPage = (nonce: string) =>
+  layout(
+    'Allow access',
+    `<h1>Allow access?</h1><p id="who"></p>
 <form id="f">
 <div id="brand"><label>Brand this connection acts in<select id="workspace" required><option value="">Loading your brands…</option></select></label>
 <p class="hint">One connection acts in one brand. To let an agent work in another brand, connect it again and choose that brand.</p></div>
@@ -147,13 +149,14 @@ const send = async (accept) => {
 f.onsubmit = (e) => { e.preventDefault(); send(true); };
 no.onclick = () => send(false);
 </script>`,
-  nonce,
-);
+    nonce,
+  );
 
 // Invitation links look like /invite#<token>; the token stays out of server logs and Referer headers.
-export const invitePage = (nonce: string) => layout(
-  'Join workspace',
-  `<h1>Join the workspace</h1><p>Sign in, or create an account, with the e-mail address the invitation was sent to.</p>
+export const invitePage = (nonce: string) =>
+  layout(
+    'Join workspace',
+    `<h1>Join the workspace</h1><p>Sign in, or create an account, with the e-mail address the invitation was sent to.</p>
 <form id="f">
   <label id="nameRow" hidden>Name<input id="name" name="name" type="text" autocomplete="name"></label>
   <label>E-mail<input id="email" name="email" type="email" autocomplete="username" required></label>
@@ -190,5 +193,5 @@ f.onsubmit = async (e) => {
 };
 if (!token) { err.textContent = 'This link has no invitation token. Copy the whole link.'; go.disabled = true; }
 </script>`,
-  nonce,
-);
+    nonce,
+  );

@@ -526,7 +526,8 @@ export const messages = pgTable(
     status: text('status').$type<MessageStatus>().notNull(),
     /** When the provider accepted the message (#453); null while queued, sending, suppressed or failed. */
     sentAt: ts('sent_at'),
-    reason: text('reason'),    recipientHash: text('recipient_hash'),
+    reason: text('reason'),
+    recipientHash: text('recipient_hash'),
     data: jsonb('data').$type<Record<string, unknown>>().notNull().default({}),
     attempts: integer('attempts').notNull().default(0),
     /** Held back until then (quiet hours, a paused stream). */

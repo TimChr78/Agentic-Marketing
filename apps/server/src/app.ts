@@ -376,9 +376,7 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
       // Not JSON: Better Auth answers with its own validation error for the replayed request.
     }
     const request = new Request(c.req.raw.url, { method: 'POST', headers: c.req.raw.headers, body: raw });
-    return withConsentRequest({ query, mode: 'consent' }, () =>
-      auth.handler(withClientIp({ req: { raw: request }, env: c.env })),
-    );
+    return withConsentRequest({ query, mode: 'consent' }, () => auth.handler(withClientIp({ req: { raw: request }, env: c.env })));
   });
   app.on(['GET', 'POST'], '/api/auth/*', (c) => auth.handler(withClientIp(c)));
 

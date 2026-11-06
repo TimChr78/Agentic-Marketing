@@ -41,7 +41,7 @@ describe('consent page renders brand names as text (#478)', () => {
   it('never builds HTML from the workspace list', async () => {
     const { document } = await renderConsent([{ id: '11111111-1111-1111-1111-111111111111', name: PAYLOAD, role: 'owner' }]);
     // The payload is shown exactly as text and parses into no element and no handler attribute.
-    const select = document.getElementById('workspace') as HTMLSelectElement;
+    const select = document.getElementById('workspace') as unknown as HTMLSelectElement;
     expect(select.options).toHaveLength(1);
     expect(select.options[0].textContent).toContain(PAYLOAD);
     expect(select.options[0].textContent).toContain('(owner)');
@@ -60,7 +60,7 @@ describe('consent page renders brand names as text (#478)', () => {
 
   it('builds the requested scope rows without parsing the scope string as HTML', async () => {
     const { document } = await renderConsent([{ id: '11111111-1111-1111-1111-111111111111', name: 'Brand', role: 'owner' }]);
-    const boxes = [...document.querySelectorAll('#scopes input[type=checkbox]')] as HTMLInputElement[];
+    const boxes = [...document.querySelectorAll('#scopes input[type=checkbox]')] as unknown as HTMLInputElement[];
     expect(boxes.map((b) => b.value)).toEqual(['artifacts:read']);
     expect(document.querySelector('#scopes label.scope code')?.textContent).toBe('artifacts:read');
   });

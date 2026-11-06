@@ -1,6 +1,6 @@
 import { Client, StreamableHTTPClientTransport, UnauthorizedError } from '@modelcontextprotocol/client';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { cookieOf, PASSWORD, startTestServer, testPort, TestOAuthProvider, type User } from './harness';
+import { cookieOf, PASSWORD, startTestServer, TestOAuthProvider, testPort, type User } from './harness';
 
 // #456: two consent tabs share one browser session. The brand choice must belong to the exact
 // authorization request (client, redirect, state, PKCE), never to the session, so tab A cannot
@@ -32,7 +32,14 @@ async function authorizationUrl(): Promise<{ url: URL; provider: TestOAuthProvid
 }
 
 const redirectOf = async (res: Response) => {
-  const location = res.headers.get('location') ?? (await res.clone().json().catch(() => ({}))).url;
+  const location =
+    res.headers.get('location') ??
+    (
+      await res
+        .clone()
+        .json()
+        .catch(() => ({}))
+    ).url;
   return new URL(location, t.base);
 };
 
@@ -56,9 +63,7 @@ describe('consent brand selection is bound to its authorization request (#456)',
     expect(consentA.pathname).toBe('/consent');
 
     // Tab B's authorize request now finds the signed-in session and lands on its own consent query.
-    const consentB = await redirectOf(
-      await fetch(b.url, { redirect: 'manual', headers: { accept: 'application/json', cookie } }),
-    );
+    const consentB = await redirectOf(await fetch(b.url, { redirect: 'manual', headers: { accept: 'application/json', cookie } }));
     expect(consentB.pathname).toBe('/consent');
     expect(consentB.search).not.toBe(consentA.search);
 

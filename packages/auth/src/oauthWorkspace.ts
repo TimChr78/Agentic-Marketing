@@ -97,9 +97,7 @@ export async function chooseOAuthWorkspace(
     [selectionId(input.sessionId, key), input.workspaceId],
   );
   // Pending choices are short-lived (an abandoned tab). Drop ones nobody came back for.
-  await db.admin.query(
-    `DELETE FROM oauth_workspace_selections WHERE updated_at < now() - interval '1 day'`,
-  );
+  await db.admin.query(`DELETE FROM oauth_workspace_selections WHERE updated_at < now() - interval '1 day'`);
   return m;
 }
 
