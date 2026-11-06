@@ -105,6 +105,7 @@ function BroadcastPageForId({ params }: { params: Record<string, string> }) {
       artifact: ctx.artifact,
       run: status.data?.run ?? null,
       statusError: status.error,
+      statusLoading: status.loading,
       dirty: ctx.dirty,
       readOnly: ctx.readOnly,
       canSubmit: can('artifacts:publish') && (state === 'draft' || state === 'rejected') && !ctx.dirty && !pendingBlocked,
@@ -116,6 +117,12 @@ function BroadcastPageForId({ params }: { params: Record<string, string> }) {
       case 'save':
         return (
           <Button variant="primary" loading={ctx.saving} onClick={() => void ctx.save()}>
+            {action.label}
+          </Button>
+        );
+      case 'loading':
+        return (
+          <Button variant="primary" loading>
             {action.label}
           </Button>
         );
@@ -254,7 +261,8 @@ function BroadcastPageForId({ params }: { params: Record<string, string> }) {
             artifact: ctx.artifact,
             run: status.data?.run ?? null,
             statusError: status.error,
-                  dirty: ctx.dirty,
+            statusLoading: status.loading,
+            dirty: ctx.dirty,
             readOnly: ctx.readOnly,
             canSubmit: can('artifacts:publish') && (state === 'draft' || state === 'rejected') && !ctx.dirty && !pendingBlocked,
             directPublish: ctx.directPublish,

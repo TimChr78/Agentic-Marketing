@@ -277,6 +277,26 @@ describe('BroadcastPage (#448)', () => {
     expect(location.search).toBe('?tab=versions');
   });
 
+  it('waits for the send state before offering publish or submit (#484)', async () => {
+    h.artifact = draftArtifact;
+    let release!: (value: unknown) => void;
+    h.status = new Promise((resolve) => {
+      release = resolve;
+    });
+    h.approvals = async () => ({ approvals: [] });
+    renderPage();
+    await screen.findByRole('heading', { level: 1, name: 'Lifecycle playbook' });
+
+    // The status read is in flight: an unknown run is not a draft with no run.
+    expect(screen.queryByRole('button', { name: 'Publish v2' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Submit for review' })).toBeNull();
+    const checking = screen.getByRole('button', { name: 'Checking send state' }) as HTMLButtonElement;
+    expect(checking.disabled).toBe(true);
+
+    await act(async () => release(notRunStatus));
+    expect(await screen.findByRole('button', { name: 'Publish v2' })).toBeTruthy();
+  });
+
   it('shows a retryable error above the tabs and disables submission when the pending read fails', async () => {
     h.artifact = draftArtifact;
     h.status = notRunStatus;
