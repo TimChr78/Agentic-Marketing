@@ -7,6 +7,7 @@ import { Link, navigate, useLocation } from '../../app/router';
 import { useSession } from '../../app/session';
 import { useApi } from '../../app/useApi';
 import { ApprovalDrawer } from '../../features/approvals/ApprovalDrawer';
+import { approvalDecisions } from '../../features/approvals/decisions';
 import { HoldBadge, HoldCountdown } from '../../features/approvals/HoldBadge';
 import { useNow } from '../../features/approvals/holds';
 import { RequesterView } from '../../features/approvals/requester';
@@ -62,10 +63,8 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
   const all = list.data?.approvals ?? [];
   // A bundle (#107) is one decision, so it is one row: the member the others exist for (the
   // broadcast, the form) stands for it, and counts as viewed once every member's preview was opened.
-  const items = all.filter((a) => {
-    const lead = a.bundle?.members.at(-1)?.approvalId;
-    return !lead || lead === a.id || !all.some((x) => x.id === lead);
-  });
+  // The nav badge uses the same grouping (#483).
+  const items = approvalDecisions(all);
   const canApprove = can('artifacts:approve');
   const viewed = (a: Approval) =>
     a.bundle ? a.bundle.members.every((m) => wasViewed(user!.id, m.approvalId, m.version)) : wasViewed(user!.id, a.id, a.version);
