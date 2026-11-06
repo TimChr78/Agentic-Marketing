@@ -8,9 +8,9 @@ import { formatDateTime } from '../../../ui/time';
 import { type LocalDayPeriod, periodDateLabel } from '../period';
 import { CampaignHoldoutArea } from './CampaignHoldout';
 import {
+  type AnalyticsMetaView,
   allTotalsZero,
   deliveryChartState,
-  type metaOf,
   ratePercent,
   rateReason,
   readSeries,
@@ -31,7 +31,7 @@ import {
 
 const count = (value: number | null) => (value === null ? '—' : value.toLocaleString());
 
-function SectionMeta({ meta, period }: { meta: ReturnType<typeof metaOf>; period: LocalDayPeriod }) {
+function SectionMeta({ meta, period }: { meta: AnalyticsMetaView; period: LocalDayPeriod }) {
   return (
     <p className="text-[12px] leading-[18px] text-muted">
       {periodDateLabel(period)} · {meta.timeZone ?? period.zone} · Latest event in period:{' '}
@@ -181,7 +181,6 @@ function TotalsSection({
           }
         />
       </div>
-      <SectionMeta meta={view.meta} period={period} />
       <p className="text-[12px] leading-[18px] text-muted">Counts are distinct people in the whole period, not messages.</p>
 
       <BarChart
@@ -283,7 +282,6 @@ function EngagementSection({
         note="Daily people by event day; the period count above is deduplicated separately."
         onRetry={onRetry}
       />
-      {!error && !loading && <SectionMeta meta={series.meta} period={period} />}
     </div>
   );
 }
@@ -339,6 +337,7 @@ export function ReportBody({ artifactId, period }: { artifactId: string; period:
         onRetry={seriesQuery.reload}
         period={period}
       />
+      {(totalsQuery.data || seriesQuery.data) && <SectionMeta meta={totalsQuery.data ? totals.meta : series.meta} period={period} />}
       <LinkInspection canReadProfiles={can('profiles:read')} />
       <CampaignHoldoutArea artifactId={artifactId} period={period} />
     </div>
