@@ -1,8 +1,8 @@
 import { personalDataInText } from '@agentic-marketing/ai';
 import { type CommandContext, defineCommand, PERMISSIONS, type Permission, ROLE_PERMISSIONS } from '@agentic-marketing/commands';
-import { AppError, newId } from '@agentic-marketing/core';
+import { AppError, decodeTimestampCursor, encodeTimestampCursor, newId } from '@agentic-marketing/core';
 import { type Role, schema } from '@agentic-marketing/db';
-import { and, desc, eq, inArray, lt, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, lt, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { AGENT_EVENT_TYPES } from './agentEvents';
 import { describeHostedSchedule, isValidHostedSchedule, nextHostedRunAt } from './hostedSchedule';
@@ -473,6 +473,84 @@ export const hostedAgentRuns = defineCommand({
   },
 });
 
+/** A recent failed hosted run, for the workspace's failure queue (Home, Phase 24). */
+const FailedRun = z.object({
+  id: z.string(),
+  agentId: z.string(),
+  agentName: z.string(),
+  startedAt: z.string(),
+  finishedAt: z.string().nullable(),
+  status: z.literal('failed'),
+  summary: z.string(),
+  error: z.string().nullable(),
+});
+
+export const runFailures = defineCommand({
+  name: 'agents.runFailures',
+  title: 'Recent failed hosted runs',
+  description:
+    'Hosted-agent runs that failed since a given time, newest first across every agent, with the agent’s name, when it ran and why it failed. A bounded recent list for a failure queue: these are failures, not unresolved incidents, and other background jobs keep their own alerts.',
+  input: z.object({
+    since: z.string().datetime().describe('Only runs that started at or after this time (ISO 8601)'),
+    limit: z.number().int().min(1).max(100).default(20),
+    cursor: z.string().max(256).optional().describe('Opaque `nextCursor` from the previous page; omit for the first page'),
+  }),
+  output: z.object({
+    runs: z.array(FailedRun),
+    nextCursor: z.string().nullable().describe('Pass as `cursor` for the next page; null on the last page'),
+    asOf: z.string(),
+  }),
+  permission: 'artifacts:read',
+  effect: 'read',
+  // Workspace scoping comes from row-level security; there is deliberately no workspace filter here.
+  handler: async (input, ctx) => {
+    const cursor = input.cursor ? decodeTimestampCursor(input.cursor) : undefined;
+    if (input.cursor && !cursor) {
+      throw new AppError('invalid_input', 'The cursor is not valid. Omit it to start from the first page.');
+    }
+    const filters = [eq(schema.hostedAgentRuns.status, 'failed'), gte(schema.hostedAgentRuns.startedAt, new Date(input.since))];
+    const pageFilter = cursor
+      ? and(
+          ...filters,
+          or(
+            lt(schema.hostedAgentRuns.startedAt, sql`${cursor.at}::timestamptz`),
+            and(eq(schema.hostedAgentRuns.startedAt, sql`${cursor.at}::timestamptz`), lt(schema.hostedAgentRuns.id, cursor.id)),
+          ),
+        )
+      : and(...filters);
+    const rows = await ctx.tx
+      .select({
+        r: schema.hostedAgentRuns,
+        agentName: schema.agents.name,
+        cursorAt: sql<string>`to_char(${schema.hostedAgentRuns.startedAt} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
+      })
+      .from(schema.hostedAgentRuns)
+      .innerJoin(
+        schema.agents,
+        and(eq(schema.agents.workspaceId, schema.hostedAgentRuns.workspaceId), eq(schema.agents.id, schema.hostedAgentRuns.agentId)),
+      )
+      .where(pageFilter)
+      .orderBy(desc(schema.hostedAgentRuns.startedAt), desc(schema.hostedAgentRuns.id))
+      .limit(input.limit + 1);
+    const page = rows.slice(0, input.limit);
+    const last = page[page.length - 1];
+    return {
+      runs: page.map(({ r, agentName }) => ({
+        id: r.id,
+        agentId: r.agentId,
+        agentName,
+        startedAt: r.startedAt.toISOString(),
+        finishedAt: r.finishedAt?.toISOString() ?? null,
+        status: 'failed' as const,
+        summary: r.summary,
+        error: r.error,
+      })),
+      nextCursor: rows.length > input.limit && last ? encodeTimestampCursor({ at: last.cursorAt, id: last.r.id }) : null,
+      asOf: new Date().toISOString(),
+    };
+  },
+});
+
 /** A hosted agent's own notes (#340): bounded, inspectable and free of personal data. */
 const MEMORY_MAX_NOTES = 50;
 const MEMORY_MAX_CHARS = 10_000;
@@ -695,6 +773,7 @@ export const hostedAgentCommands = [
   deleteHostedAgent,
   runHostedAgentNow,
   hostedAgentRuns,
+  runFailures,
   listHostedMemory,
   addHostedMemory,
   updateHostedMemory,

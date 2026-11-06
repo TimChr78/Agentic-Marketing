@@ -53,7 +53,7 @@ const LIMIT = 50;
 export default function AgentPage({ params }: { params: Record<string, string> }) {
   const id = params.id ?? '';
   const agent = useApi(() => api.call('agents.get', { id }), [id]);
-  useCrumbs([{ label: 'Agents', to: '/settings/agents' }, { label: agent.data?.name ?? 'Agent' }]);
+  useCrumbs([{ label: 'Agents', to: '/work/agents' }, { label: agent.data?.name ?? 'Agent' }]);
 
   if (agent.loading && !agent.data) return <LoadingBlock lines={6} label="Loading agent" />;
   if (agent.error && !agent.data)

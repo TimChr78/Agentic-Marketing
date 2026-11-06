@@ -5,6 +5,7 @@ import { useCrumbs } from '../../app/page';
 import { Link } from '../../app/router';
 import { useSession } from '../../app/session';
 import { useApi } from '../../app/useApi';
+import { usePageTab } from '../../app/useTab';
 import { ConsentHistoryTable } from '../../features/audience/consent';
 import { personLabel } from '../../features/audience/profile';
 import {
@@ -23,11 +24,14 @@ import {
   Select,
   StatusPill,
   TableFrame,
+  Tabs,
   Tag,
   Textarea,
   useToast,
 } from '../../ui';
 import { pageWidth } from '../../ui/layout';
+import TopicsPage from '../build/TopicsPage';
+import PurposesPage from '../settings/PurposesPage';
 
 type Status = 'granted' | 'denied' | 'withdrawn' | 'objected';
 type Lookup = { id: string; from: string };
@@ -38,7 +42,7 @@ const PURPOSE = /^[a-z][a-z0-9_]{0,63}$/;
 const refused = (c: { denied: number; withdrawn: number; objected: number }) => c.denied + c.withdrawn + c.objected;
 
 /** Purposes in force and the append-only ledger they are recorded in. */
-export default function ConsentPage() {
+export function ConsentLedger() {
   useCrumbs([{ label: 'Consent' }]);
   const { can } = useSession();
   const [value, setValue] = useState('');
@@ -391,5 +395,54 @@ function RecordDrawer({
         <button type="submit" hidden />
       </form>
     </Drawer>
+  );
+}
+
+const CONSENT_TABS = ['consent', 'purposes', 'topics'] as const;
+type ConsentTab = (typeof CONSENT_TABS)[number];
+
+const CONSENT_TAB_ITEMS: { key: ConsentTab; label: string }[] = [
+  { key: 'consent', label: 'Consent' },
+  { key: 'purposes', label: 'Purposes' },
+  { key: 'topics', label: 'Topics' },
+];
+
+/**
+ * Consent (#446): the append-only consent ledger plus the existing purposes editor and topics
+ * manager as named tabs. The page route admits either permission; each tab keeps its own gate, so
+ * an artifacts-only role can use Purposes/Topics without seeing the consent summary.
+ */
+export default function ConsentPage() {
+  const { can } = useSession();
+  const { active, forbidden, invalid, select } = usePageTab({
+    keys: CONSENT_TABS,
+    fallback: 'consent',
+    allowed: (tab) => (tab === 'consent' ? can('profiles:read') : can('artifacts:read')),
+  });
+  useCrumbs([{ label: active === 'consent' ? 'Consent' : active === 'purposes' ? 'Purposes' : 'Topics' }]);
+
+  return (
+    <div className={pageWidth('default')}>
+      {invalid && (
+        <Alert tone="info" className="mb-4">
+          This tab is unavailable.
+        </Alert>
+      )}
+      <Tabs items={CONSENT_TAB_ITEMS} value={active} onChange={select} label="Consent">
+        {forbidden ? (
+          <EmptyState title="Your role can't open this tab">
+            {forbidden === 'consent'
+              ? 'The consent ledger needs profiles:read. Ask a workspace admin for it.'
+              : 'Purposes and topics need artifacts:read. Ask a workspace admin for it.'}
+          </EmptyState>
+        ) : active === 'purposes' ? (
+          <PurposesPage />
+        ) : active === 'topics' ? (
+          <TopicsPage />
+        ) : (
+          <ConsentLedger />
+        )}
+      </Tabs>
+    </div>
   );
 }

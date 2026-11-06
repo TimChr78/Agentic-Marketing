@@ -21,7 +21,7 @@ export default function HostedPagesPage() {
         title="Hosted pages"
         description="The pages subscribers see on your links address after signing up and when they unsubscribe. They use the live brand, and a form can override parts of it."
         actions={
-          <ButtonLink to="/design/brand" variant="primary">
+          <ButtonLink to="/content/brand" variant="primary">
             Edit brand
           </ButtonLink>
         }
@@ -60,7 +60,7 @@ export default function HostedPagesPage() {
               <>
                 <p className="text-[13px] text-fg-2">No public archive yet. Turn it on and choose an address in the brand.</p>
                 <p className="mt-2 text-[13px]">
-                  <ButtonLink to="/design/brand">Set up the archive</ButtonLink>
+                  <ButtonLink to="/content/brand">Set up the archive</ButtonLink>
                 </p>
               </>
             )}

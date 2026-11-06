@@ -130,8 +130,8 @@ describe('desktop navigation collapse (#180)', () => {
     expect(localStorage.getItem('am.nav.u1')).toBe('collapsed');
     expect(screen.getByRole('button', { name: 'Expand navigation' }).getAttribute('aria-expanded')).toBe('false');
     // The rail keeps the pending-approvals badge and accessible group names.
-    expect(screen.getByRole('link', { name: /Approvals, 3 pending/ }).textContent).toContain('3');
-    expect(screen.getByRole('button', { name: 'Build navigation' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /Work navigation, 3 pending/ }).textContent).toContain('3');
+    expect(screen.getByRole('button', { name: 'Marketing navigation' })).toBeTruthy();
 
     first.unmount();
     render(

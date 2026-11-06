@@ -188,7 +188,7 @@ describe('agent notifications (#226)', () => {
     const heldMail = toSponsor.find((m) => m.subject.startsWith('Held:'))!;
     expect(heldMail.text).toContain(`It runs at ${held.body.runsAt}`);
     expect(heldMail.text).toContain(`/approvals/${held.body.approvalId}`);
-    expect(heldMail.text).toContain(`/settings/agents/${s.agentId}`);
+    expect(heldMail.text).toContain(`/work/agents/${s.agentId}`);
     expect(heldMail.html).toContain(`/approvals/${held.body.approvalId}`);
 
     // The cursor makes the next run silent, so the sponsor has exactly one message for the hold.
@@ -239,7 +239,7 @@ describe('agent notifications (#226)', () => {
     expect(firstDigest.text).toContain('2 allowed');
     expect(firstDigest.text).toContain('Ran autonomously');
     expect(firstDigest.text).toContain('Autonomous one: what the agent intends to do');
-    expect(firstDigest.text).toContain(`/settings/agents/${s.agentId}`);
+    expect(firstDigest.text).toContain(`/work/agents/${s.agentId}`);
     expect(await emailRows(s.ws, 'agent-digest:')).toHaveLength(1);
 
     // New activity an hour later must wait for the next day: one digest per sponsor per day.
@@ -271,7 +271,7 @@ describe('agent notifications (#226)', () => {
     const expiry = outbox.filter((m) => m.to === s.owner.email && m.subject.startsWith('Mandate for'));
     expect(expiry).toHaveLength(1);
     expect(expiry[0].text).toContain('expires');
-    expect(expiry[0].text).toContain(`/settings/agents/${s.agentId}`);
+    expect(expiry[0].text).toContain(`/work/agents/${s.agentId}`);
     expect(await emailRows(s.ws, 'agent-expiry:')).toHaveLength(1);
 
     expect((await run()).expiries).toBe(0);

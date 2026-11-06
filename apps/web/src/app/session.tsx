@@ -1,6 +1,7 @@
 import { createContext, type ReactNode, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { setWorkspaceTimeZone } from '../ui/time';
 import { ApiError, api, getWorkspaceId, type Out, setWorkspaceId } from './api';
+import { clearRecentsMemory, setRecentsScope } from './recents';
 import { setThemeUser } from './theme';
 
 // The signed-in person, their workspace and what they may do. Loaded once after sign-in; the UI
@@ -50,6 +51,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [memberships, setMemberships] = useState<Membership[]>([]);
   const [pending, setPending] = useState(0);
 
+  // Recents are isolated per person and workspace; signing out clears this page's memory.
+  useEffect(() => {
+    setRecentsScope(user?.id ?? null, workspace?.id ?? null);
+  }, [user?.id, workspace?.id]);
+
   const load = useCallback(async () => {
     const u = await getSession();
     if (u === 'offline') return setStatus('offline');
@@ -89,21 +95,15 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   const refreshPending = useCallback(() => {
     if (status !== 'ready') return;
-    // The nav badge counts what this person can act on: approvals, plus pending workspace
-    // setting proposals for admins (everyone else can see proposals but not decide them).
-    const approvals = api
+    // The nav badge uses the approvals list's own pending total (B7): pending requests, never
+    // “assigned to you”. Older responses without `total` fall back to counting decisions, where a
+    // bundle (#107) is one decision, as in the list.
+    api
       .call('approvals.list', { status: 'pending', limit: 200 })
-      // A bundle (#107) is one decision, as in the list.
-      .then((r) => new Set(r.approvals.map((a) => a.bundle?.id ?? a.id)).size)
-      .catch(() => 0);
-    const proposals = workspace?.you.permissions.includes('workspace:admin')
-      ? api
-          .call('workspace.proposals', { status: 'pending', limit: 200 })
-          .then((r) => r.proposals.length)
-          .catch(() => 0)
-      : Promise.resolve(0);
-    Promise.all([approvals, proposals]).then(([a, p]) => setPending(a + p));
-  }, [status, workspace]);
+      .then((r) => (typeof r.total === 'number' ? r.total : new Set(r.approvals.map((a) => a.bundle?.id ?? a.id)).size))
+      .catch(() => 0)
+      .then(setPending);
+  }, [status]);
   useEffect(() => {
     refreshPending();
     const t = setInterval(refreshPending, 60_000);
@@ -142,6 +142,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         setWorkspace(null);
         setUser(null);
         setThemeUser(null);
+        clearRecentsMemory();
         setStatus('signed-out');
       },
     };

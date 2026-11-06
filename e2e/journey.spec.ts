@@ -3,11 +3,11 @@ import { call, PEOPLE, signIn } from './helpers';
 
 test('journey builder: add by drag, connect, delete by keyboard and context menu, autosave (#33)', async ({ page }) => {
   await signIn(page, PEOPLE.builder);
-  await page.goto('/build/journeys');
+  await page.goto('/marketing/journeys');
   await page.getByRole('button', { name: 'New journey' }).first().click();
   await page.getByRole('dialog').getByLabel('Name').fill('E2E onboarding');
   await page.getByRole('button', { name: 'Create draft' }).click();
-  await expect(page).toHaveURL(/\/build\/journeys\/jrn_/);
+  await expect(page).toHaveURL(/\/marketing\/journeys\/jrn_/);
   const id = page.url().split('/').pop()!;
   const canvas = page.locator('.react-flow');
   await expect(canvas.locator('.react-flow__node')).toHaveCount(2);
@@ -106,7 +106,7 @@ test('journey builder uses the window and shows live stats (#114, #58)', async (
   expect(published.status).toBe('published');
 
   await page.setViewportSize({ width: 1920, height: 1080 });
-  await page.goto(`/build/journeys/${created.artifactId}`);
+  await page.goto(`/marketing/journeys/${created.artifactId}`);
   const canvas = page.locator('.react-flow');
   await expect(canvas.locator('.react-flow__node')).toHaveCount(3);
 

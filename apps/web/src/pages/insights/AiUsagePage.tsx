@@ -233,7 +233,7 @@ export default function AiUsagePage() {
             <EmptyState
               icon={<Bot size={16} />}
               title={kind ? `No “${kind}” calls yet` : 'No AI calls yet'}
-              action={can('artifacts:read') && <ButtonLink to="/build/prompts">Go to AI prompts</ButtonLink>}
+              action={can('artifacts:read') && <ButtonLink to="/work/agents?tab=library">Go to AI prompts</ButtonLink>}
             >
               Decisions from journey AI steps, prompt tests, copilot turns, independent checks and hosted agent runs appear here.
             </EmptyState>

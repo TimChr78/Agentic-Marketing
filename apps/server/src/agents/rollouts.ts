@@ -105,7 +105,7 @@ async function notifyPaused(
     .from(schema.workspaceMembers)
     .where(and(eq(schema.workspaceMembers.workspaceId, workspaceId), inArray(schema.workspaceMembers.role, ['owner', 'admin'])));
   if (!members.length) return;
-  const url = `${deps.publicUrl.replace(/\/$/, '')}/build/experiences/${encodeURIComponent(row.artifactId)}`;
+  const url = `${deps.publicUrl.replace(/\/$/, '')}/marketing/experiences/${encodeURIComponent(row.artifactId)}`;
   const subject = `Experience ramp paused: ${name}`;
   const text = [
     `The ramp on “${name}” was paused at ${row.share}% of visitors.`,

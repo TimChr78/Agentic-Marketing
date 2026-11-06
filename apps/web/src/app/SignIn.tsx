@@ -3,7 +3,7 @@ import { useState } from 'react';
 import { Alert, Button, Field, Input } from '../ui';
 import { AuthShell } from './AuthShell';
 import { Link } from './router';
-import { ThemeMenu } from './Shell';
+import { ThemeMenu } from './ThemeMenu';
 
 /** Sign-in (#34): the only signed-out screen of the real app. The demo is linked from here only. */
 export function SignIn({ onDone }: { onDone: () => void }) {

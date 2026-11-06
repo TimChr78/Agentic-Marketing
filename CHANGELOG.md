@@ -2,6 +2,29 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+### Added
+
+- Home at `/` (#447): a role-ordered page of what needs attention (pending reviews and holds from one approvals page, firing alerts, guardian caps and recent failed hosted runs), what is running (scheduled and sending broadcasts, live journeys and active agents) and how e-mail is going (sent, delivered, clicked and click rate for the last seven complete local days, with a same-length comparison). Every block loads and fails independently from bounded reads; restricted roles get no read or block they cannot use. A derived setup checklist for a new brand reads the published brand, marketing provider, verified primary link domain and audience from current state, and can be hidden per person and device. The sending-DNS advisory is separate and never blocks completion.
+- The Phase 24 navigation and shell (#446): a New menu with the exact creation order and gates, the command palette's Recents (per person and workspace, using successful detail reads only), Create actions and Go-to pages, the `?create=<type>` seam that opens each existing create dialog once, and the `/create` gallery with Blank and Starters tabs.
+- `broadcasts.list` returns the operational rows a broadcast list needs in one read: each broadcast's run (status, counts, times and error), the segment and template it is pinned to, the staged send's stage and stop reason, and its messages by current status. Filter by run status before paging, and follow `nextCursor` for the filtered `total`. `broadcasts.status` keeps its output and shares the same run, stage and delivery projection.
+- `agents.runFailures` lists recent failed hosted runs across every agent since a given time, newest first, with each agent's name, summary and error. It is a bounded failure queue, not an incident lifecycle.
+- `approvals.list` adds `total` for the same status and artifact filter (including held rows) and a `nextCursor`, so the approvals destination can page the whole queue. Bundle member resolution and the existing list output are unchanged.
+
+### Changed
+
+- Broadcasts are the first screen family on the Phase 24 v2 list/detail templates (#448). The list reads `broadcasts.list` once per page with the operational state, audience, schedule and result per row, status filters, cursor paging, and honest empty, failure and loading states; it no longer calls `broadcasts.status` once per row. The detail page shares one `broadcasts.status` read across the pill, the who/when/next summary, Sending and the context panel, chooses one primary action from the runtime state, defaults its tabs from that state (`?tab=` wins), and adds the Report summary from the existing analytics read. `ArtifactDetailPage` gains optional detail slots that default to the existing page for every other artifact family.
+
+### Fixed
+
+- Broadcast detail now shows the audience and template of the version that is actually sending, shows that pinned version in its metadata and labels a newer draft as a separate draft reference.
+- “Open in Analytics” from Home and a broadcast Report now opens with its date range and broadcast filter; the filter appears as a removable chip and is kept in the query.
+- A broadcast Report no longer shows suppressed or unavailable data as “No sends”, and its click-rate tile only says “No delivered people to divide by” for an observed zero denominator.
+- Broadcast detail shows a retryable error when pending approvals cannot be read and keeps publish or submit disabled until the read succeeds.
+- The Home setup checklist reads marketing e-mail and link-domain status for every role that can read them; only the settings links ask for an admin.
+- Broadcast paging cannot advance with a stale cursor: Previous, Next and the status filter are disabled while a page loads, and an empty later page says “This page is empty”.
+
 ## [0.9.0] - 2026-11-06
 
 ### Added
@@ -18,6 +41,7 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 
 ### Changed
 
+- Navigation is grouped by work (#446): Work, Marketing, Audience, Content and Insights with collapsible groups, Settings pinned at the bottom with its own secondary navigation, Preferences in the account menu, and the desktop rail opening named group menus. Every page has its canonical URL; the old `/build`, `/design`, `/settings/agents`, Imports, Purposes, Preferences, Journey stats and AI usage URLs redirect with their ids, other query values and hash preserved.
 - Adopt the DESIGN.md v2 foundations (#436): warm stone neutrals in light and tonal surfaces in dark, the 24/32 page and 16/24 section scale, 32/40 KPIs, 13/20 UI and tables, 32/24 section rhythm, 8/12 px radii, overlays-only shadows, and the categorical/sequential/diverging data-visualisation palette in `apps/web/src/index.css` and the shared `ui` components.
 - Charts now read the v2 tokens (quiet grids, direct end labels, 12/18 axis and tooltip type, system font, theme re-read without the legacy theme hook), and the new shared primitives in `apps/web/src/ui/charts.tsx` provide the KPI tile with direction-aware deltas and data states, line/area and bar charts, and the “Show data table” fallback (#436).
 - Operational state replaces the publication version as the primary status (#437). List and detail headers show a state pill from the new `lib/state.ts` model (broadcast, journey, agent, experience and form families), and “Published v2” is secondary metadata. The shared artifact list, broadcast list and header, agents and agent detail adopt it; other screens follow in later phases.

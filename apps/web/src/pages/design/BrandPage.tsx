@@ -4,13 +4,15 @@ import { api, errText } from '../../app/api';
 import { useCrumbs } from '../../app/page';
 import { useWorkspace } from '../../app/session';
 import { useApi } from '../../app/useApi';
+import { usePageTab } from '../../app/useTab';
 import { ArtifactDetailPage } from '../../features/artifacts/ArtifactDetailPage';
 import { BrandEditor } from '../../features/brand/BrandEditor';
-import { Alert, Button, EmptyState, LoadingBlock, PageHeader } from '../../ui';
+import { Alert, Button, EmptyState, LoadingBlock, PageHeader, Tabs } from '../../ui';
 import { pageWidth } from '../../ui/layout';
+import HostedPagesPage from './HostedPagesPage';
 
 /** Design → Brand (#37): the workspace brand is one artifact, reviewed like any other change. */
-export default function BrandPage() {
+export function BrandHome() {
   const { can, workspace } = useWorkspace();
   const list = useApi(() => api.call('artifacts.list', { type: 'brand', limit: 1 }), []);
   const [busy, setBusy] = useState(false);
@@ -86,6 +88,33 @@ function NoBrand({
       >
         Until you set one up, confirm and unsubscribe pages use a plain neutral look.
       </EmptyState>
+    </div>
+  );
+}
+
+const BRAND_TABS = ['brand', 'subscriber-pages'] as const;
+type BrandTab = (typeof BRAND_TABS)[number];
+
+const BRAND_TAB_ITEMS: { key: BrandTab; label: string }[] = [
+  { key: 'brand', label: 'Brand' },
+  { key: 'subscriber-pages', label: 'Subscriber pages' },
+];
+
+/** Brand (#446): the brand editor and the existing hosted subscriber pages as named tabs. */
+export default function BrandPage() {
+  const { active, invalid, select } = usePageTab({ keys: BRAND_TABS, fallback: 'brand' });
+  useCrumbs([{ label: active === 'subscriber-pages' ? 'Subscriber pages' : 'Brand' }]);
+
+  return (
+    <div className={pageWidth('default')}>
+      {invalid && (
+        <Alert tone="info" className="mb-4">
+          This tab is unavailable.
+        </Alert>
+      )}
+      <Tabs items={BRAND_TAB_ITEMS} value={active} onChange={select} label="Brand">
+        {active === 'subscriber-pages' ? <HostedPagesPage /> : <BrandHome />}
+      </Tabs>
     </div>
   );
 }

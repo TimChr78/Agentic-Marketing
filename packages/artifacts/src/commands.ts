@@ -1,7 +1,7 @@
 import { type ActionClass, type CommandContext, defineCommand, type Impact, recordAgentAction } from '@agentic-marketing/commands';
-import { AppError, canonicalJson, hashValue, newId } from '@agentic-marketing/core';
+import { AppError, canonicalJson, decodeTimestampCursor, encodeTimestampCursor, hashValue, newId } from '@agentic-marketing/core';
 import { type AgentUndo, schema, type VersionState } from '@agentic-marketing/db';
-import { and, asc, count, desc, eq, inArray, lt, or, sql } from 'drizzle-orm';
+import { and, asc, count, desc, eq, gt, inArray, lt, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { diffJson } from './diff';
 import { noteWithPolicy, publishImpact } from './impact';
@@ -1278,43 +1278,75 @@ const approvalOut = (ctx: CommandContext, r: ApprovalRow, a: ArtifactRow, reques
 export const listApprovals = defineCommand({
   name: 'approvals.list',
   title: 'List approval requests',
-  description: 'Approval requests in this workspace (default: pending), oldest first, optionally for one artifact.',
+  description:
+    'Approval requests in this workspace (default: pending), oldest first, optionally for one artifact. `total` counts the requests matching the filter, including held ones, across every page; `nextCursor` continues the same list.',
   input: z.object({
     status: z.enum(['pending', 'approved', 'rejected', 'withdrawn']).default('pending'),
     limit: z.number().int().min(1).max(200).default(50),
     artifactId: ArtifactId.optional().describe('Only requests for this artifact'),
+    cursor: z.string().max(256).optional().describe('Opaque `nextCursor` from the previous page; omit for the first page'),
   }),
-  output: z.object({ approvals: z.array(Approval) }),
+  output: z.object({
+    approvals: z.array(Approval),
+    total: z.number().int().describe('All requests matching the status and artifact filter, independent of the cursor'),
+    nextCursor: z.string().nullable().describe('Pass as `cursor` for the next page; null on the last page'),
+  }),
   permission: 'artifacts:read',
   effect: 'read',
   handler: async (input, ctx) => {
+    const cursor = input.cursor ? decodeTimestampCursor(input.cursor) : undefined;
+    if (input.cursor && !cursor) {
+      throw new AppError('invalid_input', 'The cursor is not valid. Omit it to start from the first page.');
+    }
+    const filters = [
+      eq(schema.approvalRequests.status, input.status),
+      input.artifactId ? eq(schema.approvalRequests.artifactId, input.artifactId) : undefined,
+    ];
+    // Compare in the database's timestamp type so microseconds survive the round trip.
+    const pageFilter = cursor
+      ? and(
+          ...filters,
+          or(
+            gt(schema.approvalRequests.createdAt, sql`${cursor.at}::timestamptz`),
+            and(eq(schema.approvalRequests.createdAt, sql`${cursor.at}::timestamptz`), gt(schema.approvalRequests.id, cursor.id)),
+          ),
+        )
+      : and(...filters);
+    const artifactJoin = and(
+      eq(schema.artifacts.workspaceId, schema.approvalRequests.workspaceId),
+      eq(schema.artifacts.id, schema.approvalRequests.artifactId),
+    );
     const rows = await ctx.tx
-      .select({ r: schema.approvalRequests, a: schema.artifacts })
+      .select({
+        r: schema.approvalRequests,
+        a: schema.artifacts,
+        cursorAt: sql<string>`to_char(${schema.approvalRequests.createdAt} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
+      })
       .from(schema.approvalRequests)
-      .innerJoin(
-        schema.artifacts,
-        and(
-          eq(schema.artifacts.workspaceId, schema.approvalRequests.workspaceId),
-          eq(schema.artifacts.id, schema.approvalRequests.artifactId),
-        ),
-      )
-      .where(
-        and(
-          eq(schema.approvalRequests.status, input.status),
-          input.artifactId ? eq(schema.approvalRequests.artifactId, input.artifactId) : undefined,
-        ),
-      )
-      .orderBy(schema.approvalRequests.createdAt)
-      .limit(input.limit);
+      .innerJoin(schema.artifacts, artifactJoin)
+      .where(pageFilter)
+      .orderBy(asc(schema.approvalRequests.createdAt), asc(schema.approvalRequests.id))
+      .limit(input.limit + 1);
+    const [{ n }] = await ctx.tx
+      .select({ n: count() })
+      .from(schema.approvalRequests)
+      .innerJoin(schema.artifacts, artifactJoin)
+      .where(and(...filters));
+    const page = rows.slice(0, input.limit);
     const requesters = await resolveRequesters(
       ctx,
-      rows.map(({ r }) => r),
+      page.map(({ r }) => r),
     );
     const bundles = await bundlesOf(
       ctx,
-      rows.map(({ r }) => r),
+      page.map(({ r }) => r),
     );
-    return { approvals: rows.map(({ r, a }) => approvalOut(ctx, r, a, requesters.get(r.id)!, bundles)) };
+    const last = page[page.length - 1];
+    return {
+      approvals: page.map(({ r, a }) => approvalOut(ctx, r, a, requesters.get(r.id)!, bundles)),
+      total: Number(n),
+      nextCursor: rows.length > input.limit && last ? encodeTimestampCursor({ at: last.cursorAt, id: last.r.id }) : null,
+    };
   },
 });
 

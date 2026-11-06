@@ -1,9 +1,10 @@
 import { Plus, Search } from 'lucide-react';
-import { type ReactNode, useMemo, useState } from 'react';
+import { type ReactNode, useEffect, useMemo, useState } from 'react';
 import { api, errText } from '../../app/api';
 import { artifactPath } from '../../app/artifactRoutes';
+import { parseCreateIntent } from '../../app/createIntent';
 import { useCrumbs } from '../../app/page';
-import { Link, navigate } from '../../app/router';
+import { Link, navigate, setSearchParam, useLocation } from '../../app/router';
 import { useSession } from '../../app/session';
 import { publicationLabel, stateOfArtifact } from '../../lib/state';
 import {
@@ -59,6 +60,7 @@ export function ArtifactListPage<S = Record<string, never>>({
   emptyText,
   columns,
   rowState,
+  rowHref,
 }: {
   type: string;
   title: string;
@@ -71,6 +73,8 @@ export function ArtifactListPage<S = Record<string, never>>({
   columns?: { header: string; cell: (a: ArtifactRow) => ReactNode; className?: string }[];
   /** A family-specific operational pill (a broadcast reads its run); defaults to the artifact state. */
   rowState?: (a: ArtifactRow) => ReactNode;
+  /** A family-specific destination (the journey reports view selects the Report tab). */
+  rowHref?: (a: ArtifactRow) => string;
 }) {
   useCrumbs([{ label: crumb ?? title }]);
   const { can } = useSession();
@@ -90,6 +94,17 @@ export function ArtifactListPage<S = Record<string, never>>({
   const total = list.data?.total ?? 0;
   const loaded = list.data?.artifacts.length ?? 0;
   const canCreate = !!create && can('artifacts:write');
+  const href = (a: ArtifactRow) => rowHref?.(a) ?? artifactPath(a.type, a.id);
+  const { search } = useLocation();
+  const intent = parseCreateIntent(search);
+
+  // The New menu and palette only navigate; this page opens its existing dialog once and consumes
+  // `create` with replace, so a reload never reopens it or duplicates a draft.
+  useEffect(() => {
+    if (!create || !canCreate || intent !== type) return;
+    setCreating(true);
+    setSearchParam('create', null);
+  }, [create, canCreate, intent, type]);
 
   return (
     <div className={pageWidth('default')}>
@@ -176,13 +191,9 @@ export function ArtifactListPage<S = Record<string, never>>({
           </THead>
           <tbody>
             {rows.map((a) => (
-              <Tr key={a.id} onClick={() => navigate(artifactPath(a.type, a.id))}>
+              <Tr key={a.id} onClick={() => navigate(href(a))}>
                 <Td>
-                  <Link
-                    to={artifactPath(a.type, a.id)}
-                    className="font-medium text-fg hover:underline"
-                    onClick={(e) => e.stopPropagation()}
-                  >
+                  <Link to={href(a)} className="font-medium text-fg hover:underline" onClick={(e) => e.stopPropagation()}>
                     {a.name}
                   </Link>
                   <div className="mt-0.5 text-[12px] leading-[18px] text-muted">

@@ -14,15 +14,16 @@ import { pageWidth } from '../../ui/layout';
 type Node = { id: string; label?: string; kind?: string };
 
 /** People in a journey right now, and how many reached every step. */
-export default function JourneyStatsPage() {
-  useCrumbs([{ label: 'Journey stats' }]);
+export default function JourneyStatsPage({ journeyId, embedded = false }: { journeyId?: string; embedded?: boolean } = {}) {
+  useCrumbs([{ label: embedded ? 'Report' : 'Journey stats' }]);
   const { can } = useSession();
-  const [selected, setSelected] = useState('');
+  const [selected, setSelected] = useState(journeyId ?? '');
 
   const journeys = useAllArtifacts('journey');
   useEffect(() => {
-    if (!selected && journeys.data?.artifacts.length) setSelected(journeys.data.artifacts[0].id);
-  }, [journeys.data, selected]);
+    if (journeyId && journeyId !== selected) setSelected(journeyId);
+    else if (!journeyId && !selected && journeys.data?.artifacts.length) setSelected(journeys.data.artifacts[0].id);
+  }, [journeyId, journeys.data, selected]);
 
   const stats = useApi(() => api.call('journeys.stats', { artifactId: selected }), [selected], { skip: !selected });
   const artifact = useApi(() => api.call('artifacts.get', { artifactId: selected }), [selected], { skip: !selected });
@@ -51,18 +52,20 @@ export default function JourneyStatsPage() {
     });
 
   return (
-    <div className={pageWidth('default')}>
-      <PageHeader
-        title="Journey stats"
-        description="How many people are at each step of a journey right now, and how many passed it."
-        actions={
-          selected && (
-            <ButtonLink to={`/build/journeys/${selected}`} icon={<ExternalLink size={15} />}>
-              Open in builder
-            </ButtonLink>
-          )
-        }
-      />
+    <div className={embedded ? 'space-y-5' : pageWidth('default')}>
+      {!embedded && (
+        <PageHeader
+          title="Journey stats"
+          description="How many people are at each step of a journey right now, and how many passed it."
+          actions={
+            selected && (
+              <ButtonLink to={`/marketing/journeys/${selected}`} icon={<ExternalLink size={15} />}>
+                Open in builder
+              </ButtonLink>
+            )
+          }
+        />
+      )}
 
       {journeys.loading ? (
         <LoadingBlock lines={5} label="Loading journeys" />
@@ -77,7 +80,7 @@ export default function JourneyStatsPage() {
             title="No journeys yet"
             action={
               can('artifacts:write') && (
-                <ButtonLink to="/build/journeys" variant="primary">
+                <ButtonLink to="/marketing/journeys" variant="primary">
                   Create a journey
                 </ButtonLink>
               )
@@ -88,16 +91,18 @@ export default function JourneyStatsPage() {
         </div>
       ) : (
         <div className="space-y-5">
-          <Field label="Journey" className="max-w-[380px]">
-            <Select value={selected} onChange={(e) => setSelected(e.target.value)}>
-              {(journeys.data?.artifacts ?? []).map((j) => (
-                <option key={j.id} value={j.id}>
-                  {j.name}
-                  {j.publishedVersion ? ` · live v${j.publishedVersion}` : ` · ${j.latestState.replace(/_/g, ' ')}`}
-                </option>
-              ))}
-            </Select>
-          </Field>
+          {!journeyId && (
+            <Field label="Journey" className="max-w-[380px]">
+              <Select value={selected} onChange={(e) => setSelected(e.target.value)}>
+                {(journeys.data?.artifacts ?? []).map((j) => (
+                  <option key={j.id} value={j.id}>
+                    {j.name}
+                    {j.publishedVersion ? ` · live v${j.publishedVersion}` : ` · ${j.latestState.replace(/_/g, ' ')}`}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+          )}
 
           {stats.loading ? (
             <LoadingBlock lines={6} label="Loading journey stats" />
@@ -162,4 +167,12 @@ export default function JourneyStatsPage() {
       )}
     </div>
   );
+}
+
+/**
+ * Hook for task B's journey detail Report tab (#448): mount inside `?tab=report` with the route id.
+ * It renders the existing journey stats scoped to that id, without the standalone picker or header.
+ */
+export function JourneyReport({ journeyId }: { journeyId: string }) {
+  return <JourneyStatsPage journeyId={journeyId} embedded />;
 }

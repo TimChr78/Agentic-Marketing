@@ -7,7 +7,7 @@ export default function CampaignPage({ params }: { params: Record<string, string
   return (
     <ArtifactDetailPage
       id={params.id}
-      crumbs={[{ label: 'Campaigns', to: '/build/campaigns' }]}
+      crumbs={[{ label: 'Campaigns', to: '/marketing/campaigns' }]}
       wide
       editor={(p) => <CampaignEditor {...p} />}
       extraTabs={[

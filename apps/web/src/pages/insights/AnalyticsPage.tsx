@@ -1,7 +1,10 @@
+import { X } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { api, type Out } from '../../app/api';
 import { useCrumbs } from '../../app/page';
+import { setSearchParam, useLocation } from '../../app/router';
 import { useApi } from '../../app/useApi';
+import { usePageTab } from '../../app/useTab';
 import { hasBreakdown, TIME_DIMENSIONS } from '../../lib/breakdown';
 import {
   ANALYTICS_MEASURES,
@@ -26,30 +29,29 @@ import {
   PageHeader,
   Table,
   TableFrame,
+  Tabs,
   Td,
   THead,
   Th,
   Tr,
 } from '../../ui';
+import { Identifier } from '../../ui/Identifier';
 import { pageWidth } from '../../ui/layout';
+import { getWorkspaceTimeZone } from '../../ui/time';
+import AiUsagePage from './AiUsagePage';
+import { analyticsParams, dayEndIso, dayStartIso } from './analyticsParams';
 
 type Result = Out<'analytics.query'>;
 type Column = Result['columns'][number];
 type MeasureColumn = Column & { index: number };
 type TimeDimension = 'day' | 'week' | 'month';
 
-const DEFAULT_MEASURES = ['email.sent', 'email.delivered', 'email.click_rate'];
 const UNIT_ORDER: MetricUnit[] = ['count', 'ratio', 'currency'];
 const UNIT_TITLE: Record<MetricUnit, string> = {
   count: 'Counts over time',
   ratio: 'Rates over time',
   currency: 'Revenue over time',
 };
-
-/** YYYY-MM-DD, for the date inputs. */
-const dateInput = (date: Date) => date.toISOString().slice(0, 10);
-const dayStart = (date: string) => new Date(`${date}T00:00:00.000Z`).toISOString();
-const dayEnd = (date: string) => new Date(`${date}T23:59:59.999Z`).toISOString();
 
 /** A ratio is stored as a fraction; every visible rate, chart and table alike, is a percentage. */
 const chartValue = (column: Column, value: number | null): number | null => {
@@ -73,13 +75,21 @@ const number = (value: number | string | null, unit?: string, currency?: string 
  * and axis (DESIGN.md → Chart contract), and every measure and dimension is named through the
  * label registry, never by its raw key (#437).
  */
-export default function AnalyticsPage() {
+export function AnalyticsPerformance() {
   useCrumbs([{ label: 'Analytics' }]);
+  const { search } = useLocation();
   const catalog = useApi(() => api.call('analytics.metrics.list', {}), []);
-  const [measures, setMeasures] = useState<string[]>(DEFAULT_MEASURES);
-  const [dimensions, setDimensions] = useState<string[]>(['day']);
-  const [from, setFrom] = useState(dateInput(new Date(Date.now() - 29 * 86_400_000)));
-  const [to, setTo] = useState(dateInput(new Date()));
+  const [initial] = useState(() => analyticsParams(search));
+  const [measures, setMeasures] = useState<string[]>(initial.params.measures);
+  const [dimensions, setDimensions] = useState<string[]>(initial.params.dimensions);
+  const [from, setFrom] = useState(initial.params.from);
+  const [to, setTo] = useState(initial.params.to);
+  const [broadcast, setBroadcast] = useState<string | null>(initial.params.broadcast);
+
+  const removeBroadcast = () => {
+    setBroadcast(null);
+    setSearchParam('broadcast', null);
+  };
 
   const allowed = useMemo(() => {
     const chosen = (catalog.data?.measures ?? []).filter((m) => measures.includes(m.id));
@@ -94,15 +104,16 @@ export default function AnalyticsPage() {
     setDimensions((current) => current.filter((d) => allowed.has(d)));
   }, [allowed, catalog.data]);
 
-  const key = `${measures.join(',')}|${dimensions.join(',')}|${from}|${to}`;
+  const key = `${measures.join(',')}|${dimensions.join(',')}|${from}|${to}|${broadcast ?? ''}`;
   const result = useApi(
     () =>
       api.call('analytics.query', {
         measures,
         dimensions,
-        from: dayStart(from),
-        to: dayEnd(to),
+        from: dayStartIso(from, getWorkspaceTimeZone()),
+        to: dayEndIso(to, getWorkspaceTimeZone()),
         limit: 5000,
+        ...(broadcast ? { filters: { broadcast: [broadcast] } } : {}),
       }),
     [key],
     { skip: measures.length === 0 },
@@ -154,6 +165,29 @@ export default function AnalyticsPage() {
         title="Analytics"
         description="The read-only metric layer behind the platform and its agents: one catalogue of measures over message, journey and conversion events. Rows smaller than five people are suppressed in breakdowns."
       />
+
+      {initial.invalid.length > 0 && (
+        <Alert tone="info" className="mb-5">
+          This link had an invalid {initial.invalid.join(', ')} value; the available defaults are shown instead.
+        </Alert>
+      )}
+
+      {broadcast && (
+        <div className="mb-5 flex flex-wrap items-center gap-2 rounded-lg border border-line bg-surface px-3 py-2 text-[12px] leading-[18px]">
+          <span className="text-muted">Broadcast filter</span>
+          <span className="inline-flex items-center gap-1 rounded-full border border-line bg-surface-2 py-0.5 pr-1 pl-2.5 text-fg-2">
+            <Identifier value={broadcast} label="Broadcast filter" />
+            <button
+              type="button"
+              aria-label="Remove broadcast filter"
+              onClick={removeBroadcast}
+              className="inline-flex size-6 items-center justify-center rounded-full text-muted hover:bg-surface hover:text-fg"
+            >
+              <X size={13} aria-hidden />
+            </button>
+          </span>
+        </div>
+      )}
 
       <div className="mb-5 grid gap-4 lg:grid-cols-[1fr_280px]">
         <div className="rounded-lg border border-line bg-surface p-3">
@@ -308,6 +342,33 @@ export default function AnalyticsPage() {
           ))}
         </ul>
       ) : null}
+    </div>
+  );
+}
+
+const ANALYTICS_TABS = ['performance', 'ai'] as const;
+type AnalyticsTab = (typeof ANALYTICS_TABS)[number];
+
+const ANALYTICS_TAB_ITEMS: { key: AnalyticsTab; label: string }[] = [
+  { key: 'performance', label: 'Performance' },
+  { key: 'ai', label: 'AI usage' },
+];
+
+/** Insights → Analytics (#446): the metric layer and the existing AI usage report as named tabs. */
+export default function AnalyticsPage() {
+  const { active, invalid, select } = usePageTab({ keys: ANALYTICS_TABS, fallback: 'performance' });
+  useCrumbs([{ label: active === 'ai' ? 'AI usage' : 'Analytics' }]);
+
+  return (
+    <div className={pageWidth('default')}>
+      {invalid && (
+        <Alert tone="info" className="mb-4">
+          This tab is unavailable.
+        </Alert>
+      )}
+      <Tabs items={ANALYTICS_TAB_ITEMS} value={active} onChange={select} label="Analytics">
+        {active === 'ai' ? <AiUsagePage /> : <AnalyticsPerformance />}
+      </Tabs>
     </div>
   );
 }

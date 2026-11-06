@@ -1,0 +1,190 @@
+import type { ReactNode } from 'react';
+import { api } from '../../app/api';
+import { artifactPath } from '../../app/artifactRoutes';
+import { TextLink } from '../../app/links';
+import { useApi } from '../../app/useApi';
+import { Identifier } from '../../ui/Identifier';
+import { formatDateTime } from '../../ui/time';
+import type { BroadcastContent, BroadcastDetailArtifact, BroadcastStatusData } from './detailView';
+import type { ArtifactName } from './names';
+
+// The broadcast context panel (#448): published/latest versions, the actual version author, the
+// pinned segment and template, the schedule, preparation and current delivery counts, campaign
+// membership and artifact references. Missing references are shown as unavailable with their id
+// and are never fetched; there is no current-user owner fallback.
+
+const count = (n: number) => n.toLocaleString('en-US');
+
+function ReferenceRow({ id, names }: { id: string; names: Map<string, ArtifactName> }) {
+  const known = names.get(id);
+  if (known) {
+    return <TextLink to={artifactPath(known.type, id)}>{known.name}</TextLink>;
+  }
+  return (
+    <span className="inline-flex flex-wrap items-center gap-1.5">
+      <span className="text-muted">Unavailable reference</span>
+      <Identifier value={id} label="Reference ID" />
+    </span>
+  );
+}
+
+function Definition({ term, children }: { term: string; children: ReactNode }) {
+  return (
+    <div>
+      <dt className="text-[12px] leading-[18px] text-muted">{term}</dt>
+      <dd className="mt-0.5 min-w-0 break-words text-[13px] leading-5 text-fg-2">{children}</dd>
+    </div>
+  );
+}
+
+export function BroadcastContext({
+  artifact,
+  status,
+  segmentName,
+  templateName,
+  names,
+}: {
+  artifact: BroadcastDetailArtifact;
+  status: { data: BroadcastStatusData | undefined; loading: boolean; error: string | null };
+  segmentName?: string | null;
+  templateName?: string | null;
+  names: Map<string, ArtifactName>;
+}) {
+  const campaigns = useApi(() => api.call('campaigns.of', { artifactId: artifact.id }), [artifact.id]);
+  const content = (artifact.version.content ?? {}) as BroadcastContent;
+  const run = status.data?.run;
+  const delivery = status.data?.delivery;
+  const runStarted = !!run && run.status !== 'not_scheduled';
+  const pinnedSegmentId = runStarted ? (status.data?.segmentId ?? null) : null;
+  const pinnedTemplateId = runStarted ? (status.data?.templateId ?? null) : null;
+  const segmentId = pinnedSegmentId ?? content.segment;
+  const templateId = pinnedTemplateId ?? content.template;
+  const segmentLabel = pinnedSegmentId ? names.get(pinnedSegmentId)?.name : segmentName;
+  const templateLabel = pinnedTemplateId ? names.get(pinnedTemplateId)?.name : templateName;
+  const draftDiffers =
+    runStarted &&
+    !!run &&
+    (artifact.latestVersion > (run.version ?? 0) ||
+      (pinnedSegmentId !== null && content.segment !== pinnedSegmentId) ||
+      (pinnedTemplateId !== null && content.template !== pinnedTemplateId));
+  const draftSegmentName = content.segment ? names.get(content.segment)?.name : undefined;
+  const draftTemplateName = content.template ? names.get(content.template)?.name : undefined;
+  const author = artifact.version.by?.displayName ?? (artifact.version.author.type === 'agent' ? 'an agent' : 'a person');
+
+  const schedule = run?.sendAt
+    ? formatDateTime(run.sendAt, { zone: true })
+    : content.sendAt
+      ? `${formatDateTime(content.sendAt, { zone: true })} (saved)`
+      : 'On publication';
+
+  const preparation =
+    !run || run.status === 'not_scheduled'
+      ? 'Eligibility checked on review'
+      : run.status === 'scheduled'
+        ? 'Not prepared yet'
+        : `${count(run.recipients)} reached · ${count(run.queued)} queued · ${count(run.skipped)} skipped · ${count(run.windowSkipped)} window-skipped`;
+
+  let currentDelivery: ReactNode;
+  if (status.error) currentDelivery = 'Unavailable · retry status';
+  else if (status.loading || !status.data) currentDelivery = 'Checking…';
+  else if (!run || run.status === 'not_scheduled' || run.status === 'scheduled') currentDelivery = 'Not started';
+  else if (!delivery) currentDelivery = 'Delivery unavailable';
+  else {
+    const accepted = (delivery.sent ?? 0) + (delivery.delivered ?? 0) + (delivery.bounced ?? 0) + (delivery.complained ?? 0);
+    const pending = (delivery.queued ?? 0) + (delivery.sending ?? 0);
+    const failed = delivery.failed ?? 0;
+    const suppressed = delivery.suppressed ?? 0;
+    if (!accepted && !pending && !failed && !suppressed) currentDelivery = 'No messages';
+    else
+      currentDelivery = (
+        <>
+          {accepted > 0 && <div>{count(accepted)} provider-accepted</div>}
+          {pending > 0 && <div>{count(pending)} awaiting provider</div>}
+          {failed > 0 && <div>{count(failed)} failed</div>}
+          {suppressed > 0 && <div>{count(suppressed)} suppressed</div>}
+        </>
+      );
+  }
+
+  return (
+    <div>
+      <h2 className="mb-3 text-[16px] leading-6 font-semibold">Context</h2>
+      <dl className="space-y-3">
+        <Definition term="Versions">
+          {artifact.publishedVersion !== null
+            ? `Published v${artifact.publishedVersion} · latest v${artifact.latestVersion}`
+            : `Not published · latest v${artifact.latestVersion}`}
+          {runStarted && run?.version != null ? ` · sending v${run.version}` : ''}
+        </Definition>
+        <Definition term="Changed by">{author}</Definition>
+        <Definition term="Segment">
+          {segmentId ? (
+            segmentLabel ? (
+              <TextLink to={artifactPath('segment', segmentId)}>{segmentLabel}</TextLink>
+            ) : (
+              <span className="inline-flex flex-wrap items-center gap-1.5">
+                <span className="text-muted">Unavailable reference</span>
+                <Identifier value={segmentId} label="Segment ID" />
+              </span>
+            )
+          ) : (
+            'Not set'
+          )}
+        </Definition>
+        <Definition term="Template">
+          {templateId ? (
+            templateLabel ? (
+              <TextLink to={artifactPath('email_template', templateId)}>{templateLabel}</TextLink>
+            ) : (
+              <span className="inline-flex flex-wrap items-center gap-1.5">
+                <span className="text-muted">Unavailable reference</span>
+                <Identifier value={templateId} label="Template ID" />
+              </span>
+            )
+          ) : (
+            'Not set'
+          )}
+        </Definition>
+        {draftDiffers && (
+          <Definition term={`Draft v${artifact.latestVersion} targets`}>
+            {draftSegmentName ?? 'Segment'}
+            {draftTemplateName ? ` · ${draftTemplateName}` : ''}
+          </Definition>
+        )}
+        <Definition term="Schedule">{schedule}</Definition>
+        <Definition term="Preparation">{preparation}</Definition>
+        <Definition term="Current delivery">{currentDelivery}</Definition>
+        <Definition term="Campaign">
+          {campaigns.loading ? (
+            'Checking…'
+          ) : campaigns.error ? (
+            'Unavailable'
+          ) : campaigns.data?.campaigns.length ? (
+            <span className="space-y-1">
+              {campaigns.data.campaigns.map((campaign) => (
+                <div key={campaign.id}>
+                  <TextLink to={`/marketing/campaigns/${campaign.id}`}>{campaign.name}</TextLink>
+                </div>
+              ))}
+            </span>
+          ) : (
+            'None'
+          )}
+        </Definition>
+        <Definition term="Dependencies">
+          {artifact.references.length ? (
+            <span className="space-y-1">
+              {artifact.references.map((id) => (
+                <div key={id}>
+                  <ReferenceRow id={id} names={names} />
+                </div>
+              ))}
+            </span>
+          ) : (
+            'None'
+          )}
+        </Definition>
+      </dl>
+    </div>
+  );
+}

@@ -1,21 +1,22 @@
-// Where each artifact type lives in the UI. Types without a page of their own open the generic
-// artifact page, which still shows content, versions, diff and activity.
+// Where each artifact type lives in the UI (#446). Canonical URLs only: legacy paths are redirects,
+// never emitted by a page, a breadcrumb, a search result or a notification. Types without a page of
+// their own open the generic artifact page, which still shows content, versions, diff and activity.
 
 const base: Record<string, string> = {
-  journey: '/build/journeys',
-  broadcast: '/build/broadcasts',
-  campaign: '/build/campaigns',
-  form: '/build/forms',
-  segment: '/build/segments',
-  experience: '/build/experiences',
-  prompt: '/build/prompts',
-  email_template: '/design/templates',
-  email_block: '/design/blocks',
+  journey: '/marketing/journeys',
+  broadcast: '/marketing/broadcasts',
+  campaign: '/marketing/campaigns',
+  form: '/audience/forms',
+  segment: '/audience/segments',
+  experience: '/marketing/experiences',
+  prompt: '/work/agents/library',
+  email_template: '/content/templates',
+  email_block: '/content/templates/blocks',
 };
 
 export function artifactPath(type: string, id: string): string {
-  if (type === 'brand') return '/design/brand';
-  if (type === 'purposes') return '/settings/purposes';
+  if (type === 'brand') return '/content/brand';
+  if (type === 'purposes') return '/audience/consent?tab=purposes';
   return base[type] ? `${base[type]}/${id}` : `/artifacts/${id}`;
 }
 

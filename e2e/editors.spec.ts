@@ -5,12 +5,12 @@ import { call, PEOPLE, signIn } from './helpers';
 
 test('create an experience with two variants in the editor and save', async ({ page }) => {
   await signIn(page, PEOPLE.builder);
-  await page.goto('/build/experiences');
+  await page.goto('/marketing/experiences');
   await page.getByRole('button', { name: 'New experience' }).first().click();
   const create = page.getByRole('dialog', { name: 'New experience' });
   await create.getByLabel('Name').fill('E2E article banner');
   await create.getByRole('button', { name: 'Create draft' }).click();
-  await expect(page).toHaveURL(/\/build\/experiences\/exp_/);
+  await expect(page).toHaveURL(/\/marketing\/experiences\/exp_/);
   const id = page.url().split('/').pop()!;
 
   await page.getByLabel('Placement').fill('e2e-article-footer');

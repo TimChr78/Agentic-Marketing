@@ -1,13 +1,16 @@
-import { Suspense } from 'react';
+import { lazy, Suspense } from 'react';
 import { AutonomyProvider } from '../features/agents/AutonomyProvider';
 import { Alert, Button, LoadingBlock, ToastProvider } from '../ui';
 import { ForgotPassword } from './ForgotPassword';
 import { ResetPassword } from './ResetPassword';
 import { useLocation } from './router';
 import { Routes } from './routes';
-import { Shell } from './Shell';
 import { SignIn } from './SignIn';
 import { SessionProvider, useSession } from './session';
+
+// The signed-in shell (and its command palette, New menu and copilot) is only needed after
+// authentication, so the sign-in screen stays light and the shell loads as one chunk.
+const Shell = lazy(async () => ({ default: (await import('./Shell')).Shell }));
 
 export function Root() {
   return (
@@ -54,11 +57,13 @@ function Gate() {
     );
   return (
     <AutonomyProvider>
-      <Shell>
-        <Suspense fallback={<LoadingBlock lines={6} />}>
-          <Routes />
-        </Suspense>
-      </Shell>
+      <Suspense fallback={<LoadingBlock lines={6} />}>
+        <Shell>
+          <Suspense fallback={<LoadingBlock lines={6} />}>
+            <Routes />
+          </Suspense>
+        </Shell>
+      </Suspense>
     </AutonomyProvider>
   );
 }
