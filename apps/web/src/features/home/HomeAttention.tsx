@@ -47,7 +47,7 @@ function RequestRow({ group, held, canApprove, now }: { group: ApprovalGroup; he
   const bundleSize = lead.bundle?.members.length ?? 1;
   const passed = lead.holdUntil !== null && new Date(lead.holdUntil).getTime() <= now.getTime();
   return (
-    <li className="flex min-h-16 flex-wrap items-start justify-between gap-3 px-4 py-3 md:px-5">
+    <div className="flex min-h-16 flex-wrap items-start justify-between gap-3 px-4 py-3 md:px-5">
       <div className="min-w-0 flex-1">
         <Link to={`/approvals/${lead.id}`} className="text-[13px] leading-5 font-medium break-words text-fg hover:underline">
           {lead.artifactName}
@@ -90,7 +90,7 @@ function RequestRow({ group, held, canApprove, now }: { group: ApprovalGroup; he
           {canApprove ? 'Review' : 'View request'}
         </Link>
       </div>
-    </li>
+    </div>
   );
 }
 
@@ -193,7 +193,7 @@ function AlertRows({ resource, onRetry }: { resource: Resource<AlertsResult>; on
         <HomeBlockEmpty>No firing alerts</HomeBlockEmpty>
       ) : (
         rules.map((rule) => (
-          <li key={rule.id} className="flex min-h-16 flex-wrap items-start justify-between gap-3 px-4 py-3 md:px-5">
+          <div key={rule.id} className="flex min-h-16 flex-wrap items-start justify-between gap-3 px-4 py-3 md:px-5">
             <div className="min-w-0 flex-1">
               <Link to="/insights/alerts" className="text-[13px] leading-5 font-medium break-words text-fg hover:underline">
                 {rule.name}
@@ -203,7 +203,7 @@ function AlertRows({ resource, onRetry }: { resource: Resource<AlertsResult>; on
               </p>
             </div>
             <StatusPill tone="bad">Firing</StatusPill>
-          </li>
+          </div>
         ))
       )}
     </HomeBlock>
@@ -240,7 +240,7 @@ function CapRows({ resource, onRetry }: { resource: Resource<AgentsResult>; onRe
         <HomeBlockEmpty>No guardian caps</HomeBlockEmpty>
       ) : (
         agents.map((agent) => (
-          <li key={agent.id} className="flex min-h-16 flex-wrap items-start justify-between gap-3 px-4 py-3 md:px-5">
+          <div key={agent.id} className="flex min-h-16 flex-wrap items-start justify-between gap-3 px-4 py-3 md:px-5">
             <div className="min-w-0 flex-1">
               <Link
                 to={`/work/agents/${encodeURIComponent(agent.id)}`}
@@ -255,7 +255,7 @@ function CapRows({ resource, onRetry }: { resource: Resource<AgentsResult>; onRe
               </p>
             </div>
             <OperationalPill state={stateOfAgent({ status: agent.status, statusReason: agent.statusReason, guard: agent.guard })} />
-          </li>
+          </div>
         ))
       )}
     </HomeBlock>
@@ -299,7 +299,7 @@ function FailureRows({ resource, onRetry }: { resource: Resource<FailuresResult>
         <HomeBlockEmpty>No failed hosted runs in the last 7 days</HomeBlockEmpty>
       ) : (
         runs.map((run: FailedRun) => (
-          <li key={run.id} className="flex min-h-16 flex-wrap items-start justify-between gap-3 px-4 py-3 md:px-5">
+          <div key={run.id} className="flex min-h-16 flex-wrap items-start justify-between gap-3 px-4 py-3 md:px-5">
             <div className="min-w-0 flex-1">
               <Link
                 to={`/work/agents/${encodeURIComponent(run.agentId)}`}
@@ -318,7 +318,7 @@ function FailureRows({ resource, onRetry }: { resource: Resource<FailuresResult>
               )}
             </div>
             <StatusPill tone="bad">Failed</StatusPill>
-          </li>
+          </div>
         ))
       )}
     </HomeBlock>

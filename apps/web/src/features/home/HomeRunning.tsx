@@ -65,7 +65,7 @@ function BroadcastRows({ resource, now, onRetry }: { resource: Resource<Broadcas
                 ? `Started ${formatDateTime(broadcast.run.startedAt, { zone: true })}`
                 : `Updated ${formatDateTime(broadcast.updatedAt, { zone: true })}`;
           return (
-            <li key={broadcast.artifactId} className="flex min-h-16 flex-wrap items-start justify-between gap-3 px-4 py-3 md:px-5">
+            <div key={broadcast.artifactId} className="flex min-h-16 flex-wrap items-start justify-between gap-3 px-4 py-3 md:px-5">
               <div className="min-w-0 flex-1">
                 <Link
                   to={artifactPath('broadcast', broadcast.artifactId)}
@@ -76,7 +76,7 @@ function BroadcastRows({ resource, now, onRetry }: { resource: Resource<Broadcas
                 <p className="mt-1 text-[12px] leading-[18px] text-muted">{timing}</p>
               </div>
               <OperationalPill state={state} />
-            </li>
+            </div>
           );
         })
       )}
@@ -131,7 +131,7 @@ function JourneyRows({ resource, now, onRetry }: { resource: Resource<JourneysRe
             publishedVersion: journey.publishedVersion,
           });
           return (
-            <li key={journey.id} className="flex min-h-16 flex-wrap items-start justify-between gap-3 px-4 py-3 md:px-5">
+            <div key={journey.id} className="flex min-h-16 flex-wrap items-start justify-between gap-3 px-4 py-3 md:px-5">
               <div className="min-w-0 flex-1">
                 <Link
                   to={`/marketing/journeys/${encodeURIComponent(journey.id)}?tab=report`}
@@ -144,7 +144,7 @@ function JourneyRows({ resource, now, onRetry }: { resource: Resource<JourneysRe
                 </p>
               </div>
               <OperationalPill state={state} />
-            </li>
+            </div>
           );
         })
       )}
@@ -183,7 +183,7 @@ function AgentRows({ resource, onRetry }: { resource: Resource<AgentsResult>; on
         <HomeBlockEmpty>No active agents</HomeBlockEmpty>
       ) : (
         shown.map((agent) => (
-          <li key={agent.id} className="flex min-h-16 flex-wrap items-start justify-between gap-3 px-4 py-3 md:px-5">
+          <div key={agent.id} className="flex min-h-16 flex-wrap items-start justify-between gap-3 px-4 py-3 md:px-5">
             <div className="min-w-0 flex-1">
               <Link
                 to={`/work/agents/${encodeURIComponent(agent.id)}`}
@@ -196,7 +196,7 @@ function AgentRows({ resource, onRetry }: { resource: Resource<AgentsResult>; on
               </p>
             </div>
             <OperationalPill state={stateOfAgent({ status: agent.status, statusReason: agent.statusReason, guard: agent.guard })} />
-          </li>
+          </div>
         ))
       )}
     </HomeBlock>
