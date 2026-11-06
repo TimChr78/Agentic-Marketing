@@ -1505,9 +1505,11 @@ const agentMandate = z.object({
         .optional()
         .describe('Experiences it publishes need holdoutPercent of at least this'),
       experienceRamp: z
-        .union([z.boolean(), z.number().int().min(1).max(100)])
+        .union([z.boolean(), z.number().int().min(1).max(99)])
         .optional()
-        .describe('Experiences it publishes need a rollout: true for any ramp, or the minimum first step share (rollout.steps[0])'),
+        .describe(
+          'Experiences it publishes need a real ramp: rollout.steps with at least two steps, a first step below 100%, and a rollout.guardrail. true requires any such ramp; a number (1–99) also requires the first step to be at least that share',
+        ),
     })
     .default({})
     .describe(

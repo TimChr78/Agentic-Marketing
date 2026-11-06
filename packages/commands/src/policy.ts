@@ -62,6 +62,10 @@ export interface Impact {
     subjectTest?: boolean;
     /** For an experience with a rollout: its first step share, or null when it has no ramp (#427). */
     rampFirstStep?: number | null;
+    /** How many steps the ramp has, for the "a real ramp" rule (#475). */
+    rampSteps?: number | null;
+    /** Whether the ramp carries a guardrail, so a breach pauses it (#475). */
+    rampGuardrail?: boolean;
   }[];
 }
 
@@ -359,9 +363,17 @@ function learningGaps(impact: Impact, rules: MandateView['learning']): string[] 
         `Experience ${l.id} holds out ${l.controlPercent}% of visitors; the mandate requires at least ${rules.experienceHoldoutPercent}% (holdoutPercent).`,
       );
     if (l.type === 'experience' && rules.experienceRamp) {
-      const required = rules.experienceRamp === true ? 1 : rules.experienceRamp;
-      if ((l.rampFirstStep ?? 0) < required)
-        out.push(`Experience ${l.id} has no ramp starting at ${required}% of visitors; the mandate requires one (rollout.steps).`);
+      const minimum = rules.experienceRamp === true ? 1 : rules.experienceRamp;
+      // A ramp is only measurable if it actually ramps (#475): at least two steps, a first step
+      // below 100, and a guardrail that pauses it when the change hurts.
+      const problems: string[] = [];
+      if ((l.rampSteps ?? 0) < 2) problems.push('has no ramp (rollout.steps needs at least two steps)');
+      else if ((l.rampFirstStep ?? 100) >= 100) problems.push('starts its ramp at 100% of visitors');
+      else if ((l.rampFirstStep ?? 0) < minimum)
+        problems.push(`starts its ramp at ${l.rampFirstStep ?? 0}%, below the mandated ${minimum}%`);
+      if (!l.rampGuardrail) problems.push('has no rollout.guardrail, so the ramp cannot pause itself');
+      if (problems.length)
+        out.push(`Experience ${l.id} ${problems.join(' and ')}; the mandate requires a gradual, guarded ramp (rollout).`);
     }
   }
   return out;
