@@ -1,14 +1,16 @@
-import { Blocks, Code2, ImageIcon, Paintbrush } from 'lucide-react';
-import { lazy, Suspense, useMemo, useRef, useState } from 'react';
+import { Code2, Eye, Paintbrush, Plus, Redo2, SquareDashed, Undo2 } from 'lucide-react';
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../../app/api';
 import { useApi } from '../../app/useApi';
-import { Alert, Button, Field, Input, LoadingBlock, Segmented, Select, Textarea } from '../../ui';
+import { Alert, Button, Field, IconButton, Input, LoadingBlock, Segmented, Select, Textarea } from '../../ui';
 import type { EditorProps } from '../artifacts/ArtifactDetailPage';
 import { JsonEditor } from '../artifacts/JsonEditor';
 import { topicsOf } from '../artifacts/PurposesEditor';
 import { AssetPicker } from '../assets/AssetPicker';
-import { BlockPicker } from '../blocks/BlockPicker';
+import { EditorPreview } from './EditorPreview';
+import { type InsertElementKind, InsertPalette } from './InsertPalette';
 import { imageTag, lostLiquid } from './liquid';
+import { templateContentChanged } from './localRender';
 import type { VisualMjmlHandle } from './VisualMjml';
 
 const VisualMjml = lazy(() => import('./VisualMjml'));
@@ -26,16 +28,24 @@ export interface TemplateContent {
 
 /**
  * E-mail template editor: subject, preheader and purpose; the body in GrapesJS or as MJML with
- * Liquid; images from the asset library (#35); sample data and UTM under Advanced.
+ * Liquid; images from the asset library (#35); sample data and UTM under Advanced. One toolbar
+ * (Visual / MJML and Liquid, Insert, Undo, Redo, Outlines, Preview) replaces the GrapesJS chrome
+ * and the separate block panels (Phase 25, #499).
  */
 export function TemplateEditor({ artifact, content, onChange, readOnly, errors }: EditorProps<TemplateContent>) {
-  const [mode, setMode] = useState<'visual' | 'code'>('visual');
+  const [view, setView] = useState<'visual' | 'code' | 'preview'>('visual');
+  const [inserting, setInserting] = useState(false);
   const [picking, setPicking] = useState(false);
-  const [pickingBlock, setPickingBlock] = useState(false);
+  const [pendingInsert, setPendingInsert] = useState<{ kind: InsertElementKind; columns?: 1 | 2 } | null>(null);
+  const [visualReady, setVisualReady] = useState(false);
+  const [outlines, setOutlines] = useState(false);
   const purposes = useApi(() => api.call('purposes.list', {}), []);
   const visual = useRef<VisualMjmlHandle>(null);
   const code = useRef<HTMLTextAreaElement>(null);
-  const saved = (artifact.version.content as TemplateContent).mjml;
+  const insertButton = useRef<HTMLButtonElement>(null);
+  const savedContent = artifact.version.content as TemplateContent;
+  const saved = savedContent.mjml;
+  const dirty = templateContentChanged(content, savedContent);
   const lost = useMemo(() => lostLiquid(saved, content.mjml), [saved, content.mjml]);
   const set = (p: Partial<TemplateContent>) => onChange({ ...content, ...p });
   // Remount the visual editor when the content goes back to the saved one (discard) or the saved
@@ -47,21 +57,22 @@ export function TemplateEditor({ artifact, content, onChange, readOnly, errors }
   wasDirty.current = !clean;
   const visualKey = `${artifact.version.contentHash}-${resets.current}`;
 
-  const insert = (src: string, alt: string) => {
-    if (mode === 'visual') return visual.current?.insertImage(src, alt);
-    const el = code.current;
-    const tag = imageTag(src, alt);
-    if (!el) return set({ mjml: `${content.mjml}\n${tag}` });
-    const at = el.selectionStart ?? content.mjml.length;
-    set({ mjml: content.mjml.slice(0, at) + tag + content.mjml.slice(at) });
-  };
+  useEffect(() => {
+    if (view !== 'visual') setVisualReady(false);
+  }, [view]);
 
-  // The visual editor treats the tag as text and may escape it, so insert it in the code view:
-  // switch there and append when the textarea is not mounted yet.
+  // An element inserted from code view waits for the visual editor to mount, then lands in the
+  // selected column (or the first one) just as if it had been inserted from the canvas.
+  useEffect(() => {
+    if (!pendingInsert || view !== 'visual' || !visualReady) return;
+    visual.current?.insertElement(pendingInsert.kind, pendingInsert.columns);
+    setPendingInsert(null);
+  }, [pendingInsert, view, visualReady]);
+
   const insertTag = (tag: string) => {
-    const el = mode === 'code' ? code.current : null;
+    const el = view === 'code' ? code.current : null;
     if (!el) {
-      setMode('code');
+      setView('code');
       set({ mjml: `${content.mjml}\n${tag}` });
       return;
     }
@@ -69,8 +80,31 @@ export function TemplateEditor({ artifact, content, onChange, readOnly, errors }
     set({ mjml: content.mjml.slice(0, at) + tag + content.mjml.slice(at) });
   };
 
+  const insertImage = (src: string, alt: string) => {
+    if (view === 'visual' && visualReady) {
+      visual.current?.insertImage(src, alt);
+      return;
+    }
+    insertTag(imageTag(src, alt));
+  };
+
+  const insertElement = (kind: InsertElementKind, columns?: 1 | 2) => {
+    setInserting(false);
+    insertButton.current?.focus();
+    if (kind === 'image') {
+      setPicking(true);
+      return;
+    }
+    if (view !== 'visual' || !visualReady) {
+      setPendingInsert({ kind, columns });
+      setView('visual');
+      return;
+    }
+    visual.current?.insertElement(kind, columns);
+  };
+
   return (
-    <div className="space-y-5">
+    <div className="min-w-0 space-y-5">
       <div className="grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,2fr)_minmax(0,1fr)_minmax(0,1fr)]">
         <Field label="Subject" hint="Liquid works here, e.g. {{ profile.firstName | default: 'there' }}." error={errors.subject} required>
           <Input value={content.subject ?? ''} readOnly={readOnly} maxLength={300} onChange={(e) => set({ subject: e.target.value })} />
@@ -119,26 +153,87 @@ export function TemplateEditor({ artifact, content, onChange, readOnly, errors }
         </Field>
       </div>
 
-      <div className="flex flex-wrap items-center justify-between gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <Segmented
           label="Editor"
-          value={mode}
-          onChange={setMode}
+          value={view === 'code' ? 'code' : 'visual'}
+          onChange={setView}
           items={[
             { key: 'visual', label: 'Visual', icon: <Paintbrush size={13} aria-hidden /> },
             { key: 'code', label: 'MJML and Liquid', icon: <Code2 size={13} aria-hidden /> },
           ]}
         />
         {!readOnly && (
-          <div className="flex flex-wrap gap-2">
-            <Button size="sm" icon={<Blocks size={14} />} onClick={() => setPickingBlock(true)}>
-              Insert block
+          <>
+            <div className="relative">
+              <Button
+                ref={insertButton}
+                size="sm"
+                icon={<Plus size={14} aria-hidden />}
+                aria-expanded={inserting}
+                aria-haspopup="dialog"
+                onClick={() => setInserting((v) => !v)}
+              >
+                Insert
+              </Button>
+              {inserting && (
+                <InsertPalette
+                  onClose={() => {
+                    setInserting(false);
+                    insertButton.current?.focus();
+                  }}
+                  onInsertElement={insertElement}
+                  onInsertImage={() => {
+                    setInserting(false);
+                    insertButton.current?.focus();
+                    setPicking(true);
+                  }}
+                  onInsertBlock={(tag) => {
+                    setInserting(false);
+                    insertButton.current?.focus();
+                    insertTag(tag);
+                  }}
+                />
+              )}
+            </div>
+            <IconButton
+              label="Undo"
+              size="sm"
+              icon={<Undo2 size={15} aria-hidden />}
+              disabled={view !== 'visual'}
+              onClick={() => visual.current?.undo()}
+            />
+            <IconButton
+              label="Redo"
+              size="sm"
+              icon={<Redo2 size={15} aria-hidden />}
+              disabled={view !== 'visual'}
+              onClick={() => visual.current?.redo()}
+            />
+            <Button
+              size="sm"
+              variant="ghost"
+              aria-pressed={outlines}
+              disabled={view !== 'visual'}
+              icon={<SquareDashed size={14} aria-hidden />}
+              onClick={() => {
+                setOutlines((v) => !v);
+                visual.current?.toggleOutlines();
+              }}
+            >
+              Outlines
             </Button>
-            <Button size="sm" icon={<ImageIcon size={14} />} onClick={() => setPicking(true)}>
-              Insert image
-            </Button>
-          </div>
+          </>
         )}
+        <Button
+          size="sm"
+          variant={view === 'preview' ? 'secondary' : 'ghost'}
+          aria-pressed={view === 'preview'}
+          icon={<Eye size={14} aria-hidden />}
+          onClick={() => setView((v) => (v === 'preview' ? 'visual' : 'preview'))}
+        >
+          Preview
+        </Button>
       </div>
       {lost.length > 0 && (
         <Alert tone="warn" title="Liquid changed in the visual editor">
@@ -147,13 +242,21 @@ export function TemplateEditor({ artifact, content, onChange, readOnly, errors }
         </Alert>
       )}
       {errors.mjml && <Alert tone="bad">{errors.mjml}</Alert>}
-      {mode === 'visual' ? (
+      {view === 'preview' ? (
+        <EditorPreview artifactId={artifact.id} version={artifact.version.number} content={content} dirty={dirty} readOnly={readOnly} />
+      ) : view === 'visual' ? (
         readOnly ? (
           <Alert tone="info">Your role can read this template but not edit it. Open Preview to see it rendered.</Alert>
         ) : (
-          <div className="h-[calc(100vh-300px)] min-h-[560px] overflow-x-auto overflow-y-hidden rounded-lg border border-line">
+          <div className="h-[calc(100vh-340px)] min-h-[420px] min-w-0 overflow-hidden rounded-lg border border-line md:min-h-[560px]">
             <Suspense fallback={<LoadingBlock lines={8} label="Loading the visual editor" />}>
-              <VisualMjml key={visualKey} ref={visual} mjml={content.mjml} onChange={(mjml) => set({ mjml })} />
+              <VisualMjml
+                key={visualKey}
+                ref={visual}
+                mjml={content.mjml}
+                onChange={(mjml) => set({ mjml })}
+                onReady={() => setVisualReady(true)}
+              />
             </Suspense>
           </div>
         )
@@ -221,12 +324,11 @@ export function TemplateEditor({ artifact, content, onChange, readOnly, errors }
           title="Insert an image"
           onClose={() => setPicking(false)}
           onPick={(a) => {
-            insert(a.url, a.altText);
+            insertImage(a.url, a.altText);
             setPicking(false);
           }}
         />
       )}
-      {pickingBlock && <BlockPicker onClose={() => setPickingBlock(false)} onPick={insertTag} />}
     </div>
   );
 }

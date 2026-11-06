@@ -2,22 +2,13 @@ import grapesjs, { type Editor, type Button as GjsButton, type Panel } from 'gra
 import { useEffect, useRef, useState } from 'react';
 import 'grapesjs/dist/css/grapes.min.css';
 import grapesjsMjml from 'grapesjs-mjml';
-import { Liquid } from 'liquidjs';
 import { Code2, Eye, Mail, Paintbrush, Save } from 'lucide-react';
-import mjml2html from 'mjml-browser';
 import { exec } from '../api/commands';
 import { AuthorBadge, Button, cx, inputBase, inputCls, Pill, timeAgo } from '../components/ui';
+import { renderDraft } from '../features/templates/localRender';
 import { useStore } from '../mock/store';
 
-const liquid = new Liquid({ strictVariables: false, strictFilters: false });
 type Mode = 'visual' | 'code' | 'preview';
-
-async function render(mjml: string, vars: Record<string, unknown>) {
-  const filled = await liquid.parseAndRender(mjml, vars);
-  // mjml-browser 5 renders in a promise, like the server's mjml.
-  const out = await mjml2html(filled, { validationLevel: 'soft' });
-  return out.html;
-}
 
 export default function EmailEditor() {
   const { templates, profiles, toast } = useStore();
@@ -90,8 +81,8 @@ export default function EmailEditor() {
       variant,
       unsubscribe_url: 'https://example.com/u/one-click',
     };
-    Promise.all([render(source, vars), liquid.parseAndRender(subject, vars)])
-      .then(([html, subj]) => setPreview({ html, subject: subj, error: '' }))
+    renderDraft({ subject, mjml: source, sampleData: vars })
+      .then((r) => setPreview({ html: r.html, subject: r.subject, error: '' }))
       .catch((e: Error) => setPreview({ html: '', subject: '', error: e.message }));
   }, [mode, source, subject, profile, variant]);
 

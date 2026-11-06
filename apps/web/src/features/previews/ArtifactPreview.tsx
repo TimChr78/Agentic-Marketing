@@ -2,10 +2,13 @@ import { lazy, Suspense } from 'react';
 import { JsonView, LoadingBlock } from '../../ui';
 import { referencedIds, useArtifactNames } from '../artifactCache';
 import type { JourneyContent } from '../journey/model';
+import type { DraftEmailContent } from '../templates/localRender';
 import { BlockPreview } from './BlockPreview';
 import { BroadcastPreview } from './BroadcastPreview';
 import { EmailPreview } from './EmailPreview';
 import { type FormContent, FormPreview } from './FormPreview';
+import { PreviewLabel } from './PreviewLabel';
+import type { PreviewSource } from './previewSource';
 import { SegmentPreview } from './SegmentPreview';
 
 // React Flow is large and only needed when an approval actually previews a journey (#60).
@@ -17,6 +20,7 @@ export const PREVIEWABLE = new Set(['email_template', 'email_block', 'form', 'jo
 /**
  * The object itself, by type (#41). Falls back to its content as JSON. `bundle` maps the other
  * artifacts reviewed together (#107) to their versions under review, e.g. a broadcast's template.
+ * `source` says which provenance the caller is showing; it never changes which version is fetched.
  */
 export function ArtifactPreview({
   type,
@@ -25,6 +29,8 @@ export function ArtifactPreview({
   content,
   compact,
   bundle,
+  source,
+  sourceSuffix,
 }: {
   type: string;
   artifactId: string;
@@ -32,16 +38,39 @@ export function ArtifactPreview({
   content: unknown;
   compact?: boolean;
   bundle?: Record<string, number>;
+  source?: PreviewSource;
+  sourceSuffix?: string;
 }) {
+  // Old callers pass the exact version they render. That is a Saved vN pin, not an inference about
+  // the publication pointer; C supplies Published only when it selected the published version.
+  const resolved: PreviewSource | undefined = source ?? (version != null ? { kind: 'saved', version } : undefined);
+  const draftContent = resolved?.kind === 'unsaved' ? (content as DraftEmailContent) : undefined;
   switch (type) {
     case 'email_template':
-      return <EmailPreview artifactId={artifactId} version={version} compact={compact} />;
+      return (
+        <EmailPreview
+          artifactId={artifactId}
+          version={version}
+          compact={compact}
+          source={resolved}
+          draftContent={draftContent}
+          sourceSuffix={sourceSuffix}
+        />
+      );
     case 'email_block':
-      return <BlockPreview artifactId={artifactId} version={version} compact={compact} />;
+      return <BlockPreview artifactId={artifactId} version={version} compact={compact} source={resolved} sourceSuffix={sourceSuffix} />;
     case 'form':
-      return <FormPreview content={content as FormContent} />;
+      return <FormPreview content={content as FormContent} source={resolved} sourceSuffix={sourceSuffix} />;
     case 'segment':
-      return <SegmentPreview artifactId={artifactId} version={version} content={content as { condition?: unknown }} />;
+      return (
+        <SegmentPreview
+          artifactId={artifactId}
+          version={version}
+          content={content as { condition?: unknown }}
+          source={resolved}
+          sourceSuffix={sourceSuffix}
+        />
+      );
     case 'broadcast':
       return (
         <BroadcastPreview
@@ -49,19 +78,39 @@ export function ArtifactPreview({
           version={version}
           content={content as { template?: string; segment?: string }}
           templateVersion={bundle?.[(content as { template?: string }).template ?? '']}
+          source={resolved}
+          sourceSuffix={sourceSuffix}
         />
       );
     case 'journey':
-      return <JourneyPreview content={content as JourneyContent} height={compact ? 420 : 560} />;
+      return (
+        <JourneyPreview content={content as JourneyContent} height={compact ? 420 : 560} source={resolved} sourceSuffix={sourceSuffix} />
+      );
     default:
-      return <JsonView value={content} label="Content" maxHeight={compact ? 480 : 720} />;
+      return (
+        <div className="space-y-2">
+          {resolved && <PreviewLabel source={resolved} suffix={sourceSuffix} />}
+          <JsonView value={content} label="Content" maxHeight={compact ? 480 : 720} />
+        </div>
+      );
   }
 }
 
-function JourneyPreview({ content, height }: { content: JourneyContent; height: number }) {
+function JourneyPreview({
+  content,
+  height,
+  source,
+  sourceSuffix,
+}: {
+  content: JourneyContent;
+  height: number;
+  source?: PreviewSource;
+  sourceSuffix?: string;
+}) {
   const names = useArtifactNames(referencedIds(content.nodes));
   return (
     <div className="space-y-2">
+      {source && <PreviewLabel source={source} suffix={sourceSuffix} />}
       <p className="text-[13px] text-fg-2">
         Purpose <strong className="font-medium">{content.purpose}</strong>
         {content.goal ? <> · Goal: {content.goal}</> : null}

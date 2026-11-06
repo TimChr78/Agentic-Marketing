@@ -1,0 +1,402 @@
+/* GrapesJS chrome for the e-mail editor, scoped to this editor's container only (Phase 25,
+   #499). Everything uses the v2 tokens so the chrome follows the app theme; the message inside
+   the canvas iframe keeps its own colours. No selector here reaches outside `.am-gjs`. */
+
+.am-gjs {
+  --gjs-primary-color: var(--surface);
+  --gjs-secondary-color: var(--fg-2);
+  --gjs-tertiary-color: var(--accent);
+  --gjs-quaternary-color: var(--accent);
+  --gjs-font-color: var(--fg-2);
+  --gjs-font-color-active: var(--fg);
+  --gjs-main-dark-color: var(--line);
+  --gjs-secondary-dark-color: var(--surface-2);
+  --gjs-main-light-color: var(--surface-3);
+  --gjs-secondary-light-color: var(--muted);
+  --gjs-soft-light-color: transparent;
+  --gjs-light-border: var(--line);
+  --gjs-arrow-color: var(--fg-2);
+  --gjs-dark-text-shadow: transparent;
+  --gjs-main-font: var(--font-sans);
+  --gjs-font-size: 13px;
+  --gjs-left-width: 280px;
+  --gjs-canvas-top: 0px;
+  --gjs-input-padding: 6px;
+  --gjs-color-highlight: var(--accent);
+  --gjs-color-warn: var(--warn);
+  --gjs-placeholder-background-color: var(--accent);
+  position: relative;
+  background: var(--surface-2);
+  color: var(--fg);
+  font-family: var(--font-sans);
+}
+
+.am-gjs .gjs-editor,
+.am-gjs .gjs-editor-cont {
+  background: transparent;
+  color: var(--fg);
+  font-family: var(--font-sans);
+}
+
+/* Panels and the one inspector tab row. */
+.am-gjs .gjs-pn-panel {
+  background: var(--surface);
+  border-color: var(--line);
+  color: var(--fg);
+}
+.am-gjs .gjs-pn-views {
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+.am-gjs .gjs-pn-views-container {
+  background: var(--surface);
+  box-shadow: none;
+  border-left: 1px solid var(--line);
+}
+.am-gjs .gjs-pn-btn {
+  min-height: 32px;
+  min-width: 32px;
+  border-radius: var(--radius-sm);
+  color: var(--fg-2);
+  background: transparent;
+}
+.am-gjs .gjs-pn-btn:hover {
+  background: var(--surface-2);
+  color: var(--fg);
+}
+.am-gjs .gjs-pn-btn.gjs-pn-active,
+.am-gjs .gjs-pn-btn[aria-pressed="true"] {
+  background: var(--accent-soft);
+  box-shadow: none;
+  color: var(--accent);
+}
+.am-gjs .gjs-pn-btn.gjs-pn-btn--disabled,
+.am-gjs .gjs-pn-btn:disabled {
+  background: var(--surface-2);
+  color: var(--muted);
+  cursor: not-allowed;
+  opacity: 1;
+}
+.am-gjs .gjs-pn-btn svg {
+  fill: currentColor;
+}
+.am-gjs .am-gjs-tab {
+  font: 500 13px / 20px var(--font-sans);
+  padding: 0 6px;
+}
+
+/* Inspector tabs, sectors and property rows. */
+.am-gjs .gjs-sm-sector,
+.am-gjs .gjs-sm-properties,
+.am-gjs .gjs-trt-traits,
+.am-gjs .gjs-trt-trait,
+.am-gjs .gjs-layer,
+.am-gjs .gjs-layers,
+.am-gjs .gjs-clm-tags,
+.am-gjs .gjs-clm-tags-c {
+  background: var(--surface);
+  border-color: var(--line);
+  color: var(--fg);
+}
+.am-gjs .gjs-sm-sector-title,
+.am-gjs .gjs-sm-property,
+.am-gjs .gjs-trt-trait__wrp,
+.am-gjs .gjs-layer-title,
+.am-gjs .gjs-block-category .gjs-title,
+.am-gjs .gjs-trait-category .gjs-title {
+  background: var(--surface-2);
+  border-color: var(--line);
+  color: var(--fg-2);
+}
+.am-gjs .gjs-sm-sector-title,
+.am-gjs .gjs-layer-title,
+.am-gjs .gjs-block-category .gjs-title,
+.am-gjs .gjs-trait-category .gjs-title {
+  font-weight: 500;
+  letter-spacing: 0;
+  min-height: 32px;
+}
+.am-gjs .gjs-layer-item {
+  background: var(--surface);
+  border-color: var(--line);
+  color: var(--fg-2);
+}
+.am-gjs .gjs-layer-item:hover,
+.am-gjs .gjs-layer.gjs-layer--selected .gjs-layer-item,
+.am-gjs .gjs-layer.gjs-selected .gjs-layer-item {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.am-gjs .gjs-layer-name,
+.am-gjs .gjs-label,
+.am-gjs .gjs-sm-label,
+.am-gjs .gjs-trt-trait .gjs-label,
+.am-gjs .gjs-clm-label-sel,
+.am-gjs .gjs-clm-sels-info,
+.am-gjs .gjs-sm-sector-label {
+  color: var(--fg-2);
+}
+.am-gjs .gjs-label-wrp,
+.am-gjs .gjs-sm-label-wrp {
+  color: var(--fg-2);
+}
+.am-gjs .gjs-layer-title {
+  /* biome-ignore lint/complexity/noImportantStyles: GrapesJS sets the layer title background inline with !important */
+  background-color: transparent !important;
+}
+.am-gjs .gjs-sm-caret,
+.am-gjs .gjs-layer-caret,
+.am-gjs .gjs-sm-sector-caret,
+.am-gjs .gjs-d-s-arrow,
+.am-gjs .gjs-clm-d-s-arrow {
+  color: var(--fg-2);
+  fill: currentColor;
+}
+
+/* Fields, selects and value controls: neutral chrome, selected state text + marker. */
+.am-gjs .gjs-field {
+  background: var(--surface-2);
+  border: 1px solid var(--control);
+  border-radius: var(--radius-sm);
+  box-shadow: none;
+  color: var(--fg);
+}
+.am-gjs .gjs-field:focus-within {
+  border-color: var(--accent);
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.am-gjs .gjs-field input,
+.am-gjs .gjs-field select,
+.am-gjs .gjs-field textarea,
+.am-gjs .gjs-input {
+  background: transparent;
+  border: 0;
+  color: var(--fg);
+  font: 500 13px / 20px var(--font-sans);
+}
+.am-gjs .gjs-field input::placeholder,
+.am-gjs .gjs-field textarea::placeholder {
+  color: var(--muted);
+}
+.am-gjs .gjs-field-arrow-u,
+.am-gjs .gjs-field-arrow-d {
+  border-top-color: var(--fg-2);
+  border-bottom-color: var(--fg-2);
+}
+.am-gjs .gjs-field-colorp,
+.am-gjs .gjs-field-colorp-c {
+  border: 1px solid var(--line-strong);
+}
+.am-gjs .gjs-radio-item,
+.am-gjs .gjs-radio-item-label {
+  background: var(--surface-2);
+  border-color: var(--line);
+  color: var(--fg-2);
+}
+.am-gjs .gjs-radio-item:hover,
+.am-gjs .gjs-radio-item-label:hover {
+  background: var(--surface-3);
+  color: var(--fg);
+}
+.am-gjs .gjs-radio-item input:checked + .gjs-radio-item-label {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.am-gjs .gjs-btn,
+.am-gjs .gjs-btn-prim,
+.am-gjs .gjs-sm-btn {
+  background: var(--surface-2);
+  border: 1px solid var(--control);
+  border-radius: var(--radius-sm);
+  color: var(--fg);
+  opacity: 1;
+  text-shadow: none;
+}
+.am-gjs .gjs-btn:hover,
+.am-gjs .gjs-btn-prim:hover,
+.am-gjs .gjs-sm-btn:hover {
+  background: var(--surface-3);
+  color: var(--fg);
+}
+.am-gjs .gjs-btn-prim {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-fg);
+}
+.am-gjs .gjs-btn-prim:hover {
+  background: var(--accent-hover);
+  color: var(--accent-fg);
+}
+.am-gjs .gjs-disabled,
+.am-gjs .gjs-btn.gjs-disabled,
+.am-gjs .gjs-field.gjs-disabled {
+  background: var(--surface-2);
+  color: var(--muted);
+  opacity: 1;
+}
+
+/* Blocks stay themed even though the palette now lives in the app toolbar. */
+.am-gjs .gjs-blocks-c {
+  background: var(--surface);
+}
+.am-gjs .gjs-block {
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: none;
+  color: var(--fg-2);
+}
+.am-gjs .gjs-block:hover,
+.am-gjs .gjs-block.gjs-block--active {
+  border-color: var(--accent);
+  color: var(--fg);
+}
+.am-gjs .gjs-block-label {
+  color: inherit;
+  font-family: var(--font-sans);
+}
+
+/* Selection labels, toolbars and the canvas frame. */
+.am-gjs .gjs-toolbar {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-1);
+  color: var(--fg-2);
+}
+.am-gjs .gjs-toolbar-item {
+  color: var(--fg-2);
+}
+.am-gjs .gjs-toolbar-item:hover {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.am-gjs .gjs-badge {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+.am-gjs .gjs-badge-warning {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+.am-gjs .gjs-selected {
+  /* biome-ignore lint/complexity/noImportantStyles: GrapesJS injects its own high-specificity selection rules that this must override */
+  outline-color: var(--accent) !important;
+}
+.am-gjs .gjs-hovered {
+  /* biome-ignore lint/complexity/noImportantStyles: GrapesJS injects its own high-specificity hover rules that this must override */
+  outline-color: var(--line-strong) !important;
+}
+.am-gjs .gjs-resizer-h {
+  background: var(--accent);
+  border-color: var(--surface);
+}
+.am-gjs .gjs-placeholder {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.am-gjs .gjs-cv-canvas,
+.am-gjs .gjs-cv-canvas__frames,
+.am-gjs .gjs-frame-wrapper {
+  background: var(--surface-2);
+}
+.am-gjs .gjs-frame {
+  border: 1px solid var(--line);
+  background: #ffffff;
+}
+
+/* Dialogs and the rich-text toolbar. */
+.am-gjs .gjs-mdl-container {
+  background: var(--scrim);
+}
+.am-gjs .gjs-mdl-dialog,
+.am-gjs .gjs-mdl-header,
+.am-gjs .gjs-mdl-content {
+  background: var(--surface);
+  border-color: var(--line);
+  color: var(--fg);
+  text-shadow: none;
+}
+.am-gjs .gjs-mdl-title {
+  color: var(--fg);
+  font-weight: 600;
+}
+.am-gjs .gjs-mdl-btn-close {
+  color: var(--fg-2);
+  opacity: 1;
+}
+.am-gjs .gjs-mdl-btn-close:hover {
+  color: var(--fg);
+}
+.am-gjs .gjs-rte-toolbar-ui,
+.am-gjs .gjs-rte-actionbar {
+  background: var(--surface);
+  border-color: var(--line);
+}
+.am-gjs .gjs-rte-action {
+  border-color: var(--line);
+  color: var(--fg-2);
+}
+.am-gjs .gjs-rte-action:hover,
+.am-gjs .gjs-rte-active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* Notices and empty states use text, never a colour-only marker. */
+.am-gjs .gjs-am-assets-cont,
+.am-gjs .gjs-am-asset,
+.am-gjs .gjs-am-assets-header,
+.am-gjs .gjs-am-add-asset {
+  background: var(--surface);
+  border-color: var(--line);
+  color: var(--fg-2);
+}
+.am-gjs .gjs-am-asset:hover {
+  background: var(--surface-2);
+}
+.am-gjs .gjs-am-highlight {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* One toolbar on touch, and one column where the host is narrow. The canvas keeps a usable
+   height; the inspector moves below it instead of forcing horizontal chrome scrolling. */
+@media (pointer: coarse), (max-width: 767px) {
+  .am-gjs .gjs-pn-btn,
+  .am-gjs .gjs-pn-views .gjs-pn-btn,
+  .am-gjs .gjs-sm-sector-title,
+  .am-gjs .gjs-layer-item,
+  .am-gjs .gjs-trt-trait,
+  .am-gjs .gjs-field {
+    min-height: 40px;
+  }
+}
+
+@media (max-width: 900px) {
+  .am-gjs {
+    --gjs-left-width: 100%;
+  }
+  .am-gjs .gjs-pn-views {
+    top: auto;
+    bottom: 40%;
+    border-top: 1px solid var(--line);
+    border-bottom: 0;
+    text-align: left;
+    padding-left: 4px;
+  }
+  .am-gjs .gjs-pn-views-container {
+    top: auto;
+    bottom: 0;
+    height: 40%;
+    padding-top: 0;
+    border-top: 1px solid var(--line);
+    border-left: 0;
+    box-shadow: none;
+  }
+  .am-gjs .gjs-cv-canvas {
+    width: 100%;
+    height: 60%;
+  }
+}
