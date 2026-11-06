@@ -10,7 +10,7 @@ import { consentPage } from '../src/http/pages';
 const PAYLOAD = '<img src=x onerror="alert(1)">';
 
 function scriptOf(html: string): string {
-  return [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map((m) => m[1]).join('\n');
+  return [...html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script[^>]*>/gi)].map((m) => m[1]).join('\n');
 }
 
 async function renderConsent(

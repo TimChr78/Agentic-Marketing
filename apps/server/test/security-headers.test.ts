@@ -72,7 +72,7 @@ describe('security headers', () => {
       expect(nonce).toBeTruthy();
       const html = await res.text();
       // Every script and style tag carries that nonce, and nothing inline is left without one.
-      for (const tag of html.matchAll(/<(script|style)([^>]*)>/g)) expect(tag[2]).toContain(`nonce="${nonce}"`);
+      for (const tag of html.matchAll(/<(script|style)\b([^>]*)>/gi)) expect(tag[2]).toContain(`nonce="${nonce}"`);
       expect(html).toContain(`<script nonce="${nonce}">`);
       expect(csp).toContain("frame-ancestors 'none'");
     }
