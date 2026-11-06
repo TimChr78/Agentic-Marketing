@@ -246,7 +246,7 @@ async function resolve(tx: Tx, workspaceId: string, ids: Ident[], crypto: Person
 
 /**
  * Folds `from` into `into`: identifiers, journeys, holdouts, topic choices, static/snapshot list
- * memberships, traits and personal data move; purpose consent is recomputed.
+ * memberships, message history, traits and personal data move; purpose consent is recomputed.
  */
 async function merge(tx: Tx, workspaceId: string, from: string, into: string, crypto: PersonCrypto, reason: string) {
   const [src] = await tx
@@ -278,6 +278,10 @@ async function merge(tx: Tx, workspaceId: string, from: string, into: string, cr
   await tx.execute(
     sql`UPDATE journey_participants SET profile_id = ${into}, updated_at = now() WHERE workspace_id = ${workspaceId} AND profile_id = ${from}`,
   );
+  // Message ownership follows too (#460): the delivery caps count one profile's history, so a merge
+  // that left messages behind reset the person's frequency and cross-agent contact caps. updated_at
+  // is untouched, keeping the stale-sending check honest for an in-flight row.
+  await tx.execute(sql`UPDATE messages SET profile_id = ${into} WHERE workspace_id = ${workspaceId} AND profile_id = ${from}`);
   // Holdout arms follow too: the survivor keeps its arm for a scope and otherwise inherits the
   // merged profile's (earliest wins). The function is the app role's only way to move these rows.
   await tx.execute(sql`SELECT merge_holdout_assignments(${from}, ${into})`);

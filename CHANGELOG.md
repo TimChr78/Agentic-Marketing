@@ -12,6 +12,7 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 
 - Delivery caps count a completed contact from when the provider actually sent it (`messages.sent_at`) instead of from enqueue time, so a backlog that waited for quiet hours, a pause or a retry consumes the window from its real send time (#453).
 - Two messages queued at the same instant can no longer both pass a `max: 1` frequency or cross-agent contact cap: in-flight reservations are ordered by enqueue time and message id (#452).
+- An identity merge moves the merged person's message history to the surviving profile in the same transaction, so routine identity resolution no longer resets their frequency and cross-agent contact caps (#460).
 - `workspace.create` enforces a per-person brand quota (`WORKSPACE_QUOTA`, default 10) instead of letting one owner create unbounded brands and pending domain claims; the refusal names the limit (#487).
 - An OAuth brand choice is bound to the authorization request that asked for it instead of the browser session, so consenting in one tab can no longer issue a grant for the brand chosen in another tab, and refresh tokens keep the brand (#456).
 
