@@ -447,6 +447,8 @@ export const setOwner = defineCommand({
   humansOnly: true,
   target: (i) => i.artifactId,
   handler: async (input, ctx) => {
+    // Locked before the read and the write, in the same id order as coordination checks (#471).
+    await lockArtifacts(ctx, [input.artifactId]);
     const a = await loadArtifact(ctx, input.artifactId);
     if (input.ownerAgentId) {
       const [agent] = await ctx.tx
