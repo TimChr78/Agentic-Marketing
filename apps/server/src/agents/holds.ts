@@ -1,5 +1,13 @@
 import { activeMandate, dueHolds, type HeldCheck, runHeldChange, systemContext } from '@agentic-marketing/artifacts';
-import { agentCounters, autonomySettings, decide, IRREVERSIBLE, REACH_CLASSES, type Services } from '@agentic-marketing/commands';
+import {
+  agentCounters,
+  autonomySettings,
+  coordinationFor,
+  decide,
+  IRREVERSIBLE,
+  REACH_CLASSES,
+  type Services,
+} from '@agentic-marketing/commands';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import { logger } from '@agentic-marketing/telemetry';
 import { eq } from 'drizzle-orm';
@@ -44,6 +52,9 @@ async function checkHeld(
     REACH_CLASSES.includes(held.actionClass) && services.mandateGuardrails
       ? await services.mandateGuardrails(tx, workspaceId, agentId, mandate.view)
       : null;
+  // Who owns the artifacts now and what other agents have pending on them (#469): a person may have
+  // transferred ownership, or another agent's request may have arrived, while this one waited.
+  const coordination = await coordinationFor(tx, workspaceId, agentId, held.actionClass, held.impact);
   const policy = decide({
     command: 'artifacts.requestPublish',
     actionClass: held.actionClass,
@@ -55,6 +66,8 @@ async function checkHeld(
     outsideHours: null,
     guardrailBreach,
     guard: agent?.guard ?? null,
+    ...(coordination.ownership ? { ownership: coordination.ownership } : {}),
+    ...(coordination.conflicts.length ? { conflicts: coordination.conflicts } : {}),
   });
   // Its window has passed, so a hold now counts as allowed; in shadow mode a person decides as before.
   if (!policy.shadow && (policy.decision === 'allow' || policy.decision === 'hold')) return { run: true };
