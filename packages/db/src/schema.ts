@@ -557,6 +557,8 @@ export const messages = pgTable(
   (t) => [
     primaryKey({ columns: [t.workspaceId, t.id] }),
     index('messages_agent_contact').on(t.workspaceId, t.profileId, t.createdAt).where(sql`agent_id IS NOT NULL`),
+    // Counts one agent's contact-pressure skips in a period without scanning the workspace (#488).
+    index('messages_agent_contact_count').on(t.workspaceId, t.agentId, t.createdAt).where(sql`agent_id IS NOT NULL`),
     index('messages_journey_status').on(t.workspaceId, t.journeyId, t.status).where(sql`journey_id IS NOT NULL`),
   ],
 );
@@ -1653,7 +1655,11 @@ export const hostedAgentRuns = pgTable(
     trigger: text('trigger').$type<'schedule' | 'event'>().notNull().default('schedule'),
     eventIds: jsonb('event_ids').$type<number[]>().notNull().default([]),
   },
-  (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.id] }),
+    // agents.runFailures filters by status across all agents, newest first (#488).
+    index('hosted_agent_runs_status_started').on(t.workspaceId, t.status, t.startedAt.desc(), t.id),
+  ],
 );
 
 /**

@@ -93,6 +93,9 @@ export const ENV_SINCE: Record<string, string> = {
 
   // 0.7.4 (issue #387): read by the pino logger, not by src/config.ts
   LOG_LEVEL: '0.7.4',
+
+  // 0.10.1 (issue #488)
+  RETENTION_HOSTED_AGENT_RUN_DAYS: '0.10.1',
 };
 
 /**

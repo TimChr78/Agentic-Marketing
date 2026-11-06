@@ -167,6 +167,12 @@ const Env = z.object({
     .min(1)
     .default(180)
     .describe('Days finished webhook and action deliveries and AI call logs are kept'),
+  RETENTION_HOSTED_AGENT_RUN_DAYS: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .default(90)
+    .describe('Days finished hosted-agent runs are kept; the failure queue and run history read only this window'),
   ERASURE_GRACE_HOURS: z.coerce
     .number()
     .int()
@@ -333,7 +339,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
         .map((h) => h.trim())
         .filter(Boolean),
     },
-    retention: { unconfirmedDays: e.RETENTION_UNCONFIRMED_DAYS, logDays: e.RETENTION_LOG_DAYS },
+    retention: {
+      unconfirmedDays: e.RETENTION_UNCONFIRMED_DAYS,
+      logDays: e.RETENTION_LOG_DAYS,
+      hostedAgentRunDays: e.RETENTION_HOSTED_AGENT_RUN_DAYS,
+    },
     erasureGraceHours: e.ERASURE_GRACE_HOURS,
     stepUp: {
       maxFailures: e.STEP_UP_MAX_FAILURES,
