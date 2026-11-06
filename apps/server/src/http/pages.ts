@@ -2,6 +2,7 @@
 // no build step, no framework. The consent page lets the person choose what the agent may do;
 // MCP clients request every advertised scope, so this is where least privilege happens.
 
+import { randomBytes } from 'node:crypto';
 import { brandWordmarkSvg } from '@agentic-marketing/core';
 
 const scopeText: Record<string, string> = {
@@ -24,10 +25,20 @@ const defaultOn = new Set(['openid', 'profile', 'email', 'offline_access', 'arti
 /** The product mark on every server-rendered page, so OAuth sign-in and consent look like the app. */
 const brandHeader = `<a class="brand" href="/" aria-label="Agentic Marketing">${brandWordmarkSvg({ width: 180, title: '' })}</a>`;
 
-const layout = (title: string, body: string) => `<!doctype html>
+/**
+ * A fresh nonce for the one inline script (and style) each server-rendered page carries (#478).
+ * The page's CSP allows exactly that nonce, so an injected `<img onerror>` or any later inline
+ * handler cannot run even if a value ever reached the HTML.
+ */
+export const pageNonce = () => randomBytes(18).toString('base64');
+
+export const pagesCsp = (nonce: string) =>
+  `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`;
+
+const layout = (title: string, body: string, nonce: string) => `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${title} · Agentic Marketing</title>
-<style>
+<style nonce="${nonce}">
   :root { --bg:#f7f8fa; --fg:#14171c; --muted:#646c79; --accent:#2457d6; --accent-fg:#fff; --line:#c9ced6; --card:#fff; color-scheme: light dark; }
   @media (prefers-color-scheme: dark) { :root { --bg:#0e1013; --fg:#e7e9ed; --muted:#8d95a3; --accent:#7097f5; --accent-fg:#0e1013; --line:#3a404b; --card:#15181d; } }
   body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.55 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; padding:48px max(16px, env(safe-area-inset-left)); }
@@ -44,7 +55,7 @@ const layout = (title: string, body: string) => `<!doctype html>
   #err { color: #c42b2b; min-height: 1.5em; }
 </style></head><body><main>${brandHeader}${body}</main></body></html>`;
 
-export const loginPage = layout(
+export const loginPage = (nonce: string) => layout(
   'Sign in',
   `<h1>Sign in</h1><p>An app wants to connect to your marketing workspace.</p>
 <form id="f">
@@ -53,7 +64,7 @@ export const loginPage = layout(
   <p id="err" role="alert"></p>
   <button class="primary">Sign in</button>
 </form>
-<script>
+<script nonce="${nonce}">
 f.onsubmit = async (e) => {
   e.preventDefault(); err.textContent = '';
   const r = await fetch('/api/auth/sign-in/email', { method: 'POST', headers: { 'content-type': 'application/json' },
@@ -62,9 +73,10 @@ f.onsubmit = async (e) => {
   if (j.url) location.href = j.url; else err.textContent = j.message || 'Sign-in failed. Check your e-mail and password.';
 };
 </script>`,
+  nonce,
 );
 
-export const consentPage = layout(
+export const consentPage = (nonce: string) => layout(
   'Allow access',
   `<h1>Allow access?</h1><p id="who"></p>
 <form id="f">
@@ -72,7 +84,7 @@ export const consentPage = layout(
 <p class="hint">One connection acts in one brand. To let an agent work in another brand, connect it again and choose that brand.</p></div>
 <div id="scopes"></div><p id="err" role="alert"></p>
 <button class="primary" id="yes">Allow selected</button> <button type="button" id="no">Deny</button></form>
-<script>
+<script nonce="${nonce}">
 const text = ${JSON.stringify(scopeText)};
 const on = new Set(${JSON.stringify([...defaultOn])});
 const q = new URLSearchParams(location.search);
@@ -81,8 +93,21 @@ who.textContent = 'An app (' + (q.get('client_id') || 'unknown') + ') wants to a
 const requested = (q.get('scope') || '').split(' ').filter(Boolean);
 for (const s of requested) {
   if (!text[s]) continue;
-  const id = 'scope-' + s.replace(/[^a-z]/g, '-');
-  scopes.insertAdjacentHTML('beforeend', '<label class="scope"><input type="checkbox" id="' + id + '" value="' + s + '"' + (on.has(s) ? ' checked' : '') + '><span>' + text[s] + '<br><code>' + s + '</code></span></label>');
+  const label = document.createElement('label');
+  label.className = 'scope';
+  const box = document.createElement('input');
+  box.type = 'checkbox';
+  box.id = 'scope-' + s.replace(/[^a-z]/g, '-');
+  box.value = s;
+  box.checked = on.has(s);
+  const span = document.createElement('span');
+  span.textContent = text[s];
+  span.append(document.createElement('br'));
+  const code = document.createElement('code');
+  code.textContent = s;
+  span.append(code);
+  label.append(box, span);
+  scopes.append(label);
 }
 const chosenScopes = () => [...scopes.querySelectorAll('input:checked')].map((i) => i.value);
 const loadBrands = async () => {
@@ -92,7 +117,13 @@ const loadBrands = async () => {
   if (!r.ok) throw new Error(j.message || 'Could not load your brands.');
   const list = j.workspaces || [];
   if (!list.length) throw new Error('You do not belong to a brand yet. Ask someone to invite you first.');
-  brandSelect.innerHTML = list.map((w) => '<option value="' + w.id + '">' + w.name + ' (' + w.role + ')</option>').join('');
+  // Brand names are people-supplied: build elements and set textContent, never parse HTML (#478).
+  brandSelect.replaceChildren(...list.map((w) => {
+    const option = document.createElement('option');
+    option.value = w.id;
+    option.textContent = w.name + ' (' + w.role + ')';
+    return option;
+  }));
 };
 loadBrands().catch((e) => { err.textContent = e.message; yes.disabled = true; });
 const send = async (accept) => {
@@ -103,7 +134,8 @@ const send = async (accept) => {
   if (accept) {
     if (!brandSelect.value) { err.textContent = 'Choose the brand this connection acts in.'; return; }
     const brand = await fetch('/api/oauth/workspace', { method: 'POST', credentials: 'include',
-      headers: { 'content-type': 'application/json' }, body: JSON.stringify({ workspaceId: brandSelect.value, scope }) });
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ workspaceId: brandSelect.value, scope }) });
     const b = await brand.json().catch(() => ({}));
     if (!brand.ok) { err.textContent = b.message || 'That brand cannot be chosen.'; return; }
   }
@@ -115,10 +147,11 @@ const send = async (accept) => {
 f.onsubmit = (e) => { e.preventDefault(); send(true); };
 no.onclick = () => send(false);
 </script>`,
+  nonce,
 );
 
 // Invitation links look like /invite#<token>; the token stays out of server logs and Referer headers.
-export const invitePage = layout(
+export const invitePage = (nonce: string) => layout(
   'Join workspace',
   `<h1>Join the workspace</h1><p>Sign in, or create an account, with the e-mail address the invitation was sent to.</p>
 <form id="f">
@@ -129,7 +162,7 @@ export const invitePage = layout(
   <button class="primary" id="go">Sign in and join</button> <button type="button" id="mode">I don't have an account</button>
 </form>
 <p id="done" hidden></p>
-<script>
+<script nonce="${nonce}">
 const token = location.hash.slice(1);
 let signUp = false;
 mode.onclick = () => {
@@ -157,4 +190,5 @@ f.onsubmit = async (e) => {
 };
 if (!token) { err.textContent = 'This link has no invitation token. Copy the whole link.'; go.disabled = true; }
 </script>`,
+  nonce,
 );

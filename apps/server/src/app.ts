@@ -36,7 +36,7 @@ import { createDomainService, type PublicRequest } from './domains';
 import { copilotApi } from './http/copilot';
 import { MCP_MAX_BODY, mcpEndpoint } from './http/mcp';
 import { metricsHandler } from './http/metrics';
-import { consentPage, invitePage, loginPage } from './http/pages';
+import { consentPage, invitePage, loginPage, pageNonce, pagesCsp } from './http/pages';
 import { passwordResetRoutes } from './http/password-reset';
 import { DOMAIN_CHALLENGE, isBrandPath } from './http/public-only';
 import { rejectUnsafeRawPath } from './http/raw-path';
@@ -370,9 +370,16 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
     app.get('/.well-known/oauth-protected-resource/*', (c) => auth.handler(withClientIp(c)));
   }
 
-  app.get('/login', (c) => c.html(loginPage));
-  app.get('/consent', (c) => c.html(consentPage));
-  app.get('/invite', (c) => c.html(invitePage));
+  // The server-rendered pages carry one inline script and one inline style each: a per-response
+  // nonce lets exactly those run and blocks an injected handler or a later inline script (#478).
+  const inlinePage = (c: Context, render: (nonce: string) => string) => {
+    const nonce = pageNonce();
+    c.header('Content-Security-Policy', pagesCsp(nonce));
+    return c.html(render(nonce));
+  };
+  app.get('/login', (c) => inlinePage(c, loginPage));
+  app.get('/consent', (c) => inlinePage(c, consentPage));
+  app.get('/invite', (c) => inlinePage(c, invitePage));
 
   // The consent page chooses the brand an OAuth client acts in (#187). The choice is checked
   // against the person's memberships and role here, then stored for the pending consent; the

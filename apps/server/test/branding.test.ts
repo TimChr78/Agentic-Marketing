@@ -50,11 +50,12 @@ describe('brand assets (#195)', () => {
   });
 
   it('puts the mark on the server-rendered sign-in page', async () => {
-    expect(loginPage).toContain('Agentic Marketing');
-    expect(loginPage).toContain('<svg');
-    expect(loginPage).toContain('aria-label="Agentic Marketing"');
+    const page = loginPage('test-nonce');
+    expect(page).toContain('Agentic Marketing');
+    expect(page).toContain('<svg');
+    expect(page).toContain('aria-label="Agentic Marketing"');
     // The page still works when the admin build is absent: the mark is inline, not a linked file.
-    expect(loginPage).not.toContain('<img src="/brand/mark.svg"');
+    expect(page).not.toContain('<img src="/brand/mark.svg"');
   });
 
   it('ships a manifest that names the app and its maskable icons', async () => {

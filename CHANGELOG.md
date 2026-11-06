@@ -2,6 +2,12 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+### Security
+
+- The OAuth consent page renders brand names as text instead of HTML, and the sign-in, consent and invitation pages are served under a nonce-based Content-Security-Policy, so a brand name can no longer run script in a member's browser (#478).
+
 ## [0.10.0] - 2026-11-06
 
 ### Added
