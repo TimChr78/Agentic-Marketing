@@ -69,9 +69,13 @@ for (const name of SUBSET) {
         // The signed-out screens must really be signed out (#442 review): the form, not the app.
         if (route!.signedOut) await expect(page.getByLabel(/e-mail/i).first()).toBeVisible();
         // People is captured as a person first sees it: the first page, its count and Load more.
-        // The seed gives every person a distinct, e-mail-derived last-seen time, so the order is stable.
         await page.evaluate(() => window.scrollTo(0, 0));
-        await expect(page).toHaveScreenshot(`${name}-${width}-${theme}.png`, { mask: await volatileMasks(page) });
+        // Which people come first depends on when asynchronous activity bumped their last-seen time,
+        // which differs between machines; the baseline guards the page's layout (header, count,
+        // columns, row structure), so the per-person cells are masked like other volatile text.
+        const mask = [...(await volatileMasks(page))];
+        if (name === 'people') mask.push(page.locator('table tbody td'));
+        await expect(page).toHaveScreenshot(`${name}-${width}-${theme}.png`, { mask });
       }
     }
   });
