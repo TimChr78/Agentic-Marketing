@@ -2,6 +2,16 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+### Added
+
+- Broadcast Report (#500): four people totals with period, denominator and freshness, delivery event bars, tracked opens and clicks over time, daily unsubscribes, the explicit B4 “Top links unavailable” notice, and a campaign-wide holdout with its verdict, interval and per-currency revenue. The report supports Last 7 and Last 30 complete workspace-local days, loading, error, no-data, below-volume, suppressed and restricted states.
+
+### Changed
+
+- The broadcast Report tab now reads the ten whole-period totals and five daily series in two `analytics.query` calls instead of the Phase 24 four-measure summary; period changes and Refresh remount every section so a result from the previous period is never shown as current. `BroadcastReport({artifactId,active})` is unchanged for its host.
+
 ## [0.10.1] - 2026-11-06
 
 ### Security
