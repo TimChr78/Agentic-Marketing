@@ -165,12 +165,25 @@ type RoleClient = Pick<pg.Client, 'query' | 'escapeLiteral'>;
 export async function ensureAppRole(client: RoleClient, opts: { appRolePassword: string; appRole?: string }): Promise<string> {
   const role = opts.appRole ?? 'am_app';
   if (!roleName.test(role)) throw new Error(`Invalid app role name ${role}`);
-  const { rowCount } = await client.query('SELECT 1 FROM pg_roles WHERE rolname = $1', [role]);
   const pwd = client.escapeLiteral(opts.appRolePassword);
-  await client.query(
-    rowCount ? `ALTER ROLE ${role} WITH LOGIN PASSWORD ${pwd}` : `CREATE ROLE ${role} LOGIN PASSWORD ${pwd} NOSUPERUSER NOBYPASSRLS`,
-  );
-  return role;
+  // Roles are shared by every database on the server, and the migrator's advisory lock is per
+  // database: two databases migrating at once (tests, a restore next to a running install) can
+  // race on the same role row. Postgres reports that as "tuple concurrently updated" or a
+  // duplicate role; both mean another session just wrote the same role, so look again and retry.
+  for (let attempt = 1; ; attempt++) {
+    const { rowCount } = await client.query('SELECT 1 FROM pg_roles WHERE rolname = $1', [role]);
+    try {
+      await client.query(
+        rowCount ? `ALTER ROLE ${role} WITH LOGIN PASSWORD ${pwd}` : `CREATE ROLE ${role} LOGIN PASSWORD ${pwd} NOSUPERUSER NOBYPASSRLS`,
+      );
+      return role;
+    } catch (err) {
+      const e = err as { code?: string; message?: string };
+      const raced = e.code === '23505' || e.code === '42710' || /tuple concurrently updated/.test(e.message ?? '');
+      if (!raced || attempt >= 5) throw err;
+      await new Promise((r) => setTimeout(r, 50 * attempt));
+    }
+  }
 }
 
 /** Ensures the role in the database behind `databaseUrl`; a restore runs this before pg_restore. */

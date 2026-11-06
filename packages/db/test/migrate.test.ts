@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import pg from 'pg';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it, vi } from 'vitest';
 import { isNoTransaction, migrate, splitSqlStatements } from '../src/migrate';
 import { hasTestDatabase } from './disposable';
 
@@ -55,6 +55,10 @@ async function tempMigrations(files: Record<string, string>): Promise<string> {
   for (const [name, sql] of Object.entries(files)) await writeFile(join(dir, name), sql);
   return dir;
 }
+
+// These tests create and migrate real databases; under a full parallel run that takes longer
+// than the default timeout.
+vi.setConfig({ testTimeout: 90_000 });
 
 describe('splitSqlStatements', () => {
   it('keeps semicolons inside strings, identifiers, dollar quotes and comments', () => {
