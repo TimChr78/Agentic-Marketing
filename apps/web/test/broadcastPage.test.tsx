@@ -44,6 +44,9 @@ const artifact = {
 };
 
 const status = {
+  // The run's pinned definition (#449 review): the summary names this segment, not the draft's.
+  segmentId: seg,
+  templateId: tpl,
   run: {
     status: 'done',
     version: 2,

@@ -37,8 +37,9 @@ import {
 } from '../../ui';
 import { Identifier } from '../../ui/Identifier';
 import { pageWidth } from '../../ui/layout';
+import { getWorkspaceTimeZone } from '../../ui/time';
 import AiUsagePage from './AiUsagePage';
-import { analyticsParams } from './analyticsParams';
+import { analyticsParams, dayEndIso, dayStartIso } from './analyticsParams';
 
 type Result = Out<'analytics.query'>;
 type Column = Result['columns'][number];
@@ -51,10 +52,6 @@ const UNIT_TITLE: Record<MetricUnit, string> = {
   ratio: 'Rates over time',
   currency: 'Revenue over time',
 };
-
-/** YYYY-MM-DD, for the date inputs. */
-const dayStart = (date: string) => new Date(`${date}T00:00:00.000Z`).toISOString();
-const dayEnd = (date: string) => new Date(`${date}T23:59:59.999Z`).toISOString();
 
 /** A ratio is stored as a fraction; every visible rate, chart and table alike, is a percentage. */
 const chartValue = (column: Column, value: number | null): number | null => {
@@ -113,8 +110,8 @@ export function AnalyticsPerformance() {
       api.call('analytics.query', {
         measures,
         dimensions,
-        from: dayStart(from),
-        to: dayEnd(to),
+        from: dayStartIso(from, getWorkspaceTimeZone()),
+        to: dayEndIso(to, getWorkspaceTimeZone()),
         limit: 5000,
         ...(broadcast ? { filters: { broadcast: [broadcast] } } : {}),
       }),

@@ -93,7 +93,8 @@ export function broadcastConsequenceOf(input: ConsequenceInput): BroadcastConseq
   const runStarted = !!run && run.status !== 'not_scheduled';
   // While a run exists, who it reaches comes from the run's pinned version, never from a later
   // draft that targets another segment (#449 review).
-  const segment = runStarted ? (input.runSegmentName ?? input.segmentName ?? 'Segment') : (input.segmentName ?? 'Segment');
+  // An unresolved pinned name stays unresolved: the draft's segment may be a different audience.
+  const segment = runStarted ? (input.runSegmentName ?? 'Segment unavailable') : (input.segmentName ?? 'Segment');
   const who =
     runStarted && run && run.recipients > 0
       ? `${segment} · ${count(run.recipients)} reached at preparation`

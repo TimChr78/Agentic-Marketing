@@ -94,7 +94,9 @@ export default function BroadcastsPage() {
         : 'ready';
   const segmentName = (row: BroadcastListRow) => segments.data?.get(row.segmentId)?.name;
   const asOf = currentPage ? formatDateTime(currentPage.asOf, { zone: true }) : null;
-  const pageBusy = list.refreshing || !loadedPage;
+  // Busy only while a request is in flight: after a failed page or filter change the filter and
+  // Previous work again, and Next still needs the displayed page's own cursor (#442 re-review).
+  const pageBusy = list.refreshing;
 
   const changeFilter = (key: string) => {
     const next = BROADCAST_STATUS_FILTERS.find((f) => f.key === key);
@@ -117,7 +119,7 @@ export default function BroadcastsPage() {
 
   const next = () => {
     const nextCursor = currentPage?.nextCursor ?? null;
-    if (pageBusy || !nextCursor) return;
+    if (pageBusy || !loadedPage || !nextCursor) return;
     setPaging({
       param: filter.param,
       stack: [...activePaging.stack.slice(0, activePaging.index + 1), nextCursor],
@@ -135,7 +137,16 @@ export default function BroadcastsPage() {
     notice = {
       title: 'Couldn’t load broadcasts',
       body: list.error ?? 'Broadcast data is unavailable.',
-      action: <Button onClick={() => void list.reload()}>Retry</Button>,
+      action: (
+        <div className="flex flex-wrap gap-2">
+          <Button onClick={() => void list.reload()}>Retry</Button>
+          {activePaging.index > 0 && (
+            <Button variant="secondary" disabled={pageBusy} onClick={previous}>
+              Previous page
+            </Button>
+          )}
+        </div>
+      ),
     };
   } else if (state === 'empty') {
     const hasPrevious = activePaging.index > 0;
@@ -302,7 +313,7 @@ export default function BroadcastsPage() {
             <Button size="sm" variant="secondary" disabled={pageBusy || activePaging.index === 0} onClick={previous}>
               Previous
             </Button>
-            <Button size="sm" variant="secondary" disabled={pageBusy || !data?.nextCursor} onClick={next}>
+            <Button size="sm" variant="secondary" disabled={pageBusy || !loadedPage || !currentPage?.nextCursor} onClick={next}>
               Next
             </Button>
           </div>

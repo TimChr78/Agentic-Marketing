@@ -66,6 +66,7 @@ function run(overrides: Partial<BroadcastRun> = {}): BroadcastRun {
 const base = {
   artifact: artifact(),
   segmentName: 'Lifecycle readers',
+  runSegmentName: 'Lifecycle readers',
   now: AT,
 };
 
@@ -97,6 +98,16 @@ describe('broadcast detail summary (#448)', () => {
     });
     expect(lines.who).toBe('Segment A · 500 reached at preparation');
     expect(lines.draft).toBe('Draft v2 targets Segment B · Field notes');
+  });
+
+  it('an unresolved pinned segment is never replaced by the draft’s segment (#449 re-review)', () => {
+    const lines = broadcastConsequenceOf({
+      ...base,
+      run: run({ status: 'scheduled', version: 1, sendAt: '2026-11-06T14:00:00Z', recipients: 500 }),
+      segmentName: 'Segment B',
+      runSegmentName: null,
+    });
+    expect(lines.who).toBe('Segment unavailable · 500 reached at preparation');
   });
 
   it('scheduled overdue: says the time passed instead of a missed failure', () => {

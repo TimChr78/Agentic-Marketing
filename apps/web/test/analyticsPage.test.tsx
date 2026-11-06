@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import AnalyticsPage from '../src/pages/insights/AnalyticsPage';
+import { setWorkspaceTimeZone } from '../src/ui/time';
 
 const h = vi.hoisted(() => ({
   calls: [] as { name: string; input: any }[],
@@ -83,6 +84,8 @@ vi.mock('../src/app/session', () => ({
 const broadcast = `bct_${'a'.repeat(32)}`;
 
 beforeEach(() => {
+  // Date-only links resolve in the workspace zone; UTC keeps the expected instants readable.
+  setWorkspaceTimeZone('UTC');
   cleanup();
   h.calls.length = 0;
 });

@@ -6,6 +6,7 @@ import { ToastProvider } from '../src/ui/toast';
 
 const h = vi.hoisted(() => ({
   calls: [] as { name: string; input: unknown }[],
+  failSecondPage: false,
 }));
 
 const seg = `seg_${'b'.repeat(32)}`;
@@ -67,6 +68,7 @@ vi.mock('../src/app/api', async (importOriginal) => {
           };
         }
         if (name === 'broadcasts.list') {
+          if (input.cursor === 'c2' && h.failSecondPage) throw new Error('network down');
           if (input.cursor === 'c2') return { broadcasts: [third], total: 30, nextCursor: 'c3', asOf: '2026-11-06T10:20:00.000Z' };
           if (input.cursor === 'c3') return { broadcasts: [], total: 30, nextCursor: null, asOf: '2026-11-06T10:20:00.000Z' };
           if (input.statuses?.includes('running'))
@@ -86,6 +88,7 @@ vi.mock('../src/app/session', () => ({
 beforeEach(() => {
   cleanup();
   h.calls.length = 0;
+  h.failSecondPage = false;
   clearArtifactNameCache();
   history.replaceState(null, '', '/build/broadcasts');
 });
@@ -145,6 +148,24 @@ describe('BroadcastsPage (#448)', () => {
     const calls = h.calls.filter((c) => c.name === 'broadcasts.list');
     expect(calls).toHaveLength(2);
     expect(calls.at(-1)!.input).toEqual({ limit: 25, cursor: 'c2' });
+  });
+
+  it('after a failed page, Previous and the filter work again and Next stays off (#442 re-review)', async () => {
+    h.failSecondPage = true;
+    renderPage();
+    await screen.findAllByText('Signal Weekly · issue 128');
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+    expect(await screen.findByText('Couldn’t load broadcasts')).toBeTruthy();
+
+    // The failed page has no Next; the way back and the filter are open.
+    expect(screen.queryByRole('button', { name: 'Next' })).toBeNull();
+    const previous = screen.getByRole('button', { name: 'Previous page' }) as HTMLButtonElement;
+    expect(previous.disabled).toBe(false);
+    expect((screen.getByRole('combobox') as HTMLSelectElement).disabled).toBe(false);
+
+    h.failSecondPage = false;
+    fireEvent.click(previous);
+    expect((await screen.findAllByText('Signal Weekly · issue 128')).length).toBeGreaterThan(0);
   });
 
   it('a later empty page says the page is empty, not that no broadcasts exist', async () => {

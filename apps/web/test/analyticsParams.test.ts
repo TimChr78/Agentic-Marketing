@@ -69,3 +69,14 @@ describe('Analytics query parameters (#449 review)', () => {
     expect(params.to).toBe('2026-11-06');
   });
 });
+
+describe('local day boundaries (#442 re-review)', () => {
+  it('resolves date-only links in the workspace zone, across a DST change', async () => {
+    const { dayStartIso, dayEndIso } = await import('../src/pages/insights/analyticsParams');
+    // New York leaves daylight time on 1 Nov 2026: 30 Oct is UTC-4, 5 Nov is UTC-5.
+    expect(dayStartIso('2026-10-30', 'America/New_York')).toBe('2026-10-30T04:00:00.000Z');
+    expect(dayEndIso('2026-11-05', 'America/New_York')).toBe('2026-11-06T04:59:59.999Z');
+    expect(dayStartIso('2026-10-30', 'UTC')).toBe('2026-10-30T00:00:00.000Z');
+    expect(dayEndIso('2026-11-05', 'UTC')).toBe('2026-11-05T23:59:59.999Z');
+  });
+});

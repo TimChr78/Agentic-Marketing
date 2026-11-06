@@ -1,4 +1,5 @@
 import { ANALYTICS_DIMENSIONS, ANALYTICS_MEASURES } from '../../lib/labels';
+import { wallTimeToIso } from '../../ui/time';
 
 // Analytics links from Home and the broadcast Report use one format: `YYYY-MM-DD` date-only
 // boundaries, inclusive, plus optional comma-separated measures/dimensions and a broadcast id.
@@ -94,4 +95,21 @@ export function analyticsParams(search: URLSearchParams, now = new Date()): Anal
   }
 
   return { params: { from, to, measures, dimensions, broadcast }, invalid };
+}
+
+/**
+ * The instants a `YYYY-MM-DD` range covers in the workspace's time zone (#442 re-review): Home and
+ * the broadcast report count local calendar days, so Analytics must too. The end is the last
+ * millisecond before the next local midnight (the query compares with `<= to`); local midnights
+ * are resolved per day, so a DST change inside the range neither shortens nor lengthens it.
+ */
+export function dayStartIso(day: string, zone: string): string {
+  const local = wallTimeToIso(`${day}T00:00`, zone);
+  return new Date(local ?? `${day}T00:00:00.000Z`).toISOString();
+}
+
+export function dayEndIso(day: string, zone: string): string {
+  const [y, m, d] = day.split('-').map(Number);
+  const next = new Date(Date.UTC(y, m - 1, d + 1, 12)).toISOString().slice(0, 10);
+  return new Date(new Date(dayStartIso(next, zone)).getTime() - 1).toISOString();
 }
