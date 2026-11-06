@@ -273,9 +273,11 @@ last field. Journey canvas may pan inside a labelled region; use node list/inspe
 
 ### Navigation target
 
-Work: Home, Approvals, Agents. Marketing: Campaigns, Broadcasts, Journeys, Web experiences. Audience:
-People, Segments, Forms, Consent. Content: Templates, Assets, Brand. Insights: Analytics, Message
-activity, Deliverability, Alerts. Settings: single entry with secondary navigation above.
+**Built in Phase 24 (#446).** Work: Home, Approvals, Agents. Marketing: Campaigns, Broadcasts, Journeys,
+Web experiences. Audience: People, Segments, Forms, Consent. Content: Templates, Assets, Brand.
+Insights: Analytics, Message activity, Deliverability, Alerts. Settings: single entry with secondary
+navigation above. Paths are the canonical URLs in `apps/web/src/app/nav.ts`; legacy URLs redirect with
+their query and hash preserved.
 Imports → People action/history; Topics → Consent beside Purposes; Blocks → Templates tab/insert panel;
 Hosted pages → Brand → Subscriber pages; Recipes → create gallery; AI prompts → Agents library;
 Journey stats → journey Report; AI usage → Analytics view. Old URLs redirect, deep approval links survive.

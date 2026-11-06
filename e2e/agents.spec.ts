@@ -18,7 +18,7 @@ test('pause an agent with a reason, resume it, and switch the workspace to propo
   });
   expect(used.ok(), `the token's first call: ${await used.text()}`).toBeTruthy();
 
-  await page.goto('/settings/agents');
+  await page.goto('/work/agents');
   // The agents table, not the comparison card below it, which also has a row per agent.
   const row = page.getByRole('row').filter({ has: page.getByRole('button', { name: `Actions for ${name}` }) });
   await expect(row).toContainText('Active');
@@ -38,6 +38,8 @@ test('pause an agent with a reason, resume it, and switch the workspace to propo
   await expect(row).toContainText('Active');
 
   // Propose-only: every change beyond a draft waits for a person, and the top bar says so.
+  // The autonomy controls now live in Settings -> Approval policy and agent autonomy.
+  await page.goto('/settings/approval-policy?tab=autonomy');
   await page.getByRole('radio', { name: /^Propose only/ }).check();
   await page.getByRole('button', { name: 'Save autonomy' }).click();
   await expect(page.getByRole('link', { name: /Agents: propose only/ })).toBeVisible();

@@ -6,7 +6,7 @@ export default function JourneyPage({ params }: { params: Record<string, string>
   return (
     <ArtifactDetailPage
       id={params.id}
-      crumbs={[{ label: 'Journeys', to: '/build/journeys' }]}
+      crumbs={[{ label: 'Journeys', to: '/marketing/journeys' }]}
       wide
       autosave
       description={<CampaignMembership artifactId={params.id} />}

@@ -1,4 +1,9 @@
+import { useCrumbs } from '../../app/page';
+import { usePageTab } from '../../app/useTab';
 import { ArtifactListPage } from '../../features/artifacts/ArtifactListPage';
+import { Alert, Tabs } from '../../ui';
+import { pageWidth } from '../../ui/layout';
+import BlocksPage from './BlocksPage';
 
 const STARTER = `<mjml>
   <mj-body background-color="#f4f5f7">
@@ -13,7 +18,7 @@ const STARTER = `<mjml>
   </mj-body>
 </mjml>`;
 
-export default function TemplatesPage() {
+export function TemplateList() {
   return (
     <ArtifactListPage
       type="email_template"
@@ -26,5 +31,32 @@ export default function TemplatesPage() {
         content: (name) => ({ purpose: 'marketing_email', subject: name, mjml: STARTER, sampleData: { profile: { firstName: 'Ada' } } }),
       }}
     />
+  );
+}
+
+const TEMPLATE_TABS = ['templates', 'blocks'] as const;
+type TemplateTab = (typeof TEMPLATE_TABS)[number];
+
+const TEMPLATE_TAB_ITEMS: { key: TemplateTab; label: string }[] = [
+  { key: 'templates', label: 'Templates' },
+  { key: 'blocks', label: 'Blocks' },
+];
+
+/** Templates (#446): the template gallery and the existing block library as named tabs. */
+export default function TemplatesPage() {
+  const { active, invalid, select } = usePageTab({ keys: TEMPLATE_TABS, fallback: 'templates' });
+  useCrumbs([{ label: active === 'blocks' ? 'Blocks' : 'E-mail templates' }]);
+
+  return (
+    <div className={pageWidth('default')}>
+      {invalid && (
+        <Alert tone="info" className="mb-4">
+          This tab is unavailable.
+        </Alert>
+      )}
+      <Tabs items={TEMPLATE_TAB_ITEMS} value={active} onChange={select} label="Templates">
+        {active === 'blocks' ? <BlocksPage /> : <TemplateList />}
+      </Tabs>
+    </div>
   );
 }

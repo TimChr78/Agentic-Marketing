@@ -6,23 +6,21 @@ import { useCrumbs } from '../../app/page';
 import { Link, navigate } from '../../app/router';
 import { useWorkspace } from '../../app/session';
 import { useApi } from '../../app/useApi';
+import { usePageTab } from '../../app/useTab';
 import { AgentControls } from '../../features/agents/AgentControls';
 import { AgentStatusPill } from '../../features/agents/AgentStatus';
-import { AutonomyCard } from '../../features/agents/AutonomyCard';
-import { useAutonomy } from '../../features/agents/AutonomyProvider';
 import { CompareAgentsCard } from '../../features/agents/CompareAgentsCard';
 import { HostedAgentDialog } from '../../features/agents/HostedAgentDialog';
 import { type Agent, credentialKinds } from '../../features/agents/labels';
-import { Alert, Button, Card, EmptyState, LoadingBlock, PageHeader, Table, TableFrame, Td, THead, Th, Tr, useToast } from '../../ui';
+import { Alert, Button, EmptyState, PageHeader, Table, TableFrame, Tabs, Td, THead, Th, Tr } from '../../ui';
 import { pageWidth } from '../../ui/layout';
+import PromptsPage from '../build/PromptsPage';
 
-/** Settings → Agents (#213, #215): who acts for this workspace, how to stop them, and the ceilings. */
-export default function AgentsPage() {
+/** Work → Agents (#213, #215, #446): who acts for this workspace, how to stop them. */
+export function AgentsHome() {
   useCrumbs([{ label: 'Agents' }]);
   const { can } = useWorkspace();
-  const toast = useToast();
   const agents = useApi(() => api.call('agents.list', {}), []);
-  const autonomy = useAutonomy();
   const [creating, setCreating] = useState(false);
   const rows = agents.data?.agents ?? [];
   const admin = can('workspace:admin');
@@ -46,7 +44,7 @@ export default function AgentsPage() {
           onClose={() => setCreating(false)}
           onSaved={(agentId) => {
             void agents.reload();
-            navigate(`/settings/agents/${agentId}`);
+            navigate(`/work/agents/${agentId}`);
           }}
         />
       )}
@@ -91,7 +89,7 @@ export default function AgentsPage() {
             {rows.map((a: Agent) => (
               <Tr key={a.id}>
                 <Td>
-                  <Link to={`/settings/agents/${a.id}`} className="font-medium text-fg hover:underline">
+                  <Link to={`/work/agents/${a.id}`} className="font-medium text-fg hover:underline">
                     {a.name}
                   </Link>
                   {a.description && <div className="mt-0.5 line-clamp-1 max-w-[360px] text-[12px] text-muted">{a.description}</div>}
@@ -125,25 +123,33 @@ export default function AgentsPage() {
       </TableFrame>
 
       <CompareAgentsCard />
+    </div>
+  );
+}
 
-      {autonomy.loading && !autonomy.settings ? (
-        <Card title="Autonomy">
-          <LoadingBlock lines={4} label="Loading autonomy settings" />
-        </Card>
-      ) : autonomy.error && !autonomy.settings ? (
-        <Alert tone="bad" title="Couldn't load autonomy settings" onRetry={() => void autonomy.reload()}>
-          {autonomy.error}
+const AGENT_TABS = ['agents', 'library'] as const;
+type AgentTab = (typeof AGENT_TABS)[number];
+
+const AGENT_TAB_ITEMS: { key: AgentTab; label: string }[] = [
+  { key: 'agents', label: 'Agents' },
+  { key: 'library', label: 'Library' },
+];
+
+/** Work → Agents (#446): the agent inventory and the existing AI prompt library as named tabs. */
+export default function AgentsPage() {
+  const { active, invalid, select } = usePageTab({ keys: AGENT_TABS, fallback: 'agents' });
+  useCrumbs([{ label: active === 'library' ? 'AI prompts' : 'Agents' }]);
+
+  return (
+    <div className={pageWidth('default')}>
+      {invalid && (
+        <Alert tone="info" className="mb-4">
+          This tab is unavailable.
         </Alert>
-      ) : autonomy.settings ? (
-        <AutonomyCard
-          settings={autonomy.settings}
-          canEdit={admin}
-          onSave={async (patch) => {
-            await autonomy.save(patch);
-            toast.success('Saved the autonomy settings. They apply to the next agent request.');
-          }}
-        />
-      ) : null}
+      )}
+      <Tabs items={AGENT_TAB_ITEMS} value={active} onChange={select} label="Agents">
+        {active === 'library' ? <PromptsPage /> : <AgentsHome />}
+      </Tabs>
     </div>
   );
 }

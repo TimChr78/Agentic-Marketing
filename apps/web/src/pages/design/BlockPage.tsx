@@ -6,7 +6,7 @@ export default function BlockPage({ params }: { params: Record<string, string> }
   return (
     <ArtifactDetailPage
       id={params.id}
-      crumbs={[{ label: 'Blocks', to: '/design/blocks' }]}
+      crumbs={[{ label: 'Blocks', to: '/content/templates?tab=blocks' }]}
       editor={(p) => <BlockEditor {...p} />}
       preview
       extraTabs={[{ key: 'usage', label: 'Used by', render: (a) => <BlockUsage artifactId={a.id} /> }]}

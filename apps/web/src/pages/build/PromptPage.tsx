@@ -6,7 +6,7 @@ export default function PromptPage({ params }: { params: Record<string, string> 
   return (
     <ArtifactDetailPage
       id={params.id}
-      crumbs={[{ label: 'AI prompts', to: '/build/prompts' }]}
+      crumbs={[{ label: 'AI prompts', to: '/work/agents?tab=library' }]}
       wide
       editor={(p) => <PromptEditor {...p} />}
       extraTabs={[{ key: 'tests', label: 'Tests', render: (a) => <PromptTests artifact={a} /> }]}

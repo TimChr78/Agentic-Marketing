@@ -5,14 +5,12 @@ import {
   ChevronRight,
   LogOut,
   Menu as MenuIcon,
-  Monitor,
-  Moon,
   PanelLeftClose,
   PanelLeftOpen,
   Plus,
   Search,
   Settings2,
-  Sun,
+  Settings as SettingsIcon,
   X,
 } from 'lucide-react';
 import { lazy, type ReactNode, Suspense, useEffect, useRef, useState } from 'react';
@@ -21,20 +19,26 @@ import { switchNotice } from '../features/agents/labels';
 import { CopilotDrawer } from '../features/copilot/CopilotDrawer';
 import { Badge, cx, IconButton, Kbd, Menu } from '../ui';
 import { useFocusTrap } from '../ui/focus';
-import { navFor, visibleNav } from './nav';
+import { NewMenu } from './NewMenu';
+import { type NavGroup, type NavItem, navFor, visibleNav } from './nav';
 import { type Crumb, CrumbsProvider } from './page';
-import { useNavPref } from './prefs';
+import { useCollapsedNavGroups, useNavPref } from './prefs';
 import { Link, navigate, useLocation } from './router';
-import { SearchPalette } from './SearchPalette';
 import { useSession } from './session';
-import { setThemePref, type ThemePref, useThemePref } from './theme';
+import { THEME_ITEMS } from './ThemeMenu';
+import { setThemePref, useThemePref } from './theme';
 
-// The New brand wizard is only needed when someone opens it, so it stays out of the shell bundle.
+// The New brand wizard and the command palette are only needed when someone opens them, so they
+// stay out of the shell bundle.
 const NewBrandDrawer = lazy(async () => ({ default: (await import('../features/brand/NewBrandDrawer')).NewBrandDrawer }));
+const SearchPalette = lazy(async () => ({ default: (await import('./SearchPalette')).SearchPalette }));
 
-// The signed-in shell (DESIGN.md → Layout): sidebar with the brand switcher and nav, top bar with
-// breadcrumbs, search, theme and the user menu. Under 1024 px the sidebar becomes a drawer; on
-// desktop it can collapse to a 64 px rail, remembered per person and device (#180).
+const isActive = (path: string, itemPath: string) =>
+  itemPath === '/' ? path === '/' : path === itemPath || path.startsWith(`${itemPath}/`);
+
+// The signed-in shell (DESIGN.md → Layout): a 232 px sidebar with collapsible work groups and Settings
+// pinned at the bottom, a 56 px top bar with breadcrumbs, search, New and the account menu. Under
+// 1024 px the sidebar becomes a 280 px drawer; on desktop it can collapse to a 64 px rail.
 export function Shell({ children }: { children: ReactNode }) {
   const { path } = useLocation();
   const [crumbs, setCrumbs] = useState<Crumb[]>([]);
@@ -47,12 +51,23 @@ export function Shell({ children }: { children: ReactNode }) {
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: the mobile drawer closes on navigation, which the body does not read
   useEffect(() => setNavOpen(false), [path]);
+
+  const openSearch = () => {
+    window.dispatchEvent(new Event('am:close-menus'));
+    setNavOpen(false);
+    setCopilotOpen(false);
+    setSearchOpen(true);
+  };
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement;
       const typing = t.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(t.tagName);
       if ((e.key === 'k' && (e.metaKey || e.ctrlKey)) || (e.key === '/' && !typing)) {
         e.preventDefault();
+        window.dispatchEvent(new Event('am:close-menus'));
+        setNavOpen(false);
+        setCopilotOpen(false);
         setSearchOpen(true);
       }
     };
@@ -101,10 +116,20 @@ export function Shell({ children }: { children: ReactNode }) {
           </div>
           <nav aria-label="Breadcrumb" className="min-w-0 flex-1">
             <ol className="flex min-w-0 items-center gap-1 text-[13px]">
-              {group && !group.path && <li className="hidden shrink-0 text-muted sm:block">{group.label}</li>}
+              {group && (
+                <li className="hidden shrink-0 text-muted sm:block">
+                  {group.key === 'settings' ? (
+                    <Link to="/settings" className="hover:text-fg">
+                      {group.label}
+                    </Link>
+                  ) : (
+                    group.label
+                  )}
+                </li>
+              )}
               {crumbs.map((c, i) => (
                 <li key={c.to ?? c.label} className={cx('flex min-w-0 items-center gap-1', i < crumbs.length - 1 && 'hidden sm:flex')}>
-                  {((group && !group.path) || i > 0) && (
+                  {(group || i > 0) && (
                     <ChevronRight size={14} className={cx('shrink-0 text-muted', i === 0 && 'hidden sm:block')} aria-hidden />
                   )}
                   {c.to && i < crumbs.length - 1 ? (
@@ -120,19 +145,33 @@ export function Shell({ children }: { children: ReactNode }) {
               ))}
             </ol>
           </nav>
+          <div className="lg:hidden">
+            <NewMenu variant="topbar" />
+          </div>
           <AgentModeBadge />
           <button
             type="button"
-            onClick={() => setSearchOpen(true)}
+            onClick={openSearch}
             className="hidden h-8 w-[240px] items-center gap-2 rounded-md border border-line-strong bg-surface-2 px-2.5 text-[13px] text-muted hover:border-control md:flex xl:w-[280px]"
           >
             <Search size={14} aria-hidden />
-            <span className="flex-1 text-left">Search</span>
+            <span className="flex-1 text-left">Search or create…</span>
             <Kbd>⌘K</Kbd>
           </button>
-          <IconButton className="md:hidden" label="Search" icon={<Search size={16} />} onClick={() => setSearchOpen(true)} />
-          {can('artifacts:read') && <IconButton label="Copilot" icon={<Bot size={16} />} onClick={() => setCopilotOpen(true)} />}
-          <ThemeMenu />
+          <IconButton className="md:hidden" label="Search" icon={<Search size={16} />} onClick={openSearch} />
+          {can('artifacts:read') && (
+            <span className="hidden md:inline-flex">
+              <IconButton
+                label="Copilot"
+                icon={<Bot size={16} />}
+                onClick={() => {
+                  window.dispatchEvent(new Event('am:close-menus'));
+                  setSearchOpen(false);
+                  setCopilotOpen(true);
+                }}
+              />
+            </span>
+          )}
           <UserMenu />
         </header>
         {/* The page, not the shell, decides its width (#114): see ui/layout.ts pageWidth(). */}
@@ -140,7 +179,11 @@ export function Shell({ children }: { children: ReactNode }) {
           <CrumbsProvider onChange={setCrumbs}>{children}</CrumbsProvider>
         </main>
       </div>
-      {searchOpen && <SearchPalette onClose={() => setSearchOpen(false)} />}
+      {searchOpen && (
+        <Suspense fallback={null}>
+          <SearchPalette onClose={() => setSearchOpen(false)} />
+        </Suspense>
+      )}
       <CopilotDrawer open={copilotOpen} onClose={() => setCopilotOpen(false)} />
     </div>
   );
@@ -148,7 +191,7 @@ export function Shell({ children }: { children: ReactNode }) {
 
 /**
  * A standing reminder when the workspace is not fully on (#215): propose-only or off. It links to
- * Settings → Agents so the person can see what is paused and switch it back.
+ * the Agents work page so the person can see the agent settings that are paused.
  */
 function AgentModeBadge() {
   const { settings } = useAutonomy();
@@ -156,7 +199,7 @@ function AgentModeBadge() {
   if (!notice) return null;
   return (
     <Link
-      to="/settings/agents"
+      to="/work/agents"
       aria-label={`${notice.label}. Change agent autonomy`}
       title={notice.label}
       className={cx(
@@ -186,68 +229,79 @@ function MobileNav({ onClose }: { onClose: () => void }) {
         <div className="absolute top-2 right-2">
           <IconButton label="Close navigation" icon={<X size={16} />} onClick={onClose} />
         </div>
-        <Sidebar />
+        <Sidebar mobile />
       </div>
     </div>
   );
 }
 
-function Sidebar({ rail = false }: { rail?: boolean }) {
-  const { can, pending } = useSession();
+function Sidebar({ rail = false, mobile = false }: { rail?: boolean; mobile?: boolean }) {
+  const { can, pending, user, workspace } = useSession();
   const { path } = useLocation();
   const groups = visibleNav(can);
+  const active = navFor(path);
+  const [collapsedGroups, setCollapsedGroups] = useCollapsedNavGroups(user?.id, workspace?.id);
+  // Navigation expands the active group for this page view without rewriting the saved preference.
+  const [autoOpen, setAutoOpen] = useState<string | null>(null);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: expand on navigation only; toggling must not re-open
+  useEffect(() => {
+    if (active.group && collapsedGroups.includes(active.group.key)) setAutoOpen(active.group.key);
+  }, [path, active.group?.key]);
+
+  const openGroup = (group: NavGroup) => !collapsedGroups.includes(group.key) || autoOpen === group.key;
+  const toggleGroup = (group: NavGroup) => {
+    const open = openGroup(group);
+    setAutoOpen((current) => (current === group.key ? null : current));
+    setCollapsedGroups((current) => (open ? [...new Set([...current, group.key])] : current.filter((key) => key !== group.key)));
+  };
+
   return (
     <div className="flex h-full flex-col">
       <WorkspaceSwitcher rail={rail} />
-      <nav aria-label="Main" className={cx('flex-1 overflow-y-auto pb-4', rail ? 'px-1.5' : 'px-2')}>
+      {!mobile && (
+        <div className={cx('pt-3', rail ? 'flex justify-center px-2' : 'px-2')}>
+          <NewMenu variant={rail ? 'rail' : 'sidebar'} />
+        </div>
+      )}
+      <nav aria-label="Main" className={cx('flex-1 overflow-y-auto pt-1 pb-4', rail ? 'px-1.5' : 'px-2')}>
         {rail ? (
           <RailNav groups={groups} path={path} pending={pending} />
         ) : (
-          groups.map((g) => {
-            const Icon = g.icon;
-            if (g.path) {
-              const active = path === g.path || path.startsWith(`${g.path}/`);
-              return (
-                <div key={g.key} className="mt-4">
-                  <Link
-                    to={g.path}
-                    aria-current={active ? 'page' : undefined}
-                    className={cx(
-                      'flex h-10 items-center gap-2 rounded-md px-2 text-[13px] font-medium pointer-coarse:h-10 lg:h-8',
-                      active ? 'bg-accent-soft text-accent' : 'text-fg-2 hover:bg-surface-2 hover:text-fg',
-                    )}
-                  >
-                    <Icon size={16} aria-hidden className={active ? '' : 'text-muted'} />
-                    <span className="flex-1">{g.label}</span>
-                    {pending > 0 && (
-                      <Badge tone="accent" label={`${pending} pending`}>
-                        {pending}
-                      </Badge>
-                    )}
-                  </Link>
-                </div>
-              );
-            }
+          groups.map((group) => {
+            const Icon = group.icon;
+            const open = openGroup(group);
             return (
-              <div key={g.key} className="mt-4">
-                <div className="flex h-10 items-center gap-2 px-2 text-[12px] leading-[18px] font-medium text-muted lg:h-7">
+              <div key={group.key} className="mt-4">
+                <button
+                  type="button"
+                  aria-expanded={open}
+                  aria-controls={`nav-group-${group.key}`}
+                  onClick={() => toggleGroup(group)}
+                  className="flex h-10 w-full items-center gap-2 rounded-md px-2 text-[12px] leading-[18px] font-medium text-muted hover:bg-surface-2 hover:text-fg lg:h-7"
+                >
                   <Icon size={14} aria-hidden />
-                  {g.label}
-                </div>
-                <ul>
-                  {g.items.map((i) => {
-                    const active = path === i.path || path.startsWith(`${i.path}/`);
+                  <span className="flex-1 text-left">{group.label}</span>
+                  <ChevronDown size={14} aria-hidden className={cx('transition-transform', !open && '-rotate-90')} />
+                </button>
+                <ul id={`nav-group-${group.key}`} hidden={!open} className="mt-0.5 space-y-0.5">
+                  {group.items.map((item) => {
+                    const current = active.item?.path === item.path;
                     return (
-                      <li key={i.path}>
+                      <li key={item.path}>
                         <Link
-                          to={i.path}
-                          aria-current={active ? 'page' : undefined}
+                          to={item.path}
+                          aria-current={current ? 'page' : undefined}
                           className={cx(
                             'flex h-10 items-center rounded-md pr-2 pl-[30px] text-[13px] pointer-coarse:h-10 lg:h-8',
-                            active ? 'bg-accent-soft font-medium text-accent' : 'text-fg-2 hover:bg-surface-2 hover:text-fg',
+                            current ? 'bg-accent-soft font-medium text-accent' : 'text-fg-2 hover:bg-surface-2 hover:text-fg',
                           )}
                         >
-                          {i.label}
+                          <span className="min-w-0 flex-1 truncate">{item.label}</span>
+                          {item.path === '/approvals' && pending > 0 && (
+                            <Badge tone="accent" label={`${pending} pending requests`}>
+                              {pending}
+                            </Badge>
+                          )}
                         </Link>
                       </li>
                     );
@@ -258,62 +312,78 @@ function Sidebar({ rail = false }: { rail?: boolean }) {
           })
         )}
       </nav>
+      <div className={cx('border-t border-line py-2', rail ? 'px-1.5' : 'px-2')}>
+        <SettingsLink rail={rail} />
+      </div>
     </div>
   );
 }
 
+function SettingsLink({ rail }: { rail: boolean }) {
+  const { path } = useLocation();
+  const current = path === '/settings' || path.startsWith('/settings/');
+  return (
+    <Link
+      to="/settings"
+      aria-current={current ? 'page' : undefined}
+      aria-label="Settings"
+      title="Settings"
+      className={cx(
+        'flex h-10 items-center gap-2 rounded-md text-[13px] pointer-coarse:h-10 lg:h-8',
+        rail ? 'justify-center' : 'px-2',
+        current ? 'bg-accent-soft font-medium text-accent' : 'text-fg-2 hover:bg-surface-2 hover:text-fg',
+      )}
+    >
+      <SettingsIcon size={16} aria-hidden className={current ? '' : 'text-muted'} />
+      {!rail && <span>Settings</span>}
+    </Link>
+  );
+}
+
 /**
- * The collapsed desktop navigation (#180): group icons with a tooltip and accessible name, the
- * pending-approvals badge, and a menu with the group's pages so everything stays reachable without
- * expanding the rail. Under 1024 px the full sidebar is used instead.
+ * The collapsed desktop navigation: a brand mark, New, the five work-group icons and Settings. Each
+ * group icon opens a named popover of its permitted destinations; no group click navigates. The
+ * active group is accent-soft, the active destination gets a check.
  */
-function RailNav({ groups, path, pending }: { groups: ReturnType<typeof visibleNav>; path: string; pending: number }) {
+function RailNav({ groups, path, pending }: { groups: NavGroup[]; path: string; pending: number }) {
   return (
     <ul className="mt-2 space-y-1">
-      {groups.map((g) => {
-        const Icon = g.icon;
-        const active = g.path
-          ? path === g.path || path.startsWith(`${g.path}/`)
-          : g.items.some((item) => path === item.path || path.startsWith(`${item.path}/`));
+      {groups.map((group) => {
+        const Icon = group.icon;
+        const active = group.items.some((item) => isActive(path, item.path));
         const itemClass = cx(
           'relative flex h-10 w-full items-center justify-center rounded-md',
           active ? 'bg-accent-soft text-accent' : 'text-fg-2 hover:bg-surface-2 hover:text-fg',
         );
         const badge =
-          g.path === '/approvals' && pending > 0 ? (
+          group.items.some((item) => item.path === '/approvals') && pending > 0 ? (
             <span className="absolute top-1 right-1 inline-flex min-w-4 items-center justify-center rounded-full bg-accent px-1 text-[10px] leading-4 font-semibold text-accent-fg">
               {pending}
             </span>
           ) : null;
         return (
-          <li key={g.key}>
-            {g.path ? (
-              <Link
-                to={g.path}
-                aria-label={pending > 0 && g.path === '/approvals' ? `${g.label}, ${pending} pending` : g.label}
-                title={g.label}
-                aria-current={active ? 'page' : undefined}
-                className={itemClass}
-              >
-                <Icon size={18} aria-hidden />
-                {badge}
-              </Link>
-            ) : (
-              <Menu
-                label={g.label}
-                align="start"
-                items={g.items.map((item) => ({
-                  label: item.label,
-                  icon: path === item.path || path.startsWith(`${item.path}/`) ? <Check /> : undefined,
-                  onSelect: () => navigate(item.path),
-                }))}
-                trigger={(p) => (
-                  <button {...p} type="button" aria-label={`${g.label} navigation`} title={g.label} className={itemClass}>
-                    <Icon size={18} aria-hidden />
-                  </button>
-                )}
-              />
-            )}
+          <li key={group.key}>
+            <Menu
+              label={`${group.label} navigation`}
+              align="start"
+              items={group.items.map((item: NavItem) => ({
+                label: item.label,
+                icon: isActive(path, item.path) ? <Check /> : undefined,
+                onSelect: () => navigate(item.path),
+              }))}
+              trigger={(p) => (
+                <button
+                  {...p}
+                  type="button"
+                  aria-label={`${group.label} navigation${badge ? `, ${pending} pending requests` : ''}`}
+                  title={group.label}
+                  className={itemClass}
+                >
+                  <Icon size={18} aria-hidden />
+                  {badge}
+                </button>
+              )}
+            />
           </li>
         );
       })}
@@ -433,41 +503,10 @@ export function WorkspaceSwitcher({ rail = false }: { rail?: boolean }) {
   );
 }
 
-const themeItems: { key: ThemePref; label: string; icon: ReactNode }[] = [
-  { key: 'system', label: 'System', icon: <Monitor /> },
-  { key: 'light', label: 'Light', icon: <Sun /> },
-  { key: 'dark', label: 'Dark', icon: <Moon /> },
-];
-
-export function ThemeMenu() {
-  const pref = useThemePref();
-  const current = themeItems.find((t) => t.key === pref)!;
-  return (
-    <Menu
-      label="Theme"
-      items={themeItems.map((t) => ({
-        label: t.label,
-        icon: t.icon,
-        hint: t.key === pref ? <Check size={14} /> : undefined,
-        onSelect: () => setThemePref(t.key),
-      }))}
-      trigger={(p) => (
-        <button
-          {...p}
-          type="button"
-          aria-label={`Theme: ${current.label}`}
-          title={`Theme: ${current.label}`}
-          className="inline-flex size-10 items-center justify-center rounded-md text-fg-2 pointer-coarse:size-10 hover:bg-surface-2 hover:text-fg md:size-8 [&_svg]:size-4"
-        >
-          {current.icon}
-        </button>
-      )}
-    />
-  );
-}
-
 function UserMenu() {
-  const { user, signOut } = useSession();
+  const { user, workspace, signOut } = useSession();
+  const pref = useThemePref();
+  const current = THEME_ITEMS.find((t) => t.key === pref)!;
   const initials = (user?.name || user?.email || '?')
     .split(/[\s@.]+/)
     .filter(Boolean)
@@ -477,18 +516,26 @@ function UserMenu() {
   return (
     <Menu
       label="Account"
+      header={
+        <span className="block">
+          <span className="block font-medium text-fg">{user?.name || 'Signed in'}</span>
+          <span className="block text-[12px] text-muted">{user?.email}</span>
+          <span className="block text-[12px] text-muted">{roleName(workspace?.you.role ?? '')}</span>
+        </span>
+      }
       items={[
+        { label: 'Preferences', icon: <Settings2 />, onSelect: () => navigate('/preferences') },
         {
-          label: (
-            <span className="block">
-              <span className="block font-medium">{user?.name || 'Signed in'}</span>
-              <span className="block text-[12px] text-muted">{user?.email}</span>
-            </span>
-          ),
-          onSelect: () => navigate('/settings/preferences'),
+          label: `Theme: ${current.label}`,
+          icon: current.icon,
+          items: THEME_ITEMS.map((t) => ({
+            label: t.label,
+            icon: t.icon,
+            hint: t.key === pref ? <Check size={14} /> : undefined,
+            onSelect: () => setThemePref(t.key),
+          })),
         },
         'separator',
-        { label: 'Preferences', icon: <Settings2 />, onSelect: () => navigate('/settings/preferences') },
         {
           label: 'Sign out',
           icon: <LogOut />,

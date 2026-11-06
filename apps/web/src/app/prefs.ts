@@ -1,4 +1,4 @@
-import { useCallback, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useState, useSyncExternalStore } from 'react';
 
 // Per-person, per-device preferences (#180), beside the theme. Values live under
 // `am.<name>.<userId>` so two people on one browser keep separate choices; before sign-in, or in
@@ -53,3 +53,42 @@ const NAV_VALUES = ['expanded', 'collapsed'] as const;
 export const getNavPref = () => getPref('nav', NAV_VALUES, 'expanded');
 export const setNavPref = (value: NavPref) => setPref('nav', value);
 export const useNavPref = () => usePref('nav', NAV_VALUES, 'expanded');
+
+/**
+ * Collapsed work groups (#446), stored per person and workspace as a JSON string array of group
+ * keys under `am.navGroups.<userId>.<workspaceId>.v1`. An empty array means every group is open.
+ * Storage failures leave the choice in this component's memory for the page view.
+ */
+const navGroupsKey = (userId: string, workspaceId: string) => `am.navGroups.${userId}.${workspaceId}.v1`;
+
+function readCollapsedGroups(key: string): string[] {
+  try {
+    const raw = JSON.parse(localStorage.getItem(key) ?? '[]');
+    return Array.isArray(raw) ? raw.filter((v): v is string => typeof v === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+export function useCollapsedNavGroups(userId: string | null | undefined, workspaceId: string | null | undefined) {
+  const key = userId && workspaceId ? navGroupsKey(userId, workspaceId) : null;
+  const [collapsed, setCollapsedState] = useState<string[]>([]);
+  useEffect(() => setCollapsedState(key ? readCollapsedGroups(key) : []), [key]);
+  const setCollapsed = useCallback(
+    (next: string[] | ((current: string[]) => string[])) => {
+      setCollapsedState((current) => {
+        const value = typeof next === 'function' ? next(current) : next;
+        if (key) {
+          try {
+            localStorage.setItem(key, JSON.stringify(value));
+          } catch {
+            // Private mode or blocked storage: the choice lasts this page view only.
+          }
+        }
+        return value;
+      });
+    },
+    [key],
+  );
+  return [collapsed, setCollapsed] as const;
+}

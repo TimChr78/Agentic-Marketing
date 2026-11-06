@@ -8,7 +8,7 @@ export default function BroadcastPage({ params }: { params: Record<string, strin
   return (
     <ArtifactDetailPage
       id={params.id}
-      crumbs={[{ label: 'Broadcasts', to: '/build/broadcasts' }]}
+      crumbs={[{ label: 'Broadcasts', to: '/marketing/broadcasts' }]}
       wide
       description={<CampaignMembership artifactId={params.id} />}
       editor={(p) => <BroadcastEditor {...p} />}

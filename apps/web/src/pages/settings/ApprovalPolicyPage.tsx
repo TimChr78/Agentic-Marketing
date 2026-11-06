@@ -2,7 +2,10 @@ import { useEffect, useState } from 'react';
 import { api, errText } from '../../app/api';
 import { useCrumbs } from '../../app/page';
 import { useWorkspace, type Workspace } from '../../app/session';
-import { Alert, Button, Card, Meta, PageHeader, RadioCards, StatusPill, useConfirm, useToast } from '../../ui';
+import { usePageTab } from '../../app/useTab';
+import { AutonomyCard } from '../../features/agents/AutonomyCard';
+import { useAutonomy } from '../../features/agents/AutonomyProvider';
+import { Alert, Button, Card, LoadingBlock, Meta, PageHeader, RadioCards, StatusPill, Tabs, useConfirm, useToast } from '../../ui';
 import { pageWidth } from '../../ui/layout';
 
 type Policy = Workspace['approvalPolicy'];
@@ -31,7 +34,7 @@ const POLICY_INFO: Record<Policy, { label: string; description: string; agent: s
 const RANK: Record<Policy, number> = { none: 0, agent_changes: 1, all_publishes: 2 };
 
 /** The workspace approval policy, shown read-only to people who cannot change it. */
-export default function ApprovalPolicyPage() {
+export function PolicySection() {
   useCrumbs([{ label: 'Approval policy' }]);
   const { workspace, can, refresh } = useWorkspace();
   const toast = useToast();
@@ -131,6 +134,64 @@ export default function ApprovalPolicyPage() {
         </div>
       </Card>
       {confirmDialog}
+    </div>
+  );
+}
+
+const POLICY_TABS = ['policy', 'autonomy'] as const;
+type PolicyTab = (typeof POLICY_TABS)[number];
+
+const POLICY_TAB_ITEMS: { key: PolicyTab; label: string }[] = [
+  { key: 'policy', label: 'Policy' },
+  { key: 'autonomy', label: 'Agent autonomy' },
+];
+
+/** The workspace autonomy controls that used to sit on Agents, reusing their existing gates. */
+function AutonomyTab() {
+  const { can } = useWorkspace();
+  const toast = useToast();
+  const autonomy = useAutonomy();
+  if (autonomy.loading && !autonomy.settings) return <LoadingBlock lines={4} label="Loading autonomy settings" />;
+  if (autonomy.error && !autonomy.settings)
+    return (
+      <Alert tone="bad" title="Couldn't load autonomy settings" onRetry={() => void autonomy.reload()}>
+        {autonomy.error}
+      </Alert>
+    );
+  if (!autonomy.settings) return null;
+  return (
+    <div className={pageWidth('reading', 'space-y-5')}>
+      <PageHeader
+        title="Agent autonomy"
+        description="How far agents may act before a person steps in. These controls apply to every agent in the workspace."
+      />
+      <AutonomyCard
+        settings={autonomy.settings}
+        canEdit={can('workspace:admin')}
+        onSave={async (patch) => {
+          await autonomy.save(patch);
+          toast.success('Saved the autonomy settings. They apply to the next agent request.');
+        }}
+      />
+    </div>
+  );
+}
+
+/** Settings → Approval policy and agent autonomy (#446): Policy and Agent autonomy as named tabs. */
+export default function ApprovalPolicyPage() {
+  const { active, invalid, select } = usePageTab({ keys: POLICY_TABS, fallback: 'policy' });
+  useCrumbs([{ label: 'Approval policy and agent autonomy' }]);
+
+  return (
+    <div className={pageWidth('default')}>
+      {invalid && (
+        <Alert tone="info" className="mb-4">
+          This tab is unavailable.
+        </Alert>
+      )}
+      <Tabs items={POLICY_TAB_ITEMS} value={active} onChange={select} label="Approval policy and agent autonomy">
+        {active === 'autonomy' ? <AutonomyTab /> : <PolicySection />}
+      </Tabs>
     </div>
   );
 }

@@ -5,7 +5,7 @@ export default function SegmentPage({ params }: { params: Record<string, string>
   return (
     <ArtifactDetailPage
       id={params.id}
-      crumbs={[{ label: 'Segments', to: '/build/segments' }]}
+      crumbs={[{ label: 'Segments', to: '/audience/segments' }]}
       wide
       editor={(p) => <SegmentEditor {...p} />}
     />
