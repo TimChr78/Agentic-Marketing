@@ -82,15 +82,15 @@ export function Identifier({
           if (event.key === 'Escape') closeTooltip();
         }}
         aria-expanded={expanded}
+        // The label joins the visible text in the accessible name; the full value stays in the
+        // tooltip and in the copy button's name, which the spec asks for.
+        aria-label={`${label}: ${expanded ? value : short}`}
         aria-describedby={tooltip ? tooltipId : undefined}
         className={cx(
           'min-w-0 rounded-sm text-left font-mono text-[12px] leading-[18px] text-fg-2 pointer-coarse:min-h-10',
           expanded ? 'break-all whitespace-normal select-all' : 'truncate',
         )}
       >
-        {/* The label joins the visible text in the accessible name; the full value stays in the
-            tooltip and in the copy button's name, which the spec asks for. */}
-        <span className="sr-only">{label}: </span>
         {expanded ? value : short}
       </button>
       <button

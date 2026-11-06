@@ -40,8 +40,8 @@ describe('Identifier (#437)', () => {
 
   it('expands the short form to selectable full text on click', async () => {
     render(<Identifier value={ID} />);
-    await userEvent.click(screen.getByRole('button', { name: /^ID:/ }));
-    expect(screen.getByRole('button', { name: /^ID:/ }).getAttribute('aria-expanded')).toBe('true');
+    await userEvent.click(screen.getByRole('button', { name: `ID: ${shortId(ID)}` }));
+    expect(screen.getByRole('button', { name: `ID: ${ID}` }).getAttribute('aria-expanded')).toBe('true');
     expect(screen.getByText(ID)).toBeTruthy();
   });
 
