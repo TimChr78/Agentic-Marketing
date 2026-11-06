@@ -14,6 +14,7 @@ import {
   invitationWorkspace,
   isMcpResourceUrlAllowed,
   RESET_PASSWORD_TTL_SECONDS,
+  withConsentRequest,
 } from '@agentic-marketing/auth';
 import { createExecutor, type Services, userPrincipal } from '@agentic-marketing/commands';
 import { AppError, newUuid, RESOLVED_CLIENT_IP_HEADER, remoteAddressFromEnv, resolveClientIp } from '@agentic-marketing/core';
@@ -36,7 +37,7 @@ import { createDomainService, type PublicRequest } from './domains';
 import { copilotApi } from './http/copilot';
 import { MCP_MAX_BODY, mcpEndpoint } from './http/mcp';
 import { metricsHandler } from './http/metrics';
-import { consentPage, invitePage, loginPage } from './http/pages';
+import { consentPage, invitePage, loginPage, pageNonce, pagesCsp } from './http/pages';
 import { passwordResetRoutes } from './http/password-reset';
 import { DOMAIN_CHALLENGE, isBrandPath } from './http/public-only';
 import { rejectUnsafeRawPath } from './http/raw-path';
@@ -139,6 +140,8 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
     db,
     serverVersion: VERSION,
     ownsAnyWorkspace: async (userId) => (await directory.memberships(userId)).some((membership) => membership.role === 'owner'),
+    ownedWorkspaceCount: async (userId) => (await directory.memberships(userId)).filter((membership) => membership.role === 'owner').length,
+    workspaceQuota: config.workspaceQuota,
     strictInputs: config.strictInputs,
     // Reach of publishing, for the agent policy engine (ADR-0016).
     artifactImpact: {
@@ -357,6 +360,26 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
     clientIpHeaders: config.clientIpHeaders,
     trustedProxyCidrs: config.trustedProxyCidrs,
   });
+  // The OAuth consent flow binds a brand choice to one authorization request (#456). The provider
+  // hook that issues the grant only receives the session, so the request's stable parameters are
+  // carried in an async context: /authorize from its URL query, /oauth2/consent from the
+  // oauth_query it was posted with. The body is replayed unchanged for Better Auth to read.
+  const authorize = (c: Context) =>
+    withConsentRequest({ query: new URL(c.req.url).search, mode: 'authorize' }, () => auth.handler(withClientIp(c)));
+  app.get('/api/auth/oauth2/authorize', authorize);
+  app.get('/api/auth/oauth2/authorize/*', authorize);
+  app.post('/api/auth/oauth2/consent', async (c) => {
+    const raw = await c.req.text();
+    let query: string | undefined;
+    try {
+      const body = JSON.parse(raw) as { oauth_query?: unknown };
+      if (typeof body.oauth_query === 'string') query = body.oauth_query;
+    } catch {
+      // Not JSON: Better Auth answers with its own validation error for the replayed request.
+    }
+    const request = new Request(c.req.raw.url, { method: 'POST', headers: c.req.raw.headers, body: raw });
+    return withConsentRequest({ query, mode: 'consent' }, () => auth.handler(withClientIp({ req: { raw: request }, env: c.env })));
+  });
   app.on(['GET', 'POST'], '/api/auth/*', (c) => auth.handler(withClientIp(c)));
 
   // OAuth discovery at the root, where MCP clients look (RFC 8414 path insertion included). The MCP
@@ -372,13 +395,20 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
     app.get('/.well-known/oauth-protected-resource/*', (c) => auth.handler(withClientIp(c)));
   }
 
-  app.get('/login', (c) => c.html(loginPage));
-  app.get('/consent', (c) => c.html(consentPage));
-  app.get('/invite', (c) => c.html(invitePage));
+  // The server-rendered pages carry one inline script and one inline style each: a per-response
+  // nonce lets exactly those run and blocks an injected handler or a later inline script (#478).
+  const inlinePage = (c: Context, render: (nonce: string) => string) => {
+    const nonce = pageNonce();
+    c.header('Content-Security-Policy', pagesCsp(nonce));
+    return c.html(render(nonce));
+  };
+  app.get('/login', (c) => inlinePage(c, loginPage));
+  app.get('/consent', (c) => inlinePage(c, consentPage));
+  app.get('/invite', (c) => inlinePage(c, invitePage));
 
   // The consent page chooses the brand an OAuth client acts in (#187). The choice is checked
-  // against the person's memberships and role here, then stored for the pending consent; the
-  // OAuth provider reads it as the grant's reference id.
+  // against the person's memberships and role here, then stored for this exact authorization
+  // request (#456); the OAuth provider reads it as the grant's reference id.
   app.post(
     '/api/oauth/workspace',
     bodyLimit(INVITATION_MAX_BODY, (c) =>
@@ -387,7 +417,7 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
     async (c) => {
       const session = await auth.api.getSession({ headers: c.req.raw.headers });
       if (!session) throw new AppError('unauthorized', 'Sign in first, then choose the brand this connection acts in.');
-      const body = (await c.req.json().catch(() => ({}))) as { workspaceId?: unknown; scope?: unknown };
+      const body = (await c.req.json().catch(() => ({}))) as { workspaceId?: unknown; scope?: unknown; oauthQuery?: unknown };
       if (typeof body.workspaceId !== 'string')
         throw new AppError('invalid_input', 'Choose the brand (workspaceId) this connection acts in.');
       const choice = await chooseOAuthWorkspace(db, {
@@ -395,6 +425,7 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
         userId: session.user.id,
         workspaceId: body.workspaceId,
         scope: typeof body.scope === 'string' ? body.scope : undefined,
+        oauthQuery: typeof body.oauthQuery === 'string' ? body.oauthQuery : undefined,
       });
       return c.json({ workspaceId: choice.id, name: choice.name });
     },

@@ -6,13 +6,6 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 
 ### Security
 
-- `workspace.domains.add` and `workspace.domains.update` no longer accept `status`: a domain becomes `verified` only through `workspace.domains.verify`, so an admin can no longer activate a hostname without proving that it reaches this installation (#461). This is a breaking input change; callers that sent `status` now get `invalid_input`.
-- A hostname now belongs to one workspace: another workspace cannot register any prefix on a host that is already claimed or verified, and verification re-checks ownership, so a brand can no longer carve a path prefix out of another brand's verified host (#462, including the prefix-shadowing case in #479).
-- The installation's admin host (`PUBLIC_URL`) and fallback links host (`PUBLIC_LINKS_URL`) are reserved and can never be registered or created as a brand domain (#480).
-- Host checking is persisted once it has been switched on: removing the last verified domain no longer reverts the installation to any-Host and re-enables cross-brand public pages (#463).
-- Domain verification fetches through the shared egress guard, so private, link-local and metadata targets are refused, and the caller no longer receives the internal error or HTTP status of the challenge fetch (#466).
-- The domain resolver cannot repopulate its cache from a load that started before an invalidation; writes reach other server processes within the documented 5-second TTL (#464).
-
 ### Fixed
 
 - Broadcast segment and template names refresh after a change instead of keeping the old name for the rest of the session (#459).
@@ -34,6 +27,11 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 - A mandate’s `learning.experienceRamp` requires at least two steps, a first step below 100% and a guardrail, so a one-step `[100]` rollout no longer satisfies it (#475).
 - `experience.rollout_paused` is delivered from a durable pause row, so a `stopRollout` before the event sweep no longer drops the pause agents were waiting for (#476).
 - `experiences.stopRollout` pushes the stopped bundle to Cloudflare KV before it returns; the remaining delay is the worker’s isolate cache and KV propagation, now stated truthfully in the command and the docs instead of “at once” (#477).
+- Delivery caps count a completed contact from when the provider actually sent it (`messages.sent_at`) instead of from enqueue time, so a backlog that waited for quiet hours, a pause or a retry consumes the window from its real send time (#453).
+- Two messages queued at the same instant can no longer both pass a `max: 1` frequency or cross-agent contact cap: in-flight reservations are ordered by enqueue time and message id (#452).
+- An identity merge moves the merged person's message history to the surviving profile in the same transaction, so routine identity resolution no longer resets their frequency and cross-agent contact caps (#460).
+- `workspace.create` enforces a per-person brand quota (`WORKSPACE_QUOTA`, default 10) instead of letting one owner create unbounded brands and pending domain claims; the refusal names the limit (#487).
+- An OAuth brand choice is bound to the authorization request that asked for it instead of the browser session, so consenting in one tab can no longer issue a grant for the brand chosen in another tab, and refresh tokens keep the brand (#456).
 
 
 ## [0.10.0] - 2026-11-06

@@ -145,6 +145,21 @@ async function assertOwnsABrand(ctx: CommandContext) {
 }
 
 /**
+ * Bounds the brands one person can own (#487): the ownership rule alone let a single owner create
+ * unbounded brands, each with its own pending domain claim. The count is the person's owner
+ * memberships across the installation, not just this brand.
+ */
+async function assertWithinQuota(ctx: CommandContext) {
+  const quota = ctx.services.workspaceQuota;
+  const owned = await ctx.services.ownedWorkspaceCount?.(ctx.principal.userId);
+  if (quota === undefined || owned === undefined || owned < quota) return;
+  throw new AppError(
+    'forbidden',
+    `You own ${owned} brands, the limit for one person is ${quota}. Use an existing brand, or ask an operator to raise WORKSPACE_QUOTA.`,
+  );
+}
+
+/**
  * Runs `fn` with RLS scoped to a workspace that does not exist yet. The command's transaction
  * stays the same, so a failed insert (for example a duplicate domain) rolls the workspace back
  * together with everything else.
@@ -167,7 +182,7 @@ export const createWorkspace = defineCommand({
   name: 'workspace.create',
   title: 'Create a brand',
   description:
-    'People only, and only for a person who owns at least one brand: create another brand (workspace) in this installation. In one transaction it creates the workspace with the same defaults as `am bootstrap`, your owner membership, a draft brand artifact and, when a host is given, a pending primary domain. Verify the domain with workspace.domains.verify before it serves links. Nothing is copied from another brand.',
+    'People only, and only for a person who owns at least one brand: create another brand (workspace) in this installation. At most WORKSPACE_QUOTA brands per person (default 10); the refusal names the limit. In one transaction it creates the workspace with the same defaults as `am bootstrap`, your owner membership, a draft brand artifact and, when a host is given, a pending primary domain. Verify the domain with workspace.domains.verify before it serves links. Nothing is copied from another brand.',
   input: z
     .object({
       name: z.string().trim().min(1).max(120).describe('Brand name, shown in the workspace switcher'),
@@ -197,6 +212,7 @@ export const createWorkspace = defineCommand({
   auditTarget: (output) => output.workspaceId,
   handler: async (input, ctx) => {
     await assertOwnsABrand(ctx);
+    await assertWithinQuota(ctx);
     // Validate the brand basics before writing anything, so a bad logo URL cannot leave a brand behind.
     const content = await validateContent(
       'brand',

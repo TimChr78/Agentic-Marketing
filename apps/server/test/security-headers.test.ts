@@ -59,6 +59,25 @@ describe('security headers', () => {
     expect(res.headers.get('x-content-type-options')).toBe('nosniff');
   });
 
+  it('the server-rendered pages allow only their own nonced script (#478)', async () => {
+    for (const path of ['/login', '/consent', '/invite']) {
+      const res = await fetch(`${t.base}${path}`);
+      expect(res.status).toBe(200);
+      const csp = res.headers.get('content-security-policy') ?? '';
+      // No script source unless it carries this response's nonce: no 'unsafe-inline', no hosts.
+      expect(csp).toContain("default-src 'none'");
+      expect(csp).not.toContain('unsafe-inline');
+      expect(csp).not.toContain('unsafe-eval');
+      const nonce = /script-src 'nonce-([^']+)'/.exec(csp)?.[1];
+      expect(nonce).toBeTruthy();
+      const html = await res.text();
+      // Every script and style tag carries that nonce, and nothing inline is left without one.
+      for (const tag of html.matchAll(/<(script|style)([^>]*)>/g)) expect(tag[2]).toContain(`nonce="${nonce}"`);
+      expect(html).toContain(`<script nonce="${nonce}">`);
+      expect(csp).toContain("frame-ancestors 'none'");
+    }
+  });
+
   it('the reset page sends no referrer, because its URL carries a token (#191)', async () => {
     for (const path of ['/reset-password?token=secret-token', '/reset-password/anything']) {
       const res = await fetch(`${t.base}${path}`);

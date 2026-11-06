@@ -535,6 +535,8 @@ export const messages = pgTable(
     providerId: text('provider_id'),
     providerMessageId: text('provider_message_id'),
     status: text('status').$type<MessageStatus>().notNull(),
+    /** When the provider accepted the message (#453); null while queued, sending, suppressed or failed. */
+    sentAt: ts('sent_at'),
     reason: text('reason'),
     recipientHash: text('recipient_hash'),
     data: jsonb('data').$type<Record<string, unknown>>().notNull().default({}),
@@ -557,6 +559,7 @@ export const messages = pgTable(
   (t) => [
     primaryKey({ columns: [t.workspaceId, t.id] }),
     index('messages_agent_contact').on(t.workspaceId, t.profileId, t.createdAt).where(sql`agent_id IS NOT NULL`),
+    index('messages_policy_window').on(t.workspaceId, t.profileId, t.sentAt),
     index('messages_journey_status').on(t.workspaceId, t.journeyId, t.status).where(sql`journey_id IS NOT NULL`),
   ],
 );
