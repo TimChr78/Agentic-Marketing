@@ -476,7 +476,11 @@ export async function syncEdge(deps: EdgeDeps, ws: string, opts: { bundleOnly?: 
       `edge-sync:${ws}`,
     ]);
     locked = result.rows[0].locked;
-    if (locked) await syncEdgeLocked(deps, ws, opts);
+    // A stop that gave up waiting for this lock commits its share 0 while our upload may still be
+    // in flight (#477); that upload can land after the stop. Republish under the same lock until
+    // the bundle written last is the current one, so the stale write never stays in KV.
+    for (let attempt = 0; locked && attempt < 3; attempt++)
+      if ((await syncEdgeLocked(deps, ws, attempt === 0 ? opts : { bundleOnly: true })) !== 'republish') break;
   } finally {
     if (locked) {
       try {
@@ -489,7 +493,7 @@ export async function syncEdge(deps: EdgeDeps, ws: string, opts: { bundleOnly?: 
   }
 }
 
-async function syncEdgeLocked(deps: EdgeDeps, ws: string, opts: { bundleOnly?: boolean } = {}) {
+async function syncEdgeLocked(deps: EdgeDeps, ws: string, opts: { bundleOnly?: boolean } = {}): Promise<'republish' | undefined> {
   const state = await deps.db.withWorkspace(ws, async (tx) => {
     const [t] = await tx.select().from(schema.edgeTargets);
     if (!t) return null;
@@ -610,6 +614,23 @@ async function syncEdgeLocked(deps: EdgeDeps, ws: string, opts: { bundleOnly?: b
       // the target moves. Its row lock observes this reservation and queues the old keys.
       if (!(await update({ pushedKeys: [...new Set([...t.pushedKeys, ...keys])] }))) return;
       await kv.put(entries);
+      // The upload is outside any transaction: a stop may have committed while it ran. If the
+      // generation moved but the destination is the same, what we just wrote there is stale and the
+      // caller republishes the current bundle under this lock. A moved destination is handled as
+      // before: this tick stops and the next one cleans up and publishes in order.
+      const [after] = await deps.db.withWorkspace(ws, (tx) =>
+        tx
+          .select({
+            generation: schema.edgeTargets.generation,
+            accountId: schema.edgeTargets.accountId,
+            namespaceId: schema.edgeTargets.namespaceId,
+          })
+          .from(schema.edgeTargets)
+          .where(eq(schema.edgeTargets.workspaceId, ws)),
+      );
+      if (!after) return;
+      if (after.generation !== t.generation)
+        return after.accountId === t.accountId && after.namespaceId === t.namespaceId ? 'republish' : undefined;
       const gone = t.pushedKeys.filter((k) => !keys.includes(k));
       if (gone.length) await kv.delete(gone);
       if (!(await update({ bundleHash: hash, pushedKeys: keys }))) return;
@@ -683,19 +704,26 @@ export interface EdgePushResult {
 export async function acquireEdgeSyncLock(tx: Tx, ws: string, waitMs = 10_000): Promise<boolean> {
   // `pg_advisory_xact_lock` conflicts with the session-scoped `pg_try_advisory_lock` the
   // background sync takes on the same key, and is released when the caller's transaction ends.
+  // The caller's own lock_timeout is restored afterwards: a leftover 10 s timeout would abort the
+  // very stop this lock exists to protect, and forcing 0 would override a caller that set one.
+  const original =
+    (await tx.execute<{ lock_timeout: string }>(sql`SELECT current_setting('lock_timeout') AS lock_timeout`)).rows[0]?.lock_timeout ?? '0';
   await tx.execute(sql`SAVEPOINT edge_sync_lock`);
   let locked = false;
   try {
     await tx.execute(sql`SELECT set_config('lock_timeout', ${`${waitMs}ms`}, true)`);
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`edge-sync:${ws}`}, 0))`);
     locked = true;
-  } catch {
-    await tx.execute(sql`ROLLBACK TO SAVEPOINT edge_sync_lock`).catch(() => {});
+  } catch (err) {
+    // Only the expected lock timeout (55P03 lock_not_available) means "another sync still runs";
+    // cancellation, a statement timeout or a query error is a real failure and propagates.
+    await tx.execute(sql`ROLLBACK TO SAVEPOINT edge_sync_lock`);
+    // Drizzle wraps the driver error; the SQLSTATE is on the cause.
+    const e = err as { code?: string; cause?: { code?: string } };
+    if ((e.code ?? e.cause?.code) !== '55P03') throw err;
   }
   if (locked) await tx.execute(sql`RELEASE SAVEPOINT edge_sync_lock`);
-  // The caller still has to take its own row locks and write. A leftover 10 s lock timeout there
-  // would abort the very stop this lock exists to protect.
-  await tx.execute(sql`SELECT set_config('lock_timeout', '0', true)`).catch(() => {});
+  await tx.execute(sql`SELECT set_config('lock_timeout', ${original}, true)`);
   return locked;
 }
 

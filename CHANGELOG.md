@@ -6,6 +6,14 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 
 ### Security
 
+- `workspace.domains.add` and `workspace.domains.update` no longer accept `status`: a domain becomes `verified` only through `workspace.domains.verify`, so an admin can no longer activate a hostname without proving that it reaches this installation (#461). This is a breaking input change; callers that sent `status` now get `invalid_input`.
+- A hostname now belongs to one workspace: another workspace cannot register any prefix on a host that is already claimed or verified, and verification re-checks ownership, so a brand can no longer carve a path prefix out of another brand's verified host (#462, including the prefix-shadowing case in #479).
+- The installation's admin host (`PUBLIC_URL`) and fallback links host (`PUBLIC_LINKS_URL`) are reserved and can never be registered or created as a brand domain (#480).
+- Host checking is persisted once it has been switched on: removing the last verified domain no longer reverts the installation to any-Host and re-enables cross-brand public pages (#463).
+- Domain verification fetches through the shared egress guard, so private, link-local and metadata targets are refused, and the caller no longer receives the internal error or HTTP status of the challenge fetch (#466).
+- The domain resolver cannot repopulate its cache from a load that started before an invalidation; writes reach other server processes within the documented 5-second TTL (#464).
+- The OAuth consent page renders brand names as text instead of HTML, and the sign-in, consent and invitation pages are served under a nonce-based Content-Security-Policy, so a brand name can no longer run script in a member's browser (#478).
+
 ### Fixed
 
 - Bulk mandate renewal renews from the published version and refuses a mandate that has an unpublished draft instead of replacing and publishing it; the mandate row is locked for the hash check and draft write, so concurrent renewals become successive versions instead of both reading the same one and overwriting it (#455).
@@ -20,9 +28,6 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 - `agents.renewMandates` rejects a `validUntil` in the past or more than a year away, matching its schema (#472).
 - `agents.renewals` reports a recently expired mandate as a negative number of days and sorts newest expiry first, as documented (#482).
 - `agents.runFailures` and the contact-pressure count have supporting indexes, and finished hosted-agent runs are removed after `RETENTION_HOSTED_AGENT_RUN_DAYS` (default 90) (#488).
-
-### Fixed
-
 - Broadcast segment and template names refresh after a change instead of keeping the old name for the rest of the session (#459).
 - The shared broadcast name cache is dropped on artifact create, rename, delete and publish, with a short time limit as a backstop (#486).
 - The sidebar pending badge counts decisions, so a bundle counts once, exactly as on Approvals; members are grouped by bundle id even when the bundle’s lead is on another page (#483).
@@ -58,8 +63,9 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 - **Background backfill:** the migration does not rewrite `messages`. After the scheduler starts, it fills `sent_at` for already-completed messages in batches of 10,000 in short transactions. It stops when no row is left or a batch fails; there is no continuous retry, so a failed pass runs again on the next start (or restart). Until a row is filled, delivery caps count it from `updated_at` exactly as 0.10.0 did, so caps stay correct throughout. `am doctor` reports how many completed messages are left (`migrations.sent-at-backfill`); no manual step is needed.
 - **Interrupted index build:** if a `CREATE INDEX CONCURRENTLY` is interrupted, its index is left invalid. The next `am migrate` (or server start) drops that index and builds it again; `am doctor` reports one that is still present (`migrations.invalid-indexes`).
 - **Rollout pauses:** a ramp paused before 0.10.1 was already e-mailed by the old in-transaction path. It is recorded as notified and is **not re-notified** after the upgrade, so an upgrade does not send a burst of old pause e-mails. Only pauses created after 0.10.1 are delivered from the durable outbox.
-- **Configuration:** no new environment variables.
-- **Breaking changes:** none.
+- **Migrations, reserved hosts:** a domain claim on the installation's own admin host (`PUBLIC_URL`) or fallback links host (`PUBLIC_LINKS_URL`) is now ignored by the resolver, including one verified under 0.10.0; `am doctor` lists any such row with its id; remove it with `workspace.domains.remove` and give that brand its own hostname.
+- **Configuration:** two new optional variables: `WORKSPACE_QUOTA` (default 10, how many brands one person may own) and `RETENTION_HOSTED_AGENT_RUN_DAYS` (default 90, how long finished hosted-agent runs are kept). Both are passed through by the Compose file and the Helm chart.
+- **Breaking changes:** `workspace.domains.add` and `workspace.domains.update` no longer accept `status`; a domain becomes verified only through `workspace.domains.verify`. A hostname with a non-default port is refused. A hostname belongs to one brand; unverified claims expire after seven days and can then be taken by another brand. Once any domain has been verified, Host checking stays on even if the last verified domain is removed. A mandate's `learning.experienceRamp` now requires at least two steps, a first step below 100% and a guardrail. `agents.compare` covers at most 20 agents (the most recently active when none are named) and reports `truncated`. `experiences.stopRollout` reports `edgePushed` and `edgePushReason`; a successful push still needs Cloudflare's propagation time. Rollout pause e-mails are delivered at least once, de-duplicated by key, with bounded retries.
 - **Manual steps:** none.
 - **Upgrade:** download `agentic-marketing-compose-0.10.1.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.10.1 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.10.1` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.10.1). Run `docker compose exec app am doctor`.
 

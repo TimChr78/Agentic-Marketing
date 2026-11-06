@@ -1,6 +1,7 @@
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { syncEdge } from '@agentic-marketing/personalize';
+import { acquireEdgeSyncLock, syncEdge } from '@agentic-marketing/personalize';
+import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { startTestServer, testPort, type User } from './harness';
 
@@ -205,4 +206,45 @@ describe('stopping a ramp during an edge sync (#477, round 3)', () => {
     await syncEdge({ db: t.srv.db, hot: t.srv.hot, kp: t.srv.keyProvider, egress: t.srv.egress }, w);
     expect(bundleOf(E, w)?.experiences.find((e) => e.id === id)?.share).toBe(0);
   }, 60_000);
+
+  it('a stop that times out wins over an upload already in flight (#477 final review)', async () => {
+    const u = await t.signUp(`edge-stop-upload-${Date.now()}@example.com`);
+    const w = await t.workspaceWith([[u, 'owner']], 'none');
+    const api = t.api(u, w);
+    const created = await api.call('artifacts.create', {
+      type: 'experience',
+      name: 'Stop during an upload',
+      content: {
+        placement: 'hero',
+        variants: [{ id: 'a', name: 'A', weight: 100, content: { html: '<h1>A</h1>' } }],
+        rollout: { steps: [5, 25, 100], stepHours: 1 },
+      },
+    });
+    const id = created.artifactId;
+    expect((await api.call('artifacts.requestPublish', { artifactId: id, note: 'ramp' })).status).toBe('published');
+    await api.call('edge.configure', { accountId: A, namespaceId: 'f'.repeat(32), apiBase, apiToken: 'test-token-'.repeat(4) });
+
+    // The sync passes its generation check and starts uploading the share-5 bundle; the upload is
+    // held before Cloudflare applies it.
+    const gate = { path: '/bulk', entered: deferred(), release: deferred() };
+    pause = gate;
+    const tick = syncEdge({ db: t.srv.db, hot: t.srv.hot, kp: t.srv.keyProvider, egress: t.srv.egress }, w);
+    await gate.entered.promise;
+    // The stop cannot get the edge lock within its wait, so it commits share 0 without pushing.
+    const stopped = await api.call('experiences.stopRollout', { artifactId: id, reason: 'Stop during an upload' });
+    expect(stopped).toMatchObject({ status: 'stopped', share: 0, edgePushed: false });
+    // Now the old upload lands. The sync sees the generation moved and republishes under its lock.
+    gate.release.resolve();
+    await tick;
+    expect(bundleOf('f'.repeat(32), w)?.experiences.find((e) => e.id === id)?.share).toBe(0);
+  }, 60_000);
+
+  it('restores the caller’s lock_timeout after taking the edge lock (#477 final review)', async () => {
+    const after = await t.srv.db.withWorkspace(ws, async (tx) => {
+      await tx.execute(sql`SELECT set_config('lock_timeout', '7s', true)`);
+      expect(await acquireEdgeSyncLock(tx, ws, 1_000)).toBe(true);
+      return (await tx.execute<{ v: string }>(sql`SELECT current_setting('lock_timeout') AS v`)).rows[0]?.v;
+    });
+    expect(after).toBe('7s');
+  });
 });
