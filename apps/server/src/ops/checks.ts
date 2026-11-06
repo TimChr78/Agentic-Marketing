@@ -4,7 +4,7 @@ import { readdir } from 'node:fs/promises';
 import { connect } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { isMcpResourceUrlAllowed } from '@agentic-marketing/auth';
-import { createDb, type Db } from '@agentic-marketing/db';
+import { createDb, type Db, normalizeHost } from '@agentic-marketing/db';
 import { valkeyHotState } from '@agentic-marketing/hotstate';
 import { type Config, ENV_KEYS, loadConfig, REQUIRED_ENV_KEYS } from '../config';
 import { keyProviderFor } from '../keys';
@@ -779,6 +779,7 @@ export async function operationalHealthChecks(db: Db): Promise<Check[]> {
 }
 
 export interface BrandDomainRow {
+  id: string;
   workspaceId: string;
   workspaceName: string;
   host: string;
@@ -790,6 +791,8 @@ export interface BrandDomainRow {
 export interface BrandDomainDeps {
   lookup?: (host: string) => Promise<unknown>;
   probe?: (url: string) => Promise<number>;
+  /** Extra reserved hosts to quarantine, on top of PUBLIC_URL and PUBLIC_LINKS_URL. */
+  reservedHosts?: string[];
 }
 
 /** Reads the registry for `am doctor`; a fresh install has no table yet, which means no domains. */
@@ -798,7 +801,7 @@ async function readBrandDomains(db: Db): Promise<{ domains: BrandDomainRow[]; wo
     const [domainResult, workspaceResult] = await Promise.all([
       withTimeout(
         db.admin.query<BrandDomainRow>(
-          `SELECT d.workspace_id AS "workspaceId", w.name AS "workspaceName", d.host,
+          `SELECT d.id, d.workspace_id AS "workspaceId", w.name AS "workspaceName", d.host,
                   d.path_prefix AS "pathPrefix", d.is_primary AS "isPrimary", d.status
              FROM workspace_domains d
              JOIN workspaces w ON w.id = d.workspace_id
@@ -838,12 +841,22 @@ function looksLikeTlsError(err: unknown): boolean {
 export async function checkBrandDomains(
   domains: BrandDomainRow[],
   workspaces: { id: string; name: string }[],
-  config: Pick<Config, 'publicUrl'>,
+  config: Pick<Config, 'publicUrl' | 'linksUrl'>,
   deps: BrandDomainDeps = {},
 ): Promise<Check[]> {
   const lookup = deps.lookup ?? ((host: string) => dnsLookup(host));
   const probe = deps.probe ?? probeHttp;
   const adminHost = new URL(config.publicUrl).hostname.toLowerCase();
+  // The admin and fallback hosts belong to the installation, so the resolver quarantines any row
+  // on them. A 0.10.0 install could still have verified one; report it so an operator can remove it.
+  const reservedHosts = new Set(deps.reservedHosts ?? []);
+  for (const value of [config.publicUrl, config.linksUrl]) {
+    try {
+      reservedHosts.add(normalizeHost(new URL(value).hostname));
+    } catch {
+      // A malformed configured URL is reported by config checks; skip it here.
+    }
+  }
   const checks: Check[] = [];
 
   checks.push(
@@ -851,6 +864,13 @@ export async function checkBrandDomains(
       domains.map(async (domain) => {
         const id = `brand-domains.${domain.host}${domain.pathPrefix ?? ''}`;
         const label = `${domain.host}${domain.pathPrefix ?? ''}`;
+        if (reservedHosts.has(domain.host))
+          return {
+            id,
+            status: 'warn' as const,
+            message: `${label} is a reserved installation host (the admin or fallback links host) and is ignored by the resolver`,
+            hint: `Remove the row with workspace.domains.remove {id: "${domain.id}"} in that brand (or DELETE FROM workspace_domains WHERE id = '${domain.id}'), then map the brand to its own hostname.`,
+          };
         if (domain.status !== 'verified')
           return {
             id,

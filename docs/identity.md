@@ -138,11 +138,21 @@ domain is a normalised hostname plus an optional path prefix:
   `workspace.get` returns the workspace's `domains` and its effective `linksUrl`; only a **verified**
   primary domain appears as `primaryDomain` in `workspace.get` and `workspace.memberships` (#465);
 - an unverified claim holds its hostname for **7 days**. After that another workspace may register
-  the same host and prefix, which replaces the expired claim (#467). Verified domains never expire.
+  the same host under any prefix, which removes every expired claim on that host so it can no longer
+  be verified later (#467). Verified domains never expire.
 
 The admin host (`PUBLIC_URL`) and the fallback links host (`PUBLIC_LINKS_URL`) are **reserved
 installation-wide** and can never be registered as a brand domain (#480): they belong to the
-installation, not to one brand.
+installation, not to one brand. The resolver also **quarantines** any row on those hosts, so a row
+someone verified on a 0.10.0 install cannot take the fallback or admin host away from the
+installation; `am doctor` reports such a row with the remediation below.
+
+Claims, expired-claim reclamation and verification take one transaction-scoped advisory lock per
+normalised hostname. Two workspaces therefore cannot both pass the ownership check at different
+prefixes and insert: exactly one claim wins, and the other is refused. Verification serialises with
+claiming too; if the row's host, prefix or token changed while the challenge was being fetched, the
+verify command refuses with "the domain changed during verification" instead of verifying the
+replacement (#462).
 
 Normalisation runs before the row is written, so `MartechSignal.COM` and `martechsignal.com` are the
 same host, and `/am/` and `am` are the same prefix. Host resolution for a request (before any
@@ -165,11 +175,15 @@ another brand's traffic.
    token. The challenge is answered even while the domain is pending, and on any Host.
 3. Run `workspace.domains.verify {id}`. The server fetches the same URL through the shared egress
    guard (timeboxed, at most 4 KiB read, no redirects; plain http only on localhost), compares the
-   body with the token, and sets `status: "verified"` and `verifiedAt`. A private, link-local or
-   metadata address is refused unless the hostname is listed in `EGRESS_ALLOWED_HOSTS`, like any
-   other outbound target. A wrong token, a non-200 answer or an unreachable host is refused without
-   repeating the internal error or HTTP status: the caller only learns that the challenge could not
-   be reached or did not answer with the token (#466).
+   body with the token, and sets `status: "verified"` and `verifiedAt`. The update is conditioned on
+   the row it checked (same host, prefix, token and still pending): if an update replaced any of
+   them during the fetch, verification fails with "the domain changed during verification" and the
+   replacement stays pending (#462). The update and the installation-wide routing policy it switches
+   on are written in the same transaction, so a crash cannot separate them (#463). A private,
+   link-local or metadata address is refused unless the hostname is listed in
+   `EGRESS_ALLOWED_HOSTS`, like any other outbound target. A wrong token, a non-200 answer or an
+   unreachable host is refused without repeating the internal error or HTTP status: the caller only
+   learns that the challenge could not be reached or did not answer with the token (#466).
 
 Only verified domains are used for request resolution and `linksUrlFor`. Changing a domain's host or
 prefix resets it to pending, so verify it again before it serves. Removing the primary domain makes
@@ -234,11 +248,22 @@ host is reserved and cannot be registered by a workspace (#480); give the defaul
 hostname if it should appear in the registry. If several workspaces exist and some have no primary
 domain, `am doctor` warns that their links still use `PUBLIC_LINKS_URL`.
 
+**Upgrading from 0.10.0:** a 0.10.0 install could already contain a **verified** row on the fallback
+or admin host, because the reserved-host check was only applied to new registrations. 0.10.1
+quarantines such a row: the resolver ignores it, so it no longer resolves traffic or supplies links,
+and `am doctor` reports it as a reserved installation host. Remove the row from its brand
+(`workspace.domains.remove {id}`) or with
+`DELETE FROM workspace_domains WHERE id = '<row id>'`; the installation then keeps using
+`PUBLIC_LINKS_URL` (or `PUBLIC_URL`) as before. No migration is needed for this, and a taken-over
+host does not need to be released before the upgrade.
+
 ### `am doctor`
 
 For each registered domain, `am doctor` checks that DNS resolves, that `https://<host><prefix>/healthz`
 (or the public listener's path) answers, and that the TLS certificate is valid. A pending domain is
 reported as inactive with the verification step. It warns when a registered host is the admin host,
 when a multi-brand install has brands without a verified primary domain, and when a host uses a
-reserved or private suffix. The checks are short and timeboxed like the other network checks; a fresh
-install with no domains reports that links use `PUBLIC_LINKS_URL`.
+reserved or private suffix. A row on the admin or fallback host is also reported with the
+`workspace.domains.remove` command (and the row id) that clears it (#480), because the resolver
+ignores that row and it can never serve the brand. The checks are short and timeboxed like the other
+network checks; a fresh install with no domains reports that links use `PUBLIC_LINKS_URL`.

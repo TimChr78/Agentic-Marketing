@@ -50,6 +50,36 @@ describe('brand domains', () => {
     expect((await t.api(owner, wsA).call('workspace.domains.list', {})).linksUrl).toBe(LINKS_URL);
   });
 
+  it('writes verification and routing activation in one transaction (#463)', async () => {
+    const added = await t.api(owner, wsA).call('workspace.domains.add', { host: 'crash.example' });
+    // Fail the activation write after the verification update: both must roll back.
+    await t.srv.db.admin.query(
+      `CREATE OR REPLACE FUNCTION refuse_activation() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN RAISE EXCEPTION 'activation failed on purpose'; END $$`,
+    );
+    await t.srv.db.admin.query(
+      `CREATE TRIGGER refuse_activation BEFORE INSERT ON installation_settings
+         FOR EACH ROW WHEN (NEW.key = 'domain_routing_active') EXECUTE FUNCTION refuse_activation()`,
+    );
+    t.srv.services.fetchDomainChallenge = async (url) => ({
+      status: 200,
+      body: decodeURIComponent(new URL(url).pathname.split('/').pop() ?? ''),
+    });
+    try {
+      const failed = await rejects(t.api(owner, wsA).call('workspace.domains.verify', { id: added.domain.id }));
+      expect(failed.status).toBeGreaterThanOrEqual(500);
+    } finally {
+      await t.srv.db.admin.query('DROP TRIGGER IF EXISTS refuse_activation ON installation_settings');
+      await t.srv.db.admin.query('DROP FUNCTION IF EXISTS refuse_activation()');
+    }
+    const domain = (await t.api(owner, wsA).call('workspace.domains.list', {})).domains.find(
+      (row: { id: string }) => row.id === added.domain.id,
+    );
+    expect(domain).toMatchObject({ status: 'pending', verifiedAt: null });
+    const setting = await t.srv.db.admin.query("SELECT key FROM installation_settings WHERE key = 'domain_routing_active'");
+    expect(setting.rows).toEqual([]);
+  });
+
   it('registers two domains for two workspaces and resolves each by Host and path once verified', async () => {
     const a = await t.api(owner, wsA).call('workspace.domains.add', { host: 'MartechSignal.COM', isPrimary: true });
     martechId = a.domain.id;
@@ -165,6 +195,28 @@ describe('brand domains', () => {
     expect(fallbackRequest).toMatchObject({ workspaceId: null, matched: false });
   });
 
+  it('quarantines a verified row someone already planted on the fallback host (#480)', async () => {
+    await t.srv.db.admin.query(
+      `INSERT INTO workspace_domains (id, workspace_id, host, path_prefix, is_primary, status, verification_token, created_by, verified_at)
+       VALUES ($1, $2, 'links.example.com', NULL, false, 'verified', 'wdv_takeover', $3, now())`,
+      ['wdo_takeover_480', wsB, otherOwner.id],
+    );
+    t.srv.domains.invalidate();
+    try {
+      // The resolver ignores the quarantined row, so it cannot take over the fallback host.
+      expect(await t.srv.domains.resolveWorkspaceForRequest('links.example.com', '/f/x')).toBeNull();
+      expect(await t.srv.domains.resolvePublicRequest('links.example.com', '/u/token')).toMatchObject({
+        workspaceId: null,
+        matched: false,
+      });
+      // Nor does it become B's links URL; B's verified primary still wins.
+      expect(await t.srv.domains.linksUrlFor(wsB)).toBe('https://second.example/am');
+    } finally {
+      await t.srv.db.admin.query('DELETE FROM workspace_domains WHERE id = $1', ['wdo_takeover_480']);
+      t.srv.domains.invalidate();
+    }
+  });
+
   it('does not let another workspace carve a prefix out of a verified host (#462, #479)', async () => {
     const unverifiedPrefix = await rejects(
       t.api(otherOwner, wsB).call('workspace.domains.add', { host: 'martechsignal.com', pathPrefix: '/deals' }),
@@ -211,6 +263,86 @@ describe('brand domains', () => {
     const blocked = await rejects(t.api(otherOwner, wsB).call('workspace.domains.add', { host: 'fresh.example' }));
     expect(blocked.status).toBe(400);
     expect(blocked.message).toMatch(/claimed by another workspace/i);
+  });
+
+  it('serializes concurrent claims of one host at different prefixes (#462, #467)', async () => {
+    // Hold both inserts for a moment after their ownership check: without a per-host lock both
+    // checks pass and the unique index allows the two different prefixes, so both would be written.
+    await t.srv.db.admin.query(
+      `CREATE OR REPLACE FUNCTION slow_domain_insert() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN PERFORM pg_sleep(0.2); RETURN NEW; END $$`,
+    );
+    await t.srv.db.admin.query(
+      'CREATE TRIGGER slow_domain_insert BEFORE INSERT ON workspace_domains FOR EACH ROW EXECUTE FUNCTION slow_domain_insert()',
+    );
+    let results: PromiseSettledResult<unknown>[] = [];
+    try {
+      results = await Promise.allSettled([
+        t.api(owner, wsA).call('workspace.domains.add', { host: 'race.example', pathPrefix: '/a' }),
+        t.api(otherOwner, wsB).call('workspace.domains.add', { host: 'race.example', pathPrefix: '/b' }),
+      ]);
+    } finally {
+      await t.srv.db.admin.query('DROP TRIGGER IF EXISTS slow_domain_insert ON workspace_domains');
+      await t.srv.db.admin.query('DROP FUNCTION IF EXISTS slow_domain_insert()');
+    }
+    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+    const rows = await t.srv.db.admin.query<{ workspaceId: string; pathPrefix: string }>(
+      'SELECT workspace_id AS "workspaceId", path_prefix AS "pathPrefix" FROM workspace_domains WHERE host = $1',
+      ['race.example'],
+    );
+    expect(rows.rows).toHaveLength(1);
+    expect(['/a', '/b']).toContain(rows.rows[0].pathPrefix);
+  });
+
+  it('removes expired claims at other prefixes so they can never be verified later (#467)', async () => {
+    await t.srv.db.admin.query(
+      `INSERT INTO workspace_domains (id, workspace_id, host, path_prefix, is_primary, status, verification_token, created_by, created_at)
+       VALUES ($1, $2, 'stale-prefix.example', '/old', false, 'pending', 'wdv_old', $3, now() - interval '8 days')`,
+      ['wdo_stale_prefix', wsA, owner.id],
+    );
+    // B claims the same host at another prefix: A's abandoned claim is gone, not just ignored.
+    const claimed = await t.api(otherOwner, wsB).call('workspace.domains.add', {
+      host: 'stale-prefix.example',
+      pathPrefix: '/new',
+    });
+    expect(claimed.domain).toMatchObject({ host: 'stale-prefix.example', pathPrefix: '/new' });
+    const stale = await t.srv.db.admin.query('SELECT id FROM workspace_domains WHERE id = $1', ['wdo_stale_prefix']);
+    expect(stale.rows).toEqual([]);
+    const verify = await rejects(t.api(owner, wsA).call('workspace.domains.verify', { id: 'wdo_stale_prefix' }));
+    expect(verify.status).toBe(404);
+  });
+
+  it('refuses verification when the domain changes during the challenge (#462)', async () => {
+    const added = await t.api(owner, wsA).call('workspace.domains.add', { host: 'verify-race.example' });
+    let started!: () => void;
+    const startedPromise = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    t.srv.services.fetchDomainChallenge = async (url) => {
+      started();
+      await gate;
+      return { status: 200, body: decodeURIComponent(new URL(url).pathname.split('/').pop() ?? '') };
+    };
+    const verifying = rejects(t.api(owner, wsA).call('workspace.domains.verify', { id: added.domain.id }));
+    await startedPromise;
+    // A concurrent update replaces the host and token while the fetch is in flight.
+    const moved = await t.api(owner, wsA).call('workspace.domains.update', {
+      id: added.domain.id,
+      host: 'verify-race-moved.example',
+    });
+    expect(moved.domain).toMatchObject({ host: 'verify-race-moved.example', status: 'pending' });
+    release();
+    const err = await verifying;
+    expect(err.status).toBe(409);
+    expect(err.message).toMatch(/changed during verification/i);
+    const row = (await t.api(owner, wsA).call('workspace.domains.list', {})).domains.find(
+      (domain: { id: string }) => domain.id === added.domain.id,
+    );
+    expect(row).toMatchObject({ host: 'verify-race-moved.example', status: 'pending', verifiedAt: null });
   });
 
   it('rejects an explicit non-default port instead of dropping it (#481)', async () => {

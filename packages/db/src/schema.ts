@@ -76,8 +76,9 @@ export const workspaceDomains = pgTable(
 );
 
 /**
- * Installation-wide settings that outlive any one workspace. Only the owner connection reads and
- * writes them; they are not tenant data. `domain_routing_active` remembers that brand Host checking
+ * Installation-wide settings that outlive any one workspace. They are not tenant data: resolution
+ * reads them on the owner connection, and a command transaction may write one setting itself so it
+ * commits with the change it belongs to. `domain_routing_active` remembers that brand Host checking
  * has been switched on, so removing the last verified domain cannot turn it off again (#463).
  */
 export const installationSettings = pgTable('installation_settings', {
