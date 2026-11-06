@@ -165,6 +165,8 @@ vi.mock('../src/app/api', async (importOriginal) => {
   };
 });
 
+vi.mock('../src/components/Chart', () => ({ Chart: () => null }));
+
 vi.mock('../src/app/session', () => ({
   useWorkspace: () => ({
     can: (permission: string) => permission !== 'messages:send',
@@ -204,7 +206,7 @@ describe('BroadcastPage (#448)', () => {
 
     await waitFor(() => expect(screen.getByRole('tab', { name: 'Report' }).getAttribute('aria-selected')).toBe('true'));
     expect(h.calls.filter((c) => c.name === 'broadcasts.status')).toHaveLength(1);
-    await waitFor(() => expect(h.calls.filter((c) => c.name === 'analytics.query')).toHaveLength(1));
+    await waitFor(() => expect(h.calls.filter((c) => c.name === 'analytics.query')).toHaveLength(2));
 
     expect(screen.getByText('Context')).toBeTruthy();
     expect(screen.getByText('Alex Morgan')).toBeTruthy();
@@ -220,11 +222,11 @@ describe('BroadcastPage (#448)', () => {
     history.replaceState(null, '', `/build/broadcasts/${id}?tab=content`);
     renderPage();
     await screen.findByRole('heading', { level: 1, name: 'Lifecycle playbook' });
-    expect(screen.queryByText('E-mails sent')).toBeNull();
+    expect(screen.queryByText('Sent people')).toBeNull();
     expect(h.calls.filter((c) => c.name === 'analytics.query')).toHaveLength(0);
     fireEvent.click(screen.getByRole('tab', { name: 'Report' }));
-    expect(await screen.findByText('E-mails sent')).toBeTruthy();
-    expect(h.calls.filter((c) => c.name === 'analytics.query')).toHaveLength(1);
+    expect(await screen.findByText('Sent people')).toBeTruthy();
+    expect(h.calls.filter((c) => c.name === 'analytics.query')).toHaveLength(2);
   });
 
   const draftArtifact = {
