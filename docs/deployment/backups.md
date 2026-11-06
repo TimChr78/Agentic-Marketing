@@ -229,7 +229,10 @@ the standard five fields (`minute hour day-of-month month day-of-week`), with `*
 (`1,15`), ranges (`1-5`) and steps (`*/15`, `0-6/2`). `BACKUP_KEEP_DAYS` defaults to 14. A failed
 run is logged and the next minute is still checked; `docker compose stop backup` (SIGTERM) stops
 the loop after the current run. The container needs only `DATABASE_URL`, `CLICKHOUSE_URL` and
-`CLICKHOUSE_DATABASE`; it does not read `AUTH_SECRET` or `MASTER_KEY`.
+`CLICKHOUSE_DATABASE`; it does not read `AUTH_SECRET` or `MASTER_KEY`. Pass the same
+`CLICKHOUSE_DATABASE` value the app uses (the `compose.override.example.yaml` block reads it from
+`.env` with `${CLICKHOUSE_DATABASE:-am}`), or the dump targets the wrong database on an install that
+renamed it.
 
 The scheduler writes `<BACKUP_DIR>/.schedule-status.json` (`0600`) at start and after every
 minute tick: `{ lastRunAt, lastOk, lastError?, nextRunAt }`. Check it from a healthcheck with:
