@@ -20,7 +20,7 @@ test('create a mandate for an agent and see it on the agent page (#228)', async 
   const agent = agents.agents.find((a) => a.name === name);
   expect(agent, 'the agent list has the new agent').toBeTruthy();
 
-  await page.goto(`/settings/agents/${agent!.id}`);
+  await page.goto(`/work/agents/${agent!.id}`);
   await expect(page.getByText('No active mandate')).toBeVisible();
 
   // The button prefills the agent; the editor opens on the new draft.
@@ -41,7 +41,7 @@ test('create a mandate for an agent and see it on the agent page (#228)', async 
   expect(published.status).toBe('published');
 
   // Back on the agent page: the active mandate, its link and its expiry.
-  await page.goto(`/settings/agents/${agent!.id}`);
+  await page.goto(`/work/agents/${agent!.id}`);
   await expect(page.getByRole('link', { name: `${name} mandate` })).toBeVisible();
   await expect(page.getByText(/days left/)).toBeVisible();
   await expect(page.getByText(/Expires/)).toBeVisible();

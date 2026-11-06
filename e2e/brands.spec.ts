@@ -54,9 +54,9 @@ test('the desktop nav collapses to a rail and the mobile drawer is unchanged (#1
   await page.getByRole('button', { name: 'Collapse navigation' }).click();
   await expect(page.getByRole('button', { name: 'Expand navigation' })).toBeVisible();
   await expect.poll(async () => (await sidebar.boundingBox())?.width).toBe(64);
-  // Every rail icon has an accessible name, and the approvals badge is still visible.
-  await expect(page.getByRole('link', { name: /Approvals/ })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Build navigation' })).toBeVisible();
+  // Every rail icon has an accessible name, and the approvals badge is still visible on Work.
+  await expect(page.getByRole('button', { name: /Work navigation, 3 pending/ })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Marketing navigation' })).toBeVisible();
 
   await page.reload();
   await expect(page.getByRole('button', { name: 'Expand navigation' })).toBeVisible();

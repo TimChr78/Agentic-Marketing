@@ -7,9 +7,11 @@ test.describe('approvals (#41)', () => {
     await page.getByLabel('E-mail').fill(PEOPLE.approver);
     await page.getByLabel('Password').fill(PASSWORD);
     await page.getByRole('button', { name: 'Sign in' }).click();
-    // Approvers land on the queue; the demo is nowhere in the signed-in app.
-    await expect(page).toHaveURL(/\/approvals$/);
+    // The queue is a destination, not the landing page; Home is the start page for everyone.
+    await expect(page).toHaveURL(/\/$/);
+    await expect(page.getByRole('heading', { name: 'Home' })).toBeVisible();
     await expect(page.getByRole('navigation', { name: 'Main' })).not.toContainText(/demo/i);
+    await page.goto('/approvals');
 
     const row = page.getByRole('row', { name: /Weekly Signal #43/ });
     await expect(row).toContainText('Hermes');
