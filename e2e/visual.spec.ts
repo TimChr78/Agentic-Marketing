@@ -74,7 +74,8 @@ for (const name of SUBSET) {
         // which differs between machines; the baseline guards the page's layout (header, count,
         // columns, row structure), so the per-person cells are masked like other volatile text.
         const mask = [...(await volatileMasks(page))];
-        if (name === 'people') mask.push(page.locator('table tbody td'));
+        // Phones show the same people as cards in a list instead of table rows.
+        if (name === 'people') mask.push(page.locator('table tbody td'), page.getByRole('list', { name: 'People' }).getByRole('listitem'));
         await expect(page).toHaveScreenshot(`${name}-${width}-${theme}.png`, { mask });
       }
     }

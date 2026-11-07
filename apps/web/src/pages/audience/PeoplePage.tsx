@@ -268,8 +268,8 @@ export function PeopleList() {
               id="people-find-email"
               type="text"
               compact
-              placeholder="E-mail or prf_… profile ID"
-              className="w-[260px] max-w-full"
+              placeholder="E-mail or profile ID"
+              className="w-[260px] min-w-[200px] max-w-full"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
             />
