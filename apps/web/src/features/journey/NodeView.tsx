@@ -4,13 +4,14 @@ import { memo } from 'react';
 import { cx } from '../../ui';
 import { NODE_W } from './layout';
 import { edgeLabel, type JNode, KINDS, maxEdges } from './model';
+import { countText, type NodeCounts } from './report/counts';
 
 export interface NodeData extends Record<string, unknown> {
   node: JNode;
   summary: string;
   warnings: string[];
-  /** People who passed it / are waiting there (journey stats). */
-  stats?: { reached?: number; waiting?: number };
+  /** People who reached it / are waiting there (journey stats). A missing key stays unavailable. */
+  stats?: NodeCounts;
   readOnly?: boolean;
   /** On the simulated path. */
   highlight?: boolean;
@@ -71,8 +72,8 @@ export const NodeView = memo(function NodeView({ data, selected }: NodeProps) {
             </span>
           )}
           {stats && (
-            <span className="text-muted tabular-nums">
-              {(stats.reached ?? 0).toLocaleString()} passed · {(stats.waiting ?? 0).toLocaleString()} waiting
+            <span className="text-muted tabular-nums" title={stats.label}>
+              {countText(stats)}
             </span>
           )}
         </div>

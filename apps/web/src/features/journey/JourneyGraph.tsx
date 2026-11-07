@@ -6,32 +6,45 @@ import { Legend } from './Legend';
 import { positionsOf } from './layout';
 import { edgesOf, type JNode, summary } from './model';
 import { type NodeData, nodeTypes } from './NodeView';
+import { countFor, countText, type JourneyCounts, withNodeCounts } from './report/counts';
 
-/** A read-only journey graph, e.g. in the approval drawer. Also lists the steps as text for screen readers. */
+/**
+ * A read-only journey graph, e.g. in the approval drawer, the report or the builder preview.
+ * It renders counts supplied by its host and never fetches anything itself (#507).
+ */
 export function JourneyGraph({
   nodes,
   warnings = {},
   names,
   height = 480,
+  counts,
+  countsLabel,
 }: {
   nodes: JNode[];
   warnings?: Record<string, string[]>;
   names?: (id: string) => string | undefined;
   height?: number;
+  /** Node counts from one shared journeys.stats read; a missing key stays unavailable. */
+  counts?: JourneyCounts;
+  countsLabel?: string;
 }) {
   const theme = useResolvedTheme();
   const pos = useMemo(() => positionsOf(nodes), [nodes]);
   const flowNodes = useMemo<Node[]>(
     () =>
-      nodes.map((n) => ({
-        id: n.id,
-        type: 'step',
-        position: pos[n.id]!,
-        data: { node: n, summary: summary(n, names), warnings: warnings[n.id] ?? [], readOnly: true } satisfies NodeData,
-        draggable: false,
-        connectable: false,
-      })),
-    [nodes, pos, warnings, names],
+      withNodeCounts(
+        nodes.map((n) => ({
+          id: n.id,
+          type: 'step',
+          position: pos[n.id]!,
+          data: { node: n, summary: summary(n, names), warnings: warnings[n.id] ?? [], readOnly: true } satisfies NodeData,
+          draggable: false,
+          connectable: false,
+        })),
+        counts,
+        countsLabel,
+      ),
+    [nodes, pos, warnings, names, counts, countsLabel],
   );
   const flowEdges = useMemo<Edge[]>(
     () =>
@@ -49,6 +62,7 @@ export function JourneyGraph({
   );
   return (
     <div className="space-y-2">
+      {counts && countsLabel && <p className="text-[11px] leading-4 text-muted">{countsLabel}</p>}
       {/* A section, not role="img": the read-only nodes and the zoom controls inside it are focusable. */}
       <section
         className="overflow-hidden rounded-md border border-line bg-surface-2"
@@ -80,9 +94,11 @@ export function JourneyGraph({
         <ol className="mt-2 list-decimal space-y-1 pl-5">
           {nodes.map((n) => {
             const out = edgesOf(nodes).filter((e) => e.source === n.id);
+            const nodeCounts = countFor(n.id, counts, countsLabel);
             return (
               <li key={n.id}>
                 <span className="font-medium">{n.label}</span> <span className="text-muted">({n.kind})</span>: {summary(n, names)}
+                {nodeCounts && <span className="text-muted"> · {countText(nodeCounts)}</span>}
                 {out.length > 0 && (
                   <span className="text-muted">
                     {' '}

@@ -69,15 +69,17 @@ vi.mock('../../../app/api', async (importOriginal) => {
   };
 });
 
-const session = () => ({
-  can: (permission: string) => (permission === 'artifacts:read' ? h.canRead : true),
-  workspace: { id: 'ws_1' },
-  user: { id: 'u1' },
-});
-
 vi.mock('../../../app/session', () => ({
-  useSession: session,
-  useWorkspace: session,
+  useSession: () => ({
+    can: (permission: string) => (permission === 'artifacts:read' ? h.canRead : true),
+    workspace: { id: 'ws_1' },
+    user: { id: 'u1' },
+  }),
+  useWorkspace: () => ({
+    can: (permission: string) => (permission === 'artifacts:read' ? h.canRead : true),
+    workspace: { id: 'ws_1' },
+    user: { id: 'u1' },
+  }),
 }));
 
 vi.mock('../../../app/theme', () => ({ useResolvedTheme: () => 'light' }));
@@ -95,7 +97,7 @@ vi.mock('@xyflow/react', async () => {
         'div',
         null,
         nodes.map((node) => {
-          const Step = nodeTypes[node.type ?? 'step']!;
+          const Step = nodeTypes[node.type ?? 'step']! as React.ComponentType<{ data: unknown; selected: boolean }>;
           return React.createElement(Step, { key: node.id, data: node.data, selected: false });
         }),
       ),
@@ -235,6 +237,7 @@ describe('journey report reads (#507)', () => {
 
     renderReport();
     await screen.findByText('Published v1 · counts across all versions');
+    await screen.findByText('Entered in period');
 
     expect(calls('artifacts.get')).toEqual([
       { name: 'artifacts.get', input: { artifactId: journeyId } },
@@ -303,7 +306,7 @@ describe('journey report reads (#507)', () => {
     await screen.findByText('No published topology. Draft preview has no live count overlay.');
     expect(calls('journeys.stats')).toHaveLength(1);
     expect(calls('analytics.journeyFunnel')).toHaveLength(0);
-    expect(screen.getAllByRole('button', { name: /^Copy ID n\d$/ }).length).toBeGreaterThan(0);
+    expect((await screen.findAllByRole('button', { name: /^Copy ID n\d$/ })).length).toBeGreaterThan(0);
   });
 });
 
@@ -423,7 +426,7 @@ describe('funnel gate (#507)', () => {
 
   it('draws a funnel only for a passing topology', async () => {
     renderReport();
-    await screen.findByText('Sequential event reach');
+    await waitFor(() => expect(screen.getAllByText('Sequential event reach').length).toBeGreaterThan(0));
     expect(screen.queryByText('This journey branches. Step reach is not a cohort funnel.')).toBeNull();
     expect(screen.getByText('Compatible linear topology; complete monotone steps. Event reach, not an entry cohort.')).toBeTruthy();
   });
@@ -450,8 +453,8 @@ describe('funnel gate (#507)', () => {
 
     renderReport();
     await screen.findByText('This journey branches. Step reach is not a cohort funnel.');
-    expect(screen.queryByText('Sequential event reach')).toBeNull();
-    expect(screen.getByText('Participants reaching steps · selected period')).toBeTruthy();
+    expect(screen.queryAllByText('Sequential event reach')).toHaveLength(0);
+    expect(screen.getAllByText('Participants reaching steps · selected period').length).toBeGreaterThan(0);
     expect(screen.getByRole('figure', { name: 'Participants reaching steps · selected period' })).toBeTruthy();
   });
 });
@@ -499,6 +502,19 @@ describe('current, all-time and period counts stay separate (#507)', () => {
     await screen.findByText('Historical step · name unavailable');
     expect(screen.getByRole('button', { name: 'Copy ID old_node' })).toBeTruthy();
     expect(screen.queryByText('Welcome email')).toBeNull();
+  });
+
+  it('keeps the funnel chart table and the step list in agreement', async () => {
+    renderReport();
+    await screen.findByText('Entered in period');
+
+    const figure = screen.getByRole('figure', { name: 'Sequential event reach' });
+    const chartTable = within(figure).getByRole('table', { name: 'Sequential event reach' });
+    expect(within(chartTable).getByText('Welcome email')).toBeTruthy();
+    expect(within(chartTable).getAllByText(/720/).length).toBeGreaterThan(0);
+
+    const steps = screen.getByRole('table', { name: 'Journey steps' });
+    expect(stepRow(steps, 'Welcome email').textContent).toContain('720');
   });
 
   it('never shows the raw journey id', async () => {
@@ -590,11 +606,19 @@ describe('journey report states (#507)', () => {
     expect(stepRow(table, 'Welcome email').textContent).toContain('Unavailable');
   });
 
+  it('never renders an epoch as freshness', async () => {
+    h.funnel = funnel({ meta: { ...funnel().meta, freshness: '1970-01-01T00:00:00.000Z' } });
+    renderReport();
+    await screen.findByText('Entered in period');
+    expect(screen.queryByText(/1970/)).toBeNull();
+    expect(screen.getAllByText(/Latest event in period \(step events\): Unavailable/).length).toBeGreaterThan(0);
+  });
+
   it('keeps a section failure local and retries only that section', async () => {
     h.statsError = new Error('stats unavailable');
     renderReport();
     await screen.findByText('Participant counts unavailable');
-    expect(screen.getByText('Sequential event reach')).toBeTruthy();
+    expect(screen.getAllByText('Sequential event reach').length).toBeGreaterThan(0);
     expect(calls('journeys.stats')).toHaveLength(1);
     expect(calls('analytics.journeyFunnel')).toHaveLength(1);
 
@@ -608,15 +632,15 @@ describe('journey report states (#507)', () => {
     renderReport();
     await screen.findByText('This item is not available at this address.');
     expect(screen.getByRole('link', { name: 'Return to the list' })).toBeTruthy();
-    expect(screen.queryByText('No recorded activity in this period. Choose another period; missing data is not a healthy result.')).toBeNull();
+    expect(
+      screen.queryByText('No recorded activity in this period. Choose another period; missing data is not a healthy result.'),
+    ).toBeNull();
   });
 
   it('shows unavailable when a successful read cannot establish the metric', async () => {
     h.stats = {};
     renderReport();
-    await screen.findByText(
-      'Values unavailable. This read does not provide the required metric or freshness. No estimate is substituted.',
-    );
+    await screen.findByText('Values unavailable. This read does not provide the required metric or freshness. No estimate is substituted.');
   });
 
   it('loads the holdout only after expanding it, once for the period', async () => {
@@ -634,6 +658,11 @@ describe('journey report states (#507)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Holdout' }));
     await waitFor(() => expect(calls('journeys.holdoutResult')).toHaveLength(1));
     expect(calls('journeys.holdoutResult')[0]!.input).toEqual({ journeyId, from: periodFrom, to: periodTo });
-    await screen.findByText('Not enough data yet');
+    expect((await screen.findAllByText('Not enough data yet')).length).toBeGreaterThan(0);
+
+    // Refresh reruns only the two report reads; the expanded holdout stays as it was.
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => expect(calls('analytics.journeyFunnel')).toHaveLength(2));
+    expect(calls('journeys.holdoutResult')).toHaveLength(1);
   });
 });
