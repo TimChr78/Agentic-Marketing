@@ -125,6 +125,81 @@ describe('changelog fragments', () => {
     expect(result.section).toContain('<!-- issues: 4, 5 -->');
   });
 
+  it('merges repeated sections instead of overwriting the earlier one', () => {
+    const changelog = `# Changelog
+
+## [Unreleased]
+
+### Changed
+
+- First change.
+
+### Changed
+
+- Second change.
+
+## [0.12.0] - 2026-11-07
+
+### Added
+
+- Previous release.
+`;
+    const { fragmentDir, changelogPath } = workspace(changelog);
+    const result = build({ version: '0.13.0', date: '2026-11-08', dir: fragmentDir, changelogPath });
+    expect(result.section).toContain('- First change.');
+    expect(result.section).toContain('- Second change.');
+  });
+
+  it('refuses bare text before the first subsection and writes nothing', () => {
+    const changelog = `# Changelog
+
+## [Unreleased]
+
+- Orphan bullet.
+
+### Changed
+
+- Real change.
+
+## [0.12.0] - 2026-11-07
+
+### Added
+
+- Previous release.
+`;
+    const { fragmentDir, changelogPath } = workspace(changelog, {
+      '1-new.md': fragment('Added', [1], '- New addition.'),
+    });
+    const before = readFileSync(changelogPath, 'utf8');
+    expect(() => build({ version: '0.13.0', date: '2026-11-08', dir: fragmentDir, changelogPath })).toThrow(/Orphan bullet/);
+    expect(readFileSync(changelogPath, 'utf8')).toBe(before);
+    expect(readFragments(fragmentDir).map((item) => item.name)).toEqual(['1-new.md']);
+  });
+
+  it('refuses to build a version section that already exists and writes nothing', () => {
+    const changelog = `# Changelog
+
+## [0.13.0] - 2026-11-08
+
+### Added
+
+- Already released.
+
+## [0.12.0] - 2026-11-07
+
+### Added
+
+- Previous release.
+`;
+    const { fragmentDir, changelogPath } = workspace(changelog, {
+      '1-new.md': fragment('Added', [1], '- New addition.'),
+    });
+    const before = readFileSync(changelogPath, 'utf8');
+    expect(() => build({ version: '0.13.0', date: '2026-11-08', dir: fragmentDir, changelogPath })).toThrow(/already has/);
+    expect(readFileSync(changelogPath, 'utf8')).toBe(before);
+    expect(readFragments(fragmentDir).map((item) => item.name)).toEqual(['1-new.md']);
+  });
+
   it('handles the empty case and leaves the files alone on a dry run', () => {
     const empty = workspace('# Changelog\n\nIntro.\n\n## [0.12.0] - 2026-11-07\n\n### Added\n\n- Previous release.\n');
     const result = build({ version: '0.13.0', date: '2026-11-08', dir: empty.fragmentDir, changelogPath: empty.changelogPath });

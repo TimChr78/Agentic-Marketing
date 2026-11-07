@@ -146,20 +146,26 @@ export function splitSections(changelog) {
   return { preamble, sections };
 }
 
-/** `### Heading` subsections of a section body, in the order they appear. */
+/** `### Heading` subsections of a section body, merged when a heading repeats. */
 function subsections(lines) {
   const map = new Map();
   let heading = null;
+  const before = [];
   for (const line of lines) {
     const match = /^### (.+)$/.exec(line);
     if (match) {
       heading = match[1].trim();
-      map.set(heading, []);
-    } else if (heading) {
-      map.get(heading).push(line);
+      if (!map.has(heading)) map.set(heading, []);
+      continue;
     }
+    if (heading) map.get(heading).push(line);
+    else before.push(line);
   }
-  for (const [heading, body] of map) map.set(heading, body.join('\n').trim());
+  const bare = before.map((line) => line.trim()).filter(Boolean);
+  if (bare.length) {
+    throw new Error(`CHANGELOG.md [Unreleased] has text before its first ### section: "${bare[0]}"; move it under a section`);
+  }
+  for (const [name, body] of map) map.set(name, body.join('\n').trim());
   return map;
 }
 
@@ -216,6 +222,9 @@ export function build({
 
   const changelog = readFileSync(changelogPath, 'utf8');
   const { preamble, sections } = splitSections(changelog);
+  if (sections.some((candidate) => candidate.version === version)) {
+    throw new Error(`CHANGELOG.md already has a ## [${version}] section; revert it or bump the version`);
+  }
   const unreleasedSection = sections.find((section) => section.version === 'Unreleased');
   const unreleased = unreleasedSection ? subsections(unreleasedSection.lines) : new Map();
   const section = renderSection({ version, date: day, unreleased, fragments, upgradeBlock });
