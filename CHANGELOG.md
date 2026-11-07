@@ -2,7 +2,7 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
-## [Unreleased]
+## [0.11.0] - 2026-11-07
 
 ### Added
 
@@ -22,6 +22,14 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 ### Fixed
 
 - Removed the two deferred template-route axe findings: GrapesJS chrome contrast and scrollable regions without keyboard access. The axe allowlist is empty (#499).
+
+### Upgrading from 0.10.1
+
+- **Migrations:** none.
+- **Configuration:** no new environment variables.
+- **Breaking changes:** none in commands, artifacts or URLs. The admin UI changes: the broadcast Content tab is a single-page composer whose edits stay local until Save draft, the approval drawer's tabs are Review / Content / History instead of Preview / Changes, and the e-mail editor's GrapesJS Blocks, Code, Import, Full screen and device controls are replaced by the Insert palette and the app toolbar.
+- **Manual steps:** none.
+- **Upgrade:** download `agentic-marketing-compose-0.11.0.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.11.0 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.11.0` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.11.0). Run `docker compose exec app am doctor`.
 
 ## [0.10.1] - 2026-11-06
 
