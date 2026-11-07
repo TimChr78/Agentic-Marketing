@@ -1,13 +1,14 @@
 import { api } from '../../app/api';
 import { useSession } from '../../app/session';
-import { useApi } from '../../app/useApi';
 import { Alert, Card, Meta, Skeleton } from '../../ui';
 import { formatDateTime, getWorkspaceTimeZone } from '../../ui/time';
 import { useArtifactRef } from '../artifactCache';
 import { EmailPreview } from './EmailPreview';
 import { RefName } from './FormPreview';
 import { PreviewLabel } from './PreviewLabel';
+import { useSharedRead } from './previewRead';
 import type { PreviewSource } from './previewSource';
+import { type PreviewStatus, useReportPreviewStatus } from './previewStatus';
 
 const skipText: Record<string, string> = {
   no_consent: 'No consent for the purpose',
@@ -29,6 +30,7 @@ export function BroadcastPreview({
   source,
   sourceSuffix,
   eligibility = 'load',
+  reportId = 'artifact',
 }: {
   artifactId: string;
   version?: number;
@@ -45,14 +47,16 @@ export function BroadcastPreview({
   sourceSuffix?: string;
   /** `save-required` skips the saved-version audience read for an unsaved broadcast. */
   eligibility?: 'load' | 'save-required';
+  /** Which readiness slot this renderer reports to the Review panel. */
+  reportId?: string;
 }) {
   const { can } = useSession();
-  const reach = useApi(
+  const skip = !can('artifacts:read') || eligibility === 'save-required';
+  const reach = useSharedRead(
+    'broadcasts.preview',
+    { artifactId, version, templateVersion },
     () => api.call('broadcasts.preview', { artifactId, version, templateVersion }),
-    [artifactId, version, templateVersion],
-    {
-      skip: !can('artifacts:read') || eligibility === 'save-required',
-    },
+    { skip },
   );
   const tpl = useArtifactRef(content.template);
   const isEmail = content.template?.startsWith('eml_');
@@ -61,6 +65,20 @@ export function BroadcastPreview({
     : tpl.artifact?.publishedVersion
       ? { kind: 'published', version: tpl.artifact.publishedVersion }
       : undefined;
+  const status: PreviewStatus = skip
+    ? 'ready'
+    : reach.loading
+      ? 'loading'
+      : reach.error
+        ? 'error'
+        : isEmail && content.template
+          ? tpl.error
+            ? 'error'
+            : tpl.artifact
+              ? 'ready'
+              : 'loading'
+          : 'ready';
+  useReportPreviewStatus(reportId, status);
   return (
     <div className="space-y-4">
       {source && <PreviewLabel source={source} suffix={sourceSuffix} />}
@@ -159,6 +177,7 @@ export function BroadcastPreview({
                 version={templateVersion ?? tpl.artifact.publishedVersion ?? undefined}
                 source={nestedSource}
                 sourceSuffix={templateVersion ? 'In this bundle' : undefined}
+                reportId={`${reportId}:template`}
               />
             ) : tpl.error ? (
               <Alert tone="bad">{tpl.error}</Alert>

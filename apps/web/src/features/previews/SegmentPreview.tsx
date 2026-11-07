@@ -1,11 +1,12 @@
 import { Users } from 'lucide-react';
 import { api } from '../../app/api';
 import { useSession } from '../../app/session';
-import { useApi } from '../../app/useApi';
 import { Alert, Card, Skeleton } from '../../ui';
 import { ConditionView } from './ConditionView';
 import { PreviewLabel } from './PreviewLabel';
+import { useSharedRead } from './previewRead';
 import { type PreviewSource, resolvePreviewSource } from './previewSource';
+import { type PreviewStatus, useReportPreviewStatus } from './previewStatus';
 
 /** A segment's condition in words, or its mode, and its estimated size now (#41, #83). */
 export function SegmentPreview({
@@ -14,6 +15,7 @@ export function SegmentPreview({
   content,
   source,
   sourceSuffix,
+  reportId = 'artifact',
 }: {
   artifactId: string;
   version?: number;
@@ -26,16 +28,24 @@ export function SegmentPreview({
   };
   source?: PreviewSource;
   sourceSuffix?: string;
+  /** Which readiness slot this renderer reports to the Review panel. */
+  reportId?: string;
 }) {
   const { can } = useSession();
   const unsaved = source?.kind === 'unsaved';
   // An explicit version always wins; `source` is provenance, not a second way to choose a read.
   const pinned = version ?? (source && source.kind !== 'unsaved' ? source.version : undefined);
-  const size = useApi(() => api.call('segments.preview', { artifactId, version: pinned }), [artifactId, pinned], {
-    skip: !can('profiles:read') || unsaved,
-  });
+  const skip = !can('profiles:read') || unsaved;
+  const size = useSharedRead(
+    'segments.preview',
+    { artifactId, version: pinned },
+    () => api.call('segments.preview', { artifactId, version: pinned }),
+    { skip },
+  );
   const mode = content.mode ?? 'dynamic';
   const resolved = source ?? (version != null ? { kind: 'saved' as const, version } : resolvePreviewSource({ requestedVersion: version }));
+  const status: PreviewStatus = skip ? 'ready' : size.loading ? 'loading' : size.error ? 'error' : 'ready';
+  useReportPreviewStatus(reportId, status);
   return (
     <div className="space-y-4">
       {resolved && <PreviewLabel source={resolved} suffix={sourceSuffix} />}

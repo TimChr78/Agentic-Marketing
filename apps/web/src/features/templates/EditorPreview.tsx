@@ -1,12 +1,12 @@
 import { Eye, FileText, Monitor, Moon, Smartphone } from 'lucide-react';
 import { useState } from 'react';
 import { api } from '../../app/api';
-import { useApi } from '../../app/useApi';
 import { Alert, CodeView, LoadingBlock, Meta, Segmented } from '../../ui';
 import { emailDoc, useDraftEmail } from '../previews/EmailPreview';
 import { PreviewLabel } from '../previews/PreviewLabel';
+import { useSharedRead } from '../previews/previewRead';
 import type { PreviewSource } from '../previews/previewSource';
-import type { DraftEmailContent, DraftRender } from './localRender';
+import { contentRevision, type DraftEmailContent, type DraftRender } from './localRender';
 
 /**
  * The editor's own preview (Phase 25, #499): the unsaved draft is rendered locally with the same
@@ -30,11 +30,21 @@ export function EditorPreview({
   const [darkMail, setDarkMail] = useState(false);
   const [tab, setTab] = useState<'html' | 'text'>('html');
   const draft = useDraftEmail(content, dirty && !readOnly);
-  const saved = useApi(() => api.call('templates.preview', { artifactId, version }), [artifactId, version], { skip: dirty });
+  // A save updates the draft in place at the same version; the content revision makes that a new
+  // key, so the previous body cannot appear under the clean Saved vN label.
+  const saved = useSharedRead(
+    'templates.preview',
+    { artifactId, version, revision: contentRevision(content) },
+    () => api.call('templates.preview', { artifactId, version }),
+    { skip: dirty },
+  );
   const blocked = dirty && !readOnly && draft.state.status === 'blocked';
-  const previous = useApi(() => api.call('templates.preview', { artifactId, version }), [artifactId, version], {
-    skip: !blocked,
-  });
+  const previous = useSharedRead(
+    'templates.preview',
+    { artifactId, version },
+    () => api.call('templates.preview', { artifactId, version }),
+    { skip: !blocked },
+  );
   const source: PreviewSource = dirty ? { kind: 'unsaved', baseVersion: version } : { kind: 'saved', version };
   const shown: DraftRender | undefined =
     dirty && !readOnly ? (draft.state.status === 'ready' ? draft.state.result : undefined) : saved.data;
@@ -110,7 +120,7 @@ export function EditorPreview({
         <Alert
           tone="bad"
           title={dirty ? "Couldn't render this draft" : "Couldn't render this e-mail"}
-          onRetry={dirty ? draft.retry : saved.reload}
+          onRetry={dirty ? draft.retry : saved.refresh}
         >
           {failure}
         </Alert>

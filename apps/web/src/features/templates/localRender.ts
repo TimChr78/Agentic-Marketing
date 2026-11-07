@@ -84,6 +84,20 @@ export async function renderDraft(content: DraftEmailContent): Promise<DraftRend
   };
 }
 
+/**
+ * A revision key for a rendered result: saving updates the latest draft in place, so artifact id
+ * and version alone cannot tell one saved render from the next (#499 review).
+ */
+export function contentRevision(content: unknown): string {
+  const json = JSON.stringify(content ?? null);
+  let hash = 2_166_136_261;
+  for (let i = 0; i < json.length; i++) {
+    hash ^= json.charCodeAt(i);
+    hash = Math.imul(hash, 16_777_619);
+  }
+  return `${(hash >>> 0).toString(36)}:${json.length}`;
+}
+
 /** Whether the editor's local copy differs from the exact saved version it was opened from. */
 export function templateContentChanged(
   content: DraftEmailContent & { purpose?: string; topic?: string; utm?: unknown },
