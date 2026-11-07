@@ -304,7 +304,7 @@ describe('journey report reads (#507)', () => {
     });
     renderReport();
     await screen.findByText('No published topology. Draft preview has no live count overlay.');
-    expect(calls('journeys.stats')).toHaveLength(1);
+    await waitFor(() => expect(calls('journeys.stats')).toHaveLength(1));
     expect(calls('analytics.journeyFunnel')).toHaveLength(0);
     expect((await screen.findAllByRole('button', { name: /^Copy ID n\d$/ })).length).toBeGreaterThan(0);
   });
