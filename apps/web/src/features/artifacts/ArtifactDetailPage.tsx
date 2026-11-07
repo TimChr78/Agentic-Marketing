@@ -30,6 +30,8 @@ import { invalidateArtifact } from '../artifactCache';
 import { withLayout } from '../journey/layout';
 import type { JNode } from '../journey/model';
 import { ArtifactPreview } from '../previews/ArtifactPreview';
+import { BroadcastPreview } from '../previews/BroadcastPreview';
+import type { PreviewSource } from '../previews/previewSource';
 import { ActivityPanel } from './ActivityPanel';
 import {
   adoptSnapshot,
@@ -49,6 +51,7 @@ import { PurposesEditor } from './PurposesEditor';
 import { VersionsPanel } from './VersionsPanel';
 
 export type Artifact = Out<'artifacts.get'>;
+type BroadcastPreviewContent = Parameters<typeof BroadcastPreview>[0]['content'];
 export type DraftWarning = { nodeId: string | null; path: string; message: string };
 
 export interface EditorProps<C = any> {
@@ -592,13 +595,37 @@ export function ArtifactDetailPage({
             </div>
           )
         );
-      case 'preview':
+      case 'preview': {
+        if (draft === undefined) return null;
+        // A dirty draft is labelled Unsaved draft and rendered from the local content. A broadcast
+        // keeps the saved-version audience boundary: its preview says "save to estimate" instead
+        // of reading a saved version behind the unsaved label.
+        const previewSource: PreviewSource = dirty
+          ? { kind: 'unsaved', baseVersion: latest.number }
+          : { kind: 'saved', version: latest.number };
+        const previewContent = dirty ? draft : latest.content;
         return (
           <div className="max-w-[1100px] space-y-3">
-            {dirty && <Alert tone="info">The preview shows the saved version {latest.number}. Save to preview your changes.</Alert>}
-            <ArtifactPreview type={a.type} artifactId={a.id} version={latest.number} content={latest.content} />
+            {a.type === 'broadcast' && dirty ? (
+              <BroadcastPreview
+                artifactId={a.id}
+                version={latest.number}
+                content={previewContent as BroadcastPreviewContent}
+                source={previewSource}
+                eligibility="save-required"
+              />
+            ) : (
+              <ArtifactPreview
+                type={a.type}
+                artifactId={a.id}
+                version={dirty ? undefined : latest.number}
+                content={previewContent}
+                source={previewSource}
+              />
+            )}
           </div>
         );
+      }
       case 'versions':
         return <VersionsPanel artifact={a} />;
       case 'activity':
