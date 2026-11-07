@@ -13,6 +13,11 @@
 # published ports are only reachable on the Docker bridge; set AM_TEST_HOST to override.
 set -euo pipefail
 
+if [ "${BASH_VERSINFO[0]:-0}" -lt 4 ]; then
+  echo "error: scripts/test-services.sh requires bash >= 4 (macOS: brew install bash, then run with /opt/homebrew/bin/bash)." >&2
+  exit 1
+fi
+
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 

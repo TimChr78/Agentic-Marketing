@@ -9,6 +9,19 @@
 # checkout's am-patch-test-*, a release install) is never touched.
 set -euo pipefail
 
+if [ "${BASH_VERSINFO[0]:-0}" -lt 4 ]; then
+  echo "error: scripts/docker-clean.sh requires bash >= 4 (macOS: brew install bash, then run with /opt/homebrew/bin/bash)." >&2
+  exit 1
+fi
+if command -v timeout >/dev/null 2>&1; then
+  TIMEOUT=timeout
+elif command -v gtimeout >/dev/null 2>&1; then
+  TIMEOUT=gtimeout
+else
+  echo "error: scripts/docker-clean.sh requires GNU coreutils timeout (macOS: brew install coreutils puts gtimeout on PATH; Linux: install coreutils)." >&2
+  exit 1
+fi
+
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 
@@ -30,17 +43,21 @@ case "${1:-}" in
     ;;
 esac
 
-mapfile -t containers < <(docker ps -aq --filter label=am-test=1 2>/dev/null || true)
-mapfile -t container_names < <(docker ps -a --filter label=am-test=1 --format '{{.Names}}' 2>/dev/null || true)
-mapfile -t volumes < <(docker volume ls -q --filter label=am-test=1 2>/dev/null || true)
-mapfile -t networks < <(docker network ls -q --filter label=am-test=1 2>/dev/null || true)
+containers=()
+while IFS= read -r id; do if [ -n "$id" ]; then containers+=("$id"); fi; done < <(docker ps -aq --filter label=am-test=1 2>/dev/null || true)
+container_names=()
+while IFS= read -r name; do if [ -n "$name" ]; then container_names+=("$name"); fi; done < <(docker ps -a --filter label=am-test=1 --format '{{.Names}}' 2>/dev/null || true)
+volumes=()
+while IFS= read -r name; do if [ -n "$name" ]; then volumes+=("$name"); fi; done < <(docker volume ls -q --filter label=am-test=1 2>/dev/null || true)
+networks=()
+while IFS= read -r id; do if [ -n "$id" ]; then networks+=("$id"); fi; done < <(docker network ls -q --filter label=am-test=1 2>/dev/null || true)
 
 # Sizes as Docker reports them, for the labelled volumes only. `docker system df -v` can be slow
 # on a host with many volumes, so it is bounded and falls back to `du` in a throwaway container.
 volume_bytes() {
   local names df_output total=0
   names=$(printf '%s\n' "$@" 2>/dev/null || true)
-  df_output=$(timeout "${AM_TEST_DF_TIMEOUT:-20}" docker system df -v --format '{{json .Volumes}}' 2>/dev/null || true)
+  df_output=$("$TIMEOUT" "${AM_TEST_DF_TIMEOUT:-20}" docker system df -v --format '{{json .Volumes}}' 2>/dev/null || true)
   if [ -n "$df_output" ]; then
     printf '%s' "$df_output" | NAMES="$names" node -e '
       const parse = (s) => {
@@ -63,7 +80,7 @@ volume_bytes() {
   fi
   for name in "$@"; do
     local kb
-    kb=$(timeout 20 docker run --rm -v "$name":/v:ro --entrypoint du postgres:16-alpine -sk /v 2>/dev/null | awk 'NR == 1 { print $1 }')
+    kb=$("$TIMEOUT" 20 docker run --rm -v "$name":/v:ro --entrypoint du postgres:16-alpine -sk /v 2>/dev/null | awk 'NR == 1 { print $1 }')
     [ -n "$kb" ] && total=$((total + kb))
   done
   echo $((total * 1024))

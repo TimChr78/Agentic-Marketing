@@ -329,6 +329,10 @@ inside a container, where the host's published ports are only reachable on the D
 `AM_TEST_HOST` to override that. The optional `mail` (Mailpit) and `obs` (Grafana otel-lgtm)
 profiles are off unless named: `scripts/test-services.sh up mail obs`.
 
+The scripts target **Linux (Unraid included)**. macOS needs bash 5 and GNU coreutils from
+Homebrew (`brew install bash coreutils`; run the scripts with `$HOMEBREW_PREFIX/bin/bash` and keep
+`gtimeout` on `PATH`). The scripts fail fast with that message rather than half-running.
+
 `scripts/docker-clean.sh` selects containers, volumes and networks by the `am-test=1` label only,
 never by name: another checkout's `amtest-*` or `am-patch-test-*` containers and a release
 install are left alone. It is a dry run until `--yes`.

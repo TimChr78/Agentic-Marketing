@@ -8,6 +8,11 @@
 #   AM_TEST_MIN_FREE_GB=10 (default), AM_TEST_PG_PORT, AM_TEST_CH_PORT, ...
 set -uo pipefail
 
+if [ "${BASH_VERSINFO[0]:-0}" -lt 4 ]; then
+  echo "FAIL  scripts/preflight.sh requires bash >= 4 (macOS: brew install bash, then run with /opt/homebrew/bin/bash)."
+  exit 1
+fi
+
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 
@@ -123,8 +128,54 @@ NATS_PORT=${AM_TEST_NATS_PORT:-24222}
 OPENBAO_PORT=${AM_TEST_OPENBAO_PORT:-28200}
 PORTS="$PG_PORT,$CH_PORT,$VALKEY_PORT,$NATS_PORT,$OPENBAO_PORT"
 
-# Probe from a host-network container, because this script may itself run inside a container
-# whose own namespace cannot see the ports the tests will use on the host.
+# Probe the host namespace first when this runs on a Linux host: /proc/net/tcp is the real table
+# and `ss` is its readable form. Inside a container the namespace is not the host's, so the
+# host-network probe container is the only honest source.
+in_container() { [ -f /.dockerenv ] || [ -f /run/.containerenv ]; }
+
+host_port_state() {
+  local port=$1 out hex file
+  if command -v ss >/dev/null 2>&1; then
+    if out=$(ss -H -ltn 2>/dev/null); then
+      if printf '%s\n' "$out" | awk -v p=":$port" '$4 ~ (p "$") { found = 1 } END { exit(found ? 0 : 1) }'; then
+        printf 'busy'
+      else
+        printf 'free'
+      fi
+      return 0
+    fi
+  fi
+  if [ -r /proc/net/tcp ]; then
+    hex=$(printf '%04X' "$port")
+    for file in /proc/net/tcp /proc/net/tcp6; do
+      [ -r "$file" ] || continue
+      if awk -v want=":$hex" 'FNR > 1 && $4 == "0A" && substr($2, length($2) - 4) == want { found = 1 } END { exit(found ? 0 : 1) }' "$file"; then
+        printf 'busy'
+        return 0
+      fi
+    done
+    printf 'free'
+    return 0
+  fi
+  return 1
+}
+
+states=""
+probed_by=""
+if ! in_container && [ "$(uname -s)" = "Linux" ]; then
+  for port in ${PORTS//,/ }; do
+    if state=$(host_port_state "$port"); then
+      states+="$port $state"$'\n'
+    else
+      states=""
+      break
+    fi
+  done
+  [ -n "$states" ] && probed_by="the host namespace (ss//proc/net/tcp)"
+fi
+
+# Inside a container, probe from a host-network container: its own namespace cannot see the ports
+# the tests will use on the host.
 PROBE='
 const net = require("node:net");
 const ports = String(process.argv[1] || "").split(",").filter(Boolean).map(Number);
@@ -139,41 +190,48 @@ const ports = String(process.argv[1] || "").split(",").filter(Boolean).map(Numbe
   }
 })();
 '
-probe_output=""
-if docker image inspect "$PLAYWRIGHT_IMAGE" >/dev/null 2>&1; then
-  probe_output=$(docker run --rm --network host --entrypoint node "$PLAYWRIGHT_IMAGE" -e "$PROBE" "$PORTS" 2>/dev/null || true)
+if [ -z "$states" ] && docker image inspect "$PLAYWRIGHT_IMAGE" >/dev/null 2>&1; then
+  states=$(docker run --rm --network host --entrypoint node "$PLAYWRIGHT_IMAGE" -e "$PROBE" "$PORTS" 2>/dev/null || true)
+  [ -n "$states" ] && probed_by="a host-network container"
 fi
 
-if [ -z "$probe_output" ]; then
-  note "could not probe host ports from a container; checking Docker publishers only"
-  for port in ${PORTS//,/ }; do
-    owners=$(docker ps --filter "publish=$port" --format '{{.Names}}	{{.Label "am-test"}}' 2>/dev/null || true)
-    if [ -z "$owners" ]; then
-      pass "port $port is not published by Docker"
-    elif printf '%s\n' "$owners" | grep -qv $'\t1$'; then
-      fail "port $port is held by a container outside the am-test stack:"
-      printf '%s\n' "$owners" | sed 's/^/      /'
-    else
-      pass "port $port is held by the am-test stack"
-    fi
-  done
+if [ -z "$states" ]; then
+  if [ "${AM_TEST_ALLOW_UNVERIFIED_PORTS:-0}" = "1" ]; then
+    note "could not read the host's listening ports; UNKNOWN accepted by AM_TEST_ALLOW_UNVERIFIED_PORTS=1"
+    pass "port availability UNKNOWN for $PORTS"
+  else
+    fail "cannot establish whether ports $PORTS are free (UNKNOWN)"
+    note "run this on the host with iproute2 (ss) or a readable /proc/net/tcp, or set AM_TEST_ALLOW_UNVERIFIED_PORTS=1 to accept UNKNOWN"
+  fi
 else
-  while read -r port state; do
-    [ -n "$port" ] || continue
-    if [ "$state" = free ]; then
-      pass "port $port is free"
-      continue
-    fi
-    owners=$(docker ps --filter "publish=$port" --format '{{.Names}}	{{.Label "am-test"}}' 2>/dev/null || true)
-    if [ -z "$owners" ]; then
-      fail "port $port is in use by a non-Docker process on the host"
-    elif printf '%s\n' "$owners" | grep -qv $'\t1$'; then
-      fail "port $port is held by a container outside the am-test stack:"
-      printf '%s\n' "$owners" | sed 's/^/      /'
-    else
-      pass "port $port is held by the am-test stack"
-    fi
-  done <<<"$probe_output"
+  note "ports probed from $probed_by"
+  for port in ${PORTS//,/ }; do
+    state=$(printf '%s\n' "$states" | awk -v p="$port" '$1 == p { print $2; exit }')
+    case "$state" in
+      free)
+        pass "port $port is free"
+        ;;
+      busy)
+        owners=$(docker ps --filter "publish=$port" --format '{{.Names}}	{{.Label "am-test"}}' 2>/dev/null || true)
+        if [ -z "$owners" ]; then
+          fail "port $port is in use by a non-Docker process on the host"
+        elif printf '%s\n' "$owners" | grep -qv $'\t1$'; then
+          fail "port $port is held by a container outside the am-test stack:"
+          printf '%s\n' "$owners" | sed 's/^/      /'
+        else
+          pass "port $port is held by the am-test stack"
+        fi
+        ;;
+      *)
+        if [ "${AM_TEST_ALLOW_UNVERIFIED_PORTS:-0}" = "1" ]; then
+          pass "port $port availability UNKNOWN (override)"
+        else
+          fail "port $port availability UNKNOWN"
+          note "set AM_TEST_ALLOW_UNVERIFIED_PORTS=1 only if you accept that the probe could not check it"
+        fi
+        ;;
+    esac
+  done
 fi
 
 # --- test environment ------------------------------------------------------------------------
