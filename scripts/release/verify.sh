@@ -60,7 +60,7 @@ else
 fi
 
 assets=()
-while IFS= read -r file; do assets+=("$file"); done < <(find "$tmp" -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' | sort)
+while IFS= read -r file; do assets+=("$file"); done < <(find "$tmp" -maxdepth 1 -type f -printf '%f\n' | sort)
 if [ "${#assets[@]}" -eq 0 ]; then
   fail "the release has no assets to attest"
 else
