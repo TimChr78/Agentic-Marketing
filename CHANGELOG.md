@@ -2,7 +2,7 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
-## [Unreleased]
+## [0.12.0] - 2026-11-07
 
 ### Added
 
@@ -41,6 +41,18 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 - Changing the Analytics question or period, or the Deliverability stream, shows loading for the new selection instead of the previous selection's values under the new label; period totals and daily results appear only when both belong to the same selection.
 - A journey draft no longer shows the live version's canvas counts, even when its steps were only saved, not published; the overlay stays hidden until the published, unmodified version is shown.
 
+
+### Upgrading from 0.11.0
+
+- **Migrations:** none.
+- **Configuration:** no new environment variables.
+- **Breaking changes:** none in existing commands, artifacts or URLs. Two read commands are new: `deliverability.trend` and `agents.mandate` (both `artifacts:read`). The admin UI changes:
+  - Analytics opens on fixed questions with period comparison.
+  - The agent page has Overview, Activity, Mandate and Credentials tabs (linkable with `?tab=`), and Pause is a single click without a reason.
+  - People pages through the list with loaded counts and shows consent per purpose.
+  - The journey canvas counts read “reached all time · waiting now”.
+- **Manual steps:** none.
+- **Upgrade:** download `agentic-marketing-compose-0.12.0.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.12.0 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.12.0` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.12.0). Run `docker compose exec app am doctor`.
 
 ## [0.11.0] - 2026-11-07
 
