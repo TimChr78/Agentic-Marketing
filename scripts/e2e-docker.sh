@@ -318,10 +318,13 @@ else
 fi
 
 log "running: ${*}"
+# Run as the invoking user so traces, screenshots and reports stay writable outside the container.
 if ! docker run --rm --init \
   --network "$NETWORK" \
+  --user "$(id -u):$(id -g)" \
   -v "$REPO_ROOT":"$REPO_ROOT" \
   -w "$REPO_ROOT" \
+  -e HOME=/tmp \
   -e CHROMIUM="$CHROMIUM_PATH" \
   -e E2E_BASE="http://localhost:$PORT" \
   -e E2E_PORT="$PORT" \
