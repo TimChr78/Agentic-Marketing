@@ -30,7 +30,7 @@ import {
   Undo2,
 } from 'lucide-react';
 import { type KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { api } from '../../app/api';
+import { api, type Out } from '../../app/api';
 import { useSession } from '../../app/session';
 import { useResolvedTheme } from '../../app/theme';
 import { useApi } from '../../app/useApi';
@@ -53,7 +53,6 @@ import {
 } from '../../ui';
 import { referencedIds, useArtifactNames } from '../artifactCache';
 import type { EditorProps } from '../artifacts/ArtifactDetailPage';
-import { type StepStats, withNodeStats } from './canvas';
 import { localWarnings, mergeWarnings } from './checks';
 import { Inspector } from './Inspector';
 import { Legend } from './Legend';
@@ -62,6 +61,8 @@ import { edgesOf, type JNode, type JourneyContent, KINDS, maxEdges, type NodeKin
 import { type NodeData, nodeTypes } from './NodeView';
 import { addNode, connect, deleteNode, disconnect, duplicateNode, type EditResult, withPositions } from './ops';
 import { DND_TYPE, Palette } from './Palette';
+import { COUNTS_LABEL, type JourneyCounts, withNodeCounts } from './report/counts';
+import { sameTopology } from './report/model';
 import { SimulatePanel } from './SimulatePanel';
 
 type Sel = { kind: 'node'; id: string } | { kind: 'edge'; source: string; index: number } | null;
@@ -122,16 +123,25 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
   const names = useArtifactNames(referencedIds(nodes));
 
   const published = artifact.publishedVersion !== null && artifact.publishedVersion !== undefined;
-  // #58: per-step passed/waiting for the live version, refreshed while shown.
+  // #507: one journeys.stats read for the canvas overlay and the control-group summary. The old
+  // 30-second timer is gone; the person refreshes explicitly. Aggregate counts cannot be attributed
+  // to a saved draft, so the overlay needs the displayed version to be the live one and its steps
+  // to be unmodified; otherwise it is withheld with the notice below.
+  const versionIsPublished = published && artifact.version.number === artifact.publishedVersion;
+  const topologyCurrent = useMemo(
+    () => sameTopology(nodes, (artifact.version.content as JourneyContent).nodes),
+    [nodes, artifact.version.content],
+  );
+  const countsEligible = versionIsPublished && topologyCurrent;
+  const wantsStats = published && ((showStats && countsEligible) || !!content.controlGroup);
   const stats = useApi(() => api.call('journeys.stats', { artifactId: artifact.id }), [artifact.id, artifact.publishedVersion], {
-    skip: !showStats || !published,
+    skip: !wantsStats,
   });
-  const statData = showStats ? stats.data : undefined;
-  useEffect(() => {
-    if (!showStats || !published) return;
-    const timer = setInterval(() => void stats.reload(), 30_000);
-    return () => clearInterval(timer);
-  }, [showStats, published, stats.reload]);
+  const showCounts = showStats && countsEligible;
+  const counts = useMemo<JourneyCounts | undefined>(
+    () => (showCounts && stats.data ? { reached: stats.data.reached, waitingAt: stats.data.waitingAt } : undefined),
+    [showCounts, stats.data],
+  );
 
   const setPref = (key: string, value: boolean, set: (v: boolean) => void) => {
     set(value);
@@ -221,21 +231,21 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
     [nodes, positions, sel, readOnly, names, warnings, path],
   );
   const [rfNodes, setRfNodes] = useState<Node[]>(build);
-  // A stats poll or cache refresh must not rebuild the canvas mid-drag (#383): those updates only
-  // touch node data, and a structural rebuild waits until the drag ends.
-  const statsRef = useRef<StepStats | undefined>(statData);
+  // A stats refresh must not rebuild the canvas mid-drag (#383): those updates only touch node
+  // data, and a structural rebuild waits until the drag ends.
+  const countsRef = useRef<JourneyCounts | undefined>(counts);
   const dragging = useRef(false);
   useEffect(() => {
-    statsRef.current = statData;
-  }, [statData]);
+    countsRef.current = counts;
+  }, [counts]);
   useEffect(() => {
     if (dragging.current) return;
-    setRfNodes(withNodeStats(build(), statsRef.current));
+    setRfNodes(withNodeCounts(build(), countsRef.current, COUNTS_LABEL));
   }, [build]);
   useEffect(() => {
     if (dragging.current) return;
-    setRfNodes((ns) => withNodeStats(ns, statData));
-  }, [statData]);
+    setRfNodes((ns) => withNodeCounts(ns, counts, COUNTS_LABEL));
+  }, [counts]);
 
   const rfEdges = useMemo<Edge[]>(
     () =>
@@ -481,6 +491,10 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
               {showStats ? 'Hide stats' : 'Show stats'}
             </Button>
           )}
+          {showCounts && <span className="hidden text-[11px] leading-4 text-muted md:inline">{COUNTS_LABEL}</span>}
+          {showStats && published && !countsEligible && (
+            <span className="text-[11px] leading-4 text-warn">Counts are hidden until you view the live version unmodified.</span>
+          )}
           {content.controlGroup && (
             <Tag icon={<ShieldCheck size={12} aria-hidden />} className="hidden sm:inline-flex">
               Control {content.controlGroup.percent}%
@@ -658,7 +672,7 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
                   onDuplicate={() => commit(duplicateNode(nodes, selectedNode.id))}
                 />
               ) : (
-                <JourneySettings content={content} onChange={onChange} readOnly={readOnly} artifactId={artifact.id} published={published} />
+                <JourneySettings content={content} onChange={onChange} readOnly={readOnly} published={published} stats={stats.data} />
               ))}
             {panel === 'check' && (
               <CheckList
@@ -719,37 +733,35 @@ function JourneySettings({
   content,
   onChange,
   readOnly,
-  artifactId,
   published,
+  stats,
 }: {
   content: JourneyContent;
   onChange: (c: JourneyContent) => void;
   readOnly: boolean;
-  artifactId: string;
   published: boolean;
+  stats?: Out<'journeys.stats'>;
 }) {
-  return <JourneyMeta content={content} onChange={onChange} readOnly={readOnly} artifactId={artifactId} published={published} />;
+  return <JourneyMeta content={content} onChange={onChange} readOnly={readOnly} published={published} stats={stats} />;
 }
 
 function JourneyMeta({
   content,
   onChange,
   readOnly,
-  artifactId,
   published,
+  stats,
 }: {
   content: JourneyContent;
   onChange: (c: JourneyContent) => void;
   readOnly: boolean;
-  artifactId: string;
   published: boolean;
+  stats?: Out<'journeys.stats'>;
 }) {
   const purposes = useApi(() => api.call('purposes.list', {}), []);
-  // A rough expected control size from the people already in the journey, not a forecast.
-  const stats = useApi(() => api.call('journeys.stats', { artifactId }), [artifactId], { skip: !published });
-  const total = stats.data
-    ? stats.data.now.ready + stats.data.now.waiting + stats.data.now.completed + stats.data.now.exited + stats.data.now.failed
-    : 0;
+  // A rough expected control size from the people already in the journey, not a forecast. The
+  // stats result is shared with the canvas overlay (#507), not fetched a second time here.
+  const total = stats ? stats.now.ready + stats.now.waiting + stats.now.completed + stats.now.exited + stats.now.failed : 0;
   const cg = content.controlGroup;
   const setCg = (patch: Partial<NonNullable<JourneyContent['controlGroup']>>) =>
     onChange({ ...content, controlGroup: { percent: 10, minSampleSize: 200, ...cg, ...patch } });

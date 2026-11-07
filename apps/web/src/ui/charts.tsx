@@ -373,6 +373,8 @@ export interface KpiTileProps {
   favourableDirection?: KpiDirection;
   sparkline?: number[];
   updatedAt?: string | Date | null;
+  /** What `updatedAt` measures (default "Updated"). Event freshness reads "Latest event in period". */
+  freshnessLabel?: string;
   /** Freshness threshold in milliseconds; supplied by the data source, never invented. */
   staleAfter?: number;
   dataState?: KpiDataState;
@@ -437,11 +439,12 @@ export function describeDelta({
   return { text, direction, tone: favourable };
 }
 
-function freshnessText(updatedAt: string | Date | null | undefined, staleAfter?: number): string {
-  if (!updatedAt) return 'Updated time not available';
+function freshnessText(updatedAt: string | Date | null | undefined, staleAfter?: number, label?: string): string {
+  const unavailable = label ? `${label}: unavailable` : 'Updated time not available';
+  if (!updatedAt) return unavailable;
   const at = updatedAt instanceof Date ? updatedAt : new Date(updatedAt);
   // A missing source value is often zero/epoch. Never render 1/1/1970 as freshness (#438).
-  if (Number.isNaN(at.getTime()) || at.getFullYear() < 2000) return 'Updated time not available';
+  if (Number.isNaN(at.getTime()) || at.getFullYear() < 2000) return unavailable;
   const s = Math.max(0, Math.round((Date.now() - at.getTime()) / 1000));
   const relative =
     s < 45
@@ -452,7 +455,7 @@ function freshnessText(updatedAt: string | Date | null | undefined, staleAfter?:
           ? `${Math.round(s / 3600)} h ago`
           : `${Math.round(s / 86_400)} d ago`;
   const stale = staleAfter !== undefined && Date.now() - at.getTime() > staleAfter;
-  return `Updated ${relative}${stale ? ' · stale' : ''}`;
+  return `${label ?? 'Updated'} ${relative}${stale ? ' · stale' : ''}`;
 }
 
 function Sparkline({ points }: { points: number[] }) {
@@ -487,6 +490,7 @@ export function KpiTile({
   favourableDirection = 'neutral',
   sparkline,
   updatedAt,
+  freshnessLabel,
   staleAfter,
   dataState = 'populated',
   explanation,
@@ -562,7 +566,7 @@ export function KpiTile({
             {numerator.toLocaleString()} / {denominator.toLocaleString()}
           </p>
         )}
-        <p className="mt-1 text-[12px] leading-[18px] text-muted">{freshnessText(updatedAt, staleAfter)}</p>
+        <p className="mt-1 text-[12px] leading-[18px] text-muted">{freshnessText(updatedAt, staleAfter, freshnessLabel)}</p>
       </div>
     </section>
   );

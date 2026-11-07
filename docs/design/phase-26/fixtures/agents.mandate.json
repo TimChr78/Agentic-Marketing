@@ -1,0 +1,59 @@
+{
+  "agentId": "agt_0123456789abcdef0123456789abcdef",
+  "mandate": {
+    "id": "mnd_0123456789abcdef0123456789abcdef",
+    "version": 4,
+    "content": {
+      "agent": "agt_0123456789abcdef0123456789abcdef",
+      "purpose": "Send the weekly newsletter and its follow-ups to the people who asked for it.",
+      "goals": [
+        { "measure": "email.click_rate", "target": 0.035, "direction": "up" },
+        { "measure": "email.unsubscribe_rate", "target": 0.004, "direction": "down" }
+      ],
+      "scope": {
+        "segments": ["seg_0123456789abcdef0123456789abcdef"],
+        "purposes": ["marketing_email"],
+        "topics": ["newsletter"],
+        "channels": ["email"],
+        "artifactTypes": ["broadcast", "email_template"],
+        "artifacts": [],
+        "brand": null
+      },
+      "levels": {
+        "draft": 3,
+        "content.publish": 2,
+        "send.broadcast": 3,
+        "send.direct": 2,
+        "data.write": 1
+      },
+      "limits": {
+        "recipientsPerSend": 5000,
+        "recipientGrowth": 1.2,
+        "sendsPerDay": 1,
+        "changesPerDay": 20,
+        "messagesPerDay": 5000
+      },
+      "guardrails": {
+        "unsubscribeRate": 0.005,
+        "complaintRate": 0.001,
+        "bounceRate": 0.03,
+        "window": "P7D",
+        "minSent": 200
+      },
+      "validUntil": "2027-02-01T00:00:00.000Z",
+      "workingHours": {
+        "start": "07:00",
+        "end": "11:00",
+        "days": ["mon", "tue", "wed", "thu", "fri"]
+      },
+      "blackoutDates": ["2026-12-24", "2026-12-25", "2026-12-31"],
+      "holdWindow": "PT2H",
+      "escalation": { "userIds": ["user_0123456789abcdef0123456789abcdef"] },
+      "independentCheck": false,
+      "learning": { "broadcastHoldout": true },
+      "shadow": false
+    }
+  },
+  "outsideHours": null,
+  "asOf": "2026-11-07T08:30:00.000Z"
+}

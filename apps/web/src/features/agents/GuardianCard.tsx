@@ -26,7 +26,7 @@ const ACTION: Record<string, string> = {
 export function GuardianCard({ agent, onChanged }: { agent: Agent; onChanged: () => void }) {
   const { can } = useWorkspace();
   const toast = useToast();
-  const data = useApi(() => api.call('agents.guardian', { agentId: agent.id, limit: 20 }), [agent.id, agent.guard?.since]);
+  const data = useApi(() => api.call('agents.guardian', { agentId: agent.id, limit: 50 }), [agent.id, agent.guard?.since]);
   const [clearing, setClearing] = useState(false);
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);

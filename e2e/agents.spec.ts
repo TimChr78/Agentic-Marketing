@@ -6,7 +6,7 @@ test.afterEach(async ({ page }) => {
   await call(page.request, 'workspace.setAutonomy', { switch: 'on' }).catch(() => {});
 });
 
-test('pause an agent with a reason, resume it, and switch the workspace to propose-only (#213, #215)', { tag: '@smoke' }, async ({
+test('pause an agent in one click, resume it, and switch the workspace to propose-only (#213, #215)', { tag: '@smoke' }, async ({
   page,
 }) => {
   await signIn(page, PEOPLE.owner);
@@ -21,22 +21,16 @@ test('pause an agent with a reason, resume it, and switch the workspace to propo
   expect(used.ok(), `the token's first call: ${await used.text()}`).toBeTruthy();
 
   await page.goto('/work/agents');
-  // The agents table, not the comparison card below it, which also has a row per agent.
-  const row = page.getByRole('row').filter({ has: page.getByRole('button', { name: `Actions for ${name}` }) });
+  // The agents table, not the comparison below it, which also has a row per agent.
+  const row = page.getByRole('row').filter({ has: page.getByRole('button', { name: `More actions for ${name}` }) });
   await expect(row).toContainText('Active');
 
-  // Pause with a reason: the status and the reason show at once.
-  await row.getByRole('button', { name: `Actions for ${name}` }).click();
-  await page.getByRole('menuitem', { name: 'Pause' }).click();
-  const pause = page.getByRole('dialog');
-  await pause.getByRole('textbox', { name: 'Reason (optional)', exact: true }).fill('Budget review');
-  await pause.getByRole('button', { name: 'Pause agent' }).click();
+  // Phase 26 (#509): Pause is one click on every active row, with no dialog.
+  await row.getByRole('button', { name: 'Pause', exact: true }).click();
   await expect(row).toContainText('Paused');
-  await expect(row).toContainText('Budget review');
 
   // Resume: resumable, with the same credentials.
-  await row.getByRole('button', { name: `Actions for ${name}` }).click();
-  await page.getByRole('menuitem', { name: 'Resume' }).click();
+  await row.getByRole('button', { name: 'Resume', exact: true }).click();
   await expect(row).toContainText('Active');
 
   // Propose-only: every change beyond a draft waits for a person, and the top bar says so.

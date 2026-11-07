@@ -1,0 +1,315 @@
+{
+  "points": [
+    {
+      "day": "2026-10-08",
+      "windowFrom": "2026-10-01T22:00:00.000Z",
+      "windowTo": "2026-10-08T22:00:00.000Z",
+      "sent": 0,
+      "bounced": 0,
+      "complained": 0,
+      "bounceRate": null,
+      "complaintRate": null
+    },
+    {
+      "day": "2026-10-09",
+      "windowFrom": "2026-10-02T22:00:00.000Z",
+      "windowTo": "2026-10-09T22:00:00.000Z",
+      "sent": 0,
+      "bounced": 0,
+      "complained": 0,
+      "bounceRate": null,
+      "complaintRate": null
+    },
+    {
+      "day": "2026-10-10",
+      "windowFrom": "2026-10-03T22:00:00.000Z",
+      "windowTo": "2026-10-10T22:00:00.000Z",
+      "sent": 0,
+      "bounced": 0,
+      "complained": 0,
+      "bounceRate": null,
+      "complaintRate": null
+    },
+    {
+      "day": "2026-10-11",
+      "windowFrom": "2026-10-04T22:00:00.000Z",
+      "windowTo": "2026-10-11T22:00:00.000Z",
+      "sent": 213,
+      "bounced": 4,
+      "complained": 0,
+      "bounceRate": 0.018779,
+      "complaintRate": 0
+    },
+    {
+      "day": "2026-10-12",
+      "windowFrom": "2026-10-05T22:00:00.000Z",
+      "windowTo": "2026-10-12T22:00:00.000Z",
+      "sent": 224,
+      "bounced": 5,
+      "complained": 0,
+      "bounceRate": 0.022321,
+      "complaintRate": 0
+    },
+    {
+      "day": "2026-10-13",
+      "windowFrom": "2026-10-06T22:00:00.000Z",
+      "windowTo": "2026-10-13T22:00:00.000Z",
+      "sent": 235,
+      "bounced": 5,
+      "complained": 0,
+      "bounceRate": 0.021277,
+      "complaintRate": 0
+    },
+    {
+      "day": "2026-10-14",
+      "windowFrom": "2026-10-07T22:00:00.000Z",
+      "windowTo": "2026-10-14T22:00:00.000Z",
+      "sent": 246,
+      "bounced": 5,
+      "complained": 0,
+      "bounceRate": 0.020325,
+      "complaintRate": 0
+    },
+    {
+      "day": "2026-10-15",
+      "windowFrom": "2026-10-08T22:00:00.000Z",
+      "windowTo": "2026-10-15T22:00:00.000Z",
+      "sent": 257,
+      "bounced": 13,
+      "complained": 0,
+      "bounceRate": 0.050584,
+      "complaintRate": 0
+    },
+    {
+      "day": "2026-10-16",
+      "windowFrom": "2026-10-09T22:00:00.000Z",
+      "windowTo": "2026-10-16T22:00:00.000Z",
+      "sent": 268,
+      "bounced": 6,
+      "complained": 0,
+      "bounceRate": 0.022388,
+      "complaintRate": 0
+    },
+    {
+      "day": "2026-10-17",
+      "windowFrom": "2026-10-10T22:00:00.000Z",
+      "windowTo": "2026-10-17T22:00:00.000Z",
+      "sent": 279,
+      "bounced": 6,
+      "complained": 0,
+      "bounceRate": 0.021505,
+      "complaintRate": 0
+    },
+    {
+      "day": "2026-10-18",
+      "windowFrom": "2026-10-11T22:00:00.000Z",
+      "windowTo": "2026-10-18T22:00:00.000Z",
+      "sent": 290,
+      "bounced": 6,
+      "complained": 0,
+      "bounceRate": 0.02069,
+      "complaintRate": 0
+    },
+    {
+      "day": "2026-10-19",
+      "windowFrom": "2026-10-12T22:00:00.000Z",
+      "windowTo": "2026-10-19T22:00:00.000Z",
+      "sent": 301,
+      "bounced": 6,
+      "complained": 0,
+      "bounceRate": 0.019934,
+      "complaintRate": 0
+    },
+    {
+      "day": "2026-10-20",
+      "windowFrom": "2026-10-13T22:00:00.000Z",
+      "windowTo": "2026-10-20T22:00:00.000Z",
+      "sent": 312,
+      "bounced": 7,
+      "complained": 1,
+      "bounceRate": 0.022436,
+      "complaintRate": 0.003205
+    },
+    {
+      "day": "2026-10-21",
+      "windowFrom": "2026-10-14T22:00:00.000Z",
+      "windowTo": "2026-10-21T22:00:00.000Z",
+      "sent": 323,
+      "bounced": 7,
+      "complained": 0,
+      "bounceRate": 0.021672,
+      "complaintRate": 0
+    },
+    {
+      "day": "2026-10-22",
+      "windowFrom": "2026-10-15T22:00:00.000Z",
+      "windowTo": "2026-10-22T22:00:00.000Z",
+      "sent": 334,
+      "bounced": 7,
+      "complained": 0,
+      "bounceRate": 0.020958,
+      "complaintRate": 0
+    },
+    {
+      "day": "2026-10-23",
+      "windowFrom": "2026-10-16T22:00:00.000Z",
+      "windowTo": "2026-10-23T22:00:00.000Z",
+      "sent": 345,
+      "bounced": 7,
+      "complained": 0,
+      "bounceRate": 0.02029,
+      "complaintRate": 0
+    },
+    {
+      "day": "2026-10-24",
+      "windowFrom": "2026-10-17T23:00:00.000Z",
+      "windowTo": "2026-10-24T23:00:00.000Z",
+      "sent": 356,
+      "bounced": 7,
+      "complained": 0,
+      "bounceRate": 0.019663,
+      "complaintRate": 0
+    },
+    {
+      "day": "2026-10-25",
+      "windowFrom": "2026-10-18T23:00:00.000Z",
+      "windowTo": "2026-10-25T23:00:00.000Z",
+      "sent": 367,
+      "bounced": 8,
+      "complained": 0,
+      "bounceRate": 0.021798,
+      "complaintRate": 0
+    },
+    {
+      "day": "2026-10-26",
+      "windowFrom": "2026-10-19T23:00:00.000Z",
+      "windowTo": "2026-10-26T23:00:00.000Z",
+      "sent": 378,
+      "bounced": 8,
+      "complained": 0,
+      "bounceRate": 0.021164,
+      "complaintRate": 0
+    },
+    {
+      "day": "2026-10-27",
+      "windowFrom": "2026-10-20T23:00:00.000Z",
+      "windowTo": "2026-10-27T23:00:00.000Z",
+      "sent": 389,
+      "bounced": 8,
+      "complained": 0,
+      "bounceRate": 0.020566,
+      "complaintRate": 0
+    },
+    {
+      "day": "2026-10-28",
+      "windowFrom": "2026-10-21T23:00:00.000Z",
+      "windowTo": "2026-10-28T23:00:00.000Z",
+      "sent": 400,
+      "bounced": 8,
+      "complained": 0,
+      "bounceRate": 0.02,
+      "complaintRate": 0
+    },
+    {
+      "day": "2026-10-29",
+      "windowFrom": "2026-10-22T23:00:00.000Z",
+      "windowTo": "2026-10-29T23:00:00.000Z",
+      "sent": 411,
+      "bounced": 9,
+      "complained": 0,
+      "bounceRate": 0.021898,
+      "complaintRate": 0
+    },
+    {
+      "day": "2026-10-30",
+      "windowFrom": "2026-10-23T23:00:00.000Z",
+      "windowTo": "2026-10-30T23:00:00.000Z",
+      "sent": 422,
+      "bounced": 9,
+      "complained": 0,
+      "bounceRate": 0.021327,
+      "complaintRate": 0
+    },
+    {
+      "day": "2026-10-31",
+      "windowFrom": "2026-10-24T23:00:00.000Z",
+      "windowTo": "2026-10-31T23:00:00.000Z",
+      "sent": 433,
+      "bounced": 9,
+      "complained": 0,
+      "bounceRate": 0.020785,
+      "complaintRate": 0
+    },
+    {
+      "day": "2026-11-01",
+      "windowFrom": "2026-10-25T23:00:00.000Z",
+      "windowTo": "2026-11-01T23:00:00.000Z",
+      "sent": 444,
+      "bounced": 9,
+      "complained": 0,
+      "bounceRate": 0.02027,
+      "complaintRate": 0
+    },
+    {
+      "day": "2026-11-02",
+      "windowFrom": "2026-10-26T23:00:00.000Z",
+      "windowTo": "2026-11-02T23:00:00.000Z",
+      "sent": 455,
+      "bounced": 10,
+      "complained": 0,
+      "bounceRate": 0.021978,
+      "complaintRate": 0
+    },
+    {
+      "day": "2026-11-03",
+      "windowFrom": "2026-10-27T23:00:00.000Z",
+      "windowTo": "2026-11-03T23:00:00.000Z",
+      "sent": 466,
+      "bounced": 10,
+      "complained": 0,
+      "bounceRate": 0.021459,
+      "complaintRate": 0
+    },
+    {
+      "day": "2026-11-04",
+      "windowFrom": "2026-10-28T23:00:00.000Z",
+      "windowTo": "2026-11-04T23:00:00.000Z",
+      "sent": 477,
+      "bounced": 10,
+      "complained": 0,
+      "bounceRate": 0.020964,
+      "complaintRate": 0
+    },
+    {
+      "day": "2026-11-05",
+      "windowFrom": "2026-10-29T23:00:00.000Z",
+      "windowTo": "2026-11-05T23:00:00.000Z",
+      "sent": 488,
+      "bounced": 10,
+      "complained": 0,
+      "bounceRate": 0.020492,
+      "complaintRate": 0
+    },
+    {
+      "day": "2026-11-06",
+      "windowFrom": "2026-10-30T23:00:00.000Z",
+      "windowTo": "2026-11-06T23:00:00.000Z",
+      "sent": 499,
+      "bounced": 10,
+      "complained": 0,
+      "bounceRate": 0.02004,
+      "complaintRate": 0
+    }
+  ],
+  "windowDays": 7,
+  "thresholds": {
+    "complaintWarn": 0.001,
+    "complaintStop": 0.003,
+    "bounceStop": 0.05,
+    "minVolume": 200
+  },
+  "autoPause": true,
+  "timeZone": "Europe/Copenhagen",
+  "computedAt": "2026-11-07T08:30:00.000Z",
+  "semantics": "current_status_by_creation_window"
+}
