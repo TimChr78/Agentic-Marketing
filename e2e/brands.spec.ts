@@ -32,9 +32,9 @@ test('an owner creates a brand and lands in it (#190)', async ({ page }) => {
   const dialog = page.getByRole('dialog', { name: 'New brand' });
   await expect(dialog).toBeVisible();
   const suffix = Date.now();
-  await dialog.getByLabel('Brand name').fill(`E2E brand ${suffix}`);
-  await dialog.getByLabel('Primary domain').fill(`e2e-${suffix}.example`);
-  await dialog.getByLabel('Site name').fill(`E2E site ${suffix}`);
+  await dialog.getByRole('textbox', { name: 'Brand name', exact: true }).fill(`E2E brand ${suffix}`);
+  await dialog.getByRole('textbox', { name: 'Primary domain', exact: true }).fill(`e2e-${suffix}.example`);
+  await dialog.getByRole('textbox', { name: 'Site name', exact: true }).fill(`E2E site ${suffix}`);
   await dialog.getByRole('button', { name: 'Create brand' }).click();
 
   await expect(page.getByRole('button', { name: new RegExp(`^Brand: E2E brand ${suffix}`) })).toBeVisible();

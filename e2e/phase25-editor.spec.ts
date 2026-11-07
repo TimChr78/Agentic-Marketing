@@ -17,7 +17,7 @@ async function openTemplate(page: import('@playwright/test').Page) {
   return template;
 }
 
-test('the editor inserts from the palette, opens every preview mode and labels the source', async ({ page }) => {
+test('the editor inserts from the palette, opens every preview mode and labels the source', { tag: '@smoke' }, async ({ page }) => {
   await openTemplate(page);
 
   // A clean editor preview is the exact saved version, not an unsaved draft.
@@ -35,12 +35,12 @@ test('the editor inserts from the palette, opens every preview mode and labels t
   for (const label of ['Text', 'Image', 'Button', 'Divider', 'Spacer', 'Columns']) {
     await expect(palette.getByRole('button', { name: label, exact: true })).toBeVisible();
   }
-  await palette.getByLabel('Find an element or block').fill('zzz');
+  await palette.getByRole('textbox', { name: 'Find an element or block', exact: true }).fill('zzz');
   await expect(palette.getByText(/No elements match/)).toBeVisible();
-  await palette.getByLabel('Find an element or block').fill('spacer');
+  await palette.getByRole('textbox', { name: 'Find an element or block', exact: true }).fill('spacer');
   await expect(palette.getByRole('button', { name: 'Spacer', exact: true })).toBeVisible();
   await expect(palette.getByRole('button', { name: 'Text', exact: true })).toHaveCount(0);
-  await palette.getByLabel('Find an element or block').fill('');
+  await palette.getByRole('textbox', { name: 'Find an element or block', exact: true }).fill('');
 
   // The reusable-blocks tab shares the block list; a block created by another spec may already
   // exist, so accept either the empty state or the shared list.
@@ -56,7 +56,7 @@ test('the editor inserts from the palette, opens every preview mode and labels t
   await expect(insert).toBeFocused();
 
   await page.getByRole('radio', { name: 'MJML and Liquid' }).click();
-  const source = page.getByLabel('MJML with Liquid');
+  const source = page.getByRole('textbox', { name: 'MJML with Liquid', exact: true });
   await expect(source).toHaveValue(/Write your text here\./, { timeout: 15_000 });
 
   // The draft preview is local, labelled Unsaved draft, and offers width, dark mail and text modes.

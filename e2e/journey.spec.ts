@@ -5,7 +5,7 @@ test('journey builder: add by drag, connect, delete by keyboard and context menu
   await signIn(page, PEOPLE.builder);
   await page.goto('/marketing/journeys');
   await page.getByRole('button', { name: 'New journey' }).first().click();
-  await page.getByRole('dialog').getByLabel('Name').fill('E2E onboarding');
+  await page.getByRole('dialog').getByRole('textbox', { name: 'Name', exact: true }).fill('E2E onboarding');
   await page.getByRole('button', { name: 'Create draft' }).click();
   await expect(page).toHaveURL(/\/marketing\/journeys\/jrn_/);
   const id = page.url().split('/').pop()!;
@@ -38,7 +38,7 @@ test('journey builder: add by drag, connect, delete by keyboard and context menu
 
   // Connect wait → exit with the keyboard-friendly inspector select.
   await wait.click();
-  await page.getByLabel('Next step').selectOption({ label: 'Exit (Exit)' });
+  await page.getByRole('combobox', { name: 'Next step', exact: true }).selectOption({ label: 'Exit (Exit)' });
   await expect(canvas.locator('.react-flow__edge')).toHaveCount(2);
 
   // Add an e-mail after the wait (press in the palette), then delete it with the Delete key.

@@ -2,10 +2,10 @@ import { expect, test } from '@playwright/test';
 import { call, PASSWORD, PEOPLE, signIn } from './helpers';
 
 test.describe('approvals (#41)', () => {
-  test('sign in, review the rendered e-mail, reject needs a reason, approve', async ({ page }) => {
+  test('sign in, review the rendered e-mail, reject needs a reason, approve', { tag: '@smoke' }, async ({ page }) => {
     await page.goto('/');
-    await page.getByLabel('E-mail').fill(PEOPLE.approver);
-    await page.getByLabel('Password').fill(PASSWORD);
+    await page.getByRole('textbox', { name: 'E-mail', exact: true }).fill(PEOPLE.approver);
+    await page.getByLabel('Password', { exact: true }).fill(PASSWORD);
     await page.getByRole('button', { name: 'Sign in' }).click();
     // The queue is a destination, not the landing page; Home is the start page for everyone.
     await expect(page).toHaveURL(/\/$/);
@@ -24,7 +24,7 @@ test.describe('approvals (#41)', () => {
     await expect(drawer).toContainText('Signal #43: the inbox is the new homepage');
     await expect(drawer.frameLocator('iframe[title^="E-mail preview"]').getByText('Feeds come and go')).toBeVisible();
     await drawer.getByRole('tab', { name: 'Text version' }).click();
-    await expect(drawer.getByLabel('Plain-text part')).toContainText('Feeds come and go');
+    await expect(drawer.getByLabel('Plain-text part', { exact: true })).toContainText('Feeds come and go');
 
     await drawer.getByRole('button', { name: 'Reject', exact: true }).click();
     await drawer.getByRole('button', { name: 'Reject with reason' }).click();

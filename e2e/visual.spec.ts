@@ -67,7 +67,7 @@ for (const name of SUBSET) {
         await page.goto(route!.path);
         await settle(page);
         // The signed-out screens must really be signed out (#442 review): the form, not the app.
-        if (route!.signedOut) await expect(page.getByLabel(/e-mail/i).first()).toBeVisible();
+        if (route!.signedOut) await expect(page.getByRole('textbox', { name: /e-mail/i }).first()).toBeVisible();
         // People is captured as a person first sees it: the first page, its count and Load more.
         await page.evaluate(() => window.scrollTo(0, 0));
         // Which people come first depends on when asynchronous activity bumped their last-seen time,
