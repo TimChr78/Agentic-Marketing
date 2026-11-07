@@ -3,7 +3,7 @@ import { useEffect, useId, useState } from 'react';
 import { api, type Out } from '../../app/api';
 import { useSession } from '../../app/session';
 import { useApi } from '../../app/useApi';
-import { Alert, Button, JsonView, Skeleton, StatusPill } from '../../ui';
+import { Alert, Button, JsonView, StatusPill } from '../../ui';
 import { formatDateTime } from '../../ui/time';
 import { getArtifact } from '../artifactCache';
 import { ConditionView } from '../previews/ConditionView';
@@ -374,22 +374,6 @@ function TemplateChecks({ check }: { check: TemplateCheck }) {
           ))}
         </ul>
       )}
-    </div>
-  );
-}
-
-/** A skeleton that follows the summary's sequence while the authoritative read is loading. */
-export function ConsequenceSkeleton() {
-  return (
-    <div
-      className="space-y-3 rounded-lg border border-line bg-surface-2 px-4 py-4"
-      role="status"
-      aria-label="Loading the consequence summary"
-    >
-      <Skeleton className="h-5 w-28" />
-      <Skeleton className="h-3.5 w-4/5" />
-      <Skeleton className="h-3.5 w-3/5" />
-      <Skeleton className="h-3.5 w-2/3" />
     </div>
   );
 }
