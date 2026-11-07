@@ -133,14 +133,12 @@ function StreamTable({ health }: { health: Health }) {
 function MetricTile({
   label,
   value,
-  unit,
   meta,
   note,
   windowDays,
 }: {
   label: string;
   value: string;
-  unit?: string;
   meta: string;
   note?: string;
   windowDays: number;
@@ -150,7 +148,6 @@ function MetricTile({
       <p className="text-[13px] leading-5 font-medium text-fg-2">{label}</p>
       <div className="mt-2 flex items-baseline gap-1">
         <span className="num text-[28px] leading-9 font-semibold tracking-[-0.02em] text-fg md:text-[32px] md:leading-10">{value}</span>
-        {unit && <span className="text-[14px] leading-[22px] text-fg-2">{unit}</span>}
       </div>
       <p className="mt-2 text-[12px] leading-[18px] text-fg-2">{meta}</p>
       {note && <p className="mt-1 text-[12px] leading-[18px] text-muted">{note}</p>}
@@ -217,7 +214,6 @@ export function SelectedStreamTiles({
           windowDays={health.windowDays}
           label="Bounce rate"
           value={bounce.value === null ? '—' : rateText(bounce.value)}
-          unit={bounce.value === null ? undefined : '%'}
           meta={
             bounce.value === null
               ? withheldText(bounce.withheld)
@@ -229,7 +225,6 @@ export function SelectedStreamTiles({
           windowDays={health.windowDays}
           label="Complaint rate"
           value={complaint.value === null ? '—' : rateText(complaint.value)}
-          unit={complaint.value === null ? undefined : '%'}
           meta={
             complaint.value === null
               ? withheldText(complaint.withheld)

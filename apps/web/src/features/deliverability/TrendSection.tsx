@@ -41,7 +41,7 @@ function latest(points: readonly TrendPoint[], kind: 'bounce' | 'complaint', min
     const rate = pointRate(point, kind, minVolume);
     if (rate.value !== null) return `${rate.value.toFixed(2)}% on ${dayLabel(point.day)}`;
   }
-  return 'no evaluated window';
+  return 'none';
 }
 
 function gapCount(points: readonly TrendPoint[], kind: 'bounce' | 'complaint', minVolume: number): number {
@@ -215,7 +215,7 @@ export function TrendSection({
             Bounce and complaint trend
           </h2>
           <p className="mt-0.5 text-[12px] leading-[18px] text-muted">
-            {stream.label} · {periodDateLabel(period)} · {period.zone} · rates use today’s {trend?.windowDays ?? 'policy'}‑day rolling
+            {stream.label} · {periodDateLabel(period)} · {period.zone} · rates use today’s {trend ? `${trend.windowDays}-day ` : ''}rolling
             creation windows and current statuses.
           </p>
         </div>
@@ -251,7 +251,8 @@ export function TrendSection({
           <NotFoundBlock />
         ) : (
           <Alert tone="bad" title="Couldn’t load the trend" onRetry={onRetry}>
-            {error}. Successful health and DNS sections remain visible.
+            <p>{error}</p>
+            <p className="mt-1">Successful health and DNS sections remain visible.</p>
           </Alert>
         )
       ) : !trend || trend.points.length === 0 ? (
@@ -315,7 +316,7 @@ export function TrendSection({
 
           {hasNoRate(trend.points, 'bounce', minVolume) && hasNoRate(trend.points, 'complaint', minVolume) && !allZero && (
             <p className="text-[12px] leading-[18px] text-muted">
-              Every window is below the evaluation volume; rates are withheld and the table marks each gap.
+              No window has an evaluated rate; gaps are zero volume or below evaluation volume, and the table marks each one.
             </p>
           )}
 

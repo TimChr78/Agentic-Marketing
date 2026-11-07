@@ -210,7 +210,7 @@ export function DnsSection({
           </EmptyState>
         </div>
       ) : (
-        <div className="grid gap-3 lg:grid-cols-2">
+        <div className="grid gap-3 md:grid-cols-2">
           {data.domains.map((report) => (
             <DomainCard key={report.domain} report={report} checkedAt={data.checkedAt} />
           ))}

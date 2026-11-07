@@ -372,6 +372,7 @@ describe('Deliverability stream states (#508)', () => {
     expect(document.querySelector('line[data-threshold="complaintStop"]')?.getAttribute('stroke-dasharray')).toBe('8 6');
     expect(document.querySelector('line[data-threshold="complaintWarn"]')?.getAttribute('stroke-dasharray')).toBe('3 5');
     expect(screen.getByText(/Lines show current thresholds, not historic pause decisions/)).toBeTruthy();
+    expect(document.body.textContent).not.toContain('%%');
   });
 });
 
@@ -442,6 +443,17 @@ describe('Deliverability data states (#508)', () => {
     await screen.findByText(/load the health summary/);
     expect(screen.getByText(/Successful trend and DNS sections remain visible/)).toBeTruthy();
     expect(screen.getByRole('heading', { name: /Bounce rate · last 7 complete days/ })).toBeTruthy();
+  });
+
+  it('removes old health values when a refresh fails instead of showing them as current', async () => {
+    render(<DeliverabilityPage />);
+    await screen.findByText('Selected stream · E-mail · marketing');
+
+    h.healthError = new Error('refresh failed');
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh rates' }));
+    await screen.findByText(/load the health summary/);
+    expect(screen.queryByText('Selected stream · E-mail · marketing')).toBeNull();
+    expect(screen.queryByText('Sample 2,000 / minimum 200')).toBeNull();
   });
 
   it('keeps health and trend visible when DNS fails, and retries only DNS', async () => {
