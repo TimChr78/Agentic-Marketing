@@ -12,7 +12,7 @@
     "dev:web": "pnpm --filter @agentic-marketing/web dev",
     "build:demo": "pnpm --filter @agentic-marketing/web build:single",
     "migrate": "pnpm --filter @agentic-marketing/server cli migrate",
-    "lint": "biome check . && node scripts/check-e2e-selectors.mjs",
+    "lint": "biome check . && node scripts/check-e2e-selectors.mjs && node scripts/changelog.mjs check",
     "format": "biome format --write .",
     "typecheck": "pnpm -r --filter './packages/*' --filter './apps/*' typecheck",
     "test": "vitest run",
