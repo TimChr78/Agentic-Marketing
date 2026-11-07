@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../../../app/api';
 import { setSearchParam, useLocation } from '../../../app/router';
 import { useSession } from '../../../app/session';
-import { useApi } from '../../../app/useApi';
+import { useApi, useKeyedApi } from '../../../app/useApi';
 import { ANALYTICS_MEASURES, METRIC_UNIT_LABEL, measureDescription, measureLabel, measureUnit } from '../../../lib/labels';
 import { analyticsParams } from '../../../pages/insights/analyticsParams';
 import { Alert, Button, Checkbox, Field, Input, LineChart, PageHeader, Select, Skeleton } from '../../../ui';
@@ -256,28 +256,31 @@ export default function AnalyticsPerformance() {
   const filters = broadcast ? { broadcast } : undefined;
   const readKey = `${resolvedMeasures.join(',')}|${range.from}|${range.to}|${broadcast ?? ''}|${conversion}`;
   const priorKey = `${priorRange.from}|${priorRange.to}`;
+  const priorReadKey = `${readKey}|prior:${priorKey}`;
   const enabled = canRead && resolvedMeasures.length > 0;
 
   // Hook order matters for the contract's read budget: catalogue, current totals, prior totals,
   // prior series, current series. Current series is last so the latest read is the selected period.
-  const currentTotals = useApi(
+  // Each result is keyed to the question, measures and bounds it belongs to, so a pending read for
+  // a new selection never leaves older values under the new label.
+  const currentTotals = useKeyedApi(
+    readKey,
     () => api.call('analytics.query', queryInput({ measures: resolvedMeasures, range, kind: 'totals', filters, conversion })),
-    [readKey],
     { skip: !enabled },
   );
-  const priorTotals = useApi(
+  const priorTotals = useKeyedApi(
+    priorReadKey,
     () => api.call('analytics.query', queryInput({ measures: resolvedMeasures, range: priorRange, kind: 'totals', filters, conversion })),
-    [readKey, priorKey, compare],
     { skip: !enabled || !compare },
   );
-  const priorSeries = useApi(
+  const priorSeries = useKeyedApi(
+    priorReadKey,
     () => api.call('analytics.query', queryInput({ measures: resolvedMeasures, range: priorRange, kind: 'series', filters, conversion })),
-    [readKey, priorKey, compare],
     { skip: !enabled || !compare },
   );
-  const currentSeries = useApi(
+  const currentSeries = useKeyedApi(
+    readKey,
     () => api.call('analytics.query', queryInput({ measures: resolvedMeasures, range, kind: 'series', filters, conversion })),
-    [readKey],
     { skip: !enabled },
   );
 

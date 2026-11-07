@@ -124,17 +124,20 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
 
   const published = artifact.publishedVersion !== null && artifact.publishedVersion !== undefined;
   // #507: one journeys.stats read for the canvas overlay and the control-group summary. The old
-  // 30-second timer is gone; the person refreshes explicitly. A draft or an edited topology gets
-  // no overlay because aggregate counts cannot be attributed to it.
+  // 30-second timer is gone; the person refreshes explicitly. Aggregate counts cannot be attributed
+  // to a saved draft, so the overlay needs the displayed version to be the live one and its steps
+  // to be unmodified; otherwise it is withheld with the notice below.
+  const versionIsPublished = published && artifact.version.number === artifact.publishedVersion;
   const topologyCurrent = useMemo(
     () => sameTopology(nodes, (artifact.version.content as JourneyContent).nodes),
     [nodes, artifact.version.content],
   );
-  const wantsStats = published && ((showStats && topologyCurrent) || !!content.controlGroup);
+  const countsEligible = versionIsPublished && topologyCurrent;
+  const wantsStats = published && ((showStats && countsEligible) || !!content.controlGroup);
   const stats = useApi(() => api.call('journeys.stats', { artifactId: artifact.id }), [artifact.id, artifact.publishedVersion], {
     skip: !wantsStats,
   });
-  const showCounts = showStats && published && topologyCurrent;
+  const showCounts = showStats && countsEligible;
   const counts = useMemo<JourneyCounts | undefined>(
     () => (showCounts && stats.data ? { reached: stats.data.reached, waitingAt: stats.data.waitingAt } : undefined),
     [showCounts, stats.data],
@@ -489,8 +492,8 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
             </Button>
           )}
           {showCounts && <span className="hidden text-[11px] leading-4 text-muted md:inline">{COUNTS_LABEL}</span>}
-          {showStats && published && !topologyCurrent && (
-            <span className="text-[11px] leading-4 text-warn">Counts are hidden while the draft's steps differ from the live version.</span>
+          {showStats && published && !countsEligible && (
+            <span className="text-[11px] leading-4 text-warn">Counts are hidden until you view the live version unmodified.</span>
           )}
           {content.controlGroup && (
             <Tag icon={<ShieldCheck size={12} aria-hidden />} className="hidden sm:inline-flex">

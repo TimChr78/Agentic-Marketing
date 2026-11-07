@@ -21,7 +21,13 @@ export default function JourneyPage({ params }: { params: Record<string, string>
       autosave
       description={<CampaignMembership artifactId={params.id} />}
       editor={(p) => <JourneyBuilder {...p} />}
-      extraTabs={[{ key: 'report', label: 'Report', render: (a) => <JourneyReport journeyId={a.id} active={urlTab === 'report'} /> }]}
+      extraTabs={[
+        {
+          key: 'report',
+          label: 'Report',
+          render: (a) => <JourneyReport journeyId={a.id} artifact={a} active={urlTab === 'report'} />,
+        },
+      ]}
       tab={urlTab && TABS.has(urlTab) ? urlTab : 'content'}
       onTabChange={(tab) => setSearchParam('tab', tab === 'content' ? null : tab)}
     />
