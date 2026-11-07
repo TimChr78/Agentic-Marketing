@@ -40,6 +40,10 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+# Container identity from mountinfo/cgroup, in its own file so the parser is testable.
+# shellcheck source=scripts/container-id.sh
+. "$REPO_ROOT/scripts/container-id.sh"
+
 IMAGE="${E2E_IMAGE:-mcr.microsoft.com/playwright:v1.64.1-noble}"
 READY_TIMEOUT="${E2E_READY_TIMEOUT:-240}"
 # A real seed takes about 30 s. Answering sooner than this is not proof, but it is the wording we
@@ -250,16 +254,8 @@ inside_container() {
     grep -qaE '(docker|containerd|kubepods|crio|libpod)' /proc/self/cgroup 2>/dev/null
 }
 
-# A custom $HOSTNAME is a container name, not an id; read the id from the runtime's own metadata.
-container_id_from_proc() {
-  local id
-  id="$(grep -ohE '(docker|containerd|crio|libpod)[-/][0-9a-f]{64}' /proc/self/mountinfo /proc/self/cgroup 2>/dev/null |
-    grep -oE '[0-9a-f]{64}' | head -1 || true)"
-  if [ -z "$id" ]; then
-    id="$(grep -ohE '[0-9a-f]{64}' /proc/self/cgroup 2>/dev/null | head -1 || true)"
-  fi
-  printf '%s' "$id"
-}
+# A custom $HOSTNAME is a container name, not an id; container_id_from_proc (scripts/container-id.sh)
+# reads the id from the runtime's own metadata when the hostname is not enough.
 
 resolve_self_container() {
   local ref name
@@ -304,6 +300,9 @@ log "chromium: $CHROMIUM_PATH"
 # --- server lifecycle ----------------------------------------------------------------------------
 SERVER_PID=""
 SERVER_PGID=""
+REPORTED_PID=""
+LAUNCHED_PID=""
+PGID_FILE=""
 DB_OWNED=0
 CALLER_PGID="$(ps -o pgid= -p $$ | tr -d ' ')"
 
@@ -329,28 +328,47 @@ signal_server() {
   kill "-$signal" "$SERVER_PID" 2>/dev/null
 }
 
+# Before the group is verified there is still a launched child (setsid, then the server). Stop that
+# exact pid so a timeout or a cancellation during the PID handshake cannot leak it.
+stop_unverified_pid() {
+  local pid="$1"
+  log "stopping the seeded server launcher (pid $pid; process group not verified)"
+  kill -TERM "$pid" 2>/dev/null
+  for _ in $(seq 1 50); do
+    kill -0 "$pid" 2>/dev/null || return 0
+    sleep 0.2
+  done
+  kill -KILL "$pid" 2>/dev/null
+}
+
 cleanup() {
   local code=$?
   trap - EXIT INT TERM
   set +e
-  if [ -n "$SERVER_PID" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
-    log "stopping the seeded server (pid $SERVER_PID, process group $SERVER_PGID)"
-    signal_server TERM
-    for _ in $(seq 1 50); do
-      kill -0 "$SERVER_PID" 2>/dev/null || break
-      sleep 0.2
-    done
-    signal_server KILL
-  elif [ -n "$SERVER_PID" ]; then
-    log "seeded server (pid $SERVER_PID) is already gone"
+  if [ -n "$SERVER_PGID" ]; then
+    if kill -0 "$SERVER_PID" 2>/dev/null; then
+      log "stopping the seeded server (pid $SERVER_PID, process group $SERVER_PGID)"
+      signal_server TERM
+      for _ in $(seq 1 50); do
+        kill -0 "$SERVER_PID" 2>/dev/null || break
+        sleep 0.2
+      done
+      signal_server KILL
+    else
+      log "seeded server (pid $SERVER_PID) is already gone"
+    fi
+  elif [ -n "$REPORTED_PID" ] && kill -0 "$REPORTED_PID" 2>/dev/null; then
+    stop_unverified_pid "$REPORTED_PID"
+  elif [ -n "$LAUNCHED_PID" ] && kill -0 "$LAUNCHED_PID" 2>/dev/null; then
+    stop_unverified_pid "$LAUNCHED_PID"
   fi
-  # Drop only the exact database this invocation created. For a generated name, the name was
-  # verified absent before the build, so its existence now means this run's server created it even
-  # if it died before /ready. An explicit name is owned only after the seed check below.
+  # Drop only the exact database this invocation created. Both kinds of name were verified absent
+  # before launch, so a confirmed existence means this run's server created it, even if the seed
+  # failed before the workspace check. A failed probe (exit 2) never grants ownership.
   owned=0
   if [ "$DB_OWNED" = 1 ]; then
     owned=1
-  elif [ "$DB_MODE" = generated ]; then
+  else
     db_database_exists "$PG_DB"
     DB_STATE=$?
     [ "$DB_STATE" -eq 0 ] && owned=1
@@ -365,6 +383,9 @@ cleanup() {
     fi
   else
     log "leaving database $PG_DB alone (this run never created it)"
+  fi
+  if [ -n "$PGID_FILE" ]; then
+    rm -f "$PGID_FILE"
   fi
   restore_ownership
   if [ "$code" -eq 0 ]; then
@@ -407,26 +428,28 @@ setsid bash -c '
   VALKEY_URL="${VALKEY_URL:-redis://localhost:6379}" \
   NATS_URL="${NATS_URL:-nats://127.0.0.1:4222}" \
   npx tsx apps/server/test/e2e/server.ts >"$SERVER_LOG" 2>&1 &
-SETSID_PID=$!
+LAUNCHED_PID=$!
 
 for _ in $(seq 1 100); do
   [ -s "$PGID_FILE" ] && break
   sleep 0.1
 done
 if [ ! -s "$PGID_FILE" ]; then
-  die "the seeded server (launcher pid $SETSID_PID) did not report its process group; refusing to signal an unverified group"
+  die "the seeded server (launcher pid $LAUNCHED_PID) did not report its process group; refusing to signal an unverified group"
 fi
-SERVER_PID="$(tr -d '[:space:]' <"$PGID_FILE")"
-SERVER_PGID="$SERVER_PID"
-case "$SERVER_PID" in
-  '' | *[!0-9]* | 0) die "the seeded server reported an invalid process group '$SERVER_PID'" ;;
+REPORTED_PID="$(tr -d '[:space:]' <"$PGID_FILE")"
+case "$REPORTED_PID" in
+  '' | *[!0-9]* | 0) die "the seeded server reported an invalid process group '$REPORTED_PID'" ;;
 esac
-ACTUAL_PGID="$(ps -o pgid= -p "$SERVER_PID" 2>/dev/null | tr -d ' ')"
-[ "$ACTUAL_PGID" = "$SERVER_PID" ] ||
-  die "seeded server pid $SERVER_PID is not the leader of its own process group (pgid '${ACTUAL_PGID:-none}')"
-[ "$SERVER_PGID" != "$CALLER_PGID" ] ||
-  die "seeded server process group $SERVER_PGID equals the caller's group; refusing to signal it"
-kill -0 "$SERVER_PID" 2>/dev/null || die "seeded server pid $SERVER_PID is not running"
+ACTUAL_PGID="$(ps -o pgid= -p "$REPORTED_PID" 2>/dev/null | tr -d ' ')"
+[ "$ACTUAL_PGID" = "$REPORTED_PID" ] ||
+  die "seeded server pid $REPORTED_PID is not the leader of its own process group (pgid '${ACTUAL_PGID:-none}')"
+[ "$REPORTED_PID" != "$CALLER_PGID" ] ||
+  die "seeded server process group $REPORTED_PID equals the caller's group; refusing to signal it"
+kill -0 "$REPORTED_PID" 2>/dev/null || die "seeded server pid $REPORTED_PID is not running"
+# Only a verified private leader becomes the group cleanup may signal.
+SERVER_PID="$REPORTED_PID"
+SERVER_PGID="$REPORTED_PID"
 log "server pid $SERVER_PID, process group $SERVER_PGID; log $SERVER_LOG"
 
 ready=0
