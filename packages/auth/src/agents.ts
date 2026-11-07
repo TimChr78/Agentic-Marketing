@@ -285,6 +285,50 @@ export const getAgent = defineCommand({
   },
 });
 
+export const getAgentMandate = defineCommand({
+  name: 'agents.mandate',
+  title: 'An agent’s active mandate',
+  description:
+    'The published, unarchived, unexpired mandate that applies to an agent now: its id, published version, full content, and why the current time is outside its working hours or on a blackout date (null when it is inside). Null when the agent has no active mandate. Drafts are never returned and credentials are not included.',
+  input: z.object({ agentId: AGENT_ID }),
+  output: z.object({
+    agentId: z.string(),
+    mandate: z
+      .object({
+        id: z.string(),
+        version: z.number().int(),
+        content: z.unknown().describe('The published agent_mandate content, the same shape artifacts.get returns'),
+      })
+      .nullable(),
+    outsideHours: z.string().nullable().describe('Why now is outside the mandate’s working hours or a blackout date; null when inside'),
+    asOf: z.string().describe('When the answer was calculated, ISO 8601'),
+  }),
+  permission: 'artifacts:read',
+  effect: 'read',
+  target: (i) => i.agentId,
+  handler: async (input, ctx) => {
+    const asOf = new Date();
+    const [agent] = await ctx.tx.select({ id: schema.agents.id }).from(schema.agents).where(eq(schema.agents.id, input.agentId));
+    if (!agent) throw new AppError('not_found', `Agent ${input.agentId} not found.`);
+    // The policy service selects the same active mandate the engine uses (published, unarchived,
+    // unexpired, newest applicable) but exposes only its view; read the published content here
+    // instead of fanning out per artifact on the client.
+    const active = await ctx.services.activeMandate?.(ctx.tx, input.agentId);
+    if (!active) return { agentId: input.agentId, mandate: null, outsideHours: null, asOf: asOf.toISOString() };
+    const [version] = await ctx.tx
+      .select({ content: schema.artifactVersions.content })
+      .from(schema.artifactVersions)
+      .where(and(eq(schema.artifactVersions.artifactId, active.view.id), eq(schema.artifactVersions.number, active.view.version)));
+    if (!version) throw new AppError('not_found', `The published version of mandate ${active.view.id} could not be read.`);
+    return {
+      agentId: input.agentId,
+      mandate: { id: active.view.id, version: active.view.version, content: version.content },
+      outsideHours: active.outsideHours,
+      asOf: asOf.toISOString(),
+    };
+  },
+});
+
 export const updateAgent = defineCommand({
   name: 'agents.update',
   title: 'Rename or re-sponsor an agent',
@@ -1319,6 +1363,7 @@ export const setAutonomy = defineCommand({
 export const agentCommands = [
   listAgents,
   getAgent,
+  getAgentMandate,
   updateAgent,
   pauseAgent,
   resumeAgent,
