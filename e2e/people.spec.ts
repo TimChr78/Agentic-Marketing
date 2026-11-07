@@ -9,9 +9,9 @@ test('people lookup finds a seeded person by e-mail', { tag: '@smoke' }, async (
   await page.goto('/audience/people');
   await expect(page.getByRole('heading', { level: 1, name: 'People' })).toBeVisible();
 
-  const search = page.getByRole('textbox', { name: 'Search by e-mail or profile id', exact: true });
+  const search = page.getByRole('textbox', { name: 'E-mail or profile ID', exact: true });
   await search.fill('reader1@example.net');
-  await page.getByRole('button', { name: 'Find', exact: true }).click();
+  await page.getByRole('button', { name: 'Find person', exact: true }).click();
 
   // An exact e-mail opens the person instead of leaving a one-row list.
   await expect(page).toHaveURL(/\/audience\/people\/prf_/);
