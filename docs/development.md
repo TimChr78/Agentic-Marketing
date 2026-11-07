@@ -151,7 +151,7 @@ published prerequisites and pending approvals of every reviewed type) without to
 
 ```bash
 pnpm --filter @agentic-marketing/web build   # writes apps/web/dist, which the seeded server serves
-npx tsx apps/server/test/e2e/server.ts       # API + that build on http://localhost:3100, a fresh am_e2e database
+npx tsx apps/server/test/e2e/server.ts       # API + that build on http://localhost:3100, a fresh run-scoped e2e database
 API_URL=http://localhost:3100 pnpm dev:web   # or the dev UI against it on :5173
 ```
 
@@ -298,7 +298,7 @@ pnpm test        # every Vitest project; needs the shared test stack (scripts/te
                  # eval "$(scripts/test-services.sh env)") or services of your own
 pnpm vitest run --project docs       # one project: docs, packages, web or server
 pnpm test:ci     # what CI runs: also writes reports/junit.xml and a coverage report in reports/coverage
-pnpm test:clean  # drop test databases a crashed run left in Postgres and ClickHouse
+pnpm test:clean  # drop the current run's leftover test databases (--all-stale for older idle runs)
 node scripts/check-versions.mjs      # every file that names the release version agrees (see Releasing)
 pnpm audit --prod --audit-level=moderate   # accepted advisories are listed in SECURITY.md
 ```
