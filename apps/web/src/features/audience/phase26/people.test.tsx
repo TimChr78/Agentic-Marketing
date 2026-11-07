@@ -326,7 +326,7 @@ describe('People list (#510)', () => {
     const push = vi.spyOn(history, 'pushState');
     renderList();
     await screen.findAllByText('ada@example.com');
-    const input = screen.getByLabelText('Find email');
+    const input = screen.getByLabelText('E-mail or profile ID');
     await userEvent.type(input, 'lee@example.com');
     expect(calls('profiles.find')).toHaveLength(0);
 
@@ -337,11 +337,23 @@ describe('People list (#510)', () => {
     push.mockRestore();
   });
 
+  it('opens a pasted profile id directly without a lookup', async () => {
+    const push = vi.spyOn(history, 'pushState');
+    renderList();
+    await screen.findAllByText('ada@example.com');
+    const id = `prf_${'c'.repeat(32)}`;
+    await userEvent.type(screen.getByLabelText('E-mail or profile ID'), id);
+    await userEvent.click(screen.getByRole('button', { name: 'Find person' }));
+    await waitFor(() => expect(push).toHaveBeenCalledWith(null, '', `/audience/people/${id}`));
+    expect(calls('profiles.find')).toHaveLength(0);
+    push.mockRestore();
+  });
+
   it('says No match for an unknown e-mail without opening anyone', async () => {
     h.respond = (name, input) => (name === 'profiles.find' ? { profileId: null } : baseRespond(name, input));
     renderList();
     await screen.findAllByText('ada@example.com');
-    await userEvent.type(screen.getByLabelText('Find email'), 'nobody@example.com');
+    await userEvent.type(screen.getByLabelText('E-mail or profile ID'), 'nobody@example.com');
     await userEvent.click(screen.getByRole('button', { name: 'Find person' }));
     expect(await screen.findByText('No match')).toBeTruthy();
   });

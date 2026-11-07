@@ -16,6 +16,7 @@ import { pageWidth } from '../../ui/layout';
 import ImportsPage from './ImportsPage';
 
 const PAGE_SIZE = 50;
+const PROFILE_ID = /^prf_[0-9a-f]{32}$/;
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 type ProfilePage = Out<'profiles.list'>;
 
@@ -177,8 +178,12 @@ export function PeopleList() {
     const value = query.trim();
     if (!value) return;
     setSearchError(null);
+    if (PROFILE_ID.test(value)) {
+      navigate(`/audience/people/${value}`);
+      return;
+    }
     if (!EMAIL.test(value)) {
-      setSearchError('Enter an e-mail address.');
+      setSearchError('Enter an e-mail address, or paste a profile id (prf_…).');
       return;
     }
     setSearching(true);
@@ -255,14 +260,13 @@ export function PeopleList() {
             }}
           >
             <label htmlFor="people-find-email" className="whitespace-nowrap text-[13px] text-fg-2">
-              Find email
+              E-mail or profile ID
             </label>
             <Input
               id="people-find-email"
-              type="email"
+              type="text"
               compact
-              aria-label="Find email"
-              placeholder="name@example.com"
+              placeholder="E-mail or prf_… profile id"
               className="w-[220px] max-w-full"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
