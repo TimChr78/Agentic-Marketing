@@ -4,6 +4,7 @@ import type { Db } from '@agentic-marketing/db';
 import { outbox } from '@agentic-marketing/email';
 import { Hono } from 'hono';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { seededRandom } from '../../../test-support/index';
 import { passwordResetRoutes } from '../src/http/password-reset';
 import {
   enqueueResetRequest,
@@ -30,9 +31,11 @@ let t: Awaited<ReturnType<typeof startTestServer>>;
 let owner: User;
 let ws = '';
 
+const random = seededRandom();
+
 /** A distinct client IP per call, so one test's rate-limit buckets never touch another's (or an earlier run's). */
-const nextIp = () => `10.${Math.floor(Math.random() * 256)}.${Math.floor(Math.random() * 256)}.${Math.floor(Math.random() * 254) + 1}`;
-const runId = Math.random().toString(36).slice(2, 8);
+const nextIp = () => `10.${Math.floor(random() * 256)}.${Math.floor(random() * 256)}.${Math.floor(random() * 254) + 1}`;
+const runId = random().toString(36).slice(2, 8);
 
 const headers = (ip: string) => ({ 'content-type': 'application/json', origin: BASE, 'x-forwarded-for': ip });
 
@@ -132,7 +135,7 @@ async function newAccountAt(email: string): Promise<User> {
 }
 
 async function newAccount(): Promise<User> {
-  return newAccountAt(`reset-${Date.now()}-${Math.random().toString(36).slice(2, 8)}@example.com`);
+  return newAccountAt(`reset-${Date.now()}-${random().toString(36).slice(2, 8)}@example.com`);
 }
 
 /** The sender the second test creates; a test that needs mail on its own creates one if absent. */
@@ -349,7 +352,7 @@ describe('requesting a reset link (#191)', () => {
   });
 
   it('rate limits per IP and recovers on another address', async () => {
-    const ip = `203.0.113.${Math.floor(Math.random() * 254) + 1}`;
+    const ip = `203.0.113.${Math.floor(random() * 254) + 1}`;
     const statuses: number[] = [];
     for (let i = 0; i < 6; i++) statuses.push((await forgot(`flood-${runId}-${i}@example.com`, ip)).status);
     expect(statuses.slice(0, 5)).toEqual([200, 200, 200, 200, 200]);
@@ -813,7 +816,7 @@ describe('the reset delivery queue (#379)', () => {
 describe('the audit trail (#191)', () => {
   it('records the request and the reset with the person and IP, never the token', async () => {
     const account = await newAccount();
-    const ip = `203.0.113.${Math.floor(Math.random() * 254) + 1}`;
+    const ip = `203.0.113.${Math.floor(random() * 254) + 1}`;
     await requestLink(account.email, ip);
     const token = linkToken(mailsTo(account.email)[0]);
     expect((await reset(token, NEW_PASSWORD, ip)).status).toBe(200);

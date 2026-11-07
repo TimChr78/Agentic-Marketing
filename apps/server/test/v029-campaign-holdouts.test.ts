@@ -9,6 +9,10 @@ import { eventually, rejects, startTestServer, testPort, type User } from './har
 
 const PORT = testPort(3481);
 const DB = 'test_v029_campaign_holdouts';
+// The arm is a hash of the database-generated profile id, so the test cannot pick it directly.
+// 64 people make the chance that a run sees only one arm negligible (< 2^-63); the assertions
+// below still require both before choosing one. AM_TEST_SEED does not control these ids.
+const CAMPAIGN_PEOPLE = 64;
 
 let t: Awaited<ReturnType<typeof startTestServer>>;
 let owner: User;
@@ -170,12 +174,12 @@ beforeAll(async () => {
     subject: 'Campaign news',
     mjml: mjml('The campaign is here.'),
   });
-  await preparePeople('arm-', 16, true);
+  await preparePeople('arm-', CAMPAIGN_PEOPLE, true);
   segment = await create('segment', 'Campaign subscribers', { condition: { consent: 'marketing_email' } });
   await api().call('artifacts.requestPublish', { artifactId: segment, note: 'audience' });
   await eventually(
     async () => (await api().call('segments.members', { artifactId: segment })).members.length,
-    (n) => n === 16,
+    (n) => n === CAMPAIGN_PEOPLE,
     20_000,
   );
   await sendCampaign();
@@ -186,19 +190,27 @@ afterAll(() => t?.close());
 describe('campaign control group', () => {
   it('assigns one deterministic arm per person across both sending members', async () => {
     const people = await profilesByPrefix('arm-');
-    expect(people).toHaveLength(16);
+    expect(people).toHaveLength(CAMPAIGN_PEOPLE);
     await eventually(
       () => messagesOf(broadcastId),
-      (rows) => rows.length === 16,
+      (rows) => rows.length === CAMPAIGN_PEOPLE,
       20_000,
     );
     const hash = holdoutHashVersion(50);
     const stored = await assignmentsOf(campaignId);
-    expect(stored).toHaveLength(16);
+    expect(stored).toHaveLength(CAMPAIGN_PEOPLE);
     for (const row of people) {
       const expected = armFor(50, ws, campaignId, hash, row.profile_id);
       expect(stored.find((s) => s.profile_id === row.profile_id)).toMatchObject({ arm: expected, hash_version: hash });
     }
+    expect(
+      stored.some((s) => s.arm === 'control'),
+      'no control arm',
+    ).toBe(true);
+    expect(
+      stored.some((s) => s.arm === 'treatment'),
+      'no treatment arm',
+    ).toBe(true);
     // The journey entry reads the campaign's arm instead of randomising again.
     const personWithArm = (arm: 'control' | 'treatment') => {
       const row = stored.find((s) => s.arm === arm);
@@ -210,7 +222,7 @@ describe('campaign control group', () => {
     treatment = personWithArm('treatment');
     expect(control).not.toBeNull();
     expect(treatment).not.toBeNull();
-    expect(await assignmentCount(campaignId)).toBe(16);
+    expect(await assignmentCount(campaignId)).toBe(CAMPAIGN_PEOPLE);
   });
 
   it('sends to treatment and suppresses control in the broadcast, then does the same in the journey', async () => {
@@ -255,7 +267,7 @@ describe('campaign control group', () => {
     expect(outbox.filter((m) => m.to === control!.email)).toHaveLength(0);
 
     // Still one assignment per person after the second member touched them.
-    expect(await assignmentCount(campaignId)).toBe(16);
+    expect(await assignmentCount(campaignId)).toBe(CAMPAIGN_PEOPLE);
     const events = await holdoutEventsOf(campaignId);
     for (const person of [control!, treatment!]) {
       const mine = events.filter((e) => e.profile_id === person.profileId);
@@ -268,7 +280,7 @@ describe('campaign control group', () => {
     expect(result.minSampleSizeMet).toBe(false);
     expect(result.verdict).toBe('not_enough_data');
     expect(result.goal).toMatchObject({ kind: 'conversion', event: 'Campaign Purchase', attributionDays: 7 });
-    expect(result.control.entered + result.treatment.entered).toBe(16);
+    expect(result.control.entered + result.treatment.entered).toBe(CAMPAIGN_PEOPLE);
     expect(result.control.revenue).toEqual({});
   });
 });
@@ -468,6 +480,6 @@ describe('scope changes and erasure', () => {
     expect(control).not.toBeNull();
     await api().call('profiles.erase', { profileId: control!.profileId, reason: 'test erasure' });
     expect((await assignmentsOf(campaignId)).some((a) => a.profile_id === control!.profileId)).toBe(false);
-    expect(await assignmentCount(campaignId)).toBe(15);
+    expect(await assignmentCount(campaignId)).toBe(CAMPAIGN_PEOPLE - 1);
   });
 });

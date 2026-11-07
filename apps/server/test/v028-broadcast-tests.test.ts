@@ -1,6 +1,7 @@
 import { subjectAssignment } from '@agentic-marketing/audience';
 import { outbox } from '@agentic-marketing/email';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { seededRandom } from '../../../test-support/index';
 import { eventually, startTestServer, testPort, type User } from './harness';
 
 // Phase 15 (#88, #70): newsletter subject A/B tests and recipient-local send windows on
@@ -35,7 +36,8 @@ const createPublished = async (type: 'email_template' | 'segment' | 'broadcast',
   return a.artifactId;
 };
 
-const broadcast = async (content: object) => createPublished('broadcast', `v028 ${Date.now()}-${Math.random()}`, content);
+const random = seededRandom();
+const broadcast = async (content: object) => createPublished('broadcast', `v028 ${Date.now()}-${random()}`, content);
 
 const status = (artifactId: string) => api().call('broadcasts.status', { artifactId });
 

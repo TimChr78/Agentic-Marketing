@@ -6,6 +6,7 @@
       "apps/**",
       "e2e/**",
       "scripts/**",
+      "test-support/**",
       "*.ts",
       "*.mts",
       "!**/node_modules",

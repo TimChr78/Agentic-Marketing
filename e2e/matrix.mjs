@@ -242,6 +242,17 @@ export async function settle(page, { timeout = 20_000 } = {}) {
     undefined,
     { timeout },
   );
+  // The journey canvas (React Flow) mounts its nodes hidden until it has measured them; capture once
+  // every canvas shows its nodes. CI once caught the builder with an empty canvas.
+  await page.waitForFunction(
+    () =>
+      Array.from(document.querySelectorAll('.react-flow')).every((flow) => {
+        const nodes = Array.from(flow.querySelectorAll('.react-flow__node'));
+        return nodes.length > 0 && nodes.every((node) => getComputedStyle(node).visibility !== 'hidden');
+      }),
+    undefined,
+    { timeout },
+  );
   // Two frames, so charts (ECharts SVG) and layout effects have painted.
   await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 }
