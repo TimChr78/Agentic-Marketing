@@ -3,7 +3,7 @@ import { migrateAuth } from '@agentic-marketing/auth';
 import { type ApiError, createClient } from '@agentic-marketing/client';
 import { newUuid } from '@agentic-marketing/core';
 import { createDb, migrate } from '@agentic-marketing/db';
-import { migrateClickHouse, resetClickHouse, resetNatsNamespace } from '@agentic-marketing/events';
+import { migrateClickHouse, resetClickHouse, resetNatsNamespace, resetNatsPrefix } from '@agentic-marketing/events';
 import { serve } from '@hono/node-server';
 import { Client, type OAuthClientProvider, StreamableHTTPClientTransport, UnauthorizedError } from '@modelcontextprotocol/client';
 import pg from 'pg';
@@ -219,7 +219,12 @@ export async function dropRunDatabases() {
   for (const name of chNames) await resetClickHouse(chUrl, name);
 
   const natsUrl = process.env.NATS_URL ?? 'nats://127.0.0.1:4222';
-  for (const name of new Set([...pgNames, ...chNames])) await resetNatsNamespace(natsUrl, name).catch(() => {});
+  if (runId) {
+    // Package tests create streams like am_<run>_test_events_pkg that no database name reveals.
+    await resetNatsPrefix(natsUrl, prefix).catch(() => {});
+  } else {
+    for (const name of new Set([...pgNames, ...chNames])) await resetNatsNamespace(natsUrl, name).catch(() => {});
+  }
 }
 
 /**

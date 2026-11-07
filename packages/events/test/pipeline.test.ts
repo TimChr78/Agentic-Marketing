@@ -53,6 +53,9 @@ afterAll(async () => {
   stop.abort();
   await bus?.close();
   await store.close();
+  // This namespace is not a database name, so global teardown cannot infer it. Remove its stream
+  // and consumers explicitly, after the bus's own connection has drained.
+  await resetNatsNamespace(NATS_URL, NS);
 });
 
 describe('Segment event schema', () => {
