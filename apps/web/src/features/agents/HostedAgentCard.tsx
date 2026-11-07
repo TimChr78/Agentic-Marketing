@@ -1,5 +1,5 @@
 import { BookOpen, Brain, CalendarClock, Pencil, Play, Trash2 } from 'lucide-react';
-import { type ReactNode, useState } from 'react';
+import { type ReactNode, useEffect, useState } from 'react';
 import { api, errText } from '../../app/api';
 import { artifactPath } from '../../app/artifactRoutes';
 import { Link, navigate } from '../../app/router';
@@ -45,10 +45,24 @@ export function HostedAgentCard({ agentId, onChanged }: { agentId: string; onCha
   const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [memoryBusy, setMemoryBusy] = useState<string | null>(null);
-  const view = useApi(() => api.call('agents.hostedRuns', { agentId }), [agentId]);
+  const [moreRuns, setMoreRuns] = useState<{ runs: HostedAgentRun[]; next: string | null; loaded: boolean }>({
+    runs: [],
+    next: null,
+    loaded: false,
+  });
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [moreError, setMoreError] = useState<string | null>(null);
+  const view = useApi(() => api.call('agents.hostedRuns', { agentId, limit: 20 }), [agentId]);
   const memory = useApi(() => api.call('agents.memory.list', { agentId }), [agentId]);
   const skillArts = useAllArtifacts('skill');
   const admin = can('workspace:admin');
+
+  // A reload of the first page (Run now, an edit) makes any extra pages stale.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reset paging when the first page is replaced
+  useEffect(() => {
+    setMoreRuns({ runs: [], next: null, loaded: false });
+    setMoreError(null);
+  }, [view.data]);
 
   if (view.loading && !view.data)
     return (
@@ -66,7 +80,22 @@ export function HostedAgentCard({ agentId, onChanged }: { agentId: string; onCha
     );
   const hosted = view.data?.hosted;
   if (!hosted) return null;
-  const runs = view.data?.runs ?? [];
+  const runs = [...(view.data?.runs ?? []), ...moreRuns.runs];
+  const next = moreRuns.loaded ? moreRuns.next : (view.data?.next ?? null);
+
+  const loadMore = async () => {
+    if (next === null || loadingMore) return;
+    setLoadingMore(true);
+    setMoreError(null);
+    try {
+      const page = await api.call('agents.hostedRuns', { agentId, limit: 20, before: next });
+      setMoreRuns((current) => ({ runs: [...current.runs, ...page.runs], next: page.next, loaded: true }));
+    } catch (e) {
+      setMoreError(errText(e));
+    } finally {
+      setLoadingMore(false);
+    }
+  };
 
   const runNow = async () => {
     setBusy(true);
@@ -247,6 +276,27 @@ export function HostedAgentCard({ agentId, onChanged }: { agentId: string; onCha
         onRetry={view.reload}
         columns={6}
         isEmpty={runs.length === 0}
+        footer={
+          next !== null || moreError ? (
+            <div className="space-y-2">
+              {moreError && (
+                <Alert tone="bad" title="Couldn't load more runs" onRetry={() => void loadMore()}>
+                  {moreError}
+                </Alert>
+              )}
+              <div className="flex flex-wrap items-center gap-3">
+                {next !== null && (
+                  <Button loading={loadingMore} onClick={() => void loadMore()}>
+                    Load more runs
+                  </Button>
+                )}
+                <span className="text-[12px] text-muted">
+                  {runs.length.toLocaleString('en-US')} {runs.length === 1 ? 'run' : 'runs'} shown
+                </span>
+              </div>
+            </div>
+          ) : undefined
+        }
         empty={
           <EmptyState title="No runs yet">
             The first run starts at {hosted.nextRunAt ? formatDateTime(hosted.nextRunAt) : 'the next scheduled time'}.
