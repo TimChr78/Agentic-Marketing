@@ -1,12 +1,13 @@
 import { Monitor, Smartphone } from 'lucide-react';
 import { useState } from 'react';
 import { api } from '../../app/api';
-import { useApi } from '../../app/useApi';
 import { Alert, LoadingBlock, Segmented } from '../../ui';
 import { useArtifactRef } from '../artifactCache';
 import { emailDoc } from './EmailPreview';
 import { PreviewLabel } from './PreviewLabel';
+import { useSharedRead } from './previewRead';
 import { type PreviewSource, resolvePreviewSource } from './previewSource';
+import { type PreviewStatus, useReportPreviewStatus } from './previewStatus';
 
 /** A block as it looks with its default parameters (blocks.preview). */
 export function BlockPreview({
@@ -15,12 +16,15 @@ export function BlockPreview({
   compact,
   source,
   sourceSuffix,
+  reportId = 'artifact',
 }: {
   artifactId: string;
   version?: number;
   compact?: boolean;
   source?: PreviewSource;
   sourceSuffix?: string;
+  /** Which readiness slot this renderer reports to the Review panel. */
+  reportId?: string;
 }) {
   const [width, setWidth] = useState<'desktop' | 'mobile'>(() => (window.innerWidth < 640 ? 'mobile' : 'desktop'));
   const unsaved = source?.kind === 'unsaved';
@@ -29,9 +33,12 @@ export function BlockPreview({
   // A dirty block has no local renderer in the preview host. Never fetch the saved version and
   // show it under an Unsaved label; say what will make it render instead.
   const pointer = useArtifactRef(!source && version == null ? artifactId : null);
-  const { data, error, loading, reload } = useApi(() => api.call('blocks.preview', { artifactId, version: pinned }), [artifactId, pinned], {
-    skip: unsaved,
-  });
+  const { data, error, loading, refresh } = useSharedRead(
+    'blocks.preview',
+    { artifactId, version: pinned },
+    () => api.call('blocks.preview', { artifactId, version: pinned }),
+    { skip: unsaved },
+  );
   const resolved =
     source ??
     resolvePreviewSource({
@@ -39,6 +46,8 @@ export function BlockPreview({
       resolvedVersion: data?.version,
       publishedVersion: pointer.artifact?.publishedVersion,
     });
+  const status: PreviewStatus = unsaved ? 'ready' : loading ? 'loading' : error ? 'error' : data ? 'ready' : 'loading';
+  useReportPreviewStatus(reportId, status);
   if (unsaved)
     return (
       <div className="space-y-3">
@@ -51,7 +60,7 @@ export function BlockPreview({
   if (loading) return <LoadingBlock lines={6} label="Rendering the block" />;
   if (error)
     return (
-      <Alert tone="bad" title="Couldn't render this block" onRetry={reload}>
+      <Alert tone="bad" title="Couldn't render this block" onRetry={refresh}>
         {error}
       </Alert>
     );

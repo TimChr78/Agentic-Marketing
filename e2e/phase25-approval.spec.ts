@@ -244,6 +244,7 @@ test('a bundle shows every member first, then the selected member’s detail, an
   await again.getByRole('button', { name: 'Reject all 2 with reason' }).click();
   await expect(again).toContainText('Say what to change');
   await again.getByRole('button', { name: 'Cancel' }).click();
+  await expect(again.getByRole('button', { name: 'Reject all' })).toBeFocused();
   await again.getByRole('button', { name: 'Reject all' }).click();
   await again.getByLabel('Why are you rejecting it?').fill('The offer is not ready yet.');
   await again.getByRole('button', { name: 'Reject all 2 with reason' }).click();
@@ -311,4 +312,77 @@ test('a restricted reader sees the review without an audience count or approval 
   // Leave the fixture decided rather than pending for later specs.
   await signIn(page, PEOPLE.owner);
   await call(page.request, 'approvals.reject', { approvalId: request.approvalId, note: 'Cleaning up the review fixture.' });
+});
+
+test('a bundled block review withholds the combined message and previews each exact block version', async ({ page }) => {
+  await signIn(page, PEOPLE.owner);
+  const bundle = await withApprovalPolicy(page, async () => {
+    const block = await call<{ artifactId: string }>(page.request, 'artifacts.create', {
+      type: 'email_block',
+      name: 'Review bundle block',
+      content: {
+        category: 'header',
+        mjml: '<mj-section><mj-column><mj-text>{{ block.title }}</mj-text></mj-column></mj-section>',
+        params: [{ key: 'title', label: 'Title', type: 'text', default: 'Hello' }],
+      },
+    });
+    const template = await call<{ artifactId: string }>(page.request, 'artifacts.create', {
+      type: 'email_template',
+      name: 'Review block template',
+      content: {
+        purpose: 'marketing_email',
+        subject: 'A template with a bundled block',
+        preheader: 'Bundled',
+        mjml: `<mjml><mj-body><mj-section><mj-column><mj-text>Intro</mj-text><mj-text><a href="{{ unsubscribe_url }}">Unsubscribe</a></mj-text></mj-column></mj-section>{% block '${block.artifactId}', title: 'Bundled title' %}</mj-body></mjml>`,
+      },
+    });
+    return call<{ members: { approvalId: string; artifactId: string; type: string; name: string }[] }>(
+      page.request,
+      'artifacts.requestPublishBundle',
+      { artifactIds: [block.artifactId, template.artifactId], note: 'A block and its template, unpublished together.' },
+    );
+  });
+  const templateMember = bundle.members.find((m) => m.type === 'email_template') ?? bundle.members[bundle.members.length - 1]!;
+
+  await signIn(page, PEOPLE.approver);
+  await page.goto(`/approvals/${templateMember.approvalId}`);
+  const drawer = page.getByRole('dialog', { name: 'Review block template' });
+  await expect(drawer.getByText('Bundled block render unavailable before publication', { exact: true })).toBeVisible();
+  await expect(drawer).toContainText(/exact reviewed content/);
+  // The server expands published block v1, so the combined message must not be presented as the future bundle.
+  await expect(drawer.locator('iframe[title^="E-mail preview"]')).toHaveCount(0);
+  // Each block is previewed at its exact bundle version.
+  await expect(drawer.getByText('Reusable blocks')).toBeVisible();
+  await expect(drawer.locator('[data-preview-source="saved"]').filter({ hasText: 'In this bundle' }).first()).toContainText('Saved v1');
+  await expect(drawer.locator('iframe[title^="Block preview"]').first()).toBeVisible({ timeout: 20_000 });
+
+  // Leave the bundle decided rather than pending for later specs.
+  await drawer.getByRole('button', { name: 'Reject all' }).click();
+  await drawer.getByLabel('Why are you rejecting it?').fill('Cleaning up the block bundle fixture.');
+  await drawer.getByRole('button', { name: /Reject all 2 with reason/ }).click();
+  await expect(page.getByText(/Rejected 2 changes/)).toBeVisible();
+});
+
+test('closing a row-opened review returns focus to its row; a deep link falls back to the queue heading', async ({ page }) => {
+  await signIn(page, PEOPLE.owner);
+  const name = `Review focus ${Date.now()}`;
+  const request = await requestBroadcast(page, name);
+
+  await signIn(page, PEOPLE.approver);
+  await page.goto('/approvals');
+  const row = page.getByRole('row', { name: new RegExp(name) });
+  const rowLink = row.getByRole('link', { name });
+  await rowLink.click();
+  await expect(page.getByRole('dialog', { name })).toBeVisible();
+  await page.getByRole('button', { name: 'Close' }).click();
+  await expect(rowLink).toBeFocused();
+
+  // A deep link has no invoking row: focus returns to the queue heading.
+  await page.goto(`/approvals/${request.approvalId}`);
+  await expect(page.getByRole('dialog', { name })).toBeVisible();
+  await page.getByRole('button', { name: 'Close' }).click();
+  await expect(page.getByRole('heading', { level: 1, name: 'Approvals' }).locator('span[tabindex="-1"]')).toBeFocused();
+
+  await signIn(page, PEOPLE.owner);
+  await call(page.request, 'approvals.reject', { approvalId: request.approvalId, note: 'Cleaning up the focus fixture.' });
 });

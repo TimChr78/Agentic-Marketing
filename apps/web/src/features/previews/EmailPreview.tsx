@@ -1,13 +1,14 @@
 import { Monitor, Smartphone } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { api, errText } from '../../app/api';
-import { useApi } from '../../app/useApi';
 import { Alert, CodeView, LoadingBlock, Meta, Segmented, Tabs } from '../../ui';
 import { useArtifactRef } from '../artifactCache';
 import { type DraftEmailContent, type DraftRender, draftUsesBlocks, renderDraft } from '../templates/localRender';
 import { ChecksPanel } from './ChecksPanel';
 import { PreviewLabel } from './PreviewLabel';
+import { useSharedRead } from './previewRead';
 import { type PreviewSource, resolvePreviewSource } from './previewSource';
+import { type PreviewStatus, useReportPreviewStatus } from './previewStatus';
 
 const DARK_MAIL_CSS = `html,body{background:#111512!important;color:#edf0e9!important}
 body *:not(img):not(picture):not(svg):not(svg *){color:#edf0e9!important}
@@ -85,6 +86,7 @@ export function EmailPreview({
   source,
   draftContent,
   sourceSuffix,
+  reportId = 'artifact',
 }: {
   artifactId: string;
   version?: number;
@@ -92,6 +94,8 @@ export function EmailPreview({
   source?: PreviewSource;
   draftContent?: DraftEmailContent;
   sourceSuffix?: string;
+  /** Which readiness slot this renderer reports to the Review panel. */
+  reportId?: string;
 }) {
   const [width, setWidth] = useState<'desktop' | 'mobile'>(() => (window.innerWidth < 640 ? 'mobile' : 'desktop'));
   const [tab, setTab] = useState<'html' | 'text'>('html');
@@ -103,9 +107,14 @@ export function EmailPreview({
   // With no explicit version, resolve the returned version and the publication pointer before
   // choosing a label; never infer Published from a caller omission.
   const pointer = useArtifactRef(!source && version == null ? artifactId : null);
-  const server = useApi(() => api.call('templates.preview', { artifactId, version: pinned }), [artifactId, pinned], {
-    skip: !!unsaved,
-  });
+  // Keyed by the exact artifact/version input: a previous render is never shown under a new
+  // provenance label, even though the transport keeps data while a read is in flight.
+  const server = useSharedRead(
+    'templates.preview',
+    { artifactId, version: pinned },
+    () => api.call('templates.preview', { artifactId, version: pinned }),
+    { skip: !!unsaved },
+  );
   const resolved =
     source ??
     resolvePreviewSource({
@@ -115,9 +124,19 @@ export function EmailPreview({
     });
   const baseVersion = source?.kind === 'unsaved' ? source.baseVersion : undefined;
   const blocked = !!unsaved && !!draft && local.state.status === 'blocked';
-  const savedFallback = useApi(() => api.call('templates.preview', { artifactId, version: baseVersion }), [artifactId, baseVersion], {
-    skip: !blocked || !baseVersion,
-  });
+  const savedFallback = useSharedRead(
+    'templates.preview',
+    { artifactId, version: baseVersion },
+    () => api.call('templates.preview', { artifactId, version: baseVersion }),
+    { skip: !blocked || !baseVersion },
+  );
+  const rendering = unsaved ? local.state.status === 'rendering' || local.state.status === 'idle' : server.loading;
+  const failure = unsaved ? (local.state.status === 'error' ? local.state.message : null) : server.error;
+  const shown: DraftRender | undefined = unsaved ? (local.state.status === 'ready' ? local.state.result : undefined) : server.data;
+  const versionShown = unsaved ? undefined : server.data?.version;
+  const status: PreviewStatus =
+    unsaved && !draftContent ? 'ready' : blocked ? 'ready' : rendering ? 'loading' : failure ? 'error' : shown ? 'ready' : 'loading';
+  useReportPreviewStatus(reportId, status);
 
   if (unsaved && !draftContent)
     return (
@@ -154,11 +173,6 @@ export function EmailPreview({
       </div>
     );
 
-  const rendering = unsaved ? local.state.status === 'rendering' || local.state.status === 'idle' : server.loading;
-  const failure = unsaved ? (local.state.status === 'error' ? local.state.message : null) : server.error;
-  const shown: DraftRender | undefined = unsaved ? (local.state.status === 'ready' ? local.state.result : undefined) : server.data;
-  const versionShown = unsaved ? undefined : server.data?.version;
-
   if (rendering) return <LoadingBlock lines={6} label={unsaved ? 'Rendering draft…' : 'Rendering the e-mail'} />;
   if (failure)
     return (
@@ -167,7 +181,7 @@ export function EmailPreview({
         <Alert
           tone="bad"
           title={unsaved ? "Couldn't render this draft" : "Couldn't render this e-mail"}
-          onRetry={unsaved ? local.retry : server.reload}
+          onRetry={unsaved ? local.retry : server.refresh}
         >
           {failure}
         </Alert>

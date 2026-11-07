@@ -9,6 +9,7 @@ import { EmailPreview } from './EmailPreview';
 import { type FormContent, FormPreview } from './FormPreview';
 import { PreviewLabel } from './PreviewLabel';
 import type { PreviewSource } from './previewSource';
+import { ReportPreviewStatus } from './previewStatus';
 import { SegmentPreview } from './SegmentPreview';
 
 // React Flow is large and only needed when an approval actually previews a journey (#60).
@@ -31,6 +32,7 @@ export function ArtifactPreview({
   bundle,
   source,
   sourceSuffix,
+  reportId = 'artifact',
 }: {
   type: string;
   artifactId: string;
@@ -40,6 +42,8 @@ export function ArtifactPreview({
   bundle?: Record<string, number>;
   source?: PreviewSource;
   sourceSuffix?: string;
+  /** Readiness slot reported to the Review panel. */
+  reportId?: string;
 }) {
   // Old callers pass the exact version they render. That is a Saved vN pin, not an inference about
   // the publication pointer; C supplies Published only when it selected the published version.
@@ -55,12 +59,27 @@ export function ArtifactPreview({
           source={resolved}
           draftContent={draftContent}
           sourceSuffix={sourceSuffix}
+          reportId={reportId}
         />
       );
     case 'email_block':
-      return <BlockPreview artifactId={artifactId} version={version} compact={compact} source={resolved} sourceSuffix={sourceSuffix} />;
+      return (
+        <BlockPreview
+          artifactId={artifactId}
+          version={version}
+          compact={compact}
+          source={resolved}
+          sourceSuffix={sourceSuffix}
+          reportId={reportId}
+        />
+      );
     case 'form':
-      return <FormPreview content={content as FormContent} source={resolved} sourceSuffix={sourceSuffix} />;
+      return (
+        <>
+          <ReportPreviewStatus id={reportId} />
+          <FormPreview content={content as FormContent} source={resolved} sourceSuffix={sourceSuffix} />
+        </>
+      );
     case 'segment':
       return (
         <SegmentPreview
@@ -69,6 +88,7 @@ export function ArtifactPreview({
           content={content as { condition?: unknown }}
           source={resolved}
           sourceSuffix={sourceSuffix}
+          reportId={reportId}
         />
       );
     case 'broadcast':
@@ -80,15 +100,20 @@ export function ArtifactPreview({
           templateVersion={bundle?.[(content as { template?: string }).template ?? '']}
           source={resolved}
           sourceSuffix={sourceSuffix}
+          reportId={reportId}
         />
       );
     case 'journey':
       return (
-        <JourneyPreview content={content as JourneyContent} height={compact ? 420 : 560} source={resolved} sourceSuffix={sourceSuffix} />
+        <>
+          <ReportPreviewStatus id={reportId} />
+          <JourneyPreview content={content as JourneyContent} height={compact ? 420 : 560} source={resolved} sourceSuffix={sourceSuffix} />
+        </>
       );
     default:
       return (
         <div className="space-y-2">
+          <ReportPreviewStatus id={reportId} />
           {resolved && <PreviewLabel source={resolved} suffix={sourceSuffix} />}
           <JsonView value={content} label="Content" maxHeight={compact ? 480 : 720} />
         </div>
