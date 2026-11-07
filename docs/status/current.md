@@ -2,23 +2,34 @@
 
 Durable handoff for the agent working on this repository. Update it when a long run starts, when work lands, and at every handoff. A new session should be able to resume from this file alone.
 
-_Last updated: 2026-11-07_
+_Last updated: 2026-11-07 (evening)_
 
 ## Now
 
-- **Phase 26 (truthful insights, 0.12.0)** on `feat/phase-26`, tracker #512. Merged: people #510, campaigns #511, server reads #508/#509, analytics #506, journey report #507, agents #509. Remaining: deliverability #508 UI, then integration checks (full suite, e2e, axe, visual baselines), Sol review, PR to `main`, release 0.12.0 (pre-approved by the user once checks and review are green).
-- **Process improvements** (user request, 2026-11-07), from the research in `/mnt/user/appdata/t3code/Mixed research/`. Three PRs first, then stop and report:
-  1. Determinism kit: `TZ=UTC` in Vitest, seeded RNG helper, `uniqueEvent()`/`uniqueJourney()`, unordered-assertion helper, CLI built once.
-  2. Local Playwright runner `scripts/e2e-docker.sh` (smoke, functional, axe, visual, shots) with an `@smoke` subset and role/test-id selectors.
-  3. Shared labelled test stack `docker-compose.test.yml` (`am-test=1`) plus `scripts/test-services.sh`, `scripts/preflight.sh`, `scripts/docker-clean.sh`.
+- **0.12.0 released** (Phase 26, truthful insights). Tag `v0.12.0` on `f64fdcc`. Checksums and attestations for the chart, Compose bundle and image are verified. Tracker #512 is closed.
+- **Process improvements** (user request, 2026-11-07), from the research in `/mnt/user/appdata/t3code/Mixed research/`:
+  1. Determinism kit: **in progress** (DeepSeek task on `process/determinism-kit`).
+  2. Local Playwright runner: **#516**, updated from `main`. The People smoke spec now follows the Phase 26 labels, and smoke passed locally through the runner. A CI test-job rerun was needed after a service `curl` blip.
+  3. Shared labelled test stack: **#515**, updated from `main`, green.
+  - Once all three are green, Sol reviews them together, then they merge. Then stop and report, and recommend whether more Docker/Unraid tuning is worth it before the next phase.
 
 ## Next
 
-After the three process PRs are green and reported: phase branch with per-delegate draft PRs, affected-test selection, changelog fragments, migration reservation, one-pass release with a verification script. Phase 27 (remaining families and recipient surfaces) waits until the process work is done.
+- After the three process PRs: either the second process batch (phase branch with per-delegate draft PRs, affected-test selection, changelog fragments, migration reservation, one-pass release and verification script) or Phase 27. The user decides after the report.
 
 ## Blocked / decisions needed
 
 - None blocking.
+
+## Lessons from Phase 26 (feed the process work)
+
+- **CHANGELOG conflicts.** Every parallel merge conflicted, and section headings got scrambled twice, so they had to be regrouped by hand. Changelog fragments fix this.
+- **Flakes under host load.** Four web tests used Testing Library's 1 s default wait, which load exceeded. The web project now has a 5 s async timeout. One test was racing a lazy-module import, and two campaign tests asserted counts before an independent chain had settled.
+- **Visual masks.** A mask takes the size of the text it covers, so volatile values need a fixed placeholder before masking. People cards on phones need masking too.
+- **Visual baselines** must come from a fresh seed that has only had the visual run. A prior functional run leaves e2e agents in the list.
+- **Delegates dropping features.** They removed existing features (hosted, guardian and shadow controls, Create mandate, pasted profile ids) to meet read budgets. Review for lost functionality on every rewrite.
+- **Jargon in the UI.** Implementation wording ("reads", "lanes", "k-suppression field") leaked into the interface. A copy check belongs in review.
+- **CI blips.** Two network failures (postgresql.org key download, service `curl`). Rerun the failed job; do not change code.
 
 ## Baseline (2026-11-07, before the process work)
 
@@ -43,4 +54,4 @@ After the three process PRs are green and reported: phase branch with per-delega
 
 ## Last green
 
-- `main` at `33e858d` (v0.11.0, released and verified).
+- `main` at `f64fdcc` (v0.12.0, released and verified).
