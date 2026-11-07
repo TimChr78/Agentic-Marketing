@@ -2,6 +2,16 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+### Added
+
+- People (#510): the list is cursor-paged with honest loaded counts (“50 shown · Page 1”, More people available / End of list) and keeps cached pages for Back; a search by exact e-mail runs only on submit. Each person shows one primary e-mail, their visible name and the profile id behind a named copy control, with consent beside every purpose instead of an aggregate. The person page adds a loaded-history timeline that interleaves events, message creations, returned message events and consent changes, names each source, keeps an independent cursor and Load more for events and messages, and captions what each source covers. Loading, empty, observed-zero, unavailable, partial-failure with local Retry, restricted, not-found, PII-hidden and last-page states are explicit.
+
+### Changed
+
+- The People list no longer calls the loaded row count a population, no longer reads a profile per row, and no longer hides purpose keys in place of names: an unavailable purpose name is labelled “Purpose name unavailable” and its key stays behind a copy control. Consent mutations, export and erasure keep their existing controls and permissions.
+
 ## [0.11.0] - 2026-11-07
 
 ### Added
