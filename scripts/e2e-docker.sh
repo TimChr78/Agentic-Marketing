@@ -222,9 +222,12 @@ if [ -n "${E2E_DB:-}" ]; then
     '' | *[!a-z0-9_]*) die "E2E_DB must be lower-case letters, digits and underscores, got '$DB_NAME'" ;;
   esac
   PG_DB="$(db_name_for "$DB_NAME")" || die "could not compute the database name for E2E_DB=$DB_NAME under AM_TEST_RUN=$AM_TEST_RUN"
-  if db_database_exists "$PG_DB"; then
+  DB_CHECK=0
+  db_database_exists "$PG_DB" || DB_CHECK=$?
+  if [ "$DB_CHECK" -eq 0 ]; then
     die "database $PG_DB (E2E_DB=$DB_NAME) already exists; refusing to reuse or drop a database this run did not create (unset E2E_DB for a fresh name)"
   fi
+  [ "$DB_CHECK" -eq 1 ] || die "could not check whether $PG_DB exists; is TEST_DATABASE_URL reachable?"
 else
   DB_MODE=generated
   attempt=0
@@ -232,7 +235,10 @@ else
     attempt=$((attempt + 1))
     DB_NAME="e2e_$(date -u +%Y%m%d_%H%M%S)_$$_$(printf '%04x' "$RANDOM")"
     PG_DB="$(db_name_for "$DB_NAME")" || die "could not compute a database name under AM_TEST_RUN=$AM_TEST_RUN"
-    db_database_exists "$PG_DB" || break
+    DB_CHECK=0
+    db_database_exists "$PG_DB" || DB_CHECK=$?
+    [ "$DB_CHECK" -eq 1 ] && break
+    [ "$DB_CHECK" -eq 0 ] || die "could not check whether $PG_DB exists; is TEST_DATABASE_URL reachable?"
     [ "$attempt" -lt 5 ] || die "could not find an unused database name after $attempt attempts"
   done
 fi
@@ -344,8 +350,10 @@ cleanup() {
   owned=0
   if [ "$DB_OWNED" = 1 ]; then
     owned=1
-  elif [ "$DB_MODE" = generated ] && db_database_exists "$PG_DB"; then
-    owned=1
+  elif [ "$DB_MODE" = generated ]; then
+    db_database_exists "$PG_DB"
+    DB_STATE=$?
+    [ "$DB_STATE" -eq 0 ] && owned=1
   fi
   if [ "${E2E_KEEP_DB:-0}" = "1" ] && [ "$owned" = 1 ]; then
     log "keeping database $PG_DB (E2E_KEEP_DB=1)"
