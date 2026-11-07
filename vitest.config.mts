@@ -26,6 +26,8 @@ const docs = [
   'apps/server/test/mcp-tools-doc.test.ts',
   'apps/server/test/action-classes.test.ts',
   'apps/server/test/docs-determinism.test.ts',
+  'apps/server/test/changelog.test.ts',
+  'apps/server/test/release-tooling.test.ts',
 ];
 
 export default defineConfig({

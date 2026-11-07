@@ -81,6 +81,10 @@ jobs:
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           case "$v" in 0.*|*-*) echo "prerelease=true" >> "$GITHUB_OUTPUT" ;; *) echo "prerelease=false" >> "$GITHUB_OUTPUT" ;; esac
 
+      # The publication path must not accept a TODO or an incomplete upgrade block.
+      - name: Check the release notes
+        run: node scripts/release/check-notes.mjs "${{ steps.version.outputs.version }}"
+
       # Fails early when the release files or the notes' upgrade block are not ready.
       - name: Build the Compose bundle
         run: scripts/release-bundle.sh "${{ steps.version.outputs.version }}" dist
