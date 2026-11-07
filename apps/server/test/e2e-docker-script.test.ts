@@ -164,6 +164,12 @@ describe('e2e-docker prerequisites and portability', () => {
     expect(script).not.toMatch(/date \+%s%3N/);
   });
 
+  it('hands files back only after Playwright ran, so cleanup never pulls the image', () => {
+    const fn = script.slice(script.indexOf('restore_ownership() {'));
+    expect(fn.slice(0, fn.indexOf('\n}'))).toMatch(/PLAYWRIGHT_RAN:-0\}" = "1" \] \|\| return 0/);
+    expect(script.indexOf('PLAYWRIGHT_RAN=1')).toBeLessThan(script.indexOf('if ! docker run --rm --init'));
+  });
+
   it('fails fast without setsid before installing a trap', () => {
     const setsidCheck = script.search(/command -v setsid/);
     const trap = script.search(/trap cleanup EXIT/);

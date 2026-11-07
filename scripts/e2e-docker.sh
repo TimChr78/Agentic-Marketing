@@ -309,12 +309,15 @@ CALLER_PGID="$(ps -o pgid= -p $$ | tr -d ' ')"
 # The image runs as root (as it does in CI). Hand the files it wrote back to the invoking user, so a
 # trace or a screenshot stays editable and removable afterwards.
 restore_ownership() {
+  # Only after Playwright actually ran in the container: otherwise there is nothing to hand back,
+  # and a cancelled or failed startup must not pull or start the image during cleanup.
+  [ "${PLAYWRIGHT_RAN:-0}" = "1" ] || return 0
   [ "$(id -u)" = "0" ] && return 0
   docker run --rm --user 0 \
     -v "$REPO_ROOT":"$REPO_ROOT" \
     -w "$REPO_ROOT" \
     -e OWNER="$(id -u):$(id -g)" \
-    "$IMAGE" sh -c 'for p in test-results reports shots-p25-composer; do [ -e "$p" ] && chown -R "$OWNER" "$p"; done' \
+    "$IMAGE" sh -c 'for p in test-results reports; do [ -e "$p" ] && chown -R "$OWNER" "$p"; done' \
     >/dev/null 2>&1 || true
 }
 
@@ -508,6 +511,7 @@ else
 fi
 
 log "running: ${*}"
+PLAYWRIGHT_RAN=1
 if ! docker run --rm --init \
   --network "$NETWORK" \
   -v "$REPO_ROOT":"$REPO_ROOT" \
