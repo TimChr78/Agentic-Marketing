@@ -130,7 +130,7 @@ export function goalMetText(met: boolean | null | undefined): string {
 export function goalTileExplanation(goal: GoalOutcome): string {
   const target = goalTargetText(goal.measure, goal.target);
   const value = goalValueText(goal.measure, goal.value);
-  const targetPart = goal.target === undefined || goal.target === null ? 'no target set' : `${goalDirectionText(goal.direction)} ${target}`;
+  const targetPart = goal.target === undefined || goal.target === null ? 'No target' : `${goalDirectionText(goal.direction)} ${target}`;
   const parts = [`${value} (${targetPart})`, goalMetText(goal.met)];
   if (goal.note) parts.push(goal.note);
   return parts.join(' · ');

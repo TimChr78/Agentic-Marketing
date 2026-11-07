@@ -14,7 +14,6 @@ import {
   decisionTotals,
   fetchedText,
   type GoalOutcome,
-  goalMetText,
   goalTileExplanation,
   goalTileUnit,
   goalTileValue,
@@ -151,14 +150,22 @@ export function OverviewTab({
                   label="Broadcast sent people"
                   value={broadcasts.sent}
                   unit="count"
-                  explanation="Agent-published broadcasts; distinct people."
+                  explanation={
+                    numberState(broadcasts.sent) === 'no-data'
+                      ? 'Unavailable — the report returned no sent count.'
+                      : 'Agent-published broadcasts; distinct people.'
+                  }
                   dataState={numberState(broadcasts.sent)}
                 />
                 <KpiTile
                   label="Broadcast clicked people"
                   value={broadcasts.clicked}
                   unit="count"
-                  explanation={`${intText(broadcasts.clicked)} / ${intText(broadcasts.sent)} sent people`}
+                  explanation={
+                    numberState(broadcasts.clicked) === 'no-data'
+                      ? 'Unavailable — the report returned no clicked count.'
+                      : `${intText(broadcasts.clicked)} / ${intText(broadcasts.sent)} sent people`
+                  }
                   dataState={numberState(broadcasts.clicked)}
                 />
               </>
@@ -176,7 +183,11 @@ export function OverviewTab({
                 label="Direct messages sent"
                 value={direct.sent}
                 unit="count"
-                explanation="Separate message-count lane; never added to broadcast people."
+                explanation={
+                  numberState(direct.sent) === 'no-data'
+                    ? 'Unavailable — the report returned no direct-message count.'
+                    : 'Separate message-count lane; never added to broadcast people.'
+                }
                 dataState={numberState(direct.sent)}
               />
             ) : (
@@ -252,9 +263,7 @@ function GoalTile({ goal }: { goal: GoalOutcome }) {
       unit={goalTileUnit(goal)}
       precision={goalTileUnit(goal) === '%' ? 1 : 0}
       dataState={value === null ? 'no-data' : 'populated'}
-      explanation={
-        goal.value === null || goal.value === undefined ? `Value unavailable · ${goalMetText(goal.met)}` : goalTileExplanation(goal)
-      }
+      explanation={goalTileExplanation(goal)}
     />
   );
 }
@@ -295,6 +304,7 @@ function OutcomeLaneTable({
       ) : (
         <div className="p-4 text-[13px] text-muted">Unavailable — this report returned no lane.</div>
       )}
+      <p className="px-4 pb-3 text-[12px] leading-[18px] text-muted">— means Unavailable.</p>
     </Card>
   );
 }
