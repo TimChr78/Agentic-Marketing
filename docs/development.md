@@ -357,6 +357,44 @@ pnpm audit --prod --audit-level=moderate   # accepted advisories are listed in S
 
 Biome checks every directory unless `biome.json` excludes it; add generated output to its `files.includes` exclusions rather than leaving a new directory unchecked.
 
+### Testing only what changed
+
+The full local suite takes about 44 minutes on the shared test stack. While iterating on a change,
+run the projects and files it touches instead:
+
+```bash
+eval "$(scripts/test-services.sh env)"    # the shared stack, once per shell
+pnpm test:affected:print                  # what would run: projects, files and the reason for each
+pnpm test:affected                        # run it with Vitest, one invocation per selected project
+```
+
+`scripts/test-affected.mjs` takes the changed files from `git diff --name-only origin/main...HEAD`
+plus staged, unstaged and untracked files, then maps them:
+
+- a changed test file runs that file in its own Vitest project; the docs project's file list is read
+  from `vitest.config.mts`, so a new docs test is routed without editing the script;
+- a change confined to `apps/web/src/features/<name>/` runs the web tests whose import graph reaches
+  it; any other admin-UI change runs the whole web project;
+- `docs/**` and `*.md` run the docs project;
+- any change to `packages/*/src/**`, `apps/server/src/**`, an `apps/server/test/**` helper or
+  `apps/server/test/e2e/**` runs the whole `server`, `docs` and `packages` projects, plus `web` when
+  web tests or the web runtime depend on that package. The reason is printed: a static import scan
+  cannot see the harness path, subprocesses or the CLI bundle, so the script does not pretend to be
+  precise there. `apps/server/test/e2e/**` also suggests `scripts/e2e-docker.sh smoke`.
+
+Only test-file changes and web feature changes are fine-grained. Everything else that looks like
+source runs whole projects, which is slower than a graph walk but cannot miss a test that reaches
+the code through the harness, a subprocess or the CLI.
+
+`--base <ref>` changes the comparison base, `--files a b …` maps an explicit list, `--print` (or
+`--json`) only prints the plan, and arguments after `--` go to Vitest. A migration, a package
+manifest, `pnpm-lock.yaml`, `vitest.config.mts`, `test-support/**`, `.github/**` or any path the
+script cannot classify runs the full suite, and the output says why.
+
+This is the quick loop, not the merge gate. The phase PR and the release still run the full suite
+in CI (`pnpm test:ci`, the `test` job in `.github/workflows/ci.yml`), as does `pnpm test` locally.
+
+
 ### The shared test stack
 
 One stack per machine, shared by every checkout and delegate: the services are stateless between

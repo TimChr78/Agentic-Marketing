@@ -28,7 +28,9 @@
     "e2e:selectors": "node scripts/check-e2e-selectors.mjs",
     "shots": "node e2e/screenshots.mjs reports/shots",
     "test:ci": "vitest run --coverage --reporter=default --reporter=junit --outputFile.junit=reports/junit.xml",
-    "test:clean": "tsx apps/server/test/clean.ts"
+    "test:clean": "tsx apps/server/test/clean.ts",
+    "test:affected": "node scripts/test-affected.mjs --run",
+    "test:affected:print": "node scripts/test-affected.mjs --print"
   },
   "pnpm": {
     "overrides": {
