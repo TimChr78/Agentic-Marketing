@@ -1,5 +1,5 @@
 import { Check, ExternalLink, RefreshCw, Send, X } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ApiError, api, errText, type Out } from '../../app/api';
 import { artifactPath, typeLabel } from '../../app/artifactRoutes';
 import { TextLink } from '../../app/links';
@@ -22,10 +22,13 @@ import {
   timeAgo,
   useToast,
 } from '../../ui';
-import { invalidateArtifact } from '../artifactCache';
+import { getArtifact, invalidateArtifact } from '../artifactCache';
 import { BlockUsage } from '../blocks/BlockUsage';
 import { ArtifactPreview } from '../previews/ArtifactPreview';
 import { BlockPreview } from '../previews/BlockPreview';
+import { PreviewReadProvider } from '../previews/previewRead';
+import { type PreviewStatus, PreviewStatusProvider, ReportPreviewStatus } from '../previews/previewStatus';
+import { type BlockPin, type BlockRef, bundleMemberSummary, resolveBlockPins } from './bundleSummary';
 import { ConsequenceSummary } from './ConsequenceSummary';
 import { blockIdsIn } from './consequences';
 import { HoldBadge } from './HoldBadge';
@@ -72,6 +75,15 @@ export function ApprovalDrawer({
   const [reasonError, setReasonError] = useState<string | null>(null);
   const [busy, setBusy] = useState<null | 'approve' | 'reject' | 'test'>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const rejectButtonRef = useRef<HTMLButtonElement>(null);
+  const focusRejectOnCancel = useRef(false);
+
+  // Cancelling a rejection returns focus to the Reject button that revealed the reason field.
+  useEffect(() => {
+    if (rejecting || !focusRejectOnCancel.current) return;
+    focusRejectOnCancel.current = false;
+    rejectButtonRef.current?.focus();
+  }, [rejecting]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: reset the dialog state whenever a different approval is opened
   useEffect(() => {
@@ -236,7 +248,13 @@ export function ApprovalDrawer({
                 <div className="ml-auto flex w-full flex-wrap justify-end gap-2 sm:w-auto">
                   {rejecting ? (
                     <>
-                      <Button variant="ghost" onClick={() => setRejecting(false)}>
+                      <Button
+                        variant="ghost"
+                        onClick={() => {
+                          focusRejectOnCancel.current = true;
+                          setRejecting(false);
+                        }}
+                      >
                         Cancel
                       </Button>
                       <Button variant="danger" icon={<X size={14} />} loading={busy === 'reject'} onClick={() => decide('reject')}>
@@ -249,7 +267,7 @@ export function ApprovalDrawer({
                     </>
                   ) : (
                     <>
-                      <Button variant="danger" icon={<X size={14} />} onClick={() => setRejecting(true)}>
+                      <Button ref={rejectButtonRef} variant="danger" icon={<X size={14} />} onClick={() => setRejecting(true)}>
                         {held ? (bundle ? 'Veto all' : 'Veto') : bundle ? 'Reject all' : 'Reject'}
                       </Button>
                       <Button variant="primary" icon={<Check size={14} />} loading={busy === 'approve'} onClick={() => decide('approve')}>
@@ -279,35 +297,37 @@ export function ApprovalDrawer({
           </Alert>
         </div>
       ) : a ? (
-        <div className="space-y-5 p-4 sm:p-5">
-          {/* The consequence summary is the context for every tab, exactly as the mock-up shows:
+        <PreviewReadProvider>
+          <div className="space-y-5 p-4 sm:p-5">
+            {/* The consequence summary is the context for every tab, exactly as the mock-up shows:
               notices and summary, then the requester's note, then Review / Content / History. */}
-          <ReviewContext
-            approval={a}
-            bundle={bundle}
-            bundleVersions={bundleVersions}
-            stale={stale}
-            pending={pending}
-            ownRequest={!!ownRequest}
-            workspaceApprovalPolicy={workspace.approvalPolicy}
-          />
-          <Tabs
-            label="Review"
-            value={tab}
-            onChange={setTab}
-            items={[
-              { key: 'review', label: 'Review' },
-              { key: 'content', label: 'Content' },
-              { key: 'history', label: 'History' },
-            ]}
-          >
-            {tab === 'review' && <ReviewPanel approval={a} bundleVersions={bundleVersions} />}
-            {tab === 'content' && (
-              <JsonView value={a.content} label={`Version ${a.version} as JSON (what agents read and write)`} maxHeight={600} />
-            )}
-            {tab === 'history' && <History a={a} />}
-          </Tabs>
-        </div>
+            <ReviewContext
+              approval={a}
+              bundle={bundle}
+              bundleVersions={bundleVersions}
+              stale={stale}
+              pending={pending}
+              ownRequest={!!ownRequest}
+              workspaceApprovalPolicy={workspace.approvalPolicy}
+            />
+            <Tabs
+              label="Review"
+              value={tab}
+              onChange={setTab}
+              items={[
+                { key: 'review', label: 'Review' },
+                { key: 'content', label: 'Content' },
+                { key: 'history', label: 'History' },
+              ]}
+            >
+              {tab === 'review' && <ReviewPanel approval={a} bundleVersions={bundleVersions} />}
+              {tab === 'content' && (
+                <JsonView value={a.content} label={`Version ${a.version} as JSON (what agents read and write)`} maxHeight={600} />
+              )}
+              {tab === 'history' && <History a={a} />}
+            </Tabs>
+          </div>
+        </PreviewReadProvider>
       ) : null}
     </Drawer>
   );
@@ -370,74 +390,191 @@ function ReviewContext({
   );
 }
 
+function useBlockRefs(ids: string[]) {
+  const key = [...ids].sort().join(',');
+  const [attempt, setAttempt] = useState(0);
+  const [state, setState] = useState<{ data: Record<string, BlockRef>; loading: boolean; error: string | null }>({
+    data: {},
+    loading: !!key,
+    error: null,
+  });
+  // biome-ignore lint/correctness/useExhaustiveDependencies: attempt is the explicit retry counter; the body reads key only
+  useEffect(() => {
+    let live = true;
+    const list = key ? key.split(',') : [];
+    if (!list.length) {
+      setState({ data: {}, loading: false, error: null });
+      return;
+    }
+    setState({ data: {}, loading: true, error: null });
+    Promise.all(
+      list.map(async (id): Promise<readonly [string, BlockRef]> => {
+        try {
+          const artifact = await getArtifact(id);
+          return [id, { publishedVersion: artifact.publishedVersion }];
+        } catch {
+          return [id, { publishedVersion: null, missing: true }];
+        }
+      }),
+    ).then((rows) => {
+      if (!live) return;
+      setState({
+        data: Object.fromEntries(rows),
+        loading: false,
+        error: rows.some(([, ref]) => ref.missing) ? 'Some reusable blocks could not be read.' : null,
+      });
+    });
+    return () => {
+      live = false;
+    };
+  }, [key, attempt]);
+  return { ...state, reload: () => setAttempt((n) => n + 1) };
+}
+
 function ReviewPanel({ approval, bundleVersions }: { approval: Detail; bundleVersions?: Record<string, number> }) {
   const { user } = useWorkspace();
-  // Opening the rendered Review is what counts as viewing this exact version, not opening a
-  // loading drawer, and never a different version of the same request.
+  const reviewKey = `${approval.id}:${approval.version}`;
+  // Readiness of every renderer in this Review. A request is viewed only when all of them have
+  // loaded successfully; a loading or failed preview never marks it (#498).
+  const [statuses, setStatuses] = useState<{ key: string; byId: Record<string, PreviewStatus> }>({ key: '', byId: {} });
+  const report = useCallback(
+    (id: string, status: PreviewStatus) => {
+      setStatuses((previous) => {
+        if (previous.key !== reviewKey) return { key: reviewKey, byId: { [id]: status } };
+        if (previous.byId[id] === status) return previous;
+        return { key: reviewKey, byId: { ...previous.byId, [id]: status } };
+      });
+    },
+    [reviewKey],
+  );
+  const currentStatuses = statuses.key === reviewKey ? statuses.byId : {};
+  const reported = Object.values(currentStatuses);
+  const ready = statuses.key === reviewKey && reported.length > 0 && reported.every((status) => status === 'ready');
+
   useEffect(() => {
-    if (user && approval.status === 'pending') markViewed(user.id, approval.id, approval.version);
-  }, [user, approval.id, approval.version, approval.status]);
+    if (ready && user && approval.status === 'pending') markViewed(user.id, approval.id, approval.version);
+  }, [ready, user, approval.id, approval.version, approval.status]);
+
+  const blockIds = approval.artifactType === 'email_template' ? blockIdsIn(String((approval.content as { mjml?: string }).mjml ?? '')) : [];
+  const refs = useBlockRefs(blockIds);
+  const pins = resolveBlockPins(blockIds, bundleVersions, refs.data);
+  const blocksLoading = blockIds.length > 0 && refs.loading;
+  const blocksError = !!refs.error;
+  // The server expands published block vN; a bundle pin that differs (or has nothing published)
+  // cannot be reproduced by the combined message render.
+  const reproducible = !blocksLoading && !blocksError && pins.every((pin) => pin.reproducible);
+  const blocksStatus: PreviewStatus = blocksLoading ? 'loading' : blocksError ? 'error' : 'ready';
 
   return (
-    <div className="space-y-5">
-      <section aria-labelledby="review-artifact-heading" className="space-y-2">
-        <h3 id="review-artifact-heading" className="text-[15px] leading-6 font-semibold">
-          {artifactHeading(approval.artifactType)}
-        </h3>
-        <ArtifactPreview
-          type={approval.artifactType}
-          artifactId={approval.artifactId}
-          version={approval.version}
-          content={approval.content}
-          compact
-          bundle={bundleVersions}
-          source={{ kind: 'saved', version: approval.version }}
-          sourceSuffix="Under review"
-        />
-      </section>
+    <PreviewStatusProvider onChange={report}>
+      <ReportPreviewStatus id="blocks" status={blocksStatus} />
+      <div className="space-y-5">
+        <section aria-labelledby="review-artifact-heading" className="space-y-2">
+          <h3 id="review-artifact-heading" className="text-[15px] leading-6 font-semibold">
+            {artifactHeading(approval.artifactType)}
+          </h3>
+          {approval.artifactType === 'email_template' && !reproducible ? (
+            blocksLoading ? (
+              <LoadingBlock lines={4} label="Resolving reusable blocks" />
+            ) : (
+              <div className="space-y-3">
+                <Alert
+                  tone={blocksError ? 'bad' : 'warn'}
+                  title={
+                    blocksError ? 'Couldn’t read this template’s reusable blocks' : 'Bundled block render unavailable before publication'
+                  }
+                  {...(blocksError ? { onRetry: refs.reload } : {})}
+                >
+                  {blocksError
+                    ? 'The combined message is withheld until every reusable block can be resolved. The exact reviewed content is shown below.'
+                    : 'The server expands each block at its published version, so it cannot render this bundle’s block pins. The exact reviewed content is shown below, and each block is previewed separately at the version this review would use.'}
+                </Alert>
+                <JsonView
+                  value={approval.content}
+                  label={`Version ${approval.version} as JSON (the exact reviewed content)`}
+                  maxHeight={480}
+                />
+              </div>
+            )
+          ) : (
+            <ArtifactPreview
+              type={approval.artifactType}
+              artifactId={approval.artifactId}
+              version={approval.version}
+              content={approval.content}
+              compact
+              bundle={bundleVersions}
+              source={{ kind: 'saved', version: approval.version }}
+              sourceSuffix="Under review"
+            />
+          )}
+        </section>
 
-      {approval.artifactType === 'email_template' && <BundledBlocks approval={approval} bundleVersions={bundleVersions} />}
+        {approval.artifactType === 'email_template' && (
+          <BundledBlocks pins={pins} loading={blocksLoading} error={refs.error} onRetry={refs.reload} />
+        )}
 
-      <section aria-labelledby="review-changes-heading" className="space-y-2">
-        <h3 id="review-changes-heading" className="text-[15px] leading-6 font-semibold">
-          Changes · {approval.diff.changes.length}
-        </h3>
-        <details open className="rounded-lg border border-line bg-surface px-4 py-3">
-          <summary className="cursor-pointer text-[13px] font-medium text-fg-2">Before and after</summary>
-          <div className="mt-3">
-            <DiffView changes={approval.diff.changes} from={approval.diff.from} to={approval.diff.to} />
-          </div>
-        </details>
-      </section>
-    </div>
+        <section aria-labelledby="review-changes-heading" className="space-y-2">
+          <h3 id="review-changes-heading" className="text-[15px] leading-6 font-semibold">
+            Changes · {approval.diff.changes.length}
+          </h3>
+          <details open className="rounded-lg border border-line bg-surface px-4 py-3">
+            <summary className="cursor-pointer text-[13px] font-medium text-fg-2">Before and after</summary>
+            <div className="mt-3">
+              <DiffView changes={approval.diff.changes} from={approval.diff.from} to={approval.diff.to} />
+            </div>
+          </details>
+        </section>
+      </div>
+    </PreviewStatusProvider>
   );
 }
 
 /** Each reusable block at the exact version the reviewed template would use. */
-function BundledBlocks({ approval, bundleVersions }: { approval: Detail; bundleVersions?: Record<string, number> }) {
-  const blocks = blockIdsIn(String((approval.content as { mjml?: string }).mjml ?? ''));
-  if (!blocks.length) return null;
+function BundledBlocks({
+  pins,
+  loading,
+  error,
+  onRetry,
+}: {
+  pins: BlockPin[];
+  loading: boolean;
+  error: string | null;
+  onRetry: () => void;
+}) {
+  if (!pins.length) return null;
   return (
     <section aria-labelledby="review-blocks-heading" className="space-y-3">
       <h3 id="review-blocks-heading" className="text-[15px] leading-6 font-semibold">
         Reusable blocks
       </h3>
       <p className="text-[12px] leading-[18px] text-muted">
-        Each block is shown at the version this review would use. The combined message cannot be rendered until an unpublished bundled block
-        is published.
+        Each block is shown at the exact version this review would use: the bundle override when there is one, otherwise its published
+        version.
       </p>
-      {blocks.map((id) => {
-        const version = bundleVersions?.[id];
-        return (
+      {loading && <LoadingBlock lines={4} label="Resolving reusable blocks" />}
+      {error && !loading && (
+        <Alert tone="bad" title="Some reusable blocks could not be read" onRetry={onRetry}>
+          {error}
+        </Alert>
+      )}
+      {pins.map((pin) =>
+        pin.version == null ? (
+          <Alert key={pin.id} tone="bad" title={`Reusable block ${pin.id} is unavailable`}>
+            This block has no published version and is not in this bundle, so there is no exact version to render.
+          </Alert>
+        ) : (
           <BlockPreview
-            key={id}
-            artifactId={id}
-            version={version}
+            key={pin.id}
+            artifactId={pin.id}
+            version={pin.version}
             compact
-            {...(version != null ? { source: { kind: 'saved' as const, version }, sourceSuffix: 'In this bundle' } : {})}
+            source={pin.bundled ? { kind: 'saved', version: pin.version } : { kind: 'published', version: pin.version }}
+            {...(pin.bundled ? { sourceSuffix: 'In this bundle' } : {})}
+            reportId={`block:${pin.id}`}
           />
-        );
-      })}
+        ),
+      )}
     </section>
   );
 }
@@ -476,6 +613,7 @@ function BundleMemberRow({
   const detail = useApi(() => api.call('approvals.get', { approvalId: member.approvalId }), [member.approvalId], { skip: isCurrent });
   const a = isCurrent ? current : detail.data;
   const stale = !!a && a.artifactLatestVersion > a.version;
+  const summary = a ? bundleMemberSummary(a, (iso) => formatDateTime(iso, { zone: true })) : null;
   return (
     <li className="rounded-md border border-line px-2.5 py-2">
       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-[13px] leading-5">
@@ -499,6 +637,29 @@ function BundleMemberRow({
         {stale && <StatusPill tone="warn">Newer draft v{a.artifactLatestVersion}</StatusPill>}
         {isCurrent && <StatusPill tone="info">This review</StatusPill>}
       </div>
+      {summary && (
+        <dl className="mt-1.5 grid gap-x-3 gap-y-0.5 text-[12px] leading-[18px] sm:grid-cols-[84px_minmax(0,1fr)]">
+          <dt className="text-muted">Publishes</dt>
+          <dd className="min-w-0 text-fg-2">
+            {summary.publishes} <span className="text-muted">· {summary.live}</span>
+          </dd>
+          <dt className="text-muted">When</dt>
+          <dd className="min-w-0 text-fg-2">{summary.when}</dd>
+          {summary.audience && (
+            <>
+              <dt className="text-muted">Audience</dt>
+              <dd className="min-w-0 break-words text-fg-2">{summary.audience}</dd>
+            </>
+          )}
+          {summary.consent && (
+            <>
+              <dt className="text-muted">Consent</dt>
+              <dd className="min-w-0 break-words text-fg-2">{summary.consent}</dd>
+            </>
+          )}
+          {summary.effect && <dd className="text-muted sm:col-span-2">{summary.effect}</dd>}
+        </dl>
+      )}
       {!isCurrent && detail.error && (
         <p className="mt-1 flex flex-wrap items-center gap-2 text-[12px] text-bad">
           Member summary unavailable.

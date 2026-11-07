@@ -1,5 +1,5 @@
 import { RefreshCw } from 'lucide-react';
-import { useEffect, useId, useState } from 'react';
+import { useEffect, useId, useMemo, useState } from 'react';
 import { api, type Out } from '../../app/api';
 import { useSession } from '../../app/session';
 import { useApi } from '../../app/useApi';
@@ -7,6 +7,7 @@ import { Alert, Button, JsonView, StatusPill } from '../../ui';
 import { formatDateTime } from '../../ui/time';
 import { getArtifact } from '../artifactCache';
 import { ConditionView } from '../previews/ConditionView';
+import { useSharedRead } from '../previews/previewRead';
 import {
   type BroadcastAudience,
   buildReadPlan,
@@ -103,40 +104,28 @@ export function ConsequenceSummary({ approval, bundleVersions }: { approval: Det
   const purposes = useApi(() => api.call('purposes.list', {}), [], { skip: !plan.purposes });
   const provider = useApi(() => api.call('system.status', {}), [], { skip: !plan.provider });
   const domains = useApi(() => api.call('sendingDomains.list', {}), [], { skip: !plan.domains });
-  const broadcast = useApi(
-    async (): Promise<BroadcastAudience> => {
-      const r = await api.call('broadcasts.preview', plan.broadcast!);
-      // `as of` is the client completion time, not a server snapshot timestamp.
-      return {
-        audience: r.audience,
-        checked: r.checked,
-        wouldSend: r.wouldSend,
-        wouldSkip: r.wouldSkip,
-        completedAt: new Date().toISOString(),
-      };
-    },
-    [plan.broadcast?.artifactId, plan.broadcast?.version, plan.broadcast?.templateVersion],
-    { skip: !plan.broadcast },
+  // One shared result per command + input: the summary and the renderer below it (the e-mail
+  // preview, checks panel, broadcast or segment preview) issue the same read once (#498 review).
+  const broadcast = useSharedRead('broadcasts.preview', plan.broadcast ?? {}, () => api.call('broadcasts.preview', plan.broadcast!), {
+    skip: !plan.broadcast,
+  });
+  const broadcastAudience = useMemo<BroadcastAudience | null>(
+    // `as of` is the client completion time, not a server snapshot timestamp.
+    () => (broadcast.data ? { ...broadcast.data, completedAt: new Date().toISOString() } : null),
+    [broadcast.data],
   );
-  const templatePreview = useApi(
+  const templatePreview = useSharedRead(
+    'templates.preview',
+    plan.templatePreview ?? {},
     () => api.call('templates.preview', plan.templatePreview!),
-    [plan.templatePreview?.artifactId, plan.templatePreview?.version],
-    {
-      skip: !plan.templatePreview,
-    },
+    { skip: !plan.templatePreview },
   );
-  const templateCheck = useApi(
-    () => api.call('templates.check', plan.templateCheck!),
-    [plan.templateCheck?.artifactId, plan.templateCheck?.version],
-    {
-      skip: !plan.templateCheck,
-    },
-  );
-  const segment = useApi(
-    () => api.call('segments.preview', plan.segmentPreview!),
-    [plan.segmentPreview?.artifactId, plan.segmentPreview?.version],
-    { skip: !plan.segmentPreview },
-  );
+  const templateCheck = useSharedRead('templates.check', plan.templateCheck ?? {}, () => api.call('templates.check', plan.templateCheck!), {
+    skip: !plan.templateCheck,
+  });
+  const segment = useSharedRead('segments.preview', plan.segmentPreview ?? {}, () => api.call('segments.preview', plan.segmentPreview!), {
+    skip: !plan.segmentPreview,
+  });
 
   const templateId = type === 'broadcast' && typeof content.template === 'string' ? content.template : undefined;
   const templateVersion = templateId
@@ -176,7 +165,7 @@ export function ConsequenceSummary({ approval, bundleVersions }: { approval: Det
     templatePreviewError: templatePreview.error,
     templateCheck: (templateCheck.data as unknown as TemplateCheck | undefined) ?? null,
     templateCheckError: templateCheck.error,
-    broadcastAudience: broadcast.data ?? null,
+    broadcastAudience,
     audienceError: broadcast.error,
     segmentCount: segment.data ? { count: segment.data.count } : null,
     segmentCountRestricted: !can('profiles:read'),
@@ -191,7 +180,7 @@ export function ConsequenceSummary({ approval, bundleVersions }: { approval: Det
 
   const consent = model.evidence.filter((e) => e.key === 'consent-purpose');
   const evidence = model.evidence.filter((e) => e.key !== 'consent-purpose');
-  const retryAudience = () => (type === 'segment' ? segment.reload() : broadcast.reload());
+  const retryAudience = () => (type === 'segment' ? segment.refresh() : broadcast.refresh());
 
   return (
     <section aria-labelledby={headingId} className="rounded-lg border border-line bg-surface-2 px-4 py-4">
@@ -217,9 +206,9 @@ export function ConsequenceSummary({ approval, bundleVersions }: { approval: Det
               <p className="text-[12px] text-muted">{model.audience.label}</p>
               <p className="text-[18px] leading-6 font-semibold tabular-nums">{model.audience.value}</p>
             </div>
-            {model.audience.unavailable && (
-              <Button size="sm" variant="ghost" icon={<RefreshCw size={13} />} onClick={retryAudience}>
-                Retry
+            {(model.audience.unavailable || (plan.broadcast ?? plan.segmentPreview)) && (
+              <Button size="sm" variant="ghost" icon={<RefreshCw size={13} />} onClick={retryAudience} title="Run the audience check again">
+                {model.audience.unavailable ? 'Retry' : 'Refresh'}
               </Button>
             )}
           </div>
@@ -268,7 +257,7 @@ export function ConsequenceSummary({ approval, bundleVersions }: { approval: Det
 
       {model.templateCheck && <TemplateChecks check={model.templateCheck} />}
       {templateCheck.error && (
-        <Alert tone="warn" title="Pre-send checks unavailable" onRetry={templateCheck.reload} className="mt-3">
+        <Alert tone="warn" title="Pre-send checks unavailable" onRetry={templateCheck.refresh} className="mt-3">
           {templateCheck.error}
         </Alert>
       )}
