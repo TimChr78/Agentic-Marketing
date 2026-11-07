@@ -42,7 +42,7 @@ export function MandateTab({ agentId, agent, canArtifacts }: { agentId: string; 
     );
   }
 
-  if ((mandate.loading && !mandate.data) || (autonomy.loading && !autonomy.data)) {
+  if (mandate.refreshing || autonomy.refreshing || (mandate.loading && !mandate.data) || (autonomy.loading && !autonomy.data)) {
     return (
       <section aria-busy="true" aria-label="Loading the agent mandate" className="space-y-3">
         <p className="text-[13px] text-muted">Loading the active mandate and the workspace ceiling…</p>
@@ -62,7 +62,7 @@ export function MandateTab({ agentId, agent, canArtifacts }: { agentId: string; 
 
   const data: AgentMandate | undefined = mandate.data;
   if (!data) return null;
-  const autonomySettings: AutonomySettings | null = autonomy.data ?? null;
+  const autonomySettings: AutonomySettings | null = autonomy.error ? null : (autonomy.data ?? null);
   const selected = data.mandate;
   const content = isMandateContent(selected?.content) ? selected.content : null;
   const shadow = content?.shadow === true;
