@@ -180,6 +180,58 @@ CHROMIUM=/usr/bin/chromium pnpm e2e           # use a system Chromium instead of
 pnpm shots                                    # screenshots of every admin route, light and dark, 1440/768/390 px
 ```
 
+#### The browser suite in the CI image
+
+`scripts/e2e-docker.sh` runs the same browser CI runs, from any checkout, without installing
+Chromium: it builds the UI, starts the seeded server on a fresh database, waits for `/ready`, then
+runs Playwright inside `mcr.microsoft.com/playwright:v1.64.1-noble` with the repository mounted at
+its own path.
+
+```bash
+scripts/e2e-docker.sh smoke        # the @smoke subset: sign-in/Home, approvals, composer, editor, people, agent pause
+scripts/e2e-docker.sh functional   # every functional spec
+scripts/e2e-docker.sh axe          # the accessibility project
+scripts/e2e-docker.sh visual       # visual regression against the committed baselines
+scripts/e2e-docker.sh update       # re-record those baselines (review the diff, then commit)
+scripts/e2e-docker.sh shots        # the full screenshot matrix in reports/shots
+pnpm e2e:smoke                     # the same wrapper through package.json
+```
+
+Each run creates a fresh database under one `AM_TEST_RUN` namespace (generated for the invocation
+unless you set it), and computes its exact name with `packages/db/test/print-db.ts` — the same
+builder the harness and `test:clean` use. It passes `AM_TEST_RUN`, `TEST_DATABASE_URL`,
+`CLICKHOUSE_URL`, `NATS_URL` and `VALKEY_URL` through to the server, verifies the seeded database
+by that name, and drops only that database afterwards (`E2E_KEEP_DB=1` keeps it). An explicit
+`E2E_DB` is refused when the database already exists, so a failed run can never drop someone
+else's data. The port is `E2E_PORT`, or `3100 + TEST_PORT_OFFSET` from `e2e/ports.ts` when unset
+(`E2E_PORT+1` is the fixtures port); this is the same offset Playwright and the helpers use. A run
+refuses to start if either port is already in use and prints the holding process — the wrapper
+never pattern-kills anything. Playwright's artifacts go to `test-results/<AM_TEST_RUN>`, so two
+concurrent runs do not delete each other's traces. `E2E_SKIP_BUILD=1` reuses `apps/web/dist`.
+
+The wrapper targets **Linux**, like the shared test stack: it needs `setsid` (util-linux) to give
+the seeded server its own process group, and never relies on GNU-only `date` formats. macOS lacks
+`setsid`, so the script fails before doing any work there.
+
+The runner's Docker network comes from `E2E_DOCKER_NETWORK`: `host` by default, so the container
+reaches the server on the host's loopback. When the script itself runs inside a container (there is
+a `/.dockerenv`, or the cgroup names a container runtime), it resolves that container from
+`$HOSTNAME` matched against both container names and ids, then from `/proc/self/mountinfo` and
+`/proc/self/cgroup` when the hostname is custom, and uses `container:<name>` so the runner shares
+that container's network namespace and `localhost:E2E_PORT` still reaches the server. If it cannot
+resolve the enclosing container it fails and names `E2E_DOCKER_NETWORK`; it never falls back
+silently to host networking. On this machine that makes
+`E2E_DOCKER_NETWORK=container:T3-Code` unnecessary to set by hand.
+
+The smoke selection is the `@smoke` tag on the tests themselves (`test(..., { tag: '@smoke' }, ...)`),
+so `pnpm e2e --project functional --grep @smoke` runs it against a local dev server too. It is meant
+to stay under about three minutes excluding the build and seed.
+
+Label selectors follow #248: use `getByRole(role, { name, exact: true })` (or a `data-testid` where a
+required field's accessible name includes a hidden asterisk), never a loose `getByLabel(...)` that can
+match a second field. `scripts/check-e2e-selectors.mjs` (`pnpm e2e:selectors`, part of `pnpm lint`)
+fails on any `getByLabel(` in `e2e/` without `{ exact: true }`.
+
 #### Screenshots, visual regression and accessibility
 
 The route matrix is one list, `e2e/matrix.mjs`: every entry in `apps/web/src/app/nav.ts` (read from

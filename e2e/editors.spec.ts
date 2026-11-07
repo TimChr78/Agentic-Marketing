@@ -8,21 +8,21 @@ test('create an experience with two variants in the editor and save', async ({ p
   await page.goto('/marketing/experiences');
   await page.getByRole('button', { name: 'New experience' }).first().click();
   const create = page.getByRole('dialog', { name: 'New experience' });
-  await create.getByLabel('Name').fill('E2E article banner');
+  await create.getByRole('textbox', { name: 'Name', exact: true }).fill('E2E article banner');
   await create.getByRole('button', { name: 'Create draft' }).click();
   await expect(page).toHaveURL(/\/marketing\/experiences\/exp_/);
   const id = page.url().split('/').pop()!;
 
-  await page.getByLabel('Placement').fill('e2e-article-footer');
-  await page.getByLabel('Description').fill('A two-variant banner for the e2e suite.');
+  await page.getByRole('textbox', { name: 'Placement', exact: true }).fill('e2e-article-footer');
+  await page.getByRole('textbox', { name: 'Description', exact: true }).fill('A two-variant banner for the e2e suite.');
   await page.getByRole('button', { name: 'Add variant' }).click();
 
-  await expect(page.getByLabel('Name of variant 1')).toHaveValue('Variant A');
-  await page.getByLabel('Name of variant 2').fill('Variant B');
-  await page.getByLabel('Weight of variant 2').fill('60');
-  await page.getByLabel('HTML for variant 2').fill('<p>Second pitch for the e2e.</p>');
+  await expect(page.getByRole('textbox', { name: 'Name of variant 1', exact: true })).toHaveValue('Variant A');
+  await page.getByRole('textbox', { name: 'Name of variant 2', exact: true }).fill('Variant B');
+  await page.getByRole('spinbutton', { name: 'Weight of variant 2', exact: true }).fill('60');
+  await page.getByRole('textbox', { name: 'HTML for variant 2', exact: true }).fill('<p>Second pitch for the e2e.</p>');
   await expect(page.getByText('The weights total 110%')).toBeVisible();
-  await expect(page.getByLabel('Name of variant 2')).toHaveValue('Variant B');
+  await expect(page.getByRole('textbox', { name: 'Name of variant 2', exact: true })).toHaveValue('Variant B');
 
   await page.getByRole('button', { name: 'Save draft' }).click();
   await expect(page.getByText('Draft saved.')).toBeVisible();
@@ -48,9 +48,11 @@ test('edit a purpose description and save, without renaming its key', async ({ p
   await page.goto(`/artifacts/${artifactId}`);
 
   // marketing_email is in force, so its key is locked and only the description changes.
-  await expect(page.getByLabel(`Key of purpose ${n}`)).not.toBeEditable();
-  await expect(page.getByLabel(`Description of purpose ${n}`)).toHaveValue('News and offers by e-mail.');
-  await page.getByLabel(`Description of purpose ${n}`).fill('Weekly news and occasional offers, by e-mail.');
+  await expect(page.getByRole('textbox', { name: `Key of purpose ${n}`, exact: true })).not.toBeEditable();
+  await expect(page.getByRole('textbox', { name: `Description of purpose ${n}`, exact: true })).toHaveValue('News and offers by e-mail.');
+  await page
+    .getByRole('textbox', { name: `Description of purpose ${n}`, exact: true })
+    .fill('Weekly news and occasional offers, by e-mail.');
   await page.getByRole('button', { name: 'Save draft' }).click();
   await expect(page.getByText(/Saved as draft v|Draft saved\./)).toBeVisible();
 

@@ -32,7 +32,7 @@ test('create a mandate for an agent and see it on the agent page (#228)', async 
 
   const artifactId = page.url().split('/').pop()!;
   await page.getByRole('textbox', { name: 'Purpose', exact: true }).fill('Send the weekly newsletter within the mandate.');
-  await page.getByLabel(/^Valid until/).fill(new Date(Date.now() + 30 * 86_400_000).toISOString().slice(0, 10));
+  await page.getByLabel(/^Valid until/, { exact: true }).fill(new Date(Date.now() + 30 * 86_400_000).toISOString().slice(0, 10));
   await page.getByRole('button', { name: 'Save draft' }).click();
   await expect(page.getByText(/Draft saved|Saved as draft/)).toBeVisible();
   const saved = await call<{ version: { content: { agent: string; purpose: string } } }>(page.request, 'artifacts.get', { artifactId });
