@@ -2,6 +2,22 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+### Added
+
+- Analytics now leads with three fixed questions — Newsletter performance, Journey conversion and Deliverability — over a grouped measure picker with plain names, descriptions and units. Each question reads one totals result and one daily series per period through the existing metric layer, shows the chart before the result table, and compares with the immediately preceding equal local-day period (#506).
+
+### Changed
+
+- Analytics asks “What changed in your newsletter results?” with Last 7 / Last 30 complete workspace-local days by default, keeps the existing `from`/`to`/`measures`/`dimensions`/`broadcast` deep links, and keeps the AI usage tab unchanged. Changing a question visibly drops a filter the new source does not support; switching measure group replaces incompatible selections with that group’s defaults and announces it (#506).
+- Analytics periods now name both date ranges and the workspace zone, rates show their numerator/denominator, and freshness reads “Latest event in period” instead of a fetch time (#506).
+
+### Fixed
+
+- A revenue chart is drawn only when the result carries one usable currency and the comparison period carries the same currency; mixed, missing and different-currency results keep currency-labelled table rows and replace the chart with the explained unavailable state (#506).
+- Analytics no longer renders an epoch date as freshness, an absent cell as an observed zero, or old values as current after a failed refresh (#506).
+
 ## [0.11.0] - 2026-11-07
 
 ### Added
