@@ -357,6 +357,42 @@ pnpm audit --prod --audit-level=moderate   # accepted advisories are listed in S
 
 Biome checks every directory unless `biome.json` excludes it; add generated output to its `files.includes` exclusions rather than leaving a new directory unchecked.
 
+### Testing only what changed
+
+The full local suite takes about 44 minutes on the shared test stack. While iterating on a change,
+run the projects and files it touches instead:
+
+```bash
+eval "$(scripts/test-services.sh env)"    # the shared stack, once per shell
+pnpm test:affected:print                  # what would run: projects, files and the reason for each
+pnpm test:affected                        # run it with Vitest, one invocation per selected project
+```
+
+`scripts/test-affected.mjs` takes the changed files from `git diff --name-only origin/main...HEAD`
+plus staged, unstaged and untracked files, then maps them:
+
+- `apps/web/**` runs the web project; a change confined to `apps/web/src/features/<name>/` lists the
+  tests that import it through a static import walk (the project is only a minute or two, so a
+  feature with no matching test still runs the whole project);
+- `packages/<name>/src/**` runs that package's tests, every workspace package that depends on it
+  transitively, and the server tests that import it (walking through `apps/server/test` helpers);
+- `packages/<name>/test/**` runs those tests;
+- `apps/server/test/<file>.test.ts` runs that file; `apps/server/src/**` runs the server tests whose
+  import graph reaches it (the harness, `registry.ts` and the command wiring run the whole project);
+- `docs/**` and `*.md` run the docs project;
+- `e2e/**` and the Playwright configs have no Vitest tests; the script suggests
+  `scripts/e2e-docker.sh smoke`.
+
+`--base <ref>` changes the comparison base, `--files a b …` maps an explicit list, `--print` (or
+`--json`) only prints the plan, and arguments after `--` go to Vitest. A migration, a package
+manifest, `pnpm-lock.yaml`, `vitest.config.mts`, `test-support/**`, `.github/**` or any path the
+script cannot classify runs the full suite, and the output says why: when in doubt it selects more,
+never less.
+
+This is the quick loop, not the merge gate. The phase PR and the release still run the full suite
+in CI (`pnpm test:ci`, the `test` job in `.github/workflows/ci.yml`), as does `pnpm test` locally.
+
+
 ### The shared test stack
 
 One stack per machine, shared by every checkout and delegate: the services are stateless between
