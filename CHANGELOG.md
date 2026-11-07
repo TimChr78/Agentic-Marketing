@@ -11,6 +11,8 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 - `deliverability.trend` (#508): bounce and complaint rates as workspace-local daily points, each over the delivery policy's rolling creation window with current message statuses. Zero-volume points return null rates; thresholds are today's policy and there is no pause history.
 - `agents.mandate` (#509): the published, unarchived and unexpired mandate that applies to an agent now, with its content and the current working-hours verdict. It returns null when the agent has none, never a newer draft, and includes no credentials.
 - Analytics now leads with three fixed questions — Newsletter performance, Journey conversion and Deliverability — over a grouped measure picker with plain names, descriptions and units. Each question reads one totals result and one daily series per period through the existing metric layer, shows the chart before the result table, and compares with the immediately preceding equal local-day period (#506).
+- Journey Report (#507): the journey detail's Report tab now reports the current participant snapshot, selected-period entries, goal, completions and exits, and all-time step reach as separate values, with Last 7 and Last 30 complete workspace-local days. Step reach comes from the published topology's graph order; a sequential funnel appears only for one linear published version whose event steps all map, are complete, unsuppressed, monotone and have entrants — every other journey shows independent bars and says “Step reach is not a cohort funnel.” Historical step ids stay a separate unmapped list behind a copy control.
+- Canvas counts for journeys (#507): `JourneyGraph` accepts optional `counts` and `countsLabel` and renders “reached all time / waiting now” per step without fetching; a node key the read did not return stays Unavailable, never zero. The builder's Counts overlay and its control-group summary share one `journeys.stats` read.
 
 ### Changed
 
@@ -18,6 +20,8 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 - The campaign Evaluation tab shares one Last 7 / Last 30 complete-days period between the summary and the campaign-wide holdout, refreshes the same reads, and mounts neither while the tab is inactive. `CampaignEvaluation({campaignId})` and `CampaignHoldoutCard({campaignId})` keep their existing required prop; `from`, `to` and `active` are additive for the host.
 - Analytics asks “What changed in your newsletter results?” with Last 7 / Last 30 complete workspace-local days by default, keeps the existing `from`/`to`/`measures`/`dimensions`/`broadcast` deep links, and keeps the AI usage tab unchanged. Changing a question visibly drops a filter the new source does not support; switching measure group replaces incompatible selections with that group’s defaults and announces it (#506).
 - Analytics periods now name both date ranges and the workspace zone, rates show their numerator/denominator, and freshness reads “Latest event in period” instead of a fetch time (#506).
+- The journey builder no longer polls journey stats every 30 seconds; the canvas overlay and the report refresh explicitly, and a draft or edited topology shows no count overlay because aggregate counts cannot be attributed to one saved version.
+- `JourneyReport` and `JourneyStatsPage` share one implementation, so the standalone Insights page and the Report tab use the same reads, period controls and states.
 
 ### Fixed
 
