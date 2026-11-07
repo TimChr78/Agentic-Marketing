@@ -3,8 +3,9 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
-  DOCS_TEST_FILES,
   packageNameOf,
+  parseDocsProject,
+  readDocsProject,
   resolveSpecifier,
   scanImports,
   selectAffected,
@@ -13,80 +14,112 @@ import {
 } from '../../../scripts/test-affected.mjs';
 
 // The mapping behind scripts/test-affected.mjs. It reads the real repository graph (package
-// manifests and imports), so the expectations below name files that exist today; the fixture file
-// lists stand in for a diff.
+// manifests, the Vitest config and imports), so the expectations below name files that exist
+// today; the fixture file lists stand in for a diff.
 
 const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 const select = (files: string[]) => selectAffected({ root: ROOT, files });
-const selected = (files: string[] | null) => files ?? [];
 
-describe('selectAffected', () => {
-  it('selects only the web project for a UI feature change', () => {
+describe('selectAffected: fine-grained mappings', () => {
+  it('selects only the tests that import a web feature change', () => {
     const result = select(['apps/web/src/features/journey/Builder.tsx']);
+    const web = result.selections.web.files ?? [];
 
     expect(result.full).toBe(false);
-    expect(selected(result.selections.web.files)).toContain('apps/web/test/journeyBuilderCounts.test.tsx');
-    expect(result.selections.docs.files).toEqual([]);
+    expect(web).toContain('apps/web/test/journeyBuilderCounts.test.tsx');
+    expect(web.length).toBeLessThan(20);
+    expect(result.selections.server.files).toEqual([]);
     expect(result.selections.packages.files).toEqual([]);
-    expect(result.selections.server.files).toEqual([]);
+    expect(result.selections.docs.files).toEqual([]);
   });
 
-  it('selects a web test file on its own when only that test changed', () => {
-    const result = select(['apps/web/test/journeyBuilderCounts.test.tsx']);
-
-    expect(result.selections.web.files).toEqual(['apps/web/test/journeyBuilderCounts.test.tsx']);
-    expect(result.selections.server.files).toEqual([]);
+  it('selects a changed test file in its own project', () => {
+    expect(select(['apps/web/test/journeyBuilderCounts.test.tsx']).selections.web.files).toEqual([
+      'apps/web/test/journeyBuilderCounts.test.tsx',
+    ]);
+    expect(select(['apps/server/test/phase7.test.ts']).selections.server.files).toEqual(['apps/server/test/phase7.test.ts']);
+    expect(select(['packages/email/test/render.test.ts']).selections.packages.files).toEqual(['packages/email/test/render.test.ts']);
   });
+});
 
-  it('selects a package, its dependants and the server tests that import it', () => {
-    const result = select(['packages/email/src/gateway.ts']);
-    const packages = selected(result.selections.packages.files);
-    const server = selected(result.selections.server.files);
+describe('selectAffected: conservative whole-project mappings', () => {
+  it('runs server, docs, packages and web for a package source change web imports', () => {
+    const result = select(['packages/analytics/src/registry.ts']);
 
     expect(result.full).toBe(false);
-    // Its own tests.
-    expect(packages).toContain('packages/email/test/render.test.ts');
-    // A package that depends on email, transitively (audience -> email).
-    expect(packages).toContain('packages/audience/test/import.test.ts');
-    // A server test with a direct import: `import { outbox } from '@agentic-marketing/email'`.
-    expect(server).toContain('apps/server/test/phase7.test.ts');
-    // The admin UI does not depend on email, so it stays out.
+    // The web test labels.test.ts imports packages/analytics/src/registry.ts directly.
+    expect(result.selections.web.files).toBeNull();
+    expect(result.selections.server.files).toBeNull();
+    expect(result.selections.docs.files).toBeNull();
+    expect(result.selections.packages.files).toBeNull();
+    expect(result.selections.server.reasons.join(' ')).toContain('static import scan cannot see harness, subprocess and CLI paths');
+  });
+
+  it('runs docs and server (and packages) for a server source change, without web', () => {
+    const result = select(['apps/server/src/registry.ts']);
+
+    expect(result.selections.docs.files).toBeNull();
+    expect(result.selections.server.files).toBeNull();
+    expect(result.selections.packages.files).toBeNull();
+    // Web only follows package sources it imports; no package changed here.
     expect(result.selections.web.files).toEqual([]);
   });
 
-  it('runs the whole server project when the harness changes', () => {
+  it('runs the whole server project for a CLI path reached only by a subprocess', () => {
+    const result = select(['apps/server/src/ops/upgrade-notes.ts']);
+
+    expect(result.selections.server.files).toBeNull();
+    expect(result.selections.docs.files).toBeNull();
+    expect(result.selections.packages.files).toBeNull();
+  });
+
+  it('runs the whole server project when the test harness changes', () => {
     const result = select(['apps/server/test/harness.ts']);
 
     expect(result.selections.server.files).toBeNull();
-    expect(result.selections.server.reasons.join(' ')).toMatch(/harness/);
-    expect(result.full).toBe(false);
+    expect(result.selections.server.reasons.join(' ')).toContain('static import scan cannot see harness');
   });
 
-  it('runs everything for a database migration', () => {
-    const result = select(['packages/db/migrations/0099_example.sql']);
+  it('runs the whole projects and suggests the e2e smoke run for a server e2e helper', () => {
+    const result = select(['apps/server/test/e2e/server.ts']);
 
-    expect(result.full).toBe(true);
     expect(result.selections.server.files).toBeNull();
-    expect(vitestInvocations(result)).toEqual([['run']]);
-  });
-
-  it('selects the docs project for a documentation-only change', () => {
-    const result = select(['docs/development.md']);
-
-    expect(result.full).toBe(false);
     expect(result.selections.docs.files).toBeNull();
-    expect(result.selections.packages.files).toEqual([]);
-    expect(result.selections.web.files).toEqual([]);
-    expect(result.selections.server.files).toEqual([]);
+    expect(result.selections.packages.files).toBeNull();
+    expect(result.suggestions.join(' ')).toContain('scripts/e2e-docker.sh smoke');
+  });
+});
+
+describe('selectAffected: the docs project comes from vitest.config.mts', () => {
+  it('parses the docs list without a copied constant', () => {
+    const source = readFileSync(join(ROOT, 'vitest.config.mts'), 'utf8');
+    const block = /const\s+docs\s*=\s*\[([\s\S]*?)\]\s*;/.exec(source)?.[1] ?? '';
+    const fromConfig = [...block.matchAll(/['"]([^'"]+\.test\.[cm]?tsx?)['"]/g)].map((match) => match[1]);
+
+    expect(fromConfig.length).toBeGreaterThan(0);
+    expect(readDocsProject(ROOT)).toEqual(fromConfig);
   });
 
-  it('sends a docs-project test file to the docs project, not the server project', () => {
-    const result = select([DOCS_TEST_FILES[0]]);
+  it('picks up new docs tests added to the config (for example #521)', () => {
+    const added = ['apps/server/test/changelog.test.ts', 'apps/server/test/release-tooling.test.ts'];
+    const source = `const docs = [\n  '${added[0]}',\n  '${added[1]}',\n];\n`;
 
-    expect(result.selections.docs.files).toBeNull();
-    expect(result.selections.server.files).toEqual([]);
+    expect(parseDocsProject(source)).toEqual(added);
   });
 
+  it('routes every configured docs test to the docs project, not the server project', () => {
+    const docsFiles = readDocsProject(ROOT);
+    expect(docsFiles).not.toBeNull();
+
+    for (const file of docsFiles ?? []) {
+      const result = select([file]);
+      expect(result.selections.docs.files, file).toEqual([file]);
+      expect(result.selections.server.files, file).toEqual([]);
+    }
+  });
+});
+
+describe('selectAffected: full-suite fallbacks', () => {
   it('runs everything for an unknown path', () => {
     const result = select(['tools/unknown.bin']);
 
@@ -95,8 +128,15 @@ describe('selectAffected', () => {
     expect(result.fullReasons.join(' ')).toContain('not classified');
   });
 
-  it('runs everything for the Vitest config, the lockfile, test-support and CI', () => {
-    for (const file of ['vitest.config.mts', 'pnpm-lock.yaml', 'test-support/harness.ts', '.github/workflows/ci.yml']) {
+  it('runs everything for migrations, the Vitest config, the lockfile, test-support, manifests and CI', () => {
+    for (const file of [
+      'packages/db/migrations/0099_example.sql',
+      'vitest.config.mts',
+      'pnpm-lock.yaml',
+      'test-support/harness.ts',
+      'package.json',
+      '.github/workflows/ci.yml',
+    ]) {
       expect(select([file]).full, file).toBe(true);
     }
   });
@@ -105,16 +145,15 @@ describe('selectAffected', () => {
     const result = select(['e2e/smoke.spec.ts']);
 
     expect(result.full).toBe(false);
-    expect(result.selections.docs.files).toEqual([]);
     expect(result.selections.web.files).toEqual([]);
     expect(result.suggestions.join(' ')).toContain('scripts/e2e-docker.sh smoke');
     expect(vitestInvocations(result)).toEqual([]);
   });
 
   it('passes extra Vitest arguments through', () => {
-    const result = select(['docs/development.md']);
+    const docsFile = (readDocsProject(ROOT) ?? [])[0];
 
-    expect(vitestInvocations(result, ['--reporter=dot'])).toEqual([['run', '--project', 'docs', '--reporter=dot']]);
+    expect(vitestInvocations(select([docsFile]), ['--reporter=dot'])).toEqual([['run', '--project', 'docs', docsFile, '--reporter=dot']]);
   });
 });
 
@@ -137,7 +176,7 @@ describe('the static import scan', () => {
   it('resolves workspace package names to their source entry', () => {
     const packages = workspacePackages(ROOT);
     const fromTest = join(ROOT, 'apps/server/test/phase7.test.ts');
-    const fromWeb = join(ROOT, 'apps/web/test/journeyBuilderCounts.test.tsx');
+    const fromWeb = join(ROOT, 'apps/web/test/labels.test.ts');
 
     expect(packageNameOf('@agentic-marketing/email/testing')).toBe('@agentic-marketing/email');
     expect(packageNameOf('node:fs')).toBeNull();

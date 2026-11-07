@@ -371,23 +371,25 @@ pnpm test:affected                        # run it with Vitest, one invocation p
 `scripts/test-affected.mjs` takes the changed files from `git diff --name-only origin/main...HEAD`
 plus staged, unstaged and untracked files, then maps them:
 
-- `apps/web/**` runs the web project; a change confined to `apps/web/src/features/<name>/` lists the
-  tests that import it through a static import walk (the project is only a minute or two, so a
-  feature with no matching test still runs the whole project);
-- `packages/<name>/src/**` runs that package's tests, every workspace package that depends on it
-  transitively, and the server tests that import it (walking through `apps/server/test` helpers);
-- `packages/<name>/test/**` runs those tests;
-- `apps/server/test/<file>.test.ts` runs that file; `apps/server/src/**` runs the server tests whose
-  import graph reaches it (the harness, `registry.ts` and the command wiring run the whole project);
+- a changed test file runs that file in its own Vitest project; the docs project's file list is read
+  from `vitest.config.mts`, so a new docs test is routed without editing the script;
+- a change confined to `apps/web/src/features/<name>/` runs the web tests whose import graph reaches
+  it; any other admin-UI change runs the whole web project;
 - `docs/**` and `*.md` run the docs project;
-- `e2e/**` and the Playwright configs have no Vitest tests; the script suggests
-  `scripts/e2e-docker.sh smoke`.
+- any change to `packages/*/src/**`, `apps/server/src/**`, an `apps/server/test/**` helper or
+  `apps/server/test/e2e/**` runs the whole `server`, `docs` and `packages` projects, plus `web` when
+  web tests or the web runtime depend on that package. The reason is printed: a static import scan
+  cannot see the harness path, subprocesses or the CLI bundle, so the script does not pretend to be
+  precise there. `apps/server/test/e2e/**` also suggests `scripts/e2e-docker.sh smoke`.
+
+Only test-file changes and web feature changes are fine-grained. Everything else that looks like
+source runs whole projects, which is slower than a graph walk but cannot miss a test that reaches
+the code through the harness, a subprocess or the CLI.
 
 `--base <ref>` changes the comparison base, `--files a b …` maps an explicit list, `--print` (or
 `--json`) only prints the plan, and arguments after `--` go to Vitest. A migration, a package
 manifest, `pnpm-lock.yaml`, `vitest.config.mts`, `test-support/**`, `.github/**` or any path the
-script cannot classify runs the full suite, and the output says why: when in doubt it selects more,
-never less.
+script cannot classify runs the full suite, and the output says why.
 
 This is the quick loop, not the merge gate. The phase PR and the release still run the full suite
 in CI (`pnpm test:ci`, the `test` job in `.github/workflows/ci.yml`), as does `pnpm test` locally.

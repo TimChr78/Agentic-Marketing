@@ -15,6 +15,15 @@
 //
 //   eval "$(scripts/test-services.sh env)"
 //
+// Design (#522 review): only two mappings are fine-grained, because they are reliable:
+//   - a changed test file runs that file in its own project (membership read from vitest.config.mts);
+//   - a change confined to apps/web/src/features/<name>/ runs the web tests whose import graph
+//     reaches it.
+// Any server or package source, server test helper or apps/server/test/e2e file runs the whole
+// server, docs and packages projects, and the whole web project when web tests import the package.
+// A static import scan cannot see the harness path, subprocesses or the CLI bundle, so pretending
+// to be precise there under-selects; this never does.
+//
 // The mapping is exported for apps/server/test/test-affected.test.ts.
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
@@ -24,25 +33,6 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 export const DEFAULT_BASE = 'origin/main';
-
-// The docs project's include list in vitest.config.mts. A change to one of these files belongs to
-// the docs project, not to the server project (which excludes them). Keep in sync with the config.
-export const DOCS_TEST_FILES = [
-  'apps/server/test/action-classes.test.ts',
-  'apps/server/test/docs-consistency.test.ts',
-  'apps/server/test/docs-determinism.test.ts',
-  'apps/server/test/mcp-tools-doc.test.ts',
-];
-
-// Changing one of these affects nearly every server file, so the project runs whole rather than as
-// a long file list. `app.ts` wires the REST/MCP command surfaces, `registry.ts` the command set.
-export const SERVER_HUB_FILES = new Set([
-  'apps/server/test/harness.ts',
-  'apps/server/src/app.ts',
-  'apps/server/src/registry.ts',
-  'apps/server/src/http/mcp.ts',
-  'apps/server/src/http/rest.ts',
-]);
 
 const PLAYWRIGHT_CONFIGS = new Set(['playwright.config.ts', 'playwright.visual.config.ts']);
 const PROJECTS = ['docs', 'packages', 'web', 'server'];
@@ -180,7 +170,7 @@ export function scanImports(source) {
   return [...found].sort();
 }
 
-/** Test file → every repository file it reaches, following relative and workspace imports. */
+/** Entry file → every repository file it reaches, following relative and workspace imports. */
 function reachability(root, packages, entries, visit) {
   const adjacency = new Map();
   const importsOf = (file) => {
@@ -215,65 +205,6 @@ function reachability(root, packages, entries, visit) {
   return map;
 }
 
-/**
- * Server test → the workspace packages it imports, following imports through the test helpers
- * (harness.ts and friends). The walk deliberately stops at apps/server/test: a package change runs
- * the tests that name it, not every test that reaches registry.ts through the harness.
- */
-function serverTestPackageImports(root, packages) {
-  const testDir = join(root, 'apps/server/test');
-  const files = walk(testDir).filter((file) => SOURCE_EXTENSIONS.test(file));
-  const adjacency = new Map();
-  const importsOf = (file) => {
-    if (adjacency.has(file)) return adjacency.get(file);
-    let source = '';
-    try {
-      source = readFileSync(file, 'utf8');
-    } catch {
-      // An unreadable helper is a leaf.
-    }
-    const local = [];
-    const used = new Set();
-    for (const specifier of scanImports(source)) {
-      const name = packageNameOf(specifier);
-      if (name && packages.has(name)) {
-        used.add(name);
-        continue;
-      }
-      if (!specifier.startsWith('.')) continue;
-      const target = resolveFile(resolve(dirname(file), specifier));
-      if (target?.startsWith(`${testDir}${sep}`) && SOURCE_EXTENSIONS.test(target)) local.push(target);
-    }
-    const result = { local, used };
-    adjacency.set(file, result);
-    return result;
-  };
-  const map = new Map();
-  for (const file of files.filter(isTestFile)) {
-    const seen = new Set();
-    const used = new Set();
-    const stack = [file];
-    while (stack.length) {
-      const helper = stack.pop();
-      if (seen.has(helper)) continue;
-      seen.add(helper);
-      const next = importsOf(helper);
-      for (const name of next.used) used.add(name);
-      for (const local of next.local) if (!seen.has(local)) stack.push(local);
-    }
-    map.set(posix(relative(root, file)), used);
-  }
-  return map;
-}
-
-/** Server test → every apps/server and packages/* source file it reaches. */
-function serverSourceReachability(root, packages) {
-  const entries = walk(join(root, 'apps/server/test'))
-    .filter(isTestFile)
-    .map((file) => posix(relative(root, file)));
-  return reachability(root, packages, entries, (file) => file.startsWith('apps/server/') || /^packages\/[^/]+\/src\//.test(file));
-}
-
 /** Web test → every apps/web and packages/* source file it reaches. */
 function webReachability(root, packages) {
   const entries = walk(join(root, 'apps/web'))
@@ -287,38 +218,14 @@ function workspaceDependencies(pkg) {
   return Object.keys(declared).filter((name) => name.startsWith('@agentic-marketing/'));
 }
 
-/** The workspace packages under packages/* that depend on `name`, transitively. */
-function packageDependants(packages, name) {
-  const reverse = new Map();
-  for (const [candidate, workspace] of packages) {
-    if (!workspace.rel.startsWith('packages/')) continue;
-    for (const dependency of workspaceDependencies(workspace.pkg)) {
-      if (!reverse.has(dependency)) reverse.set(dependency, new Set());
-      reverse.get(dependency).add(candidate);
-    }
-  }
-  const dependants = [];
-  const seen = new Set([name]);
-  const stack = [name];
-  while (stack.length) {
-    for (const dependant of reverse.get(stack.pop()) ?? []) {
-      if (seen.has(dependant)) continue;
-      seen.add(dependant);
-      dependants.push(dependant);
-      stack.push(dependant);
-    }
-  }
-  return dependants;
-}
-
-/** Whether the admin UI depends on `name`, directly or through another workspace package. */
+/** Whether the admin UI depends on `name` at runtime, directly or through another package. */
 function webDependsOn(packages, name) {
   const web = packages.get('@agentic-marketing/web');
   if (!web) return false;
   const seen = new Set();
   // Runtime dependencies only: apps/web lists @agentic-marketing/server as a devDependency for
   // types, and following that would make every package change run the whole web project.
-  const stack = Object.keys(web.pkg.dependencies ?? {}).filter((name) => name.startsWith('@agentic-marketing/'));
+  const stack = Object.keys(web.pkg.dependencies ?? {}).filter((dependency) => dependency.startsWith('@agentic-marketing/'));
   while (stack.length) {
     const dependency = stack.pop();
     if (dependency === name) return true;
@@ -330,11 +237,75 @@ function webDependsOn(packages, name) {
   return false;
 }
 
+/**
+ * What the web tests and web sources import. Direct `packages/<name>/src/...` paths (the UI reads
+ * the analytics registry that way) count, as do package names resolved through exports. An
+ * unresolvable relative import makes the result unsure, and the caller then selects web anyway.
+ */
+function webPackageImports(root, packages) {
+  const imported = new Set();
+  let unsure = false;
+  const files = [join(root, 'apps/web/test'), join(root, 'apps/web/src')]
+    .flatMap((dir) => walk(dir))
+    .filter((file) => SOURCE_EXTENSIONS.test(file));
+  for (const file of files) {
+    let source = '';
+    try {
+      source = readFileSync(file, 'utf8');
+    } catch {
+      unsure = true;
+      continue;
+    }
+    for (const specifier of scanImports(source)) {
+      const name = packageNameOf(specifier);
+      if (name && packages.has(name)) imported.add(name);
+      if (name?.startsWith('@agentic-marketing/') && !packages.has(name)) unsure = true;
+      const target = resolveSpecifier(root, packages, file, specifier);
+      if (!target) {
+        // A relative path that does not resolve might point anywhere; do not under-select.
+        if (specifier.startsWith('.')) unsure = true;
+        continue;
+      }
+      const direct = /^packages\/([^/]+)\/src\//.exec(target);
+      if (direct) imported.add(`@agentic-marketing/${direct[1]}`);
+    }
+  }
+  return { imported, unsure };
+}
+
+/** Every test file of one workspace package. */
 function packageTests(root, packages, name) {
   const workspace = packages.get(name);
   if (!workspace) return [];
   const files = [...walk(join(workspace.dir, 'test')).filter(isTestFile), ...walk(join(workspace.dir, 'src')).filter(isTestFile)];
   return [...new Set(files.map((file) => posix(relative(root, file))))].sort();
+}
+
+/**
+ * The docs project's files, parsed from vitest.config.mts. There is deliberately no copied list:
+ * a project that adds a test to the config is mapped correctly without touching this script.
+ */
+export function parseDocsProject(source) {
+  const block = /(?:export\s+)?const\s+docs(?:\s*:\s*[^=]+)?\s*=\s*\[([\s\S]*?)\]\s*;/.exec(source);
+  if (!block) return null;
+  return [...block[1].matchAll(/['"]([^'"]+\.test\.[cm]?tsx?)['"]/g)].map((match) => match[1]);
+}
+
+export function readDocsProject(root = ROOT) {
+  try {
+    return parseDocsProject(readFileSync(join(root, 'vitest.config.mts'), 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+/** The Vitest project a changed test file runs in, or null when it is in none. */
+function projectForTestFile(file, docsFiles) {
+  if (docsFiles?.includes(file)) return 'docs';
+  if (file.startsWith('apps/server/test/') && isTestFile(file)) return 'server';
+  if (file.startsWith('apps/web/') && isTestFile(file)) return 'web';
+  if (/^packages\/[^/]+\/(?:test|src)\//.test(file) && isTestFile(file)) return 'packages';
+  return null;
 }
 
 /** The reason a path forces the full suite, or null. */
@@ -348,21 +319,29 @@ function fullTriggerReason(file) {
   return null;
 }
 
-function classifyPath(file, packages) {
+function classifyPath(file, packages, docsFiles) {
   const full = fullTriggerReason(file);
   if (full) return { kind: 'full', reason: full };
   if (file.startsWith('e2e/') || PLAYWRIGHT_CONFIGS.has(file)) return { kind: 'e2e' };
+  // An e2e helper under apps/server/test is part of the server project's inputs, not a test.
+  if (file.startsWith('apps/server/test/e2e/')) return { kind: 'source', e2e: true };
+  // A changed test file runs in its own project.
+  if (isTestFile(file)) {
+    const project = projectForTestFile(file, docsFiles);
+    if (project) return { kind: 'test', project };
+    return { kind: 'unknown', reason: 'a test file outside every Vitest project' };
+  }
   // Documentation is a project of its own; a Markdown file anywhere belongs to it.
-  if (file.endsWith('.md') || file.startsWith('docs/') || DOCS_TEST_FILES.includes(file)) return { kind: 'docs' };
+  if (file.endsWith('.md') || file.startsWith('docs/')) return { kind: 'docs' };
   if (file.startsWith('apps/web/')) return { kind: 'web' };
-  if (SERVER_HUB_FILES.has(file)) return { kind: 'server-hub' };
-  if (file.startsWith('apps/server/test/')) return { kind: isTestFile(file) ? 'server-test' : 'server-helper' };
-  if (file.startsWith('apps/server/src/')) return { kind: 'server-src' };
+  // Server source and test helpers: the whole projects, because subprocess/CLI paths are invisible.
+  if (file.startsWith('apps/server/test/') || file.startsWith('apps/server/src/')) return { kind: 'source' };
   const match = /^packages\/([^/]+)\/(src|test)\//.exec(file);
   if (match) {
     const name = `@agentic-marketing/${match[1]}`;
     if (!packages.has(name)) return { kind: 'unknown', reason: `${match[1]} is not a workspace package` };
-    return { kind: match[2] === 'src' ? 'package-src' : 'package-test', package: name };
+    if (match[2] === 'src') return { kind: 'source', package: name };
+    return { kind: 'package-test-helper', package: name };
   }
   return { kind: 'unknown', reason: 'the path is not classified' };
 }
@@ -416,6 +395,7 @@ function normaliseChanged(files, root) {
  */
 export function selectAffected({ root = ROOT, files = [], base = null } = {}) {
   const packages = workspacePackages(root);
+  const docsFiles = readDocsProject(root);
   const changed = normaliseChanged(files, root);
   const result = {
     base,
@@ -426,6 +406,7 @@ export function selectAffected({ root = ROOT, files = [], base = null } = {}) {
     notes: [],
     suggestions: [],
   };
+  if (docsFiles === null) result.notes.push('could not read the docs project list from vitest.config.mts');
   if (!changed.length) {
     result.notes.push('no changed files: nothing to run');
     return result;
@@ -434,28 +415,19 @@ export function selectAffected({ root = ROOT, files = [], base = null } = {}) {
   const buckets = {
     docs: [],
     web: [],
-    serverTest: [],
-    serverSrc: [],
-    serverHelper: [],
-    serverHub: [],
-    packageSrc: [],
-    packageTest: [],
+    tests: [],
+    sources: [],
+    packageTestHelpers: [],
     e2e: [],
   };
   const fullReasons = [];
   for (const file of changed) {
-    const classified = classifyPath(file, packages);
+    const classified = classifyPath(file, packages, docsFiles);
     if (classified.kind === 'full') fullReasons.push(`${file}: ${classified.reason}`);
     else if (classified.kind === 'unknown') fullReasons.push(`${file}: ${classified.reason}, so run everything`);
-    else if (classified.kind === 'package-src' || classified.kind === 'package-test') {
-      buckets[classified.kind === 'package-src' ? 'packageSrc' : 'packageTest'].push({
-        file,
-        package: classified.package,
-      });
-    } else if (classified.kind === 'server-test') buckets.serverTest.push(file);
-    else if (classified.kind === 'server-src') buckets.serverSrc.push(file);
-    else if (classified.kind === 'server-helper') buckets.serverHelper.push(file);
-    else if (classified.kind === 'server-hub') buckets.serverHub.push(file);
+    else if (classified.kind === 'test') buckets.tests.push({ file, project: classified.project, docsUnavailable: docsFiles === null });
+    else if (classified.kind === 'source') buckets.sources.push({ file, package: classified.package, e2e: classified.e2e });
+    else if (classified.kind === 'package-test-helper') buckets.packageTestHelpers.push({ file, package: classified.package });
     else buckets[classified.kind].push(file);
   }
   if (fullReasons.length) {
@@ -472,40 +444,36 @@ export function selectAffected({ root = ROOT, files = [], base = null } = {}) {
     addProject(result, 'docs', `documentation path(s) changed: ${named}${more}`);
   }
 
-  for (const file of buckets.serverHub) addProject(result, 'server', `${file}: harness, registry or command wiring changed`);
-  for (const file of buckets.serverHelper) addProject(result, 'server', `${file}: a server test helper changed`);
-  if (buckets.serverTest.length) {
-    const docsFiles = buckets.serverTest.filter((file) => DOCS_TEST_FILES.includes(file));
-    const serverFiles = buckets.serverTest.filter((file) => !DOCS_TEST_FILES.includes(file));
-    if (docsFiles.length) addProject(result, 'docs', `${docsFiles.join(', ')}: documentation tests changed`);
-    if (serverFiles.length) addFiles(result, 'server', serverFiles, `${serverFiles.length} server test file(s) changed`);
+  for (const { file, project, docsUnavailable } of buckets.tests) {
+    if (docsUnavailable && file.startsWith('apps/server/test/')) {
+      // Without the config's docs list a docs test cannot be told apart from a server test; run both.
+      addProject(result, 'docs', 'the docs project list could not be read; run the docs project');
+      addFiles(result, 'server', [file], `${file}: server test changed`);
+      continue;
+    }
+    addFiles(result, project, [file], `${file}: test file changed`);
   }
-  // One graph for every changed server source file: the walk is the expensive part.
-  if (buckets.serverSrc.length) {
-    const reach = serverSourceReachability(root, packages);
-    for (const file of buckets.serverSrc) {
-      if (SERVER_HUB_FILES.has(file)) {
-        addProject(result, 'server', `${file}: harness, registry or command wiring changed`);
-        continue;
-      }
-      const tests = [...reach.entries()].filter(([, seen]) => seen.has(file)).map(([test]) => test);
-      if (tests.length) addFiles(result, 'server', tests.sort(), `${file}: ${tests.length} server test file(s) import it`);
-      else addProject(result, 'server', `${file}: no server test imports it (a subprocess may), so run the server project`);
+
+  if (buckets.sources.length) {
+    const reason = 'server/package source: whole projects (static import scan cannot see harness, subprocess and CLI paths)';
+    addProject(result, 'server', reason);
+    addProject(result, 'docs', reason);
+    addProject(result, 'packages', reason);
+    const packageNames = [...new Set(buckets.sources.map((source) => source.package).filter(Boolean))];
+    if (packageNames.length) {
+      const index = webPackageImports(root, packages);
+      const named = packageNames.filter((name) => index.unsure || index.imported.has(name) || webDependsOn(packages, name));
+      if (named.length) addProject(result, 'web', `${named.join(', ')}: web tests import it, so run the whole web project`);
+    }
+    if (buckets.sources.some((source) => source.e2e)) {
+      result.suggestions.push('server e2e helpers changed: run scripts/e2e-docker.sh smoke');
     }
   }
 
-  const serverImports = buckets.packageSrc.length || buckets.packageTest.length ? serverTestPackageImports(root, packages) : new Map();
-  for (const { file, package: name } of buckets.packageSrc) {
-    const dependants = packageDependants(packages, name);
-    const tests = [...packageTests(root, packages, name), ...dependants.flatMap((dependant) => packageTests(root, packages, dependant))];
-    addFiles(result, 'packages', tests, `${file}: source change selects ${name}'s tests and ${dependants.length} dependant package(s)`);
-    const importers = [...serverImports.entries()].filter(([, used]) => used.has(name)).map(([test]) => test);
-    if (importers.length) addFiles(result, 'server', importers.sort(), `${file}: ${importers.length} server test file(s) import ${name}`);
-    if (webDependsOn(packages, name)) addProject(result, 'web', `${file}: the admin UI depends on ${name}`);
-  }
-  for (const { file, package: name } of buckets.packageTest) {
-    if (isTestFile(file)) addFiles(result, 'packages', [file], `${file}: package test changed`);
-    else addFiles(result, 'packages', packageTests(root, packages, name), `${file}: package test fixture or helper changed`);
+  for (const { file, package: name } of buckets.packageTestHelpers) {
+    const tests = packageTests(root, packages, name);
+    if (tests.length) addFiles(result, 'packages', tests, `${file}: package test fixture or helper changed`);
+    else addProject(result, 'packages', `${file}: package test fixture or helper changed, so run the packages project`);
   }
 
   if (buckets.web.length) selectWeb(root, packages, result, buckets.web);

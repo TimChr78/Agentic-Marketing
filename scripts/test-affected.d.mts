@@ -1,8 +1,6 @@
 /** Types for test-affected.mjs, so the mapping test can import it (like check-versions.d.mts). */
 
 export const DEFAULT_BASE: string;
-export const DOCS_TEST_FILES: string[];
-export const SERVER_HUB_FILES: Set<string>;
 
 export interface Selection {
   /** null runs the whole project; [] selects nothing. */
@@ -35,6 +33,10 @@ export function collectChangedFiles(options?: { root?: string; base?: string }):
   base: string | null;
   warning: string | null;
 };
+
+/** The docs project's test files, or null when the `const docs = [...]` block is not found. */
+export function parseDocsProject(source: string): string[] | null;
+export function readDocsProject(root?: string): string[] | null;
 
 export function vitestInvocations(result: AffectedResult, passthrough?: string[]): string[][];
 
