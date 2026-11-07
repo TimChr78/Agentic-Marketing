@@ -486,6 +486,7 @@ For example, ClickHouse's single binary: `clickhouse server -- --path=./data/ch/
 
 ## Conventions
 
+- Phases are built by parallel tasks on a phase branch, one draft PR per task; see [the phase workflow](process/delegates.md) for the branch model, the shared-file rules and the delegate brief template.
 - Dependencies are pinned to exact versions that have been published for at least two weeks (`.npmrc` `save-exact`). Better Auth packages are pinned together via `pnpm.overrides`.
 - Migrations are forward-only SQL files in `packages/db/migrations`; never edit an applied one (the runner refuses).
 - Every tenant table has `workspace_id` and row-level security. Command handlers use the transaction they are given and do not filter by workspace manually.
