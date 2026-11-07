@@ -10,11 +10,19 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 - Campaign Evaluation (#511): the tab is now a roll-up of the campaign’s published artifacts. One `analytics.campaignSummary` read supplies the period, the distinct-person headline with its denominators, the independent funnel counts, per-member results and journey holdouts; a published campaign with a control group and a goal event adds one `campaigns.holdoutResult` read, never one read per member. Campaign and journey holdouts stay separate, revenue stays per currency, and loading, empty/not started, observed zero, null, suppressed, partial failure, restricted and not-found states each have their own copy.
 - `deliverability.trend` (#508): bounce and complaint rates as workspace-local daily points, each over the delivery policy's rolling creation window with current message statuses. Zero-volume points return null rates; thresholds are today's policy and there is no pause history.
 - `agents.mandate` (#509): the published, unarchived and unexpired mandate that applies to an agent now, with its content and the current working-hours verdict. It returns null when the agent has none, never a newer draft, and includes no credentials.
+- Analytics now leads with three fixed questions — Newsletter performance, Journey conversion and Deliverability — over a grouped measure picker with plain names, descriptions and units. Each question reads one totals result and one daily series per period through the existing metric layer, shows the chart before the result table, and compares with the immediately preceding equal local-day period (#506).
 
 ### Changed
 
 - The People list no longer calls the loaded row count a population, no longer reads a profile per row, and no longer hides purpose keys in place of names: an unavailable purpose name is labelled “Purpose name unavailable” and its key stays behind a copy control. Consent mutations, export and erasure keep their existing controls and permissions.
 - The campaign Evaluation tab shares one Last 7 / Last 30 complete-days period between the summary and the campaign-wide holdout, refreshes the same reads, and mounts neither while the tab is inactive. `CampaignEvaluation({campaignId})` and `CampaignHoldoutCard({campaignId})` keep their existing required prop; `from`, `to` and `active` are additive for the host.
+- Analytics asks “What changed in your newsletter results?” with Last 7 / Last 30 complete workspace-local days by default, keeps the existing `from`/`to`/`measures`/`dimensions`/`broadcast` deep links, and keeps the AI usage tab unchanged. Changing a question visibly drops a filter the new source does not support; switching measure group replaces incompatible selections with that group’s defaults and announces it (#506).
+- Analytics periods now name both date ranges and the workspace zone, rates show their numerator/denominator, and freshness reads “Latest event in period” instead of a fetch time (#506).
+
+### Fixed
+
+- A revenue chart is drawn only when the result carries one usable currency and the comparison period carries the same currency; mixed, missing and different-currency results keep currency-labelled table rows and replace the chart with the explained unavailable state (#506).
+- Analytics no longer renders an epoch date as freshness, an absent cell as an observed zero, or old values as current after a failed refresh (#506).
 
 ## [0.11.0] - 2026-11-07
 
