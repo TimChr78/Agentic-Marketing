@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import pg from 'pg';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { runScoped } from '../../../packages/db/test/run';
 import { loadConfig } from '../src/config';
 import {
   type BrandDomainRow,
@@ -374,7 +375,7 @@ describe('am doctor brand-domain checks', () => {
 });
 
 describe('am doctor live checks', () => {
-  const dbName = `am_doctor_${process.pid}_${randomBytes(4).toString('hex')}`;
+  const dbName = runScoped(`am_doctor_${process.pid}_${randomBytes(4).toString('hex')}`);
   const basePgUrl = new URL(process.env.TEST_DATABASE_URL ?? 'postgres://am:am@localhost:5432/am_test');
   const maintenanceUrl = Object.assign(new URL(basePgUrl), { pathname: '/postgres' }).toString();
   const dbUrl = Object.assign(new URL(basePgUrl), { pathname: `/${dbName}` }).toString();

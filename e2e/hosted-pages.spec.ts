@@ -1,12 +1,12 @@
 import { expect, type Page, test } from '@playwright/test';
-import { BASE, call, PEOPLE, signIn } from './helpers';
+import { call, PEOPLE, signIn } from './helpers';
+import { e2eFixturesBase } from './ports';
 
 // The hosted pages a subscriber clicks through (#115). These run in a real browser on purpose:
 // the browser enforces the page's CSP (form-action also covers the redirect after a POST), which
 // a plain HTTP client never does. The seeded server signs the links on a test-only side port.
 
-const base = BASE;
-const fixtures = process.env.E2E_FIXTURES ?? `http://127.0.0.1:${Number(new URL(base).port || 80) + 1}`;
+const fixtures = e2eFixturesBase;
 const SITE = 'https://martechsignal.example';
 
 /** Signs up like the site's form does and returns the confirmation link from the "e-mail". */

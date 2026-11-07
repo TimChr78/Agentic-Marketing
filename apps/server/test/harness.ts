@@ -3,10 +3,11 @@ import { migrateAuth } from '@agentic-marketing/auth';
 import { type ApiError, createClient } from '@agentic-marketing/client';
 import { newUuid } from '@agentic-marketing/core';
 import { createDb, migrate } from '@agentic-marketing/db';
-import { migrateClickHouse, resetClickHouse, resetNatsNamespace } from '@agentic-marketing/events';
+import { migrateClickHouse, resetClickHouse, resetNatsNamespace, resetNatsPrefix } from '@agentic-marketing/events';
 import { serve } from '@hono/node-server';
 import { Client, type OAuthClientProvider, StreamableHTTPClientTransport, UnauthorizedError } from '@modelcontextprotocol/client';
 import pg from 'pg';
+import { runId, scopedDbName, testPortOffset } from '../../../packages/db/test/run';
 import { createServer } from '../src/app';
 import { loadConfig } from '../src/config';
 import { prefixOf } from '../src/domains';
@@ -154,11 +155,10 @@ export async function connectAgent(BASE: string, u: User, permissions: string[],
  * the numbers in the files repeat. Worker n adds (n - 1) * 1000; the files use 2500–3499.
  * TEST_PORT_OFFSET moves every block, so two checkouts can run their suites at once.
  */
-export const testPort = (port: number) =>
-  port + (Number(process.env.VITEST_POOL_ID ?? '1') - 1) * 1000 + Number(process.env.TEST_PORT_OFFSET ?? '0');
+export const testPort = (port: number) => port + (Number(process.env.VITEST_POOL_ID ?? '1') - 1) * 1000 + testPortOffset();
 
-/** The migrated database that test-setup.ts prepares once per run; empty outside Vitest. */
-export const TEMPLATE_DB = 'am_test_template';
+/** The migrated database that test-setup.ts prepares once per run; run-scoped like every test database. */
+export const TEMPLATE_DB = scopedDbName('am_test_template');
 
 // Hot state (rate-limit buckets, sessions, snapshots) is not dropped with the databases. A run-unique
 // prefix keeps one run's buckets out of the next one, which matters now that seeded fixtures reuse
@@ -196,10 +196,49 @@ export async function prepareTemplateDatabase() {
 }
 
 /**
+ * Drops everything this run created, by its own prefix only. test-setup.ts runs it in global
+ * teardown; `AM_TEST_KEEP_DB=1` keeps the databases of a failed run for inspection. CI has no run
+ * namespace, so it keeps the old behaviour and the runner disposes of its service containers.
+ */
+export async function dropRunDatabases() {
+  if (!runId || process.env.AM_TEST_KEEP_DB) return;
+  const prefix = `am_${runId}_`;
+  const maint = new pg.Client({ connectionString: testDatabaseUrl('postgres').toString() });
+  await maint.connect();
+  let pgNames: string[] = [];
+  try {
+    const { rows } = await maint.query<{ datname: string }>(
+      'SELECT datname FROM pg_database WHERE NOT datistemplate AND starts_with(datname, $1)',
+      [prefix],
+    );
+    pgNames = rows.map((r) => r.datname);
+    for (const name of pgNames) await maint.query(`DROP DATABASE IF EXISTS "${name}" WITH (FORCE)`);
+  } finally {
+    await maint.end();
+  }
+
+  const chUrl = process.env.CLICKHOUSE_URL ?? 'http://localhost:8123';
+  const chNames = (await (await fetch(`${chUrl}/?query=${encodeURIComponent('SHOW DATABASES')}`)).text())
+    .split('\n')
+    .filter((name) => name.startsWith(prefix));
+  for (const name of chNames) await resetClickHouse(chUrl, name);
+
+  const natsUrl = process.env.NATS_URL ?? 'nats://127.0.0.1:4222';
+  if (runId) {
+    // Package tests create streams like am_<run>_test_events_pkg that no database name reveals.
+    await resetNatsPrefix(natsUrl, prefix).catch(() => {});
+  } else {
+    for (const name of new Set([...pgNames, ...chNames])) await resetNatsNamespace(natsUrl, name).catch(() => {});
+  }
+}
+
+/**
  * Drops and creates a test database: a copy of the migrated template when test-setup.ts made one,
  * else empty (the e2e server, a single file run outside the server project). `migrated` says which.
+ * The name is run-scoped, so two checkouts on one stack never drop each other's databases.
  */
-export async function freshDatabase(dbName: string): Promise<{ url: URL; migrated: boolean }> {
+export async function freshDatabase(name: string): Promise<{ url: URL; migrated: boolean; dbName: string }> {
+  const dbName = scopedDbName(name);
   const template = process.env.AM_TEST_TEMPLATE;
   const maint = new pg.Client({ connectionString: testDatabaseUrl('postgres').toString() });
   await maint.connect();
@@ -218,7 +257,7 @@ export async function freshDatabase(dbName: string): Promise<{ url: URL; migrate
   } finally {
     await maint.end();
   }
-  return { url: testDatabaseUrl(dbName), migrated: Boolean(template) };
+  return { url: testDatabaseUrl(dbName), migrated: Boolean(template), dbName };
 }
 
 export async function startTestServer(
@@ -228,8 +267,7 @@ export async function startTestServer(
   testOptions: { warehouseTickMs?: number; edgeTickMs?: number } = {},
 ) {
   const base = `http://localhost:${port}`;
-  const dbName = `am_${name}`;
-  const { url: pgUrl, migrated } = await freshDatabase(dbName);
+  const { url: pgUrl, migrated, dbName } = await freshDatabase(`am_${name}`);
 
   const natsUrl = process.env.NATS_URL ?? 'nats://127.0.0.1:4222';
   await resetNatsNamespace(natsUrl, dbName);
@@ -324,6 +362,7 @@ export async function startTestServer(
   return {
     srv,
     base,
+    dbName,
     publicBase: config.publicPort ? `http://localhost:${config.publicPort}` : undefined,
     signUp,
     workspaceWith,

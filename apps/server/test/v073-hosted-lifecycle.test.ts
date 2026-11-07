@@ -2,6 +2,7 @@ import { type FakeReply, type FakeRequest, fakeLlm } from '@agentic-marketing/ai
 import { outbox } from '@agentic-marketing/email';
 import pg from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { runScoped } from '../../../packages/db/test/run';
 import { seededRandom } from '../../../test-support/index';
 import { runHostedAgentsOnce } from '../src/agents/hosted';
 import { eventually, startTestServer, testDatabaseUrl, testPort, type User } from './harness';
@@ -11,7 +12,7 @@ import { eventually, startTestServer, testDatabaseUrl, testPort, type User } fro
 // release or overwrite its successor's state; and a skipped attempt keeps the trigger and events
 // that started it. The scheduler is driven directly with a clock, like hosted-agents.test.ts.
 
-const DB_NAME = 'am_test_hosted_lifecycle';
+const DB_NAME = runScoped('am_test_hosted_lifecycle');
 const PORT = testPort(3501);
 const DAY = 86_400_000;
 const random = seededRandom();

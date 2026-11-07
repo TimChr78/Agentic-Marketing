@@ -8,6 +8,7 @@ import { migrateClickHouse } from '@agentic-marketing/events';
 import { localKeyProvider, open, seal } from '@agentic-marketing/secrets';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { runScoped } from '../../../packages/db/test/run';
 import { run as backupRun } from '../src/ops/backup';
 import {
   type BackupManifest,
@@ -144,7 +145,7 @@ describe('scheduler health', () => {
 
 describe.skipIf(!chUp)('ClickHouse export and restore', () => {
   it('round-trips one MergeTree table', async () => {
-    const database = `am_backup_ch_${randomUUID().replace(/-/g, '').slice(0, 10)}`;
+    const database = runScoped(`am_backup_ch_${randomUUID().replace(/-/g, '').slice(0, 10)}`);
     const out = await mkdtemp(join(tmpdir(), 'am-ch-backup-'));
     try {
       await clickhouse(`CREATE DATABASE ${database}`);
@@ -174,7 +175,7 @@ describe.skipIf(!chUp)('ClickHouse export and restore', () => {
 
 describe.skipIf(!pgToolsReady)('backup and restore', () => {
   const suffix = randomUUID().replace(/-/g, '').slice(0, 10);
-  const dbName = `am_backup_${suffix}`;
+  const dbName = runScoped(`am_backup_${suffix}`);
   const role = `am_app_bk_${suffix}`;
   const password = 'backup_test_password';
   const base = new URL(process.env.TEST_DATABASE_URL ?? 'postgres://am:am@localhost:5432/am_test');
@@ -358,7 +359,7 @@ describe.skipIf(!pgToolsReady)('backup and restore', () => {
 
 describe.skipIf(!pgToolsReady)('restore replays erasures (#144)', () => {
   const suffix = randomUUID().replace(/-/g, '').slice(0, 10);
-  const dbName = `am_backup_erasure_${suffix}`;
+  const dbName = runScoped(`am_backup_erasure_${suffix}`);
   const role = `am_app_er_${suffix}`;
   const password = 'backup_test_password';
   const base = new URL(process.env.TEST_DATABASE_URL ?? 'postgres://am:am@localhost:5432/am_test');
@@ -482,7 +483,7 @@ describe.skipIf(!pgToolsReady)('restore replays erasures (#144)', () => {
 
 describe.skipIf(!pgToolsReady)('restore verifies the master key (#143)', () => {
   const suffix = randomUUID().replace(/-/g, '').slice(0, 10);
-  const dbName = `am_backup_key_${suffix}`;
+  const dbName = runScoped(`am_backup_key_${suffix}`);
   const role = `am_app_key_${suffix}`;
   const password = 'backup_test_password';
   const base = new URL(process.env.TEST_DATABASE_URL ?? 'postgres://am:am@localhost:5432/am_test');
@@ -609,8 +610,8 @@ describe.skipIf(!pgToolsReady)('restore verifies the master key (#143)', () => {
 
 describe.skipIf(!pgToolsReady || !chUp)('ClickHouse backup under row policies (#129)', () => {
   const suffix = randomUUID().replace(/-/g, '').slice(0, 10);
-  const dbName = `am_backup_ch_${suffix}`;
-  const chDatabase = `am_backup_ch_${suffix}`;
+  const dbName = runScoped(`am_backup_ch_${suffix}`);
+  const chDatabase = runScoped(`am_backup_ch_${suffix}`);
   const role = `am_app_ch_${suffix}`;
   const password = 'backup_test_password';
   const base = new URL(process.env.TEST_DATABASE_URL ?? 'postgres://am:am@localhost:5432/am_test');

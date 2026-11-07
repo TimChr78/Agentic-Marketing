@@ -14,8 +14,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 // bundled); its package scope is symlinked beside the artifact.
 //
 // The directory carries a run-unique id (#518): two runs on the same checkout (or one run's global
-// setup and a stray worker) must never delete an artifact another is still using. `AM_TEST_RUN`
-// names the run explicitly; otherwise it is the pid plus random bytes.
+// setup and a stray worker) must never delete an artifact another is still using. The id lives in
+// its own variable, AM_TEST_CLI_RUN: it reuses AM_TEST_RUN when one is set, but never sets
+// AM_TEST_RUN itself, which stays empty in CI so the database names keep their CI form.
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const sourceRoot = root.endsWith('/') ? root : `${root}/`;
@@ -33,7 +34,7 @@ interface BuildApi {
 export const CLI_ENV = 'AM_TEST_CLI';
 
 /** Optional run id; when absent, a pid and random suffix keep concurrent runs apart. */
-export const RUN_ENV = 'AM_TEST_RUN';
+export const RUN_ENV = 'AM_TEST_CLI_RUN';
 
 const sanitize = (value: string) => value.replace(/[^A-Za-z0-9._-]+/g, '_') || 'run';
 
@@ -44,7 +45,7 @@ const sanitize = (value: string) => value.replace(/[^A-Za-z0-9._-]+/g, '_') || '
 export function ensureTestRunId(): string {
   const fromEnvironment = process.env[RUN_ENV]?.trim();
   if (fromEnvironment) return sanitize(fromEnvironment);
-  process.env[RUN_ENV] ??= `${process.pid}-${randomBytes(6).toString('hex')}`;
+  process.env[RUN_ENV] = process.env.AM_TEST_RUN?.trim() || `${process.pid}-${randomBytes(6).toString('hex')}`;
   return sanitize(process.env[RUN_ENV]);
 }
 
