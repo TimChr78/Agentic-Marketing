@@ -1,14 +1,16 @@
 import { existsSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
-import { buildTestCli, cleanupTestCli } from '../../../test-support/cli';
+import { buildTestCli, cleanupTestCli, ensureTestRunId } from '../../../test-support/cli';
 
 // #518 review: the bundle used to live in one directory per checkout, so two runs that shared a
 // checkout deleted each other's artifact. Each run id must own its directory, and cleanup must
 // remove only that one.
 
-const RUN_A = 'bundle-run-a';
-const RUN_B = 'bundle-run-b';
+// Prefixed with this run's own CLI run id, so concurrent suites (even in other checkouts) never
+// build or delete each other's test directories.
+const RUN_A = `${ensureTestRunId()}-bundle-a`;
+const RUN_B = `${ensureTestRunId()}-bundle-b`;
 
 describe('bundled CLI artifact', () => {
   afterAll(async () => {
