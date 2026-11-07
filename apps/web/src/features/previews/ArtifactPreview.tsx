@@ -1,15 +1,16 @@
-import { lazy, Suspense } from 'react';
-import { JsonView, LoadingBlock } from '../../ui';
+import { Component, lazy, type ReactNode, Suspense } from 'react';
+import { Alert, JsonView, LoadingBlock } from '../../ui';
 import { referencedIds, useArtifactNames } from '../artifactCache';
 import type { JourneyContent } from '../journey/model';
 import type { DraftEmailContent } from '../templates/localRender';
 import { BlockPreview } from './BlockPreview';
 import { BroadcastPreview } from './BroadcastPreview';
+import type { BlockGuard } from './BundledBlocks';
 import { EmailPreview } from './EmailPreview';
 import { type FormContent, FormPreview } from './FormPreview';
 import { PreviewLabel } from './PreviewLabel';
 import type { PreviewSource } from './previewSource';
-import { ReportPreviewStatus } from './previewStatus';
+import { ReportPreviewStatus, useReportPreviewStatus } from './previewStatus';
 import { SegmentPreview } from './SegmentPreview';
 
 // React Flow is large and only needed when an approval actually previews a journey (#60).
@@ -30,6 +31,7 @@ export function ArtifactPreview({
   content,
   compact,
   bundle,
+  blockGuard,
   source,
   sourceSuffix,
   reportId = 'artifact',
@@ -40,6 +42,8 @@ export function ArtifactPreview({
   content: unknown;
   compact?: boolean;
   bundle?: Record<string, number>;
+  /** Block pins for a broadcast's nested template, resolved by the review panel. */
+  blockGuard?: BlockGuard;
   source?: PreviewSource;
   sourceSuffix?: string;
   /** Readiness slot reported to the Review panel. */
@@ -98,6 +102,7 @@ export function ArtifactPreview({
           version={version}
           content={content as { template?: string; segment?: string }}
           templateVersion={bundle?.[(content as { template?: string }).template ?? '']}
+          blockGuard={blockGuard}
           source={resolved}
           sourceSuffix={sourceSuffix}
           reportId={reportId}
@@ -105,10 +110,13 @@ export function ArtifactPreview({
       );
     case 'journey':
       return (
-        <>
-          <ReportPreviewStatus id={reportId} />
-          <JourneyPreview content={content as JourneyContent} height={compact ? 420 : 560} source={resolved} sourceSuffix={sourceSuffix} />
-        </>
+        <JourneyPreview
+          content={content as JourneyContent}
+          height={compact ? 420 : 560}
+          source={resolved}
+          sourceSuffix={sourceSuffix}
+          reportId={reportId}
+        />
       );
     default:
       return (
@@ -121,16 +129,50 @@ export function ArtifactPreview({
   }
 }
 
+/** Reports ready only after the lazy graph has actually mounted. */
+function JourneyGraphReady({ reportId, children }: { reportId: string; children: ReactNode }) {
+  useReportPreviewStatus(reportId, 'ready');
+  return <>{children}</>;
+}
+
+/**
+ * The journey graph is lazy (React Flow) and can fail to load or to draw. The review must not count
+ * as viewed until the graph has mounted successfully, so both the load and the graph are covered:
+ * the loading fallback reports loading, this boundary reports error, and only the mounted graph
+ * reports ready (#498 review).
+ */
+class JourneyGraphBoundary extends Component<{ reportId: string; children: ReactNode }, { failed: boolean }> {
+  state = { failed: false };
+
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+
+  render() {
+    if (!this.state.failed) return this.props.children;
+    return (
+      <div className="space-y-2">
+        <ReportPreviewStatus id={this.props.reportId} status="error" />
+        <Alert tone="bad" title="Couldn’t render this journey graph">
+          The journey could not be drawn, so this review cannot be marked viewed. The reviewed steps are still shown in the Content tab.
+        </Alert>
+      </div>
+    );
+  }
+}
+
 function JourneyPreview({
   content,
   height,
   source,
   sourceSuffix,
+  reportId,
 }: {
   content: JourneyContent;
   height: number;
   source?: PreviewSource;
   sourceSuffix?: string;
+  reportId: string;
 }) {
   const names = useArtifactNames(referencedIds(content.nodes));
   return (
@@ -140,15 +182,20 @@ function JourneyPreview({
         Purpose <strong className="font-medium">{content.purpose}</strong>
         {content.goal ? <> · Goal: {content.goal}</> : null}
       </p>
-      <Suspense
-        fallback={
-          <div style={{ height }} className="overflow-hidden rounded-md border border-line bg-surface-2">
-            <LoadingBlock lines={6} label="Loading the journey graph" />
-          </div>
-        }
-      >
-        <JourneyGraph nodes={content.nodes ?? []} names={names} height={height} />
-      </Suspense>
+      <JourneyGraphBoundary reportId={reportId}>
+        <Suspense
+          fallback={
+            <div style={{ height }} className="overflow-hidden rounded-md border border-line bg-surface-2">
+              <ReportPreviewStatus id={reportId} status="loading" />
+              <LoadingBlock lines={6} label="Loading the journey graph" />
+            </div>
+          }
+        >
+          <JourneyGraphReady reportId={reportId}>
+            <JourneyGraph nodes={content.nodes ?? []} names={names} height={height} />
+          </JourneyGraphReady>
+        </Suspense>
+      </JourneyGraphBoundary>
     </div>
   );
 }

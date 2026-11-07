@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // #498 review: the block previews must represent the reviewed publication. The combined server
@@ -9,6 +9,7 @@ const h = vi.hoisted(() => ({
   calls: [] as { name: string; input: Record<string, unknown> }[],
   detail: null as unknown,
   blockRefs: {} as Record<string, { publishedVersion: number | null }>,
+  templateContent: null as unknown,
 }));
 
 vi.mock('../src/app/api', async (importOriginal) => {
@@ -21,6 +22,19 @@ vi.mock('../src/app/api', async (importOriginal) => {
         if (name === 'approvals.get') return Promise.resolve(h.detail);
         if (name === 'artifacts.get') {
           const id = String(input.artifactId);
+          if (id === eml) {
+            const version = Number(input.version ?? 2);
+            return Promise.resolve({
+              id,
+              type: 'email_template',
+              name: 'Bundle template',
+              latestVersion: 2,
+              publishedVersion: 1,
+              version: { number: version, state: 'published', content: h.templateContent },
+              layout: null,
+              references: [],
+            });
+          }
           const ref = h.blockRefs[id];
           if (!ref) throw new Error(`unexpected artifact ${id}`);
           return Promise.resolve({
@@ -34,6 +48,16 @@ vi.mock('../src/app/api', async (importOriginal) => {
             references: [],
           });
         }
+        if (name === 'broadcasts.preview')
+          return Promise.resolve({
+            audience: 120,
+            checked: 120,
+            wouldSend: 100,
+            wouldSkip: {},
+            sendAt: null,
+            sendWindow: null,
+            subjectTest: null,
+          });
         if (name === 'blocks.preview')
           return Promise.resolve({
             version: Number(input.version ?? 1),
@@ -81,6 +105,7 @@ vi.mock('../src/app/session', () => ({
 }));
 
 import { ApprovalDrawer } from '../src/features/approvals/ApprovalDrawer';
+import { wasViewed } from '../src/features/approvals/viewed';
 import { invalidateArtifact } from '../src/features/artifactCache';
 import { ToastProvider } from '../src/ui/toast';
 
@@ -136,6 +161,33 @@ function templateDetail(overrides: Record<string, unknown> = {}) {
   };
 }
 
+const bct = `bct_${'e'.repeat(32)}`;
+const seg = `seg_${'f'.repeat(32)}`;
+
+function broadcastDetail() {
+  return {
+    ...templateDetail(),
+    id: 'apr_broadcast',
+    artifactId: bct,
+    artifactName: 'Bundle broadcast',
+    artifactType: 'broadcast',
+    version: 3,
+    artifactLatestVersion: 3,
+    artifactPublishedVersion: 2,
+    publishedVersion: 2,
+    content: { template: eml, segment: seg, description: 'A broadcast whose template already has a newer block.' },
+    bundle: {
+      id: 'bnd_broadcast',
+      members: [
+        { approvalId: 'apr_broadcast', artifactId: bct, artifactName: 'Bundle broadcast', artifactType: 'broadcast', version: 3 },
+        { approvalId: 'apr_template', artifactId: eml, artifactName: 'Block bundle template', artifactType: 'email_template', version: 2 },
+        { approvalId: 'apr_block', artifactId: blkBundle, artifactName: 'Bundled header', artifactType: 'email_block', version: 2 },
+      ],
+    },
+    diff: { from: 2, to: 3, changes: [] },
+  };
+}
+
 function renderDrawer(id: string) {
   return render(
     <ToastProvider>
@@ -151,8 +203,16 @@ beforeEach(() => {
     [blkBundle]: { publishedVersion: 1 },
     [blkPublished]: { publishedVersion: 3 },
     [blkExact]: { publishedVersion: 4 },
+    [seg]: { publishedVersion: 1 },
+  };
+  h.templateContent = {
+    purpose: 'marketing_email',
+    subject: 'Bundled broadcast',
+    preheader: '',
+    mjml: `<mjml><mj-body><mj-section><mj-column>{% block '${blkBundle}', title: 'A' %}</mj-column></mj-section></mj-body></mjml>`,
   };
   localStorage.clear();
+  invalidateArtifact(eml);
   invalidateArtifact(blkBundle);
   invalidateArtifact(blkPublished);
   invalidateArtifact(blkExact);
@@ -182,6 +242,46 @@ describe('block previews represent the reviewed publication (#498 review)', () =
     expect(previews.find((c) => c.input.artifactId === blkPublished)?.input.version).toBe(3);
     expect((await screen.findAllByText('Published v3')).length).toBeGreaterThan(0);
     expect((await screen.findAllByText(/Saved v2/)).length).toBeGreaterThan(0);
+  });
+
+  it('resolves a broadcast’s nested template pins and withholds the published block render', async () => {
+    h.detail = broadcastDetail();
+    renderDrawer('apr_broadcast');
+
+    // The broadcast's template v2 references block v2 while block v1 is published. The nested
+    // e-mail must not silently render block v1 as the future bundle message.
+    expect(await screen.findByText('Bundled block render unavailable before publication')).toBeTruthy();
+    expect(screen.queryByTitle(/^E-mail preview/)).toBeNull();
+    expect(screen.queryByText('Bundled broadcast')).toBeNull();
+    expect(screen.getAllByText(/exact reviewed content/).length).toBeGreaterThan(0);
+
+    await waitFor(() => {
+      const preview = h.calls.find((c) => c.name === 'blocks.preview' && c.input.artifactId === blkBundle);
+      expect(preview?.input.version).toBe(2);
+    });
+    expect(screen.getByText('Reusable blocks')).toBeTruthy();
+    expect(h.calls.filter((c) => c.name === 'templates.preview')).toHaveLength(0);
+  });
+
+  it('does not count an unpublished unbundled block as viewed', async () => {
+    h.blockRefs[blkExact] = { publishedVersion: null };
+    h.detail = templateDetail({
+      content: {
+        purpose: 'marketing_email',
+        subject: 'Unpublished block',
+        preheader: '',
+        mjml: `<mjml><mj-body><mj-section><mj-column>{% block '${blkExact}', title: 'A' %}</mj-column></mj-section></mj-body></mjml>`,
+      },
+    });
+    renderDrawer('apr_template');
+
+    expect(await screen.findByText('Bundled block render unavailable before publication')).toBeTruthy();
+    expect(await screen.findByText(new RegExp(`Reusable block ${blkExact} is unavailable`))).toBeTruthy();
+    // The withheld render and the unavailable block never count as a successful review.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(wasViewed('usr_reviewer', 'apr_template', 2)).toBe(false);
   });
 
   it('passes the exact version for an unbundled block review', async () => {

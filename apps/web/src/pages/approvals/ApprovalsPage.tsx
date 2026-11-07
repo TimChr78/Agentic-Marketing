@@ -1,5 +1,5 @@
 import { Check, CheckCheck, Eye, X } from 'lucide-react';
-import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { api, errText, type Out } from '../../app/api';
 import { typeLabel } from '../../app/artifactRoutes';
 import { useCrumbs } from '../../app/page';
@@ -48,35 +48,111 @@ let returnFocusPending = false;
 let returnFocusApprovalId: string | null = null;
 let approvalsPageSeq = 0;
 
+const FOCUS_RETURN_LIMIT_MS = 10_000;
+const FOCUS_RETURN_POLL_MS = 50;
+// Every timer the pending restoration owns. Navigation or unmount clears them, so a late retry
+// can never steal focus after the person has moved on (#498 review).
+const returnFocusTimers = new Set<ReturnType<typeof setTimeout>>();
+let returnFocusIntentExpiry: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleReturnFocus(fn: () => void, delay: number) {
+  const timer = setTimeout(() => {
+    returnFocusTimers.delete(timer);
+    fn();
+  }, delay);
+  returnFocusTimers.add(timer);
+  return timer;
+}
+
+/** Cancel every timer belonging to a pending focus restoration. */
+export function cancelApprovalFocusReturn() {
+  for (const timer of returnFocusTimers) clearTimeout(timer);
+  returnFocusTimers.clear();
+}
+
+/** Forget the restoration intent too, e.g. when the person navigated away from Approvals. */
+function clearReturnFocusIntent() {
+  returnFocusPending = false;
+  returnFocusApprovalId = null;
+  if (returnFocusIntentExpiry) {
+    clearTimeout(returnFocusIntentExpiry);
+    returnFocusIntentExpiry = null;
+  }
+}
+
+/**
+ * An unmount can be the route remount that finishes a normal drawer close. Keep the intent for a
+ * task so the next Approvals instance can consume it, then drop it if nobody did.
+ */
+function expireReturnFocusIntent() {
+  if (returnFocusIntentExpiry) clearTimeout(returnFocusIntentExpiry);
+  returnFocusIntentExpiry = setTimeout(() => {
+    returnFocusIntentExpiry = null;
+    clearReturnFocusIntent();
+  }, 0);
+}
+
+/** Forget every pending restoration. Tests also use this to isolate cases. */
+export function resetApprovalFocusReturn() {
+  cancelApprovalFocusReturn();
+  clearReturnFocusIntent();
+}
+
+/** Focus already belongs to a person's chosen control, not the body or the closing drawer. */
+function focusMovedByUser() {
+  const active = document.activeElement as HTMLElement | null;
+  if (!active || active === document.body || active === document.documentElement) return false;
+  // While the drawer is still in the DOM its trap/remnant is not a deliberate destination.
+  return !active.closest('[role="dialog"]');
+}
+
 /** Focus the invoking row in the mounted queue, waiting while its list reloads after a remount. */
-function focusApprovalReturn(id: string | null, fromPageId: number, force = false) {
+export function focusApprovalReturn(id: string | null, fromPageId: number, force = false) {
+  cancelApprovalFocusReturn();
   const started = Date.now();
+  let finished = false;
+  const stop = () => {
+    finished = true;
+    cancelApprovalFocusReturn();
+  };
   // The drawer's focus trap restores its previous focus in a passive effect during unmount,
   // which can land after this task; re-assert once so the return focus is the last word.
   const keepFocus = (element: HTMLElement | undefined) => {
     if (!element) return;
     element.focus();
-    setTimeout(() => {
-      // Only undo a trap restoring focus to the body; never steal focus from a person who has
-      // already moved on to another control.
-      const active = document.activeElement;
-      if (element.isConnected && (!active || active === document.body)) element.focus();
+    scheduleReturnFocus(() => {
+      // Only undo a trap restoring focus to the body or a drawer remnant; never steal focus from a
+      // person who has already moved on to another control.
+      if (element.isConnected && !focusMovedByUser()) element.focus();
     }, 150);
   };
   const attempt = () => {
+    if (finished) return;
+    // A person who moved focus somewhere meaningful is not asking for a restoration.
+    if (focusMovedByUser()) {
+      returnFocusApprovalId = null;
+      stop();
+      return;
+    }
+    const elapsed = Date.now() - started;
     const roots = [...document.querySelectorAll<HTMLElement>('[data-approvals-page]')];
     // The closing route remounts the page; prefer the newly mounted instance. A direct render
     // (tests) never remounts, so accept the existing root after a short grace period.
     const root = force
       ? roots[roots.length - 1]
-      : (roots.find((candidate) => candidate.dataset.approvalsPage !== String(fromPageId)) ??
-        (Date.now() - started >= 200 ? roots[0] : undefined));
+      : (roots.find((candidate) => candidate.dataset.approvalsPage !== String(fromPageId)) ?? (elapsed >= 200 ? roots[0] : undefined));
     if (!root) {
-      setTimeout(attempt, 50);
+      // No queue to focus: give up at the same limit as every other retry path.
+      if (elapsed >= FOCUS_RETURN_LIMIT_MS) {
+        returnFocusApprovalId = null;
+        stop();
+        return;
+      }
+      scheduleReturnFocus(attempt, FOCUS_RETURN_POLL_MS);
       return;
     }
     const loading = !!root.querySelector('[role="status"][aria-label="Loading"]');
-    const links = id && root ? [...root.querySelectorAll<HTMLAnchorElement>(`a[data-approval-link="${id}"]`)] : [];
+    const links = id ? [...root.querySelectorAll<HTMLAnchorElement>(`a[data-approval-link="${id}"]`)] : [];
     // Both responsive copies exist; only the one with a layout box is focusable. jsdom has no
     // layout, so fall back to the first and let the DOM report whether focus moved.
     const laidOut = links.filter((link) => link.offsetParent !== null);
@@ -84,19 +160,21 @@ function focusApprovalReturn(id: string | null, fromPageId: number, force = fals
     if (target) {
       keepFocus(target);
       returnFocusApprovalId = null;
+      finished = true;
       return;
     }
     // The queue reloads on remount; wait for it rather than focusing the heading too early.
-    if (id && (loading || Date.now() - started < 250) && Date.now() - started < 10_000) {
-      setTimeout(attempt, 50);
+    if (id && (loading || elapsed < 250) && elapsed < FOCUS_RETURN_LIMIT_MS) {
+      scheduleReturnFocus(attempt, FOCUS_RETURN_POLL_MS);
       return;
     }
     keepFocus(root.querySelector<HTMLElement>('[data-approvals-heading]') ?? undefined);
     returnFocusApprovalId = null;
+    finished = true;
   };
   // The drawer's focus trap restores focus in a passive effect during unmount; a task boundary
   // lets that cleanup finish so the return focus is the last word.
-  setTimeout(attempt, 30);
+  scheduleReturnFocus(attempt, 30);
 }
 
 // The review drawer and its consequence reads are only needed once a request is opened; keeping
@@ -118,14 +196,33 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
   }, [highlightedProposal, proposals.data]);
   const toast = useToast();
   const [pageId] = useState(() => ++approvalsPageSeq);
+  const closeFallbackTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // A row-opened drawer returns focus to that row's link; a deep link has no invoking row and
   // falls back to the queue heading (#498 review). The route remounts this page, so a closing
   // drawer leaves the intent for whichever instance mounts next as well as trying immediately.
   useEffect(() => {
     if (!returnFocusPending) return;
     returnFocusPending = false;
+    if (returnFocusIntentExpiry) {
+      clearTimeout(returnFocusIntentExpiry);
+      returnFocusIntentExpiry = null;
+    }
     focusApprovalReturn(returnFocusApprovalId, pageId, true);
   }, [pageId]);
+  // Leaving the page cancels any pending restoration. A remount to another /approvals route keeps
+  // the intent for one task, so the normal drawer close can still return focus.
+  useEffect(
+    () => () => {
+      if (closeFallbackTimer.current) {
+        clearTimeout(closeFallbackTimer.current);
+        closeFallbackTimer.current = null;
+      }
+      cancelApprovalFocusReturn();
+      if (window.location.pathname.replace(/\/+$/, '').startsWith('/approvals')) expireReturnFocusIntent();
+      else clearReturnFocusIntent();
+    },
+    [],
+  );
   const openApproval = (id: string) => {
     lastApprovalInvokerId = id;
     navigate(`/approvals/${id}${status === 'pending' ? '' : `?status=${status}`}`);
@@ -137,7 +234,9 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
     navigate(status === 'pending' ? '/approvals' : `/approvals?status=${status}`);
     // A remount handles the return focus; when the page does not remount (a directly rendered
     // queue), retry in this instance after the drawer has finished unmounting.
-    setTimeout(() => {
+    if (closeFallbackTimer.current) clearTimeout(closeFallbackTimer.current);
+    closeFallbackTimer.current = setTimeout(() => {
+      closeFallbackTimer.current = null;
       if (!returnFocusPending) return;
       returnFocusPending = false;
       focusApprovalReturn(returnFocusApprovalId, pageId, true);

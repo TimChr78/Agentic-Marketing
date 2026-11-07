@@ -1,8 +1,9 @@
 import { api } from '../../app/api';
 import { useSession } from '../../app/session';
-import { Alert, Card, Meta, Skeleton } from '../../ui';
+import { Alert, Card, JsonView, LoadingBlock, Meta, Skeleton } from '../../ui';
 import { formatDateTime, getWorkspaceTimeZone } from '../../ui/time';
 import { useArtifactRef } from '../artifactCache';
+import { type BlockGuard, BundledBlocks } from './BundledBlocks';
 import { EmailPreview } from './EmailPreview';
 import { RefName } from './FormPreview';
 import { PreviewLabel } from './PreviewLabel';
@@ -27,6 +28,7 @@ export function BroadcastPreview({
   version,
   content,
   templateVersion,
+  blockGuard,
   source,
   sourceSuffix,
   eligibility = 'load',
@@ -43,6 +45,8 @@ export function BroadcastPreview({
     sendWindow?: { start: string; end: string; days?: string[]; maxDelay?: string };
   };
   templateVersion?: number;
+  /** Block pins for the nested template, resolved by the review; the combined render must honor them. */
+  blockGuard?: BlockGuard;
   source?: PreviewSource;
   sourceSuffix?: string;
   /** `save-required` skips the saved-version audience read for an unsaved broadcast. */
@@ -65,6 +69,9 @@ export function BroadcastPreview({
     : tpl.artifact?.publishedVersion
       ? { kind: 'published', version: tpl.artifact.publishedVersion }
       : undefined;
+  const guardLoading = !!blockGuard?.loading;
+  const guardFailed = !!blockGuard && (!!blockGuard.error || blockGuard.unavailable);
+  const guardWithheld = !!blockGuard && (guardLoading || !blockGuard.reproducible);
   const status: PreviewStatus = skip
     ? 'ready'
     : reach.loading
@@ -72,11 +79,15 @@ export function BroadcastPreview({
       : reach.error
         ? 'error'
         : isEmail && content.template
-          ? tpl.error
-            ? 'error'
-            : tpl.artifact
-              ? 'ready'
-              : 'loading'
+          ? guardLoading
+            ? 'loading'
+            : guardFailed
+              ? 'error'
+              : tpl.error
+                ? 'error'
+                : tpl.artifact
+                  ? 'ready'
+                  : 'loading'
           : 'ready';
   useReportPreviewStatus(reportId, status);
   return (
@@ -170,7 +181,41 @@ export function BroadcastPreview({
           }
         >
           <div className="p-4">
-            {tpl.artifact ? (
+            {guardWithheld ? (
+              guardLoading ? (
+                <LoadingBlock lines={4} label="Resolving reusable blocks" />
+              ) : (
+                <div className="space-y-3">
+                  <Alert
+                    tone={blockGuard?.error ? 'bad' : 'warn'}
+                    title={
+                      blockGuard?.error
+                        ? 'Couldn’t read this template’s reusable blocks'
+                        : 'Bundled block render unavailable before publication'
+                    }
+                    {...(blockGuard?.error ? { onRetry: blockGuard.onRetry } : {})}
+                  >
+                    {blockGuard?.error
+                      ? 'The combined message is withheld until every reusable block can be resolved. The exact reviewed content is shown below.'
+                      : 'The server expands each block at its published version, so it cannot render this bundle’s block pins. The exact reviewed content is shown below, and each block is previewed separately at the version this review would use.'}
+                  </Alert>
+                  {blockGuard?.templateContent != null && (
+                    <JsonView
+                      value={blockGuard.templateContent}
+                      label={
+                        blockGuard.templateVersion
+                          ? `Template version v${blockGuard.templateVersion} as JSON (the exact reviewed content)`
+                          : 'Template as JSON (the exact reviewed content)'
+                      }
+                      maxHeight={480}
+                    />
+                  )}
+                  {blockGuard && (
+                    <BundledBlocks pins={blockGuard.pins} loading={false} error={null} onRetry={blockGuard.onRetry} showHeading />
+                  )}
+                </div>
+              )
+            ) : tpl.artifact ? (
               <EmailPreview
                 compact
                 artifactId={content.template}
