@@ -1,5 +1,5 @@
 import { RefreshCw, Upload } from 'lucide-react';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { api, errText, type Out } from '../../app/api';
 import { ButtonLink } from '../../app/links';
 import { useCrumbs } from '../../app/page';
@@ -13,7 +13,9 @@ import { usePurposes } from '../../features/audience/phase26/usePurposes';
 import { Alert, Button, EmptyState, IconButton, Input, Skeleton, Table, Tabs, Td, THead, Th, Tr, timeAgo } from '../../ui';
 import { ListPage } from '../../ui/ListPage';
 import { pageWidth } from '../../ui/layout';
-import ImportsPage from './ImportsPage';
+
+// The Imports tab is its own screen; load it only when opened so the People list stays light.
+const ImportsPage = lazy(() => import('./ImportsPage'));
 
 const PAGE_SIZE = 50;
 const PROFILE_ID = /^prf_[0-9a-f]{32}$/;
@@ -393,7 +395,9 @@ export default function PeoplePage() {
               : 'Restricted by your role. Browsing people needs profiles:read. Ask a workspace admin for it.'}
           </EmptyState>
         ) : active === 'imports' ? (
-          <ImportsPage />
+          <Suspense fallback={<Skeleton className="h-40 w-full" />}>
+            <ImportsPage />
+          </Suspense>
         ) : (
           <PeopleList />
         )}
