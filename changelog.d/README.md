@@ -19,8 +19,9 @@ issues: [123]
 ```
 
 - `section` is required and is one of `Added`, `Changed`, `Fixed`, `Security` or `Removed`.
-- `issues` is optional; use `[123, 124]` when a change closes several issues. `changelog.mjs build`
-  records them in a hidden `<!-- issues: … -->` comment so `close-issues.mjs` can find them.
+- `issues` is optional; use `[123, 124]` when a change closes several issues. When it is omitted,
+  the number in the file name is used. `changelog.mjs build` records the issues in a hidden
+  `<!-- issues: … -->` comment so `close-issues.mjs` can find them.
 - The body is one or more `- ` bullets. Sub-bullets may be indented under a bullet.
 
 ## Checks and releases

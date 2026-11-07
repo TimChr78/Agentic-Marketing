@@ -56,10 +56,11 @@ function issueList(value) {
 /** One parsed fragment. `name` is the file name, which makes the ordering deterministic. */
 export function parseFragment(source, name) {
   const { data, body } = parseFrontMatter(source);
+  const namedIssue = /^(\d+)-/.exec(name)?.[1];
   return {
     name,
     section: typeof data.section === 'string' ? data.section.trim() : '',
-    issues: issueList(data.issues),
+    issues: data.issues === undefined && namedIssue ? [Number(namedIssue)] : issueList(data.issues),
     text: body,
   };
 }

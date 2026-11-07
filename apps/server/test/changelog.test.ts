@@ -66,6 +66,7 @@ describe('changelog fragments', () => {
   it('requires the <issue>-<slug>.md layout and a bullet body', () => {
     const parsed = parseFragment('---\nsection: Fixed\nissues: [12, 13]\n---\n- Fixed it.\n', '12-fixed.md');
     expect(parsed).toEqual({ name: '12-fixed.md', section: 'Fixed', issues: [12, 13], text: '- Fixed it.' });
+    expect(parseFragment('---\nsection: Fixed\n---\n- Fixed it.\n', '12-fixed.md').issues).toEqual([12]);
     expect(checkFragments([{ ...parsed, name: 'Fixed.md' }]).join('\n')).toMatch(/name must be <issue>-<slug>\.md/);
     expect(checkFragments([{ ...parsed, text: 'Not a bullet' }]).join('\n')).toMatch(/must be a "- " bullet/);
   });
