@@ -288,6 +288,9 @@ function packageTests(root, packages, name) {
 export function parseDocsProject(source) {
   const block = /(?:export\s+)?const\s+docs(?:\s*:\s*[^=]+)?\s*=\s*\[([\s\S]*?)\]\s*;/.exec(source);
   if (!block) return null;
+  // Comments could hide or fake entries (a `// ];` inside the array ends this match early); an
+  // unexpected shape returns null so the caller falls back to running more, never fewer.
+  if (/\/\/|\/\*/.test(block[1])) return null;
   return [...block[1].matchAll(/['"]([^'"]+\.test\.[cm]?tsx?)['"]/g)].map((match) => match[1]);
 }
 
@@ -322,7 +325,10 @@ function fullTriggerReason(file) {
 function classifyPath(file, packages, docsFiles) {
   const full = fullTriggerReason(file);
   if (full) return { kind: 'full', reason: full };
-  if (file.startsWith('e2e/') || PLAYWRIGHT_CONFIGS.has(file)) return { kind: 'e2e' };
+  // Playwright specs are browser-only; any other file under e2e/ (ports, helpers, matrix) can be
+  // imported by Vitest tests too, so it counts as source and runs whole projects.
+  if (PLAYWRIGHT_CONFIGS.has(file) || (file.startsWith('e2e/') && /\.spec\.[cm]?tsx?$/.test(file))) return { kind: 'e2e' };
+  if (file.startsWith('e2e/')) return { kind: 'source', e2e: true };
   // An e2e helper under apps/server/test is part of the server project's inputs, not a test.
   if (file.startsWith('apps/server/test/e2e/')) return { kind: 'source', e2e: true };
   // A changed test file runs in its own project.
@@ -470,10 +476,13 @@ export function selectAffected({ root = ROOT, files = [], base = null } = {}) {
     }
   }
 
+  // A package's test helper or fixture can be imported by other packages' tests and by server tests
+  // (packages/db/test/run.ts, packages/profiles/test/consentCases.ts), so it runs whole projects.
   for (const { file, package: name } of buckets.packageTestHelpers) {
-    const tests = packageTests(root, packages, name);
-    if (tests.length) addFiles(result, 'packages', tests, `${file}: package test fixture or helper changed`);
-    else addProject(result, 'packages', `${file}: package test fixture or helper changed, so run the packages project`);
+    const why = `${file}: package test helper or fixture changed (imported outside its package), so run whole projects`;
+    for (const project of ['server', 'docs', 'packages']) addProject(result, project, why);
+    const index = webPackageImports(root, packages);
+    if (index.unsure || index.imported.has(name) || webDependsOn(packages, name)) addProject(result, 'web', why);
   }
 
   if (buckets.web.length) selectWeb(root, packages, result, buckets.web);

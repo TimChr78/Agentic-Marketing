@@ -150,6 +150,26 @@ describe('selectAffected: full-suite fallbacks', () => {
     expect(vitestInvocations(result)).toEqual([]);
   });
 
+  it('runs whole projects for a package test helper imported outside its package (#522 re-check)', () => {
+    for (const file of ['packages/profiles/test/consentCases.ts', 'packages/db/test/run.ts']) {
+      const result = select([file]);
+      expect(result.selections.server.files, file).toBeNull();
+      expect(result.selections.packages.files, file).toBeNull();
+      expect(result.selections.docs.files, file).toBeNull();
+    }
+  });
+
+  it('treats a non-spec file under e2e/ as source, so its Vitest consumers run', () => {
+    const result = select(['e2e/ports.ts']);
+    // apps/server/test/e2e-ports.test.ts imports e2e/ports.ts.
+    expect(result.selections.server.files).toBeNull();
+    expect(vitestInvocations(result).length).toBeGreaterThan(0);
+  });
+
+  it('refuses to trust a docs list that contains comments', () => {
+    expect(parseDocsProject("const docs = [\n  'a.test.ts',\n  // ];\n  'b.test.ts',\n];")).toBeNull();
+  });
+
   it('passes extra Vitest arguments through', () => {
     const docsFile = (readDocsProject(ROOT) ?? [])[0];
 
