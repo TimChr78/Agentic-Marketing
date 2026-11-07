@@ -1,6 +1,7 @@
 import { outbox } from '@agentic-marketing/email';
 import { armFor, holdoutHashVersion } from '@agentic-marketing/journeys';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { triggerEventOf, uniqueEvent, uniqueJourney } from '../../../test-support/index';
 import { eventually, rejects, startTestServer, testPort, type User } from './harness';
 
 // v0.2.9 (#67): control groups for journeys. Assignment is deterministic and recorded once per
@@ -88,10 +89,9 @@ async function createJourney(
   name: string,
   opts: { percent?: number; minSampleSize?: number; reentry?: 'once' | 'always'; event?: string } = {},
 ) {
-  const a = await api().call('artifacts.create', {
-    type: 'journey',
-    name,
-    content: {
+  const event = uniqueEvent(opts.event ?? 'Holdout Start');
+  const content = uniqueJourney(
+    {
       purpose: 'onboarding',
       ...(opts.percent ? { controlGroup: { percent: opts.percent, minSampleSize: opts.minSampleSize ?? 200 } } : {}),
       nodes: [
@@ -99,7 +99,7 @@ async function createJourney(
           id: 'trigger',
           kind: 'trigger',
           label: 'Start',
-          config: { event: opts.event ?? 'Holdout Start', reentry: opts.reentry ?? 'once' },
+          config: { event, reentry: opts.reentry ?? 'once' },
         },
         { id: 'email', kind: 'email', label: 'Mail', config: { template }, next: [{ to: 'wait' }] },
         { id: 'wait', kind: 'wait', label: 'One day', config: { duration: 'P1D' }, next: [{ to: 'goal' }] },
@@ -112,34 +112,33 @@ async function createJourney(
         },
         { id: 'done', kind: 'exit', label: 'Done', config: {} },
       ],
-    } as never,
-  });
+    },
+    event,
+  );
+  const a = await api().call('artifacts.create', { type: 'journey', name, content: content as never });
   await api().call('artifacts.requestPublish', { artifactId: a.artifactId, note: 'test' });
-  return a.artifactId;
+  return { id: a.artifactId, event: triggerEventOf(content) };
 }
 
 /** A journey with no messages, for synthetic measurement rows. */
 async function createMeasurementJourney(name: string, percent: number, minSampleSize: number) {
-  const a = await api().call('artifacts.create', {
-    type: 'journey',
-    name,
-    content: {
-      purpose: 'onboarding',
-      controlGroup: { percent, minSampleSize },
-      nodes: [
-        { id: 'trigger', kind: 'trigger', label: 'Start', config: { event: 'Measure Start', reentry: 'once' } },
-        { id: 'wait', kind: 'wait', label: 'One day', config: { duration: 'P1D' } },
-        {
-          id: 'goal',
-          kind: 'goal',
-          label: 'Goal',
-          config: { event: 'Measure Goal', within: 'P14D' },
-          next: [{ to: 'done' }, { to: 'done' }],
-        },
-        { id: 'done', kind: 'exit', label: 'Done', config: {} },
-      ],
-    } as never,
+  const content = uniqueJourney({
+    purpose: 'onboarding',
+    controlGroup: { percent, minSampleSize },
+    nodes: [
+      { id: 'trigger', kind: 'trigger', label: 'Start', config: { event: 'Measure Start', reentry: 'once' } },
+      { id: 'wait', kind: 'wait', label: 'One day', config: { duration: 'P1D' } },
+      {
+        id: 'goal',
+        kind: 'goal',
+        label: 'Goal',
+        config: { event: 'Measure Goal', within: 'P14D' },
+        next: [{ to: 'done' }, { to: 'done' }],
+      },
+      { id: 'done', kind: 'exit', label: 'Done', config: {} },
+    ],
   });
+  const a = await api().call('artifacts.create', { type: 'journey', name, content: content as never });
   await api().call('artifacts.requestPublish', { artifactId: a.artifactId, note: 'test' });
   return a.artifactId;
 }
@@ -167,19 +166,19 @@ afterAll(() => t?.close());
 
 describe('deterministic assignment (#67)', () => {
   it('keeps the same arm across re-entries and records one assignment', async () => {
-    const journeyId = await createJourney('Re-entry', { percent: 50, reentry: 'always', event: 'Reentry Start' });
+    const { id: journeyId, event } = await createJourney('Re-entry', { percent: 50, reentry: 'always', event: 'Reentry Start' });
     const userId = 'holdout-reentry';
     await send([{ type: 'identify', userId, traits: { email: `${userId}@example.com` } }]);
     const profileId = await profileIdOf(userId);
     const hash = holdoutHashVersion(50);
     const expected = armFor(50, ws, journeyId, hash, profileId);
 
-    await send([{ type: 'track', event: 'Reentry Start', userId }]);
+    await send([{ type: 'track', event, userId }]);
     await eventually(
       () => assignmentCount(journeyId),
       (n) => n === 1,
     );
-    await send([{ type: 'track', event: 'Reentry Start', userId }]);
+    await send([{ type: 'track', event, userId }]);
 
     const participants = await eventually(
       async () =>
@@ -214,7 +213,7 @@ describe('deterministic assignment (#67)', () => {
 
 describe('treatment and control (#67)', () => {
   it('sends to treatment but skips every channel step for control, while both reach the goal', async () => {
-    const journeyId = await createJourney('Arms', { percent: 50, event: 'Arms Start' });
+    const { id: journeyId, event } = await createJourney('Arms', { percent: 50, event: 'Arms Start' });
     const hash = holdoutHashVersion(50);
 
     // The arm depends on the generated profile id, so identify first and pick one of each.
@@ -227,8 +226,8 @@ describe('treatment and control (#67)', () => {
     expect(treatment).toBeDefined();
 
     await send([
-      { type: 'track', event: 'Arms Start', userId: control.userId },
-      { type: 'track', event: 'Arms Start', userId: treatment.userId },
+      { type: 'track', event, userId: control.userId },
+      { type: 'track', event, userId: treatment.userId },
     ]);
 
     // Control walks past the e-mail node without a message; treatment gets one.
@@ -379,11 +378,11 @@ describe('result statistics (#67)', () => {
 
 describe('scope changes (#67)', () => {
   it('refuses a changed percentage after assignments, and allows it with reset', async () => {
-    const journeyId = await createJourney('Scope', { percent: 10, minSampleSize: 1, event: 'Scope Start' });
+    const { id: journeyId, event } = await createJourney('Scope', { percent: 10, minSampleSize: 1, event: 'Scope Start' });
     const userId = 'holdout-scope';
     await send([
       { type: 'identify', userId, traits: { email: `${userId}@example.com` } },
-      { type: 'track', event: 'Scope Start', userId },
+      { type: 'track', event, userId },
     ]);
     await eventually(
       () => assignmentCount(journeyId),
@@ -408,14 +407,16 @@ describe('profile merges (#67)', () => {
   it('moves the arm to the survivor, keeping the survivor’s own arm when it has one', async () => {
     // Two journeys so both merge paths run: in "inherit" only the merged-away profile has an arm,
     // in "keep" both do and the survivor's arm must win.
-    const inherit = await createJourney('Merge inherit', { percent: 50, minSampleSize: 1, event: 'Merge Inherit' });
-    const keep = await createJourney('Merge keep', { percent: 50, minSampleSize: 1, event: 'Merge Keep' });
+    const inheritJourney = await createJourney('Merge inherit', { percent: 50, minSampleSize: 1, event: 'Merge Inherit' });
+    const keepJourney = await createJourney('Merge keep', { percent: 50, minSampleSize: 1, event: 'Merge Keep' });
+    const inherit = inheritJourney.id;
+    const keep = keepJourney.id;
     const hash = holdoutHashVersion(50);
 
     // Older logged-in customer (A) and a newer anonymous visitor (B).
     await send([{ type: 'identify', userId: 'merge-holdout', traits: { email: 'merge-holdout@example.com' } }]);
     const survivor = await profileIdOf('merge-holdout');
-    await send([{ type: 'track', event: 'Merge Keep', userId: 'merge-holdout' }]);
+    await send([{ type: 'track', event: keepJourney.event, userId: 'merge-holdout' }]);
     await eventually(
       () => assignmentCount(keep),
       (n) => n === 1,
@@ -429,8 +430,8 @@ describe('profile merges (#67)', () => {
 
     // B enters both journeys; A never enters "inherit".
     await send([
-      { type: 'track', event: 'Merge Inherit', anonymousId: 'anon-merge-holdout' },
-      { type: 'track', event: 'Merge Keep', anonymousId: 'anon-merge-holdout' },
+      { type: 'track', event: inheritJourney.event, anonymousId: 'anon-merge-holdout' },
+      { type: 'track', event: keepJourney.event, anonymousId: 'anon-merge-holdout' },
     ]);
     const merged = await eventually(
       () => api().call('profiles.find', { type: 'anonymous_id', value: 'anon-merge-holdout' }),
@@ -485,11 +486,11 @@ describe('profile merges (#67)', () => {
 
 describe('erasure (#67)', () => {
   it('removes the assignment with the profile', async () => {
-    const journeyId = await createJourney('Erasure', { percent: 50, minSampleSize: 1, event: 'Erasure Start' });
+    const { id: journeyId, event } = await createJourney('Erasure', { percent: 50, minSampleSize: 1, event: 'Erasure Start' });
     const userId = 'holdout-erase';
     await send([
       { type: 'identify', userId, traits: { email: `${userId}@example.com` } },
-      { type: 'track', event: 'Erasure Start', userId },
+      { type: 'track', event, userId },
     ]);
     const profileId = await profileIdOf(userId);
     await eventually(
@@ -507,7 +508,7 @@ describe('journeys.splitResult (#313)', () => {
     const a = await api().call('artifacts.create', {
       type: 'journey',
       name: 'Split measured',
-      content: {
+      content: uniqueJourney({
         purpose: 'onboarding',
         nodes: [
           { id: 'trigger', kind: 'trigger', label: 'Start', config: { event: 'Split Start', reentry: 'once' }, next: [{ to: 'split' }] },
@@ -516,7 +517,7 @@ describe('journeys.splitResult (#313)', () => {
           { id: 'b', kind: 'wait', label: 'B', config: { duration: 'P2D' }, next: [{ to: 'done' }] },
           { id: 'done', kind: 'exit', label: 'Done', config: {} },
         ],
-      } as never,
+      }) as never,
     });
     await api().call('artifacts.requestPublish', { artifactId: a.artifactId, note: 'test' });
     const journeyId = a.artifactId;

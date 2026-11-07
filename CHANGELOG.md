@@ -2,6 +2,12 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+### Changed
+
+- The test suite is deterministic: every Vitest project runs in `TZ=UTC`, fixture randomness comes from `AM_TEST_SEED` through a shared seeded RNG, journey triggers and holdout fixtures get per-test names, order-independent results use an unordered assertion, and the CLI is bundled once per run instead of compiled by tsx on every call.
+
 ## [0.12.0] - 2026-11-07
 
 ### Added

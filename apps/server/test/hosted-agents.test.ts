@@ -5,10 +5,13 @@ import { newId } from '@agentic-marketing/core';
 import type { Db } from '@agentic-marketing/db';
 import { outbox } from '@agentic-marketing/email';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { seededRandom } from '../../../test-support/index';
 import { runHostedAgentsOnce } from '../src/agents/hosted';
 import { HOSTED_AGENT_TEMPLATES, hostedAgentTemplate } from '../src/agents/hostedTemplates';
 import { commands } from '../src/registry';
 import { rejects, startTestServer, testPort, type User } from './harness';
+
+const random = seededRandom();
 
 // Wave 4, Phase 19 (#258, #86): the platform runs a hosted agent itself on a schedule. Each run is
 // a fresh copilot session on the in-process MCP client, as the agent principal, with budgets and a
@@ -551,7 +554,7 @@ describe('event-triggered hosted runs (#338)', () => {
     await t.srv.db.admin.query(
       `INSERT INTO agent_events (workspace_id, agent_id, subscription_id, type, event_key, summary, subject, at)
        VALUES ($1, $2, $3, 'guardrail.breach', $4, $5, '{"episodeId":"gde_x"}', $6)`,
-      [s.ws, s.agentId, rows[0].trigger_subscription_id, `k-${Math.random()}`, summary, at],
+      [s.ws, s.agentId, rows[0].trigger_subscription_id, `k-${random()}`, summary, at],
     );
   }
   const runs = async (s: Setup) => (await s.api.call('agents.hostedRuns', { agentId: s.agentId })).runs;

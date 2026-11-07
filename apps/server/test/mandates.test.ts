@@ -3,11 +3,14 @@ import { getAgent } from '@agentic-marketing/auth';
 import { agentPolicy, agentPrincipal } from '@agentic-marketing/commands';
 import { newId } from '@agentic-marketing/core';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { seededRandom } from '../../../test-support/index';
 import { runHoldsOnce } from '../src/agents/holds';
 import { connectAgent, eventually, startTestServer, testPort, type User } from './harness';
 
 // Wave 4, Phase 18 (ADR-0016): mandates (#223), autonomy levels with scope, limits, guardrails and
 // intents (#224), holds with veto windows (#225), the same for any agent runtime (#229).
+
+const random = seededRandom();
 
 let t: Awaited<ReturnType<typeof startTestServer>>;
 let owner: User;
@@ -353,7 +356,7 @@ describe('audit fixes (#260, #262, #263, #267, #268)', () => {
       (
         await as('artifacts.create', {
           type: 'broadcast',
-          name: `Audit ${Date.now()}-${Math.random()}`,
+          name: `Audit ${Date.now()}-${random()}`,
           content: { template: templateId, segment: news },
         })
       ).body.artifactId as string;

@@ -1,26 +1,25 @@
 import { execFile } from 'node:child_process';
 import { mkdtemp, rm } from 'node:fs/promises';
-import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { buildTestCli } from '../../../test-support/cli';
 import { VERSION } from '../src/version';
 
 // Spawn the real CLI the way an operator does, with no configuration at all. The cwd is a temp
-// directory so cli.ts cannot load the checkout's .env; tsx is resolved to an absolute path
-// because a bare `--import tsx` only resolves when the cwd is inside the repository.
+// directory so the bundle cannot load the checkout's .env. The bundle is built once per run by
+// the server project's global setup (or lazily here when this file runs by itself), so a call
+// costs Node startup instead of a tsx compile of the full CLI.
 const run = promisify(execFile);
-const cli = fileURLToPath(new URL('../src/cli.ts', import.meta.url));
-const loader = createRequire(import.meta.url).resolve('tsx');
+let cli = '';
 
 async function am(args: string[], cwd: string) {
   try {
-    const { stdout, stderr } = await run(process.execPath, ['--import', loader, '--', cli, ...args], {
+    const { stdout, stderr } = await run(process.execPath, [cli, ...args], {
       cwd,
-      env: { PATH: process.env.PATH, HOME: process.env.HOME },
-      timeout: 60_000,
+      env: { PATH: process.env.PATH, HOME: process.env.HOME, TZ: 'UTC' },
+      timeout: 30_000,
     });
     return { code: 0, stdout, stderr };
   } catch (err) {
@@ -29,10 +28,10 @@ async function am(args: string[], cwd: string) {
   }
 }
 
-// Each call compiles the CLI with tsx in a fresh process; next to parallel test files that is slow.
-describe('am without configuration', { timeout: 120_000 }, () => {
+describe('am without configuration', { timeout: 60_000 }, () => {
   let dir: string;
   beforeAll(async () => {
+    cli = await buildTestCli();
     dir = await mkdtemp(join(tmpdir(), 'am-cli-'));
   });
   afterAll(async () => {

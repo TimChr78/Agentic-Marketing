@@ -307,6 +307,16 @@ Biome checks every directory unless `biome.json` excludes it; add generated outp
 
 The `server` project runs its files in parallel, four at a time (`TEST_WORKERS=1` runs them one by one). Each file gets its own Postgres and ClickHouse database, NATS namespace and Valkey prefix; `apps/server/test/setup.ts` migrates one template database first and every file starts from a copy of it. A file keeps its database after the run so a failure can be inspected; `pnpm test:clean` removes them. Ports come from `testPort()` in `apps/server/test/harness.ts`, which gives each worker its own block; set `TEST_PORT_OFFSET=10000` to run a second checkout's suite at the same time.
 
+### Determinism rules
+
+The suite is a release gate, so a test must produce the same result on any machine, in any worker order:
+
+- **Time:** every Vitest project runs with `TZ=UTC`, pinned at the top of `vitest.config.mts` and in `test.env`. Do not depend on the host time zone; a test that exercises a workspace time zone passes it explicitly.
+- **Randomness:** use `seededRandom()` from `test-support/index.ts` for fixture data, not `Math.random()`. It reads `AM_TEST_SEED` (default `0x5eed1234`) and prints the seed on failure when the default was used. A failing run is reproducible with `AM_TEST_SEED=<seed> pnpm vitest run`.
+- **Triggers:** use `uniqueEvent('Wait Start')` for an event name that only one test owns, and `uniqueJourney(content)` (with `triggerEventOf(content)` when the test must send the trigger) so a published journey cannot be entered by another test's person.
+- **Order:** when the query behind a result has no defined order, compare with `expectUnordered(actual, expected)` instead of `toEqual` or `.sort()`. Do not add `ORDER BY` to product code just to stabilise a test.
+- **CLI tests:** the server project's global setup bundles the CLI once and exports `AM_TEST_CLI`; tests spawn that artifact. Never add `--import tsx` to a per-call `execFile`.
+
 CI (`.github/workflows/ci.yml`) runs lint, typecheck, the version check, the audit and the documentation tests in a `static` job, the suite in `test`, and the browser, image and chart checks in `e2e`, `docker-smoke` and `helm`. The `e2e` job runs the functional specs and the axe checks; `visual` compares the committed baselines and uploads the diff images on failure, on pull requests that touch `apps/web` or `e2e`; `screenshots` captures the full matrix as an artifact when a manual run asks for it. Pull requests that only change Markdown, `docs/` or `.claude/` skip the slow jobs. The release workflow calls the same file for the tagged commit.
 
 ### Migrations

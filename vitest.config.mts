@@ -1,5 +1,10 @@
 import { defineConfig } from 'vitest/config';
 
+// Pin the time zone before anything creates a Date in this process. Workers inherit the value and
+// `test.env` sets it again inside each test process, so a machine in CET or DST produces the same
+// results. Product code keeps passing a workspace time zone where it needs one.
+process.env.TZ = 'UTC';
+
 // Four projects (#172):
 //   docs      documentation that must agree with the code; no services.
 //   packages  package unit tests, in parallel. events and secrets reach NATS/ClickHouse/OpenBao
@@ -14,13 +19,28 @@ const docs = [
   'apps/server/test/docs-consistency.test.ts',
   'apps/server/test/mcp-tools-doc.test.ts',
   'apps/server/test/action-classes.test.ts',
+  'apps/server/test/docs-determinism.test.ts',
 ];
 
 export default defineConfig({
   test: {
+    // Every project, including global setup and workers, runs in UTC.
+    env: { TZ: 'UTC' },
     projects: [
       { extends: true, test: { name: 'docs', include: docs } },
-      { extends: true, test: { name: 'packages', include: ['packages/*/test/**/*.test.ts', 'packages/*/src/**/*.test.ts'] } },
+      {
+        extends: true,
+        // Files use their own NATS/ClickHouse names, but the host is shared: an unbounded worker
+        // pool starves a dynamic import past the 20 s timeout under load. Use the same cap as
+        // the server project (TEST_WORKERS, default 4).
+        test: {
+          name: 'packages',
+          include: ['packages/*/test/**/*.test.ts', 'packages/*/src/**/*.test.ts'],
+          maxWorkers: serverWorkers,
+          // Its own worker count needs its own group: after the quick projects and before server.
+          sequence: { groupOrder: 1 },
+        },
+      },
       {
         extends: true,
         test: {
@@ -39,8 +59,8 @@ export default defineConfig({
           globalSetup: ['apps/server/test/setup.ts'],
           maxWorkers: serverWorkers,
           fileParallelism: serverWorkers > 1,
-          // Its own worker count needs its own group: after the quick projects.
-          sequence: { groupOrder: 1 },
+          // Its own worker count needs its own group: after the quick projects and packages.
+          sequence: { groupOrder: 2 },
         },
       },
     ],
