@@ -1,4 +1,3 @@
-import { mkdirSync } from 'node:fs';
 import AxeBuilder from '@axe-core/playwright';
 import { expect, type Page, test } from '@playwright/test';
 import { call, PEOPLE, signIn } from './helpers';
@@ -162,7 +161,6 @@ test('a reader without artifacts:write sees the composer but cannot edit it', as
 test('the composer has no accessibility violations and is captured at 1440 and 390', async ({ page }) => {
   await signIn(page, PEOPLE.owner);
   const broadcast = await broadcastId(page);
-  mkdirSync('shots-p25-composer', { recursive: true });
 
   for (const view of [
     { theme: 'light' as const, width: 1440 as const },
@@ -179,6 +177,7 @@ test('the composer has no accessibility violations and is captured at 1440 and 3
     expect(details, `${view.width} px ${view.theme}`).toEqual([]);
     // A full-page capture can otherwise catch the sandboxed e-mail frame before its srcDoc paints.
     await page.waitForTimeout(500);
-    await page.screenshot({ path: `shots-p25-composer/composer-${view.width}-${view.theme}.png`, fullPage: true });
+    // Written to the test's output directory (test-results/), not into the checkout.
+    await page.screenshot({ path: test.info().outputPath(`composer-${view.width}-${view.theme}.png`), fullPage: true });
   }
 });
