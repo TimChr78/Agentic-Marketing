@@ -1,37 +1,24 @@
-import { api } from '../../app/api';
-import { useApi } from '../../app/useApi';
-import { Alert, EmptyState, LoadingBlock } from '../../ui';
-import { HoldoutCard } from '../insights/HoldoutCard';
+import { CampaignHoldoutView } from './phase26/CampaignHoldoutView';
+import type { CampaignArtifactView } from './phase26/model';
 
-// The campaign's own holdout card (#67): one assignment across all sending members, measured
-// against the campaign goal. Self-contained so the evaluation tab can place it untouched.
-export function CampaignHoldoutCard({ campaignId }: { campaignId: string }) {
-  const artifact = useApi(() => api.call('artifacts.get', { artifactId: campaignId }), [campaignId]);
-  const content = artifact.data?.version.content as { controlGroup?: { percent: number } } | undefined;
-  const published = artifact.data?.version.state === 'published';
-  const hasControl = !!content?.controlGroup;
-  const result = useApi(() => api.call('campaigns.holdoutResult', { campaignId }), [campaignId], {
-    skip: !hasControl || !published,
-  });
+// The campaign's own holdout card (#67, Phase 26 #511). It stays `CampaignHoldoutCard({campaignId})`
+// for existing hosts; the optional `from`/`to`/`active` share the evaluation period and the active
+// state, and an optional host artifact avoids a duplicate artifacts.get.
 
-  if (artifact.error)
-    return (
-      <Alert tone="bad" title="Couldn't load the campaign" onRetry={artifact.reload}>
-        {artifact.error}
-      </Alert>
-    );
-  if (artifact.loading) return <LoadingBlock lines={4} label="Loading the campaign holdout" />;
-  if (!hasControl)
-    return (
-      <EmptyState compact title="No control group">
-        Set a control group in the campaign editor and publish it to measure what the campaign adds over reaching nobody.
-      </EmptyState>
-    );
-  if (!published)
-    return (
-      <EmptyState compact title="Not published yet">
-        The holdout result appears once a version with this control group is published and people are assigned.
-      </EmptyState>
-    );
-  return <HoldoutCard title="Campaign holdout result" result={result.data} loading={result.loading} error={result.error ?? undefined} />;
+export function CampaignHoldoutCard({
+  campaignId,
+  from,
+  to,
+  active = true,
+  refreshKey = 0,
+  artifact,
+}: {
+  campaignId: string;
+  from?: string;
+  to?: string;
+  active?: boolean;
+  refreshKey?: number;
+  artifact?: CampaignArtifactView;
+}) {
+  return <CampaignHoldoutView campaignId={campaignId} from={from} to={to} active={active} refreshKey={refreshKey} artifact={artifact} />;
 }
