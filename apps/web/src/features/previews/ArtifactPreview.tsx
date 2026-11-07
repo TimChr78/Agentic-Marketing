@@ -111,6 +111,7 @@ export function ArtifactPreview({
     case 'journey':
       return (
         <JourneyPreview
+          graphKey={`${artifactId}@${version ?? 'latest'}`}
           content={content as JourneyContent}
           height={compact ? 420 : 560}
           source={resolved}
@@ -162,12 +163,15 @@ class JourneyGraphBoundary extends Component<{ reportId: string; children: React
 }
 
 function JourneyPreview({
+  graphKey,
   content,
   height,
   source,
   sourceSuffix,
   reportId,
 }: {
+  /** A failed graph stays failed only for the artifact version it failed on. */
+  graphKey: string;
   content: JourneyContent;
   height: number;
   source?: PreviewSource;
@@ -182,7 +186,7 @@ function JourneyPreview({
         Purpose <strong className="font-medium">{content.purpose}</strong>
         {content.goal ? <> · Goal: {content.goal}</> : null}
       </p>
-      <JourneyGraphBoundary reportId={reportId}>
+      <JourneyGraphBoundary key={graphKey} reportId={reportId}>
         <Suspense
           fallback={
             <div style={{ height }} className="overflow-hidden rounded-md border border-line bg-surface-2">

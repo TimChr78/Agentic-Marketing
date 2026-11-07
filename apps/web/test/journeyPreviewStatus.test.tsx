@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const h = vi.hoisted(() => ({
   mode: 'ready' as 'ready' | 'loading' | 'error',
   pending: new Promise<void>(() => {}),
+  details: {} as Record<string, unknown>,
 }));
 
 vi.mock('../src/features/journey/JourneyGraph', () => ({
@@ -23,8 +24,8 @@ vi.mock('../src/app/api', async (importOriginal) => {
   return {
     ...actual,
     api: {
-      call: vi.fn((name: string) => {
-        if (name === 'approvals.get') return Promise.resolve(detail);
+      call: vi.fn((name: string, input?: unknown) => {
+        if (name === 'approvals.get') return Promise.resolve(h.details[(input as { approvalId: string }).approvalId] ?? detail);
         if (name === 'purposes.list') return Promise.resolve({ source: 'published', purposes: [] });
         throw new Error(`unexpected command ${name}`);
       }),
@@ -77,6 +78,10 @@ const detail = {
   history: [],
 };
 
+const next = { ...detail, id: 'apr_journey_next', artifactId: `jrn_${'b'.repeat(32)}`, artifactName: 'Next journey' };
+h.details[detail.id] = detail;
+h.details[next.id] = next;
+
 function renderDrawer() {
   return render(
     <ToastProvider>
@@ -115,5 +120,20 @@ describe('a journey review is viewed only after its graph mounts (#498 review)',
 
     expect(await screen.findByTestId('journey-graph')).toBeTruthy();
     await waitFor(() => expect(wasViewed('usr_reviewer', detail.id, detail.version)).toBe(true));
+  });
+
+  it('draws the next journey after the previous graph failed', async () => {
+    h.mode = 'error';
+    const view = renderDrawer();
+    expect(await screen.findByText('Couldn’t render this journey graph')).toBeTruthy();
+
+    h.mode = 'ready';
+    view.rerender(
+      <ToastProvider>
+        <ApprovalDrawer id={next.id} queue={[detail.id, next.id]} onClose={() => {}} onDecided={() => {}} />
+      </ToastProvider>,
+    );
+    expect(await screen.findByTestId('journey-graph')).toBeTruthy();
+    await waitFor(() => expect(wasViewed('usr_reviewer', next.id, next.version)).toBe(true));
   });
 });
