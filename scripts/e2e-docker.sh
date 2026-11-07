@@ -204,7 +204,18 @@ log "chromium: $CHROMIUM_PATH"
 # --- server lifecycle ----------------------------------------------------------------------------
 SERVER_PID=""
 SERVER_PGID=""
-STOPPING=0
+
+# The image runs as root (as it does in CI). Hand the files it wrote back to the invoking user, so a
+# trace or a screenshot stays editable and removable afterwards.
+restore_ownership() {
+  [ "$(id -u)" = "0" ] && return 0
+  docker run --rm --user 0 \
+    -v "$REPO_ROOT":"$REPO_ROOT" \
+    -w "$REPO_ROOT" \
+    -e OWNER="$(id -u):$(id -g)" \
+    "$IMAGE" sh -c 'for p in test-results reports shots-p25-composer; do [ -e "$p" ] && chown -R "$OWNER" "$p"; done' \
+    >/dev/null 2>&1 || true
+}
 
 cleanup() {
   local code=$?
@@ -230,6 +241,7 @@ cleanup() {
       log "WARN: could not drop database $PG_DB"
     fi
   fi
+  restore_ownership
   if [ "$code" -eq 0 ]; then
     log "PASS: $COMMAND (database $DB_NAME, port $PORT)"
   else
@@ -318,13 +330,10 @@ else
 fi
 
 log "running: ${*}"
-# Run as the invoking user so traces, screenshots and reports stay writable outside the container.
 if ! docker run --rm --init \
   --network "$NETWORK" \
-  --user "$(id -u):$(id -g)" \
   -v "$REPO_ROOT":"$REPO_ROOT" \
   -w "$REPO_ROOT" \
-  -e HOME=/tmp \
   -e CHROMIUM="$CHROMIUM_PATH" \
   -e E2E_BASE="http://localhost:$PORT" \
   -e E2E_PORT="$PORT" \
