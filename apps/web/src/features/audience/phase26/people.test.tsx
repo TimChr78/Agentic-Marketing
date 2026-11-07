@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../../app/api';
@@ -261,6 +261,11 @@ describe('People list (#510)', () => {
     expect(calls('profiles.list')[0].input).toEqual({ limit: 50 });
     expect(calls('profiles.list')[0].input).not.toHaveProperty('before');
     expect(calls('profiles.get')).toHaveLength(0);
+    // The test hooks the visual suite masks: identity, consent status and last seen per row.
+    const volatile = [...document.querySelectorAll('[data-volatile]')];
+    expect(volatile.some((element) => element.textContent === 'ada@example.com')).toBe(true);
+    expect(volatile.some((element) => element.textContent === 'Allowed')).toBe(true);
+    expect(volatile.some((element) => element.getAttribute('title') === row().lastSeen)).toBe(true);
   });
 
   it('does not read purposes without artifacts:read', async () => {
@@ -298,6 +303,43 @@ describe('People list (#510)', () => {
     await userEvent.click(screen.getByRole('button', { name: /previous/i }));
     expect(await screen.findByText('1 shown · Page 1')).toBeTruthy();
     expect(h.calls.length).toBe(before);
+  });
+
+  it('drops a Next response that arrives after a refresh', async () => {
+    let resolveNext: ((value: unknown) => void) | null = null;
+    const cursor = { lastSeen: '2026-11-06T21:42:00.000000Z', id: personId };
+    h.respond = (name, input) => {
+      if (name === 'profiles.list' && input.before) {
+        return new Promise((resolve) => {
+          resolveNext = resolve;
+        });
+      }
+      if (name === 'profiles.list') return listPage({ nextCursor: cursor });
+      return baseRespond(name, input);
+    };
+    renderList();
+    expect(await screen.findByText('1 shown · Page 1')).toBeTruthy();
+
+    await userEvent.click(screen.getByRole('button', { name: /next/i }));
+    await waitFor(() => expect(calls('profiles.list').filter((call) => call.input.before)).toHaveLength(1));
+
+    // Refresh while the old page is still in flight: the old response must not join the new stack.
+    await userEvent.click(screen.getByRole('button', { name: 'Refresh people' }));
+    await waitFor(() => expect(calls('profiles.list').filter((call) => !call.input.before)).toHaveLength(2));
+    expect(await screen.findByText('1 shown · Page 1')).toBeTruthy();
+
+    await act(async () => {
+      resolveNext?.(listPage({ profiles: [row({ id: otherId, email: 'stale@example.com' })], nextCursor: null }));
+    });
+    expect(screen.queryAllByText('stale@example.com')).toHaveLength(0);
+    expect(screen.getByText('1 shown · Page 1')).toBeTruthy();
+    expect(screen.getByRole('button', { name: /previous/i }).hasAttribute('disabled')).toBe(true);
+
+    // Next after the refresh reads a fresh page instead of stepping into a stale stack.
+    const beforeRefreshStack = calls('profiles.list').length;
+    await userEvent.click(screen.getByRole('button', { name: /next/i }));
+    await waitFor(() => expect(calls('profiles.list').length).toBe(beforeRefreshStack + 1));
+    expect(calls('profiles.list').at(-1)?.input).toEqual({ limit: 50, before: cursor.lastSeen, beforeId: cursor.id });
   });
 
   it('separates the first empty page from a list that changed underneath', async () => {

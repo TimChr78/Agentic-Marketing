@@ -30,10 +30,15 @@ function PersonCell({ row, canSeePii }: { row: ProfilePage['profiles'][number]; 
         to={`/audience/people/${row.id}`}
         onClick={(e) => e.stopPropagation()}
         className="font-medium break-all text-fg hover:underline"
+        data-volatile
       >
         {identity.email}
       </Link>
-      {identity.name && <div className="mt-0.5 text-[12px] leading-[18px] text-muted">{identity.name}</div>}
+      {identity.name && (
+        <div className="mt-0.5 text-[12px] leading-[18px] text-muted" data-volatile>
+          {identity.name}
+        </div>
+      )}
       <div className="mt-0.5">
         <CopyPersonId id={row.id} />
       </div>
@@ -80,12 +85,18 @@ export function PeopleList() {
   const [announcement, setAnnouncement] = useState('');
   const listHeading = useRef<HTMLHeadingElement>(null);
   const generation = useRef(0);
+  const pageIndexRef = useRef(0);
+  const pagination = useRef(0);
 
   const loadFirst = useCallback(async () => {
     if (!canRead) return;
     const gen = ++generation.current;
+    // A refresh cancels any page request that is still in flight.
+    pagination.current += 1;
+    setLoadingPage(false);
     // A refresh clears the loaded pages: old rows are never presented as the current page.
     setPages([]);
+    pageIndexRef.current = 0;
     setPageIndex(0);
     setLoading(true);
     setError(null);
@@ -128,6 +139,10 @@ export function PeopleList() {
   const emptyFirst = rows.length === 0 && pageIndex === 0 && !loading && !error;
 
   const moveTo = (index: number) => {
+    // Moving within the loaded stack cancels any page request still in flight.
+    pagination.current += 1;
+    setLoadingPage(false);
+    pageIndexRef.current = index;
     setPageIndex(index);
     const count = pages[index]?.profiles.length ?? 0;
     setAnnouncement(`${count} shown, page ${index + 1}`);
@@ -155,6 +170,9 @@ export function PeopleList() {
       return;
     }
     setPageError(null);
+    const gen = generation.current;
+    const origin = pageIndex;
+    const token = ++pagination.current;
     setLoadingPage(true);
     try {
       const page = await api.call('profiles.list', {
@@ -162,17 +180,19 @@ export function PeopleList() {
         before: current.nextCursor.lastSeen,
         beforeId: current.nextCursor.id,
       });
+      // A refresh, a page move or a newer page request owns the stack now; this response is stale.
+      if (gen !== generation.current || pageIndexRef.current !== origin || token !== pagination.current) return;
+      const target = origin + 1;
       setPages((loaded) => [...loaded, page]);
-      setPageIndex((index) => {
-        const target = index + 1;
-        setAnnouncement(`${page.profiles.length} shown, page ${target + 1}`);
-        queueMicrotask(() => listHeading.current?.focus());
-        return target;
-      });
+      pageIndexRef.current = target;
+      setPageIndex(target);
+      setAnnouncement(`${page.profiles.length} shown, page ${target + 1}`);
+      queueMicrotask(() => listHeading.current?.focus());
     } catch (e) {
+      if (gen !== generation.current || pageIndexRef.current !== origin || token !== pagination.current) return;
       setPageError(errText(e));
     } finally {
-      setLoadingPage(false);
+      if (token === pagination.current) setLoadingPage(false);
     }
   };
 
@@ -332,7 +352,7 @@ export function PeopleList() {
                   <ConsentCell row={row} purposes={purposes.data?.purposes} />
                 </Td>
                 <Td className="whitespace-nowrap" title={row.lastSeen}>
-                  {timeAgo(row.lastSeen)}
+                  <span data-volatile>{timeAgo(row.lastSeen)}</span>
                 </Td>
               </Tr>
             ))}
@@ -348,7 +368,10 @@ export function PeopleList() {
                 <ConsentCell row={row} purposes={purposes.data?.purposes} />
               </div>
               <div className="mt-2 text-[12px] leading-[18px] text-muted">
-                Last seen <span title={row.lastSeen}>{timeAgo(row.lastSeen)}</span>
+                Last seen{' '}
+                <span title={row.lastSeen} data-volatile>
+                  {timeAgo(row.lastSeen)}
+                </span>
               </div>
             </li>
           ))}

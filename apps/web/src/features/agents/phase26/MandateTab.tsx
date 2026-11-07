@@ -25,6 +25,8 @@ import {
   mandateScopeText,
   matrixExplanation,
   safeDateText,
+  shadowInfo,
+  shadowText,
   workingHoursText,
 } from './model';
 
@@ -69,7 +71,8 @@ export function MandateTab({ agentId, agent, canArtifacts }: { agentId: string; 
   const autonomySettings: AutonomySettings | null = autonomy.error ? null : (autonomy.data ?? null);
   const selected = data.mandate;
   const content = isMandateContent(selected?.content) ? selected.content : null;
-  const shadow = content?.shadow === true;
+  const shadow = shadowInfo(content?.shadow as boolean | string[] | undefined);
+  const shadowClasses = shadow.classes.map(actionClassLabel).join(', ');
 
   return (
     <div className="space-y-5">
@@ -111,9 +114,15 @@ export function MandateTab({ agentId, agent, canArtifacts }: { agentId: string; 
                   {agent.guard.reason} The cap applies on top of the mandate until a person clears it.
                 </Alert>
               )}
-              {shadow && (
+              {shadow.full && (
                 <Alert tone="info" title="Shadow mode is on">
-                  The mandate records what it would decide; nothing runs under it until shadow mode is turned off.
+                  The mandate records what it would decide for every action class; nothing runs under it until shadow mode is turned off.
+                </Alert>
+              )}
+              {!shadow.full && shadow.classes.length > 0 && (
+                <Alert tone="info" title={`Shadow mode is limited to ${shadowClasses}`}>
+                  The mandate records what it would decide only for {shadowClasses}; nothing runs for those classes until shadow mode is
+                  turned off. The other classes follow the usual approval policy.
                 </Alert>
               )}
               {autonomySettings && autonomySettings.switch !== 'on' && (
@@ -141,7 +150,7 @@ export function MandateTab({ agentId, agent, canArtifacts }: { agentId: string; 
                   ['Validity', validityText(content.validUntil)],
                   ['Working hours', workingHoursText(content.workingHours)],
                   ['Blackout dates', blackoutText(content.blackoutDates)],
-                  ['Shadow mode', shadow ? 'On' : 'Off'],
+                  ['Shadow mode', shadowText(content.shadow as boolean | string[] | undefined)],
                   ['Computed', computedText(data.asOf)],
                 ]}
               />
@@ -181,7 +190,7 @@ export function MandateTab({ agentId, agent, canArtifacts }: { agentId: string; 
                       ceiling,
                       guard: agent.guard,
                       outsideHours: data.outsideHours,
-                      shadow,
+                      shadow: content.shadow as boolean | string[] | undefined,
                     });
                     return (
                       <Tr key={actionClass} className="max-sm:block max-sm:border-b max-sm:border-line">

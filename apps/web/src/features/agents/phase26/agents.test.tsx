@@ -420,6 +420,19 @@ const baseRespond = (name: string, input: any): unknown => {
   if (name === 'agents.hostedRuns') return hosted();
   if (name === 'agents.memory.list') return memory();
   if (name === 'artifacts.list') return { artifacts: [skillArtifact()], total: 1 };
+  if (name === 'artifacts.get')
+    return {
+      ...skillArtifact(),
+      version: {
+        number: 2,
+        state: 'published',
+        content: {},
+        createdAt: '2026-11-01T09:00:00.000Z',
+        createdBy: { type: 'person', id: userId },
+      },
+      layout: null,
+      references: [],
+    };
   if (name === 'agents.runHostedNow') return hosted().hosted;
   if (name === 'agents.memory.delete') return { deleted: true };
   if (name === 'agents.deleteHosted') return { deleted: true };
@@ -543,8 +556,8 @@ describe('agent reads (#509)', () => {
     await screen.findByText('Wrote and published the weekly newsletter.');
     expect(calls('agents.hostedRuns')).toHaveLength(1);
     expect(calls('agents.hostedRuns')[0]!.input).toEqual({ agentId, limit: 20 });
-    expect(calls('agents.memory.list')).toHaveLength(1);
-    expect(calls('artifacts.list')).toHaveLength(1);
+    expect(calls('agents.memory.list')).toHaveLength(0);
+    expect(calls('artifacts.get')).toHaveLength(0);
   });
 
   it('reads guardian episodes only when their details are expanded', async () => {
@@ -566,7 +579,7 @@ describe('agent reads (#509)', () => {
 });
 
 describe('restored hosted management (#509 follow-up)', () => {
-  it('reads nothing for the hosted section until it opens and keeps every action', async () => {
+  it('reads only hosted runs when the hosted section opens, then memory and skills on their own disclosures', async () => {
     renderAgent();
     await screen.findByText('Broadcast sent people');
     fireEvent.click(screen.getByRole('tab', { name: 'Credentials' }));
@@ -574,24 +587,38 @@ describe('restored hosted management (#509 follow-up)', () => {
 
     expect(calls('agents.hostedRuns')).toHaveLength(0);
     expect(calls('agents.memory.list')).toHaveLength(0);
+    expect(calls('artifacts.get')).toHaveLength(0);
     expect(calls('artifacts.list')).toHaveLength(0);
 
     fireEvent.click(screen.getByText('Show the hosted agent and its runs'));
-    await screen.findByRole('region', { name: 'Hosted agent' });
-    const hostedSection = screen.getByRole('region', { name: 'Hosted agent' });
+    const hostedSection = await screen.findByRole('region', { name: 'Hosted agent' });
     await within(hostedSection).findByRole('button', { name: 'Run now' });
 
+    // Opening the hosted section is exactly one hosted-runs read: memory and skills stay closed.
     expect(calls('agents.hostedRuns')).toHaveLength(1);
     expect(calls('agents.hostedRuns')[0]!.input).toEqual({ agentId, limit: 20 });
+    expect(calls('agents.memory.list')).toHaveLength(0);
+    expect(calls('artifacts.get')).toHaveLength(0);
+    expect(calls('artifacts.list')).toHaveLength(0);
+
+    fireEvent.click(within(hostedSection).getByText('Memory notes'));
+    await within(hostedSection).findByText('Remember the warm, plain-spoken tone.');
     expect(calls('agents.memory.list')).toHaveLength(1);
-    expect(calls('artifacts.list')).toHaveLength(1);
-    expect(calls('artifacts.list')[0]!.input).toMatchObject({ type: 'skill', limit: 200 });
+    expect(calls('agents.memory.list')[0]!.input).toEqual({ agentId });
+
+    fireEvent.click(within(hostedSection).getByText('Referenced skills'));
+    await within(hostedSection).findByRole('link', { name: /Weekly voice/ });
+    // Only the referenced skill is resolved, with no catalogue scan.
+    expect(calls('artifacts.get')).toHaveLength(1);
+    expect(calls('artifacts.get')[0]!.input).toEqual({ artifactId: skillId });
+    expect(calls('artifacts.list')).toHaveLength(0);
 
     expect(within(hostedSection).getByRole('button', { name: 'Edit' })).toBeTruthy();
     expect(within(hostedSection).getByRole('button', { name: 'Delete hosted agent' })).toBeTruthy();
-    expect(within(hostedSection).getByRole('button', { name: 'Delete' })).toBeTruthy();
-    expect(within(hostedSection).getByText('Remember the warm, plain-spoken tone.')).toBeTruthy();
-    expect(within(hostedSection).getByRole('link', { name: /Weekly voice/ })).toBeTruthy();
+
+    fireEvent.click(within(hostedSection).getByRole('button', { name: 'Delete' }));
+    await waitFor(() => expect(calls('agents.memory.delete')).toHaveLength(1));
+    expect(calls('agents.memory.delete')[0]!.input).toEqual({ id: 'mem_1' });
 
     fireEvent.click(within(hostedSection).getByRole('button', { name: 'Run now' }));
     await waitFor(() => expect(calls('agents.runHostedNow')).toHaveLength(1));
@@ -834,6 +861,82 @@ describe('mandate matrix (#509)', () => {
     expect(screen.getByText(/The guardian has capped this agent/)).toBeTruthy();
     expect(screen.getAllByText(/Outside working hours, irreversible actions are capped at level 2/).length).toBeGreaterThan(0);
     expect(screen.getAllByText('On').length).toBeGreaterThan(0);
+  });
+
+  it('says shadow mode covers every action class and explains it on each row', async () => {
+    h.respond = (name, input) => {
+      if (name === 'agents.mandate')
+        return mandateResponse({ mandate: { id: mandateId, version: 5, content: mandateContent({ shadow: true }) } });
+      return baseRespond(name, input);
+    };
+
+    renderAgent();
+    fireEvent.click(await screen.findByRole('tab', { name: 'Mandate' }));
+    await screen.findByText('Levels by action class');
+
+    expect(screen.getByText('On for every action class')).toBeTruthy();
+    expect(screen.getByText(/Shadow mode is on/)).toBeTruthy();
+    for (const label of [/Broadcast sends/, /Data writes/, /Destructive actions/]) {
+      const row = screen.getByRole('row', { name: label });
+      expect(within(row).getByText(/Shadow mode: decisions are recorded, nothing runs\./)).toBeTruthy();
+    }
+  });
+
+  it('says which classes a class-scoped shadow mandate covers and marks the others', async () => {
+    h.respond = (name, input) => {
+      if (name === 'agents.mandate')
+        return mandateResponse({
+          mandate: { id: mandateId, version: 5, content: mandateContent({ shadow: ['send.broadcast'] }) },
+        });
+      return baseRespond(name, input);
+    };
+
+    renderAgent();
+    fireEvent.click(await screen.findByRole('tab', { name: 'Mandate' }));
+    await screen.findByText('Levels by action class');
+
+    expect(screen.getByText('Limited to Broadcast sends')).toBeTruthy();
+    expect(screen.getByText(/Shadow mode is limited to Broadcast sends/)).toBeTruthy();
+
+    const broadcasts = screen.getByRole('row', { name: /Broadcast sends/ });
+    expect(within(broadcasts).getByText(/Shadow mode: decisions are recorded, nothing runs\./)).toBeTruthy();
+    const dataWrites = screen.getByRole('row', { name: /Data writes/ });
+    expect(within(dataWrites).getByText(/Not in shadow mode; the usual approval policy applies\./)).toBeTruthy();
+    expect(within(dataWrites).queryByText(/decisions are recorded, nothing runs/)).toBeNull();
+  });
+
+  it('says shadow mode is off when the mandate does not set it', async () => {
+    h.respond = (name, input) => {
+      if (name === 'agents.mandate')
+        return mandateResponse({ mandate: { id: mandateId, version: 5, content: mandateContent({ shadow: false }) } });
+      return baseRespond(name, input);
+    };
+
+    renderAgent();
+    fireEvent.click(await screen.findByRole('tab', { name: 'Mandate' }));
+    await screen.findByText('Levels by action class');
+
+    expect(screen.getByText('Off')).toBeTruthy();
+    expect(screen.queryByText(/Shadow mode is on/)).toBeNull();
+    expect(screen.queryByText(/Shadow mode is limited/)).toBeNull();
+    expect(screen.queryByText(/decisions are recorded, nothing runs/)).toBeNull();
+
+    // An absent key behaves like false: the schema default, never a partial shadow claim.
+    cleanup();
+    h.calls.length = 0;
+    h.respond = (name, input) => {
+      if (name === 'agents.mandate') {
+        const content: Record<string, unknown> = mandateContent();
+        delete content.shadow;
+        return mandateResponse({ mandate: { id: mandateId, version: 5, content } });
+      }
+      return baseRespond(name, input);
+    };
+    renderAgent();
+    fireEvent.click(await screen.findByRole('tab', { name: 'Mandate' }));
+    await screen.findByText('Levels by action class');
+    expect(screen.getByText('Off')).toBeTruthy();
+    expect(screen.queryByText(/decisions are recorded, nothing runs/)).toBeNull();
   });
 });
 

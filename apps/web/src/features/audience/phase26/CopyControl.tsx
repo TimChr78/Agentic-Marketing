@@ -54,7 +54,11 @@ function CopyValue({
         {copied ? <Check size={13} aria-hidden /> : <Copy size={13} aria-hidden />}
         {label}
       </button>
-      {failed && <code className="ml-1 break-all font-mono text-[11px] text-fg-2 select-all">{value}</code>}
+      {failed && (
+        <code className="ml-1 break-all font-mono text-[11px] text-fg-2 select-all" data-volatile>
+          {value}
+        </code>
+      )}
       <span role="status" aria-live="polite" className="sr-only">
         {copied ? copiedLabel : failed ? `Could not copy ${label.replace(/^Copy /, '')}` : ''}
       </span>
