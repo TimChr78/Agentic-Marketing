@@ -15,7 +15,10 @@ task="$1"; phase="$2"; issue="$3"; title="$4"; body_file="${5:-}"
 
 case "$issue" in (*[!0-9]*|'') echo "error: issue must be a number, got '$issue'" >&2; exit 2;; esac
 # Only the documented phase-branch form: an arbitrary base (main, a release branch) is refused.
-case "$phase" in (feat/phase-[0-9]*) ;; (*) echo "error: '$phase' is not a phase branch (expected feat/phase-<n>)" >&2; exit 2;; esac
+if ! [[ "$phase" =~ ^feat/phase-[0-9]+$ ]]; then
+  echo "error: '$phase' is not a phase branch (expected feat/phase-<n>)" >&2
+  exit 2
+fi
 case "$task" in
   ("$phase"|main|master|feat/phase-*|release-*) echo "error: '$task' cannot be a task branch" >&2; exit 2;;
 esac

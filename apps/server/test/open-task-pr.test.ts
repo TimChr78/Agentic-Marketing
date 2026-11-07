@@ -12,6 +12,7 @@ describe('open-task-pr.sh guards', () => {
   it.each([
     [['task/x', 'main', '1', 'T'], /not a phase branch/],
     [['task/x', 'release-0.12.0', '1', 'T'], /not a phase branch/],
+    [['task/x', 'feat/phase-27oops', '1', 'T'], /not a phase branch/],
     [['feat/phase-27', 'feat/phase-27', '1', 'T'], /cannot be a task branch/],
     [['main', 'feat/phase-27', '1', 'T'], /cannot be a task branch/],
     [['feat/phase-26', 'feat/phase-27', '1', 'T'], /cannot be a task branch/],
