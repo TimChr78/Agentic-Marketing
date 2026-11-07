@@ -1,6 +1,7 @@
 import { canaryAssignment } from '@agentic-marketing/audience';
 import { outbox } from '@agentic-marketing/email';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { seededRandom } from '../../../test-support/index';
 import { eventually, startTestServer, testPort, type User } from './harness';
 
 // Issue #254: a staged send goes to a deterministic canary share first, waits, checks the canary's
@@ -35,7 +36,8 @@ const createPublished = async (type: 'email_template' | 'segment' | 'broadcast',
   return a.artifactId;
 };
 
-const broadcast = async (content: object) => createPublished('broadcast', `staged ${Date.now()}-${Math.random()}`, content);
+const random = seededRandom();
+const broadcast = async (content: object) => createPublished('broadcast', `staged ${Date.now()}-${random()}`, content);
 
 const status = (artifactId: string) => api().call('broadcasts.status', { artifactId });
 

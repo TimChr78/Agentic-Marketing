@@ -5,7 +5,10 @@ import { clearAnalyticsCache } from '@agentic-marketing/analytics';
 import type { BusEvent, JourneyEvent, MessageEvent } from '@agentic-marketing/events';
 import { verifyWebhook } from '@agentic-marketing/integrations';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { seededRandom } from '../../../test-support/index';
 import { eventually, rejects, startTestServer, testPort, type User } from './harness';
+
+const random = seededRandom();
 
 // Phase 16 (#76, alerts part): threshold rules over the metric layer, evaluated by the scheduler
 // with an injectable clock. Two workspaces, synthetic ClickHouse events, a local webhook receiver
@@ -64,8 +67,8 @@ const messageEvents = (
   const people = Array.from({ length: paper.sent }, person);
   const event = (type: MessageEvent['type'], i: number): MessageEvent => ({
     workspaceId,
-    messageId: `msg_${workspaceId}_${type}_${i}_${Math.random().toString(36).slice(2, 8)}`,
-    eventId: `${type}:${i}:${Math.random().toString(36).slice(2, 10)}`,
+    messageId: `msg_${workspaceId}_${type}_${i}_${random().toString(36).slice(2, 8)}`,
+    eventId: `${type}:${i}:${random().toString(36).slice(2, 10)}`,
     type,
     at,
     profileId: people[i],
@@ -103,7 +106,7 @@ const signupEvents = (workspaceId: string, at: string, count: number): BusEvent[
   Array.from({ length: count }, (_, i) => ({
     workspaceId,
     sourceId: 'test',
-    messageId: `doi:${workspaceId}:${at}:${i}:${Math.random().toString(36).slice(2, 8)}`,
+    messageId: `doi:${workspaceId}:${at}:${i}:${random().toString(36).slice(2, 8)}`,
     type: 'track' as const,
     name: 'Subscription Confirmed',
     anonymousId: `anon_${workspaceId}_${at}_${i}`,
