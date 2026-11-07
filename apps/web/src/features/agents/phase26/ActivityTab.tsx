@@ -12,6 +12,20 @@ import { useFetchedAt } from './useFetchedAt';
 
 const LIMIT = 50;
 
+const GUARDIAN_KIND: Record<string, string> = {
+  guardrail: 'Guardrail',
+  anomaly: 'Anomaly',
+  probing: 'Probing',
+  loop: 'Loop',
+  errors: 'Rising errors',
+};
+
+const GUARDIAN_ACTION: Record<string, string> = {
+  cap: 'Every change waits for a person',
+  hold: 'Irreversible actions are held',
+  pause: 'Paused',
+};
+
 // The Activity tab (#509): the action ledger as a timeline with a cursor, not a closed report.
 // `agents.activity` has `since` but no `to`, so the label says “Since”, never “period”. Guardian
 // episodes are a separate source lane and are read only when their details are expanded.
@@ -55,7 +69,7 @@ export function ActivityTab({
     );
   }
 
-  if (list.loading && !list.data) {
+  if (list.refreshing || (list.loading && !list.data)) {
     return (
       <section aria-busy="true" aria-label="Loading agent activity" className="space-y-3">
         <p className="text-[13px] text-muted">Loading the activity ledger…</p>
@@ -202,7 +216,7 @@ function UndoEvidence({ action }: { action: AgentActionRow }) {
       </p>
     );
   }
-  if (action.undoable) return <p className="mt-1 text-[12px] leading-[18px] text-muted">Can be undone from the approval ledger.</p>;
+  if (action.undoable) return <p className="mt-1 text-[12px] leading-[18px] text-muted">Can be undone.</p>;
   if (action.undoBlockedBy) return <p className="mt-1 text-[12px] leading-[18px] text-muted">{action.undoBlockedBy}</p>;
   return null;
 }
@@ -293,8 +307,8 @@ function GuardianEpisodes({ agentId }: { agentId: string }) {
       {rows.map((episode) => (
         <li key={episode.id} className="rounded-md border border-line px-3 py-2">
           <div className="flex flex-wrap items-center gap-2">
-            <span className="font-medium text-fg">{episode.kind}</span>
-            <StatusPill tone={episode.action === 'pause' ? 'bad' : 'warn'}>{episode.action}</StatusPill>
+            <span className="font-medium text-fg">{GUARDIAN_KIND[episode.kind] ?? episode.kind}</span>
+            <StatusPill tone={episode.action === 'pause' ? 'bad' : 'warn'}>{GUARDIAN_ACTION[episode.action] ?? episode.action}</StatusPill>
           </div>
           <p className="mt-1 text-muted">{episode.reason}</p>
           <p className="mt-1 text-muted">{safeDateTimeText(episode.at)}</p>

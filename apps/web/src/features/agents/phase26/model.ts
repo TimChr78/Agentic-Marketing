@@ -242,14 +242,19 @@ export function matrixExplanation({
 
 export function mandateScopeText(scope: MandateContent['scope'] | null | undefined): string {
   if (!scope) return 'Everything the levels allow';
+  const segments = scope.segments ?? [];
+  const purposes = scope.purposes ?? [];
+  const topics = scope.topics ?? [];
+  const artifactTypes = scope.artifactTypes ?? [];
+  const channels = scope.channels ?? [];
   const parts: string[] = [];
-  if (scope.segments.length) parts.push(`${scope.segments.length} ${scope.segments.length === 1 ? 'audience' : 'audiences'}`);
-  if (scope.purposes.length) parts.push(`${scope.purposes.length} ${scope.purposes.length === 1 ? 'purpose' : 'purposes'}`);
-  if (scope.topics.length) parts.push(`${scope.topics.length} ${scope.topics.length === 1 ? 'topic' : 'topics'}`);
-  if (scope.artifactTypes.length) {
-    parts.push(`${scope.artifactTypes.length} ${scope.artifactTypes.length === 1 ? 'artifact type' : 'artifact types'}`);
+  if (segments.length) parts.push(`${segments.length} ${segments.length === 1 ? 'audience' : 'audiences'}`);
+  if (purposes.length) parts.push(`${purposes.length} ${purposes.length === 1 ? 'purpose' : 'purposes'}`);
+  if (topics.length) parts.push(`${topics.length} ${topics.length === 1 ? 'topic' : 'topics'}`);
+  if (artifactTypes.length) {
+    parts.push(`${artifactTypes.length} ${artifactTypes.length === 1 ? 'artifact type' : 'artifact types'}`);
   }
-  if (scope.channels.length) parts.push(scope.channels.join(', '));
+  if (channels.length) parts.push(channels.join(', '));
   return parts.length ? parts.join(' · ') : 'Everything the levels allow';
 }
 
@@ -257,11 +262,12 @@ export function mandateLimitsText(limits: MandateContent['limits'] | null | unde
   if (!limits) return 'No extra limits beyond the levels.';
   const parts: string[] = [];
   const number = (value: number) => value.toLocaleString('en-US');
-  if (limits.recipientsPerSend) parts.push(`${number(limits.recipientsPerSend)} recipients per send`);
-  if (limits.sendsPerDay) parts.push(`${number(limits.sendsPerDay)} ${limits.sendsPerDay === 1 ? 'send' : 'sends'}/day`);
-  if (limits.changesPerDay) parts.push(`${number(limits.changesPerDay)} changes/day`);
-  if (limits.messagesPerDay) parts.push(`${number(limits.messagesPerDay)} messages/day`);
-  if (limits.recipientGrowth) parts.push(`audience growth ${limits.recipientGrowth}×`);
+  if (typeof limits.recipientsPerSend === 'number') parts.push(`${number(limits.recipientsPerSend)} recipients per send`);
+  if (typeof limits.sendsPerDay === 'number')
+    parts.push(`${number(limits.sendsPerDay)} ${limits.sendsPerDay === 1 ? 'send' : 'sends'}/day`);
+  if (typeof limits.changesPerDay === 'number') parts.push(`${number(limits.changesPerDay)} changes/day`);
+  if (typeof limits.messagesPerDay === 'number') parts.push(`${number(limits.messagesPerDay)} messages/day`);
+  if (typeof limits.recipientGrowth === 'number') parts.push(`audience growth ${limits.recipientGrowth}×`);
   return parts.length ? parts.join(' · ') : 'No extra limits beyond the levels.';
 }
 

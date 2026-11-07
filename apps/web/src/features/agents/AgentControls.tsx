@@ -119,7 +119,7 @@ export function AgentControls({
   ];
 
   return (
-    <div className={variant === 'menu' ? 'flex flex-col items-end gap-1' : 'flex flex-col items-end gap-1'}>
+    <div className="flex flex-col items-end gap-1">
       <div className="flex flex-wrap items-center justify-end gap-2">
         {stopControls}
         {variant === 'menu' ? (
