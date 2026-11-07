@@ -756,6 +756,9 @@ describe('mandate matrix (#509)', () => {
     expect(screen.getByText(/5,000 recipients per send/)).toBeTruthy();
     expect(screen.getByText(/1 send\/day/)).toBeTruthy();
     expect(screen.getByText('Validity')).toBeTruthy();
+    // The expiry stays readable at a glance, and the link names what it opens.
+    expect(screen.getByText(/87 days left/)).toBeTruthy();
+    expect(screen.getByRole('link', { name: /^Open mandate v\d+$/ })).toBeTruthy();
   });
 
   it('opens the tab named in ?tab= so a tab can be linked to', async () => {
@@ -928,7 +931,7 @@ describe('agent states (#509)', () => {
     await screen.findByText('No recorded activity in this period');
     expect(screen.getByLabelText('Period')).toBeTruthy();
     expect(screen.getByText(/missing data is not a healthy result/i)).toBeTruthy();
-    expect(screen.getByText(/no metric layer/i)).toBeTruthy();
+    expect(screen.getByText(/Outcomes are unavailable for this period/i)).toBeTruthy();
   });
 
   it('shows an observed zero only when the read returned it', async () => {
@@ -1027,7 +1030,7 @@ describe('agent states (#509)', () => {
 
     renderAgent();
     await screen.findByText('Outcomes unavailable');
-    expect(screen.getByText(/no k-suppression field/)).toBeTruthy();
+    expect(screen.getByText(/never as zero/)).toBeTruthy();
     expect(document.body.textContent).not.toMatch(/fewer than 5|k=5|k = 5/);
   });
 

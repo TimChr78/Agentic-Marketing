@@ -95,7 +95,7 @@ export function ComparisonSection({ agents, canAudit }: { agents: Agent[]; canAu
   return (
     <Card
       title="Comparison"
-      description="Period totals from one agents.compare read. Explicit selection of 1–20 agents; no polling and no per-agent report."
+      description="Totals for the selected period. Choose up to 20 agents to compare side by side."
       action={
         <div className="flex flex-wrap items-center gap-2">
           <Select
@@ -311,7 +311,11 @@ function MetricLane({
       <p className="text-[12px] font-medium text-fg-2">{title}</p>
       {!values ? (
         <p className="mt-1 text-[12px] text-muted">
-          Unavailable — {lane === 'broadcasts' ? 'this comparison returned no broadcast lane' : 'this comparison returned no direct lane'}.
+          Unavailable —{' '}
+          {lane === 'broadcasts'
+            ? 'no broadcast results for this agent in the period'
+            : 'no direct-message results for this agent in the period'}
+          .
         </p>
       ) : (
         <div className="mt-1 space-y-1.5">

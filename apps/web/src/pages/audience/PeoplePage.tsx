@@ -238,7 +238,7 @@ export function PeopleList() {
   return (
     <ListPage
       title="People"
-      description="Everyone this workspace has seen, most recent activity first. One honest loaded page at a time, with consent beside every purpose."
+      description="Everyone this workspace has seen, most recent activity first, with their consent for each purpose."
       primaryAction={
         canWrite && (
           <ButtonLink to="/audience/people?tab=imports" variant="primary" icon={<Upload size={15} />}>
@@ -255,21 +255,21 @@ export function PeopleList() {
             {announcement}
           </span>
           <form
-            className="flex min-w-0 flex-wrap items-center gap-2"
+            className="flex min-w-0 items-center gap-2"
             onSubmit={(e) => {
               e.preventDefault();
               void find();
             }}
           >
-            <label htmlFor="people-find-email" className="whitespace-nowrap text-[13px] text-fg-2">
+            <label htmlFor="people-find-email" className="sr-only">
               E-mail or profile ID
             </label>
             <Input
               id="people-find-email"
               type="text"
               compact
-              placeholder="E-mail or prf_… profile id"
-              className="w-[220px] max-w-full"
+              placeholder="E-mail or prf_… profile ID"
+              className="w-[260px] max-w-full"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
             />

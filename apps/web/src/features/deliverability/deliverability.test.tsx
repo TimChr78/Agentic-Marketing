@@ -511,6 +511,6 @@ describe('Deliverability data states (#508)', () => {
 
   it('states that these operational reads carry no suppression field', async () => {
     render(<DeliverabilityPage />);
-    await screen.findByText(/no k-suppression field/);
+    await screen.findByText(/never as zero/);
   });
 });

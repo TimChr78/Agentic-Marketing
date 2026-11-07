@@ -245,8 +245,7 @@ export function SelectedStreamTiles({
         />
       </div>
       <p className="text-[12px] leading-[18px] text-muted">
-        Today’s thresholds only. This operational read has no k-suppression field; missing values stay unavailable and no suppression
-        threshold is invented.
+        Thresholds are today’s settings. Missing values are shown as unavailable, never as zero.
       </p>
     </section>
   );

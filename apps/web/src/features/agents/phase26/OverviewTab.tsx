@@ -143,14 +143,13 @@ export function OverviewTab({
       {noRecordedActivity ? (
         <Alert tone="info" title="No recorded activity in this period">
           Choose another period; missing data is not a healthy result.
-          {!outcomes && ' This read returned no metric layer, so outcomes stay Unavailable.'}
+          {!outcomes && ' Outcomes are unavailable for this period.'}
         </Alert>
       ) : (
         <>
           {!outcomes && (
             <Alert tone="info" title="Outcomes unavailable">
-              This report returned no metric layer. This operational read has no k-suppression field; missing values remain Unavailable and
-              no threshold is invented.
+              Outcome numbers are not available for this agent and period. Missing values are shown as Unavailable, never as zero.
             </Alert>
           )}
 
@@ -158,23 +157,25 @@ export function OverviewTab({
             {broadcasts ? (
               <>
                 <KpiTile
+                  freshnessLabel="Latest event in period"
                   label="Broadcast sent people"
                   value={broadcasts.sent}
                   unit="count"
                   explanation={
                     numberState(broadcasts.sent) === 'no-data'
-                      ? 'Unavailable — the report returned no sent count.'
+                      ? 'Unavailable — no sent count for this period.'
                       : 'Agent-published broadcasts; distinct people.'
                   }
                   dataState={numberState(broadcasts.sent)}
                 />
                 <KpiTile
+                  freshnessLabel="Latest event in period"
                   label="Broadcast clicked people"
                   value={broadcasts.clicked}
                   unit="count"
                   explanation={
                     numberState(broadcasts.clicked) === 'no-data'
-                      ? 'Unavailable — the report returned no clicked count.'
+                      ? 'Unavailable — no click count for this period.'
                       : `${intText(broadcasts.clicked)} / ${intText(broadcasts.sent)} sent people`
                   }
                   dataState={numberState(broadcasts.clicked)}
@@ -182,41 +183,45 @@ export function OverviewTab({
               </>
             ) : (
               <KpiTile
+                freshnessLabel="Latest event in period"
                 label="Broadcast outcomes"
                 value={null}
                 unit="count"
                 dataState="no-data"
-                explanation="Unavailable — this report returned no broadcast lane."
+                explanation="Unavailable — no broadcast results in this period."
               />
             )}
             {direct ? (
               <KpiTile
+                freshnessLabel="Latest event in period"
                 label="Direct messages sent"
                 value={direct.sent}
                 unit="count"
                 explanation={
                   numberState(direct.sent) === 'no-data'
-                    ? 'Unavailable — the report returned no direct-message count.'
-                    : 'Separate message-count lane; never added to broadcast people.'
+                    ? 'Unavailable — no direct-message count for this period.'
+                    : 'Counted in messages; never added to broadcast people.'
                 }
                 dataState={numberState(direct.sent)}
               />
             ) : (
               <KpiTile
+                freshnessLabel="Latest event in period"
                 label="Direct outcomes"
                 value={null}
                 unit="count"
                 dataState="no-data"
-                explanation="Unavailable — this report returned no direct-message lane."
+                explanation="Unavailable — no direct-message results in this period."
               />
             )}
             {goals.length === 0 ? (
               <KpiTile
+                freshnessLabel="Latest event in period"
                 label="Goals"
                 value={null}
                 unit="count"
                 dataState="no-data"
-                explanation={outcomes ? 'No goals in the active mandate.' : 'Unavailable — this report returned no goals.'}
+                explanation={outcomes ? 'No goals in the active mandate.' : 'Unavailable — no goal results for this period.'}
               />
             ) : (
               goals.map((goal) => <GoalTile key={goal.measure} goal={goal} />)
@@ -269,6 +274,7 @@ function GoalTile({ goal }: { goal: GoalOutcome }) {
   const value = goalTileValue(goal);
   return (
     <KpiTile
+      freshnessLabel="Latest event in period"
       label={`Goal · ${measureName(goal.measure)}`}
       value={value}
       unit={goalTileUnit(goal)}
@@ -313,7 +319,7 @@ function OutcomeLaneTable({
           </tbody>
         </Table>
       ) : (
-        <div className="p-4 text-[13px] text-muted">Unavailable — this report returned no lane.</div>
+        <div className="p-4 text-[13px] text-muted">Unavailable — no results for this period.</div>
       )}
       <p className="px-4 pb-3 text-[12px] leading-[18px] text-muted">— means Unavailable.</p>
     </Card>

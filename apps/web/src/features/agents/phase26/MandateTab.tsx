@@ -93,7 +93,7 @@ export function MandateTab({ agentId, agent, canArtifacts }: { agentId: string; 
               <span className="flex flex-wrap items-center gap-2">
                 Mandate
                 <Link to={artifactPath('agent_mandate', selected.id)} className="text-accent hover:underline">
-                  v{selected.version}
+                  Open mandate v{selected.version}
                 </Link>
                 <StatusPill tone="good">Active</StatusPill>
               </span>
@@ -138,7 +138,7 @@ export function MandateTab({ agentId, agent, canArtifacts }: { agentId: string; 
                   ['Scope', mandateScopeText(content.scope)],
                   ['Limits', mandateLimitsText(content.limits)],
                   ['Veto window', holdWindowText(content.holdWindow)],
-                  ['Validity', content.validUntil ? safeDateText(content.validUntil) : 'Unavailable'],
+                  ['Validity', validityText(content.validUntil)],
                   ['Working hours', workingHoursText(content.workingHours)],
                   ['Blackout dates', blackoutText(content.blackoutDates)],
                   ['Shadow mode', shadow ? 'On' : 'Off'],
@@ -296,6 +296,23 @@ function NoActiveMandate({
         />
       </div>
     </Card>
+  );
+}
+
+/** "Expires 1 Feb 2027 · 87 days left", warning within three days; never a bogus epoch date. */
+function validityText(validUntil: string | undefined) {
+  const text = validUntil ? safeDateText(validUntil) : 'Unavailable';
+  const at = validUntil ? new Date(validUntil).getTime() : Number.NaN;
+  if (!Number.isFinite(at) || new Date(at).getFullYear() < 2000) return text;
+  const days = Math.max(0, Math.ceil((at - Date.now()) / 86_400_000));
+  return (
+    <>
+      Expires {text}
+      <span className={days <= 3 ? 'font-medium text-warn' : 'text-muted'}>
+        {' '}
+        · {days} {days === 1 ? 'day' : 'days'} left
+      </span>
+    </>
   );
 }
 
