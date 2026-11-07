@@ -7,6 +7,7 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 ### Changed
 
 - The test suite is deterministic: every Vitest project runs in `TZ=UTC`, fixture randomness comes from `AM_TEST_SEED` through a shared seeded RNG, journey triggers and holdout fixtures get per-test names, order-independent results use an unordered assertion, and the CLI is bundled once per run instead of compiled by tsx on every call.
+- The test CLI bundle now keeps every module's source-relative paths (migrations, `.env.example`, recipes, web assets and `CHANGELOG.md`), so it behaves like the real CLI, and builds into a run-unique directory shared through `AM_TEST_RUN`/`AM_TEST_CLI` so concurrent runs cannot delete each other's artifact; global teardown removes only its own. Holdout and campaign tests create enough people to guarantee both arms instead of relying on twelve randomly generated profile ids.
 
 ## [0.12.0] - 2026-11-07
 

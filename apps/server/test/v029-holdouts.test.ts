@@ -216,14 +216,18 @@ describe('treatment and control (#67)', () => {
     const { id: journeyId, event } = await createJourney('Arms', { percent: 50, event: 'Arms Start' });
     const hash = holdoutHashVersion(50);
 
-    // The arm depends on the generated profile id, so identify first and pick one of each.
-    const candidates = Array.from({ length: 12 }, (_, i) => `holdout-arm-${i}`);
+    // The arm depends on the database-generated profile id, which the test cannot choose. Create
+    // enough people that the chance of seeing only one arm is negligible (< 2^-63), then assert
+    // both arms exist before picking: a broken hash fails here instead of as a confusing downstream
+    // undefined. AM_TEST_SEED controls the fixture names, not these ids.
+    const candidates = Array.from({ length: 64 }, (_, i) => `holdout-arm-${i}`);
     await send(candidates.map((userId) => ({ type: 'identify', userId, traits: { email: `${userId}@example.com` } })));
     const profiles = await Promise.all(candidates.map(async (userId) => ({ userId, profileId: await profileIdOf(userId) })));
-    const control = profiles.find((p) => armFor(50, ws, journeyId, hash, p.profileId) === 'control')!;
-    const treatment = profiles.find((p) => armFor(50, ws, journeyId, hash, p.profileId) === 'treatment')!;
-    expect(control).toBeDefined();
-    expect(treatment).toBeDefined();
+    const control = profiles.find((p) => armFor(50, ws, journeyId, hash, p.profileId) === 'control');
+    const treatment = profiles.find((p) => armFor(50, ws, journeyId, hash, p.profileId) === 'treatment');
+    expect(control, `no control arm among ${profiles.length} profiles`).toBeDefined();
+    expect(treatment, `no treatment arm among ${profiles.length} profiles`).toBeDefined();
+    if (!control || !treatment) throw new Error('the fixtures must cover both arms');
 
     await send([
       { type: 'track', event, userId: control.userId },
