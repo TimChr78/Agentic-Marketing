@@ -1,4 +1,4 @@
-import { type ReactNode, useState } from 'react';
+import { type ReactNode, useRef, useState } from 'react';
 import { api } from '../../app/api';
 import { useSession } from '../../app/session';
 import { useApi } from '../../app/useApi';
@@ -51,6 +51,7 @@ export function DeliverabilityView() {
   const [selectors, setSelectors] = useState('');
   const [appliedSelectors, setAppliedSelectors] = useState<string[]>([]);
   const [dnsKey, setDnsKey] = useState(0);
+  const healthHeading = useRef<HTMLHeadingElement>(null);
 
   const health = useApi(() => api.call('deliverability.health', {}), [refreshKey], { skip: !canRead });
   const stream = streamOf(streamKey);
@@ -90,6 +91,11 @@ export function DeliverabilityView() {
     setPeriod(reportPeriod(choice));
   };
   const changeStream = (key: StreamKey) => setStreamKey(key);
+  const retryHealth = async () => {
+    await health.reload();
+    // Retry keeps the person oriented: focus returns to the stable section heading after the reread.
+    queueMicrotask(() => healthHeading.current?.focus());
+  };
   const checkDns = () => {
     const next = cleanSelectors(selectors);
     if (sameSelectors(next, appliedSelectors)) setDnsKey((value) => value + 1);
@@ -102,24 +108,29 @@ export function DeliverabilityView() {
         {refreshing ? 'Refreshing deliverability values.' : ''}
       </p>
 
-      {health.loading ? (
-        <LoadingSection label="Loading deliverability" lines={6} />
-      ) : health.error ? (
-        <SectionError title="Couldn’t load the health summary" error={health.error} onRetry={() => void health.reload()}>
-          Successful trend and DNS sections remain visible.
-        </SectionError>
-      ) : health.data ? (
-        <>
-          <SelectedStreamTiles health={health.data} streamKey={streamKey} onRefresh={refresh} refreshing={refreshing} />
+      {health.data && !health.error && (
+        <SelectedStreamTiles health={health.data} streamKey={streamKey} onRefresh={refresh} refreshing={refreshing} />
+      )}
+      <section aria-labelledby="health-heading" className="space-y-3">
+        <h2 id="health-heading" ref={healthHeading} tabIndex={-1} className="text-[16px] leading-6 font-semibold outline-none">
+          Delivery health{health.data ? ` · rolling ${health.data.windowDays} days` : ''}
+        </h2>
+        {health.loading ? (
+          <LoadingSection label="Loading deliverability" lines={6} />
+        ) : health.error ? (
+          <SectionError title="Couldn’t load the health summary" error={health.error} onRetry={() => void retryHealth()}>
+            Successful trend and DNS sections remain visible.
+          </SectionError>
+        ) : health.data ? (
           <StreamHealthSection health={health.data} />
-        </>
-      ) : null}
+        ) : null}
+      </section>
 
       <TrendSection
         trend={trend.data}
         loading={trend.loading}
         error={trend.error}
-        onRetry={() => void trend.reload()}
+        onRetry={() => trend.reload()}
         refreshing={refreshing}
         streamKey={streamKey}
         onStreamChange={changeStream}
@@ -132,7 +143,7 @@ export function DeliverabilityView() {
         data={domains.data}
         loading={domains.loading}
         error={domains.error}
-        onRetry={() => void domains.reload()}
+        onRetry={() => domains.reload()}
         refreshing={domains.refreshing}
         admin={admin}
         selectors={selectors}

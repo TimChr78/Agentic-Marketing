@@ -1,3 +1,4 @@
+import { useRef } from 'react';
 import { Alert, Field, LoadingBlock, Select } from '../../ui';
 import { dayLabel, type LocalDayPeriod, periodDateLabel } from '../broadcasts/period';
 import {
@@ -192,7 +193,7 @@ export function TrendSection({
   trend: Trend | undefined;
   loading: boolean;
   error: string | null;
-  onRetry: () => void;
+  onRetry: () => Promise<void> | void;
   refreshing: boolean;
   streamKey: StreamKey;
   onStreamChange: (key: StreamKey) => void;
@@ -201,6 +202,12 @@ export function TrendSection({
   onPeriodChange: (choice: 7 | 30) => void;
 }) {
   const stream = streamOf(streamKey);
+  const heading = useRef<HTMLHeadingElement>(null);
+  const retry = async () => {
+    await onRetry();
+    // Retry keeps the person oriented: focus returns to the section heading after the reread.
+    queueMicrotask(() => heading.current?.focus());
+  };
   const labels = trend?.points.map((point) => dayLabel(point.day)) ?? [];
   const minVolume = trend?.thresholds.minVolume ?? 0;
   const bounceValues = trend?.points.map((point) => pointRate(point, 'bounce', minVolume).value) ?? [];
@@ -211,7 +218,7 @@ export function TrendSection({
     <section aria-labelledby="trend-heading" className="space-y-4">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h2 id="trend-heading" className="text-[16px] leading-6 font-semibold">
+          <h2 id="trend-heading" ref={heading} tabIndex={-1} className="text-[16px] leading-6 font-semibold outline-none">
             Bounce and complaint trend
           </h2>
           <p className="mt-0.5 text-[12px] leading-[18px] text-muted">
@@ -250,7 +257,7 @@ export function TrendSection({
         isNotFound(error) ? (
           <NotFoundBlock />
         ) : (
-          <Alert tone="bad" title="Couldn’t load the trend" onRetry={onRetry}>
+          <Alert tone="bad" title="Couldn’t load the trend" onRetry={() => void retry()}>
             <p>{error}</p>
             <p className="mt-1">Successful health and DNS sections remain visible.</p>
           </Alert>

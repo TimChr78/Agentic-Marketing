@@ -255,16 +255,11 @@ export function SelectedStreamTiles({
 export function StreamHealthSection({ health }: { health: Health }) {
   const empty = STREAMS.every((stream) => ratesOf(health, stream.key).sent <= 0);
   return (
-    <section aria-labelledby="health-heading" className="space-y-3">
-      <div>
-        <h2 id="health-heading" className="text-[16px] leading-6 font-semibold">
-          Delivery health · rolling {health.windowDays} days
-        </h2>
-        <p className="mt-0.5 text-[12px] leading-[18px] text-muted">
-          Sent = sent + delivered + bounced + complained, counted by message and creation time, never unique people. Rates use today’s
-          evaluation minimum of {health.thresholds.minVolume.toLocaleString()} messages.
-        </p>
-      </div>
+    <div className="space-y-3">
+      <p className="text-[12px] leading-[18px] text-muted">
+        Sent = sent + delivered + bounced + complained, counted by message and creation time, never unique people. Rates use today’s
+        evaluation minimum of {health.thresholds.minVolume.toLocaleString()} messages.
+      </p>
       {empty && (
         <Alert tone="info" title="No recorded activity in this period">
           No stream has a recorded send in the rolling window. Missing data is not a healthy result; choose another period when the
@@ -275,6 +270,6 @@ export function StreamHealthSection({ health }: { health: Health }) {
       <p className="text-[12px] leading-[18px] text-muted">
         Latest event in period: Unavailable. The three reads that build this page do not return an event timestamp.
       </p>
-    </section>
+    </div>
   );
 }

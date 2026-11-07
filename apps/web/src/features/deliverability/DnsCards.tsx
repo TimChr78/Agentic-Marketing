@@ -1,4 +1,5 @@
 import { ShieldCheck } from 'lucide-react';
+import { useRef } from 'react';
 import type { Out } from '../../app/api';
 import { ButtonLink } from '../../app/links';
 import { Alert, Button, EmptyState, Field, Input, LoadingBlock, Mono, StatusPill, Tag } from '../../ui';
@@ -136,18 +137,29 @@ export function DnsSection({
   data: Domains | undefined;
   loading: boolean;
   error: string | null;
-  onRetry: () => void;
+  onRetry: () => Promise<void> | void;
   refreshing: boolean;
   admin: boolean;
   selectors: string;
   onSelectorsChange: (value: string) => void;
   onCheck: () => void;
 }) {
+  const heading = useRef<HTMLHeadingElement>(null);
+  const retry = async () => {
+    await onRetry();
+    // Retry keeps the person oriented: focus returns to the section heading after the reread.
+    queueMicrotask(() => heading.current?.focus());
+  };
   return (
     <section aria-labelledby="domains-heading" className="space-y-3">
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div>
-          <h2 id="domains-heading" className="flex items-center gap-1.5 text-[16px] leading-6 font-semibold">
+          <h2
+            id="domains-heading"
+            ref={heading}
+            tabIndex={-1}
+            className="flex items-center gap-1.5 text-[16px] leading-6 font-semibold outline-none"
+          >
             <ShieldCheck size={16} className="text-muted" aria-hidden />
             Sending domain checks
           </h2>
@@ -188,7 +200,7 @@ export function DnsSection({
             Return to the deliverability page from the workspace navigation.
           </Alert>
         ) : (
-          <Alert tone="bad" title="DNS checks unavailable" onRetry={onRetry}>
+          <Alert tone="bad" title="DNS checks unavailable" onRetry={() => void retry()}>
             {error}. Retry DNS independently; successful rates remain visible.
           </Alert>
         )

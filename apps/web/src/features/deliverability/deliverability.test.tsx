@@ -445,6 +445,16 @@ describe('Deliverability data states (#508)', () => {
     expect(screen.getByRole('heading', { name: /Bounce rate · last 7 complete days/ })).toBeTruthy();
   });
 
+  it('returns focus to the trend heading after Retry succeeds', async () => {
+    h.trendError = new Error('trend failed');
+    render(<DeliverabilityPage />);
+    await screen.findByText(/load the trend/);
+
+    h.trendError = null;
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Bounce and complaint trend' })));
+  });
+
   it('removes old health values when a refresh fails instead of showing them as current', async () => {
     render(<DeliverabilityPage />);
     await screen.findByText('Selected stream · E-mail · marketing');
