@@ -64,6 +64,14 @@ async function requestBroadcast(page: Page, name: string, description = 'A broad
 }
 
 async function axeDrawer(page: Page) {
+  // The drawer and its scrim fade in (am-drawer-in / am-fade-in); measuring contrast mid-animation
+  // sees semi-transparent colours. Wait until no animation is running.
+  // Endless animations (a loading pulse) are ignored; they never finish.
+  await page.waitForFunction(() =>
+    document
+      .getAnimations()
+      .every((animation) => animation.playState !== 'running' || animation.effect?.getTiming().iterations === Number.POSITIVE_INFINITY),
+  );
   const { violations } = await new AxeBuilder({ page }).withTags(TAGS).options({ iframes: false }).exclude('iframe').analyze();
   expect(
     violations.map((v) => `${v.id}: ${v.help}`),
