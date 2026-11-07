@@ -95,6 +95,7 @@ function KpiData({ data }: { data: PerformanceBlock }) {
             explanation={isRate ? rateExplanation : countExplanation(value)}
             period={data.period.label}
             updatedAt={freshness}
+            freshnessLabel="Latest event in period"
             className="border border-line"
           />
         );

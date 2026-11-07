@@ -20,8 +20,9 @@ test('create a mandate for an agent and see it on the agent page (#228)', async 
   const agent = agents.agents.find((a) => a.name === name);
   expect(agent, 'the agent list has the new agent').toBeTruthy();
 
-  await page.goto(`/work/agents/${agent!.id}`);
-  await expect(page.getByText('No active mandate')).toBeVisible();
+  // Phase 26 (#509): the mandate lives on the agent's Mandate tab.
+  await page.goto(`/work/agents/${agent!.id}?tab=mandate`);
+  await expect(page.getByText('No active mandate').first()).toBeVisible();
 
   // The button prefills the agent; the editor opens on the new draft.
   await page.getByRole('button', { name: 'Create mandate' }).click();
@@ -41,8 +42,8 @@ test('create a mandate for an agent and see it on the agent page (#228)', async 
   expect(published.status).toBe('published');
 
   // Back on the agent page: the active mandate, its link and its expiry.
-  await page.goto(`/work/agents/${agent!.id}`);
-  await expect(page.getByRole('link', { name: `${name} mandate` })).toBeVisible();
+  await page.goto(`/work/agents/${agent!.id}?tab=mandate`);
+  await expect(page.getByRole('link', { name: /^Open mandate v\d+$/ })).toBeVisible();
   await expect(page.getByText(/days left/)).toBeVisible();
   await expect(page.getByText(/Expires/)).toBeVisible();
   await expect(page.getByRole('button', { name: 'Create mandate' })).toHaveCount(0);
@@ -50,6 +51,6 @@ test('create a mandate for an agent and see it on the agent page (#228)', async 
   // Responsive: the mandate card stays in view at 390 px and 1440 px.
   for (const width of [390, 1440]) {
     await page.setViewportSize({ width, height: 900 });
-    await expect(page.getByRole('link', { name: `${name} mandate` })).toBeInViewport();
+    await expect(page.getByRole('link', { name: /^Open mandate v\d+$/ })).toBeInViewport();
   }
 });
