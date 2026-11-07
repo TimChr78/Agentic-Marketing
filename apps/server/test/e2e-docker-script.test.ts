@@ -104,6 +104,13 @@ describe('e2e-docker follows the #515 shared stack', () => {
     expect(script).toMatch(/TEST_PORT_OFFSET/);
   });
 
+  it('keeps Playwright artifacts in a run-scoped output directory', () => {
+    // Two concurrent runs share the mounted checkout; a fixed test-results/ made them delete each
+    // other's traces.
+    expect(script).toMatch(/--output/);
+    expect(script).toMatch(/OUTPUT_DIR="test-results\/\$AM_TEST_RUN"/);
+  });
+
   it('keeps fresh-database and stale-server detection', () => {
     expect(script).toMatch(/MIN_SEED_SECONDS/);
     expect(script).toMatch(/db_database_exists "\$PG_DB"/);

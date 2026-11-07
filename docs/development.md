@@ -206,7 +206,8 @@ by that name, and drops only that database afterwards (`E2E_KEEP_DB=1` keeps it)
 else's data. The port is `E2E_PORT`, or `3100 + TEST_PORT_OFFSET` from `e2e/ports.ts` when unset
 (`E2E_PORT+1` is the fixtures port); this is the same offset Playwright and the helpers use. A run
 refuses to start if either port is already in use and prints the holding process — the wrapper
-never pattern-kills anything. `E2E_SKIP_BUILD=1` reuses `apps/web/dist`.
+never pattern-kills anything. Playwright's artifacts go to `test-results/<AM_TEST_RUN>`, so two
+concurrent runs do not delete each other's traces. `E2E_SKIP_BUILD=1` reuses `apps/web/dist`.
 
 The wrapper targets **Linux**, like the shared test stack: it needs `setsid` (util-linux) to give
 the seeded server its own process group, and never relies on GNU-only `date` formats. macOS lacks

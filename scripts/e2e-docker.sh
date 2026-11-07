@@ -468,16 +468,19 @@ DB_OWNED=1
 log "verified seeded database $PG_DB (run $AM_TEST_RUN)"
 
 # --- Playwright in the CI image ------------------------------------------------------------------
+# Concurrent runs share the mounted checkout, so Playwright's artifacts go to a directory named
+# after this run instead of the fixed test-results/ that every run would otherwise delete.
+OUTPUT_DIR="test-results/$AM_TEST_RUN"
 if [ "$COMMAND" = "shots" ]; then
   [ -f e2e/screenshots.mjs ] || die "e2e/screenshots.mjs does not exist"
   set -- node e2e/screenshots.mjs reports/shots "$@"
 else
   case "$COMMAND" in
-    smoke) set -- npx playwright test --project=functional --grep '@smoke' "$@" ;;
-    functional) set -- npx playwright test --project=functional "$@" ;;
-    axe) set -- npx playwright test --project=axe "$@" ;;
-    visual) set -- npx playwright test -c playwright.visual.config.ts "$@" ;;
-    update) set -- npx playwright test -c playwright.visual.config.ts --update-snapshots "$@" ;;
+    smoke) set -- npx playwright test --output "$OUTPUT_DIR" --project=functional --grep '@smoke' "$@" ;;
+    functional) set -- npx playwright test --output "$OUTPUT_DIR" --project=functional "$@" ;;
+    axe) set -- npx playwright test --output "$OUTPUT_DIR" --project=axe "$@" ;;
+    visual) set -- npx playwright test --output "$OUTPUT_DIR" -c playwright.visual.config.ts "$@" ;;
+    update) set -- npx playwright test --output "$OUTPUT_DIR" -c playwright.visual.config.ts --update-snapshots "$@" ;;
   esac
 fi
 
