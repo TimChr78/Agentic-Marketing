@@ -1,5 +1,6 @@
 import { newUuid } from '@agentic-marketing/core';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { runScoped } from '../../db/test/run';
 import {
   type BusEvent,
   clickHouseStore,
@@ -15,11 +16,12 @@ import {
 
 const NATS_URL = process.env.NATS_URL ?? 'nats://127.0.0.1:4222';
 const CH_URL = process.env.CLICKHOUSE_URL ?? 'http://localhost:8123';
-const NS = 'test_events_pkg';
+const NS = runScoped('test_events_pkg');
+const CH_DB = runScoped('am_test_events');
 const ws = newUuid();
 
 let bus: EventBus;
-const store = clickHouseStore({ url: CH_URL, database: 'am_test_events' });
+const store = clickHouseStore({ url: CH_URL, database: CH_DB });
 const stop = new AbortController();
 
 const ev = (i: number, over: Partial<BusEvent> = {}): BusEvent => ({
@@ -42,8 +44,8 @@ const ev = (i: number, over: Partial<BusEvent> = {}): BusEvent => ({
 
 beforeAll(async () => {
   await resetNatsNamespace(NATS_URL, NS);
-  await resetClickHouse(CH_URL, 'am_test_events');
-  await migrateClickHouse(CH_URL, 'am_test_events');
+  await resetClickHouse(CH_URL, CH_DB);
+  await migrateClickHouse(CH_URL, CH_DB);
   bus = await natsBus({ url: NATS_URL, namespace: NS });
 });
 

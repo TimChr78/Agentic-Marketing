@@ -294,18 +294,63 @@ Every MCP tool advertises an object `outputSchema` and returns matching `structu
 ```bash
 pnpm lint        # Biome, over the whole repository (packages, apps, e2e, scripts)
 pnpm typecheck
-pnpm test        # every Vitest project; needs Postgres (TEST_DATABASE_URL, default postgres://am:am@localhost:5432/am_test),
-                 # ClickHouse (CLICKHOUSE_URL), NATS (NATS_URL) and Valkey (VALKEY_URL)
+pnpm test        # every Vitest project; needs the shared test stack (scripts/test-services.sh up,
+                 # eval "$(scripts/test-services.sh env)") or services of your own
 pnpm vitest run --project docs       # one project: docs, packages, web or server
 pnpm test:ci     # what CI runs: also writes reports/junit.xml and a coverage report in reports/coverage
-pnpm test:clean  # drop the test databases earlier runs left in Postgres and ClickHouse
+pnpm test:clean  # drop test databases a crashed run left in Postgres and ClickHouse
 node scripts/check-versions.mjs      # every file that names the release version agrees (see Releasing)
 pnpm audit --prod --audit-level=moderate   # accepted advisories are listed in SECURITY.md
 ```
 
 Biome checks every directory unless `biome.json` excludes it; add generated output to its `files.includes` exclusions rather than leaving a new directory unchecked.
 
-The `server` project runs its files in parallel, four at a time (`TEST_WORKERS=1` runs them one by one). Each file gets its own Postgres and ClickHouse database, NATS namespace and Valkey prefix; `apps/server/test/setup.ts` migrates one template database first and every file starts from a copy of it. A file keeps its database after the run so a failure can be inspected; `pnpm test:clean` removes them. Ports come from `testPort()` in `apps/server/test/harness.ts`, which gives each worker its own block; set `TEST_PORT_OFFSET=10000` to run a second checkout's suite at the same time.
+### The shared test stack
+
+One stack per machine, shared by every checkout and delegate: the services are stateless between
+runs apart from the named volumes, and a checkout's tests only need their own namespace inside
+them. CI keeps its own service containers and does not use this stack.
+
+```bash
+scripts/preflight.sh                    # disk, pinned images, ports, node/docker/pnpm
+scripts/test-services.sh up             # Postgres, ClickHouse, Valkey, NATS and OpenBao; waits for health
+eval "$(scripts/test-services.sh env)"  # TEST_DATABASE_URL, CLICKHOUSE_URL, VALKEY_URL, NATS_URL, OPENBAO_TEST_*
+pnpm test
+scripts/test-services.sh down           # keep the volumes
+scripts/test-services.sh reset          # drop the volumes
+scripts/docker-clean.sh --yes           # remove only resources labelled am-test=1
+```
+
+The defaults are the host's long-lived test ports (25432, 28123, 26379, 24222, 28200) bound to
+`0.0.0.0`. Change them in `.env.test` (see `.env.test.example`) or with the `AM_TEST_PG_PORT`,
+`AM_TEST_CH_PORT`, `AM_TEST_VALKEY_PORT`, `AM_TEST_NATS_PORT` and `AM_TEST_OPENBAO_PORT`
+variables. `scripts/test-services.sh env` prints `localhost` on a normal host and `172.17.0.1`
+inside a container, where the host's published ports are only reachable on the Docker bridge; set
+`AM_TEST_HOST` to override that. The optional `mail` (Mailpit) and `obs` (Grafana otel-lgtm)
+profiles are off unless named: `scripts/test-services.sh up mail obs`.
+
+`scripts/docker-clean.sh` selects containers, volumes and networks by the `am-test=1` label only,
+never by name: another checkout's `amtest-*` or `am-patch-test-*` containers and a release
+install are left alone. It is a dry run until `--yes`.
+
+#### Runs, names and workers
+
+The `server` project runs its files in parallel, four at a time (`TEST_WORKERS` sets the worker
+count; 1 runs them one by one). Each file gets its own Postgres and ClickHouse database, NATS
+namespace and Valkey prefix, and `apps/server/test/setup.ts` migrates one template database first
+so every file starts from a copy of it. Ports come from `testPort()` in
+`apps/server/test/harness.ts`, which gives each worker its own block; `TEST_PORT_OFFSET` moves
+every block and the seeded e2e server's default port, so a second checkout can run at the same
+time even against another stack.
+
+`AM_TEST_RUN` namespaces a whole run: every database, ClickHouse database, NATS namespace and
+Valkey prefix is written `am_<run>_...`, so two checkouts (or two delegates) can use one stack
+without dropping each other's data. `vitest.config.mts` derives it once per `pnpm test` from the
+checkout path and the Vitest process, and every project and worker inherits it. CI leaves it empty
+so its fixed service containers keep the names they always had. Set it yourself for a named run
+(lower-case letters and digits; other characters are removed); global teardown drops only
+`am_<run>_*` databases and resets those NATS namespaces, and `AM_TEST_KEEP_DB=1` keeps them after
+a failure for inspection. `pnpm test:clean` removes leftovers from a crashed run.
 
 CI (`.github/workflows/ci.yml`) runs lint, typecheck, the version check, the audit and the documentation tests in a `static` job, the suite in `test`, and the browser, image and chart checks in `e2e`, `docker-smoke` and `helm`. The `e2e` job runs the functional specs and the axe checks; `visual` compares the committed baselines and uploads the diff images on failure, on pull requests that touch `apps/web` or `e2e`; `screenshots` captures the full matrix as an artifact when a manual run asks for it. Pull requests that only change Markdown, `docs/` or `.claude/` skip the slow jobs. The release workflow calls the same file for the tagged commit.
 

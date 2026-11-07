@@ -296,7 +296,7 @@ describe('retry schedule', () => {
     await api.call('emailProviders.create', {
       name: 'Dead relay',
       adapter: 'smtp',
-      config: { host: '127.0.0.1', port: 2528, requireTls: false },
+      config: { host: '127.0.0.1', port: testPort(2528), requireTls: false },
       secrets: { password: 'irrelevant' },
       fromEmail: 'news@shop.example.com',
       useFor: ['marketing', 'transactional'],

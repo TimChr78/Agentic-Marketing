@@ -2,6 +2,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import pg from 'pg';
 import { migrate } from '../src/migrate';
 import { createDb } from '../src/pool';
+import { runScoped } from './run';
 
 // A throwaway database for package-level SQL tests. It is never the shared test template: each
 // caller gets its own freshly migrated database and drops it afterwards, so package tests can run
@@ -33,7 +34,7 @@ export interface DisposableDbOptions {
 
 export async function createDisposableDb(prefix: string, opts: DisposableDbOptions = {}): Promise<DisposableDb> {
   if (!process.env.TEST_DATABASE_URL) throw new Error('TEST_DATABASE_URL is not set');
-  const name = `am_${prefix}_${process.pid}_${randomBytes(4).toString('hex')}`;
+  const name = runScoped(`am_${prefix}_${process.pid}_${randomBytes(4).toString('hex')}`);
   const maint = new pg.Client({ connectionString: urlOf('postgres').toString() });
   await maint.connect();
   try {

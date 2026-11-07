@@ -3,6 +3,7 @@ import type { AddressInfo } from 'node:net';
 import { gunzipSync } from 'node:zlib';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { runScoped } from '../../../packages/db/test/run';
 import { eventually, startTestServer, testPort, type User } from './harness';
 
 // Phase 10 (wave 2), part c: warehouse export. A Postgres warehouse receives pseudonymous data
@@ -13,7 +14,7 @@ let t: Awaited<ReturnType<typeof startTestServer>>;
 let owner: User;
 let ws = '';
 let key = '';
-const DEST = 'am_test_warehouse_dest';
+const DEST = runScoped('am_test_warehouse_dest');
 const destUrl = (process.env.TEST_DATABASE_URL ?? 'postgres://am:am@localhost:5432/am_test')
   .replace(/localhost/, '127.0.0.1')
   .replace(/\/[^/]+$/, `/${DEST}`);

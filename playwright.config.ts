@@ -1,11 +1,13 @@
 import { defineConfig, devices } from '@playwright/test';
+import { testPortOffset } from './packages/db/test/run';
 
 // End-to-end tests of the admin UI against a seeded server (apps/server/test/e2e/server.ts).
 //   pnpm e2e            builds the UI, starts the seeded server on :3100 and runs the tests
 //   E2E_BASE=http://localhost:5173 pnpm e2e:dev   against a running Vite dev server instead
 //   E2E_PORT=3120 E2E_DB=e2e_mine pnpm e2e   another port and database, so two checkouts can run at once
+// TEST_PORT_OFFSET also moves the default port, matching apps/server/test/e2e/server.ts.
 // Uses the system Chromium when CHROMIUM (or /usr/bin/chromium) is set, else Playwright's own.
-const e2ePort = Number(process.env.E2E_PORT ?? 3100);
+const e2ePort = Number(process.env.E2E_PORT ?? 3100 + testPortOffset());
 const base = process.env.E2E_BASE ?? `http://localhost:${e2ePort}`;
 const executablePath = process.env.CHROMIUM || undefined;
 

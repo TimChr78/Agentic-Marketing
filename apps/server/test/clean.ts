@@ -2,11 +2,12 @@ import { resetClickHouse } from '@agentic-marketing/events';
 import pg from 'pg';
 import { testDatabaseUrl } from './harness';
 
-// `pnpm test:clean`: drops the databases test runs leave behind (#173). Test files keep their
-// database after a run so a failure can be inspected; this removes them on the TEST_DATABASE_URL
-// Postgres server and the CLICKHOUSE_URL server. Only names the harness and tests create match.
+// `pnpm test:clean`: drops the databases test runs leave behind (#173). A run's global teardown
+// removes its own prefix; this removes leftovers on the TEST_DATABASE_URL Postgres server and the
+// CLICKHOUSE_URL server. Only names the harness and tests create match, with or without a run
+// namespace (`am_<run>_test_*`, `am_e2e`, ...).
 
-const TEST_DB = /^am_(test_|e2e|backup_|doctor_)/;
+const TEST_DB = /^am_(?:[a-z0-9]+_)?(?:test_|e2e|backup_|doctor_)/;
 
 const maint = new pg.Client({ connectionString: testDatabaseUrl('postgres').toString() });
 await maint.connect();

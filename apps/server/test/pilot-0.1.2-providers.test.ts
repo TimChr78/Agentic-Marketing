@@ -39,7 +39,7 @@ afterAll(() => t?.close());
 const relay = {
   name: 'Relay',
   adapter: 'smtp' as const,
-  config: { host: '127.0.0.1', port: 2527, requireTls: false, events: 'postmark' },
+  config: { host: '127.0.0.1', port: testPort(2527), requireTls: false, events: 'postmark' },
   secrets: { password: 'relay-password' },
   fromEmail: 'news@example.com',
   fromName: 'Pilot',

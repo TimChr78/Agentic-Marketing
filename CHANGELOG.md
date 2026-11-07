@@ -2,6 +2,12 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+### Changed
+
+- The test services are now one shared, labelled `am-test` stack per machine (`docker-compose.test.yml`, `scripts/test-services.sh`), with preflight and label-scoped cleanup scripts (`scripts/preflight.sh`, `scripts/docker-clean.sh`) and a run-scoped `AM_TEST_RUN` namespace so concurrent checkouts no longer collide on database, ClickHouse, NATS or Valkey names. Product behaviour is unchanged; CI keeps its own service containers.
+
 ## [0.11.0] - 2026-11-07
 
 ### Added

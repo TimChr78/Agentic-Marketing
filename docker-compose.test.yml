@@ -1,0 +1,149 @@
+# The shared test stack: one per machine, used by every checkout and delegate.
+#
+#   scripts/test-services.sh up
+#   eval "$(scripts/test-services.sh env)"
+#   pnpm test
+#
+# The images match .github/workflows/ci.yml. CI keeps its own service containers and does not use
+# this file. Every service, volume and network carries am-test=1: scripts/docker-clean.sh removes
+# only those, never another project's containers.
+#
+# Published ports default to the host's long-lived test ports. Override them through .env.test or
+# the environment when they are taken (scripts/test-services.sh loads .env.test):
+#   AM_TEST_BIND_IP=0.0.0.0 AM_TEST_PG_PORT=35432 AM_TEST_CH_PORT=38123 \
+#   AM_TEST_VALKEY_PORT=36379 AM_TEST_NATS_PORT=34222 AM_TEST_OPENBAO_PORT=38200 \
+#     scripts/test-services.sh up
+name: am-test
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    labels: ["am-test=1"]
+    environment:
+      POSTGRES_USER: am
+      POSTGRES_PASSWORD: am
+      POSTGRES_DB: am
+    ports:
+      - "${AM_TEST_BIND_IP:-0.0.0.0}:${AM_TEST_PG_PORT:-25432}:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U am -d am"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    mem_limit: 1g
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:26.8
+    labels: ["am-test=1"]
+    environment:
+      # The row-policy tests create policies; that needs access management.
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    ports:
+      - "${AM_TEST_BIND_IP:-0.0.0.0}:${AM_TEST_CH_PORT:-28123}:8123"
+    volumes:
+      - ch_data:/var/lib/clickhouse
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8123/ping || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    mem_limit: 2g
+
+  valkey:
+    image: valkey/valkey:8.1.9
+    labels: ["am-test=1"]
+    command: ["valkey-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "${AM_TEST_BIND_IP:-0.0.0.0}:${AM_TEST_VALKEY_PORT:-26379}:6379"
+    healthcheck:
+      test: ["CMD-SHELL", "valkey-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    mem_limit: 256m
+
+  nats:
+    image: nats:2.15.0-alpine
+    labels: ["am-test=1"]
+    # -js is JetStream; the monitoring port backs the healthcheck.
+    command: ["-js", "-sd", "/data", "-m", "8222"]
+    ports:
+      - "${AM_TEST_BIND_IP:-0.0.0.0}:${AM_TEST_NATS_PORT:-24222}:4222"
+    volumes:
+      - nats_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8222/healthz || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    mem_limit: 256m
+
+  openbao:
+    image: openbao/openbao:2.6.4
+    labels: ["am-test=1"]
+    # Dev mode: in-memory, root token `root`, exactly what packages/secrets and phase10-ops expect.
+    command: ["server", "-dev", "-dev-root-token-id=root", "-dev-listen-address=0.0.0.0:8200"]
+    environment:
+      BAO_ADDR: http://127.0.0.1:8200
+      BAO_DEV_ROOT_TOKEN_ID: root
+      VAULT_ADDR: http://127.0.0.1:8200
+    ports:
+      - "${AM_TEST_BIND_IP:-0.0.0.0}:${AM_TEST_OPENBAO_PORT:-28200}:8200"
+    healthcheck:
+      test: ["CMD-SHELL", "bao status >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    mem_limit: 256m
+
+  # Optional: `scripts/test-services.sh up mail` (SMTP 21025, UI http://localhost:28025).
+  mailpit:
+    image: axllent/mailpit:v1.27.8
+    labels: ["am-test=1"]
+    profiles: ["mail"]
+    ports:
+      - "${AM_TEST_BIND_IP:-0.0.0.0}:${AM_TEST_MAILPIT_SMTP_PORT:-21025}:1025"
+      - "${AM_TEST_BIND_IP:-0.0.0.0}:${AM_TEST_MAILPIT_PORT:-28025}:8025"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8025/api/v1/info || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    mem_limit: 256m
+
+  # Optional: `scripts/test-services.sh up obs` (Grafana 23000, OTLP 24317/24318).
+  otel-lgtm:
+    image: grafana/otel-lgtm:0.11.1
+    labels: ["am-test=1"]
+    profiles: ["obs"]
+    ports:
+      - "${AM_TEST_BIND_IP:-0.0.0.0}:${AM_TEST_GRAFANA_PORT:-23000}:3000"
+      - "${AM_TEST_BIND_IP:-0.0.0.0}:${AM_TEST_OTLP_GRPC_PORT:-24317}:4317"
+      - "${AM_TEST_BIND_IP:-0.0.0.0}:${AM_TEST_OTLP_HTTP_PORT:-24318}:4318"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    mem_limit: 1g
+
+volumes:
+  pg_data:
+    labels: ["am-test=1"]
+  ch_data:
+    labels: ["am-test=1"]
+  nats_data:
+    labels: ["am-test=1"]
+
+networks:
+  default:
+    name: am-test
+    labels: ["am-test=1"]

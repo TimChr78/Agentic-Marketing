@@ -6,6 +6,7 @@ import pg from 'pg';
 import { afterAll, describe, expect, it, vi } from 'vitest';
 import { isNoTransaction, migrate, splitSqlStatements } from '../src/migrate';
 import { hasTestDatabase } from './disposable';
+import { runScoped } from './run';
 
 // The migrator's no-transaction marker (#453, 0.10.1 review): a file whose first line is
 // `-- am:no-transaction` must run one statement at a time, outside BEGIN/COMMIT, so
@@ -23,7 +24,7 @@ const maintUrl = () => {
 };
 
 async function createDatabase(prefix: string): Promise<{ url: URL; name: string }> {
-  const name = `am_${prefix}_${process.pid}_${randomBytes(4).toString('hex')}`;
+  const name = runScoped(`am_${prefix}_${process.pid}_${randomBytes(4).toString('hex')}`);
   const maint = new pg.Client({ connectionString: maintUrl() });
   await maint.connect();
   try {

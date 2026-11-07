@@ -1,5 +1,6 @@
 import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
+import { testPortOffset } from '../../../../packages/db/test/run';
 import { startTestServer } from '../harness';
 import { PEOPLE, seed } from './seed';
 
@@ -7,8 +8,9 @@ import { PEOPLE, seed } from './seed';
 //   pnpm --filter @agentic-marketing/web build && npx tsx apps/server/test/e2e/server.ts
 // Serves the built UI and the API on http://localhost:3100 (E2E_PORT). Every person's password
 // is `correct-horse-battery-staple`. Stop with Ctrl-C; the next start re-creates the database.
+// TEST_PORT_OFFSET moves the default port, so two checkouts can run the e2e suite at once.
 
-const port = Number(process.env.E2E_PORT ?? 3100);
+const port = Number(process.env.E2E_PORT ?? 3100 + testPortOffset());
 const t = await startTestServer(process.env.E2E_DB ?? 'e2e', port, {
   PUBLIC_URL: `http://localhost:${port}`,
   PUBLIC_LINKS_URL: `http://localhost:${port}`,
