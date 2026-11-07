@@ -14,7 +14,7 @@ _Last updated: 2026-11-07_
 
 ## Next
 
-After the three process PRs are green and reported: phase branch with per-delegate draft PRs, affected-test selection, changelog fragments, migration reservation, one-pass release with a verification script. Then Phase 28 (polish pass), skipping Phase 27 for now, as the user asked.
+After the three process PRs are green and reported: phase branch with per-delegate draft PRs, affected-test selection, changelog fragments, migration reservation, one-pass release with a verification script. Phase 27 (remaining families and recipient surfaces) waits until the process work is done.
 
 ## Blocked / decisions needed
 
