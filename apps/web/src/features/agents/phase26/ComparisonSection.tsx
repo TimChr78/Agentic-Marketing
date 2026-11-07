@@ -343,7 +343,8 @@ function MetricLane({
 
 function ComparisonTable({ agents }: { agents: ComparedAgent[] }) {
   return (
-    <div className="overflow-x-auto rounded-lg border border-line">
+    // biome-ignore lint/a11y/noNoninteractiveTabindex: a scrollable table must be reachable by keyboard (axe scrollable-region-focusable).
+    <section className="overflow-x-auto rounded-lg border border-line" aria-label="Agent comparison values, scrollable" tabIndex={0}>
       <Table label="Agent comparison values">
         <THead>
           <tr>
@@ -394,7 +395,7 @@ function ComparisonTable({ agents }: { agents: ComparedAgent[] }) {
           ))}
         </tbody>
       </Table>
-    </div>
+    </section>
   );
 }
 

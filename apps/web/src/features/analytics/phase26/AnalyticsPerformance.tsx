@@ -622,7 +622,10 @@ export default function AnalyticsPerformance() {
   const renderCharts = () => {
     if (!chartMeasures.length) return null;
     return (
-      <section className="space-y-5" aria-label="Charts">
+      <section className="space-y-5" aria-labelledby="analytics-charts-heading">
+        <h2 id="analytics-charts-heading" className="sr-only">
+          Charts
+        </h2>
         {chartMeasures.map((id) => {
           const unit = measureUnit(id);
           if (canRead && conversionSelected && unit === 'currency' && !gate.ok) {
@@ -734,7 +737,8 @@ export default function AnalyticsPerformance() {
             {currency ? ` · ${currency}` : ''}
           </span>
         </div>
-        <div className="overflow-x-auto">
+        {/* biome-ignore lint/a11y/noNoninteractiveTabindex: a scrollable table must be reachable by keyboard (axe scrollable-region-focusable). */}
+        <section className="overflow-x-auto" aria-label="Analytics results, scrollable" tabIndex={0}>
           <table aria-label="Analytics results" className="w-full border-collapse text-left text-[13px] leading-5">
             <caption className="sr-only">
               {periodDateLabel(range)} in {range.zone}
@@ -818,7 +822,7 @@ export default function AnalyticsPerformance() {
               })}
             </tbody>
           </table>
-        </div>
+        </section>
         {!series.tableRows.length && <p className="px-4 py-4 text-[13px] text-muted">No rows for this period.</p>}
         <p className="border-t border-line px-4 py-2 text-[12px] leading-[18px] text-muted">
           Daily unique people are not added to period totals.

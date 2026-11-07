@@ -1,9 +1,13 @@
-import { api } from '../../../app/api';
+import { Plus } from 'lucide-react';
+import { useState } from 'react';
+import { api, errText } from '../../../app/api';
 import { artifactPath } from '../../../app/artifactRoutes';
 import { Link } from '../../../app/router';
+import { useWorkspace } from '../../../app/session';
 import { useApi } from '../../../app/useApi';
-import { Alert, Card, Meta, Skeleton, StatusPill, Table, Tag, Td, THead, Th, Tr } from '../../../ui';
+import { Alert, Button, Card, Meta, Skeleton, StatusPill, Table, Tag, Td, THead, Th, Tr } from '../../../ui';
 import type { MandateContent } from '../../artifacts/MandateEditor';
+import { createMandateDraft } from '../createMandate';
 import { actionClassLabel, SWITCH_INFO } from '../labels';
 import {
   type AgentDetail,
@@ -76,7 +80,7 @@ export function MandateTab({ agentId, agent, canArtifacts }: { agentId: string; 
       )}
 
       {!selected ? (
-        <NoActiveMandate autonomy={autonomySettings} computedAt={computedText(data.asOf)} />
+        <NoActiveMandate agent={agent} autonomy={autonomySettings} computedAt={computedText(data.asOf)} />
       ) : !content ? (
         <Alert tone="bad" title="Mandate content unavailable">
           The server returned an active mandate, but its published content could not be read. Nothing is treated as a level 0 or as a grant;
@@ -229,12 +233,48 @@ export function MandateTab({ agentId, agent, canArtifacts }: { agentId: string; 
   );
 }
 
-function NoActiveMandate({ autonomy, computedAt }: { autonomy: AutonomySettings | null; computedAt: string }) {
+function NoActiveMandate({
+  agent,
+  autonomy,
+  computedAt,
+}: {
+  agent: { id: string; name: string };
+  autonomy: AutonomySettings | null;
+  computedAt: string;
+}) {
+  const { can } = useWorkspace();
+  const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
+  const create = async () => {
+    setCreating(true);
+    setCreateError(null);
+    try {
+      await createMandateDraft(agent, autonomy);
+    } catch (e) {
+      setCreateError(errText(e));
+    } finally {
+      setCreating(false);
+    }
+  };
   return (
     <Card
       title="No active mandate"
       description="This agent follows the workspace approval policy and ceilings until a person publishes a mandate for it."
+      action={
+        can('artifacts:write') ? (
+          <Button variant="primary" icon={<Plus size={14} />} loading={creating} onClick={() => void create()}>
+            Create mandate
+          </Button>
+        ) : undefined
+      }
     >
+      {createError && (
+        <div className="px-4 pt-4">
+          <Alert tone="bad" title="Couldn't create the mandate" onRetry={() => void create()}>
+            {createError}
+          </Alert>
+        </div>
+      )}
       <div className="space-y-4 p-4">
         <Alert tone="info" title="No active mandate">
           A draft is never treated as active. When a mandate is published, unarchived and unexpired, its levels and scope appear here.

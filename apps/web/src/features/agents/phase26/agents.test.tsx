@@ -457,6 +457,8 @@ beforeEach(() => {
   vi.useFakeTimers({ toFake: ['Date'] });
   vi.setSystemTime(new Date('2026-11-06T12:00:00.000Z'));
   setWorkspaceTimeZone('UTC');
+  // The agent page keeps its tab in ?tab=; start every test on Overview.
+  history.replaceState(null, '', '/work/agents');
   h.calls.length = 0;
   h.held.length = 0;
   h.hold.clear();
@@ -756,6 +758,13 @@ describe('mandate matrix (#509)', () => {
     expect(screen.getByText('Validity')).toBeTruthy();
   });
 
+  it('opens the tab named in ?tab= so a tab can be linked to', async () => {
+    history.replaceState(null, '', '/work/agents?tab=mandate');
+    renderAgent();
+    await waitFor(() => expect(calls('agents.mandate')).toHaveLength(1));
+    expect(screen.getByRole('tab', { name: 'Mandate' }).getAttribute('aria-selected')).toBe('true');
+  });
+
   it('says No active mandate instead of an empty level 0', async () => {
     h.respond = (name, input) => {
       if (name === 'agents.mandate') return { agentId, mandate: null, outsideHours: null, asOf: '2026-11-07T08:30:00.000Z' };
@@ -770,6 +779,37 @@ describe('mandate matrix (#509)', () => {
     expect(screen.queryByText('0 · Observe')).toBeNull();
     expect(calls('artifacts.get')).toHaveLength(0);
     expect(calls('artifacts.list')).toHaveLength(0);
+  });
+
+  it('creates a draft mandate prefilled for this agent when none is active', async () => {
+    const push = vi.spyOn(history, 'pushState');
+    h.respond = (name, input) => {
+      if (name === 'agents.mandate') return { agentId, mandate: null, outsideHours: null, asOf: '2026-11-07T08:30:00.000Z' };
+      if (name === 'artifacts.create') return { artifactId: `mnd_${'d'.repeat(32)}`, version: 1 };
+      return baseRespond(name, input);
+    };
+
+    renderAgent();
+    fireEvent.click(await screen.findByRole('tab', { name: 'Mandate' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Create mandate' }));
+    await waitFor(() => expect(calls('artifacts.create')).toHaveLength(1));
+    const input = calls('artifacts.create')[0].input as { type: string; content: { agent: string } };
+    expect(input.type).toBe('agent_mandate');
+    expect(input.content.agent).toBe(agentId);
+    await waitFor(() => expect(push).toHaveBeenCalled());
+    push.mockRestore();
+  });
+
+  it('offers no Create mandate without artifacts:write', async () => {
+    h.can = (permission) => permission !== 'artifacts:write';
+    h.respond = (name, input) => {
+      if (name === 'agents.mandate') return { agentId, mandate: null, outsideHours: null, asOf: '2026-11-07T08:30:00.000Z' };
+      return baseRespond(name, input);
+    };
+    renderAgent();
+    fireEvent.click(await screen.findByRole('tab', { name: 'Mandate' }));
+    await screen.findAllByText('No active mandate');
+    expect(screen.queryByRole('button', { name: 'Create mandate' })).toBeNull();
   });
 
   it('shows outsideHours, shadow mode and the guardian cap separately', async () => {

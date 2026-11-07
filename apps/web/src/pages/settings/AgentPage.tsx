@@ -4,6 +4,7 @@ import { ButtonLink } from '../../app/links';
 import { useCrumbs } from '../../app/page';
 import { useWorkspace } from '../../app/session';
 import { useApi } from '../../app/useApi';
+import { usePageTab } from '../../app/useTab';
 import { AgentControls } from '../../features/agents/AgentControls';
 import { AgentStatusPill } from '../../features/agents/AgentStatus';
 import { ActivityTab } from '../../features/agents/phase26/ActivityTab';
@@ -37,16 +38,16 @@ export default function AgentPage({ params }: { params: Record<string, string> }
   const canArtifacts = can('artifacts:read');
   const canAudit = can('audit:read');
   const agent = useApi(() => api.call('agents.get', { id }), [id], { skip: !canArtifacts });
-  const [tab, setTab] = useState<AgentTab>('overview');
+  // ?tab= like every other tabbed page, so a tab can be linked to and survives a reload.
+  const { active: tab, select: setTab } = usePageTab<AgentTab>({ keys: AGENT_TABS, fallback: 'overview' });
   const [choice, setChoice] = useState<ReportPeriodChoice>(7);
   const [anchor, setAnchor] = useState(() => new Date());
   const [refreshKey, setRefreshKey] = useState(0);
   const period = useMemo(() => reportPeriod(choice, anchor), [choice, anchor]);
 
-  // A different agent is a different page: start on Overview and the default period.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: reset the tab when a different agent is opened, which the body does not read
+  // A different agent is a different page: start on the default period (its URL carries the tab).
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reset the period when a different agent is opened, which the body does not read
   useEffect(() => {
-    setTab('overview');
     setChoice(7);
     setAnchor(new Date());
     setRefreshKey(0);
