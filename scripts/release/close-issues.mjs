@@ -92,11 +92,9 @@ function previousTag(repo, version) {
 }
 
 /** Commit SHAs in v<previous>..v<version>, or the tag's history for the first release. */
-function commitsInRange(repo, previous, version) {
-  const out = previous
-    ? gh(['api', `repos/${repo}/compare/${previous}...v${version}`, '--jq', '.commits[].sha'])
-    : gh(['api', `repos/${repo}/commits?per_page=250`, '--jq', '.[].sha']);
-  return out.split('\n').filter(Boolean);
+function commitsInRange(previous, version) {
+  const range = previous ? `${previous}..v${version}` : `v${version}`;
+  return execFileSync('git', ['rev-list', range], { cwd: root, encoding: 'utf8' }).split('\n').filter(Boolean);
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
@@ -107,7 +105,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     const release = JSON.parse(gh(['api', `repos/${repo}/releases/tags/v${options.version}`]));
     const branch = defaultBranch(repo);
     const previous = previousTag(repo, options.version);
-    const commits = commitsInRange(repo, previous, options.version);
+    const commits = commitsInRange(previous, options.version);
     const prs = JSON.parse(
       gh(['pr', 'list', '--repo', repo, '--state', 'merged', '--limit', '500', '--json', 'number,body,baseRefName,mergeCommit']),
     );
