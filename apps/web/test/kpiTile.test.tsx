@@ -96,4 +96,12 @@ describe('KpiTile (#436)', () => {
     expect(screen.getByText('Updated time not available')).toBeTruthy();
     expect(screen.queryByText(/1970/)).toBeNull();
   });
+
+  it('names event freshness as the latest event in the period when asked', () => {
+    render(<KpiTile label="Clicks" value={1} updatedAt={new Date()} freshnessLabel="Latest event in period" />);
+    expect(screen.getByText('Latest event in period just now')).toBeTruthy();
+    cleanup();
+    render(<KpiTile label="Clicks" value={1} updatedAt={null} freshnessLabel="Latest event in period" />);
+    expect(screen.getByText('Latest event in period: unavailable')).toBeTruthy();
+  });
 });

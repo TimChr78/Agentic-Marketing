@@ -1,11 +1,11 @@
 import { Resolver } from 'node:dns/promises';
 import { DEFAULT_PURPOSES, publishedSingleton } from '@agentic-marketing/artifacts';
 import { defineCommand } from '@agentic-marketing/commands';
-import { AppError } from '@agentic-marketing/core';
+import { AppError, isoDateTime } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
-import { eq } from 'drizzle-orm';
+import { and, eq, gte, inArray, lt, sql } from 'drizzle-orm';
 import { z } from 'zod';
-import { deliveryPolicy, streamRates } from './policy';
+import { CONTACTED, deliveryPolicy, isMarketing, streamRates, type TrendRow, trendBoundaries, trendPoints } from './policy';
 
 // Deliverability (Phase 7): are the sending domain's DNS records in place, and are bounce and
 // complaint rates within what mailbox providers accept (Gmail and Yahoo: complaints under 0.3%)?
@@ -217,4 +217,87 @@ export const deliverabilityHealth = defineCommand({
   },
 });
 
-export const deliverabilityCommands = [checkDomain, listSendingDomains, deliverabilityHealth] as const;
+const Trend = z.object({
+  day: z.string().describe('Workspace-local calendar date that ended at windowTo'),
+  windowFrom: z.string(),
+  windowTo: z.string(),
+  sent: z.number(),
+  bounced: z.number(),
+  complained: z.number(),
+  bounceRate: z.number().nullable().describe('bounced / sent; null when sent is 0'),
+  complaintRate: z.number().nullable().describe('complained / sent; null when sent is 0'),
+});
+
+/**
+ * The operational bounce and complaint trend under today's policy. Each point ends at a
+ * workspace-local midnight; its window is exactly the policy's rolling duration, counted by
+ * creation time and current status. This is a read-only recalculation: late bounces and
+ * complaints can revise earlier points, and the thresholds are today's, not historic ones.
+ */
+export const deliverabilityTrend = defineCommand({
+  name: 'deliverability.trend',
+  title: 'Bounce and complaint trend under current policy',
+  description:
+    'Daily points at workspace-local midnights, each over the delivery policy’s rolling window by message creation time with current statuses. Rates are null on a zero denominator. Thresholds are today’s policy; late status updates can revise earlier points. At most 90 points.',
+  input: z.object({
+    from: isoDateTime('from'),
+    to: isoDateTime('to'),
+    channel: z.enum(['email', 'sms']),
+    stream: z.enum(['marketing', 'transactional']),
+  }),
+  output: z.object({
+    points: z.array(Trend),
+    windowDays: z.number(),
+    thresholds: z.object({ complaintWarn: z.number(), complaintStop: z.number(), bounceStop: z.number(), minVolume: z.number() }),
+    autoPause: z.boolean(),
+    timeZone: z.string(),
+    computedAt: z.string(),
+    semantics: z.literal('current_status_by_creation_window'),
+  }),
+  permission: 'artifacts:read',
+  effect: 'read',
+  handler: async (input, ctx) => {
+    const [workspace] = await ctx.tx.select({ timeZone: schema.workspaces.timeZone }).from(schema.workspaces);
+    const timeZone = workspace?.timeZone ?? 'UTC';
+    const boundaries = trendBoundaries(new Date(input.from), new Date(input.to), timeZone);
+    const policy = await deliveryPolicy(ctx.tx);
+    const purposes = (await publishedSingleton(ctx.tx, 'purposes'))?.purposes ?? DEFAULT_PURPOSES;
+    const keys = purposes.filter((p) => isMarketing(p.basis) === (input.stream === 'marketing')).map((p) => p.key);
+    const windowDays = policy.health.windowDays;
+
+    let rows: TrendRow[] = [];
+    if (keys.length && boundaries.length) {
+      const first = boundaries[0] as (typeof boundaries)[number];
+      const last = boundaries[boundaries.length - 1] as (typeof boundaries)[number];
+      const since = new Date(first.windowTo.getTime() - windowDays * 86_400_000);
+      const minute = sql<number>`floor(extract(epoch from ${schema.messages.createdAt}) / 60)::int`;
+      rows = await ctx.tx
+        .select({ minute, status: schema.messages.status, n: sql<number>`count(*)::int` })
+        .from(schema.messages)
+        .where(
+          and(
+            eq(schema.messages.channel, input.channel),
+            eq(schema.messages.test, false),
+            inArray(schema.messages.purpose, keys),
+            inArray(schema.messages.status, [...CONTACTED]),
+            gte(schema.messages.createdAt, since),
+            lt(schema.messages.createdAt, last.windowTo),
+          ),
+        )
+        .groupBy(minute, schema.messages.status);
+    }
+
+    const { autoPause, windowDays: days, ...thresholds } = policy.health;
+    return {
+      points: trendPoints(boundaries, days, rows),
+      windowDays: days,
+      thresholds,
+      autoPause,
+      timeZone,
+      computedAt: new Date().toISOString(),
+      semantics: 'current_status_by_creation_window' as const,
+    };
+  },
+});
+
+export const deliverabilityCommands = [checkDomain, listSendingDomains, deliverabilityHealth, deliverabilityTrend] as const;

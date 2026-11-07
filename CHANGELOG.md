@@ -8,6 +8,58 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 
 - The test services are now one shared, labelled `am-test` stack per machine (`docker-compose.test.yml`, `scripts/test-services.sh`), with preflight and label-scoped cleanup scripts (`scripts/preflight.sh`, `scripts/docker-clean.sh`) and a run-scoped `AM_TEST_RUN` namespace so concurrent checkouts no longer collide on database, ClickHouse, NATS or Valkey names. Product behaviour is unchanged; CI keeps its own service containers.
 
+## [0.12.0] - 2026-11-07
+
+### Added
+
+- People (#510): the list is cursor-paged with honest loaded counts (“50 shown · Page 1”, More people available / End of list) and keeps cached pages for Back; a search by exact e-mail runs only on submit. Each person shows one primary e-mail, their visible name and the profile id behind a named copy control, with consent beside every purpose instead of an aggregate. The person page adds a loaded-history timeline that interleaves events, message creations, returned message events and consent changes, names each source, keeps an independent cursor and Load more for events and messages, and captions what each source covers. Loading, empty, observed-zero, unavailable, partial-failure with local Retry, restricted, not-found, PII-hidden and last-page states are explicit.
+- Campaign Evaluation (#511): the tab is now a roll-up of the campaign’s published artifacts. One `analytics.campaignSummary` read supplies the period, the distinct-person headline with its denominators, the independent funnel counts, per-member results and journey holdouts; a published campaign with a control group and a goal event adds one `campaigns.holdoutResult` read, never one read per member. Campaign and journey holdouts stay separate, revenue stays per currency, and loading, empty/not started, observed zero, null, suppressed, partial failure, restricted and not-found states each have their own copy.
+- `deliverability.trend` (#508): bounce and complaint rates as workspace-local daily points, each over the delivery policy's rolling creation window with current message statuses. Zero-volume points return null rates; thresholds are today's policy and there is no pause history.
+- Deliverability (#508): the page now shows all four stream statuses with their raw sample and evaluation minimum, then KPI tiles for the selected stream with numerator/denominator and today’s thresholds. Bounce and complaint trends are separate charts with the current stop and warning thresholds drawn as labelled dashed lines, followed by a nine-column table with each rolling window’s bounds. DNS checks are cards per sending domain with the fix beside every failure and a copy control only for supplied records. Loading, empty, observed zero, unavailable, below evaluation volume, partial failure with local Retry, restricted, not-found and stale-response states are explicit, and a missing DKIM selector never yields a green pass.
+- `agents.mandate` (#509): the published, unarchived and unexpired mandate that applies to an agent now, with its content and the current working-hours verdict. It returns null when the agent has none, never a newer draft, and includes no credentials.
+- Analytics now leads with three fixed questions — Newsletter performance, Journey conversion and Deliverability — over a grouped measure picker with plain names, descriptions and units. Each question reads one totals result and one daily series per period through the existing metric layer, shows the chart before the result table, and compares with the immediately preceding equal local-day period (#506).
+- Journey Report (#507): the journey detail's Report tab now reports the current participant snapshot, selected-period entries, goal, completions and exits, and all-time step reach as separate values, with Last 7 and Last 30 complete workspace-local days. Step reach comes from the published topology's graph order; a sequential funnel appears only for one linear published version whose event steps all map, are complete, unsuppressed, monotone and have entrants — every other journey shows independent bars and says “Step reach is not a cohort funnel.” Historical step ids stay a separate unmapped list behind a copy control.
+- Canvas counts for journeys (#507): `JourneyGraph` accepts optional `counts` and `countsLabel` and renders “reached all time / waiting now” per step without fetching; a node key the read did not return stays Unavailable, never zero. The builder's Counts overlay and its control-group summary share one `journeys.stats` read.
+- Agents (#509): the agent page is now Overview / Activity / Mandate / Credentials with Pause always one click away in the header. Overview shows outcome and goal tiles with the period and an explicit “Latest event in period: Unavailable”, the decision breakdown by action class with count bars and a table, and journey outcomes without an artifact scan. Activity is a paging timeline with Load more, separate ownership, guardian and shadow lanes, and no closed-period claim; the guardian controls (including Clear) and shadow results are mounted only when their disclosure opens. Mandate is a matrix of action class, granted level, workspace ceiling, guardian cap and explanation from one `agents.mandate` read; missing levels default to 1 and no active mandate is never an empty level 0. Credentials list kind, since and a copy control; the hosted agent and its runs, memory notes, skills, Run now, Edit and Delete are mounted only when the hosted disclosure opens, with a paged run table. The agents list puts Pause on every active row and compares 1–20 explicit agents as small multiples from one `agents.compare` read.
+
+### Changed
+
+- KPI tiles on Home, the broadcast report and the agent overview name their timestamp “Latest event in period”, because it is the newest event in range, not when the data was fetched; `KpiTile` takes an optional `freshnessLabel` (default “Updated”).
+- The agent page keeps its tab in `?tab=` like every other tabbed page, so Overview, Activity, Mandate and Credentials can be linked to.
+- The People Imports tab loads on demand, keeping the People list inside its bundle budget.
+- The People list no longer calls the loaded row count a population, no longer reads a profile per row, and no longer hides purpose keys in place of names: an unavailable purpose name is labelled “Purpose name unavailable” and its key stays behind a copy control. Consent mutations, export and erasure keep their existing controls and permissions.
+- The campaign Evaluation tab shares one Last 7 / Last 30 complete-days period between the summary and the campaign-wide holdout, refreshes the same reads, and mounts neither while the tab is inactive. `CampaignEvaluation({campaignId})` and `CampaignHoldoutCard({campaignId})` keep their existing required prop; `from`, `to` and `active` are additive for the host.
+- Analytics asks “What changed in your newsletter results?” with Last 7 / Last 30 complete workspace-local days by default, keeps the existing `from`/`to`/`measures`/`dimensions`/`broadcast` deep links, and keeps the AI usage tab unchanged. Changing a question visibly drops a filter the new source does not support; switching measure group replaces incompatible selections with that group’s defaults and announces it (#506).
+- Analytics periods now name both date ranges and the workspace zone, rates show their numerator/denominator, and freshness reads “Latest event in period” instead of a fetch time (#506).
+- The journey builder no longer polls journey stats every 30 seconds; the canvas overlay and the report refresh explicitly, and a draft or edited topology shows no count overlay because aggregate counts cannot be attributed to one saved version.
+- `JourneyReport` and `JourneyStatsPage` share one implementation, so the standalone Insights page and the Report tab use the same reads, period controls and states.
+- The agent page no longer scans every mandate artifact, reads a report or hosted run per agent, or opens a Pause dialog: Pause is one click with an inline Retry, and a failed Pause leaves the agent active. MandateCard’s P+2M fan-out is replaced by one `agents.mandate` read, the report and activity are read only for the selected period and only with audit access, and comparison is an explicit 1–20 agent selection rather than an implicit all-agents request.
+
+### Fixed
+
+- The agent Mandate tab now says whether shadow mode covers every action class or only some, and explains it on each matrix row; a People page that arrives after Refresh no longer appends a stale Next page to the new cursor stack.
+- The agent Mandate tab offers Create mandate again when no mandate is active, and shows when the active mandate expires (“N days left”, a warning within three days).
+- People search opens a pasted `prf_…` profile id again, as before Phase 26.
+- The Analytics charts section has a heading, and the analytics result table and agent comparison table scroll in keyboard-reachable regions (axe).
+- Plain wording on the agent, deliverability and People pages instead of implementation terms.
+- A revenue chart is drawn only when the result carries one usable currency and the comparison period carries the same currency; mixed, missing and different-currency results keep currency-labelled table rows and replace the chart with the explained unavailable state (#506).
+- Analytics no longer renders an epoch date as freshness, an absent cell as an observed zero, or old values as current after a failed refresh (#506).
+- Changing the Analytics question or period, or the Deliverability stream, shows loading for the new selection instead of the previous selection's values under the new label; period totals and daily results appear only when both belong to the same selection.
+- A journey draft no longer shows the live version's canvas counts, even when its steps were only saved, not published; the overlay stays hidden until the published, unmodified version is shown.
+
+
+### Upgrading from 0.11.0
+
+- **Migrations:** none.
+- **Configuration:** no new environment variables.
+- **Breaking changes:** none in existing commands, artifacts or URLs. Two read commands are new: `deliverability.trend` and `agents.mandate` (both `artifacts:read`). The admin UI changes:
+  - Analytics opens on fixed questions with period comparison.
+  - The agent page has Overview, Activity, Mandate and Credentials tabs (linkable with `?tab=`), and Pause is a single click without a reason.
+  - People pages through the list with loaded counts and shows consent per purpose.
+  - The journey canvas counts read “reached all time · waiting now”.
+- **Manual steps:** none.
+- **Upgrade:** download `agentic-marketing-compose-0.12.0.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.12.0 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.12.0` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.12.0). Run `docker compose exec app am doctor`.
+
 ## [0.11.0] - 2026-11-07
 
 ### Added

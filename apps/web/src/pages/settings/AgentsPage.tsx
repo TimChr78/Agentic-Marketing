@@ -9,27 +9,46 @@ import { useApi } from '../../app/useApi';
 import { usePageTab } from '../../app/useTab';
 import { AgentControls } from '../../features/agents/AgentControls';
 import { AgentStatusPill } from '../../features/agents/AgentStatus';
-import { CompareAgentsCard } from '../../features/agents/CompareAgentsCard';
 import { HostedAgentDialog } from '../../features/agents/HostedAgentDialog';
 import { type Agent, credentialKinds } from '../../features/agents/labels';
+import { ComparisonSection } from '../../features/agents/phase26/ComparisonSection';
 import { Alert, Button, EmptyState, PageHeader, Table, TableFrame, Tabs, Td, THead, Th, Tr } from '../../ui';
 import { pageWidth } from '../../ui/layout';
 import PromptsPage from '../build/PromptsPage';
 
-/** Work → Agents (#213, #215, #446): who acts for this workspace, how to stop them. */
+/** Work → Agents (#213, #215, #446, #509): who acts for this workspace, how to stop them. */
 export function AgentsHome() {
   useCrumbs([{ label: 'Agents' }]);
   const { can } = useWorkspace();
-  const agents = useApi(() => api.call('agents.list', {}), []);
+  const canArtifacts = can('artifacts:read');
+  const agents = useApi(() => api.call('agents.list', {}), [], { skip: !canArtifacts });
   const [creating, setCreating] = useState(false);
   const rows = agents.data?.agents ?? [];
   const admin = can('workspace:admin');
+  const canAudit = can('audit:read');
+
+  // Pause returns the updated agent, so the row changes without a second agents.list read.
+  const replace = (updated: Agent) => {
+    agents.setData((current) =>
+      current ? { ...current, agents: current.agents.map((row) => (row.id === updated.id ? updated : row)) } : current,
+    );
+  };
+
+  if (!canArtifacts) {
+    return (
+      <div className={pageWidth('default', 'space-y-5')}>
+        <Alert tone="info" title="Restricted by your role">
+          The agents list needs artifact access. No protected reads were made. Ask a workspace administrator for access.
+        </Alert>
+      </div>
+    );
+  }
 
   return (
     <div className={pageWidth('default', 'space-y-5')}>
       <PageHeader
         title="Agents"
-        description="Every API token, connected MCP client and hosted run acts as an agent, with a person accountable for it. Pause or revoke one to stop it at once; its sponsor and its history stay."
+        description="Every API token, connected MCP client and hosted run acts as an agent, with a person accountable for it. Pause is on every active row; revoke ends an agent for good."
         actions={
           admin && (
             <Button variant="primary" icon={<Plus size={14} />} onClick={() => setCreating(true)}>
@@ -53,7 +72,7 @@ export function AgentsHome() {
         loading={agents.loading}
         error={agents.error}
         onRetry={agents.reload}
-        columns={admin ? 6 : 5}
+        columns={5}
         isEmpty={rows.length === 0}
         empty={
           <EmptyState
@@ -78,11 +97,6 @@ export function AgentsHome() {
               <Th>Status</Th>
               <Th className="hidden lg:table-cell">Credentials</Th>
               <Th>Last 24 hours</Th>
-              {admin && (
-                <Th>
-                  <span className="sr-only">Actions</span>
-                </Th>
-              )}
             </tr>
           </THead>
           <tbody>
@@ -93,6 +107,11 @@ export function AgentsHome() {
                     {a.name}
                   </Link>
                   {a.description && <div className="mt-0.5 line-clamp-1 max-w-[360px] text-[12px] text-muted">{a.description}</div>}
+                  {admin && (
+                    <div className="mt-1.5">
+                      <AgentControls agent={a} variant="menu" onUpdated={replace} />
+                    </div>
+                  )}
                 </Td>
                 <Td className="hidden md:table-cell">{a.sponsor.name}</Td>
                 <Td>
@@ -111,18 +130,13 @@ export function AgentsHome() {
                     denied
                   </span>
                 </Td>
-                {admin && (
-                  <Td className="text-right">
-                    <AgentControls agent={a} variant="menu" onChanged={() => void agents.reload()} />
-                  </Td>
-                )}
               </Tr>
             ))}
           </tbody>
         </Table>
       </TableFrame>
 
-      <CompareAgentsCard />
+      <ComparisonSection agents={rows} canAudit={canAudit} />
     </div>
   );
 }
