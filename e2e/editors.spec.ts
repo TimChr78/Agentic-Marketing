@@ -19,7 +19,7 @@ test('create an experience with two variants in the editor and save', async ({ p
 
   await expect(page.getByRole('textbox', { name: 'Name of variant 1', exact: true })).toHaveValue('Variant A');
   await page.getByRole('textbox', { name: 'Name of variant 2', exact: true }).fill('Variant B');
-  await page.getByRole('textbox', { name: 'Weight of variant 2', exact: true }).fill('60');
+  await page.getByRole('spinbutton', { name: 'Weight of variant 2', exact: true }).fill('60');
   await page.getByRole('textbox', { name: 'HTML for variant 2', exact: true }).fill('<p>Second pitch for the e2e.</p>');
   await expect(page.getByText('The weights total 110%')).toBeVisible();
   await expect(page.getByRole('textbox', { name: 'Name of variant 2', exact: true })).toHaveValue('Variant B');

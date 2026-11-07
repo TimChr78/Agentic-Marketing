@@ -309,9 +309,9 @@ if [ "$COMMAND" = "shots" ]; then
   set -- node e2e/screenshots.mjs reports/shots "$@"
 else
   case "$COMMAND" in
-    smoke) set -- npx playwright test --project functional --grep '@smoke' "$@" ;;
-    functional) set -- npx playwright test --project functional "$@" ;;
-    axe) set -- npx playwright test --project axe "$@" ;;
+    smoke) set -- npx playwright test --project=functional --grep '@smoke' "$@" ;;
+    functional) set -- npx playwright test --project=functional "$@" ;;
+    axe) set -- npx playwright test --project=axe "$@" ;;
     visual) set -- npx playwright test -c playwright.visual.config.ts "$@" ;;
     update) set -- npx playwright test -c playwright.visual.config.ts --update-snapshots "$@" ;;
   esac
