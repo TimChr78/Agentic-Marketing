@@ -1,0 +1,198 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Audience and marketing families · #525</title><style>html,body{margin:0;font:14px/1.5 system-ui;color:var(--foreground,#202521)}.controls{display:flex;flex-wrap:wrap;gap:16px;padding:16px;background:var(--card,#f0efeb);border-radius:12px}label{display:block}select{display:block;min-height:40px;max-width:260px;padding:8px;font:inherit}h2{font-size:16px}.host{overflow:auto;max-width:100%;margin:16px 0 32px;border-radius:12px}iframe{border:1px solid #87958a;display:block;height:1300px}.intro{padding:16px 0}.intro p{margin:0}</style></head><body><div class="intro"><p>Audience and marketing families · #525 · Offline review. Select screen, state and theme. Each fixed-width frame is independently responsive; scroll its host to inspect desktop at narrow widths.</p></div><div class="controls"><label>Screen<select id="screen"></select></label><label>Scenario<select id="scenario"></select></label><label>Theme<select id="theme"><option value="light">Light</option><option value="dark">Dark</option></select></label></div><h2>1440 px</h2><div class="host" tabindex="0" role="region" aria-label="1440 pixel layout"><iframe id="frame1440" width="1440" title="1440 pixel design review"></iframe></div><h2>768 px</h2><div class="host" tabindex="0" role="region" aria-label="768 pixel layout"><iframe id="frame768" width="768" title="768 pixel design review"></iframe></div><h2>390 px</h2><div class="host" tabindex="0" role="region" aria-label="390 pixel layout"><iframe id="frame390" width="390" title="390 pixel design review"></iframe></div><script>const D={
+  "screens": {
+    "Forms": "<div class=\"tabs\" aria-label=\"Sections\"><button>Content</button><button>Preview</button><button>Versions</button><button>Activity</button></div><div class=\"columns\"><div><section class=\"panel\"><h2>Consent</h2><label>Purposes<select><option>Newsletter</option></select></label><label>Consent text<input value=\"Send me the newsletter. I can unsubscribe at any time.\"></label><label>Double opt-in<select><option>Confirm by e-mail</option><option>Subscribe on submission</option></select></label><label>Confirmation e-mail<select><option>Confirm your subscription</option></select></label></section><section class=\"panel\"><h2>Fields</h2><label>Additional field<input value=\"firstName\"></label><button>Add field</button></section><section class=\"panel\"><h2>After submitting</h2><label>Success page<input value=\"/thanks\"></label><label>Confirmed page<input value=\"\"></label><label>Error page<input value=\"\"></label></section><details><summary>Security and form appearance</summary><label>Allowed sites<input value=\"https://example.com\"></label><label>Bot protection<select><option>Turnstile required</option><option>Off</option></select></label><label>Form site name<input value=\"Northstar Journal\"></label><label>Accent colour<input value=\"#2457d6\"></label><label>Confirm page title<input value=\"Confirm your subscription\"></label></details></div><aside class=\"context\"><h2>Before publishing</h2><p>Unsaved draft preview: E-mail address, first name and consent wording. Double opt-in asks the person to confirm before consent counts.</p><button class=\"primary\">Submit for review</button><p>Saved v3 · design example</p></aside></div>",
+    "Segments": "<div class=\"tabs\" aria-label=\"Sections\"><button>Content</button><button>Preview</button><button>Versions</button><button>Activity</button></div><div class=\"columns\"><div><section class=\"panel\"><h2>Who is in it</h2><label>Description<input value=\"Readers who allow the newsletter\"></label><label>Match<select><option>All conditions</option><option>Any condition</option></select></label><label>Condition<select><option>Allows purpose</option><option>Trait</option><option>Did event</option><option>In segment</option><option>Not</option><option>Group</option></select></label><label>Purpose<select><option>Newsletter</option></select></label><button>Add condition</button><button>Estimate audience</button></section><section class=\"panel\"><h2>Members</h2><p>Membership is not consent. Sending still checks every person’s choices.</p><table><caption>Person overview · design examples</caption><thead><tr><th scope=\"col\">Person</th><th scope=\"col\">Added</th><th scope=\"col\">Action</th></tr></thead><tbody><tr><td data-label=\"Person\">Email hidden</td><td data-label=\"Added\">2 Nov 2026</td><td data-label=\"Action\"><button>Remove</button></td></tr></tbody></table><button>Add people</button><button>Import CSV</button><button>Refresh from source</button><button>Next page</button></section></div><aside class=\"context\"><h2>Before publishing</h2><p>Changes go live after review. Your published version is unchanged.</p><button class=\"primary\">Submit for review</button><p>Saved v3 · design example</p></aside></div>",
+    "Web experiences": "<div class=\"tabs\" aria-label=\"Sections\"><button>Content</button><button>Preview</button><button>Versions</button><button>Activity</button></div><div class=\"columns\"><div><section class=\"panel\"><h2>Placement and variants</h2><label>Placement<input value=\"article-footer\"></label><label>Description<input value=\"Newsletter signup below articles\"></label><label>Variant name<input value=\"A · concise introduction\"></label><label>Weight<input value=\"50\"></label><label>HTML<input value=\"&lt;p&gt;Read the next issue&lt;/p&gt;\"></label><label>Control share<input value=\"10%\"></label><details><summary>Advanced content and analysis</summary><p>Targeting, goal, method and all existing document fields remain editable.</p></details></section><section class=\"panel\"><h2>Results</h2><table><caption>Variant overview · design examples</caption><thead><tr><th scope=\"col\">Variant</th><th scope=\"col\">Exposed</th><th scope=\"col\">Converted</th><th scope=\"col\">Rate</th></tr></thead><tbody><tr><td data-label=\"Variant\">Control</td><td data-label=\"Exposed\">—</td><td data-label=\"Converted\">—</td><td data-label=\"Rate\">Unavailable</td></tr><tr><td data-label=\"Variant\">A</td><td data-label=\"Exposed\">—</td><td data-label=\"Converted\">—</td><td data-label=\"Rate\">Unavailable</td></tr></tbody></table><p>No exposures yet · period and latest activity unavailable.</p></section></div><aside class=\"context\"><h2>Before publishing</h2><p>Changes go live after review. Your published version is unchanged.</p><button class=\"primary\">Submit for review</button><p>Saved v3 · design example</p></aside></div>",
+    "Consent": "<div class=\"tabs\" aria-label=\"Sections\"><button>Consent</button><button>Purposes</button><button>Editorial topics</button></div><section class=\"panel\"><h2>Consent by purpose</h2><table><caption>Purpose overview · design examples</caption><thead><tr><th scope=\"col\">Purpose</th><th scope=\"col\">Choice</th><th scope=\"col\">People</th></tr></thead><tbody><tr><td data-label=\"Purpose\">Newsletter</td><td data-label=\"Choice\">Allowed</td><td data-label=\"People\">240</td></tr><tr><td data-label=\"Purpose\">Newsletter</td><td data-label=\"Choice\">No recorded choice</td><td data-label=\"People\">18</td></tr></tbody></table><p>Current recorded choices · not sending eligibility · freshness unavailable.</p></section><section class=\"panel\"><h2>Look up a person</h2><label>E-mail or profile identifier<input value=\"\"></label><button class=\"primary\">Find person</button><button>Record consent</button></section><section class=\"panel\"><h2>Consent ledger</h2><table><caption>When overview · design examples</caption><thead><tr><th scope=\"col\">When</th><th scope=\"col\">Choice</th><th scope=\"col\">Source</th></tr></thead><tbody><tr><td data-label=\"When\">2 Nov 2026</td><td data-label=\"Choice\">Allowed · E-mail</td><td data-label=\"Source\">Signup form</td></tr></tbody></table><p>Proof: Newsletter checkbox, version 3. Personal details stay hidden for this role.</p></section>",
+    "Purposes": "<section class=\"panel\"><h2>In-force purposes</h2><label>Name<input value=\"Newsletter\"></label><label>Lawful basis<select><option>Consent</option><option>Legitimate interest</option><option>Contract</option><option>Legal obligation</option></select></label><label>Description<input value=\"Your newsletter choices\"></label><label>Channels<input value=\"E-mail\"></label><label>Subscriber topics<input value=\"Weekly stories\"></label><button>Edit purposes</button></section>",
+    "Editorial topics": "<section class=\"panel\"><h2>Ideas and briefs</h2><label>Filter by owner<input value=\"\"></label><label>Filter by tag<input value=\"\"></label><label>Status<select><option>All</option><option>Idea</option><option>Scored</option><option>Brief</option><option>Approved</option><option>Drafting</option><option>Published</option><option>Archived</option></select></label><label>Minimum score<input value=\"25\"></label><button>New topic</button><table><caption>Title overview · design examples</caption><thead><tr><th scope=\"col\">Title</th><th scope=\"col\">Score</th><th scope=\"col\">Actions</th></tr></thead><tbody><tr><td data-label=\"Title\">The next journal</td><td data-label=\"Score\">75</td><td data-label=\"Actions\"><button>Create brief</button><button>Archive</button></td></tr></tbody></table></section>",
+    "Alerts": "<section class=\"panel\"><h2>Rules</h2><table><caption>Rule overview · design examples</caption><thead><tr><th scope=\"col\">Rule</th><th scope=\"col\">Condition</th><th scope=\"col\">Status</th><th scope=\"col\">Actions</th></tr></thead><tbody><tr><td data-label=\"Rule\">Bounce rate</td><td data-label=\"Condition\">Above 5% · 24 hours · at least 100 sent</td><td data-label=\"Status\">Not firing</td><td data-label=\"Actions\"><button>Edit</button><button>History</button><button>Send a test</button></td></tr><tr><td data-label=\"Rule\">Journey errors</td><td data-label=\"Condition\">Above 10 · 1 hour</td><td data-label=\"Status\">Paused</td><td data-label=\"Actions\"><button>Edit</button></td></tr></tbody></table></section><section class=\"panel\"><h2>Recent history</h2><table><caption>When overview · design examples</caption><thead><tr><th scope=\"col\">When</th><th scope=\"col\">Rule</th><th scope=\"col\">State</th><th scope=\"col\">Value / threshold</th></tr></thead><tbody><tr><td data-label=\"When\">2 Nov, 09:00</td><td data-label=\"Rule\">Bounce rate</td><td data-label=\"State\">Resolved</td><td data-label=\"Value / threshold\">3% / 5%</td></tr></tbody></table></section><section class=\"panel\"><h2>Rule settings</h2><label>Name<input value=\"Bounce rate\"></label><label>Kind<select><option>Deliverability</option><option>Signup drop</option><option>Journey errors</option></select></label><label>Minimum sent<input value=\"100\"></label><label>Threshold (%)<input value=\"5\"></label><label>Notify<select><option>Team member e-mail</option><option>Webhook endpoint</option></select></label><button class=\"primary\">Save rule</button></section>",
+    "Forms list": "<section class=\"panel\"><h2>Forms</h2><label>Search by name<input value=\"\"></label><label>Publication state<select><option>All publications</option><option>Published</option><option>Draft</option><option>In review</option><option>Rejected</option></select></label><button class=\"primary\">New form</button><table><caption>1 design example shown</caption><thead><tr><th>Name</th><th>Publication</th><th>Changed by</th></tr></thead><tbody><tr><td data-label=\"Name\">Weekly journal</td><td data-label=\"Publication\">Published v2 · Newer draft</td><td data-label=\"Changed by\">Sam Rivera · 2 Nov 2026</td></tr></tbody></table></section>",
+    "Segments list": "<section class=\"panel\"><h2>Segments</h2><label>Search by name<input value=\"\"></label><label>Publication state<select><option>All publications</option><option>Published</option><option>Draft</option><option>In review</option><option>Rejected</option></select></label><button class=\"primary\">New segment</button><table><caption>1 design example shown</caption><thead><tr><th>Name</th><th>Publication</th><th>Changed by</th></tr></thead><tbody><tr><td data-label=\"Name\">Weekly journal</td><td data-label=\"Publication\">Published v2 · Newer draft</td><td data-label=\"Changed by\">Sam Rivera · 2 Nov 2026</td></tr></tbody></table></section>",
+    "Web experiences list": "<section class=\"panel\"><h2>Web experiences</h2><label>Search by name<input value=\"\"></label><label>Publication state<select><option>All publications</option><option>Published</option><option>Draft</option><option>In review</option><option>Rejected</option></select></label><button class=\"primary\">New web experience</button><table><caption>1 design example shown</caption><thead><tr><th>Name</th><th>Publication</th><th>Changed by</th></tr></thead><tbody><tr><td data-label=\"Name\">Weekly journal</td><td data-label=\"Publication\">Published v2 · Newer draft</td><td data-label=\"Changed by\">Sam Rivera · 2 Nov 2026</td></tr></tbody></table></section>"
+  },
+  "states": {
+    "Ready": "Saved example · ready to review.",
+    "Loading": "Loading this page…",
+    "Empty": "Nothing here yet. Start with the existing create action.",
+    "No matches": "Nothing matches. Clear the filters to see more.",
+    "Error": "Couldn’t load this section. Retry.",
+    "Restricted": "Your role can’t open this page. Ask a workspace admin for access.",
+    "Not found": "This item is unavailable. It may have been removed or belong to another workspace.",
+    "Read only": "You can view this page. Your role cannot change it.",
+    "Unsaved draft": "Unsaved draft · Preview includes local changes where supported.",
+    "Saving": "Saving your draft…",
+    "Save failed": "Not saved. Your changes are still here. Try again.",
+    "Conflict": "A newer version is available. Keep your changes and review before saving.",
+    "In review": "Submitted for review. The published version is unchanged.",
+    "Rejected": "Changes requested: update the wording before submitting again.",
+    "Newer draft": "Published v2 · A newer draft is available.",
+    "Unavailable": "Value unavailable · No reliable result was returned.",
+    "Observed zero": "0 recorded results · A successful result, not an unavailable value.",
+    "Suppressed": "Some results are hidden to protect privacy. No value is shown.",
+    "Missing confirmation": "Choose a published confirmation e-mail before publishing this form.",
+    "Invalid origin": "Enter an allowed site such as https://example.com.",
+    "Snapshot source missing": "The source segment is unavailable. Existing members stay fixed.",
+    "Unmatched import": "3 imported rows did not match a person. Review the unmatched rows.",
+    "No exposures": "No exposures yet. A result cannot be calculated.",
+    "No goal": "Set a goal to measure conversions.",
+    "Insufficient sample": "There is not enough evidence to recommend a variant.",
+    "Paused": "This alert is paused. Its history is kept.",
+    "Firing": "This alert is firing. Review its value and threshold.",
+    "Resolved": "This alert recovered. Its episode is recorded.",
+    "Test failed": "The test notification failed. Review its delivery result.",
+    "Invalid trait": "Use a letter, then letters, digits or underscores; at most 20 additional fields.",
+    "Invalid redirect": "Enter an allowed address or a path beginning with /.",
+    "Confirmation pending": "Please check your inbox and confirm your subscription.",
+    "Estimate unavailable": "The audience estimate is unavailable. Your rules are retained.",
+    "Static list empty": "No one is on this list yet. Add people or import a CSV.",
+    "Snapshot unchanged": "The source is unavailable. The frozen list is unchanged.",
+    "Dry-run import": "Import preview only. No members have been changed.",
+    "Duplicate import": "Some rows already belong to the audience. Review the import result.",
+    "Unpublished experience": "Publish the experience before results can be collected.",
+    "No control": "No control group is configured. Comparison is unavailable.",
+    "No consent records": "No consent choices have been recorded for this person.",
+    "No lookup match": "No person matched that address. Try another address.",
+    "Test queued": "The test notification was queued. It has not yet been delivered.",
+    "Test skipped": "No test notification was queued. Review the selected recipients.",
+    "Not firing": "This rule is not firing. This does not establish healthy traffic.",
+    "No episodes": "This rule has no recorded episodes.",
+    "Partial failure": "One section failed to load. Other available sections remain usable."
+  },
+  "nav": [
+    [
+      "Work",
+      [
+        "Home",
+        "Approvals",
+        "Agents"
+      ]
+    ],
+    [
+      "Marketing",
+      [
+        "Campaigns",
+        "Broadcasts",
+        "Journeys",
+        "Web experiences"
+      ]
+    ],
+    [
+      "Audience",
+      [
+        "People",
+        "Segments",
+        "Forms",
+        "Consent"
+      ]
+    ],
+    [
+      "Content",
+      [
+        "Templates",
+        "Assets",
+        "Brand"
+      ]
+    ],
+    [
+      "Insights",
+      [
+        "Analytics",
+        "Message activity",
+        "Deliverability",
+        "Alerts"
+      ]
+    ],
+    [
+      "Settings",
+      []
+    ]
+  ],
+  "tokens": {
+    "light": {
+      "bg": "#f7f6f2",
+      "surface": "#ffffff",
+      "surface-2": "#f0efeb",
+      "surface-3": "#e6e5df",
+      "line": "#deded7",
+      "line-strong": "#c5c6bf",
+      "control": "#7c807a",
+      "fg": "#202521",
+      "fg-2": "#4c554e",
+      "muted": "#606860",
+      "accent": "#2457d6",
+      "accent-hover": "#1e4bbb",
+      "accent-fg": "#ffffff",
+      "accent-soft": "#eaf0fd",
+      "good": "#18794a",
+      "good-soft": "#e7f4ed",
+      "warn": "#9a5400",
+      "warn-soft": "#fcf0df",
+      "bad": "#c0282d",
+      "bad-soft": "#fcebeb",
+      "viz-1": "#2457a7",
+      "viz-2": "#087d80",
+      "viz-3": "#996000",
+      "viz-4": "#8256a8",
+      "viz-5": "#ba472b",
+      "viz-6": "#59636e",
+      "seq-1": "#e2f3f1",
+      "seq-2": "#acd9d6",
+      "seq-3": "#6bb8b4",
+      "seq-4": "#268e8e",
+      "seq-5": "#09666c",
+      "div-1": "#9a4c0c",
+      "div-2": "#cb8b48",
+      "div-3": "#f0d0aa",
+      "div-4": "#f0efeb",
+      "div-5": "#b6d9d7",
+      "div-6": "#5faaa9",
+      "div-7": "#086f73"
+    },
+    "dark": {
+      "bg": "#111512",
+      "surface": "#191f1b",
+      "surface-2": "#222a24",
+      "surface-3": "#2c352e",
+      "line": "#343e36",
+      "line-strong": "#49554b",
+      "control": "#87958a",
+      "fg": "#edf0e9",
+      "fg-2": "#c0c9bf",
+      "muted": "#a0aca1",
+      "accent": "#8baafa",
+      "accent-hover": "#a5bdfb",
+      "accent-fg": "#111512",
+      "accent-soft": "#222f4a",
+      "good": "#70d29b",
+      "good-soft": "#193526",
+      "warn": "#f0b665",
+      "warn-soft": "#392c18",
+      "bad": "#ff9292",
+      "bad-soft": "#422427",
+      "viz-1": "#8eb5ff",
+      "viz-2": "#59c8c6",
+      "viz-3": "#e8b653",
+      "viz-4": "#c3a1e5",
+      "viz-5": "#ff9d80",
+      "viz-6": "#b6c1cc",
+      "seq-1": "#213c3c",
+      "seq-2": "#2b5e5d",
+      "seq-3": "#378782",
+      "seq-4": "#55b2aa",
+      "seq-5": "#8cddd0",
+      "div-1": "#f5c48a",
+      "div-2": "#ce985e",
+      "div-3": "#7c5a35",
+      "div-4": "#2c352e",
+      "div-5": "#305c5a",
+      "div-6": "#52a09a",
+      "div-7": "#8cddd0"
+    }
+  },
+  "css": "*{box-sizing:border-box}body{margin:0;font:14px/1.57 system-ui;color:var(--fg)}button,input,select,summary{font:inherit}button,select,input{min-height:40px;border:1px solid var(--control);background:var(--surface);color:var(--fg);border-radius:8px;padding:8px 12px;max-width:100%}button{cursor:pointer;margin:4px 6px 4px 0}button.primary{background:var(--accent);color:var(--accent-fg);border-color:var(--accent)}:focus-visible{outline:2px solid var(--accent);outline-offset:2px}h1{font-size:24px;line-height:32px;letter-spacing:-.02em;margin:0 0 8px}h2{font-size:16px;line-height:24px;margin:0 0 12px}h3{font-size:13px}p{margin:8px 0 16px}small,.muted{color:var(--muted)}.shell{display:grid;grid-template-columns:216px minmax(0,1fr);background:var(--bg);min-height:1000px}.nav{background:var(--surface);border-right:1px solid var(--line);padding:20px 16px}.nav h2{margin-bottom:24px}.nav h3{color:var(--muted);margin:16px 8px 4px;text-transform:uppercase;font-size:11px;letter-spacing:.08em}.nav a{display:block;color:var(--fg-2);padding:5px 8px;text-decoration:none;border-radius:6px}.nav a.active{background:var(--accent-soft);color:var(--accent);font-weight:600}.nav .settings{margin-top:20px;border-top:1px solid var(--line);padding-top:12px}.top{padding:12px 24px;border-bottom:1px solid var(--line);color:var(--muted)}main{padding:28px;min-width:0}.pagehead{display:flex;justify-content:space-between;align-items:start;gap:16px;margin-bottom:24px}.pagehead p{color:var(--muted)}.panel{margin-bottom:24px;border:1px solid var(--line);border-radius:12px;padding:20px;background:var(--surface);min-width:0}.columns{display:grid;grid-template-columns:minmax(0,800px) 320px;gap:24px}.context{padding:20px;background:var(--surface-2);border-radius:12px;align-self:start}.tabs{display:flex;flex-wrap:wrap;gap:4px;border-bottom:1px solid var(--line);padding-bottom:8px;margin-bottom:24px}.tabs button:first-child{color:var(--accent);border-color:var(--accent)}label{display:block;margin-bottom:16px;color:var(--fg-2)}label input:not([type=checkbox]),label select{display:block;width:100%;margin-top:6px}input[type=checkbox]{min-height:20px;width:20px;vertical-align:middle}.check{padding:8px 0}.tiles{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}.tiles .panel{margin:0}.thumbnail{background:var(--surface-2);padding:36px 12px;border-radius:8px;text-align:center;color:var(--muted)}table{border-collapse:collapse;width:100%;font-size:13px;line-height:20px;text-align:left}caption{text-align:left;color:var(--muted);padding-bottom:12px}th{color:var(--muted);font-weight:500}td,th{padding:12px 8px;border-bottom:1px solid var(--line);overflow-wrap:anywhere}.mail,.recipient{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:32px;max-width:640px;margin:16px auto}.mail{box-shadow:0 3px 12px #0001}.recipient header{font-size:12px;letter-spacing:.1em;color:var(--muted);margin-bottom:32px}.recipient h1{font-size:32px;line-height:40px}details{background:var(--surface-2);border-radius:8px;padding:12px;margin-bottom:24px}summary{cursor:pointer;min-height:40px}.builder{display:grid;grid-template-columns:190px minmax(0,1fr) 280px;gap:16px}.node{border:1px solid var(--control);border-radius:12px;padding:18px;background:var(--surface);max-width:300px;margin:auto}.connector{text-align:center;font-size:24px;color:var(--muted)}.graph{background:var(--surface-2)}.warning,.notice{padding:12px 16px;border-radius:8px;background:var(--warn-soft);color:var(--warn);margin-bottom:24px}.warning{font-size:12px;margin-top:12px}.simulation{padding:12px 24px;background:var(--accent-soft);color:var(--fg)}.mobilemenu{display:none}hr{border:0;border-top:1px solid var(--line);margin:24px 0}@media(max-width:1279px){.columns{grid-template-columns:1fr}.builder{grid-template-columns:1fr 1.5fr}.builder>section:last-child{grid-column:1/-1}}@media(max-width:900px){.shell{grid-template-columns:1fr}.nav{border-right:0;border-bottom:1px solid var(--line)}.nav h2{margin:0}.nav .navitems{display:none}.nav.open .navitems{display:block}.mobilemenu{display:inline-block;float:right}.tiles{grid-template-columns:repeat(2,minmax(0,1fr))}main{padding:24px}.builder{grid-template-columns:1fr}.builder>section:last-child{grid-column:auto}}@media(max-width:767px){main{padding:24px 16px}.pagehead{display:block}.tiles{grid-template-columns:1fr}.panel{padding:16px}.recipient,.mail{padding:24px 16px}.recipient h1{font-size:28px;line-height:36px}thead{display:none}table,tbody,tr,td{display:block}tr{padding:12px 0;border-bottom:1px solid var(--line)}td{border:0;padding:6px 0}td:before{content:attr(data-label) ': ';color:var(--muted)}.top{padding:12px 16px}input{font-size:16px}}@media(prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}",
+  "slug": "audience-marketing"
+};const screen=document.getElementById('screen'),scenario=document.getElementById('scenario'),theme=document.getElementById('theme');
+for(const k of Object.keys(D.screens))screen.add(new Option(k,k));for(const k of Object.keys(D.states))scenario.add(new Option(k,k));
+function render(){for(const w of [1440,768,390]){const t=theme.value,s=scenario.value,name=screen.value;const vars=Object.entries(D.tokens[t]).map(([k,v])=>'--'+k+':'+v).join(';');let nav=D.nav.map(([g,items])=>g==='Settings'?'<div class="settings"><a href="#">Settings</a></div>':'<h3>'+g+'</h3>'+items.map(x=>'<a href="#" class="'+(x===name?'active':'')+'">'+x+'</a>').join('')).join('');let blocked=['Loading','Empty','No matches','Error','Restricted','Not found','Suppressed','Unavailable','Observed zero'].includes(s);let body=blocked?'<section class="panel" aria-busy="'+(s==='Loading')+'"><h2>'+s+'</h2><p>'+D.states[s]+'</p>'+(['Error','No matches','Not found'].includes(s)?'<button>Try again / Go back</button>':'')+'</section>':D.screens[name];let notice=s==='Ready'?'':'<div class="notice" role="status">'+D.states[s]+'</div>';let doc='<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>:root{'+vars+';color-scheme:'+t+'}'+D.css+'</style><body><div class="shell"><nav class="nav" aria-label="Main navigation"><button class="mobilemenu" aria-expanded="false">Menu</button><h2>Northstar Journal</h2><small>Design example workspace</small><div class="navitems">'+nav+'</div></nav><div><div class="top">Workspace / '+name+' · Account preferences</div>'+(D.slug==='demo'?'<div class="simulation">Simulated demo · sample data · Changes are unavailable</div>':'')+'<main><div class="pagehead"><div><small>PHASE 27 · DESIGN EXAMPLE</small><h1>'+name+'</h1><p>Clear choices. Familiar controls. Every existing capability retained.</p></div><button class="primary">'+(D.slug==='recipients'?'Preview only':'Save draft')+'</button></div>'+notice+body+'<p class="muted">Design proposal · Synthetic fixtures · Actions do not contact a server.</p></main></div></div><script>document.querySelector(".mobilemenu").onclick=function(){let n=document.querySelector(".nav");n.classList.toggle("open");this.setAttribute("aria-expanded",n.classList.contains("open"))};document.querySelectorAll("a").forEach(a=>a.onclick=e=>e.preventDefault());document.querySelectorAll("button:not(.mobilemenu)").forEach(b=>{b.disabled=true;b.title="Offline design example"});<'+ '/script></body></html>';document.getElementById('frame'+w).srcdoc=doc}}
+for(const el of [screen,scenario,theme])el.addEventListener('change',render);render();</script></body></html>

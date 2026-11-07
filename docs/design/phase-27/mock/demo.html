@@ -1,0 +1,174 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Demo parity · #530</title><style>html,body{margin:0;font:14px/1.5 system-ui;color:var(--foreground,#202521)}.controls{display:flex;flex-wrap:wrap;gap:16px;padding:16px;background:var(--card,#f0efeb);border-radius:12px}label{display:block}select{display:block;min-height:40px;max-width:260px;padding:8px;font:inherit}h2{font-size:16px}.host{overflow:auto;max-width:100%;margin:16px 0 32px;border-radius:12px}iframe{border:1px solid #87958a;display:block;height:1300px}.intro{padding:16px 0}.intro p{margin:0}</style></head><body><div class="intro"><p>Demo parity · #530 · Offline review. Select screen, state and theme. Each fixed-width frame is independently responsive; scroll its host to inspect desktop at narrow widths.</p></div><div class="controls"><label>Screen<select id="screen"></select></label><label>Scenario<select id="scenario"></select></label><label>Theme<select id="theme"><option value="light">Light</option><option value="dark">Dark</option></select></label></div><h2>1440 px</h2><div class="host" tabindex="0" role="region" aria-label="1440 pixel layout"><iframe id="frame1440" width="1440" title="1440 pixel design review"></iframe></div><h2>768 px</h2><div class="host" tabindex="0" role="region" aria-label="768 pixel layout"><iframe id="frame768" width="768" title="768 pixel design review"></iframe></div><h2>390 px</h2><div class="host" tabindex="0" role="region" aria-label="390 pixel layout"><iframe id="frame390" width="390" title="390 pixel design review"></iframe></div><script>const D={
+  "screens": {
+    "Home": "<section class=\"panel\"><h2>Needs your attention</h2><table><caption>Work overview · design examples</caption><thead><tr><th scope=\"col\">Work</th><th scope=\"col\">Status</th><th scope=\"col\">Next step</th></tr></thead><tbody><tr><td data-label=\"Work\">Weekly journal</td><td data-label=\"Status\">Awaiting review</td><td data-label=\"Next step\"><button>Review</button></td></tr><tr><td data-label=\"Work\">Welcome journey</td><td data-label=\"Status\">1 issue</td><td data-label=\"Next step\"><button>Open journey</button></td></tr></tbody></table></section><section class=\"panel\"><h2>A consistent sample workspace</h2><p>Fixed fixture date: 2 November 2026 · Europe/Copenhagen. Totals use the same fixture definitions as the reports.</p><div class=\"tiles\"><article><h2>3</h2><p>Drafts awaiting review · current sample</p></article><article><h2>2</h2><p>Published journeys · current sample</p></article></div></section>",
+    "People": "<div class=\"tabs\" aria-label=\"Sections\"><button>Consent</button><button>Purposes</button><button>Editorial topics</button></div><section class=\"panel\"><h2>Consent by purpose</h2><table><caption>Purpose overview · design examples</caption><thead><tr><th scope=\"col\">Purpose</th><th scope=\"col\">Choice</th><th scope=\"col\">People</th></tr></thead><tbody><tr><td data-label=\"Purpose\">Newsletter</td><td data-label=\"Choice\">Allowed</td><td data-label=\"People\">240</td></tr><tr><td data-label=\"Purpose\">Newsletter</td><td data-label=\"Choice\">No recorded choice</td><td data-label=\"People\">18</td></tr></tbody></table><p>Current recorded choices · not sending eligibility · freshness unavailable.</p></section><section class=\"panel\"><h2>Look up a person</h2><label>E-mail or profile identifier<input value=\"\"></label><button class=\"primary\">Find person</button><button>Record consent</button></section><section class=\"panel\"><h2>Consent ledger</h2><table><caption>When overview · design examples</caption><thead><tr><th scope=\"col\">When</th><th scope=\"col\">Choice</th><th scope=\"col\">Source</th></tr></thead><tbody><tr><td data-label=\"When\">2 Nov 2026</td><td data-label=\"Choice\">Allowed · E-mail</td><td data-label=\"Source\">Signup form</td></tr></tbody></table><p>Proof: Newsletter checkbox, version 3. Personal details stay hidden for this role.</p></section>",
+    "Templates": "<div class=\"tabs\" aria-label=\"Sections\"><button>Content</button><button>Preview</button><button>Versions</button><button>Activity</button></div><div class=\"columns\"><div><section class=\"panel\"><h2>Message</h2><label>Subject<input value=\"A quieter way to keep in touch\"></label><label>Preheader<input value=\"This week from Northstar\"></label><label>Purpose<select><option>Newsletter</option></select></label><label>Topic<select><option>All updates</option></select></label><div class=\"tabs\" aria-label=\"Sections\"><button>Visual</button><button>Code</button></div><article class=\"mail\"><small>NORTHSTAR JOURNAL</small><h2>Good ideas, delivered thoughtfully.</h2><p>Hi Ada,</p><p>A few things worth your time this week, chosen by our editors.</p><button class=\"primary\">Read the journal</button><hr><p>Manage preferences · Unsubscribe · View in browser</p></article><button>Insert image</button><button>Insert block</button><details><summary>Text alternative, sample data and campaign tags</summary><label>Plain-text version<input value=\"\"></label><label>Sample data<input value=\"Ada\"></label><label>Campaign<input value=\"weekly-journal\"></label></details></section></div><aside class=\"context\"><h2>Before publishing</h2><p>Preview · Saved v3. Desktop / Mobile / Dark mail and text alternatives remain available. Send me a test uses the saved version.</p><button class=\"primary\">Submit for review</button><p>Saved v3 · design example</p></aside></div>",
+    "Journeys": "<div class=\"tabs\" aria-label=\"Sections\"><button>Content</button><button>Preview</button><button>Report</button><button>Versions</button><button>Activity</button></div><div class=\"toolbar\"><button>Add step</button><button>Auto-layout</button><button>Undo</button><button>Redo</button><button>Fit</button><button>Minimap</button><button>Full screen</button></div><div class=\"builder\"><section class=\"panel\"><h2>Steps</h2><label>Find a step<input value=\"\"></label><h3>Message</h3><button>E-mail</button><button>SMS</button><button>Push</button><h3>Wait</h3><button>Wait</button><button>Wait for event</button><details><summary>All categories</summary><p>Trigger · Branch and goal · AI · Webhook and action · Exit</p></details></section><section class=\"panel graph\" tabindex=\"0\" aria-label=\"Journey canvas\"><h2>Welcome journey</h2><article class=\"node\">① Signup confirmed<br><small>Trigger</small></article><div class=\"connector\">↓</div><article class=\"node\">② Welcome e-mail<br><small>Message · Choose a template</small><p class=\"warning\">1 issue · Template is missing</p></article><div class=\"connector\">↓</div><article class=\"node\">③ Wait one day<br><small>Wait · Next: follow-up</small></article></section><section class=\"panel\"><div class=\"tabs\" aria-label=\"Sections\"><button>Step</button><button>Check</button><button>Simulate</button></div><h2>Welcome e-mail</h2><label>Template<select><option>Choose a template</option><option>Welcome to the journal</option></select></label><label>Next step<select><option>Wait one day</option></select></label><button>Duplicate</button><button>Delete step</button><p>Choose a template before submitting for review.</p></section></div>",
+    "Providers": "<section class=\"panel\"><h2>Delivery and AI</h2><table><caption>Channel overview · design examples</caption><thead><tr><th scope=\"col\">Channel</th><th scope=\"col\">Provider</th><th scope=\"col\">Use</th><th scope=\"col\">Action</th></tr></thead><tbody><tr><td data-label=\"Channel\">E-mail</td><td data-label=\"Provider\">Postmark</td><td data-label=\"Use\">Marketing and transactional</td><td data-label=\"Action\"><button>Edit</button></td></tr><tr><td data-label=\"Channel\">SMS</td><td data-label=\"Provider\">Not configured</td><td data-label=\"Use\">—</td><td data-label=\"Action\"><button>Add SMS</button></td></tr><tr><td data-label=\"Channel\">Push</td><td data-label=\"Provider\">Not configured</td><td data-label=\"Use\">—</td><td data-label=\"Action\"><button>Add push</button></td></tr><tr><td data-label=\"Channel\">AI</td><td data-label=\"Provider\">Configured</td><td data-label=\"Use\">Fast and default model</td><td data-label=\"Action\"><button>Edit</button></td></tr></tbody></table></section><section class=\"panel\"><h2>E-mail provider</h2><label>Name<input value=\"Newsletter delivery\"></label><label>Provider<select><option>Postmark</option><option>SMTP</option><option>Amazon SES</option></select></label><label>From address<input value=\"journal@example.com\"></label><label>From name<input value=\"Northstar Journal\"></label><label>Reply-to<input value=\"hello@example.com\"></label><label>API key<input value=\"\"></label><p>Leave a stored credential blank to keep it. It cannot be read back.</p><button class=\"primary\">Save provider</button><details><summary>Setup help</summary><p>Verify your sending domain with the provider, then enter its credential here. Provider tracking settings can override your choice.</p></details></section>",
+    "Analytics": "<section class=\"panel\"><h2>Sample report</h2><p>The integrated demo uses the real report component and its seeded results, period, denominator and freshness labels.</p><p>Offline design example · no live data.</p></section>"
+  },
+  "states": {
+    "Ready": "Saved example · ready to review.",
+    "Loading": "Loading this page…",
+    "Empty": "Nothing here yet. Start with the existing create action.",
+    "No matches": "Nothing matches. Clear the filters to see more.",
+    "Error": "Couldn’t load this section. Retry.",
+    "Restricted": "Your role can’t open this page. Ask a workspace admin for access.",
+    "Not found": "This item is unavailable. It may have been removed or belong to another workspace.",
+    "Read only": "You can view this page. Your role cannot change it.",
+    "Unsaved draft": "Unsaved draft · Preview includes local changes where supported.",
+    "Saving": "Saving your draft…",
+    "Save failed": "Not saved. Your changes are still here. Try again.",
+    "Conflict": "A newer version is available. Keep your changes and review before saving.",
+    "In review": "Submitted for review. The published version is unchanged.",
+    "Rejected": "Changes requested: update the wording before submitting again.",
+    "Newer draft": "Published v2 · A newer draft is available.",
+    "Unavailable": "Value unavailable · No reliable result was returned.",
+    "Observed zero": "0 recorded results · A successful result, not an unavailable value.",
+    "Suppressed": "Some results are hidden to protect privacy. No value is shown.",
+    "Mutation unavailable": "Demo only · changes are unavailable. Sign in to work with your own data.",
+    "Legacy destination": "This walkthrough has been retired. Explore the real product screens with sample data.",
+    "Missing fixture": "This example is unavailable. No request was sent to a live workspace.",
+    "Signed-in storage present": "Simulated workspace remains isolated from your signed-in workspace.",
+    "No sample activity": "There is no activity in this sample period. Choose another period.",
+    "Demo exit": "Return to sign in to use your own workspace.",
+    "Fixed fixture time": "Sample activity is fixed at 2 November 2026, Europe/Copenhagen.",
+    "Restricted sample role": "This sample role cannot open the selected section."
+  },
+  "nav": [
+    [
+      "Work",
+      [
+        "Home",
+        "Approvals",
+        "Agents"
+      ]
+    ],
+    [
+      "Marketing",
+      [
+        "Campaigns",
+        "Broadcasts",
+        "Journeys",
+        "Web experiences"
+      ]
+    ],
+    [
+      "Audience",
+      [
+        "People",
+        "Segments",
+        "Forms",
+        "Consent"
+      ]
+    ],
+    [
+      "Content",
+      [
+        "Templates",
+        "Assets",
+        "Brand"
+      ]
+    ],
+    [
+      "Insights",
+      [
+        "Analytics",
+        "Message activity",
+        "Deliverability",
+        "Alerts"
+      ]
+    ],
+    [
+      "Settings",
+      []
+    ]
+  ],
+  "tokens": {
+    "light": {
+      "bg": "#f7f6f2",
+      "surface": "#ffffff",
+      "surface-2": "#f0efeb",
+      "surface-3": "#e6e5df",
+      "line": "#deded7",
+      "line-strong": "#c5c6bf",
+      "control": "#7c807a",
+      "fg": "#202521",
+      "fg-2": "#4c554e",
+      "muted": "#606860",
+      "accent": "#2457d6",
+      "accent-hover": "#1e4bbb",
+      "accent-fg": "#ffffff",
+      "accent-soft": "#eaf0fd",
+      "good": "#18794a",
+      "good-soft": "#e7f4ed",
+      "warn": "#9a5400",
+      "warn-soft": "#fcf0df",
+      "bad": "#c0282d",
+      "bad-soft": "#fcebeb",
+      "viz-1": "#2457a7",
+      "viz-2": "#087d80",
+      "viz-3": "#996000",
+      "viz-4": "#8256a8",
+      "viz-5": "#ba472b",
+      "viz-6": "#59636e",
+      "seq-1": "#e2f3f1",
+      "seq-2": "#acd9d6",
+      "seq-3": "#6bb8b4",
+      "seq-4": "#268e8e",
+      "seq-5": "#09666c",
+      "div-1": "#9a4c0c",
+      "div-2": "#cb8b48",
+      "div-3": "#f0d0aa",
+      "div-4": "#f0efeb",
+      "div-5": "#b6d9d7",
+      "div-6": "#5faaa9",
+      "div-7": "#086f73"
+    },
+    "dark": {
+      "bg": "#111512",
+      "surface": "#191f1b",
+      "surface-2": "#222a24",
+      "surface-3": "#2c352e",
+      "line": "#343e36",
+      "line-strong": "#49554b",
+      "control": "#87958a",
+      "fg": "#edf0e9",
+      "fg-2": "#c0c9bf",
+      "muted": "#a0aca1",
+      "accent": "#8baafa",
+      "accent-hover": "#a5bdfb",
+      "accent-fg": "#111512",
+      "accent-soft": "#222f4a",
+      "good": "#70d29b",
+      "good-soft": "#193526",
+      "warn": "#f0b665",
+      "warn-soft": "#392c18",
+      "bad": "#ff9292",
+      "bad-soft": "#422427",
+      "viz-1": "#8eb5ff",
+      "viz-2": "#59c8c6",
+      "viz-3": "#e8b653",
+      "viz-4": "#c3a1e5",
+      "viz-5": "#ff9d80",
+      "viz-6": "#b6c1cc",
+      "seq-1": "#213c3c",
+      "seq-2": "#2b5e5d",
+      "seq-3": "#378782",
+      "seq-4": "#55b2aa",
+      "seq-5": "#8cddd0",
+      "div-1": "#f5c48a",
+      "div-2": "#ce985e",
+      "div-3": "#7c5a35",
+      "div-4": "#2c352e",
+      "div-5": "#305c5a",
+      "div-6": "#52a09a",
+      "div-7": "#8cddd0"
+    }
+  },
+  "css": "*{box-sizing:border-box}body{margin:0;font:14px/1.57 system-ui;color:var(--fg)}button,input,select,summary{font:inherit}button,select,input{min-height:40px;border:1px solid var(--control);background:var(--surface);color:var(--fg);border-radius:8px;padding:8px 12px;max-width:100%}button{cursor:pointer;margin:4px 6px 4px 0}button.primary{background:var(--accent);color:var(--accent-fg);border-color:var(--accent)}:focus-visible{outline:2px solid var(--accent);outline-offset:2px}h1{font-size:24px;line-height:32px;letter-spacing:-.02em;margin:0 0 8px}h2{font-size:16px;line-height:24px;margin:0 0 12px}h3{font-size:13px}p{margin:8px 0 16px}small,.muted{color:var(--muted)}.shell{display:grid;grid-template-columns:216px minmax(0,1fr);background:var(--bg);min-height:1000px}.nav{background:var(--surface);border-right:1px solid var(--line);padding:20px 16px}.nav h2{margin-bottom:24px}.nav h3{color:var(--muted);margin:16px 8px 4px;text-transform:uppercase;font-size:11px;letter-spacing:.08em}.nav a{display:block;color:var(--fg-2);padding:5px 8px;text-decoration:none;border-radius:6px}.nav a.active{background:var(--accent-soft);color:var(--accent);font-weight:600}.nav .settings{margin-top:20px;border-top:1px solid var(--line);padding-top:12px}.top{padding:12px 24px;border-bottom:1px solid var(--line);color:var(--muted)}main{padding:28px;min-width:0}.pagehead{display:flex;justify-content:space-between;align-items:start;gap:16px;margin-bottom:24px}.pagehead p{color:var(--muted)}.panel{margin-bottom:24px;border:1px solid var(--line);border-radius:12px;padding:20px;background:var(--surface);min-width:0}.columns{display:grid;grid-template-columns:minmax(0,800px) 320px;gap:24px}.context{padding:20px;background:var(--surface-2);border-radius:12px;align-self:start}.tabs{display:flex;flex-wrap:wrap;gap:4px;border-bottom:1px solid var(--line);padding-bottom:8px;margin-bottom:24px}.tabs button:first-child{color:var(--accent);border-color:var(--accent)}label{display:block;margin-bottom:16px;color:var(--fg-2)}label input:not([type=checkbox]),label select{display:block;width:100%;margin-top:6px}input[type=checkbox]{min-height:20px;width:20px;vertical-align:middle}.check{padding:8px 0}.tiles{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}.tiles .panel{margin:0}.thumbnail{background:var(--surface-2);padding:36px 12px;border-radius:8px;text-align:center;color:var(--muted)}table{border-collapse:collapse;width:100%;font-size:13px;line-height:20px;text-align:left}caption{text-align:left;color:var(--muted);padding-bottom:12px}th{color:var(--muted);font-weight:500}td,th{padding:12px 8px;border-bottom:1px solid var(--line);overflow-wrap:anywhere}.mail,.recipient{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:32px;max-width:640px;margin:16px auto}.mail{box-shadow:0 3px 12px #0001}.recipient header{font-size:12px;letter-spacing:.1em;color:var(--muted);margin-bottom:32px}.recipient h1{font-size:32px;line-height:40px}details{background:var(--surface-2);border-radius:8px;padding:12px;margin-bottom:24px}summary{cursor:pointer;min-height:40px}.builder{display:grid;grid-template-columns:190px minmax(0,1fr) 280px;gap:16px}.node{border:1px solid var(--control);border-radius:12px;padding:18px;background:var(--surface);max-width:300px;margin:auto}.connector{text-align:center;font-size:24px;color:var(--muted)}.graph{background:var(--surface-2)}.warning,.notice{padding:12px 16px;border-radius:8px;background:var(--warn-soft);color:var(--warn);margin-bottom:24px}.warning{font-size:12px;margin-top:12px}.simulation{padding:12px 24px;background:var(--accent-soft);color:var(--fg)}.mobilemenu{display:none}hr{border:0;border-top:1px solid var(--line);margin:24px 0}@media(max-width:1279px){.columns{grid-template-columns:1fr}.builder{grid-template-columns:1fr 1.5fr}.builder>section:last-child{grid-column:1/-1}}@media(max-width:900px){.shell{grid-template-columns:1fr}.nav{border-right:0;border-bottom:1px solid var(--line)}.nav h2{margin:0}.nav .navitems{display:none}.nav.open .navitems{display:block}.mobilemenu{display:inline-block;float:right}.tiles{grid-template-columns:repeat(2,minmax(0,1fr))}main{padding:24px}.builder{grid-template-columns:1fr}.builder>section:last-child{grid-column:auto}}@media(max-width:767px){main{padding:24px 16px}.pagehead{display:block}.tiles{grid-template-columns:1fr}.panel{padding:16px}.recipient,.mail{padding:24px 16px}.recipient h1{font-size:28px;line-height:36px}thead{display:none}table,tbody,tr,td{display:block}tr{padding:12px 0;border-bottom:1px solid var(--line)}td{border:0;padding:6px 0}td:before{content:attr(data-label) ': ';color:var(--muted)}.top{padding:12px 16px}input{font-size:16px}}@media(prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}",
+  "slug": "demo"
+};const screen=document.getElementById('screen'),scenario=document.getElementById('scenario'),theme=document.getElementById('theme');
+for(const k of Object.keys(D.screens))screen.add(new Option(k,k));for(const k of Object.keys(D.states))scenario.add(new Option(k,k));
+function render(){for(const w of [1440,768,390]){const t=theme.value,s=scenario.value,name=screen.value;const vars=Object.entries(D.tokens[t]).map(([k,v])=>'--'+k+':'+v).join(';');let nav=D.nav.map(([g,items])=>g==='Settings'?'<div class="settings"><a href="#">Settings</a></div>':'<h3>'+g+'</h3>'+items.map(x=>'<a href="#" class="'+(x===name?'active':'')+'">'+x+'</a>').join('')).join('');let blocked=['Loading','Empty','No matches','Error','Restricted','Not found','Suppressed','Unavailable','Observed zero'].includes(s);let body=blocked?'<section class="panel" aria-busy="'+(s==='Loading')+'"><h2>'+s+'</h2><p>'+D.states[s]+'</p>'+(['Error','No matches','Not found'].includes(s)?'<button>Try again / Go back</button>':'')+'</section>':D.screens[name];let notice=s==='Ready'?'':'<div class="notice" role="status">'+D.states[s]+'</div>';let doc='<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>:root{'+vars+';color-scheme:'+t+'}'+D.css+'</style><body><div class="shell"><nav class="nav" aria-label="Main navigation"><button class="mobilemenu" aria-expanded="false">Menu</button><h2>Northstar Journal</h2><small>Design example workspace</small><div class="navitems">'+nav+'</div></nav><div><div class="top">Workspace / '+name+' · Account preferences</div>'+(D.slug==='demo'?'<div class="simulation">Simulated demo · sample data · Changes are unavailable</div>':'')+'<main><div class="pagehead"><div><small>PHASE 27 · DESIGN EXAMPLE</small><h1>'+name+'</h1><p>Clear choices. Familiar controls. Every existing capability retained.</p></div><button class="primary">'+(D.slug==='recipients'?'Preview only':'Save draft')+'</button></div>'+notice+body+'<p class="muted">Design proposal · Synthetic fixtures · Actions do not contact a server.</p></main></div></div><script>document.querySelector(".mobilemenu").onclick=function(){let n=document.querySelector(".nav");n.classList.toggle("open");this.setAttribute("aria-expanded",n.classList.contains("open"))};document.querySelectorAll("a").forEach(a=>a.onclick=e=>e.preventDefault());document.querySelectorAll("button:not(.mobilemenu)").forEach(b=>{b.disabled=true;b.title="Offline design example"});<'+ '/script></body></html>';document.getElementById('frame'+w).srcdoc=doc}}
+for(const el of [screen,scenario,theme])el.addEventListener('change',render);render();</script></body></html>
