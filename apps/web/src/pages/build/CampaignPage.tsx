@@ -1,7 +1,6 @@
 import { ArtifactDetailPage } from '../../features/artifacts/ArtifactDetailPage';
 import { CampaignEditor } from '../../features/artifacts/CampaignEditor';
-import { CampaignEvaluation } from '../../features/artifacts/CampaignEvaluation';
-import { CampaignHoldoutCard } from '../../features/campaigns/CampaignHoldoutCard';
+import { CampaignEvaluationTab } from '../../features/campaigns/phase26/CampaignEvaluationTab';
 
 export default function CampaignPage({ params }: { params: Record<string, string> }) {
   return (
@@ -14,12 +13,7 @@ export default function CampaignPage({ params }: { params: Record<string, string
         {
           key: 'evaluation',
           label: 'Evaluation',
-          render: (a) => (
-            <div className="space-y-4">
-              <CampaignEvaluation campaignId={a.id} />
-              <CampaignHoldoutCard campaignId={a.id} />
-            </div>
-          ),
+          render: (a) => <CampaignEvaluationTab campaignId={a.id} artifact={a} active />,
         },
       ]}
     />

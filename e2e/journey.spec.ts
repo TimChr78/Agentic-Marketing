@@ -117,7 +117,9 @@ test('journey builder uses the window and shows live stats (#114, #58)', async (
 
   // #58: live stats for the published version, off until asked for.
   await page.getByRole('button', { name: 'Show stats' }).click();
-  await expect(page.getByText('0 passed · 0 waiting').first()).toBeVisible();
+  // Phase 26 (#507): counts are labelled by what they measure; an absent count is unavailable, not 0.
+  await expect(page.getByText('All versions · reached all time / waiting now').first()).toBeVisible();
+  await expect(page.getByText(/reached all time · .* waiting now/).first()).toBeVisible();
 
   // Full screen hides the app chrome; with the panels collapsed the canvas is the window.
   await page.getByRole('button', { name: 'Hide step palette' }).click();

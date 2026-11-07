@@ -74,7 +74,17 @@ for (const name of SUBSET) {
         // which differs between machines; the baseline guards the page's layout (header, count,
         // columns, row structure), so the per-person cells are masked like other volatile text.
         const mask = [...(await volatileMasks(page))];
-        if (name === 'people') mask.push(page.locator('table tbody td'));
+        // People values (e-mail/name, a copied value, consent statuses and last seen) vary between
+        // machines. Mask only those text hooks, not whole cells or phone cards, so layout
+        // regressions inside a card still fail the comparison.
+        if (name === 'people') {
+          // A mask takes the size of what it covers, so the person-specific text gets a fixed
+          // placeholder first; otherwise the boxes still differ with whoever comes first.
+          await page.evaluate(() => {
+            for (const el of document.querySelectorAll('[data-volatile]')) el.textContent = 'xxxxxxxxxx';
+          });
+          mask.push(page.locator('[data-volatile]'));
+        }
         await expect(page).toHaveScreenshot(`${name}-${width}-${theme}.png`, { mask });
       }
     }

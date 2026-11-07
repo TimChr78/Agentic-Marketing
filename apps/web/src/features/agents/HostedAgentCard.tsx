@@ -1,5 +1,5 @@
 import { BookOpen, Brain, CalendarClock, Pencil, Play, Trash2 } from 'lucide-react';
-import { type ReactNode, useState } from 'react';
+import { type ReactNode, useEffect, useState } from 'react';
 import { api, errText } from '../../app/api';
 import { artifactPath } from '../../app/artifactRoutes';
 import { Link, navigate } from '../../app/router';
@@ -25,7 +25,6 @@ import {
   useConfirm,
   useToast,
 } from '../../ui';
-import { useAllArtifacts } from '../artifacts/artifactList';
 import { HostedAgentDialog } from './HostedAgentDialog';
 import type { HostedAgentRun } from './labels';
 
@@ -44,11 +43,22 @@ export function HostedAgentCard({ agentId, onChanged }: { agentId: string; onCha
   const [confirmDialog, confirm] = useConfirm();
   const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [memoryBusy, setMemoryBusy] = useState<string | null>(null);
-  const view = useApi(() => api.call('agents.hostedRuns', { agentId }), [agentId]);
-  const memory = useApi(() => api.call('agents.memory.list', { agentId }), [agentId]);
-  const skillArts = useAllArtifacts('skill');
+  const [moreRuns, setMoreRuns] = useState<{ runs: HostedAgentRun[]; next: string | null; loaded: boolean }>({
+    runs: [],
+    next: null,
+    loaded: false,
+  });
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [moreError, setMoreError] = useState<string | null>(null);
+  const view = useApi(() => api.call('agents.hostedRuns', { agentId, limit: 20 }), [agentId]);
   const admin = can('workspace:admin');
+
+  // A reload of the first page (Run now, an edit) makes any extra pages stale.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reset paging when the first page is replaced
+  useEffect(() => {
+    setMoreRuns({ runs: [], next: null, loaded: false });
+    setMoreError(null);
+  }, [view.data]);
 
   if (view.loading && !view.data)
     return (
@@ -66,7 +76,22 @@ export function HostedAgentCard({ agentId, onChanged }: { agentId: string; onCha
     );
   const hosted = view.data?.hosted;
   if (!hosted) return null;
-  const runs = view.data?.runs ?? [];
+  const runs = [...(view.data?.runs ?? []), ...moreRuns.runs];
+  const next = moreRuns.loaded ? moreRuns.next : (view.data?.next ?? null);
+
+  const loadMore = async () => {
+    if (next === null || loadingMore) return;
+    setLoadingMore(true);
+    setMoreError(null);
+    try {
+      const page = await api.call('agents.hostedRuns', { agentId, limit: 20, before: next });
+      setMoreRuns((current) => ({ runs: [...current.runs, ...page.runs], next: page.next, loaded: true }));
+    } catch (e) {
+      setMoreError(errText(e));
+    } finally {
+      setLoadingMore(false);
+    }
+  };
 
   const runNow = async () => {
     setBusy(true);
@@ -98,20 +123,6 @@ export function HostedAgentCard({ agentId, onChanged }: { agentId: string; onCha
     } catch (e) {
       toast.error(errText(e));
       setBusy(false);
-    }
-  };
-
-  const removeMemory = async (id: string) => {
-    setMemoryBusy(id);
-    try {
-      await api.call('agents.memory.delete', { id });
-      toast.success('Memory note deleted.');
-      await memory.reload();
-      onChanged?.();
-    } catch (e) {
-      toast.error(errText(e));
-    } finally {
-      setMemoryBusy(null);
     }
   };
 
@@ -178,67 +189,8 @@ export function HostedAgentCard({ agentId, onChanged }: { agentId: string; onCha
             </p>
           </details>
         </div>
-        <div className="flex flex-wrap items-center gap-2 border-t border-line px-4 py-3">
-          <BookOpen size={14} className="text-muted" />
-          <span className="text-[12px] font-medium text-fg-2">Skills</span>
-          {(hosted.skills ?? []).length === 0 ? (
-            <span className="text-[12px] text-muted">None referenced. A skill’s published instructions are added to each run.</span>
-          ) : (
-            (hosted.skills ?? []).map((id) => {
-              const skill = skillArts.data?.artifacts.find((a) => a.id === id);
-              return (
-                <Link key={id} to={artifactPath('skill', id)} className="text-[12px] text-accent hover:underline">
-                  {skill?.name ?? id}
-                  {skill && skill.publishedVersion === null ? ' (draft, not used yet)' : ''}
-                </Link>
-              );
-            })
-          )}
-        </div>
-        <div className="border-t border-line px-4 py-3">
-          <div className="flex flex-wrap items-center gap-2">
-            <Brain size={14} className="text-muted" />
-            <span className="text-[12px] font-medium text-fg-2">Memory</span>
-            <span className="text-[12px] text-muted">
-              {memory.data
-                ? `${memory.data.count} of ${memory.data.limits.notes} notes · ${memory.data.characters.toLocaleString('en-US')} of ${memory.data.limits.characters.toLocaleString('en-US')} characters`
-                : ''}
-            </span>
-          </div>
-          {memory.error ? (
-            <Alert tone="bad" title="Couldn't load the memory" onRetry={() => void memory.reload()}>
-              {memory.error}
-            </Alert>
-          ) : (memory.data?.notes.length ?? 0) === 0 ? (
-            <p className="mt-2 text-[12px] text-muted">
-              No notes yet. The agent writes its own notes during a run, and people can add or delete them here.
-            </p>
-          ) : (
-            <ul className="mt-2 divide-y divide-line">
-              {(memory.data?.notes ?? []).map((note) => (
-                <li key={note.id} className="flex flex-wrap items-start gap-2 py-2">
-                  <div className="min-w-0 flex-1">
-                    <p className="whitespace-pre-wrap text-[12px] text-fg-2">{note.text}</p>
-                    <p className="mt-0.5 text-[11px] text-muted">
-                      {note.createdBy.type === 'run' ? 'Written by a run' : 'Written by a person'} · {timeAgo(note.createdAt)}
-                    </p>
-                  </div>
-                  {admin && (
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      icon={<Trash2 size={13} />}
-                      loading={memoryBusy === note.id}
-                      onClick={() => void removeMemory(note.id)}
-                    >
-                      Delete
-                    </Button>
-                  )}
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
+        <SkillsSection ids={hosted.skills ?? []} />
+        <MemorySection agentId={agentId} admin={admin} onChanged={onChanged} />
       </Card>
 
       <TableFrame
@@ -247,6 +199,27 @@ export function HostedAgentCard({ agentId, onChanged }: { agentId: string; onCha
         onRetry={view.reload}
         columns={6}
         isEmpty={runs.length === 0}
+        footer={
+          next !== null || moreError ? (
+            <div className="space-y-2">
+              {moreError && (
+                <Alert tone="bad" title="Couldn't load more runs" onRetry={() => void loadMore()}>
+                  {moreError}
+                </Alert>
+              )}
+              <div className="flex flex-wrap items-center gap-3">
+                {next !== null && (
+                  <Button loading={loadingMore} onClick={() => void loadMore()}>
+                    Load more runs
+                  </Button>
+                )}
+                <span className="text-[12px] text-muted">
+                  {runs.length.toLocaleString('en-US')} {runs.length === 1 ? 'run' : 'runs'} shown
+                </span>
+              </div>
+            </div>
+          ) : undefined
+        }
         empty={
           <EmptyState title="No runs yet">
             The first run starts at {hosted.nextRunAt ? formatDateTime(hosted.nextRunAt) : 'the next scheduled time'}.
@@ -304,6 +277,146 @@ export function HostedAgentCard({ agentId, onChanged }: { agentId: string; onCha
         </div>
       )}
     </>
+  );
+}
+
+/**
+ * Memory notes load on their own disclosure: opening the hosted section reads only hosted runs.
+ * Delete still works here, with its own pending state and reload.
+ */
+function MemorySection({ agentId, admin, onChanged }: { agentId: string; admin: boolean; onChanged?: () => void }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="border-t border-line px-4 py-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <Brain size={14} className="text-muted" />
+        <span className="text-[12px] font-medium text-fg-2">Memory</span>
+      </div>
+      <details className="mt-1" onToggle={(event) => setOpen(event.currentTarget.open)}>
+        <summary className="cursor-pointer text-[12px] font-medium text-accent">Memory notes</summary>
+        {open && <MemoryNotes agentId={agentId} admin={admin} onChanged={onChanged} />}
+      </details>
+    </div>
+  );
+}
+
+function MemoryNotes({ agentId, admin, onChanged }: { agentId: string; admin: boolean; onChanged?: () => void }) {
+  const toast = useToast();
+  const memory = useApi(() => api.call('agents.memory.list', { agentId }), [agentId]);
+  const [memoryBusy, setMemoryBusy] = useState<string | null>(null);
+
+  const removeMemory = async (id: string) => {
+    setMemoryBusy(id);
+    try {
+      await api.call('agents.memory.delete', { id });
+      toast.success('Memory note deleted.');
+      await memory.reload();
+      onChanged?.();
+    } catch (e) {
+      toast.error(errText(e));
+    } finally {
+      setMemoryBusy(null);
+    }
+  };
+
+  if (memory.loading && !memory.data) return <p className="mt-2 text-[12px] text-muted">Loading memory notes…</p>;
+  return (
+    <>
+      <span className="text-[12px] text-muted">
+        {memory.data
+          ? `${memory.data.count} of ${memory.data.limits.notes} notes · ${memory.data.characters.toLocaleString('en-US')} of ${memory.data.limits.characters.toLocaleString('en-US')} characters`
+          : ''}
+      </span>
+      {memory.error ? (
+        <Alert tone="bad" title="Couldn't load the memory" onRetry={() => void memory.reload()}>
+          {memory.error}
+        </Alert>
+      ) : (memory.data?.notes.length ?? 0) === 0 ? (
+        <p className="mt-2 text-[12px] text-muted">
+          No notes yet. The agent writes its own notes during a run, and people can add or delete them here.
+        </p>
+      ) : (
+        <ul className="mt-2 divide-y divide-line">
+          {(memory.data?.notes ?? []).map((note) => (
+            <li key={note.id} className="flex flex-wrap items-start gap-2 py-2">
+              <div className="min-w-0 flex-1">
+                <p className="whitespace-pre-wrap text-[12px] text-fg-2">{note.text}</p>
+                <p className="mt-0.5 text-[11px] text-muted">
+                  {note.createdBy.type === 'run' ? 'Written by a run' : 'Written by a person'} · {timeAgo(note.createdAt)}
+                </p>
+              </div>
+              {admin && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  icon={<Trash2 size={13} />}
+                  loading={memoryBusy === note.id}
+                  onClick={() => void removeMemory(note.id)}
+                >
+                  Delete
+                </Button>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </>
+  );
+}
+
+/**
+ * Skills resolve on their own disclosure. Only the ids the hosted agent references are read
+ * (`artifacts.get` per id), so no page of the skill catalogue is scanned.
+ */
+function SkillsSection({ ids }: { ids: string[] }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="border-t border-line px-4 py-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <BookOpen size={14} className="text-muted" />
+        <span className="text-[12px] font-medium text-fg-2">Skills</span>
+        {ids.length === 0 && (
+          <span className="text-[12px] text-muted">None referenced. A skill’s published instructions are added to each run.</span>
+        )}
+      </div>
+      {ids.length > 0 && (
+        <details className="mt-1" onToggle={(event) => setOpen(event.currentTarget.open)}>
+          <summary className="cursor-pointer text-[12px] font-medium text-accent">Referenced skills</summary>
+          {open && <SkillLinks ids={ids} />}
+        </details>
+      )}
+    </div>
+  );
+}
+
+function SkillLinks({ ids }: { ids: string[] }) {
+  const key = ids.join(',');
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the joined id list changes exactly when the references do
+  const skills = useApi(
+    () =>
+      Promise.all(
+        ids.map(async (id) => {
+          try {
+            const artifact = await api.call('artifacts.get', { artifactId: id });
+            return { id, name: artifact.name, draft: artifact.publishedVersion === null };
+          } catch {
+            // A skill that cannot be read still keeps its id visible behind the link.
+            return { id, name: null, draft: false };
+          }
+        }),
+      ),
+    [key],
+  );
+  if (!skills.data) return <p className="mt-2 text-[12px] text-muted">Loading referenced skills…</p>;
+  return (
+    <div className="mt-2 flex flex-wrap gap-1.5">
+      {skills.data.map((skill) => (
+        <Link key={skill.id} to={artifactPath('skill', skill.id)} className="text-[12px] text-accent hover:underline">
+          {skill.name ?? skill.id}
+          {skill.draft ? ' (draft, not used yet)' : ''}
+        </Link>
+      ))}
+    </div>
   );
 }
 

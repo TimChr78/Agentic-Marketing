@@ -35,7 +35,7 @@ export default defineConfig({
         // the server project (TEST_WORKERS, default 4).
         test: {
           name: 'packages',
-          include: ['packages/*/test/**/*.test.ts'],
+          include: ['packages/*/test/**/*.test.ts', 'packages/*/src/**/*.test.ts'],
           maxWorkers: serverWorkers,
           // Its own worker count needs its own group: after the quick projects and before server.
           sequence: { groupOrder: 1 },
@@ -43,7 +43,12 @@ export default defineConfig({
       },
       {
         extends: true,
-        test: { name: 'web', include: ['apps/web/test/**/*.test.{ts,tsx}', 'apps/web/src/**/*.test.{ts,tsx}'], environment: 'jsdom' },
+        test: {
+          name: 'web',
+          include: ['apps/web/test/**/*.test.{ts,tsx}', 'apps/web/src/**/*.test.{ts,tsx}'],
+          environment: 'jsdom',
+          setupFiles: ['apps/web/test/setup.ts'],
+        },
       },
       {
         extends: true,
