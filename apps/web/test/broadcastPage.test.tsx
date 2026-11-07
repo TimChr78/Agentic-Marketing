@@ -1,5 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { invalidateArtifact } from '../src/features/artifactCache';
 import { clearArtifactNameCache } from '../src/features/broadcasts/names';
 import BroadcastPage from '../src/pages/build/BroadcastPage';
@@ -236,6 +236,12 @@ beforeEach(() => {
   invalidateArtifact(tpl);
   invalidateArtifact(seg);
   history.replaceState(null, '', `/build/broadcasts/${id}`);
+});
+
+// Unmount after every test too: the last test must not leave lazy or debounced work running once
+// the jsdom environment is torn down ("window is not defined" in CI).
+afterEach(() => {
+  cleanup();
 });
 
 const renderPage = () =>
