@@ -1,17 +1,16 @@
 import { Check, CheckCheck, Eye, X } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { api, errText, type Out } from '../../app/api';
 import { typeLabel } from '../../app/artifactRoutes';
 import { useCrumbs } from '../../app/page';
 import { Link, navigate, useLocation } from '../../app/router';
 import { useSession } from '../../app/session';
 import { useApi } from '../../app/useApi';
-import { ApprovalDrawer } from '../../features/approvals/ApprovalDrawer';
 import { approvalDecisions } from '../../features/approvals/decisions';
 import { HoldBadge, HoldCountdown } from '../../features/approvals/HoldBadge';
 import { useNow } from '../../features/approvals/holds';
 import { RequesterView } from '../../features/approvals/requester';
-import { useViewedTick, wasViewed } from '../../features/approvals/viewed';
+import { decisionWasViewed, useViewedTick } from '../../features/approvals/viewed';
 import {
   Alert,
   Button,
@@ -19,6 +18,7 @@ import {
   cx,
   EmptyState,
   Field,
+  LoadingBlock,
   PageHeader,
   StatusPill,
   Table,
@@ -40,6 +40,10 @@ type Approval = Out<'approvals.list'>['approvals'][number];
 type Proposal = Out<'workspace.proposals'>['proposals'][number];
 type Status = 'pending' | 'approved' | 'rejected';
 
+// The review drawer and its consequence reads are only needed once a request is opened; keeping
+// them out of the queue's chunk leaves the list light (#60, #498).
+const ApprovalDrawer = lazy(() => import('../../features/approvals/ApprovalDrawer').then((m) => ({ default: m.ApprovalDrawer })));
+
 /** Approvals (#41): the queue of changes waiting for a person, each opened in a review drawer. */
 export default function ApprovalsPage({ params }: { params: Record<string, string> }) {
   useCrumbs([{ label: 'Approvals', to: '/approvals' }, ...(params.id ? [{ label: 'Review' }] : [])]);
@@ -54,6 +58,7 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
     document.getElementById(`proposal-${highlightedProposal}`)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
   }, [highlightedProposal, proposals.data]);
   const toast = useToast();
+  const headingRef = useRef<HTMLSpanElement>(null);
   const [confirmDialog, confirm] = useConfirm();
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [batching, setBatching] = useState(false);
@@ -66,8 +71,7 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
   // The nav badge uses the same grouping (#483).
   const items = approvalDecisions(all);
   const canApprove = can('artifacts:approve');
-  const viewed = (a: Approval) =>
-    a.bundle ? a.bundle.members.every((m) => wasViewed(user!.id, m.approvalId, m.version)) : wasViewed(user!.id, a.id, a.version);
+  const viewed = (a: Approval) => decisionWasViewed(user!.id, a);
   const selectable = items.filter((a) => a.status === 'pending' && viewed(a));
   const chosen = items.filter((a) => selected.has(a.id) && viewed(a));
   const notViewed = items.filter((a) => a.status === 'pending' && !viewed(a)).length;
@@ -135,7 +139,12 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
   return (
     <div className={pageWidth('default')}>
       <PageHeader
-        title="Approvals"
+        title={
+          // The fallback focus target when a deep-linked drawer closes (there is no invoking row).
+          <span ref={headingRef} tabIndex={-1} className="outline-none">
+            Approvals
+          </span>
+        }
         description="Changes waiting for a person. Open each one to see the actual e-mail, form, journey, segment or broadcast before you approve it."
         actions={
           canApprove && status === 'pending' && items.length > 0 ? (
@@ -305,12 +314,18 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
       </div>
       {confirmDialog}
       {params.id && (
-        <ApprovalDrawer
-          id={params.id}
-          queue={items.filter((a) => a.status === 'pending').map((a) => a.id)}
-          onClose={() => navigate(status === 'pending' ? '/approvals' : `/approvals?status=${status}`)}
-          onDecided={reload}
-        />
+        <Suspense fallback={<LoadingBlock lines={6} label="Opening the review" />}>
+          <ApprovalDrawer
+            id={params.id}
+            queue={items.filter((a) => a.status === 'pending').map((a) => a.id)}
+            onClose={() => {
+              navigate(status === 'pending' ? '/approvals' : `/approvals?status=${status}`);
+              // A deep link has no invoking row; return focus to the queue heading instead.
+              requestAnimationFrame(() => headingRef.current?.focus());
+            }}
+            onDecided={reload}
+          />
+        </Suspense>
       )}
     </div>
   );
@@ -395,13 +410,25 @@ function WorkspaceSettings({
               <RequesterView r={p.requester} />
               <span>proposed {timeAgo(p.createdAt)}</span>
             </div>
-            <ul className="mt-1.5 space-y-0.5 text-[14px] text-fg">
-              {proposalLines(p.changes).map((line) => (
-                <li key={line.label}>
-                  {line.label}: <span className="text-muted">{line.from}</span> → <span className="font-medium">{line.to}</span>
+            <p className="mt-1.5 text-[13px] text-fg-2">
+              <strong className="font-medium text-fg">If approved:</strong> Applies workspace settings immediately on approval.
+            </p>
+            <ul className="mt-1 space-y-0.5 text-[14px] text-fg">
+              {p.changes.name && (
+                <li>
+                  Name: <span className="text-muted">{p.changes.name.from}</span> → <span className="font-medium">{p.changes.name.to}</span>
                 </li>
-              ))}
+              )}
+              {p.changes.timeZone && (
+                <li>
+                  Time zone: <span className="text-muted">{p.changes.timeZone.from}</span> →{' '}
+                  <span className="font-medium">{p.changes.timeZone.to}</span>
+                </li>
+              )}
             </ul>
+            {p.changes.timeZone && (
+              <p className="mt-1 text-[12px] text-muted">Changes display time zone; stored send instants stay the same.</p>
+            )}
             <p className="mt-1.5 text-[13px] whitespace-pre-wrap text-fg-2">{p.note}</p>
             {canApprove ? (
               rejecting === p.id ? (
@@ -464,14 +491,6 @@ function WorkspaceSettings({
       </ul>
     </section>
   );
-}
-
-/** The human-readable lines of a proposal's stored diff. */
-function proposalLines(changes: Proposal['changes']) {
-  return [
-    ...(changes.name ? [{ label: 'Name', ...changes.name }] : []),
-    ...(changes.timeZone ? [{ label: 'Time zone', ...changes.timeZone }] : []),
-  ];
 }
 
 function ViewedPill({ a, viewed }: { a: Approval; viewed: boolean }) {

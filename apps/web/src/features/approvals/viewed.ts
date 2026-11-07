@@ -17,6 +17,19 @@ export function wasViewed(userId: string, approvalId: string, version: number): 
   return !!localStorage.getItem(key(userId, approvalId, version));
 }
 
+/** A queue row: a bundle counts as viewed only once every member's exact version was reviewed. */
+export interface ViewableDecision {
+  id: string;
+  version: number;
+  bundle?: { members: { approvalId: string; version: number }[] } | null;
+}
+
+export function decisionWasViewed(userId: string, decision: ViewableDecision): boolean {
+  return decision.bundle
+    ? decision.bundle.members.every((m) => wasViewed(userId, m.approvalId, m.version))
+    : wasViewed(userId, decision.id, decision.version);
+}
+
 let tick = 0;
 const subscribe = (l: () => void) => {
   const wrapped = () => {

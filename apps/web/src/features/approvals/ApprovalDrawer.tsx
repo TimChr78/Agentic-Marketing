@@ -1,9 +1,9 @@
-import { Check, ExternalLink, Send, X } from 'lucide-react';
+import { Check, ExternalLink, RefreshCw, Send, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
-import { api, errText, type Out } from '../../app/api';
+import { ApiError, api, errText, type Out } from '../../app/api';
 import { artifactPath, typeLabel } from '../../app/artifactRoutes';
 import { TextLink } from '../../app/links';
-import { navigate } from '../../app/router';
+import { Link, navigate } from '../../app/router';
 import { useWorkspace } from '../../app/session';
 import { useApi } from '../../app/useApi';
 import {
@@ -25,18 +25,32 @@ import {
 import { invalidateArtifact } from '../artifactCache';
 import { BlockUsage } from '../blocks/BlockUsage';
 import { ArtifactPreview } from '../previews/ArtifactPreview';
+import { BlockPreview } from '../previews/BlockPreview';
+import { ConsequenceSummary } from './ConsequenceSummary';
+import { blockIdsIn } from './consequences';
 import { HoldBadge } from './HoldBadge';
 import { holdCountdownText, useNow } from './holds';
 import { RequesterView } from './requester';
 import { markViewed } from './viewed';
 
 type Detail = Out<'approvals.get'>;
-type Tab = 'preview' | 'changes' | 'content' | 'history';
+type Tab = 'review' | 'content' | 'history';
+
+const artifactHeading = (type: string) => {
+  if (type === 'broadcast' || type === 'email_template' || type === 'sms_template' || type === 'push_template') return 'The message';
+  if (type === 'journey') return 'The journey';
+  if (type === 'segment') return 'The segment';
+  if (type === 'form') return 'The form';
+  if (type === 'experience') return 'The experience';
+  return 'The artifact';
+};
 
 /**
- * Review drawer (#41): the object itself first (rendered e-mail, form, journey graph, segment
- * size, broadcast audience), then what changed against the live version, who asked and why, and
- * Approve / Reject right here. Deep link: /approvals/<id> (the reviewUrl agents get back).
+ * Review drawer (#41, #498): the exact version under review, opened by its consequence summary,
+ * then the requester's note and the rendered artifact, then what changed against the live
+ * version. Approve / Reject stay in the footer. Deep link: /approvals/<id>.
+ *
+ * The contract's read order is Review → Content → History; the old Preview/Changes split is gone.
  */
 export function ApprovalDrawer({
   id,
@@ -52,25 +66,20 @@ export function ApprovalDrawer({
   const { can, user, workspace } = useWorkspace();
   const toast = useToast();
   const d = useApi(() => api.call('approvals.get', { approvalId: id }), [id]);
-  const [tab, setTab] = useState<Tab>('preview');
+  const [tab, setTab] = useState<Tab>('review');
   const [rejecting, setRejecting] = useState(false);
   const [reason, setReason] = useState('');
   const [reasonError, setReasonError] = useState<string | null>(null);
   const [busy, setBusy] = useState<null | 'approve' | 'reject' | 'test'>(null);
   const [actionError, setActionError] = useState<string | null>(null);
-  const now = useNow();
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: reset the dialog state whenever a different approval is opened
   useEffect(() => {
-    setTab('preview');
+    setTab('review');
     setRejecting(false);
     setReason('');
     setActionError(null);
   }, [id]);
-  // Opening the preview is what counts as viewing this version.
-  useEffect(() => {
-    if (d.data && tab === 'preview') markViewed(user.id, d.data.id, d.data.version);
-  }, [d.data, tab, user.id]);
 
   const a = d.data;
   const pending = a?.status === 'pending';
@@ -122,6 +131,8 @@ export function ApprovalDrawer({
       next();
     } catch (e) {
       setActionError(errText(e));
+      // A conflict refreshes the request in place; it must never silently move to another version.
+      if (e instanceof ApiError && e.status === 409) void d.reload();
     } finally {
       setBusy(null);
     }
@@ -143,19 +154,24 @@ export function ApprovalDrawer({
     }
   };
 
-  const stale = a && a.artifactLatestVersion > a.version;
+  const stale = !!a && a.artifactLatestVersion > a.version;
   return (
     <Drawer
       open
       onClose={onClose}
       width="xl"
-      title={a?.artifactName ?? 'Loading…'}
+      title={
+        // Focus lands on the heading when the drawer opens; a deep link has no invoking row.
+        <span data-autofocus tabIndex={-1} className="outline-none">
+          {a?.artifactName ?? 'Loading…'}
+        </span>
+      }
       meta={
         a && (
           <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
             <span>
-              {typeLabel(a.artifactType)} · Version {a.version} ·{' '}
-              {a.publishedVersion ? `changes live v${a.publishedVersion}` : 'new, nothing live yet'}
+              {typeLabel(a.artifactType)} · Reviewing Saved v{a.version} ·{' '}
+              {a.publishedVersion ? `Published v${a.publishedVersion}` : 'Nothing live yet'}
             </span>
             {held && <HoldBadge />}
             {a.status !== 'pending' && (
@@ -208,6 +224,7 @@ export function ApprovalDrawer({
               <div className="flex flex-wrap items-center gap-2">
                 {testable && (
                   <Button
+                    className="w-full sm:w-auto"
                     icon={<Send size={14} />}
                     loading={busy === 'test'}
                     onClick={sendTest}
@@ -216,7 +233,7 @@ export function ApprovalDrawer({
                     Send me a test
                   </Button>
                 )}
-                <div className="ml-auto flex flex-wrap gap-2">
+                <div className="ml-auto flex w-full flex-wrap justify-end gap-2 sm:w-auto">
                   {rejecting ? (
                     <>
                       <Button variant="ghost" onClick={() => setRejecting(false)}>
@@ -262,92 +279,29 @@ export function ApprovalDrawer({
           </Alert>
         </div>
       ) : a ? (
-        <div className="space-y-4 p-5">
-          <section aria-label="Request" className="rounded-lg border border-line bg-surface-2 px-4 py-3">
-            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px]">
-              <RequesterView r={a.requester} className="font-medium text-fg" />
-              <span className="text-muted" title={formatDateTime(a.createdAt, { zone: true })}>
-                asked {timeAgo(a.createdAt)}
-              </span>
-            </div>
-            {a.note && <p className="mt-2 text-[14px] leading-[22px] whitespace-pre-wrap text-fg">{a.note}</p>}
-            {held && a.holdUntil && (
-              <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md border border-warn/40 bg-warn-soft px-3 py-2">
-                <HoldBadge />
-                <span className="text-[13px] text-fg">{holdCountdownText(a.holdUntil, now)}</span>
-                <span className="text-[12px] text-muted">
-                  · runs {formatDateTime(a.holdUntil, { zone: true })}. Run it now, or veto it and say why.
-                </span>
-              </div>
-            )}
-          </section>
-          {bundle && (
-            <section aria-label="Reviewed together" className="rounded-lg border border-line px-4 py-3">
-              <p className="text-[13px] text-fg-2">
-                Reviewed together:{' '}
-                {pending
-                  ? 'approving publishes all of them, in this order, in one step; rejecting rejects all.'
-                  : 'these were decided together.'}
-              </p>
-              <ol className="mt-2 flex flex-wrap gap-2">
-                {bundle.members.map((m, i) => (
-                  <li key={m.approvalId}>
-                    <button
-                      type="button"
-                      onClick={() => m.approvalId !== a.id && navigate(`/approvals/${m.approvalId}`)}
-                      aria-current={m.approvalId === a.id ? 'true' : undefined}
-                      className={
-                        m.approvalId === a.id
-                          ? 'rounded-md border border-[var(--accent)] bg-surface-2 px-2.5 py-1 text-[13px] font-medium text-fg'
-                          : 'rounded-md border border-line px-2.5 py-1 text-[13px] text-fg-2 hover:bg-surface-2'
-                      }
-                    >
-                      {i + 1}. {m.artifactName}{' '}
-                      <span className="text-muted">
-                        · {typeLabel(m.artifactType)} v{m.version}
-                      </span>
-                    </button>
-                  </li>
-                ))}
-              </ol>
-            </section>
-          )}
-          {a.artifactType === 'email_block' && <BlockUsage artifactId={a.artifactId} />}
-          {stale && (
-            <Alert tone="warn" title={`A newer draft (v${a.artifactLatestVersion}) exists`}>
-              Approving publishes version {a.version}, the one shown here. The newer draft stays a draft.
-            </Alert>
-          )}
-          {ownRequest && pending && workspace.approvalPolicy === 'all_publishes' && (
-            <Alert tone="info">You submitted this yourself. Under four-eyes review, another person has to approve it.</Alert>
-          )}
+        <div className="space-y-5 p-4 sm:p-5">
+          {/* The consequence summary is the context for every tab, exactly as the mock-up shows:
+              notices and summary, then the requester's note, then Review / Content / History. */}
+          <ReviewContext
+            approval={a}
+            bundle={bundle}
+            bundleVersions={bundleVersions}
+            stale={stale}
+            pending={pending}
+            ownRequest={!!ownRequest}
+            workspaceApprovalPolicy={workspace.approvalPolicy}
+          />
           <Tabs
             label="Review"
             value={tab}
             onChange={setTab}
             items={[
-              { key: 'preview', label: 'Preview' },
-              {
-                key: 'changes',
-                label: a.publishedVersion ? 'Changes' : 'Content changes',
-                shortLabel: 'Changes',
-                count: a.diff.changes.length,
-              },
+              { key: 'review', label: 'Review' },
               { key: 'content', label: 'Content' },
               { key: 'history', label: 'History' },
             ]}
           >
-            {tab === 'preview' && (
-              <ArtifactPreview
-                type={a.artifactType}
-                artifactId={a.artifactId}
-                version={a.version}
-                content={a.content}
-                compact
-                bundle={bundleVersions}
-              />
-            )}
-            {tab === 'changes' && <DiffView changes={a.diff.changes} from={a.diff.from} to={a.diff.to} />}
+            {tab === 'review' && <ReviewPanel approval={a} bundleVersions={bundleVersions} />}
             {tab === 'content' && (
               <JsonView value={a.content} label={`Version ${a.version} as JSON (what agents read and write)`} maxHeight={600} />
             )}
@@ -356,6 +310,205 @@ export function ApprovalDrawer({
         </div>
       ) : null}
     </Drawer>
+  );
+}
+
+function ReviewContext({
+  approval,
+  bundle,
+  bundleVersions,
+  stale,
+  pending,
+  ownRequest,
+  workspaceApprovalPolicy,
+}: {
+  approval: Detail;
+  bundle: Detail['bundle'];
+  bundleVersions?: Record<string, number>;
+  stale: boolean;
+  pending: boolean;
+  ownRequest: boolean;
+  workspaceApprovalPolicy: string;
+}) {
+  const now = useNow();
+  const held = !!approval.holdUntil && pending;
+  return (
+    <div className="space-y-5">
+      {stale && (
+        <Alert tone="warn" title={`A newer draft (v${approval.artifactLatestVersion}) exists`}>
+          Approving publishes v{approval.version}, the one shown here. The newer draft stays a draft.
+        </Alert>
+      )}
+      {ownRequest && pending && workspaceApprovalPolicy === 'all_publishes' && (
+        <Alert tone="info">You submitted this yourself. Under four-eyes review, another person has to approve it.</Alert>
+      )}
+      {held && approval.holdUntil && (
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md border border-warn/40 bg-warn-soft px-3 py-2">
+          <HoldBadge />
+          <span className="text-[13px] text-fg">{holdCountdownText(approval.holdUntil, now)}</span>
+          <span className="text-[12px] text-muted">
+            · runs {formatDateTime(approval.holdUntil, { zone: true })}. Run it now, or veto it and say why.
+          </span>
+        </div>
+      )}
+      {bundle && <BundlePanel bundle={bundle} current={approval} pending={pending} />}
+
+      <ConsequenceSummary approval={approval} bundleVersions={bundleVersions} />
+
+      <section aria-label="Request" className="rounded-lg border border-line bg-surface-2 px-4 py-3">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px]">
+          <RequesterView r={approval.requester} className="font-medium text-fg" />
+          <span className="text-muted" title={formatDateTime(approval.createdAt, { zone: true })}>
+            asked {timeAgo(approval.createdAt)}
+          </span>
+        </div>
+        {approval.note && <p className="mt-2 text-[14px] leading-[22px] whitespace-pre-wrap text-fg">{approval.note}</p>}
+      </section>
+
+      {approval.artifactType === 'email_block' && <BlockUsage artifactId={approval.artifactId} />}
+    </div>
+  );
+}
+
+function ReviewPanel({ approval, bundleVersions }: { approval: Detail; bundleVersions?: Record<string, number> }) {
+  const { user } = useWorkspace();
+  // Opening the rendered Review is what counts as viewing this exact version, not opening a
+  // loading drawer, and never a different version of the same request.
+  useEffect(() => {
+    if (user && approval.status === 'pending') markViewed(user.id, approval.id, approval.version);
+  }, [user, approval.id, approval.version, approval.status]);
+
+  return (
+    <div className="space-y-5">
+      <section aria-labelledby="review-artifact-heading" className="space-y-2">
+        <h3 id="review-artifact-heading" className="text-[15px] leading-6 font-semibold">
+          {artifactHeading(approval.artifactType)}
+        </h3>
+        <ArtifactPreview
+          type={approval.artifactType}
+          artifactId={approval.artifactId}
+          version={approval.version}
+          content={approval.content}
+          compact
+          bundle={bundleVersions}
+          source={{ kind: 'saved', version: approval.version }}
+          sourceSuffix="Under review"
+        />
+      </section>
+
+      {approval.artifactType === 'email_template' && <BundledBlocks approval={approval} bundleVersions={bundleVersions} />}
+
+      <section aria-labelledby="review-changes-heading" className="space-y-2">
+        <h3 id="review-changes-heading" className="text-[15px] leading-6 font-semibold">
+          Changes · {approval.diff.changes.length}
+        </h3>
+        <details open className="rounded-lg border border-line bg-surface px-4 py-3">
+          <summary className="cursor-pointer text-[13px] font-medium text-fg-2">Before and after</summary>
+          <div className="mt-3">
+            <DiffView changes={approval.diff.changes} from={approval.diff.from} to={approval.diff.to} />
+          </div>
+        </details>
+      </section>
+    </div>
+  );
+}
+
+/** Each reusable block at the exact version the reviewed template would use. */
+function BundledBlocks({ approval, bundleVersions }: { approval: Detail; bundleVersions?: Record<string, number> }) {
+  const blocks = blockIdsIn(String((approval.content as { mjml?: string }).mjml ?? ''));
+  if (!blocks.length) return null;
+  return (
+    <section aria-labelledby="review-blocks-heading" className="space-y-3">
+      <h3 id="review-blocks-heading" className="text-[15px] leading-6 font-semibold">
+        Reusable blocks
+      </h3>
+      <p className="text-[12px] leading-[18px] text-muted">
+        Each block is shown at the version this review would use. The combined message cannot be rendered until an unpublished bundled block
+        is published.
+      </p>
+      {blocks.map((id) => {
+        const version = bundleVersions?.[id];
+        return (
+          <BlockPreview
+            key={id}
+            artifactId={id}
+            version={version}
+            compact
+            {...(version != null ? { source: { kind: 'saved' as const, version }, sourceSuffix: 'In this bundle' } : {})}
+          />
+        );
+      })}
+    </section>
+  );
+}
+
+function BundlePanel({ bundle, current, pending }: { bundle: NonNullable<Detail['bundle']>; current: Detail; pending: boolean }) {
+  return (
+    <section aria-label="Reviewed together" className="rounded-lg border border-line px-4 py-3">
+      <h3 className="text-[14px] leading-5 font-semibold">Reviewed together</h3>
+      <p className="mt-1 text-[13px] leading-5 text-fg-2">
+        <strong className="font-medium text-fg">Publishes {bundle.members.length} changes together.</strong>{' '}
+        {pending ? 'Approving publishes all of them, in this order, in one step; rejecting rejects all.' : 'These were decided together.'}
+      </p>
+      <ol className="mt-2 space-y-1.5">
+        {bundle.members.map((member, index) => (
+          <BundleMemberRow key={member.approvalId} member={member} index={index} current={current} />
+        ))}
+      </ol>
+      <p className="mt-2 text-[12px] leading-[18px] text-muted">
+        Audience checks use current membership; bundled changes are not simulated.
+      </p>
+    </section>
+  );
+}
+
+function BundleMemberRow({
+  member,
+  index,
+  current,
+}: {
+  member: NonNullable<Detail['bundle']>['members'][number];
+  index: number;
+  current: Detail;
+}) {
+  const isCurrent = member.approvalId === current.id;
+  // One exact read per member per open review; the open member's read is already the drawer's.
+  const detail = useApi(() => api.call('approvals.get', { approvalId: member.approvalId }), [member.approvalId], { skip: isCurrent });
+  const a = isCurrent ? current : detail.data;
+  const stale = !!a && a.artifactLatestVersion > a.version;
+  return (
+    <li className="rounded-md border border-line px-2.5 py-2">
+      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-[13px] leading-5">
+        <span className="text-[12px] text-muted">{index + 1}.</span>
+        <Link
+          to={`/approvals/${member.approvalId}`}
+          aria-current={isCurrent ? 'true' : undefined}
+          className="font-medium text-fg hover:underline"
+        >
+          {member.artifactName}
+        </Link>
+        <span className="text-[12px] text-muted">
+          · {typeLabel(member.artifactType)} · Saved v{member.version}
+        </span>
+        {a &&
+          (a.publishedVersion != null ? (
+            <StatusPill tone="good">Live v{a.publishedVersion}</StatusPill>
+          ) : (
+            <StatusPill tone="neutral">Nothing live yet</StatusPill>
+          ))}
+        {stale && <StatusPill tone="warn">Newer draft v{a.artifactLatestVersion}</StatusPill>}
+        {isCurrent && <StatusPill tone="info">This review</StatusPill>}
+      </div>
+      {!isCurrent && detail.error && (
+        <p className="mt-1 flex flex-wrap items-center gap-2 text-[12px] text-bad">
+          Member summary unavailable.
+          <Button size="sm" variant="ghost" icon={<RefreshCw size={13} />} onClick={detail.reload}>
+            Retry
+          </Button>
+        </p>
+      )}
+      {!isCurrent && !a && !detail.error && <p className="mt-1 text-[12px] text-muted">Loading member summary…</p>}
+    </li>
   );
 }
 

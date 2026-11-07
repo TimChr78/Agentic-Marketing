@@ -51,7 +51,10 @@ test.describe('approvals (#41)', () => {
     await expect(
       drawer.frameLocator('iframe[title^="E-mail preview"]').getByText('This issue and its send were approved together.'),
     ).toBeVisible();
-    await drawer.getByRole('button', { name: /Weekly Signal #44/ }).click();
+    await drawer
+      .getByRole('region', { name: 'Reviewed together' })
+      .getByRole('link', { name: /Weekly Signal #44/ })
+      .click();
     await expect(page.getByRole('dialog', { name: 'Weekly Signal #44' })).toContainText('Reviewed together');
 
     await page.getByRole('dialog', { name: 'Weekly Signal #44' }).getByRole('button', { name: 'Approve all 2 and publish' }).click();
@@ -88,7 +91,8 @@ test.describe('approvals (#41)', () => {
         expect(box.right).toBeLessThanOrEqual(viewport.width + 1);
       }
     }
-    await drawer.getByRole('tab', { name: /Changes/ }).click();
+    // The diff is part of Review now and initially open (#498).
+    await expect(drawer.getByRole('heading', { name: /Changes · \d+/ })).toBeVisible();
     await expect(drawer).toContainText('condition');
     await drawer.getByRole('button', { name: 'Close' }).click();
 
