@@ -319,6 +319,10 @@ vi.mock('../../../app/api', async (importOriginal) => {
   };
 });
 
+// ECharts cannot draw in jsdom and is slow to initialise; the charts' table fallbacks carry the
+// values these tests assert on.
+vi.mock('../../../components/Chart', () => ({ Chart: () => null }));
+
 vi.mock('../../../app/session', () => ({
   useSession: () => ({ can: () => h.can, workspace: { id: 'ws_1' }, user: { id: 'u1' } }),
   useWorkspace: () => ({ can: () => h.can, workspace: { id: 'ws_1' }, user: { id: 'u1' } }),
