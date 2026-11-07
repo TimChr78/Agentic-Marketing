@@ -20,6 +20,9 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 
 ### Changed
 
+- KPI tiles on Home, the broadcast report and the agent overview name their timestamp “Latest event in period”, because it is the newest event in range, not when the data was fetched; `KpiTile` takes an optional `freshnessLabel` (default “Updated”).
+- The agent page keeps its tab in `?tab=` like every other tabbed page, so Overview, Activity, Mandate and Credentials can be linked to.
+- The People Imports tab loads on demand, keeping the People list inside its bundle budget.
 - The People list no longer calls the loaded row count a population, no longer reads a profile per row, and no longer hides purpose keys in place of names: an unavailable purpose name is labelled “Purpose name unavailable” and its key stays behind a copy control. Consent mutations, export and erasure keep their existing controls and permissions.
 - The campaign Evaluation tab shares one Last 7 / Last 30 complete-days period between the summary and the campaign-wide holdout, refreshes the same reads, and mounts neither while the tab is inactive. `CampaignEvaluation({campaignId})` and `CampaignHoldoutCard({campaignId})` keep their existing required prop; `from`, `to` and `active` are additive for the host.
 ### Added
@@ -32,6 +35,10 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 
 ### Fixed
 
+- The agent Mandate tab offers Create mandate again when no mandate is active, and shows when the active mandate expires (“N days left”, a warning within three days).
+- People search opens a pasted `prf_…` profile id again, as before Phase 26.
+- The Analytics charts section has a heading, and the analytics result table and agent comparison table scroll in keyboard-reachable regions (axe).
+- Plain wording on the agent, deliverability and People pages instead of implementation terms.
 - A revenue chart is drawn only when the result carries one usable currency and the comparison period carries the same currency; mixed, missing and different-currency results keep currency-labelled table rows and replace the chart with the explained unavailable state (#506).
 - Analytics no longer renders an epoch date as freshness, an absent cell as an observed zero, or old values as current after a failed refresh (#506).
 
