@@ -211,7 +211,31 @@ export function lazyNatsBus(opts: Parameters<typeof natsBus>[0]): EventBus {
 
 /** Deletes a namespace's stream and consumers (tests, and resetting a development install). */
 export async function resetNatsNamespace(url: string, namespace: string) {
+  await connect({ servers: url }).then(async (nc) => {
+    try {
+      await (await jetstreamManager(nc)).streams.delete(namespace.toUpperCase()).catch(() => {});
+    } finally {
+      await nc.close();
+    }
+  });
+}
+
+/**
+ * Deletes every stream whose name starts with [prefix] (case-insensitive), e.g. one run's
+ * `am_<run>_` namespace. Package tests create streams that no database name can reveal, so global
+ * teardown uses the prefix rather than a list of databases.
+ */
+export async function resetNatsPrefix(url: string, prefix: string) {
   const nc = await connect({ servers: url });
-  await (await jetstreamManager(nc)).streams.delete(namespace.toUpperCase()).catch(() => {});
-  await nc.close();
+  try {
+    const jsm = await jetstreamManager(nc);
+    const wanted = prefix.toUpperCase();
+    for await (const stream of jsm.streams.list()) {
+      if (stream.config.name.toUpperCase().startsWith(wanted)) {
+        await jsm.streams.delete(stream.config.name).catch(() => {});
+      }
+    }
+  } finally {
+    await nc.close();
+  }
 }

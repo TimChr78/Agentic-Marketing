@@ -1,5 +1,6 @@
 import { runExport, warehouseCommands } from '@agentic-marketing/warehouse';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { runScoped } from '../../../packages/db/test/run';
 import { rejects, startTestServer, testDatabaseUrl, testPort, type User } from './harness';
 
 // #373: erasure failures stay visible, and private deletion keys exist only while needed.
@@ -11,7 +12,7 @@ describe('warehouse erasure safety', () => {
   let ws: string;
   let exportId: string;
   const name = 'test_v072_wh_safety';
-  const url = testDatabaseUrl(`am_${name}`).toString();
+  const url = testDatabaseUrl(runScoped(`am_${name}`)).toString();
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   beforeAll(async () => {
     t = await startTestServer(name, testPort(3493), { EGRESS_ALLOWED_HOSTS: new URL(url).hostname }, { warehouseTickMs: 86_400_000 });

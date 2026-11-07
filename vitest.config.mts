@@ -1,4 +1,10 @@
 import { defineConfig } from 'vitest/config';
+import { runId } from './packages/db/test/run.ts';
+
+// One namespace for the whole run: every project and worker inherits AM_TEST_RUN, and the test
+// harness scopes Postgres, ClickHouse, NATS and Valkey names with it. CI leaves it empty, so its
+// own service containers keep the fixed names and ports they always had.
+if (runId) process.env.AM_TEST_RUN = runId;
 
 // Four projects (#172):
 //   docs      documentation that must agree with the code; no services.
