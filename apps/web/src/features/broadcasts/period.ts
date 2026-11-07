@@ -92,6 +92,31 @@ export function periodDateLabel(period: Pick<LocalDayPeriod, 'fromDate' | 'toDat
   return fromYear === toYear ? `${from}–${to} ${toYear}` : `${from} ${fromYear}–${to} ${toYear}`;
 }
 
+/** The local calendar date of an ISO instant in `zone`, as YYYY-MM-DD. */
+function localDateOfInstant(iso: string, zone: string): string | null {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return null;
+  try {
+    const parts = Object.fromEntries(
+      new Intl.DateTimeFormat('en-US', { timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit' })
+        .formatToParts(date)
+        .map((part) => [part.type, part.value]),
+    );
+    return `${parts.year}-${parts.month}-${parts.day}`;
+  } catch {
+    return null;
+  }
+}
+
+/** Human label for the bounds a read returned, interpreted in that read's zone. */
+export function returnedPeriodLabel(from: string | null, to: string | null, zone: string): string | null {
+  if (!from || !to) return null;
+  const fromDate = localDateOfInstant(from, zone);
+  const toDate = localDateOfInstant(to, zone);
+  if (!fromDate || !toDate) return null;
+  return periodDateLabel({ fromDate, toDate });
+}
+
 /** A single day in the report's table and axis labels, e.g. "30 Oct". */
 export function dayLabel(day: string): string {
   const date = new Date(`${day}T12:00:00.000Z`);

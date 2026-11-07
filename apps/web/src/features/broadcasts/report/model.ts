@@ -1,6 +1,6 @@
 import type { Out } from '../../../app/api';
 import type { ChartDataState, KpiDataState } from '../../../ui/charts';
-import { dayLabel } from '../period';
+import { dayLabel, type LocalDayPeriod } from '../period';
 
 // Pure reads for the broadcast Report (#500). Analytics queries return columns by name, never by a
 // fixed position, and a missing, suppressed or null cell stays unavailable instead of becoming an
@@ -95,20 +95,46 @@ export function readTotals(result: AnalyticsResult | undefined): TotalsView {
   return { values, complete: !!row, meta: metaOf(result) };
 }
 
-export function readSeries(result: AnalyticsResult | undefined): SeriesView {
-  const days: SeriesDay[] = [];
+const emptyDayValues = (): Record<SeriesMeasure, number | null> =>
+  Object.fromEntries(SERIES_MEASURES.map((id) => [id, null])) as Record<SeriesMeasure, number | null>;
+
+/** Every local calendar day in the selected period, inclusive, as YYYY-MM-DD. */
+function periodDays(period: Pick<LocalDayPeriod, 'fromDate' | 'toDate'>): string[] {
+  const start = new Date(`${period.fromDate}T00:00:00.000Z`);
+  const end = new Date(`${period.toDate}T00:00:00.000Z`);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || start > end) return [];
+  const days: string[] = [];
+  for (let cursor = start.getTime(); cursor <= end.getTime(); cursor += 86_400_000) {
+    days.push(new Date(cursor).toISOString().slice(0, 10));
+  }
+  return days;
+}
+
+/**
+ * The series read on the selected calendar axis. A day the query did not return is a gap (null),
+ * never an observed zero, so the chart cannot draw straight across a missing day. A returned zero
+ * stays an observed zero.
+ */
+export function readSeries(result: AnalyticsResult | undefined, period: Pick<LocalDayPeriod, 'fromDate' | 'toDate'>): SeriesView {
+  const returned = new Map<string, Record<SeriesMeasure, number | null>>();
   if (result) {
-    for (const row of result.rows) {
-      const index = result.columns.findIndex((column) => column.name === 'day');
-      const day = index >= 0 ? row[index] : null;
-      if (typeof day !== 'string' || !day) continue;
-      days.push({
-        day,
-        label: dayLabel(day),
-        values: Object.fromEntries(SERIES_MEASURES.map((id) => [id, cell(result, row, id)])) as Record<SeriesMeasure, number | null>,
-      });
+    const index = result.columns.findIndex((column) => column.name === 'day');
+    if (index >= 0) {
+      for (const row of result.rows) {
+        const day = row[index];
+        if (typeof day !== 'string' || !day) continue;
+        returned.set(
+          day,
+          Object.fromEntries(SERIES_MEASURES.map((id) => [id, cell(result, row, id)])) as Record<SeriesMeasure, number | null>,
+        );
+      }
     }
   }
+  const days = periodDays(period).map((day) => ({
+    day,
+    label: dayLabel(day),
+    values: returned.get(day) ?? emptyDayValues(),
+  }));
   return { days, meta: metaOf(result) };
 }
 

@@ -2,8 +2,8 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setWorkspaceTimeZone } from '../../../ui/time';
 import { BroadcastReport } from '../BroadcastReport';
-import { lastThirtyLocalDays, localDayPeriod, periodDateLabel } from '../period';
-import { SERIES_MEASURES, TOTAL_MEASURES } from './model';
+import { lastThirtyLocalDays, localDayPeriod, periodDateLabel, returnedPeriodLabel } from '../period';
+import { readSeries, SERIES_MEASURES, TOTAL_MEASURES } from './model';
 
 const broadcast = `bct_${'a'.repeat(32)}`;
 const campaignId = `cmp_${'b'.repeat(32)}`;
@@ -109,7 +109,9 @@ const meta = {
   notes: [],
 };
 
-const totalsResult = (overrides: Record<string, number | null> = {}, suppressed = 0) => {
+type MetaOverrides = Partial<{ [K in keyof typeof meta]: (typeof meta)[K] | null }>;
+
+const totalsResult = (overrides: Record<string, number | null> = {}, suppressed = 0, metaOverrides: MetaOverrides = {}) => {
   const values = { ...counts, ...overrides };
   return {
     columns: TOTAL_MEASURES.map((name) => ({
@@ -118,7 +120,7 @@ const totalsResult = (overrides: Record<string, number | null> = {}, suppressed 
       unit: name.endsWith('_rate') ? 'ratio' : 'count',
     })),
     rows: [TOTAL_MEASURES.map((name) => values[name] ?? null)],
-    meta: { ...meta, suppressed },
+    meta: { ...meta, suppressed, ...metaOverrides },
   };
 };
 
@@ -132,7 +134,7 @@ const seriesDays = [
   { day: '2026-11-05', sent: 900, delivered: 880, opened: 200, clicked: 70, unsubscribed: 2 },
 ];
 
-const seriesResult = (days = seriesDays, suppressed = 0) => ({
+const seriesResult = (days = seriesDays, suppressed = 0, metaOverrides: MetaOverrides = {}) => ({
   columns: [
     { name: 'day', kind: 'dimension' },
     ...SERIES_MEASURES.map((name) => ({
@@ -142,7 +144,7 @@ const seriesResult = (days = seriesDays, suppressed = 0) => ({
     })),
   ],
   rows: days.map((day) => [day.day, day.sent, day.delivered, day.opened, day.clicked, day.unsubscribed]),
-  meta: { ...meta, suppressed },
+  meta: { ...meta, suppressed, ...metaOverrides },
 });
 
 const campaign = (overrides: Record<string, unknown> = {}) => ({
@@ -260,6 +262,49 @@ describe('broadcast report period (#500)', () => {
     expect(thirty.to).toBe('2026-11-05T23:59:59.999Z');
     expect(periodDateLabel(thirty)).toBe('7 Oct–5 Nov 2026');
   });
+
+  it('labels the returned read bounds in the read zone', () => {
+    expect(returnedPeriodLabel('2026-10-30T04:00:00.000Z', '2026-11-06T04:59:59.999Z', 'America/New_York')).toBe('30 Oct–5 Nov 2026');
+  });
+});
+
+describe('broadcast report daily axis (#500)', () => {
+  const period = localDayPeriod(7, new Date('2026-11-06T12:00:00Z'), 'UTC');
+  const input = (days = seriesDays) => seriesResult(days) as unknown as Parameters<typeof readSeries>[0];
+
+  it('builds every selected day and leaves an absent middle day as a gap', () => {
+    const view = readSeries(input(seriesDays.filter((day) => day.day !== '2026-11-01')), period);
+    expect(view.days.map((day) => day.day)).toEqual([
+      '2026-10-30',
+      '2026-10-31',
+      '2026-11-01',
+      '2026-11-02',
+      '2026-11-03',
+      '2026-11-04',
+      '2026-11-05',
+    ]);
+    expect(view.days[2]!.values['email.opened']).toBeNull();
+    expect(view.days[2]!.values['email.clicked']).toBeNull();
+    expect(view.days[2]!.values['email.unsubscribed']).toBeNull();
+  });
+
+  it('keeps a returned zero as an observed zero', () => {
+    const view = readSeries(
+      input(seriesDays.map((day) => (day.day === '2026-11-01' ? { ...day, opened: 0, clicked: 0, unsubscribed: 0 } : day))),
+      period,
+    );
+    expect(view.days[2]!.values['email.opened']).toBe(0);
+    expect(view.days[2]!.values['email.clicked']).toBe(0);
+    expect(view.days[2]!.values['email.unsubscribed']).toBe(0);
+  });
+
+  it('produces one category per day for a 30-day period', () => {
+    const thirty = lastThirtyLocalDays(new Date('2026-11-06T12:00:00Z'), 'UTC');
+    const view = readSeries(input([]), thirty);
+    expect(view.days).toHaveLength(30);
+    expect(view.days[0]!.day).toBe('2026-10-07');
+    expect(view.days[29]!.day).toBe('2026-11-05');
+  });
 });
 
 describe('broadcast report reads (#500)', () => {
@@ -289,6 +334,25 @@ describe('broadcast report reads (#500)', () => {
     expect(screen.getByText('981 / 11,826')).toBeTruthy();
     expect(screen.getByText('0.3% of delivered people')).toBeTruthy();
     expect(screen.getAllByText(/Latest event in period:/).length).toBeGreaterThan(0);
+  });
+
+  it('shows each successful read its own returned bounds and freshness', async () => {
+    h.totals = totalsResult({}, 0, {
+      from: '2026-10-30T00:00:00.000Z',
+      to: '2026-11-05T23:59:59.999Z',
+      freshness: null,
+    });
+    h.series = seriesResult(seriesDays, 0, {
+      from: '2026-10-29T00:00:00.000Z',
+      to: '2026-11-04T23:59:59.999Z',
+      freshness: '2026-11-04T10:00:00.000Z',
+    });
+    renderReport();
+    await screen.findAllByText('12,104');
+
+    expect(screen.getByText(/^Totals read: 30 Oct–5 Nov 2026 · UTC · Latest event in period: Unavailable$/)).toBeTruthy();
+    const seriesMeta = screen.getByText(/^Series read: 29 Oct–4 Nov 2026 · UTC · Latest event in period:/);
+    expect(seriesMeta.textContent).not.toMatch(/Unavailable$/);
   });
 
   it('does not load reads while the Report tab is inactive', async () => {
@@ -500,6 +564,23 @@ describe('broadcast report accessibility (#500)', () => {
     expect(screen.getByRole('figure', { name: 'Tracked engagement over time' })).toBeTruthy();
   });
 
+  it('shows an absent middle day as unavailable in both day tables', async () => {
+    h.series = seriesResult(seriesDays.filter((day) => day.day !== '2026-11-01'));
+    renderReport();
+    await screen.findAllByText('12,104');
+    for (const summary of screen.getAllByText('Show data table')) fireEvent.click(summary);
+
+    const engagement = screen.getByRole('table', { name: 'Tracked engagement over time' });
+    const openRow = within(engagement).getByText('1 Nov').closest('tr');
+    expect(openRow?.textContent).toContain('—');
+    expect(within(engagement).getAllByText('—')).toHaveLength(2);
+
+    const unsubscribes = screen.getByRole('table', { name: 'Unsubscribes over time' });
+    const unsubscribeRow = within(unsubscribes).getByText('1 Nov').closest('tr');
+    expect(unsubscribeRow?.textContent).toContain('—');
+    expect(unsubscribeRow?.textContent).not.toMatch(/\b0\b/);
+  });
+
   it('tabulates every day of a 30-day unsubscribe series', async () => {
     const days = Array.from({ length: 30 }, (_, i) => {
       const day = new Date(Date.UTC(2026, 9, 7 + i)).toISOString().slice(0, 10);
@@ -508,11 +589,14 @@ describe('broadcast report accessibility (#500)', () => {
     h.series = seriesResult(days);
     renderReport();
     await screen.findAllByText('12,104');
+    fireEvent.change(screen.getByLabelText('Period'), { target: { value: '30' } });
+    await waitFor(() => expect(seriesCalls()).toHaveLength(2));
     for (const summary of screen.getAllByText('Show data table')) fireEvent.click(summary);
     const unsubscribes = screen.getByRole('table', { name: 'Unsubscribes over time' });
     expect(within(unsubscribes).getByText('7 Oct')).toBeTruthy();
     expect(within(unsubscribes).getByText('5 Nov')).toBeTruthy();
     expect(within(unsubscribes).getByText('30')).toBeTruthy();
+    expect(within(unsubscribes).getAllByRole('row')).toHaveLength(31);
     expect(screen.queryByText(/Showing the first/)).toBeNull();
   });
 

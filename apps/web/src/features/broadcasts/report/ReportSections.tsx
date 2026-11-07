@@ -5,7 +5,7 @@ import { useApi } from '../../../app/useApi';
 import { Alert, BarChart, KpiTile, LineChart } from '../../../ui';
 import type { ChartDataState } from '../../../ui/charts';
 import { formatDateTime } from '../../../ui/time';
-import { type LocalDayPeriod, periodDateLabel } from '../period';
+import { type LocalDayPeriod, periodDateLabel, returnedPeriodLabel } from '../period';
 import { CampaignHoldoutArea } from './CampaignHoldout';
 import {
   type AnalyticsMetaView,
@@ -31,10 +31,12 @@ import {
 
 const count = (value: number | null) => (value === null ? '—' : value.toLocaleString());
 
-function SectionMeta({ meta, period }: { meta: AnalyticsMetaView; period: LocalDayPeriod }) {
+function SectionMeta({ meta, period, scope }: { meta: AnalyticsMetaView; period: LocalDayPeriod; scope: 'Totals' | 'Series' }) {
+  const zone = meta.timeZone ?? period.zone;
+  const bounds = returnedPeriodLabel(meta.from, meta.to, zone);
   return (
     <p className="text-[12px] leading-[18px] text-muted">
-      {periodDateLabel(period)} · {meta.timeZone ?? period.zone} · Latest event in period:{' '}
+      {scope} read: {bounds ?? 'Returned period unavailable'} · {zone} · Latest event in period:{' '}
       {meta.freshness ? formatDateTime(meta.freshness, { zone: true }) : 'Unavailable'}
       {meta.suppressed > 0 ? ` · ${meta.suppressed} ${meta.suppressed === 1 ? 'row' : 'rows'} suppressed below ${meta.k ?? 5} people` : ''}
     </p>
@@ -62,12 +64,14 @@ function TotalsSection({
   error,
   onRetry,
   period,
+  showMeta,
 }: {
   view: TotalsView;
   loading: boolean;
   error: string | null;
   onRetry: () => void;
   period: LocalDayPeriod;
+  showMeta: boolean;
 }) {
   const values = view.values;
   const suppressed = view.meta.suppressed;
@@ -128,6 +132,7 @@ function TotalsSection({
 
   return (
     <div className="space-y-4">
+      {showMeta && <SectionMeta meta={view.meta} period={period} scope="Totals" />}
       {noEvents && (
         <Alert tone="info" title="No recorded events in this period">
           Choose another period to inspect this broadcast.
@@ -210,6 +215,7 @@ function EngagementSection({
   error,
   onRetry,
   period,
+  showMeta,
 }: {
   series: SeriesView;
   totals: TotalsView;
@@ -217,6 +223,7 @@ function EngagementSection({
   error: string | null;
   onRetry: () => void;
   period: LocalDayPeriod;
+  showMeta: boolean;
 }) {
   const labels = series.days.map((day) => day.label);
   const opened = seriesValues(series.days, 'email.opened');
@@ -246,6 +253,7 @@ function EngagementSection({
 
   return (
     <div className="space-y-5">
+      {showMeta && <SectionMeta meta={series.meta} period={period} scope="Series" />}
       <LineChart
         title="Tracked engagement over time"
         subtitle={
@@ -326,11 +334,18 @@ export function ReportBody({ artifactId, period }: { artifactId: string; period:
     [artifactId, period.from, period.to],
   );
   const totals = readTotals(totalsQuery.data);
-  const series = readSeries(seriesQuery.data);
+  const series = readSeries(seriesQuery.data, period);
 
   return (
     <div className="space-y-5">
-      <TotalsSection view={totals} loading={totalsQuery.loading} error={totalsQuery.error} onRetry={totalsQuery.reload} period={period} />
+      <TotalsSection
+        view={totals}
+        loading={totalsQuery.loading}
+        error={totalsQuery.error}
+        onRetry={totalsQuery.reload}
+        period={period}
+        showMeta={!!totalsQuery.data && !totalsQuery.error}
+      />
       <EngagementSection
         series={series}
         totals={totals}
@@ -338,8 +353,8 @@ export function ReportBody({ artifactId, period }: { artifactId: string; period:
         error={seriesQuery.error}
         onRetry={seriesQuery.reload}
         period={period}
+        showMeta={!!seriesQuery.data && !seriesQuery.error}
       />
-      {(totalsQuery.data || seriesQuery.data) && <SectionMeta meta={totalsQuery.data ? totals.meta : series.meta} period={period} />}
       <LinkInspection canReadProfiles={can('profiles:read')} />
       <CampaignHoldoutArea artifactId={artifactId} period={period} />
     </div>
