@@ -1,4 +1,5 @@
 import { defineConfig, devices } from '@playwright/test';
+import { e2eBase } from './e2e/ports';
 
 // Visual regression (#433): the stable route subset from e2e/visual.spec.ts against committed
 // baselines, on its own so the functional e2e stays fast.
@@ -9,7 +10,6 @@ import { defineConfig, devices } from '@playwright/test';
 //
 // Baselines are Linux screenshots: record them in the official Playwright container
 // (mcr.microsoft.com/playwright:v1.64.1-noble, the same image CI uses) so they match CI.
-const base = process.env.E2E_BASE ?? `http://localhost:${process.env.E2E_PORT ?? 3100}`;
 const executablePath = process.env.CHROMIUM || undefined;
 
 export default defineConfig({
@@ -31,7 +31,7 @@ export default defineConfig({
   reporter: [['list']],
   outputDir: 'test-results/visual',
   use: {
-    baseURL: base,
+    baseURL: e2eBase,
     trace: 'retain-on-failure',
     ...devices['Desktop Chrome'],
     viewport: { width: 1440, height: 900 },
@@ -42,7 +42,7 @@ export default defineConfig({
     ? undefined
     : {
         command: 'pnpm --filter @agentic-marketing/web build:live && npx tsx apps/server/test/e2e/server.ts',
-        url: `${base}/healthz`,
+        url: `${e2eBase}/healthz`,
         timeout: 240_000,
         reuseExistingServer: !process.env.CI,
       },

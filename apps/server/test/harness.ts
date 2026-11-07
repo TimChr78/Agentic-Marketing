@@ -7,7 +7,7 @@ import { migrateClickHouse, resetClickHouse, resetNatsNamespace } from '@agentic
 import { serve } from '@hono/node-server';
 import { Client, type OAuthClientProvider, StreamableHTTPClientTransport, UnauthorizedError } from '@modelcontextprotocol/client';
 import pg from 'pg';
-import { runId, runScoped, testPortOffset } from '../../../packages/db/test/run';
+import { runId, scopedDbName, testPortOffset } from '../../../packages/db/test/run';
 import { createServer } from '../src/app';
 import { loadConfig } from '../src/config';
 import { prefixOf } from '../src/domains';
@@ -158,7 +158,7 @@ export async function connectAgent(BASE: string, u: User, permissions: string[],
 export const testPort = (port: number) => port + (Number(process.env.VITEST_POOL_ID ?? '1') - 1) * 1000 + testPortOffset();
 
 /** The migrated database that test-setup.ts prepares once per run; run-scoped like every test database. */
-export const TEMPLATE_DB = runScoped('am_test_template');
+export const TEMPLATE_DB = scopedDbName('am_test_template');
 const APP_ROLE = { appRole: 'am_app_test', appRolePassword: 'am_app_test_password' };
 
 /** The admin URL of a test database on the TEST_DATABASE_URL server. */
@@ -228,7 +228,7 @@ export async function dropRunDatabases() {
  * The name is run-scoped, so two checkouts on one stack never drop each other's databases.
  */
 export async function freshDatabase(name: string): Promise<{ url: URL; migrated: boolean; dbName: string }> {
-  const dbName = runScoped(name);
+  const dbName = scopedDbName(name);
   const template = process.env.AM_TEST_TEMPLATE;
   const maint = new pg.Client({ connectionString: testDatabaseUrl('postgres').toString() });
   await maint.connect();
@@ -352,6 +352,7 @@ export async function startTestServer(
   return {
     srv,
     base,
+    dbName,
     publicBase: config.publicPort ? `http://localhost:${config.publicPort}` : undefined,
     signUp,
     workspaceWith,

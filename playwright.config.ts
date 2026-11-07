@@ -1,14 +1,12 @@
 import { defineConfig, devices } from '@playwright/test';
-import { testPortOffset } from './packages/db/test/run';
+import { e2eBase, e2eFixturesBase } from './e2e/ports';
 
 // End-to-end tests of the admin UI against a seeded server (apps/server/test/e2e/server.ts).
 //   pnpm e2e            builds the UI, starts the seeded server on :3100 and runs the tests
 //   E2E_BASE=http://localhost:5173 pnpm e2e:dev   against a running Vite dev server instead
 //   E2E_PORT=3120 E2E_DB=e2e_mine pnpm e2e   another port and database, so two checkouts can run at once
-// TEST_PORT_OFFSET also moves the default port, matching apps/server/test/e2e/server.ts.
+// TEST_PORT_OFFSET moves the default port and the fixtures port together (e2e/ports.ts).
 // Uses the system Chromium when CHROMIUM (or /usr/bin/chromium) is set, else Playwright's own.
-const e2ePort = Number(process.env.E2E_PORT ?? 3100 + testPortOffset());
-const base = process.env.E2E_BASE ?? `http://localhost:${e2ePort}`;
 const executablePath = process.env.CHROMIUM || undefined;
 
 export default defineConfig({
@@ -26,7 +24,7 @@ export default defineConfig({
     { name: 'axe', testMatch: '**/axe.spec.ts' },
   ],
   use: {
-    baseURL: base,
+    baseURL: e2eBase,
     trace: 'retain-on-failure',
     ...devices['Desktop Chrome'],
     viewport: { width: 1440, height: 900 },
@@ -38,7 +36,7 @@ export default defineConfig({
     : {
         command: 'pnpm --filter @agentic-marketing/web build:live && npx tsx apps/server/test/e2e/server.ts',
         // The fixtures port is opened only after the seed finishes; /healthz is up too early.
-        url: `http://127.0.0.1:${e2ePort + 1}/ready`,
+        url: `${e2eFixturesBase}/ready`,
         timeout: 240_000,
         reuseExistingServer: !process.env.CI,
       },
