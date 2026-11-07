@@ -236,6 +236,12 @@ export async function settle(page, { timeout = 20_000 } = {}) {
     undefined,
     { timeout },
   );
+  // The e-mail editor removes GrapesJS's own chrome when it is ready; capture after that, not before.
+  await page.waitForFunction(
+    () => Array.from(document.querySelectorAll('.am-gjs-app')).every((el) => el.dataset.amGjsReady === 'true'),
+    undefined,
+    { timeout },
+  );
   // Two frames, so charts (ECharts SVG) and layout effects have painted.
   await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 }

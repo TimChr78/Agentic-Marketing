@@ -38,6 +38,14 @@
   font-family: var(--font-sans);
 }
 
+/* GrapesJS's own command, option and device bars are replaced by the app toolbar. They are also
+   removed on ready; hiding them here keeps them from flashing over the canvas before that. */
+.am-gjs-app .gjs-pn-commands,
+.am-gjs-app .gjs-pn-options,
+.am-gjs-app .gjs-pn-devices-c {
+  display: none;
+}
+
 /* Panels and the one inspector tab row. */
 .am-gjs .gjs-pn-panel {
   background: var(--surface);

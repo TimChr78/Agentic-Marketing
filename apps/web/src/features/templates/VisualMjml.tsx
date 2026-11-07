@@ -152,6 +152,9 @@ const VisualMjml = forwardRef<VisualMjmlHandle, { mjml: string; onChange: (mjml:
         if (optionsPanel) panels.remove(optionsPanel);
         const devicesPanel = ed.Panels.getPanel('devices-c');
         if (devicesPanel) panels.remove(devicesPanel);
+        // The emptied commands bar would otherwise sit over the top of the canvas (canvas top is 0).
+        const commandsPanel = ed.Panels.getPanel('commands');
+        if (commandsPanel) panels.remove(commandsPanel);
         const viewsPanel = ed.Panels.getPanel('views');
         const blocksButton = ed.Panels.getButton('views', 'open-blocks');
         if (viewsPanel && blocksButton) viewsPanel.buttons.remove(blocksButton);
@@ -189,7 +192,7 @@ const VisualMjml = forwardRef<VisualMjmlHandle, { mjml: string; onChange: (mjml:
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
-    return <div ref={host} className="am-gjs h-full min-w-0" />;
+    return <div ref={host} className="am-gjs am-gjs-app h-full min-w-0" />;
   },
 );
 export default VisualMjml;
