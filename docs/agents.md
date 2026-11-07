@@ -206,6 +206,8 @@ A **mandate** is an `agent_mandate` artifact (prefix `mnd_`): versioned, reviewe
 
 Only people can create, change or publish a mandate. An agent that tries gets `403` with "Only people can create, change or publish agent mandates; agents cannot set their own borders."
 
+Read the mandate that applies now with `agents.mandate` (`{agentId}`): the published, unarchived and unexpired version the policy engine uses, its full content, and why the current time is outside its working hours or on a blackout date (`outsideHours`, `null` when inside). It returns `mandate: null` when the agent has none, never the newest draft, and never credentials. The agent page calls it once instead of scanning every mandate for the agent.
+
 ### Autonomy levels
 
 | Level | Name | What happens |

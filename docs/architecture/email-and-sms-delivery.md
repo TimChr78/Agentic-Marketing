@@ -85,6 +85,12 @@ domain and link domain together. `workspace.get` / `workspace.domains.list` retu
 links URL. `am doctor` prints the link host per sending domain and warns when the registrable domains
 differ.
 
+`deliverability.trend` returns the same operational numerator and denominator as a series: one point
+per workspace-local midnight, each counting current message statuses created in the delivery policy's
+rolling duration. Its thresholds are today's policy, not historic values, and it has no pause history.
+`emailProviders.checkDomain` still answers the DNS question separately, so a DNS failure never hides
+the rates.
+
 **Provider webhooks.** `emailProviders.create` returns `webhookPath` and `webhookUrl` built from the
 workspace's verified primary domain (or `PUBLIC_LINKS_URL` when it has none). After a domain change,
 `emailProviders.refreshWebhookUrl {id}` (or `emailProviders.rotateWebhook`) issues a fresh URL on the

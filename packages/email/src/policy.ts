@@ -1,6 +1,6 @@
 import { DEFAULT_DELIVERY_POLICY, type DeliveryPolicy, type Purposes, publishedSingleton } from '@agentic-marketing/artifacts';
 import { autonomySettings } from '@agentic-marketing/commands';
-import { zonedInstant, zonedParts } from '@agentic-marketing/core';
+import { AppError, zonedInstant, zonedParts } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
 import { and, eq, gte, inArray, isNotNull, isNull, ne, or, sql } from 'drizzle-orm';
 
@@ -13,7 +13,7 @@ export type Channel = 'email' | 'sms' | 'push';
 export type Hold = { ok: true } | { ok: false; reason: string } | { ok: 'later'; until: Date; reason: string };
 
 /** Statuses of a completed contact: the provider accepted the message and its send time is known. */
-const CONTACTED = ['sent', 'delivered', 'bounced', 'complained'] as const;
+export const CONTACTED = ['sent', 'delivered', 'bounced', 'complained'] as const;
 /** A reservation: claimed for sending, or still queued behind the worker. Both count conservatively. */
 const IN_FLIGHT = ['queued', 'sending'] as const;
 export const isMarketing = (basis: string) => basis !== 'contract' && basis !== 'legal_obligation';
@@ -234,6 +234,118 @@ export async function streamRates(
     }
   }
   return { sent, bounced, complained, bounceRate, complaintRate, status, reason };
+}
+
+/** One local-midnight point of a deliverability trend: the day it ends, and the boundary itself. */
+export interface TrendBoundary {
+  /** Workspace-local calendar date that ended at windowTo, e.g. "2026-11-06". */
+  day: string;
+  /** The local midnight that ends `day`. */
+  windowTo: Date;
+}
+
+const DAY_MS = 86_400_000;
+const pad2 = (n: number) => String(n).padStart(2, '0');
+const dateKey = (at: number) => {
+  const d = new Date(at);
+  return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
+};
+
+/**
+ * The workspace-local daily boundaries whose midnight lies in (from, to], at most 90.
+ * Each point ends at local midnight and is labelled with the date that ended there, so a
+ * request for the last 30 complete local days (from = midnight 30 days ago, to = today's
+ * midnight) returns 30 points, the first labelled 30 days ago.
+ */
+export function trendBoundaries(from: Date, to: Date, timeZone: string, maxPoints = 90): TrendBoundary[] {
+  if (!(from.getTime() < to.getTime())) throw new AppError('invalid_input', '`from` must be before `to`.');
+  const start = zonedParts(from, timeZone);
+  const startDay = Date.UTC(start.y, start.m - 1, start.d);
+  const points: TrendBoundary[] = [];
+  for (let cursor = startDay + DAY_MS; ; cursor += DAY_MS) {
+    const cursorDate = new Date(cursor);
+    const windowTo = zonedInstant(cursorDate.getUTCFullYear(), cursorDate.getUTCMonth() + 1, cursorDate.getUTCDate(), 0, 0, timeZone);
+    if (windowTo.getTime() > to.getTime()) break;
+    if (windowTo.getTime() <= from.getTime()) continue;
+    points.push({ day: dateKey(cursor - DAY_MS), windowTo });
+    if (points.length > maxPoints)
+      throw new AppError('invalid_input', `The trend is at most ${maxPoints} daily points; narrow \`from\` and \`to\`.`);
+  }
+  return points;
+}
+
+/** One status count at a whole UTC minute, as grouped from the messages table. */
+export interface TrendRow {
+  /** Epoch minutes: `floor(epoch(created_at) / 60)`. */
+  minute: number;
+  /** A contacted status; other rows are ignored defensively. */
+  status: string;
+  n: number;
+}
+
+export interface TrendPoint {
+  day: string;
+  windowFrom: string;
+  windowTo: string;
+  sent: number;
+  bounced: number;
+  complained: number;
+  bounceRate: number | null;
+  complaintRate: number | null;
+}
+
+/**
+ * Rolling creation-window points over a bounded set of minute buckets. The window ends at each
+ * local midnight and starts exactly `windowDays * 86_400_000` ms earlier, matching streamRates
+ * across DST instead of counting local calendar days. Current statuses are mutually exclusive:
+ * sent = sent + delivered + bounced + complained, and a zero denominator yields null rates.
+ */
+export function trendPoints(boundaries: TrendBoundary[], windowDays: number, rows: TrendRow[]): TrendPoint[] {
+  const byMinute = new Map<number, { sent: number; delivered: number; bounced: number; complained: number }>();
+  for (const row of rows) {
+    if (!(CONTACTED as readonly string[]).includes(row.status)) continue;
+    const bucket = byMinute.get(row.minute) ?? { sent: 0, delivered: 0, bounced: 0, complained: 0 };
+    bucket[row.status as (typeof CONTACTED)[number]] += row.n;
+    byMinute.set(row.minute, bucket);
+  }
+  const minutes = [...byMinute.keys()].sort((a, b) => a - b);
+  const totals = { sent: 0, delivered: 0, bounced: 0, complained: 0 };
+  const windowMs = windowDays * DAY_MS;
+  let add = 0;
+  let remove = 0;
+  const points: TrendPoint[] = [];
+  for (const boundary of boundaries) {
+    const toMinute = Math.floor(boundary.windowTo.getTime() / 60_000);
+    const fromMinute = Math.floor((boundary.windowTo.getTime() - windowMs) / 60_000);
+    while (add < minutes.length && (minutes[add] as number) < toMinute) {
+      const bucket = byMinute.get(minutes[add] as number)!;
+      totals.sent += bucket.sent;
+      totals.delivered += bucket.delivered;
+      totals.bounced += bucket.bounced;
+      totals.complained += bucket.complained;
+      add += 1;
+    }
+    while (remove < add && (minutes[remove] as number) < fromMinute) {
+      const bucket = byMinute.get(minutes[remove] as number)!;
+      totals.sent -= bucket.sent;
+      totals.delivered -= bucket.delivered;
+      totals.bounced -= bucket.bounced;
+      totals.complained -= bucket.complained;
+      remove += 1;
+    }
+    const sent = totals.sent + totals.delivered + totals.bounced + totals.complained;
+    points.push({
+      day: boundary.day,
+      windowFrom: new Date(boundary.windowTo.getTime() - windowMs).toISOString(),
+      windowTo: boundary.windowTo.toISOString(),
+      sent,
+      bounced: totals.bounced,
+      complained: totals.complained,
+      bounceRate: sent ? totals.bounced / sent : null,
+      complaintRate: sent ? totals.complained / sent : null,
+    });
+  }
+  return points;
 }
 
 // Rates are read for every marketing message; a short cache keeps a broadcast from re-counting.

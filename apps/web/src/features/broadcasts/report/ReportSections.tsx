@@ -144,6 +144,7 @@ function TotalsSection({
           value={sent}
           period={periodText}
           updatedAt={view.meta.freshness}
+          freshnessLabel="Latest event in period"
           dataState={tileState(sent, suppressed)}
           explanation={tileExplanation(sent, suppressed)}
         />
@@ -152,6 +153,7 @@ function TotalsSection({
           value={delivered}
           period={periodText}
           updatedAt={view.meta.freshness}
+          freshnessLabel="Latest event in period"
           dataState={tileState(delivered, suppressed)}
           explanation={tileExplanation(delivered, suppressed)}
         />
@@ -164,6 +166,7 @@ function TotalsSection({
           denominator={clicks === null ? undefined : (delivered ?? undefined)}
           period={`${periodText} · clicked ÷ delivered`}
           updatedAt={view.meta.freshness}
+          freshnessLabel="Latest event in period"
           dataState={clicks === null ? tileState(null, suppressed) : 'populated'}
           explanation={clicks === null ? reason : undefined}
         />
@@ -174,6 +177,7 @@ function TotalsSection({
           denominator={delivered === null ? undefined : delivered}
           period={periodText}
           updatedAt={view.meta.freshness}
+          freshnessLabel="Latest event in period"
           dataState={tileState(unsubscribed, suppressed)}
           explanation={
             unsubscribed === null

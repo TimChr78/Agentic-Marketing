@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setWorkspaceTimeZone } from '../../../ui/time';
 import { BroadcastReport } from '../BroadcastReport';
 import { lastThirtyLocalDays, localDayPeriod, periodDateLabel, returnedPeriodLabel } from '../period';
@@ -215,6 +215,12 @@ const useCampaign = (
   h.artifacts.set(membership.id as string, campaignArtifact(content, { id: membership.id, name: membership.name }));
   h.holdout[membership.id as string] = result;
 };
+
+// BroadcastReport lazy-loads ReportEntry. Import it once up front so the first test does not race
+// the module load against findBy's one-second default when the host is busy (a recurring flake).
+beforeAll(async () => {
+  await import('./ReportEntry');
+});
 
 const renderReport = (active = true) => render(<BroadcastReport artifactId={broadcast} active={active} />);
 
