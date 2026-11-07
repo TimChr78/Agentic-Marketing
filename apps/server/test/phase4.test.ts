@@ -241,8 +241,19 @@ describe('AI steps in a journey', () => {
       },
       consent('ada', true),
       { type: 'track', event: 'Product Viewed', userId: 'ada', properties: { name: 'Fjell 2 tent', note: 'call me on +45 12 34 56 78' } },
-      { type: 'track', event: 'Browse Abandoned', userId: 'ada' },
     ]);
+    // The AI context reads stored events, so the trigger waits until the product view is visible (#503).
+    const adaId = (
+      await eventually(
+        () => api.call('profiles.find', { type: 'email', value: 'ada@example.com' }),
+        (r) => !!r.profileId,
+      )
+    ).profileId!;
+    await eventually(
+      () => api.call('profiles.events', { profileId: adaId }),
+      (r) => r.events.some((e) => e.name === 'Product Viewed'),
+    );
+    await send([{ type: 'track', event: 'Browse Abandoned', userId: 'ada' }]);
     const mail = await eventually(
       async () => mailTo('ada@example.com'),
       (m) => m.length === 1,
