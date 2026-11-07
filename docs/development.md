@@ -180,6 +180,46 @@ CHROMIUM=/usr/bin/chromium pnpm e2e           # use a system Chromium instead of
 pnpm shots                                    # screenshots of every admin route, light and dark, 1440/768/390 px
 ```
 
+#### The browser suite in the CI image
+
+`scripts/e2e-docker.sh` runs the same browser CI runs, from any checkout, without installing
+Chromium: it builds the UI, starts the seeded server on a fresh database, waits for `/ready`, then
+runs Playwright inside `mcr.microsoft.com/playwright:v1.64.1-noble` with the repository mounted at
+its own path.
+
+```bash
+scripts/e2e-docker.sh smoke        # the @smoke subset: sign-in/Home, approvals, composer, editor, people, agent pause
+scripts/e2e-docker.sh functional   # every functional spec
+scripts/e2e-docker.sh axe          # the accessibility project
+scripts/e2e-docker.sh visual       # visual regression against the committed baselines
+scripts/e2e-docker.sh update       # re-record those baselines (review the diff, then commit)
+scripts/e2e-docker.sh shots        # the full screenshot matrix in reports/shots
+pnpm e2e:smoke                     # the same wrapper through package.json
+```
+
+Each run creates `e2e_<timestamp>` and a fresh `am_e2e_<timestamp>` database, passes
+`TEST_DATABASE_URL`, `CLICKHOUSE_URL`, `NATS_URL` and `VALKEY_URL` through to the server, and
+removes the database afterwards (`E2E_KEEP_DB=1` keeps it). The port is `E2E_PORT` (default 3100;
+`E2E_PORT+1` is the fixtures port). A run refuses to start if either port is already in use and
+prints the holding process — the wrapper never pattern-kills anything. `E2E_SKIP_BUILD=1` reuses
+`apps/web/dist`.
+
+The runner's Docker network comes from `E2E_DOCKER_NETWORK`: `host` by default, so the container
+reaches the server on the host's loopback. When the script itself runs inside a container (there is
+a `/.dockerenv`) and `docker ps` finds a container named after `$HOSTNAME`, it uses
+`container:<name>` instead, so the runner shares that container's network namespace and
+`localhost:E2E_PORT` still reaches the server. On this machine that makes
+`E2E_DOCKER_NETWORK=container:T3-Code` unnecessary to set by hand.
+
+The smoke selection is the `@smoke` tag on the tests themselves (`test(..., { tag: '@smoke' }, ...)`),
+so `pnpm e2e --project functional --grep @smoke` runs it against a local dev server too. It is meant
+to stay under about three minutes excluding the build and seed.
+
+Label selectors follow #248: use `getByRole(role, { name, exact: true })` (or a `data-testid` where a
+required field's accessible name includes a hidden asterisk), never a loose `getByLabel(...)` that can
+match a second field. `scripts/check-e2e-selectors.mjs` (`pnpm e2e:selectors`, part of `pnpm lint`)
+fails on any `getByLabel(` in `e2e/` without `{ exact: true }`.
+
 #### Screenshots, visual regression and accessibility
 
 The route matrix is one list, `e2e/matrix.mjs`: every entry in `apps/web/src/app/nav.ts` (read from

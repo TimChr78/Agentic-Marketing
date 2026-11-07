@@ -80,9 +80,9 @@ test.describe('New and the command palette', () => {
 
     const dialog = page.getByRole('dialog', { name: 'New broadcast' });
     await expect(dialog).toBeVisible();
-    await dialog.getByLabel('Name').fill(`E2E navigation broadcast ${Date.now()}`);
-    await dialog.getByLabel('Template').selectOption({ index: 1 });
-    await dialog.getByLabel('Segment').selectOption({ index: 1 });
+    await dialog.getByRole('textbox', { name: 'Name', exact: true }).fill(`E2E navigation broadcast ${Date.now()}`);
+    await dialog.getByRole('combobox', { name: 'Template', exact: true }).selectOption({ index: 1 });
+    await dialog.getByRole('combobox', { name: 'Segment', exact: true }).selectOption({ index: 1 });
     await dialog.getByRole('button', { name: 'Create draft' }).click();
     await expect(page.getByText(/Created .* as a draft/)).toBeVisible();
     await expect(page).toHaveURL(/\/marketing\/broadcasts\/bct_/);

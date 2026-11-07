@@ -240,13 +240,13 @@ test('a bundle shows every member first, then the selected member’s detail, an
   await page.goto(`/approvals/${broadcastMember.approvalId}`);
   const again = page.getByRole('dialog', { name: 'Review bundle send' });
   await again.getByRole('button', { name: 'Reject all' }).click();
-  await expect(again.getByLabel('Why are you rejecting it?')).toBeFocused();
+  await expect(again.getByRole('textbox', { name: 'Why are you rejecting it?', exact: true })).toBeFocused();
   await again.getByRole('button', { name: 'Reject all 2 with reason' }).click();
   await expect(again).toContainText('Say what to change');
   await again.getByRole('button', { name: 'Cancel' }).click();
   await expect(again.getByRole('button', { name: 'Reject all' })).toBeFocused();
   await again.getByRole('button', { name: 'Reject all' }).click();
-  await again.getByLabel('Why are you rejecting it?').fill('The offer is not ready yet.');
+  await again.getByRole('textbox', { name: 'Why are you rejecting it?', exact: true }).fill('The offer is not ready yet.');
   await again.getByRole('button', { name: 'Reject all 2 with reason' }).click();
   await expect(page.getByText(/Rejected 2 changes/)).toBeVisible();
   const rejected = await call<{ approvals: { artifactName: string }[] }>(page.request, 'approvals.list', {
@@ -358,7 +358,7 @@ test('a bundled block review withholds the combined message and previews each ex
 
   // Leave the bundle decided rather than pending for later specs.
   await drawer.getByRole('button', { name: 'Reject all' }).click();
-  await drawer.getByLabel('Why are you rejecting it?').fill('Cleaning up the block bundle fixture.');
+  await drawer.getByRole('textbox', { name: 'Why are you rejecting it?', exact: true }).fill('Cleaning up the block bundle fixture.');
   await drawer.getByRole('button', { name: /Reject all 2 with reason/ }).click();
   await expect(page.getByText(/Rejected 2 changes/)).toBeVisible();
 });
@@ -448,7 +448,7 @@ test('a broadcast bundle with a newer block withholds the nested published e-mai
 
   // Leave the bundle decided rather than pending for later specs.
   await drawer.getByRole('button', { name: 'Reject all' }).click();
-  await drawer.getByLabel('Why are you rejecting it?').fill('Cleaning up the broadcast bundle fixture.');
+  await drawer.getByRole('textbox', { name: 'Why are you rejecting it?', exact: true }).fill('Cleaning up the broadcast bundle fixture.');
   await drawer.getByRole('button', { name: /Reject all 3 with reason/ }).click();
   await expect(page.getByText(/Rejected 3 changes/)).toBeVisible();
 });

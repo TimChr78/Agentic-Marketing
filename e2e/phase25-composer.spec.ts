@@ -30,7 +30,7 @@ async function openComposer(page: Page, id?: string) {
   return broadcast;
 }
 
-test('the composer separates evidence from consent and holds the estimate behind a save', async ({ page }) => {
+test('the composer separates evidence from consent and holds the estimate behind a save', { tag: '@smoke' }, async ({ page }) => {
   await signIn(page, PEOPLE.builder);
   const broadcast = await broadcastId(page);
   const previewRequests: string[] = [];
@@ -83,7 +83,7 @@ test('the composer separates evidence from consent and holds the estimate behind
   await expect(page.locator('#composer-when').getByText('Scheduled time shown in UTC; arrival time varies.')).toBeVisible();
 
   // Dirtying the segment requires a save before the estimate refreshes.
-  const segment = page.getByLabel(/Segment/);
+  const segment = page.getByRole('combobox', { name: 'Segment', exact: true });
   const selected = await segment.inputValue();
   const next = await segment
     .locator('option')
@@ -120,30 +120,30 @@ test('the composer keeps schedule, window and advanced fields without saving the
 
   // Schedule restores a picker in the workspace zone and the preview names the instant.
   await page.getByRole('radio', { name: 'Schedule' }).click();
-  const sendAt = page.getByLabel('Send at');
+  const sendAt = page.getByLabel('Send at', { exact: true });
   await sendAt.fill('2026-12-01T09:00');
   await expect(page.getByText(/Dec 1, 2026/).first()).toBeVisible();
 
   // A local-time window toggles its complete panel and the reader-zone helper.
-  const windowToggle = page.getByLabel('Only send inside a local-time window');
+  const windowToggle = page.getByRole('checkbox', { name: 'Only send inside a local-time window', exact: true });
   await windowToggle.check();
-  await expect(page.getByLabel('Window opens')).toHaveValue('09:00');
-  await expect(page.getByLabel('Window closes')).toHaveValue('17:00');
+  await expect(page.getByLabel('Window opens', { exact: true })).toHaveValue('09:00');
+  await expect(page.getByLabel('Window closes', { exact: true })).toHaveValue('17:00');
   await expect(page.getByText('Readers without a valid zone use the delivery-policy zone.', { exact: true })).toBeVisible();
   await expect(page.getByText(/09:00–17:00 in each reader’s time zone · every day · maximum wait 1 day/)).toBeVisible();
 
   // Subject test and staged send stay mutually exclusive with a visible reason.
   await page.getByText('Subject test · Off').click();
-  await page.getByLabel('Test subject lines on a sample').check();
-  await expect(page.getByLabel('Subject A')).toBeVisible();
-  await expect(page.getByLabel('Subject B')).toBeVisible();
+  await page.getByRole('checkbox', { name: 'Test subject lines on a sample', exact: true }).check();
+  await expect(page.getByLabel('Subject A', { exact: true })).toBeVisible();
+  await expect(page.getByLabel('Subject B', { exact: true })).toBeVisible();
   await expect(page.getByText('Staged send is unavailable while a subject test is on.')).toBeVisible();
 
   // Newsletter archive keeps its own fields when enabled.
   await page.getByText(/Newsletter archive · Off/).click();
-  await page.getByLabel('Publish to the archive').check();
-  await expect(page.getByLabel('Issue address')).toBeVisible();
-  await expect(page.getByLabel('Summary')).toBeVisible();
+  await page.getByRole('checkbox', { name: 'Publish to the archive', exact: true }).check();
+  await expect(page.getByLabel('Issue address', { exact: true })).toBeVisible();
+  await expect(page.getByLabel('Summary', { exact: true })).toBeVisible();
 });
 
 test('a reader without artifacts:write sees the composer but cannot edit it', async ({ page }) => {
@@ -151,8 +151,8 @@ test('a reader without artifacts:write sees the composer but cannot edit it', as
   await openComposer(page);
 
   await expect(page.getByText('Your role can read this broadcast but cannot edit it.')).toBeVisible();
-  await expect(page.getByLabel(/Template/)).toBeDisabled();
-  await expect(page.getByLabel(/Segment/)).toBeDisabled();
+  await expect(page.getByRole('combobox', { name: 'Template', exact: true })).toBeDisabled();
+  await expect(page.getByRole('combobox', { name: 'Segment', exact: true })).toBeDisabled();
   await expect(page.getByRole('button', { name: 'Save draft' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Refresh checks' })).toBeEnabled();
   await expect(page.getByRole('heading', { name: 'Live preview' })).toBeVisible();

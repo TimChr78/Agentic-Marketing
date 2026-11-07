@@ -2,6 +2,12 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+### Changed
+
+- The browser suite runs the way CI does from any checkout: `scripts/e2e-docker.sh <smoke|functional|axe|visual|update|shots>` builds the UI, starts the seeded server on a fresh database, waits for `/ready`, verifies the seed by database name, runs Playwright in the pinned image and stops the server by process group. `pnpm e2e:smoke` tags the critical journeys (sign-in and Home, approvals review, the broadcast composer, the template editor, people lookup and pausing an agent) for a run under three minutes. `pnpm lint` also rejects `getByLabel(...)` without `{ exact: true }` in `e2e/`, and the ambiguous label selectors now use `getByRole(..., { exact: true })` (#248).
+
 ## [0.12.0] - 2026-11-07
 
 ### Added

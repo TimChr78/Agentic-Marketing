@@ -6,7 +6,9 @@ test.afterEach(async ({ page }) => {
   await call(page.request, 'workspace.setAutonomy', { switch: 'on' }).catch(() => {});
 });
 
-test('pause an agent with a reason, resume it, and switch the workspace to propose-only (#213, #215)', async ({ page }) => {
+test('pause an agent in one click, resume it, and switch the workspace to propose-only (#213, #215)', { tag: '@smoke' }, async ({
+  page,
+}) => {
   await signIn(page, PEOPLE.owner);
 
   // A token acts as an agent the first time it calls a command, with the token's name.
