@@ -44,6 +44,7 @@ export default function AgentPage({ params }: { params: Record<string, string> }
   const period = useMemo(() => reportPeriod(choice, anchor), [choice, anchor]);
 
   // A different agent is a different page: start on Overview and the default period.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reset the tab when a different agent is opened, which the body does not read
   useEffect(() => {
     setTab('overview');
     setChoice(7);

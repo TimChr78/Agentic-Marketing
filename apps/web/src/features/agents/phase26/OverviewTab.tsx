@@ -335,63 +335,61 @@ function DecisionBreakdown({ actions }: { actions: AgentReport['actions'] }) {
         {rows.length === 0 ? (
           <p className="text-[13px] text-muted">No decisions recorded in this period.</p>
         ) : (
-          <>
-            <figure aria-label="Decision counts by action class" className="space-y-5">
-              <figcaption className="sr-only">
-                Decision counts by action class: action rows, not people, with a table of the same returned values.
-              </figcaption>
-              <div className="space-y-2">
-                {DECISION_ROWS.map((row) => {
-                  const value = totals[row.key];
-                  return (
-                    <div key={row.key}>
-                      <div className="flex items-baseline justify-between gap-3 text-[12px] leading-[18px]">
-                        <span className="text-fg-2">{row.label}</span>
-                        <span className="num text-fg">{value.toLocaleString('en-US')}</span>
-                      </div>
-                      <div
-                        className="mt-1 h-2 rounded-sm bg-surface-2"
-                        role="img"
-                        aria-label={`${row.label}: ${value.toLocaleString('en-US')} action rows`}
-                      >
-                        <div className="h-2 rounded-sm bg-viz-1" style={{ width: max > 0 ? `${(value / max) * 100}%` : '0%' }} />
-                      </div>
+          <figure aria-label="Decision counts by action class" className="space-y-5">
+            <figcaption className="sr-only">
+              Decision counts by action class: action rows, not people, with a table of the same returned values.
+            </figcaption>
+            <div className="space-y-2">
+              {DECISION_ROWS.map((row) => {
+                const value = totals[row.key];
+                return (
+                  <div key={row.key}>
+                    <div className="flex items-baseline justify-between gap-3 text-[12px] leading-[18px]">
+                      <span className="text-fg-2">{row.label}</span>
+                      <span className="num text-fg">{value.toLocaleString('en-US')}</span>
                     </div>
-                  );
-                })}
-              </div>
-              <p className="text-[12px] leading-[18px] text-muted">
-                {total.toLocaleString('en-US')} action rows in this period. The bars share one count scale; they are not a percentage split
-                and not a count of people.
-              </p>
-              <div className="overflow-x-auto">
-                <Table label="Decisions by action class">
-                  <THead>
-                    <tr>
-                      <Th>Action class</Th>
-                      {DECISION_ROWS.map((row) => (
-                        <Th key={row.key} align="right">
-                          {row.label}
-                        </Th>
-                      ))}
-                    </tr>
-                  </THead>
-                  <tbody>
-                    {rows.map(({ actionClass, counts }) => (
-                      <Tr key={actionClass}>
-                        <Td>{actionClassLabel(actionClass)}</Td>
-                        {DECISION_ROWS.map((row) => (
-                          <Td key={row.key} align="right">
-                            {counts[row.key as DecisionKey].toLocaleString('en-US')}
-                          </Td>
-                        ))}
-                      </Tr>
+                    <div
+                      className="mt-1 h-2 rounded-sm bg-surface-2"
+                      role="img"
+                      aria-label={`${row.label}: ${value.toLocaleString('en-US')} action rows`}
+                    >
+                      <div className="h-2 rounded-sm bg-viz-1" style={{ width: max > 0 ? `${(value / max) * 100}%` : '0%' }} />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <p className="text-[12px] leading-[18px] text-muted">
+              {total.toLocaleString('en-US')} action rows in this period. The bars share one count scale; they are not a percentage split
+              and not a count of people.
+            </p>
+            <div className="overflow-x-auto">
+              <Table label="Decisions by action class">
+                <THead>
+                  <tr>
+                    <Th>Action class</Th>
+                    {DECISION_ROWS.map((row) => (
+                      <Th key={row.key} align="right">
+                        {row.label}
+                      </Th>
                     ))}
-                  </tbody>
-                </Table>
-              </div>
-            </figure>
-          </>
+                  </tr>
+                </THead>
+                <tbody>
+                  {rows.map(({ actionClass, counts }) => (
+                    <Tr key={actionClass}>
+                      <Td>{actionClassLabel(actionClass)}</Td>
+                      {DECISION_ROWS.map((row) => (
+                        <Td key={row.key} align="right">
+                          {counts[row.key as DecisionKey].toLocaleString('en-US')}
+                        </Td>
+                      ))}
+                    </Tr>
+                  ))}
+                </tbody>
+              </Table>
+            </div>
+          </figure>
         )}
       </div>
     </Card>
