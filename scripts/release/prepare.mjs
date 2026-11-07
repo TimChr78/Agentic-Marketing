@@ -48,9 +48,9 @@ export function envKeys(text) {
 }
 
 /** The newest release section in CHANGELOG.md, i.e. the version this release upgrades from. */
-export function findPreviousVersion(changelog) {
+export function findPreviousVersion(changelog, exclude) {
   const { sections } = splitSections(changelog);
-  return sections.find((section) => /^\d+\.\d+\.\d+/.test(section.version))?.version ?? null;
+  return sections.find((section) => /^\d+\.\d+\.\d+/.test(section.version) && section.version !== exclude)?.version ?? null;
 }
 
 /** The migration files added since `previous`, from the tag to HEAD. */
@@ -238,7 +238,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       console.log(`release check: ${options.version} is ready (version surfaces, upgrade block and ENV_SINCE)`);
     } else {
       const changelog = read(join(root, 'CHANGELOG.md'));
-      const previous = options.previous ?? findPreviousVersion(changelog);
+      const previous = options.previous ?? findPreviousVersion(changelog, options.version);
       if (!previous) throw new Error('cannot infer the previous release; pass --previous <version>');
       const migrations = migrationsSince(root, previous);
       const envVars = envVarsSince(root, previous);

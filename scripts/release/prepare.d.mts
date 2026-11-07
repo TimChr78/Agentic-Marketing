@@ -1,6 +1,6 @@
 /** Types for prepare.mjs, so the release-tooling tests can import it. */
 export function envKeys(text: string): Set<string>;
-export function findPreviousVersion(changelog: string): string | null;
+export function findPreviousVersion(changelog: string, exclude?: string): string | null;
 export function migrationsSince(root: string, previous: string): string[];
 export function envVarsSince(root: string, previous: string): string[];
 export function renderUpgradeBlock(options: { previous: string; version: string; migrations?: string[]; envVars?: string[] }): string;

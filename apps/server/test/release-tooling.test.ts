@@ -78,6 +78,7 @@ describe('the release upgrade block', () => {
     const changelog =
       '## [Unreleased]\n\n## [0.13.0] - 2026-11-08\n\n### Added\n\n- New.\n\n### Upgrading from 0.12.0\n\n- **Migrations:** none.\n\n## [0.12.0] - 2026-11-07\n';
     expect(findPreviousVersion(changelog)).toBe('0.13.0');
+    expect(findPreviousVersion(changelog, '0.13.0')).toBe('0.12.0');
     expect(findPreviousVersion('## [Unreleased]\n\n## [0.12.0] - 2026-11-07\n')).toBe('0.12.0');
     const section = changelog.slice(changelog.indexOf('## [0.13.0]'), changelog.indexOf('## [0.12.0]'));
     expect(upgradeBlockOf(section)).toContain('### Upgrading from 0.12.0');
