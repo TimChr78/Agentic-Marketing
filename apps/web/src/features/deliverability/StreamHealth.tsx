@@ -34,12 +34,12 @@ function withheldText(withheld: WithheldReason): string {
 
 function StreamTable({ health }: { health: Health }) {
   return (
-    <div className="overflow-hidden rounded-lg border border-line bg-surface">
-      <table className="w-full border-collapse text-left text-[13px] leading-5 max-md:block">
+    <div className="overflow-x-auto rounded-lg border border-line bg-surface">
+      <table className="w-full border-collapse text-left text-[13px] leading-5 max-lg:block">
         <caption className="sr-only">
           Delivery health for {STREAMS.length} streams over rolling {health.windowDays}-day windows with today’s thresholds.
         </caption>
-        <thead className="bg-surface-2 text-[12px] leading-[18px] text-muted max-md:hidden">
+        <thead className="bg-surface-2 text-[12px] leading-[18px] text-muted max-lg:hidden">
           <tr>
             <th scope="col" className="h-9 px-4 font-medium">
               Stream
@@ -61,7 +61,7 @@ function StreamTable({ health }: { health: Health }) {
             </th>
           </tr>
         </thead>
-        <tbody className="max-md:block">
+        <tbody className="max-lg:block">
           {STREAMS.map((stream) => {
             const rates = ratesOf(health, stream.key);
             const verdict = streamVerdict(rates, health.thresholds, {
@@ -74,29 +74,29 @@ function StreamTable({ health }: { health: Health }) {
             return (
               <tr
                 key={stream.key}
-                className="border-t border-line align-top max-md:block max-md:border-b max-md:p-4 max-md:last:border-b-0"
+                className="border-t border-line align-top max-lg:block max-lg:border-b max-lg:p-4 max-lg:last:border-b-0"
               >
                 <th
                   scope="row"
-                  className="px-4 py-3 text-left font-medium text-fg max-md:flex max-md:flex-wrap max-md:items-center max-md:justify-between max-md:gap-2 max-md:p-0"
+                  className="px-4 py-3 text-left font-medium text-fg max-lg:flex max-lg:flex-wrap max-lg:items-center max-lg:justify-between max-lg:gap-2 max-lg:p-0"
                 >
                   <span>{stream.label}</span>
                 </th>
                 <td
                   data-label="Sent"
-                  className="num px-4 py-3 text-right text-fg-2 max-md:flex max-md:justify-between max-md:gap-3 max-md:p-0 max-md:pt-2 max-md:before:text-muted max-md:before:content-[attr(data-label)]"
+                  className="num px-4 py-3 text-right text-fg-2 max-lg:flex max-lg:justify-between max-lg:gap-3 max-lg:p-0 max-lg:pt-2 max-lg:before:text-muted max-lg:before:content-[attr(data-label)]"
                 >
                   {rates.sent.toLocaleString()}
                 </td>
                 <td
                   data-label="Sample"
-                  className="num px-4 py-3 text-right text-fg-2 max-md:flex max-md:justify-between max-md:gap-3 max-md:p-0 max-md:pt-1 max-md:before:text-muted max-md:before:content-[attr(data-label)]"
+                  className="num px-4 py-3 text-right text-fg-2 max-lg:flex max-lg:justify-between max-lg:gap-3 max-lg:p-0 max-lg:pt-1 max-lg:before:text-muted max-lg:before:content-[attr(data-label)]"
                 >
                   {rates.sent.toLocaleString()} / minimum {health.thresholds.minVolume.toLocaleString()}
                 </td>
                 <td
                   data-label="Bounce rate"
-                  className="num px-4 py-3 text-right text-fg-2 max-md:flex max-md:flex-wrap max-md:justify-between max-md:gap-3 max-md:p-0 max-md:pt-1 max-md:before:text-muted max-md:before:content-[attr(data-label)]"
+                  className="num px-4 py-3 text-right text-fg-2 max-lg:flex max-lg:flex-wrap max-lg:justify-between max-lg:gap-3 max-lg:p-0 max-lg:pt-1 max-lg:before:text-muted max-lg:before:content-[attr(data-label)]"
                 >
                   <span className="block w-full text-right">{rateText(bounce.value)}</span>
                   <span className="block w-full text-[12px] leading-[18px] text-muted">
@@ -107,7 +107,7 @@ function StreamTable({ health }: { health: Health }) {
                 </td>
                 <td
                   data-label="Complaint rate"
-                  className="num px-4 py-3 text-right text-fg-2 max-md:flex max-md:flex-wrap max-md:justify-between max-md:gap-3 max-md:p-0 max-md:pt-1 max-md:before:text-muted max-md:before:content-[attr(data-label)]"
+                  className="num px-4 py-3 text-right text-fg-2 max-lg:flex max-lg:flex-wrap max-lg:justify-between max-lg:gap-3 max-lg:p-0 max-lg:pt-1 max-lg:before:text-muted max-lg:before:content-[attr(data-label)]"
                 >
                   <span className="block w-full text-right">{rateText(complaint.value)}</span>
                   <span className="block w-full text-[12px] leading-[18px] text-muted">
@@ -116,7 +116,7 @@ function StreamTable({ health }: { health: Health }) {
                       : `${rates.complained.toLocaleString()} / ${rates.sent.toLocaleString()} sent · warn ≥${pctThreshold(health.thresholds.complaintWarn)} · stop ≥${pctThreshold(health.thresholds.complaintStop)}`}
                   </span>
                 </td>
-                <td data-label="Status" className="px-4 py-3 max-md:block max-md:p-0 max-md:pt-2">
+                <td data-label="Status" className="px-4 py-3 max-lg:block max-lg:p-0 max-lg:pt-2">
                   <StatusPill tone={verdict.tone}>{verdict.label}</StatusPill>
                   <p className="mt-1 max-w-[260px] text-[12px] leading-[18px] text-muted">{verdict.detail}</p>
                   {verdict.reason && <p className="mt-1 max-w-[260px] text-[12px] leading-[18px] text-warn">{verdict.reason}</p>}
