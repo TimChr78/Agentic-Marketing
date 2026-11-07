@@ -3,7 +3,7 @@ import { measureLabel, measureUnit } from '../../../lib/labels';
 import { formatDate, formatDateTime, getWorkspaceTimeZone } from '../../../ui/time';
 import type { MandateContent } from '../../artifacts/MandateEditor';
 import { returnedPeriodLabel as returnedPeriodLabelFromBounds } from '../../broadcasts/period';
-import { AGENT_STATUS, AUTONOMY_LEVEL, type Autonomy, levelFor, MANDATE_CLASSES } from '../labels';
+import { AGENT_STATUS, AUTONOMY_LEVEL, type Autonomy, actionClassLabel, levelFor, MANDATE_CLASSES } from '../labels';
 
 // Pure reads and formatting for the Phase 26 agent page (#509). The server owns the action
 // tallies, the mandate selection and the comparison; this module only names units, keeps the
@@ -207,6 +207,30 @@ export function guardianCap(guard: AgentDetail['guard'], actionClass: string): {
   };
 }
 
+/** What a mandate's `shadow` value covers: every class, only the listed ones, or nothing. */
+export type ShadowMode = boolean | readonly string[] | null | undefined;
+
+export function shadowInfo(shadow: ShadowMode): { full: boolean; classes: string[] } {
+  if (shadow === true) return { full: true, classes: [] };
+  if (Array.isArray(shadow)) {
+    return { full: false, classes: [...new Set(shadow.filter((value): value is string => typeof value === 'string'))] };
+  }
+  return { full: false, classes: [] };
+}
+
+export function shadowApplies(shadow: ShadowMode, actionClass: string): boolean {
+  const info = shadowInfo(shadow);
+  return info.full || info.classes.includes(actionClass);
+}
+
+/** "On for every action class", "Limited to Broadcast sends", or "Off" — never a bare boolean. */
+export function shadowText(shadow: ShadowMode): string {
+  const info = shadowInfo(shadow);
+  if (info.full) return 'On for every action class';
+  if (info.classes.length) return `Limited to ${info.classes.map(actionClassLabel).join(', ')}`;
+  return 'Off';
+}
+
 export function matrixExplanation({
   actionClass,
   granted,
@@ -220,7 +244,7 @@ export function matrixExplanation({
   ceiling: number | null;
   guard: AgentDetail['guard'];
   outsideHours: string | null;
-  shadow: boolean;
+  shadow: ShadowMode;
 }): string {
   const parts: string[] = [];
   if (!granted.set) parts.push('Policy default level 1 (Propose).');
@@ -233,7 +257,11 @@ export function matrixExplanation({
   if (outsideHours && IRREVERSIBLE_CLASSES.has(actionClass)) {
     parts.push('Outside working hours, irreversible actions are capped at level 2.');
   }
-  if (shadow) parts.push('Shadow mode: decisions are recorded, nothing runs.');
+  if (shadowApplies(shadow, actionClass)) {
+    parts.push('Shadow mode: decisions are recorded, nothing runs.');
+  } else if (shadowInfo(shadow).classes.length) {
+    parts.push('Not in shadow mode; the usual approval policy applies.');
+  }
   if (!parts.length) {
     parts.push(ceiling !== null && granted.level >= ceiling ? 'At the workspace ceiling.' : 'Within the workspace ceiling.');
   }

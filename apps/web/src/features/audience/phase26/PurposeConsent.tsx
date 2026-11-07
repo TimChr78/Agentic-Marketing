@@ -43,7 +43,9 @@ export function PurposeConsentList({
           <li key={row.key} className="min-w-0 text-[13px] leading-5">
             <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
               <PurposeLabel row={row} />
-              <ConsentChoice status={row.status} />
+              <span data-volatile className="inline-flex">
+                <ConsentChoice status={row.status} />
+              </span>
             </div>
             {context && <div className="mt-0.5 text-[12px] leading-[18px] text-muted">{context}</div>}
           </li>

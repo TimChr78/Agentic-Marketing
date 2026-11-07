@@ -31,6 +31,7 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 
 ### Fixed
 
+- The agent Mandate tab now says whether shadow mode covers every action class or only some, and explains it on each matrix row; a People page that arrives after Refresh no longer appends a stale Next page to the new cursor stack.
 - The agent Mandate tab offers Create mandate again when no mandate is active, and shows when the active mandate expires (“N days left”, a warning within three days).
 - People search opens a pasted `prf_…` profile id again, as before Phase 26.
 - The Analytics charts section has a heading, and the analytics result table and agent comparison table scroll in keyboard-reachable regions (axe).
