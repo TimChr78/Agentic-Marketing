@@ -2,6 +2,13 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [Unreleased]
+
+### Added
+
+- `deliverability.trend` (#508): bounce and complaint rates as workspace-local daily points, each over the delivery policy's rolling creation window with current message statuses. Zero-volume points return null rates; thresholds are today's policy and there is no pause history.
+- `agents.mandate` (#509): the published, unarchived and unexpired mandate that applies to an agent now, with its content and the current working-hours verdict. It returns null when the agent has none, never a newer draft, and includes no credentials.
+
 ## [0.11.0] - 2026-11-07
 
 ### Added
