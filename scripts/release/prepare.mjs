@@ -185,6 +185,22 @@ export function upgradeBlockOf(section) {
   return (next < 0 ? rest : rest.slice(0, next + 1)).trim();
 }
 
+/** The fields every release's upgrade block must carry, each with a non-empty value. */
+export const UPGRADE_FIELDS = ['Migrations', 'Configuration', 'Breaking changes', 'Manual steps', 'Upgrade'];
+
+/** Problems with one upgrade block: missing or empty fields, and an unfilled TODO. */
+export function validateUpgradeBlock(block) {
+  if (!block) return ['has no ### Upgrading from block'];
+  const errors = [];
+  if (/\bTODO\b/.test(block)) errors.push('still contains TODO; fill it in or write "none"');
+  for (const field of UPGRADE_FIELDS) {
+    const match = new RegExp(`^- \\*\\*${field}:\\*\\*[ \\t]*(.*)$`, 'm').exec(block);
+    if (!match) errors.push(`is missing "- **${field}:**"`);
+    else if (!match[1].trim()) errors.push(`has an empty "- **${field}:**"`);
+  }
+  return errors;
+}
+
 /** Problems that must be fixed before the release PR can merge. */
 export function checkRelease({ root, version }) {
   const errors = [];
@@ -193,10 +209,7 @@ export function checkRelease({ root, version }) {
   if (section === null) {
     errors.push(`CHANGELOG.md has no ## [${version}] section`);
   } else {
-    const upgrade = upgradeBlockOf(section);
-    if (!upgrade) errors.push(`the ${version} section has no ### Upgrading from block`);
-    else if (/\bTODO\b/.test(upgrade))
-      errors.push(`the Upgrading from block of ${version} still contains TODO; fill it in or write "none"`);
+    for (const error of validateUpgradeBlock(upgradeBlockOf(section))) errors.push(`the ${version} section ${error}`);
   }
   const missing = missingEnvHistory(root);
   if (missing.length) errors.push(`ENV_SINCE is missing ${missing.join(', ')}; run prepare.mjs again or add them by hand`);

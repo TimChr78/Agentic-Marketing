@@ -31,6 +31,7 @@ fi
 owner="${repo%%/*}"
 owner="${owner,,}"
 image="ghcr.io/${owner}/agentic-marketing:${version}"
+script_dir="$(cd "$(dirname "$0")" && pwd)"
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
@@ -58,6 +59,7 @@ if [ -f "$tmp/SHA256SUMS" ]; then
 else
   fail "SHA256SUMS is missing from the release"
 fi
+run "expected assets and checksum lines" node "${script_dir}/release-assets.mjs" "$version" "$tmp"
 
 assets=()
 while IFS= read -r file; do assets+=("$file"); done < <(find "$tmp" -maxdepth 1 -type f -printf '%f\n' | sort)
@@ -73,9 +75,10 @@ run "attestation ${image}" gh attestation verify "oci://${image}" --repo "$repo"
 
 manifest=""
 if manifest="$(docker manifest inspect "$image" 2>&1)"; then
+  printf '%s' "$manifest" >"$tmp/manifest.json"
+  platforms="$(node "${script_dir}/manifest-platforms.mjs" "$tmp/manifest.json")"
   for arch in amd64 arm64; do
-    if printf '%s' "$manifest" | grep -Eq "\"architecture\"[[:space:]]*:[[:space:]]*\"${arch}\"" &&
-      printf '%s' "$manifest" | grep -Eq '"os"[[:space:]]*:[[:space:]]*"linux"'; then
+    if printf '%s\n' "$platforms" | grep -qx "linux/${arch}"; then
       pass "manifest linux/${arch}"
     else
       fail "manifest linux/${arch}"
@@ -83,7 +86,7 @@ if manifest="$(docker manifest inspect "$image" 2>&1)"; then
   done
 elif manifest="$(docker buildx imagetools inspect "$image" 2>&1)"; then
   for arch in amd64 arm64; do
-    if printf '%s' "$manifest" | grep -Eq "Platform:[[:space:]]*linux/${arch}"; then
+    if printf '%s\n' "$manifest" | grep -Eq "^[[:space:]]*Platform:[[:space:]]*linux/${arch}[[:space:]]*$"; then
       pass "manifest linux/${arch}"
     else
       fail "manifest linux/${arch}"

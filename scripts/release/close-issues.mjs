@@ -8,7 +8,6 @@
 //
 // The repository comes from GITHUB_REPOSITORY or `gh repo view`.
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { releaseSection } from './prepare.mjs';
@@ -61,14 +60,43 @@ function parseArgs(argv) {
   return options;
 }
 
-/** The merged pull requests that belong to a release, from the previous release's publish time. */
-export function releasePullRequests({ repo, version, publishedAt }) {
-  const releases = JSON.parse(gh(['api', `repos/${repo}/releases?per_page=100`]));
-  const index = releases.findIndex((release) => release.tag_name === `v${version}`);
-  const previous = releases.slice(index + 1).find((release) => release.published_at && release.published_at < publishedAt);
-  const since = previous?.published_at ?? '1970-01-01T00:00:00Z';
-  const prs = JSON.parse(gh(['pr', 'list', '--repo', repo, '--state', 'merged', '--limit', '500', '--json', 'number,body,mergedAt']));
-  return prs.filter((pr) => pr.mergedAt && pr.mergedAt > since && pr.mergedAt <= publishedAt);
+/** The merged pull requests that belong to a release, by tag range and default branch. */
+export function selectReleasePullRequests({ prs, commits, defaultBranch }) {
+  const range = new Set(commits);
+  return prs.filter((pr) => pr.baseRefName === defaultBranch && pr.mergeCommit?.oid && range.has(pr.mergeCommit.oid));
+}
+
+/** Issues named by the selected pull requests and by the release section's fragment marker. */
+export function issuesForRelease({ prs, changelog, version }) {
+  const section = version ? releaseSection(changelog, version) : changelog;
+  const issues = new Set();
+  for (const pr of prs) for (const issue of parseCloses(pr.body ?? '')) issues.add(issue);
+  for (const issue of parseIssuesComment(section ?? '')) issues.add(issue);
+  return [...issues].sort((a, b) => a - b);
+}
+
+/** The CHANGELOG.md at the release tag, not the checkout, so a later edit cannot change the result. */
+export function readChangelogAtTag(version, run = (args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' })) {
+  return run(['show', `v${version}:CHANGELOG.md`]);
+}
+
+function defaultBranch(repo) {
+  return gh(['api', `repos/${repo}`, '--jq', '.default_branch']);
+}
+
+/** The release immediately before `version`, or null for the first release. */
+function previousTag(repo, version) {
+  const releases = JSON.parse(gh(['release', 'list', '--repo', repo, '--limit', '100', '--json', 'tagName,publishedAt']));
+  const index = releases.findIndex((release) => release.tagName === `v${version}`);
+  return index >= 0 ? (releases[index + 1]?.tagName ?? null) : null;
+}
+
+/** Commit SHAs in v<previous>..v<version>, or the tag's history for the first release. */
+function commitsInRange(repo, previous, version) {
+  const out = previous
+    ? gh(['api', `repos/${repo}/compare/${previous}...v${version}`, '--jq', '.commits[].sha'])
+    : gh(['api', `repos/${repo}/commits?per_page=250`, '--jq', '.[].sha']);
+  return out.split('\n').filter(Boolean);
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
@@ -77,15 +105,19 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     const dryRun = !options.yes || options.dryRun;
     const repo = repository();
     const release = JSON.parse(gh(['api', `repos/${repo}/releases/tags/v${options.version}`]));
-    const prs = releasePullRequests({ repo, version: options.version, publishedAt: release.published_at });
+    const branch = defaultBranch(repo);
+    const previous = previousTag(repo, options.version);
+    const commits = commitsInRange(repo, previous, options.version);
+    const prs = JSON.parse(
+      gh(['pr', 'list', '--repo', repo, '--state', 'merged', '--limit', '500', '--json', 'number,body,baseRefName,mergeCommit']),
+    );
+    const selected = selectReleasePullRequests({ prs, commits, defaultBranch: branch });
+    const changelog = readChangelogAtTag(options.version);
+    const sorted = issuesForRelease({ prs: selected, changelog, version: options.version });
 
-    const issues = new Set();
-    for (const pr of prs) for (const issue of parseCloses(pr.body ?? '')) issues.add(issue);
-    const changelog = readFileSync(join(root, 'CHANGELOG.md'), 'utf8');
-    for (const issue of parseIssuesComment(releaseSection(changelog, options.version) ?? '')) issues.add(issue);
-    const sorted = [...issues].sort((a, b) => a - b);
-
-    console.log(`close-issues: v${options.version} has ${prs.length} merged pull request(s) and ${sorted.length} issue(s)`);
+    console.log(
+      `close-issues: v${options.version} has ${selected.length} merged pull request(s) on ${branch} and ${sorted.length} issue(s)`,
+    );
     if (!sorted.length) {
       console.log('close-issues: nothing to close');
       process.exit(0);

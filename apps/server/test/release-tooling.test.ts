@@ -2,7 +2,15 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { parseCloses, parseIssuesComment } from '../../../scripts/release/close-issues.mjs';
+import { releaseNotesErrors, topReleaseVersion } from '../../../scripts/release/check-notes.mjs';
+import {
+  issuesForRelease,
+  parseCloses,
+  parseIssuesComment,
+  readChangelogAtTag,
+  selectReleasePullRequests,
+} from '../../../scripts/release/close-issues.mjs';
+import { missingPlatforms, platforms } from '../../../scripts/release/manifest-platforms.mjs';
 import {
   bumpVersions,
   checkRelease,
@@ -12,7 +20,9 @@ import {
   renderUpgradeBlock,
   updateEnvHistory,
   upgradeBlockOf,
+  validateUpgradeBlock,
 } from '../../../scripts/release/prepare.mjs';
+import { assetProblems, expectedAssets } from '../../../scripts/release/release-assets.mjs';
 
 // The release helpers (#521): the generated upgrade block, the version bump and the env-history
 // source the test reads. Pure filesystem tests in the docs project.
@@ -147,7 +157,7 @@ describe('the release check', () => {
     );
     put(root, '.env.example', 'AUTH_SECRET=\nAM_VERSION=0.13.0\n');
     const changelog = (breaking: string) =>
-      `## [0.13.0] - 2026-11-08\n\n### Added\n\n- New.\n\n### Upgrading from 0.12.0\n\n- **Migrations:** none.\n- **Breaking changes:** ${breaking}\n- **Manual steps:** none.\n- **Upgrade:** pull.\n`;
+      `## [0.13.0] - 2026-11-08\n\n### Added\n\n- New.\n\n### Upgrading from 0.12.0\n\n- **Migrations:** none.\n- **Configuration:** no new environment variables.\n- **Breaking changes:** ${breaking}\n- **Manual steps:** none.\n- **Upgrade:** pull.\n`;
     put(root, 'CHANGELOG.md', changelog('TODO: fill this in.'));
     expect(checkRelease({ root, version: '0.13.0' }).join('\n')).toMatch(/still contains TODO/);
     put(root, 'CHANGELOG.md', changelog('none.'));
@@ -161,5 +171,92 @@ describe('closing issues', () => {
     expect(parseCloses('No issue here.')).toEqual([]);
     expect(parseIssuesComment('## [0.13.0]\n\n<!-- issues: 3, 1, 3 -->')).toEqual([1, 3]);
     expect(parseIssuesComment('')).toEqual([]);
+  });
+
+  it('keeps only pull requests on the default branch inside the tag range', () => {
+    const prs = [
+      { number: 1, body: 'Closes #10', baseRefName: 'main', mergeCommit: { oid: 'in-main' } },
+      { number: 2, body: 'Closes #20', baseRefName: 'phase/26', mergeCommit: { oid: 'in-phase' } },
+      { number: 3, body: 'Closes #30', baseRefName: 'main', mergeCommit: { oid: 'after-release' } },
+    ];
+    expect(selectReleasePullRequests({ prs, commits: ['in-main', 'in-phase'], defaultBranch: 'main' }).map((pr) => pr.number)).toEqual([1]);
+  });
+
+  it('reads fragment issues from the tagged changelog, not the checkout', () => {
+    const changelog = '## [0.13.0] - 2026-11-08\n\n### Added\n\n- New.\n\n<!-- issues: 42, 7 -->\n';
+    expect(issuesForRelease({ prs: [{ number: 1, body: 'Closes #7\nFixes #9' }], changelog })).toEqual([7, 9, 42]);
+    expect(
+      readChangelogAtTag('0.13.0', (args) => {
+        expect(args).toEqual(['show', 'v0.13.0:CHANGELOG.md']);
+        return changelog;
+      }),
+    ).toBe(changelog);
+  });
+});
+
+describe('the upgrade block validator', () => {
+  const complete =
+    '### Upgrading from 0.12.0\n\n- **Migrations:** none.\n- **Configuration:** no new environment variables.\n- **Breaking changes:** none.\n- **Manual steps:** none.\n- **Upgrade:** pull.\n';
+
+  it('accepts a complete block', () => {
+    expect(validateUpgradeBlock(complete)).toEqual([]);
+  });
+
+  it('requires every field and a non-empty value', () => {
+    expect(validateUpgradeBlock('### Upgrading from 0.12.0\n').join('\n')).toMatch(/missing "- \*\*Migrations:\*\*"/);
+    expect(
+      validateUpgradeBlock(
+        '### Upgrading from 0.12.0\n\n- **Migrations:**\n- **Configuration:** none.\n- **Breaking changes:** none.\n- **Manual steps:** none.\n- **Upgrade:** pull.\n',
+      ).join('\n'),
+    ).toMatch(/empty "- \*\*Migrations:\*\*"/);
+  });
+
+  it('rejects a TODO', () => {
+    expect(
+      validateUpgradeBlock(complete.replace('- **Breaking changes:** none.', '- **Breaking changes:** TODO: fill this in.')).join('\n'),
+    ).toMatch(/TODO/);
+  });
+});
+
+describe('the release notes gate', () => {
+  const section =
+    '## [0.13.0] - 2026-11-08\n\n### Added\n\n- New.\n\n### Upgrading from 0.12.0\n\n- **Migrations:** none.\n- **Configuration:** no new environment variables.\n- **Breaking changes:** none.\n- **Manual steps:** none.\n- **Upgrade:** pull.\n';
+
+  it('accepts a complete top release and names it', () => {
+    const changelog = `# Changelog\n\n## [Unreleased]\n\n${section}\n## [0.12.0] - 2026-11-07\n\n### Added\n\n- Old.\n`;
+    expect(topReleaseVersion(changelog)).toBe('0.13.0');
+    expect(releaseNotesErrors({ changelog, version: '0.13.0' })).toEqual([]);
+  });
+
+  it('reports an incomplete upgrade block', () => {
+    const changelog = section.replace('- **Upgrade:** pull.\n', '');
+    expect(releaseNotesErrors({ changelog, version: '0.13.0' }).join('\n')).toMatch(/missing "- \*\*Upgrade:\*\*"/);
+  });
+});
+
+describe('manifest platforms', () => {
+  it('requires the exact linux/amd64 and linux/arm64 pairs', () => {
+    const manifest = {
+      manifests: [{ platform: { os: 'linux', architecture: 'amd64' } }, { platform: { os: 'windows', architecture: 'arm64' } }],
+    };
+    expect(platforms(manifest)).toEqual(['linux/amd64', 'windows/arm64']);
+    expect(missingPlatforms(manifest)).toEqual(['linux/arm64']);
+  });
+});
+
+describe('release assets', () => {
+  const version = '0.13.0';
+  const hash = (character: string) => character.repeat(64);
+
+  it('requires the bundle, chart and SHA256SUMS with a checksum line for each', () => {
+    const files = expectedAssets(version);
+    const sums = `${hash('a')}  agentic-marketing-compose-${version}.tar.gz\n${hash('b')}  agentic-marketing-${version}.tgz\n`;
+    expect(assetProblems({ version, files, sums })).toEqual([]);
+    expect(assetProblems({ version, files: files.filter((file) => file !== `agentic-marketing-${version}.tgz`), sums })).toContain(
+      `missing asset agentic-marketing-${version}.tgz`,
+    );
+    expect(assetProblems({ version, files, sums: sums.split('\n')[0] })).toContain(
+      `SHA256SUMS has no checksum line for agentic-marketing-${version}.tgz`,
+    );
   });
 });

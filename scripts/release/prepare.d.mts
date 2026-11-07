@@ -9,4 +9,6 @@ export function missingEnvHistory(root: string): string[];
 export function updateEnvHistory(root: string, version: string): string[];
 export function releaseSection(changelog: string, version: string): string | null;
 export function upgradeBlockOf(section: string): string | null;
+export const UPGRADE_FIELDS: string[];
+export function validateUpgradeBlock(block: string | null | undefined): string[];
 export function checkRelease(options: { root: string; version: string }): string[];

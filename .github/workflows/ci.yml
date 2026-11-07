@@ -61,6 +61,9 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The release-notes gate diffs CHANGELOG.md against the pull request's base commit.
+          fetch-depth: 0
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
@@ -70,6 +73,16 @@ jobs:
       # Spikes (with large benchmark dependencies) are not part of CI.
       - run: pnpm install --frozen-lockfile --filter "./packages/**" --filter "./apps/**" --filter "agentic-marketing"
       - run: pnpm lint
+      - name: Check the top release notes when CHANGELOG.md changes
+        if: github.event_name == 'pull_request'
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if git diff --name-only "$BASE" HEAD | grep -qx 'CHANGELOG.md'; then
+            node scripts/release/check-notes.mjs
+          else
+            echo "CHANGELOG.md did not change"
+          fi
       - run: pnpm typecheck
       - run: node scripts/check-versions.mjs
       # Accepted advisories are listed in package.json (pnpm.auditConfig) with reasons in SECURITY.md.
