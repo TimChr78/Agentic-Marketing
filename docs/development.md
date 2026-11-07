@@ -352,9 +352,25 @@ Valkey prefix is written `am_<run>_...`, so two checkouts (or two delegates) can
 without dropping each other's data. `vitest.config.mts` derives it once per `pnpm test` from the
 checkout path and the Vitest process, and every project and worker inherits it. CI leaves it empty
 so its fixed service containers keep the names they always had. Set it yourself for a named run
-(lower-case letters and digits; other characters are removed); global teardown drops only
-`am_<run>_*` databases and resets those NATS namespaces, and `AM_TEST_KEEP_DB=1` keeps them after
-a failure for inspection. `pnpm test:clean` removes leftovers from a crashed run.
+(lower-case letters and digits; other characters are removed, and ids longer than 16 characters
+are hashed to 10 hex characters).
+
+`scopedDbName()` in `packages/db/test/run.ts` is the one name builder the harness, the e2e server
+and the cleanup use; it refuses a name over PostgreSQL's 63-byte identifier limit. A shell wrapper
+can print the exact database name its `AM_TEST_RUN` produces, and must use that answer rather than
+compose one itself:
+
+```bash
+AM_TEST_RUN=example node --import tsx packages/db/test/run.ts print-db am_e2e_20260101_120000_123
+# am_example_e2e_20260101_120000_123
+```
+
+Global teardown drops only `am_<run>_*` databases and ClickHouse databases, and deletes NATS
+streams under the same prefix (so package-test namespaces that no database name reveals go too);
+`AM_TEST_KEEP_DB=1` keeps them after a failure for inspection. `pnpm test:clean` cleans only
+`AM_TEST_RUN`'s own namespace. `pnpm test:clean -- --all-stale` may also remove other runs, but only
+when `pg_stat_activity` shows no connection and PostgreSQL reports the database older than
+`AM_TEST_CLEAN_STALE_MINUTES` (default 60); it prints every database it skips and why.
 
 CI (`.github/workflows/ci.yml`) runs lint, typecheck, the version check, the audit and the documentation tests in a `static` job, the suite in `test`, and the browser, image and chart checks in `e2e`, `docker-smoke` and `helm`. The `e2e` job runs the functional specs and the axe checks; `visual` compares the committed baselines and uploads the diff images on failure, on pull requests that touch `apps/web` or `e2e`; `screenshots` captures the full matrix as an artifact when a manual run asks for it. Pull requests that only change Markdown, `docs/` or `.claude/` skip the slow jobs. The release workflow calls the same file for the tagged commit.
 

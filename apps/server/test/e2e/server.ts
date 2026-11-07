@@ -1,6 +1,6 @@
 import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
-import { e2eFixturesBase, e2eFixturesPort, e2ePort } from '../../../e2e/ports';
+import { e2eFixturesBase, e2eFixturesPort, e2ePort } from '../../../../e2e/ports';
 import { startTestServer } from '../harness';
 import { PEOPLE, seed } from './seed';
 

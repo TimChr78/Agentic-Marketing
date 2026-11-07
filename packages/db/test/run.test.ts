@@ -1,14 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import {
-  MAX_IDENTIFIER_BYTES,
-  MAX_RUN_ID_LENGTH,
-  runScopedFor,
-  sanitiseRunId,
-  scopedDbName,
-  testPortOffset,
-} from './run';
+import { MAX_IDENTIFIER_BYTES, MAX_RUN_ID_LENGTH, runScopedFor, sanitiseRunId, scopedDbName, testPortOffset } from './run';
 
 // A run id is a namespace, not a free-form label: every name built from it becomes an unquoted
 // PostgreSQL identifier, so it must be short and safe. These checks are the contract the shell

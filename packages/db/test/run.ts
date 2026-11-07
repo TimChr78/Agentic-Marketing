@@ -32,7 +32,9 @@ export function sanitiseRunId(raw: string): string {
 const explicitRun = sanitiseRunId(process.env.AM_TEST_RUN ?? '');
 export const runId =
   explicitRun ||
-  (process.env.CI ? '' : sanitiseRunId(`r${createHash('sha256').update(process.cwd()).digest('hex').slice(0, 6)}${process.pid.toString(36)}`));
+  (process.env.CI
+    ? ''
+    : sanitiseRunId(`r${createHash('sha256').update(process.cwd()).digest('hex').slice(0, 6)}${process.pid.toString(36)}`));
 
 /**
  * `am_test_p1` becomes `am_<run>_test_p1`; unchanged when there is no run namespace (CI).

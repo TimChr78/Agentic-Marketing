@@ -242,7 +242,9 @@ if (import.meta.url === invokedPath) {
   const allStale = args.includes('--all-stale');
   const minutes = Number(process.env.AM_TEST_CLEAN_STALE_MINUTES ?? 60);
   if (!process.env.AM_TEST_RUN && !process.env.CI) {
-    console.warn(`note: AM_TEST_RUN is not set; using the derived run namespace '${runId}'. Set AM_TEST_RUN to the crashed run's namespace to clean that run.`);
+    console.warn(
+      `note: AM_TEST_RUN is not set; using the derived run namespace '${runId}'. Set AM_TEST_RUN to the crashed run's namespace to clean that run.`,
+    );
   }
   const result = await cleanTestDatabases({
     run: runId,

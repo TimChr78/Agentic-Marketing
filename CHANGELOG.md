@@ -7,6 +7,7 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 ### Changed
 
 - The test services are now one shared, labelled `am-test` stack per machine (`docker-compose.test.yml`, `scripts/test-services.sh`), with preflight and label-scoped cleanup scripts (`scripts/preflight.sh`, `scripts/docker-clean.sh`) and a run-scoped `AM_TEST_RUN` namespace so concurrent checkouts no longer collide on database, ClickHouse, NATS or Valkey names. Product behaviour is unchanged; CI keeps its own service containers.
+- Test-run housekeeping now has one authoritative name: `scopedDbName()`/`print-db` in `packages/db/test/run.ts` bounds and hashes long run ids and refuses identifiers over 63 bytes; `pnpm test:clean` removes only the current run unless `--all-stale` proves another run is idle and old; package NATS streams are deleted by run prefix; `e2e/ports.ts` moves every e2e consumer with `TEST_PORT_OFFSET`; preflight reports UNKNOWN port availability as a failure unless `AM_TEST_ALLOW_UNVERIFIED_PORTS=1`; and the stack scripts fail fast without bash 4 and GNU coreutils on macOS. Product behaviour is unchanged.
 
 ## [0.12.0] - 2026-11-07
 

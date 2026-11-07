@@ -26,10 +26,9 @@ async function maintenance() {
 async function databaseNames(): Promise<string[]> {
   const client = await maintenance();
   try {
-    const { rows } = await client.query<{ datname: string }>(
-      'SELECT datname FROM pg_database WHERE datname = ANY($1::text[])',
-      [[dbA, dbB]],
-    );
+    const { rows } = await client.query<{ datname: string }>('SELECT datname FROM pg_database WHERE datname = ANY($1::text[])', [
+      [dbA, dbB],
+    ]);
     return rows.map((row) => row.datname);
   } finally {
     await client.end();
@@ -83,11 +82,11 @@ describe('test:clean run isolation', () => {
       expect((await databaseNames()).sort()).toEqual([dbA, dbB].sort());
 
       // The shell side: the helper is authoritative, so its answer is what the CLI must protect.
-      const printed = spawnSync(
-        process.execPath,
-        ['--import', 'tsx', 'packages/db/test/run.ts', 'print-db', 'am_test_clean'],
-        { cwd: root, encoding: 'utf8', env: { ...process.env, AM_TEST_RUN: runA, CI: '' } },
-      );
+      const printed = spawnSync(process.execPath, ['--import', 'tsx', 'packages/db/test/run.ts', 'print-db', 'am_test_clean'], {
+        cwd: root,
+        encoding: 'utf8',
+        env: { ...process.env, AM_TEST_RUN: runA, CI: '' },
+      });
       expect(printed.status, printed.stderr).toBe(0);
       expect(printed.stdout.trim()).toBe(dbA);
 
