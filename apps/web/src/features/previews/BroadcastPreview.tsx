@@ -1,11 +1,15 @@
 import { api } from '../../app/api';
 import { useSession } from '../../app/session';
-import { useApi } from '../../app/useApi';
-import { Alert, Card, Meta, Skeleton } from '../../ui';
+import { Alert, Card, JsonView, LoadingBlock, Meta, Skeleton } from '../../ui';
 import { formatDateTime, getWorkspaceTimeZone } from '../../ui/time';
 import { useArtifactRef } from '../artifactCache';
+import { type BlockGuard, BundledBlocks } from './BundledBlocks';
 import { EmailPreview } from './EmailPreview';
 import { RefName } from './FormPreview';
+import { PreviewLabel } from './PreviewLabel';
+import { useSharedRead } from './previewRead';
+import type { PreviewSource } from './previewSource';
+import { type PreviewStatus, useReportPreviewStatus } from './previewStatus';
 
 const skipText: Record<string, string> = {
   no_consent: 'No consent for the purpose',
@@ -24,6 +28,11 @@ export function BroadcastPreview({
   version,
   content,
   templateVersion,
+  blockGuard,
+  source,
+  sourceSuffix,
+  eligibility = 'load',
+  reportId = 'artifact',
 }: {
   artifactId: string;
   version?: number;
@@ -36,23 +45,60 @@ export function BroadcastPreview({
     sendWindow?: { start: string; end: string; days?: string[]; maxDelay?: string };
   };
   templateVersion?: number;
+  /** Block pins for the nested template, resolved by the review; the combined render must honor them. */
+  blockGuard?: BlockGuard;
+  source?: PreviewSource;
+  sourceSuffix?: string;
+  /** `save-required` skips the saved-version audience read for an unsaved broadcast. */
+  eligibility?: 'load' | 'save-required';
+  /** Which readiness slot this renderer reports to the Review panel. */
+  reportId?: string;
 }) {
   const { can } = useSession();
-  const reach = useApi(
+  const skip = !can('artifacts:read') || eligibility === 'save-required';
+  const reach = useSharedRead(
+    'broadcasts.preview',
+    { artifactId, version, templateVersion },
     () => api.call('broadcasts.preview', { artifactId, version, templateVersion }),
-    [artifactId, version, templateVersion],
-    {
-      skip: !can('artifacts:read'),
-    },
+    { skip },
   );
   const tpl = useArtifactRef(content.template);
   const isEmail = content.template?.startsWith('eml_');
+  const nestedSource: PreviewSource | undefined = templateVersion
+    ? { kind: 'saved', version: templateVersion }
+    : tpl.artifact?.publishedVersion
+      ? { kind: 'published', version: tpl.artifact.publishedVersion }
+      : undefined;
+  const guardLoading = !!blockGuard?.loading;
+  const guardFailed = !!blockGuard && (!!blockGuard.error || blockGuard.unavailable);
+  const guardWithheld = !!blockGuard && (guardLoading || !blockGuard.reproducible);
+  const status: PreviewStatus = skip
+    ? 'ready'
+    : reach.loading
+      ? 'loading'
+      : reach.error
+        ? 'error'
+        : isEmail && content.template
+          ? guardLoading
+            ? 'loading'
+            : guardFailed
+              ? 'error'
+              : tpl.error
+                ? 'error'
+                : tpl.artifact
+                  ? 'ready'
+                  : 'loading'
+          : 'ready';
+  useReportPreviewStatus(reportId, status);
   return (
     <div className="space-y-4">
+      {source && <PreviewLabel source={source} suffix={sourceSuffix} />}
       {content.description && <p className="text-[13px] text-fg-2">{content.description}</p>}
       <div className="grid gap-3 sm:grid-cols-3">
         <Stat label="Would receive it now">
-          {reach.loading ? (
+          {eligibility === 'save-required' ? (
+            <span className="text-[13px] text-muted">Save the draft to estimate</span>
+          ) : reach.loading ? (
             <Skeleton className="h-5 w-16" />
           ) : reach.error ? (
             <span className="text-[13px] text-bad">{reach.error}</span>
@@ -61,7 +107,13 @@ export function BroadcastPreview({
           )}
         </Stat>
         <Stat label="In the segment">
-          {reach.loading ? <Skeleton className="h-5 w-16" /> : (reach.data?.audience.toLocaleString() ?? '—')}
+          {eligibility === 'save-required' ? (
+            <span className="text-[13px] text-muted">Save the draft to estimate</span>
+          ) : reach.loading ? (
+            <Skeleton className="h-5 w-16" />
+          ) : (
+            (reach.data?.audience.toLocaleString() ?? '—')
+          )}
         </Stat>
         <Stat label="Sends">
           <span className="text-[14px]">
@@ -129,8 +181,49 @@ export function BroadcastPreview({
           }
         >
           <div className="p-4">
-            {tpl.artifact ? (
-              <EmailPreview compact artifactId={content.template} version={templateVersion ?? tpl.artifact.publishedVersion ?? undefined} />
+            {guardWithheld ? (
+              guardLoading ? (
+                <LoadingBlock lines={4} label="Resolving reusable blocks" />
+              ) : (
+                <div className="space-y-3">
+                  <Alert
+                    tone={blockGuard?.error ? 'bad' : 'warn'}
+                    title={
+                      blockGuard?.error
+                        ? 'Couldn’t read this template’s reusable blocks'
+                        : 'Bundled block render unavailable before publication'
+                    }
+                    {...(blockGuard?.error ? { onRetry: blockGuard.onRetry } : {})}
+                  >
+                    {blockGuard?.error
+                      ? 'The combined message is withheld until every reusable block can be resolved. The exact reviewed content is shown below.'
+                      : 'The server expands each block at its published version, so it cannot render this bundle’s block pins. The exact reviewed content is shown below, and each block is previewed separately at the version this review would use.'}
+                  </Alert>
+                  {blockGuard?.templateContent != null && (
+                    <JsonView
+                      value={blockGuard.templateContent}
+                      label={
+                        blockGuard.templateVersion
+                          ? `Template version v${blockGuard.templateVersion} as JSON (the exact reviewed content)`
+                          : 'Template as JSON (the exact reviewed content)'
+                      }
+                      maxHeight={480}
+                    />
+                  )}
+                  {blockGuard && (
+                    <BundledBlocks pins={blockGuard.pins} loading={false} error={null} onRetry={blockGuard.onRetry} showHeading />
+                  )}
+                </div>
+              )
+            ) : tpl.artifact ? (
+              <EmailPreview
+                compact
+                artifactId={content.template}
+                version={templateVersion ?? tpl.artifact.publishedVersion ?? undefined}
+                source={nestedSource}
+                sourceSuffix={templateVersion ? 'In this bundle' : undefined}
+                reportId={`${reportId}:template`}
+              />
             ) : tpl.error ? (
               <Alert tone="bad">{tpl.error}</Alert>
             ) : (

@@ -267,15 +267,29 @@ export interface BarChartProps extends ChartBlockProps {
   data: { label: string; value: number | null }[];
   /** Keep the caller's order for inherently ordered categories; otherwise sort descending. */
   ordered?: boolean;
+  /** Most categories to plot and tabulate (default eight). Raise it only for ordered series such as days. */
+  maxCategories?: number;
+  /** Palette slot for the single series (default 0 = viz-1). */
+  vizIndex?: number;
 }
 
-/** Horizontal bars: one series, zero baseline, values at the end, at most eight categories. */
-export function BarChart({ data, ordered, height = 240, unit, formatValue, dataState = 'populated', ...p }: BarChartProps) {
+/** Horizontal bars: one series, zero baseline, values at the end, at most eight categories by default. */
+export function BarChart({
+  data,
+  ordered,
+  height = 240,
+  unit,
+  formatValue,
+  dataState = 'populated',
+  maxCategories = 8,
+  vizIndex = 0,
+  ...p
+}: BarChartProps) {
   const state = dataState;
   const sorted = ordered
     ? [...data]
     : [...data].sort((a, b) => (b.value ?? Number.NEGATIVE_INFINITY) - (a.value ?? Number.NEGATIVE_INFINITY));
-  const shown = sorted.slice(0, 8);
+  const shown = sorted.slice(0, maxCategories);
   const format = formatValue ?? ((v: number | null) => withUnit(v, unit));
   const option = (c: ChartColors): EChartsOption => ({
     tooltip: { trigger: 'axis', valueFormatter: (v: unknown) => format(typeof v === 'number' ? v : null) },
@@ -292,7 +306,7 @@ export function BarChart({ data, ordered, height = 240, unit, formatValue, dataS
         type: 'bar',
         barMaxWidth: 20,
         data: shown.map((d) => d.value),
-        itemStyle: { color: c.viz[0] },
+        itemStyle: { color: c.viz[vizIndex] ?? c.viz[0] },
         label: {
           show: true,
           position: 'right',
@@ -321,10 +335,10 @@ export function BarChart({ data, ordered, height = 240, unit, formatValue, dataS
     >
       {state === 'populated' ? (
         <>
-          <Chart option={option} height={height} deps={[shown, unit]} />
+          <Chart option={option} height={height} deps={[shown, unit, vizIndex]} />
           {sorted.length > shown.length && (
             <p className="mt-2 text-[12px] leading-[18px] text-muted">
-              Showing the first eight of {sorted.length}. Group smaller categories only when that aggregation is meaningful.
+              Showing the first {shown.length} of {sorted.length}. Group smaller categories only when that aggregation is meaningful.
             </p>
           )}
         </>

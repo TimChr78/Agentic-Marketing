@@ -1,17 +1,16 @@
 import { Check, CheckCheck, Eye, X } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { api, errText, type Out } from '../../app/api';
 import { typeLabel } from '../../app/artifactRoutes';
 import { useCrumbs } from '../../app/page';
 import { Link, navigate, useLocation } from '../../app/router';
 import { useSession } from '../../app/session';
 import { useApi } from '../../app/useApi';
-import { ApprovalDrawer } from '../../features/approvals/ApprovalDrawer';
 import { approvalDecisions } from '../../features/approvals/decisions';
 import { HoldBadge, HoldCountdown } from '../../features/approvals/HoldBadge';
 import { useNow } from '../../features/approvals/holds';
 import { RequesterView } from '../../features/approvals/requester';
-import { useViewedTick, wasViewed } from '../../features/approvals/viewed';
+import { decisionWasViewed, useViewedTick } from '../../features/approvals/viewed';
 import {
   Alert,
   Button,
@@ -19,6 +18,7 @@ import {
   cx,
   EmptyState,
   Field,
+  LoadingBlock,
   PageHeader,
   StatusPill,
   Table,
@@ -40,6 +40,147 @@ type Approval = Out<'approvals.list'>['approvals'][number];
 type Proposal = Out<'workspace.proposals'>['proposals'][number];
 type Status = 'pending' | 'approved' | 'rejected';
 
+// The route table keys each page by path (routes.tsx), so opening /approvals/:id remounts this
+// page. The invoking row therefore has to be remembered outside the component instance; a deep
+// link has never set it and falls back to the queue heading.
+let lastApprovalInvokerId: string | null = null;
+let returnFocusPending = false;
+let returnFocusApprovalId: string | null = null;
+let approvalsPageSeq = 0;
+
+const FOCUS_RETURN_LIMIT_MS = 10_000;
+const FOCUS_RETURN_POLL_MS = 50;
+// Every timer the pending restoration owns. Navigation or unmount clears them, so a late retry
+// can never steal focus after the person has moved on (#498 review).
+const returnFocusTimers = new Set<ReturnType<typeof setTimeout>>();
+let returnFocusIntentExpiry: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleReturnFocus(fn: () => void, delay: number) {
+  const timer = setTimeout(() => {
+    returnFocusTimers.delete(timer);
+    fn();
+  }, delay);
+  returnFocusTimers.add(timer);
+  return timer;
+}
+
+/** Cancel every timer belonging to a pending focus restoration. */
+export function cancelApprovalFocusReturn() {
+  for (const timer of returnFocusTimers) clearTimeout(timer);
+  returnFocusTimers.clear();
+}
+
+/** Forget the restoration intent too, e.g. when the person navigated away from Approvals. */
+function clearReturnFocusIntent() {
+  returnFocusPending = false;
+  returnFocusApprovalId = null;
+  if (returnFocusIntentExpiry) {
+    clearTimeout(returnFocusIntentExpiry);
+    returnFocusIntentExpiry = null;
+  }
+}
+
+/**
+ * An unmount can be the route remount that finishes a normal drawer close. Keep the intent for a
+ * task so the next Approvals instance can consume it, then drop it if nobody did.
+ */
+function expireReturnFocusIntent() {
+  if (returnFocusIntentExpiry) clearTimeout(returnFocusIntentExpiry);
+  returnFocusIntentExpiry = setTimeout(() => {
+    returnFocusIntentExpiry = null;
+    clearReturnFocusIntent();
+  }, 0);
+}
+
+/** Forget every pending restoration. Tests also use this to isolate cases. */
+export function resetApprovalFocusReturn() {
+  cancelApprovalFocusReturn();
+  clearReturnFocusIntent();
+}
+
+/** Focus already belongs to a person's chosen control, not the body or the closing drawer. */
+function focusMovedByUser() {
+  const active = document.activeElement as HTMLElement | null;
+  if (!active || active === document.body || active === document.documentElement) return false;
+  // While the drawer is still in the DOM its trap/remnant is not a deliberate destination.
+  return !active.closest('[role="dialog"]');
+}
+
+/** Focus the invoking row in the mounted queue, waiting while its list reloads after a remount. */
+export function focusApprovalReturn(id: string | null, fromPageId: number, force = false) {
+  cancelApprovalFocusReturn();
+  const started = Date.now();
+  let finished = false;
+  const stop = () => {
+    finished = true;
+    cancelApprovalFocusReturn();
+  };
+  // The drawer's focus trap restores its previous focus in a passive effect during unmount,
+  // which can land after this task; re-assert once so the return focus is the last word.
+  const keepFocus = (element: HTMLElement | undefined) => {
+    if (!element) return;
+    element.focus();
+    scheduleReturnFocus(() => {
+      // Only undo a trap restoring focus to the body or a drawer remnant; never steal focus from a
+      // person who has already moved on to another control.
+      if (element.isConnected && !focusMovedByUser()) element.focus();
+    }, 150);
+  };
+  const attempt = () => {
+    if (finished) return;
+    // A person who moved focus somewhere meaningful is not asking for a restoration.
+    if (focusMovedByUser()) {
+      returnFocusApprovalId = null;
+      stop();
+      return;
+    }
+    const elapsed = Date.now() - started;
+    const roots = [...document.querySelectorAll<HTMLElement>('[data-approvals-page]')];
+    // The closing route remounts the page; prefer the newly mounted instance. A direct render
+    // (tests) never remounts, so accept the existing root after a short grace period.
+    const root = force
+      ? roots[roots.length - 1]
+      : (roots.find((candidate) => candidate.dataset.approvalsPage !== String(fromPageId)) ?? (elapsed >= 200 ? roots[0] : undefined));
+    if (!root) {
+      // No queue to focus: give up at the same limit as every other retry path.
+      if (elapsed >= FOCUS_RETURN_LIMIT_MS) {
+        returnFocusApprovalId = null;
+        stop();
+        return;
+      }
+      scheduleReturnFocus(attempt, FOCUS_RETURN_POLL_MS);
+      return;
+    }
+    const loading = !!root.querySelector('[role="status"][aria-label="Loading"]');
+    const links = id ? [...root.querySelectorAll<HTMLAnchorElement>(`a[data-approval-link="${id}"]`)] : [];
+    // Both responsive copies exist; only the one with a layout box is focusable. jsdom has no
+    // layout, so fall back to the first and let the DOM report whether focus moved.
+    const laidOut = links.filter((link) => link.offsetParent !== null);
+    const target = (laidOut.length ? laidOut : links)[0];
+    if (target) {
+      keepFocus(target);
+      returnFocusApprovalId = null;
+      finished = true;
+      return;
+    }
+    // The queue reloads on remount; wait for it rather than focusing the heading too early.
+    if (id && (loading || elapsed < 250) && elapsed < FOCUS_RETURN_LIMIT_MS) {
+      scheduleReturnFocus(attempt, FOCUS_RETURN_POLL_MS);
+      return;
+    }
+    keepFocus(root.querySelector<HTMLElement>('[data-approvals-heading]') ?? undefined);
+    returnFocusApprovalId = null;
+    finished = true;
+  };
+  // The drawer's focus trap restores focus in a passive effect during unmount; a task boundary
+  // lets that cleanup finish so the return focus is the last word.
+  scheduleReturnFocus(attempt, 30);
+}
+
+// The review drawer and its consequence reads are only needed once a request is opened; keeping
+// them out of the queue's chunk leaves the list light (#60, #498).
+const ApprovalDrawer = lazy(() => import('../../features/approvals/ApprovalDrawer').then((m) => ({ default: m.ApprovalDrawer })));
+
 /** Approvals (#41): the queue of changes waiting for a person, each opened in a review drawer. */
 export default function ApprovalsPage({ params }: { params: Record<string, string> }) {
   useCrumbs([{ label: 'Approvals', to: '/approvals' }, ...(params.id ? [{ label: 'Review' }] : [])]);
@@ -54,6 +195,53 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
     document.getElementById(`proposal-${highlightedProposal}`)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
   }, [highlightedProposal, proposals.data]);
   const toast = useToast();
+  const [pageId] = useState(() => ++approvalsPageSeq);
+  const closeFallbackTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // A row-opened drawer returns focus to that row's link; a deep link has no invoking row and
+  // falls back to the queue heading (#498 review). The route remounts this page, so a closing
+  // drawer leaves the intent for whichever instance mounts next as well as trying immediately.
+  useEffect(() => {
+    if (!returnFocusPending) return;
+    returnFocusPending = false;
+    if (returnFocusIntentExpiry) {
+      clearTimeout(returnFocusIntentExpiry);
+      returnFocusIntentExpiry = null;
+    }
+    focusApprovalReturn(returnFocusApprovalId, pageId, true);
+  }, [pageId]);
+  // Leaving the page cancels any pending restoration. A remount to another /approvals route keeps
+  // the intent for one task, so the normal drawer close can still return focus.
+  useEffect(
+    () => () => {
+      if (closeFallbackTimer.current) {
+        clearTimeout(closeFallbackTimer.current);
+        closeFallbackTimer.current = null;
+      }
+      cancelApprovalFocusReturn();
+      if (window.location.pathname.replace(/\/+$/, '').startsWith('/approvals')) expireReturnFocusIntent();
+      else clearReturnFocusIntent();
+    },
+    [],
+  );
+  const openApproval = (id: string) => {
+    lastApprovalInvokerId = id;
+    navigate(`/approvals/${id}${status === 'pending' ? '' : `?status=${status}`}`);
+  };
+  const closeApproval = () => {
+    returnFocusApprovalId = lastApprovalInvokerId;
+    returnFocusPending = true;
+    lastApprovalInvokerId = null;
+    navigate(status === 'pending' ? '/approvals' : `/approvals?status=${status}`);
+    // A remount handles the return focus; when the page does not remount (a directly rendered
+    // queue), retry in this instance after the drawer has finished unmounting.
+    if (closeFallbackTimer.current) clearTimeout(closeFallbackTimer.current);
+    closeFallbackTimer.current = setTimeout(() => {
+      closeFallbackTimer.current = null;
+      if (!returnFocusPending) return;
+      returnFocusPending = false;
+      focusApprovalReturn(returnFocusApprovalId, pageId, true);
+    }, 400);
+  };
   const [confirmDialog, confirm] = useConfirm();
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [batching, setBatching] = useState(false);
@@ -66,8 +254,7 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
   // The nav badge uses the same grouping (#483).
   const items = approvalDecisions(all);
   const canApprove = can('artifacts:approve');
-  const viewed = (a: Approval) =>
-    a.bundle ? a.bundle.members.every((m) => wasViewed(user!.id, m.approvalId, m.version)) : wasViewed(user!.id, a.id, a.version);
+  const viewed = (a: Approval) => decisionWasViewed(user!.id, a);
   const selectable = items.filter((a) => a.status === 'pending' && viewed(a));
   const chosen = items.filter((a) => selected.has(a.id) && viewed(a));
   const notViewed = items.filter((a) => a.status === 'pending' && !viewed(a)).length;
@@ -133,9 +320,14 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
   );
 
   return (
-    <div className={pageWidth('default')}>
+    <div className={pageWidth('default')} data-approvals-page={pageId}>
       <PageHeader
-        title="Approvals"
+        title={
+          // The fallback focus target when a deep-linked drawer closes (there is no invoking row).
+          <span data-approvals-heading tabIndex={-1} className="outline-none">
+            Approvals
+          </span>
+        }
         description="Changes waiting for a person. Open each one to see the actual e-mail, form, journey, segment or broadcast before you approve it."
         actions={
           canApprove && status === 'pending' && items.length > 0 ? (
@@ -186,7 +378,11 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
               <li key={a.id}>
                 <Link
                   to={`/approvals/${a.id}${status === 'pending' ? '' : `?status=${status}`}`}
+                  data-approval-link={a.id}
                   className="block px-4 py-3 hover:bg-surface-2"
+                  onClick={() => {
+                    lastApprovalInvokerId = a.id;
+                  }}
                 >
                   <div className="flex items-start justify-between gap-2">
                     <span className="font-medium text-fg">
@@ -236,11 +432,7 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
             </THead>
             <tbody>
               {items.map((a) => (
-                <Tr
-                  key={a.id}
-                  onClick={() => navigate(`/approvals/${a.id}${status === 'pending' ? '' : `?status=${status}`}`)}
-                  selected={params.id === a.id}
-                >
+                <Tr key={a.id} onClick={() => openApproval(a.id)} selected={params.id === a.id}>
                   {canApprove && status === 'pending' && (
                     <Td className="pr-0" onClick={(e) => e.stopPropagation()}>
                       <Checkbox
@@ -260,8 +452,12 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
                   <Td>
                     <Link
                       to={`/approvals/${a.id}${status === 'pending' ? '' : `?status=${status}`}`}
+                      data-approval-link={a.id}
                       className="font-medium text-fg hover:underline"
-                      onClick={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        lastApprovalInvokerId = a.id;
+                      }}
                     >
                       {a.artifactName}
                     </Link>
@@ -305,12 +501,14 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
       </div>
       {confirmDialog}
       {params.id && (
-        <ApprovalDrawer
-          id={params.id}
-          queue={items.filter((a) => a.status === 'pending').map((a) => a.id)}
-          onClose={() => navigate(status === 'pending' ? '/approvals' : `/approvals?status=${status}`)}
-          onDecided={reload}
-        />
+        <Suspense fallback={<LoadingBlock lines={6} label="Opening the review" />}>
+          <ApprovalDrawer
+            id={params.id}
+            queue={items.filter((a) => a.status === 'pending').map((a) => a.id)}
+            onClose={closeApproval}
+            onDecided={reload}
+          />
+        </Suspense>
       )}
     </div>
   );
@@ -395,13 +593,25 @@ function WorkspaceSettings({
               <RequesterView r={p.requester} />
               <span>proposed {timeAgo(p.createdAt)}</span>
             </div>
-            <ul className="mt-1.5 space-y-0.5 text-[14px] text-fg">
-              {proposalLines(p.changes).map((line) => (
-                <li key={line.label}>
-                  {line.label}: <span className="text-muted">{line.from}</span> → <span className="font-medium">{line.to}</span>
+            <p className="mt-1.5 text-[13px] text-fg-2">
+              <strong className="font-medium text-fg">If approved:</strong> Applies workspace settings immediately on approval.
+            </p>
+            <ul className="mt-1 space-y-0.5 text-[14px] text-fg">
+              {p.changes.name && (
+                <li>
+                  Name: <span className="text-muted">{p.changes.name.from}</span> → <span className="font-medium">{p.changes.name.to}</span>
                 </li>
-              ))}
+              )}
+              {p.changes.timeZone && (
+                <li>
+                  Time zone: <span className="text-muted">{p.changes.timeZone.from}</span> →{' '}
+                  <span className="font-medium">{p.changes.timeZone.to}</span>
+                </li>
+              )}
             </ul>
+            {p.changes.timeZone && (
+              <p className="mt-1 text-[12px] text-muted">Changes display time zone; stored send instants stay the same.</p>
+            )}
             <p className="mt-1.5 text-[13px] whitespace-pre-wrap text-fg-2">{p.note}</p>
             {canApprove ? (
               rejecting === p.id ? (
@@ -464,14 +674,6 @@ function WorkspaceSettings({
       </ul>
     </section>
   );
-}
-
-/** The human-readable lines of a proposal's stored diff. */
-function proposalLines(changes: Proposal['changes']) {
-  return [
-    ...(changes.name ? [{ label: 'Name', ...changes.name }] : []),
-    ...(changes.timeZone ? [{ label: 'Time zone', ...changes.timeZone }] : []),
-  ];
 }
 
 function ViewedPill({ a, viewed }: { a: Approval; viewed: boolean }) {

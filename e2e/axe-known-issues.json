@@ -1,15 +1,4 @@
 {
   "$comment": "axe-core violations that are known and deliberately not fixed yet (#206). The wave is done when this list is empty (docs/architecture/roadmap-wave-5.md, done criteria). Each entry names the axe rule id, the route it appears on (a route name from e2e/matrix.mjs, or * for every route) and why it is deferred. Remove an entry when the cause is fixed; the spec fails on any violation that is not listed here.",
-  "issues": [
-    {
-      "rule": "color-contrast",
-      "route": "template",
-      "reason": "The e-mail editor's GrapesJS chrome is still a dark third-party UI inside the app (grey #888686 on #2c2e35, 3.74:1). Theming it to the design system is Phase 25 (docs/architecture/roadmap-wave-5.md)."
-    },
-    {
-      "rule": "scrollable-region-focusable",
-      "route": "template",
-      "reason": "The GrapesJS views panel scrolls without focusable content. It is replaced when the e-mail editor is rebuilt on the design system in Phase 25."
-    }
-  ]
+  "issues": []
 }

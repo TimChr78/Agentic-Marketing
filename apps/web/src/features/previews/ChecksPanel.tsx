@@ -1,8 +1,8 @@
 import { Link2, RefreshCw } from 'lucide-react';
 import { useState } from 'react';
 import { api, errText, type Out } from '../../app/api';
-import { useApi } from '../../app/useApi';
 import { Alert, Button, Card, Skeleton } from '../../ui';
+import { useSharedRead } from './previewRead';
 
 type Checks = Out<'templates.check'>;
 type Finding = Checks['findings'][number];
@@ -39,7 +39,9 @@ function FindingList({ findings }: { findings: Finding[] }) {
  * because it fetches up to thirty URLs. Shown in the template preview and the approval drawer.
  */
 export function ChecksPanel({ artifactId, version }: { artifactId: string; version?: number }) {
-  const base = useApi(() => api.call('templates.check', { artifactId, version }), [artifactId, version]);
+  // The consequence summary reads the same exact check; the drawer's shared cache makes that one
+  // request, and this panel gets the same findings (#498 review).
+  const base = useSharedRead('templates.check', { artifactId, version }, () => api.call('templates.check', { artifactId, version }), {});
   const [full, setFull] = useState<Checks | null>(null);
   const [checkingLinks, setCheckingLinks] = useState(false);
   const [linkError, setLinkError] = useState<string | null>(null);
@@ -60,7 +62,7 @@ export function ChecksPanel({ artifactId, version }: { artifactId: string; versi
 
   if (base.error && !shown)
     return (
-      <Alert tone="bad" title="Couldn't check this e-mail" onRetry={base.reload}>
+      <Alert tone="bad" title="Couldn't check this e-mail" onRetry={base.refresh}>
         {base.error}
       </Alert>
     );

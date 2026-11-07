@@ -3,6 +3,8 @@ import { artifactPath } from '../../app/artifactRoutes';
 import { Link } from '../../app/router';
 import { Alert, Card, Meta, Mono, StatusPill, Tag } from '../../ui';
 import { useArtifactRef } from '../artifactCache';
+import { PreviewLabel } from './PreviewLabel';
+import type { PreviewSource } from './previewSource';
 
 export interface FormContent {
   purposes?: string[];
@@ -47,10 +49,21 @@ const url = (u?: string) =>
   );
 
 /** A signup form as visitors see it, plus what happens on submit (#41). */
-export function FormPreview({ content, stacked }: { content: FormContent; stacked?: boolean }) {
+export function FormPreview({
+  content,
+  stacked,
+  source,
+  sourceSuffix,
+}: {
+  content: FormContent;
+  stacked?: boolean;
+  source?: PreviewSource;
+  sourceSuffix?: string;
+}) {
   const traits = content.traits ?? ['firstName'];
   return (
     <div className="space-y-4">
+      {source && <PreviewLabel source={source} suffix={sourceSuffix} />}
       <div className={stacked ? 'grid gap-4' : 'grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]'}>
         <Card title="What visitors see" description="Fields and consent text; the site renders the form itself.">
           <div className="space-y-3 p-4" aria-hidden>
