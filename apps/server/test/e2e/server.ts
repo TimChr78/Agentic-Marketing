@@ -1,5 +1,6 @@
 import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
+import { e2eFixturesBase, e2eFixturesPort, e2ePort } from '../../../../e2e/ports';
 import { startTestServer } from '../harness';
 import { PEOPLE, seed } from './seed';
 
@@ -7,8 +8,10 @@ import { PEOPLE, seed } from './seed';
 //   pnpm --filter @agentic-marketing/web build && npx tsx apps/server/test/e2e/server.ts
 // Serves the built UI and the API on http://localhost:3100 (E2E_PORT). Every person's password
 // is `correct-horse-battery-staple`. Stop with Ctrl-C; the next start re-creates the database.
+// e2e/ports.ts moves the default port with TEST_PORT_OFFSET; an explicit AM_TEST_RUN (set by a
+// wrapper) namespaces the database it creates, and the server prints that exact name.
 
-const port = Number(process.env.E2E_PORT ?? 3100);
+const port = e2ePort;
 const t = await startTestServer(process.env.E2E_DB ?? 'e2e', port, {
   PUBLIC_URL: `http://localhost:${port}`,
   PUBLIC_LINKS_URL: `http://localhost:${port}`,
@@ -16,9 +19,8 @@ const t = await startTestServer(process.env.E2E_DB ?? 'e2e', port, {
 });
 // The signup form confirms to the site's welcome page, which the fixtures port below plays: a
 // real cross-origin redirect after the confirm POST, with no DNS and no request interception.
-const fixturesBase = `http://127.0.0.1:${port + 1}`;
 const seedStarted = Date.now();
-const s = await seed(t, { confirmedUrl: `${fixturesBase}/welcome` });
+const s = await seed(t, { confirmedUrl: `${e2eFixturesBase}/welcome` });
 console.log(`Seeded in ${((Date.now() - seedStarted) / 1000).toFixed(1)}s`);
 
 // Test-only fixtures on the next port (never part of the product): the links a subscriber would
@@ -56,9 +58,10 @@ fixtures.post('/preferences-link', async (c) => {
   const token = t.srv.email.links.sign({ w: s.ws, p: profileId, u: 'marketing_email', m: `e2e-pref-${Date.now()}` });
   return c.json({ url: `${t.base}/u/p/${token}` });
 });
-const fixturesHttp = serve({ fetch: fixtures.fetch, port: port + 1, hostname: '127.0.0.1' });
+const fixturesHttp = serve({ fetch: fixtures.fetch, port: e2eFixturesPort, hostname: '127.0.0.1' });
 
 console.log(`\nReady on ${t.base}`);
+console.log(`  database ${t.dbName}`);
 for (const [role, p] of Object.entries(PEOPLE)) console.log(`  ${role.padEnd(8)} ${p.email}`);
 console.log(`  password correct-horse-battery-staple\n  agent token ${s.token}\n`);
 const stop = async () => {

@@ -1,7 +1,8 @@
 import { type APIRequestContext, expect, type Page } from '@playwright/test';
+import { e2eBase } from './ports';
 
-/** Where the seeded server runs (see playwright.config.ts). */
-export const BASE = process.env.E2E_BASE ?? `http://localhost:${process.env.E2E_PORT ?? 3100}`;
+/** Where the seeded server runs (see e2e/ports.ts and playwright.config.ts). */
+export const BASE = e2eBase;
 export const PASSWORD = 'correct-horse-battery-staple';
 export const PEOPLE = { owner: 'alex@example.com', builder: 'sam@example.com', approver: 'jo@example.com', viewer: 'vic@example.com' };
 
