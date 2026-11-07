@@ -3,60 +3,72 @@ import { useState } from 'react';
 import { ApiError, api, errText, type Out } from '../../app/api';
 import { useWorkspace } from '../../app/session';
 import { useApi } from '../../app/useApi';
-import {
-  Alert,
-  Button,
-  Drawer,
-  Field,
-  fieldErrors,
-  IconButton,
-  Input,
-  Menu,
-  Modal,
-  Mono,
-  Select,
-  Textarea,
-  useConfirm,
-  useToast,
-} from '../../ui';
+import { Alert, Button, Drawer, Field, fieldErrors, IconButton, Input, Menu, Mono, Select, Textarea, useConfirm, useToast } from '../../ui';
 import type { Agent } from './labels';
 
 type Member = Out<'members.list'>['members'][number];
 const personName = (m: Member) => m.name || m.email || 'This person';
 
 /**
- * The stop controls and details editor for one agent (#213): pause with a reason, resume it, edit
- * its name, description or sponsor, or revoke it for good. Admin-only; renders nothing otherwise.
- * `variant="menu"` fits a table row, `variant="buttons"` the detail header.
+ * The stop controls and details editor for one agent (#213, #509). Pause is a single click: no
+ * modal, no mandatory reason, and the returned agent replaces the old state only after the server
+ * confirms it. Resume, edit and revoke keep their existing semantics. Admin-only; renders nothing
+ * otherwise. `variant="menu"` keeps Pause/Resume visible in a table row and puts edit/revoke in the
+ * row menu, so the stop control stays one click away on every layout.
  */
 export function AgentControls({
   agent,
+  onUpdated,
   onChanged,
   variant = 'buttons',
 }: {
   agent: Agent;
-  onChanged: () => void;
+  /** The agent returned by the mutation; replaces the old row without another read. */
+  onUpdated?: (agent: Agent) => void;
+  /** Fallback for hosts that do not accept the returned agent. */
+  onChanged?: () => void;
   variant?: 'menu' | 'buttons';
 }) {
   const { can } = useWorkspace();
   const toast = useToast();
   const [confirmDialog, confirm] = useConfirm();
-  const [pausing, setPausing] = useState(false);
+  const [busy, setBusy] = useState<'pause' | 'resume' | 'revoke' | null>(null);
+  const [pauseError, setPauseError] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
-  const [busy, setBusy] = useState(false);
 
   if (!can('workspace:admin')) return null;
 
-  const resume = async () => {
-    setBusy(true);
+  const applied = (updated: Agent) => {
+    if (onUpdated) onUpdated(updated);
+    else onChanged?.();
+  };
+
+  const pause = async () => {
+    setBusy('pause');
+    setPauseError(null);
     try {
-      await api.call('agents.resume', { id: agent.id });
+      const updated = await api.call('agents.pause', { id: agent.id });
+      applied(updated);
+      toast.success(`Paused “${agent.name}”. Its credentials no longer work.`);
+    } catch (e) {
+      // Preserve the active state until the server says otherwise; the error stays beside the
+      // control with a Retry rather than becoming a toast that disappears.
+      setPauseError(errText(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const resume = async () => {
+    setBusy('resume');
+    try {
+      const updated = await api.call('agents.resume', { id: agent.id });
+      applied(updated);
       toast.success(`Resumed “${agent.name}”. It works again with the same credentials and limits.`);
-      onChanged();
     } catch (e) {
       toast.error(errText(e));
     } finally {
-      setBusy(false);
+      setBusy(null);
     }
   };
 
@@ -72,21 +84,34 @@ export function AgentControls({
       destructive: true,
     });
     if (!ok) return;
+    setBusy('revoke');
     try {
-      await api.call('agents.revoke', { id: agent.id });
+      const updated = await api.call('agents.revoke', { id: agent.id });
+      applied(updated);
       toast.success(`Revoked “${agent.name}”. Its credentials no longer work.`);
-      onChanged();
     } catch (e) {
       toast.error(errText(e));
+    } finally {
+      setBusy(null);
     }
   };
 
-  const items = [
-    ...(agent.status === 'active'
-      ? [{ label: 'Pause', icon: <Pause size={14} />, onSelect: () => setPausing(true) }]
-      : agent.status === 'paused'
-        ? [{ label: 'Resume', icon: <Play size={14} />, onSelect: () => void resume(), disabled: busy }]
-        : []),
+  const stopControls = (
+    <>
+      {agent.status === 'active' && (
+        <Button icon={<Pause size={14} />} loading={busy === 'pause'} onClick={() => void pause()}>
+          Pause
+        </Button>
+      )}
+      {agent.status === 'paused' && (
+        <Button variant="primary" icon={<Play size={14} />} loading={busy === 'resume'} onClick={() => void resume()}>
+          Resume
+        </Button>
+      )}
+    </>
+  );
+
+  const menuItems = [
     { label: 'Edit', icon: <Pencil size={14} />, onSelect: () => setEditing(true) },
     ...(agent.status === 'revoked'
       ? []
@@ -94,107 +119,56 @@ export function AgentControls({
   ];
 
   return (
-    <>
-      {variant === 'menu' ? (
-        <Menu
-          label={`Actions for ${agent.name}`}
-          items={items}
-          trigger={(p) => <IconButton {...p} label={`Actions for ${agent.name}`} icon={<MoreHorizontal size={16} />} />}
-        />
-      ) : (
-        <div className="flex flex-wrap items-center gap-2">
-          {agent.status === 'active' && (
-            <Button icon={<Pause size={14} />} onClick={() => setPausing(true)}>
-              Pause
+    <div className={variant === 'menu' ? 'flex flex-col items-end gap-1' : 'flex flex-col items-end gap-1'}>
+      <div className="flex flex-wrap items-center justify-end gap-2">
+        {stopControls}
+        {variant === 'menu' ? (
+          <Menu
+            label={`More actions for ${agent.name}`}
+            items={menuItems}
+            trigger={(p) => <IconButton {...p} label={`More actions for ${agent.name}`} icon={<MoreHorizontal size={16} />} />}
+          />
+        ) : (
+          <>
+            <Button icon={<Pencil size={14} />} onClick={() => setEditing(true)}>
+              Edit
             </Button>
-          )}
-          {agent.status === 'paused' && (
-            <Button variant="primary" icon={<Play size={14} />} loading={busy} onClick={() => void resume()}>
-              Resume
-            </Button>
-          )}
-          <Button icon={<Pencil size={14} />} onClick={() => setEditing(true)}>
-            Edit
+            {agent.status !== 'revoked' && (
+              <Button variant="danger" icon={<Ban size={14} />} loading={busy === 'revoke'} onClick={() => void revoke()}>
+                Revoke
+              </Button>
+            )}
+          </>
+        )}
+      </div>
+      {pauseError && (
+        <div className="max-w-[360px] rounded-md border border-bad/30 bg-bad-soft px-3 py-2 text-[12px] leading-[18px] text-fg">
+          <p role="alert">
+            Pause failed. {agent.name} remains active. {pauseError}
+          </p>
+          <Button size="sm" variant="ghost" className="mt-1" onClick={() => void pause()}>
+            Retry
           </Button>
-          {agent.status !== 'revoked' && (
-            <Button variant="danger" icon={<Ban size={14} />} onClick={() => void revoke()}>
-              Revoke
-            </Button>
-          )}
         </div>
       )}
 
-      {pausing && <PauseDialog agent={agent} onClose={() => setPausing(false)} onPaused={onChanged} />}
-      {editing && <EditAgentDrawer agent={agent} onClose={() => setEditing(false)} onSaved={onChanged} />}
+      {editing && (
+        <EditAgentDrawer
+          agent={agent}
+          onClose={() => setEditing(false)}
+          onSaved={(updated) => {
+            applied(updated);
+            setEditing(false);
+          }}
+        />
+      )}
       {confirmDialog}
-    </>
-  );
-}
-
-/** Pause stops every credential at its next request; the reason is shown to the agent and in the ledger. */
-function PauseDialog({ agent, onClose, onPaused }: { agent: Agent; onClose: () => void; onPaused: () => void }) {
-  const toast = useToast();
-  const [reason, setReason] = useState('');
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  const submit = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      const trimmed = reason.trim();
-      await api.call('agents.pause', { id: agent.id, ...(trimmed ? { reason: trimmed } : {}) });
-      toast.success(`Paused “${agent.name}”. Its credentials no longer work.`);
-      onClose();
-      onPaused();
-    } catch (e) {
-      setError(errText(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <Modal
-      open
-      onClose={onClose}
-      title={`Pause “${agent.name}”?`}
-      footer={
-        <>
-          <Button onClick={onClose}>Cancel</Button>
-          <Button variant="primary" loading={busy} onClick={() => void submit()}>
-            Pause agent
-          </Button>
-        </>
-      }
-    >
-      <p>Every credential it holds stops at the next request, and its pending approvals cannot be approved until it is resumed.</p>
-      <form
-        className="mt-4 space-y-3"
-        onSubmit={(e) => {
-          e.preventDefault();
-          void submit();
-        }}
-      >
-        <Field label="Reason (optional)" hint="Shown to the agent and in its activity.">
-          <Textarea
-            rows={3}
-            maxLength={500}
-            value={reason}
-            data-autofocus
-            onChange={(e) => setReason(e.target.value)}
-            placeholder="e.g. Budget review"
-          />
-        </Field>
-        {error && <Alert tone="bad">{error}</Alert>}
-        <button type="submit" hidden />
-      </form>
-    </Modal>
+    </div>
   );
 }
 
 /** Name, description and sponsor. Saves only what changed. */
-function EditAgentDrawer({ agent, onClose, onSaved }: { agent: Agent; onClose: () => void; onSaved: () => void }) {
+function EditAgentDrawer({ agent, onClose, onSaved }: { agent: Agent; onClose: () => void; onSaved: (agent: Agent) => void }) {
   const toast = useToast();
   const members = useApi(() => api.call('members.list', {}), []);
   const [name, setName] = useState(agent.name);
@@ -210,15 +184,14 @@ function EditAgentDrawer({ agent, onClose, onSaved }: { agent: Agent; onClose: (
     setBusy(true);
     setError(null);
     try {
-      await api.call('agents.update', {
+      const updated = await api.call('agents.update', {
         id: agent.id,
         ...(trimmed !== agent.name ? { name: trimmed } : {}),
         ...(description !== agent.description ? { description } : {}),
         ...(sponsorId !== agent.sponsor.id ? { sponsorUserId: sponsorId } : {}),
       });
       toast.success(`Saved “${trimmed}”.`);
-      onClose();
-      onSaved();
+      onSaved(updated);
     } catch (e) {
       if (e instanceof ApiError && e.code === 'invalid_input') setErrors(fieldErrors(e.details));
       else setError(errText(e));

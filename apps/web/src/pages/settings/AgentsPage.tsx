@@ -9,14 +9,14 @@ import { useApi } from '../../app/useApi';
 import { usePageTab } from '../../app/useTab';
 import { AgentControls } from '../../features/agents/AgentControls';
 import { AgentStatusPill } from '../../features/agents/AgentStatus';
-import { CompareAgentsCard } from '../../features/agents/CompareAgentsCard';
 import { HostedAgentDialog } from '../../features/agents/HostedAgentDialog';
 import { type Agent, credentialKinds } from '../../features/agents/labels';
+import { ComparisonSection } from '../../features/agents/phase26/ComparisonSection';
 import { Alert, Button, EmptyState, PageHeader, Table, TableFrame, Tabs, Td, THead, Th, Tr } from '../../ui';
 import { pageWidth } from '../../ui/layout';
 import PromptsPage from '../build/PromptsPage';
 
-/** Work → Agents (#213, #215, #446): who acts for this workspace, how to stop them. */
+/** Work → Agents (#213, #215, #446, #509): who acts for this workspace, how to stop them. */
 export function AgentsHome() {
   useCrumbs([{ label: 'Agents' }]);
   const { can } = useWorkspace();
@@ -24,12 +24,20 @@ export function AgentsHome() {
   const [creating, setCreating] = useState(false);
   const rows = agents.data?.agents ?? [];
   const admin = can('workspace:admin');
+  const canAudit = can('audit:read');
+
+  // Pause returns the updated agent, so the row changes without a second agents.list read.
+  const replace = (updated: Agent) => {
+    agents.setData((current) =>
+      current ? { ...current, agents: current.agents.map((row) => (row.id === updated.id ? updated : row)) } : current,
+    );
+  };
 
   return (
     <div className={pageWidth('default', 'space-y-5')}>
       <PageHeader
         title="Agents"
-        description="Every API token, connected MCP client and hosted run acts as an agent, with a person accountable for it. Pause or revoke one to stop it at once; its sponsor and its history stay."
+        description="Every API token, connected MCP client and hosted run acts as an agent, with a person accountable for it. Pause is on every active row; revoke ends an agent for good."
         actions={
           admin && (
             <Button variant="primary" icon={<Plus size={14} />} onClick={() => setCreating(true)}>
@@ -113,7 +121,9 @@ export function AgentsHome() {
                 </Td>
                 {admin && (
                   <Td className="text-right">
-                    <AgentControls agent={a} variant="menu" onChanged={() => void agents.reload()} />
+                    <div className="flex justify-end">
+                      <AgentControls agent={a} variant="menu" onUpdated={replace} />
+                    </div>
                   </Td>
                 )}
               </Tr>
@@ -122,7 +132,7 @@ export function AgentsHome() {
         </Table>
       </TableFrame>
 
-      <CompareAgentsCard />
+      <ComparisonSection agents={rows} canAudit={canAudit} />
     </div>
   );
 }
