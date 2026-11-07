@@ -5,8 +5,9 @@ import { prepareTemplateDatabase, TEMPLATE_DB } from './harness';
 // file's database is a copy of it (startTestServer); bundle the CLI once so the CLI tests spawn a
 // built artifact instead of compiling it with tsx on every call. Workers start after this and
 // inherit the env. The run id is chosen before the artifact so workers and teardown agree on one
-// directory, and teardown removes only this run's directory (#518).
-export default async function setup() {
+// directory, and teardown removes only this run's directory (#518). Both hooks are named exports:
+// Vitest ignores a named teardown beside a default setup.
+export async function setup() {
   ensureTestRunId();
   await prepareTemplateDatabase();
   process.env.AM_TEST_TEMPLATE = TEMPLATE_DB;
