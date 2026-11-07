@@ -42,9 +42,12 @@ test('the editor inserts from the palette, opens every preview mode and labels t
   await expect(palette.getByRole('button', { name: 'Text', exact: true })).toHaveCount(0);
   await palette.getByLabel('Find an element or block').fill('');
 
-  // The reusable-blocks tab shares the block list and its empty state.
+  // The reusable-blocks tab shares the block list; a block created by another spec may already
+  // exist, so accept either the empty state or the shared list.
   await palette.getByRole('tab', { name: 'Reusable blocks' }).click();
-  await expect(palette.getByText('No reusable blocks yet. Create one in Design → Blocks')).toBeVisible();
+  await expect(
+    palette.getByText('No reusable blocks yet. Create one in Design → Blocks').or(palette.locator('ul button').first()),
+  ).toBeVisible();
 
   // Insert a text element into the visual editor; it lands in the first compatible column.
   await palette.getByRole('tab', { name: 'Elements' }).click();
