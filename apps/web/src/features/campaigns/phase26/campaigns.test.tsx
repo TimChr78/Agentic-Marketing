@@ -308,6 +308,8 @@ describe('campaign roll-up reads (#511)', () => {
 
     renderTab({ artifact: draft });
     await screen.findAllByText('2,400');
+    // The holdout chain (pinned definition, then result) settles independently of the summary.
+    await waitFor(() => expect(holdoutCalls()).toHaveLength(1));
 
     expect(artifactCalls()).toHaveLength(1);
     expect(artifactCalls()[0]!.input).toEqual({ artifactId: campaignId, version: 2 });
@@ -323,6 +325,7 @@ describe('campaign roll-up reads (#511)', () => {
 
     render(<CampaignHoldoutCard campaignId={campaignId} />);
     await screen.findByText('Campaign-wide holdout');
+    await waitFor(() => expect(holdoutCalls()).toHaveLength(1));
 
     expect(artifactCalls().map((call) => call.input)).toEqual([{ artifactId: campaignId }, { artifactId: campaignId, version: 2 }]);
     expect(holdoutCalls()).toHaveLength(1);
