@@ -14,6 +14,11 @@ fi
 task="$1"; phase="$2"; issue="$3"; title="$4"; body_file="${5:-}"
 
 case "$issue" in (*[!0-9]*|'') echo "error: issue must be a number, got '$issue'" >&2; exit 2;; esac
+# Only the documented phase-branch form: an arbitrary base (main, a release branch) is refused.
+case "$phase" in (feat/phase-[0-9]*) ;; (*) echo "error: '$phase' is not a phase branch (expected feat/phase-<n>)" >&2; exit 2;; esac
+case "$task" in
+  ("$phase"|main|master|feat/phase-*|release-*) echo "error: '$task' cannot be a task branch" >&2; exit 2;;
+esac
 git rev-parse --verify --quiet "refs/heads/$task" >/dev/null || { echo "error: no local branch '$task'" >&2; exit 1; }
 git ls-remote --exit-code --heads origin "$phase" >/dev/null || { echo "error: phase branch '$phase' is not on origin; push it first" >&2; exit 1; }
 
@@ -35,8 +40,11 @@ else
 fi
 grep -Eq "(Closes|Fixes|Resolves) #$issue\b" "$tmp" || printf '\nCloses #%s\n' "$issue" >> "$tmp"
 
-if url="$(gh pr view "$task" --json url -q .url 2>/dev/null)"; then
-  echo "already open: $url"
+# Reuse only an OPEN pull request from this head into this phase branch; anything else (a PR into
+# main, a closed one) is not the task PR, so a new draft is opened.
+existing="$(gh pr list --state open --head "$task" --base "$phase" --json url -q '.[0].url' 2>/dev/null || true)"
+if [ -n "$existing" ]; then
+  echo "already open: $existing"
 else
   gh pr create --draft --base "$phase" --head "$task" --title "$title" --body-file "$tmp"
 fi
