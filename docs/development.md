@@ -197,18 +197,29 @@ scripts/e2e-docker.sh shots        # the full screenshot matrix in reports/shots
 pnpm e2e:smoke                     # the same wrapper through package.json
 ```
 
-Each run creates `e2e_<timestamp>` and a fresh `am_e2e_<timestamp>` database, passes
-`TEST_DATABASE_URL`, `CLICKHOUSE_URL`, `NATS_URL` and `VALKEY_URL` through to the server, and
-removes the database afterwards (`E2E_KEEP_DB=1` keeps it). The port is `E2E_PORT` (default 3100;
-`E2E_PORT+1` is the fixtures port). A run refuses to start if either port is already in use and
-prints the holding process — the wrapper never pattern-kills anything. `E2E_SKIP_BUILD=1` reuses
-`apps/web/dist`.
+Each run creates a fresh database under one `AM_TEST_RUN` namespace (generated for the invocation
+unless you set it), and computes its exact name with `packages/db/test/print-db.ts` — the same
+builder the harness and `test:clean` use. It passes `AM_TEST_RUN`, `TEST_DATABASE_URL`,
+`CLICKHOUSE_URL`, `NATS_URL` and `VALKEY_URL` through to the server, verifies the seeded database
+by that name, and drops only that database afterwards (`E2E_KEEP_DB=1` keeps it). An explicit
+`E2E_DB` is refused when the database already exists, so a failed run can never drop someone
+else's data. The port is `E2E_PORT`, or `3100 + TEST_PORT_OFFSET` from `e2e/ports.ts` when unset
+(`E2E_PORT+1` is the fixtures port); this is the same offset Playwright and the helpers use. A run
+refuses to start if either port is already in use and prints the holding process — the wrapper
+never pattern-kills anything. `E2E_SKIP_BUILD=1` reuses `apps/web/dist`.
+
+The wrapper targets **Linux**, like the shared test stack: it needs `setsid` (util-linux) to give
+the seeded server its own process group, and never relies on GNU-only `date` formats. macOS lacks
+`setsid`, so the script fails before doing any work there.
 
 The runner's Docker network comes from `E2E_DOCKER_NETWORK`: `host` by default, so the container
 reaches the server on the host's loopback. When the script itself runs inside a container (there is
-a `/.dockerenv`) and `docker ps` finds a container named after `$HOSTNAME`, it uses
-`container:<name>` instead, so the runner shares that container's network namespace and
-`localhost:E2E_PORT` still reaches the server. On this machine that makes
+a `/.dockerenv`, or the cgroup names a container runtime), it resolves that container from
+`$HOSTNAME` matched against both container names and ids, then from `/proc/self/mountinfo` and
+`/proc/self/cgroup` when the hostname is custom, and uses `container:<name>` so the runner shares
+that container's network namespace and `localhost:E2E_PORT` still reaches the server. If it cannot
+resolve the enclosing container it fails and names `E2E_DOCKER_NETWORK`; it never falls back
+silently to host networking. On this machine that makes
 `E2E_DOCKER_NETWORK=container:T3-Code` unnecessary to set by hand.
 
 The smoke selection is the `@smoke` tag on the tests themselves (`test(..., { tag: '@smoke' }, ...)`),

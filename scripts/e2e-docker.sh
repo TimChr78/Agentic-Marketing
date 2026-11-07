@@ -6,19 +6,30 @@
 #
 # What a run does:
 #   1. builds the admin UI (unless E2E_SKIP_BUILD=1),
-#   2. starts apps/server/test/e2e/server.ts on E2E_PORT with a fresh database name per run,
+#   2. starts apps/server/test/e2e/server.ts on E2E_PORT with a fresh, run-scoped database,
 #   3. waits for /ready on E2E_PORT+1 and refuses a server that answered before it could have seeded,
 #   4. runs Playwright in mcr.microsoft.com/playwright:v1.64.1-noble,
-#   5. always stops the server it started (by process group) and drops the database it created.
+#   5. always stops the server it started (by its own process group) and drops only the database
+#      this invocation created.
+#
+# The target is Linux (the CI image and the shared test stack are Linux). macOS lacks `setsid` and
+# GNU `date`; the script fails fast instead of half-running.
 #
 # Environment:
-#   E2E_PORT=3100              the seeded server's port (E2E_PORT+1 is the fixtures port)
-#   E2E_DB=e2e_<timestamp>     the database name; a fresh one per run unless you set it yourself
+#   E2E_PORT=3100              the seeded server's port (E2E_PORT+1 is the fixtures port). When
+#                              unset, it comes from e2e/ports.ts (3100 + TEST_PORT_OFFSET).
+#   TEST_PORT_OFFSET=0         moves every e2e port together, exactly as Playwright and the helpers do.
+#   E2E_DB=e2e_<timestamp>     an explicit database name; refused if it already exists. A fresh,
+#                              generated name is used unless you set it.
+#   AM_TEST_RUN=...            the run namespace shared with #515 (generated when unset); the
+#                              database name is printed by packages/db/test/print-db.ts.
 #   E2E_KEEP_DB=1              keep that database for inspection
 #   E2E_SKIP_BUILD=1           reuse the existing apps/web/dist
 #   E2E_DOCKER_NETWORK=host    docker network for the runner. Default: host; when this script runs
-#                              inside a container whose name matches $HOSTNAME, container:<name>,
-#                              so the container shares this namespace and reaches localhost:E2E_PORT.
+#                              inside a container, container:<name>, found by container name or id,
+#                              so the runner shares this namespace and reaches localhost:E2E_PORT.
+#                              A container that cannot be resolved is an error, never a silent
+#                              fallback to host networking.
 #   E2E_READY_TIMEOUT=240      seconds to wait for the seed
 #   CHROMIUM=...               override the Chromium path resolved from the image
 #
@@ -30,8 +41,6 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 IMAGE="${E2E_IMAGE:-mcr.microsoft.com/playwright:v1.64.1-noble}"
-PORT="${E2E_PORT:-3100}"
-READY_PORT=$((PORT + 1))
 READY_TIMEOUT="${E2E_READY_TIMEOUT:-240}"
 # A real seed takes about 30 s. Answering sooner than this is not proof, but it is the wording we
 # use when the fresh database is also missing.
@@ -63,6 +72,43 @@ die() {
   log "FAIL: $*"
   exit 1
 }
+
+# --- prerequisites -------------------------------------------------------------------------------
+# Checked before any trap is installed: a run that cannot isolate its server or its database must
+# not start one.
+command -v docker >/dev/null 2>&1 || die "docker is not on PATH"
+command -v node >/dev/null 2>&1 || die "node is not on PATH"
+command -v pnpm >/dev/null 2>&1 || die "pnpm is not on PATH (try: corepack enable, or add ~/.local/bin)"
+command -v curl >/dev/null 2>&1 || die "curl is not on PATH"
+if ! command -v setsid >/dev/null 2>&1; then
+  die "setsid is required to give the seeded server its own process group (install util-linux; the browser suite targets Linux, not macOS)"
+fi
+# GNU date's %3N is not portable; seconds and $RANDOM are enough for timing and a unique name, so
+# never depend on it.
+
+# --- one run namespace for the whole invocation (#515) -------------------------------------------
+# The harness, print-db, the server and the cleanup all agree through this one value. Generate a
+# short lower-case id here when the caller did not set one.
+AM_TEST_RUN="${AM_TEST_RUN:-e2e$(printf '%x' "$(date +%s)")$(printf '%04x' "$RANDOM")}"
+export AM_TEST_RUN
+
+db_name_for() {
+  node --import tsx packages/db/test/print-db.ts "am_$1"
+}
+
+# --- port (e2e/ports.ts semantics) ---------------------------------------------------------------
+# The wrapper, Playwright and the helpers all read the port from e2e/ports.ts, so TEST_PORT_OFFSET
+# moves the wrapper's port exactly as it moves theirs. An explicit E2E_PORT still wins.
+if [ -n "${E2E_PORT:-}" ]; then
+  PORT="$E2E_PORT"
+else
+  PORT="$(node --import tsx -e 'import("./e2e/ports.ts").then((m) => console.log(m.portsFor({ TEST_PORT_OFFSET: process.env.TEST_PORT_OFFSET }).port))')" ||
+    die "could not derive the e2e port from e2e/ports.ts"
+fi
+case "$PORT" in
+  '' | *[!0-9]*) die "E2E_PORT must be a port number, got '$PORT'" ;;
+esac
+READY_PORT=$((PORT + 1))
 
 # --- who holds a port ---------------------------------------------------------------------------
 # No lsof/ss/fuser on the CI-style images, so read /proc: the listening socket's inode in
@@ -165,28 +211,76 @@ for port in "$PORT" "$READY_PORT"; do
   fi
 done
 
-command -v docker >/dev/null 2>&1 || die "docker is not on PATH"
-command -v node >/dev/null 2>&1 || die "node is not on PATH"
-command -v pnpm >/dev/null 2>&1 || die "pnpm is not on PATH (try: corepack enable, or add ~/.local/bin)"
-
-DB_NAME="${E2E_DB:-e2e_$(date -u +%Y%m%d_%H%M%S)_$$}"
-case "$DB_NAME" in
-  e2e_*) ;;
-  *) log "WARN: E2E_DB=$DB_NAME does not start with e2e_; the server prefixes it with am_ anyway." ;;
-esac
-PG_DB="am_$DB_NAME"
-SERVER_LOG="$TMP_ROOT/e2e-server-$DB_NAME.log"
+# --- database name and ownership -----------------------------------------------------------------
+# An explicit name is accepted only when it does not exist yet: cleanup must never drop a database
+# another run (or a person) owns. A generated name is checked absent too, so an existing database
+# under that name later can only be this invocation's own server having created it.
+if [ -n "${E2E_DB:-}" ]; then
+  DB_MODE=explicit
+  DB_NAME="$E2E_DB"
+  case "$DB_NAME" in
+    '' | *[!a-z0-9_]*) die "E2E_DB must be lower-case letters, digits and underscores, got '$DB_NAME'" ;;
+  esac
+  PG_DB="$(db_name_for "$DB_NAME")" || die "could not compute the database name for E2E_DB=$DB_NAME under AM_TEST_RUN=$AM_TEST_RUN"
+  if db_database_exists "$PG_DB"; then
+    die "database $PG_DB (E2E_DB=$DB_NAME) already exists; refusing to reuse or drop a database this run did not create (unset E2E_DB for a fresh name)"
+  fi
+else
+  DB_MODE=generated
+  attempt=0
+  while :; do
+    attempt=$((attempt + 1))
+    DB_NAME="e2e_$(date -u +%Y%m%d_%H%M%S)_$$_$(printf '%04x' "$RANDOM")"
+    PG_DB="$(db_name_for "$DB_NAME")" || die "could not compute a database name under AM_TEST_RUN=$AM_TEST_RUN"
+    db_database_exists "$PG_DB" || break
+    [ "$attempt" -lt 5 ] || die "could not find an unused database name after $attempt attempts"
+  done
+fi
+SERVER_LOG="$TMP_ROOT/e2e-server-$AM_TEST_RUN-$DB_NAME.log"
 
 # --- network -------------------------------------------------------------------------------------
+inside_container() {
+  [ -f /.dockerenv ] || [ -f /run/.containerenv ] ||
+    grep -qaE '(docker|containerd|kubepods|crio|libpod)' /proc/self/cgroup 2>/dev/null
+}
+
+# A custom $HOSTNAME is a container name, not an id; read the id from the runtime's own metadata.
+container_id_from_proc() {
+  local id
+  id="$(grep -ohE '(docker|containerd|crio|libpod)[-/][0-9a-f]{64}' /proc/self/mountinfo /proc/self/cgroup 2>/dev/null |
+    grep -oE '[0-9a-f]{64}' | head -1 || true)"
+  if [ -z "$id" ]; then
+    id="$(grep -ohE '[0-9a-f]{64}' /proc/self/cgroup 2>/dev/null | head -1 || true)"
+  fi
+  printf '%s' "$id"
+}
+
+resolve_self_container() {
+  local ref name
+  for ref in "$@"; do
+    [ -n "$ref" ] || continue
+    name="$(docker ps --filter "id=$ref" --format '{{.Names}}' 2>/dev/null | head -1 || true)"
+    [ -n "$name" ] && {
+      printf '%s' "$name"
+      return 0
+    }
+    name="$(docker ps --filter "name=^${ref}$" --format '{{.Names}}' 2>/dev/null | head -1 || true)"
+    [ -n "$name" ] && {
+      printf '%s' "$name"
+      return 0
+    }
+  done
+  return 1
+}
+
 NETWORK="${E2E_DOCKER_NETWORK:-}"
 if [ -z "$NETWORK" ]; then
-  if [ -f /.dockerenv ] && [ -n "${HOSTNAME:-}" ]; then
-    SELF_CONTAINER="$(docker ps --filter "id=$HOSTNAME" --format '{{.Names}}' 2>/dev/null | head -1 || true)"
-    if [ -n "$SELF_CONTAINER" ]; then
-      NETWORK="container:$SELF_CONTAINER"
-    else
-      NETWORK="host"
+  if inside_container; then
+    PROC_CONTAINER_ID="$(container_id_from_proc)"
+    if ! SELF_CONTAINER="$(resolve_self_container "${HOSTNAME:-}" "$PROC_CONTAINER_ID")"; then
+      die "running inside a container but could not resolve it from \$HOSTNAME (${HOSTNAME:-unset}), /proc/self/mountinfo or /proc/self/cgroup; set E2E_DOCKER_NETWORK=container:<this-container-name> (use host only when the test stack is reachable that way)"
     fi
+    NETWORK="container:$SELF_CONTAINER"
   else
     NETWORK="host"
   fi
@@ -204,6 +298,8 @@ log "chromium: $CHROMIUM_PATH"
 # --- server lifecycle ----------------------------------------------------------------------------
 SERVER_PID=""
 SERVER_PGID=""
+DB_OWNED=0
+CALLER_PGID="$(ps -o pgid= -p $$ | tr -d ' ')"
 
 # The image runs as root (as it does in CI). Hand the files it wrote back to the invoking user, so a
 # trace or a screenshot stays editable and removable afterwards.
@@ -217,35 +313,56 @@ restore_ownership() {
     >/dev/null 2>&1 || true
 }
 
+signal_server() {
+  local signal="$1"
+  if [ -n "$SERVER_PGID" ] && [ "$SERVER_PGID" != "$CALLER_PGID" ] && [ "$SERVER_PGID" != "$$" ]; then
+    kill "-$signal" -- "-$SERVER_PGID" 2>/dev/null && return 0
+  elif [ -n "$SERVER_PGID" ]; then
+    log "WARN: refusing to signal process group $SERVER_PGID (the caller's own group); signalling pid $SERVER_PID only"
+  fi
+  kill "-$signal" "$SERVER_PID" 2>/dev/null
+}
+
 cleanup() {
   local code=$?
   trap - EXIT INT TERM
   set +e
   if [ -n "$SERVER_PID" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
     log "stopping the seeded server (pid $SERVER_PID, process group $SERVER_PGID)"
-    kill -TERM -- "-$SERVER_PGID" 2>/dev/null || kill -TERM "$SERVER_PID" 2>/dev/null
+    signal_server TERM
     for _ in $(seq 1 50); do
       kill -0 "$SERVER_PID" 2>/dev/null || break
       sleep 0.2
     done
-    kill -KILL -- "-$SERVER_PGID" 2>/dev/null || kill -KILL "$SERVER_PID" 2>/dev/null
+    signal_server KILL
   elif [ -n "$SERVER_PID" ]; then
     log "seeded server (pid $SERVER_PID) is already gone"
   fi
-  if [ "${E2E_KEEP_DB:-0}" = "1" ]; then
+  # Drop only the exact database this invocation created. For a generated name, the name was
+  # verified absent before the build, so its existence now means this run's server created it even
+  # if it died before /ready. An explicit name is owned only after the seed check below.
+  owned=0
+  if [ "$DB_OWNED" = 1 ]; then
+    owned=1
+  elif [ "$DB_MODE" = generated ] && db_database_exists "$PG_DB"; then
+    owned=1
+  fi
+  if [ "${E2E_KEEP_DB:-0}" = "1" ] && [ "$owned" = 1 ]; then
     log "keeping database $PG_DB (E2E_KEEP_DB=1)"
-  elif [ -n "$DB_NAME" ]; then
+  elif [ "$owned" = 1 ]; then
     if db_drop "$PG_DB"; then
       log "dropped database $PG_DB"
     else
       log "WARN: could not drop database $PG_DB"
     fi
+  else
+    log "leaving database $PG_DB alone (this run never created it)"
   fi
   restore_ownership
   if [ "$code" -eq 0 ]; then
-    log "PASS: $COMMAND (database $DB_NAME, port $PORT)"
+    log "PASS: $COMMAND (database $PG_DB, port $PORT, run $AM_TEST_RUN)"
   else
-    log "FAIL: $COMMAND exited with $code (database $DB_NAME, server log $SERVER_LOG)"
+    log "FAIL: $COMMAND exited with $code (database $PG_DB, server log $SERVER_LOG)"
   fi
   exit "$code"
 }
@@ -263,9 +380,18 @@ else
 fi
 
 # --- start the server ----------------------------------------------------------------------------
-STARTED_MS="$(date +%s%3N)"
-log "starting the seeded server on port $PORT with database $PG_DB"
-setsid env \
+PGID_FILE="$TMP_ROOT/e2e-pgid-$AM_TEST_RUN-$$"
+rm -f "$PGID_FILE"
+STARTED_AT="$(date +%s)"
+log "starting the seeded server on port $PORT with database $PG_DB (run $AM_TEST_RUN)"
+# The child creates its own session and writes the process group it leads before exec'ing the
+# server, so the group is established and verifiable instead of inferred from ps at launch time.
+setsid bash -c '
+  printf "%s\n" "$$" > "$1"
+  shift
+  exec "$@"
+' _ "$PGID_FILE" env \
+  AM_TEST_RUN="$AM_TEST_RUN" \
   E2E_PORT="$PORT" \
   E2E_DB="$DB_NAME" \
   TEST_DATABASE_URL="${TEST_DATABASE_URL:-postgres://am:am@localhost:5432/am_test}" \
@@ -273,9 +399,26 @@ setsid env \
   VALKEY_URL="${VALKEY_URL:-redis://localhost:6379}" \
   NATS_URL="${NATS_URL:-nats://127.0.0.1:4222}" \
   npx tsx apps/server/test/e2e/server.ts >"$SERVER_LOG" 2>&1 &
-SERVER_PID=$!
-SERVER_PGID="$(ps -o pgid= -p "$SERVER_PID" | tr -d ' ')"
-[ -n "$SERVER_PGID" ] || SERVER_PGID="$SERVER_PID"
+SETSID_PID=$!
+
+for _ in $(seq 1 100); do
+  [ -s "$PGID_FILE" ] && break
+  sleep 0.1
+done
+if [ ! -s "$PGID_FILE" ]; then
+  die "the seeded server (launcher pid $SETSID_PID) did not report its process group; refusing to signal an unverified group"
+fi
+SERVER_PID="$(tr -d '[:space:]' <"$PGID_FILE")"
+SERVER_PGID="$SERVER_PID"
+case "$SERVER_PID" in
+  '' | *[!0-9]* | 0) die "the seeded server reported an invalid process group '$SERVER_PID'" ;;
+esac
+ACTUAL_PGID="$(ps -o pgid= -p "$SERVER_PID" 2>/dev/null | tr -d ' ')"
+[ "$ACTUAL_PGID" = "$SERVER_PID" ] ||
+  die "seeded server pid $SERVER_PID is not the leader of its own process group (pgid '${ACTUAL_PGID:-none}')"
+[ "$SERVER_PGID" != "$CALLER_PGID" ] ||
+  die "seeded server process group $SERVER_PGID equals the caller's group; refusing to signal it"
+kill -0 "$SERVER_PID" 2>/dev/null || die "seeded server pid $SERVER_PID is not running"
 log "server pid $SERVER_PID, process group $SERVER_PGID; log $SERVER_LOG"
 
 ready=0
@@ -298,12 +441,11 @@ done
   die "timed out waiting for /ready on port $READY_PORT"
 }
 
-ELAPSED_MS=$(( $(date +%s%3N) - STARTED_MS ))
-ELAPSED_S=$(( ELAPSED_MS / 1000 ))
+ELAPSED_S=$(( $(date +%s) - STARTED_AT ))
 log "server ready after ${ELAPSED_S}s"
 
 # The fresh database name is the proof that this server seeded, not a stopwatch: a stale server on
-# the same port answers /ready at once but never creates am_e2e_<timestamp>.
+# the same port answers /ready at once but never creates this run's database.
 if ! db_database_exists "$PG_DB"; then
   if [ "$ELAPSED_S" -lt "$MIN_SEED_SECONDS" ]; then
     die "answered /ready after only ${ELAPSED_S}s and database $PG_DB does not exist; a stale server must be answering, or the seed never ran"
@@ -313,7 +455,9 @@ fi
 if ! db_has_seeded_workspace "$PG_DB"; then
   die "database $PG_DB has no seeded workspace; the seed did not finish"
 fi
-log "verified seeded database $PG_DB"
+# Only now has this invocation proved that it created and seeded exactly this database.
+DB_OWNED=1
+log "verified seeded database $PG_DB (run $AM_TEST_RUN)"
 
 # --- Playwright in the CI image ------------------------------------------------------------------
 if [ "$COMMAND" = "shots" ]; then
