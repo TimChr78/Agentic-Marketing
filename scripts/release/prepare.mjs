@@ -99,9 +99,10 @@ export function bumpVersions(root, version) {
   const changes = [];
   for (const file of JSON_SURFACES) {
     const path = join(root, file);
-    const pkg = JSON.parse(read(path));
-    pkg.version = version;
-    write(path, `${JSON.stringify(pkg, null, 2)}\n`);
+    const source = read(path);
+    const next = source.replace(/^(\s*"version"\s*:\s*")[^"]+(")/m, `$1${version}$2`);
+    if (next === source && !source.includes(`"version": "${version}"`)) throw new Error(`${file} has no "version" field`);
+    write(path, next);
     changes.push(file);
   }
 
