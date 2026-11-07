@@ -6,12 +6,14 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 
 ### Added
 
+- Approval review (#498): every request opens with an “If approved” consequence summary — what publishes (and whether it replaces a live version), who would receive it, when, the direct dependencies with their required and live versions, and a bundle’s members in publish order — then the requester’s note, the exact reviewed message or artifact under a Saved vN · Under review label, and an initially open “Changes · N” diff. Evidence and consent are separate: the provider, sending-domain (including “DKIM not checked — selectors required”), template checks and purpose rows show Ready / Needs attention / Not checked / Not applicable, while eligible recipients remain an estimate from the current check. Workspace proposals describe the settings they change and explain the time-zone consequence, and every state (stale draft, four-eyes, hold, bundle, restricted role, read failure) has its own copy.
 - Every artifact preview now names its source above the output — Unsaved draft (with the saved version it grew from), Saved vN or Published vN — through the shared `PreviewSource` and `PreviewLabel` contract, including hosted-page, template and e-mail previews (#499).
 - The e-mail editor has one Insert palette for the six basic MJML elements and reusable blocks, an in-editor preview with Desktop, Mobile, Dark mail and Text version modes, and a local unsaved-draft renderer that never shows a saved body under an unsaved label (#499).
 - Broadcast Report (#500): four people totals with period, denominator and freshness, delivery event bars, tracked opens and clicks over time, daily unsubscribes, the explicit B4 “Top links unavailable” notice, and a campaign-wide holdout with its verdict, interval and per-currency revenue. The report supports Last 7 and Last 30 complete workspace-local days, loading, error, no-data, suppressed and restricted states.
 
 ### Changed
 
+- The approval drawer’s Review / Content / History tabs replace the old Preview / Changes split, so the reviewed artifact and its diff sit in one reading order; a version counts as viewed only when its rendered Review has loaded, never merely when a loading drawer opens or when a different version was opened (#498).
 - The e-mail editor's GrapesJS chrome is themed with the design-system tokens in light and dark, replacing the third-party greys; Styles, Settings and Layers remain the named inspector tabs, and the duplicate Code, Import, Blocks, Full screen, Preview and device controls are gone (#499).
 - The broadcast Report tab now reads the ten whole-period totals and five daily series in two `analytics.query` calls instead of the Phase 24 four-measure summary; period changes and Refresh remount every section so a result from the previous period is never shown as current. `BroadcastReport({artifactId,active})` is unchanged for its host.
 
