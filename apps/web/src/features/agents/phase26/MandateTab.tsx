@@ -75,8 +75,13 @@ export function MandateTab({ agentId, agent, canArtifacts }: { agentId: string; 
         </Alert>
       )}
 
-      {!selected || !content ? (
+      {!selected ? (
         <NoActiveMandate autonomy={autonomySettings} computedAt={computedText(data.asOf)} />
+      ) : !content ? (
+        <Alert tone="bad" title="Mandate content unavailable">
+          The server returned an active mandate, but its published content could not be read. Nothing is treated as a level 0 or as a grant;
+          reload the page or ask a workspace administrator to check the mandate.
+        </Alert>
       ) : (
         <>
           <Card
@@ -147,74 +152,76 @@ export function MandateTab({ agentId, agent, canArtifacts }: { agentId: string; 
             title="Levels by action class"
             description="Rows are the existing action classes. A missing level means the policy default of 1 (Propose), never 0. The workspace ceiling and the guardian cap can both lower the effective level."
           >
-            <Table
-              label="Mandate levels by action class"
-              className="max-sm:block max-sm:[&_thead]:hidden max-sm:[&_tbody]:block max-sm:[&_tr]:block max-sm:[&_tr]:border-b max-sm:[&_tr]:border-line max-sm:[&_tr]:last:border-0"
-            >
-              <THead>
-                <tr>
-                  <Th>Action class</Th>
-                  <Th>Granted</Th>
-                  <Th>Workspace ceiling</Th>
-                  <Th>Guardian cap</Th>
-                  <Th>Explanation</Th>
-                </tr>
-              </THead>
-              <tbody>
-                {MATRIX_CLASSES.map((actionClass) => {
-                  const granted = grantedLevel(content, actionClass);
-                  const ceiling = autonomySettings ? ceilingLevel(autonomySettings, actionClass) : null;
-                  const cap = guardianCap(agent.guard, actionClass);
-                  const explanation = matrixExplanation({
-                    actionClass,
-                    granted,
-                    ceiling,
-                    guard: agent.guard,
-                    outsideHours: data.outsideHours,
-                    shadow,
-                  });
-                  return (
-                    <Tr key={actionClass} className="max-sm:block max-sm:border-b max-sm:border-line">
-                      <Td
-                        data-label="Action class"
-                        className="max-sm:flex max-sm:items-baseline max-sm:justify-between max-sm:gap-3 max-sm:border-0 max-sm:px-3 max-sm:py-1 max-sm:font-medium max-sm:text-fg max-sm:before:text-[12px] max-sm:before:font-normal max-sm:before:text-muted max-sm:before:content-[attr(data-label)]"
-                      >
-                        {actionClassLabel(actionClass)}
-                      </Td>
-                      <Td
-                        data-label="Granted"
-                        className="max-sm:flex max-sm:items-baseline max-sm:justify-between max-sm:gap-3 max-sm:border-0 max-sm:px-3 max-sm:py-1 max-sm:before:text-[12px] max-sm:before:text-muted max-sm:before:content-[attr(data-label)]"
-                      >
-                        <span>
-                          {levelText(granted.level)}
-                          {!granted.set && <Tag className="ml-2">Default</Tag>}
-                        </span>
-                      </Td>
-                      <Td
-                        data-label="Workspace ceiling"
-                        className="max-sm:flex max-sm:items-baseline max-sm:justify-between max-sm:gap-3 max-sm:border-0 max-sm:px-3 max-sm:py-1 max-sm:before:text-[12px] max-sm:before:text-muted max-sm:before:content-[attr(data-label)]"
-                      >
-                        {ceiling === null ? 'Unavailable' : levelText(ceiling)}
-                      </Td>
-                      <Td
-                        data-label="Guardian cap"
-                        className="max-sm:flex max-sm:items-baseline max-sm:justify-between max-sm:gap-3 max-sm:border-0 max-sm:px-3 max-sm:py-1 max-sm:before:text-[12px] max-sm:before:text-muted max-sm:before:content-[attr(data-label)]"
-                      >
-                        <span title={cap.irreversible ? 'The guardian’s irreversible-action cap applies to this class' : undefined}>
-                          {cap.text}
-                        </span>
-                      </Td>
-                      <Td
-                        data-label="Explanation"
-                        className="max-sm:block max-sm:border-0 max-sm:px-3 max-sm:pt-1 max-sm:pb-2 max-sm:text-[12px] max-sm:text-muted max-sm:before:text-[12px] max-sm:before:font-normal max-sm:before:text-muted max-sm:before:content-[attr(data-label)]"
-                      >
-                        <span className="max-sm:block max-sm:pt-0.5">{explanation}</span>
-                      </Td>
-                    </Tr>
-                  );
-                })}
-              </tbody>
-            </Table>
+            <div className="overflow-x-auto">
+              <Table
+                label="Mandate levels by action class"
+                className="max-sm:block sm:min-w-[720px] max-sm:[&_thead]:hidden max-sm:[&_tbody]:block max-sm:[&_tr]:block max-sm:[&_tr]:border-b max-sm:[&_tr]:border-line max-sm:[&_tr]:last:border-0"
+              >
+                <THead>
+                  <tr>
+                    <Th>Action class</Th>
+                    <Th>Granted</Th>
+                    <Th>Workspace ceiling</Th>
+                    <Th>Guardian cap</Th>
+                    <Th>Explanation</Th>
+                  </tr>
+                </THead>
+                <tbody>
+                  {MATRIX_CLASSES.map((actionClass) => {
+                    const granted = grantedLevel(content, actionClass);
+                    const ceiling = autonomySettings ? ceilingLevel(autonomySettings, actionClass) : null;
+                    const cap = guardianCap(agent.guard, actionClass);
+                    const explanation = matrixExplanation({
+                      actionClass,
+                      granted,
+                      ceiling,
+                      guard: agent.guard,
+                      outsideHours: data.outsideHours,
+                      shadow,
+                    });
+                    return (
+                      <Tr key={actionClass} className="max-sm:block max-sm:border-b max-sm:border-line">
+                        <Td
+                          data-label="Action class"
+                          className="max-sm:flex max-sm:items-baseline max-sm:justify-between max-sm:gap-3 max-sm:border-0 max-sm:px-3 max-sm:py-1 max-sm:font-medium max-sm:text-fg max-sm:before:text-[12px] max-sm:before:font-normal max-sm:before:text-muted max-sm:before:content-[attr(data-label)]"
+                        >
+                          {actionClassLabel(actionClass)}
+                        </Td>
+                        <Td
+                          data-label="Granted"
+                          className="max-sm:flex max-sm:items-baseline max-sm:justify-between max-sm:gap-3 max-sm:border-0 max-sm:px-3 max-sm:py-1 max-sm:before:text-[12px] max-sm:before:text-muted max-sm:before:content-[attr(data-label)]"
+                        >
+                          <span>
+                            {levelText(granted.level)}
+                            {!granted.set && <Tag className="ml-2">Default</Tag>}
+                          </span>
+                        </Td>
+                        <Td
+                          data-label="Workspace ceiling"
+                          className="max-sm:flex max-sm:items-baseline max-sm:justify-between max-sm:gap-3 max-sm:border-0 max-sm:px-3 max-sm:py-1 max-sm:before:text-[12px] max-sm:before:text-muted max-sm:before:content-[attr(data-label)]"
+                        >
+                          {ceiling === null ? 'Unavailable' : levelText(ceiling)}
+                        </Td>
+                        <Td
+                          data-label="Guardian cap"
+                          className="max-sm:flex max-sm:items-baseline max-sm:justify-between max-sm:gap-3 max-sm:border-0 max-sm:px-3 max-sm:py-1 max-sm:before:text-[12px] max-sm:before:text-muted max-sm:before:content-[attr(data-label)]"
+                        >
+                          <span title={cap.irreversible ? 'The guardian’s irreversible-action cap applies to this class' : undefined}>
+                            {cap.text}
+                          </span>
+                        </Td>
+                        <Td
+                          data-label="Explanation"
+                          className="max-sm:block max-sm:border-0 max-sm:px-3 max-sm:pt-1 max-sm:pb-2 max-sm:text-[12px] max-sm:text-muted max-sm:before:text-[12px] max-sm:before:font-normal max-sm:before:text-muted max-sm:before:content-[attr(data-label)]"
+                        >
+                          <span className="max-sm:block max-sm:pt-0.5">{explanation}</span>
+                        </Td>
+                      </Tr>
+                    );
+                  })}
+                </tbody>
+              </Table>
+            </div>
           </Card>
         </>
       )}

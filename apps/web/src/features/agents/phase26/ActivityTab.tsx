@@ -6,7 +6,7 @@ import { useApi } from '../../../app/useApi';
 import { Alert, Button, Card, EmptyState, Skeleton, StatusPill, Tag } from '../../../ui';
 import { Identifier } from '../../../ui/Identifier';
 import { DecisionBadge } from '../AgentStatus';
-import { ACTION_CLASS_LABEL, DECISION, impactText } from '../labels';
+import { actionClassLabel, DECISION, impactText } from '../labels';
 import { type AgentActionRow, type AgentActivity, type AgentDetail, intText, safeDateText, safeDateTimeText } from './model';
 import { useFetchedAt } from './useFetchedAt';
 
@@ -164,15 +164,13 @@ function TimelineEntry({ action }: { action: AgentActionRow }) {
           <span title={action.shadow.reasons.join(' ')}>Shadow: {DECISION[action.shadow.decision].label.toLowerCase()}</span>
         )}
       </div>
-      <h3 className="mt-1 text-[14px] leading-5 font-semibold">
-        {action.intent || ACTION_CLASS_LABEL[action.actionClass] || action.actionClass}
-      </h3>
+      <h3 className="mt-1 text-[14px] leading-5 font-semibold">{action.intent || actionClassLabel(action.actionClass)}</h3>
       <p className="mt-1 text-[13px] leading-5 text-fg-2">
         {decision.label}
         {action.reasons.length ? ` · ${action.reasons.join(' · ')}` : ''}
       </p>
       <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] leading-[18px] text-muted">
-        <span>{ACTION_CLASS_LABEL[action.actionClass] ?? action.actionClass}</span>
+        <span>{actionClassLabel(action.actionClass)}</span>
         {action.surface && <Tag>{action.surface}</Tag>}
         {action.target && (
           <span className="inline-flex min-w-0 items-center gap-1">
@@ -247,16 +245,21 @@ function CoordinationSummary({ data }: { data: AgentActivity }) {
 
 function GuardianLane({ agentId, guard }: { agentId: string; guard: AgentDetail['guard'] }) {
   const [open, setOpen] = useState(false);
-  if (!guard) return null;
   return (
     <Card title="Guardian" description="A separate source lane. Its episodes are read only when you expand the details.">
       <div className="space-y-2 p-4 text-[12px] leading-[18px]">
-        <p className="text-fg-2">
-          Capped at level {guard.cap}
-          {guard.irreversibleCap !== undefined ? `; irreversible actions at level ${guard.irreversibleCap}` : ''} since{' '}
-          {safeDateTimeText(guard.since)}.
-        </p>
-        <p className="text-muted">{guard.reason}</p>
+        {guard ? (
+          <>
+            <p className="text-fg-2">
+              Capped at level {guard.cap}
+              {guard.irreversibleCap !== undefined ? `; irreversible actions at level ${guard.irreversibleCap}` : ''} since{' '}
+              {safeDateTimeText(guard.since)}.
+            </p>
+            <p className="text-muted">{guard.reason}</p>
+          </>
+        ) : (
+          <p className="text-muted">No guardian cap is in force. Past episodes stay readable below.</p>
+        )}
         <details onToggle={(event) => setOpen(event.currentTarget.open)}>
           <summary className="flex min-h-10 cursor-pointer items-center text-[12px] font-medium text-accent">Guardian episodes</summary>
           {open && <GuardianEpisodes agentId={agentId} />}

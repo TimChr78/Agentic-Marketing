@@ -23,6 +23,7 @@ import {
   OUTCOME_METRICS,
   outcomeValue,
   reportPeriodLabel,
+  returnedPeriodLabel,
 } from './model';
 import { useFetchedAt } from './useFetchedAt';
 
@@ -69,10 +70,17 @@ export function OverviewTab({
     </div>
   );
 
+  const periodAnnouncement = (
+    <p role="status" aria-live="polite" className="sr-only">
+      Showing {returnedPeriodLabel(period.from, period.to)} in {period.zone}.
+    </p>
+  );
+
   if (!canAudit) {
     return (
       <div className="space-y-5">
         {toolbar}
+        {periodAnnouncement}
         <Alert tone="info" title="Restricted by your role">
           The report needs audit access. No protected reads were made. Ask a workspace administrator for access.
         </Alert>
@@ -84,6 +92,7 @@ export function OverviewTab({
     return (
       <div className="space-y-5">
         {toolbar}
+        {periodAnnouncement}
         <section aria-busy="true" aria-label="Loading agent overview" className="space-y-4">
           <p className="text-[13px] text-muted">Loading the agent report…</p>
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -105,6 +114,7 @@ export function OverviewTab({
     return (
       <div className="space-y-5">
         {toolbar}
+        {periodAnnouncement}
         <Alert tone="bad" title="Couldn't load the agent report" onRetry={() => void report.reload()}>
           {report.error}
         </Alert>
@@ -125,6 +135,7 @@ export function OverviewTab({
   return (
     <div className="space-y-5">
       {toolbar}
+      {periodAnnouncement}
       <p className="text-[12px] leading-[18px] text-muted" role="status" aria-live="polite">
         {reportPeriodLabel(data)} · {period.zone} · {LATEST_EVENT_UNAVAILABLE} · {fetchedText(fetchedAt)}
       </p>
@@ -325,56 +336,61 @@ function DecisionBreakdown({ actions }: { actions: AgentReport['actions'] }) {
           <p className="text-[13px] text-muted">No decisions recorded in this period.</p>
         ) : (
           <>
-            <div className="space-y-2">
-              {DECISION_ROWS.map((row) => {
-                const value = totals[row.key];
-                return (
-                  <div key={row.key}>
-                    <div className="flex items-baseline justify-between gap-3 text-[12px] leading-[18px]">
-                      <span className="text-fg-2">{row.label}</span>
-                      <span className="num text-fg">{value.toLocaleString('en-US')}</span>
+            <figure aria-label="Decision counts by action class" className="space-y-5">
+              <figcaption className="sr-only">
+                Decision counts by action class: action rows, not people, with a table of the same returned values.
+              </figcaption>
+              <div className="space-y-2">
+                {DECISION_ROWS.map((row) => {
+                  const value = totals[row.key];
+                  return (
+                    <div key={row.key}>
+                      <div className="flex items-baseline justify-between gap-3 text-[12px] leading-[18px]">
+                        <span className="text-fg-2">{row.label}</span>
+                        <span className="num text-fg">{value.toLocaleString('en-US')}</span>
+                      </div>
+                      <div
+                        className="mt-1 h-2 rounded-sm bg-surface-2"
+                        role="img"
+                        aria-label={`${row.label}: ${value.toLocaleString('en-US')} action rows`}
+                      >
+                        <div className="h-2 rounded-sm bg-viz-1" style={{ width: max > 0 ? `${(value / max) * 100}%` : '0%' }} />
+                      </div>
                     </div>
-                    <div
-                      className="mt-1 h-2 rounded-sm bg-surface-2"
-                      role="img"
-                      aria-label={`${row.label}: ${value.toLocaleString('en-US')} action rows`}
-                    >
-                      <div className="h-2 rounded-sm bg-viz-1" style={{ width: max > 0 ? `${(value / max) * 100}%` : '0%' }} />
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-            <p className="text-[12px] leading-[18px] text-muted">
-              {total.toLocaleString('en-US')} action rows in this period. The bars share one count scale; they are not a percentage split
-              and not a count of people.
-            </p>
-            <div className="overflow-x-auto">
-              <Table label="Decisions by action class">
-                <THead>
-                  <tr>
-                    <Th>Action class</Th>
-                    {DECISION_ROWS.map((row) => (
-                      <Th key={row.key} align="right">
-                        {row.label}
-                      </Th>
-                    ))}
-                  </tr>
-                </THead>
-                <tbody>
-                  {rows.map(({ actionClass, counts }) => (
-                    <Tr key={actionClass}>
-                      <Td>{actionClassLabel(actionClass)}</Td>
+                  );
+                })}
+              </div>
+              <p className="text-[12px] leading-[18px] text-muted">
+                {total.toLocaleString('en-US')} action rows in this period. The bars share one count scale; they are not a percentage split
+                and not a count of people.
+              </p>
+              <div className="overflow-x-auto">
+                <Table label="Decisions by action class">
+                  <THead>
+                    <tr>
+                      <Th>Action class</Th>
                       {DECISION_ROWS.map((row) => (
-                        <Td key={row.key} align="right">
-                          {counts[row.key as DecisionKey].toLocaleString('en-US')}
-                        </Td>
+                        <Th key={row.key} align="right">
+                          {row.label}
+                        </Th>
                       ))}
-                    </Tr>
-                  ))}
-                </tbody>
-              </Table>
-            </div>
+                    </tr>
+                  </THead>
+                  <tbody>
+                    {rows.map(({ actionClass, counts }) => (
+                      <Tr key={actionClass}>
+                        <Td>{actionClassLabel(actionClass)}</Td>
+                        {DECISION_ROWS.map((row) => (
+                          <Td key={row.key} align="right">
+                            {counts[row.key as DecisionKey].toLocaleString('en-US')}
+                          </Td>
+                        ))}
+                      </Tr>
+                    ))}
+                  </tbody>
+                </Table>
+              </div>
+            </figure>
           </>
         )}
       </div>

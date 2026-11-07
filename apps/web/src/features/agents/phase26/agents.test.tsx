@@ -902,6 +902,13 @@ describe('agent role restrictions (#509)', () => {
     expect(h.calls).toEqual([]);
   });
 
+  it('issues zero list reads without artifact access', async () => {
+    h.can = () => false;
+    renderList();
+    await screen.findByText('Restricted by your role');
+    expect(h.calls).toEqual([]);
+  });
+
   it('does not let a viewer mutate an agent', async () => {
     h.can = (permission) => permission === 'artifacts:read' || permission === 'audit:read';
     renderAgent();

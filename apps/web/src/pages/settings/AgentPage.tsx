@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { api } from '../../app/api';
 import { ButtonLink } from '../../app/links';
 import { useCrumbs } from '../../app/page';
@@ -42,6 +42,14 @@ export default function AgentPage({ params }: { params: Record<string, string> }
   const [anchor, setAnchor] = useState(() => new Date());
   const [refreshKey, setRefreshKey] = useState(0);
   const period = useMemo(() => reportPeriod(choice, anchor), [choice, anchor]);
+
+  // A different agent is a different page: start on Overview and the default period.
+  useEffect(() => {
+    setTab('overview');
+    setChoice(7);
+    setAnchor(new Date());
+    setRefreshKey(0);
+  }, [id]);
 
   useCrumbs([{ label: 'Agents', to: '/work/agents' }, { label: agent.data?.name ?? 'Agent' }]);
 

@@ -53,6 +53,7 @@ export function ComparisonSection({ agents, canAudit }: { agents: Agent[]; canAu
     { skip: !canAudit || applied.length === 0 },
   );
   const fetchedAt = useFetchedAt(compare.data);
+  const comparisonBusy = compare.refreshing || (compare.loading && !compare.data);
 
   if (!canAudit) {
     return (
@@ -161,7 +162,7 @@ export function ComparisonSection({ agents, canAudit }: { agents: Agent[]; canAu
         <EmptyState compact title="Choose agents to compare">
           Select between 1 and 20 agents, then Apply. The comparison reads once for that selection.
         </EmptyState>
-      ) : compare.loading && !compare.data ? (
+      ) : comparisonBusy ? (
         <section aria-busy="true" aria-label="Loading the agent comparison" className="space-y-3 p-4">
           <Skeleton className="h-3 w-1/3" />
           <div className="grid gap-4 sm:grid-cols-2">

@@ -224,7 +224,8 @@ export function matrixExplanation({
 }): string {
   const parts: string[] = [];
   if (!granted.set) parts.push('Policy default level 1 (Propose).');
-  if (ceiling !== null && granted.level > ceiling) parts.push('Above the workspace ceiling; the ceiling applies.');
+  if (ceiling === null) parts.push('Workspace ceiling unavailable; the granted level is shown without it.');
+  else if (granted.level > ceiling) parts.push('Above the workspace ceiling; the ceiling applies.');
   if (guard) {
     const cap = guardianCap(guard, actionClass);
     if (cap.cap !== null && cap.cap < granted.level) parts.push(`The guardian caps this class at level ${cap.cap} until cleared.`);
