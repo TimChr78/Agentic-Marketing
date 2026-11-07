@@ -1,5 +1,6 @@
 import { type FakeRequest, fakeLlm } from '@agentic-marketing/ai/testing';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { uniqueEvent, uniqueJourney } from '../../../test-support/index';
 import { eventually, rejects, startTestServer, testPort, type User } from './harness';
 
 // Phase 11 (wave 2), part b: AI. Classifying texts (ai.classify) as a job, with the label stored
@@ -144,14 +145,22 @@ describe('generated text per segment', () => {
       slots: [{ name: 'intro', description: 'One line', maxLength: 80, fallback: 'Hello.' }],
       cache: { segments: [segment], ttlHours: 24 },
     });
-    const journey = await publish('journey', 'Intro', {
-      purpose: 'onboarding',
-      nodes: [
-        { id: 'start', kind: 'trigger', label: 'Browsed', config: { event: 'Browse Abandoned', reentry: 'once' } },
-        { id: 'write', kind: 'aiGenerate', label: 'Write', config: { prompt } },
-        { id: 'end', kind: 'exit', label: 'Done', config: {} },
-      ],
-    });
+    const trigger = uniqueEvent('Browse Abandoned');
+    const journey = await publish(
+      'journey',
+      'Intro',
+      uniqueJourney(
+        {
+          purpose: 'onboarding',
+          nodes: [
+            { id: 'start', kind: 'trigger', label: 'Browsed', config: { event: 'Browse Abandoned', reentry: 'once' } },
+            { id: 'write', kind: 'aiGenerate', label: 'Write', config: { prompt } },
+            { id: 'end', kind: 'exit', label: 'Done', config: {} },
+          ],
+        },
+        trigger,
+      ),
+    );
     for (const u of ['fan-1', 'fan-2'])
       await send([{ type: 'identify', userId: u, traits: { interest: 'tents', secret_hobby: `hobby-of-${u}` } }, aiConsent(u, true)]);
     for (const u of ['fan-1', 'fan-2']) {
@@ -165,12 +174,12 @@ describe('generated text per segment', () => {
       );
     }
     const before = llm.requests.length;
-    await send([{ type: 'track', event: 'Browse Abandoned', userId: 'fan-1' }]);
+    await send([{ type: 'track', event: trigger, userId: 'fan-1' }]);
     await eventually(
       () => api.call('ai.calls', { journeyId: journey }),
       (r) => r.calls.length === 1 && r.calls[0].status === 'done',
     );
-    await send([{ type: 'track', event: 'Browse Abandoned', userId: 'fan-2' }]);
+    await send([{ type: 'track', event: trigger, userId: 'fan-2' }]);
     const { calls } = await eventually(
       () => api.call('ai.calls', { journeyId: journey }),
       (r) => r.calls.length === 2 && r.calls.every((c) => c.status === 'done'),

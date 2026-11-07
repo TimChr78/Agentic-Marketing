@@ -1,6 +1,7 @@
 import { type FakeRequest, fakeLlm } from '@agentic-marketing/ai/testing';
 import { outbox } from '@agentic-marketing/email';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { expectUnordered, uniqueEvent, uniqueJourney } from '../../../test-support/index';
 import { eventually, rejects, startTestServer, testPort, type User } from './harness';
 
 // Phase 4 acceptance: "AI-chosen branches/content with full decision logs and fallbacks". A
@@ -8,6 +9,7 @@ import { eventually, rejects, startTestServer, testPort, type User } from './har
 // copilot run through the real adapters, worker and MCP server.
 
 let t: Awaited<ReturnType<typeof startTestServer>>;
+let trigger = '';
 let llm: Awaited<ReturnType<typeof fakeLlm>>;
 let owner: User;
 let key: string;
@@ -195,23 +197,28 @@ describe('AI steps in a journey', () => {
     };
     ids.vip = await template('Early access', 'VIP: {{ content.intro }} {{ content.ps }}');
     ids.standard = await template('This week', 'Offer: {{ content.intro }} {{ content.ps }}');
-    const journey = (options: string[], fallback = 'standard') => ({
-      purpose: 'marketing_email',
-      nodes: [
-        { id: 'start', kind: 'trigger', label: 'Browsed', config: { event: 'Browse Abandoned', reentry: 'once' } },
-        { id: 'write', kind: 'aiGenerate', label: 'Write intro', config: { prompt: ids.generate } },
+    trigger = uniqueEvent('Browse Abandoned');
+    const journey = (options: string[], fallback = 'standard') =>
+      uniqueJourney(
         {
-          id: 'tier',
-          kind: 'aiDecide',
-          label: 'Pick the offer',
-          config: { prompt: ids.decide, options, fallback, timeout: 'PT5M' },
-          next: [{ to: 'vip_mail' }, { to: 'std_mail' }],
+          purpose: 'marketing_email',
+          nodes: [
+            { id: 'start', kind: 'trigger', label: 'Browsed', config: { event: 'Browse Abandoned', reentry: 'once' } },
+            { id: 'write', kind: 'aiGenerate', label: 'Write intro', config: { prompt: ids.generate } },
+            {
+              id: 'tier',
+              kind: 'aiDecide',
+              label: 'Pick the offer',
+              config: { prompt: ids.decide, options, fallback, timeout: 'PT5M' },
+              next: [{ to: 'vip_mail' }, { to: 'std_mail' }],
+            },
+            { id: 'vip_mail', kind: 'email', label: 'Early access', config: { template: ids.vip }, next: [{ to: 'end' }] },
+            { id: 'std_mail', kind: 'email', label: 'This week', config: { template: ids.standard }, next: [{ to: 'end' }] },
+            { id: 'end', kind: 'exit', label: 'Done', config: {} },
+          ],
         },
-        { id: 'vip_mail', kind: 'email', label: 'Early access', config: { template: ids.vip }, next: [{ to: 'end' }] },
-        { id: 'std_mail', kind: 'email', label: 'This week', config: { template: ids.standard }, next: [{ to: 'end' }] },
-        { id: 'end', kind: 'exit', label: 'Done', config: {} },
-      ],
-    });
+        trigger,
+      );
     ids.journey = (
       await api.call('artifacts.create', { type: 'journey', name: 'Browse follow-up', content: journey(['vip', 'gold'], 'vip') })
     ).artifactId;
@@ -253,7 +260,7 @@ describe('AI steps in a journey', () => {
       () => api.call('profiles.events', { profileId: adaId }),
       (r) => r.events.some((e) => e.name === 'Product Viewed'),
     );
-    await send([{ type: 'track', event: 'Browse Abandoned', userId: 'ada' }]);
+    await send([{ type: 'track', event: trigger, userId: 'ada' }]);
     const mail = await eventually(
       async () => mailTo('ada@example.com'),
       (m) => m.length === 1,
@@ -287,10 +294,10 @@ describe('AI steps in a journey', () => {
     await send([
       { type: 'identify', userId: 'bo', traits: { email: 'bo@example.com', lifetime_value: 5000 } },
       consent('bo', false),
-      { type: 'track', event: 'Browse Abandoned', userId: 'bo' },
+      { type: 'track', event: trigger, userId: 'bo' },
       { type: 'identify', userId: 'cy', traits: { email: 'cy@example.com', lifetime_value: 5000, fail: true } },
       consent('cy', true),
-      { type: 'track', event: 'Browse Abandoned', userId: 'cy' },
+      { type: 'track', event: trigger, userId: 'cy' },
     ]);
     const bo = await eventually(
       async () => mailTo('bo@example.com'),
@@ -313,7 +320,7 @@ describe('AI steps in a journey', () => {
     await send([
       { type: 'identify', userId: 'dan', traits: { email: 'dan@example.com', lifetime_value: 5000 } },
       consent('dan', true),
-      { type: 'track', event: 'Browse Abandoned', userId: 'dan' },
+      { type: 'track', event: trigger, userId: 'dan' },
     ]);
     const dan = await eventually(
       async () => mailTo('dan@example.com'),
@@ -326,7 +333,7 @@ describe('AI steps in a journey', () => {
     const { calls } = await api.call('ai.calls', { journeyId: ids.journey, kind: 'decide' });
     const reasons = calls.map((c) => `${c.status}: ${c.error?.split(':')[0]}`);
     // Different people's journeys run concurrently, so these calls have no fixed order.
-    expect(reasons.sort()).toEqual(['done: undefined', 'fallback: budget', 'fallback: model_error', 'fallback: no_lawful_basis']);
+    expectUnordered(reasons, ['done: undefined', 'fallback: budget', 'fallback: model_error', 'fallback: no_lawful_basis']);
   });
 
   it('includes AI decisions in the person’s access export', async () => {

@@ -2,6 +2,7 @@ import { linkSigner } from '@agentic-marketing/email';
 import type { EventBus } from '@agentic-marketing/events';
 import { valkeyHotState } from '@agentic-marketing/hotstate';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { seededRandom } from '../../../test-support/index';
 import { createDisposableDb, type DisposableDb, hasTestDatabase } from '../../db/test/disposable';
 import { type DoiToken, formsApi, takeFormSubmission } from '../src/forms';
 
@@ -10,7 +11,8 @@ import { type DoiToken, formsApi, takeFormSubmission } from '../src/forms';
 // honestly instead of resetting every bucket or falling back to an unbounded local allowance.
 
 const VALKEY_URL = process.env.VALKEY_URL;
-const prefix = `am-forms-test-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+const random = seededRandom();
+const prefix = `am-forms-test-${Date.now()}-${random().toString(36).slice(2, 8)}`;
 const formId = `frm_${'a'.repeat(32)}`;
 const otherFormId = `frm_${'b'.repeat(32)}`;
 

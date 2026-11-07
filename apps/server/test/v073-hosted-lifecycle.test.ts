@@ -3,6 +3,7 @@ import { outbox } from '@agentic-marketing/email';
 import pg from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { runScoped } from '../../../packages/db/test/run';
+import { seededRandom } from '../../../test-support/index';
 import { runHostedAgentsOnce } from '../src/agents/hosted';
 import { eventually, startTestServer, testDatabaseUrl, testPort, type User } from './harness';
 
@@ -14,6 +15,7 @@ import { eventually, startTestServer, testDatabaseUrl, testPort, type User } fro
 const DB_NAME = runScoped('am_test_hosted_lifecycle');
 const PORT = testPort(3501);
 const DAY = 86_400_000;
+const random = seededRandom();
 /** Beyond every schedule (a weekly run is at most seven days away). */
 const DUE = () => new Date(Date.now() + 8 * DAY);
 
@@ -176,7 +178,7 @@ async function addEvent(s: Setup, summary: string, at = new Date()): Promise<num
   const { rows: inserted } = await t.srv.db.admin.query<{ id: string }>(
     `INSERT INTO agent_events (workspace_id, agent_id, subscription_id, type, event_key, summary, subject, at)
      VALUES ($1, $2, $3, 'guardrail.breach', $4, $5, '{"episodeId":"gde_x"}', $6) RETURNING id`,
-    [s.ws, s.agentId, rows[0]!.trigger_subscription_id, `k-${Math.random()}`, summary, at],
+    [s.ws, s.agentId, rows[0]!.trigger_subscription_id, `k-${random()}`, summary, at],
   );
   return Number(inserted[0]!.id);
 }

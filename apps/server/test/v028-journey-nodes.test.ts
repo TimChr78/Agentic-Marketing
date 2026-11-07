@@ -1,5 +1,6 @@
 import { outbox } from '@agentic-marketing/email';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { expectUnordered, uniqueEvent } from '../../../test-support/index';
 import { eventually, startTestServer, testPort, type User } from './harness';
 
 // 0.2.8 (#92, #93): wait until a condition matches, and business entry keys for event triggers.
@@ -75,7 +76,7 @@ async function createJourney(name: string, content: Record<string, unknown>) {
  * starts on its own event (`startEvent(name)`): with a shared one, a person would also enter the
  * other tests' journeys, and their outcome would write the same trait.
  */
-const startEvent = (name: string) => `Wait Start: ${name}`;
+const startEvent = (name: string) => uniqueEvent(`Wait Start: ${name}`);
 const waitJourney = (name: string, wait: Record<string, unknown>, purpose = 'onboarding') =>
   createJourney(name, {
     purpose,
@@ -290,7 +291,7 @@ describe('waitUntil (#92)', () => {
         content: {
           purpose: 'onboarding',
           nodes: [
-            { id: 'trigger', kind: 'trigger', label: 'Start', config: { event: 'Wait Start', reentry: 'once' } },
+            { id: 'trigger', kind: 'trigger', label: 'Start', config: { event: startEvent('invalid wait'), reentry: 'once' } },
             { id: 'wait', kind: 'waitUntil', label: 'Wait', config },
             { id: 'done', kind: 'exit', label: 'Done', config: {} },
           ],
@@ -473,7 +474,10 @@ describe('entry keys (#93)', () => {
       () => rowsOf(journeyId, profileId),
       (r) => r.length === 2,
     );
-    expect(rows.map((r) => r.entry_key)).toEqual(['prop:order_id:C-1', 'prop:order_id:C-1']);
+    expectUnordered(
+      rows.map((r) => r.entry_key),
+      ['prop:order_id:C-1', 'prop:order_id:C-1'],
+    );
   });
 
   it('keeps the message-id and profile behaviour when no entry key is configured', async () => {
@@ -511,7 +515,7 @@ describe('entry keys (#93)', () => {
             id: 'trigger',
             kind: 'trigger',
             label: 'Start',
-            config: { event: 'Wait Start', reentry: 'once', entryKey: { source: 'event_property' } },
+            config: { event: startEvent('bad entry key'), reentry: 'once', entryKey: { source: 'event_property' } },
           },
           { id: 'done', kind: 'exit', label: 'Done', config: {} },
         ],

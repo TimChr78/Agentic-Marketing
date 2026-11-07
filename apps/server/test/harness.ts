@@ -159,6 +159,11 @@ export const testPort = (port: number) => port + (Number(process.env.VITEST_POOL
 
 /** The migrated database that test-setup.ts prepares once per run; run-scoped like every test database. */
 export const TEMPLATE_DB = scopedDbName('am_test_template');
+
+// Hot state (rate-limit buckets, sessions, snapshots) is not dropped with the databases. A run-unique
+// prefix keeps one run's buckets out of the next one, which matters now that seeded fixtures reuse
+// the same client IPs and message ids on every run.
+const VALKEY_RUN_ID = `${process.pid.toString(36)}_${Date.now().toString(36)}`;
 const APP_ROLE = { appRole: 'am_app_test', appRolePassword: 'am_app_test_password' };
 
 /** The admin URL of a test database on the TEST_DATABASE_URL server. */
@@ -280,7 +285,7 @@ export async function startTestServer(
     NATS_URL: natsUrl,
     NATS_NAMESPACE: dbName,
     VALKEY_URL: process.env.VALKEY_URL ?? 'redis://localhost:6379',
-    VALKEY_PREFIX: dbName,
+    VALKEY_PREFIX: `${dbName}_${VALKEY_RUN_ID}`,
     // Test receivers for webhooks and connector actions listen on loopback.
     EGRESS_ALLOWED_HOSTS: '127.0.0.1',
     ...env,
