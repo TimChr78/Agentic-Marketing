@@ -42,6 +42,7 @@ const h = vi.hoisted(() => ({
   nulls: false,
   priorZero: false,
   deferred: null as null | { promise: Promise<unknown>; resolve: (value: unknown) => void; used?: boolean },
+  slow: null as null | ((input: any) => Promise<unknown> | null),
 }));
 
 const UNITS: Record<string, 'count' | 'ratio' | 'currency'> = {
@@ -299,6 +300,8 @@ vi.mock('../../../app/api', async (importOriginal) => {
     api: {
       call: vi.fn(async (name: string, input: any) => {
         h.calls.push({ name, input });
+        const slow = h.slow?.(input);
+        if (slow) return slow;
         if (
           h.deferred &&
           !h.deferred.used &&
@@ -355,6 +358,7 @@ beforeEach(() => {
   h.nulls = false;
   h.priorZero = false;
   h.deferred = null;
+  h.slow = null;
 });
 
 afterEach(cleanup);
@@ -711,6 +715,38 @@ describe('data states (#506)', () => {
     const alert = screen.getByText('Could not load analytics').closest('[role="alert"]') as HTMLElement;
     fireEvent.click(within(alert).getByRole('button', { name: 'Retry' }));
     await waitForReads(4);
+  });
+
+  it('shows no old values under a new selection while its reads are pending', async () => {
+    renderAt();
+    await waitForReads(4);
+    expect(screen.getByText('Delivered people')).toBeTruthy();
+
+    h.slow = (input) => (input.measures?.includes('journey.entered') ? new Promise(() => {}) : null);
+    choose('Question', 'journey');
+    await waitForReads(8);
+
+    expect(screen.getByLabelText('Loading analytics')).toBeTruthy();
+    expect(screen.queryByText('Delivered people')).toBeNull();
+    expect(screen.queryByText('Delivered over time')).toBeNull();
+    expect(screen.queryByText('Result table')).toBeNull();
+  });
+
+  it('never pairs a newly returned totals result with a series from another selection', async () => {
+    renderAt();
+    await waitForReads(4);
+
+    // The new totals land, but the new series is still pending: the old series must not be shown
+    // beside the new totals under the new question.
+    h.slow = (input) => (input.measures?.includes('journey.entered') && input.dimensions?.includes('day') ? new Promise(() => {}) : null);
+    choose('Question', 'journey');
+    await waitForReads(8);
+
+    expect(screen.getByLabelText('Loading analytics')).toBeTruthy();
+    // 800 is the new totals result; it must wait for the matching series rather than join old rows.
+    expect(screen.queryByText('800')).toBeNull();
+    expect(screen.queryByText('Delivered over time')).toBeNull();
+    expect(screen.queryByText('Result table')).toBeNull();
   });
 
   it('never lets a stale response replace a newer selection', async () => {

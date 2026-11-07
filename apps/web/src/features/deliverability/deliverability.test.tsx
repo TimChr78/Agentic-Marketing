@@ -489,6 +489,23 @@ describe('Deliverability data states (#508)', () => {
     expect(screen.queryByText('No recorded activity in this period')).toBeNull();
   });
 
+  it('shows no old trend points under a newly selected stream while its read is pending', async () => {
+    let resolveSms!: (value: Trend) => void;
+    h.trendHandler = (input) => (input.channel === 'sms' ? new Promise<Trend>((done) => (resolveSms = done)) : trendFixture(defaultPoints));
+    render(<DeliverabilityPage />);
+    await screen.findByRole('heading', { name: /Bounce rate · last 7 complete days/ });
+    expect(screen.queryAllByText('31 Oct').length).toBeGreaterThan(0);
+
+    fireEvent.change(screen.getByLabelText('Stream'), { target: { value: 'sms.transactional' } });
+    expect(await screen.findByRole('status', { name: 'Loading the deliverability trend' })).toBeTruthy();
+    expect(screen.queryAllByText('31 Oct')).toHaveLength(0);
+    expect(screen.getAllByText(/SMS · transactional/).length).toBeGreaterThan(0);
+
+    await act(async () => resolveSms(trendFixture([point('2026-11-06', 200, 4, 0, 0.02, 0)])));
+    expect((await screen.findAllByText('6 Nov')).length).toBeGreaterThan(0);
+    expect(screen.queryAllByText('31 Oct')).toHaveLength(0);
+  });
+
   it('never lets a stale trend response replace a newer stream selection', async () => {
     const resolvers: Array<(value: Trend) => void> = [];
     h.trendHandler = () => new Promise<Trend>((resolve) => resolvers.push(resolve));

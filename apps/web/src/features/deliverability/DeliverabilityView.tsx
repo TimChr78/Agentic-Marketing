@@ -1,7 +1,7 @@
 import { type ReactNode, useRef, useState } from 'react';
 import { api } from '../../app/api';
 import { useSession } from '../../app/session';
-import { useApi } from '../../app/useApi';
+import { useApi, useKeyedApi } from '../../app/useApi';
 import { Alert, Card, EmptyState, LoadingBlock } from '../../ui';
 import { type ReportPeriodChoice, reportPeriod } from '../broadcasts/period';
 import { DnsSection } from './DnsCards';
@@ -55,7 +55,11 @@ export function DeliverabilityView() {
 
   const health = useApi(() => api.call('deliverability.health', {}), [refreshKey], { skip: !canRead });
   const stream = streamOf(streamKey);
-  const trend = useApi(
+  // The trend belongs to the exact bounds and stream it was requested for. Until that read lands,
+  // a previously selected stream's points must not sit under the new stream's label.
+  const trendKey = `${period.from}|${period.nextMidnight}|${streamKey}|${refreshKey}`;
+  const trend = useKeyedApi(
+    trendKey,
     () =>
       api.call('deliverability.trend', {
         from: period.from,
@@ -63,7 +67,6 @@ export function DeliverabilityView() {
         channel: stream.channel,
         stream: stream.stream,
       }),
-    [period.from, period.nextMidnight, streamKey, refreshKey],
     { skip: !canRead },
   );
   const domains = useApi(() => api.call('sendingDomains.list', { dkimSelectors: appliedSelectors }), [appliedSelectors, dnsKey], {
