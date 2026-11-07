@@ -2,34 +2,35 @@
 
 Durable handoff for the agent working on this repository. Update it when a long run starts, when work lands, and at every handoff. A new session should be able to resume from this file alone.
 
-_Last updated: 2026-11-07 (evening)_
+_Last updated: 2026-11-07 (night)_
 
 ## Now
 
-- **0.12.0 released** (Phase 26, truthful insights). Tag `v0.12.0` on `f64fdcc`. Checksums and attestations for the chart, Compose bundle and image are verified. Tracker #512 is closed.
-- **Process improvements** (user request, 2026-11-07), from the research in `/mnt/user/appdata/t3code/Mixed research/`:
-  1. Determinism kit: **in progress** (DeepSeek task on `process/determinism-kit`).
-  2. Local Playwright runner: **#516**, updated from `main`. The People smoke spec now follows the Phase 26 labels, and smoke passed locally through the runner. A CI test-job rerun was needed after a service `curl` blip.
-  3. Shared labelled test stack: **#515**, updated from `main`, green.
-  - Once all three are green, Sol reviews them together, then they merge. Then stop and report, and recommend whether more Docker/Unraid tuning is worth it before the next phase.
+- **Process batch 1 is merged** (2026-11-07). Each item was reviewed by Sol, re-checked after its fixes, and passed CI:
+  - **#515 — shared labelled test stack.**
+    - `docker-compose.test.yml` (label `am-test=1`), `scripts/test-services.sh`, `scripts/preflight.sh` and `scripts/docker-clean.sh`.
+    - `AM_TEST_RUN` and `scopedDbName()` / `packages/db/test/print-db.ts` give each run its own names.
+    - `TEST_PORT_OFFSET` with `e2e/ports.ts`.
+    - A run-scoped `test:clean`.
+  - **#518 — determinism kit.**
+    - `TZ=UTC`, plus the `test-support/` helpers: a seeded RNG, `uniqueEvent`/`uniqueJourney` and `expectUnordered`.
+    - The CLI is bundled once per run with source-path parity. The CLI test went from 396 s, with timeouts, to 110–170 s.
+    - The packages worker cap.
+  - **#516 — local Playwright runner.** `scripts/e2e-docker.sh` with smoke/functional/axe/visual/update/shots and an `@smoke` subset, plus the exact-selector lint.
+  - **Alongside these:** the curl retries for the PostgreSQL key (#519 and CI), the web 5 s async timeout, and `settle()` now waits for the journey canvas nodes.
+- **Waiting for the user:** a decision on the recommendation below (host setup, then batch 2 or Phase 27).
 
 ## Next
 
-- After the three process PRs: either the second process batch (phase branch with per-delegate draft PRs, affected-test selection, changelog fragments, migration reservation, one-pass release and verification script) or Phase 27. The user decides after the report.
+- **Recommended:** a short host-setup step, then a trimmed batch 2, then Phase 27.
+  - Batch 2 is: changelog fragments, per-delegate draft PRs against the phase branch, affected-test selection, and a release script with verification.
+  - Migration reservation is deferred; the Wave 5 UI phases rarely add migrations.
 
 ## Blocked / decisions needed
 
-- None blocking.
-
-## Lessons from Phase 26 (feed the process work)
-
-- **CHANGELOG conflicts.** Every parallel merge conflicted, and section headings got scrambled twice, so they had to be regrouped by hand. Changelog fragments fix this.
-- **Flakes under host load.** Four web tests used Testing Library's 1 s default wait, which load exceeded. The web project now has a 5 s async timeout. One test was racing a lazy-module import, and two campaign tests asserted counts before an independent chain had settled.
-- **Visual masks.** A mask takes the size of the text it covers, so volatile values need a fixed placeholder before masking. People cards on phones need masking too.
-- **Visual baselines** must come from a fresh seed that has only had the visual run. A prior functional run leaves e2e agents in the list.
-- **Delegates dropping features.** They removed existing features (hosted, guardian and shadow controls, Create mandate, pasted profile ids) to meet read budgets. Review for lost functionality on every rewrite.
-- **Jargon in the UI.** Implementation wording ("reads", "lanes", "k-suppression field") leaked into the interface. A copy check belongs in review.
-- **CI blips.** Two network failures (postgresql.org key download, service `curl`). Rerun the failed job; do not change code.
+- **Host:** this Unraid host has no persistent Docker Compose, so `scripts/test-services.sh` cannot start the shared stack. The user needs to install the Compose plugin, or approve a pinned `docker-compose` binary under `/mnt/user/appdata`.
+- **Containers:** `am-patch-test-*` (four containers, not ours) is still running. Remove it only with the user's OK.
+- **Disk:** 33 GB of unused Docker volumes are reclaimable. Prune only with the user's OK; `docker-clean.sh` only touches `am-test` resources.
 
 ## Baseline (2026-11-07, before the process work)
 
