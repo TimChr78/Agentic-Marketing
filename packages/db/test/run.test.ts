@@ -52,7 +52,7 @@ describe('run identifiers', () => {
   it('prints the exact database name a shell wrapper must verify or drop', () => {
     const output = execFileSync(
       process.execPath,
-      ['--import', 'tsx', fileURLToPath(new URL('./run.ts', import.meta.url)), 'print-db', 'am_e2e_20260101_120000_123'],
+      ['--import', 'tsx', fileURLToPath(new URL('./print-db.ts', import.meta.url)), 'am_e2e_20260101_120000_123'],
       {
         encoding: 'utf8',
         env: { ...process.env, AM_TEST_RUN: 'Run-A', CI: '' },
@@ -64,7 +64,7 @@ describe('run identifiers', () => {
   it('derives the same name the harness would for an explicit run', () => {
     const output = execFileSync(
       process.execPath,
-      ['--import', 'tsx', fileURLToPath(new URL('./run.ts', import.meta.url)), 'print-db', 'am_test_template'],
+      ['--import', 'tsx', fileURLToPath(new URL('./print-db.ts', import.meta.url)), 'am_test_template'],
       { encoding: 'utf8', env: { ...process.env, AM_TEST_RUN: SHA, CI: '' } },
     );
     expect(output.trim()).toBe(`am_${sanitiseRunId(SHA)}_test_template`);

@@ -47,4 +47,10 @@ describe('e2e ports', () => {
       fixturesBase: 'http://127.0.0.1:9001',
     });
   });
+
+  it('uses the scheme default port for an E2E_BASE without one', () => {
+    expect(portsFor({ E2E_BASE: 'https://localhost' })).toMatchObject({ port: 443, fixturesPort: 444 });
+    expect(portsFor({ E2E_BASE: 'https://localhost:443' })).toMatchObject({ port: 443, fixturesPort: 444 });
+    expect(portsFor({ E2E_BASE: 'http://localhost' })).toMatchObject({ port: 80, fixturesPort: 81 });
+  });
 });

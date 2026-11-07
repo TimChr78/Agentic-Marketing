@@ -18,7 +18,9 @@ export interface E2EPorts {
 export function portsFor(env: Record<string, string | undefined> = process.env): E2EPorts {
   // An explicit E2E_BASE names an already-running server; its port decides the fixtures port, as
   // it did before the offset existed. E2E_PORT still wins when both are set.
-  const basePort = env.E2E_BASE ? Number(new URL(env.E2E_BASE).port || 80) : null;
+  const baseUrl = env.E2E_BASE ? new URL(env.E2E_BASE) : null;
+  // URL drops a scheme's default port ("https://x:443".port === ''), so fall back by scheme.
+  const basePort = baseUrl ? Number(baseUrl.port || (baseUrl.protocol === 'https:' ? 443 : 80)) : null;
   const port = Number(env.E2E_PORT ?? basePort ?? 3100 + testPortOffset(env));
   const fixturesPort = port + 1;
   return {

@@ -1,5 +1,4 @@
 import { createHash } from 'node:crypto';
-import { pathToFileURL } from 'node:url';
 
 /**
  * The namespace for one test run, shared by every database, ClickHouse database, NATS namespace
@@ -66,21 +65,3 @@ export const runScoped = (name: string) => scopedDbName(name);
 
 /** The port offset from TEST_PORT_OFFSET; 0 when unset or not a number. */
 export const testPortOffset = (env: Record<string, string | undefined> = process.env) => Number(env.TEST_PORT_OFFSET ?? '0') || 0;
-
-// `node --import tsx packages/db/test/run.ts print-db <name>` prints the exact database name the
-// harness creates for AM_TEST_RUN, so a shell wrapper can verify and drop the right database.
-// It is inert when this module is imported by the harness, Vitest or a config.
-const invokedPath = process.argv[1] ? pathToFileURL(process.argv[1]).href : '';
-if (import.meta.url === invokedPath) {
-  const [command, ...args] = process.argv.slice(2);
-  if (command !== 'print-db' || args.length !== 1) {
-    console.error('usage: node --import tsx packages/db/test/run.ts print-db <database-name>');
-    process.exit(2);
-  }
-  try {
-    console.log(scopedDbName(args[0]));
-  } catch (error) {
-    console.error(`error: ${(error as Error).message}`);
-    process.exit(1);
-  }
-}

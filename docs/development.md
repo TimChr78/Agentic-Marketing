@@ -361,7 +361,7 @@ can print the exact database name its `AM_TEST_RUN` produces, and must use that 
 compose one itself:
 
 ```bash
-AM_TEST_RUN=example node --import tsx packages/db/test/run.ts print-db am_e2e_20260101_120000_123
+AM_TEST_RUN=example node --import tsx packages/db/test/print-db.ts am_e2e_20260101_120000_123
 # am_example_e2e_20260101_120000_123
 ```
 

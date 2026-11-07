@@ -82,7 +82,7 @@ describe('test:clean run isolation', () => {
       expect((await databaseNames()).sort()).toEqual([dbA, dbB].sort());
 
       // The shell side: the helper is authoritative, so its answer is what the CLI must protect.
-      const printed = spawnSync(process.execPath, ['--import', 'tsx', 'packages/db/test/run.ts', 'print-db', 'am_test_clean'], {
+      const printed = spawnSync(process.execPath, ['--import', 'tsx', 'packages/db/test/print-db.ts', 'am_test_clean'], {
         cwd: root,
         encoding: 'utf8',
         env: { ...process.env, AM_TEST_RUN: runA, CI: '' },
