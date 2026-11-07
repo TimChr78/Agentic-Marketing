@@ -7,10 +7,12 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 ### Added
 
 - People (#510): the list is cursor-paged with honest loaded counts (“50 shown · Page 1”, More people available / End of list) and keeps cached pages for Back; a search by exact e-mail runs only on submit. Each person shows one primary e-mail, their visible name and the profile id behind a named copy control, with consent beside every purpose instead of an aggregate. The person page adds a loaded-history timeline that interleaves events, message creations, returned message events and consent changes, names each source, keeps an independent cursor and Load more for events and messages, and captions what each source covers. Loading, empty, observed-zero, unavailable, partial-failure with local Retry, restricted, not-found, PII-hidden and last-page states are explicit.
+- Campaign Evaluation (#511): the tab is now a roll-up of the campaign’s published artifacts. One `analytics.campaignSummary` read supplies the period, the distinct-person headline with its denominators, the independent funnel counts, per-member results and journey holdouts; a published campaign with a control group and a goal event adds one `campaigns.holdoutResult` read, never one read per member. Campaign and journey holdouts stay separate, revenue stays per currency, and loading, empty/not started, observed zero, null, suppressed, partial failure, restricted and not-found states each have their own copy.
 
 ### Changed
 
 - The People list no longer calls the loaded row count a population, no longer reads a profile per row, and no longer hides purpose keys in place of names: an unavailable purpose name is labelled “Purpose name unavailable” and its key stays behind a copy control. Consent mutations, export and erasure keep their existing controls and permissions.
+- The campaign Evaluation tab shares one Last 7 / Last 30 complete-days period between the summary and the campaign-wide holdout, refreshes the same reads, and mounts neither while the tab is inactive. `CampaignEvaluation({campaignId})` and `CampaignHoldoutCard({campaignId})` keep their existing required prop; `from`, `to` and `active` are additive for the host.
 
 ## [0.11.0] - 2026-11-07
 
