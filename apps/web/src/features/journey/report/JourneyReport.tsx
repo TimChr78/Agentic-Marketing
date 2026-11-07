@@ -36,7 +36,16 @@ type Funnel = Out<'analytics.journeyFunnel'>;
 const rowCellClass =
   'max-sm:flex max-sm:items-baseline max-sm:justify-between max-sm:gap-3 max-sm:border-0 max-sm:px-0 max-sm:py-1 max-sm:before:text-muted max-sm:before:content-[attr(data-label)]';
 
-export function JourneyReport({ journeyId, active = true }: { journeyId: string; active?: boolean }) {
+export function JourneyReport({
+  journeyId,
+  active = true,
+  artifact: hostArtifact,
+}: {
+  journeyId: string;
+  active?: boolean;
+  /** The artifact the host page already loaded; embedded use then needs no duplicate host read. */
+  artifact?: Artifact;
+}) {
   const { can } = useWorkspace();
   if (!can('artifacts:read'))
     return (
@@ -45,14 +54,16 @@ export function JourneyReport({ journeyId, active = true }: { journeyId: string;
       </Alert>
     );
   if (!active) return null;
-  return <AuthorizedReport journeyId={journeyId} />;
+  return <AuthorizedReport journeyId={journeyId} hostArtifact={hostArtifact} />;
 }
 
 const notFound = (message: string) => /does not exist|not found|not_found/i.test(message);
 
-function AuthorizedReport({ journeyId }: { journeyId: string }) {
-  const host = useApi(() => api.call('artifacts.get', { artifactId: journeyId }), [journeyId]);
-  const artifact = host.data;
+function AuthorizedReport({ journeyId, hostArtifact }: { journeyId: string; hostArtifact?: Artifact }) {
+  const host = useApi(() => api.call('artifacts.get', { artifactId: journeyId }), [journeyId], { skip: !!hostArtifact });
+  const artifact = hostArtifact ?? host.data;
+  const hostLoading = !hostArtifact && host.loading;
+  const hostError = hostArtifact ? null : host.error;
   const pinnedVersion = artifact?.publishedVersion ?? null;
   const needsPinned = !!artifact && pinnedVersion !== null && artifact.version.number !== pinnedVersion;
   const pinned = useApi(
@@ -61,15 +72,15 @@ function AuthorizedReport({ journeyId }: { journeyId: string }) {
     { skip: !needsPinned },
   );
 
-  if (host.loading && !artifact) return <LoadingSection label="Loading the journey report" />;
-  if (host.error)
-    return notFound(host.error) ? (
+  if (hostLoading && !artifact) return <LoadingSection label="Loading the journey report" />;
+  if (hostError)
+    return notFound(hostError) ? (
       <Alert tone="info" title="This item is not available at this address.">
         <TextLink to="/marketing/journeys">Return to the list</TextLink>
       </Alert>
     ) : (
       <Alert tone="bad" title="Could not load the journey" onRetry={host.reload}>
-        {host.error} No old values are shown as current.
+        {hostError} No old values are shown as current.
       </Alert>
     );
   if (!artifact) return null;

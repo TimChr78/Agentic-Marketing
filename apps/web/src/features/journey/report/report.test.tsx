@@ -181,6 +181,8 @@ const holdout = () => ({
 const calls = (name: string) => h.calls.filter((call) => call.name === name);
 
 const renderReport = (active = true) => render(<JourneyReport journeyId={journeyId} active={active} />);
+const renderEmbeddedReport = () =>
+  render(<JourneyReport journeyId={journeyId} artifact={artifact() as unknown as Parameters<typeof JourneyReport>[0]['artifact']} />);
 
 const stepRow = (table: HTMLElement, label: string) => within(table).getByText(label).closest('tr') as HTMLElement;
 
@@ -224,6 +226,15 @@ describe('journey report reads (#507)', () => {
     expect(calls('journeys.holdoutResult')).toHaveLength(0);
     expect(screen.getByText(/30 Oct–5 Nov 2026 · UTC/)).toBeTruthy();
     expect(screen.getByText('120 / 812 entries = 14.8%')).toBeTruthy();
+  });
+
+  it('reuses the artifact its host already loaded in embedded mode', async () => {
+    renderEmbeddedReport();
+    await screen.findByText('Entered in period');
+
+    expect(calls('artifacts.get')).toHaveLength(0);
+    expect(calls('journeys.stats')).toHaveLength(1);
+    expect(calls('analytics.journeyFunnel')).toHaveLength(1);
   });
 
   it('reads the pinned published topology once when the latest draft differs', async () => {
