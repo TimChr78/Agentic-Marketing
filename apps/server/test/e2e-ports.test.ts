@@ -33,9 +33,17 @@ describe('e2e ports', () => {
 
   it('keeps E2E_BASE and E2E_FIXTURES overrides, while the fixtures bind stays next to the port', () => {
     expect(portsFor({ E2E_BASE: 'http://localhost:5173', E2E_FIXTURES: 'http://127.0.0.1:9001', TEST_PORT_OFFSET: '1000' })).toEqual({
-      port: 4100,
+      port: 5173,
       base: 'http://localhost:5173',
-      fixturesPort: 4101,
+      fixturesPort: 5174,
+      fixturesBase: 'http://127.0.0.1:9001',
+    });
+  });
+
+  it('takes the port from an explicit E2E_BASE, so the fixtures port follows it', () => {
+    expect(portsFor({ E2E_BASE: 'http://localhost:9000' })).toMatchObject({
+      port: 9000,
+      fixturesPort: 9001,
       fixturesBase: 'http://127.0.0.1:9001',
     });
   });

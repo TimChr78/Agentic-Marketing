@@ -3,7 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 import { afterAll, describe, expect, it } from 'vitest';
-import { classifyStale, cleanTestDatabases } from './clean';
+import { classifyStale, cleanTestDatabases, clickHouseDropDecision } from './clean';
 import { testDatabaseUrl } from './harness';
 
 // `pnpm test:clean` must only touch the run it is asked to clean. Other checkouts share the same
@@ -132,4 +132,40 @@ describe('cleaning a run directly', () => {
     const result = await cleanTestDatabases({ run: runA, clickhouseUrl: 'http://127.0.0.1:1' });
     expect(result.skipped.some((entry) => /ClickHouse/.test(entry.reason))).toBe(true);
   }, 30_000);
+
+  it('never force-drops another run: a stale database that gains a connection is skipped', async () => {
+    const client = await maintenance();
+    let held: pg.Client | null = null;
+    try {
+      await client.query(`DROP DATABASE IF EXISTS "${dbB}" WITH (FORCE)`);
+      await client.query(`CREATE DATABASE "${dbB}"`);
+      // The other run reconnects between inspection and the drop: simulate it by holding a
+      // connection; minAgeMs 0 makes the database look stale and idle-by-age.
+      held = new pg.Client({ connectionString: testDatabaseUrl(dbB).toString() });
+      await held.connect();
+      const result = await cleanTestDatabases({ run: runA, allStale: true, minAgeMs: 0, clickhouseUrl: 'http://127.0.0.1:1' });
+      expect(result.pgDropped).not.toContain(dbB);
+      expect(result.skipped.some((entry) => entry.name === dbB)).toBe(true);
+      // The other run's connection survives.
+      expect((await held.query('select 1 as ok')).rows[0].ok).toBe(1);
+    } finally {
+      await held?.end();
+      await client.query(`DROP DATABASE IF EXISTS "${dbB}" WITH (FORCE)`);
+      await client.end();
+    }
+  }, 30_000);
+});
+
+describe('ClickHouse drop decisions (#515 review)', () => {
+  const base = { allStale: true, inCurrentRun: false, pgDropped: true };
+  it('skips another run when ClickHouse activity is unknown', () => {
+    expect(clickHouseDropDecision({ ...base, active: null, name: 'x' })).toMatchObject({ drop: false });
+  });
+  it('skips another run with an active query, and drops an idle stale one', () => {
+    expect(clickHouseDropDecision({ ...base, active: new Set(['x']), name: 'x' })).toMatchObject({ drop: false });
+    expect(clickHouseDropDecision({ ...base, active: new Set(), name: 'x' })).toEqual({ drop: true });
+  });
+  it('always drops the current run, even when activity is unknown', () => {
+    expect(clickHouseDropDecision({ ...base, inCurrentRun: true, active: null, name: 'x' })).toEqual({ drop: true });
+  });
 });

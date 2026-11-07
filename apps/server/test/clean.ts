@@ -104,8 +104,29 @@ async function databaseRows(client: pg.Client): Promise<PgRow[]> {
 
 const quoteIdent = (name: string) => `"${name.replaceAll('"', '""')}"`;
 
-async function dropDatabase(client: pg.Client, name: string) {
-  await client.query(`DROP DATABASE IF EXISTS ${quoteIdent(name)} WITH (FORCE)`);
+/**
+ * The current run's databases are force-dropped (its own leftovers). Another run's are dropped
+ * without FORCE, so a run that reconnected after inspection makes the drop fail instead of having
+ * its connection killed (#515 review).
+ */
+async function dropDatabase(client: pg.Client, name: string, force: boolean) {
+  await client.query(`DROP DATABASE IF EXISTS ${quoteIdent(name)}${force ? ' WITH (FORCE)' : ''}`);
+}
+
+/** Whether a ClickHouse database may go. Unknown activity never permits deleting another run's. */
+export function clickHouseDropDecision(input: {
+  name: string;
+  inCurrentRun: boolean;
+  allStale: boolean;
+  pgDropped: boolean;
+  active: Set<string> | null;
+}): { drop: true } | { drop: false; reason: string } {
+  if (input.inCurrentRun) return { drop: true };
+  if (!input.allStale) return { drop: false, reason: 'belongs to another run' };
+  if (!input.pgDropped) return { drop: false, reason: 'no matching Postgres database met the stale threshold' };
+  if (input.active === null) return { drop: false, reason: 'ClickHouse activity unknown; not dropping another run' };
+  if (input.active.has(input.name)) return { drop: false, reason: 'has an active ClickHouse query' };
+  return { drop: true };
 }
 
 async function clickHouseDatabases(url: string): Promise<string[] | null> {
@@ -178,9 +199,17 @@ export async function cleanTestDatabases(opts: CleanOptions = {}): Promise<Clean
       result.skipped.push(...stale.skipped.filter((entry) => !current.test(entry.name)));
     }
 
-    for (const name of [...currentRows, ...stale.drop]) {
-      await dropDatabase(client, name);
+    for (const name of currentRows) {
+      await dropDatabase(client, name, true);
       result.pgDropped.push(name);
+    }
+    for (const name of stale.drop) {
+      try {
+        await dropDatabase(client, name, false);
+        result.pgDropped.push(name);
+      } catch (error) {
+        result.skipped.push({ name, reason: `in use again; not dropped (${(error as Error).message})` });
+      }
     }
   } finally {
     await client.end();
@@ -193,19 +222,17 @@ export async function cleanTestDatabases(opts: CleanOptions = {}): Promise<Clean
   } else {
     for (const name of chNames) {
       const inCurrentRun = current.test(name);
-      if (!inCurrentRun && !opts.allStale) {
-        if (anyTestDbPattern().test(name)) result.skipped.push({ name, reason: 'belongs to another run' });
+      if (!inCurrentRun && !anyTestDbPattern().test(name)) continue;
+      const decision = clickHouseDropDecision({
+        name,
+        inCurrentRun,
+        allStale: !!opts.allStale,
+        pgDropped: result.pgDropped.includes(name),
+        active: chActive,
+      });
+      if (!decision.drop) {
+        result.skipped.push({ name, reason: decision.reason });
         continue;
-      }
-      if (!inCurrentRun) {
-        if (!result.pgDropped.includes(name)) {
-          result.skipped.push({ name, reason: 'no matching Postgres database met the stale threshold' });
-          continue;
-        }
-        if (chActive?.has(name)) {
-          result.skipped.push({ name, reason: 'has an active ClickHouse query' });
-          continue;
-        }
       }
       try {
         await resetClickHouse(chUrl, name);

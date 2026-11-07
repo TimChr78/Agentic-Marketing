@@ -16,7 +16,10 @@ export interface E2EPorts {
 }
 
 export function portsFor(env: Record<string, string | undefined> = process.env): E2EPorts {
-  const port = Number(env.E2E_PORT ?? 3100 + testPortOffset(env));
+  // An explicit E2E_BASE names an already-running server; its port decides the fixtures port, as
+  // it did before the offset existed. E2E_PORT still wins when both are set.
+  const basePort = env.E2E_BASE ? Number(new URL(env.E2E_BASE).port || 80) : null;
+  const port = Number(env.E2E_PORT ?? basePort ?? 3100 + testPortOffset(env));
   const fixturesPort = port + 1;
   return {
     port,
