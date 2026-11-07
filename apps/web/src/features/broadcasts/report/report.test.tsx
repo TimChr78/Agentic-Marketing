@@ -500,6 +500,22 @@ describe('broadcast report accessibility (#500)', () => {
     expect(screen.getByRole('figure', { name: 'Tracked engagement over time' })).toBeTruthy();
   });
 
+  it('tabulates every day of a 30-day unsubscribe series', async () => {
+    const days = Array.from({ length: 30 }, (_, i) => {
+      const day = new Date(Date.UTC(2026, 9, 7 + i)).toISOString().slice(0, 10);
+      return { day, sent: 100, delivered: 99, opened: 40, clicked: 10, unsubscribed: i + 1 };
+    });
+    h.series = seriesResult(days);
+    renderReport();
+    await screen.findAllByText('12,104');
+    for (const summary of screen.getAllByText('Show data table')) fireEvent.click(summary);
+    const unsubscribes = screen.getByRole('table', { name: 'Unsubscribes over time' });
+    expect(within(unsubscribes).getByText('7 Oct')).toBeTruthy();
+    expect(within(unsubscribes).getByText('5 Nov')).toBeTruthy();
+    expect(within(unsubscribes).getByText('30')).toBeTruthy();
+    expect(screen.queryByText(/Showing the first/)).toBeNull();
+  });
+
   it('never renders a raw link URL in the B4 notice', async () => {
     renderReport();
     await screen.findAllByText('12,104');

@@ -21,7 +21,10 @@ export default defineConfig({
     projects: [
       { extends: true, test: { name: 'docs', include: docs } },
       { extends: true, test: { name: 'packages', include: ['packages/*/test/**/*.test.ts'] } },
-      { extends: true, test: { name: 'web', include: ['apps/web/test/**/*.test.{ts,tsx}'], environment: 'jsdom' } },
+      {
+        extends: true,
+        test: { name: 'web', include: ['apps/web/test/**/*.test.{ts,tsx}', 'apps/web/src/**/*.test.{ts,tsx}'], environment: 'jsdom' },
+      },
       {
         extends: true,
         test: {

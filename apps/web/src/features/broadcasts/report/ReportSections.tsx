@@ -275,7 +275,9 @@ function EngagementSection({
         subtitle={totalsReady ? unsubscribeSummary : undefined}
         data={series.days.map((day) => ({ label: day.label, value: day.values['email.unsubscribed'] }))}
         ordered
-        height={200}
+        maxCategories={31}
+        vizIndex={2}
+        height={Math.max(200, series.days.length * 22 + 48)}
         formatValue={(value) => (value === null ? '—' : value.toLocaleString())}
         dataState={unsubscribeState}
         stateMessage="No unsubscribe events in this period."
