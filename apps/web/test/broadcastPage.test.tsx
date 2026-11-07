@@ -1,5 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { invalidateArtifact } from '../src/features/artifactCache';
 import { clearArtifactNameCache } from '../src/features/broadcasts/names';
 import BroadcastPage from '../src/pages/build/BroadcastPage';
 import { ToastProvider } from '../src/ui/toast';
@@ -9,6 +10,7 @@ const h = vi.hoisted(() => ({
   artifact: null as unknown,
   status: null as unknown,
   approvals: null as null | (() => Promise<unknown>),
+  can: (_permission: string): boolean => true,
 }));
 
 const id = `bct_${'a'.repeat(32)}`;
@@ -156,7 +158,55 @@ vi.mock('../src/app/api', async (importOriginal) => {
         }
         if (name === 'approvals.list') return (await h.approvals?.()) ?? { approvals: [] };
         if (name === 'campaigns.of') return { campaigns: [] };
-        if (name === 'purposes.list') return { purposes: [] };
+        if (name === 'purposes.list')
+          return {
+            source: 'published',
+            purposes: [
+              {
+                key: 'marketing_email',
+                name: 'Marketing e-mail',
+                description: '',
+                basis: 'consent',
+                channels: ['email'],
+                requiresDoubleOptIn: false,
+                topics: [{ key: 'newsletter', name: 'Weekly newsletter', description: '', default: 'subscribed' }],
+              },
+            ],
+          };
+        if (name === 'system.status')
+          return {
+            serverVersion: '0.11.0',
+            emailProvider: { configured: true, marketing: true, transactional: true, adapter: 'ses', tracking: 'configurable' },
+            pendingApprovals: 0,
+          };
+        if (name === 'sendingDomains.list')
+          return {
+            checkedAt: '2026-11-06T10:32:00Z',
+            domains: [
+              {
+                domain: 'mail.martechsignal.example',
+                ok: true,
+                uses: ['marketing', 'transactional'],
+                spf: { ok: true, record: 'v=spf1', advice: null },
+                dmarc: { ok: true, record: 'v=DMARC1', policy: 'none', advice: null },
+                dkim: [],
+              },
+            ],
+          };
+        if (name === 'broadcasts.preview')
+          return {
+            audience: 12480,
+            checked: 2000,
+            wouldSend: 1842,
+            wouldSkip: { no_consent: 110 },
+            sendAt: null,
+            sendWindow: null,
+            subjectTest: null,
+          };
+        if (name === 'templates.preview')
+          return { version: 5, subject: 'Field notes', preheader: '', html: '<html><body>Hi</body></html>', text: 'Hi', warnings: [] };
+        if (name === 'templates.check')
+          return { version: 5, findings: [], checkedAt: '2026-11-06T10:32:00Z', summary: { blocking: 0, warning: 0, info: 0 } };
         if (name === 'analytics.query') return analytics;
         if (name === 'archive.issues') return { issues: [] };
         throw new Error(`unexpected command ${name}`);
@@ -169,7 +219,7 @@ vi.mock('../src/components/Chart', () => ({ Chart: () => null }));
 
 vi.mock('../src/app/session', () => ({
   useWorkspace: () => ({
-    can: (permission: string) => permission !== 'messages:send',
+    can: (permission: string) => h.can(permission),
     workspace: { id: 'ws_1', approvalPolicy: 'none' },
     user: { id: 'u1' },
   }),
@@ -181,7 +231,10 @@ beforeEach(() => {
   h.artifact = null;
   h.status = null;
   h.approvals = null;
+  h.can = (permission) => permission !== 'messages:send';
   clearArtifactNameCache();
+  invalidateArtifact(tpl);
+  invalidateArtifact(seg);
   history.replaceState(null, '', `/build/broadcasts/${id}`);
 });
 
@@ -331,5 +384,48 @@ describe('BroadcastPage (#448)', () => {
 
     await act(async () => release({ approvals: [] }));
     expect(await screen.findByRole('button', { name: 'Publish v2' })).toBeTruthy();
+  });
+
+  it('renders the composer on the Content tab while the Report tab keeps its own reads', async () => {
+    history.replaceState(null, '', `/build/broadcasts/${id}?tab=content`);
+    renderPage();
+    await screen.findByRole('heading', { level: 1, name: 'Lifecycle playbook' });
+
+    expect(await screen.findByText('Live preview')).toBeTruthy();
+    expect(screen.getByText('Pre-send checks')).toBeTruthy();
+    expect(screen.getByText('1 · What')).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'Jump to preview' })).toBeTruthy();
+    expect(h.calls.filter((call) => call.name === 'broadcasts.status')).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Report' }));
+    expect(await screen.findByText('Sent people')).toBeTruthy();
+    expect(h.calls.filter((call) => call.name === 'analytics.query')).toHaveLength(2);
+  });
+
+  it('skips every composer read and shows the restricted page without artifacts:read', async () => {
+    h.can = () => false;
+    renderPage();
+    expect(await screen.findByText('Broadcasts are restricted')).toBeTruthy();
+    expect(screen.queryByText('Live preview')).toBeNull();
+    expect(h.calls.filter((call) => call.name === 'artifacts.get')).toHaveLength(0);
+    expect(h.calls.filter((call) => call.name === 'purposes.list')).toHaveLength(0);
+    expect(h.calls.filter((call) => call.name === 'system.status')).toHaveLength(0);
+    expect(h.calls.filter((call) => call.name === 'broadcasts.preview')).toHaveLength(0);
+  });
+
+  it('keeps the composer inspectable but disabled without artifacts:write', async () => {
+    h.can = (permission) => permission === 'artifacts:read';
+    h.artifact = draftArtifact;
+    h.status = notRunStatus;
+    h.approvals = async () => ({ approvals: [] });
+    history.replaceState(null, '', `/build/broadcasts/${id}?tab=content`);
+    renderPage();
+    await screen.findByRole('heading', { level: 1, name: 'Lifecycle playbook' });
+
+    expect(await screen.findByText('Your role can read this broadcast but cannot edit it.')).toBeTruthy();
+    expect((screen.getByLabelText(/Template/) as HTMLSelectElement).disabled).toBe(true);
+    expect((screen.getByLabelText(/Segment/) as HTMLSelectElement).disabled).toBe(true);
+    expect(screen.queryByRole('button', { name: 'Save draft' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'View content' })).toBeTruthy();
   });
 });
