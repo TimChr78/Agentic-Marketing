@@ -37,6 +37,8 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 - Plain wording on the agent, deliverability and People pages instead of implementation terms.
 - A revenue chart is drawn only when the result carries one usable currency and the comparison period carries the same currency; mixed, missing and different-currency results keep currency-labelled table rows and replace the chart with the explained unavailable state (#506).
 - Analytics no longer renders an epoch date as freshness, an absent cell as an observed zero, or old values as current after a failed refresh (#506).
+- Changing the Analytics question or period, or the Deliverability stream, shows loading for the new selection instead of the previous selection's values under the new label; period totals and daily results appear only when both belong to the same selection.
+- A journey draft no longer shows the live version's canvas counts, even when its steps were only saved, not published; the overlay stays hidden until the published, unmodified version is shown.
 
 
 ## [0.11.0] - 2026-11-07
