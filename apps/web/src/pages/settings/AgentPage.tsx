@@ -156,9 +156,11 @@ export default function AgentPage({ params }: { params: Record<string, string> }
             onRefresh={refresh}
           />
         )}
-        {tab === 'activity' && <ActivityTab agentId={a.id} since={period.from} canAudit={canAudit} guard={a.guard} />}
+        {tab === 'activity' && (
+          <ActivityTab agentId={a.id} since={period.from} canAudit={canAudit} agent={a} onChanged={() => void agent.reload()} />
+        )}
         {tab === 'mandate' && <MandateTab agentId={a.id} agent={a} canArtifacts={canArtifacts} />}
-        {tab === 'credentials' && <CredentialsTab agent={a} canArtifacts={canArtifacts} />}
+        {tab === 'credentials' && <CredentialsTab agent={a} canArtifacts={canArtifacts} onChanged={() => void agent.reload()} />}
       </Tabs>
     </div>
   );

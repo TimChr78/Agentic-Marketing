@@ -67,6 +67,7 @@ const mandateId = `mnd_${'c'.repeat(32)}`;
 const journeyId = `jrn_${'d'.repeat(32)}`;
 const broadcastId = `bct_${'e'.repeat(32)}`;
 const userId = `user_${'f'.repeat(32)}`;
+const skillId = `skl_${'5'.repeat(32)}`;
 
 const from = '2026-10-30T00:00:00.000Z';
 const to = '2026-11-05T23:59:59.999Z';
@@ -340,7 +341,7 @@ const hosted = (overrides: Record<string, unknown> = {}) => ({
     scopes: ['artifacts:read'],
     enabled: true,
     budgets: { maxTokensPerRun: 100000, maxToolCallsPerRun: 50 },
-    skills: [],
+    skills: [skillId],
     modelProviderId: null,
     consecutiveFailures: 0,
     lastRunAt: '2026-11-02T09:00:00.000Z',
@@ -369,6 +370,40 @@ const hosted = (overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 });
 
+const memory = (overrides: Record<string, unknown> = {}) => ({
+  notes: [
+    {
+      id: 'mem_1',
+      agentId,
+      text: 'Remember the warm, plain-spoken tone.',
+      createdBy: { type: 'person', id: userId },
+      createdAt: '2026-11-03T09:00:00.000Z',
+      updatedAt: '2026-11-03T09:00:00.000Z',
+    },
+  ],
+  count: 1,
+  characters: 42,
+  limits: { notes: 50, characters: 10000 },
+  ...overrides,
+});
+
+const skillArtifact = (overrides: Record<string, unknown> = {}) => ({
+  id: skillId,
+  name: 'Weekly voice',
+  type: 'skill',
+  latestVersion: 2,
+  publishedVersion: 2,
+  updatedAt: '2026-11-01T09:00:00.000Z',
+  ...overrides,
+});
+
+const shadowReport = (overrides: Record<string, unknown> = {}) => ({
+  summary: { total: 10, agree: 6, tooBold: 2, tooCautious: 1, pending: 1, unreviewed: 0, agreementRate: 0.667 },
+  byClass: { 'content.publish': { total: 10, agree: 6, tooBold: 2, tooCautious: 1 } },
+  actions: [],
+  ...overrides,
+});
+
 const baseRespond = (name: string, input: any): unknown => {
   if (name === 'agents.get') return agent();
   if (name === 'agents.list') return { agents: [agent(), otherAgent()] };
@@ -381,7 +416,14 @@ const baseRespond = (name: string, input: any): unknown => {
   }
   if (name === 'agents.compare') return comparison();
   if (name === 'agents.guardian') return guardian();
+  if (name === 'agents.shadowReport') return shadowReport();
   if (name === 'agents.hostedRuns') return hosted();
+  if (name === 'agents.memory.list') return memory();
+  if (name === 'artifacts.list') return { artifacts: [skillArtifact()], total: 1 };
+  if (name === 'agents.runHostedNow') return hosted().hosted;
+  if (name === 'agents.memory.delete') return { deleted: true };
+  if (name === 'agents.deleteHosted') return { deleted: true };
+  if (name === 'agents.clearGuard') return { cleared: 1, agent: agent() };
   if (name === 'agents.pause') return agent({ status: 'paused', statusReason: null });
   if (name === 'agents.resume') return agent();
   if (name === 'agents.revoke') return agent({ status: 'revoked' });
@@ -499,7 +541,8 @@ describe('agent reads (#509)', () => {
     await screen.findByText('Wrote and published the weekly newsletter.');
     expect(calls('agents.hostedRuns')).toHaveLength(1);
     expect(calls('agents.hostedRuns')[0]!.input).toEqual({ agentId, limit: 20 });
-    expect(calls('agents.memory.list')).toHaveLength(0);
+    expect(calls('agents.memory.list')).toHaveLength(1);
+    expect(calls('artifacts.list')).toHaveLength(1);
   });
 
   it('reads guardian episodes only when their details are expanded', async () => {
@@ -517,6 +560,109 @@ describe('agent reads (#509)', () => {
     await screen.findByText('A send was far larger than usual.');
     expect(calls('agents.guardian')).toHaveLength(1);
     expect(calls('agents.guardian')[0]!.input).toEqual({ agentId, limit: 50 });
+  });
+});
+
+describe('restored hosted management (#509 follow-up)', () => {
+  it('reads nothing for the hosted section until it opens and keeps every action', async () => {
+    renderAgent();
+    await screen.findByText('Broadcast sent people');
+    fireEvent.click(screen.getByRole('tab', { name: 'Credentials' }));
+    await screen.findByRole('heading', { name: 'Credentials' });
+
+    expect(calls('agents.hostedRuns')).toHaveLength(0);
+    expect(calls('agents.memory.list')).toHaveLength(0);
+    expect(calls('artifacts.list')).toHaveLength(0);
+
+    fireEvent.click(screen.getByText('Show the hosted agent and its runs'));
+    await screen.findByRole('region', { name: 'Hosted agent' });
+    const hostedSection = screen.getByRole('region', { name: 'Hosted agent' });
+    await within(hostedSection).findByRole('button', { name: 'Run now' });
+
+    expect(calls('agents.hostedRuns')).toHaveLength(1);
+    expect(calls('agents.hostedRuns')[0]!.input).toEqual({ agentId, limit: 20 });
+    expect(calls('agents.memory.list')).toHaveLength(1);
+    expect(calls('artifacts.list')).toHaveLength(1);
+    expect(calls('artifacts.list')[0]!.input).toMatchObject({ type: 'skill', limit: 200 });
+
+    expect(within(hostedSection).getByRole('button', { name: 'Edit' })).toBeTruthy();
+    expect(within(hostedSection).getByRole('button', { name: 'Delete hosted agent' })).toBeTruthy();
+    expect(within(hostedSection).getByRole('button', { name: 'Delete' })).toBeTruthy();
+    expect(within(hostedSection).getByText('Remember the warm, plain-spoken tone.')).toBeTruthy();
+    expect(within(hostedSection).getByRole('link', { name: /Weekly voice/ })).toBeTruthy();
+
+    fireEvent.click(within(hostedSection).getByRole('button', { name: 'Run now' }));
+    await waitFor(() => expect(calls('agents.runHostedNow')).toHaveLength(1));
+    expect(calls('agents.runHostedNow')[0]!.input).toEqual({ agentId });
+  });
+
+  it('keeps the paged hosted run table', async () => {
+    h.respond = (name, input) => {
+      if (name === 'agents.hostedRuns' && input.before) {
+        return { ...hosted(), runs: [{ ...hosted().runs[0], id: 'run_0', summary: 'Older run summary' }], next: null };
+      }
+      if (name === 'agents.hostedRuns') return hosted({ next: '2026-11-01T09:00:00.000Z' });
+      return baseRespond(name, input);
+    };
+
+    renderAgent();
+    await screen.findByText('Broadcast sent people');
+    fireEvent.click(screen.getByRole('tab', { name: 'Credentials' }));
+    fireEvent.click(screen.getByText('Show the hosted agent and its runs'));
+
+    const hostedSection = await screen.findByRole('region', { name: 'Hosted agent' });
+    await within(hostedSection).findByRole('button', { name: 'Load more runs' });
+    expect(calls('agents.hostedRuns')).toHaveLength(1);
+
+    fireEvent.click(within(hostedSection).getByRole('button', { name: 'Load more runs' }));
+    await waitFor(() => expect(calls('agents.hostedRuns')).toHaveLength(2));
+    expect(calls('agents.hostedRuns')[1]!.input).toEqual({ agentId, limit: 20, before: '2026-11-01T09:00:00.000Z' });
+    await within(hostedSection).findByText('Older run summary');
+  });
+});
+
+describe('restored guardian controls (#509 follow-up)', () => {
+  it('reads nothing until expanded and still clears the cap with a note', async () => {
+    h.respond = (name, input) => {
+      if (name === 'agents.get') return agent({ guard: guardian().guard });
+      return baseRespond(name, input);
+    };
+
+    renderAgent();
+    fireEvent.click(await screen.findByRole('tab', { name: 'Activity' }));
+    await screen.findByText('Published Weekly Signal');
+    expect(calls('agents.guardian')).toHaveLength(0);
+    expect(screen.queryByRole('button', { name: 'Clear' })).toBeNull();
+
+    fireEvent.click(screen.getByText('Guardian episodes'));
+    await screen.findByRole('button', { name: 'Clear' });
+    expect(calls('agents.guardian')).toHaveLength(1);
+    expect(calls('agents.guardian')[0]!.input).toEqual({ agentId, limit: 50 });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.change(within(dialog).getByLabelText('What did you check?'), { target: { value: 'Checked the anomaly.' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Clear' }));
+
+    await waitFor(() => expect(calls('agents.clearGuard')).toHaveLength(1));
+    expect(calls('agents.clearGuard')[0]!.input).toEqual({ agentId, note: 'Checked the anomaly.' });
+  });
+});
+
+describe('restored shadow results (#509 follow-up)', () => {
+  it('reads nothing until expanded and shows the returned report', async () => {
+    renderAgent();
+    fireEvent.click(await screen.findByRole('tab', { name: 'Activity' }));
+    await screen.findByText('Published Weekly Signal');
+    expect(calls('agents.shadowReport')).toHaveLength(0);
+
+    fireEvent.click(screen.getByText('Shadow results'));
+    await screen.findByText('Agreement');
+
+    expect(calls('agents.shadowReport')).toHaveLength(1);
+    expect(calls('agents.shadowReport')[0]!.input).toEqual({ agentId, limit: 500 });
+    expect(screen.getByText('Too bold')).toBeTruthy();
+    expect(screen.getByText('67%')).toBeTruthy();
   });
 });
 

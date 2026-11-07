@@ -6,25 +6,13 @@ import { useApi } from '../../../app/useApi';
 import { Alert, Button, Card, EmptyState, Skeleton, StatusPill, Tag } from '../../../ui';
 import { Identifier } from '../../../ui/Identifier';
 import { DecisionBadge } from '../AgentStatus';
+import { GuardianCard } from '../GuardianCard';
 import { actionClassLabel, DECISION, impactText } from '../labels';
+import { ShadowCard } from '../ShadowCard';
 import { type AgentActionRow, type AgentActivity, type AgentDetail, intText, safeDateText, safeDateTimeText } from './model';
 import { useFetchedAt } from './useFetchedAt';
 
 const LIMIT = 50;
-
-const GUARDIAN_KIND: Record<string, string> = {
-  guardrail: 'Guardrail',
-  anomaly: 'Anomaly',
-  probing: 'Probing',
-  loop: 'Loop',
-  errors: 'Rising errors',
-};
-
-const GUARDIAN_ACTION: Record<string, string> = {
-  cap: 'Every change waits for a person',
-  hold: 'Irreversible actions are held',
-  pause: 'Paused',
-};
 
 // The Activity tab (#509): the action ledger as a timeline with a cursor, not a closed report.
 // `agents.activity` has `since` but no `to`, so the label says “Since”, never “period”. Guardian
@@ -34,12 +22,14 @@ export function ActivityTab({
   agentId,
   since,
   canAudit,
-  guard,
+  agent,
+  onChanged,
 }: {
   agentId: string;
   since: string;
   canAudit: boolean;
-  guard: AgentDetail['guard'];
+  agent: AgentDetail;
+  onChanged: () => void;
 }) {
   const list = useApi(() => api.call('agents.activity', { agentId, since, limit: LIMIT }), [agentId, since], { skip: !canAudit });
   const [more, setMore] = useState<{ rows: AgentActionRow[]; next: number | null; loaded: boolean }>({
@@ -158,7 +148,8 @@ export function ActivityTab({
 
       <aside className="min-w-0 space-y-4">
         {data && <CoordinationSummary data={data} />}
-        <GuardianLane agentId={agentId} guard={guard} />
+        <LazyGuardian agent={agent} onChanged={onChanged} />
+        <LazyShadow agentId={agentId} />
       </aside>
     </div>
   );
@@ -257,63 +248,39 @@ function CoordinationSummary({ data }: { data: AgentActivity }) {
   );
 }
 
-function GuardianLane({ agentId, guard }: { agentId: string; guard: AgentDetail['guard'] }) {
+function LazyGuardian({ agent, onChanged }: { agent: AgentDetail; onChanged: () => void }) {
   const [open, setOpen] = useState(false);
   return (
-    <Card title="Guardian" description="A separate source lane. Its episodes are read only when you expand the details.">
-      <div className="space-y-2 p-4 text-[12px] leading-[18px]">
-        {guard ? (
-          <>
-            <p className="text-fg-2">
-              Capped at level {guard.cap}
-              {guard.irreversibleCap !== undefined ? `; irreversible actions at level ${guard.irreversibleCap}` : ''} since{' '}
-              {safeDateTimeText(guard.since)}.
-            </p>
-            <p className="text-muted">{guard.reason}</p>
-          </>
-        ) : (
-          <p className="text-muted">No guardian cap is in force. Past episodes stay readable below.</p>
+    <section className="rounded-lg border border-line bg-surface" aria-label="Guardian">
+      <details onToggle={(event) => setOpen(event.currentTarget.open)}>
+        <summary className="flex min-h-10 cursor-pointer items-center px-4 py-3 text-[13px] font-medium text-accent">
+          Guardian episodes
+        </summary>
+        {open && (
+          <div className="space-y-3 border-t border-line p-4">
+            {!agent.guard && <p className="text-[12px] text-muted">No guardian cap is in force. Past episodes stay readable below.</p>}
+            <GuardianCard agent={agent} onChanged={onChanged} />
+          </div>
         )}
-        <details onToggle={(event) => setOpen(event.currentTarget.open)}>
-          <summary className="flex min-h-10 cursor-pointer items-center text-[12px] font-medium text-accent">Guardian episodes</summary>
-          {open && <GuardianEpisodes agentId={agentId} />}
-        </details>
-      </div>
-    </Card>
+      </details>
+    </section>
   );
 }
 
-function GuardianEpisodes({ agentId }: { agentId: string }) {
-  const episodes = useApi(() => api.call('agents.guardian', { agentId, limit: 50 }), [agentId]);
-  if (episodes.loading && !episodes.data) {
-    return (
-      <div role="status" aria-label="Loading guardian episodes" className="space-y-2 py-2">
-        <Skeleton className="h-3 w-3/5" />
-        <Skeleton className="h-3 w-4/5" />
-      </div>
-    );
-  }
-  if (episodes.error) {
-    return (
-      <Alert tone="bad" title="Couldn't load guardian episodes" onRetry={() => void episodes.reload()}>
-        {episodes.error}
-      </Alert>
-    );
-  }
-  const rows = episodes.data?.episodes ?? [];
-  if (rows.length === 0) return <p className="py-2 text-muted">No guardian episodes.</p>;
+function LazyShadow({ agentId }: { agentId: string }) {
+  const [open, setOpen] = useState(false);
   return (
-    <ul className="mt-2 space-y-2">
-      {rows.map((episode) => (
-        <li key={episode.id} className="rounded-md border border-line px-3 py-2">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="font-medium text-fg">{GUARDIAN_KIND[episode.kind] ?? episode.kind}</span>
-            <StatusPill tone={episode.action === 'pause' ? 'bad' : 'warn'}>{GUARDIAN_ACTION[episode.action] ?? episode.action}</StatusPill>
+    <section className="rounded-lg border border-line bg-surface" aria-label="Shadow results">
+      <details onToggle={(event) => setOpen(event.currentTarget.open)}>
+        <summary className="flex min-h-10 cursor-pointer items-center px-4 py-3 text-[13px] font-medium text-accent">
+          Shadow results
+        </summary>
+        {open && (
+          <div className="border-t border-line p-4">
+            <ShadowCard agentId={agentId} />
           </div>
-          <p className="mt-1 text-muted">{episode.reason}</p>
-          <p className="mt-1 text-muted">{safeDateTimeText(episode.at)}</p>
-        </li>
-      ))}
-    </ul>
+        )}
+      </details>
+    </section>
   );
 }
