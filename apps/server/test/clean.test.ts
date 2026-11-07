@@ -143,7 +143,14 @@ describe('cleaning a run directly', () => {
       // connection; minAgeMs 0 makes the database look stale and idle-by-age.
       held = new pg.Client({ connectionString: testDatabaseUrl(dbB).toString() });
       await held.connect();
-      const result = await cleanTestDatabases({ run: runA, allStale: true, minAgeMs: 0, clickhouseUrl: 'http://127.0.0.1:1' });
+      const result = await cleanTestDatabases({
+        run: runA,
+        allStale: true,
+        minAgeMs: 0,
+        // Only this test's runs: the server is shared with every other test file (and the template).
+        onlyRuns: [runB],
+        clickhouseUrl: 'http://127.0.0.1:1',
+      });
       expect(result.pgDropped).not.toContain(dbB);
       expect(result.skipped.some((entry) => entry.name === dbB)).toBe(true);
       // The other run's connection survives.
@@ -154,6 +161,20 @@ describe('cleaning a run directly', () => {
       await client.end();
     }
   }, 30_000);
+});
+
+describe('restricting --all-stale to named runs', () => {
+  it('ignores every database outside the named runs, including the shared template', () => {
+    const old = new Date(Date.now() - 24 * 3_600_000);
+    const rows = [
+      { name: 'am_test_template', active: 0, created: old },
+      { name: 'am_test_other_file', active: 0, created: old },
+      { name: `am_${runB}_test_clean`, active: 0, created: old },
+    ];
+    const result = classifyStale(rows, { run: runA, minAgeMs: 0, onlyRuns: [runB] });
+    expect(result.drop).toEqual([`am_${runB}_test_clean`]);
+    expect(result.skipped).toEqual([]);
+  });
 });
 
 describe('ClickHouse drop decisions (#515 review)', () => {

@@ -36,6 +36,12 @@ export interface StaleOptions {
   run: string;
   now?: number;
   minAgeMs: number;
+  /**
+   * Limit stale candidates to these runs' namespaces. Tests use it: on a shared server (CI or a
+   * shared stack) an unrestricted --all-stale with a zero age would remove every idle test
+   * database, including other files' databases and the template.
+   */
+  onlyRuns?: string[];
 }
 
 export interface CleanSkip {
@@ -61,8 +67,10 @@ export function classifyStale(rows: DbRow[], opts: StaleOptions): { drop: string
   const minutes = Math.round(opts.minAgeMs / 60_000);
   const drop: string[] = [];
   const skipped: CleanSkip[] = [];
+  const only = opts.onlyRuns?.map((run) => currentRunPattern(run));
   for (const row of rows) {
     if (!any.test(row.name)) continue;
+    if (only && !only.some((pattern) => pattern.test(row.name))) continue;
     if (current.test(row.name)) {
       skipped.push({ name: row.name, reason: 'belongs to the current run' });
     } else if (row.active > 0) {
@@ -162,6 +170,8 @@ export interface CleanOptions {
   run?: string;
   /** Drop other runs that are idle and older than [minAgeMs]. */
   allStale?: boolean;
+  /** Limit --all-stale to these runs' namespaces (see StaleOptions.onlyRuns). */
+  onlyRuns?: string[];
   minAgeMs?: number;
   /** Injectable for tests. */
   now?: number;
@@ -185,7 +195,7 @@ export async function cleanTestDatabases(opts: CleanOptions = {}): Promise<Clean
     rows = await databaseRows(client);
     const currentRows = rows.filter((row) => current.test(row.name)).map((row) => row.name);
     const stale = opts.allStale
-      ? classifyStale(rows, { run, now: opts.now, minAgeMs: opts.minAgeMs ?? 60 * 60_000 })
+      ? classifyStale(rows, { run, now: opts.now, minAgeMs: opts.minAgeMs ?? 60 * 60_000, onlyRuns: opts.onlyRuns })
       : { drop: [] as string[], skipped: [] as CleanSkip[] };
 
     if (!opts.allStale) {
