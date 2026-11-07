@@ -473,7 +473,19 @@ correctness does not depend on the backfill finishing first.
 
 ### Releasing
 
-A version bump edits every file `scripts/check-versions.mjs` lists: the root, `apps/server`, `apps/web`, `packages/sdk-js` and `packages/edge-worker` package files, the chart's `version` and `appVersion`, `AM_VERSION` in `.env.example`, its default in `docker-compose.yml` and in the README, and a `## [x.y.z]` section in CHANGELOG.md. A new migration head also goes into `MIGRATION_RELEASES` (see [Migrations](#migrations)). Then push a `vX.Y.Z` tag (or run the Release workflow from main); it runs CI on that commit and publishes only if it passes. Before tagging, check that private vulnerability reporting is still enabled (Settings → Security), since `SECURITY.md` points reporters to it.
+A release is one pass plus one review. Start from a clean `main`:
+
+1. `node scripts/release/prepare.mjs <version> --previous <previous>` — bumps every version surface `scripts/check-versions.mjs` lists (the root, `apps/server`, `apps/web`, `packages/sdk-js` and `packages/edge-worker` package files, the chart's `version` and `appVersion`, `AM_VERSION` in `.env.example` and its default in `docker-compose.yml` and the README, the README's "current release is the **X.Y** line" sentence), folds `changelog.d/` fragments and the `## [Unreleased]` section into `## [<version>] - <date>`, generates the `### Upgrading from <previous>` block from the migrations and `.env.example` changes since that tag, records new variables in `ENV_SINCE`, and runs `node scripts/check-versions.mjs`.
+2. Review the generated `### Upgrading from <previous>` block in `CHANGELOG.md`. Replace the `TODO` under **Breaking changes** with the user-visible changes or `none`. `node scripts/release/prepare.mjs <version> --check` fails while a `TODO` remains.
+3. Commit the release changes and open the release pull request.
+4. Merge it to `main`.
+5. Release that commit through the release workflow: run **Actions → Release → Run workflow** from `main` with the version, or push a `v<version>` tag. `.github/workflows/release.yml` runs the same CI on the commit, builds and smoke-tests the amd64 image, pushes linux/amd64 and linux/arm64 with build-provenance attestations, packages the Helm chart and the Compose bundle with `SHA256SUMS`, and creates the GitHub release from the `## [<version>]` section. 0.x releases are marked as pre-releases.
+6. `scripts/release/verify.sh <version>` — downloads the GitHub release into a fresh temporary directory, runs `sha256sum -c SHA256SUMS`, verifies the attestation of every asset and of `oci://ghcr.io/<owner>/agentic-marketing:<version>`, and checks that the image manifest has `linux/amd64` and `linux/arm64`. It prints PASS/FAIL per check and exits non-zero on any failure.
+7. `scripts/release/close-issues.mjs <version> --yes` — collects the issues named by the release's merged pull requests' `Closes #` lines and by the fragment `issues:` marker, comments with the release link and closes the ones still open. Without `--yes` it is a dry run.
+
+A new migration head also goes into `MIGRATION_RELEASES` (see [Migrations](#migrations)); `prepare.mjs` lists the migration files it finds but cannot know which one is the new head. Before tagging, check that private vulnerability reporting is still enabled (Settings → Security), since `SECURITY.md` points reporters to it.
+
+Contributors and delegates add a fragment under `changelog.d/` instead of editing `CHANGELOG.md`; see [`changelog.d/README.md`](../changelog.d/README.md).
 
 ### Services without Docker
 
