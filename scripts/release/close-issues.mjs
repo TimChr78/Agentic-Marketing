@@ -84,11 +84,38 @@ function defaultBranch(repo) {
   return gh(['api', `repos/${repo}`, '--jq', '.default_branch']);
 }
 
-/** The release immediately before `version`, or null for the first release. */
-function previousTag(repo, version) {
-  const releases = JSON.parse(gh(['release', 'list', '--repo', repo, '--limit', '100', '--json', 'tagName,publishedAt']));
-  const index = releases.findIndex((release) => release.tagName === `v${version}`);
-  return index >= 0 ? (releases[index + 1]?.tagName ?? null) : null;
+/** [major, minor, patch, isRelease, prerelease] so a prerelease sorts before its release. */
+function versionKey(tag) {
+  const match = /^v(\d+)\.(\d+)\.(\d+)(?:-(.+))?$/.exec(tag);
+  if (!match) return null;
+  return [Number(match[1]), Number(match[2]), Number(match[3]), match[4] ? 0 : 1, match[4] ?? ''];
+}
+
+function compareKeys(a, b) {
+  for (let i = 0; i < 4; i++) if (a[i] !== b[i]) return a[i] - b[i];
+  return a[4] < b[4] ? -1 : a[4] > b[4] ? 1 : 0;
+}
+
+/**
+ * The tag immediately before `v<version>` among `tags`, or null when it is the first. Tags come from
+ * the local repository, which always has the complete list (no paging), so null means a proven
+ * first release. Throws when the target tag itself is missing.
+ */
+export function previousTagFrom(tags, version) {
+  const target = versionKey(`v${version}`);
+  if (!target || !tags.includes(`v${version}`)) throw new Error(`tag v${version} is not in the local repository; fetch tags first`);
+  let best = null;
+  for (const tag of tags) {
+    const key = versionKey(tag);
+    if (!key || compareKeys(key, target) >= 0) continue;
+    if (!best || compareKeys(key, best.key) > 0) best = { tag, key };
+  }
+  return best?.tag ?? null;
+}
+
+function previousTag(version) {
+  const tags = execFileSync('git', ['tag', '--list', 'v*'], { cwd: root, encoding: 'utf8' }).split('\n').filter(Boolean);
+  return previousTagFrom(tags, version);
 }
 
 /** Commit SHAs in v<previous>..v<version>, or the tag's history for the first release. */
@@ -104,7 +131,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     const repo = repository();
     const release = JSON.parse(gh(['api', `repos/${repo}/releases/tags/v${options.version}`]));
     const branch = defaultBranch(repo);
-    const previous = previousTag(repo, options.version);
+    const previous = previousTag(options.version);
     const commits = commitsInRange(previous, options.version);
     const prs = JSON.parse(
       gh(['pr', 'list', '--repo', repo, '--state', 'merged', '--limit', '500', '--json', 'number,body,baseRefName,mergeCommit']),

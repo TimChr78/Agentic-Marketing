@@ -7,6 +7,7 @@ import {
   issuesForRelease,
   parseCloses,
   parseIssuesComment,
+  previousTagFrom,
   readChangelogAtTag,
   selectReleasePullRequests,
 } from '../../../scripts/release/close-issues.mjs';
@@ -258,5 +259,21 @@ describe('release assets', () => {
     expect(assetProblems({ version, files, sums: sums.split('\n')[0] })).toContain(
       `SHA256SUMS has no checksum line for agentic-marketing-${version}.tgz`,
     );
+  });
+});
+
+describe('previousTagFrom (#521 re-check)', () => {
+  const tags = ['v0.1.0', 'v0.9.0', 'v0.10.0', 'v0.10.1', 'v0.11.0-rc.1', 'v0.11.0', 'v0.12.0', 'not-a-version'];
+  it('finds the immediately preceding version by semver, not by listing order or paging', () => {
+    expect(previousTagFrom(tags, '0.12.0')).toBe('v0.11.0');
+    expect(previousTagFrom(tags, '0.11.0')).toBe('v0.11.0-rc.1');
+    expect(previousTagFrom(tags, '0.11.0-rc.1')).toBe('v0.10.1');
+    expect(previousTagFrom(tags, '0.10.0')).toBe('v0.9.0');
+  });
+  it('returns null only for a proven first release', () => {
+    expect(previousTagFrom(tags, '0.1.0')).toBeNull();
+  });
+  it('refuses when the release tag is not present locally', () => {
+    expect(() => previousTagFrom(tags, '0.13.0')).toThrow(/not in the local repository/);
   });
 });

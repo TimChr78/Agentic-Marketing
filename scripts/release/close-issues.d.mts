@@ -8,3 +8,4 @@ export function selectReleasePullRequests(options: {
 }): { number: number; body?: string; baseRefName?: string; mergeCommit?: { oid: string } | null }[];
 export function issuesForRelease(options: { prs: { number: number; body?: string }[]; changelog: string; version?: string }): number[];
 export function readChangelogAtTag(version: string, run?: (args: string[]) => string): string;
+export function previousTagFrom(tags: string[], version: string): string | null;
