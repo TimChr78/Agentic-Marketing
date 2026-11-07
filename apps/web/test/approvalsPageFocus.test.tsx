@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // #498 review: closing a drawer opened from a queue row returns focus to that row; only a deep
@@ -61,11 +61,12 @@ vi.mock('../src/features/approvals/ApprovalDrawer', () => ({
 }));
 
 import { useLocation } from '../src/app/router';
-import ApprovalsPage from '../src/pages/approvals/ApprovalsPage';
+import ApprovalsPage, { focusApprovalReturn, resetApprovalFocusReturn } from '../src/pages/approvals/ApprovalsPage';
 import { ToastProvider } from '../src/ui/toast';
 
 function Route() {
   const { path } = useLocation();
+  if (!path.startsWith('/approvals')) return <p>Elsewhere</p>;
   const id = path.startsWith('/approvals/') ? path.slice('/approvals/'.length) : undefined;
   return <ApprovalsPage params={id ? { id } : {}} />;
 }
@@ -79,11 +80,16 @@ function renderPage() {
 }
 
 beforeEach(() => {
+  resetApprovalFocusReturn();
   localStorage.clear();
   history.replaceState(null, '', '/approvals');
 });
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  resetApprovalFocusReturn();
+  vi.useRealTimers();
+});
 
 describe('approval drawer focus return (#498 review)', () => {
   it('returns focus to the queue row that opened it', async () => {
@@ -106,5 +112,66 @@ describe('approval drawer focus return (#498 review)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Close drawer' }));
 
     await waitFor(() => expect(document.activeElement?.textContent).toBe('Approvals'));
+  });
+
+  it('cancels a pending restoration when the page unmounts', async () => {
+    const view = renderPage();
+    const rowLink = (await screen.findAllByRole('link', { name: 'Review me' }))[0]!;
+    fireEvent.click(rowLink);
+    expect(await screen.findByRole('dialog', { name: 'Review apr_1' })).toBeTruthy();
+
+    // The queue reloads; the drawer closes while its timers are still pending.
+    vi.useFakeTimers();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Close drawer' }));
+    });
+    view.unmount();
+
+    const elsewhere = document.createElement('button');
+    elsewhere.textContent = 'Elsewhere';
+    document.body.appendChild(elsewhere);
+    elsewhere.focus();
+    await act(async () => {
+      vi.advanceTimersByTime(60_000);
+    });
+    expect(document.activeElement).toBe(elsewhere);
+    elsewhere.remove();
+  });
+
+  it('stops retrying when no approvals root appears, instead of stealing focus later', async () => {
+    vi.useFakeTimers();
+    // A stale restoration from a queue that never mounts must not keep polling forever.
+    focusApprovalReturn('apr_1', 1, true);
+    await act(async () => {
+      vi.advanceTimersByTime(10_100);
+    });
+    expect(vi.getTimerCount()).toBe(0);
+    await act(async () => {
+      vi.advanceTimersByTime(60_000);
+    });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('does not steal focus when the person already moved it elsewhere', async () => {
+    const view = renderPage();
+    const rowLink = (await screen.findAllByRole('link', { name: 'Review me' }))[0]!;
+    fireEvent.click(rowLink);
+    expect(await screen.findByRole('dialog', { name: 'Review apr_1' })).toBeTruthy();
+
+    vi.useFakeTimers();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Close drawer' }));
+    });
+
+    const elsewhere = document.createElement('button');
+    elsewhere.textContent = 'Elsewhere';
+    document.body.appendChild(elsewhere);
+    elsewhere.focus();
+    await act(async () => {
+      vi.advanceTimersByTime(60_000);
+    });
+    expect(document.activeElement).toBe(elsewhere);
+    elsewhere.remove();
+    view.unmount();
   });
 });

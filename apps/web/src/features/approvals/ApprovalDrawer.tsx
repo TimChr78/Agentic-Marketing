@@ -25,10 +25,10 @@ import {
 import { getArtifact, invalidateArtifact } from '../artifactCache';
 import { BlockUsage } from '../blocks/BlockUsage';
 import { ArtifactPreview } from '../previews/ArtifactPreview';
-import { BlockPreview } from '../previews/BlockPreview';
-import { PreviewReadProvider } from '../previews/previewRead';
+import { type BlockGuard, BundledBlocks } from '../previews/BundledBlocks';
+import { PreviewReadProvider, useSharedRead } from '../previews/previewRead';
 import { type PreviewStatus, PreviewStatusProvider, ReportPreviewStatus } from '../previews/previewStatus';
-import { type BlockPin, type BlockRef, bundleMemberSummary, resolveBlockPins } from './bundleSummary';
+import { type BlockRef, bundleMemberSummary, resolveBlockPins } from './bundleSummary';
 import { ConsequenceSummary } from './ConsequenceSummary';
 import { blockIdsIn } from './consequences';
 import { HoldBadge } from './HoldBadge';
@@ -431,6 +431,64 @@ function useBlockRefs(ids: string[]) {
   return { ...state, reload: () => setAttempt((n) => n + 1) };
 }
 
+/**
+ * The template a review renders, exact: the reviewed e-mail template itself, or the broadcast's
+ * nested template at its bundle override or its published version. Block ids come from that exact
+ * content, never from the live version (#498 review).
+ */
+function useReviewedTemplate(approval: Detail, bundleVersions?: Record<string, number>) {
+  const content = (approval.content ?? {}) as { template?: string; mjml?: string };
+  const direct = approval.artifactType === 'email_template';
+  const templateId = direct
+    ? approval.artifactId
+    : approval.artifactType === 'broadcast' && content.template?.startsWith('eml_')
+      ? content.template
+      : undefined;
+  const bundledVersion = templateId ? bundleVersions?.[templateId] : undefined;
+  // A bundled template's version is known from the bundle; an unbundled one uses its published
+  // pointer, read once through the session cache shared with the consequence summary.
+  const needsPointer = !direct && !!templateId && bundledVersion == null;
+  const [attempt, setAttempt] = useState(0);
+  const [pointer, setPointer] = useState<{ artifact: Out<'artifacts.get'> | null; loading: boolean; error: string | null }>({
+    artifact: null,
+    loading: needsPointer,
+    error: null,
+  });
+  // biome-ignore lint/correctness/useExhaustiveDependencies: keyed by the template id and the explicit retry counter
+  useEffect(() => {
+    if (!needsPointer || !templateId) {
+      setPointer({ artifact: null, loading: false, error: null });
+      return;
+    }
+    let live = true;
+    setPointer({ artifact: null, loading: true, error: null });
+    getArtifact(templateId)
+      .then((artifact) => live && setPointer({ artifact, loading: false, error: null }))
+      .catch((e: Error) => live && setPointer({ artifact: null, loading: false, error: e.message ?? 'Not found' }));
+    return () => {
+      live = false;
+    };
+  }, [templateId, needsPointer, attempt]);
+
+  const version = direct ? approval.version : (bundledVersion ?? pointer.artifact?.publishedVersion ?? undefined);
+  // Shared with the consequence summary: one exact artifacts.get per template version per review.
+  const read = useSharedRead(
+    'artifacts.get',
+    { artifactId: templateId, version },
+    () => api.call('artifacts.get', { artifactId: templateId!, version: version! }),
+    { skip: !templateId || direct || version == null },
+  );
+  const readLoading = !!templateId && !direct && version != null && read.loading && read.data === undefined && !read.error;
+  const loading = direct ? false : (needsPointer && pointer.loading) || readLoading;
+  const error = direct ? null : ((needsPointer ? pointer.error : null) ?? (version != null ? read.error : null));
+  const templateContent = direct ? approval.content : read.data?.version.content;
+  const retry = () => {
+    setAttempt((n) => n + 1);
+    if (!direct && templateId && version != null) read.refresh();
+  };
+  return { templateId, version, content: templateContent, loading, error, retry };
+}
+
 function ReviewPanel({ approval, bundleVersions }: { approval: Detail; bundleVersions?: Record<string, number> }) {
   const { user } = useWorkspace();
   const reviewKey = `${approval.id}:${approval.version}`;
@@ -455,15 +513,39 @@ function ReviewPanel({ approval, bundleVersions }: { approval: Detail; bundleVer
     if (ready && user && approval.status === 'pending') markViewed(user.id, approval.id, approval.version);
   }, [ready, user, approval.id, approval.version, approval.status]);
 
-  const blockIds = approval.artifactType === 'email_template' ? blockIdsIn(String((approval.content as { mjml?: string }).mjml ?? '')) : [];
+  const template = useReviewedTemplate(approval, bundleVersions);
+  const blockIds =
+    template.content && typeof (template.content as { mjml?: unknown }).mjml === 'string'
+      ? blockIdsIn((template.content as { mjml: string }).mjml)
+      : [];
   const refs = useBlockRefs(blockIds);
   const pins = resolveBlockPins(blockIds, bundleVersions, refs.data);
-  const blocksLoading = blockIds.length > 0 && refs.loading;
-  const blocksError = !!refs.error;
+  const blocksLoading = template.loading || (blockIds.length > 0 && refs.loading);
+  const blocksError = template.error ?? refs.error;
   // The server expands published block vN; a bundle pin that differs (or has nothing published)
   // cannot be reproduced by the combined message render.
   const reproducible = !blocksLoading && !blocksError && pins.every((pin) => pin.reproducible);
-  const blocksStatus: PreviewStatus = blocksLoading ? 'loading' : blocksError ? 'error' : 'ready';
+  // A block with no exact version at all has no successful preview, so this review is not viewable.
+  const blockUnavailable = pins.some((pin) => pin.version == null);
+  const blocksStatus: PreviewStatus = blocksLoading ? 'loading' : blocksError || blockUnavailable ? 'error' : 'ready';
+  const retryBlocks = () => {
+    template.retry();
+    refs.reload();
+  };
+  // A broadcast renders its nested template itself, so the same pin guard has to travel with it.
+  const broadcastGuard: BlockGuard | undefined =
+    approval.artifactType === 'broadcast' && template.templateId
+      ? {
+          pins,
+          loading: blocksLoading,
+          error: blocksError,
+          reproducible,
+          unavailable: blockUnavailable,
+          templateContent: template.content,
+          templateVersion: template.version,
+          onRetry: retryBlocks,
+        }
+      : undefined;
 
   return (
     <PreviewStatusProvider onChange={report}>
@@ -483,7 +565,7 @@ function ReviewPanel({ approval, bundleVersions }: { approval: Detail; bundleVer
                   title={
                     blocksError ? 'Couldn’t read this template’s reusable blocks' : 'Bundled block render unavailable before publication'
                   }
-                  {...(blocksError ? { onRetry: refs.reload } : {})}
+                  {...(blocksError ? { onRetry: retryBlocks } : {})}
                 >
                   {blocksError
                     ? 'The combined message is withheld until every reusable block can be resolved. The exact reviewed content is shown below.'
@@ -504,6 +586,7 @@ function ReviewPanel({ approval, bundleVersions }: { approval: Detail; bundleVer
               content={approval.content}
               compact
               bundle={bundleVersions}
+              blockGuard={broadcastGuard}
               source={{ kind: 'saved', version: approval.version }}
               sourceSuffix="Under review"
             />
@@ -511,7 +594,7 @@ function ReviewPanel({ approval, bundleVersions }: { approval: Detail; bundleVer
         </section>
 
         {approval.artifactType === 'email_template' && (
-          <BundledBlocks pins={pins} loading={blocksLoading} error={refs.error} onRetry={refs.reload} />
+          <BundledBlocks pins={pins} loading={blocksLoading} error={refs.error} onRetry={retryBlocks} />
         )}
 
         <section aria-labelledby="review-changes-heading" className="space-y-2">
@@ -527,55 +610,6 @@ function ReviewPanel({ approval, bundleVersions }: { approval: Detail; bundleVer
         </section>
       </div>
     </PreviewStatusProvider>
-  );
-}
-
-/** Each reusable block at the exact version the reviewed template would use. */
-function BundledBlocks({
-  pins,
-  loading,
-  error,
-  onRetry,
-}: {
-  pins: BlockPin[];
-  loading: boolean;
-  error: string | null;
-  onRetry: () => void;
-}) {
-  if (!pins.length) return null;
-  return (
-    <section aria-labelledby="review-blocks-heading" className="space-y-3">
-      <h3 id="review-blocks-heading" className="text-[15px] leading-6 font-semibold">
-        Reusable blocks
-      </h3>
-      <p className="text-[12px] leading-[18px] text-muted">
-        Each block is shown at the exact version this review would use: the bundle override when there is one, otherwise its published
-        version.
-      </p>
-      {loading && <LoadingBlock lines={4} label="Resolving reusable blocks" />}
-      {error && !loading && (
-        <Alert tone="bad" title="Some reusable blocks could not be read" onRetry={onRetry}>
-          {error}
-        </Alert>
-      )}
-      {pins.map((pin) =>
-        pin.version == null ? (
-          <Alert key={pin.id} tone="bad" title={`Reusable block ${pin.id} is unavailable`}>
-            This block has no published version and is not in this bundle, so there is no exact version to render.
-          </Alert>
-        ) : (
-          <BlockPreview
-            key={pin.id}
-            artifactId={pin.id}
-            version={pin.version}
-            compact
-            source={pin.bundled ? { kind: 'saved', version: pin.version } : { kind: 'published', version: pin.version }}
-            {...(pin.bundled ? { sourceSuffix: 'In this bundle' } : {})}
-            reportId={`block:${pin.id}`}
-          />
-        ),
-      )}
-    </section>
   );
 }
 

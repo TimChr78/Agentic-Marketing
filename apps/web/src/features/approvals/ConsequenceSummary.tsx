@@ -131,9 +131,11 @@ export function ConsequenceSummary({ approval, bundleVersions }: { approval: Det
   const templateVersion = templateId
     ? (bundleVersions?.[templateId] ?? dependencies.data[templateId]?.publishedVersion ?? undefined)
     : undefined;
-  const templateContent = useApi(
+  // Shared with the review panel, which resolves the nested template's block pins from the same read.
+  const templateContent = useSharedRead(
+    'artifacts.get',
+    { artifactId: templateId, version: templateVersion },
     () => api.call('artifacts.get', { artifactId: templateId!, version: templateVersion! }),
-    [templateId, templateVersion],
     { skip: !templateId || templateVersion == null || !can('artifacts:read') },
   );
   const templatePurpose =

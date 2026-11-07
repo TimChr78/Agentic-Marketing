@@ -363,6 +363,96 @@ test('a bundled block review withholds the combined message and previews each ex
   await expect(page.getByText(/Rejected 2 changes/)).toBeVisible();
 });
 
+test('a broadcast bundle with a newer block withholds the nested published e-mail render', async ({ page }) => {
+  await signIn(page, PEOPLE.owner);
+  const { segment } = await seedRefs(page);
+  let bundle: { members: { approvalId: string; artifactId: string; type: string; name: string }[] };
+  await call(page.request, 'workspace.setApprovalPolicy', { policy: 'none' });
+  try {
+    // Block v1 and template v1 are live; both then get a v2 draft.
+    const block = await call<{ artifactId: string }>(page.request, 'artifacts.create', {
+      type: 'email_block',
+      name: 'Broadcast bundle block',
+      content: {
+        category: 'header',
+        mjml: '<mj-section><mj-column><mj-text>{{ block.title }}</mj-text></mj-column></mj-section>',
+        params: [{ key: 'title', label: 'Title', type: 'text', default: 'Hello' }],
+      },
+    });
+    await call(page.request, 'artifacts.requestPublish', { artifactId: block.artifactId, note: 'Publish block v1.' });
+    const blockV1 = await call<{ version: { content: Record<string, unknown> } }>(page.request, 'artifacts.get', {
+      artifactId: block.artifactId,
+    });
+    const blockV2 = await call<{ version: number }>(page.request, 'artifacts.updateDraft', {
+      artifactId: block.artifactId,
+      content: {
+        ...blockV1.version.content,
+        params: [{ key: 'title', label: 'Title', type: 'text', default: 'Bundled title' }],
+      },
+    });
+    expect(blockV2.version).toBe(2);
+
+    const template = await call<{ artifactId: string }>(page.request, 'artifacts.create', {
+      type: 'email_template',
+      name: 'Broadcast bundle template',
+      content: {
+        purpose: 'marketing_email',
+        subject: 'A broadcast with a newer block',
+        preheader: 'Bundled',
+        mjml: `<mjml><mj-body><mj-section><mj-column><mj-text>Intro</mj-text><mj-text><a href="{{ unsubscribe_url }}">Unsubscribe</a></mj-text></mj-column></mj-section>{% block '${block.artifactId}', title: 'Bundled title' %}</mj-body></mjml>`,
+      },
+    });
+    await call(page.request, 'artifacts.requestPublish', { artifactId: template.artifactId, note: 'Publish template v1.' });
+    const templateV1 = await call<{ version: { content: Record<string, unknown> } }>(page.request, 'artifacts.get', {
+      artifactId: template.artifactId,
+    });
+    const templateV2 = await call<{ version: number }>(page.request, 'artifacts.updateDraft', {
+      artifactId: template.artifactId,
+      content: { ...templateV1.version.content, subject: 'A broadcast with a newer block (v2)' },
+    });
+    expect(templateV2.version).toBe(2);
+
+    const broadcast = await call<{ artifactId: string }>(page.request, 'artifacts.create', {
+      type: 'broadcast',
+      name: 'Review broadcast: bundled block',
+      content: { template: template.artifactId, segment: segment.id, description: 'The nested template has a newer block.' },
+    });
+
+    // Four-eyes: the bundle holds block v2, template v2 and the broadcast, while block v1 is live.
+    await call(page.request, 'workspace.setApprovalPolicy', { policy: ADMIN });
+    bundle = await call<{ members: { approvalId: string; artifactId: string; type: string; name: string }[] }>(
+      page.request,
+      'artifacts.requestPublishBundle',
+      {
+        artifactIds: [block.artifactId, template.artifactId, broadcast.artifactId],
+        note: 'A broadcast and the newer block its template uses.',
+      },
+    );
+  } finally {
+    await call(page.request, 'workspace.setApprovalPolicy', { policy: 'agent_changes' });
+  }
+  const broadcastMember = bundle.members.find((m) => m.type === 'broadcast')!;
+
+  await signIn(page, PEOPLE.approver);
+  await page.goto(`/approvals/${broadcastMember.approvalId}`);
+  const drawer = page.getByRole('dialog', { name: 'Review broadcast: bundled block' });
+  await expect(drawer).toContainText('Broadcast · Reviewing Saved v1');
+  await expect(drawer.getByText('Bundled block render unavailable before publication', { exact: true })).toBeVisible();
+  // The server expands published block v1; the nested e-mail must not present it as the bundle result.
+  await expect(drawer.locator('iframe[title^="E-mail preview"]')).toHaveCount(0);
+  await expect(drawer).toContainText(/exact reviewed content/);
+  // The exact block override is previewed instead.
+  await expect(drawer.getByText('Reusable blocks')).toBeVisible();
+  await expect(drawer.locator('[data-preview-source="saved"]').filter({ hasText: 'In this bundle' }).first()).toContainText('Saved v2');
+  await expect(drawer.locator('iframe[title^="Block preview"]').first()).toBeVisible({ timeout: 20_000 });
+
+  // Leave the bundle decided rather than pending for later specs.
+  await drawer.getByRole('button', { name: 'Reject all' }).click();
+  await drawer.getByLabel('Why are you rejecting it?').fill('Cleaning up the broadcast bundle fixture.');
+  await drawer.getByRole('button', { name: /Reject all 3 with reason/ }).click();
+  await expect(page.getByText(/Rejected 3 changes/)).toBeVisible();
+});
+
 test('closing a row-opened review returns focus to its row; a deep link falls back to the queue heading', async ({ page }) => {
   await signIn(page, PEOPLE.owner);
   const name = `Review focus ${Date.now()}`;
