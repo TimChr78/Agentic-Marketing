@@ -285,6 +285,16 @@ describe('Providers compact channel rows (#527)', () => {
     );
   });
 
+  it('keeps the SMS development outbox without Twilio fields', async () => {
+    renderChannels();
+    await screen.findByText('Twilio alerts');
+    await userEvent.click(screen.getByRole('button', { name: 'Add SMS provider' }));
+    const drawer = await screen.findByRole('dialog', { name: 'Add SMS provider' });
+    await userEvent.selectOptions(fld(drawer, 'Adapter'), 'log');
+    expect(within(drawer).getByText('Development outbox')).toBeTruthy();
+    expect(within(drawer).queryByLabelText(/^Account SID/)).toBeNull();
+  });
+
   it('keeps push schema-specific setup for web push, Firebase and Apple', async () => {
     renderChannels();
     await screen.findByText('Web push');

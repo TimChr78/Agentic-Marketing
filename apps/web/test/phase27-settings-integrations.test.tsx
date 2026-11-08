@@ -6,6 +6,56 @@ import { ToastProvider } from '../src/ui';
 
 const h = vi.hoisted(() => ({
   calls: [] as { name: string; input: Record<string, unknown> }[],
+  sources: [
+    {
+      id: 'src_1',
+      name: 'Website',
+      kind: 'browser',
+      allowedOrigins: ['https://example.com'],
+      requiredPurpose: 'analytics',
+      enabled: true,
+      keyHint: 'wrk_…abcd',
+      writeKey: 'wrk_public',
+    },
+  ],
+  endpoints: [
+    {
+      id: 'wh_1',
+      name: 'Order events',
+      url: 'https://hooks.example.com/am',
+      events: ['order.completed'],
+      purpose: 'analytics',
+      enabled: true,
+    },
+  ],
+  deliveries: [
+    {
+      id: 'dlv_1',
+      kind: 'webhook',
+      targetId: 'wh_1',
+      status: 'failed',
+      attempts: 3,
+      statusCode: 500,
+      error: 'Connection refused',
+      createdAt: '2026-11-07T09:00:00Z',
+      payload: { type: 'order.completed' },
+    },
+  ],
+  connectors: [
+    { id: 'http', label: 'HTTP API', description: 'Call your own API.', auth: 'oauth2', inbound: false, settings: {}, secrets: {} },
+  ],
+  connections: [
+    {
+      id: 'cn_1',
+      name: 'Shopify',
+      connector: 'http',
+      enabled: true,
+      hasSecrets: true,
+      settings: {},
+      inbound: false,
+      oauth: { status: 'error', error: 'Access denied by the provider' },
+    },
+  ],
   token: {
     id: 'tok_1',
     name: 'n8n reporting',
@@ -59,15 +109,15 @@ vi.mock('../src/app/api', async (importOriginal) => {
       case 'system.inputWarnings':
         return { clients: [], sinceDays: 30, strictInputs: true, safeToEnableStrict: false };
       case 'sources.list':
-        return { sources: [] };
+        return { sources: h.sources };
       case 'webhooks.list':
-        return { endpoints: [] };
+        return { endpoints: h.endpoints };
       case 'deliveries.list':
-        return { deliveries: [] };
+        return { deliveries: h.deliveries };
       case 'connectors.list':
-        return { connectors: [] };
+        return { connectors: h.connectors };
       case 'connections.list':
-        return { connections: [] };
+        return { connections: h.connections };
       case 'purposes.list':
         return { source: 'published', purposes: [] };
       default:
@@ -141,6 +191,59 @@ describe('Integrations sections (#527)', () => {
     expect(names()).toHaveLength(before);
     expect(screen.getByText(/Clients that support OAuth/)).toBeTruthy();
     expect(screen.getByText(/Authorization: Bearer amk_/)).toBeTruthy();
+  });
+
+  it('keeps the token create drawer fields and the section name', async () => {
+    renderPage();
+    await screen.findByText('n8n reporting');
+    await userEvent.click(screen.getAllByRole('button', { name: 'Create token' })[0]);
+    const drawer = await screen.findByRole('dialog', { name: 'Create an API token' });
+    for (const label of ['Name', 'Brand', 'Expires']) expect(within(drawer).getByLabelText(new RegExp(`^${label}\\*?$`))).toBeTruthy();
+    expect(within(drawer).getByText('Scopes')).toBeTruthy();
+  });
+
+  it('keeps the event source origins and consent rules in the add drawer', async () => {
+    renderPage();
+    await screen.findByText('n8n reporting');
+    await userEvent.click(screen.getByRole('tab', { name: 'Event sources' }));
+    expect(await screen.findByText('https://example.com')).toBeTruthy();
+    await userEvent.click(screen.getAllByRole('button', { name: 'Add source' })[0]);
+    const drawer = await screen.findByRole('dialog', { name: 'Add an event source' });
+    expect(within(drawer).getByRole('radio', { name: /Website/ })).toBeTruthy();
+    expect(within(drawer).getByRole('radio', { name: /Server/ })).toBeTruthy();
+    for (const label of ['Name', 'Allowed sites', 'Keep events only with consent for'])
+      expect(within(drawer).getByLabelText(new RegExp(`^${label}\\*?$`))).toBeTruthy();
+  });
+
+  it('keeps webhook endpoints, visible delivery errors, retry and the endpoint drawer', async () => {
+    renderPage();
+    await screen.findByText('n8n reporting');
+    await userEvent.click(screen.getByRole('tab', { name: 'Webhooks' }));
+    expect((await screen.findAllByText('Order events')).length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Failed').length).toBeGreaterThan(0);
+    expect(screen.getByText('Connection refused')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeTruthy();
+    await userEvent.click(screen.getAllByRole('button', { name: 'Add endpoint' })[0]);
+    const drawer = await screen.findByRole('dialog', { name: 'Add endpoint' });
+    for (const label of ['Name', 'Endpoint URL', 'Events', 'Purpose'])
+      expect(within(drawer).getByLabelText(new RegExp(`^${label}\\*?$`))).toBeTruthy();
+    expect(within(drawer).getByText(/signing secret is shown once/)).toBeTruthy();
+  });
+
+  it('keeps complete connection fields and an authorization failure with recovery', async () => {
+    renderPage();
+    await screen.findByText('n8n reporting');
+    await userEvent.click(screen.getByRole('tab', { name: 'Connections' }));
+    expect(await screen.findByText('Shopify')).toBeTruthy();
+    expect(screen.getByText('Authorization failed')).toBeTruthy();
+    expect(screen.getByText('Access denied by the provider')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Authorize' })).toBeTruthy();
+    await userEvent.click(screen.getAllByRole('button', { name: 'Add connection' })[0]);
+    const drawer = await screen.findByRole('dialog', { name: 'Add connection' });
+    expect(within(drawer).getByLabelText(/^Connector/)).toBeTruthy();
+    expect(within(drawer).getByLabelText(/^Name/)).toBeTruthy();
+    expect(within(drawer).getByText('Settings')).toBeTruthy();
+    expect(within(drawer).getByText('Credentials')).toBeTruthy();
   });
 
   it('opens a token deep link inside the API tokens section with one exact read', async () => {
