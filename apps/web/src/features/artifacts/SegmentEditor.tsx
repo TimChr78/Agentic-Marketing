@@ -626,6 +626,8 @@ function SegmentPicker({
 interface Estimate {
   /** The condition JSON this result (or request) belongs to. */
   key: string;
+  /** The request that produced (or is producing) this state; a completion may only settle its own. */
+  request: number;
   loading: boolean;
   count?: number;
   error?: string;
@@ -650,8 +652,8 @@ function EstimatedSize({ condition }: { condition: Condition }) {
     setEstimate((prev) => (prev?.loading && prev.key !== conditionKey ? { ...prev, loading: false, cancelled: true } : prev));
   }, [conditionKey]);
 
-  const settle = (key: string) =>
-    setEstimate((prev) => (prev?.loading && prev.key === key ? { ...prev, loading: false, cancelled: true } : prev));
+  const settle = (request: number) =>
+    setEstimate((prev) => (prev?.loading && prev.request === request ? { ...prev, loading: false, cancelled: true } : prev));
 
   // A size is an explicit request, never an automatic read on every keystroke or on open. The
   // result belongs to the exact rules it was asked for: editing the rules makes it a previous
@@ -661,20 +663,20 @@ function EstimatedSize({ condition }: { condition: Condition }) {
     const key = keyRef.current;
     const request = requestRef.current + 1;
     requestRef.current = request;
-    setEstimate({ key, loading: true });
+    setEstimate({ key, request, loading: true });
     try {
       const r = await api.call('segments.preview', { condition });
       if (requestRef.current !== request || keyRef.current !== key) {
-        settle(key);
+        settle(request);
         return;
       }
-      setEstimate({ key, loading: false, count: r.count });
+      setEstimate({ key, request, loading: false, count: r.count });
     } catch (e) {
       if (requestRef.current !== request || keyRef.current !== key) {
-        settle(key);
+        settle(request);
         return;
       }
-      setEstimate({ key, loading: false, error: errText(e) });
+      setEstimate({ key, request, loading: false, error: errText(e) });
     }
   };
 

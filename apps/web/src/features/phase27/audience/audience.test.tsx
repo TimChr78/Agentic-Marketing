@@ -587,6 +587,45 @@ describe('segments family (#525)', () => {
     expect(again.disabled).toBe(false);
   });
 
+  it('does not let an obsolete response settle the newer request for the same rules', async () => {
+    h.rows.segment = [row(segmentId, 'segment', 'Weekly readers')];
+    const older = pendingCount();
+    const newer = pendingCount();
+    h.previewQueue = [() => older.promise, () => newer.promise];
+    const first = { mode: 'dynamic', condition: { trait: 'loyaltyTier', op: 'eq', value: 'gold' } };
+    const second = { mode: 'dynamic', condition: { trait: 'loyaltyTier', op: 'eq', value: 'silver' } };
+    const editor = (content: Record<string, unknown>) => (
+      <SegmentEditor
+        artifact={artifact(segmentId, 'segment', 'Weekly readers', content) as never}
+        content={content as never}
+        onChange={() => {}}
+        readOnly={false}
+        errors={{}}
+        warnings={[]}
+      />
+    );
+    const { rerender } = renderWithToast(editor(first));
+    fireEvent.click(screen.getByRole('button', { name: 'Estimate audience' }));
+    await waitFor(() => expect(callsOf('segments.preview')).toHaveLength(1));
+
+    rerender(<ToastProvider>{editor(second)}</ToastProvider>);
+    await waitFor(() => expect(estimateText()).toContain('previous estimate was not applied'));
+    rerender(<ToastProvider>{editor(first)}</ToastProvider>);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Estimate again' }));
+    await waitFor(() => expect(callsOf('segments.preview')).toHaveLength(2));
+
+    // The first request for these rules resolves while the second one is still pending.
+    older.resolve(11);
+    await waitFor(() => expect(estimateText()).not.toContain('11 people'));
+    expect(estimateText()).not.toContain('was not applied');
+    expect((screen.getByRole('button', { name: 'Estimate again' }) as HTMLButtonElement).disabled).toBe(true);
+
+    newer.resolve(22);
+    await waitFor(() => expect(estimateText()).toContain('22 people'));
+    expect((screen.getByRole('button', { name: 'Estimate again' }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
   it('ignores an estimate that completes after a newer one', async () => {
     h.rows.segment = [row(segmentId, 'segment', 'Weekly readers')];
     const older = pendingCount();
