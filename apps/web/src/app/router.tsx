@@ -14,18 +14,53 @@ export function getRouterBasePath() {
   return basePath;
 }
 
-/** The path the app routes on, without the mounted base. */
-export function routerPath(pathname: string): string {
-  if (!basePath) return pathname;
-  if (pathname === basePath) return '/';
-  return pathname.startsWith(`${basePath}/`) ? pathname.slice(basePath.length) : pathname;
+/**
+ * Resolves `.`/`..` segments and collapses duplicate slashes without decoding percent escapes.
+ * `..` above the root is clamped at the root, so normalization itself can never escape the base.
+ */
+function normalizePath(path: string): string {
+  const out: string[] = [];
+  for (const segment of path.split('/')) {
+    if (!segment || segment === '.') continue;
+    if (segment === '..') {
+      out.pop();
+      continue;
+    }
+    out.push(segment);
+  }
+  return `/${out.join('/')}`;
 }
 
-/** A browser href for an in-app path, including the mounted base. */
+/** Split a destination into its path and the query/hash suffix it keeps verbatim. */
+function splitHref(to: string): [string, string] {
+  const index = to.search(/[?#]/);
+  return index < 0 ? [to, ''] : [to.slice(0, index), to.slice(index)];
+}
+
+/** The path the app routes on, without the mounted base. */
+export function routerPath(pathname: string): string {
+  if (!basePath) return normalizePath(pathname);
+  if (pathname === basePath) return '/';
+  if (pathname.startsWith(`${basePath}/`)) return normalizePath(pathname.slice(basePath.length));
+  return normalizePath(pathname);
+}
+
+/**
+ * A browser href for an in-app path, including the mounted base. The destination is resolved
+ * against the base, so `/../approvals`, `/./approvals`, `//approvals` and a destination that already
+ * names the base all stay inside it.
+ */
 export function routerHref(to: string): string {
-  if (!basePath || !to.startsWith('/')) return to;
-  if (to === basePath || to.startsWith(`${basePath}/`)) return to;
-  return to === '/' ? basePath : `${basePath}${to}`;
+  if (!to.startsWith('/')) return to;
+  const [path, suffix] = splitHref(to);
+  let internal = path;
+  if (basePath) {
+    if (internal === basePath) internal = '/';
+    else if (internal.startsWith(`${basePath}/`)) internal = internal.slice(basePath.length);
+  }
+  const normalized = normalizePath(internal);
+  if (!basePath) return `${normalized}${suffix}`;
+  return normalized === '/' ? `${basePath}${suffix}` : `${basePath}${normalized}${suffix}`;
 }
 
 type Listener = () => void;

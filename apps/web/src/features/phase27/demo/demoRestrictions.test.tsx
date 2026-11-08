@@ -80,6 +80,24 @@ describe('demo mutation controls are visibly disabled (#530)', () => {
     expect(submit.getAttribute('data-demo-blocked')).toBe('true');
   });
 
+  it('Journeys: the create dialog submit is disabled with the demo reason', async () => {
+    await renderDemoAt('/demo/marketing/journeys');
+    fireEvent.click(await screen.findByRole('button', { name: 'New journey' }));
+    const dialog = await screen.findByRole('dialog');
+    const create = within(dialog).getByRole('button', { name: 'Create draft' }) as HTMLButtonElement;
+    expect(create.disabled).toBe(true);
+    expect(create.getAttribute('title')).toBe(DEMO_RESTRICTION_REASON);
+  });
+
+  it('Templates: the create dialog submit is disabled with the demo reason', async () => {
+    await renderDemoAt('/demo/content/templates');
+    fireEvent.click(await screen.findByRole('button', { name: 'New template' }));
+    const dialog = await screen.findByRole('dialog');
+    const create = within(dialog).getByRole('button', { name: 'Create draft' }) as HTMLButtonElement;
+    expect(create.disabled).toBe(true);
+    expect(create.getAttribute('title')).toBe(DEMO_RESTRICTION_REASON);
+  });
+
   it('leaves the same controls enabled outside the demo', async () => {
     // The shared primitive is the single switch: the default context keeps every page unchanged.
     const { Button } = await import('../../../ui');

@@ -219,6 +219,7 @@ export default function UsersPage() {
                         variant="danger"
                         label={`Remove ${personName(m)}`}
                         icon={<Trash2 size={15} />}
+                        mutation
                         disabled={!mayRemove(m) || busyId === m.userId}
                         onClick={() => void remove(m)}
                       />
@@ -247,6 +248,7 @@ export default function UsersPage() {
                       variant="danger"
                       label={`Remove ${personName(m)}`}
                       icon={<Trash2 size={15} />}
+                      mutation
                       disabled={!mayRemove(m) || busyId === m.userId}
                       onClick={() => void remove(m)}
                     />
@@ -318,7 +320,7 @@ export default function UsersPage() {
                       Created {timeAgo(inv.createdAt)} · expires {formatDate(inv.expiresAt)}
                     </p>
                   </div>
-                  <Button size="sm" variant="ghost" loading={revoking === inv.id} onClick={() => void revoke(inv)}>
+                  <Button size="sm" variant="ghost" mutation loading={revoking === inv.id} onClick={() => void revoke(inv)}>
                     Revoke
                   </Button>
                 </li>
@@ -453,7 +455,7 @@ function InviteDrawer({ isOwner, onClose, onInvited }: { isOwner: boolean; onClo
         ) : (
           <>
             <Button onClick={onClose}>Cancel</Button>
-            <Button variant="primary" loading={busy} onClick={() => void submit()}>
+            <Button variant="primary" mutation loading={busy} onClick={() => void submit()}>
               Create invitation
             </Button>
           </>

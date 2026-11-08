@@ -46,11 +46,23 @@ test('@smoke demo runs the real shell on sample data with no API traffic', async
   await expect(page.getByText(/live-site walkthrough has been retired/i)).toBeVisible();
   await expect(page.getByRole('heading', { level: 1, name: 'Home' })).toBeVisible();
 
+  // A caller that pushes a production path is confined to /demo, not stamped as demo outside it.
+  await page.evaluate(() => window.history.pushState(null, '', '/approvals'));
+  await expect(page).toHaveURL(/\/demo\/approvals$/);
+
   expect(api).toEqual([]);
 });
 
 test('@smoke a normal admin route does not load the demo', async ({ page }) => {
   await page.goto('/approvals');
+  await expect(page.getByRole('note', { name: 'Demo mode' })).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'Sign in' })).toBeVisible();
+
+  // Even a stale demo history state on a production URL is not demo mode.
+  await page.evaluate(() => {
+    window.history.replaceState({ demo: true }, '', '/approvals');
+    window.location.reload();
+  });
   await expect(page.getByRole('note', { name: 'Demo mode' })).toHaveCount(0);
   await expect(page.getByRole('heading', { name: 'Sign in' })).toBeVisible();
 });

@@ -174,7 +174,7 @@ function ConnectionDrawer({
           <Button variant="secondary" onClick={onClose}>
             Cancel
           </Button>
-          <Button variant="primary" type="submit" form="connection-form" loading={saving}>
+          <Button variant="primary" type="submit" form="connection-form" mutation loading={saving}>
             {connection ? 'Save changes' : 'Add connection'}
           </Button>
         </>
@@ -427,7 +427,13 @@ export function ConnectionsCard() {
                         <Td align="right">
                           <div className="flex items-center justify-end gap-2">
                             {connector?.auth === 'oauth2' && (
-                              <Button size="sm" icon={<ExternalLink size={14} />} loading={busy === c.id} onClick={() => void authorize(c)}>
+                              <Button
+                                size="sm"
+                                icon={<ExternalLink size={14} />}
+                                mutation
+                                loading={busy === c.id}
+                                onClick={() => void authorize(c)}
+                              >
                                 {c.oauth?.status === 'connected' ? 'Reconnect' : 'Authorize'}
                               </Button>
                             )}

@@ -187,7 +187,7 @@ export default function TopicsPage() {
         footer={
           <>
             <Button onClick={() => setCreating(false)}>Cancel</Button>
-            <Button variant="primary" loading={saving} disabled={!draft.title.trim()} onClick={() => void create()}>
+            <Button variant="primary" mutation loading={saving} disabled={!draft.title.trim()} onClick={() => void create()}>
               Add topic
             </Button>
           </>

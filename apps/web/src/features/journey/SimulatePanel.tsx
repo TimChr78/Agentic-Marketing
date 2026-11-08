@@ -170,7 +170,7 @@ export function SimulatePanel({
           ))}
         </div>
       )}
-      <Button variant="primary" icon={<Play size={14} />} loading={busy} disabled={dirty} onClick={run}>
+      <Button variant="primary" icon={<Play size={14} />} mutation loading={busy} disabled={dirty} onClick={run}>
         Run simulation
       </Button>
       {error && <Alert tone="bad">{error}</Alert>}

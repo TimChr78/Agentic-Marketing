@@ -95,7 +95,7 @@ export default function PurposesPage() {
               Edit purposes
             </ButtonLink>
           ) : canWrite ? (
-            <Button variant="primary" icon={<Plus size={15} />} loading={creating} onClick={() => void create()}>
+            <Button variant="primary" icon={<Plus size={15} />} mutation loading={creating} onClick={() => void create()}>
               Create purposes
             </Button>
           ) : undefined}

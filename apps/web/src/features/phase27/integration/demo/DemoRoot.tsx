@@ -1,18 +1,14 @@
 import { X } from 'lucide-react';
 import { Suspense, useEffect, useMemo, useState } from 'react';
-import { getWorkspaceId, setWorkspaceId } from '../../../../app/api';
 import { CapabilitiesProvider, DEMO_CAPABILITIES } from '../../../../app/capabilities';
-import { setRouterBasePath } from '../../../../app/router';
 import { Routes } from '../../../../app/routes';
 import { Shell } from '../../../../app/Shell';
 import { SessionContext } from '../../../../app/session';
 import { AutonomyProvider } from '../../../../features/agents/AutonomyProvider';
 import { Button, LoadingBlock, ToastProvider } from '../../../../ui';
-import { setWorkspaceTimeZone } from '../../../../ui/time';
-import { demoLiveRetired, enterDemo, installDemoHistory, LIVE_RETIRED_NOTICE } from '../../demo/entry';
-import { DEMO_TIME_ZONE, DEMO_WORKSPACE_ID } from './fixtures';
+import { demoLiveRetired, enterDemo, LIVE_RETIRED_NOTICE } from '../../demo/entry';
+import { ensureDemoRuntime, teardownDemoRuntime } from '../../demo/runtime';
 import { DEMO_BANNER, DEMO_BANNER_HINT, demoSessionValue } from './session';
-import { installDemoStreamTransport, installDemoTransport } from './transport';
 
 /**
  * The real shell in demo mode (#524, #530): the same authenticated shell, navigation and page
@@ -22,32 +18,23 @@ import { installDemoStreamTransport, installDemoTransport } from './transport';
  * page, dialog and deep link is visibly sample data; the shell keeps its ordinary context line.
  *
  * The entry normalises `/demo`, the legacy hashes and the retired live-site walkthrough before the
- * shell mounts. Every navigation afterwards carries demo history state, so reload and back/forward
- * stay on fixtures, while a typed real URL or the sign-in exit starts a real session.
+ * shell mounts. Every navigation afterwards is confined to `/demo`, so reload and back/forward stay
+ * on fixtures, while a typed real URL or the sign-in exit starts a real session.
  */
 export function DemoRoot() {
   const session = useMemo(() => demoSessionValue(), []);
-  const [liveRetired, setLiveRetired] = useState(() => enterDemo().liveRetired || demoLiveRetired());
-  // Install synchronously during render: child effects run before the parent's, so a page's first
-  // read must already see the fixture transport. The cleanup removes it when the demo unmounts.
-  const [cleanup] = useState(() => {
-    const uninstall = installDemoTransport();
-    const uninstallStream = installDemoStreamTransport();
-    const uninstallHistory = installDemoHistory();
-    setWorkspaceTimeZone(DEMO_TIME_ZONE);
-    // Keyed caches act in the demo workspace, in memory only: the stored workspace of a signed-in
-    // person is left untouched.
-    const previous = getWorkspaceId();
-    setWorkspaceId(DEMO_WORKSPACE_ID, { persist: false });
-    return () => {
-      uninstall();
-      uninstallStream();
-      uninstallHistory();
-      setRouterBasePath('');
-      setWorkspaceId(previous, { persist: false });
-    };
+  const [liveRetired, setLiveRetired] = useState(() => {
+    const entry = enterDemo();
+    // Install synchronously during render: child effects run before the parent's, so a page's first
+    // read must already see the fixture transport.
+    ensureDemoRuntime();
+    return entry.liveRetired || demoLiveRetired();
   });
-  useEffect(() => cleanup, [cleanup]);
+  // The setup runs again after StrictMode's replay cleanup, so the runtime is re-installed there.
+  useEffect(() => {
+    ensureDemoRuntime();
+    return teardownDemoRuntime;
+  }, []);
 
   return (
     <ToastProvider>

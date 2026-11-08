@@ -287,13 +287,13 @@ export default function AlertsPage() {
                   </Button>
                   {admin && (
                     <>
-                      <Button size="sm" variant="ghost" onClick={() => void test(rule)}>
+                      <Button size="sm" variant="ghost" mutation onClick={() => void test(rule)}>
                         <Send size={13} /> Send a test
                       </Button>
                       <Button size="sm" onClick={() => setEditing(rule)}>
                         Edit
                       </Button>
-                      <Button size="sm" variant="ghost" onClick={() => void remove(rule)} aria-label={`Delete ${rule.name}`}>
+                      <Button size="sm" variant="ghost" mutation onClick={() => void remove(rule)} aria-label={`Delete ${rule.name}`}>
                         <Trash2 size={13} />
                       </Button>
                     </>
@@ -635,7 +635,7 @@ function AlertForm({
 
       <div className="flex justify-end gap-2 border-t border-line pt-4">
         <Button onClick={onCancel}>Cancel</Button>
-        <Button variant="primary" loading={busy} onClick={() => void save()}>
+        <Button variant="primary" mutation loading={busy} onClick={() => void save()}>
           {rule ? 'Save changes' : 'Create rule'}
         </Button>
       </div>

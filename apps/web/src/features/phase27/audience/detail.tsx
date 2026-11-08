@@ -37,12 +37,12 @@ export function audienceActions(ctx: ArtifactDetailActionContext): ArtifactDetai
   if (ctx.dirty && !ctx.readOnly) {
     return {
       primary: (
-        <Button variant="primary" loading={ctx.saving} onClick={() => void ctx.save()}>
+        <Button variant="primary" mutation loading={ctx.saving} onClick={() => void ctx.save()}>
           Save draft
         </Button>
       ),
       secondary: (
-        <Button variant="ghost" onClick={ctx.resetToSaved}>
+        <Button variant="ghost" mutation onClick={ctx.resetToSaved}>
           Discard changes
         </Button>
       ),
@@ -61,7 +61,7 @@ export function audienceActions(ctx: ArtifactDetailActionContext): ArtifactDetai
   if (ctx.canPublish && !pendingUnknown) {
     return {
       primary: (
-        <Button variant="primary" icon={<Send size={14} />} onClick={ctx.openPublish}>
+        <Button variant="primary" icon={<Send size={14} />} mutation onClick={ctx.openPublish}>
           {ctx.directPublish ? 'Publish' : 'Submit for review'}
         </Button>
       ),

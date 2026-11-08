@@ -262,7 +262,14 @@ function SourceDrawer({
           <Button variant="ghost" onClick={onClose}>
             Cancel
           </Button>
-          <Button variant="primary" className="ml-auto" icon={source ? undefined : <KeyRound size={14} />} loading={busy} onClick={save}>
+          <Button
+            variant="primary"
+            className="ml-auto"
+            icon={source ? undefined : <KeyRound size={14} />}
+            mutation
+            loading={busy}
+            onClick={save}
+          >
             {source ? 'Save changes' : 'Add source'}
           </Button>
         </>

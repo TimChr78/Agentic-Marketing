@@ -143,7 +143,7 @@ export function HostedAgentDialog({
       footer={
         <>
           <Button onClick={onClose}>Cancel</Button>
-          <Button variant="primary" loading={busy} onClick={() => void submit()}>
+          <Button variant="primary" mutation loading={busy} onClick={() => void submit()}>
             {agent ? 'Save changes' : 'Create hosted agent'}
           </Button>
         </>

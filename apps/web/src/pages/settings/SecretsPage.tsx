@@ -86,10 +86,10 @@ export default function SecretsPage() {
 
   const actions = (secret: Secret) => (
     <div className="flex flex-wrap justify-end gap-1">
-      <Button size="sm" variant="ghost" icon={<RotateCw size={14} />} onClick={() => setEditing({ mode: 'rotate', secret })}>
+      <Button size="sm" variant="ghost" icon={<RotateCw size={14} />} mutation onClick={() => setEditing({ mode: 'rotate', secret })}>
         Rotate
       </Button>
-      <Button size="sm" variant="danger" icon={<Trash2 size={14} />} onClick={() => void remove(secret)}>
+      <Button size="sm" variant="danger" icon={<Trash2 size={14} />} mutation onClick={() => void remove(secret)}>
         Delete
       </Button>
     </div>
@@ -253,7 +253,7 @@ function SecretDrawer({ editing, onClose, onSaved }: { editing: Editing; onClose
       footer={
         <>
           <Button onClick={onClose}>Cancel</Button>
-          <Button variant="primary" loading={busy} onClick={() => void submit()}>
+          <Button variant="primary" mutation loading={busy} onClick={() => void submit()}>
             {rotate ? 'Replace value' : 'Add secret'}
           </Button>
         </>

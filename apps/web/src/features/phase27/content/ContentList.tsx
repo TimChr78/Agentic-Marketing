@@ -342,7 +342,7 @@ function CreateDialog({ type, spec, onClose }: { type: string; spec: ContentCrea
       footer={
         <>
           <Button onClick={onClose}>Cancel</Button>
-          <Button variant="primary" loading={busy} onClick={submit}>
+          <Button variant="primary" mutation loading={busy} onClick={submit}>
             Create draft
           </Button>
         </>
