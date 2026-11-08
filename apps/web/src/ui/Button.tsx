@@ -59,6 +59,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
       type={type}
       {...p}
       title={blocked ? (reason ?? p.title) : p.title}
+      aria-description={blocked ? (reason ?? undefined) : p['aria-description']}
       disabled={disabled || loading || blocked}
       data-demo-blocked={blocked || undefined}
       aria-busy={loading || undefined}
@@ -92,6 +93,7 @@ export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(functio
       type={type}
       aria-label={label}
       title={blocked ? `${label} · ${reason ?? 'Unavailable'}` : label}
+      aria-description={blocked ? (reason ?? undefined) : p['aria-description']}
       {...p}
       disabled={p.disabled || blocked}
       data-demo-blocked={blocked || undefined}

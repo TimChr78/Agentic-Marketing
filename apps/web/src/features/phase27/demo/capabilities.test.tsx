@@ -24,6 +24,7 @@ describe('shared capability primitives (#530)', () => {
     expect(button.disabled).toBe(true);
     expect(button.getAttribute('title')).toBe(DEMO_RESTRICTION_REASON);
     expect(button.getAttribute('data-demo-blocked')).toBe('true');
+    expect(button.getAttribute('aria-description')).toBe(DEMO_RESTRICTION_REASON);
 
     const icon = screen.getByRole('button', { name: 'Delete provider' }) as HTMLButtonElement;
     expect(icon.disabled).toBe(true);
