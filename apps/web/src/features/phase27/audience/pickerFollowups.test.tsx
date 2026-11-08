@@ -4,7 +4,14 @@ import { setWorkspaceId } from '../../../app/api';
 import { ToastProvider } from '../../../ui/toast';
 import { ArtifactListPage } from '../../artifacts/ArtifactListPage';
 import type { ArtifactRow } from '../../artifacts/artifactList';
-import { invalidatePickerArtifact, invalidatePickerIndex, resetPickerIndexes, usePickerIndex } from '../../artifacts/pickerIndex';
+import {
+  invalidatePickerArtifact,
+  invalidatePickerIndex,
+  peekPickerIndex,
+  readPickerIndex,
+  resetPickerIndexes,
+  usePickerIndex,
+} from '../../artifacts/pickerIndex';
 
 // #525 review follow-ups: a skipped picker index must not subscribe, and a pending index must be
 // invalidated like a loaded one so a pre-mutation response cannot fill the cache.
@@ -66,6 +73,18 @@ function formRow(name: string): ArtifactRow {
     latestVersion: 1,
     latestState: 'draft',
     publishedVersion: null,
+    updatedAt: '2026-11-02T09:00:00.000Z',
+  };
+}
+
+function templateRow(): ArtifactRow {
+  return {
+    id: `eml_${'e'.repeat(32)}`,
+    type: 'email_template',
+    name: 'Confirm your subscription',
+    latestVersion: 1,
+    latestState: 'published',
+    publishedVersion: 1,
     updatedAt: '2026-11-02T09:00:00.000Z',
   };
 }
@@ -165,5 +184,36 @@ describe('pending picker index (#525)', () => {
     newer.resolve('Weekly readers');
     expect(await screen.findByText('Weekly readers')).toBeTruthy();
     expect(screen.queryByText('Old name')).toBeNull();
+  });
+
+  it('an unknown artifact prefix drops pending indexes but leaves loaded indexes alone', async () => {
+    const older = deferredPage();
+    const newer = deferredPage();
+    h.listQueue = [older.load, newer.load];
+
+    function Names() {
+      const index = usePickerIndex('segment');
+      return <p>{index.loading ? 'loading' : (index.data?.artifacts.map((artifact) => artifact.name).join(', ') ?? 'none')}</p>;
+    }
+    render(<Names />);
+    await waitFor(() => expect(callsOf('artifacts.list')).toHaveLength(1));
+
+    const loaded = await readPickerIndex(ws, 'email_template', {
+      load: async () => ({ artifacts: [templateRow()], total: 1, nextCursor: null }),
+    });
+    expect(loaded.artifacts[0]?.name).toBe('Confirm your subscription');
+
+    // An id without a known type prefix cannot name its index; every pending index is dropped,
+    // but a loaded index that does not hold the id is not touched.
+    invalidatePickerArtifact(ws, `zzz_${'d'.repeat(32)}`);
+    await waitFor(() => expect(callsOf('artifacts.list')).toHaveLength(2));
+    expect(peekPickerIndex(ws, 'email_template')?.artifacts[0]?.name).toBe('Confirm your subscription');
+
+    older.resolve('Old name');
+    await waitFor(() => expect(screen.getByText('loading')).toBeTruthy());
+    expect(screen.queryByText('Old name')).toBeNull();
+
+    newer.resolve('Weekly readers');
+    expect(await screen.findByText('Weekly readers')).toBeTruthy();
   });
 });
