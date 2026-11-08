@@ -2,7 +2,7 @@ import { type ReactNode, useRef, useState } from 'react';
 import { api } from '../../app/api';
 import { useSession } from '../../app/session';
 import { useApi, useKeyedApi } from '../../app/useApi';
-import { Alert, Card, EmptyState, ListSkeleton } from '../../ui';
+import { Alert, Card, EmptyState, KpiSkeleton, ListSkeleton } from '../../ui';
 import { type ReportPeriodChoice, reportPeriod } from '../broadcasts/period';
 import { DnsSection } from './DnsCards';
 import { cleanSelectors, isNotFound, type StreamKey, sameSelectors, streamOf } from './model';
@@ -109,6 +109,13 @@ export function DeliverabilityView() {
         {refreshing ? 'Refreshing deliverability values.' : ''}
       </p>
 
+      {health.loading && !health.error && (
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          {['Sent messages', 'Bounce rate', 'Complaint rate', 'Auto-pause'].map((label) => (
+            <KpiSkeleton key={label} label={label} />
+          ))}
+        </div>
+      )}
       {health.data && !health.error && (
         <SelectedStreamTiles health={health.data} streamKey={streamKey} onRefresh={refresh} refreshing={refreshing} />
       )}

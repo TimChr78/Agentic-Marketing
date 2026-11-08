@@ -408,6 +408,11 @@ describe('Deliverability data states (#508)', () => {
     expect(screen.getByRole('status', { name: 'Loading deliverability' })).toBeTruthy();
     expect(screen.getByRole('status', { name: 'Loading the deliverability trend' })).toBeTruthy();
     expect(screen.getByRole('status', { name: 'Checking sending domains' })).toBeTruthy();
+    // The four KPI tiles reserve their final geometry before the health read lands.
+    for (const name of ['Sent messages', 'Bounce rate', 'Complaint rate', 'Auto-pause']) {
+      const tile = screen.getByRole('status', { name });
+      expect(tile.getAttribute('data-geometry')).toBe('kpi');
+    }
   });
 
   it('keeps period and filter controls in the empty state', async () => {
