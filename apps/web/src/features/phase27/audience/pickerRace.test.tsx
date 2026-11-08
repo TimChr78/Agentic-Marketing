@@ -1,6 +1,7 @@
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setWorkspaceId } from '../../../app/api';
+import type { ArtifactListLoader, ArtifactRow } from '../../artifacts/artifactList';
 import { peekPickerIndex, readPickerIndex, refreshPickerIndex, resetPickerIndexes, usePickerIndex } from '../../artifacts/pickerIndex';
 
 // #525 review: a refresh must never let an older in-flight read overwrite the newer index.
@@ -24,7 +25,7 @@ vi.mock('../../../app/api', async (importOriginal) => {
   };
 });
 
-function row(i: number) {
+function row(i: number): ArtifactRow {
   return {
     id: `seg_${String(i).padStart(32, '0')}`,
     type: 'segment',
@@ -37,12 +38,13 @@ function row(i: number) {
 }
 
 function deferredRows() {
-  let resolve!: (value: { artifacts: unknown[]; total: number; nextCursor: null }) => void;
-  const promise = new Promise<{ artifacts: unknown[]; total: number; nextCursor: null }>((done) => {
+  let resolve!: (value: { artifacts: ArtifactRow[]; total: number; nextCursor: null }) => void;
+  const promise = new Promise<{ artifacts: ArtifactRow[]; total: number; nextCursor: null }>((done) => {
     resolve = done;
   });
+  const load: ArtifactListLoader = () => promise;
   return {
-    load: () => promise,
+    load,
     resolve: (i: number) => resolve({ artifacts: [row(i)], total: 1, nextCursor: null }),
   };
 }
