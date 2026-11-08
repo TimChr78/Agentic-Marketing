@@ -990,7 +990,7 @@ export default function AnalyticsPerformance() {
             </Alert>
           )}
           {failed.length > 0 && !anySuccess && !loading && (
-            <Alert tone="bad" className="mt-4" title="Could not load analytics" onRetry={retryFailed}>
+            <Alert tone="bad" className="mt-4" title="Couldn’t load analytics" onRetry={retryFailed}>
               No old values are shown as current.
             </Alert>
           )}

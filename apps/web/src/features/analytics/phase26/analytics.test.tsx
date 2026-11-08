@@ -707,12 +707,12 @@ describe('data states (#506)', () => {
   it('shows no old values as current when every read fails, and retries', async () => {
     h.fail = () => 'server unavailable';
     renderAt();
-    await waitFor(() => expect(screen.getByText('Could not load analytics')).toBeTruthy());
+    await waitFor(() => expect(screen.getByText('Couldn’t load analytics')).toBeTruthy());
     expect(screen.queryByText('Delivered people')).toBeNull();
 
     h.fail = null;
     h.calls.length = 0;
-    const alert = screen.getByText('Could not load analytics').closest('[role="alert"]') as HTMLElement;
+    const alert = screen.getByText('Couldn’t load analytics').closest('[role="alert"]') as HTMLElement;
     fireEvent.click(within(alert).getByRole('button', { name: 'Retry' }));
     await waitForReads(4);
   });

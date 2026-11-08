@@ -101,7 +101,7 @@ test('a failed report read names the report and offers Retry', async ({ page }) 
   await page.goto('/insights/analytics');
   await settle(page);
 
-  const alert = page.getByText('Could not load analytics').first();
+  const alert = page.getByText('Couldn’t load analytics').first();
   await expect(alert).toBeVisible();
   await expect(page.getByRole('alert').getByRole('button', { name: 'Retry' }).first()).toBeVisible();
 });
