@@ -308,7 +308,7 @@ function ProviderDrawer({
           <Button variant="ghost" onClick={onClose}>
             Cancel
           </Button>
-          <Button variant="primary" className="ml-auto" loading={busy} onClick={save}>
+          <Button variant="primary" className="ml-auto" mutation loading={busy} onClick={save}>
             {provider ? 'Save changes' : 'Add provider'}
           </Button>
         </>

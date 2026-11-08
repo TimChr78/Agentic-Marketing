@@ -24,11 +24,13 @@ export {
 } from './fixtures';
 export { DEMO_BANNER, DEMO_BANNER_HINT, DEMO_TIME_ZONE_LABEL, demoNow, demoSessionValue } from './session';
 export {
+  createDemoStreamTransport,
   createDemoTransport,
   DEMO_MUTATIONS,
   DEMO_READ_ONLY_MESSAGE,
   type DemoRead,
   type DemoTransportOptions,
   demoReads,
+  installDemoStreamTransport,
   installDemoTransport,
 } from './transport';

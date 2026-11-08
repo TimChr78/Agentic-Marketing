@@ -251,7 +251,7 @@ function SmsDrawer({
           <Button variant="secondary" onClick={onClose}>
             Cancel
           </Button>
-          <Button variant="primary" type="submit" form="sms-provider-form" loading={saving}>
+          <Button variant="primary" type="submit" form="sms-provider-form" mutation loading={saving}>
             {provider ? 'Save changes' : 'Add provider'}
           </Button>
         </>
@@ -664,7 +664,7 @@ function PushDrawer({ provider, onClose, onSaved }: { provider: Push | null; onC
           <Button variant="secondary" onClick={onClose}>
             Cancel
           </Button>
-          <Button variant="primary" type="submit" form="push-provider-form" loading={saving}>
+          <Button variant="primary" type="submit" form="push-provider-form" mutation loading={saving}>
             {provider ? 'Save changes' : 'Add provider'}
           </Button>
         </>
@@ -1076,7 +1076,7 @@ function AiDrawer({ provider, onClose, onSaved }: { provider: Ai | null; onClose
           <Button variant="secondary" onClick={onClose}>
             Cancel
           </Button>
-          <Button variant="primary" type="submit" form="ai-provider-form" loading={saving}>
+          <Button variant="primary" type="submit" form="ai-provider-form" mutation loading={saving}>
             {provider ? 'Save changes' : 'Add provider'}
           </Button>
         </>

@@ -1,6 +1,8 @@
 import { X } from 'lucide-react';
 import { Suspense, useEffect, useMemo, useState } from 'react';
 import { getWorkspaceId, setWorkspaceId } from '../../../../app/api';
+import { CapabilitiesProvider, DEMO_CAPABILITIES } from '../../../../app/capabilities';
+import { setRouterBasePath } from '../../../../app/router';
 import { Routes } from '../../../../app/routes';
 import { Shell } from '../../../../app/Shell';
 import { SessionContext } from '../../../../app/session';
@@ -10,7 +12,7 @@ import { setWorkspaceTimeZone } from '../../../../ui/time';
 import { demoLiveRetired, enterDemo, installDemoHistory, LIVE_RETIRED_NOTICE } from '../../demo/entry';
 import { DEMO_TIME_ZONE, DEMO_WORKSPACE_ID } from './fixtures';
 import { DEMO_BANNER, DEMO_BANNER_HINT, demoSessionValue } from './session';
-import { installDemoTransport } from './transport';
+import { installDemoStreamTransport, installDemoTransport } from './transport';
 
 /**
  * The real shell in demo mode (#524, #530): the same authenticated shell, navigation and page
@@ -30,6 +32,7 @@ export function DemoRoot() {
   // read must already see the fixture transport. The cleanup removes it when the demo unmounts.
   const [cleanup] = useState(() => {
     const uninstall = installDemoTransport();
+    const uninstallStream = installDemoStreamTransport();
     const uninstallHistory = installDemoHistory();
     setWorkspaceTimeZone(DEMO_TIME_ZONE);
     // Keyed caches act in the demo workspace, in memory only: the stored workspace of a signed-in
@@ -38,7 +41,9 @@ export function DemoRoot() {
     setWorkspaceId(DEMO_WORKSPACE_ID, { persist: false });
     return () => {
       uninstall();
+      uninstallStream();
       uninstallHistory();
+      setRouterBasePath('');
       setWorkspaceId(previous, { persist: false });
     };
   });
@@ -47,17 +52,19 @@ export function DemoRoot() {
   return (
     <ToastProvider>
       <SessionContext.Provider value={session}>
-        <DemoBanner />
-        {liveRetired && <LiveRetiredNotice onClose={() => setLiveRetired(false)} />}
-        <AutonomyProvider>
-          <Suspense fallback={<LoadingBlock lines={6} />}>
-            <Shell>
-              <Suspense fallback={<LoadingBlock lines={6} />}>
-                <Routes />
-              </Suspense>
-            </Shell>
-          </Suspense>
-        </AutonomyProvider>
+        <CapabilitiesProvider value={DEMO_CAPABILITIES}>
+          <DemoBanner />
+          {liveRetired && <LiveRetiredNotice onClose={() => setLiveRetired(false)} />}
+          <AutonomyProvider>
+            <Suspense fallback={<LoadingBlock lines={6} />}>
+              <Shell>
+                <Suspense fallback={<LoadingBlock lines={6} />}>
+                  <Routes />
+                </Suspense>
+              </Shell>
+            </Suspense>
+          </AutonomyProvider>
+        </CapabilitiesProvider>
       </SessionContext.Provider>
     </ToastProvider>
   );

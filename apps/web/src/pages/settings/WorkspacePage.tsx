@@ -207,11 +207,11 @@ export default function WorkspacePage() {
       ]}
       primaryAction={
         active === 'test-sends' ? (
-          <Button type="submit" form="workspace-seed-form" variant="primary" loading={savingSeed}>
+          <Button type="submit" form="workspace-seed-form" variant="primary" mutation loading={savingSeed}>
             Save test sends
           </Button>
         ) : (
-          <Button type="submit" form="workspace-general-form" variant="primary" loading={savingGeneral}>
+          <Button type="submit" form="workspace-general-form" variant="primary" mutation loading={savingGeneral}>
             Save
           </Button>
         )

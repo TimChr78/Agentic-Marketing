@@ -1,4 +1,4 @@
-import { ApiError, type CommandTransport, setCommandTransport } from '../../../../app/api';
+import { ApiError, type CommandTransport, type StreamTransport, setCommandTransport, setStreamTransport } from '../../../../app/api';
 import { demoDestinationReads } from '../../demo/reads';
 import { DEMO_ARTIFACTS, DEMO_MEMBERSHIPS, DEMO_PENDING_APPROVALS, DEMO_WORKSPACE, DEMO_WORKSPACE_ID } from './fixtures';
 
@@ -219,6 +219,22 @@ export function createDemoTransport(opts: DemoTransportOptions = {}): CommandTra
 /** Installs the demo transport behind `api.call`; returns the uninstall. */
 export function installDemoTransport(opts: DemoTransportOptions = {}): () => void {
   return setCommandTransport(createDemoTransport(opts));
+}
+
+/**
+ * The streaming guard (#530): the copilot's `/api/copilot` response cannot be a command, so it has
+ * its own transport. The demo refuses it with the same read-only message as a mutation, before any
+ * request could carry the visitor's session cookie.
+ */
+export function createDemoStreamTransport(): StreamTransport {
+  return async () => {
+    throw new ApiError(403, 'demo_read_only', READ_ONLY);
+  };
+}
+
+/** Installs the streaming guard; returns the uninstall. */
+export function installDemoStreamTransport(): () => void {
+  return setStreamTransport(createDemoStreamTransport());
 }
 
 /** Exposed for the mutation guard's own copy, so a refusal reads the same everywhere. */

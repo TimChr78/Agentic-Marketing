@@ -3,6 +3,31 @@ import { type AnchorHTMLAttributes, forwardRef, type MouseEvent, useSyncExternal
 // A small history router (DECISIONS.md D6): real paths, so deep links such as /approvals/apr_…
 // work and the server's SPA fallback serves them. Links are plain anchors that push state.
 
+// A URL base for a mounted app, e.g. `/demo`. The browser address keeps the base; pages, matches
+// and the shell see the internal path. Production never sets one, so every existing URL is
+// unchanged. The demo entry sets it before the shell mounts and clears it on exit.
+let basePath = '';
+export function setRouterBasePath(base: string) {
+  basePath = base === '/' ? '' : base.replace(/\/+$/, '');
+}
+export function getRouterBasePath() {
+  return basePath;
+}
+
+/** The path the app routes on, without the mounted base. */
+export function routerPath(pathname: string): string {
+  if (!basePath) return pathname;
+  if (pathname === basePath) return '/';
+  return pathname.startsWith(`${basePath}/`) ? pathname.slice(basePath.length) : pathname;
+}
+
+/** A browser href for an in-app path, including the mounted base. */
+export function routerHref(to: string): string {
+  if (!basePath || !to.startsWith('/')) return to;
+  if (to === basePath || to.startsWith(`${basePath}/`)) return to;
+  return to === '/' ? basePath : `${basePath}${to}`;
+}
+
 type Listener = () => void;
 const listeners = new Set<Listener>();
 const subscribe = (l: Listener) => {
@@ -25,15 +50,16 @@ export function addNavigationGuard(g: () => boolean) {
 }
 
 export function navigate(to: string, opts: { replace?: boolean } = {}) {
-  if (to === location.pathname + location.search) return;
+  const target = routerHref(to);
+  if (target === location.pathname + location.search) return;
   for (const g of guards) if (!g()) return;
-  if (opts.replace) history.replaceState(null, '', to);
-  else history.pushState(null, '', to);
+  if (opts.replace) history.replaceState(null, '', target);
+  else history.pushState(null, '', target);
   window.scrollTo(0, 0);
   emit();
 }
 
-const snapshot = () => location.pathname + location.search;
+const snapshot = () => routerPath(location.pathname) + location.search;
 export function useLocation() {
   const href = useSyncExternalStore(subscribe, snapshot, snapshot);
   const url = new URL(href, location.origin);
@@ -68,7 +94,7 @@ export const Link = forwardRef<HTMLAnchorElement, AnchorHTMLAttributes<HTMLAncho
     return (
       <a
         ref={ref}
-        href={to}
+        href={routerHref(to)}
         {...p}
         onClick={(e: MouseEvent<HTMLAnchorElement>) => {
           onClick?.(e);

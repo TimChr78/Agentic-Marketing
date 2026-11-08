@@ -238,6 +238,7 @@ export function ApprovalDrawer({
                   <Button
                     className="w-full sm:w-auto"
                     icon={<Send size={14} />}
+                    mutation
                     loading={busy === 'test'}
                     onClick={sendTest}
                     title="Send a [Test] copy of this version to your own address"
@@ -257,7 +258,7 @@ export function ApprovalDrawer({
                       >
                         Cancel
                       </Button>
-                      <Button variant="danger" icon={<X size={14} />} loading={busy === 'reject'} onClick={() => decide('reject')}>
+                      <Button variant="danger" icon={<X size={14} />} mutation loading={busy === 'reject'} onClick={() => decide('reject')}>
                         {bundle
                           ? `${held ? 'Veto' : 'Reject'} all ${bundle.members.length} with reason`
                           : held
@@ -267,10 +268,16 @@ export function ApprovalDrawer({
                     </>
                   ) : (
                     <>
-                      <Button ref={rejectButtonRef} variant="danger" icon={<X size={14} />} onClick={() => setRejecting(true)}>
+                      <Button ref={rejectButtonRef} variant="danger" icon={<X size={14} />} mutation onClick={() => setRejecting(true)}>
                         {held ? (bundle ? 'Veto all' : 'Veto') : bundle ? 'Reject all' : 'Reject'}
                       </Button>
-                      <Button variant="primary" icon={<Check size={14} />} loading={busy === 'approve'} onClick={() => decide('approve')}>
+                      <Button
+                        variant="primary"
+                        icon={<Check size={14} />}
+                        mutation
+                        loading={busy === 'approve'}
+                        onClick={() => decide('approve')}
+                      >
                         {held
                           ? bundle
                             ? `Run all ${bundle.members.length} now`
