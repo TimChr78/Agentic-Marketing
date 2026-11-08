@@ -2,11 +2,16 @@
 // Select the Vitest projects and files a change actually touches, so a local run does not pay for
 // the whole 44-minute server project. The full suite still runs in CI for a phase PR and a release.
 //
-//   node scripts/test-affected.mjs --print                     what would run, from origin/main to HEAD
+//   node scripts/test-affected.mjs --print                     what would run, from the nearest base to HEAD
 //   node scripts/test-affected.mjs --run                       run it with npx vitest
 //   node scripts/test-affected.mjs --base origin/main --print  another base
 //   node scripts/test-affected.mjs --files a b c --print       map an explicit file list
 //   node scripts/test-affected.mjs --run -- --reporter=dot     extra Vitest arguments after --
+//
+// Without --base, the comparison base is the nearest origin/feat/phase-* branch that is an
+// ancestor of HEAD (the phase branch a task branch was cut from); otherwise origin/main. Setting
+// AM_AFFECTED_BASE overrides that, and an explicit --base overrides both. The chosen base and the
+// reason are printed, so a phase branch no longer diffs against main and runs the whole suite.
 //
 // Changed files are `git diff --name-only <base>...HEAD` plus staged, unstaged and untracked files.
 // The mapping is deliberately conservative: a path it cannot classify, a migration, the Vitest
@@ -530,22 +535,74 @@ function git(root, args) {
   return execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 }
 
+/** Remote phase branches, the integration branches a task branch is cut from. */
+export function phaseBranches(root = ROOT) {
+  try {
+    return git(root, ['for-each-ref', '--format=%(refname:short)', 'refs/remotes/origin/feat/phase-*'])
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The base to diff against when the caller names none. On a task branch cut from a phase branch,
+ * `origin/main` includes every earlier task in the phase and the selection falls back to the whole
+ * suite. The nearest phase branch is the one that is an ancestor of HEAD whose merge-base with HEAD
+ * is closest: fewest commits between the merge-base and HEAD wins.
+ */
+export function resolveDefaultBase({ root = ROOT } = {}) {
+  const candidates = [];
+  for (const branch of phaseBranches(root)) {
+    try {
+      git(root, ['merge-base', '--is-ancestor', branch, 'HEAD']);
+    } catch {
+      continue; // Not merged into this branch: not its base.
+    }
+    const mergeBase = git(root, ['merge-base', branch, 'HEAD']).trim();
+    const behind = Number(git(root, ['rev-list', '--count', `${mergeBase}..HEAD`]).trim());
+    candidates.push({ branch, mergeBase, behind });
+  }
+  if (!candidates.length) {
+    return { base: DEFAULT_BASE, reason: 'no origin/feat/phase-* branch is an ancestor of HEAD' };
+  }
+  candidates.sort((a, b) => a.behind - b.behind || a.branch.localeCompare(b.branch));
+  const nearest = candidates[0];
+  return {
+    base: nearest.branch,
+    reason: `nearest of ${candidates.length} phase branch(es): an ancestor of HEAD with the most recent merge-base (${nearest.behind} commit(s) since)`,
+  };
+}
+
+/**
+ * The comparison base and why: an explicit `--base` wins, then `AM_AFFECTED_BASE`, then the nearest
+ * phase branch, then `origin/main`.
+ */
+export function resolveBase({ root = ROOT, explicit = null, env = process.env } = {}) {
+  if (explicit) return { base: explicit, reason: 'the explicit --base' };
+  if (env.AM_AFFECTED_BASE) return { base: env.AM_AFFECTED_BASE, reason: 'AM_AFFECTED_BASE' };
+  return resolveDefaultBase({ root });
+}
+
 /**
  * The changed files from git: the merge base with `base` to HEAD, plus staged, unstaged and
  * untracked files. Returns a warning instead of failing when the base ref does not exist.
  */
-export function collectChangedFiles({ root = ROOT, base = DEFAULT_BASE } = {}) {
+export function collectChangedFiles({ root = ROOT, base = null, env = process.env } = {}) {
   const files = new Set();
-  let resolvedBase = base;
+  const chosen = resolveBase({ root, explicit: base, env });
+  let resolvedBase = chosen.base;
   let warning = null;
   try {
-    git(root, ['rev-parse', '--verify', '--quiet', `${base}^{commit}`]);
+    git(root, ['rev-parse', '--verify', '--quiet', `${resolvedBase}^{commit}`]);
   } catch {
     for (const fallback of ['main', 'origin/HEAD']) {
       try {
         git(root, ['rev-parse', '--verify', '--quiet', `${fallback}^{commit}`]);
         resolvedBase = fallback;
-        warning = `base ${base} is not available; using ${fallback}`;
+        warning = `base ${chosen.base} is not available; using ${fallback}`;
         break;
       } catch {
         // Try the next fallback.
@@ -553,7 +610,7 @@ export function collectChangedFiles({ root = ROOT, base = DEFAULT_BASE } = {}) {
     }
     if (warning === null) {
       resolvedBase = null;
-      warning = `base ${base} is not available; only staged, unstaged and untracked changes are mapped`;
+      warning = `base ${chosen.base} is not available; only staged, unstaged and untracked changes are mapped`;
     }
   }
   const add = (output) => {
@@ -563,7 +620,7 @@ export function collectChangedFiles({ root = ROOT, base = DEFAULT_BASE } = {}) {
   add(git(root, ['diff', '--name-only', '--no-renames']));
   add(git(root, ['diff', '--name-only', '--no-renames', '--cached']));
   add(git(root, ['ls-files', '--others', '--exclude-standard']));
-  return { files: [...files].sort(), base: resolvedBase, warning };
+  return { files: [...files].sort(), base: resolvedBase, reason: chosen.reason, warning };
 }
 
 /**
@@ -585,6 +642,7 @@ export function vitestInvocations(result, passthrough = []) {
 export function formatHuman(result) {
   const lines = [];
   lines.push(`Changed files: ${result.changed.length}${result.base ? ` (base ${result.base})` : ''}`);
+  if (result.baseReason) lines.push(`Base: ${result.base ?? 'none'}; ${result.baseReason}`);
   for (const file of result.changed) lines.push(`  ${file}`);
   lines.push('');
   if (result.full) {
@@ -660,16 +718,22 @@ function main(argv) {
 
   let changed;
   let gitBase = base;
+  let baseReason = null;
   let warning = null;
   if (files) {
     changed = files;
+    const chosen = resolveBase({ root: ROOT, explicit: base });
+    gitBase = chosen.base;
+    baseReason = chosen.reason;
   } else {
-    const collected = collectChangedFiles({ root: ROOT, base: base ?? DEFAULT_BASE });
+    const collected = collectChangedFiles({ root: ROOT, base });
     changed = collected.files;
     gitBase = collected.base;
+    baseReason = collected.reason;
     warning = collected.warning;
   }
   const result = selectAffected({ root: ROOT, files: changed, base: gitBase });
+  result.baseReason = baseReason;
   if (warning) result.notes.push(warning);
 
   if (json) console.log(JSON.stringify(result, null, 2));

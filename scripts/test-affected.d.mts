@@ -10,6 +10,8 @@ export interface Selection {
 
 export interface AffectedResult {
   base: string | null;
+  /** Why that base was chosen, set by the CLI (not by selectAffected). */
+  baseReason?: string | null;
   changed: string[];
   full: boolean;
   fullReasons: string[];
@@ -28,9 +30,24 @@ export function workspacePackages(root: string): Map<string, WorkspacePackage>;
 
 export function selectAffected(options?: { root?: string; files?: string[]; base?: string | null }): AffectedResult;
 
-export function collectChangedFiles(options?: { root?: string; base?: string }): {
+export interface BaseChoice {
+  base: string;
+  reason: string;
+}
+
+/** Remote `origin/feat/phase-*` branches, or an empty list when git cannot be read. */
+export function phaseBranches(root?: string): string[];
+
+/** The nearest phase branch that is an ancestor of HEAD, or the default base with the reason. */
+export function resolveDefaultBase(options?: { root?: string }): BaseChoice;
+
+/** The explicit base, then `AM_AFFECTED_BASE`, then the nearest phase branch, then origin/main. */
+export function resolveBase(options?: { root?: string; explicit?: string | null; env?: Record<string, string | undefined> }): BaseChoice;
+
+export function collectChangedFiles(options?: { root?: string; base?: string | null; env?: Record<string, string | undefined> }): {
   files: string[];
   base: string | null;
+  reason: string;
   warning: string | null;
 };
 

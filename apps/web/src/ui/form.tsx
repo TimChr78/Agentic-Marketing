@@ -150,8 +150,12 @@ export const Select = forwardRef<
         {...p}
         {...useField(p)}
         title={blocked ? (reason ?? undefined) : p.title}
-        aria-description={blocked ? (reason ?? undefined) : undefined}
+        aria-description={blocked ? (reason ?? undefined) : p['aria-description']}
         data-demo-blocked={blocked || undefined}
+        // A disabled native select ignores a user's change, but a synthetic or programmatic event
+        // still reaches React; dropping the handler is the second guard, so a blocked control can
+        // never run its command.
+        onChange={blocked ? undefined : p.onChange}
         disabled={p.disabled || blocked}
         className={cx(
           controlClass,
