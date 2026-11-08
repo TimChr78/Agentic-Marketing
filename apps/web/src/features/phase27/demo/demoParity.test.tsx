@@ -125,6 +125,7 @@ const DESTINATIONS: { path: string; heading: string }[] = [
   { path: '/content/templates', heading: 'E-mail templates' },
   { path: '/insights/analytics', heading: 'Analytics' },
   { path: '/settings/integrations', heading: 'Integrations and API tokens' },
+  { path: '/settings/providers', heading: 'Providers' },
 ];
 
 describe('demo destinations render on the real shell (#530)', () => {
