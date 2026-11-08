@@ -130,9 +130,12 @@ test.describe('blocks and brand fields are unchanged', () => {
     await signIn(page, PEOPLE.owner);
     await page.goto('/content/templates?tab=blocks');
     await settle(page);
-    // No block is seeded, so the list states what is missing and names the create action.
-    await expect(page.getByText('No blocks yet')).toBeVisible();
+    // The create action is always reachable. No block is seeded, but other specs create blocks in
+    // the shared database (phase25-approval), so the empty copy is only checked when the list is
+    // empty; the empty-state wording itself is covered by content-loading.test.tsx.
     await expect(page.getByRole('button', { name: 'New block' }).first()).toBeVisible();
+    const rows = await page.locator('main#main table tbody tr').count();
+    if (rows === 0) await expect(page.getByText('No blocks yet')).toBeVisible();
 
     // Every block control still exists on the detail editor.
     const created = await call<{ artifactId: string }>(page.request, 'artifacts.create', {
