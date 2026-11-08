@@ -59,6 +59,7 @@ const renderEditor = (over: Partial<TemplateContent> = {}, readOnly = false) => 
 
 beforeEach(() => {
   h.calls = [];
+  Object.defineProperty(window, 'innerWidth', { writable: true, configurable: true, value: 1440 });
 });
 afterEach(cleanup);
 
@@ -72,7 +73,7 @@ describe('Template editor (#526)', () => {
     expect(h.calls.filter((c) => c.name === 'purposes.list')).toHaveLength(1);
   });
 
-  it('keeps visual and code modes, insert, undo, redo, outlines and the preview toggle', async () => {
+  it('keeps visual and code modes, insert, undo, redo and outlines', async () => {
     renderEditor();
     expect(screen.getByRole('radio', { name: 'Visual' })).toBeTruthy();
     expect(screen.getByRole('radio', { name: 'MJML and Liquid' })).toBeTruthy();
@@ -80,14 +81,31 @@ describe('Template editor (#526)', () => {
     expect(screen.getByRole('button', { name: 'Undo' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Redo' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Outlines' })).toBeTruthy();
+    await userEvent.click(screen.getByRole('radio', { name: 'MJML and Liquid' }));
+    expect(screen.getByLabelText('MJML with Liquid')).toHaveProperty('value', content.mjml);
+  });
+
+  it('starts with the preview closed at 1440 and toggles it on and off', async () => {
+    renderEditor();
     const preview = screen.getByRole('button', { name: 'Preview' });
-    expect(preview.getAttribute('aria-pressed')).toBe('true');
-    expect(screen.getByText('Recipient preview')).toBeTruthy();
+    expect(preview.getAttribute('aria-pressed')).toBe('false');
+    expect(screen.queryByText('Recipient preview')).toBeNull();
+
     await userEvent.click(preview);
     expect(preview.getAttribute('aria-pressed')).toBe('true');
     expect(screen.getByText('Recipient preview')).toBeTruthy();
-    await userEvent.click(screen.getByRole('radio', { name: 'MJML and Liquid' }));
-    expect(screen.getByLabelText('MJML with Liquid')).toHaveProperty('value', content.mjml);
+
+    await userEvent.click(preview);
+    expect(preview.getAttribute('aria-pressed')).toBe('false');
+    expect(screen.queryByText('Recipient preview')).toBeNull();
+  });
+
+  it('starts with the preview open only when both panes fit', () => {
+    Object.defineProperty(window, 'innerWidth', { writable: true, configurable: true, value: 1920 });
+    renderEditor();
+    const preview = screen.getByRole('button', { name: 'Preview' });
+    expect(preview.getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByText('Recipient preview')).toBeTruthy();
   });
 
   it('keeps the plain-text version, sample data and UTM fields under Advanced', async () => {
