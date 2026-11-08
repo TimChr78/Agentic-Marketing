@@ -242,6 +242,8 @@ export default function AlertsPage() {
         </div>
       ) : (
         <div className="am-frame overflow-hidden rounded-lg border border-line bg-surface">
+          {/* Rule names are h3 sections; this keeps the outline h1 → h2 → h3 (axe heading-order). */}
+          <h2 className="sr-only">Rules</h2>
           <div
             className="hidden border-b border-line bg-surface-2 px-4 py-2 text-[12px] leading-[18px] text-muted md:grid md:grid-cols-[minmax(0,1.2fr)_minmax(0,1.4fr)_190px_auto] md:gap-4"
             aria-hidden
