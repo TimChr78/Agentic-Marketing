@@ -12,13 +12,127 @@ const ROOT = join(process.cwd(), 'apps/web/src');
 const ALLOWED_FILES = new Set(['app/SignIn.tsx', 'app/ForgotPassword.tsx', 'app/ResetPassword.tsx']);
 
 /**
- * Read-only submit controls, scoped to their exact control rather than a file-wide name: only the
- * person lookup in Consent and the People search are exempt, not every button that happens to use
- * the same loading flag.
+ * Read-only submit controls and async reads, scoped to their exact control rather than a file-wide
+ * name: only the person lookup in Consent and the People search are exempt, not every button that
+ * happens to use the same loading flag. A reload, a next page or a preview is a `void fn(…)` but
+ * does not change data, so it is allowlisted here with the reason it is read-only.
  */
-const ALLOWED_CONTROLS: { file: string; control: RegExp }[] = [
-  { file: 'pages/audience/ConsentPage.tsx', control: /<Button type="submit" loading=\{lookingUp\}/ },
-  { file: 'pages/audience/PeoplePage.tsx', control: /<Button size="sm" type="submit" loading=\{searching\}/ },
+const ALLOWED_CONTROLS: { file: string; control: RegExp; reason: string }[] = [
+  {
+    file: 'app/Root.tsx',
+    control: /<Button className="mt-4" onClick=\{\(\) => void signOut\(\)\}>/,
+    reason: 'ends the session; changes no workspace data',
+  },
+  {
+    file: 'pages/audience/ConsentPage.tsx',
+    control: /<Button type="submit" loading=\{lookingUp\}/,
+    reason: 'looks up one person; no write',
+  },
+  {
+    file: 'pages/audience/PeoplePage.tsx',
+    control: /<Button size="sm" type="submit" loading=\{searching\}/,
+    reason: 'searches people; no write',
+  },
+  {
+    file: 'features/agents/HostedAgentCard.tsx',
+    control: /<Button loading=\{loadingMore\} onClick=\{\(\) => void loadMore\(\)\}>/,
+    reason: 'loads the next page of runs; a read',
+  },
+  {
+    file: 'features/agents/phase26/ActivityTab.tsx',
+    control: /<Button loading=\{loadingMore\} onClick=\{\(\) => void loadMore\(\)\}>/,
+    reason: 'loads the next page of activity; a read',
+  },
+  {
+    file: 'features/artifacts/ArtifactDetailPage.tsx',
+    control: /<Button onClick=\{\(\) => void art\.reload\(\)\}>/,
+    reason: 'retries the detail read after an error',
+  },
+  {
+    file: 'features/artifacts/SegmentEditor.tsx',
+    control: /<Button size="sm" variant="secondary" loading=\{!!current\?\.loading\} onClick=\{\(\) => void estimateNow\(\)\}>/,
+    reason: 'segments.preview: a size estimate, not a write',
+  },
+  {
+    file: 'features/home/OnboardingChecklist.tsx',
+    control: /<Button size="sm" variant="ghost" onClick=\{\(\) => void load\(\)\}>/,
+    reason: 'reloads the checklist read',
+  },
+  {
+    file: 'features/phase27/content/ContentList.tsx',
+    control: /<Button onClick=\{\(\) => void list\.reload\(\)\}>/,
+    reason: 'retries the list read',
+  },
+  {
+    file: 'features/tokens/TokenDrawer.tsx',
+    control: /<Button variant="ghost" disabled=\{!dirty\} onClick=\{\(\) => void t\.reload\(\)\}>/,
+    reason: 'reloads the token read',
+  },
+  {
+    file: 'pages/HomePage.tsx',
+    control: /<Button variant="secondary".*onClick=\{\(\) => void home\.reload\(\)\}>/,
+    reason: 'reloads the dashboard reads',
+  },
+  {
+    file: 'pages/audience/PeoplePage.tsx',
+    control: /<Button variant="secondary" onClick=\{\(\) => void retryFirst\(\)\}>/,
+    reason: 'retries the first page read',
+  },
+  {
+    file: 'pages/audience/PeoplePage.tsx',
+    control: /<Button onClick=\{\(\) => void next\(\)\} loading=\{loadingPage\}/,
+    reason: 'pages forward; a read',
+  },
+  {
+    file: 'pages/audience/PeoplePage.tsx',
+    control: /<IconButton label="Refresh people".*onClick=\{\(\) => void loadFirst\(\)\}/,
+    reason: 'refreshes the first page; a read',
+  },
+  {
+    file: 'pages/audience/PersonPage.tsx',
+    control: /<Button icon=\{<RefreshCw size=\{15\} \/>\} onClick=\{\(\) => void profile\.reload\(\)\}>/,
+    reason: 'retries the profile read',
+  },
+  {
+    file: 'pages/build/BroadcastsPage.tsx',
+    control: /<Button onClick=\{\(\) => void list\.reload\(\)\}>/,
+    reason: 'retries the list read',
+  },
+  {
+    file: 'pages/build/RecipesPage.tsx',
+    control: /<Button onClick=\{\(\) => void loadList\(\)\}>/,
+    reason: 'retries the starters read',
+  },
+  {
+    file: 'pages/build/RecipesPage.tsx',
+    control: /<Button variant="secondary" loading=\{checking\} onClick=\{\(\) => void check\(\)\}>/,
+    reason: 'recipes.preview: checks prerequisites, no write',
+  },
+  {
+    file: 'pages/design/AssetsPage.tsx',
+    control: /<Button onClick=\{\(\) => void list\.reload\(\)\}>/,
+    reason: 'retries the asset list read',
+  },
+  {
+    file: 'pages/insights/MessagesPage.tsx',
+    control: /<Button onClick=\{\(\) => void loadMore\(\)\} loading=\{loadingMore\}>/,
+    reason: 'pages forward; a read',
+  },
+  {
+    file: 'pages/settings/SecretsPage.tsx',
+    control: /<Button onClick=\{\(\) => void list\.reload\(\)\}>/,
+    reason: 'retries the secrets list read',
+  },
+  {
+    file: 'pages/settings/UsersPage.tsx',
+    control: /<Button onClick=\{\(\) => void data\.reload\(\)\}>/,
+    reason: 'retries the member list read',
+  },
+  {
+    file: 'pages/settings/UsersPage.tsx',
+    control: /<Button icon=\{<Copy size=\{14\} \/>\} onClick=\{\(\) => void copy\(\)\}>/,
+    reason: 'copies the invitation link to the clipboard',
+  },
 ];
 
 const MUTATING_HANDLER =
@@ -26,9 +140,18 @@ const MUTATING_HANDLER =
 
 const MUTATING_SWITCH = /(\btoggle\b|onToggle|void\s+toggle\s*\()/;
 
-// A dropdown that writes on change fires an async command (`void changeRole(…)`, `api.call(…)`);
-// one that edits a draft only updates local state. Lexical verbs miss names like changeRole.
-const MUTATING_SELECT = /\bvoid\s+[\w.]+\s*\(|\bapi\.call\s*\(/;
+// A handler that fires an async command mutates even when its name is lexical rather than verbal:
+// `removeSelection`, `onPick`, `void save(…)` and `api.call(…)` all count. The verb list stays as
+// the second signal; either one is enough for a button, and it was already the rule for Select.
+const ASYNC_COMMAND = /\bvoid\s+[\w.]+\s*\(|\bapi\.call\s*\(/;
+
+/** Whether one control's handler changes data, by name or by firing an async command. */
+export function handlerMutates(name: string, handler: string | null): boolean {
+  if (handler === null) return false;
+  if (name === 'Switch') return MUTATING_SWITCH.test(handler);
+  if (name === 'Select') return ASYNC_COMMAND.test(handler);
+  return MUTATING_HANDLER.test(handler) || ASYNC_COMMAND.test(handler);
+}
 
 function walk(dir: string, out: string[] = []) {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -134,13 +257,7 @@ function failures(): string[] {
         if (/\bmutation\b/.test(tag.text)) continue;
         const submit = /type="submit"/.test(tag.text) || /\bform="/.test(tag.text);
         const handler = prop(tag.text, name === 'Switch' || name === 'Select' ? 'onChange' : 'onClick');
-        const mutating =
-          handler !== null &&
-          (name === 'Switch'
-            ? MUTATING_SWITCH.test(handler)
-            : name === 'Select'
-              ? MUTATING_SELECT.test(handler)
-              : MUTATING_HANDLER.test(handler));
+        const mutating = handlerMutates(name, handler);
         if (!submit && !mutating) continue;
         if (allowed(tag.text)) continue;
         problems.push(`${file}:${tag.line}: mark this ${name} with mutation\n  ${tag.text.replace(/\s+/g, ' ').slice(0, 180)}`);
@@ -170,5 +287,26 @@ function failures(): string[] {
 describe('demo mutation sweep (#530)', () => {
   it('marks every visible submit, switch, menu action and mutating control with mutation', () => {
     expect(failures()).toEqual([]);
+  });
+
+  it('flags a Button or IconButton that fires an async command, whatever its name (#552)', () => {
+    expect(handlerMutates('Button', '() => void removeSelection(id)')).toBe(true);
+    expect(handlerMutates('IconButton', '() => void api.call("members.remove", input)')).toBe(true);
+    expect(handlerMutates('Button', '() => { void archive(row); }')).toBe(true);
+  });
+
+  it('keeps the verb list as a second signal (#552)', () => {
+    expect(handlerMutates('Button', '() => save()')).toBe(true);
+    expect(handlerMutates('IconButton', '() => remove(id)')).toBe(true);
+  });
+
+  it('does not flag local state or navigation (#552)', () => {
+    expect(handlerMutates('Button', '() => setOpen(true)')).toBe(false);
+    expect(handlerMutates('IconButton', '() => navigate("/settings")')).toBe(false);
+    expect(handlerMutates('Button', null)).toBe(false);
+  });
+
+  it('flags a clipboard copy by shape, so the sweep can allowlist that exact control (#552)', () => {
+    expect(handlerMutates('Button', '() => void navigator.clipboard.writeText(text)')).toBe(true);
   });
 });

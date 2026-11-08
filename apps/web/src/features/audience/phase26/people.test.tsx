@@ -502,7 +502,8 @@ describe('Person detail (#510)', () => {
     renderPerson();
     await screen.findByRole('heading', { level: 1, name: 'ada@example.com' });
 
-    expect(names()).toEqual(['profiles.get', 'profiles.events', 'messages.list', 'consent.history', 'purposes.list']);
+    // The timeline reads start in their own effects, so the heading can render first under load.
+    await waitFor(() => expect(names()).toEqual(['profiles.get', 'profiles.events', 'messages.list', 'consent.history', 'purposes.list']));
     expect(calls('profiles.events')[0].input).toEqual({ profileId: canonicalId, limit: 100 });
     expect(calls('messages.list')[0].input).toEqual({ profileId: canonicalId, limit: 50 });
     expect(calls('consent.history')[0].input).toEqual({ profileId: canonicalId });
@@ -518,7 +519,7 @@ describe('Person detail (#510)', () => {
     h.calls.length = 0;
     renderPerson();
     await screen.findByRole('heading', { level: 1, name: 'ada@example.com' });
-    expect(names()).toEqual(['profiles.get', 'profiles.events', 'messages.list', 'consent.history']);
+    await waitFor(() => expect(names()).toEqual(['profiles.get', 'profiles.events', 'messages.list', 'consent.history']));
   });
 
   it('shows the identity hierarchy and copies the full id without printing it', async () => {
@@ -674,6 +675,9 @@ describe('Person detail (#510)', () => {
   it('refreshes with the four base reads, without purpose or template fan-out', async () => {
     renderPerson();
     await screen.findByRole('heading', { level: 1, name: 'ada@example.com' });
+    // Let the initial timeline reads land before counting, so a slow first load is not added to the
+    // four the refresh issues.
+    await waitFor(() => expect(names()).toEqual(['profiles.get', 'profiles.events', 'messages.list', 'consent.history', 'purposes.list']));
     const before = h.calls.length;
     await userEvent.click(screen.getByRole('button', { name: 'Refresh' }));
     await waitFor(() => expect(h.calls.length).toBe(before + 4));

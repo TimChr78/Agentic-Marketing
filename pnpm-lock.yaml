@@ -13,6 +13,7 @@ overrides:
   happy-dom: ^21.0.4
   minimatch: 11.0.1
   mjml-browser: 5.4.1
+  smtp-server>nodemailer: 10.1.4
 
 importers:
 
@@ -4110,8 +4111,8 @@ packages:
     resolution: {integrity: sha512-6li2QanLsAXpIH2R6j77MzRyvOyrvdTqlKtO4CgBdHGNvN99ZZfyxszHc5o5+IZBWD5u6Hzwg83JoGXmqZNG9Q==}
     engines: {node: '>=18'}
 
-  nodemailer@10.0.14:
-    resolution: {integrity: sha512-eJoLFKg55fesSlzUekmfOv/SBXh4KUYT8oiQc2RLP0tfG0rbNMJBK7wgHJwXTJwqyKlSJMz9UzDZ4v+aHEvo8g==}
+  nodemailer@10.1.4:
+    resolution: {integrity: sha512-EsMnOR2oRv4LGnWvHgcVYkkQ4O2j8KO4WTw6l+PHR4sOXo8SAgIraxtEnGDmotjbhv0hDsu3IuDIFZm8iXwO4A==}
     engines: {node: '>=20.0.0'}
 
   nodemailer@10.3.1:
@@ -8103,7 +8104,7 @@ snapshots:
 
   node-releases@2.0.63: {}
 
-  nodemailer@10.0.14: {}
+  nodemailer@10.1.4: {}
 
   nodemailer@10.3.1: {}
 
@@ -8724,7 +8725,7 @@ snapshots:
   smtp-server@3.19.17:
     dependencies:
       ipv6-normalize: 1.0.1
-      nodemailer: 10.0.14
+      nodemailer: 10.1.4
       punycode.js: 2.3.1
 
   sonic-boom@4.2.1:

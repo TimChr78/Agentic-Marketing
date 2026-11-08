@@ -248,7 +248,7 @@ export function CopilotDrawer({ open, onClose }: { open: boolean; onClose: () =>
               {can('artifacts:read') ? (
                 <div className="flex flex-wrap gap-2">
                   {SUGGESTIONS.map((s) => (
-                    <Button key={s} variant="secondary" size="sm" disabled={!copilotAvailable} onClick={() => void ask(s)}>
+                    <Button key={s} variant="secondary" size="sm" mutation disabled={!copilotAvailable} onClick={() => void ask(s)}>
                       {s}
                     </Button>
                   ))}
@@ -331,6 +331,7 @@ export function CopilotDrawer({ open, onClose }: { open: boolean; onClose: () =>
             <Button
               variant="primary"
               icon={<Send size={14} />}
+              mutation
               disabled={busy || !input.trim() || !can('artifacts:read') || !copilotAvailable}
               onClick={() => void ask(input)}
             >
