@@ -1,6 +1,7 @@
 import { Loader2 } from 'lucide-react';
 import { type AnchorHTMLAttributes, type ButtonHTMLAttributes, forwardRef, type ReactNode } from 'react';
 import { useCapabilities } from '../app/capabilities';
+import { routerHref } from '../app/router';
 import { cx } from './cx';
 
 export type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'danger' | 'danger-solid';
@@ -114,11 +115,16 @@ export function LinkButton({
   size = 'md',
   className,
   icon,
+  href,
   children,
   ...p
 }: AnchorHTMLAttributes<HTMLAnchorElement> & { variant?: ButtonVariant; size?: ButtonSize; icon?: ReactNode }) {
   return (
-    <a {...p} className={buttonClass({ variant, size, className: cx('no-underline', className) })}>
+    <a
+      {...p}
+      href={href ? routerHref(href) : undefined}
+      className={buttonClass({ variant, size, className: cx('no-underline', className) })}
+    >
       {icon}
       {children}
     </a>

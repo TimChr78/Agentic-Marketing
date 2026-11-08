@@ -166,6 +166,7 @@ describe('demo destinations render on the real shell (#530)', () => {
 
     expect(await screen.findByText("This page doesn't exist")).toBeTruthy();
     expect(screen.getByRole('note', { name: 'Demo mode' })).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'Go to Home' }).getAttribute('href')).toBe('/demo');
   });
 
   it('never adopts or overwrites a signed-in workspace', async () => {
