@@ -75,7 +75,7 @@ export function ResetPassword({ token }: { token: string | null }) {
             else if (body.code === 'INVALID_TOKEN') {
               setExpired(true);
               setErr('This reset link has expired or was already used. Ask for a new one.');
-            } else setErr(body.message ?? `The password could not be changed (${r.status}).`);
+            } else setErr('Couldn’t change the password. Try again, or request a new link.');
           } catch {
             setErr('The server did not answer. Check that it is running and try again.');
           } finally {

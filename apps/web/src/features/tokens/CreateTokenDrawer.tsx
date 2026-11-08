@@ -117,7 +117,11 @@ export function CreateTokenDrawer({
             <option value="">Never</option>
           </Select>
         </Field>
-        {error && <Alert tone="bad">{error}</Alert>}
+        {error && (
+          <Alert tone="bad" title="Couldn’t create the token">
+            {error}
+          </Alert>
+        )}
         <button type="submit" hidden />
       </form>
     </Drawer>

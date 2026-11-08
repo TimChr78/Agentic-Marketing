@@ -584,8 +584,9 @@ describe('composer component (#497)', () => {
     render(<Harness />);
     expect(await screen.findByText('1,842 eligible in current check')).toBeTruthy();
 
+    // The live-version read can land just after the first estimate renders under load.
+    await waitFor(() => expect(calls('artifacts.get')).toHaveLength(3));
     const gets = calls('artifacts.get');
-    expect(gets).toHaveLength(3);
     expect(gets.map((call) => call.input)).toEqual(
       expect.arrayContaining([{ artifactId: tpl }, { artifactId: tpl, version: 5 }, { artifactId: seg }]),
     );

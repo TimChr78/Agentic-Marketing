@@ -10,7 +10,7 @@ function PurposeLabel({ row }: { row: PurposeRow }) {
   if (row.name) return <span className="font-medium text-fg">{row.name}</span>;
   return (
     <span className="inline-flex flex-wrap items-center gap-x-2 gap-y-1">
-      <span className="font-medium text-fg">Purpose name unavailable</span>
+      <span className="font-medium text-fg">Unavailable purpose</span>
       <CopyPurposeKey purposeKey={row.key} />
     </span>
   );

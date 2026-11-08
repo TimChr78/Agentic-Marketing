@@ -89,7 +89,7 @@ export function Tabs<K extends string>({
               onClick={() => onChange(t.key)}
               onKeyDown={(e) => onKey(e, i)}
               className={cx(
-                'focus-inset -mb-px inline-flex h-10 shrink-0 items-center border-b-2 font-medium whitespace-nowrap transition-colors pointer-coarse:h-10 md:h-9',
+                'focus-inset -mb-px inline-flex h-10 shrink-0 items-center border-b-2 font-medium whitespace-nowrap am-motion-colors pointer-coarse:h-10 md:h-9',
                 compact ? 'gap-1 px-1.5 text-[12px]' : 'gap-1.5 px-2.5 text-[13px]',
                 value === t.key ? 'border-accent text-fg' : 'border-transparent text-muted hover:text-fg',
               )}
@@ -155,7 +155,7 @@ export function Segmented<K extends string>({
           aria-checked={value === t.key}
           onClick={() => onChange(t.key)}
           className={cx(
-            'inline-flex h-10 items-center gap-1.5 rounded-md px-3 text-[13px] font-medium transition-colors pointer-coarse:h-10 md:h-6 md:rounded-[5px] md:px-2 md:text-[12px]',
+            'inline-flex h-10 items-center gap-1.5 rounded-md px-3 text-[13px] font-medium am-motion-colors pointer-coarse:h-10 md:h-6 md:rounded-[5px] md:px-2 md:text-[12px]',
             value === t.key ? 'bg-surface text-fg' : 'text-muted hover:text-fg',
           )}
         >

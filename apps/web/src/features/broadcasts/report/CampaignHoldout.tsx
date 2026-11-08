@@ -1,7 +1,7 @@
 import { api, errText } from '../../../app/api';
 import { TextLink } from '../../../app/links';
 import { useApi } from '../../../app/useApi';
-import { Alert, LoadingBlock, StatusPill, Table, Td, THead, Th, Tr } from '../../../ui';
+import { Alert, DetailSkeleton, ListSkeleton, StatusPill, Table, Td, THead, Th, Tr } from '../../../ui';
 import { formatDateTime } from '../../../ui/time';
 import type { LocalDayPeriod } from '../period';
 import {
@@ -81,7 +81,7 @@ function CampaignHoldoutResult({
         {error}
       </Alert>
     );
-  if (loading || !result) return <LoadingBlock lines={5} label="Loading the campaign holdout" />;
+  if (loading || !result) return <DetailSkeleton label="Loading the campaign holdout" />;
 
   const verdict = holdoutVerdict(result);
   const interval = result.ci95 ? `${points(result.ci95[0])} to ${points(result.ci95[1])}` : 'Unavailable';
@@ -198,7 +198,7 @@ export function CampaignHoldoutArea({ artifactId, period }: { artifactId: string
         {campaigns.error}
       </Alert>
     );
-  if (campaigns.loading) return <LoadingBlock lines={4} label="Loading campaign holdout" />;
+  if (campaigns.loading) return <ListSkeleton label="Loading campaign holdout" columns={2} />;
   if (!list.length)
     return (
       <Alert tone="info" title="No campaign control group">
@@ -211,7 +211,7 @@ export function CampaignHoldoutArea({ artifactId, period }: { artifactId: string
         {controls.error}
       </Alert>
     );
-  if (controls.loading || !controls.data) return <LoadingBlock lines={5} label="Loading campaign holdout" />;
+  if (controls.loading || !controls.data) return <DetailSkeleton label="Loading campaign holdout" />;
 
   const controlled = controls.data.filter((read): read is Extract<ControlRead, { control: CampaignControl }> => !!read.control);
   const errors = controls.data.filter((read) => read.error);

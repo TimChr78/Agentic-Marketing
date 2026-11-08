@@ -8,6 +8,7 @@ import { useSession } from '../../app/session';
 import { useApi } from '../../app/useApi';
 import { AssetGrid, AssetThumb } from '../../features/assets/AssetGrid';
 import { ACCEPT, type Asset, formatBytes, uploadFile } from '../../features/assets/upload';
+import { GallerySkeleton, PhoneListSkeleton } from '../../features/phase28/content/GallerySkeleton';
 import {
   Alert,
   Button,
@@ -202,7 +203,14 @@ export default function AssetsPage() {
                   }
               : undefined
         }
-        loadingContent={<LoadingBlock lines={6} />}
+        loadingContent={
+          <>
+            <PhoneListSkeleton label="Loading assets" />
+            <div className="hidden md:block">
+              <GallerySkeleton label="Loading assets" minWidth={176} tileHeight={190} />
+            </div>
+          </>
+        }
         desktopTable={<AssetGrid assets={assets} onOpen={setOpen} />}
         mobileList={<AssetPhoneList assets={assets} onOpen={setOpen} />}
       />
@@ -334,7 +342,7 @@ function AssetDrawer({ id, onClose, onChanged }: { id: string; onClose: () => vo
       }
     >
       {a.loading ? (
-        <LoadingBlock lines={8} />
+        <LoadingBlock geometry="detail" label="Loading this asset" />
       ) : a.error ? (
         <div className="p-5">
           <Alert tone="bad" title="This asset is unavailable" onRetry={a.reload}>

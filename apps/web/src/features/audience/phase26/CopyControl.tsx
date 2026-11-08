@@ -60,7 +60,7 @@ function CopyValue({
         </code>
       )}
       <span role="status" aria-live="polite" className="sr-only">
-        {copied ? copiedLabel : failed ? `Could not copy ${label.replace(/^Copy /, '')}` : ''}
+        {copied ? copiedLabel : failed ? `Couldn’t copy ${label.replace(/^Copy /, '')}. Select and copy the value.` : ''}
       </span>
     </span>
   );

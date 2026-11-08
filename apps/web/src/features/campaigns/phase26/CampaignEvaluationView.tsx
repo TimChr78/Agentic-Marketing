@@ -2,7 +2,7 @@ import { useId, useMemo, useState } from 'react';
 import { api } from '../../../app/api';
 import { useWorkspace } from '../../../app/session';
 import { useApi } from '../../../app/useApi';
-import { Alert, Button, Card, EmptyState, Field, LoadingBlock, Select, Table, TableFrame, Td, THead, Th, Tr } from '../../../ui';
+import { Alert, Button, Card, ChartSkeleton, EmptyState, Field, Select, Table, TableFrame, Td, THead, Th, Tr } from '../../../ui';
 import { StatCard } from '../../insights/Stats';
 import { HoldoutPanel } from './HoldoutPanel';
 import {
@@ -479,7 +479,7 @@ export function CampaignEvaluationView({ campaignId, from, to, active = true, re
       <div className="space-y-4">
         {selector}
         <section aria-busy="true" aria-label="Loading campaign evaluation">
-          <LoadingBlock lines={8} label="Loading campaign evaluation" />
+          <ChartSkeleton label="Loading campaign evaluation" />
         </section>
       </div>
     );

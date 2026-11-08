@@ -6,7 +6,8 @@ import { useCrumbs } from '../../app/page';
 import { Link } from '../../app/router';
 import { useSession } from '../../app/session';
 import { useApi } from '../../app/useApi';
-import { StatCard, StatGrid } from '../../features/insights/Stats';
+import { StatCard, StatGrid, StatGridSkeleton } from '../../features/insights/Stats';
+import { purposeLabel } from '../../lib/labels';
 import {
   Alert,
   Button,
@@ -127,6 +128,11 @@ export default function MessagesPage() {
         <Alert tone="bad" title="Couldn't load message performance" onRetry={stats.reload} className="mb-5">
           {stats.error}
         </Alert>
+      ) : stats.loading ? (
+        <div className="mb-5">
+          <StatGridSkeleton labels={['Sent', 'Delivered', 'Opened', 'Clicked', 'Bounced', 'Complained']} />
+          <p className="mt-2 text-[12px] text-muted">Last {days} days. Loading the period’s counts.</p>
+        </div>
       ) : (
         <div className="mb-5">
           <StatGrid>
@@ -239,7 +245,7 @@ export default function MessagesPage() {
                   )}
                 </Td>
                 <Td className="hidden lg:table-cell">
-                  {m.purpose.replace(/_/g, ' ')}
+                  {purposeLabel(m.purpose)}
                   {m.test && <span className="ml-1 text-muted">· test</span>}
                 </Td>
                 <Td className="hidden md:table-cell">{m.attempts > 0 ? m.attempts : <span className="text-muted">—</span>}</Td>

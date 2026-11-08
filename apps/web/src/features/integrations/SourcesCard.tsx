@@ -52,7 +52,7 @@ export function SourcesCard() {
       setSecret({ name: s.name, key: r.key });
       void list.reload();
     } catch (e) {
-      toast.error(errText(e));
+      toast.error(`Couldn’t replace the key of “${s.name}”: ${errText(e)}`);
     }
   };
   const remove = async (s: Source) => {
@@ -69,7 +69,7 @@ export function SourcesCard() {
       toast.success(`Deleted “${s.name}”.`);
       void list.reload();
     } catch (e) {
-      toast.error(errText(e));
+      toast.error(`Couldn’t delete “${s.name}”: ${errText(e)}`);
     }
   };
   const toggle = async (s: Source) => {
@@ -77,7 +77,7 @@ export function SourcesCard() {
       await api.call('sources.update', { id: s.id, enabled: !s.enabled });
       void list.reload();
     } catch (e) {
-      toast.error(errText(e));
+      toast.error(`Couldn’t ${s.enabled ? 'disable' : 'enable'} “${s.name}”: ${errText(e)}`);
     }
   };
 
@@ -304,7 +304,7 @@ function SourceDrawer({
             <option value="">No consent check</option>
             {purposes.data?.purposes.map((p) => (
               <option key={p.key} value={p.key}>
-                {p.name} ({p.key})
+                {p.name}
               </option>
             ))}
           </Select>
@@ -314,7 +314,11 @@ function SourceDrawer({
             Without a consent check, website events are kept for every visitor. Most sites need consent for analytics.
           </Alert>
         )}
-        {error && <Alert tone="bad">{error}</Alert>}
+        {error && (
+          <Alert tone="bad" title={source ? 'Couldn’t save the event source' : 'Couldn’t add the event source'}>
+            {error}
+          </Alert>
+        )}
       </div>
     </Drawer>
   );

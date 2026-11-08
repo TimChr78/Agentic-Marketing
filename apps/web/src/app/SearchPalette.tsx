@@ -4,7 +4,7 @@ import { createPortal } from 'react-dom';
 import { fetchAllArtifacts } from '../features/artifacts/artifactList';
 import { Badge, cx, StatePill, Tag } from '../ui';
 import { useFocusTrap } from '../ui/focus';
-import { api, errText, type Out } from './api';
+import { api, type Out } from './api';
 import { artifactPath, typeLabel } from './artifactRoutes';
 import { CREATE_ACTIONS, STARTER_ACTION } from './createIntent';
 import { visibleNav } from './nav';
@@ -34,8 +34,6 @@ interface Section {
   results: Result[];
 }
 
-const shortId = (id: string) => (id.length > 16 ? `${id.slice(0, 8)}…${id.slice(-4)}` : id);
-
 /**
  * Global search (#446): ⌘K or `/` opens one labelled combobox. With no query it shows recents,
  * Create actions (same order and gate as New), the permitted destinations plus Settings, then
@@ -61,9 +59,9 @@ export function SearchPalette({ onClose }: { onClose: () => void }) {
     }
     fetchAllArtifacts()
       .then((r) => setArtifacts(r.artifacts))
-      .catch((e) => {
+      .catch(() => {
         setArtifacts([]);
-        setErr(errText(e));
+        setErr('failed');
       });
     api
       .call('agents.list', {})
@@ -108,7 +106,7 @@ export function SearchPalette({ onClose }: { onClose: () => void }) {
         results.push({
           key: `recent:person:${recent.id}`,
           label: 'Person',
-          hint: shortId(recent.id),
+          hint: 'Recent',
           to: `/audience/people/${encodeURIComponent(recent.id)}`,
           search: '',
           icon: UserRound,
@@ -269,7 +267,7 @@ export function SearchPalette({ onClose }: { onClose: () => void }) {
           />
         </div>
         <div id="search-results" role="listbox" aria-label="Results" className="max-h-[52vh] overflow-y-auto p-1.5">
-          {err && <div className="px-3 py-2 text-[12px] text-bad">Artifact search failed: {err}</div>}
+          {err && <div className="px-3 py-2 text-[12px] text-bad">Couldn’t search artifacts. Pages and actions still work.</div>}
           {!err && artifacts === null && <div className="px-3 py-1 text-[12px] text-muted">Searching artifacts…</div>}
           {q.trim() && flat.length === 0 && (
             <div className="px-3 py-6 text-center text-[13px] text-muted">No matches. Try a name or type.</div>

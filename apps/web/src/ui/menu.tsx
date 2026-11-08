@@ -149,7 +149,7 @@ export function Menu({
             >
               {it.icon && <span className="text-muted [&_svg]:size-4">{it.icon}</span>}
               <span className="min-w-0 flex-1 truncate">{it.label}</span>
-              <ChevronRight size={14} className={cx('shrink-0 text-muted transition-transform', expanded && 'rotate-90')} aria-hidden />
+              <ChevronRight size={14} className={cx('shrink-0 text-muted am-motion-transform', expanded && 'rotate-90')} aria-hidden />
             </button>
             {expanded && (
               <div role="menu" aria-label={typeof it.label === 'string' ? it.label : undefined} className="pl-3">

@@ -166,21 +166,23 @@ export function EmptyState({
   );
 }
 
-export function Skeleton({ className }: { className?: string }) {
-  return <span className={cx('am-skeleton block h-3.5', className)} aria-hidden />;
-}
-
-/** Skeleton lines in place of loading content, announced once to screen readers. */
-export function LoadingBlock({ lines = 4, label = 'Loading' }: { lines?: number; label?: string }) {
-  return (
-    <div className="space-y-2.5 p-4" role="status" aria-label={label}>
-      {Array.from({ length: lines }, (_, i) => (
-        // biome-ignore lint/suspicious/noArrayIndexKey: loading placeholders are generated, never reordered, and have no identity
-        <Skeleton key={i} className={i % 3 === 2 ? 'w-2/5' : i % 2 ? 'w-4/5' : 'w-3/5'} />
-      ))}
-    </div>
-  );
-}
+// Reserved loading geometry (#555): the primitive and its whole-region variants live in
+// `ui/Skeleton.tsx`; re-exported here so existing imports from `ui` keep one surface.
+export {
+  AuthSkeleton,
+  ChartSkeleton,
+  DetailSkeleton,
+  EditorSkeleton,
+  KpiSkeleton,
+  ListSkeleton,
+  LoadingBlock,
+  SKELETON_DELAY_MS,
+  SKELETON_GEOMETRY,
+  Skeleton,
+  type SkeletonGeometry,
+  SkeletonRegion,
+  type SkeletonShape,
+} from './Skeleton';
 
 export function Alert({
   tone = 'info',

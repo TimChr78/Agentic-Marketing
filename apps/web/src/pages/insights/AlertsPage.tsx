@@ -14,7 +14,7 @@ import {
   Field,
   formatDateTime,
   Input,
-  LoadingBlock,
+  ListSkeleton,
   PageHeader,
   Select,
   StatusPill,
@@ -181,7 +181,7 @@ export default function AlertsPage() {
       if (historyRule?.id === rule.id) setHistoryRule(null);
       reload();
     } catch (e) {
-      toast.error(errText(e));
+      toast.error(`Couldn’t delete “${rule.name}”: ${errText(e)}`);
     }
   };
 
@@ -193,7 +193,7 @@ export default function AlertsPage() {
       else toast.info(feedback.message);
       reload();
     } catch (e) {
-      toast.error(errText(e));
+      toast.error(`Couldn’t send a test for “${rule.name}”: ${errText(e)}`);
     }
   };
 
@@ -219,7 +219,7 @@ export default function AlertsPage() {
       />
 
       {rules.loading ? (
-        <LoadingBlock lines={4} label="Loading alert rules" />
+        <ListSkeleton label="Loading alert rules" columns={4} />
       ) : rules.error ? (
         <Alert tone="bad" title="Couldn't load alert rules" onRetry={rules.reload}>
           {rules.error}
@@ -314,7 +314,7 @@ export default function AlertsPage() {
           Recent history
         </h2>
         {history.loading ? (
-          <LoadingBlock lines={3} label="Loading alert history" />
+          <ListSkeleton label="Loading alert history" columns={6} rows={3} />
         ) : history.error ? (
           <Alert tone="bad" title="Couldn't load alert history" onRetry={history.reload}>
             {history.error}
@@ -390,7 +390,7 @@ export default function AlertsPage() {
       >
         {ruleHistory.loading ? (
           <div className="p-5">
-            <LoadingBlock lines={4} label="Loading history" />
+            <ListSkeleton label="Loading history" columns={4} rows={3} />
           </div>
         ) : ruleHistory.error ? (
           <div className="p-5">

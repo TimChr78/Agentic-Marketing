@@ -1,4 +1,4 @@
-import { Alert, LoadingBlock, StatusPill, Table, TableFrame, Td, THead, Th, Tr } from '../../ui';
+import { Alert, ListSkeleton, StatusPill, Table, TableFrame, Td, THead, Th, Tr } from '../../ui';
 
 // Treatment against control, with the interval and the guardrail (#67). Shared by the journey
 // stats page and the campaign evaluation card so both say the same thing about a holdout.
@@ -56,7 +56,7 @@ export function HoldoutCard({
         {error}
       </Alert>
     );
-  if (!result) return loading ? <LoadingBlock lines={4} label="Loading the holdout result" /> : null;
+  if (!result) return loading ? <ListSkeleton label="Loading the holdout result" rows={2} columns={5} /> : null;
   const pct = (x: number) => `${Math.round(x * 1000) / 10}%`;
   const v = VERDICT[result.verdict];
   const arms = [

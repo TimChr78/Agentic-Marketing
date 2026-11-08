@@ -2,7 +2,8 @@ import { Search, Upload } from 'lucide-react';
 import { useRef, useState } from 'react';
 import { api, errText } from '../../app/api';
 import { useApi } from '../../app/useApi';
-import { Alert, Button, EmptyState, Input, LoadingBlock, Modal } from '../../ui';
+import { Alert, Button, EmptyState, Input, Modal } from '../../ui';
+import { GallerySkeleton } from '../phase28/content/GallerySkeleton';
 import { AssetGrid } from './AssetGrid';
 import { type Asset, uploadFile } from './upload';
 
@@ -79,7 +80,13 @@ export function AssetPicker({
         {error && <Alert tone="bad">{error}</Alert>}
         <div className="max-h-[52vh] overflow-y-auto p-1">
           {list.loading ? (
-            <LoadingBlock lines={4} />
+            <GallerySkeleton
+              label={kind === 'image' ? 'Loading images' : 'Loading files'}
+              minWidth={176}
+              tileHeight={190}
+              tiles={4}
+              className="p-0"
+            />
           ) : list.error ? (
             <Alert tone="bad" onRetry={list.reload}>
               {list.error}
@@ -87,8 +94,12 @@ export function AssetPicker({
           ) : list.data!.assets.length ? (
             <AssetGrid assets={list.data!.assets} onOpen={setSelected} selectedId={selected?.id} />
           ) : (
-            <EmptyState compact title={q ? 'Nothing matches' : 'No images yet'}>
-              {q ? 'Try another search.' : 'Upload a PNG, JPEG, GIF, WebP or SVG.'}
+            <EmptyState compact title={q ? 'Nothing matches' : kind === 'image' ? 'No images yet' : 'No files yet'}>
+              {q
+                ? 'Try another search.'
+                : kind === 'image'
+                  ? 'Upload a PNG, JPEG, GIF, WebP or SVG to use it here.'
+                  : 'Upload a PDF to use it here.'}
             </EmptyState>
           )}
         </div>

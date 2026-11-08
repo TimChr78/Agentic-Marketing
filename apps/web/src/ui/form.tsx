@@ -90,7 +90,7 @@ function useField(p: { id?: string; 'aria-describedby'?: string; 'aria-invalid'?
 }
 
 export const controlClass =
-  'w-full rounded-md border border-control bg-surface text-[16px] leading-6 text-fg pointer-coarse:text-[16px] pointer-coarse:leading-6 placeholder:text-muted transition-colors duration-[120ms] hover:border-fg-2 focus:border-accent focus:outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:bg-surface-2 disabled:text-muted aria-[invalid=true]:border-bad read-only:bg-surface-2 md:text-[13px] md:leading-5';
+  'w-full rounded-md border border-control bg-surface text-[16px] leading-6 text-fg pointer-coarse:text-[16px] pointer-coarse:leading-6 placeholder:text-muted am-motion-colors hover:border-fg-2 focus:border-accent focus:outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:bg-surface-2 disabled:text-muted aria-[invalid=true]:border-bad read-only:bg-surface-2 md:text-[13px] md:leading-5';
 
 export const Input = forwardRef<HTMLInputElement, InputHTMLAttributes<HTMLInputElement> & { compact?: boolean }>(function Input(
   { className, compact, ...p },
@@ -150,8 +150,12 @@ export const Select = forwardRef<
         {...p}
         {...useField(p)}
         title={blocked ? (reason ?? undefined) : p.title}
-        aria-description={blocked ? (reason ?? undefined) : undefined}
+        aria-description={blocked ? (reason ?? undefined) : p['aria-description']}
         data-demo-blocked={blocked || undefined}
+        // A disabled native select ignores a user's change, but a synthetic or programmatic event
+        // still reaches React; dropping the handler is the second guard, so a blocked control can
+        // never run its command.
+        onChange={blocked ? undefined : p.onChange}
         disabled={p.disabled || blocked}
         className={cx(
           controlClass,
@@ -244,13 +248,13 @@ export function Switch({
     >
       <span
         className={cx(
-          'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors duration-[120ms] pointer-coarse:h-5 pointer-coarse:w-9 md:h-[18px] md:w-8',
+          'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border am-motion-colors pointer-coarse:h-5 pointer-coarse:w-9 md:h-[18px] md:w-8',
           checked ? 'border-accent bg-accent' : 'border-control bg-surface-3',
         )}
       >
         <span
           className={cx(
-            'absolute size-3.5 rounded-full transition-transform duration-[120ms] pointer-coarse:size-3.5 md:size-3',
+            'absolute size-3.5 rounded-full am-motion-transform pointer-coarse:size-3.5 md:size-3',
             checked ? 'translate-x-[18px] bg-accent-fg md:translate-x-[15px]' : 'translate-x-[2px] bg-fg-2',
           )}
         />
@@ -301,7 +305,7 @@ export function RadioCards<T extends string>({
         <label
           key={o.value}
           className={cx(
-            'flex cursor-pointer flex-col gap-0.5 rounded-md border px-3 py-2 text-[13px] transition-colors has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-offset-2 has-[:focus-visible]:outline-accent',
+            'flex cursor-pointer flex-col gap-0.5 rounded-md border px-3 py-2 text-[13px] am-motion-colors has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-offset-2 has-[:focus-visible]:outline-accent',
             value === o.value ? 'border-accent bg-accent-soft' : 'border-line-strong hover:bg-surface-2',
           )}
         >

@@ -271,7 +271,7 @@ describe('People list (#510)', () => {
   it('does not read purposes without artifacts:read', async () => {
     h.can = (permission) => permission !== 'artifacts:read';
     renderList();
-    expect(within(await screen.findByRole('table', { name: 'People' })).getAllByText('Purpose name unavailable')).toHaveLength(3);
+    expect(within(await screen.findByRole('table', { name: 'People' })).getAllByText('Unavailable purpose')).toHaveLength(3);
     expect(names()).toEqual(['profiles.list']);
   });
 
@@ -391,13 +391,13 @@ describe('People list (#510)', () => {
     push.mockRestore();
   });
 
-  it('says No match for an unknown e-mail without opening anyone', async () => {
+  it('explains an unknown e-mail without opening anyone', async () => {
     h.respond = (name, input) => (name === 'profiles.find' ? { profileId: null } : baseRespond(name, input));
     renderList();
     await screen.findAllByText('ada@example.com');
     await userEvent.type(screen.getByLabelText('E-mail or profile ID'), 'nobody@example.com');
     await userEvent.click(screen.getByRole('button', { name: 'Find person' }));
-    expect(await screen.findByText('No match')).toBeTruthy();
+    expect(await screen.findByText(/No one has that e-mail/)).toBeTruthy();
   });
 
   it('displays the e-mail first, the name second, and the id only behind a copy control', async () => {
@@ -432,7 +432,7 @@ describe('People list (#510)', () => {
     renderList();
     await screen.findAllByText('ada@example.com');
     const table = peopleTable();
-    expect(table.getAllByText('Purpose name unavailable')).toHaveLength(3);
+    expect(table.getAllByText('Unavailable purpose')).toHaveLength(3);
     expect(screen.queryByText('marketing_email')).toBeNull();
     expect(table.getByRole('button', { name: 'Copy purpose key marketing_email' })).toBeTruthy();
   });
@@ -446,7 +446,7 @@ describe('People list (#510)', () => {
     renderList();
     await screen.findAllByText('ada@example.com');
     expect(await screen.findByText(/Purpose names could not load/)).toBeTruthy();
-    expect(peopleTable().getAllByText('Purpose name unavailable')).toHaveLength(3);
+    expect(peopleTable().getAllByText('Unavailable purpose')).toHaveLength(3);
 
     fail = false;
     await userEvent.click(screen.getByRole('button', { name: 'Retry purpose names' }));
@@ -472,7 +472,7 @@ describe('People list (#510)', () => {
   it('issues no protected reads for a restricted role', () => {
     h.can = () => false;
     renderList();
-    expect(screen.getByText(/Restricted by your role/)).toBeTruthy();
+    expect(screen.getByText(/cannot open this tab/)).toBeTruthy();
     expect(h.calls).toHaveLength(0);
   });
 
@@ -490,7 +490,7 @@ describe('People list (#510)', () => {
       return baseRespond(name, input);
     };
     renderList();
-    expect(await screen.findByText(/Could not load people/)).toBeTruthy();
+    expect(await screen.findByText(/Couldn’t load people/)).toBeTruthy();
     expect(screen.getByText(/Server exploded/)).toBeTruthy();
     await userEvent.click(screen.getByRole('button', { name: 'Retry' }));
     expect((await screen.findAllByText('ada@example.com')).length).toBeGreaterThan(0);
@@ -502,7 +502,8 @@ describe('Person detail (#510)', () => {
     renderPerson();
     await screen.findByRole('heading', { level: 1, name: 'ada@example.com' });
 
-    expect(names()).toEqual(['profiles.get', 'profiles.events', 'messages.list', 'consent.history', 'purposes.list']);
+    // The timeline reads start in their own effects, so the heading can render first under load.
+    await waitFor(() => expect(names()).toEqual(['profiles.get', 'profiles.events', 'messages.list', 'consent.history', 'purposes.list']));
     expect(calls('profiles.events')[0].input).toEqual({ profileId: canonicalId, limit: 100 });
     expect(calls('messages.list')[0].input).toEqual({ profileId: canonicalId, limit: 50 });
     expect(calls('consent.history')[0].input).toEqual({ profileId: canonicalId });
@@ -518,7 +519,7 @@ describe('Person detail (#510)', () => {
     h.calls.length = 0;
     renderPerson();
     await screen.findByRole('heading', { level: 1, name: 'ada@example.com' });
-    expect(names()).toEqual(['profiles.get', 'profiles.events', 'messages.list', 'consent.history']);
+    await waitFor(() => expect(names()).toEqual(['profiles.get', 'profiles.events', 'messages.list', 'consent.history']));
   });
 
   it('shows the identity hierarchy and copies the full id without printing it', async () => {
@@ -674,6 +675,9 @@ describe('Person detail (#510)', () => {
   it('refreshes with the four base reads, without purpose or template fan-out', async () => {
     renderPerson();
     await screen.findByRole('heading', { level: 1, name: 'ada@example.com' });
+    // Let the initial timeline reads land before counting, so a slow first load is not added to the
+    // four the refresh issues.
+    await waitFor(() => expect(names()).toEqual(['profiles.get', 'profiles.events', 'messages.list', 'consent.history', 'purposes.list']));
     const before = h.calls.length;
     await userEvent.click(screen.getByRole('button', { name: 'Refresh' }));
     await waitFor(() => expect(h.calls.length).toBe(before + 4));

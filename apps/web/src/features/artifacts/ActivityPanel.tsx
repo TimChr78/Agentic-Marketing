@@ -35,7 +35,7 @@ export function ActivityPanel({ artifactId }: { artifactId: string }) {
     <div className="space-y-4">
       <Card title="Reviews">
         {approvals.loading ? (
-          <LoadingBlock lines={3} />
+          <LoadingBlock lines={3} label="Loading reviews" />
         ) : !approvals.data?.length ? (
           <EmptyState compact title="No reviews yet">
             Requests to publish and their decisions show here.

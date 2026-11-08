@@ -308,7 +308,7 @@ describe('Deliverability stream states (#508)', () => {
   const options = { windowDays: 7, marketing: true, autoPause: true };
 
   it('never claims a pause from zero, and withholds below the evaluation minimum', () => {
-    expect(streamVerdict({ ...base, sent: 0, status: 'paused' }, THRESHOLDS, options).label).toBe('No data');
+    expect(streamVerdict({ ...base, sent: 0, status: 'paused' }, THRESHOLDS, options).label).toBe('No sends in this window');
     expect(streamVerdict({ ...base, sent: 199 }, THRESHOLDS, options).label).toBe('Below evaluation volume');
     expect(streamVerdict({ ...base, sent: 200, status: 'ok' }, THRESHOLDS, options).label).toBe('Healthy');
     expect(streamVerdict({ ...base, sent: 200, status: 'warn' }, THRESHOLDS, options).label).toBe('Warning');
@@ -408,6 +408,11 @@ describe('Deliverability data states (#508)', () => {
     expect(screen.getByRole('status', { name: 'Loading deliverability' })).toBeTruthy();
     expect(screen.getByRole('status', { name: 'Loading the deliverability trend' })).toBeTruthy();
     expect(screen.getByRole('status', { name: 'Checking sending domains' })).toBeTruthy();
+    // The four KPI tiles reserve their final geometry before the health read lands.
+    for (const name of ['Sent messages', 'Bounce rate', 'Complaint rate', 'Auto-pause']) {
+      const tile = screen.getByRole('status', { name });
+      expect(tile.getAttribute('data-geometry')).toBe('kpi');
+    }
   });
 
   it('keeps period and filter controls in the empty state', async () => {
@@ -430,7 +435,7 @@ describe('Deliverability data states (#508)', () => {
     render(<DeliverabilityPage />);
 
     await screen.findByText('Zero sends in every window');
-    expect(screen.getAllByText('No data').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('No sends in this window').length).toBeGreaterThan(0);
     expect(screen.getAllByText('No denominator available').length).toBeGreaterThan(0);
     expect(screen.getAllByText('0').length).toBeGreaterThan(0);
     expect(screen.getAllByText('—').length).toBeGreaterThan(0);

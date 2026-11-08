@@ -8,11 +8,12 @@ import { Link, navigate, setSearchParam, useLocation } from '../../../app/router
 import { useSession } from '../../../app/session';
 import { useApi } from '../../../app/useApi';
 import { publicationLabel, stateOfArtifact } from '../../../lib/state';
-import { Alert, Button, Field, Input, Modal, Select, Table, Td, THead, Th, Tr, timeAgo, useToast } from '../../../ui';
+import { Alert, Button, Field, Input, ListSkeleton, Modal, Select, Table, Td, THead, Th, Tr, timeAgo, useToast } from '../../../ui';
 import { ListPage, type PageReadState } from '../../../ui/ListPage';
 import { OperationalPill } from '../../../ui/state';
 import { notifyArtifactsChanged } from '../../artifactCache';
 import { type ArtifactRow, fetchAllArtifacts } from '../../artifacts/artifactList';
+import { GallerySkeleton, PhoneListSkeleton } from '../../phase28/content/GallerySkeleton';
 
 export interface ContentCreateSpec {
   label: string;
@@ -169,7 +170,7 @@ export function ContentList({
                 ? emptyNotice
                 : undefined
         }
-        loadingContent={<ContentSkeleton layout={layout} />}
+        loadingContent={<ContentSkeleton layout={layout} noun={noun} />}
         desktopTable={layout === 'gallery' ? <Gallery rows={rows} title={title} /> : <BlockTable rows={rows} title={title} total={total} />}
         mobileList={<PhoneList rows={rows} title={title} />}
       />
@@ -288,23 +289,18 @@ function PhoneList({ rows, title }: { rows: ArtifactRow[]; title: string }) {
   );
 }
 
-function ContentSkeleton({ layout }: { layout: 'gallery' | 'table' }) {
-  if (layout === 'table')
-    return (
-      <div role="status" aria-label="Loading" className="space-y-2 p-4">
-        {Array.from({ length: 5 }, (_, i) => (
-          // biome-ignore lint/suspicious/noArrayIndexKey: loading placeholder rows are generated, never reordered, and have no identity
-          <div key={i} className="h-8 rounded-sm bg-surface-2" />
-        ))}
-      </div>
-    );
+function ContentSkeleton({ layout, noun }: { layout: 'gallery' | 'table'; noun: string }) {
+  // The shared primitives reserve the ready template's geometry; the label names the object
+  // instead of a generic "Loading" (Phase 28, #559). Below 768 px the ready list is the compact
+  // 72 px summary list for both layouts, so the phone placeholder reserves that geometry rather
+  // than the six 170 px gallery tiles (#555 review).
   return (
-    <div role="status" aria-label="Loading" className="grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-3 p-3 md:p-4">
-      {Array.from({ length: 6 }, (_, i) => (
-        // biome-ignore lint/suspicious/noArrayIndexKey: loading placeholder tiles are generated, never reordered, and have no identity
-        <div key={i} className="h-[170px] rounded-lg bg-surface-2" />
-      ))}
-    </div>
+    <>
+      <PhoneListSkeleton label={`Loading ${noun}`} />
+      <div className="hidden md:block">
+        {layout === 'table' ? <ListSkeleton label={`Loading ${noun}`} columns={4} /> : <GallerySkeleton label={`Loading ${noun}`} />}
+      </div>
+    </>
   );
 }
 

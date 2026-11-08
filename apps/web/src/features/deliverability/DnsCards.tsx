@@ -2,7 +2,7 @@ import { ShieldCheck } from 'lucide-react';
 import { useRef } from 'react';
 import type { Out } from '../../app/api';
 import { ButtonLink } from '../../app/links';
-import { Alert, Button, EmptyState, Field, Input, LoadingBlock, Mono, StatusPill, Tag } from '../../ui';
+import { Alert, Button, EmptyState, Field, Input, ListSkeleton, Mono, StatusPill, Tag } from '../../ui';
 import { CopyRecord } from './CopyRecord';
 import { checkFix, type DnsOverall, dkimFix, dnsOverall, formatMoment, isNotFound, type Report, recordsUnavailableCopy } from './model';
 
@@ -191,9 +191,7 @@ export function DnsSection({
       </Field>
 
       {loading ? (
-        <div aria-busy="true">
-          <LoadingBlock lines={5} label="Checking sending domains" />
-        </div>
+        <ListSkeleton label="Checking sending domains" rows={2} columns={4} />
       ) : error ? (
         isNotFound(error) ? (
           <Alert tone="warn" title="This item is not available at this address">

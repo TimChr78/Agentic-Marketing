@@ -47,9 +47,20 @@ main
   Vitest projects the change touches; the full suite runs in CI.
 - `scripts/e2e-docker.sh smoke` for an interface change; `functional` or `axe` when the task's
   contract asks for it. Give each concurrent run its own `TEST_PORT_OFFSET`.
-- `npx biome check .` and the typecheck.
+- **The e2e specs share one seeded database across the full suite.** A spec must not assume the seed
+  it saw is untouched: other specs create blocks, save broadcast drafts and leave other artifacts
+  behind. Assert state-independent facts, or create your own data and clean up after it. Never make
+  a test pass only because the seed happened to be fresh.
+- Before reporting, run the **full** functional suite (`scripts/e2e-docker.sh functional`), not only
+  the specs you added. A green new spec beside a broken existing one is not a green task.
+- Run `corepack pnpm lint`, not Biome alone: the root lint also runs the e2e selector check and the
+  changelog fragment check. Run the typecheck too.
 - All of it against the one shared test stack: `eval "$(scripts/test-services.sh env)"`. A delegate
   never starts its own containers.
+
+Phase 28 hit both failures directly: **#564** was a broadcast primary action that only looked right
+on a fresh seed, and **#566** was an empty block list that another spec had already filled with a
+block. Both had passed the narrow spec run and failed in the full functional suite.
 
 ## Brief template
 

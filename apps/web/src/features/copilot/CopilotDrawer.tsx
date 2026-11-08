@@ -66,8 +66,10 @@ export function CopilotDrawer({ open, onClose }: { open: boolean; onClose: () =>
   const [conversationAgent, setConversationAgent] = useState<string | null>(null);
   const [dialog, confirm] = useConfirm();
   const end = useRef<HTMLDivElement>(null);
+  // Scroll immediately: JS `behavior: 'smooth'` ignores the CSS reduced-motion override, and
+  // motion.md forbids smooth auto-scrolling (#555 review).
   // biome-ignore lint/correctness/useExhaustiveDependencies: scroll to the newest message whenever the list changes, which the body does not read
-  useEffect(() => end.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }), [items]);
+  useEffect(() => end.current?.scrollIntoView({ block: 'end' }), [items]);
 
   const past = useApi(() => api.call('copilot.conversations', {}), [], { skip: !open || !copilotAvailable });
   // Agents this person may talk as: ones they sponsor, or any active agent for an admin.
@@ -248,7 +250,7 @@ export function CopilotDrawer({ open, onClose }: { open: boolean; onClose: () =>
               {can('artifacts:read') ? (
                 <div className="flex flex-wrap gap-2">
                   {SUGGESTIONS.map((s) => (
-                    <Button key={s} variant="secondary" size="sm" disabled={!copilotAvailable} onClick={() => void ask(s)}>
+                    <Button key={s} variant="secondary" size="sm" mutation disabled={!copilotAvailable} onClick={() => void ask(s)}>
                       {s}
                     </Button>
                   ))}
@@ -265,7 +267,7 @@ export function CopilotDrawer({ open, onClose }: { open: boolean; onClose: () =>
                   <Wrench size={13} className="text-muted" aria-hidden />
                   <Tag>{x.name}</Tag>
                   {x.ok === undefined ? (
-                    <Loader2 size={13} className="animate-spin text-muted" aria-label="Running" />
+                    <Loader2 size={13} className="am-progress text-muted" aria-label="Running the tool" />
                   ) : (
                     !x.ok && <StatusPill tone="bad">Failed</StatusPill>
                   )}
@@ -289,7 +291,7 @@ export function CopilotDrawer({ open, onClose }: { open: boolean; onClose: () =>
               </div>
             ),
           )}
-          {busy && <Loader2 size={16} className="animate-spin text-muted" aria-label="Working" />}
+          {busy && <Loader2 size={16} className="am-progress text-muted" aria-label="Waiting for the copilot" />}
           <div ref={end} />
         </div>
         <div className="space-y-2 border-t border-line px-5 py-3">
@@ -331,6 +333,7 @@ export function CopilotDrawer({ open, onClose }: { open: boolean; onClose: () =>
             <Button
               variant="primary"
               icon={<Send size={14} />}
+              mutation
               disabled={busy || !input.trim() || !can('artifacts:read') || !copilotAvailable}
               onClick={() => void ask(input)}
             >

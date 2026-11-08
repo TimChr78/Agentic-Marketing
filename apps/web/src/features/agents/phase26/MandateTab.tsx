@@ -5,7 +5,7 @@ import { artifactPath } from '../../../app/artifactRoutes';
 import { Link } from '../../../app/router';
 import { useWorkspace } from '../../../app/session';
 import { useApi } from '../../../app/useApi';
-import { Alert, Button, Card, Meta, Skeleton, StatusPill, Table, Tag, Td, THead, Th, Tr } from '../../../ui';
+import { Alert, Button, Card, Meta, Skeleton, SkeletonRegion, StatusPill, Table, Tag, Td, THead, Th, Tr } from '../../../ui';
 import type { MandateContent } from '../../artifacts/MandateEditor';
 import { createMandateDraft } from '../createMandate';
 import { actionClassLabel, SWITCH_INFO } from '../labels';
@@ -50,11 +50,10 @@ export function MandateTab({ agentId, agent, canArtifacts }: { agentId: string; 
 
   if (mandate.refreshing || autonomy.refreshing || (mandate.loading && !mandate.data) || (autonomy.loading && !autonomy.data)) {
     return (
-      <section aria-busy="true" aria-label="Loading the agent mandate" className="space-y-3">
-        <p className="text-[13px] text-muted">Loading the active mandate and the workspace ceiling…</p>
+      <SkeletonRegion label="Loading the agent mandate" geometry="detail" className="space-y-3">
         <Skeleton className="h-16 w-full" />
         <Skeleton className="h-40 w-full" />
-      </section>
+      </SkeletonRegion>
     );
   }
 

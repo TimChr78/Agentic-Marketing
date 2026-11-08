@@ -242,7 +242,10 @@ jobs:
       - run: npx playwright install --with-deps chromium
       - run: pnpm e2e
       # #60: `pnpm e2e` built the live UI, so its manifest now exists for the bundle-size check.
-      - run: npx vitest run apps/web/test/bundle.test.ts
+      # Phase 28 per-route budgets (#555) read the same manifest and must not skip here.
+      - run: npx vitest run apps/web/test/bundle.test.ts apps/web/test/phase28-bundle.test.ts
+        env:
+          PHASE28_REQUIRE_BUNDLE: '1'
       - if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

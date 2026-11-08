@@ -103,7 +103,7 @@ function VersionDetail({ artifactId, number }: { artifactId: string; number: num
     >
       {view === 'diff' &&
         (diff.loading ? (
-          <LoadingBlock />
+          <LoadingBlock label="Loading changes" />
         ) : diff.error ? (
           <Alert tone="bad">{diff.error}</Alert>
         ) : (
@@ -111,7 +111,7 @@ function VersionDetail({ artifactId, number }: { artifactId: string; number: num
         ))}
       {view === 'content' &&
         (content.loading ? (
-          <LoadingBlock />
+          <LoadingBlock label="Loading version content" />
         ) : content.error ? (
           <Alert tone="bad">{content.error}</Alert>
         ) : (

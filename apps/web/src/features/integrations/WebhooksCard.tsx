@@ -197,7 +197,7 @@ function WebhookDrawer({
         </Alert>
 
         {error && (
-          <Alert tone="bad" title={endpoint ? 'Not saved' : 'Not added'}>
+          <Alert tone="bad" title={endpoint ? 'Couldn’t save the endpoint' : 'Couldn’t add the endpoint'}>
             {error}
           </Alert>
         )}
@@ -238,7 +238,7 @@ export function WebhooksCard() {
       );
       await list.reload();
     } catch (err) {
-      toast.error(errText(err));
+      toast.error(`Couldn’t ${e.enabled ? 'pause' : 'enable'} “${e.name}”: ${errText(err)}`);
     } finally {
       setBusy(null);
     }
@@ -251,7 +251,7 @@ export function WebhooksCard() {
       toast.success(`Queued a test delivery to “${e.name}”. Its result appears under Recent deliveries.`);
       reloadDeliveriesSoon();
     } catch (err) {
-      toast.error(errText(err));
+      toast.error(`Couldn’t send a test delivery to “${e.name}”: ${errText(err)}`);
     } finally {
       setBusy(null);
     }
@@ -277,7 +277,7 @@ export function WebhooksCard() {
       toast.success(`Deleted “${e.name}”.`);
       await list.reload();
     } catch (err) {
-      toast.error(errText(err));
+      toast.error(`Couldn’t delete “${e.name}”: ${errText(err)}`);
     } finally {
       setBusy(null);
     }
@@ -290,7 +290,7 @@ export function WebhooksCard() {
       toast.success(`Queued the delivery to “${endpointName(d.targetId)}” for another attempt.`);
       reloadDeliveriesSoon();
     } catch (err) {
-      toast.error(errText(err));
+      toast.error(`Couldn’t queue another attempt to “${endpointName(d.targetId)}”: ${errText(err)}`);
     } finally {
       setRetrying(null);
     }

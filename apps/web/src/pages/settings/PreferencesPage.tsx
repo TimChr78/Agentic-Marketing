@@ -2,8 +2,9 @@ import { useCrumbs } from '../../app/page';
 import { useWorkspace } from '../../app/session';
 import { setThemePref, type ThemePref, useThemePref } from '../../app/theme';
 import { usePageTab } from '../../app/useTab';
+import { SettingsPanelSkeleton } from '../../features/phase28/settings-insights/SettingsPanelSkeleton';
 import { roleLabel } from '../../features/settings/roles';
-import { LoadingBlock, Meta, Mono, RadioCards, Tag } from '../../ui';
+import { Meta, Mono, RadioCards, Tag } from '../../ui';
 import { DetailPage } from '../../ui/DetailPage';
 
 const THEME_OPTIONS: { value: ThemePref; label: string; hint: string }[] = [
@@ -30,7 +31,7 @@ export default function PreferencesPage() {
       title="Preferences"
       kind="Account"
       state="ready"
-      loadingContent={<LoadingBlock lines={3} label="Opening your preferences" />}
+      loadingContent={<SettingsPanelSkeleton label="Opening your preferences" />}
       metadata={<span>Your appearance on this device, and what your account and role allow.</span>}
       activeTab={active}
       onTabChange={(key) => select(key as (typeof TABS)[number])}

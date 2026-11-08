@@ -1,7 +1,8 @@
 import type { ReactNode } from 'react';
-import { Alert, EmptyState, Skeleton } from './display';
+import { Alert, EmptyState } from './display';
 import type { PageNotice, PageReadState } from './ListPage';
 import { pageWidth } from './layout';
+import { DetailSkeleton, Skeleton } from './Skeleton';
 import { Tabs } from './tabs';
 
 // The v2 detail template (Phase 24, #448). It owns the shared geometry of a detail page: one h1
@@ -38,16 +39,16 @@ export interface DetailPageProps {
   context?: ReactNode;
   state: PageReadState;
   notice?: PageNotice;
-  /** Keeps the panel's space while the read is loading. */
-  loadingContent: ReactNode;
+  /** Keeps the panel's space while the read is loading. Omit for the shared detail geometry. */
+  loadingContent?: ReactNode;
 }
 
 function HeaderSkeleton() {
   return (
-    <div className="mb-6 lg:mb-8" aria-busy="true">
+    <div className="mb-6 space-y-3 lg:mb-8" aria-hidden>
       <Skeleton className="h-8 w-1/3" />
-      <Skeleton className="mt-3 h-3 w-2/5" />
-      <Skeleton className="mt-4 h-16 w-full max-w-[800px] rounded-lg" />
+      <Skeleton className="h-3 w-2/5" />
+      <Skeleton className="h-16 w-full max-w-[800px] rounded-lg" />
     </div>
   );
 }
@@ -73,6 +74,12 @@ export function DetailPage({
   loadingContent,
 }: DetailPageProps) {
   if (state === 'loading') {
+    if (loadingContent === undefined)
+      return (
+        <div className={pageWidth('default')}>
+          <DetailSkeleton label={`Loading ${title.toLowerCase()}`} />
+        </div>
+      );
     return (
       <div className={pageWidth('default')}>
         <HeaderSkeleton />

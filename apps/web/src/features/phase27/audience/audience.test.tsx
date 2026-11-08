@@ -955,7 +955,7 @@ describe('consent, purposes and editorial topics (#525)', () => {
     expect(screen.getByText('Marketing e-mail')).toBeTruthy();
     expect(screen.getByText('240 allowed')).toBeTruthy();
     expect(screen.getByText('4 refused')).toBeTruthy();
-    expect(screen.getByText(/email: 230 allowed, 3 refused/)).toBeTruthy();
+    expect(screen.getByText(/E-mail: 230 allowed, 3 refused/)).toBeTruthy();
     expect(screen.getByText(/weekly: 120 subscribed/)).toBeTruthy();
     expect(screen.getByText(/A person with no record is not counted as a refusal/)).toBeTruthy();
     expect(screen.getAllByText(/append-only/).length).toBeGreaterThan(0);
