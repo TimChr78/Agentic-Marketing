@@ -599,12 +599,18 @@ describe('web experiences family (#525)', () => {
       expect(screen.getByRole('tab', { name: tab })).toBeTruthy();
     }
     expect(await screen.findByLabelText(/^Placement/)).toBeTruthy();
+    expect(screen.getByLabelText('Priority')).toBeTruthy();
     expect(screen.getByLabelText('Trigger')).toBeTruthy();
     expect(screen.getByLabelText('Targeting')).toBeTruthy();
     expect(screen.getByLabelText('Name of variant 1')).toBeTruthy();
+    expect(screen.getByLabelText('Weight of variant 1')).toBeTruthy();
+    expect(screen.getByLabelText('Content kind for variant 1')).toBeTruthy();
+    expect(screen.getByLabelText('HTML for variant 1')).toBeTruthy();
     expect(screen.getByLabelText('Holdout')).toBeTruthy();
     expect(screen.getByLabelText('Goal event')).toBeTruthy();
     expect(screen.getByLabelText('Analysis')).toBeTruthy();
+    expect(screen.getByLabelText('Alpha')).toBeTruthy();
+    expect(screen.getByLabelText('Threshold')).toBeTruthy();
     expect(screen.getByRole('complementary', { name: 'Context' })).toBeTruthy();
   });
 
@@ -799,6 +805,8 @@ describe('consent, purposes and editorial topics (#525)', () => {
     expect(screen.getByLabelText('Minimum score')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'New topic' })).toBeTruthy();
     expect(await screen.findByText('The next journal')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Brief' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Archive The next journal' })).toBeTruthy();
   });
 
   it('issues no denied reads when the role cannot read profiles', async () => {
