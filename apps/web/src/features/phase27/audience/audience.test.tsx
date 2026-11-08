@@ -13,6 +13,7 @@ import AlertsPage from '../../../pages/insights/AlertsPage';
 import { ToastProvider } from '../../../ui/toast';
 import { ExperienceResults } from '../../artifacts/ExperienceResults';
 import { FormEditor } from '../../artifacts/FormEditor';
+import { ListAudiencePanel } from '../../artifacts/ListAudiencePanel';
 import { resetPickerIndexes } from '../../artifacts/pickerIndex';
 import { SegmentEditor } from '../../artifacts/SegmentEditor';
 
@@ -130,7 +131,17 @@ vi.mock('../../../app/api', async (importOriginal) => {
         if (name === 'hostedPages.preview') return { html: '<p>Confirm your subscription</p>' };
         if (name === 'segments.preview') return { count: 42 };
         if (name === 'segments.members') return { members: [], total: 0, nextCursor: null };
-        if (name === 'audiences.imports') return { imports: [] };
+        if (name === 'audiences.imports') return { imports: h.rows.imports ?? [] };
+        if (name === 'audiences.import')
+          return {
+            rows: 4,
+            matched: 3,
+            added: 2,
+            existing: 1,
+            unmatched: [{ row: 5, reason: 'not_found' }],
+            dryRun: input.dryRun,
+          };
+        if (name === 'audiences.refreshSnapshot') return { members: 2, added: 1, removed: 0 };
         if (name === 'experiences.results') return h.results;
         if (name === 'alerts.list') return { rules: h.rows.alert_rules ?? [] };
         if (name === 'webhooks.list') return { endpoints: [] };
@@ -464,6 +475,93 @@ describe('segments family (#525)', () => {
     expect(screen.getByRole('button', { name: 'Import CSV' })).toBeTruthy();
     await waitFor(() => expect(callsOf('segments.members')).toHaveLength(1));
     expect(callsOf('audiences.imports')).toHaveLength(1);
+  });
+
+  it('keeps nested, self and missing segment references and round-trips unknown condition keys', async () => {
+    h.rows.segment = [row(segmentId, 'segment', 'Weekly readers')];
+    const captured: Record<string, unknown>[] = [];
+    const content = {
+      mode: 'dynamic',
+      condition: {
+        all: [
+          { trait: 'loyaltyTier', op: 'eq', value: 'gold', future: { nested: true } },
+          { all: [{ trait: 'country', op: 'eq', value: 'DE' }] },
+          { segment: segmentId },
+          { segment: `seg_${'f'.repeat(32)}` },
+        ],
+      },
+    };
+    renderWithToast(
+      <SegmentEditor
+        artifact={artifact(segmentId, 'segment', 'Weekly readers', content) as never}
+        content={content as never}
+        onChange={(next) => captured.push(next as unknown as Record<string, unknown>)}
+        readOnly={false}
+        errors={{}}
+        warnings={[]}
+      />,
+    );
+    await waitFor(() => expect(screen.getAllByLabelText(/^Segment, condition/).length).toBe(2));
+    expect(screen.getAllByLabelText(/Match all or any/)).toHaveLength(2);
+    expect(screen.getAllByText(/this segment or not found/)).toHaveLength(2);
+
+    fireEvent.change(screen.getAllByLabelText(/^Operator, condition/)[0], { target: { value: 'neq' } });
+    const last = captured.at(-1) as Record<string, unknown>;
+    const all = (last.condition as { all: Record<string, unknown>[] }).all;
+    expect(all[0]).toMatchObject({ trait: 'loyaltyTier', op: 'neq', value: 'gold', future: { nested: true } });
+    expect(all[1]).toEqual({ all: [{ trait: 'country', op: 'eq', value: 'DE' }] });
+  });
+
+  it('keeps the CSV dry-run, unmatched rows and import history', async () => {
+    h.rows.imports = [
+      {
+        id: 'imp_1',
+        source: 'csv',
+        fileName: 'people.csv',
+        rows: 4,
+        matched: 3,
+        added: 2,
+        unmatched: [{ row: 5, reason: 'not_found' }],
+        createdAt: '2026-11-02T09:00:00.000Z',
+      },
+    ];
+    renderWithToast(<ListAudiencePanel artifactId={segmentId} content={{ mode: 'static' }} />);
+    expect(await screen.findByText('people.csv')).toBeTruthy();
+    expect(screen.getByText(/1 unmatched/)).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Import CSV' }));
+    const csv = 'email\nada@example.com\nbo@example.com\n';
+    fireEvent.change(screen.getByLabelText('CSV file'), {
+      target: { files: [new File([csv], 'people.csv', { type: 'text/csv' })] },
+    });
+    const column = await screen.findByLabelText('Column with the identifier');
+    fireEvent.change(column, { target: { value: 'email' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Preview matches' }));
+    await waitFor(() => expect(callsOf('audiences.import')).toHaveLength(1));
+    expect(callsOf('audiences.import')[0].input).toMatchObject({ dryRun: true, column: 'email' });
+    expect(await screen.findByText('Unmatched rows')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: /Apply 2 additions/ }));
+    await waitFor(() => expect(callsOf('audiences.import')).toHaveLength(2));
+    expect(callsOf('audiences.import')[1].input).toMatchObject({ dryRun: false });
+  });
+
+  it('refreshes a snapshot and refetches only the affected members and imports', async () => {
+    renderWithToast(
+      <ListAudiencePanel
+        artifactId={segmentId}
+        content={{
+          mode: 'snapshot',
+          sourceSegment: segmentId,
+          snapshotVersion: 2,
+          snapshotAt: '2026-11-02T09:00:00.000Z',
+        }}
+      />,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: 'Refresh from source' }));
+    await waitFor(() => expect(callsOf('audiences.refreshSnapshot')).toHaveLength(1));
+    await waitFor(() => expect(callsOf('segments.members')).toHaveLength(2));
+    expect(callsOf('audiences.imports')).toHaveLength(2);
   });
 });
 
