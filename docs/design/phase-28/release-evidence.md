@@ -133,28 +133,25 @@ control, the developer JSON view and preview source parsing.
 
 None.
 
-### W · 2 findings
+### W · 0 findings
 
-- `apps/web/src/features/agents/HostedAgentCard.tsx:237` **generic-error** — Error
-- `apps/web/src/pages/approvals/ApprovalsPage.tsx:154` **generic-error** — Loading
+None.
 
-### M · 1 finding
+### M · 0 findings
 
-- `apps/web/src/features/artifacts/ExperienceEditor.tsx:267` **purpose-key** — Traits, segments and session conditions need web_personalization consent; page, referrer, UTM and device do not.
+None.
 
-### A · 1 finding
+### A · 0 findings
 
-- `apps/web/src/pages/audience/ImportsPage.tsx:101` **purpose-key** — The purpose must be a lowercase key such as marketing_email.
+None.
 
-### C · 2 findings
+### C · 0 findings
 
-- `apps/web/src/features/phase27/content/ContentList.tsx:294` **generic-error** — Loading
-- `apps/web/src/features/phase27/content/ContentList.tsx:302` **generic-error** — Loading
+None.
 
-### S · 2 findings
+### S · 0 findings
 
-- `apps/web/src/features/deliverability/model.ts:99` **no-data** — No data
-- `apps/web/src/features/tokens/TokensCard.tsx:38` **banned-copy** — No client has sent unknown input keys for 7 days: it's safe to set
+None.
 
 <!-- phase28-microcopy:end -->
 
