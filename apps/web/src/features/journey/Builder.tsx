@@ -570,7 +570,7 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
         {/* biome-ignore lint/a11y/noStaticElementInteractions: canvas drop target; adding a step is also available from the palette buttons */}
         <div
           ref={wrapper}
-          className="relative min-h-0 flex-1 bg-surface-2"
+          className="relative min-h-[320px] flex-1 bg-surface-2 lg:min-h-0"
           onDragOver={(e) => {
             if (e.dataTransfer.types.includes(DND_TYPE)) {
               e.preventDefault();

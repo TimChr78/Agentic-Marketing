@@ -43,7 +43,10 @@ test.describe('390 px marketing surfaces', () => {
     await page.goto(`/marketing/broadcasts/${id}`);
     await settle(page);
 
-    const primary = page.locator('main#main').getByRole('link', { name: 'Review the request' }).first();
+    const primary = page
+      .locator('main#main')
+      .getByRole('link', { name: /^(Review the request|View request)$/ })
+      .first();
     await expect(primary).toBeVisible();
     const more = page.getByRole('button', { name: 'More actions' });
     await expect(more).toBeVisible();
@@ -72,7 +75,7 @@ test.describe('390 px marketing surfaces', () => {
 
 test('the sending panel reserves its KPI region while status loads', async ({ page }) => {
   await signIn(page, PEOPLE.builder);
-  const id = await artifactId(page, 'broadcast', 'Signal #42 resend to engaged readers');
+  const id = await artifactId(page, 'broadcast', 'Signal #40: the inbox metric that matters');
   await page.route('**/v1/broadcasts.status*', async (route) => {
     await new Promise((resolve) => setTimeout(resolve, 500));
     await route.continue();
