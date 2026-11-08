@@ -2,8 +2,9 @@ import { useEffect, useMemo, useState } from 'react';
 import { api, errText } from '../../app/api';
 import { useCrumbs } from '../../app/page';
 import { useWorkspace } from '../../app/session';
-import { Alert, Button, Card, Field, Input, PageHeader, Select, Textarea, useToast } from '../../ui';
-import { pageWidth } from '../../ui/layout';
+import { usePageTab } from '../../app/useTab';
+import { Alert, Button, Field, Input, LoadingBlock, Select, Textarea, useToast } from '../../ui';
+import { DetailPage } from '../../ui/DetailPage';
 
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -29,11 +30,17 @@ function parseSeedList(text: string): { emails: string[]; problem: string | null
   return { emails, problem: null };
 }
 
-/** Workspace settings: name, time zone and the test-send seed list (workspace:admin). */
+const TABS = ['general', 'test-sends'] as const;
+
+/**
+ * Workspace (#527): the name and time zone everyone sees, and the addresses that may receive test
+ * sends. The two sections save independently, so a failed test-send save never discards a typed name.
+ */
 export default function WorkspacePage() {
   useCrumbs([{ label: 'Workspace' }]);
   const { workspace, refresh } = useWorkspace();
   const toast = useToast();
+  const { active, select } = usePageTab({ keys: TABS, fallback: 'general' });
   const [name, setName] = useState(workspace.name);
   const [timeZone, setTimeZone] = useState(workspace.timeZone);
   const [seedText, setSeedText] = useState(workspace.seedList.join('\n'));
@@ -107,94 +114,115 @@ export default function WorkspacePage() {
   };
 
   return (
-    <div className={pageWidth('reading')}>
-      <PageHeader title="Workspace" description="The name and time zone everyone sees, and the addresses that may receive test sends." />
-      <div className="space-y-5">
-        <Card title="General" description="Shown throughout the admin UI and in messages where the workspace is named.">
-          <form
-            className="space-y-4 p-4"
-            onSubmit={(e) => {
-              e.preventDefault();
-              void saveGeneral();
-            }}
-          >
-            <Field label="Name" error={nameError} required>
-              <Input
-                value={name}
-                maxLength={120}
-                onChange={(e) => {
-                  setName(e.target.value);
-                  setNameError(null);
-                }}
-                onBlur={(e) => setNameError(nameProblem(e.target.value))}
-              />
-            </Field>
-            <Field label="Time zone" hint="Dates and the send-time picker use this zone.">
-              <Select value={timeZone} onChange={(e) => setTimeZone(e.target.value)}>
-                {zones.map((z) => (
-                  <option key={z} value={z}>
-                    {z}
-                  </option>
-                ))}
-              </Select>
-            </Field>
-            {generalError && (
-              <Alert tone="bad" title="Not saved">
-                {generalError}
-              </Alert>
-            )}
-            <div className="flex justify-end">
-              <Button type="submit" variant="primary" loading={savingGeneral}>
-                Save
-              </Button>
-            </div>
-          </form>
-        </Card>
-
-        <Card title="Test sends" description="Addresses outside the workspace that test sends may go to, such as a monitoring inbox.">
-          <form
-            className="space-y-4 p-4"
-            onSubmit={(e) => {
-              e.preventDefault();
-              void saveSeedList();
-            }}
-          >
-            <Field
-              label="Seed list"
-              hint="One e-mail address per line, at most 50. Test sends go to these addresses as well as workspace members; real broadcasts are not affected."
-              error={seedError}
+    <DetailPage
+      title="Workspace"
+      kind="Settings"
+      metadata={<span>Agentic Marketing {workspace.serverVersion}</span>}
+      state="ready"
+      loadingContent={<LoadingBlock lines={4} label="Opening workspace settings" />}
+      activeTab={active}
+      onTabChange={(key) => select(key as (typeof TABS)[number])}
+      tabs={[
+        {
+          key: 'general',
+          label: 'General',
+          panel: (
+            <form
+              id="workspace-general-form"
+              className="max-w-[560px] space-y-4"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void saveGeneral();
+              }}
             >
-              <Textarea
-                rows={5}
-                mono
-                value={seedText}
-                spellCheck={false}
-                autoComplete="off"
-                onChange={(e) => {
-                  setSeedText(e.target.value);
-                  setSeedError(null);
-                }}
-                onBlur={(e) => {
-                  const parsed = parseSeedList(e.target.value);
-                  setSeedError(parsed.problem);
-                }}
-              />
-            </Field>
-            {seedSaveError && (
-              <Alert tone="bad" title="Not saved">
-                {seedSaveError}
-              </Alert>
-            )}
-            <div className="flex justify-end">
-              <Button type="submit" variant="primary" loading={savingSeed}>
-                Save test sends
-              </Button>
-            </div>
-          </form>
-        </Card>
-
-        <p className="pt-1 text-center text-[12px] text-muted">Agentic Marketing {workspace.serverVersion}</p>
-      </div>
-    </div>
+              <Field label="Name" error={nameError} required>
+                <Input
+                  value={name}
+                  maxLength={120}
+                  onChange={(e) => {
+                    setName(e.target.value);
+                    setNameError(null);
+                  }}
+                  onBlur={(e) => setNameError(nameProblem(e.target.value))}
+                />
+              </Field>
+              <Field label="Time zone" hint="Dates and the send-time picker use this zone.">
+                <Select value={timeZone} onChange={(e) => setTimeZone(e.target.value)}>
+                  {zones.map((z) => (
+                    <option key={z} value={z}>
+                      {z}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+              {generalError && (
+                <Alert tone="bad" title="Not saved">
+                  {generalError}
+                </Alert>
+              )}
+            </form>
+          ),
+        },
+        {
+          key: 'test-sends',
+          label: 'Test sends',
+          panel: (
+            <form
+              id="workspace-seed-form"
+              className="max-w-[560px] space-y-4"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void saveSeedList();
+              }}
+            >
+              <Field
+                label="Seed list"
+                hint="One e-mail address per line, at most 50. Test sends go to these addresses as well as workspace members; real broadcasts are not affected."
+                error={seedError}
+              >
+                <Textarea
+                  rows={5}
+                  mono
+                  value={seedText}
+                  spellCheck={false}
+                  autoComplete="off"
+                  onChange={(e) => {
+                    setSeedText(e.target.value);
+                    setSeedError(null);
+                  }}
+                  onBlur={(e) => {
+                    const parsed = parseSeedList(e.target.value);
+                    setSeedError(parsed.problem);
+                  }}
+                />
+              </Field>
+              {seedSaveError && (
+                <Alert tone="bad" title="Not saved">
+                  {seedSaveError}
+                </Alert>
+              )}
+            </form>
+          ),
+        },
+      ]}
+      primaryAction={
+        active === 'test-sends' ? (
+          <Button type="submit" form="workspace-seed-form" variant="primary" loading={savingSeed}>
+            Save test sends
+          </Button>
+        ) : (
+          <Button type="submit" form="workspace-general-form" variant="primary" loading={savingGeneral}>
+            Save
+          </Button>
+        )
+      }
+      consequence={
+        <p className="rounded-lg bg-surface-2 px-4 py-3 text-[13px] leading-5 text-fg-2">
+          {active === 'test-sends'
+            ? 'Test sends reach these addresses as well as workspace members. Real broadcasts are not affected.'
+            : 'The name appears throughout the admin UI and in messages where the workspace is named. The time zone sets the dates and send-time picker everyone sees.'}
+        </p>
+      }
+    />
   );
 }

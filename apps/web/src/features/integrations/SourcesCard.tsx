@@ -5,7 +5,6 @@ import { useApi } from '../../app/useApi';
 import {
   Alert,
   Button,
-  Card,
   CodeView,
   Drawer,
   EmptyState,
@@ -83,15 +82,16 @@ export function SourcesCard() {
   };
 
   return (
-    <Card
-      title="Event sources"
-      description="Where events come from: your website (a public write key limited to its origins) or a server (a secret key)."
-      action={
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <p className="max-w-[70ch] text-[13px] leading-5 text-muted">
+          Where events come from: your website (a public write key limited to its origins) or a server (a secret key). Consent rules are
+          checked before anything is kept.
+        </p>
         <Button variant="primary" icon={<Plus size={15} />} onClick={() => setEditing('new')}>
           Add source
         </Button>
-      }
-    >
+      </div>
       <TableFrame
         loading={list.loading}
         error={list.error}
@@ -165,7 +165,7 @@ export function SourcesCard() {
         </Table>
       </TableFrame>
       {browser?.writeKey && (
-        <div className="border-t border-line p-4">
+        <div className="rounded-lg border border-line bg-surface p-3">
           <CodeView
             label={`Browser SDK for “${browser.name}”`}
             value={`import { createAnalytics } from '@agentic-marketing/sdk-js';
@@ -203,7 +203,7 @@ analytics.page();`}
         </Modal>
       )}
       {confirmDialog}
-    </Card>
+    </div>
   );
 }
 

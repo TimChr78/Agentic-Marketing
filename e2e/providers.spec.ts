@@ -23,7 +23,7 @@ test('add, edit, disable and delete an e-mail provider (#40)', async ({ page }) 
   await expect(page.getByRole('dialog', { name: /Webhook URL/ })).toContainText('/hooks/email/');
   await page.getByRole('button', { name: "I've saved it" }).click();
 
-  const item = page.getByRole('listitem').filter({ hasText: 'Postmark (newsletter)' });
+  const item = page.getByRole('row').filter({ hasText: 'Postmark (newsletter)' });
   await expect(item).toContainText('Sends marketing e-mail');
   await item.getByRole('button', { name: 'Edit' }).click();
   const edit = page.getByRole('dialog', { name: 'Edit “Postmark (newsletter)”' });
