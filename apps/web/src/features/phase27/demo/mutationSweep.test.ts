@@ -26,6 +26,10 @@ const MUTATING_HANDLER =
 
 const MUTATING_SWITCH = /(\btoggle\b|onToggle|void\s+toggle\s*\()/;
 
+// A dropdown that writes on change fires an async command (`void changeRole(…)`, `api.call(…)`);
+// one that edits a draft only updates local state. Lexical verbs miss names like changeRole.
+const MUTATING_SELECT = /\bvoid\s+[\w.]+\s*\(|\bapi\.call\s*\(/;
+
 function walk(dir: string, out: string[] = []) {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const path = join(dir, entry.name);
@@ -121,7 +125,7 @@ function failures(): string[] {
     const source = readFileSync(path, 'utf8');
     const allowed = (text: string) => ALLOWED_CONTROLS.some((row) => row.file === file && row.control.test(text));
 
-    for (const name of ['Button', 'IconButton', 'Switch']) {
+    for (const name of ['Button', 'IconButton', 'Switch', 'Select']) {
       for (const tag of tags(source, name)) {
         if (/mutation=\{false\}/.test(tag.text)) {
           if (!allowed(tag.text)) problems.push(`${file}:${tag.line}: mutation={false} is not allowed\n  ${tag.text.replace(/\s+/g, ' ')}`);
@@ -129,8 +133,14 @@ function failures(): string[] {
         }
         if (/\bmutation\b/.test(tag.text)) continue;
         const submit = /type="submit"/.test(tag.text) || /\bform="/.test(tag.text);
-        const handler = prop(tag.text, name === 'Switch' ? 'onChange' : 'onClick');
-        const mutating = handler !== null && (name === 'Switch' ? MUTATING_SWITCH.test(handler) : MUTATING_HANDLER.test(handler));
+        const handler = prop(tag.text, name === 'Switch' || name === 'Select' ? 'onChange' : 'onClick');
+        const mutating =
+          handler !== null &&
+          (name === 'Switch'
+            ? MUTATING_SWITCH.test(handler)
+            : name === 'Select'
+              ? MUTATING_SELECT.test(handler)
+              : MUTATING_HANDLER.test(handler));
         if (!submit && !mutating) continue;
         if (allowed(tag.text)) continue;
         problems.push(`${file}:${tag.line}: mark this ${name} with mutation\n  ${tag.text.replace(/\s+/g, ' ').slice(0, 180)}`);

@@ -133,16 +133,26 @@ export const Textarea = forwardRef<HTMLTextAreaElement, TextareaHTMLAttributes<H
   );
 });
 
-export const Select = forwardRef<HTMLSelectElement, SelectHTMLAttributes<HTMLSelectElement> & { compact?: boolean }>(function Select(
-  { className, compact, children, ...p },
-  ref,
-) {
+export const Select = forwardRef<
+  HTMLSelectElement,
+  SelectHTMLAttributes<HTMLSelectElement> & {
+    compact?: boolean;
+    /** Marks a dropdown that changes data as soon as it changes; disabled with the reason in a restricted surface. */
+    mutation?: boolean;
+  }
+>(function Select({ className, compact, mutation, children, ...p }, ref) {
+  const { mutations, reason } = useCapabilities();
+  const blocked = mutation === true && !mutations;
   return (
     <div className={cx('relative', className?.includes('w-auto') ? 'inline-block' : 'block')}>
       <select
         ref={ref}
         {...p}
         {...useField(p)}
+        title={blocked ? (reason ?? undefined) : p.title}
+        aria-description={blocked ? (reason ?? undefined) : undefined}
+        data-demo-blocked={blocked || undefined}
+        disabled={p.disabled || blocked}
         className={cx(
           controlClass,
           'appearance-none pr-9 md:pr-8',

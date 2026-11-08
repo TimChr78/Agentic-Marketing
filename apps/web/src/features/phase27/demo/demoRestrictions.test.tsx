@@ -114,6 +114,17 @@ describe('demo mutation controls are visibly disabled (#530)', () => {
     expect(remove.getAttribute('data-demo-blocked')).toBe('true');
   });
 
+  it('Users: role dropdowns are disabled, so a role change never submits', async () => {
+    await renderDemoAt('/demo/settings/users');
+    const roles = (await screen.findAllByRole('combobox', { name: 'Role for Vic Chen' })) as HTMLSelectElement[];
+    expect(roles.length).toBeGreaterThan(0);
+    for (const role of roles) {
+      expect(role.disabled).toBe(true);
+      expect(role.getAttribute('title')).toBe(DEMO_RESTRICTION_REASON);
+      expect(role.getAttribute('data-demo-blocked')).toBe('true');
+    }
+  });
+
   it('leaves the same controls enabled outside the demo', async () => {
     // The shared primitive is the single switch: the default context keeps every page unchanged.
     const { Button } = await import('../../../ui');
