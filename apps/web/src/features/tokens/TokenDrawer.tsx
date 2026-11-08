@@ -12,7 +12,6 @@ import {
   FieldGroup,
   formatDateTime,
   Input,
-  LoadingBlock,
   Meta,
   Mono,
   Select,
@@ -20,6 +19,7 @@ import {
   useConfirm,
   useToast,
 } from '../../ui';
+import { SettingsPanelSkeleton } from '../phase28/settings-insights/SettingsPanelSkeleton';
 import { ScopePicker } from './ScopePicker';
 import { SCOPE_TEXT, type Scope, scopeSentence } from './scopes';
 import { TokenStatus, tokenStatus } from './TokenStatus';
@@ -172,7 +172,7 @@ export function TokenDrawer({ id, onClose, onChanged }: { id: string; onClose: (
       }
     >
       {t.loading ? (
-        <LoadingBlock lines={8} />
+        <SettingsPanelSkeleton label="Loading the token" />
       ) : t.error ? (
         <div className="p-5">
           <Alert tone="bad" title="Couldn't open this token" onRetry={t.reload}>
@@ -250,7 +250,7 @@ export function TokenDrawer({ id, onClose, onChanged }: { id: string; onClose: (
             </section>
           )}
           {error && (
-            <Alert tone="bad" title="Not saved">
+            <Alert tone="bad" title="Couldn’t save this token">
               {error}
             </Alert>
           )}

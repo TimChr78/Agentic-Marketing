@@ -35,8 +35,17 @@ export function TokensCard({ openId }: { openId?: string }) {
         </Button>
       </div>
       {admin && warnings.data && !warnings.data.strictInputs && warnings.data.safeToEnableStrict && (
-        <Alert tone="good">
-          No client has sent unknown input keys for 7 days: it's safe to set <Mono>STRICT_INPUTS=true</Mono>.
+        <Alert tone="info" title="No unknown input keys recorded in the last 7 days">
+          <p>
+            Review your clients before enabling strict input validation. The seven-day observation does not guarantee that every client is
+            ready; a client that did not call in this window could still send an unknown key.
+          </p>
+          <details className="mt-2 text-[12px] leading-[18px]">
+            <summary className="cursor-pointer hover:text-fg">Technical setup</summary>
+            <p className="mt-1">
+              Set <Mono>STRICT_INPUTS=true</Mono> to reject unknown input keys instead of ignoring them.
+            </p>
+          </details>
         </Alert>
       )}
       <TableFrame
@@ -62,12 +71,12 @@ export function TokensCard({ openId }: { openId?: string }) {
           <THead>
             <tr>
               <Th>Name</Th>
-              <Th>Brand</Th>
-              {admin && <Th>Owner</Th>}
+              <Th className="hidden md:table-cell">Brand</Th>
+              {admin && <Th className="hidden md:table-cell">Owner</Th>}
               <Th className="hidden lg:table-cell">Scopes</Th>
-              <Th>Last used</Th>
+              <Th className="hidden md:table-cell">Last used</Th>
               <Th className="hidden md:table-cell">Expires</Th>
-              <Th>Status</Th>
+              <Th className="hidden md:table-cell">Status</Th>
             </tr>
           </THead>
           <tbody>
@@ -84,6 +93,9 @@ export function TokensCard({ openId }: { openId?: string }) {
                   >
                     {t.name}
                   </button>
+                  <div className="mt-1 flex flex-wrap items-center gap-2 md:hidden">
+                    <TokenStatus t={t} />
+                  </div>
                   <div className="font-mono text-[11px] text-muted">{t.tokenHint}</div>
                   {ignored.has(t.id) && (
                     // biome-ignore lint/a11y/useKeyWithClickEvents: only stops the row click from firing; the summary toggles natively from the keyboard
@@ -102,8 +114,8 @@ export function TokensCard({ openId }: { openId?: string }) {
                     </details>
                   )}
                 </Td>
-                <Td className="whitespace-nowrap">{t.workspaceName}</Td>
-                {admin && <Td>{t.ownerName}</Td>}
+                <Td className="hidden whitespace-nowrap md:table-cell">{t.workspaceName}</Td>
+                {admin && <Td className="hidden md:table-cell">{t.ownerName}</Td>}
                 <Td className="hidden max-w-[360px] lg:table-cell">
                   <span className="flex flex-wrap gap-1">
                     {t.scopes.map((s) => (
@@ -111,9 +123,9 @@ export function TokensCard({ openId }: { openId?: string }) {
                     ))}
                   </span>
                 </Td>
-                <Td className="whitespace-nowrap">{t.lastUsedAt ? timeAgo(t.lastUsedAt) : 'Never'}</Td>
+                <Td className="hidden whitespace-nowrap md:table-cell">{t.lastUsedAt ? timeAgo(t.lastUsedAt) : 'Never'}</Td>
                 <Td className="hidden whitespace-nowrap md:table-cell">{t.expiresAt ? formatDate(t.expiresAt) : 'Never'}</Td>
-                <Td>
+                <Td className="hidden md:table-cell">
                   <TokenStatus t={t} />
                 </Td>
               </Tr>

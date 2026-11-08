@@ -173,6 +173,9 @@ function writeEvidence(section: string) {
   writeFileSync(EVIDENCE, next.endsWith('\n') ? next : `${next}\n`);
 }
 
+/** Areas that have adopted the lint. A task adds its letter here when it flips to strict. */
+const STRICT: Owner[] = ['I', 'S'];
+
 describe('phase 28 microcopy lint (#555)', () => {
   const findings = scan();
 
@@ -181,14 +184,16 @@ describe('phase 28 microcopy lint (#555)', () => {
     expect(readFileSync(EVIDENCE, 'utf8')).toContain('phase28-microcopy:start');
   });
 
-  it('I-owned shared copy has no raw ids, keys or banned patterns', () => {
-    const ours = findings.filter((f) => f.owner === 'I');
-    const detail = ours.map((f) => `${f.file}:${f.line} [${f.rule}] ${f.text}`).join('\n');
-    expect(ours, detail).toEqual([]);
+  it('strict areas have no raw ids, keys or banned patterns', () => {
+    for (const owner of STRICT) {
+      const ours = findings.filter((f) => f.owner === owner);
+      const detail = ours.map((f) => `${f.file}:${f.line} [${f.rule}] ${f.text}`).join('\n');
+      expect(ours, `${owner}\n${detail}`).toEqual([]);
+    }
   });
 
-  it('reports the area totals so each task can flip its own section to strict', () => {
-    for (const owner of ['W', 'M', 'A', 'C', 'S'] as const) {
+  it('reports the remaining area totals so each task can flip its own section to strict', () => {
+    for (const owner of ['W', 'M', 'A', 'C'] as const) {
       const rows = findings.filter((f) => f.owner === owner);
       console.log(`${owner}: ${rows.length} microcopy finding${rows.length === 1 ? '' : 's'}`);
     }

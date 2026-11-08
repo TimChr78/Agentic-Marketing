@@ -366,7 +366,7 @@ function SmsDrawer({
         )}
 
         {error && (
-          <Alert tone="bad" title={provider ? 'Not saved' : 'Not added'}>
+          <Alert tone="bad" title={provider ? 'Couldn’t save this provider' : 'Couldn’t add a provider'}>
             {error}
           </Alert>
         )}
@@ -825,7 +825,7 @@ function PushDrawer({ provider, onClose, onSaved }: { provider: Push | null; onC
         )}
 
         {error && (
-          <Alert tone="bad" title={provider ? 'Not saved' : 'Not added'}>
+          <Alert tone="bad" title={provider ? 'Couldn’t save this provider' : 'Couldn’t add a provider'}>
             {error}
           </Alert>
         )}
@@ -1178,7 +1178,7 @@ function AiDrawer({ provider, onClose, onSaved }: { provider: Ai | null; onClose
         </Field>
 
         {error && (
-          <Alert tone="bad" title={provider ? 'Not saved' : 'Not added'}>
+          <Alert tone="bad" title={provider ? 'Couldn’t save this provider' : 'Couldn’t add a provider'}>
             {error}
           </Alert>
         )}

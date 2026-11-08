@@ -14,7 +14,7 @@ import {
   FieldGroup,
   fieldErrors,
   Input,
-  LoadingBlock,
+  ListSkeleton,
   Menu,
   Modal,
   Select,
@@ -265,7 +265,7 @@ function ConnectionDrawer({
         )}
 
         {error && (
-          <Alert tone="bad" title={connection ? 'Not saved' : 'Not added'}>
+          <Alert tone="bad" title={connection ? 'Couldn’t save the connection' : 'Couldn’t add the connection'}>
             {error}
           </Alert>
         )}
@@ -358,7 +358,7 @@ export function ConnectionsCard() {
           )}
         </div>
         {catalog.loading || list.loading ? (
-          <LoadingBlock lines={4} />
+          <ListSkeleton label="Loading connections" columns={4} />
         ) : (list.error ?? catalog.error) ? (
           <div className="p-3">
             <Alert tone="bad" title="Couldn't load connections" onRetry={reload}>

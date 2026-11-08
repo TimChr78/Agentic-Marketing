@@ -5,7 +5,8 @@ import { useWorkspace, type Workspace } from '../../app/session';
 import { usePageTab } from '../../app/useTab';
 import { AutonomyCard } from '../../features/agents/AutonomyCard';
 import { useAutonomy } from '../../features/agents/AutonomyProvider';
-import { Alert, Button, LoadingBlock, Meta, RadioCards, StatusPill, useConfirm, useToast } from '../../ui';
+import { SettingsPanelSkeleton } from '../../features/phase28/settings-insights/SettingsPanelSkeleton';
+import { Alert, Button, Meta, RadioCards, StatusPill, useConfirm, useToast } from '../../ui';
 import { DetailPage } from '../../ui/DetailPage';
 
 type Policy = Workspace['approvalPolicy'];
@@ -86,7 +87,7 @@ function AutonomyPanel() {
   const { can } = useWorkspace();
   const toast = useToast();
   const autonomy = useAutonomy();
-  if (autonomy.loading && !autonomy.settings) return <LoadingBlock lines={4} label="Loading autonomy settings" />;
+  if (autonomy.loading && !autonomy.settings) return <SettingsPanelSkeleton label="Loading autonomy settings" />;
   if (autonomy.error && !autonomy.settings)
     return (
       <Alert tone="bad" title="Couldn't load autonomy settings" onRetry={() => void autonomy.reload()}>
@@ -157,7 +158,7 @@ export default function ApprovalPolicyPage() {
         statePill={<StatusPill tone="info">{POLICY_INFO[workspace.approvalPolicy].label}</StatusPill>}
         metadata={<span>Applies to every artifact and broadcast in the workspace.</span>}
         state="ready"
-        loadingContent={<LoadingBlock lines={4} label="Opening the approval policy" />}
+        loadingContent={<SettingsPanelSkeleton label="Opening the approval policy" />}
         activeTab={active}
         onTabChange={(key) => select(key as PolicyTab)}
         tabs={TAB_ITEMS.map((tab) =>
@@ -169,7 +170,7 @@ export default function ApprovalPolicyPage() {
                     {invalid && <Alert tone="info">This tab is unavailable.</Alert>}
                     {canAdmin ? <PolicyChoices selected={selected} onChange={setSelected} /> : <ReadOnlyPolicy />}
                     {error && (
-                      <Alert tone="bad" title="Not saved">
+                      <Alert tone="bad" title="Couldn’t save the approval policy">
                         {error}
                       </Alert>
                     )}

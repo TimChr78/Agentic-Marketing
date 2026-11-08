@@ -111,7 +111,6 @@ test.describe('shared states', () => {
   });
 
   test('a failed list read keeps the heading and offers Retry (S)', async ({ page }) => {
-    test.fixme(true, 'Owned by task S; reporting until insights and settings land');
     await page.route('**/v1/analytics.query*', (route) => route.fulfill({ status: 500, body: '{}' }));
     await signIn(page, PEOPLE.owner);
     await page.goto('/insights/analytics');

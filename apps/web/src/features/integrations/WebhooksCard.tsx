@@ -197,7 +197,7 @@ function WebhookDrawer({
         </Alert>
 
         {error && (
-          <Alert tone="bad" title={endpoint ? 'Not saved' : 'Not added'}>
+          <Alert tone="bad" title={endpoint ? 'Couldn’t save the endpoint' : 'Couldn’t add the endpoint'}>
             {error}
           </Alert>
         )}

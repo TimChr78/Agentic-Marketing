@@ -437,7 +437,7 @@ function ProviderDrawer({
           />
         </FieldGroup>
         {error && (
-          <Alert tone="bad" title={provider ? 'Not saved' : 'Not added'}>
+          <Alert tone="bad" title={provider ? 'Couldn’t save this e-mail provider' : 'Couldn’t add an e-mail provider'}>
             {error}
           </Alert>
         )}

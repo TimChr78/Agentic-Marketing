@@ -3,7 +3,8 @@ import { api, errText } from '../../app/api';
 import { useCrumbs } from '../../app/page';
 import { useWorkspace } from '../../app/session';
 import { usePageTab } from '../../app/useTab';
-import { Alert, Button, Field, Input, LoadingBlock, Select, Textarea, useToast } from '../../ui';
+import { SettingsPanelSkeleton } from '../../features/phase28/settings-insights/SettingsPanelSkeleton';
+import { Alert, Button, Field, Input, Select, Textarea, useToast } from '../../ui';
 import { DetailPage } from '../../ui/DetailPage';
 
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -119,7 +120,7 @@ export default function WorkspacePage() {
       kind="Settings"
       metadata={<span>Agentic Marketing {workspace.serverVersion}</span>}
       state="ready"
-      loadingContent={<LoadingBlock lines={4} label="Opening workspace settings" />}
+      loadingContent={<SettingsPanelSkeleton label="Opening workspace settings" />}
       activeTab={active}
       onTabChange={(key) => select(key as (typeof TABS)[number])}
       tabs={[
@@ -156,7 +157,7 @@ export default function WorkspacePage() {
                 </Select>
               </Field>
               {generalError && (
-                <Alert tone="bad" title="Not saved">
+                <Alert tone="bad" title="Couldn’t save the workspace details">
                   {generalError}
                 </Alert>
               )}
@@ -197,7 +198,7 @@ export default function WorkspacePage() {
                 />
               </Field>
               {seedSaveError && (
-                <Alert tone="bad" title="Not saved">
+                <Alert tone="bad" title="Couldn’t save the test-send addresses">
                   {seedSaveError}
                 </Alert>
               )}

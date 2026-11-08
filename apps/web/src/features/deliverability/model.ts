@@ -96,7 +96,7 @@ export function streamVerdict(
   if (rates.sent <= 0) {
     return {
       state: 'no-data',
-      label: 'No data',
+      label: 'No sends in this window',
       tone: 'neutral',
       evaluated: false,
       detail: `No sends in the last ${options.windowDays} days.`,

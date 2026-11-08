@@ -653,7 +653,7 @@ describe('data states (#506)', () => {
     let resolve!: (value: unknown) => void;
     h.deferred = { promise: new Promise((done) => (resolve = done)), resolve: (value) => resolve(value) };
     renderAt();
-    expect(await screen.findByLabelText('Loading analytics')).toBeTruthy();
+    expect(await screen.findByLabelText('Loading analytics table')).toBeTruthy();
     expect(screen.getByLabelText('Period')).toBeTruthy();
     expect(screen.getByLabelText('Question')).toBeTruthy();
     resolve(resultFor({ from: CURRENT_FROM, to: CURRENT_TO, dimensions: ['day'], measures: ['email.delivered'] }));
@@ -726,7 +726,7 @@ describe('data states (#506)', () => {
     choose('Question', 'journey');
     await waitForReads(8);
 
-    expect(screen.getByLabelText('Loading analytics')).toBeTruthy();
+    expect(screen.getByLabelText('Loading analytics table')).toBeTruthy();
     expect(screen.queryByText('Delivered people')).toBeNull();
     expect(screen.queryByText('Delivered over time')).toBeNull();
     expect(screen.queryByText('Result table')).toBeNull();
@@ -742,7 +742,7 @@ describe('data states (#506)', () => {
     choose('Question', 'journey');
     await waitForReads(8);
 
-    expect(screen.getByLabelText('Loading analytics')).toBeTruthy();
+    expect(screen.getByLabelText('Loading analytics table')).toBeTruthy();
     // 800 is the new totals result; it must wait for the matching series rather than join old rows.
     expect(screen.queryByText('800')).toBeNull();
     expect(screen.queryByText('Delivered over time')).toBeNull();

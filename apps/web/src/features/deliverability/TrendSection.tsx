@@ -1,5 +1,5 @@
 import { useRef } from 'react';
-import { Alert, Field, LoadingBlock, Select } from '../../ui';
+import { Alert, ChartSkeleton, Field, Select } from '../../ui';
 import { dayLabel, type LocalDayPeriod, periodDateLabel } from '../broadcasts/period';
 import {
   formatMoment,
@@ -250,9 +250,7 @@ export function TrendSection({
       </p>
 
       {loading ? (
-        <div aria-busy="true">
-          <LoadingBlock lines={6} label="Loading the deliverability trend" />
-        </div>
+        <ChartSkeleton label="Loading the deliverability trend" />
       ) : error ? (
         isNotFound(error) ? (
           <NotFoundBlock />

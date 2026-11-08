@@ -304,7 +304,7 @@ function SourceDrawer({
             <option value="">No consent check</option>
             {purposes.data?.purposes.map((p) => (
               <option key={p.key} value={p.key}>
-                {p.name} ({p.key})
+                {p.name}
               </option>
             ))}
           </Select>
@@ -314,7 +314,11 @@ function SourceDrawer({
             Without a consent check, website events are kept for every visitor. Most sites need consent for analytics.
           </Alert>
         )}
-        {error && <Alert tone="bad">{error}</Alert>}
+        {error && (
+          <Alert tone="bad" title={source ? 'Couldn’t save the event source' : 'Couldn’t add the event source'}>
+            {error}
+          </Alert>
+        )}
       </div>
     </Drawer>
   );

@@ -5,14 +5,14 @@ import { ButtonLink, TextLink } from '../../app/links';
 import { useCrumbs } from '../../app/page';
 import { useSession } from '../../app/session';
 import { useApi } from '../../app/useApi';
-import { StatCard, StatGrid } from '../../features/insights/Stats';
+import { StatCard, StatGrid, StatGridSkeleton } from '../../features/insights/Stats';
 import {
   Alert,
   EmptyState,
   Field,
   formatDateTime,
   JsonView,
-  LoadingBlock,
+  ListSkeleton,
   Mono,
   PageHeader,
   Select,
@@ -129,7 +129,10 @@ export default function AiUsagePage() {
       </div>
 
       {usage.loading ? (
-        <LoadingBlock lines={4} label="Loading AI usage" />
+        <div className="space-y-5">
+          <StatGridSkeleton columns={4} labels={['AI calls', 'Input tokens', 'Output tokens', 'Fallbacks and failures']} />
+          <ListSkeleton label="Loading AI usage by kind" rows={3} columns={7} />
+        </div>
       ) : usage.error ? (
         <Alert tone="bad" title="Couldn't load AI usage" onRetry={usage.reload} className="mb-5">
           {usage.error}

@@ -16,7 +16,7 @@ import {
   formatDate,
   IconButton,
   Input,
-  LoadingBlock,
+  ListSkeleton,
   RadioCards,
   Select,
   StatusPill,
@@ -55,7 +55,7 @@ export default function UsersPage() {
   const [inviting, setInviting] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [revoking, setRevoking] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<{ title: string; message: string } | null>(null);
 
   const isOwner = workspace.you.role === 'owner';
   const isSelf = (m: Member) => m.userId === user.id;
@@ -95,7 +95,7 @@ export default function UsersPage() {
       toast.success(`Changed ${personName(m)} to ${ROLE_LABEL[role]}.`);
       void data.reload();
     } catch (e) {
-      setError(errText(e));
+      setError({ title: 'Couldn’t change the role', message: errText(e) });
     } finally {
       setBusyId(null);
     }
@@ -121,7 +121,7 @@ export default function UsersPage() {
       toast.success(`Removed ${personName(m)}. Their sessions and agents no longer have access.`);
       void data.reload();
     } catch (e) {
-      setError(errText(e));
+      setError({ title: 'Couldn’t remove this person', message: errText(e) });
     } finally {
       setBusyId(null);
     }
@@ -142,7 +142,7 @@ export default function UsersPage() {
       toast.success(`Revoked the invitation for ${inv.email}. The link no longer works.`);
       void data.reload();
     } catch (e) {
-      setError(errText(e));
+      setError({ title: 'Couldn’t revoke the invitation', message: errText(e) });
     } finally {
       setRevoking(null);
     }
@@ -165,12 +165,12 @@ export default function UsersPage() {
         state={state}
         notice={
           state === 'error'
-            ? { title: 'Couldn’t load people', body: data.error, action: <Button onClick={() => void data.reload()}>Retry</Button> }
+            ? { title: 'Couldn’t load members', body: data.error, action: <Button onClick={() => void data.reload()}>Retry</Button> }
             : state === 'empty'
               ? { title: 'No members', body: 'Invite a person to give them access to this workspace.' }
               : undefined
         }
-        loadingContent={<LoadingBlock lines={4} label="Loading people" />}
+        loadingContent={<ListSkeleton label="Loading members" />}
         desktopTable={
           <Table label="Members">
             <THead>
@@ -285,8 +285,8 @@ export default function UsersPage() {
       />
 
       {error && (
-        <Alert tone="bad" title="That did not work">
-          {error}
+        <Alert tone="bad" title={error.title}>
+          {error.message}
         </Alert>
       )}
 
@@ -303,7 +303,7 @@ export default function UsersPage() {
           }
         >
           {data.loading ? (
-            <LoadingBlock lines={2} label="Loading invitations" />
+            <ListSkeleton label="Loading invitations" rows={2} columns={3} />
           ) : !data.data ? (
             <p className="p-4 text-[13px] text-muted">Invitations are unavailable while the list of people cannot be loaded.</p>
           ) : invitations.length === 0 ? (
