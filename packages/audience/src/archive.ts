@@ -267,19 +267,35 @@ const DANGEROUS_ELEMENTS = 'script|iframe|object|embed';
 const DANGEROUS_PAIR = new RegExp(`<(${DANGEROUS_ELEMENTS})\\b[\\s\\S]*?<\\/\\1\\s*>`, 'gi');
 /** A dangerous start or end tag on its own, for unclosed and nested fragments. */
 const DANGEROUS_TAG = new RegExp(`<\\/?(${DANGEROUS_ELEMENTS})\\b[^>]*>`, 'gi');
-const QUOTED_HANDLER = [/\son[a-z]+\s*=\s*"[^"]*"/gi, /\son[a-z]+\s*=\s*'[^']*'/gi];
-const UNQUOTED_HANDLER = /\son[a-z]+\s*=\s*[^\s>"']+/gi;
-const JAVASCRIPT_URL = [
-  /\s(?:href|src)\s*=\s*"\s*javascript:[^"]*"/gi,
-  /\s(?:href|src)\s*=\s*'\s*javascript:[^']*'/gi,
-  /\s(?:href|src)\s*=\s*javascript:[^\s>"']*/gi,
-];
+// An attribute may follow whitespace, a `/` or a closing quote (`<img/onerror=…>`,
+// `<img src="x"onerror=…>`); the separator is kept so the remaining markup stays well formed.
+const QUOTED_HANDLER = [/([\s/"'])on[a-z]+\s*=\s*"[^"]*"/gi, /([\s/"'])on[a-z]+\s*=\s*'[^']*'/gi];
+const UNQUOTED_HANDLER = /([\s/"'])on[a-z]+\s*=\s*[^\s>"']+/gi;
+const URL_ATTRIBUTE = /([\s/"'])(?:href|src)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>"']+))/gi;
+
+/** The scheme a browser would see: numeric entities decoded, whitespace and controls removed. */
+function urlScheme(value: string): string {
+  const decoded = value
+    .replace(/&#x([0-9a-f]+);?/gi, (_, hex: string) => String.fromCodePoint(Number.parseInt(hex, 16)))
+    .replace(/&#([0-9]+);?/g, (_, dec: string) => String.fromCodePoint(Number(dec)));
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: browsers drop these inside a URL scheme
+  return decoded.replace(/[\u0000-\u0020]/g, '').toLowerCase();
+}
+
+/** `javascript:`, `vbscript:` and non-image `data:` URLs never reach the archive page. */
+function activeUrl(value: string): boolean {
+  const scheme = urlScheme(value);
+  if (scheme.startsWith('javascript:') || scheme.startsWith('vbscript:')) return true;
+  return scheme.startsWith('data:') && !scheme.startsWith('data:image/');
+}
 
 /** One cleanup pass: dangerous elements and tags, event handlers, then javascript: URLs. */
 function cleanEmailMarkup(body: string): string {
   let value = body.replace(DANGEROUS_PAIR, '').replace(DANGEROUS_TAG, '');
-  for (const pattern of [...QUOTED_HANDLER, UNQUOTED_HANDLER, ...JAVASCRIPT_URL]) value = value.replace(pattern, '');
-  return value;
+  for (const pattern of [...QUOTED_HANDLER, UNQUOTED_HANDLER]) value = value.replace(pattern, '$1');
+  return value.replace(URL_ATTRIBUTE, (match, separator: string, dq?: string, sq?: string, bare?: string) =>
+    activeUrl(dq ?? sq ?? bare ?? '') ? separator : match,
+  );
 }
 
 /**

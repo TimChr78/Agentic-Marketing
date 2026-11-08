@@ -68,3 +68,30 @@ describe('archive e-mail body sanitising', () => {
     expect(out).toContain('<p>ok</p>');
   });
 });
+
+describe('archive sanitising: separator and scheme obfuscation (integrator review)', () => {
+  const body = (inner: string) => emailParts(`<html><body>${inner}</body></html>`).body;
+
+  it('removes handlers that follow a slash or a closing quote instead of whitespace', () => {
+    for (const payload of ['<img/onerror=alert(1) src=x>', '<img src="x"onerror="alert(1)">', "<svg/onload='alert(1)'>"]) {
+      expect(body(payload).toLowerCase(), payload).not.toMatch(/on(error|load)\s*=/);
+    }
+  });
+
+  it('removes javascript: URLs hidden with whitespace, control characters or numeric entities', () => {
+    for (const payload of [
+      '<a href="java\tscript:alert(1)">x</a>',
+      '<a href=" java\nscript:alert(1)">x</a>',
+      '<a href="jav&#x09;ascript:alert(1)">x</a>',
+      '<a href="&#106;avascript:alert(1)">x</a>',
+      '<a href="JaVaScRiPt:alert(1)">x</a>',
+    ]) {
+      expect(body(payload), payload).not.toMatch(/href\s*=/i);
+    }
+  });
+
+  it('keeps ordinary links and attributes that merely start with "on"', () => {
+    const html = '<a href="https://example.com/one" class="online">Read</a>';
+    expect(body(html)).toBe(html);
+  });
+});
