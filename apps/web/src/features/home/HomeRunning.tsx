@@ -45,7 +45,16 @@ function BroadcastRows({ resource, now, onRetry }: { resource: Resource<Broadcas
       }
     >
       {broadcasts.length === 0 ? (
-        <HomeBlockEmpty>No scheduled or sending broadcasts</HomeBlockEmpty>
+        <HomeBlockEmpty>
+          <span>No scheduled or sending broadcasts</span> in this sample.{' '}
+          <Link
+            to="/marketing/broadcasts?status=active"
+            className="inline-flex min-h-10 items-center text-accent hover:underline md:min-h-0"
+          >
+            View broadcasts to check their status
+          </Link>
+          .
+        </HomeBlockEmpty>
       ) : (
         broadcasts.map((broadcast) => {
           const state = stateOfBroadcast({
@@ -111,16 +120,11 @@ function JourneyRows({ resource, now, onRetry }: { resource: Resource<JourneysRe
     >
       {live.length === 0 ? (
         <HomeBlockEmpty>
-          {resource.data.nextCursor ? (
-            <>
-              No live journeys in this sample.{' '}
-              <Link to="/marketing/journeys" className="inline-flex min-h-10 items-center text-accent hover:underline md:min-h-0">
-                View journeys
-              </Link>
-            </>
-          ) : (
-            'No live journeys'
-          )}
+          <span>No live journeys</span> in this sample.{' '}
+          <Link to="/marketing/journeys" className="inline-flex min-h-10 items-center text-accent hover:underline md:min-h-0">
+            View journeys to check their status
+          </Link>
+          .
         </HomeBlockEmpty>
       ) : (
         live.map((journey) => {
@@ -180,7 +184,13 @@ function AgentRows({ resource, onRetry }: { resource: Resource<AgentsResult>; on
       }
     >
       {shown.length === 0 ? (
-        <HomeBlockEmpty>No active agents</HomeBlockEmpty>
+        <HomeBlockEmpty>
+          <span>No active agents</span> in this sample.{' '}
+          <Link to="/work/agents" className="inline-flex min-h-10 items-center text-accent hover:underline md:min-h-0">
+            View agents to check their status
+          </Link>
+          .
+        </HomeBlockEmpty>
       ) : (
         shown.map((agent) => (
           <div key={agent.id} className="flex min-h-16 flex-wrap items-start justify-between gap-3 px-4 py-3 md:px-5">

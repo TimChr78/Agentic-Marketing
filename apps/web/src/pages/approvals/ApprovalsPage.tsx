@@ -151,7 +151,7 @@ export function focusApprovalReturn(id: string | null, fromPageId: number, force
       scheduleReturnFocus(attempt, FOCUS_RETURN_POLL_MS);
       return;
     }
-    const loading = !!root.querySelector('[role="status"][aria-label="Loading"]');
+    const loading = !!root.querySelector('[role="status"][aria-busy="true"]');
     const links = id ? [...root.querySelectorAll<HTMLAnchorElement>(`a[data-approval-link="${id}"]`)] : [];
     // Both responsive copies exist; only the one with a layout box is focusable. jsdom has no
     // layout, so fall back to the first and let the DOM report whether focus moved.
@@ -370,6 +370,7 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
           error={list.error}
           onRetry={list.reload}
           columns={5}
+          loadingLabel="Loading approval requests"
           isEmpty={items.length === 0}
           empty={
             <EmptyState title={status === 'pending' ? 'Nothing waiting for review' : `No ${status} changes`}>
@@ -508,7 +509,7 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
       </div>
       {confirmDialog}
       {params.id && (
-        <Suspense fallback={<LoadingBlock lines={6} label="Opening the review" />}>
+        <Suspense fallback={<LoadingBlock geometry="detail" label="Opening the review" />}>
           <ApprovalDrawer
             id={params.id}
             queue={items.filter((a) => a.status === 'pending').map((a) => a.id)}

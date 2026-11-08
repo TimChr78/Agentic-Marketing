@@ -35,6 +35,9 @@ const OWNER: Record<string, 'I' | 'W' | 'M' | 'A' | 'C' | 'S'> = {
   '/settings/approval-policy': 'S',
 };
 
+/** Areas whose routes must pass at 390. A task adds its letter here when it lands. */
+const LANDED: string[] = ['I', 'W', 'M'];
+
 async function pageOverflow(page: Page): Promise<{ scroll: number; client: number; body: number; offenders: string[] }> {
   return page.evaluate(() => {
     const client = document.documentElement.clientWidth;
@@ -85,7 +88,7 @@ test.describe('390 px page width', () => {
   for (const route of navRoutes()) {
     const owner = OWNER[route.path] ?? 'S';
     test(`${route.path} has no page-level horizontal overflow (${owner})`, async ({ page }) => {
-      test.fixme(owner !== 'I' && owner !== 'M', `Owned by task ${owner}; reporting until that area lands`);
+      test.fixme(!LANDED.includes(owner), `Owned by task ${owner}; reporting until that area lands`);
       await signIn(page, PEOPLE.owner);
       await page.goto(route.path);
       await settle(page);
