@@ -16,7 +16,7 @@ test('journey builder: add by drag, connect, delete by keyboard and context menu
   const pane = await canvas.boundingBox();
   await page
     .getByRole('navigation', { name: 'Steps' })
-    .getByRole('button', { name: 'Wait', exact: true })
+    .getByRole('button', { name: /^Wait\s*Pause for a while/ })
     .dragTo(canvas, { targetPosition: { x: pane!.width - 160, y: pane!.height / 2 } });
   await expect(canvas.locator('.react-flow__node')).toHaveCount(3);
   const wait = canvas.locator('.react-flow__node').filter({ hasText: 'Wait' }).filter({ hasText: '1 day' });
@@ -42,7 +42,10 @@ test('journey builder: add by drag, connect, delete by keyboard and context menu
   await expect(canvas.locator('.react-flow__edge')).toHaveCount(2);
 
   // Add an e-mail after the wait (press in the palette), then delete it with the Delete key.
-  await page.getByRole('navigation', { name: 'Steps' }).getByRole('button', { name: 'E-mail' }).click();
+  await page
+    .getByRole('navigation', { name: 'Steps' })
+    .getByRole('button', { name: /^E-mail\b/ })
+    .click();
   const email = canvas.locator('.react-flow__node').filter({ hasText: 'Choose a template' });
   await expect(email).toHaveCount(1);
   await expect(email).toContainText('Incomplete');

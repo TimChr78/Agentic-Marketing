@@ -20,6 +20,7 @@ import {
   Maximize,
   Maximize2,
   Minimize2,
+  MoreHorizontal,
   PanelLeft,
   PanelRight,
   Plus,
@@ -28,6 +29,7 @@ import {
   ShieldCheck,
   Trash2,
   Undo2,
+  Workflow,
 } from 'lucide-react';
 import { type KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, type Out } from '../../app/api';
@@ -39,6 +41,7 @@ import {
   Checkbox,
   ContextMenu,
   cx,
+  Drawer,
   EmptyState,
   Field,
   IconButton,
@@ -51,13 +54,15 @@ import {
   Tag,
   useToast,
 } from '../../ui';
-import { referencedIds, useArtifactNames } from '../artifactCache';
 import type { EditorProps } from '../artifacts/ArtifactDetailPage';
+import { autoLayoutNodes } from '../phase27/journey/autoLayout';
+import { artifactNameFromIndex } from '../phase27/journey/names';
+import { graphWarnings, issueLabel, issueTotal } from '../phase27/journey/validation';
 import { localWarnings, mergeWarnings } from './checks';
 import { Inspector } from './Inspector';
 import { Legend } from './Legend';
 import { NODE_H, NODE_W, positionsOf } from './layout';
-import { edgesOf, type JNode, type JourneyContent, KINDS, maxEdges, type NodeKind, PALETTE_ORDER, summary } from './model';
+import { edgesOf, type JNode, type JourneyContent, KINDS, maxEdges, type NodeKind, summary } from './model';
 import { type NodeData, nodeTypes } from './NodeView';
 import { addNode, connect, deleteNode, disconnect, duplicateNode, type EditResult, withPositions } from './ops';
 import { DND_TYPE, Palette } from './Palette';
@@ -100,7 +105,7 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
   const theme = useResolvedTheme();
   const toast = useToast();
   const rf = useReactFlow();
-  const { user } = useSession();
+  const { user, workspace } = useSession();
   const scope = user?.id ?? 'anon';
   const nodes = content.nodes ?? [];
   const [sel, setSel] = useState<Sel>(null);
@@ -114,13 +119,14 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
   const [showStats, setShowStats] = useState(() => readPref(scope, 'stats', false));
   const [fullscreen, setFullscreen] = useState(false);
   const [canvasWide, setCanvasWide] = useState(true);
+  const [addOpen, setAddOpen] = useState(false);
   const [menu, setMenu] = useState<{ x: number; y: number; items: (MenuItem | 'separator')[] } | null>(null);
   const past = useRef<JNode[][]>([]);
   const future = useRef<JNode[][]>([]);
   const [, bump] = useState(0);
   const wrapper = useRef<HTMLDivElement>(null);
   const root = useRef<HTMLDivElement>(null);
-  const names = useArtifactNames(referencedIds(nodes));
+  const names = useCallback((id: string) => artifactNameFromIndex(id, workspace?.id ?? ''), [workspace?.id]);
 
   const published = artifact.publishedVersion !== null && artifact.publishedVersion !== undefined;
   // #507: one journeys.stats read for the canvas overlay and the control-group summary. The old
@@ -173,7 +179,8 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
   }, [artifact.id]);
 
   const warnings = useMemo(() => mergeWarnings(localWarnings(nodes), serverWarnings), [nodes, serverWarnings]);
-  const warnCount = Object.values(warnings).reduce((n, w) => n + w.length, 0);
+  const graphIssues = useMemo(() => graphWarnings(serverWarnings), [serverWarnings]);
+  const warnCount = issueTotal(warnings, graphIssues);
 
   const apply = useCallback(
     (next: JNode[]) => {
@@ -219,7 +226,7 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
         position: positions[n.id]!,
         selected: sel?.kind === 'node' && sel.id === n.id,
         draggable: !readOnly,
-        ariaLabel: `${KINDS[n.kind].label}: ${n.label}. ${summary(n, names)}${warnings[n.id]?.length ? `. Incomplete: ${warnings[n.id]!.join(' ')}` : ''}`,
+        ariaLabel: `${KINDS[n.kind]?.label ?? 'Unknown step'}: ${n.label}. ${summary(n, names)}${warnings[n.id]?.length ? `. Incomplete: ${warnings[n.id]!.join(' ')}` : ''}`,
         data: {
           node: n,
           summary: summary(n, names),
@@ -294,6 +301,19 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
     }
     commit(addNode(nodes, kind, position, from ? { source: from.id, index: from.next?.length ?? 0 } : undefined));
     requestAnimationFrame(() => rf.fitView({ padding: 0.2, duration: 200 }));
+  };
+
+  // Auto-layout (#528) is a view action: positions change, the saved graph does not. It goes on
+  // the same undo stack as every other edit, so one undo restores the previous arrangement.
+  const arrange = () => {
+    if (readOnly || nodes.length === 0) return;
+    try {
+      apply(autoLayoutNodes(nodes));
+      requestAnimationFrame(() => rf.fitView({ padding: 0.2, duration: 200 }));
+      toast.info('Layout updated. Undo restores the previous positions.');
+    } catch {
+      toast.error('This journey could not be laid out. Its previous positions are kept.');
+    }
   };
 
   const nodeMenu = (n: JNode): (MenuItem | 'separator')[] => [
@@ -443,38 +463,33 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
           {!readOnly && (
             <>
               <div className="lg:hidden">
-                <Menu
-                  label="Add step"
-                  align="start"
-                  items={PALETTE_ORDER.map((k) => ({
-                    label: KINDS[k].label,
-                    icon: (() => {
-                      const I = KINDS[k].icon;
-                      return <I style={{ color: `var(--cat-${KINDS[k].category})` }} />;
-                    })(),
-                    onSelect: () => addAfterSelection(k),
-                  }))}
-                  trigger={(t) => (
-                    <Button {...t} size="sm" icon={<Plus size={14} />}>
-                      Add step
-                    </Button>
-                  )}
-                />
+                <Button size="sm" icon={<Plus size={14} />} onClick={() => setAddOpen(true)}>
+                  Add step
+                </Button>
               </div>
+              <Button size="sm" variant="ghost" icon={<Workflow size={14} />} onClick={arrange} disabled={!nodes.length}>
+                Auto-layout
+              </Button>
               <IconButton label="Undo (Ctrl Z)" icon={<Undo2 size={15} />} onClick={undo} disabled={!past.current.length} />
               <IconButton label="Redo (Ctrl Shift Z)" icon={<Redo2 size={15} />} onClick={redo} disabled={!future.current.length} />
               <IconButton label="Delete selected (Del)" icon={<Trash2 size={15} />} onClick={removeSelection} disabled={!sel} />
             </>
           )}
-          <IconButton label="Fit to screen" icon={<Maximize size={15} />} onClick={() => rf.fitView({ padding: 0.2, duration: 200 })} />
           <IconButton
-            className="hidden md:inline-flex"
+            className="hidden lg:inline-flex"
+            label="Fit to screen"
+            icon={<Maximize size={15} />}
+            onClick={() => rf.fitView({ padding: 0.2, duration: 200 })}
+          />
+          <IconButton
+            className="hidden lg:inline-flex"
             label={showMinimap ? 'Hide minimap' : 'Show minimap'}
             aria-pressed={showMinimap}
             icon={<MapIcon size={15} />}
             onClick={() => setPref('minimap', !showMinimap, setShowMinimap)}
           />
           <IconButton
+            className="hidden lg:inline-flex"
             label={fullscreen ? 'Leave full screen (Esc)' : 'Full screen (F)'}
             aria-pressed={fullscreen}
             icon={fullscreen ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
@@ -483,6 +498,7 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
           {published && (
             <Button
               size="sm"
+              className="hidden lg:inline-flex"
               variant={showStats ? 'secondary' : 'ghost'}
               icon={<BarChart3 size={14} />}
               aria-pressed={showStats}
@@ -491,6 +507,41 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
               {showStats ? 'Hide stats' : 'Show stats'}
             </Button>
           )}
+          {/* Below the desktop breakpoint the secondary view controls live in one labelled menu, so
+              every action survives on a 390 px screen without a row of unreadable icon buttons. */}
+          <div className="lg:hidden">
+            <Menu
+              label="View"
+              align="end"
+              items={[
+                { label: 'Fit to screen', icon: <Maximize size={14} />, onSelect: () => rf.fitView({ padding: 0.2, duration: 200 }) },
+                {
+                  label: showMinimap ? 'Hide minimap' : 'Show minimap',
+                  icon: <MapIcon size={14} />,
+                  onSelect: () => setPref('minimap', !showMinimap, setShowMinimap),
+                },
+                {
+                  label: fullscreen ? 'Leave full screen (Esc)' : 'Full screen (F)',
+                  icon: fullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />,
+                  onSelect: () => setFullscreen((v) => !v),
+                },
+                ...(published
+                  ? [
+                      {
+                        label: showStats ? 'Hide stats' : 'Show stats',
+                        icon: <BarChart3 size={14} />,
+                        onSelect: () => setPref('stats', !showStats, setShowStats),
+                      },
+                    ]
+                  : []),
+              ]}
+              trigger={(t) => (
+                <Button {...t} size="sm" variant="ghost" icon={<MoreHorizontal size={14} />}>
+                  View
+                </Button>
+              )}
+            />
+          </div>
           {showCounts && <span className="hidden text-[11px] leading-4 text-muted md:inline">{COUNTS_LABEL}</span>}
           {showStats && published && !countsEligible && (
             <span className="text-[11px] leading-4 text-warn">Counts are hidden until you view the live version unmodified.</span>
@@ -625,7 +676,7 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
                   zoomable
                   className="!hidden md:!block"
                   style={{ width: 150, height: 96 }}
-                  nodeColor={(n) => `var(--cat-${KINDS[(n.data as NodeData).node.kind].category})`}
+                  nodeColor={(n) => `var(--cat-${KINDS[(n.data as NodeData).node.kind]?.category ?? 'action'})`}
                 />
               )}
             </ReactFlow>
@@ -678,6 +729,7 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
               <CheckList
                 nodes={nodes}
                 warnings={warnings}
+                graph={graphIssues}
                 onSelect={(id) => {
                   setSel({ kind: 'node', id });
                   setPanel('inspect');
@@ -699,33 +751,66 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
         </aside>
       )}
       <ContextMenu at={menu} items={menu?.items ?? []} onClose={() => setMenu(null)} label="Step actions" />
+      <Drawer open={addOpen} onClose={() => setAddOpen(false)} title="Add a step" width="md">
+        <Palette
+          onAdd={(kind) => {
+            setAddOpen(false);
+            addAfterSelection(kind);
+          }}
+        />
+      </Drawer>
     </div>
   );
 }
 
-function CheckList({ nodes, warnings, onSelect }: { nodes: JNode[]; warnings: Record<string, string[]>; onSelect: (id: string) => void }) {
+function CheckList({
+  nodes,
+  warnings,
+  graph,
+  onSelect,
+}: {
+  nodes: JNode[];
+  warnings: Record<string, string[]>;
+  graph: string[];
+  onSelect: (id: string) => void;
+}) {
   const items = nodes.filter((n) => warnings[n.id]?.length);
-  if (!items.length)
+  if (!items.length && !graph.length)
     return (
       <EmptyState compact title="Ready to publish">
         Every step has what it needs. Simulate it, then submit it for review.
       </EmptyState>
     );
+  const total = issueTotal(warnings, graph);
   return (
-    <ul className="divide-y divide-line">
-      {items.map((n) => (
-        <li key={n.id}>
-          <button type="button" onClick={() => onSelect(n.id)} className="w-full px-4 py-3 text-left hover:bg-surface-2">
-            <span className="text-[13px] font-medium">{n.label}</span> <span className="text-[12px] text-muted">{KINDS[n.kind].label}</span>
-            <ul className="mt-1 list-disc pl-4 text-[12px] text-warn">
-              {warnings[n.id]!.map((w) => (
-                <li key={w}>{w}</li>
-              ))}
-            </ul>
-          </button>
-        </li>
-      ))}
-    </ul>
+    <div>
+      <p className="border-b border-line px-4 py-2 text-[12px] font-medium text-fg-2">{issueLabel(total)}</p>
+      {graph.length > 0 && (
+        <section aria-label="Journey issues" className="border-b border-line px-4 py-3">
+          {graph.map((message) => (
+            <p key={message} className="text-[12px] leading-[18px] text-warn">
+              {message}
+            </p>
+          ))}
+        </section>
+      )}
+      <ul className="divide-y divide-line">
+        {items.map((n) => (
+          <li key={n.id}>
+            <button type="button" onClick={() => onSelect(n.id)} className="w-full px-4 py-3 text-left hover:bg-surface-2">
+              <span className="text-[13px] font-medium">{n.label}</span>{' '}
+              <span className="text-[12px] text-muted">{KINDS[n.kind]?.label ?? 'Unknown step'}</span>
+              <span className="ml-1 text-[12px] text-warn">{issueLabel(warnings[n.id]!.length)}</span>
+              <ul className="mt-1 list-disc pl-4 text-[12px] text-warn">
+                {warnings[n.id]!.map((w) => (
+                  <li key={w}>{w}</li>
+                ))}
+              </ul>
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 

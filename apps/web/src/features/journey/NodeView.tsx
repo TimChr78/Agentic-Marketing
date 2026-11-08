@@ -1,10 +1,18 @@
 import { Handle, type NodeProps, Position } from '@xyflow/react';
-import { AlertTriangle } from 'lucide-react';
+import { AlertTriangle, CircleHelp } from 'lucide-react';
 import { memo } from 'react';
 import { cx } from '../../ui';
+import { nodeIssueText } from '../phase27/journey/validation';
 import { NODE_W } from './layout';
 import { edgeLabel, type JNode, KINDS, maxEdges } from './model';
 import { countText, type NodeCounts } from './report/counts';
+
+const UNKNOWN_STEP = {
+  label: 'Unknown step',
+  category: 'action' as const,
+  icon: CircleHelp,
+  hint: 'This step is not recognised by the editor. Its saved settings are kept.',
+};
 
 export interface NodeData extends Record<string, unknown> {
   node: JNode;
@@ -20,7 +28,7 @@ export interface NodeData extends Record<string, unknown> {
 /** One journey step on the canvas: category colour on the left edge and icon, text label, warnings. */
 export const NodeView = memo(function NodeView({ data, selected }: NodeProps) {
   const { node, summary, warnings, stats, readOnly, highlight } = data as NodeData;
-  const meta = KINDS[node.kind];
+  const meta = KINDS[node.kind] ?? UNKNOWN_STEP;
   const Icon = meta.icon;
   const color = `var(--cat-${meta.category})`;
   const outs = maxEdges(node);
@@ -65,10 +73,14 @@ export const NodeView = memo(function NodeView({ data, selected }: NodeProps) {
         </div>
       </div>
       {(warnings.length > 0 || stats) && (
-        <div className="flex items-center gap-2 border-t border-line px-3.5 py-1.5 text-[11px]">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-line px-3.5 py-1.5 text-[11px]">
           {warnings.length > 0 && (
-            <span className="inline-flex items-center gap-1 font-medium text-warn" title={warnings.join('\n')}>
-              <AlertTriangle size={12} aria-hidden /> Incomplete
+            <span className="flex min-w-0 items-center gap-1 font-medium text-warn" title={warnings.join('\n')}>
+              <AlertTriangle size={12} aria-hidden className="shrink-0" />
+              <span className="shrink-0">
+                Incomplete · {warnings.length} {warnings.length === 1 ? 'issue' : 'issues'}
+              </span>
+              <span className="truncate font-normal">· {nodeIssueText(warnings)}</span>
             </span>
           )}
           {stats && (
