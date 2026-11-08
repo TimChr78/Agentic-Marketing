@@ -22,9 +22,6 @@ const variants: Record<ButtonVariant, string> = {
   'danger-solid': 'bg-bad text-white hover:brightness-110 [:root[data-theme=dark]_&]:text-[var(--bg)]',
 };
 
-/** The static progress glyph's box; the idle button reserves it so the busy state cannot resize it. */
-const PROGRESS_GLYPH = { sm: 14, md: 16 } as const;
-
 export function buttonClass({
   variant = 'secondary',
   size = 'md',
@@ -56,12 +53,6 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
 ) {
   const { mutations, reason } = useCapabilities();
   const blocked = mutation === true && !mutations;
-  const glyph = PROGRESS_GLYPH[size];
-  // A button that can show the progress glyph reserves its slot even when idle, so the busy state
-  // never changes the button's width (skeletons-and-budgets.md, #555 review). A button that never
-  // takes `loading` keeps its existing layout untouched.
-  const hasSlot = loading !== undefined || icon !== undefined;
-  const reserve = icon === undefined && !loading;
   return (
     <button
       ref={ref}
@@ -74,16 +65,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
       aria-busy={loading || undefined}
       className={buttonClass({ variant, size, className })}
     >
-      {hasSlot && (
-        <span
-          className="inline-flex shrink-0 items-center justify-center"
-          data-button-slot=""
-          aria-hidden={reserve || undefined}
-          style={reserve ? { width: glyph, height: glyph } : undefined}
-        >
-          {loading ? <Loader2 size={glyph} className="am-progress" aria-hidden /> : icon}
-        </span>
-      )}
+      {loading ? <Loader2 size={size === 'sm' ? 14 : 16} className="am-progress" aria-hidden /> : icon}
       {children}
     </button>
   );

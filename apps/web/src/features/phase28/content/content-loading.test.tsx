@@ -97,8 +97,10 @@ describe('content loading placeholders are labelled skeletons (#559)', () => {
         <AssetsPage />
       </ToastProvider>,
     );
-    const region = screen.getByRole('status', { name: 'Loading assets' });
-    expect(region.getAttribute('aria-busy')).toBe('true');
+    // A phone-row region below md and the gallery from md; CSS shows exactly one at each width.
+    const regions = screen.getAllByRole('status', { name: 'Loading assets' });
+    expect(regions).toHaveLength(2);
+    for (const region of regions) expect(region.getAttribute('aria-busy')).toBe('true');
   });
 
   it('labels the asset picker read', () => {
