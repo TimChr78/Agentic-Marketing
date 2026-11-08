@@ -23,7 +23,7 @@ seconds and pass/fail per task, not an aggregate average. Product owner recruits
 
 ## Automated checklist (I collects; area owners supply separate specs)
 
-Evidence collected on integrated head `b3911c0` (area branches merged), fresh seeded run-scoped
+Evidence collected on integrated head `c88b63e` (area branches merged), fresh seeded run-scoped
 database per suite, Linux, Playwright `v1.64.1-noble` Chromium, shared test stack with
 `TEST_PORT_OFFSET=100`. Commands and exit codes are in [release evidence](release-evidence.md).
 

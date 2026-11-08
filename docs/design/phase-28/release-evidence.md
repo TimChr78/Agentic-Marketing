@@ -5,7 +5,7 @@ in [README](README.md). Record the exact SHA, fixture and command for every run;
 an artifact, not an assertion.
 
 Status: **complete for the automated gate**; the manual accessibility and findability items remain
-owner sign-off. Measured on integrated source head `b3911c0` (all area branches merged), fresh
+owner sign-off. Measured on integrated source head `c88b63e` (all area branches merged), fresh
 run-scoped seeded database per suite, Linux, Playwright `v1.64.1-noble` Chromium, shared test stack
 with `TEST_PORT_OFFSET=100`. Every area section below is strict and zero-finding.
 
