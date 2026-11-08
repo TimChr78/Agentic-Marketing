@@ -175,7 +175,7 @@ export function ApprovalDrawer({
       title={
         // Focus lands on the heading when the drawer opens; a deep link has no invoking row.
         <span data-autofocus tabIndex={-1} className="outline-none">
-          {a?.artifactName ?? 'Loading…'}
+          {a?.artifactName ?? 'Loading the approval request'}
         </span>
       }
       meta={
@@ -296,7 +296,7 @@ export function ApprovalDrawer({
       }
     >
       {d.loading ? (
-        <LoadingBlock lines={8} />
+        <LoadingBlock geometry="detail" label="Loading the approval request" />
       ) : d.error ? (
         <div className="p-5">
           <Alert tone="bad" title="Couldn't open this approval request" onRetry={d.reload}>

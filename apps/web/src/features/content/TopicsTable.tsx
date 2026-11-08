@@ -100,7 +100,7 @@ export function TopicsTable({
                 </Td>
                 <Td className="whitespace-nowrap text-[13px]">{topic.score}</Td>
                 <Td className="hidden max-w-[260px] text-[12px] text-muted lg:table-cell">{signalSummary(topic)}</Td>
-                <Td className="hidden md:table-cell text-[12px]">{topic.ownerName ?? topic.ownerId ?? 'Unassigned'}</Td>
+                <Td className="hidden md:table-cell text-[12px]">{topic.ownerName ?? 'Unassigned'}</Td>
                 <Td className="hidden whitespace-nowrap text-[12px] md:table-cell">{topic.targetDate ?? '—'}</Td>
                 <Td className="text-right">
                   <div className="flex items-center justify-end gap-1">

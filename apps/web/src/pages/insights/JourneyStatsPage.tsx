@@ -5,7 +5,7 @@ import { useCrumbs } from '../../app/page';
 import { useSession } from '../../app/session';
 import { useAllArtifacts } from '../../features/artifacts/artifactList';
 import { JourneyReport } from '../../features/journey/report/JourneyReport';
-import { Alert, EmptyState, Field, LoadingBlock, PageHeader, Select } from '../../ui';
+import { Alert, EmptyState, Field, ListSkeleton, PageHeader, Select } from '../../ui';
 import { pageWidth } from '../../ui/layout';
 
 export { JourneyReport };
@@ -60,7 +60,7 @@ function StandaloneJourneyStats({ journeyId }: { journeyId?: string }) {
       />
 
       {journeys.loading ? (
-        <LoadingBlock lines={5} label="Loading journeys" />
+        <ListSkeleton label="Loading journeys" columns={3} />
       ) : journeys.error ? (
         <Alert tone="bad" title="Couldn't load journeys" onRetry={journeys.reload}>
           {journeys.error}

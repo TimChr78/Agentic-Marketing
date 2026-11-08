@@ -1,7 +1,7 @@
 import { Link } from '../../app/router';
 import { measureLabel } from '../../lib/labels';
 import { KpiTile } from '../../ui/charts';
-import { Alert } from '../../ui/display';
+import { Alert, KpiSkeleton } from '../../ui/display';
 import { HomeSection } from './HomeSection';
 import { analyticsHref, type HomePeriod } from './period';
 import type { PerformanceBlock, PerformanceResult, Resource } from './useHomeData';
@@ -130,7 +130,7 @@ export function HomeKpis({ resource, period, onRetry }: { resource: Resource<Per
       <HomeSection title="E-mail performance" action={action}>
         <div className="grid grid-cols-1 gap-3 p-4 md:grid-cols-2 md:p-5 lg:grid-cols-4 lg:gap-4">
           {ORDER.map((measure) => (
-            <KpiTile key={measure} label={measureLabel(measure)} value={null} dataState="loading" />
+            <KpiSkeleton key={measure} label={measureLabel(measure)} className="border border-line" />
           ))}
         </div>
       </HomeSection>

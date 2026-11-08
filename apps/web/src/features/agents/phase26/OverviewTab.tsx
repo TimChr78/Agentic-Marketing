@@ -1,6 +1,6 @@
 import { api } from '../../../app/api';
 import { useApi } from '../../../app/useApi';
-import { Alert, Button, Card, Field, KpiTile, Select, Skeleton, Table, Td, THead, Th, Tr } from '../../../ui';
+import { Alert, Button, Card, Field, KpiTile, Select, Skeleton, SkeletonRegion, Table, Td, THead, Th, Tr } from '../../../ui';
 import { Identifier } from '../../../ui/Identifier';
 import type { LocalDayPeriod, ReportPeriodChoice } from '../../broadcasts/period';
 import { actionClassLabel } from '../labels';
@@ -93,19 +93,14 @@ export function OverviewTab({
       <div className="space-y-5">
         {toolbar}
         {periodAnnouncement}
-        <section aria-busy="true" aria-label="Loading agent overview" className="space-y-4">
-          <p className="text-[13px] text-muted">Loading the agent report…</p>
+        <SkeletonRegion label="Loading the agent report" geometry="kpi" className="space-y-4">
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
             {['Broadcast sent people', 'Broadcast clicked people', 'Direct messages sent', 'Goals'].map((label) => (
-              <div key={label} className="rounded-lg bg-surface p-5">
-                <Skeleton className="h-3 w-2/5" />
-                <Skeleton className="mt-3 h-8 w-1/2" />
-                <Skeleton className="mt-3 h-3 w-3/5" />
-              </div>
+              <Skeleton key={label} shape="kpi" className="bg-surface" />
             ))}
           </div>
-          <Skeleton className="h-[220px] w-full" />
-        </section>
+          <Skeleton shape="chart" className="h-[220px]" />
+        </SkeletonRegion>
       </div>
     );
   }

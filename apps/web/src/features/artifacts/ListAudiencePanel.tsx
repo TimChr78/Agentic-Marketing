@@ -103,6 +103,7 @@ export function ListAudiencePanel({ artifactId, content }: { artifactId: string;
 
       <TableFrame
         loading={members.loading}
+        loadingLabel="Loading audience members"
         error={members.error}
         onRetry={members.reload}
         isEmpty={!members.loading && !members.error && (members.data?.members.length ?? 0) === 0}

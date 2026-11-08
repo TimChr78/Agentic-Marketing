@@ -5,6 +5,7 @@ import { useCrumbs } from '../../app/page';
 import { useSession } from '../../app/session';
 import { useApi } from '../../app/useApi';
 import { guessMapping, type Mapping, parseCsv, toImportRows } from '../../lib/csvImport';
+import { purposeLabel } from '../../lib/labels';
 import {
   Alert,
   Button,
@@ -29,6 +30,12 @@ type ConsentStatus = 'granted' | 'denied' | 'withdrawn' | 'objected';
 type Result = { accepted: number; rejected: { email: string; error: string }[] };
 
 const BATCH = 5000;
+const CONSENT_LABEL: Record<ConsentStatus, string> = {
+  granted: 'Granted',
+  denied: 'Denied',
+  withdrawn: 'Withdrawn',
+  objected: 'Objected',
+};
 const FIELDS: [keyof Mapping, string][] = [
   ['email', 'E-mail'],
   ['firstName', 'First name'],
@@ -55,6 +62,7 @@ export default function ImportsPage() {
   const [result, setResult] = useState<Result | null>(null);
 
   const purposes = useApi(() => api.call('purposes.list', {}), [], { skip: !can('artifacts:read') });
+  const purposeName = (key: string) => purposes.data?.purposes.find((p) => p.key === key)?.name ?? purposeLabel(key);
   const prepared = useMemo(
     () => (mapping && rows.length > 0 && mapping.email >= 0 ? toImportRows(rows, mapping, { purpose, system, activeOnly }) : null),
     [rows, mapping, purpose, system, activeOnly],
@@ -98,7 +106,7 @@ export default function ImportsPage() {
       return;
     }
     if (!/^[a-z][a-z0-9_]{0,63}$/.test(purpose)) {
-      setError('The purpose must be a lowercase key such as marketing_email.');
+      setError('Use the purpose key from the purposes in force, in lowercase.');
       return;
     }
     setBusy(true);
@@ -204,11 +212,15 @@ export default function ImportsPage() {
                   <Input value={system} onChange={(e) => setSystem(e.target.value)} maxLength={80} />
                 </Field>
                 <Field label="Purpose" hint="What these people agreed to receive." required>
-                  {purposes.data?.purposes.length ? (
+                  {purposes.loading ? (
+                    <Select value={purpose} disabled onChange={() => {}} aria-label="Loading purposes">
+                      <option value={purpose}>Loading purposes…</option>
+                    </Select>
+                  ) : purposes.data?.purposes.length ? (
                     <Select value={purpose} onChange={(e) => setPurpose(e.target.value)}>
                       {purposes.data.purposes.map((p) => (
                         <option key={p.key} value={p.key}>
-                          {p.name} ({p.key})
+                          {p.name}
                         </option>
                       ))}
                     </Select>
@@ -267,7 +279,8 @@ export default function ImportsPage() {
                             <Td className="break-all font-medium text-fg">{r.email}</Td>
                             <Td className="hidden md:table-cell">{r.traits.firstName ?? '—'}</Td>
                             <Td>
-                              {r.consent[0]?.status ?? 'none'} · {r.consent[0]?.purpose ?? purpose}
+                              {r.consent[0]?.status ? (CONSENT_LABEL[r.consent[0].status as ConsentStatus] ?? r.consent[0].status) : 'none'}{' '}
+                              · {purposeName(r.consent[0]?.purpose ?? purpose)}
                             </Td>
                             <Td className="hidden lg:table-cell">
                               {r.consent[0]?.recordedAt ? (

@@ -3,7 +3,7 @@ import { api, type Out } from '../../../app/api';
 import { TextLink } from '../../../app/links';
 import { useWorkspace } from '../../../app/session';
 import { useApi } from '../../../app/useApi';
-import { Alert, BarChart, Button, Field, LoadingBlock, Select, Table, Tag, Td, Th, Tr } from '../../../ui';
+import { Alert, BarChart, Button, DetailSkeleton, Field, ListSkeleton, Select, Table, Tag, Td, Th, Tr } from '../../../ui';
 import { Identifier } from '../../../ui/Identifier';
 import { formatDateTime } from '../../../ui/time';
 import { type LocalDayPeriod, periodDateLabel, type ReportPeriodChoice, reportPeriod } from '../../broadcasts/period';
@@ -102,7 +102,7 @@ function AuthorizedReport({ journeyId, hostArtifact }: { journeyId: string; host
 function LoadingSection({ label }: { label: string }) {
   return (
     <section aria-busy="true" aria-label={label}>
-      <LoadingBlock lines={4} label={label} />
+      <DetailSkeleton label={label} />
     </section>
   );
 }
@@ -200,7 +200,7 @@ function CurrentParticipants({
     <section className="space-y-3" aria-busy={busy || undefined} aria-label="Current participants">
       <h2 className="text-[16px] leading-6 font-semibold">Current participants</h2>
       {busy ? (
-        <LoadingBlock lines={2} label="Loading current participants" />
+        <ListSkeleton label="Loading current participants" rows={3} columns={3} />
       ) : error ? (
         <Alert tone="bad" title="Participant counts unavailable" onRetry={onRetry}>
           {error}
@@ -540,7 +540,7 @@ function NoPublication({ view, busy }: { view: StatsView; busy: boolean }) {
     <section className="space-y-3">
       <Alert tone="info" title="No published topology. Draft preview has no live count overlay." />
       {busy ? (
-        <LoadingBlock lines={2} label="Loading historical counts" />
+        <ListSkeleton label="Loading historical counts" rows={3} columns={3} />
       ) : !view.available ? (
         <Alert tone="info" title="Values unavailable">
           Values unavailable. This read does not provide the required metric or freshness. No estimate is substituted.
