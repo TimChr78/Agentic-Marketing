@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, render, screen, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { api, setCommandTransport } from '../../../app/api';
 import { createDemoTransport, DEMO_MUTATIONS, DEMO_READ_ONLY_MESSAGE, demoReads } from '../integration/demo';
@@ -142,6 +142,30 @@ describe('demo destinations render on the real shell (#530)', () => {
       expect(fetchSpy).not.toHaveBeenCalled();
     });
   }
+
+  it('keeps all six navigation groups in the real shell', async () => {
+    vi.stubGlobal('fetch', vi.fn());
+    window.history.replaceState(null, '', '/');
+    const { DemoRoot } = await import('../integration/demo/DemoRoot');
+    render(<DemoRoot />);
+
+    const nav = await screen.findByRole('navigation', { name: 'Main' });
+    for (const group of ['Work', 'Marketing', 'Audience', 'Content', 'Insights']) {
+      expect(within(nav).getAllByText(group).length, group).toBeGreaterThan(0);
+    }
+    // Settings is pinned outside the work groups in the ordinary shell.
+    expect(screen.getAllByText('Settings').length).toBeGreaterThan(0);
+  });
+
+  it('renders an unknown demo address as Not found inside the demo', async () => {
+    vi.stubGlobal('fetch', vi.fn());
+    window.history.replaceState(null, '', '/demo/not-a-real-destination');
+    const { DemoRoot } = await import('../integration/demo/DemoRoot');
+    render(<DemoRoot />);
+
+    expect(await screen.findByText("This page doesn't exist")).toBeTruthy();
+    expect(screen.getByRole('note', { name: 'Demo mode' })).toBeTruthy();
+  });
 
   it('opens the legacy hash links at their real destinations', async () => {
     const { enterDemo } = await import('./entry');
