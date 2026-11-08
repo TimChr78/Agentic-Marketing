@@ -4,24 +4,7 @@ import { api, type Out } from '../../app/api';
 import { navigate } from '../../app/router';
 import { useWorkspace } from '../../app/session';
 import { useApi } from '../../app/useApi';
-import {
-  Alert,
-  Button,
-  Card,
-  CodeView,
-  EmptyState,
-  formatDate,
-  Modal,
-  Mono,
-  Table,
-  TableFrame,
-  Tag,
-  Td,
-  THead,
-  Th,
-  Tr,
-  timeAgo,
-} from '../../ui';
+import { Alert, Button, CodeView, EmptyState, formatDate, Modal, Mono, Table, TableFrame, Tag, Td, THead, Th, Tr, timeAgo } from '../../ui';
 import { CreateTokenDrawer } from './CreateTokenDrawer';
 import { TokenDrawer } from './TokenDrawer';
 import { TokenStatus } from './TokenStatus';
@@ -40,28 +23,23 @@ export function TokensCard({ openId }: { openId?: string }) {
   const ignored = new Map((warnings.data?.clients ?? []).filter((c) => c.principalType === 'token').map((c) => [c.principalId, c]));
   const open = (id: string) => navigate(`/settings/integrations/tokens/${id}`);
   return (
-    <Card
-      title="API tokens"
-      description={
-        admin
-          ? 'Everyone’s tokens in this workspace. Tokens act as agents with the scopes chosen, never more than the owner’s role.'
-          : 'Your tokens for scripts and agents. They act as agents with the scopes you choose.'
-      }
-      action={
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <p className="max-w-[70ch] text-[13px] leading-5 text-muted">
+          {admin
+            ? 'Everyone’s tokens in this workspace. Tokens act as agents with the scopes chosen, never more than the owner’s role.'
+            : 'Your tokens for scripts and agents. They act as agents with the scopes you choose.'}
+        </p>
         <Button variant="primary" icon={<Plus size={15} />} onClick={() => setCreating(true)}>
           Create token
         </Button>
-      }
-    >
+      </div>
       {admin && warnings.data && !warnings.data.strictInputs && warnings.data.safeToEnableStrict && (
-        <div className="px-4 pt-4">
-          <Alert tone="good">
-            No client has sent unknown input keys for 7 days: it's safe to set <Mono>STRICT_INPUTS=true</Mono>.
-          </Alert>
-        </div>
+        <Alert tone="good">
+          No client has sent unknown input keys for 7 days: it's safe to set <Mono>STRICT_INPUTS=true</Mono>.
+        </Alert>
       )}
       <TableFrame
-        className="rounded-none border-0"
         loading={list.loading}
         error={list.error}
         onRetry={list.reload}
@@ -181,6 +159,6 @@ export function TokensCard({ openId }: { openId?: string }) {
         </Modal>
       )}
       {openId && <TokenDrawer id={openId} onClose={() => navigate('/settings/integrations')} onChanged={() => void list.reload()} />}
-    </Card>
+    </div>
   );
 }
