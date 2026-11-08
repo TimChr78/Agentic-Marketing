@@ -27,8 +27,11 @@ const manifestPath = join(dist, '.vite', 'manifest.json');
 const hasBuild = existsSync(manifestPath);
 const manifest: Record<string, Chunk> = hasBuild ? JSON.parse(readFileSync(manifestPath, 'utf8')) : {};
 
-/** A dedicated CI budget run must fail when the live build is missing, not skip silently. */
-const REQUIRE = process.env.PHASE28_REQUIRE_BUNDLE === '1' || process.env.CI === 'true';
+/**
+ * The dedicated budget run (CI's e2e job, after `build:live`) sets PHASE28_REQUIRE_BUNDLE=1 so a
+ * missing build fails instead of skipping. Unit-test jobs have no build and skip, like bundle.test.ts.
+ */
+const REQUIRE = process.env.PHASE28_REQUIRE_BUNDLE === '1';
 const describeBuild = hasBuild ? describe : REQUIRE ? describe : describe.skip;
 
 const KB = 1_000;
