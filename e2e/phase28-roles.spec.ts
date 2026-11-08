@@ -22,7 +22,6 @@ test.describe('builder', () => {
   });
 
   test('the builder can reach the compose flow without a permission wall (M)', async ({ page }) => {
-    test.fixme(true, 'Owned by task M; reporting until marketing and journeys land');
     await signIn(page, PEOPLE.builder);
     await page.goto('/marketing/broadcasts?create=broadcast');
     await expect(page.getByRole('dialog')).toBeVisible();
@@ -47,7 +46,6 @@ test.describe('approver', () => {
   });
 
   test('the approver approves the exact reviewed version (W)', async ({ page }) => {
-    test.fixme(true, 'Owned by task W; reporting until Home, approvals and agents land');
     await signIn(page, PEOPLE.approver);
     await page.goto('/approvals');
     await expect(page.getByRole('main')).toBeVisible();
@@ -74,7 +72,6 @@ test.describe('viewer', () => {
   });
 
   test('the viewer cannot approve a held change (W)', async ({ page }) => {
-    test.fixme(true, 'Owned by task W; reporting until Home, approvals and agents land');
     await signIn(page, PEOPLE.viewer);
     await page.goto('/approvals');
     await expect(page.getByRole('button', { name: /Approve selected/ })).toHaveCount(0);

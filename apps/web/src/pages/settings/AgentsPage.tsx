@@ -73,6 +73,7 @@ export function AgentsHome() {
         error={agents.error}
         onRetry={agents.reload}
         columns={5}
+        loadingLabel="Loading agents"
         isEmpty={rows.length === 0}
         empty={
           <EmptyState

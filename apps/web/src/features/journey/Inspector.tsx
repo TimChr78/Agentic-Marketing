@@ -415,7 +415,7 @@ export function Inspector({
         <>
           <Field label="Endpoint" hint="Webhook endpoints are set up under Settings → Integrations.">
             <Select value={c.endpoint ?? ''} disabled={readOnly} onChange={(e) => setC({ endpoint: e.target.value })}>
-              <option value="">{webhooks.loading ? 'Loading…' : 'Choose…'}</option>
+              <option value="">{webhooks.loading ? 'Loading webhooks…' : 'Choose…'}</option>
               {webhooks.data?.endpoints.map((w) => (
                 <option key={w.id} value={w.id}>
                   {w.name} ({w.url})
@@ -438,7 +438,7 @@ export function Inspector({
         <>
           <Field label="Connection" hint="Connections are set up under Settings → Integrations.">
             <Select value={c.connection ?? ''} disabled={readOnly} onChange={(e) => setC({ connection: e.target.value })}>
-              <option value="">{connections.loading ? 'Loading…' : 'Choose…'}</option>
+              <option value="">{connections.loading ? 'Loading connections…' : 'Choose…'}</option>
               {connections.data?.connections.map((x) => (
                 <option key={x.id} value={x.id}>
                   {x.name} ({x.connector})

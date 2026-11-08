@@ -1018,8 +1018,8 @@ describe('agent states (#509)', () => {
     h.hold.add('agents.report');
     renderAgent();
 
-    await waitFor(() => expect(document.querySelector('section[aria-busy="true"]')).toBeTruthy());
-    expect(screen.getByLabelText('Loading agent overview')).toBeTruthy();
+    await waitFor(() => expect(document.querySelector('[role="status"][aria-busy="true"]')).toBeTruthy());
+    expect(screen.getByLabelText('Loading the agent report')).toBeTruthy();
     expect(screen.getByLabelText('Period')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Refresh' })).toBeTruthy();
   });

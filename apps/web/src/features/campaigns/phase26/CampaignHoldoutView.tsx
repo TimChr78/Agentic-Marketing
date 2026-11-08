@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import { api } from '../../../app/api';
 import { useWorkspace } from '../../../app/session';
 import { useApi } from '../../../app/useApi';
-import { Alert, LoadingBlock } from '../../../ui';
+import { Alert, DetailSkeleton } from '../../../ui';
 import { HoldoutPanel } from './HoldoutPanel';
 import {
   type CampaignArtifactView,
@@ -98,7 +98,7 @@ export function CampaignHoldoutView({ campaignId, from, to, active = true, refre
   if (definition.refreshing || !definition.data) {
     return (
       <section aria-busy="true" aria-label="Loading the campaign holdout">
-        <LoadingBlock lines={5} label="Loading the campaign holdout" />
+        <DetailSkeleton label="Loading the campaign holdout" />
       </section>
     );
   }
@@ -140,7 +140,7 @@ export function CampaignHoldoutView({ campaignId, from, to, active = true, refre
   if (result.refreshing || !result.data) {
     return (
       <section aria-busy="true" aria-label="Loading the campaign holdout">
-        <LoadingBlock lines={5} label="Loading the campaign holdout" />
+        <DetailSkeleton label="Loading the campaign holdout" />
       </section>
     );
   }
