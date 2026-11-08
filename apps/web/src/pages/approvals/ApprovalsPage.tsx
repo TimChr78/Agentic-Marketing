@@ -3,7 +3,7 @@ import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { api, errText, type Out } from '../../app/api';
 import { typeLabel } from '../../app/artifactRoutes';
 import { useCrumbs } from '../../app/page';
-import { Link, navigate, useLocation } from '../../app/router';
+import { Link, navigate, routerPath, useLocation } from '../../app/router';
 import { useSession } from '../../app/session';
 import { useApi } from '../../app/useApi';
 import { approvalDecisions } from '../../features/approvals/decisions';
@@ -218,7 +218,7 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
         closeFallbackTimer.current = null;
       }
       cancelApprovalFocusReturn();
-      if (window.location.pathname.replace(/\/+$/, '').startsWith('/approvals')) expireReturnFocusIntent();
+      if (routerPath(window.location.pathname).replace(/\/+$/, '').startsWith('/approvals')) expireReturnFocusIntent();
       else clearReturnFocusIntent();
     },
     [],
