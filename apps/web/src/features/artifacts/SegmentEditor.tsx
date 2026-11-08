@@ -4,6 +4,7 @@ import { api, errText } from '../../app/api';
 import { useSession } from '../../app/session';
 import { useApi } from '../../app/useApi';
 import { Button, Field, IconButton, Input, JsonView, Select, Skeleton, Textarea } from '../../ui';
+import { CopyPurposeKey } from '../audience/phase26/CopyControl';
 import type { EditorProps } from './ArtifactDetailPage';
 import { ListAudiencePanel } from './ListAudiencePanel';
 import { usePickerIndex } from './pickerIndex';
@@ -558,11 +559,16 @@ function ConsentRow({
         </option>
         {known.map((p) => (
           <option key={p.key} value={p.key}>
-            {p.name} ({p.key})
+            {p.name}
           </option>
         ))}
-        {missing && <option value={c.consent}>{c.consent} (not found)</option>}
+        {missing && <option value={c.consent}>Unavailable purpose</option>}
       </Select>
+      {missing && (
+        <div className="mt-1">
+          <CopyPurposeKey purposeKey={c.consent} />
+        </div>
+      )}
     </Field>
   );
 }
@@ -610,7 +616,7 @@ function SegmentPicker({
         aria-label={`Segment, condition ${index}`}
         onChange={(e) => onChange(e.target.value)}
       >
-        <option value="">{list.loading ? 'Loading…' : list.error ? `Couldn't load: ${list.error}` : 'Choose a segment…'}</option>
+        <option value="">{list.loading ? 'Loading segments…' : list.error ? `Couldn't load: ${list.error}` : 'Choose a segment…'}</option>
         {!known && value && <option value={value}>{value} (this segment or not found)</option>}
         {items.map((a) => (
           <option key={a.id} value={a.id}>
@@ -688,7 +694,10 @@ function EstimatedSize({ condition }: { condition: Condition }) {
         {!allowed ? (
           <p className="text-[13px] text-muted">Your role can’t read profiles, so the size isn’t shown.</p>
         ) : current?.loading ? (
-          <Skeleton className="mt-1 h-5 w-24" />
+          <span className="flex items-center gap-2">
+            <Skeleton className="mt-1 h-5 w-24" />
+            <span className="sr-only">Estimating the audience size</span>
+          </span>
         ) : current?.cancelled ? (
           <p className="text-[13px] text-muted">The estimate was not applied. Estimate again.</p>
         ) : current?.error ? (

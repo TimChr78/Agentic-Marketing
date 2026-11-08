@@ -1,9 +1,11 @@
 import { ArrowRight, ListChecks, Sparkles } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 import { api, errText, type Out } from '../../app/api';
+import { ButtonLink } from '../../app/links';
 import { useCrumbs } from '../../app/page';
 import { Link } from '../../app/router';
 import { useWorkspace } from '../../app/session';
+import { GallerySkeleton } from '../../features/phase28/content/GallerySkeleton';
 import { Alert, Button, Checkbox, EmptyState, Field, Input, LoadingBlock, Mono, PageHeader, Select, StatusPill, Tag } from '../../ui';
 import { pageWidth } from '../../ui/layout';
 
@@ -147,9 +149,11 @@ export default function RecipesPage({ embedded = false }: { embedded?: boolean }
         )}
 
         {loading ? (
-          <LoadingBlock lines={4} label="Loading starters" />
+          <GallerySkeleton label="Loading starters" minWidth={260} tileHeight={176} tiles={3} />
         ) : list.length === 0 ? (
-          <EmptyState title="No recipes">This server has no starter recipes. You can create a template from scratch.</EmptyState>
+          <EmptyState title="No recipes" action={<ButtonLink to="/content/templates">Open e-mail templates</ButtonLink>}>
+            This server has no starter recipes. Create a template from scratch.
+          </EmptyState>
         ) : (
           <ul className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
             {list.map((r) => (
@@ -357,7 +361,7 @@ export default function RecipesPage({ embedded = false }: { embedded?: boolean }
               )}
             </>
           ) : (
-            <LoadingBlock lines={5} label="Loading the starter" />
+            <LoadingBlock geometry="detail" label="Loading the starter" />
           )}
         </section>
       )}

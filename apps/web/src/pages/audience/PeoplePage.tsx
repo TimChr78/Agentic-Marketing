@@ -10,7 +10,22 @@ import { CopyPersonId } from '../../features/audience/phase26/CopyControl';
 import { availabilityLabel, listIdentity, purposeRows, shownLabel } from '../../features/audience/phase26/model';
 import { PurposeConsentList } from '../../features/audience/phase26/PurposeConsent';
 import { usePurposes } from '../../features/audience/phase26/usePurposes';
-import { Alert, Button, EmptyState, IconButton, Input, Skeleton, Table, Tabs, Td, THead, Th, Tr, timeAgo } from '../../ui';
+import {
+  Alert,
+  Button,
+  DetailSkeleton,
+  EmptyState,
+  IconButton,
+  Input,
+  ListSkeleton,
+  Table,
+  Tabs,
+  Td,
+  THead,
+  Th,
+  Tr,
+  timeAgo,
+} from '../../ui';
 import { ListPage } from '../../ui/ListPage';
 import { pageWidth } from '../../ui/layout';
 
@@ -51,17 +66,8 @@ function ConsentCell({ row, purposes }: { row: ProfilePage['profiles'][number]; 
 }
 
 function PeopleSkeleton() {
-  return (
-    <div className="space-y-3 p-4" role="status" aria-label="Loading people">
-      {[0, 1, 2, 3, 4].map((i) => (
-        <div key={i} className="flex gap-4">
-          <Skeleton className={i % 2 ? 'w-1/3' : 'w-2/5'} />
-          <Skeleton className="w-1/4" />
-          <Skeleton className="w-1/6" />
-        </div>
-      ))}
-    </div>
-  );
+  // The ready table has three columns; the shared list geometry keeps the header and row heights.
+  return <ListSkeleton label="Loading people" columns={3} />;
 }
 
 /** People known to the workspace: one loaded page at a time, with consent beside every purpose. */
@@ -212,7 +218,7 @@ export function PeopleList() {
     try {
       const result = await api.call('profiles.find', { type: 'email', value });
       if (!result.profileId) {
-        setSearchError('No match');
+        setSearchError('No one has that e-mail. Check the address, or paste their profile id.');
         return;
       }
       navigate(`/audience/people/${result.profileId}`);
@@ -227,7 +233,7 @@ export function PeopleList() {
   const count = rows.length;
   const notice = error
     ? {
-        title: 'Could not load people',
+        title: 'Couldn’t load people',
         body: `${error} No old values are shown as current.`,
         action: (
           <Button variant="secondary" onClick={() => void retryFirst()}>
@@ -414,11 +420,11 @@ export default function PeoplePage() {
         {forbidden ? (
           <EmptyState title="Your role can't open this tab">
             {forbidden === 'imports'
-              ? 'Restricted by your role. Importing people needs profiles:write. Ask a workspace admin for it.'
-              : 'Restricted by your role. Browsing people needs profiles:read. Ask a workspace admin for it.'}
+              ? 'Your role cannot open this tab. Ask a workspace admin to give you permission to import people.'
+              : 'Your role cannot open this tab. Ask a workspace admin to give you permission to browse people.'}
           </EmptyState>
         ) : active === 'imports' ? (
-          <Suspense fallback={<Skeleton className="h-40 w-full" />}>
+          <Suspense fallback={<DetailSkeleton label="Loading imports" />}>
             <ImportsPage />
           </Suspense>
         ) : (

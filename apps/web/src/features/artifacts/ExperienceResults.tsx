@@ -1,7 +1,7 @@
 import { RefreshCw } from 'lucide-react';
 import { api } from '../../app/api';
 import { useApi } from '../../app/useApi';
-import { Alert, Button, EmptyState, LoadingBlock, Table, TableFrame, Tag, Td, THead, Th, Tr } from '../../ui';
+import { Alert, Button, EmptyState, ListSkeleton, Table, TableFrame, Tag, Td, THead, Th, Tr } from '../../ui';
 import type { Artifact } from './ArtifactDetailPage';
 
 // Experiment results of a web experience: exposures, conversions and rates per variant, compared
@@ -36,7 +36,7 @@ export function ExperienceResults({ artifact }: { artifact: Artifact }) {
         Publish the experience to start collecting exposures and conversions. Results appear here as visitors see the variants.
       </EmptyState>
     );
-  if (results.loading) return <LoadingBlock lines={5} />;
+  if (results.loading) return <ListSkeleton label="Loading experience results" columns={5} />;
   if (results.error || !results.data)
     return (
       <Alert tone="bad" title="Couldn't load the results" onRetry={results.reload}>

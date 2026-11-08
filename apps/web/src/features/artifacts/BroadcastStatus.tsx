@@ -3,7 +3,7 @@ import { useState } from 'react';
 import { api, errText, type Out } from '../../app/api';
 import { useWorkspace } from '../../app/session';
 import { useApi } from '../../app/useApi';
-import { Alert, Button, EmptyState, formatDateTime, LoadingBlock, StatusPill, useConfirm, useToast } from '../../ui';
+import { Alert, Button, EmptyState, formatDateTime, Skeleton, SkeletonRegion, StatusPill, useConfirm, useToast } from '../../ui';
 import { StatCard, StatGrid } from '../insights/Stats';
 import type { Artifact } from './ArtifactDetailPage';
 
@@ -84,7 +84,19 @@ export function BroadcastStatus({ artifact, status }: { artifact: Artifact; stat
       </EmptyState>
     );
 
-  if (status.loading) return <LoadingBlock lines={5} />;
+  if (status.loading)
+    return (
+      <SkeletonRegion label="Loading sending status" geometry="kpi" className="space-y-4">
+        <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3 xl:grid-cols-4">
+          {Array.from({ length: 4 }, (_, i) => (
+            // biome-ignore lint/suspicious/noArrayIndexKey: generated placeholder tiles have no identity and never reorder
+            <Skeleton key={i} shape="card" />
+          ))}
+        </div>
+        <Skeleton shape="row" />
+        <Skeleton shape="row" />
+      </SkeletonRegion>
+    );
   if (status.error || !status.data || !run)
     return (
       <Alert tone="bad" title="Couldn’t load sending status" onRetry={status.reload}>

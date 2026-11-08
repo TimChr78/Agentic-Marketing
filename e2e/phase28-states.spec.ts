@@ -104,7 +104,6 @@ test.describe('shared states', () => {
   });
 
   test('an empty list names the missing object and its next action (W)', async ({ page }) => {
-    test.fixme(true, 'Owned by task W; reporting until Home, approvals and agents land');
     await signIn(page, PEOPLE.owner);
     await page.goto('/work/agents?tab=library');
     await expect(page.getByRole('main')).toBeVisible();
@@ -118,7 +117,6 @@ test.describe('shared states', () => {
   });
 
   test('the shared list skeleton matches the ready table geometry (W)', async ({ page }) => {
-    test.fixme(true, 'Owned by task W; reporting until Home, approvals and agents land');
     await signIn(page, PEOPLE.owner);
     await page.route('**/v1/approvals.list*', async (route) => {
       await new Promise((resolve) => setTimeout(resolve, 500));

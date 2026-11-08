@@ -626,7 +626,9 @@ function HostedPagePreview({ formId, savedVersion }: { formId: string; savedVers
     <div className="space-y-2">
       <p className="text-[12px] font-medium text-fg-2">Confirm page preview</p>
       {preview.loading ? (
-        <LoadingBlock lines={5} label="Rendering the confirm page" />
+        <div className="h-[420px]">
+          <LoadingBlock lines={5} label="Rendering the confirm page" />
+        </div>
       ) : preview.error ? (
         <Alert tone="bad" title="Couldn't render the confirm page" onRetry={preview.reload}>
           {preview.error}

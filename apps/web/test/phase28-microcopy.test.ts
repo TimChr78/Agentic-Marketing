@@ -174,7 +174,7 @@ function writeEvidence(section: string) {
 }
 
 /** Areas that have adopted the lint. A task adds its letter here when it flips to strict. */
-const STRICT: Owner[] = ['I', 'S'];
+const STRICT: Owner[] = ['I', 'W', 'M', 'A', 'C', 'S'];
 
 describe('phase 28 microcopy lint (#555)', () => {
   const findings = scan();
@@ -193,7 +193,7 @@ describe('phase 28 microcopy lint (#555)', () => {
   });
 
   it('reports the remaining area totals so each task can flip its own section to strict', () => {
-    for (const owner of ['W', 'M', 'A', 'C'] as const) {
+    for (const owner of (['W', 'M', 'A', 'C', 'S'] as const).filter((o) => !STRICT.includes(o))) {
       const rows = findings.filter((f) => f.owner === owner);
       console.log(`${owner}: ${rows.length} microcopy finding${rows.length === 1 ? '' : 's'}`);
     }

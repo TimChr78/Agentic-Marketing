@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { Link } from '../../app/router';
 import { artifactTypeLabel } from '../../lib/labels';
 import { stateOfAgent } from '../../lib/state';
@@ -130,14 +131,27 @@ function RequestBlock({
   const groups = allGroups.slice(0, MAX_GROUPS);
   const hasMore = allGroups.length > MAX_GROUPS;
 
-  let empty: string | null = null;
-  if (data.total === 0) empty = 'No pending requests';
+  let empty: ReactNode = null;
+  if (data.total === 0)
+    empty = (
+      <>
+        <span>No pending requests</span> in this sample.
+      </>
+    );
   else if (groups.length === 0)
-    empty = data.nextCursor
-      ? `No ${held ? 'holds' : 'reviews'} in the oldest 20 loaded requests`
-      : held
-        ? 'No held requests'
-        : 'No pending reviews';
+    empty = data.nextCursor ? (
+      <>
+        <span>No {held ? 'holds' : 'reviews'} in the oldest 20 loaded requests</span>.
+      </>
+    ) : held ? (
+      <>
+        <span>No held requests</span>.
+      </>
+    ) : (
+      <>
+        <span>No pending reviews</span>.
+      </>
+    );
 
   return (
     <HomeBlock
@@ -147,7 +161,7 @@ function RequestBlock({
           <Link to="/approvals" className="inline-flex min-h-10 items-center text-accent hover:underline md:min-h-0">
             View all in Approvals
           </Link>
-        ) : empty && data.nextCursor ? (
+        ) : empty ? (
           <Link to="/approvals" className="inline-flex min-h-10 items-center text-accent hover:underline md:min-h-0">
             View Approvals
           </Link>
@@ -190,7 +204,13 @@ function AlertRows({ resource, onRetry }: { resource: Resource<AlertsResult>; on
   return (
     <HomeBlock label="Firing alerts">
       {rules.length === 0 ? (
-        <HomeBlockEmpty>No firing alerts</HomeBlockEmpty>
+        <HomeBlockEmpty>
+          <span>No firing alerts</span>.{' '}
+          <Link to="/insights/alerts" className="inline-flex min-h-10 items-center text-accent hover:underline md:min-h-0">
+            View alerts to check the rules
+          </Link>
+          .
+        </HomeBlockEmpty>
       ) : (
         rules.map((rule) => (
           <div key={rule.id} className="flex min-h-16 flex-wrap items-start justify-between gap-3 px-4 py-3 md:px-5">
@@ -237,7 +257,13 @@ function CapRows({ resource, onRetry }: { resource: Resource<AgentsResult>; onRe
   return (
     <HomeBlock label="Guardian caps">
       {agents.length === 0 ? (
-        <HomeBlockEmpty>No guardian caps</HomeBlockEmpty>
+        <HomeBlockEmpty>
+          <span>No guardian caps</span>.{' '}
+          <Link to="/work/agents" className="inline-flex min-h-10 items-center text-accent hover:underline md:min-h-0">
+            View agents to review their limits
+          </Link>
+          .
+        </HomeBlockEmpty>
       ) : (
         agents.map((agent) => (
           <div key={agent.id} className="flex min-h-16 flex-wrap items-start justify-between gap-3 px-4 py-3 md:px-5">
@@ -296,7 +322,13 @@ function FailureRows({ resource, onRetry }: { resource: Resource<FailuresResult>
       }
     >
       {runs.length === 0 ? (
-        <HomeBlockEmpty>No failed hosted runs in the last 7 days</HomeBlockEmpty>
+        <HomeBlockEmpty>
+          <span>No failed hosted runs in the last 7 days</span>.{' '}
+          <Link to="/work/agents" className="inline-flex min-h-10 items-center text-accent hover:underline md:min-h-0">
+            View agents to check their runs
+          </Link>
+          .
+        </HomeBlockEmpty>
       ) : (
         runs.map((run: FailedRun) => (
           <div key={run.id} className="flex min-h-16 flex-wrap items-start justify-between gap-3 px-4 py-3 md:px-5">

@@ -214,11 +214,11 @@ export function BroadcastEditor({ artifact, content, onChange, readOnly, errors 
               >
                 <option value="">{topics.length ? 'No topic' : 'No topics'}</option>
                 {broadcast.topic && !topics.some((t) => t.key === broadcast.topic) && (
-                  <option value={broadcast.topic}>{broadcast.topic} (not under this purpose)</option>
+                  <option value={broadcast.topic}>Unavailable topic · not under this purpose</option>
                 )}
                 {topics.map((t) => (
                   <option key={t.key} value={t.key}>
-                    {t.name} ({t.key})
+                    {t.name}
                   </option>
                 ))}
               </Select>

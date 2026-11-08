@@ -15,6 +15,7 @@ const h = vi.hoisted(() => ({
   rows: {} as Record<string, unknown[]>,
   plan: null as unknown,
   simulate: null as unknown,
+  fits: [] as unknown[],
 }));
 
 vi.mock('../../../app/api', async (importOriginal) => {
@@ -29,7 +30,11 @@ vi.mock('../../../app/api', async (importOriginal) => {
           return { artifacts: rows, total: rows.length, nextCursor: null };
         }
         if (name === 'artifacts.get') return h.plan;
-        if (name === 'purposes.list') return { source: 'published', purposes: [] };
+        if (name === 'purposes.list')
+          return {
+            source: 'published',
+            purposes: [{ key: 'marketing_email', name: 'Marketing e-mail' }],
+          };
         if (name === 'webhooks.list') return { endpoints: [] };
         if (name === 'connections.list') return { connections: [] };
         if (name === 'journeys.simulate') return h.simulate;
@@ -79,7 +84,12 @@ vi.mock('@xyflow/react', async () => {
     Handle: () => null,
     Position: { Top: 'top', Bottom: 'bottom' },
     applyNodeChanges: (_changes: unknown, nodes: Node[]) => nodes,
-    useReactFlow: () => ({ fitView: () => {}, screenToFlowPosition: ({ x, y }: { x: number; y: number }) => ({ x, y }) }),
+    useReactFlow: () => ({
+      fitView: (opts: unknown) => {
+        h.fits.push(opts);
+      },
+      screenToFlowPosition: ({ x, y }: { x: number; y: number }) => ({ x, y }),
+    }),
   };
 });
 
@@ -129,6 +139,7 @@ beforeEach(() => {
   localStorage.clear();
   setWorkspaceId('ws_1', { persist: false });
   h.calls.length = 0;
+  h.fits.length = 0;
   h.rows = {};
   h.plan = { version: { content: { events: [] } } };
   h.simulate = { version: 1, outcome: 'completed', converted: false, steps: [], entry: undefined };
@@ -150,6 +161,8 @@ describe('journey auto-layout action (#528)', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Auto-layout' }));
     await waitFor(() => expect(positions(content().nodes)).not.toEqual(positions(before.nodes)));
+    // A layout/fit is an instant view change, never a camera animation (#555 motion contract).
+    expect(h.fits.at(-1)).toEqual({ padding: 0.2, duration: 0 });
     const after = content();
     expect(after.nodes.map((n) => ({ id: n.id, kind: n.kind, config: n.config, next: n.next }))).toEqual(
       before.nodes.map((n) => ({ id: n.id, kind: n.kind, config: n.config, next: n.next })),
@@ -304,6 +317,31 @@ describe('journey settings stay reachable (#528)', () => {
     expect(screen.getByText('Step colours')).toBeTruthy();
     // One purposes list on mount; the settings read is unchanged by this work.
     expect(h.calls.filter((c) => c.name === 'purposes.list')).toHaveLength(1);
+  });
+
+  it('shows purpose names only, never the stored technical key', async () => {
+    render(<Harness initial={{ purpose: 'marketing_email', goal: 'Activation', nodes: moved() }} />);
+    await waitFor(() => expect(screen.getAllByRole('option').map((o) => o.textContent)).toContain('Marketing e-mail'));
+    const select = screen.getByRole('combobox', { name: 'Purpose' }) as HTMLSelectElement;
+    expect(select.value).toBe('marketing_email');
+    const labels = screen.getAllByRole('option').map((o) => o.textContent ?? '');
+    expect(labels.some((label) => label.includes('marketing_email'))).toBe(false);
+  });
+
+  it('names an unresolved purpose and keeps the stored key in the copy affordance', async () => {
+    render(<Harness initial={{ purpose: 'legacy_newsletter', nodes: moved() }} />);
+    await waitFor(() => expect(screen.getAllByRole('option').map((o) => o.textContent)).toContain('Unavailable purpose'));
+    const labels = screen.getAllByRole('option').map((o) => o.textContent ?? '');
+    expect(labels.some((label) => label.includes('legacy_newsletter'))).toBe(false);
+    expect(screen.getByRole('button', { name: /^Purpose ID/ })).toBeTruthy();
+  });
+
+  it('exposes the steps as a readable summary beside the canvas', () => {
+    render(<Harness initial={{ purpose: 'marketing_email', nodes: moved() }} />);
+    const summary = screen.getByRole('region', { name: 'Journey steps' });
+    expect(summary.textContent).toContain('Signed up');
+    expect(summary.textContent).toContain('Welcome e-mail');
+    expect(summary.textContent).toContain('Exit');
   });
 });
 
