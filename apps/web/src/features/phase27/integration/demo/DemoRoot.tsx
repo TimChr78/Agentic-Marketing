@@ -13,14 +13,15 @@ import { DEMO_BANNER, DEMO_BANNER_HINT, demoSessionValue } from './session';
 import { installDemoTransport } from './transport';
 
 /**
- * The real shell in demo mode (#524, #530): the same Root gate, shell, navigation and pages as
- * production, over the fixture session and read transport. There is no legacy demo app and no
- * second page implementation. The marker is persistent, so every page, dialog and deep link is
- * visibly sample data; the shell keeps its ordinary context line.
+ * The real shell in demo mode (#524, #530): the same authenticated shell, navigation and page
+ * routes as production over the fixture session and read transport. There is no legacy demo app and
+ * no second page implementation. The shell is composed here rather than through Root so the demo
+ * chunk and the real Root chunk stay separate in the bundle. The marker is persistent, so every
+ * page, dialog and deep link is visibly sample data; the shell keeps its ordinary context line.
  *
  * The entry normalises `/demo`, the legacy hashes and the retired live-site walkthrough before the
- * real Root mounts. Every navigation afterwards carries demo history state, so reload and
- * back/forward stay on fixtures, while a typed real URL or the sign-in exit starts a real session.
+ * shell mounts. Every navigation afterwards carries demo history state, so reload and back/forward
+ * stay on fixtures, while a typed real URL or the sign-in exit starts a real session.
  */
 export function DemoRoot() {
   const session = useMemo(() => demoSessionValue(), []);
