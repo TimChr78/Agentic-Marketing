@@ -1,11 +1,19 @@
-import { Copy, Trash2 } from 'lucide-react';
-import { api } from '../../app/api';
+import { CircleHelp, Copy, Trash2 } from 'lucide-react';
+import { useSession } from '../../app/session';
 import { useApi } from '../../app/useApi';
 import { Alert, Button, Field, FieldGroup, Input, Segmented, Select, Textarea } from '../../ui';
 import { ArtifactSelect } from '../artifacts/ArtifactSelect';
 import { JsonEditor } from '../artifacts/JsonEditor';
+import { connectionList, trackingPlan, trackingPlanList, webhookList } from '../phase27/journey/reads';
 import { durationText } from '../previews/ConditionView';
 import { edgeLabel, type JNode, KINDS, maxEdges } from './model';
+
+const UNKNOWN_STEP = {
+  label: 'Unknown step',
+  category: 'action' as const,
+  icon: CircleHelp,
+  hint: 'This step is not recognised by the editor. Its saved settings are kept.',
+};
 
 const DURATIONS = ['PT5M', 'PT30M', 'PT1H', 'PT6H', 'PT12H', 'P1D', 'P2D', 'P3D', 'P5D', 'P1W', 'P2W', 'P30D', 'P90D'];
 
@@ -60,7 +68,7 @@ export function Inspector({
   onDelete: () => void;
   onDuplicate: () => void;
 }) {
-  const meta = KINDS[node.kind];
+  const meta = KINDS[node.kind] ?? UNKNOWN_STEP;
   const c = node.config as Record<string, any>;
   const setC = (p: Record<string, unknown>) =>
     onChange({ ...node, config: Object.fromEntries(Object.entries({ ...c, ...p }).filter(([, v]) => v !== undefined)) });
@@ -70,16 +78,18 @@ export function Inspector({
   const directSegment = typeof condition.segment === 'string' ? condition.segment : undefined;
   const outs = maxEdges(node);
   const targets = nodes.filter((n) => n.id !== node.id && n.kind !== 'trigger');
-  const webhooks = useApi(() => api.call('webhooks.list', {}), [], { skip: node.kind !== 'webhook' });
-  const connections = useApi(() => api.call('connections.list', {}), [], { skip: node.kind !== 'action' });
-  // The tracking plan can suggest a stable business key for an event trigger.
-  const planId = useApi(() => api.call('artifacts.list', { type: 'tracking_plan', limit: 1 }), [], {
+  const workspaceId = useSession().workspace?.id ?? '';
+  const webhooks = useApi(webhookList, [workspaceId], { skip: node.kind !== 'webhook' });
+  const connections = useApi(connectionList, [workspaceId], { skip: node.kind !== 'action' });
+  // The tracking plan can suggest a stable business key for an event trigger. One list per
+  // workspace and one detail read per plan are shared by every trigger selection (#528).
+  const planId = useApi(trackingPlanList, [workspaceId], {
     skip: node.kind !== 'trigger' || c.segment !== undefined,
   });
   const plan = useApi(
     async () => {
       const id = planId.data?.artifacts[0]?.id;
-      return id ? api.call('artifacts.get', { artifactId: id }) : null;
+      return id ? trackingPlan(id) : null;
     },
     [planId.data],
     { skip: !planId.data?.artifacts[0] },
@@ -479,7 +489,7 @@ export function Inspector({
                   <option value="">{current ? 'Disconnect' : 'Not connected'}</option>
                   {targets.map((t) => (
                     <option key={t.id} value={t.id}>
-                      {t.label} ({KINDS[t.kind].label})
+                      {t.label} ({KINDS[t.kind]?.label ?? 'Unknown step'})
                     </option>
                   ))}
                 </Select>
