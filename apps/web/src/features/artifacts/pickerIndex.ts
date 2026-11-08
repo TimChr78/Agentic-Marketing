@@ -33,6 +33,8 @@ interface Entry {
   error: string | null;
   loading: boolean;
   promise: Promise<PickerIndex> | null;
+  /** Bumped for every read, refresh and invalidation; only the latest may write the entry. */
+  generation: number;
   listeners: Set<() => void>;
   snapshot: PickerIndexState;
 }
@@ -70,7 +72,14 @@ function makeSnapshot(entry: Entry): PickerIndexState {
 function entryFor(key: string): Entry {
   let entry = entries.get(key);
   if (!entry) {
-    entry = { error: null, loading: true, promise: null, listeners: new Set(), snapshot: snapshotOf(undefined) };
+    entry = {
+      error: null,
+      loading: true,
+      promise: null,
+      generation: 0,
+      listeners: new Set(),
+      snapshot: snapshotOf(undefined),
+    };
     entries.set(key, entry);
   }
   return entry;
@@ -109,13 +118,18 @@ export function readPickerIndex(workspaceId: string, type: string, opts: { load?
   if (entry.data) return Promise.resolve(entry.data);
   if (entry.promise) return entry.promise;
   const load = opts.load ?? artifactListLoader;
+  const generation = entry.generation + 1;
+  entry.generation = generation;
   entry.loading = true;
   entry.error = null;
   entry.snapshot = makeSnapshot(entry);
   emit(entry);
+  const current = () => entries.get(pickerIndexKey(workspaceId, type)) === entry && entry.generation === generation;
   const promise = fetchAllArtifactPages(load, type).then(
     (page) => {
-      if (entries.get(pickerIndexKey(workspaceId, type)) !== entry) return page;
+      // A refresh or invalidation started a newer read; the older response must not revive its
+      // rows. Subscribers already saw the drop, and the newer completion is the one that emits.
+      if (!current()) return page;
       entry.data = page;
       entry.error = null;
       entry.loading = false;
@@ -124,7 +138,7 @@ export function readPickerIndex(workspaceId: string, type: string, opts: { load?
       return page;
     },
     (error: unknown) => {
-      if (entries.get(pickerIndexKey(workspaceId, type)) !== entry) throw error;
+      if (!current()) throw error;
       entry.error = errText(error);
       entry.loading = false;
       entry.promise = null;
@@ -143,6 +157,8 @@ export function refreshPickerIndex(workspaceId: string, type: string, opts: { lo
   if (entry) {
     entry.data = undefined;
     entry.promise = null;
+    // Invalidate any in-flight read before the replacement starts; its response is now stale.
+    entry.generation += 1;
   }
   return readPickerIndex(workspaceId, type, opts);
 }
@@ -156,6 +172,7 @@ function reloadEntry(workspaceId: string, type: string) {
   entry.data = undefined;
   entry.error = null;
   entry.promise = null;
+  entry.generation += 1;
   entry.loading = true;
   emit(entry);
   if (entry.listeners.size > 0) void readPickerIndex(workspaceId, type).catch(() => {});
@@ -186,7 +203,7 @@ export function resetPickerIndexes() {
 }
 
 /** The shared picker index for one type in the current workspace. */
-export function usePickerIndex(type: string): PickerIndexState {
+export function usePickerIndex(type: string, opts: { skip?: boolean } = {}): PickerIndexState {
   const workspaceId = useSyncExternalStore(onWorkspaceChange, getWorkspaceId, getWorkspaceId);
   // Before the session names a workspace there is nothing to key by; the shell does not mount
   // pages until it has, so this read is only for a direct component mount (tests, embedded editors).
@@ -197,10 +214,16 @@ export function usePickerIndex(type: string): PickerIndexState {
     () => snapshot(key),
   );
   // Every selector asks for the same key, so mounting several of them still starts one read.
+  // `skip` is for a host that mounts this hook regardless but only wants the index on one path
+  // (the artifact list keeps its Phase 24–26 read unless a family opts into the template).
   useEffect(() => {
+    if (opts.skip) return;
     void readPickerIndex(workspaceId ?? '', type).catch(() => {});
-  }, [workspaceId, type]);
-  const reload = useCallback(() => refreshPickerIndex(workspaceId ?? '', type).then(() => undefined), [workspaceId, type]);
+  }, [workspaceId, type, opts.skip]);
+  const reload = useCallback(
+    () => (opts.skip ? Promise.resolve() : refreshPickerIndex(workspaceId ?? '', type).then(() => undefined)),
+    [workspaceId, type, opts.skip],
+  );
   return { ...state, reload };
 }
 
