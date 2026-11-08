@@ -167,6 +167,21 @@ describe('demo destinations render on the real shell (#530)', () => {
     expect(screen.getByRole('note', { name: 'Demo mode' })).toBeTruthy();
   });
 
+  it('never adopts or overwrites a signed-in workspace', async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+    localStorage.setItem('am.workspace', 'real-workspace-id');
+    window.history.replaceState(null, '', '/');
+    const { DemoRoot } = await import('../integration/demo/DemoRoot');
+    render(<DemoRoot />);
+
+    await screen.findByRole('heading', { level: 1, name: 'Home' });
+    expect(localStorage.getItem('am.workspace')).toBe('real-workspace-id');
+    expect(window.history.state.demo).toBe(true);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    localStorage.removeItem('am.workspace');
+  });
+
   it('opens a person detail from the fixture list', async () => {
     vi.stubGlobal('fetch', vi.fn());
     const { DEMO_PROFILE_ROWS } = await import('./fixtures');
