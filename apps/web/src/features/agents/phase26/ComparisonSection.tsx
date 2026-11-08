@@ -1,7 +1,8 @@
 import { useEffect, useId, useMemo, useState } from 'react';
 import { api } from '../../../app/api';
+import { Link } from '../../../app/router';
 import { useApi } from '../../../app/useApi';
-import { Alert, Button, Card, Checkbox, EmptyState, Select, Skeleton, Table, Td, THead, Th, Tr } from '../../../ui';
+import { Alert, Button, Card, Checkbox, EmptyState, Select, Skeleton, SkeletonRegion, Table, Td, THead, Th, Tr } from '../../../ui';
 import { type ReportPeriodChoice, reportPeriod } from '../../broadcasts/period';
 import type { Agent } from '../labels';
 import {
@@ -71,7 +72,11 @@ export function ComparisonSection({ agents, canAudit }: { agents: Agent[]; canAu
     return (
       <Card title="Comparison" description="Side by side for the same period, from one bounded read.">
         <EmptyState compact title="No agents to compare yet">
-          An agent appears here once it has a credential.
+          An agent appears here once it has a credential.{' '}
+          <Link to="/settings/integrations" className="text-accent hover:underline">
+            Open Integrations
+          </Link>{' '}
+          to create one.
         </EmptyState>
       </Card>
     );
@@ -92,37 +97,41 @@ export function ComparisonSection({ agents, canAudit }: { agents: Agent[]; canAu
     setRefreshKey((value) => value + 1);
   };
 
+  const controls = (
+    <div className="flex flex-wrap items-center gap-2">
+      <Select
+        compact
+        className="w-auto"
+        aria-label="Comparison period"
+        value={choice}
+        onChange={(event) => {
+          setAnchor(new Date());
+          setChoice(Number(event.target.value) === 30 ? 30 : 7);
+          setRefreshKey((value) => value + 1);
+        }}
+      >
+        <option value={7}>Last 7 complete days</option>
+        <option value={30}>Last 30 complete days</option>
+      </Select>
+      <Button
+        onClick={() => {
+          setAnchor(new Date());
+          setRefreshKey((value) => value + 1);
+        }}
+      >
+        Refresh comparison
+      </Button>
+    </div>
+  );
+
   return (
     <Card
       title="Comparison"
       description="Totals for the selected period. Choose up to 20 agents to compare side by side."
-      action={
-        <div className="flex flex-wrap items-center gap-2">
-          <Select
-            compact
-            className="w-auto"
-            aria-label="Comparison period"
-            value={choice}
-            onChange={(event) => {
-              setAnchor(new Date());
-              setChoice(Number(event.target.value) === 30 ? 30 : 7);
-              setRefreshKey((value) => value + 1);
-            }}
-          >
-            <option value={7}>Last 7 complete days</option>
-            <option value={30}>Last 30 complete days</option>
-          </Select>
-          <Button
-            onClick={() => {
-              setAnchor(new Date());
-              setRefreshKey((value) => value + 1);
-            }}
-          >
-            Refresh comparison
-          </Button>
-        </div>
-      }
+      action={<div className="hidden sm:flex">{controls}</div>}
     >
+      {/* The header action cannot shrink on a phone, so the same controls move into the body there. */}
+      <div className="border-b border-line px-4 py-3 sm:hidden">{controls}</div>
       <div className="border-b border-line px-4 py-3">
         <details>
           <summary className="flex min-h-10 cursor-pointer items-center text-[12px] font-medium text-accent">
@@ -163,13 +172,13 @@ export function ComparisonSection({ agents, canAudit }: { agents: Agent[]; canAu
           Select between 1 and 20 agents, then Apply. The comparison reads once for that selection.
         </EmptyState>
       ) : comparisonBusy ? (
-        <section aria-busy="true" aria-label="Loading the agent comparison" className="space-y-3 p-4">
+        <SkeletonRegion label="Loading the agent comparison" geometry="chart" className="space-y-3 p-4">
           <Skeleton className="h-3 w-1/3" />
           <div className="grid gap-4 sm:grid-cols-2">
-            <Skeleton className="h-64 w-full" />
-            <Skeleton className="h-64 w-full" />
+            <Skeleton shape="chart" />
+            <Skeleton shape="chart" />
           </div>
-        </section>
+        </SkeletonRegion>
       ) : compare.error ? (
         <div className="p-4">
           <Alert tone="bad" title="Couldn't load the comparison" onRetry={() => void compare.reload()}>

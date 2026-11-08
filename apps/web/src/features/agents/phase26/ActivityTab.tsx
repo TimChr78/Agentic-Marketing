@@ -3,7 +3,7 @@ import { api, errText } from '../../../app/api';
 import { artifactPath } from '../../../app/artifactRoutes';
 import { Link } from '../../../app/router';
 import { useApi } from '../../../app/useApi';
-import { Alert, Button, Card, EmptyState, Skeleton, StatusPill, Tag } from '../../../ui';
+import { Alert, Button, Card, EmptyState, Skeleton, SkeletonRegion, StatusPill, Tag } from '../../../ui';
 import { Identifier } from '../../../ui/Identifier';
 import { DecisionBadge } from '../AgentStatus';
 import { GuardianCard } from '../GuardianCard';
@@ -61,13 +61,12 @@ export function ActivityTab({
 
   if (list.refreshing || (list.loading && !list.data)) {
     return (
-      <section aria-busy="true" aria-label="Loading agent activity" className="space-y-3">
-        <p className="text-[13px] text-muted">Loading the activity ledger…</p>
+      <SkeletonRegion label="Loading the activity ledger" geometry="list" className="space-y-3">
         {Array.from({ length: 4 }, (_, i) => (
           // biome-ignore lint/suspicious/noArrayIndexKey: loading placeholders are generated, never reordered, and have no identity
           <Skeleton key={i} className={i % 2 ? 'h-24 w-full' : 'h-20 w-11/12'} />
         ))}
-      </section>
+      </SkeletonRegion>
     );
   }
 

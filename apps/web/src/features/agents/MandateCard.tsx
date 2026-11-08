@@ -6,7 +6,20 @@ import { ButtonLink } from '../../app/links';
 import { Link, navigate } from '../../app/router';
 import { useWorkspace } from '../../app/session';
 import { useApi } from '../../app/useApi';
-import { Alert, Button, Card, formatDate, formatDateTime, Meta, StatusPill, Tag, timeAgo, useToast } from '../../ui';
+import {
+  Alert,
+  Button,
+  Card,
+  formatDate,
+  formatDateTime,
+  Meta,
+  Skeleton,
+  SkeletonRegion,
+  StatusPill,
+  Tag,
+  timeAgo,
+  useToast,
+} from '../../ui';
 import { fetchAllArtifacts } from '../artifacts/artifactList';
 import { defaultLevels, type MandateContent, type MandateScope } from '../artifacts/MandateEditor';
 import type { Agent } from './labels';
@@ -147,7 +160,11 @@ export function MandateCard({ agent }: { agent: Agent }) {
     >
       <div className="p-4">
         {mandates.loading && !mandates.data ? (
-          <p className="text-[13px] text-muted">Loading the agent’s mandate…</p>
+          <SkeletonRegion label="Loading the agent mandate" geometry="detail" className="space-y-2">
+            <Skeleton className="h-3 w-1/3" />
+            <Skeleton className="h-3 w-4/5" />
+            <Skeleton className="h-3 w-2/5" />
+          </SkeletonRegion>
         ) : mandates.error ? (
           <Alert tone="bad" title="Couldn't load the agent's mandate" onRetry={() => void mandates.reload()}>
             {mandates.error}
@@ -211,7 +228,7 @@ export function MandateCard({ agent }: { agent: Agent }) {
               </Alert>
             )}
             {createError && (
-              <Alert tone="bad" title="Could not create the mandate">
+              <Alert tone="bad" title="Couldn't create the mandate">
                 {createError}
               </Alert>
             )}

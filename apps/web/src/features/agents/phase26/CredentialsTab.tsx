@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { Link } from '../../../app/router';
 import { Alert, Card, EmptyState, Tag } from '../../../ui';
 import { Identifier } from '../../../ui/Identifier';
 import { HostedAgentCard } from '../HostedAgentCard';
@@ -26,7 +27,11 @@ export function CredentialsTab({ agent, canArtifacts, onChanged }: { agent: Agen
       >
         {agent.credentials.length === 0 ? (
           <EmptyState compact title="No credentials">
-            This agent has no API token, MCP client or hosted credential. It may have been revoked.
+            This agent has no API token, MCP client or hosted credential. It may have been revoked.{' '}
+            <Link to="/settings/integrations" className="text-accent hover:underline">
+              Open Integrations
+            </Link>{' '}
+            to create one.
           </EmptyState>
         ) : (
           <ul className="divide-y divide-line">
