@@ -232,7 +232,18 @@ export async function settle(page, { timeout = 20_000 } = {}) {
   await page.waitForTimeout(120);
   await page.waitForFunction(() => !document.querySelector('.am-skeleton'), undefined, { timeout, polling: 50 });
   await page.waitForFunction(
-    () => document.fonts.status === 'loaded' && Array.from(document.images).every((img) => img.complete),
+    () => {
+      // A lazy image outside the viewport is never fetched (gallery thumbnails below the fold);
+      // waiting for it would never end. Images on screen must still finish.
+      const onScreen = (img) => {
+        const r = img.getBoundingClientRect();
+        return r.bottom > 0 && r.top < window.innerHeight && r.right > 0 && r.left < window.innerWidth;
+      };
+      return (
+        document.fonts.status === 'loaded' &&
+        Array.from(document.images).every((img) => img.complete || (img.loading === 'lazy' && !onScreen(img)))
+      );
+    },
     undefined,
     { timeout },
   );
