@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import { Alert, EmptyState, PageHeader } from './display';
 import { pageWidth } from './layout';
+import { ListSkeleton } from './Skeleton';
 
 // The v2 list template (Phase 24, #448). It owns the shared geometry and display states of a data
 // list so every family reads the same: one page header with the primary action on the right, the
@@ -31,8 +32,8 @@ export interface ListPageProps {
   state: PageReadState;
   /** Empty, error or restricted copy. A ready page shows it inline (e.g. a failed refresh). */
   notice?: PageNotice;
-  /** Replaces the rows while loading; the caller supplies its row skeletons. */
-  loadingContent: ReactNode;
+  /** Replaces the rows while loading; omit for the shared list geometry. */
+  loadingContent?: ReactNode;
   /** The native table, with the caller's caption, thead and scope attributes. */
   desktopTable: ReactNode;
   /** The semantic summary list shown below 768 px instead of the table. */
@@ -72,7 +73,7 @@ export function ListPage({
       <div className="mt-4">
         {state === 'loading' ? (
           <div className="am-frame overflow-hidden rounded-lg border border-line bg-surface" aria-busy="true">
-            {loadingContent}
+            {loadingContent ?? <ListSkeleton label={`Loading ${title.toLowerCase()}`} />}
           </div>
         ) : state === 'ready' ? (
           <>

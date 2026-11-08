@@ -39,7 +39,7 @@ export function SignIn({ onDone }: { onDone: () => void }) {
               body: JSON.stringify({ email, password }),
             });
             if (r.ok) onDone();
-            else setErr((await r.json().catch(() => ({}))).message ?? `Sign-in failed (${r.status}).`);
+            else setErr('Couldn’t sign in. Check your e-mail and password, then try again.');
           } catch {
             setErr('The server did not answer. Check that it is running and try again.');
           } finally {

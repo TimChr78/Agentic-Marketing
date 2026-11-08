@@ -43,7 +43,7 @@ export function NewMenu({ variant }: { variant: 'sidebar' | 'rail' | 'topbar' })
           aria-label="New"
           title="New"
           className={cx(
-            'inline-flex items-center justify-center gap-2 rounded-md bg-accent font-medium text-accent-fg transition-colors hover:bg-accent-hover [&_svg]:size-4',
+            'inline-flex items-center justify-center gap-2 rounded-md bg-accent font-medium text-accent-fg am-motion-colors hover:bg-accent-hover [&_svg]:size-4',
             variant === 'sidebar' ? 'h-10 w-full px-2.5 text-[13px]' : 'size-10 shrink-0',
           )}
         >

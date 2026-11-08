@@ -29,7 +29,7 @@ describe('metric data states (#437)', () => {
   });
 
   it('has plain labels and tones for every state', () => {
-    expect(DATA_STATE['no-data']).toEqual({ label: 'No data', tone: 'neutral' });
+    expect(DATA_STATE['no-data']).toEqual({ label: 'No data in this period', tone: 'neutral' });
     expect(DATA_STATE['below-volume']).toEqual({ label: 'Below evaluation volume', tone: 'neutral' });
     expect(DATA_STATE.healthy).toEqual({ label: 'Healthy', tone: 'good' });
     expect(DATA_STATE.warning).toEqual({ label: 'Warning', tone: 'warn' });

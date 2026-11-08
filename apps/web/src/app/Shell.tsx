@@ -88,7 +88,7 @@ export function Shell({ children }: { children: ReactNode }) {
         id="app-sidebar"
         aria-label="Workspace"
         className={cx(
-          'fixed inset-y-0 left-0 z-30 hidden border-r border-line bg-surface transition-[width] duration-[180ms] ease-[cubic-bezier(.2,.8,.2,1)] lg:block',
+          'fixed inset-y-0 left-0 z-30 hidden border-r border-line bg-surface transition-[width] duration-[var(--duration-enter)] ease-[var(--ease)] lg:block',
           collapsed ? 'w-16' : 'w-[232px]',
         )}
       >
@@ -97,7 +97,7 @@ export function Shell({ children }: { children: ReactNode }) {
       {navOpen && <MobileNav onClose={() => setNavOpen(false)} />}
       <div
         className={cx(
-          'min-w-0 transition-[padding-left] duration-[180ms] ease-[cubic-bezier(.2,.8,.2,1)]',
+          'min-w-0 transition-[padding-left] duration-[var(--duration-enter)] ease-[var(--ease)]',
           collapsed ? 'lg:pl-16' : 'lg:pl-[232px]',
         )}
       >
@@ -281,7 +281,7 @@ function Sidebar({ rail = false, mobile = false }: { rail?: boolean; mobile?: bo
                 >
                   <Icon size={14} aria-hidden />
                   <span className="flex-1 text-left">{group.label}</span>
-                  <ChevronDown size={14} aria-hidden className={cx('transition-transform', !open && '-rotate-90')} />
+                  <ChevronDown size={14} aria-hidden className={cx('am-motion-transform', !open && '-rotate-90')} />
                 </button>
                 <ul id={`nav-group-${group.key}`} hidden={!open} className="mt-0.5 space-y-0.5">
                   {group.items.map((item) => {

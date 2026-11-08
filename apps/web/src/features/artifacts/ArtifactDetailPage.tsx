@@ -1,5 +1,5 @@
 import { Copy, MoreHorizontal, Pencil, Send, Undo2 } from 'lucide-react';
-import { Fragment, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { type ComponentProps, Fragment, lazy, type ReactNode, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError, api, errText, type Out } from '../../app/api';
 import { typeLabel } from '../../app/artifactRoutes';
 import { ButtonLink } from '../../app/links';
@@ -11,13 +11,16 @@ import { publicationLabel, stateOfArtifact } from '../../lib/state';
 import {
   Alert,
   Button,
+  DetailSkeleton,
+  EditorSkeleton,
   Field,
   fieldErrors,
   Input,
-  LoadingBlock,
   Menu,
   Modal,
   PageHeader,
+  Skeleton,
+  SkeletonRegion,
   Tabs,
   Textarea,
   timeAgo,
@@ -29,10 +32,9 @@ import { OperationalPill } from '../../ui/state';
 import { invalidateArtifact } from '../artifactCache';
 import { withLayout } from '../journey/layout';
 import type { JNode } from '../journey/model';
-import { ArtifactPreview } from '../previews/ArtifactPreview';
-import { BroadcastPreview } from '../previews/BroadcastPreview';
 import type { PreviewSource } from '../previews/previewSource';
 import { ActivityPanel } from './ActivityPanel';
+
 import {
   adoptSnapshot,
   beginSave,
@@ -44,15 +46,21 @@ import {
   shouldScheduleAutosave,
   switchArtifact,
 } from './draftSync';
-import { ExperienceEditor } from './ExperienceEditor';
 import { JsonEditor } from './JsonEditor';
-import { MandateEditor } from './MandateEditor';
-import { PurposesEditor } from './PurposesEditor';
 import { invalidatePickerArtifact } from './pickerIndex';
 import { VersionsPanel } from './VersionsPanel';
 
+// The preview stack and the structured editors are only needed by some artifact types and tabs.
+// Keeping them behind the detail page's own Suspense boundary keeps their bytes out of every detail
+// route's lazy closure (#555 budgets) without changing what the page offers.
+const ArtifactPreview = lazy(async () => ({ default: (await import('../previews/ArtifactPreview')).ArtifactPreview }));
+const BroadcastPreview = lazy(async () => ({ default: (await import('../previews/BroadcastPreview')).BroadcastPreview }));
+const MandateEditor = lazy(async () => ({ default: (await import('./MandateEditor')).MandateEditor }));
+const ExperienceEditor = lazy(async () => ({ default: (await import('./ExperienceEditor')).ExperienceEditor }));
+const PurposesEditor = lazy(async () => ({ default: (await import('./PurposesEditor')).PurposesEditor }));
+
 export type Artifact = Out<'artifacts.get'>;
-type BroadcastPreviewContent = Parameters<typeof BroadcastPreview>[0]['content'];
+type BroadcastPreviewContent = ComponentProps<typeof import('../previews/BroadcastPreview')['BroadcastPreview']>['content'];
 export type DraftWarning = { nodeId: string | null; path: string; message: string };
 
 export interface EditorProps<C = any> {
@@ -396,7 +404,7 @@ export function ArtifactDetailPage({
     );
   }
   if (art.loading) {
-    if (!detail) return <LoadingBlock lines={8} />;
+    if (!detail) return <DetailSkeleton label="Loading artifact" />;
     return (
       <DetailPage
         title=""
@@ -407,7 +415,7 @@ export function ArtifactDetailPage({
         activeTab=""
         onTabChange={() => {}}
         state="loading"
-        loadingContent={<LoadingBlock lines={8} />}
+        loadingContent={<DetailSkeleton label="Loading artifact" />}
       />
     );
   }
@@ -577,7 +585,9 @@ export function ArtifactDetailPage({
           <Fragment key={`${a.id}:${editorReset}`}>
             {draft !== undefined &&
               (pageEditor ? (
-                pageEditor({ artifact: a, content: draft, onChange: updateDraft, readOnly, errors, warnings })
+                <Suspense fallback={<EditorSkeleton label="Loading the editor" />}>
+                  {pageEditor({ artifact: a, content: draft, onChange: updateDraft, readOnly, errors, warnings })}
+                </Suspense>
               ) : (
                 <div className={wide ? '' : 'max-w-[900px]'}>
                   <JsonEditor value={draft} onChange={updateDraft} readOnly={readOnly} documentKey={a.id} />
@@ -611,23 +621,31 @@ export function ArtifactDetailPage({
         const previewContent = dirty ? draft : latest.content;
         return (
           <div className="max-w-[1100px] space-y-3">
-            {a.type === 'broadcast' && dirty ? (
-              <BroadcastPreview
-                artifactId={a.id}
-                version={latest.number}
-                content={previewContent as BroadcastPreviewContent}
-                source={previewSource}
-                eligibility="save-required"
-              />
-            ) : (
-              <ArtifactPreview
-                type={a.type}
-                artifactId={a.id}
-                version={dirty ? undefined : latest.number}
-                content={previewContent}
-                source={previewSource}
-              />
-            )}
+            <Suspense
+              fallback={
+                <SkeletonRegion label="Loading the preview" geometry="detail">
+                  <Skeleton className="h-[320px] w-full rounded-lg" />
+                </SkeletonRegion>
+              }
+            >
+              {a.type === 'broadcast' && dirty ? (
+                <BroadcastPreview
+                  artifactId={a.id}
+                  version={latest.number}
+                  content={previewContent as BroadcastPreviewContent}
+                  source={previewSource}
+                  eligibility="save-required"
+                />
+              ) : (
+                <ArtifactPreview
+                  type={a.type}
+                  artifactId={a.id}
+                  version={dirty ? undefined : latest.number}
+                  content={previewContent}
+                  source={previewSource}
+                />
+              )}
+            </Suspense>
           </div>
         );
       }

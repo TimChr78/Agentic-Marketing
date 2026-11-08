@@ -1,3 +1,5 @@
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   publicationLabel,
@@ -230,5 +232,105 @@ describe('artifact dispatcher and publication metadata (#437)', () => {
     expect(publicationLabel({ publishedVersion: 2 })).toBe('Published v2');
     expect(publicationLabel({ latestVersion: 3, publishedVersion: null })).toBe('v3 · not published');
     expect(publicationLabel({ publishedVersion: null })).toBe('Not published');
+  });
+});
+
+// Phase 28 (#555) motion contract. The shared CSS and Tailwind classes may only use the two
+// duration tokens; loops, shimmer, long flashes and `transition: all` fail here. Area tasks inherit
+// this gate as soon as they use the shared surface.
+const ROOT = process.cwd().endsWith('apps/web') ? process.cwd() : join(process.cwd(), 'apps/web');
+const SRC = join(ROOT, 'src');
+const ALLOWED_MS = new Set([0, 120, 180]);
+const ALLOWED_ARBITRARY = new Set(['120ms', '180ms', '0ms', 'var(--duration-fast)', 'var(--duration-enter)']);
+
+function sourceFiles(dir: string): string[] {
+  const out: string[] = [];
+  for (const name of readdirSync(dir)) {
+    const path = join(dir, name);
+    const stat = statSync(path);
+    if (stat.isDirectory()) out.push(...sourceFiles(path));
+    else if (/\.(?:css|tsx?|jsx?)$/.test(name)) out.push(path);
+  }
+  return out;
+}
+
+function withoutComments(text: string): string {
+  return text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+}
+
+function lineOf(text: string, index: number): number {
+  return text.slice(0, index).split('\n').length;
+}
+
+describe('motion contract (#555)', () => {
+  const css = readFileSync(join(SRC, 'index.css'), 'utf8');
+
+  it('defines both duration tokens, both easings and the feedback easing', () => {
+    expect(css).toMatch(/--duration-fast:\s*120ms;/);
+    expect(css).toMatch(/--duration-enter:\s*180ms;/);
+    expect(css).toMatch(/--ease:\s*cubic-bezier\(/);
+    expect(css).toMatch(/--ease-feedback:\s*cubic-bezier\(/);
+    expect(css).toMatch(/--default-transition-duration:\s*var\(--duration-fast\)/);
+  });
+
+  it('uses only 0, 120 or 180 ms in CSS transitions and animations', () => {
+    const violations: string[] = [];
+    for (const file of sourceFiles(SRC).filter((f) => f.endsWith('.css'))) {
+      const text = withoutComments(readFileSync(file, 'utf8'));
+      const declaration = /(?:^|[;{]\s*)(animation|transition)(?:-[a-z-]+)?\s*:\s*([^;{}]+);/gm;
+      for (const match of text.matchAll(declaration)) {
+        const value = match[2];
+        for (const duration of value.matchAll(/(\d*\.?\d+)(ms|s)\b/g)) {
+          const ms = duration[2] === 's' ? Number(duration[1]) * 1000 : Number(duration[1]);
+          if (!ALLOWED_MS.has(ms)) violations.push(`${relative(ROOT, file)}:${lineOf(text, match.index ?? 0)} ${match[0].trim()}`);
+        }
+        if (/\binfinite\b/.test(value))
+          violations.push(`${relative(ROOT, file)}:${lineOf(text, match.index ?? 0)} loops: ${match[0].trim()}`);
+        if (/\ball\b/.test(value))
+          violations.push(`${relative(ROOT, file)}:${lineOf(text, match.index ?? 0)} transitions all: ${match[0].trim()}`);
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('uses only the duration tokens in Tailwind duration and animate classes', () => {
+    const violations: string[] = [];
+    for (const file of sourceFiles(SRC).filter((f) => /\.(?:tsx?|jsx?)$/.test(f))) {
+      const text = withoutComments(readFileSync(file, 'utf8'));
+      for (const match of text.matchAll(/\bduration-(\d+)\b/g)) {
+        const ms = Number(match[1]);
+        if (!ALLOWED_MS.has(ms)) violations.push(`${relative(ROOT, file)}:${lineOf(text, match.index ?? 0)} ${match[0]}`);
+      }
+      for (const match of text.matchAll(/\bduration-\[([^\]]+)\]/g)) {
+        if (!ALLOWED_ARBITRARY.has(match[1].replaceAll(' ', '')))
+          violations.push(`${relative(ROOT, file)}:${lineOf(text, match.index ?? 0)} ${match[0]}`);
+      }
+      for (const match of text.matchAll(/\banimate-([a-z-]+)\b/g)) {
+        if (match[1] !== 'none') violations.push(`${relative(ROOT, file)}:${lineOf(text, match.index ?? 0)} ${match[0]}`);
+      }
+      for (const match of text.matchAll(/\btransition-all\b/g)) {
+        violations.push(`${relative(ROOT, file)}:${lineOf(text, match.index ?? 0)} ${match[0]}`);
+      }
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
+  it('removes all motion under prefers-reduced-motion: reduce', () => {
+    const block = css.slice(css.indexOf('@media (prefers-reduced-motion: reduce)'));
+    expect(block).toMatch(/animation:\s*none\s*!important/);
+    expect(block).toMatch(/transition-duration:\s*0ms\s*!important/);
+    expect(block).toMatch(/transition-delay:\s*0ms\s*!important/);
+    expect(block).toMatch(/animation-delay:\s*0ms\s*!important/);
+    expect(block).toMatch(/scroll-behavior:\s*auto\s*!important/);
+    expect(block).toMatch(/\.am-fade-in,[\s\S]*?\.am-drawer-in,[\s\S]*?\.am-rise\s*\{[\s\S]*?transform:\s*none\s*!important/);
+  });
+
+  it('keeps the skeleton and progress glyphs static', () => {
+    const skeleton = css.match(/\.am-skeleton\s*\{([^}]*)\}/)?.[1] ?? '';
+    expect(skeleton).toContain('background: var(--surface-3)');
+    expect(skeleton).not.toMatch(/animation|shimmer|gradient/);
+    const progress = css.match(/\.am-progress\s*\{([^}]*)\}/)?.[1] ?? '';
+    expect(progress).toMatch(/animation:\s*none/);
+    expect(css).not.toMatch(/@keyframes\s+(?:am-shimmer|flash-in|pulse-ring)/);
   });
 });
