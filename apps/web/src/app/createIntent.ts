@@ -98,7 +98,7 @@ export const STARTER_ACTION = {
   label: 'From a starter…',
   paletteLabel: 'From a starter…',
   icon: Library,
-  to: '/create?tab=starters',
+  to: '/content/templates?tab=starters',
 } as const;
 
 const CREATE_TYPES = new Set(CREATE_ACTIONS.map((a) => a.type));

@@ -1,11 +1,11 @@
 import { Plus, Search } from 'lucide-react';
-import { type ReactNode, useEffect, useMemo, useState } from 'react';
+import { Fragment, type ReactNode, useEffect, useMemo, useState } from 'react';
 import { api, errText } from '../../app/api';
 import { artifactPath } from '../../app/artifactRoutes';
 import { parseCreateIntent } from '../../app/createIntent';
 import { useCrumbs } from '../../app/page';
 import { Link, navigate, setSearchParam, useLocation } from '../../app/router';
-import { useSession } from '../../app/session';
+import { useSession, useWorkspace } from '../../app/session';
 import { publicationLabel, stateOfArtifact } from '../../lib/state';
 import {
   Alert,
@@ -13,6 +13,7 @@ import {
   EmptyState,
   Field,
   Input,
+  LoadingBlock,
   Modal,
   PageHeader,
   Select,
@@ -25,10 +26,12 @@ import {
   timeAgo,
   useToast,
 } from '../../ui';
+import { ListPage } from '../../ui/ListPage';
 import { pageWidth } from '../../ui/layout';
 import { OperationalPill } from '../../ui/state';
 import { notifyArtifactsChanged } from '../artifactCache';
 import { type ArtifactRow, useAllArtifacts } from './artifactList';
+import { invalidatePickerIndex } from './pickerIndex';
 
 export type { ArtifactRow } from './artifactList';
 
@@ -47,6 +50,17 @@ export interface CreateSpec<S> {
   defaultName?: string;
 }
 
+export interface ArtifactListTemplate {
+  /** One semantic summary row for the phone layout; include every desktop field and action. */
+  mobileRow: (a: ArtifactRow) => ReactNode;
+  /** Extra family filters, after the search and publication controls. */
+  filters?: ReactNode;
+  /** Paging footer; rendered only for a ready, non-empty list. */
+  pagination?: ReactNode;
+  /** Count wording; defaults to the existing totals copy. */
+  countLabel?: (info: { total: number; loaded: number; shown: number; complete: boolean }) => string;
+}
+
 /**
  * A list of one artifact type (DESIGN.md → Layout): title and primary action, a search and state
  * filter, then the table with loading, error and empty states.
@@ -62,6 +76,7 @@ export function ArtifactListPage<S = Record<string, never>>({
   columns,
   rowState,
   rowHref,
+  template,
 }: {
   type: string;
   title: string;
@@ -76,6 +91,8 @@ export function ArtifactListPage<S = Record<string, never>>({
   rowState?: (a: ArtifactRow) => ReactNode;
   /** A family-specific destination (the journey reports view selects the Report tab). */
   rowHref?: (a: ArtifactRow) => string;
+  /** Opt in to the v2 list template; omitted, the Phase 24–26 page is unchanged. */
+  template?: ArtifactListTemplate;
 }) {
   useCrumbs([{ label: crumb ?? title }]);
   const { can } = useSession();
@@ -107,19 +124,136 @@ export function ArtifactListPage<S = Record<string, never>>({
     setSearchParam('create', null);
   }, [create, canCreate, intent, type]);
 
+  const createButton = canCreate && (
+    <Button variant="primary" icon={<Plus size={15} />} onClick={() => setCreating(true)}>
+      {create!.label}
+    </Button>
+  );
+  const countText = (info = { total, loaded, shown: rows.length, complete: list.data?.complete ?? true }) =>
+    template?.countLabel?.(info) ??
+    (list.data && !info.complete
+      ? `${info.loaded} of ${info.total} loaded`
+      : info.shown === info.total
+        ? `${info.total} total`
+        : `${info.shown} of ${info.total}`);
+  const searchBox = (
+    <div className="relative w-full max-w-[280px]">
+      <Search size={14} className="pointer-events-none absolute top-1/2 left-2.5 -translate-y-1/2 text-muted" aria-hidden />
+      <Input
+        compact
+        aria-label={`Search ${title.toLowerCase()}`}
+        placeholder="Search by name"
+        value={q}
+        onChange={(e) => setQ(e.target.value)}
+        className="pl-8"
+      />
+    </div>
+  );
+  const stateFilter = (
+    <Select compact aria-label="Publication state" value={state} onChange={(e) => setState(e.target.value)} className="w-auto">
+      <option value="">All publications</option>
+      <option value="live">Published</option>
+      <option value="draft">Draft</option>
+      <option value="in_review">In review</option>
+      <option value="rejected">Rejected</option>
+    </Select>
+  );
+  const table = (
+    <Table label={title}>
+      <THead>
+        <tr>
+          <Th>Name</Th>
+          {columns?.map((c) => (
+            <Th key={c.header} className={c.className}>
+              {c.header}
+            </Th>
+          ))}
+          <Th>Operational state</Th>
+          <Th>Updated</Th>
+        </tr>
+      </THead>
+      <tbody>
+        {rows.map((a) => (
+          <Tr key={a.id} onClick={() => navigate(href(a))}>
+            <Td>
+              <Link to={href(a)} className="font-medium text-fg hover:underline" onClick={(e) => e.stopPropagation()}>
+                {a.name}
+              </Link>
+              <div className="mt-0.5 text-[12px] leading-[18px] text-muted">
+                {publicationLabel({ latestVersion: a.latestVersion, publishedVersion: a.publishedVersion })}
+              </div>
+            </Td>
+            {columns?.map((c) => (
+              <Td key={c.header} className={c.className}>
+                {c.cell(a)}
+              </Td>
+            ))}
+            <Td>
+              {rowState ? (
+                rowState(a)
+              ) : (
+                <OperationalPill
+                  state={stateOfArtifact({
+                    type: a.type,
+                    latestState: a.latestState,
+                    latestVersion: a.latestVersion,
+                    publishedVersion: a.publishedVersion,
+                  })}
+                />
+              )}
+            </Td>
+            <Td className="whitespace-nowrap">{timeAgo(a.updatedAt)}</Td>
+          </Tr>
+        ))}
+      </tbody>
+    </Table>
+  );
+
+  if (template) {
+    // The v2 list template (#524). Every control the default page has stays: search, publication
+    // state, totals, create, loading/error/empty and the rows; the family adds its phone summaries.
+    const notice =
+      total === 0
+        ? { title: emptyTitle, body: emptyText, action: createButton }
+        : { title: 'Nothing matches', body: 'Clear the search or choose another state.' };
+    const state2 = list.loading ? 'loading' : list.error ? 'error' : rows.length === 0 ? 'empty' : 'ready';
+    return (
+      <>
+        <ListPage
+          title={title}
+          description={description}
+          primaryAction={createButton}
+          filters={
+            total > 0 && (
+              <>
+                {searchBox}
+                {stateFilter}
+                {template.filters}
+              </>
+            )
+          }
+          countLabel={total > 0 ? countText() : undefined}
+          state={state2}
+          notice={state2 === 'ready' ? undefined : notice}
+          loadingContent={<LoadingBlock lines={5} />}
+          desktopTable={table}
+          mobileList={
+            <ul aria-label={`${title} on a phone`} className="divide-y divide-line">
+              {rows.map((a) => (
+                <Fragment key={a.id}>{template.mobileRow(a)}</Fragment>
+              ))}
+            </ul>
+          }
+          pagination={template.pagination}
+        />
+        {create && creating && <CreateDialog type={type} spec={create} onClose={() => setCreating(false)} />}
+      </>
+    );
+  }
+
   return (
     <div className={pageWidth('default')}>
-      <PageHeader
-        title={title}
-        description={description}
-        actions={
-          canCreate && (
-            <Button variant="primary" icon={<Plus size={15} />} onClick={() => setCreating(true)}>
-              {create!.label}
-            </Button>
-          )
-        }
-      />
+      <PageHeader title={title} description={description} actions={createButton} />
       <TableFrame
         loading={list.loading}
         error={list.error}
@@ -128,46 +262,15 @@ export function ArtifactListPage<S = Record<string, never>>({
         toolbar={
           total > 0 && (
             <>
-              <div className="relative w-full max-w-[280px]">
-                <Search size={14} className="pointer-events-none absolute top-1/2 left-2.5 -translate-y-1/2 text-muted" aria-hidden />
-                <Input
-                  compact
-                  aria-label={`Search ${title.toLowerCase()}`}
-                  placeholder="Search by name"
-                  value={q}
-                  onChange={(e) => setQ(e.target.value)}
-                  className="pl-8"
-                />
-              </div>
-              <Select compact aria-label="Publication state" value={state} onChange={(e) => setState(e.target.value)} className="w-auto">
-                <option value="">All publications</option>
-                <option value="live">Published</option>
-                <option value="draft">Draft</option>
-                <option value="in_review">In review</option>
-                <option value="rejected">Rejected</option>
-              </Select>
-              <span className="ml-auto text-[12px] text-muted">
-                {list.data && !list.data.complete
-                  ? `${loaded} of ${total} loaded`
-                  : rows.length === total
-                    ? `${total} total`
-                    : `${rows.length} of ${total}`}
-              </span>
+              {searchBox}
+              {stateFilter}
+              <span className="ml-auto text-[12px] text-muted">{countText()}</span>
             </>
           )
         }
         empty={
           total === 0 ? (
-            <EmptyState
-              title={emptyTitle}
-              action={
-                canCreate && (
-                  <Button variant="primary" icon={<Plus size={15} />} onClick={() => setCreating(true)}>
-                    {create!.label}
-                  </Button>
-                )
-              }
-            >
+            <EmptyState title={emptyTitle} action={createButton}>
               {emptyText}
             </EmptyState>
           ) : (
@@ -177,54 +280,7 @@ export function ArtifactListPage<S = Record<string, never>>({
           )
         }
       >
-        <Table label={title}>
-          <THead>
-            <tr>
-              <Th>Name</Th>
-              {columns?.map((c) => (
-                <Th key={c.header} className={c.className}>
-                  {c.header}
-                </Th>
-              ))}
-              <Th>Operational state</Th>
-              <Th>Updated</Th>
-            </tr>
-          </THead>
-          <tbody>
-            {rows.map((a) => (
-              <Tr key={a.id} onClick={() => navigate(href(a))}>
-                <Td>
-                  <Link to={href(a)} className="font-medium text-fg hover:underline" onClick={(e) => e.stopPropagation()}>
-                    {a.name}
-                  </Link>
-                  <div className="mt-0.5 text-[12px] leading-[18px] text-muted">
-                    {publicationLabel({ latestVersion: a.latestVersion, publishedVersion: a.publishedVersion })}
-                  </div>
-                </Td>
-                {columns?.map((c) => (
-                  <Td key={c.header} className={c.className}>
-                    {c.cell(a)}
-                  </Td>
-                ))}
-                <Td>
-                  {rowState ? (
-                    rowState(a)
-                  ) : (
-                    <OperationalPill
-                      state={stateOfArtifact({
-                        type: a.type,
-                        latestState: a.latestState,
-                        latestVersion: a.latestVersion,
-                        publishedVersion: a.publishedVersion,
-                      })}
-                    />
-                  )}
-                </Td>
-                <Td className="whitespace-nowrap">{timeAgo(a.updatedAt)}</Td>
-              </Tr>
-            ))}
-          </tbody>
-        </Table>
+        {table}
       </TableFrame>
       {create && creating && <CreateDialog type={type} spec={create} onClose={() => setCreating(false)} />}
     </div>
@@ -233,6 +289,7 @@ export function ArtifactListPage<S = Record<string, never>>({
 
 function CreateDialog<S>({ type, spec, onClose }: { type: string; spec: CreateSpec<S>; onClose: () => void }) {
   const toast = useToast();
+  const { workspace } = useWorkspace();
   const [name, setName] = useState(spec.defaultName ?? '');
   const [nameError, setNameError] = useState<string | null>(null);
   const [state, setState] = useState<S>(spec.initial ?? ({} as S));
@@ -251,6 +308,8 @@ function CreateDialog<S>({ type, spec, onClose }: { type: string; spec: CreateSp
         ? await spec.create(name.trim(), state)
         : await api.call('artifacts.create', { type: type as never, name: name.trim(), content: spec.content(name.trim(), state) });
       notifyArtifactsChanged();
+      // A new artifact belongs in its type's picker index; every other index is untouched.
+      invalidatePickerIndex(workspace.id, type);
       toast.success(`Created “${name.trim()}” as a draft.`);
       onClose();
       navigate(artifactPath(type, r.artifactId));

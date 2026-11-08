@@ -60,7 +60,7 @@ const RULES: Rule[] = [
   { pattern: /^\/build\/prompts$/, to: () => '/work/agents', set: { tab: 'library' } },
   { pattern: /^\/build\/prompts\/([^/]+)$/, to: (id) => `/work/agents/library/${carry(id)}` },
   { pattern: /^\/build\/topics$/, to: () => '/audience/consent', set: { tab: 'topics' } },
-  { pattern: /^\/build\/recipes$/, to: () => '/create', set: { tab: 'starters' } },
+  { pattern: /^\/build\/recipes$/, to: () => '/content/templates', set: { tab: 'starters' } },
 
   { pattern: /^\/design\/templates$/, to: () => '/content/templates' },
   { pattern: /^\/design\/templates\/([^/]+)$/, to: (id) => `/content/templates/${carry(id)}` },

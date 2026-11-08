@@ -37,7 +37,7 @@ const REDIRECTS: { from: string; to: string; search?: string; hash?: string }[] 
   { from: '/build/prompts', to: '/work/agents?tab=library' },
   { from: '/build/prompts/prm_01', to: '/work/agents/library/prm_01' },
   { from: '/build/topics', to: '/audience/consent?tab=topics' },
-  { from: '/build/recipes', to: '/create?tab=starters' },
+  { from: '/build/recipes', to: '/content/templates?tab=starters' },
   { from: '/design/templates', to: '/content/templates' },
   { from: '/design/templates/tpl_01', to: '/content/templates/tpl_01' },
   { from: '/design/blocks', to: '/content/templates?tab=blocks' },
@@ -67,6 +67,15 @@ test.describe('legacy URLs redirect', () => {
     await signIn(page, PEOPLE.owner);
     await page.goto('/insights/journeys?journey=jrn_42&from=2026-10-01#waiting');
     await expect(page).toHaveURL(`${BASE}/marketing/journeys/jrn_42?from=2026-10-01&tab=report#waiting`);
+  });
+
+  test('the old recipes address opens the Starters tab of Templates', async ({ page }) => {
+    await signIn(page, PEOPLE.owner);
+    await page.goto('/build/recipes');
+    await expect(page).toHaveURL(`${BASE}/content/templates?tab=starters`);
+    await expect(page.getByRole('tab', { name: 'Starters' })).toHaveAttribute('aria-selected', 'true');
+    // The existing recipe gallery is mounted; it is the same component the whole time.
+    await expect(page.getByText('Weekly newsletter', { exact: true })).toBeVisible();
   });
 });
 

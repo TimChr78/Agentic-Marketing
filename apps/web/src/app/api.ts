@@ -16,12 +16,30 @@ export function setReadListener(listener: ReadListener | null) {
 // under the same rules. The chosen workspace goes in X-Workspace-Id on every call.
 
 let workspaceId: string | null = localStorage.getItem('am.workspace');
-export function setWorkspaceId(id: string | null) {
+type WorkspaceListener = (id: string | null) => void;
+const workspaceListeners = new Set<WorkspaceListener>();
+
+/**
+ * Chooses the workspace every call acts in. `persist: false` is the demo's in-memory switch: it
+ * must never overwrite the workspace a signed-in person has stored for the real app (#524).
+ */
+export function setWorkspaceId(id: string | null, opts: { persist?: boolean } = {}) {
   workspaceId = id;
-  if (id) localStorage.setItem('am.workspace', id);
-  else localStorage.removeItem('am.workspace');
+  if (opts.persist !== false) {
+    if (id) localStorage.setItem('am.workspace', id);
+    else localStorage.removeItem('am.workspace');
+  }
+  for (const listener of workspaceListeners) listener(id);
 }
 export const getWorkspaceId = () => workspaceId;
+
+/** Notifies keyed caches (the shared picker index) when the chosen workspace changes. */
+export function onWorkspaceChange(listener: WorkspaceListener): () => void {
+  workspaceListeners.add(listener);
+  return () => {
+    workspaceListeners.delete(listener);
+  };
+}
 
 const fetchWithWorkspace: typeof fetch = (input, init = {}) => {
   const headers = new Headers(init.headers);
@@ -31,15 +49,48 @@ const fetchWithWorkspace: typeof fetch = (input, init = {}) => {
 
 const base = createClient<Commands>({ credentials: 'include', fetch: fetchWithWorkspace });
 
+/**
+ * A command transport (#524). The demo installs a fixture-backed one; production leaves it unset
+ * and every call goes through the real typed client. A transport receives the same command names
+ * and inputs as the server, so a page never learns that it is in demo mode.
+ */
+export type CommandTransport = <N extends Commands[number]['name']>(
+  name: N,
+  input: CommandInput<Commands, N>,
+  callOpts?: { idempotencyKey?: string },
+) => Promise<CommandOutput<Commands, N>>;
+
+let commandTransport: CommandTransport | null = null;
+
+/**
+ * Installs a transport (`null` restores the real API) and returns an uninstall that restores the
+ * previous one. Only the demo entry and tests call this; no page branches on demo mode.
+ */
+export function setCommandTransport(transport: CommandTransport | null): () => void {
+  const previous = commandTransport;
+  commandTransport = transport;
+  return () => {
+    if (commandTransport === transport) commandTransport = previous;
+  };
+}
+
 export const api = {
   async call<N extends Commands[number]['name']>(
     name: N,
     input: CommandInput<Commands, N>,
     callOpts: { idempotencyKey?: string } = {},
   ): Promise<CommandOutput<Commands, N>> {
-    const out = (await base.call(name, input, callOpts)) as CommandOutput<Commands, N>;
+    const out = commandTransport
+      ? await (
+          commandTransport as unknown as (
+            n: N,
+            i: CommandInput<Commands, N>,
+            o?: { idempotencyKey?: string },
+          ) => Promise<CommandOutput<Commands, N>>
+        )(name, input, callOpts)
+      : ((await base.call(name, input, callOpts)) as CommandOutput<Commands, N>);
     readListener?.(name, input, out);
-    return out;
+    return out as CommandOutput<Commands, N>;
   },
 };
 
