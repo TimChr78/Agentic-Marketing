@@ -73,6 +73,9 @@ for (const name of SUBSET) {
         // Which people come first depends on when asynchronous activity bumped their last-seen time,
         // which differs between machines; the baseline guards the page's layout (header, count,
         // columns, row structure), so the per-person cells are masked like other volatile text.
+        // The agents comparison loads after the page; its period and "Fetched" line follow the
+        // server's clock, so wait for it before masking or a later day changes the screenshot.
+        if (name === 'agents') await expect(page.getByText(/Period totals, not trends or a ranking/)).toBeVisible();
         const mask = [...(await volatileMasks(page))];
         // People values (e-mail/name, a copied value, consent statuses and last seen) vary between
         // machines. Mask only those text hooks, not whole cells or phone cards, so layout
