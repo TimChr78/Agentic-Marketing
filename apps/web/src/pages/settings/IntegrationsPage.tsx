@@ -36,7 +36,7 @@ export default function IntegrationsPage({ params }: { params: Record<string, st
     <div className={pageWidth('default')}>
       <PageHeader
         title="Integrations and API tokens"
-        description="How agents, scripts and other tools reach this workspace, and what they may do. Choose one section; its data loads when you open it."
+        description="How agents, scripts and other tools reach this workspace, and what they may do. Choose one section to see and change it."
       />
       <Tabs items={items} value={active} onChange={setSelected} label="Integration sections">
         {active === 'tokens' && <TokensCard openId={params.id} />}
