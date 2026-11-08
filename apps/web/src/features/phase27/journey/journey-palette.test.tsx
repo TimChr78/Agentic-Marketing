@@ -34,6 +34,15 @@ describe('journey step palette (#528)', () => {
     }
   });
 
+  it('wraps each purpose in full instead of truncating it (Sol P2)', () => {
+    render(<Palette onAdd={() => {}} />);
+    for (const kind of PALETTE_ORDER) {
+      const hint = screen.getByText(KINDS[kind].hint);
+      expect(hint.className).not.toMatch(/\btruncate\b|line-clamp/);
+      expect(hint.className).toMatch(/\bbreak-words\b/);
+    }
+  });
+
   it('filters locally without changing which steps exist', () => {
     const onAdd = vi.fn();
     render(<Palette onAdd={onAdd} />);

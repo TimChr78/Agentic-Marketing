@@ -12,13 +12,16 @@ test('journey builder: add by drag, connect, delete by keyboard and context menu
   const canvas = page.locator('.react-flow');
   await expect(canvas.locator('.react-flow__node')).toHaveCount(2);
 
-  // Drag "Wait" from the palette onto the canvas.
+  // Drag "Wait" from the palette onto the canvas. Purposes wrap, so the full palette can scroll;
+  // narrow it with its search first, so the step sits at the top without scrolling.
+  const steps = page.getByRole('navigation', { name: 'Steps' });
+  await steps.getByRole('textbox', { name: 'Find a step' }).fill('Wait');
   const pane = await canvas.boundingBox();
-  await page
-    .getByRole('navigation', { name: 'Steps' })
+  await steps
     .getByRole('button', { name: /^Wait\s*Pause for a while/ })
     .dragTo(canvas, { targetPosition: { x: pane!.width - 160, y: pane!.height / 2 } });
   await expect(canvas.locator('.react-flow__node')).toHaveCount(3);
+  await steps.getByRole('textbox', { name: 'Find a step' }).fill('');
   const wait = canvas.locator('.react-flow__node').filter({ hasText: 'Wait' }).filter({ hasText: '1 day' });
 
   // Delete the trigger → exit connection from its context menu, then connect trigger → wait by dragging.
