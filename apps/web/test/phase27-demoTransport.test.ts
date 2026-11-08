@@ -58,7 +58,7 @@ describe('demo transport (#524)', () => {
 
   it('names an unsupported read instead of inventing a success', async () => {
     const transport = createDemoTransport();
-    const error = await transport('recipes.list', {}).catch((e: unknown) => e);
+    const error = await transport('nothing.like.this' as never, {} as never).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(ApiError);
     expect(error).toMatchObject({ status: 404, code: 'demo_unavailable' });
     expect((error as Error).message).toContain('demo');

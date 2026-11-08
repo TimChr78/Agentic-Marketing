@@ -1,28 +1,36 @@
-import { useEffect, useMemo, useState } from 'react';
+import { X } from 'lucide-react';
+import { Suspense, useEffect, useMemo, useState } from 'react';
 import { getWorkspaceId, setWorkspaceId } from '../../../../app/api';
-import { AuthenticatedRoot } from '../../../../app/Root';
+import { Routes } from '../../../../app/routes';
+import { Shell } from '../../../../app/Shell';
 import { SessionContext } from '../../../../app/session';
-import { ToastProvider } from '../../../../ui';
+import { AutonomyProvider } from '../../../../features/agents/AutonomyProvider';
+import { Button, LoadingBlock, ToastProvider } from '../../../../ui';
 import { setWorkspaceTimeZone } from '../../../../ui/time';
+import { demoLiveRetired, enterDemo, installDemoHistory, LIVE_RETIRED_NOTICE } from '../../demo/entry';
 import { DEMO_TIME_ZONE, DEMO_WORKSPACE_ID } from './fixtures';
 import { DEMO_BANNER, DEMO_BANNER_HINT, demoSessionValue } from './session';
 import { installDemoTransport } from './transport';
 
 /**
- * The real shell in demo mode (#524): the same Root gate, shell, navigation and pages as
- * production, over the fixture session and read transport. There is no legacy demo app and no
- * second page implementation. The marker is persistent, so every page, dialog and deep link is
- * visibly sample data; the shell keeps its ordinary context line.
+ * The real shell in demo mode (#524, #530): the same authenticated shell, navigation and page
+ * routes as production over the fixture session and read transport. There is no legacy demo app and
+ * no second page implementation. The shell is composed here rather than through Root so the demo
+ * chunk and the real Root chunk stay separate in the bundle. The marker is persistent, so every
+ * page, dialog and deep link is visibly sample data; the shell keeps its ordinary context line.
  *
- * D replaces the entry point on top of this (main.tsx / the single-file build); pages never learn
- * that they are in demo mode.
+ * The entry normalises `/demo`, the legacy hashes and the retired live-site walkthrough before the
+ * shell mounts. Every navigation afterwards carries demo history state, so reload and back/forward
+ * stay on fixtures, while a typed real URL or the sign-in exit starts a real session.
  */
 export function DemoRoot() {
   const session = useMemo(() => demoSessionValue(), []);
+  const [liveRetired, setLiveRetired] = useState(() => enterDemo().liveRetired || demoLiveRetired());
   // Install synchronously during render: child effects run before the parent's, so a page's first
   // read must already see the fixture transport. The cleanup removes it when the demo unmounts.
   const [cleanup] = useState(() => {
     const uninstall = installDemoTransport();
+    const uninstallHistory = installDemoHistory();
     setWorkspaceTimeZone(DEMO_TIME_ZONE);
     // Keyed caches act in the demo workspace, in memory only: the stored workspace of a signed-in
     // person is left untouched.
@@ -30,15 +38,26 @@ export function DemoRoot() {
     setWorkspaceId(DEMO_WORKSPACE_ID, { persist: false });
     return () => {
       uninstall();
+      uninstallHistory();
       setWorkspaceId(previous, { persist: false });
     };
   });
   useEffect(() => cleanup, [cleanup]);
+
   return (
     <ToastProvider>
       <SessionContext.Provider value={session}>
         <DemoBanner />
-        <AuthenticatedRoot />
+        {liveRetired && <LiveRetiredNotice onClose={() => setLiveRetired(false)} />}
+        <AutonomyProvider>
+          <Suspense fallback={<LoadingBlock lines={6} />}>
+            <Shell>
+              <Suspense fallback={<LoadingBlock lines={6} />}>
+                <Routes />
+              </Suspense>
+            </Shell>
+          </Suspense>
+        </AutonomyProvider>
       </SessionContext.Provider>
     </ToastProvider>
   );
@@ -54,6 +73,30 @@ export function DemoBanner() {
     >
       <strong className="font-semibold text-fg">{DEMO_BANNER}</strong>
       <span className="text-muted">{DEMO_BANNER_HINT}</span>
+      {import.meta.env.MODE !== 'single' && (
+        <a href="/" className="font-medium text-accent hover:underline">
+          Sign in to your workspace
+        </a>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The short, non-executing explanation kept where the legacy live-site walkthrough was. It never
+ * offers a control that would run anything; the real destinations linked from it are the product.
+ */
+export function LiveRetiredNotice({ onClose }: { onClose: () => void }) {
+  return (
+    <div role="status" className="border-b border-line bg-accent-soft px-4 py-2.5 text-[13px] leading-5 text-fg-2">
+      <div className="mx-auto flex max-w-[1200px] flex-wrap items-start gap-x-3 gap-y-1">
+        <p className="min-w-0 flex-1">
+          <strong className="font-semibold text-fg">The live-site walkthrough has been retired.</strong> {LIVE_RETIRED_NOTICE}
+        </p>
+        <Button size="sm" variant="ghost" icon={<X size={14} />} onClick={onClose} aria-label="Dismiss the live-site notice">
+          Dismiss
+        </Button>
+      </div>
     </div>
   );
 }
