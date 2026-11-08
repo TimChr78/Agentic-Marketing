@@ -89,7 +89,7 @@ export function Palette({ onAdd, disabled }: { onAdd: (k: NodeKind) => void; dis
                         </span>
                         <span className="min-w-0 flex-1">
                           <span className="block truncate text-[13px] leading-[18px]">{meta.label}</span>
-                          <span className="block truncate text-[11px] leading-4 text-muted">{meta.hint}</span>
+                          <span className="block break-words text-[11px] leading-4 text-muted">{meta.hint}</span>
                         </span>
                       </button>
                     </li>
