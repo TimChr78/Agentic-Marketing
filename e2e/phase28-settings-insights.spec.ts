@@ -66,7 +66,7 @@ test('a partial provider read names only the failed channels', async ({ page }) 
   await expect(page.getByText('Couldn’t load providers')).toHaveCount(0);
   // The e-mail channel answered, so its provider stays visible and usable.
   await expect(page.getByText(/\d of 4 channels configured/)).toBeVisible();
-  await expect(page.getByText('E-mail').first()).toBeVisible();
+  await expect(page.getByText('Development log').filter({ visible: true })).toBeVisible();
 });
 
 test('Analytics keeps its period, freshness, denominator and accessible data table', async ({ page }) => {
