@@ -31,7 +31,75 @@ and its automatically mounted children; “cold” is their sum. Ceilings are fr
 [skeletons and budgets](skeletons-and-budgets.md); no ceiling was raised.
 
 <!-- phase28-bundle:start -->
-Pending a live build.
+Measured from `apps/web/dist/.vite/manifest.json` after
+`corepack pnpm --filter @agentic-marketing/web build:live` on this branch.
+
+- Signed-out initial (entry + Root + eagerly needed auth screens): **108.53 kB** (cap 110).
+- Signed-in initial (entry + Root + Shell + route table): **129.25 kB** (cap 150).
+- Auth screens add no separate lazy closure in this build; they are inside the signed-out initial.
+
+| Route | Initial | Lazy | Cold | Cap |
+| --- | ---: | ---: | ---: | ---: |
+| `/` | 129.25 | 14.77 | 144.02 | 25 |
+| `/approvals` | 129.25 | 6.37 | 135.62 | 25 |
+| `/approvals/:id` | 129.25 | 36.26 | 165.51 | 70 |
+| `/work/agents` | 129.25 | 27.05 | 156.30 | 35 |
+| `/work/agents/:id` | 129.25 | 36.93 | 166.18 | 45 |
+| `/work/agents/library/:id` | 129.25 | 26.76 | 156.01 | 35 |
+| `/marketing/campaigns` | 129.25 | 8.50 | 137.75 | 20 |
+| `/marketing/campaigns/:id` | 129.25 | 31.68 | 160.93 | 45 |
+| `/marketing/broadcasts` | 129.25 | 12.21 | 141.46 | 25 |
+| `/marketing/broadcasts/:id` | 129.25 | 49.98 | 179.23 | 80 |
+| `/marketing/journeys` | 129.25 | 8.70 | 137.96 | 20 |
+| `/marketing/journeys/:id` | 129.25 | 105.77 | 235.02 | 130 |
+| `/marketing/experiences` | 129.25 | 9.05 | 138.31 | 20 |
+| `/marketing/experiences/:id` | 129.25 | 26.81 | 156.06 | 40 |
+| `/audience/people` | 129.25 | 14.03 | 143.28 | 30 |
+| `/audience/people/:id` | 129.25 | 11.68 | 140.93 | 30 |
+| `/audience/segments` | 129.25 | 9.74 | 139.00 | 20 |
+| `/audience/segments/:id` | 129.25 | 33.44 | 162.69 | 40 |
+| `/audience/forms` | 129.25 | 9.74 | 139.00 | 20 |
+| `/audience/forms/:id` | 129.25 | 30.01 | 159.26 | 40 |
+| `/audience/consent` | 129.25 | 11.00 | 140.25 | 40 |
+| `/content/templates` | 129.25 | 12.72 | 141.97 | 35 |
+| `/content/templates/blocks/:id` | 129.25 | 23.94 | 153.19 | 40 |
+| `/content/templates/:id` | 129.25 | 40.52 | 169.78 | 65 |
+| `/content/assets` | 129.25 | 6.06 | 135.31 | 25 |
+| `/content/brand` | 129.25 | 30.79 | 160.04 | 40 |
+| `/insights/analytics` | 129.25 | 16.93 | 146.19 | 40 |
+| `/insights/messages` | 129.25 | 3.45 | 132.71 | 20 |
+| `/insights/deliverability` | 129.25 | 9.94 | 139.19 | 35 |
+| `/insights/alerts` | 129.25 | 7.38 | 136.63 | 30 |
+| `/settings` | 129.25 | 0.28 | 129.53 | 20 |
+| `/settings/workspace` | 129.25 | 3.29 | 132.55 | 20 |
+| `/settings/providers` | 129.25 | 14.94 | 144.19 | 40 |
+| `/settings/integrations` | 129.25 | 16.52 | 145.77 | 55 |
+| `/settings/integrations/tokens/:id` | 129.25 | 16.52 | 145.77 | 55 |
+| `/settings/secrets` | 129.25 | 3.71 | 132.96 | 20 |
+| `/settings/users` | 129.25 | 5.33 | 134.59 | 25 |
+| `/settings/approval-policy` | 129.25 | 5.04 | 134.30 | 25 |
+| `/preferences` | 129.25 | 2.88 | 132.13 | 20 |
+| `/create` | 129.25 | 5.06 | 134.31 | 20 |
+| `/artifacts/:id` | 129.25 | 21.19 | 150.44 | 130 |
+
+Additional closures, measured as increments over the signed-in initial:
+
+| Renderer / action | Gzip | Cap |
+| --- | ---: | ---: |
+| ECharts (`ChartImpl`) | 368.50 | 400 |
+| Visual e-mail authoring (`VisualMjml` + lib + CSS) | 690.41 | 1,120 |
+| Broadcast report action (`ReportEntry`) | 6.55 | 30 |
+| Demo fixture closure (`DemoRoot` + fixtures) | 14.71 | 25 |
+
+Analytics with its automatically mounted chart is **514.68 kB** (cap 590).
+Deliverability with a chart is **507.69 kB** (cap 585).
+Journey Report is **603.52 kB** (cap 680).
+Template with the automatically mounted visual editor is **860.19 kB** (cap 1,335).
+
+No ceiling was raised. Seven routes were over their ceilings before this landing because the shared
+detail page eagerly imported the preview stack and structured editors. Those imports now load through
+the detail page's own Suspense boundary, so the affected routes stay inside their published caps
+without changing what the page offers.
 <!-- phase28-bundle:end -->
 
 Signed-out initial closure (entry + Root + the auth screens it needs eagerly) is recorded with the

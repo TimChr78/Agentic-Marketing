@@ -1,12 +1,16 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { DetailPage } from '../src/ui/DetailPage';
 import { DiffView } from '../src/ui/diff';
 import { Field, Input } from '../src/ui/form';
+import { ListPage } from '../src/ui/ListPage';
 import { Menu } from '../src/ui/menu';
 import { useConfirm } from '../src/ui/overlay';
-import { ChartSkeleton, KpiSkeleton, ListSkeleton, LoadingBlock, SKELETON_DELAY_MS, Skeleton } from '../src/ui/Skeleton';
+import { ChartSkeleton, KpiSkeleton, ListSkeleton, LoadingBlock, SKELETON_DELAY_MS, SKELETON_GEOMETRY, Skeleton } from '../src/ui/Skeleton';
 import { Tabs } from '../src/ui/tabs';
 
 afterEach(cleanup);
@@ -202,5 +206,48 @@ describe('reserved loading geometry (#555)', () => {
     render(<Skeleton shape="card" />);
     const shape = document.querySelector('[data-skeleton-shape="card"]')!;
     expect(shape.className).not.toMatch(/animate-|shimmer/);
+  });
+});
+
+describe('shared templates reserve the same geometry (#555)', () => {
+  it('ListPage uses the shared list skeleton when the caller has no custom slots', () => {
+    render(<ListPage title="Broadcasts" description="One-off e-mails." state="loading" desktopTable={null} mobileList={null} />);
+    const region = screen.getByRole('status', { name: 'Loading broadcasts' });
+    expect(region.getAttribute('data-geometry')).toBe('list');
+    expect(region.querySelector('[data-skeleton-list="table"]')).toBeTruthy();
+    expect(region.querySelector('[data-skeleton-list="cards"]')).toBeTruthy();
+  });
+
+  it('DetailPage uses the shared detail skeleton when the caller has no custom slots', () => {
+    render(
+      <DetailPage
+        title="Broadcast"
+        kind="Broadcast"
+        metadata={null}
+        consequence={null}
+        tabs={[]}
+        activeTab=""
+        onTabChange={() => {}}
+        state="loading"
+      />,
+    );
+    const region = screen.getByRole('status', { name: 'Loading broadcast' });
+    expect(region.getAttribute('data-geometry')).toBe('detail');
+    expect(region.querySelector('[data-skeleton-detail="header"]')).toBeTruthy();
+    expect(region.querySelector('[data-skeleton-detail="panel"]')).toBeTruthy();
+  });
+
+  it('matches the ready table row geometry and the design dimensions', () => {
+    // Table Th is 36 px and Td is py-3.5 (14 + 14) plus 20 px line height = 48 px.
+    const table = readFileSync(join(process.cwd(), 'apps/web/src/ui/table.tsx'), 'utf8');
+    expect(table).toContain("'h-9 px-3");
+    expect(table).toContain("'px-3 py-3.5");
+    expect(SKELETON_GEOMETRY.list.header).toBe(36);
+    expect(SKELETON_GEOMETRY.list.row).toBe(48);
+    expect(SKELETON_GEOMETRY.kpi.minHeight).toBe(204);
+    expect(SKELETON_GEOMETRY.chart.plot).toBe(200);
+    expect(SKELETON_GEOMETRY.chart.plotDesktop).toBe(240);
+    expect(SKELETON_GEOMETRY.editor.mobile).toBe(420);
+    expect(SKELETON_GEOMETRY.editor.desktop).toBe(560);
   });
 });

@@ -276,7 +276,7 @@ export function KpiSkeleton({
     <SkeletonRegion label={label} geometry="kpi" delay={delay} minHeight={SKELETON_GEOMETRY.kpi.minHeight} className={className}>
       <div className="space-y-3 p-5">
         <Skeleton className="h-3 w-2/5" />
-        <Skeleton shape="kpi" className="border-0 bg-transparent p-0" height={SKELETON_GEOMETRY.kpi.value} />
+        <Skeleton shape="text" className="w-24" height={SKELETON_GEOMETRY.kpi.value} />
         <Skeleton className="h-3 w-3/5" />
         <Skeleton className="h-3 w-2/5" />
       </div>
