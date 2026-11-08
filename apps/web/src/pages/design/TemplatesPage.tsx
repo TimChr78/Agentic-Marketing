@@ -1,8 +1,9 @@
 import { useCrumbs } from '../../app/page';
 import { usePageTab } from '../../app/useTab';
-import { ArtifactListPage } from '../../features/artifacts/ArtifactListPage';
-import { Alert, Tabs } from '../../ui';
+import { ContentList } from '../../features/phase27/content/ContentList';
+import { Alert, PageHeader, Tabs } from '../../ui';
 import { pageWidth } from '../../ui/layout';
+import RecipesPage from '../build/RecipesPage';
 import BlocksPage from './BlocksPage';
 
 const STARTER = `<mjml>
@@ -20,9 +21,11 @@ const STARTER = `<mjml>
 
 export function TemplateList() {
   return (
-    <ArtifactListPage
+    <ContentList
       type="email_template"
       title="E-mail templates"
+      noun="templates"
+      layout="gallery"
       description="E-mails in MJML with Liquid placeholders. Edit visually or as code; previews render exactly what is sent."
       emptyTitle="No e-mail templates yet"
       emptyText="Create one for each newsletter issue or automated e-mail. Agents can draft templates too; you review them before they go out."
@@ -34,18 +37,28 @@ export function TemplateList() {
   );
 }
 
-const TEMPLATE_TABS = ['templates', 'blocks'] as const;
+const TEMPLATE_TABS = ['templates', 'blocks', 'starters'] as const;
 type TemplateTab = (typeof TEMPLATE_TABS)[number];
 
 const TEMPLATE_TAB_ITEMS: { key: TemplateTab; label: string }[] = [
   { key: 'templates', label: 'Templates' },
   { key: 'blocks', label: 'Blocks' },
+  { key: 'starters', label: 'Starters' },
 ];
 
-/** Templates (#446): the template gallery and the existing block library as named tabs. */
+const CRUMBS: Record<TemplateTab, string> = {
+  templates: 'E-mail templates',
+  blocks: 'Blocks',
+  starters: 'Starters',
+};
+
+/**
+ * Templates (#446, #526): the template gallery, the block library as a comparison table, and the
+ * existing starter recipes. The Starters tab is the same embedded gallery as Create → Starters.
+ */
 export default function TemplatesPage() {
   const { active, invalid, select } = usePageTab({ keys: TEMPLATE_TABS, fallback: 'templates' });
-  useCrumbs([{ label: active === 'blocks' ? 'Blocks' : 'E-mail templates' }]);
+  useCrumbs([{ label: CRUMBS[active] }]);
 
   return (
     <div className={pageWidth('default')}>
@@ -55,7 +68,19 @@ export default function TemplatesPage() {
         </Alert>
       )}
       <Tabs items={TEMPLATE_TAB_ITEMS} value={active} onChange={select} label="Templates">
-        {active === 'blocks' ? <BlocksPage /> : <TemplateList />}
+        {active === 'blocks' ? (
+          <BlocksPage />
+        ) : active === 'starters' ? (
+          <div className="space-y-5">
+            <PageHeader
+              title="Starters"
+              description="Complete marketing loops that create reviewable drafts with your parameters filled in. Nothing is published or sent until a person approves it."
+            />
+            <RecipesPage embedded />
+          </div>
+        ) : (
+          <TemplateList />
+        )}
       </Tabs>
     </div>
   );

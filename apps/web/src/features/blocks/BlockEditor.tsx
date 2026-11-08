@@ -13,40 +13,50 @@ export function BlockEditor({ content, onChange, readOnly, errors }: EditorProps
     set({ params: content.params.map((param, index) => (index === i ? { ...param, ...p } : param)) });
   return (
     <div className="space-y-5">
-      <div className="grid gap-4 sm:grid-cols-[minmax(0,1fr)_220px]">
-        <Field label="Description" hint="What the block is for, shown to reviewers and agents." error={errors.description}>
-          <Input
-            value={content.description ?? ''}
+      <section aria-labelledby="block-about" className="space-y-3">
+        <h2 id="block-about" className="text-[13px] font-semibold text-fg">
+          About this block
+        </h2>
+        <div className="grid gap-4 sm:grid-cols-[minmax(0,1fr)_220px]">
+          <Field label="Description" hint="What the block is for, shown to reviewers and agents." error={errors.description}>
+            <Input
+              value={content.description ?? ''}
+              readOnly={readOnly}
+              maxLength={1000}
+              onChange={(e) => set({ description: e.target.value || undefined })}
+            />
+          </Field>
+          <Field label="Category" hint="Groups the block in the template editor." error={errors.category} required>
+            <Select value={content.category} disabled={readOnly} onChange={(e) => set({ category: e.target.value as BlockCategory })}>
+              {Object.entries(CATEGORY_LABELS).map(([value, label]) => (
+                <option key={value} value={value}>
+                  {label}
+                </option>
+              ))}
+            </Select>
+          </Field>
+        </div>
+      </section>
+
+      <section aria-labelledby="block-fragment" className="space-y-3">
+        <h2 id="block-fragment" className="text-[13px] font-semibold text-fg">
+          Message fragment
+        </h2>
+        <Field
+          label="MJML fragment"
+          hint="Sections or columns, not a whole <mjml> document. Use {{ block.<key> }} for parameters; profile.* and unsubscribe_url also work."
+          error={errors.mjml}
+        >
+          <Textarea
+            mono
+            rows={22}
+            spellCheck={false}
             readOnly={readOnly}
-            maxLength={1000}
-            onChange={(e) => set({ description: e.target.value || undefined })}
+            value={content.mjml}
+            onChange={(e) => set({ mjml: e.target.value })}
           />
         </Field>
-        <Field label="Category" hint="Groups the block in the template editor." error={errors.category} required>
-          <Select value={content.category} disabled={readOnly} onChange={(e) => set({ category: e.target.value as BlockCategory })}>
-            {Object.entries(CATEGORY_LABELS).map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </Select>
-        </Field>
-      </div>
-
-      <Field
-        label="MJML fragment"
-        hint="Sections or columns, not a whole <mjml> document. Use {{ block.<key> }} for parameters; profile.* and unsubscribe_url also work."
-        error={errors.mjml}
-      >
-        <Textarea
-          mono
-          rows={22}
-          spellCheck={false}
-          readOnly={readOnly}
-          value={content.mjml}
-          onChange={(e) => set({ mjml: e.target.value })}
-        />
-      </Field>
+      </section>
 
       <section aria-label="Parameters" className="rounded-lg border border-line bg-surface px-4 py-3">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">

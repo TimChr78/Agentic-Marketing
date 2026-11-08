@@ -33,7 +33,8 @@ export interface TemplateContent {
  * and the separate block panels (Phase 25, #499).
  */
 export function TemplateEditor({ artifact, content, onChange, readOnly, errors }: EditorProps<TemplateContent>) {
-  const [view, setView] = useState<'visual' | 'code' | 'preview'>('visual');
+  const [view, setView] = useState<'visual' | 'code'>('visual');
+  const [showPreview, setShowPreview] = useState(true);
   const [inserting, setInserting] = useState(false);
   const [picking, setPicking] = useState(false);
   const [pendingInsert, setPendingInsert] = useState<{ kind: InsertElementKind; columns?: 1 | 2 } | null>(null);
@@ -105,58 +106,63 @@ export function TemplateEditor({ artifact, content, onChange, readOnly, errors }
 
   return (
     <div className="min-w-0 space-y-5">
-      <div className="grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,2fr)_minmax(0,1fr)_minmax(0,1fr)]">
-        <Field label="Subject" hint="Liquid works here, e.g. {{ profile.firstName | default: 'there' }}." error={errors.subject} required>
-          <Input value={content.subject ?? ''} readOnly={readOnly} maxLength={300} onChange={(e) => set({ subject: e.target.value })} />
-        </Field>
-        <Field label="Preheader" hint="The preview text inboxes show after the subject." error={errors.preheader}>
-          <Input
-            value={content.preheader ?? ''}
-            readOnly={readOnly}
-            maxLength={300}
-            onChange={(e) => set({ preheader: e.target.value || undefined })}
-          />
-        </Field>
-        <Field label="Purpose" hint="Decides consent and the unsubscribe link." error={errors.purpose} required>
-          <Select
-            value={content.purpose ?? ''}
-            disabled={readOnly || purposes.loading}
-            onChange={(e) => {
-              const purpose = e.target.value;
-              const keys = topicsOf(purposes.data?.purposes ?? [], purpose).map((t) => t.key);
-              set({ purpose, topic: content.topic && keys.includes(content.topic) ? content.topic : undefined });
-            }}
-          >
-            {!purposes.data?.purposes.some((p) => p.key === content.purpose) && (
-              <option value={content.purpose}>{content.purpose || 'Choose…'}</option>
-            )}
-            {purposes.data?.purposes.map((p) => (
-              <option key={p.key} value={p.key}>
-                {p.name} ({p.key})
-              </option>
-            ))}
-          </Select>
-        </Field>
-        <Field label="Topic (optional)" hint="A finer choice under the purpose." error={errors.topic}>
-          <Select
-            value={content.topic ?? ''}
-            disabled={readOnly || purposes.loading || topicsOf(purposes.data?.purposes ?? [], content.purpose).length === 0}
-            onChange={(e) => set({ topic: e.target.value || undefined })}
-          >
-            <option value="">{topicsOf(purposes.data?.purposes ?? [], content.purpose).length ? 'No topic' : 'No topics'}</option>
-            {topicsOf(purposes.data?.purposes ?? [], content.purpose).map((t) => (
-              <option key={t.key} value={t.key}>
-                {t.name} ({t.key})
-              </option>
-            ))}
-          </Select>
-        </Field>
-      </div>
+      <section aria-labelledby="template-message" className="space-y-3">
+        <h2 id="template-message" className="text-[13px] font-semibold text-fg">
+          Message
+        </h2>
+        <div className="grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,2fr)_minmax(0,1fr)_minmax(0,1fr)]">
+          <Field label="Subject" hint="Liquid works here, e.g. {{ profile.firstName | default: 'there' }}." error={errors.subject} required>
+            <Input value={content.subject ?? ''} readOnly={readOnly} maxLength={300} onChange={(e) => set({ subject: e.target.value })} />
+          </Field>
+          <Field label="Preheader" hint="The preview text inboxes show after the subject." error={errors.preheader}>
+            <Input
+              value={content.preheader ?? ''}
+              readOnly={readOnly}
+              maxLength={300}
+              onChange={(e) => set({ preheader: e.target.value || undefined })}
+            />
+          </Field>
+          <Field label="Purpose" hint="Decides consent and the unsubscribe link." error={errors.purpose} required>
+            <Select
+              value={content.purpose ?? ''}
+              disabled={readOnly || purposes.loading}
+              onChange={(e) => {
+                const purpose = e.target.value;
+                const keys = topicsOf(purposes.data?.purposes ?? [], purpose).map((t) => t.key);
+                set({ purpose, topic: content.topic && keys.includes(content.topic) ? content.topic : undefined });
+              }}
+            >
+              {!purposes.data?.purposes.some((p) => p.key === content.purpose) && (
+                <option value={content.purpose}>{content.purpose || 'Choose…'}</option>
+              )}
+              {purposes.data?.purposes.map((p) => (
+                <option key={p.key} value={p.key}>
+                  {p.name} ({p.key})
+                </option>
+              ))}
+            </Select>
+          </Field>
+          <Field label="Topic (optional)" hint="A finer choice under the purpose." error={errors.topic}>
+            <Select
+              value={content.topic ?? ''}
+              disabled={readOnly || purposes.loading || topicsOf(purposes.data?.purposes ?? [], content.purpose).length === 0}
+              onChange={(e) => set({ topic: e.target.value || undefined })}
+            >
+              <option value="">{topicsOf(purposes.data?.purposes ?? [], content.purpose).length ? 'No topic' : 'No topics'}</option>
+              {topicsOf(purposes.data?.purposes ?? [], content.purpose).map((t) => (
+                <option key={t.key} value={t.key}>
+                  {t.name} ({t.key})
+                </option>
+              ))}
+            </Select>
+          </Field>
+        </div>
+      </section>
 
       <div className="flex flex-wrap items-center gap-2">
         <Segmented
           label="Editor"
-          value={view === 'code' ? 'code' : 'visual'}
+          value={view}
           onChange={setView}
           items={[
             { key: 'visual', label: 'Visual', icon: <Paintbrush size={13} aria-hidden /> },
@@ -227,10 +233,10 @@ export function TemplateEditor({ artifact, content, onChange, readOnly, errors }
         )}
         <Button
           size="sm"
-          variant={view === 'preview' ? 'secondary' : 'ghost'}
-          aria-pressed={view === 'preview'}
+          variant={showPreview ? 'secondary' : 'ghost'}
+          aria-pressed={showPreview}
           icon={<Eye size={14} aria-hidden />}
-          onClick={() => setView((v) => (v === 'preview' ? 'visual' : 'preview'))}
+          onClick={() => setShowPreview(true)}
         >
           Preview
         </Button>
@@ -242,37 +248,55 @@ export function TemplateEditor({ artifact, content, onChange, readOnly, errors }
         </Alert>
       )}
       {errors.mjml && <Alert tone="bad">{errors.mjml}</Alert>}
-      {view === 'preview' ? (
-        <EditorPreview artifactId={artifact.id} version={artifact.version.number} content={content} dirty={dirty} readOnly={readOnly} />
-      ) : view === 'visual' ? (
-        readOnly ? (
-          <Alert tone="info">Your role can read this template but not edit it. Open Preview to see it rendered.</Alert>
-        ) : (
-          <div className="h-[calc(100vh-340px)] min-h-[420px] min-w-0 overflow-hidden rounded-lg border border-line md:min-h-[560px]">
-            <Suspense fallback={<LoadingBlock lines={8} label="Loading the visual editor" />}>
-              <VisualMjml
-                key={visualKey}
-                ref={visual}
-                mjml={content.mjml}
-                onChange={(mjml) => set({ mjml })}
-                onReady={() => setVisualReady(true)}
+      <div className={showPreview ? 'grid gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(320px,480px)]' : undefined}>
+        <div className="min-w-0">
+          {view === 'visual' ? (
+            readOnly ? (
+              <Alert tone="info">Your role can read this template but not edit it. The preview shows the saved version.</Alert>
+            ) : (
+              <div className="h-[calc(100vh-340px)] min-h-[420px] min-w-0 overflow-hidden rounded-lg border border-line md:min-h-[560px]">
+                <Suspense fallback={<LoadingBlock lines={8} label="Loading the visual editor" />}>
+                  <VisualMjml
+                    key={visualKey}
+                    ref={visual}
+                    mjml={content.mjml}
+                    onChange={(mjml) => set({ mjml })}
+                    onReady={() => setVisualReady(true)}
+                  />
+                </Suspense>
+              </div>
+            )
+          ) : (
+            <Field label="MJML with Liquid" hideLabel>
+              <Textarea
+                ref={code}
+                mono
+                rows={26}
+                spellCheck={false}
+                readOnly={readOnly}
+                value={content.mjml}
+                onChange={(e) => set({ mjml: e.target.value })}
               />
-            </Suspense>
+            </Field>
+          )}
+        </div>
+        {showPreview && (
+          <div className="min-w-0 space-y-4 xl:sticky xl:top-16 xl:self-start">
+            <EditorPreview artifactId={artifact.id} version={artifact.version.number} content={content} dirty={dirty} readOnly={readOnly} />
+            <section aria-label="Before publishing" className="rounded-lg bg-surface-2 p-4">
+              <h2 className="mb-1 text-[13px] font-semibold text-fg">Before publishing</h2>
+              <p className="text-[12px] leading-[18px] text-fg-2">
+                {dirty
+                  ? 'This is an unsaved draft preview. Save the draft before sending a test or submitting for review.'
+                  : `Showing saved v${artifact.version.number}. Desktop, mobile, dark mail and the text version are view modes, not versions.`}
+              </p>
+              <p className="mt-2 text-[12px] leading-[18px] text-muted">
+                “Send me a test” sends the saved version to your own address, never this local draft.
+              </p>
+            </section>
           </div>
-        )
-      ) : (
-        <Field label="MJML with Liquid" hideLabel>
-          <Textarea
-            ref={code}
-            mono
-            rows={26}
-            spellCheck={false}
-            readOnly={readOnly}
-            value={content.mjml}
-            onChange={(e) => set({ mjml: e.target.value })}
-          />
-        </Field>
-      )}
+        )}
+      </div>
 
       <details className="rounded-lg border border-line bg-surface px-4 py-3">
         <summary className="cursor-pointer text-[13px] font-medium">Advanced: text version, sample data, UTM</summary>
