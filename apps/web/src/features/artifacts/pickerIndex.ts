@@ -52,7 +52,7 @@ const entries = new Map<string, Entry>();
 
 // Artifact ids carry the type prefix the server assigns (packages/artifacts/src/types.ts). A
 // pending index has no rows to search, so its type comes from the id being renamed or discarded.
-const TYPE_BY_PREFIX: Record<string, string> = {
+export const TYPE_BY_PREFIX: Record<string, string> = {
   not: 'note',
   jrn: 'journey',
   blk: 'email_block',
