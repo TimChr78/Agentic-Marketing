@@ -675,6 +675,9 @@ describe('Person detail (#510)', () => {
   it('refreshes with the four base reads, without purpose or template fan-out', async () => {
     renderPerson();
     await screen.findByRole('heading', { level: 1, name: 'ada@example.com' });
+    // Let the initial timeline reads land before counting, so a slow first load is not added to the
+    // four the refresh issues.
+    await waitFor(() => expect(names()).toEqual(['profiles.get', 'profiles.events', 'messages.list', 'consent.history', 'purposes.list']));
     const before = h.calls.length;
     await userEvent.click(screen.getByRole('button', { name: 'Refresh' }));
     await waitFor(() => expect(h.calls.length).toBe(before + 4));
