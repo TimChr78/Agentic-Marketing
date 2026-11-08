@@ -174,7 +174,7 @@ function writeEvidence(section: string) {
 }
 
 /** Areas that have adopted the lint. A task adds its letter here when it flips to strict. */
-const STRICT: Owner[] = ['I', 'W', 'M'];
+const STRICT: Owner[] = ['I', 'W', 'M', 'A'];
 
 describe('phase 28 microcopy lint (#555)', () => {
   const findings = scan();

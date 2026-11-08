@@ -64,7 +64,9 @@ function SnapshotSource({ value, onChange }: { value: string; onChange: (id: str
   return (
     <Field label="Source segment" hint="Its current members are copied and frozen. Publish it first.">
       <Select value={value} onChange={(e) => onChange(e.target.value)}>
-        <option value="">{list.loading ? 'Loading…' : list.error ? `Couldn't load: ${list.error}` : 'Choose a live segment…'}</option>
+        <option value="">
+          {list.loading ? 'Loading segments…' : list.error ? `Couldn't load: ${list.error}` : 'Choose a live segment…'}
+        </option>
         {items.map((a) => (
           <option key={a.id} value={a.id}>
             {a.name} · v{a.publishedVersion}

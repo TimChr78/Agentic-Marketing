@@ -126,6 +126,7 @@ export default function TopicsPage() {
 
       <TableFrame
         loading={list.loading}
+        loadingLabel="Loading topics"
         error={list.error}
         onRetry={list.reload}
         isEmpty={topics.length === 0}

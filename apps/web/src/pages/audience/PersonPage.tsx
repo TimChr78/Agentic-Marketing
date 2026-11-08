@@ -17,11 +17,11 @@ import {
   Alert,
   Button,
   Card,
+  DetailSkeleton,
   EmptyState,
   Field,
   formatDateTime,
   Input,
-  LoadingBlock,
   Meta,
   Mono,
   PageHeader,
@@ -135,8 +135,8 @@ export default function PersonPage({ params }: { params: Record<string, string> 
 
   if (profile.loading)
     return (
-      <div aria-busy="true">
-        <LoadingBlock lines={8} label="Loading person" />
+      <div className={pageWidth('default')}>
+        <DetailSkeleton label="Loading person" />
       </div>
     );
 
@@ -340,6 +340,7 @@ export default function PersonPage({ params }: { params: Record<string, string> 
               </div>
               <TableFrame
                 loading={timeline.loading}
+                loadingLabel="Loading consent history"
                 error={timeline.consentError}
                 onRetry={timeline.retryConsent}
                 columns={5}
@@ -350,7 +351,7 @@ export default function PersonPage({ params }: { params: Record<string, string> 
                   The consent ledger is append-only and includes merged profiles. Each row adds a record; the latest per purpose and channel
                   is the current choice.
                 </p>
-                <ConsentHistoryTable records={timeline.consent} />
+                <ConsentHistoryTable records={timeline.consent} purposes={purposes.data?.purposes} />
               </TableFrame>
             </div>
           )}
@@ -359,6 +360,7 @@ export default function PersonPage({ params }: { params: Record<string, string> 
             <div className="mt-4">
               <TableFrame
                 loading={topics.loading}
+                loadingLabel="Loading topic choices"
                 error={topics.error}
                 onRetry={topics.reload}
                 columns={5}
@@ -406,6 +408,7 @@ export default function PersonPage({ params }: { params: Record<string, string> 
             <div className="mt-4">
               <TableFrame
                 loading={segments.loading}
+                loadingLabel="Loading segments"
                 error={segments.error}
                 onRetry={segments.reload}
                 columns={2}
