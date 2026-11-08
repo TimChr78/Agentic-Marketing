@@ -235,7 +235,7 @@ describe('Providers compact channel rows (#527)', () => {
     expect(within(drawer).getByText('Postmark tracks opens and clicks only when you enable it in the message stream.')).toBeTruthy();
     expect(
       within(drawer)
-        .getByRole('link', { name: /Postmark setup guide/ })
+        .getByRole('link', { name: /Postmark Docs/ })
         .getAttribute('href'),
     ).toBe('https://postmarkapp.com/developer');
 

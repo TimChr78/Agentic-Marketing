@@ -351,7 +351,7 @@ function ProviderDrawer({
               rel="noreferrer"
               className="inline-flex items-center gap-1 font-medium text-accent hover:underline"
             >
-              {adapter.label} setup guide <ExternalLink size={12} aria-hidden />
+              {adapter.label} Docs <ExternalLink size={12} aria-hidden />
             </a>
           </p>
         )}
