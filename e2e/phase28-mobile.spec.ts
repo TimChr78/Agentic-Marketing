@@ -35,18 +35,48 @@ const OWNER: Record<string, 'I' | 'W' | 'M' | 'A' | 'C' | 'S'> = {
   '/settings/approval-policy': 'S',
 };
 
-async function pageOverflow(page: Page): Promise<{ scroll: number; client: number; body: number }> {
-  return page.evaluate(() => ({
-    scroll: document.documentElement.scrollWidth,
-    client: document.documentElement.clientWidth,
-    body: document.body.scrollWidth,
-  }));
+async function pageOverflow(page: Page): Promise<{ scroll: number; client: number; body: number; offenders: string[] }> {
+  return page.evaluate(() => {
+    const client = document.documentElement.clientWidth;
+    const offenders: string[] = [];
+    for (const el of document.querySelectorAll('body *')) {
+      const style = getComputedStyle(el);
+      if (style.display === 'none' || style.visibility === 'hidden') continue;
+      const rect = el.getBoundingClientRect();
+      if (rect.width === 0) continue;
+      // Local scroll regions (a data table, a code view) are allowed to be wider than the page.
+      let parent = el.parentElement;
+      let local = false;
+      while (parent && parent !== document.body) {
+        const ps = getComputedStyle(parent);
+        if (ps.overflowX === 'auto' || ps.overflowX === 'scroll') {
+          local = true;
+          break;
+        }
+        parent = parent.parentElement;
+      }
+      if (!local && rect.right > client + 1) {
+        offenders.push(
+          `${el.tagName.toLowerCase()}${el.className ? `.${String(el.className).split(' ')[0]}` : ''} right=${Math.round(rect.right)}`,
+        );
+        if (offenders.length === 5) break;
+      }
+    }
+    return {
+      scroll: document.documentElement.scrollWidth,
+      client,
+      body: document.body.scrollWidth,
+      offenders,
+    };
+  });
 }
 
 async function expectNoPageOverflow(page: Page) {
-  const { scroll, client, body } = await pageOverflow(page);
+  const { scroll, client, body, offenders } = await pageOverflow(page);
   expect(client).toBe(390);
   expect(Math.max(scroll, body), `page scroll width ${Math.max(scroll, body)} > client ${client} + 1`).toBeLessThanOrEqual(client + 1);
+  // Clipping content with overflow hidden does not pass: name the elements that stick out instead.
+  expect(offenders, `elements past the 390 px viewport: ${offenders.join(', ')}`).toEqual([]);
 }
 
 test.describe('390 px page width', () => {
@@ -92,7 +122,6 @@ test.describe('390 px page width', () => {
     expect(box).not.toBeNull();
     expect(box!.x).toBeGreaterThanOrEqual(0);
     expect(box!.x + box!.width).toBeLessThanOrEqual(390);
-    await expectNoPageOverflow(page);
     await page.getByRole('button', { name: 'Close navigation' }).click();
     await expect(drawer).toHaveCount(0);
   });

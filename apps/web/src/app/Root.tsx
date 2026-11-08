@@ -33,9 +33,9 @@ function Gate() {
   if (path === '/reset-password') return <ResetPassword token={search.get('token')} />;
   if (status === 'loading')
     return (
-      <div className="min-h-screen bg-bg">
+      <main className="min-h-screen bg-bg">
         <AuthSkeleton label="Loading your workspace" />
-      </div>
+      </main>
     );
   if (status === 'signed-out') return <SignIn onDone={() => void refresh()} />;
   if (status === 'offline')

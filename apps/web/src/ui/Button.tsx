@@ -19,7 +19,7 @@ const variants: Record<ButtonVariant, string> = {
   secondary: 'border border-line-strong bg-surface text-fg hover:bg-surface-2',
   ghost: 'text-fg-2 hover:bg-surface-2 hover:text-fg',
   danger: 'border border-bad/50 bg-surface text-bad hover:bg-bad-soft',
-  'danger-solid': 'bg-bad text-white hover:brightness-110 [:root[data-theme=dark]_&]:text-[#111512]',
+  'danger-solid': 'bg-bad text-white hover:brightness-110 [:root[data-theme=dark]_&]:text-[var(--bg)]',
 };
 
 export function buttonClass({

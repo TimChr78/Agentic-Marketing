@@ -304,22 +304,27 @@ export function EditorSkeleton({
 /** The signed-out frame: the same 380 px column and field heights the auth screens use. */
 export function AuthSkeleton({ label = 'Loading the sign-in screen', delay = SKELETON_DELAY_MS }: { label?: string; delay?: number }) {
   return (
-    <SkeletonRegion label={label} geometry="auth" delay={delay} className="mx-auto w-full max-w-[380px] px-4 pt-[8vh]">
-      <div className="space-y-6">
-        <div className="flex items-center gap-2.5">
-          <Skeleton className="size-8 rounded-md" />
-          <Skeleton className="h-4 w-40" />
-        </div>
-        <div className="space-y-2">
-          <Skeleton className="h-6 w-24" />
-          <Skeleton className="h-3 w-64" />
-        </div>
-        <div className="space-y-4">
-          <Skeleton className="h-10 w-full" />
-          <Skeleton className="h-10 w-full" />
-          <Skeleton className="h-10 w-full" />
-        </div>
+    <div className="px-4">
+      <div className="h-14" />
+      <div className="mx-auto w-full max-w-[380px] pt-[8vh]">
+        <SkeletonRegion label={label} geometry="auth" delay={delay} className="mx-auto w-full max-w-[380px]">
+          <div className="space-y-6">
+            <div className="flex items-center gap-2.5">
+              <Skeleton className="size-8 rounded-md" />
+              <Skeleton className="h-4 w-40" />
+            </div>
+            <div className="space-y-2">
+              <Skeleton className="h-6 w-24" />
+              <Skeleton className="h-3 w-64" />
+            </div>
+            <div className="space-y-4">
+              <Skeleton className="h-10 w-full" />
+              <Skeleton className="h-10 w-full" />
+              <Skeleton className="h-10 w-full" />
+            </div>
+          </div>
+        </SkeletonRegion>
       </div>
-    </SkeletonRegion>
+    </div>
   );
 }

@@ -20,6 +20,7 @@ type Chunk = {
 };
 
 const rootDist = join(process.cwd(), 'apps/web/dist');
+const ROOT = process.cwd().endsWith('apps/web') ? join(process.cwd(), '../..') : process.cwd();
 const dist =
   existsSync(join(rootDist, '.vite', 'manifest.json')) || !existsSync(join(process.cwd(), 'dist')) ? rootDist : join(process.cwd(), 'dist');
 const manifestPath = join(dist, '.vite', 'manifest.json');
@@ -270,7 +271,7 @@ describeBuild('phase 28 per-route budgets (#555)', () => {
   }
 
   it('keeps every route in app/routes.tsx budgeted', () => {
-    const source = readFileSync(join(process.cwd(), 'apps/web/src/app/routes.tsx'), 'utf8');
+    const source = readFileSync(join(ROOT, 'apps/web/src/app/routes.tsx'), 'utf8');
     const declared = [...source.matchAll(/\bpath:\s*'([^']+)'/g)].map((m) => m[1]);
     const budgeted = new Set(BUDGETS.map((b) => b.route));
     const missing = declared.filter((path) => !budgeted.has(path));

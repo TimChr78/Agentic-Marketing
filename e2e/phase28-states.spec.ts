@@ -24,7 +24,14 @@ test.describe('shared states', () => {
     await expect(region).toHaveAttribute('data-skeleton-visible', 'true', { timeout: 2_000 });
     // Only the one labelled region announces; the tonal shapes are aria-hidden.
     await expect(page.locator('[data-skeleton-region]')).toHaveCount(1);
+    const reserved = await region.boundingBox();
+    expect(reserved).not.toBeNull();
     await expect(page.getByRole('heading', { name: 'Sign in' })).toBeVisible();
+    // The signed-out column keeps its x and width when the real form replaces the reserved slot.
+    const form = await page.locator('form').boundingBox();
+    expect(form).not.toBeNull();
+    expect(Math.abs(reserved!.x - form!.x)).toBeLessThanOrEqual(1);
+    expect(Math.abs(reserved!.width - form!.width)).toBeLessThanOrEqual(1);
     await expect(page.locator('[data-skeleton-region]')).toHaveCount(0);
   });
 
@@ -63,6 +70,37 @@ test.describe('shared states', () => {
     const animation = await glyph.evaluate((el) => getComputedStyle(el).animationName);
     expect(animation).toBe('none');
     release();
+  });
+
+  test('reduced motion removes transitions, animations and delays', async ({ page }) => {
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    await page.goto('/');
+    const theme = page.getByRole('button', { name: /^Theme:/ });
+    await theme.hover();
+    const styles = await theme.evaluate((el) => {
+      const s = getComputedStyle(el);
+      return { duration: s.transitionDuration, delay: s.transitionDelay, animation: s.animationName };
+    });
+    for (const value of styles.duration.split(',')) expect(Number.parseFloat(value)).toBe(0);
+    for (const value of styles.delay.split(',')) expect(Number.parseFloat(value)).toBe(0);
+    expect(styles.animation).toBe('none');
+    const loops = await page.evaluate(
+      () => Array.from(document.querySelectorAll('*')).filter((el) => getComputedStyle(el).animationIterationCount === 'infinite').length,
+    );
+    expect(loops).toBe(0);
+  });
+
+  test('an entering overlay stays within the 180 ms ceiling', async ({ page }) => {
+    await page.goto('/');
+    await page.getByRole('button', { name: /^Theme:/ }).click();
+    const menu = page.getByRole('menu');
+    await expect(menu).toBeVisible();
+    const style = await menu.evaluate((el) => {
+      const s = getComputedStyle(el);
+      return { name: s.animationName, duration: s.animationDuration, transition: s.transitionDuration };
+    });
+    if (style.name !== 'none') expect(Number.parseFloat(style.duration)).toBeLessThanOrEqual(0.18);
+    for (const value of style.transition.split(',')) expect(Number.parseFloat(value)).toBeLessThanOrEqual(0.18);
   });
 
   test('an empty list names the missing object and its next action (W)', async ({ page }) => {

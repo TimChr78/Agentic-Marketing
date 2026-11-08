@@ -239,7 +239,10 @@ describe('shared templates reserve the same geometry (#555)', () => {
 
   it('matches the ready table row geometry and the design dimensions', () => {
     // Table Th is 36 px and Td is py-3.5 (14 + 14) plus 20 px line height = 48 px.
-    const table = readFileSync(join(process.cwd(), 'apps/web/src/ui/table.tsx'), 'utf8');
+    const table = readFileSync(
+      join(process.cwd().endsWith('apps/web') ? process.cwd() : join(process.cwd(), 'apps/web'), 'src/ui/table.tsx'),
+      'utf8',
+    );
     expect(table).toContain("'h-9 px-3");
     expect(table).toContain("'px-3 py-3.5");
     expect(SKELETON_GEOMETRY.list.header).toBe(36);
