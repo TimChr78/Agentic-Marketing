@@ -8,7 +8,7 @@ import { usePageTab } from '../../app/useTab';
 import { ArtifactDetailPage, type ArtifactDetailView } from '../../features/artifacts/ArtifactDetailPage';
 import { type BrandContent, BrandEditor } from '../../features/brand/BrandEditor';
 import { HostedPreview } from '../../features/brand/HostedPreview';
-import { Alert, Button, EmptyState, LoadingBlock, PageHeader, Tabs } from '../../ui';
+import { Alert, Button, DetailSkeleton, EmptyState, PageHeader, Tabs } from '../../ui';
 import { pageWidth } from '../../ui/layout';
 import HostedPagesPage from './HostedPagesPage';
 
@@ -89,7 +89,7 @@ function NoBrand({
   onRetry: () => void;
 }) {
   useCrumbs([{ label: 'Brand' }]);
-  if (loading) return <LoadingBlock lines={6} />;
+  if (loading) return <DetailSkeleton label="Loading the brand" />;
   return (
     <div className={pageWidth('reading')}>
       <PageHeader title="Brand" description="Name, logo, colours and wording of the pages subscribers see." />

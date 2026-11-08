@@ -1,7 +1,7 @@
 import { Monitor, Smartphone } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { api, errText } from '../../app/api';
-import { Alert, Segmented, Skeleton, Tabs } from '../../ui';
+import { Alert, Segmented, Skeleton, SkeletonRegion, Tabs } from '../../ui';
 import { useArtifactRef } from '../artifactCache';
 import { PreviewLabel } from '../previews/PreviewLabel';
 import type { PreviewSource } from '../previews/previewSource';
@@ -71,7 +71,11 @@ export function HostedPreview({
         </div>
       )}
       <div className="flex flex-wrap items-end justify-between gap-2">
-        <Tabs label="Page" items={PAGE_KINDS.map((p) => ({ key: p.key, label: p.label }))} value={page} onChange={setPage} />
+        {/* A grid track with a 0 minimum keeps the tab row from forcing its own content width on the
+            page at 390 px; the tabs then scroll inside their own row (#559). */}
+        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)]">
+          <Tabs label="Page" items={PAGE_KINDS.map((p) => ({ key: p.key, label: p.label }))} value={page} onChange={setPage} />
+        </div>
         <Segmented
           label="Preview width"
           value={width}
@@ -97,7 +101,11 @@ export function HostedPreview({
             style={{ width: width === 'mobile' ? 375 : '100%', height, border: 0 }}
           />
         ) : (
-          <Skeleton className="w-full" />
+          // Reserve the exact frame height the hosted page will use, so the admin chrome around
+          // the preview does not move when the renderer answers (Phase 28, #559).
+          <SkeletonRegion label="Loading the hosted page preview" geometry="detail" className="w-full" minHeight={height}>
+            <Skeleton className="w-full rounded-sm" height={height} />
+          </SkeletonRegion>
         )}
       </div>
     </div>

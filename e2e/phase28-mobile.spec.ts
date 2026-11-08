@@ -36,7 +36,7 @@ const OWNER: Record<string, 'I' | 'W' | 'M' | 'A' | 'C' | 'S'> = {
 };
 
 /** Areas whose routes must pass at 390. A task adds its letter here when it lands. */
-const LANDED: string[] = ['I', 'W', 'M', 'A'];
+const LANDED: string[] = ['I', 'W', 'M', 'A', 'C'];
 
 async function pageOverflow(page: Page): Promise<{ scroll: number; client: number; body: number; offenders: string[] }> {
   return page.evaluate(() => {

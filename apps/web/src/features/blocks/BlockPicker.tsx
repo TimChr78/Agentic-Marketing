@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { api, errText } from '../../app/api';
-import { Alert, Button, LoadingBlock, Modal, StatusPill } from '../../ui';
+import { Alert, Button, ListSkeleton, Modal, StatusPill } from '../../ui';
 import { useAllArtifacts } from '../artifacts/artifactList';
 import { type BlockContent, blockTagSnippet } from './model';
 
@@ -36,7 +36,12 @@ export function BlockList({
     }
   };
 
-  if (list.loading) return <LoadingBlock lines={4} label="Loading blocks" />;
+  if (list.loading)
+    return (
+      <div className="max-h-[320px] overflow-hidden rounded-md border border-line">
+        <ListSkeleton label="Loading blocks" rows={4} columns={2} />
+      </div>
+    );
   if (list.error)
     return (
       <Alert tone="bad" onRetry={list.reload}>
@@ -44,7 +49,7 @@ export function BlockList({
       </Alert>
     );
   const blocks = list.data?.artifacts ?? [];
-  if (blocks.length === 0) return <p className="px-1 text-[13px] text-muted">No reusable blocks yet. Create one in Design → Blocks</p>;
+  if (blocks.length === 0) return <p className="px-1 text-[13px] text-muted">No reusable blocks yet. Create one in Design → Blocks.</p>;
   const shown = blocks.filter((a) => !needle || a.name.toLowerCase().includes(needle) || a.id.includes(needle));
   if (shown.length === 0)
     return (

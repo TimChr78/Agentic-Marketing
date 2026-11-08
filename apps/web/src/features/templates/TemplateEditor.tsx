@@ -2,7 +2,8 @@ import { Code2, Eye, Paintbrush, Plus, Redo2, SquareDashed, Undo2 } from 'lucide
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../../app/api';
 import { useApi } from '../../app/useApi';
-import { Alert, Button, Field, IconButton, Input, LoadingBlock, Segmented, Select, Textarea } from '../../ui';
+import { Alert, Button, EditorSkeleton, Field, IconButton, Input, Segmented, Select, Textarea } from '../../ui';
+import { Identifier } from '../../ui/Identifier';
 import type { EditorProps } from '../artifacts/ArtifactDetailPage';
 import { JsonEditor } from '../artifacts/JsonEditor';
 import { topicsOf } from '../artifacts/PurposesEditor';
@@ -43,6 +44,10 @@ export function TemplateEditor({ artifact, content, onChange, readOnly, errors }
   const [visualReady, setVisualReady] = useState(false);
   const [outlines, setOutlines] = useState(false);
   const purposes = useApi(() => api.call('purposes.list', {}), []);
+  const purposeOptions = purposes.data?.purposes ?? [];
+  const knownPurpose = purposeOptions.some((p) => p.key === content.purpose);
+  const topicOptions = topicsOf(purposeOptions, content.purpose);
+  const knownTopic = topicOptions.some((t) => t.key === content.topic);
   const visual = useRef<VisualMjmlHandle>(null);
   const code = useRef<HTMLTextAreaElement>(null);
   const insertButton = useRef<HTMLButtonElement>(null);
@@ -130,30 +135,40 @@ export function TemplateEditor({ artifact, content, onChange, readOnly, errors }
               disabled={readOnly || purposes.loading}
               onChange={(e) => {
                 const purpose = e.target.value;
-                const keys = topicsOf(purposes.data?.purposes ?? [], purpose).map((t) => t.key);
+                const keys = topicsOf(purposeOptions, purpose).map((t) => t.key);
                 set({ purpose, topic: content.topic && keys.includes(content.topic) ? content.topic : undefined });
               }}
             >
-              {!purposes.data?.purposes.some((p) => p.key === content.purpose) && (
-                <option value={content.purpose}>{content.purpose || 'Choose…'}</option>
+              {!content.purpose && <option value="">Choose…</option>}
+              {content.purpose && !knownPurpose && (
+                <option value={content.purpose}>{purposes.loading ? 'Loading purpose…' : 'Unavailable purpose'}</option>
               )}
-              {purposes.data?.purposes.map((p) => (
+              {purposeOptions.map((p) => (
                 <option key={p.key} value={p.key}>
-                  {p.name} ({p.key})
+                  {p.name}
                 </option>
               ))}
             </Select>
+            {content.purpose && !knownPurpose && purposes.data && (
+              <p className="mt-1 flex flex-wrap items-center gap-1.5 text-[12px] leading-[18px] text-muted">
+                The saved purpose is unavailable. Choose a purpose to replace it.
+                <Identifier value={content.purpose} label="Purpose ID" />
+              </p>
+            )}
           </Field>
           <Field label="Topic (optional)" hint="A finer choice under the purpose." error={errors.topic}>
             <Select
               value={content.topic ?? ''}
-              disabled={readOnly || purposes.loading || topicsOf(purposes.data?.purposes ?? [], content.purpose).length === 0}
+              disabled={readOnly || purposes.loading || topicOptions.length === 0}
               onChange={(e) => set({ topic: e.target.value || undefined })}
             >
-              <option value="">{topicsOf(purposes.data?.purposes ?? [], content.purpose).length ? 'No topic' : 'No topics'}</option>
-              {topicsOf(purposes.data?.purposes ?? [], content.purpose).map((t) => (
+              <option value="">{topicOptions.length ? 'No topic' : 'No topics'}</option>
+              {content.topic && !knownTopic && (
+                <option value={content.topic}>{purposes.loading ? 'Loading topic…' : 'Unavailable topic'}</option>
+              )}
+              {topicOptions.map((t) => (
                 <option key={t.key} value={t.key}>
-                  {t.name} ({t.key})
+                  {t.name}
                 </option>
               ))}
             </Select>
@@ -257,7 +272,7 @@ export function TemplateEditor({ artifact, content, onChange, readOnly, errors }
               <Alert tone="info">Your role can read this template but not edit it. The preview shows the saved version.</Alert>
             ) : (
               <div className="h-[calc(100vh-340px)] min-h-[420px] min-w-0 overflow-hidden rounded-lg border border-line md:min-h-[560px]">
-                <Suspense fallback={<LoadingBlock lines={8} label="Loading the visual editor" />}>
+                <Suspense fallback={<EditorSkeleton label="Loading the visual editor" />}>
                   <VisualMjml
                     key={visualKey}
                     ref={visual}

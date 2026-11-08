@@ -154,6 +154,8 @@ describe('Starters gallery (#526)', () => {
     h.empty = true;
     renderPage();
     expect(await screen.findByText('No recipes')).toBeTruthy();
-    expect(screen.getByText(/create a template from scratch/)).toBeTruthy();
+    expect(screen.getByText(/Create a template from scratch/)).toBeTruthy();
+    // The empty list names its next action through the existing destination.
+    expect(screen.getByRole('link', { name: 'Open e-mail templates' }).getAttribute('href')).toBe('/content/templates');
   });
 });
