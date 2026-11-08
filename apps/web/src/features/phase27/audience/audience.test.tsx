@@ -36,6 +36,7 @@ const h = vi.hoisted(() => ({
   consentSummary: null as unknown,
   consentRecords: [] as unknown[],
   results: null as unknown,
+  previewQueue: [] as (() => Promise<unknown>)[],
 }));
 
 function callsOf(name: string) {
@@ -129,7 +130,11 @@ vi.mock('../../../app/api', async (importOriginal) => {
         if (name === 'consent.history') return { records: h.consentRecords };
         if (name === 'consent.record') return { recorded: true, allowed: true };
         if (name === 'hostedPages.preview') return { html: '<p>Confirm your subscription</p>' };
-        if (name === 'segments.preview') return { count: 42 };
+        if (name === 'segments.preview') {
+          const next = h.previewQueue.shift();
+          if (next) return await next();
+          return { count: 42 };
+        }
         if (name === 'segments.members') return { members: [], total: 0, nextCursor: null };
         if (name === 'audiences.imports') return { imports: h.rows.imports ?? [] };
         if (name === 'audiences.import')
@@ -233,6 +238,7 @@ beforeEach(() => {
   h.ruleHistoryError = null;
   h.findMatch = true;
   h.consentRecords = [];
+  h.previewQueue = [];
   h.consentSummary = {
     purposes: [
       {
@@ -292,6 +298,18 @@ afterEach(() => {
 
 function renderWithToast(ui: ReactElement) {
   return render(<ToastProvider>{ui}</ToastProvider>);
+}
+
+function estimateText() {
+  return screen.getByText('Estimated size now').parentElement?.textContent ?? '';
+}
+
+function pendingCount() {
+  let resolve!: (value: { count: number }) => void;
+  const promise = new Promise<{ count: number }>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve: (count: number) => resolve({ count }) };
 }
 
 const formContent = {
@@ -412,6 +430,7 @@ describe('segments family (#525)', () => {
     fireEvent.change(screen.getByLabelText('Mode'), { target: { value: 'snapshot' } });
     const source = screen.getByLabelText('Source segment');
     await waitFor(() => expect(within(source).getByRole('option', { name: /Weekly readers · v2/ })).toBeTruthy());
+    expect(callsOf('artifacts.list').filter((c) => c.input.type === 'segment')).toHaveLength(1);
     expect(callsOf('artifacts.get')).toHaveLength(0);
   });
 
@@ -459,6 +478,120 @@ describe('segments family (#525)', () => {
     expect(await screen.findByText('42')).toBeTruthy();
     expect(callsOf('segments.preview')).toHaveLength(1);
     expect(callsOf('segments.preview')[0].input).toMatchObject({ condition: { any: conditionsOf(content) } });
+  });
+
+  it('marks an estimate as previous once the rules change', async () => {
+    h.rows.segment = [row(segmentId, 'segment', 'Weekly readers')];
+    const pending = pendingCount();
+    h.previewQueue = [() => pending.promise];
+    const first = { mode: 'dynamic', condition: { trait: 'loyaltyTier', op: 'eq', value: 'gold' } };
+    const second = { mode: 'dynamic', condition: { trait: 'loyaltyTier', op: 'eq', value: 'silver' } };
+    const { rerender } = renderWithToast(
+      <SegmentEditor
+        artifact={artifact(segmentId, 'segment', 'Weekly readers', first) as never}
+        content={first as never}
+        onChange={() => {}}
+        readOnly={false}
+        errors={{}}
+        warnings={[]}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Estimate audience' }));
+    await waitFor(() => expect(callsOf('segments.preview')).toHaveLength(1));
+    pending.resolve(42);
+    await waitFor(() => expect(estimateText()).toContain('42 people'));
+
+    rerender(
+      <ToastProvider>
+        <SegmentEditor
+          artifact={artifact(segmentId, 'segment', 'Weekly readers', second) as never}
+          content={second as never}
+          onChange={() => {}}
+          readOnly={false}
+          errors={{}}
+          warnings={[]}
+        />
+      </ToastProvider>,
+    );
+    expect(estimateText()).toContain('last estimate was 42 people, for the previous rules');
+  });
+
+  it('ignores a late estimate for rules the person has already edited', async () => {
+    h.rows.segment = [row(segmentId, 'segment', 'Weekly readers')];
+    const pending = pendingCount();
+    h.previewQueue = [() => pending.promise];
+    const first = { mode: 'dynamic', condition: { trait: 'loyaltyTier', op: 'eq', value: 'gold' } };
+    const second = { mode: 'dynamic', condition: { trait: 'loyaltyTier', op: 'eq', value: 'silver' } };
+    const { rerender } = renderWithToast(
+      <SegmentEditor
+        artifact={artifact(segmentId, 'segment', 'Weekly readers', first) as never}
+        content={first as never}
+        onChange={() => {}}
+        readOnly={false}
+        errors={{}}
+        warnings={[]}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Estimate audience' }));
+    await waitFor(() => expect(callsOf('segments.preview')).toHaveLength(1));
+
+    rerender(
+      <ToastProvider>
+        <SegmentEditor
+          artifact={artifact(segmentId, 'segment', 'Weekly readers', second) as never}
+          content={second as never}
+          onChange={() => {}}
+          readOnly={false}
+          errors={{}}
+          warnings={[]}
+        />
+      </ToastProvider>,
+    );
+    pending.resolve(99);
+    await waitFor(() => expect(estimateText()).toContain('previous estimate is no longer current'));
+    expect(estimateText()).not.toContain('99 people');
+  });
+
+  it('ignores an estimate that completes after a newer one', async () => {
+    h.rows.segment = [row(segmentId, 'segment', 'Weekly readers')];
+    const older = pendingCount();
+    const newer = pendingCount();
+    h.previewQueue = [() => older.promise, () => newer.promise];
+    const first = { mode: 'dynamic', condition: { trait: 'loyaltyTier', op: 'eq', value: 'gold' } };
+    const second = { mode: 'dynamic', condition: { trait: 'loyaltyTier', op: 'eq', value: 'silver' } };
+    const { rerender } = renderWithToast(
+      <SegmentEditor
+        artifact={artifact(segmentId, 'segment', 'Weekly readers', first) as never}
+        content={first as never}
+        onChange={() => {}}
+        readOnly={false}
+        errors={{}}
+        warnings={[]}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Estimate audience' }));
+    await waitFor(() => expect(callsOf('segments.preview')).toHaveLength(1));
+
+    rerender(
+      <ToastProvider>
+        <SegmentEditor
+          artifact={artifact(segmentId, 'segment', 'Weekly readers', second) as never}
+          content={second as never}
+          onChange={() => {}}
+          readOnly={false}
+          errors={{}}
+          warnings={[]}
+        />
+      </ToastProvider>,
+    );
+    fireEvent.click(screen.getByRole('button', { name: /Estimate/ }));
+    await waitFor(() => expect(callsOf('segments.preview')).toHaveLength(2));
+    newer.resolve(7);
+    await waitFor(() => expect(estimateText()).toContain('7 people'));
+
+    older.resolve(99);
+    await waitFor(() => expect(estimateText()).not.toContain('99 people'));
+    expect(estimateText()).toContain('7 people');
   });
 
   it('keeps the detail template, the advanced condition view and the audience panel', async () => {

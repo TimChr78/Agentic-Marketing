@@ -55,7 +55,9 @@ export function SegmentPreview({
         <div className="min-w-0 flex-1">
           <p className="text-[12px] text-muted">Estimated size now</p>
           {unsaved ? (
-            <p className="text-[13px] text-muted">Save draft to estimate membership</p>
+            <p className="text-[13px] text-muted">
+              This preview shows the saved version. For unsaved rules, use Content → Estimate audience.
+            </p>
           ) : !can('profiles:read') ? (
             <p className="text-[13px] text-muted">Your role can't read profiles, so the size isn't shown.</p>
           ) : size.loading ? (

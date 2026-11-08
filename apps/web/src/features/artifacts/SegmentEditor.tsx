@@ -623,23 +623,41 @@ function SegmentPicker({
   );
 }
 
+interface Estimate {
+  /** The condition JSON this result (or request) belongs to. */
+  key: string;
+  loading: boolean;
+  count?: number;
+  error?: string;
+}
+
 function EstimatedSize({ condition }: { condition: Condition }) {
   const { can } = useSession();
   const allowed = can('profiles:read');
-  const [asked, setAsked] = useState(false);
-  const [size, setSize] = useState<{ loading: boolean; count?: number; error?: string }>({ loading: false });
+  const conditionKey = JSON.stringify(condition);
+  const keyRef = useRef(conditionKey);
+  keyRef.current = conditionKey;
+  const requestRef = useRef(0);
+  const [estimate, setEstimate] = useState<Estimate | null>(null);
+  const current = estimate && estimate.key === conditionKey ? estimate : null;
+  const previous = estimate && estimate.key !== conditionKey ? estimate : null;
 
-  // A size is an explicit request, never an automatic read on every keystroke or on open. One
-  // request estimates the rules currently on screen; the saved preview keeps its own read.
-  const estimate = async () => {
+  // A size is an explicit request, never an automatic read on every keystroke or on open. The
+  // result belongs to the exact rules it was asked for: editing the rules makes it a previous
+  // estimate, and a response that lands after another request is ignored.
+  const estimateNow = async () => {
     if (!allowed) return;
-    setAsked(true);
-    setSize({ loading: true });
+    const key = keyRef.current;
+    const request = requestRef.current + 1;
+    requestRef.current = request;
+    setEstimate({ key, loading: true });
     try {
       const r = await api.call('segments.preview', { condition });
-      setSize({ loading: false, count: r.count });
+      if (requestRef.current !== request || keyRef.current !== key) return;
+      setEstimate({ key, loading: false, count: r.count });
     } catch (e) {
-      setSize({ loading: false, error: errText(e) });
+      if (requestRef.current !== request || keyRef.current !== key) return;
+      setEstimate({ key, loading: false, error: errText(e) });
     }
   };
 
@@ -650,21 +668,29 @@ function EstimatedSize({ condition }: { condition: Condition }) {
         <p className="text-[12px] text-muted">Estimated size now</p>
         {!allowed ? (
           <p className="text-[13px] text-muted">Your role can’t read profiles, so the size isn’t shown.</p>
-        ) : size.loading ? (
+        ) : current?.loading ? (
           <Skeleton className="mt-1 h-5 w-24" />
-        ) : size.error ? (
-          <p className="text-[13px] text-bad">{size.error} Your rules are retained.</p>
-        ) : size.count !== undefined ? (
+        ) : current?.error ? (
+          <p className="text-[13px] text-bad">{current.error} Your rules are retained.</p>
+        ) : current?.count !== undefined ? (
           <p className="text-[18px] leading-6 font-semibold tabular-nums">
-            {size.count.toLocaleString()} <span className="text-[13px] font-normal text-muted">people</span>
+            {current.count.toLocaleString()} <span className="text-[13px] font-normal text-muted">people</span>
+          </p>
+        ) : previous ? (
+          <p className="text-[13px] text-muted">
+            {previous.loading
+              ? 'The previous estimate is no longer current. Estimate the current rules.'
+              : previous.error
+                ? 'The previous estimate failed. Estimate the current rules.'
+                : `The last estimate was ${(previous.count ?? 0).toLocaleString()} people, for the previous rules.`}
           </p>
         ) : (
           <p className="text-[13px] text-muted">Not estimated yet. Estimate the rules currently shown.</p>
         )}
       </div>
       {allowed && (
-        <Button size="sm" variant="secondary" loading={size.loading} onClick={() => void estimate()}>
-          {asked ? 'Estimate again' : 'Estimate audience'}
+        <Button size="sm" variant="secondary" loading={!!current?.loading} onClick={() => void estimateNow()}>
+          {estimate ? 'Estimate again' : 'Estimate audience'}
         </Button>
       )}
     </div>

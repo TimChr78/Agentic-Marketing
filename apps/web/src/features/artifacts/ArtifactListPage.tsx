@@ -6,6 +6,7 @@ import { parseCreateIntent } from '../../app/createIntent';
 import { useCrumbs } from '../../app/page';
 import { Link, navigate, setSearchParam, useLocation } from '../../app/router';
 import { useSession, useWorkspace } from '../../app/session';
+import { useApi } from '../../app/useApi';
 import { publicationLabel, stateOfArtifact } from '../../lib/state';
 import {
   Alert,
@@ -30,8 +31,8 @@ import { ListPage } from '../../ui/ListPage';
 import { pageWidth } from '../../ui/layout';
 import { OperationalPill } from '../../ui/state';
 import { notifyArtifactsChanged } from '../artifactCache';
-import { type ArtifactRow, useAllArtifacts } from './artifactList';
-import { invalidatePickerIndex } from './pickerIndex';
+import { type ArtifactRow, fetchAllArtifacts } from './artifactList';
+import { invalidatePickerIndex, usePickerIndex } from './pickerIndex';
 
 export type { ArtifactRow } from './artifactList';
 
@@ -96,7 +97,11 @@ export function ArtifactListPage<S = Record<string, never>>({
 }) {
   useCrumbs([{ label: crumb ?? title }]);
   const { can } = useSession();
-  const list = useAllArtifacts(type);
+  // The Phase 24–26 page keeps its own read. A family that opts into the v2 template shares the
+  // bounded picker index instead, so its create dialog's selectors reuse the same rows.
+  const index = usePickerIndex(type, { skip: !template });
+  const legacy = useApi(() => fetchAllArtifacts(type), [type], { skip: !!template });
+  const list = template ? { data: index.data, loading: index.loading, error: index.error, reload: index.reload } : legacy;
   const [q, setQ] = useState('');
   const [state, setState] = useState('');
   const [creating, setCreating] = useState(false);
