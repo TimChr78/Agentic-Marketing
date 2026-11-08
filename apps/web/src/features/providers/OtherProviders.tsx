@@ -1,35 +1,23 @@
-import { BellRing, MessageSquare, MoreHorizontal, Pencil, Plus, Sparkles, Trash2 } from 'lucide-react';
+import { Trash2 } from 'lucide-react';
 import { useState } from 'react';
 import { ApiError, api, errText, type Out } from '../../app/api';
 import { useApi } from '../../app/useApi';
 import {
   Alert,
   Button,
-  Card,
   Checkbox,
   CodeView,
   Drawer,
-  EmptyState,
   Field,
   FieldGroup,
   fieldErrors,
   Input,
-  LoadingBlock,
-  Menu,
   Modal,
   Select,
-  StatusPill,
-  Switch,
-  Table,
-  TableFrame,
-  Tag,
-  Td,
-  THead,
-  Th,
-  Tr,
   useConfirm,
   useToast,
 } from '../../ui';
+import { type ChannelRow, EnabledStatus, type ProviderChannel } from '../phase27/settings/channels';
 
 type Sms = Out<'smsProviders.list'>['providers'][number];
 type SmsAdapter = Sms['adapter'];
@@ -114,25 +102,6 @@ function UseFor<T extends string>({
       ))}
       {error && <p className="text-[12px] text-bad">{error}</p>}
     </FieldGroup>
-  );
-}
-
-function MoreButton({ name, onDelete, busy }: { name: string; onDelete: () => void; busy?: boolean }) {
-  return (
-    <Menu
-      label={`More for ${name}`}
-      trigger={(t) => (
-        <button
-          {...t}
-          type="button"
-          aria-label={`More for ${name}`}
-          className="inline-flex size-7 items-center justify-center rounded-md text-fg-2 hover:bg-surface-2 hover:text-fg"
-        >
-          <MoreHorizontal size={16} />
-        </button>
-      )}
-      items={[{ label: 'Delete', icon: <Trash2 size={14} />, destructive: true, disabled: busy, onSelect: onDelete }]}
-    />
   );
 }
 
@@ -406,7 +375,8 @@ function SmsDrawer({
   );
 }
 
-export function SmsCard() {
+/** SMS providers: name, sender, uses, cost/budget and the full Twilio configuration. */
+export function useSmsChannel(): ProviderChannel {
   const list = useApi(() => api.call('smsProviders.list', {}), []);
   const toast = useToast();
   const [confirmDialog, confirm] = useConfirm();
@@ -452,149 +422,88 @@ export function SmsCard() {
     }
   };
 
-  const providers = list.data?.providers ?? [];
-  return (
-    <>
-      <Card
-        title="SMS"
-        description="Send text messages through Twilio, or log them in development, with opt-out handling for your audience."
-        action={
-          <Button variant="primary" icon={<Plus size={16} />} onClick={() => setEditing('new')}>
-            Add SMS provider
-          </Button>
-        }
-      >
-        {list.loading ? (
-          <LoadingBlock lines={4} />
-        ) : list.error ? (
-          <div className="p-3">
-            <Alert tone="bad" title="Couldn't load SMS providers" onRetry={list.reload}>
-              {errText(list.error)}
-            </Alert>
+  const rows: ChannelRow[] = (list.data?.providers ?? []).map((p) => {
+    const url = `${location.origin}${p.webhookPath}/inbound`;
+    return {
+      id: p.id,
+      name: p.name,
+      adapter: smsLabel(p.adapter),
+      enabled: p.enabled,
+      busy: busy === p.id,
+      status: <EnabledStatus enabled={p.enabled} />,
+      summary: p.useFor.length ? p.useFor.map((u) => MESSAGE_USE_LABELS[u]).join(', ') : 'Not used',
+      detail: (
+        <>
+          {p.sender} · {p.billing.pricePerSegment} {p.billing.currency}/segment
+          {p.billing.monthlyBudget != null && ` · budget ${p.billing.monthlyBudget} ${p.billing.currency}/month`}
+          <div className="mt-0.5 max-w-[260px] truncate font-mono text-[11px]" title={url}>
+            {url}
           </div>
-        ) : providers.length === 0 ? (
-          <EmptyState
-            icon={<MessageSquare size={20} />}
-            title="No SMS provider yet"
-            action={
-              <Button variant="primary" icon={<Plus size={16} />} onClick={() => setEditing('new')}>
-                Add SMS provider
-              </Button>
-            }
-          >
-            Add Twilio so journeys and broadcasts can send text messages, or a development outbox that only writes to the server log. Set
-            the number's incoming-message webhook to the URL shown after you add a Twilio provider, so STOP and HELP replies are handled.
-          </EmptyState>
-        ) : (
-          <TableFrame columns={6}>
-            <Table label="SMS providers">
-              <THead>
-                <tr>
-                  <Th>Name</Th>
-                  <Th className="hidden md:table-cell">Sender</Th>
-                  <Th className="hidden lg:table-cell">Use for</Th>
-                  <Th className="hidden md:table-cell">Cost</Th>
-                  <Th>Status</Th>
-                  <Th align="right">Actions</Th>
-                </tr>
-              </THead>
-              <tbody>
-                {providers.map((p) => {
-                  const url = `${location.origin}${p.webhookPath}/inbound`;
-                  return (
-                    <Tr key={p.id}>
-                      <Td>
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="font-medium text-fg">{p.name}</span>
-                          <Tag>{smsLabel(p.adapter)}</Tag>
-                        </div>
-                        <div className="mt-0.5 flex items-center gap-1 text-[11px] text-muted">
-                          <span className="min-w-0 truncate font-mono" title={url}>
-                            {url}
-                          </span>
-                          <span className="sr-only">Incoming messages URL</span>
-                          <CopyInline value={url} label="Copy incoming messages URL" />
-                        </div>
-                      </Td>
-                      <Td className="hidden md:table-cell">{p.sender}</Td>
-                      <Td className="hidden lg:table-cell">
-                        {p.useFor.length ? p.useFor.map((u) => MESSAGE_USE_LABELS[u]).join(', ') : 'Not used'}
-                      </Td>
-                      <Td className="hidden md:table-cell whitespace-nowrap">
-                        {p.billing.pricePerSegment} {p.billing.currency}/segment
-                        {p.billing.monthlyBudget != null && (
-                          <div className="text-[11px] text-muted">
-                            Budget {p.billing.monthlyBudget} {p.billing.currency}/month
-                          </div>
-                        )}
-                      </Td>
-                      <Td>
-                        <StatusPill tone={p.enabled ? 'good' : 'neutral'}>{p.enabled ? 'Enabled' : 'Disabled'}</StatusPill>
-                      </Td>
-                      <Td align="right">
-                        <div className="flex items-center justify-end gap-2">
-                          <Switch
-                            checked={p.enabled}
-                            onChange={() => void toggle(p)}
-                            label={`Enable ${p.name}`}
-                            hideLabel
-                            disabled={busy === p.id}
-                          />
-                          <Button size="sm" icon={<Pencil size={14} />} onClick={() => setEditing(p)}>
-                            Edit
-                          </Button>
-                          <MoreButton name={p.name} onDelete={() => void remove(p)} busy={busy === p.id} />
-                        </div>
-                      </Td>
-                    </Tr>
-                  );
-                })}
-              </tbody>
-            </Table>
-          </TableFrame>
+        </>
+      ),
+      extras: <CopyInline value={url} label="Copy incoming messages URL" />,
+      note: p.adapter === 'log' ? 'Writes messages to the server log.' : undefined,
+      onToggle: () => void toggle(p),
+      onEdit: () => setEditing(p),
+      menu: [{ label: 'Delete', icon: <Trash2 size={14} />, destructive: true, onSelect: () => void remove(p) }],
+    };
+  });
+
+  return {
+    key: 'sms',
+    label: 'SMS',
+    description: 'Text messages through Twilio, or a development outbox.',
+    addLabel: 'Add SMS provider',
+    onAdd: () => setEditing('new'),
+    rows,
+    loading: list.loading,
+    error: list.error,
+    onRetry: () => void list.reload(),
+    empty: 'Add Twilio so journeys and broadcasts can send text messages, or a development outbox that only writes to the server log.',
+    overlay: (
+      <>
+        {editing && (
+          <SmsDrawer
+            key={editing === 'new' ? 'new' : editing.id}
+            provider={editing === 'new' ? null : editing}
+            onClose={() => setEditing(null)}
+            onSaved={(p, inbound) => {
+              setEditing(null);
+              if (inbound) setCreated(inbound);
+              toast.success(
+                inbound
+                  ? `Added “${inbound.name}”. Copy the incoming-message URL and set it in Twilio.`
+                  : p
+                    ? `Saved “${p.name}”.`
+                    : 'SMS provider added.',
+              );
+              void list.reload();
+            }}
+          />
         )}
-      </Card>
-
-      {editing && (
-        <SmsDrawer
-          key={editing === 'new' ? 'new' : editing.id}
-          provider={editing === 'new' ? null : editing}
-          onClose={() => setEditing(null)}
-          onSaved={(p, inbound) => {
-            setEditing(null);
-            if (inbound) setCreated(inbound);
-            toast.success(
-              inbound
-                ? `Added “${inbound.name}”. Copy the incoming-message URL and set it in Twilio.`
-                : p
-                  ? `Saved “${p.name}”.`
-                  : 'SMS provider added.',
-            );
-            void list.reload();
-          }}
-        />
-      )}
-
-      <Modal
-        open={!!created}
-        onClose={() => setCreated(null)}
-        title={`Incoming messages URL for “${created?.name ?? ''}”`}
-        footer={
-          <Button variant="primary" onClick={() => setCreated(null)}>
-            I've saved it
-          </Button>
-        }
-      >
-        <p className="mb-3">Set this as the incoming-message webhook for the number in Twilio. It handles STOP, HELP and other replies.</p>
-        <CodeView value={created?.url ?? ''} label="Webhook URL" maxHeight={120} />
-        <p className="mt-3 text-[12px] text-muted">The URL stays available on the provider row in this list.</p>
-      </Modal>
-      {confirmDialog}
-    </>
-  );
+        <Modal
+          open={!!created}
+          onClose={() => setCreated(null)}
+          title={`Incoming messages URL for “${created?.name ?? ''}”`}
+          footer={
+            <Button variant="primary" onClick={() => setCreated(null)}>
+              I've saved it
+            </Button>
+          }
+        >
+          <p className="mb-3">
+            Set this as the incoming-message webhook for the number in Twilio. It handles STOP, HELP and other replies.
+          </p>
+          <CodeView value={created?.url ?? ''} label="Webhook URL" maxHeight={120} />
+          <p className="mt-3 text-[12px] text-muted">The URL stays available on the provider row in this list.</p>
+        </Modal>
+        {confirmDialog}
+      </>
+    ),
+  };
 }
 
-/** CopyButton with the row layout used in tables. */
+/** CopyButton with the row layout used in compact rows. */
 function CopyInline({ value, label }: { value: string; label: string }) {
   const [copied, setCopied] = useState(false);
   return (
@@ -925,7 +834,8 @@ function PushDrawer({ provider, onClose, onSaved }: { provider: Push | null; onC
   );
 }
 
-export function PushCard() {
+/** Push providers: web push (generated VAPID keys), Firebase and Apple, with every schema field. */
+export function usePushChannel(): ProviderChannel {
   const list = useApi(() => api.call('pushProviders.list', {}), []);
   const toast = useToast();
   const [confirmDialog, confirm] = useConfirm();
@@ -966,108 +876,54 @@ export function PushCard() {
     }
   };
 
-  const providers = list.data?.providers ?? [];
-  return (
-    <>
-      <Card
-        title="Push"
-        description="Send browser, Android and Apple push notifications to people in your audience."
-        action={
-          <Button variant="primary" icon={<Plus size={16} />} onClick={() => setEditing('new')}>
-            Add push provider
-          </Button>
-        }
-      >
-        {list.loading ? (
-          <LoadingBlock lines={4} />
-        ) : list.error ? (
-          <div className="p-3">
-            <Alert tone="bad" title="Couldn't load push providers" onRetry={list.reload}>
-              {errText(list.error)}
-            </Alert>
-          </div>
-        ) : providers.length === 0 ? (
-          <EmptyState
-            icon={<BellRing size={20} />}
-            title="No push provider yet"
-            action={
-              <Button variant="primary" icon={<Plus size={16} />} onClick={() => setEditing('new')}>
-                Add push provider
-              </Button>
-            }
-          >
-            Add web push for browsers, Firebase for Android or Apple Push Notification service for Apple apps. Until then, push steps in
-            journeys send nothing.
-          </EmptyState>
-        ) : (
-          <TableFrame columns={5}>
-            <Table label="Push providers">
-              <THead>
-                <tr>
-                  <Th>Name</Th>
-                  <Th className="hidden md:table-cell">Adapter</Th>
-                  <Th className="hidden lg:table-cell">Use for</Th>
-                  <Th>Status</Th>
-                  <Th align="right">Actions</Th>
-                </tr>
-              </THead>
-              <tbody>
-                {providers.map((p) => (
-                  <Tr key={p.id}>
-                    <Td>
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="font-medium text-fg">{p.name}</span>
-                        {p.adapter === 'webpush' && typeof p.config.publicKey === 'string' && (
-                          <CopyInline value={p.config.publicKey} label={`Copy public key for ${p.name}`} />
-                        )}
-                      </div>
-                      {p.adapter === 'log' && <div className="mt-0.5 text-[11px] text-muted">Writes to the server log.</div>}
-                    </Td>
-                    <Td className="hidden md:table-cell">{pushLabel(p.adapter)}</Td>
-                    <Td className="hidden lg:table-cell">
-                      {p.useFor.length ? p.useFor.map((u) => MESSAGE_USE_LABELS[u]).join(', ') : 'Not used'}
-                    </Td>
-                    <Td>
-                      <StatusPill tone={p.enabled ? 'good' : 'neutral'}>{p.enabled ? 'Enabled' : 'Disabled'}</StatusPill>
-                    </Td>
-                    <Td align="right">
-                      <div className="flex items-center justify-end gap-2">
-                        <Switch
-                          checked={p.enabled}
-                          onChange={() => void toggle(p)}
-                          label={`Enable ${p.name}`}
-                          hideLabel
-                          disabled={busy === p.id}
-                        />
-                        <Button size="sm" icon={<Pencil size={14} />} onClick={() => setEditing(p)}>
-                          Edit
-                        </Button>
-                        <MoreButton name={p.name} onDelete={() => void remove(p)} busy={busy === p.id} />
-                      </div>
-                    </Td>
-                  </Tr>
-                ))}
-              </tbody>
-            </Table>
-          </TableFrame>
-        )}
-      </Card>
+  const rows: ChannelRow[] = (list.data?.providers ?? []).map((p) => ({
+    id: p.id,
+    name: p.name,
+    adapter: pushLabel(p.adapter),
+    enabled: p.enabled,
+    busy: busy === p.id,
+    status: <EnabledStatus enabled={p.enabled} />,
+    summary: p.useFor.length ? p.useFor.map((u) => MESSAGE_USE_LABELS[u]).join(', ') : 'Not used',
+    detail: p.adapter === 'log' ? 'Writes to the server log.' : undefined,
+    extras:
+      p.adapter === 'webpush' && typeof p.config.publicKey === 'string' ? (
+        <CopyInline value={p.config.publicKey} label={`Copy public key for ${p.name}`} />
+      ) : undefined,
+    onToggle: () => void toggle(p),
+    onEdit: () => setEditing(p),
+    menu: [{ label: 'Delete', icon: <Trash2 size={14} />, destructive: true, onSelect: () => void remove(p) }],
+  }));
 
-      {editing && (
-        <PushDrawer
-          key={editing === 'new' ? 'new' : editing.id}
-          provider={editing === 'new' ? null : editing}
-          onClose={() => setEditing(null)}
-          onSaved={(p) => {
-            setEditing(null);
-            toast.success(p ? `Added “${p.name}”.` : 'Push provider saved.');
-            void list.reload();
-          }}
-        />
-      )}
-      {confirmDialog}
-    </>
-  );
+  return {
+    key: 'push',
+    label: 'Push',
+    description: 'Browser, Android and Apple notifications.',
+    addLabel: 'Add push provider',
+    onAdd: () => setEditing('new'),
+    rows,
+    loading: list.loading,
+    error: list.error,
+    onRetry: () => void list.reload(),
+    empty:
+      'Add web push for browsers, Firebase for Android or Apple Push Notification service for Apple apps. Until then, push steps in journeys send nothing.',
+    overlay: (
+      <>
+        {editing && (
+          <PushDrawer
+            key={editing === 'new' ? 'new' : editing.id}
+            provider={editing === 'new' ? null : editing}
+            onClose={() => setEditing(null)}
+            onSaved={(p) => {
+              setEditing(null);
+              toast.success(p ? `Added “${p.name}”.` : 'Push provider saved.');
+              void list.reload();
+            }}
+          />
+        )}
+        {confirmDialog}
+      </>
+    ),
+  };
 }
 
 /* ------------------------------------------------------------------- AI */
@@ -1331,7 +1187,8 @@ function AiDrawer({ provider, onClose, onSaved }: { provider: Ai | null; onClose
   );
 }
 
-export function AiCard() {
+/** AI providers: API style, models, structured outputs, personal data, uses, budget and key. */
+export function useAiChannel(): ProviderChannel {
   const list = useApi(() => api.call('aiProviders.list', {}), []);
   const toast = useToast();
   const [confirmDialog, confirm] = useConfirm();
@@ -1376,127 +1233,64 @@ export function AiCard() {
     }
   };
 
-  const providers = list.data?.providers ?? [];
-  return (
-    <>
-      <Card
-        title="AI"
-        description="Connect a model account for AI steps in journeys and the copilot."
-        action={
-          <Button variant="primary" icon={<Plus size={16} />} onClick={() => setEditing('new')}>
-            Add AI provider
-          </Button>
-        }
-      >
-        {list.loading ? (
-          <LoadingBlock lines={4} />
-        ) : list.error ? (
-          <div className="p-3">
-            <Alert tone="bad" title="Couldn't load AI providers" onRetry={list.reload}>
-              {errText(list.error)}
-            </Alert>
+  const rows: ChannelRow[] = (list.data?.providers ?? []).map((p) => ({
+    id: p.id,
+    name: p.name,
+    adapter: KIND_LABELS[p.kind],
+    enabled: p.enabled,
+    busy: busy === p.id,
+    status: <EnabledStatus enabled={p.enabled} />,
+    summary: p.useFor.length ? p.useFor.map((u) => AI_USE_LABELS[u]).join(', ') : 'Not used',
+    detail: (
+      <>
+        <span className="font-mono text-[12px]">{p.models.default}</span>
+        {p.models.fast && <span className="font-mono text-[12px]"> · fast {p.models.fast}</span>}
+        <div className="max-w-[360px] truncate font-mono text-[11px]" title={p.baseUrl}>
+          {p.baseUrl}
+        </div>
+        {p.monthlyTokenBudget !== null && (
+          <div className="text-[11px]">
+            {p.usedThisMonth.toLocaleString()} / {p.monthlyTokenBudget.toLocaleString()} tokens this month
           </div>
-        ) : providers.length === 0 ? (
-          <EmptyState
-            icon={<Sparkles size={20} />}
-            title="No AI provider yet"
-            action={
-              <Button variant="primary" icon={<Plus size={16} />} onClick={() => setEditing('new')}>
-                Add AI provider
-              </Button>
-            }
-          >
-            Add an OpenAI- or Anthropic-compatible endpoint with your own API key to run AI steps in journeys and the copilot. Until then,
-            AI steps take their fallback.
-          </EmptyState>
-        ) : (
-          <TableFrame columns={5}>
-            <Table label="AI providers">
-              <THead>
-                <tr>
-                  <Th>Name</Th>
-                  <Th className="hidden md:table-cell">Models</Th>
-                  <Th className="hidden lg:table-cell">Use for</Th>
-                  <Th>Status</Th>
-                  <Th align="right">Actions</Th>
-                </tr>
-              </THead>
-              <tbody>
-                {providers.map((p) => (
-                  <Tr key={p.id}>
-                    <Td>
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="font-medium text-fg">{p.name}</span>
-                        <Tag>{KIND_LABELS[p.kind]}</Tag>
-                      </div>
-                      <div className="mt-0.5 max-w-[280px] truncate font-mono text-[11px] text-muted" title={p.baseUrl}>
-                        {p.baseUrl}
-                      </div>
-                      {p.monthlyTokenBudget !== null && (
-                        <div className="mt-0.5 text-[11px] text-muted">
-                          {p.usedThisMonth.toLocaleString()} / {p.monthlyTokenBudget.toLocaleString()} tokens this month
-                        </div>
-                      )}
-                      {p.monthlyTokenBudget === null && p.usedThisMonth > 0 && (
-                        <div className="mt-0.5 text-[11px] text-muted">{p.usedThisMonth.toLocaleString()} tokens this month</div>
-                      )}
-                    </Td>
-                    <Td className="hidden md:table-cell">
-                      <div className="font-mono text-[12px]">{p.models.default}</div>
-                      {p.models.fast && <div className="font-mono text-[11px] text-muted">Fast: {p.models.fast}</div>}
-                    </Td>
-                    <Td className="hidden lg:table-cell">
-                      {p.useFor.length ? p.useFor.map((u) => AI_USE_LABELS[u]).join(', ') : 'Not used'}
-                    </Td>
-                    <Td>
-                      <StatusPill tone={p.enabled ? 'good' : 'neutral'}>{p.enabled ? 'Enabled' : 'Disabled'}</StatusPill>
-                    </Td>
-                    <Td align="right">
-                      <div className="flex items-center justify-end gap-2">
-                        <Switch
-                          checked={p.enabled}
-                          onChange={() => void toggle(p)}
-                          label={`Enable ${p.name}`}
-                          hideLabel
-                          disabled={busy === p.id}
-                        />
-                        <Button size="sm" icon={<Pencil size={14} />} onClick={() => setEditing(p)}>
-                          Edit
-                        </Button>
-                        <MoreButton name={p.name} onDelete={() => void remove(p)} busy={busy === p.id} />
-                      </div>
-                    </Td>
-                  </Tr>
-                ))}
-              </tbody>
-            </Table>
-          </TableFrame>
         )}
-      </Card>
+        {p.monthlyTokenBudget === null && p.usedThisMonth > 0 && (
+          <div className="text-[11px]">{p.usedThisMonth.toLocaleString()} tokens this month</div>
+        )}
+      </>
+    ),
+    onToggle: () => void toggle(p),
+    onEdit: () => setEditing(p),
+    menu: [{ label: 'Delete', icon: <Trash2 size={14} />, destructive: true, onSelect: () => void remove(p) }],
+  }));
 
-      {editing && (
-        <AiDrawer
-          key={editing === 'new' ? 'new' : editing.id}
-          provider={editing === 'new' ? null : editing}
-          onClose={() => setEditing(null)}
-          onSaved={(p) => {
-            setEditing(null);
-            toast.success(p ? `Added “${p.name}”.` : 'AI provider saved.');
-            void list.reload();
-          }}
-        />
-      )}
-      {confirmDialog}
-    </>
-  );
-}
-
-export function OtherProviders() {
-  return (
-    <div className="space-y-6">
-      <SmsCard />
-      <PushCard />
-      <AiCard />
-    </div>
-  );
+  return {
+    key: 'ai',
+    label: 'AI',
+    description: 'Model accounts for journey AI steps and the copilot.',
+    addLabel: 'Add AI provider',
+    onAdd: () => setEditing('new'),
+    rows,
+    loading: list.loading,
+    error: list.error,
+    onRetry: () => void list.reload(),
+    empty:
+      'Add an OpenAI- or Anthropic-compatible endpoint with your own API key to run AI steps in journeys and the copilot. Until then, AI steps take their fallback.',
+    overlay: (
+      <>
+        {editing && (
+          <AiDrawer
+            key={editing === 'new' ? 'new' : editing.id}
+            provider={editing === 'new' ? null : editing}
+            onClose={() => setEditing(null)}
+            onSaved={(p) => {
+              setEditing(null);
+              toast.success(p ? `Added “${p.name}”.` : 'AI provider saved.');
+              void list.reload();
+            }}
+          />
+        )}
+        {confirmDialog}
+      </>
+    ),
+  };
 }

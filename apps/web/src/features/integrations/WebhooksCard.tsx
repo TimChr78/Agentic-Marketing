@@ -298,17 +298,22 @@ export function WebhooksCard() {
 
   return (
     <div className="space-y-6">
-      <Card
-        title="Webhooks"
-        description="Send customer events and journey webhook steps to an HTTPS endpoint, signed so the receiver can verify them."
-        action={
-          admin ? (
+      <section aria-labelledby="webhook-endpoints">
+        <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <h2 id="webhook-endpoints" className="text-[16px] leading-6 font-semibold">
+              Endpoints
+            </h2>
+            <p className="mt-1 max-w-[70ch] text-[12px] leading-[18px] text-muted">
+              Send customer events and journey webhook steps to an HTTPS endpoint, signed so the receiver can verify them.
+            </p>
+          </div>
+          {admin && (
             <Button variant="primary" icon={<Plus size={16} />} onClick={() => setEditing('new')}>
               Add endpoint
             </Button>
-          ) : undefined
-        }
-      >
+          )}
+        </div>
         <TableFrame
           loading={list.loading}
           error={list.error ? errText(list.error) : null}
@@ -435,7 +440,7 @@ export function WebhooksCard() {
             </tbody>
           </Table>
         </TableFrame>
-      </Card>
+      </section>
 
       <Card
         title="Recent deliveries"

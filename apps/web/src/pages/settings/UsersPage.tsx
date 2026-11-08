@@ -10,7 +10,6 @@ import {
   Button,
   Card,
   Drawer,
-  EmptyState,
   Field,
   FieldGroup,
   fieldErrors,
@@ -18,12 +17,10 @@ import {
   IconButton,
   Input,
   LoadingBlock,
-  PageHeader,
   RadioCards,
   Select,
   StatusPill,
   Table,
-  TableFrame,
   Tag,
   Td,
   THead,
@@ -33,7 +30,7 @@ import {
   useConfirm,
   useToast,
 } from '../../ui';
-import { pageWidth } from '../../ui/layout';
+import { ListPage } from '../../ui/ListPage';
 
 type Member = Out<'members.list'>['members'][number];
 type Invitation = Out<'invitations.list'>['invitations'][number];
@@ -151,73 +148,99 @@ export default function UsersPage() {
     }
   };
 
+  const state = data.loading && !data.data ? 'loading' : data.error ? 'error' : members.length === 0 ? 'empty' : 'ready';
+  const inviteButton = (
+    <Button variant="primary" icon={<Plus size={15} />} onClick={() => setInviting(true)}>
+      Invite person
+    </Button>
+  );
+
   return (
-    <div className={pageWidth('default')}>
-      <PageHeader
+    <div className="space-y-5">
+      <ListPage
         title="Users and roles"
         description="People in this workspace and what they can do. An invitation creates a one-time link to share; no e-mail is sent."
-        actions={
-          can('workspace:admin') && (
-            <Button variant="primary" icon={<Plus size={15} />} onClick={() => setInviting(true)}>
-              Invite person
-            </Button>
-          )
+        primaryAction={can('workspace:admin') ? inviteButton : undefined}
+        countLabel={state === 'ready' ? `${members.length} ${members.length === 1 ? 'member' : 'members'}` : undefined}
+        state={state}
+        notice={
+          state === 'error'
+            ? { title: 'Couldn’t load people', body: data.error, action: <Button onClick={() => void data.reload()}>Retry</Button> }
+            : state === 'empty'
+              ? { title: 'No members', body: 'Invite a person to give them access to this workspace.' }
+              : undefined
         }
-      />
-      {error && (
-        <Alert tone="bad" title="That did not work" className="mb-4">
-          {error}
-        </Alert>
-      )}
-      <TableFrame
-        loading={data.loading}
-        error={data.error}
-        onRetry={data.reload}
-        columns={4}
-        isEmpty={members.length === 0}
-        empty={<EmptyState title="No members">Invite a person to give them access to this workspace.</EmptyState>}
-      >
-        <Table label="Members">
-          <THead>
-            <tr>
-              <Th>Person</Th>
-              <Th>Role</Th>
-              <Th className="hidden md:table-cell">Member since</Th>
-              <Th>
-                <span className="sr-only">Actions</span>
-              </Th>
-            </tr>
-          </THead>
-          <tbody>
+        loadingContent={<LoadingBlock lines={4} label="Loading people" />}
+        desktopTable={
+          <Table label="Members">
+            <THead>
+              <tr>
+                <Th>Person</Th>
+                <Th>Role</Th>
+                <Th className="hidden md:table-cell">Member since</Th>
+                <Th>
+                  <span className="sr-only">Actions</span>
+                </Th>
+              </tr>
+            </THead>
+            <tbody>
+              {members.map((m) => (
+                <Tr key={m.userId}>
+                  <Td>
+                    <div className="font-medium text-fg">
+                      {personName(m)}
+                      {isSelf(m) && <span className="ml-1.5 text-[12px] font-normal text-muted">(you)</span>}
+                    </div>
+                    <div className="mt-0.5 text-[12px] break-all text-muted">{m.email}</div>
+                  </Td>
+                  <Td>
+                    <span title={roleBlockReason(m)} className="inline-block">
+                      <Select
+                        compact
+                        aria-label={`Role for ${personName(m)}`}
+                        value={m.role}
+                        disabled={!mayChangeRole(m) || busyId === m.userId}
+                        onChange={(e) => void changeRole(m, e.target.value as Role)}
+                        className="w-auto"
+                      >
+                        {ROLES.map((r) => (
+                          <option key={r} value={r} disabled={r === 'owner' && !isOwner}>
+                            {ROLE_LABEL[r]}
+                          </option>
+                        ))}
+                      </Select>
+                    </span>
+                  </Td>
+                  <Td className="hidden whitespace-nowrap md:table-cell">{formatDate(m.since)}</Td>
+                  <Td className="text-right">
+                    <span title={removeBlockReason(m)} className="inline-block">
+                      <IconButton
+                        size="sm"
+                        variant="danger"
+                        label={`Remove ${personName(m)}`}
+                        icon={<Trash2 size={15} />}
+                        disabled={!mayRemove(m) || busyId === m.userId}
+                        onClick={() => void remove(m)}
+                      />
+                    </span>
+                  </Td>
+                </Tr>
+              ))}
+            </tbody>
+          </Table>
+        }
+        mobileList={
+          <ul aria-label="Members" className="divide-y divide-line">
             {members.map((m) => (
-              <Tr key={m.userId}>
-                <Td>
-                  <div className="font-medium text-fg">
-                    {personName(m)}
-                    {isSelf(m) && <span className="ml-1.5 text-[12px] font-normal text-muted">(you)</span>}
+              <li key={m.userId} className="space-y-3 p-3">
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="font-medium text-fg">
+                      {personName(m)}
+                      {isSelf(m) && <span className="ml-1.5 text-[12px] font-normal text-muted">(you)</span>}
+                    </p>
+                    <p className="mt-0.5 text-[12px] break-all text-muted">{m.email}</p>
                   </div>
-                  <div className="mt-0.5 text-[12px] break-all text-muted">{m.email}</div>
-                </Td>
-                <Td>
-                  <span title={roleBlockReason(m)} className="inline-block">
-                    <Select
-                      compact
-                      aria-label={`Role for ${personName(m)}`}
-                      value={m.role}
-                      disabled={!mayChangeRole(m) || busyId === m.userId}
-                      onChange={(e) => void changeRole(m, e.target.value as Role)}
-                      className="w-auto"
-                    >
-                      {ROLES.map((r) => (
-                        <option key={r} value={r} disabled={r === 'owner' && !isOwner}>
-                          {ROLE_LABEL[r]}
-                        </option>
-                      ))}
-                    </Select>
-                  </span>
-                </Td>
-                <Td className="hidden whitespace-nowrap md:table-cell">{formatDate(m.since)}</Td>
-                <Td className="text-right">
                   <span title={removeBlockReason(m)} className="inline-block">
                     <IconButton
                       size="sm"
@@ -228,21 +251,51 @@ export default function UsersPage() {
                       onClick={() => void remove(m)}
                     />
                   </span>
-                </Td>
-              </Tr>
+                </div>
+                <dl className="grid grid-cols-[minmax(88px,max-content)_minmax(0,1fr)] gap-x-3 gap-y-2 text-[12px] leading-[18px]">
+                  <dt className="text-muted">Role</dt>
+                  <dd>
+                    <span title={roleBlockReason(m)}>
+                      <Select
+                        compact
+                        aria-label={`Role for ${personName(m)}`}
+                        value={m.role}
+                        disabled={!mayChangeRole(m) || busyId === m.userId}
+                        onChange={(e) => void changeRole(m, e.target.value as Role)}
+                      >
+                        {ROLES.map((r) => (
+                          <option key={r} value={r} disabled={r === 'owner' && !isOwner}>
+                            {ROLE_LABEL[r]}
+                          </option>
+                        ))}
+                      </Select>
+                    </span>
+                  </dd>
+                  <dt className="text-muted">Member since</dt>
+                  <dd>{formatDate(m.since)}</dd>
+                </dl>
+              </li>
             ))}
-          </tbody>
-        </Table>
-      </TableFrame>
+          </ul>
+        }
+      />
 
-      <div className="mt-5 grid gap-5 lg:grid-cols-2">
+      {error && (
+        <Alert tone="bad" title="That did not work">
+          {error}
+        </Alert>
+      )}
+
+      <div className="grid gap-5 lg:grid-cols-2">
         <Card
           title="Pending invitations"
-          description="One-time links that have not been accepted yet."
+          description="One-time links that have not been accepted yet. No e-mail is sent; share the link yourself."
           action={
-            <Button size="sm" variant="ghost" icon={<Plus size={14} />} onClick={() => setInviting(true)}>
-              Invite person
-            </Button>
+            can('workspace:admin') ? (
+              <Button size="sm" variant="ghost" icon={<Plus size={14} />} onClick={() => setInviting(true)}>
+                Invite person
+              </Button>
+            ) : undefined
           }
         >
           {data.loading ? (
@@ -262,7 +315,7 @@ export default function UsersPage() {
                       {inv.status === 'expired' && <StatusPill tone="warn">Expired</StatusPill>}
                     </div>
                     <p className="mt-0.5 text-[12px] text-muted">
-                      Sent {timeAgo(inv.createdAt)} · expires {formatDate(inv.expiresAt)}
+                      Created {timeAgo(inv.createdAt)} · expires {formatDate(inv.expiresAt)}
                     </p>
                   </div>
                   <Button size="sm" variant="ghost" loading={revoking === inv.id} onClick={() => void revoke(inv)}>
