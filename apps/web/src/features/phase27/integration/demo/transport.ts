@@ -1,4 +1,5 @@
 import { ApiError, type CommandTransport, setCommandTransport } from '../../../../app/api';
+import { demoDestinationReads } from '../../demo/reads';
 import { DEMO_ARTIFACTS, DEMO_MEMBERSHIPS, DEMO_PENDING_APPROVALS, DEMO_WORKSPACE, DEMO_WORKSPACE_ID } from './fixtures';
 
 // The demo read transport (#524). It is a CommandTransport: the same names and inputs the server
@@ -93,6 +94,8 @@ export function demoReads(): Record<string, DemoRead<any>> {
         DEMO_ARTIFACTS.filter((a) => !input.type || a.type === input.type),
         input,
       ),
+    // The reads every demo destination exercises (#530). The guard and the seam originals stay.
+    ...demoDestinationReads(),
   };
 }
 
