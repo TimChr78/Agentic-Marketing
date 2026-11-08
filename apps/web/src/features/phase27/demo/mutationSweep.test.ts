@@ -19,6 +19,11 @@ const ALLOWED_FILES = new Set(['app/SignIn.tsx', 'app/ForgotPassword.tsx', 'app/
  */
 const ALLOWED_CONTROLS: { file: string; control: RegExp; reason: string }[] = [
   {
+    file: 'app/Root.tsx',
+    control: /<Button className="mt-4" onClick=\{\(\) => void signOut\(\)\}>/,
+    reason: 'ends the session; changes no workspace data',
+  },
+  {
     file: 'pages/audience/ConsentPage.tsx',
     control: /<Button type="submit" loading=\{lookingUp\}/,
     reason: 'looks up one person; no write',
