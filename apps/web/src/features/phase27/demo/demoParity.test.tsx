@@ -167,6 +167,30 @@ describe('demo destinations render on the real shell (#530)', () => {
     expect(screen.getByRole('note', { name: 'Demo mode' })).toBeTruthy();
   });
 
+  it('opens a person detail from the fixture list', async () => {
+    vi.stubGlobal('fetch', vi.fn());
+    const { DEMO_PROFILE_ROWS } = await import('./fixtures');
+    const person = DEMO_PROFILE_ROWS[0]!;
+    window.history.replaceState(null, '', `/audience/people/${person.id}`);
+    const { DemoRoot } = await import('../integration/demo/DemoRoot');
+    render(<DemoRoot />);
+
+    expect(await screen.findByRole('heading', { level: 1, name: person.email ?? '' })).toBeTruthy();
+    expect(screen.getByRole('note', { name: 'Demo mode' })).toBeTruthy();
+  });
+
+  it('opens an artifact detail from the fixture list', async () => {
+    vi.stubGlobal('fetch', vi.fn());
+    const { DEMO_ARTIFACTS } = await import('../integration/demo');
+    const template = DEMO_ARTIFACTS.find((row) => row.name === 'Weekly Signal #42')!;
+    window.history.replaceState(null, '', `/content/templates/${template.id}`);
+    const { DemoRoot } = await import('../integration/demo/DemoRoot');
+    render(<DemoRoot />);
+
+    expect(await screen.findByRole('heading', { level: 1, name: 'Weekly Signal #42' })).toBeTruthy();
+    expect(screen.getByRole('note', { name: 'Demo mode' })).toBeTruthy();
+  });
+
   it('opens the legacy hash links at their real destinations', async () => {
     const { enterDemo } = await import('./entry');
     const rows: [string, string][] = [
