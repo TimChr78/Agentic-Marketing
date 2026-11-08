@@ -464,6 +464,18 @@ function dropsAttribute(attribute: TagAttribute): boolean {
   return URL_ATTRIBUTES.has(attribute.lowerName) && attribute.value !== null && activeUrl(attribute.value);
 }
 
+/** The index just past a comment opened at `from - 4`, or -1 when it runs to the end of input. */
+function commentEnd(body: string, from: number): number {
+  if (body[from] === '>') return from + 1;
+  if (body.startsWith('->', from)) return from + 2;
+  // One forward scan to the first terminator, so each comment costs only its own length.
+  for (let at = body.indexOf('--', from); at >= 0; at = body.indexOf('--', at + 1)) {
+    if (body[at + 2] === '>') return at + 3;
+    if (body[at + 2] === '!' && body[at + 3] === '>') return at + 4;
+  }
+  return -1;
+}
+
 /**
  * Removes active content from e-mail HTML before the public archive and web version embed it.
  * The strict CSP (`default-src 'none'`) already blocks scripts, so this is defence in depth.
@@ -481,15 +493,17 @@ function sanitiseEmailBody(body: string): string {
     }
     out += body.slice(i, open);
 
-    // Comments are opaque: copy them whole so a tag-looking string inside one stays inert.
+    // Comments are opaque: copy them whole so a tag-looking string inside one stays inert. They
+    // close where a browser closes them: `<!-->` and `<!--->` are empty comments, and a comment
+    // ends at the first `-->` or `--!>`, so markup after an early close is still sanitised.
     if (body.startsWith('<!--', open)) {
-      const end = body.indexOf('-->', open + 4);
-      if (end < 0) {
+      const after = commentEnd(body, open + 4);
+      if (after < 0) {
         out += body.slice(open);
         break;
       }
-      out += body.slice(open, end + 3);
-      i = end + 3;
+      out += body.slice(open, after);
+      i = after;
       continue;
     }
     // Declarations such as <!doctype html> are copied through unchanged.

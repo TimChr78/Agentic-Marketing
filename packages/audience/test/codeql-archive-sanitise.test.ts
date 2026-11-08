@@ -320,3 +320,35 @@ describe('archive sanitising: benign output is unchanged', () => {
     }
   });
 });
+
+describe('archive sanitising: comments close where a browser closes them (integrator review)', () => {
+  const body = (inner: string) => emailParts(`<html><body>${inner}</body></html>`).body;
+
+  it('treats <!--> and <!---> as empty comments, so a following script is still removed', () => {
+    for (const opener of ['<!-->', '<!--->']) {
+      const out = body(`${opener}<script>alert(1)</script>ok`);
+      expect(out, opener).not.toMatch(/<script/i);
+      expect(out).toContain('ok');
+    }
+  });
+
+  it('ends a comment at --!> as browsers do', () => {
+    expect(body('<!-- a --!><script>alert(1)</script>ok')).not.toMatch(/<script/i);
+  });
+
+  it('keeps ordinary and MSO conditional comments byte-identical', () => {
+    for (const html of ['<!-- note --><p>ok</p>', '<!--[if mso]><table><tr><td><![endif]--><p>ok</p>']) {
+      expect(body(html)).toBe(html);
+    }
+  });
+});
+
+describe('archive sanitising: comment scanning stays linear (integrator review)', () => {
+  it('handles many short comments and long dash runs quickly', () => {
+    for (const inner of ['<!---->'.repeat(30_000), `<!--${'-'.repeat(100_000)}`, '<!-- -- '.repeat(20_000)]) {
+      const started = performance.now();
+      emailParts(`<html><body>${inner}</body></html>`);
+      expect(performance.now() - started).toBeLessThan(50);
+    }
+  });
+});
