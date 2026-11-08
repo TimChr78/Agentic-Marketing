@@ -1099,7 +1099,21 @@ export const DEMO_WEBHOOKS: Out<'webhooks.list'> = {
 export const DEMO_CONNECTIONS: Out<'connections.list'> = { connections: [] };
 export const DEMO_CONNECTORS: Out<'connectors.list'> = { connectors: [] };
 export const DEMO_SOURCES: Out<'sources.list'> = { sources: [] };
-export const DEMO_EMAIL_PROVIDERS: Out<'emailProviders.list'> = { providers: [], adapters: [], warnings: [] };
+export const DEMO_EMAIL_PROVIDERS: Out<'emailProviders.list'> = {
+  providers: [],
+  adapters: [
+    {
+      id: 'smtp',
+      label: 'Any SMTP relay',
+      config: {},
+      secrets: {},
+      tracking: 'configurable',
+      trackingNote: 'Your relay may add open and click tracking; the workspace setting decides.',
+      docsUrl: null,
+    },
+  ],
+  warnings: [],
+};
 export const DEMO_SMS_PROVIDERS: Out<'smsProviders.list'> = { providers: [] };
 export const DEMO_PUSH_PROVIDERS: Out<'pushProviders.list'> = { providers: [] };
 export const DEMO_AI_PROVIDERS: Out<'aiProviders.list'> = { providers: [] };

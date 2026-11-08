@@ -673,7 +673,7 @@ export function ArtifactDetailPage({
               <Button onClick={() => setDiscardOpen(false)} disabled={discarding}>
                 Keep the draft
               </Button>
-              <Button variant="danger" loading={discarding} onClick={() => void discardDraft()}>
+              <Button variant="danger" mutation loading={discarding} onClick={() => void discardDraft()}>
                 Discard draft
               </Button>
             </>
@@ -747,7 +747,7 @@ export function ArtifactDetailPage({
                     <Button variant="ghost" onClick={resetToSaved}>
                       Discard changes
                     </Button>
-                    <Button variant="primary" loading={saving} onClick={() => void save()}>
+                    <Button variant="primary" mutation loading={saving} onClick={() => void save()}>
                       Save draft
                     </Button>
                   </>
@@ -758,7 +758,7 @@ export function ArtifactDetailPage({
                   </ButtonLink>
                 )}
                 {canPublish && (
-                  <Button variant="primary" icon={<Send size={14} />} onClick={() => setPublishing(true)}>
+                  <Button variant="primary" icon={<Send size={14} />} mutation onClick={() => setPublishing(true)}>
                     {directPublish ? 'Publish' : 'Submit for review'}
                   </Button>
                 )}
@@ -813,7 +813,7 @@ export function ArtifactDetailPage({
                 <Button variant="ghost" onClick={resetToSaved}>
                   Discard changes
                 </Button>
-                <Button variant="primary" loading={saving} onClick={() => void save()}>
+                <Button variant="primary" mutation loading={saving} onClick={() => void save()}>
                   Save draft
                 </Button>
               </>
@@ -824,7 +824,7 @@ export function ArtifactDetailPage({
               </ButtonLink>
             )}
             {canPublish && (
-              <Button variant="primary" icon={<Send size={14} />} onClick={() => setPublishing(true)}>
+              <Button variant="primary" icon={<Send size={14} />} mutation onClick={() => setPublishing(true)}>
                 {directPublish ? 'Publish' : 'Submit for review'}
               </Button>
             )}
@@ -892,7 +892,7 @@ function PublishDialog({
       footer={
         <>
           <Button onClick={onClose}>Cancel</Button>
-          <Button variant="primary" loading={busy} onClick={submit}>
+          <Button variant="primary" mutation loading={busy} onClick={submit}>
             {direct ? `Publish v${artifact.version.number}` : 'Submit for review'}
           </Button>
         </>
@@ -940,6 +940,7 @@ function RenameDialog({ name, onClose, onRename }: { name: string; onClose: () =
           <Button onClick={onClose}>Cancel</Button>
           <Button
             variant="primary"
+            mutation
             disabled={!valid}
             loading={busy}
             onClick={async () => {

@@ -68,7 +68,7 @@ export function CreateTokenDrawer({
           <Button variant="ghost" onClick={onClose}>
             Cancel
           </Button>
-          <Button variant="primary" className="ml-auto" icon={<KeyRound size={14} />} loading={busy} onClick={submit}>
+          <Button variant="primary" className="ml-auto" mutation icon={<KeyRound size={14} />} loading={busy} onClick={submit}>
             Create token
           </Button>
         </>

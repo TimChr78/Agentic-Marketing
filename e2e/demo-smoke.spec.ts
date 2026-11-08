@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test';
 
-// #530 demo parity: the real shell on fixtures, the persistent marker, working legacy deep links,
-// zero API traffic, and no demo fixtures in a real admin route.
+// #530 demo parity: the real shell on fixtures, a URL that stays in /demo, the persistent marker,
+// working legacy deep links, zero API traffic, and no demo fixtures in a real admin route.
 test('@smoke demo runs the real shell on sample data with no API traffic', async ({ page }) => {
   const api: string[] = [];
   page.on('request', (request) => {
@@ -13,12 +13,32 @@ test('@smoke demo runs the real shell on sample data with no API traffic', async
   await expect(page.getByText('Simulated demo · sample data')).toBeVisible();
   await expect(page.getByRole('navigation', { name: 'Main' })).toBeVisible();
   await expect(page.getByRole('heading', { level: 1, name: 'Home' })).toBeVisible();
+  await expect(page).toHaveURL(/\/demo$/);
 
-  await page.goto('/demo#profiles');
+  // In-app navigation keeps the /demo namespace.
+  await page.getByRole('navigation', { name: 'Main' }).getByRole('link', { name: 'People' }).click();
+  await expect(page).toHaveURL(/\/demo\/audience\/people$/);
+  await expect(page.getByRole('heading', { level: 1, name: 'People' })).toBeVisible();
+
+  // A reload at the copied URL stays in the demo.
+  await page.reload();
   await expect(page.getByRole('heading', { level: 1, name: 'People' })).toBeVisible();
   await expect(page.getByRole('note', { name: 'Demo mode' })).toBeVisible();
+  await expect(page).toHaveURL(/\/demo\/audience\/people$/);
+
+  // A link opened in a new tab at the same address is still the demo, never the real workspace.
+  const other = await page.context().newPage();
+  await other.goto(page.url());
+  await expect(other.getByRole('note', { name: 'Demo mode' })).toBeVisible();
+  await expect(other.getByRole('heading', { level: 1, name: 'People' })).toBeVisible();
+  await other.close();
+
+  await page.goto('/demo#profiles');
+  await expect(page).toHaveURL(/\/demo\/audience\/people$/);
+  await expect(page.getByRole('heading', { level: 1, name: 'People' })).toBeVisible();
 
   await page.goto('/demo#approvals');
+  await expect(page).toHaveURL(/\/demo\/approvals$/);
   await expect(page.getByRole('heading', { level: 1, name: 'Approvals' })).toBeVisible();
   await expect(page.getByRole('note', { name: 'Demo mode' })).toBeVisible();
 

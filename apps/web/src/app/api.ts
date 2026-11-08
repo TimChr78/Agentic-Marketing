@@ -97,6 +97,9 @@ export const api = {
 /**
  * A client that acts in one chosen brand for a single call, without switching the shell. Used when
  * creating a token for another brand (#187); the server still checks the person's role there.
+ *
+ * It still obeys the installed transport: the demo fixture transport answers or refuses this call
+ * exactly like `api.call`, so a cross-brand action can never build a real credentialed client.
  */
 export function apiForWorkspace(id: string) {
   const fetchForWorkspace: typeof fetch = (input, init = {}) => {
@@ -104,7 +107,49 @@ export function apiForWorkspace(id: string) {
     headers.set('x-workspace-id', id);
     return fetch(input, { ...init, headers });
   };
-  return createClient<Commands>({ credentials: 'include', fetch: fetchForWorkspace });
+  const client = createClient<Commands>({ credentials: 'include', fetch: fetchForWorkspace });
+  return {
+    call<N extends Commands[number]['name']>(
+      name: N,
+      input: CommandInput<Commands, N>,
+      callOpts: { idempotencyKey?: string } = {},
+    ): Promise<CommandOutput<Commands, N>> {
+      if (commandTransport) {
+        return (
+          commandTransport as unknown as (
+            n: N,
+            i: CommandInput<Commands, N>,
+            o?: { idempotencyKey?: string },
+          ) => Promise<CommandOutput<Commands, N>>
+        )(name, input, callOpts);
+      }
+      return client.call(name, input, callOpts) as Promise<CommandOutput<Commands, N>>;
+    },
+  };
+}
+
+/**
+ * The streaming seam (#530). The copilot's server-sent-events response cannot go through a typed
+ * command, so it has its own transport. Production leaves it unset and streams through `fetch`; the
+ * demo installs one that refuses, so no page can open a real assistant stream with the visitor's
+ * session cookie.
+ */
+export type StreamTransport = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+
+let streamTransport: StreamTransport | null = null;
+
+/** Installs a stream transport (`null` restores `fetch`) and returns the uninstall. */
+export function setStreamTransport(transport: StreamTransport | null): () => void {
+  const previous = streamTransport;
+  streamTransport = transport;
+  return () => {
+    if (streamTransport === transport) streamTransport = previous;
+  };
+}
+
+/** Every streaming request goes through the installed transport, like `api.call` does. */
+export function streamFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  return streamTransport ? streamTransport(input, init) : fetch(input, init);
 }
 export type CommandName = Commands[number]['name'];
 export type Out<N extends CommandName> = CommandOutput<Commands, N>;

@@ -1,4 +1,4 @@
-import { cleanup, render, screen, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { api, setCommandTransport } from '../../../app/api';
 import { createDemoTransport, DEMO_MUTATIONS, DEMO_READ_ONLY_MESSAGE, demoReads } from '../integration/demo';
@@ -207,16 +207,44 @@ describe('demo destinations render on the real shell (#530)', () => {
     expect(screen.getByRole('note', { name: 'Demo mode' })).toBeTruthy();
   });
 
+  it('keeps every demo navigation under /demo, including a reload', async () => {
+    vi.stubGlobal('fetch', vi.fn());
+    window.history.replaceState(null, '', '/demo/approvals');
+    const { DemoRoot } = await import('../integration/demo/DemoRoot');
+    const first = render(<DemoRoot />);
+
+    expect(await screen.findByRole('heading', { level: 1, name: 'Approvals' })).toBeTruthy();
+    expect(window.location.pathname).toBe('/demo/approvals');
+    const nav = screen.getByRole('navigation', { name: 'Main' });
+    fireEvent.click(within(nav).getByRole('link', { name: 'People' }));
+
+    await waitFor(() => expect(window.location.pathname).toBe('/demo/audience/people'));
+    expect(await screen.findByRole('heading', { level: 1, name: 'People' })).toBeTruthy();
+    expect(screen.getByRole('note', { name: 'Demo mode' })).toBeTruthy();
+
+    // A copied link or a reload at that URL is still the demo, never the real workspace.
+    first.unmount();
+    render(<DemoRoot />);
+    expect(await screen.findByRole('heading', { level: 1, name: 'People' })).toBeTruthy();
+    expect(screen.getByRole('note', { name: 'Demo mode' })).toBeTruthy();
+  });
+
+  it('a production path is never a demo entry', async () => {
+    const { isDemoEntry } = await import('./entry');
+    window.history.replaceState(null, '', '/approvals');
+    expect(isDemoEntry()).toBe(false);
+  });
+
   it('opens the legacy hash links at their real destinations', async () => {
     const { enterDemo } = await import('./entry');
     const rows: [string, string][] = [
-      ['#overview', '/'],
-      ['#profiles', '/audience/people'],
-      ['#email', '/content/templates'],
-      ['#setup', '/settings/integrations'],
-      ['#journeys', '/marketing/journeys'],
-      ['#analytics', '/insights/analytics'],
-      ['#approvals', '/approvals'],
+      ['#overview', '/demo'],
+      ['#profiles', '/demo/audience/people'],
+      ['#email', '/demo/content/templates'],
+      ['#setup', '/demo/settings/integrations'],
+      ['#journeys', '/demo/marketing/journeys'],
+      ['#analytics', '/demo/insights/analytics'],
+      ['#approvals', '/demo/approvals'],
     ];
     for (const [hash, path] of rows) {
       window.history.replaceState(null, '', `/demo${hash}`);
@@ -230,7 +258,7 @@ describe('demo destinations render on the real shell (#530)', () => {
     const { enterDemo } = await import('./entry');
     window.history.replaceState(null, '', '/demo/not-a-real-destination');
     enterDemo();
-    expect(window.location.pathname).toBe('/not-a-real-destination');
+    expect(window.location.pathname).toBe('/demo/not-a-real-destination');
     expect(window.history.state.demo).toBe(true);
   });
 

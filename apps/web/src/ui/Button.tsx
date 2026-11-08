@@ -1,5 +1,6 @@
 import { Loader2 } from 'lucide-react';
 import { type AnchorHTMLAttributes, type ButtonHTMLAttributes, forwardRef, type ReactNode } from 'react';
+import { useCapabilities } from '../app/capabilities';
 import { cx } from './cx';
 
 export type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'danger' | 'danger-solid';
@@ -38,18 +39,27 @@ export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   /** Shows a spinner and blocks clicks, keeping the button's width. */
   loading?: boolean;
   icon?: ReactNode;
+  /**
+   * Marks a control that changes data. In a restricted surface (the demo) it renders disabled and
+   * carries the reason as its description; outside one it is unchanged.
+   */
+  mutation?: boolean;
 }
 
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button(
-  { variant = 'secondary', size = 'md', loading, icon, className, children, disabled, type = 'button', ...p },
+  { variant = 'secondary', size = 'md', loading, icon, mutation, className, children, disabled, type = 'button', ...p },
   ref,
 ) {
+  const { mutations, reason } = useCapabilities();
+  const blocked = mutation === true && !mutations;
   return (
     <button
       ref={ref}
       type={type}
       {...p}
-      disabled={disabled || loading}
+      title={blocked ? (reason ?? p.title) : p.title}
+      disabled={disabled || loading || blocked}
+      data-demo-blocked={blocked || undefined}
       aria-busy={loading || undefined}
       className={buttonClass({ variant, size, className })}
     >
@@ -65,19 +75,25 @@ export interface IconButtonProps extends Omit<ButtonHTMLAttributes<HTMLButtonEle
   icon: ReactNode;
   size?: ButtonSize;
   variant?: 'ghost' | 'secondary' | 'danger';
+  /** Marks a control that changes data; disabled with the reason in a restricted surface. */
+  mutation?: boolean;
 }
 
 export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(function IconButton(
-  { label, icon, size = 'md', variant = 'ghost', className, type = 'button', ...p },
+  { label, icon, size = 'md', variant = 'ghost', mutation, className, type = 'button', ...p },
   ref,
 ) {
+  const { mutations, reason } = useCapabilities();
+  const blocked = mutation === true && !mutations;
   return (
     <button
       ref={ref}
       type={type}
       aria-label={label}
-      title={label}
+      title={blocked ? `${label} · ${reason ?? 'Unavailable'}` : label}
       {...p}
+      disabled={p.disabled || blocked}
+      data-demo-blocked={blocked || undefined}
       className={cx(
         base,
         size === 'sm' ? 'size-10 pointer-coarse:size-10 md:size-7' : 'size-10 pointer-coarse:size-10 md:size-8',

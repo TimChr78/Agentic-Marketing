@@ -1,6 +1,7 @@
 import { ChevronRight, Loader2, Send, Trash2, Wrench } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
-import { api, errText } from '../../app/api';
+import { api, errText, streamFetch } from '../../app/api';
+import { useCopilotAvailable } from '../../app/capabilities';
 import { useWorkspace } from '../../app/session';
 import { useApi } from '../../app/useApi';
 import { Alert, Button, Drawer, EmptyState, IconButton, JsonView, Select, StatusPill, Tag, Textarea, timeAgo, useConfirm } from '../../ui';
@@ -53,6 +54,7 @@ const SUGGESTIONS = [
 
 export function CopilotDrawer({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { can, user } = useWorkspace();
+  const { available: copilotAvailable, reason: copilotReason } = useCopilotAvailable();
   const [items, setItems] = useState<Item[]>([]);
   const [conversationId, setConversationId] = useState<string | undefined>();
   const [input, setInput] = useState('');
@@ -67,9 +69,9 @@ export function CopilotDrawer({ open, onClose }: { open: boolean; onClose: () =>
   // biome-ignore lint/correctness/useExhaustiveDependencies: scroll to the newest message whenever the list changes, which the body does not read
   useEffect(() => end.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }), [items]);
 
-  const past = useApi(() => api.call('copilot.conversations', {}), [], { skip: !open });
+  const past = useApi(() => api.call('copilot.conversations', {}), [], { skip: !open || !copilotAvailable });
   // Agents this person may talk as: ones they sponsor, or any active agent for an admin.
-  const agents = useApi(() => api.call('agents.list', {}), [], { skip: !open });
+  const agents = useApi(() => api.call('agents.list', {}), [], { skip: !open || !copilotAvailable });
   const actable = (agents.data?.agents ?? []).filter((a) => a.status === 'active' && (a.sponsor.id === user.id || can('workspace:admin')));
   const agentName = (id: string | null) => (id ? (agents.data?.agents.find((a) => a.id === id)?.name ?? id) : null);
   const loadPast = () => void past.reload();
@@ -89,6 +91,10 @@ export function CopilotDrawer({ open, onClose }: { open: boolean; onClose: () =>
   }
 
   async function ask(text: string) {
+    if (!copilotAvailable) {
+      setError(copilotReason ?? 'The assistant is not available in the demo.');
+      return;
+    }
     if (!text.trim() || busy) return;
     setInput('');
     setBusy(true);
@@ -105,7 +111,7 @@ export function CopilotDrawer({ open, onClose }: { open: boolean; onClose: () =>
       } else setItems((xs) => apply(xs, e, streaming));
     };
     try {
-      const res = await fetch('/api/copilot', {
+      const res = await streamFetch('/api/copilot', {
         method: 'POST',
         credentials: 'include',
         headers: { 'content-type': 'application/json' },
@@ -181,6 +187,14 @@ export function CopilotDrawer({ open, onClose }: { open: boolean; onClose: () =>
     >
       {dialog}
       <div className="flex h-full min-h-0 flex-col">
+        {!copilotAvailable && (
+          <div className="border-b border-line px-5 py-3">
+            <Alert tone="info" title="The assistant is not available in the demo">
+              {copilotReason ?? 'The demo does not start assistant conversations.'} Open the demo in a real workspace to draft with the
+              copilot; nothing here sends a message or runs a tool.
+            </Alert>
+          </div>
+        )}
         {past.error && (
           <div className="border-b border-line px-5 py-2">
             <Alert tone="bad" title="Couldn't load earlier conversations">
@@ -233,7 +247,7 @@ export function CopilotDrawer({ open, onClose }: { open: boolean; onClose: () =>
               {can('artifacts:read') ? (
                 <div className="flex flex-wrap gap-2">
                   {SUGGESTIONS.map((s) => (
-                    <Button key={s} variant="secondary" size="sm" onClick={() => void ask(s)}>
+                    <Button key={s} variant="secondary" size="sm" disabled={!copilotAvailable} onClick={() => void ask(s)}>
                       {s}
                     </Button>
                   ))}
@@ -300,7 +314,7 @@ export function CopilotDrawer({ open, onClose }: { open: boolean; onClose: () =>
             value={input}
             placeholder="Ask or give a task"
             aria-label="Message to the copilot"
-            disabled={!can('artifacts:read')}
+            disabled={!can('artifacts:read') || !copilotAvailable}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey) {
@@ -316,7 +330,7 @@ export function CopilotDrawer({ open, onClose }: { open: boolean; onClose: () =>
             <Button
               variant="primary"
               icon={<Send size={14} />}
-              disabled={busy || !input.trim() || !can('artifacts:read')}
+              disabled={busy || !input.trim() || !can('artifacts:read') || !copilotAvailable}
               onClick={() => void ask(input)}
             >
               Send

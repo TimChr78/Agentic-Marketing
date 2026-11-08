@@ -1,3 +1,5 @@
+import { setRouterBasePath } from '../../../app/router';
+
 /** Where the legacy demo's hash routes live in the real product. */
 const LEGACY_HASH: Record<string, string> = {
   overview: '/',
@@ -12,6 +14,9 @@ const LEGACY_HASH: Record<string, string> = {
   live: '/',
 };
 
+/** The persistent demo URL namespace. Every demo link and navigation stays under it. */
+export const DEMO_BASE_PATH = '/demo';
+
 export interface DemoEntry {
   /** True when the visitor arrived at the retired live-site walkthrough. */
   liveRetired: boolean;
@@ -23,38 +28,44 @@ const isSingleFileBuild = () => import.meta.env.MODE === 'single';
 export function isDemoEntry(): boolean {
   if (isSingleFileBuild()) return true;
   if (typeof location === 'undefined') return false;
-  if (location.pathname === '/demo' || location.pathname.startsWith('/demo/')) return true;
-  // Every demo navigation carries `demo: true` in history state. A new tab, a typed real URL, or an
-  // exit to sign-in starts a real navigation without it, so the demo never leaks into a real
-  // workspace and a real workspace never inherits fixtures.
+  if (location.pathname === DEMO_BASE_PATH || location.pathname.startsWith(`${DEMO_BASE_PATH}/`)) return true;
+  // A demo history entry from the same tab. A production link, a typed real URL or the sign-in exit
+  // starts a real navigation without it, so the demo never leaks into a real workspace.
   return (history.state as { demo?: boolean } | null)?.demo === true;
 }
 
 /**
- * Normalises the demo entry into the real route it represents, before the real Root mounts. The
- * `/demo` prefix, the legacy hash routes and an unknown demo address all resolve here:
- * a known hash maps to its real section, an unknown one becomes an ordinary Not found path that
- * stays in the demo (the marker and fixture transport are already installed).
+ * Normalises the demo entry into its URL namespace, before the shell mounts. `/demo` is the base
+ * every link keeps, the legacy hash routes map to their real sections, and an unknown demo address
+ * becomes an ordinary Not found path that stays inside the demo.
  */
 export function enterDemo(): DemoEntry {
-  const underDemo = location.pathname === '/demo' || location.pathname.startsWith('/demo/');
-  let path = underDemo ? location.pathname.slice('/demo'.length) || '/' : location.pathname;
+  const single = isSingleFileBuild();
+  const pathname = location.pathname;
+  const underDemo = !single && (pathname === DEMO_BASE_PATH || pathname.startsWith(`${DEMO_BASE_PATH}/`));
   const hash = location.hash;
+  let internal = single ? pathname : underDemo ? pathname.slice(DEMO_BASE_PATH.length) || '/' : pathname;
   let liveRetired = false;
 
-  if (underDemo && hash) {
+  if (hash) {
     const legacy = hash.replace(/^#/, '').trim().toLowerCase();
     const target = LEGACY_HASH[legacy];
     if (target !== undefined) {
-      path = target;
+      internal = target;
       liveRetired = legacy === 'live';
     } else {
       // Keep the requested words so the page reads as this demo address, not a real destination.
-      path = `/demo-unknown/${encodeURIComponent(legacy || 'address')}`;
+      internal = `/unknown/${encodeURIComponent(legacy || 'address')}`;
     }
   }
 
-  const next = `${path}${location.search}${underDemo ? '' : hash}`;
+  if (single) {
+    setRouterBasePath('');
+  } else {
+    setRouterBasePath(DEMO_BASE_PATH);
+  }
+  const path = internal === '/' ? DEMO_BASE_PATH : `${DEMO_BASE_PATH}${internal}`;
+  const next = single ? `${internal}${location.search}` : `${path}${location.search}`;
   try {
     history.replaceState({ ...(history.state ?? {}), demo: true, demoLiveRetired: liveRetired }, '', next);
   } catch {

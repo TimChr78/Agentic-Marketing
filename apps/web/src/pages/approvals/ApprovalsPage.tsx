@@ -331,7 +331,14 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
         description="Changes waiting for a person. Open each one to see the actual e-mail, form, journey, segment or broadcast before you approve it."
         actions={
           canApprove && status === 'pending' && items.length > 0 ? (
-            <Button variant="primary" icon={<CheckCheck size={15} />} disabled={!chosen.length} loading={batching} onClick={batchApprove}>
+            <Button
+              variant="primary"
+              icon={<CheckCheck size={15} />}
+              mutation
+              disabled={!chosen.length}
+              loading={batching}
+              onClick={batchApprove}
+            >
               {chosen.length ? `Approve ${chosen.length} selected` : 'Approve selected'}
             </Button>
           ) : undefined
@@ -643,7 +650,7 @@ function WorkspaceSettings({
                     >
                       Cancel
                     </Button>
-                    <Button variant="danger" icon={<X size={14} />} loading={busy === p.id} onClick={() => reject(p)}>
+                    <Button variant="danger" icon={<X size={14} />} mutation loading={busy === p.id} onClick={() => reject(p)}>
                       Reject with reason
                     </Button>
                   </div>
@@ -653,6 +660,7 @@ function WorkspaceSettings({
                   <Button
                     variant="danger"
                     icon={<X size={14} />}
+                    mutation
                     onClick={() => {
                       setRejecting(p.id);
                       setReason('');
@@ -661,7 +669,7 @@ function WorkspaceSettings({
                   >
                     Reject
                   </Button>
-                  <Button variant="primary" icon={<Check size={14} />} loading={busy === p.id} onClick={() => approve(p)}>
+                  <Button variant="primary" icon={<Check size={14} />} mutation loading={busy === p.id} onClick={() => approve(p)}>
                     Approve
                   </Button>
                 </div>
