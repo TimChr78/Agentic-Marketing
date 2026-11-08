@@ -5,8 +5,8 @@ import { useSession } from '../../app/session';
 import { useApi } from '../../app/useApi';
 import { Button, Field, IconButton, Input, JsonView, Select, Skeleton, Textarea } from '../../ui';
 import type { EditorProps } from './ArtifactDetailPage';
-import { useAllArtifacts } from './artifactList';
 import { ListAudiencePanel } from './ListAudiencePanel';
+import { usePickerIndex } from './pickerIndex';
 
 // Segment condition builder: the same tree agents read and write, edited as rows instead of JSON.
 // A condition is a group ({all}/{any}) or one leaf: trait, event, consent, segment or not.
@@ -44,6 +44,18 @@ interface AnyCondition {
 type Condition = GroupCondition | AnyCondition | NotCondition | TraitCondition | EventCondition | ConsentCondition | SegmentRefCondition;
 type Mode = 'all' | 'any';
 type Kind = 'trait' | 'event' | 'consent' | 'segment' | 'not' | 'group';
+
+interface PurposeOption {
+  key: string;
+  name: string;
+}
+
+/** The one purposes read the dynamic editor shares across every consent condition row. */
+interface PurposesRead {
+  loading: boolean;
+  error: string | null;
+  purposes: PurposeOption[];
+}
 
 interface SegmentContent {
   description?: string;
@@ -83,6 +95,14 @@ export function SegmentEditor({ artifact, content, onChange, readOnly, errors }:
   const group = useMemo(() => groupOf(content.condition), [content.condition]);
   const condition = useMemo(() => buildTopCondition(group.mode, group.rows), [group]);
   const mode = content.mode ?? 'dynamic';
+  // One bounded purposes read for the whole condition tree. Static and snapshot lists have no
+  // consent conditions, so they do not read purposes at all.
+  const purposesRead = useApi(() => api.call('purposes.list', {}), [], { skip: mode !== 'dynamic' });
+  const purposes: PurposesRead = {
+    loading: purposesRead.loading,
+    error: purposesRead.error,
+    purposes: (purposesRead.data?.purposes ?? []).map((p) => ({ key: p.key, name: p.name })),
+  };
 
   const emit = (mode: Mode, rows: Condition[]) => set({ condition: buildTopCondition(mode, rows) });
 
@@ -132,13 +152,21 @@ export function SegmentEditor({ artifact, content, onChange, readOnly, errors }:
         {(errors.condition ?? errors['condition.all'] ?? errors['condition.any']) && (
           <p className="text-[12px] text-bad">{errors.condition ?? errors['condition.all'] ?? errors['condition.any']}</p>
         )}
-        <GroupEditor mode={group.mode} rows={group.rows} onChange={emit} depth={1} readOnly={readOnly} artifactId={artifact.id} />
+        <GroupEditor
+          mode={group.mode}
+          rows={group.rows}
+          onChange={emit}
+          depth={1}
+          readOnly={readOnly}
+          artifactId={artifact.id}
+          purposes={purposes}
+        />
       </section>
 
       <EstimatedSize condition={condition} />
 
       <details className="rounded-md border border-line">
-        <summary className="cursor-pointer px-3 py-2 text-[12px] font-medium text-fg-2 select-none">JSON</summary>
+        <summary className="cursor-pointer px-3 py-2 text-[12px] font-medium text-fg-2 select-none">Advanced condition view</summary>
         <div className="border-t border-line p-3">
           <JsonView value={condition} maxHeight={320} />
         </div>
@@ -154,6 +182,7 @@ function GroupEditor({
   depth,
   readOnly,
   artifactId,
+  purposes,
 }: {
   mode: Mode;
   rows: Condition[];
@@ -161,6 +190,7 @@ function GroupEditor({
   depth: number;
   readOnly: boolean;
   artifactId: string;
+  purposes: PurposesRead;
 }) {
   const setRow = (i: number, next: Condition) =>
     onChange(
@@ -198,6 +228,7 @@ function GroupEditor({
               depth={depth}
               readOnly={readOnly}
               artifactId={artifactId}
+              purposes={purposes}
             />
           </li>
         ))}
@@ -230,6 +261,7 @@ function RowEditor({
   depth,
   readOnly,
   artifactId,
+  purposes,
 }: {
   condition: Condition;
   onChange: (c: Condition) => void;
@@ -238,6 +270,7 @@ function RowEditor({
   depth: number;
   readOnly: boolean;
   artifactId: string;
+  purposes: PurposesRead;
 }) {
   const kind = kindOf(condition);
   const n = index + 1;
@@ -284,7 +317,9 @@ function RowEditor({
 
       {kind === 'trait' && <TraitRow c={condition as TraitCondition} onChange={onChange} index={n} readOnly={readOnly} />}
       {kind === 'event' && <EventRow c={condition as EventCondition} onChange={onChange} index={n} readOnly={readOnly} />}
-      {kind === 'consent' && <ConsentRow c={condition as ConsentCondition} onChange={onChange} index={n} readOnly={readOnly} />}
+      {kind === 'consent' && (
+        <ConsentRow c={condition as ConsentCondition} onChange={onChange} index={n} readOnly={readOnly} purposes={purposes} />
+      )}
       {kind === 'segment' && (
         <SegmentRow c={condition as SegmentRefCondition} onChange={onChange} index={n} readOnly={readOnly} artifactId={artifactId} />
       )}
@@ -298,6 +333,7 @@ function RowEditor({
             index={index}
             readOnly={readOnly}
             artifactId={artifactId}
+            purposes={purposes}
           />
         </div>
       )}
@@ -309,6 +345,7 @@ function RowEditor({
           depth={depth + 1}
           readOnly={readOnly}
           artifactId={artifactId}
+          purposes={purposes}
         />
       )}
     </div>
@@ -321,6 +358,7 @@ function ConditionNode({
   index,
   readOnly,
   artifactId,
+  purposes,
 }: {
   condition: Condition;
   onChange: (c: Condition) => void;
@@ -328,6 +366,7 @@ function ConditionNode({
   index: number;
   readOnly: boolean;
   artifactId: string;
+  purposes: PurposesRead;
 }) {
   if (isGroup(condition)) {
     return (
@@ -338,6 +377,7 @@ function ConditionNode({
         depth={groupDepth + 1}
         readOnly={readOnly}
         artifactId={artifactId}
+        purposes={purposes}
       />
     );
   }
@@ -350,6 +390,7 @@ function ConditionNode({
       depth={groupDepth}
       readOnly={readOnly}
       artifactId={artifactId}
+      purposes={purposes}
     />
   );
 }
@@ -493,14 +534,15 @@ function ConsentRow({
   onChange,
   index,
   readOnly,
+  purposes,
 }: {
   c: ConsentCondition;
   onChange: (c: Condition) => void;
   index: number;
   readOnly: boolean;
+  purposes: PurposesRead;
 }) {
-  const purposes = useApi(() => api.call('purposes.list', {}), []);
-  const known = purposes.data?.purposes ?? [];
+  const known = purposes.purposes;
   const missing = c.consent && !known.some((p) => p.key === c.consent);
 
   return (
@@ -557,7 +599,7 @@ function SegmentPicker({
   disabled?: boolean;
   index: number;
 }) {
-  const list = useAllArtifacts('segment');
+  const list = usePickerIndex('segment');
   const items = (list.data?.artifacts ?? []).filter((a) => a.id !== exclude);
   const known = !value || items.some((a) => a.id === value);
   return (
@@ -584,43 +626,47 @@ function SegmentPicker({
 function EstimatedSize({ condition }: { condition: Condition }) {
   const { can } = useSession();
   const allowed = can('profiles:read');
-  const [size, setSize] = useState<{ loading: boolean; count?: number; error?: string }>({ loading: true });
+  const [asked, setAsked] = useState(false);
+  const [size, setSize] = useState<{ loading: boolean; count?: number; error?: string }>({ loading: false });
 
-  useEffect(() => {
+  // A size is an explicit request, never an automatic read on every keystroke or on open. One
+  // request estimates the rules currently on screen; the saved preview keeps its own read.
+  const estimate = async () => {
     if (!allowed) return;
-    let cancelled = false;
+    setAsked(true);
     setSize({ loading: true });
-    const timer = setTimeout(async () => {
-      try {
-        const r = await api.call('segments.preview', { condition });
-        if (!cancelled) setSize({ loading: false, count: r.count });
-      } catch (e) {
-        if (!cancelled) setSize({ loading: false, error: errText(e) });
-      }
-    }, 600);
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-    };
-  }, [allowed, condition]);
+    try {
+      const r = await api.call('segments.preview', { condition });
+      setSize({ loading: false, count: r.count });
+    } catch (e) {
+      setSize({ loading: false, error: errText(e) });
+    }
+  };
 
   return (
-    <div className="flex items-center gap-3 rounded-md border border-line bg-surface-2 px-3.5 py-3" aria-live="polite">
+    <div className="flex flex-wrap items-center gap-3 rounded-md border border-line bg-surface-2 px-3.5 py-3" aria-live="polite">
       <Users size={18} className="text-muted" aria-hidden />
       <div className="min-w-0 flex-1">
         <p className="text-[12px] text-muted">Estimated size now</p>
         {!allowed ? (
-          <p className="text-[13px] text-muted">Your role can't read profiles, so the size isn't shown.</p>
+          <p className="text-[13px] text-muted">Your role can’t read profiles, so the size isn’t shown.</p>
         ) : size.loading ? (
           <Skeleton className="mt-1 h-5 w-24" />
         ) : size.error ? (
-          <p className="text-[13px] text-bad">{size.error}</p>
-        ) : (
+          <p className="text-[13px] text-bad">{size.error} Your rules are retained.</p>
+        ) : size.count !== undefined ? (
           <p className="text-[18px] leading-6 font-semibold tabular-nums">
-            {(size.count ?? 0).toLocaleString()} <span className="text-[13px] font-normal text-muted">people</span>
+            {size.count.toLocaleString()} <span className="text-[13px] font-normal text-muted">people</span>
           </p>
+        ) : (
+          <p className="text-[13px] text-muted">Not estimated yet. Estimate the rules currently shown.</p>
         )}
       </div>
+      {allowed && (
+        <Button size="sm" variant="secondary" loading={size.loading} onClick={() => void estimate()}>
+          {asked ? 'Estimate again' : 'Estimate audience'}
+        </Button>
+      )}
     </div>
   );
 }

@@ -1,5 +1,6 @@
 import { ArtifactListPage } from '../../features/artifacts/ArtifactListPage';
 import { ArtifactSelect } from '../../features/artifacts/ArtifactSelect';
+import { AudiencePhoneRow, audienceCountLabel } from '../../features/phase27/audience/listRows';
 import { Field } from '../../ui';
 
 export default function FormsPage() {
@@ -33,6 +34,10 @@ export default function FormsPage() {
           traits: ['firstName'],
           successUrl: '/thanks',
         }),
+      }}
+      template={{
+        mobileRow: (a) => <AudiencePhoneRow artifact={a} />,
+        countLabel: audienceCountLabel('form', 'forms'),
       }}
     />
   );
