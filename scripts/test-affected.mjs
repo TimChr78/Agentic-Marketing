@@ -278,14 +278,6 @@ function webPackageImports(root, packages) {
   return { imported, unsure };
 }
 
-/** Every test file of one workspace package. */
-function packageTests(root, packages, name) {
-  const workspace = packages.get(name);
-  if (!workspace) return [];
-  const files = [...walk(join(workspace.dir, 'test')).filter(isTestFile), ...walk(join(workspace.dir, 'src')).filter(isTestFile)];
-  return [...new Set(files.map((file) => posix(relative(root, file))))].sort();
-}
-
 /**
  * The docs project's files, parsed from vitest.config.mts. There is deliberately no copied list:
  * a project that adds a test to the config is mapped correctly without touching this script.

@@ -1,9 +1,14 @@
-# Admin UI design · v2
+# Admin UI design · v2 (final)
 
-Wave 5 specification, 2026-11-05, issue #436. This is a **target design contract**, not a claim that the
-application already implements it. [Showcase](showcase/index.html) is the implementation reference;
-[decisions](DECISIONS.md) record alternatives. Application code is unchanged in this specification commit.
-Retained component, theme and accessibility contracts are included below with the v2 rules.
+Wave 5 final, 2026-11-08, issue #555 (Phase 28). This contract started as the Wave 5 target for #436;
+the 0.14.0 release head implements it. [Showcase](showcase/index.html) is the implementation reference;
+[decisions](DECISIONS.md) record alternatives. This text is final for Wave 5: a later wave changes a
+binding rule only through a new decision record, not by editing this file's history.
+
+Retained component, theme and accessibility contracts are included below with the v2 rules. The three
+contracts below are binding, and are stated here only as the rules a reviewer needs; read
+[microcopy](phase-28/microcopy.md), [motion](phase-28/motion.md) and
+[skeletons and budgets](phase-28/skeletons-and-budgets.md) for the full text.
 
 ## Direction
 
@@ -18,6 +23,38 @@ Every metric names period, denominator and freshness. No data never means health
 comparison; templates/assets use thumbnails. Do not add a table/cards toggle. Plain object names replace
 API keys and identifiers. Use sentence case, specific errors and actions, system fonts only. Lucide icons:
 16 px, stroke 1.75; inline 14 px; decorative icons aria-hidden; icon buttons named with tooltips.
+
+## Copy, motion and loading rules
+
+These are the binding rules from the Phase 28 contracts, kept short here; the linked contract is the
+authority and the rendered-DOM lint enforces the copy rules in CI.
+
+**Copy.** Calm, direct, specific; sentence case for headings, tabs, buttons and statuses. Name the
+object and the consequence, then the next step. Use “e-mail”, “sign in” (verb) and “sign-in”
+(adjective); “Agent” is an identity, never a status. One binding verb per action type (New broadcast →
+Create broadcast; Save changes; Submit for review; Pause agent; Revoke token). Empty states say what
+is absent, its scope and the next existing action; errors say the failed object, the known effect and
+the recovery; loading says present participle + object (“Loading performance”). No “Oops”, “Something
+went wrong”, “successfully”, generic “Error” or unqualified safety claims. Friendly names replace raw
+purpose, metric and prefixed ids in ordinary text; identifiers stay in the copy control and technical
+code views. Dates use the workspace zone and locale; counts use locale grouping, and rates keep their
+denominator. Full text: [microcopy](phase-28/microcopy.md).
+
+**Motion.** Only orientation or feedback, never content. `--duration-fast` 120 ms for hover/press/focus
+and disclosure, `--duration-enter` 180 ms for drawer/menu/toast enter and exit; easing `--ease` and
+`--ease-feedback`. Menu/toast travel ≤8 px, drawer ≤16 px; explicit properties only, never
+`transition: all`. No animation on charts, counters, skeletons, progress icons, canvas fit, page
+content or recipient text. Under `prefers-reduced-motion: reduce` durations and delays become 0,
+entrances lose their transform, scroll behaviour is `auto`, and third-party JS motion (React Flow,
+GrapesJS) is switched off too. Full text: [motion](phase-28/motion.md).
+
+**Reserved loading and budgets.** Loading reserves the final geometry immediately with static tonal
+shapes; shapes appear after 150 ms only if the read is still pending, and a fast read never flashes
+them. One labelled `role="status"` region carries `aria-busy`; bars are `aria-hidden`. No spinner,
+shimmer or fake percentage. Refreshes keep valid values. Route budgets are decimal gzip kB for JS and
+CSS, with separate initial, route lazy and cold ceilings plus independent caps for the chart and visual
+e-mail stacks. Full table, geometries and accounting rules: [skeletons and
+budgets](phase-28/skeletons-and-budgets.md).
 
 ## Colour tokens
 
@@ -101,8 +138,10 @@ All ordinary cards, KPIs, tables, navigation, sticky bars and segmented controls
 Overlay retains a 1 px line. Z levels: normal 0, sticky 10, drawer 40, modal 50, toast 60, menu/tooltip 70.
 Motion: `--duration-fast:120ms` ease-out hover/press; `--duration-enter:180ms`,
 `--ease:cubic-bezier(.2,.8,.2,1)` opacity + translate (drawer 16px X; menu/toast 8px Y).
-Chart animation off; no animated number counting. Loading shimmer 1.2s linear, spinner 800ms linear.
-Reduced motion: all durations 0, skeleton static, spinner replaced by static progress icon + “Loading”.
+Chart animation off; no animated number counting, shimmer or looping progress. Loading uses static
+tonal shapes and a static progress icon with the object-specific label.
+Reduced motion: all durations and delays 0, entrances un-transformed, scroll `auto`; the static
+skeleton and progress text remain, because they carry the status.
 
 | Control | ≥768 px | <768 px |
 |---|---|---|
@@ -339,7 +378,8 @@ Each component lives in `apps/web/src/ui/` and is the only way that pattern is b
 
 - **Button**: variants `primary` (accent, one per view), `secondary` (bordered), `ghost` (toolbar, icon
   buttons), `danger` (bordered red; filled red only inside a confirm dialog). Sizes `sm` 28 px, `md` 32 px; both become 40 px below 768 px.
-  `loading` shows a spinner and keeps the width; disabled buttons explain why in a tooltip or helper text.
+  `loading` shows the static progress icon with the object-specific label, keeps the width and blocks a
+  duplicate submission; disabled buttons explain why in a tooltip or helper text.
 - **IconButton**: square ghost button; `label` is required (used for `aria-label` and tooltip).
 - **Input, Textarea, Select, Checkbox, Switch, DateTimeInput**: 32 px (40 px below 768 px), 8 px radius, `--control` border,
   accent border plus focus ring on focus. Always used inside **Field**: a visible label (never a placeholder
@@ -372,7 +412,9 @@ Each component lives in `apps/web/src/ui/` and is the only way that pattern is b
   text diff for long strings (e-mail HTML, text versions). Colour is backed by `+`/`−` markers and labels.
 - **Tabs**: WAI-ARIA tabs (arrow keys move, Home/End), URL-synced where they are a page section.
 - **Menu**: button + popover list, WAI-ARIA menu button pattern (arrow keys, type-ahead, `Esc`).
-- **Skeleton**: shimmer blocks matching the final layout's size.
+- **Skeleton**: static tonal shapes matching the final layout's size, never a shimmer. The region is
+  labelled once (`role="status"`, `aria-busy`); the shapes are `aria-hidden`. See the reserved-loading
+  rules above and [skeletons and budgets](phase-28/skeletons-and-budgets.md).
 - **Preview frames**: sandboxed `<iframe srcdoc>` (no scripts), width presets desktop 640 px (the e-mail's
   own width inside a 1024 frame) and mobile max 375 px, constrained to the available width.
 
