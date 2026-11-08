@@ -28,8 +28,8 @@ export function ArtifactSelect({
   const known = !value || items.some((a) => a.id === value);
   return (
     <Select id={id} value={value ?? ''} onChange={(e) => onChange(e.target.value)} disabled={disabled || list.loading}>
-      <option value="">{list.loading ? 'Loading…' : list.error ? `Couldn't load: ${list.error}` : placeholder}</option>
-      {!known && <option value={value}>{value} (not found)</option>}
+      <option value="">{list.loading ? 'Loading options' : list.error ? 'Couldn’t load options' : placeholder}</option>
+      {!known && <option value={value}>Unavailable selection</option>}
       {items.map((a) => (
         <option key={a.id} value={a.id}>
           {a.name}

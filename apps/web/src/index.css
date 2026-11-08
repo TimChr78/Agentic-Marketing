@@ -98,6 +98,7 @@
   --duration-fast: 120ms;
   --duration-enter: 180ms;
   --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --ease-feedback: cubic-bezier(0, 0, 0.2, 1);
 
   /* Spacing increments; no other values. */
   --space-2: 2px;
@@ -231,6 +232,9 @@
   --font-sans: var(--font-sans);
   --font-mono: var(--font-mono);
   --font-display: var(--font-display);
+  /* Every implicit Tailwind transition uses the shared fast token, never a hidden 150 ms default. */
+  --default-transition-duration: var(--duration-fast);
+  --default-transition-timing-function: var(--ease);
   --radius-sm: 4px;
   --radius-md: 8px;
   --radius-lg: 12px;
@@ -308,7 +312,8 @@
   }
 }
 
-/* Motion: short and purposeful; nothing for people who asked for less. */
+/* Motion: short, purposeful and static where it is decoration (#555). Durations come only from
+   --duration-fast (120ms) and --duration-enter (180ms); nothing repeats. Loading shapes are static. */
 @keyframes am-fade-in {
   from {
     opacity: 0;
@@ -326,63 +331,55 @@
     opacity: 0;
   }
 }
-@keyframes am-shimmer {
-  from {
-    background-position: 200% 0;
-  }
-  to {
-    background-position: -200% 0;
-  }
-}
 .am-fade-in {
-  animation: am-fade-in 180ms var(--ease);
+  animation: am-fade-in var(--duration-enter) var(--ease);
 }
 .am-drawer-in {
-  animation: am-slide-in-right 180ms var(--ease);
+  animation: am-slide-in-right var(--duration-enter) var(--ease);
 }
 .am-rise {
-  animation: am-rise 180ms var(--ease);
+  animation: am-rise var(--duration-enter) var(--ease);
+}
+/* Explicit token transitions. Use these instead of bare Tailwind `transition-*` classes. */
+.am-motion-colors {
+  transition-property: color, background-color, border-color, outline-color, fill, stroke;
+  transition-duration: var(--duration-fast);
+  transition-timing-function: var(--ease-feedback);
+}
+.am-motion-transform {
+  transition-property: transform;
+  transition-duration: var(--duration-fast);
+  transition-timing-function: var(--ease);
 }
 .am-skeleton {
-  background: linear-gradient(90deg, var(--surface-2) 25%, var(--surface-3) 37%, var(--surface-2) 63%);
-  background-size: 400% 100%;
-  animation: am-shimmer 1.2s ease-in-out infinite;
+  background: var(--surface-3);
   border-radius: var(--radius-sm);
+}
+/* A static progress glyph: the shape and the object-specific label carry the state, motion does not. */
+.am-progress {
+  animation: none;
 }
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
   *::after {
     /* biome-ignore lint/complexity/noImportantStyles: must override component-level animation declarations for reduced motion */
-    animation-duration: 0.01ms !important;
-    /* biome-ignore lint/complexity/noImportantStyles: must override component-level animation declarations for reduced motion */
-    animation-iteration-count: 1 !important;
+    animation: none !important;
     /* biome-ignore lint/complexity/noImportantStyles: must override component-level transition declarations for reduced motion */
-    transition-duration: 0.01ms !important;
+    transition-duration: 0ms !important;
+    /* biome-ignore lint/complexity/noImportantStyles: must override component-level transition delays for reduced motion */
+    transition-delay: 0ms !important;
+    /* biome-ignore lint/complexity/noImportantStyles: must override component-level animation delays for reduced motion */
+    animation-delay: 0ms !important;
     /* biome-ignore lint/complexity/noImportantStyles: must override component-level scroll behaviour for reduced motion */
     scroll-behavior: auto !important;
   }
-}
-
-/* Demo-only effects (Phase −1 demo). */
-@keyframes flash-in {
-  from {
-    background: var(--accent-soft);
+  .am-fade-in,
+  .am-drawer-in,
+  .am-rise {
+    /* biome-ignore lint/complexity/noImportantStyles: entering transforms are removed, not shortened, under reduced motion */
+    transform: none !important;
   }
-}
-.flash-in {
-  animation: flash-in 1.2s ease-out;
-}
-@keyframes pulse-ring {
-  0% {
-    box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 55%, transparent);
-  }
-  100% {
-    box-shadow: 0 0 0 10px transparent;
-  }
-}
-.sim-active {
-  animation: pulse-ring 1s ease-out infinite;
 }
 
 /* React Flow theming through tokens */

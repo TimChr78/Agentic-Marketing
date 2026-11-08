@@ -38,7 +38,7 @@ export function dataState({ value, sampleSize, minSample, paused, suppressed, wa
 }
 
 export const DATA_STATE: Record<MetricDataState, { label: string; tone: Tone }> = {
-  'no-data': { label: 'No data', tone: 'neutral' },
+  'no-data': { label: 'No data in this period', tone: 'neutral' },
   'below-volume': { label: 'Below evaluation volume', tone: 'neutral' },
   healthy: { label: 'Healthy', tone: 'good' },
   warning: { label: 'Warning', tone: 'warn' },

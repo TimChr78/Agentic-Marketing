@@ -265,7 +265,7 @@ export function CopilotDrawer({ open, onClose }: { open: boolean; onClose: () =>
                   <Wrench size={13} className="text-muted" aria-hidden />
                   <Tag>{x.name}</Tag>
                   {x.ok === undefined ? (
-                    <Loader2 size={13} className="animate-spin text-muted" aria-label="Running" />
+                    <Loader2 size={13} className="am-progress text-muted" aria-label="Running the tool" />
                   ) : (
                     !x.ok && <StatusPill tone="bad">Failed</StatusPill>
                   )}
@@ -289,7 +289,7 @@ export function CopilotDrawer({ open, onClose }: { open: boolean; onClose: () =>
               </div>
             ),
           )}
-          {busy && <Loader2 size={16} className="animate-spin text-muted" aria-label="Working" />}
+          {busy && <Loader2 size={16} className="am-progress text-muted" aria-label="Waiting for the copilot" />}
           <div ref={end} />
         </div>
         <div className="space-y-2 border-t border-line px-5 py-3">

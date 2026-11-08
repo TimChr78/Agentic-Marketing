@@ -1,6 +1,6 @@
 import type { EChartsOption } from 'echarts';
 import { lazy, Suspense } from 'react';
-import { LoadingBlock } from '../ui';
+import { Skeleton, SkeletonRegion } from '../ui';
 
 /**
  * Colours read from the v2 tokens: neutral chrome, categorical `viz` series, and the sequential /
@@ -30,9 +30,9 @@ export function Chart({ option, height = 240, deps = [] }: ChartProps) {
   return (
     <Suspense
       fallback={
-        <div style={{ height }}>
-          <LoadingBlock lines={4} label="Loading chart" />
-        </div>
+        <SkeletonRegion label="Loading chart" geometry="chart" minHeight={height}>
+          <Skeleton shape="chart" height={height} />
+        </SkeletonRegion>
       }
     >
       <ChartImpl option={option} height={height} deps={deps} />

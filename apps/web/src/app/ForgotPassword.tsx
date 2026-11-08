@@ -48,7 +48,7 @@ export function ForgotPassword() {
             });
             if (r.ok) setSent(true);
             else if (r.status === 429) setErr('Too many attempts. Wait a few minutes and try again.');
-            else setErr((await r.json().catch(() => ({}))).message ?? `The request failed (${r.status}).`);
+            else setErr('Couldn’t send the link. Try again in a moment.');
           } catch {
             setErr('The server did not answer. Check that it is running and try again.');
           } finally {

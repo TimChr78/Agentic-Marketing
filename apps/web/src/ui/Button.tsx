@@ -8,7 +8,7 @@ export type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'danger' | 'dang
 export type ButtonSize = 'sm' | 'md';
 
 const base =
-  'inline-flex items-center justify-center gap-1.5 rounded-md font-medium whitespace-nowrap select-none transition-colors duration-[120ms] disabled:cursor-not-allowed disabled:border-control disabled:bg-surface-2 disabled:text-muted disabled:opacity-100 disabled:hover:bg-surface-2 disabled:hover:text-muted [&_svg]:shrink-0';
+  'inline-flex items-center justify-center gap-1.5 rounded-md font-medium whitespace-nowrap select-none am-motion-colors disabled:cursor-not-allowed disabled:border-control disabled:bg-surface-2 disabled:text-muted disabled:opacity-100 disabled:hover:bg-surface-2 disabled:hover:text-muted [&_svg]:shrink-0';
 // v2 control sizes: 28/32 px on desktop, both 40 px below 768 px and on coarse pointers (DESIGN.md).
 const sizes: Record<ButtonSize, string> = {
   sm: 'h-10 px-3 text-[13px] pointer-coarse:h-10 pointer-coarse:px-3 md:h-7 md:px-2.5 md:text-[12px]',
@@ -65,7 +65,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
       aria-busy={loading || undefined}
       className={buttonClass({ variant, size, className })}
     >
-      {loading ? <Loader2 size={size === 'sm' ? 14 : 16} className="animate-spin" aria-hidden /> : icon}
+      {loading ? <Loader2 size={size === 'sm' ? 14 : 16} className="am-progress" aria-hidden /> : icon}
       {children}
     </button>
   );

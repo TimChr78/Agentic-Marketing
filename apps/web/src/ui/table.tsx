@@ -1,6 +1,7 @@
 import type { ReactNode, TdHTMLAttributes, ThHTMLAttributes } from 'react';
 import { cx } from './cx';
-import { Alert, EmptyState, Skeleton } from './display';
+import { Alert, EmptyState } from './display';
+import { ListSkeleton } from './Skeleton';
 
 // Tables (DESIGN.md → Table): the frame handles loading (skeleton rows), error (inline alert with
 // the reason and Retry) and empty (an EmptyState inside the frame), so every list behaves the same.
@@ -16,6 +17,7 @@ export function TableFrame({
   className,
   toolbar,
   footer,
+  loadingLabel = 'Loading list',
 }: {
   children: ReactNode;
   loading?: boolean;
@@ -29,6 +31,8 @@ export function TableFrame({
   toolbar?: ReactNode;
   /** Paging or summary row after the table, outside the horizontal scroll region. */
   footer?: ReactNode;
+  /** The object-specific busy label, e.g. "Loading invitations". */
+  loadingLabel?: string;
 }) {
   return (
     <div className={cx('am-frame min-w-0 overflow-hidden rounded-lg border border-line bg-surface', className)}>
@@ -40,17 +44,7 @@ export function TableFrame({
           </Alert>
         </div>
       ) : loading ? (
-        <div role="status" aria-label="Loading">
-          {Array.from({ length: 5 }, (_, i) => (
-            // biome-ignore lint/suspicious/noArrayIndexKey: loading placeholder rows are generated, never reordered, and have no identity
-            <div key={i} className="flex gap-4 border-b border-line px-4 py-3 last:border-0">
-              {Array.from({ length: columns }, (_, c) => (
-                // biome-ignore lint/suspicious/noArrayIndexKey: loading placeholder cells are positional columns of a generated row
-                <Skeleton key={c} className={cx('h-3.5', c === 0 ? 'w-1/3' : 'w-1/6')} />
-              ))}
-            </div>
-          ))}
-        </div>
+        <ListSkeleton label={loadingLabel} columns={columns} />
       ) : isEmpty ? (
         empty
       ) : (

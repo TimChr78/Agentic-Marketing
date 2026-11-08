@@ -240,7 +240,7 @@ export function ArtifactListPage<S = Record<string, never>>({
           countLabel={total > 0 ? countText() : undefined}
           state={state2}
           notice={state2 === 'ready' ? undefined : notice}
-          loadingContent={<LoadingBlock lines={5} />}
+          loadingContent={<LoadingBlock geometry="list" label="Loading artifacts" />}
           desktopTable={table}
           mobileList={
             <ul aria-label={`${title} on a phone`} className="divide-y divide-line">

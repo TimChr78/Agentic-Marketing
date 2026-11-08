@@ -1,16 +1,18 @@
 import { lazy, Suspense } from 'react';
 import { AutonomyProvider } from '../features/agents/AutonomyProvider';
-import { Alert, Button, LoadingBlock, ToastProvider } from '../ui';
+import { Alert, AuthSkeleton, Button, LoadingBlock, ToastProvider } from '../ui';
 import { ForgotPassword } from './ForgotPassword';
 import { ResetPassword } from './ResetPassword';
 import { useLocation } from './router';
-import { Routes } from './routes';
 import { SignIn } from './SignIn';
 import { SessionProvider, useSession } from './session';
 
 // The signed-in shell (and its command palette, New menu and copilot) is only needed after
 // authentication, so the sign-in screen stays light and the shell loads as one chunk.
 const Shell = lazy(async () => ({ default: (await import('./Shell')).Shell }));
+// The route table (and with it every page's dynamic import) is not needed to render a signed-out
+// screen, so it joins the signed-in closure after the session resolves.
+const Routes = lazy(async () => ({ default: (await import('./routes')).Routes }));
 
 export function Root() {
   return (
@@ -31,8 +33,8 @@ function Gate() {
   if (path === '/reset-password') return <ResetPassword token={search.get('token')} />;
   if (status === 'loading')
     return (
-      <div className="mx-auto max-w-[480px] pt-[20vh]">
-        <LoadingBlock lines={3} label="Loading your workspace" />
+      <div className="min-h-screen bg-bg">
+        <AuthSkeleton label="Loading your workspace" />
       </div>
     );
   if (status === 'signed-out') return <SignIn onDone={() => void refresh()} />;
@@ -57,9 +59,9 @@ function Gate() {
     );
   return (
     <AutonomyProvider>
-      <Suspense fallback={<LoadingBlock lines={6} />}>
+      <Suspense fallback={<LoadingBlock lines={6} label="Loading the shell" />}>
         <Shell>
-          <Suspense fallback={<LoadingBlock lines={6} />}>
+          <Suspense fallback={<LoadingBlock lines={6} label="Loading this page" />}>
             <Routes />
           </Suspense>
         </Shell>
