@@ -130,6 +130,15 @@ describe('Content surfaces (#526)', () => {
     expect(await screen.findByText('detail brd_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')).toBeTruthy();
   });
 
+  it('offers the existing brand setup with the neutral-look explanation', async () => {
+    h.brand = null;
+    window.history.replaceState(null, '', '/content/brand');
+    render(<BrandPage />);
+    expect(await screen.findByText('No brand yet')).toBeTruthy();
+    expect(screen.getByText(/plain neutral look/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Set up the brand' })).toBeTruthy();
+  });
+
   it('wires the Starters tab to the existing recipe gallery', async () => {
     window.history.replaceState(null, '', '/content/templates?tab=starters');
     render(<TemplatesPage />);
