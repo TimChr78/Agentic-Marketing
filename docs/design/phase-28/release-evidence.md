@@ -4,24 +4,25 @@ Assembled by task I (#555) on the integrated phase head. The contract, ownership
 in [README](README.md). Record the exact SHA, fixture and command for every run; a checked box needs
 an artifact, not an assertion.
 
-Status: **in progress**. The five area tasks land after this foundations branch; their findings below
-are report-mode until each owner flips its own section to strict.
+Status: **complete for the automated gate**; the manual accessibility and findability items remain
+owner sign-off. Measured on integrated source head `b3911c0` (all area branches merged), fresh
+run-scoped seeded database per suite, Linux, Playwright `v1.64.1-noble` Chromium, shared test stack
+with `TEST_PORT_OFFSET=100`. Every area section below is strict and zero-finding.
 
 ## Commands and exit codes
 
 | Check | Command | Exit | Notes |
 | --- | --- | ---: | --- |
-| Web unit tests | `npx vitest run --project web` | 0 | 95 files, 964 tests passed |
+| Web unit tests | `npx vitest run --project web` | 0 | 100 files, 1,003 tests passed |
 | Docs tests | `npx vitest run --project docs` | 0 | 6 files, 38 tests passed |
 | Live build | `corepack pnpm --filter @agentic-marketing/web build:live` | 0 | manifest at `apps/web/dist/.vite/manifest.json` |
-| Bundle budgets | `npx vitest run --project web apps/web/test/phase28-bundle.test.ts` | 0 | decimal gzip kB; 140 tests |
-| Lint | `npx biome check .` | 0 | 32 pre-existing warnings, no errors |
-| Typecheck | `corepack pnpm -r --filter './packages/*' --filter './apps/*' typecheck` | 0 | |
-| Changelog | `node scripts/changelog.mjs check` | 0 | 1 fragment |
-| Smoke e2e | `TEST_PORT_OFFSET=100 scripts/e2e-docker.sh smoke` | 0 | 7 passed |
-| Phase 28 functional | `TEST_PORT_OFFSET=100 E2E_SKIP_BUILD=1 scripts/e2e-docker.sh functional e2e/phase28-*.spec.ts` | 0 | 13 passed, 32 skipped (area-owned reporting tests) |
+| Bundle budgets | `PHASE28_REQUIRE_BUNDLE=1 npx vitest run apps/web/test/bundle.test.ts apps/web/test/phase28-bundle.test.ts` | 0 | decimal gzip kB; 151 tests in 2 files |
+| Lint | `corepack pnpm lint` | 0 | Biome, e2e selector check and changelog check; 31 pre-existing warnings, no errors |
+| Typecheck | `corepack pnpm -r --filter './packages/*' --filter './apps/*' typecheck` | 0 | all packages and apps |
+| Changelog | `node scripts/changelog.mjs check` | 0 | 8 fragments |
+| Functional e2e (full) | `TEST_PORT_OFFSET=100 E2E_SKIP_BUILD=1 scripts/e2e-docker.sh functional` | 0 | 151 passed, 4.0 min |
 | Axe | `TEST_PORT_OFFSET=100 E2E_SKIP_BUILD=1 scripts/e2e-docker.sh axe` | 0 | 43 passed, 2 skipped; 0 violations, 0 allowlist entries |
-| Visual | `TEST_PORT_OFFSET=100 E2E_SKIP_BUILD=1 scripts/e2e-docker.sh visual` | 0 | 12 routes passed; no baseline changed |
+| Visual | `TEST_PORT_OFFSET=100 E2E_SKIP_BUILD=1 scripts/e2e-docker.sh visual` | 0 | 12 routes passed; only `agents-390-light/dark` changed |
 
 ## Bundle actuals
 
@@ -120,6 +121,9 @@ build run below; it must stay at or under 110 kB.
   `ChartSkeleton`, `KpiSkeleton`, `EditorSkeleton`, and the `LoadingBlock` adapter. The slot is
   reserved immediately and the shapes reveal after `SKELETON_DELAY_MS` (150 ms). Callers pass
   geometry, the object-specific label and the busy state; the primitive never fetches.
+- `EditorSkeleton` also accepts an additive `fill` prop. The template editor already reserves a
+  `calc(100vh-340px)` frame (504 px at 390×844), so its fallback fills that frame instead of the
+  fixed 420/560 px shape; without `fill` the published 420/560 px default is unchanged.
 
 ## Microcopy lint
 
@@ -170,6 +174,16 @@ Regenerate only the baselines this branch actually moves, with
 `scripts/e2e-docker.sh update -g "<route> matches"`, and list each one here for human review.
 
 <!-- phase28-baselines:start -->
-None. All 12 committed visual routes matched their existing baselines after the shared CSS changes
-(static skeletons, token durations, static progress glyph); no `update` run was needed.
+Eight committed baselines moved in the phase; the other matrix routes kept their approved images.
+
+- `agents-390-light`, `agents-390-dark` (**W**): the comparison controls moved into the card body.
+  The integration pass regenerated these two again when the wide Status and Last 24 hours columns
+  moved under the agent name at 390 px; `agents-1440-*` is unchanged.
+- `journey-builder-390-light`, `journey-builder-390-dark` (**M**): the readable “Journey steps”
+  list replaced the phone layout that needed sideways reading.
+- `analytics-1440-light`, `analytics-1440-dark`, `analytics-390-light`, `analytics-390-dark`
+  (**S**): 204 px KPI tiles, including the reserved loading geometry.
+
+`TEST_PORT_OFFSET=100 E2E_SKIP_BUILD=1 scripts/e2e-docker.sh update -g "agents matches its baseline"`
+regenerated exactly the two agents phone baselines; the full visual run then passed all 12 routes.
 <!-- phase28-baselines:end -->
