@@ -132,6 +132,8 @@ vi.mock('../src/app/api', async (importOriginal) => {
         return { id: 'x', name: 'saved', warnings: [] };
       case 'emailProviders.rotateWebhook':
         return { webhookUrl: 'https://links.example.com/hooks/email/new' };
+      case 'emailProviders.delete':
+        return {};
       default:
         throw new Error(`unexpected command ${name}`);
     }
@@ -335,6 +337,18 @@ describe('Providers compact channel rows (#527)', () => {
     renderChannels();
     expect(await screen.findByText('Not configured')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Add SMS provider' })).toBeTruthy();
+  });
+
+  it('keeps the typed delete confirmation', async () => {
+    renderChannels();
+    const emailRow = await row('Newsletter delivery');
+    await userEvent.click(within(emailRow).getByRole('button', { name: 'More actions for Newsletter delivery' }));
+    await userEvent.click(screen.getByRole('menuitem', { name: 'Delete' }));
+    const confirm = await screen.findByRole('alertdialog');
+    const typed = within(confirm).getByRole('textbox', { name: /^Type / });
+    await userEvent.type(typed, 'Newsletter delivery');
+    await userEvent.click(within(confirm).getByRole('button', { name: 'Delete provider' }));
+    await waitFor(() => expect(h.calls.find((c) => c.name === 'emailProviders.delete')?.input).toEqual({ id: 'epr_1' }));
   });
 
   it('keeps the webhook replace action and its one-time URL', async () => {
