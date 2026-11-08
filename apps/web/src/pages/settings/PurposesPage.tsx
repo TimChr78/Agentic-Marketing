@@ -180,7 +180,9 @@ export default function PurposesPage() {
                         </span>
                         {c.channels.length > 0 && (
                           <div className="text-[12px] leading-[18px] text-muted">
-                            {c.channels.map((ch) => `${channelLabel(ch.channel)}: ${ch.granted} allowed, ${refused(ch)} refused`).join(' · ')}
+                            {c.channels
+                              .map((ch) => `${channelLabel(ch.channel)}: ${ch.granted} allowed, ${refused(ch)} refused`)
+                              .join(' · ')}
                           </div>
                         )}
                       </div>

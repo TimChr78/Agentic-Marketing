@@ -29,7 +29,6 @@ test.describe('builder', () => {
   });
 
   test('a viewer-only role cannot start a broadcast (A)', async ({ page }) => {
-    test.fixme(true, 'Owned by task A; reporting until audience and consent land');
     await signIn(page, PEOPLE.viewer);
     await page.goto('/marketing/broadcasts?create=broadcast');
     await expect(page.getByRole('dialog')).toHaveCount(0);

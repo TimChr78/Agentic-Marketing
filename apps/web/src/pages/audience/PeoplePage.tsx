@@ -10,7 +10,22 @@ import { CopyPersonId } from '../../features/audience/phase26/CopyControl';
 import { availabilityLabel, listIdentity, purposeRows, shownLabel } from '../../features/audience/phase26/model';
 import { PurposeConsentList } from '../../features/audience/phase26/PurposeConsent';
 import { usePurposes } from '../../features/audience/phase26/usePurposes';
-import { Alert, Button, DetailSkeleton, EmptyState, IconButton, Input, ListSkeleton, Table, Tabs, Td, THead, Th, Tr, timeAgo } from '../../ui';
+import {
+  Alert,
+  Button,
+  DetailSkeleton,
+  EmptyState,
+  IconButton,
+  Input,
+  ListSkeleton,
+  Table,
+  Tabs,
+  Td,
+  THead,
+  Th,
+  Tr,
+  timeAgo,
+} from '../../ui';
 import { ListPage } from '../../ui/ListPage';
 import { pageWidth } from '../../ui/layout';
 

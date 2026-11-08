@@ -275,9 +275,7 @@ export default function ImportsPage() {
                             <Td className="break-all font-medium text-fg">{r.email}</Td>
                             <Td className="hidden md:table-cell">{r.traits.firstName ?? '—'}</Td>
                             <Td>
-                              {r.consent[0]?.status
-                                ? (CONSENT_LABEL[r.consent[0].status as ConsentStatus] ?? r.consent[0].status)
-                                : 'none'}{' '}
+                              {r.consent[0]?.status ? (CONSENT_LABEL[r.consent[0].status as ConsentStatus] ?? r.consent[0].status) : 'none'}{' '}
                               · {purposeName(r.consent[0]?.purpose ?? purpose)}
                             </Td>
                             <Td className="hidden lg:table-cell">

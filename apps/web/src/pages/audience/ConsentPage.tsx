@@ -6,9 +6,9 @@ import { Link } from '../../app/router';
 import { useSession } from '../../app/session';
 import { useApi } from '../../app/useApi';
 import { usePageTab } from '../../app/useTab';
-import { purposeLabel } from '../../lib/labels';
 import { ConsentHistoryTable } from '../../features/audience/consent';
 import { personLabel } from '../../features/audience/profile';
+import { purposeLabel } from '../../lib/labels';
 import {
   Alert,
   Button,
@@ -201,7 +201,9 @@ export function ConsentLedger() {
                               </span>
                               {c.channels.length > 0 && (
                                 <div className="text-[12px] leading-[18px] text-muted">
-                                  {c.channels.map((ch) => `${channelLabel(ch.channel)}: ${ch.granted} allowed, ${refused(ch)} refused`).join(' · ')}
+                                  {c.channels
+                                    .map((ch) => `${channelLabel(ch.channel)}: ${ch.granted} allowed, ${refused(ch)} refused`)
+                                    .join(' · ')}
                                 </div>
                               )}
                               {(topicCounts.get(p.key) ?? []).length > 0 && (
