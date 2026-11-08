@@ -68,7 +68,7 @@ export default function AgentPage({ params }: { params: Record<string, string> }
   if (agent.loading && !agent.data) {
     return (
       <div className={pageWidth('default')}>
-        <LoadingBlock lines={6} label="Loading agent" />
+        <LoadingBlock geometry="detail" label="Loading the agent" />
       </div>
     );
   }

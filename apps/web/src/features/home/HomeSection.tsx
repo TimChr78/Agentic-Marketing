@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 import { cx } from '../../ui/cx';
-import { Skeleton } from '../../ui/display';
+import { Skeleton, SkeletonRegion } from '../../ui/display';
 
 // One surface per Home section (#447): a heading row and a bordered body with horizontal
 // separators. Sublists are rows inside it, never nested outlined cards.
@@ -58,17 +58,21 @@ export function HomeBlock({
   );
 }
 
-/** The shared three-row skeleton for an operational block. */
-export function HomeBlockSkeleton({ label }: { label: string }) {
+/** The shared skeleton for an operational block: the real row height, labelled once per block. */
+export function HomeBlockSkeleton({ label, rows = 3 }: { label: string; rows?: number }) {
   return (
-    <div role="status" aria-busy="true" aria-label={`Loading ${label}`} className="space-y-2.5 px-4 py-4 md:px-5">
-      {[0, 1, 2].map((row) => (
-        <div key={row} className="flex min-h-10 items-center gap-3">
-          <Skeleton className="h-3 w-2/5" />
-          <Skeleton className="ml-auto h-3 w-16" />
+    <SkeletonRegion label={`Loading ${label}`} geometry="list" className="divide-y divide-line">
+      {Array.from({ length: rows }, (_, row) => (
+        // biome-ignore lint/suspicious/noArrayIndexKey: generated placeholder rows have no identity and never reorder
+        <div key={row} className="flex min-h-16 flex-wrap items-center gap-3 px-4 py-3 md:px-5">
+          <div className="min-w-0 flex-1 space-y-1.5">
+            <Skeleton className="h-3 w-2/5" />
+            <Skeleton className="h-3 w-3/5" />
+          </div>
+          <Skeleton className="h-5 w-16 rounded-full" />
         </div>
       ))}
-    </div>
+    </SkeletonRegion>
   );
 }
 

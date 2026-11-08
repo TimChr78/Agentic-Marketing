@@ -167,11 +167,13 @@ export function HostedAgentCard({ agentId, onChanged }: { agentId: string; onCha
             {hosted.budgets.maxToolCallsPerRun} tool calls
           </Fact>
           <Fact label="Last run">
-            {hosted.lastRunAt ? timeAgo(hosted.lastRunAt) : 'Never'}
+            {hosted.lastRunAt ? timeAgo(hosted.lastRunAt) : 'No runs recorded'}
             <div className="mt-0.5 text-[12px] text-muted">
               {hosted.consecutiveFailures
                 ? `${hosted.consecutiveFailures} consecutive failure${hosted.consecutiveFailures === 1 ? '' : 's'}`
-                : 'Healthy'}
+                : hosted.lastRunAt
+                  ? 'No failures recorded'
+                  : 'Waiting for the first run'}
             </div>
           </Fact>
         </div>
@@ -198,6 +200,7 @@ export function HostedAgentCard({ agentId, onChanged }: { agentId: string; onCha
         error={view.error}
         onRetry={view.reload}
         columns={6}
+        loadingLabel="Loading hosted runs"
         isEmpty={runs.length === 0}
         footer={
           next !== null || moreError ? (
@@ -234,7 +237,7 @@ export function HostedAgentCard({ agentId, onChanged }: { agentId: string; onCha
               <Th>Summary</Th>
               <Th className="hidden md:table-cell">Tool calls</Th>
               <Th className="hidden md:table-cell">Tokens</Th>
-              <Th className="hidden lg:table-cell">Error</Th>
+              <Th className="hidden lg:table-cell">Failure</Th>
             </tr>
           </THead>
           <tbody>
