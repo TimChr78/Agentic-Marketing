@@ -1,9 +1,11 @@
 import { X } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { Suspense, useEffect, useMemo, useState } from 'react';
 import { getWorkspaceId, setWorkspaceId } from '../../../../app/api';
-import { AuthenticatedRoot } from '../../../../app/Root';
+import { Routes } from '../../../../app/routes';
+import { Shell } from '../../../../app/Shell';
 import { SessionContext } from '../../../../app/session';
-import { Button, ToastProvider } from '../../../../ui';
+import { AutonomyProvider } from '../../../../features/agents/AutonomyProvider';
+import { Button, LoadingBlock, ToastProvider } from '../../../../ui';
 import { setWorkspaceTimeZone } from '../../../../ui/time';
 import { demoLiveRetired, enterDemo, installDemoHistory, LIVE_RETIRED_NOTICE } from '../../demo/entry';
 import { DEMO_TIME_ZONE, DEMO_WORKSPACE_ID } from './fixtures';
@@ -46,7 +48,15 @@ export function DemoRoot() {
       <SessionContext.Provider value={session}>
         <DemoBanner />
         {liveRetired && <LiveRetiredNotice onClose={() => setLiveRetired(false)} />}
-        <AuthenticatedRoot />
+        <AutonomyProvider>
+          <Suspense fallback={<LoadingBlock lines={6} />}>
+            <Shell>
+              <Suspense fallback={<LoadingBlock lines={6} />}>
+                <Routes />
+              </Suspense>
+            </Shell>
+          </Suspense>
+        </AutonomyProvider>
       </SessionContext.Provider>
     </ToastProvider>
   );
