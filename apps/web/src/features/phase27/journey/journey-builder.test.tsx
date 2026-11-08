@@ -14,6 +14,7 @@ const h = vi.hoisted(() => ({
   calls: [] as Call[],
   rows: {} as Record<string, unknown[]>,
   plan: null as unknown,
+  simulate: null as unknown,
 }));
 
 vi.mock('../../../app/api', async (importOriginal) => {
@@ -31,7 +32,7 @@ vi.mock('../../../app/api', async (importOriginal) => {
         if (name === 'purposes.list') return { source: 'published', purposes: [] };
         if (name === 'webhooks.list') return { endpoints: [] };
         if (name === 'connections.list') return { connections: [] };
-        if (name === 'journeys.simulate') return { version: 1, outcome: 'completed', converted: false, steps: [], entry: undefined };
+        if (name === 'journeys.simulate') return h.simulate;
         throw new Error(`unexpected command ${name}`);
       }),
     },
@@ -130,6 +131,7 @@ beforeEach(() => {
   h.calls.length = 0;
   h.rows = {};
   h.plan = { version: { content: { events: [] } } };
+  h.simulate = { version: 1, outcome: 'completed', converted: false, steps: [], entry: undefined };
   vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
     cb(0);
     return 0;
@@ -281,7 +283,103 @@ describe('journey inspector reads (#528)', () => {
   });
 });
 
+describe('journey settings stay reachable (#528)', () => {
+  it('keeps purpose, goal and the whole control-group setting', () => {
+    render(
+      <Harness
+        initial={{
+          purpose: 'marketing_email',
+          goal: 'Activation',
+          controlGroup: { percent: 10, minSampleSize: 200 },
+          nodes: moved(),
+        }}
+      />,
+    );
+    expect(screen.getByText('Purpose')).toBeTruthy();
+    expect(screen.getAllByText('Goal').length).toBeGreaterThan(0);
+    expect(screen.getByText('Control group')).toBeTruthy();
+    expect(screen.getByText('Share in control')).toBeTruthy();
+    expect(screen.getByText('Minimum sample size')).toBeTruthy();
+    expect(screen.getByText('Start a new scope if the percentage changes')).toBeTruthy();
+    expect(screen.getByText('Step colours')).toBeTruthy();
+    // One purposes list on mount; the settings read is unchanged by this work.
+    expect(h.calls.filter((c) => c.name === 'purposes.list')).toHaveLength(1);
+  });
+});
+
 describe('journey simulation stays reachable (#528)', () => {
+  const simNodes = (): JNode[] => [
+    {
+      id: 'n1',
+      kind: 'trigger',
+      label: 'Order placed',
+      config: { event: 'Order Placed', entryKey: { source: 'event_property', property: 'order_id' } },
+      next: [{ to: 'n2' }],
+    },
+    {
+      id: 'n2',
+      kind: 'branch',
+      label: 'Big order?',
+      config: { condition: { trait: 'total', op: 'gt', value: 100 } },
+      next: [{ to: 'n3' }, { to: 'n3' }],
+    },
+    {
+      id: 'n3',
+      kind: 'aiDecide',
+      label: 'Which nudge?',
+      config: { prompt: '', options: ['a', 'b'], fallback: 'a' },
+      next: [{ to: 'n4' }, { to: 'n4' }],
+    },
+    { id: 'n4', kind: 'exit', label: 'Exit', config: {} },
+  ];
+
+  it('keeps events, entry-key sample, branch answers, AI answers and the result', async () => {
+    h.simulate = {
+      version: 1,
+      outcome: 'completed',
+      converted: true,
+      steps: [{ after: 'PT0S', node: 'n1', label: 'Order placed', kind: 'trigger', detail: '' }],
+      entry: { key: 'A-1', source: 'event_property', duplicate: false, note: '' },
+    };
+    render(<Harness initial={{ purpose: 'marketing_email', nodes: simNodes() }} />);
+    fireEvent.click(screen.getByRole('tab', { name: /Simulate/ }));
+
+    expect(screen.getByText('Add event')).toBeTruthy();
+    expect(screen.getByText('Entry key sample')).toBeTruthy();
+    expect(screen.getByText('Branch answers')).toBeTruthy();
+    expect(screen.getByText('AI decisions')).toBeTruthy();
+    expect(screen.getAllByText('Big order?').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Which nudge?').length).toBeGreaterThan(0);
+
+    // Invalid sample JSON keeps the input and reports the existing local error without a read.
+    const properties = screen.getByRole('textbox', { name: 'Properties (JSON)' });
+    fireEvent.change(properties, { target: { value: '{bad' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Run simulation' }));
+    expect(screen.getByText('The sample event properties must be JSON.')).toBeTruthy();
+    expect(h.calls.filter((c) => c.name === 'journeys.simulate')).toHaveLength(0);
+
+    fireEvent.change(properties, { target: { value: '{"order_id":"A-1"}' } });
+    fireEvent.change(screen.getByRole('combobox', { name: 'Big order?' }), { target: { value: 'yes' } });
+    fireEvent.change(screen.getByRole('combobox', { name: 'Which nudge?' }), { target: { value: 'b' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Run simulation' }));
+    await waitFor(() => expect(h.calls.filter((c) => c.name === 'journeys.simulate')).toHaveLength(1));
+
+    const call = h.calls.find((c) => c.name === 'journeys.simulate')!;
+    expect(call.input).toMatchObject({
+      artifactId: journeyId,
+      version: 1,
+      branches: { n2: 'yes' },
+      ai: { n3: 'b' },
+      sampleEvent: { name: 'Order Placed', properties: { order_id: 'A-1' } },
+    });
+    expect(await screen.findByText('Completed')).toBeTruthy();
+    expect(screen.getByText('Reached the goal')).toBeTruthy();
+    expect(screen.getAllByText('Order placed').length).toBeGreaterThan(0);
+    expect(screen.getByText(/it would enter/)).toBeTruthy();
+    expect(h.calls.filter((c) => /send/i.test(c.name))).toHaveLength(0);
+    expect(h.calls.filter((c) => /model|ai\./i.test(c.name))).toHaveLength(0);
+  });
+
   it('runs the saved version once, with no sending or model call', async () => {
     render(<Harness initial={{ purpose: 'marketing_email', nodes: moved() }} />);
     fireEvent.click(screen.getByRole('tab', { name: /Simulate/ }));
