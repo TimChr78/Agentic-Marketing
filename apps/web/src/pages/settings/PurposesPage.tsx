@@ -6,7 +6,7 @@ import { navigate } from '../../app/router';
 import { useWorkspace } from '../../app/session';
 import { useApi } from '../../app/useApi';
 import { invalidatePickerIndex } from '../../features/artifacts/pickerIndex';
-import { Alert, Button, EmptyState, Mono, StatusPill, Table, TableFrame, Tag, Td, THead, Th, Tr, useToast } from '../../ui';
+import { Alert, Button, EmptyState, Skeleton, StatusPill, Table, TableFrame, Tag, Td, THead, Th, Tr, useToast } from '../../ui';
 
 const BASIS_LABEL: Record<string, string> = {
   consent: 'Consent',
@@ -16,6 +16,16 @@ const BASIS_LABEL: Record<string, string> = {
 };
 
 const basisLabel = (basis: string) => BASIS_LABEL[basis] ?? basis.replace(/_/g, ' ');
+
+const CHANNEL_LABEL: Record<string, string> = {
+  email: 'E-mail',
+  web: 'Web',
+  sms: 'SMS',
+  push: 'Push',
+  webhook: 'Webhook',
+};
+
+const channelLabel = (channel: string) => CHANNEL_LABEL[channel] ?? channel.replace(/_/g, ' ');
 
 const refused = (c: { denied: number; withdrawn: number; objected: number }) => c.denied + c.withdrawn + c.objected;
 
@@ -111,13 +121,14 @@ export default function PurposesPage() {
         </Alert>
       )}
       {error && (
-        <Alert tone="bad" title="Could not create the purposes artifact" className="mt-3 mb-3">
+        <Alert tone="bad" title="Couldn't create the purposes artifact" className="mt-3 mb-3">
           {error}
         </Alert>
       )}
 
       <TableFrame
         loading={data.loading}
+        loadingLabel="Loading purposes"
         error={data.error}
         onRetry={data.reload}
         columns={5}
@@ -141,9 +152,6 @@ export default function PurposesPage() {
                 <Tr key={p.key}>
                   <Td>
                     <div className="font-medium text-fg">{p.name}</div>
-                    <div className="mt-0.5">
-                      <Mono>{p.key}</Mono>
-                    </div>
                     {p.description && <p className="mt-1 max-w-[360px] text-[12px] leading-[18px] text-muted">{p.description}</p>}
                   </Td>
                   <Td className="whitespace-nowrap">{basisLabel(p.basis)}</Td>
@@ -151,7 +159,7 @@ export default function PurposesPage() {
                     {p.channels.length ? (
                       <span className="flex flex-wrap gap-1">
                         {p.channels.map((ch) => (
-                          <Tag key={ch}>{ch}</Tag>
+                          <Tag key={ch}>{channelLabel(ch)}</Tag>
                         ))}
                       </span>
                     ) : (
@@ -160,7 +168,10 @@ export default function PurposesPage() {
                   </Td>
                   <Td>
                     {summary.loading ? (
-                      <span className="text-muted">…</span>
+                      <span className="inline-flex items-center gap-2">
+                        <Skeleton className="h-4 w-24" />
+                        <span className="sr-only">Loading counts</span>
+                      </span>
                     ) : c ? (
                       <div className="space-y-1">
                         <span className="flex flex-wrap gap-1">
@@ -169,7 +180,7 @@ export default function PurposesPage() {
                         </span>
                         {c.channels.length > 0 && (
                           <div className="text-[12px] leading-[18px] text-muted">
-                            {c.channels.map((ch) => `${ch.channel}: ${ch.granted} allowed, ${refused(ch)} refused`).join(' · ')}
+                            {c.channels.map((ch) => `${channelLabel(ch.channel)}: ${ch.granted} allowed, ${refused(ch)} refused`).join(' · ')}
                           </div>
                         )}
                       </div>

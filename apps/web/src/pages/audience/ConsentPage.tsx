@@ -6,6 +6,7 @@ import { Link } from '../../app/router';
 import { useSession } from '../../app/session';
 import { useApi } from '../../app/useApi';
 import { usePageTab } from '../../app/useTab';
+import { purposeLabel } from '../../lib/labels';
 import { ConsentHistoryTable } from '../../features/audience/consent';
 import { personLabel } from '../../features/audience/profile';
 import {
@@ -17,11 +18,13 @@ import {
   Field,
   fieldErrors,
   Input,
+  ListSkeleton,
   LoadingBlock,
   Meta,
   Mono,
   PageHeader,
   Select,
+  Skeleton,
   StatusPill,
   Table,
   TableFrame,
@@ -52,6 +55,23 @@ const BASIS_LABEL: Record<string, string> = {
 };
 
 const basisLabel = (basis: string) => BASIS_LABEL[basis] ?? basis.replace(/_/g, ' ');
+
+const STATUS_LABEL: Record<Status, string> = {
+  granted: 'Granted',
+  denied: 'Denied',
+  withdrawn: 'Withdrawn',
+  objected: 'Objected',
+};
+
+const CHANNEL_LABEL: Record<string, string> = {
+  email: 'E-mail',
+  web: 'Web',
+  sms: 'SMS',
+  push: 'Push',
+  webhook: 'Webhook',
+};
+
+const channelLabel = (channel: string) => CHANNEL_LABEL[channel] ?? channel.replace(/_/g, ' ');
 
 const refused = (c: { denied: number; withdrawn: number; objected: number }) => c.denied + c.withdrawn + c.objected;
 
@@ -123,7 +143,7 @@ export function ConsentLedger() {
         {!can('artifacts:read') ? (
           <Alert tone="info">Your role cannot read the purposes. Ask a workspace admin to give you access to them.</Alert>
         ) : purposes.loading ? (
-          <LoadingBlock lines={3} label="Loading purposes" />
+          <ListSkeleton label="Loading purposes" columns={5} />
         ) : purposes.error ? (
           <Alert tone="bad" title="Couldn't load the purposes" onRetry={purposes.reload}>
             {purposes.error}
@@ -134,40 +154,45 @@ export function ConsentLedger() {
               <Table label="Purposes">
                 <THead>
                   <tr>
-                    <Th>Purpose</Th>
-                    <Th>Lawful basis</Th>
-                    <Th>Channels</Th>
-                    <Th>People</Th>
-                    <Th>Double opt-in</Th>
+                    <Th className="max-md:hidden">Purpose</Th>
+                    <Th className="max-md:hidden">Lawful basis</Th>
+                    <Th className="max-md:hidden">Channels</Th>
+                    <Th className="max-md:hidden">People</Th>
+                    <Th className="max-md:hidden">Double opt-in</Th>
                   </tr>
                 </THead>
                 <tbody>
                   {(purposes.data?.purposes ?? []).map((p) => {
                     const c = counts.get(p.key);
                     return (
-                      <Tr key={p.key}>
-                        <Td>
+                      <Tr key={p.key} className="max-md:block max-md:border-t max-md:border-line">
+                        <Td className="max-md:block max-md:border-0 max-md:pb-1">
                           <div className="font-medium text-fg">{p.name}</div>
-                          <div className="mt-0.5">
-                            <Mono className="bg-transparent px-0 text-muted">{p.key}</Mono>
-                          </div>
                           {p.description && <p className="mt-1 max-w-[360px] text-[12px] leading-[18px] text-muted">{p.description}</p>}
                         </Td>
-                        <Td className="whitespace-nowrap">{basisLabel(p.basis)}</Td>
-                        <Td>
+                        <Td className="whitespace-nowrap max-md:flex max-md:justify-between max-md:gap-4 max-md:border-0 max-md:py-1">
+                          <span className="text-muted md:hidden">Lawful basis: </span>
+                          {basisLabel(p.basis)}
+                        </Td>
+                        <Td className="max-md:flex max-md:flex-wrap max-md:items-baseline max-md:justify-between max-md:gap-4 max-md:border-0 max-md:py-1">
+                          <span className="text-muted md:hidden">Channels: </span>
                           {p.channels.length ? (
                             <span className="flex flex-wrap gap-1">
                               {p.channels.map((ch) => (
-                                <Tag key={ch}>{ch}</Tag>
+                                <Tag key={ch}>{channelLabel(ch)}</Tag>
                               ))}
                             </span>
                           ) : (
                             <span className="text-muted">None</span>
                           )}
                         </Td>
-                        <Td>
+                        <Td className="max-md:block max-md:border-0 max-md:py-1">
+                          <span className="text-muted md:hidden">People: </span>
                           {summary.loading ? (
-                            <span className="text-muted">…</span>
+                            <span className="inline-flex items-center gap-2">
+                              <Skeleton className="h-4 w-24" />
+                              <span className="sr-only">Loading counts</span>
+                            </span>
                           ) : c ? (
                             <div className="space-y-1">
                               <span className="flex flex-wrap gap-1">
@@ -176,7 +201,7 @@ export function ConsentLedger() {
                               </span>
                               {c.channels.length > 0 && (
                                 <div className="text-[12px] leading-[18px] text-muted">
-                                  {c.channels.map((ch) => `${ch.channel}: ${ch.granted} allowed, ${refused(ch)} refused`).join(' · ')}
+                                  {c.channels.map((ch) => `${channelLabel(ch.channel)}: ${ch.granted} allowed, ${refused(ch)} refused`).join(' · ')}
                                 </div>
                               )}
                               {(topicCounts.get(p.key) ?? []).length > 0 && (
@@ -189,7 +214,10 @@ export function ConsentLedger() {
                             <span className="text-muted">No recorded choices</span>
                           )}
                         </Td>
-                        <Td>{p.requiresDoubleOptIn ? 'Yes' : <span className="text-muted">No</span>}</Td>
+                        <Td className="max-md:flex max-md:justify-between max-md:gap-4 max-md:border-0 max-md:py-1">
+                          <span className="text-muted md:hidden">Double opt-in: </span>
+                          {p.requiresDoubleOptIn ? 'Yes' : <span className="text-muted">No</span>}
+                        </Td>
                       </Tr>
                     );
                   })}
@@ -273,6 +301,7 @@ export function ConsentLedger() {
             error={history.error}
             onRetry={history.reload}
             columns={5}
+            loadingLabel="Loading consent history"
             isEmpty={records.length === 0}
             empty={
               <EmptyState compact title="No consent records yet">
@@ -280,7 +309,7 @@ export function ConsentLedger() {
               </EmptyState>
             }
           >
-            <ConsentHistoryTable records={records} />
+            <ConsentHistoryTable records={records} purposes={purposes.data?.purposes} />
           </TableFrame>
         </Card>
       )}
@@ -325,7 +354,7 @@ function RecordDrawer({
 
   const submit = async () => {
     const next: Record<string, string> = {};
-    if (!PURPOSE.test(purpose)) next.purpose = 'Use a lowercase key such as marketing_email.';
+    if (!PURPOSE.test(purpose)) next.purpose = 'Use the purpose key from the purposes in force, in lowercase.';
     setErrors(next);
     if (Object.keys(next).length) return;
     setBusy(true);
@@ -339,10 +368,11 @@ function RecordDrawer({
         source,
         proof: note.trim() ? { note: note.trim() } : {},
       });
+      const name = purposes.find((p) => p.key === purpose)?.name ?? purposeLabel(purpose);
       toast.success(
         r.allowed
-          ? `Recorded “${purpose}” as ${status}; it is allowed now.`
-          : `Recorded “${purpose}” as ${status}. It is not allowed under the current basis.`,
+          ? `Recorded “${name}” as ${STATUS_LABEL[status]}; it is allowed now.`
+          : `Recorded “${name}” as ${STATUS_LABEL[status]}. It is not allowed under the current basis.`,
       );
       onRecorded();
     } catch (e) {
@@ -380,7 +410,7 @@ function RecordDrawer({
             <Select value={purpose} onChange={(e) => setPurpose(e.target.value)}>
               {purposes.map((p) => (
                 <option key={p.key} value={p.key}>
-                  {p.name} ({p.key})
+                  {p.name}
                 </option>
               ))}
             </Select>
@@ -389,7 +419,10 @@ function RecordDrawer({
               value={purpose}
               onChange={(e) => setPurpose(e.target.value)}
               onBlur={() =>
-                setErrors((x) => ({ ...x, purpose: PURPOSE.test(purpose) ? '' : 'Use a lowercase key such as marketing_email.' }))
+                setErrors((x) => ({
+                  ...x,
+                  purpose: PURPOSE.test(purpose) ? '' : 'Use the purpose key from the purposes in force, in lowercase.',
+                }))
               }
               autoComplete="off"
             />

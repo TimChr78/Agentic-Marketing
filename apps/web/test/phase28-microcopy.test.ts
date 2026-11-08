@@ -82,6 +82,9 @@ const ALLOW: { file: string; rule: string; reason: string }[] = [
   },
 ];
 
+/** Area sections that have adopted the lint: their findings fail, not just report. */
+const STRICT: Owner[] = ['A'];
+
 function allowed(file: string, rule: string): boolean {
   return ALLOW.some((a) => a.file === file && a.rule === rule);
 }
@@ -185,6 +188,12 @@ describe('phase 28 microcopy lint (#555)', () => {
     const ours = findings.filter((f) => f.owner === 'I');
     const detail = ours.map((f) => `${f.file}:${f.line} [${f.rule}] ${f.text}`).join('\n');
     expect(ours, detail).toEqual([]);
+  });
+
+  it('adopted area sections have no raw ids, keys or banned patterns', () => {
+    const rows = findings.filter((f) => STRICT.includes(f.owner));
+    const detail = rows.map((f) => `${f.file}:${f.line} [${f.rule}] ${f.text}`).join('\n');
+    expect(rows, detail).toEqual([]);
   });
 
   it('reports the area totals so each task can flip its own section to strict', () => {
