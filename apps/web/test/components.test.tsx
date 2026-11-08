@@ -10,7 +10,16 @@ import { Field, Input } from '../src/ui/form';
 import { ListPage } from '../src/ui/ListPage';
 import { Menu } from '../src/ui/menu';
 import { useConfirm } from '../src/ui/overlay';
-import { ChartSkeleton, KpiSkeleton, ListSkeleton, LoadingBlock, SKELETON_DELAY_MS, SKELETON_GEOMETRY, Skeleton } from '../src/ui/Skeleton';
+import {
+  ChartSkeleton,
+  EditorSkeleton,
+  KpiSkeleton,
+  ListSkeleton,
+  LoadingBlock,
+  SKELETON_DELAY_MS,
+  SKELETON_GEOMETRY,
+  Skeleton,
+} from '../src/ui/Skeleton';
 import { Tabs } from '../src/ui/tabs';
 
 afterEach(cleanup);
@@ -200,6 +209,26 @@ describe('reserved loading geometry (#555)', () => {
     const region = screen.getByRole('status', { name: 'Loading reviews' });
     expect(region.getAttribute('data-geometry')).toBe('chart');
     expect(region.querySelector('[data-skeleton-shape="chart"]')).toBeTruthy();
+  });
+
+  it('fills its reserved frame only when the caller asks for fill', () => {
+    render(
+      <div data-testid="frame" style={{ height: 504 }}>
+        <EditorSkeleton label="Loading the visual editor" fill />
+      </div>,
+    );
+    const region = screen.getByRole('status', { name: 'Loading the visual editor' });
+    expect(region.className).toContain('h-full');
+    expect(region.getAttribute('data-fill')).toBe('true');
+    const shape = region.querySelector('[data-skeleton-shape="editor"]')!;
+    expect((shape as HTMLElement).style.height).toBe('100%');
+    cleanup();
+    // The default stays the fixed 420/560 px frame the shared contract publishes.
+    render(<EditorSkeleton label="Loading the editor" />);
+    const plain = screen.getByRole('status', { name: 'Loading the editor' });
+    expect(plain.className).not.toContain('h-full');
+    expect(plain.getAttribute('data-fill')).toBeNull();
+    expect((plain.querySelector('[data-skeleton-shape="editor"]') as HTMLElement).style.height).toBe('');
   });
 
   it('never renders an animated shape', () => {

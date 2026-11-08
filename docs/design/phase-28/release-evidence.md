@@ -4,24 +4,25 @@ Assembled by task I (#555) on the integrated phase head. The contract, ownership
 in [README](README.md). Record the exact SHA, fixture and command for every run; a checked box needs
 an artifact, not an assertion.
 
-Status: **in progress**. The five area tasks land after this foundations branch; their findings below
-are report-mode until each owner flips its own section to strict.
+Status: **complete for the automated gate**; the manual accessibility and findability items remain
+owner sign-off. Measured on integrated source head `c88b63e` (all area branches merged), fresh
+run-scoped seeded database per suite, Linux, Playwright `v1.64.1-noble` Chromium, shared test stack
+with `TEST_PORT_OFFSET=100`. Every area section below is strict and zero-finding.
 
 ## Commands and exit codes
 
 | Check | Command | Exit | Notes |
 | --- | --- | ---: | --- |
-| Web unit tests | `npx vitest run --project web` | 0 | 95 files, 964 tests passed |
+| Web unit tests | `npx vitest run --project web` | 0 | 100 files, 1,003 tests passed |
 | Docs tests | `npx vitest run --project docs` | 0 | 6 files, 38 tests passed |
 | Live build | `corepack pnpm --filter @agentic-marketing/web build:live` | 0 | manifest at `apps/web/dist/.vite/manifest.json` |
-| Bundle budgets | `npx vitest run --project web apps/web/test/phase28-bundle.test.ts` | 0 | decimal gzip kB; 140 tests |
-| Lint | `npx biome check .` | 0 | 32 pre-existing warnings, no errors |
-| Typecheck | `corepack pnpm -r --filter './packages/*' --filter './apps/*' typecheck` | 0 | |
-| Changelog | `node scripts/changelog.mjs check` | 0 | 1 fragment |
-| Smoke e2e | `TEST_PORT_OFFSET=100 scripts/e2e-docker.sh smoke` | 0 | 7 passed |
-| Phase 28 functional | `TEST_PORT_OFFSET=100 E2E_SKIP_BUILD=1 scripts/e2e-docker.sh functional e2e/phase28-*.spec.ts` | 0 | 13 passed, 32 skipped (area-owned reporting tests) |
+| Bundle budgets | `PHASE28_REQUIRE_BUNDLE=1 npx vitest run apps/web/test/bundle.test.ts apps/web/test/phase28-bundle.test.ts` | 0 | decimal gzip kB; 151 tests in 2 files |
+| Lint | `corepack pnpm lint` | 0 | Biome, e2e selector check and changelog check; 31 pre-existing warnings, no errors |
+| Typecheck | `corepack pnpm -r --filter './packages/*' --filter './apps/*' typecheck` | 0 | all packages and apps |
+| Changelog | `node scripts/changelog.mjs check` | 0 | 8 fragments |
+| Functional e2e (full) | `TEST_PORT_OFFSET=100 E2E_SKIP_BUILD=1 scripts/e2e-docker.sh functional` | 0 | 151 passed, 4.0 min |
 | Axe | `TEST_PORT_OFFSET=100 E2E_SKIP_BUILD=1 scripts/e2e-docker.sh axe` | 0 | 43 passed, 2 skipped; 0 violations, 0 allowlist entries |
-| Visual | `TEST_PORT_OFFSET=100 E2E_SKIP_BUILD=1 scripts/e2e-docker.sh visual` | 0 | 12 routes passed; no baseline changed |
+| Visual | `TEST_PORT_OFFSET=100 E2E_SKIP_BUILD=1 scripts/e2e-docker.sh visual` | 0 | 12 routes passed; only `agents-390-light/dark` changed |
 
 ## Bundle actuals
 
@@ -34,67 +35,67 @@ and its automatically mounted children; “cold” is their sum. Ceilings are fr
 Measured from `apps/web/dist/.vite/manifest.json` after
 `corepack pnpm --filter @agentic-marketing/web build:live` on this branch.
 
-- Signed-out initial (entry + Root + eagerly needed auth screens): **108.55 kB** (cap 110).
-- Signed-in initial (entry + Root + Shell + route table): **129.27 kB** (cap 150).
+- Signed-out initial (entry + Root + eagerly needed auth screens): **108.65 kB** (cap 110).
+- Signed-in initial (entry + Root + Shell + route table): **129.46 kB** (cap 150).
 - Auth screens add no separate lazy closure in this build; they are inside the signed-out initial.
 
 | Route | Initial | Lazy | Cold | Cap |
 | --- | ---: | ---: | ---: | ---: |
-| `/` | 129.27 | 14.77 | 144.04 | 25 |
-| `/approvals` | 129.27 | 6.37 | 135.63 | 25 |
-| `/approvals/:id` | 129.27 | 36.26 | 165.53 | 70 |
-| `/work/agents` | 129.27 | 27.05 | 156.32 | 35 |
-| `/work/agents/:id` | 129.27 | 36.93 | 166.19 | 45 |
-| `/work/agents/library/:id` | 129.27 | 26.78 | 156.04 | 35 |
-| `/marketing/campaigns` | 129.27 | 8.50 | 137.76 | 20 |
-| `/marketing/campaigns/:id` | 129.27 | 31.70 | 160.96 | 45 |
-| `/marketing/broadcasts` | 129.27 | 12.21 | 141.48 | 25 |
-| `/marketing/broadcasts/:id` | 129.27 | 49.99 | 179.26 | 80 |
-| `/marketing/journeys` | 129.27 | 8.71 | 137.97 | 20 |
-| `/marketing/journeys/:id` | 129.27 | 105.79 | 235.06 | 130 |
-| `/marketing/experiences` | 129.27 | 9.06 | 138.32 | 20 |
-| `/marketing/experiences/:id` | 129.27 | 26.83 | 156.10 | 40 |
-| `/audience/people` | 129.27 | 14.04 | 143.30 | 30 |
-| `/audience/people/:id` | 129.27 | 11.69 | 140.95 | 30 |
-| `/audience/segments` | 129.27 | 9.75 | 139.01 | 20 |
-| `/audience/segments/:id` | 129.27 | 33.46 | 162.73 | 40 |
-| `/audience/forms` | 129.27 | 9.75 | 139.02 | 20 |
-| `/audience/forms/:id` | 129.27 | 30.03 | 159.30 | 40 |
-| `/audience/consent` | 129.27 | 11.00 | 140.26 | 40 |
-| `/content/templates` | 129.27 | 12.72 | 141.99 | 35 |
-| `/content/templates/blocks/:id` | 129.27 | 23.95 | 153.22 | 40 |
-| `/content/templates/:id` | 129.27 | 40.55 | 169.82 | 65 |
-| `/content/assets` | 129.27 | 6.06 | 135.33 | 25 |
-| `/content/brand` | 129.27 | 30.81 | 160.08 | 40 |
-| `/insights/analytics` | 129.27 | 16.93 | 146.20 | 40 |
-| `/insights/messages` | 129.27 | 3.45 | 132.72 | 20 |
-| `/insights/deliverability` | 129.27 | 9.94 | 139.21 | 35 |
-| `/insights/alerts` | 129.27 | 7.38 | 136.65 | 30 |
-| `/settings` | 129.27 | 0.28 | 129.54 | 20 |
-| `/settings/workspace` | 129.27 | 3.29 | 132.56 | 20 |
-| `/settings/providers` | 129.27 | 14.94 | 144.21 | 40 |
-| `/settings/integrations` | 129.27 | 16.52 | 145.79 | 55 |
-| `/settings/integrations/tokens/:id` | 129.27 | 16.52 | 145.79 | 55 |
-| `/settings/secrets` | 129.27 | 3.71 | 132.97 | 20 |
-| `/settings/users` | 129.27 | 5.33 | 134.60 | 25 |
-| `/settings/approval-policy` | 129.27 | 5.04 | 134.31 | 25 |
-| `/preferences` | 129.27 | 2.88 | 132.14 | 20 |
-| `/create` | 129.27 | 5.05 | 134.32 | 20 |
-| `/artifacts/:id` | 129.27 | 21.20 | 150.47 | 130 |
+| / | 129.46 kB | 14.96 kB | 144.42 kB | 25 |
+| /approvals | 129.46 kB | 6.39 kB | 135.85 kB | 25 |
+| /approvals/:id | 129.46 kB | 36.29 kB | 165.75 kB | 70 |
+| /artifacts/:id | 129.46 kB | 21.21 kB | 150.67 kB | 130 |
+| /audience/consent | 129.46 kB | 14.42 kB | 143.88 kB | 40 |
+| /audience/forms | 129.46 kB | 9.75 kB | 139.21 kB | 20 |
+| /audience/forms/:id | 129.46 kB | 30.04 kB | 159.50 kB | 40 |
+| /audience/people | 129.46 kB | 14.56 kB | 144.02 kB | 30 |
+| /audience/people/:id | 129.46 kB | 12.45 kB | 141.91 kB | 30 |
+| /audience/segments | 129.46 kB | 9.74 kB | 139.21 kB | 20 |
+| /audience/segments/:id | 129.46 kB | 34.35 kB | 163.81 kB | 40 |
+| /content/assets | 129.46 kB | 6.48 kB | 135.94 kB | 25 |
+| /content/brand | 129.46 kB | 31.32 kB | 160.78 kB | 40 |
+| /content/templates | 129.46 kB | 13.43 kB | 142.89 kB | 35 |
+| /content/templates/:id | 129.46 kB | 42.36 kB | 171.83 kB | 65 |
+| /content/templates/blocks/:id | 129.46 kB | 23.96 kB | 153.43 kB | 40 |
+| /create | 129.46 kB | 5.78 kB | 135.24 kB | 20 |
+| /insights/alerts | 129.46 kB | 7.43 kB | 136.89 kB | 30 |
+| /insights/analytics | 129.46 kB | 17.15 kB | 146.61 kB | 40 |
+| /insights/deliverability | 129.46 kB | 9.97 kB | 139.44 kB | 35 |
+| /insights/messages | 129.46 kB | 5.56 kB | 135.02 kB | 20 |
+| /marketing/broadcasts | 129.46 kB | 12.22 kB | 141.68 kB | 25 |
+| /marketing/broadcasts/:id | 129.46 kB | 50.17 kB | 179.63 kB | 80 |
+| /marketing/campaigns | 129.46 kB | 8.50 kB | 137.96 kB | 20 |
+| /marketing/campaigns/:id | 129.46 kB | 31.80 kB | 161.26 kB | 45 |
+| /marketing/experiences | 129.46 kB | 9.05 kB | 138.51 kB | 20 |
+| /marketing/experiences/:id | 129.46 kB | 26.84 kB | 156.30 kB | 40 |
+| /marketing/journeys | 129.46 kB | 8.71 kB | 138.17 kB | 20 |
+| /marketing/journeys/:id | 129.46 kB | 106.13 kB | 235.59 kB | 130 |
+| /preferences | 129.46 kB | 3.27 kB | 132.73 kB | 20 |
+| /settings | 129.46 kB | 0.66 kB | 130.12 kB | 20 |
+| /settings/approval-policy | 129.46 kB | 5.45 kB | 134.91 kB | 25 |
+| /settings/integrations | 129.46 kB | 17.31 kB | 146.77 kB | 55 |
+| /settings/integrations/tokens/:id | 129.46 kB | 17.31 kB | 146.77 kB | 55 |
+| /settings/providers | 129.46 kB | 15.55 kB | 145.01 kB | 40 |
+| /settings/secrets | 129.46 kB | 3.73 kB | 133.19 kB | 20 |
+| /settings/users | 129.46 kB | 5.36 kB | 134.83 kB | 25 |
+| /settings/workspace | 129.46 kB | 3.70 kB | 133.16 kB | 20 |
+| /work/agents | 129.46 kB | 27.24 kB | 156.70 kB | 35 |
+| /work/agents/:id | 129.46 kB | 37.01 kB | 166.47 kB | 45 |
+| /work/agents/library/:id | 129.46 kB | 26.79 kB | 156.25 kB | 35 |
 
 Additional closures, measured as increments over the signed-in initial:
 
 | Renderer / action | Gzip | Cap |
 | --- | ---: | ---: |
 | ECharts (`ChartImpl`) | 368.50 | 400 |
-| Visual e-mail authoring (`VisualMjml` + lib + CSS) | 690.41 | 1,120 |
+| Visual e-mail authoring (`VisualMjml` + lib + CSS) | 692.31 | 1,120 |
 | Broadcast report action (`ReportEntry`) | 6.55 | 30 |
-| Demo fixture closure (`DemoRoot` + fixtures) | 14.71 | 25 |
+| Demo fixture closure (`DemoRoot` + fixtures) | 14.75 | 25 |
 
-Analytics with its automatically mounted chart is **514.70 kB** (cap 590).
-Deliverability with a chart is **507.70 kB** (cap 585).
-Journey Report is **603.56 kB** (cap 680).
-Template with the automatically mounted visual editor is **860.27 kB** (cap 1,335).
+Analytics with its automatically mounted chart is **515.11 kB** (cap 590).
+Deliverability with a chart is **507.94 kB** (cap 585).
+Journey Report is **604.09 kB** (cap 680).
+Template with the automatically mounted visual editor is **864.14 kB** (cap 1,335).
 
 No ceiling was raised. Seven routes were over their ceilings before this landing because the shared
 detail page eagerly imported the preview stack and structured editors. Those imports now load through
@@ -120,41 +121,41 @@ build run below; it must stay at or under 110 kB.
   `ChartSkeleton`, `KpiSkeleton`, `EditorSkeleton`, and the `LoadingBlock` adapter. The slot is
   reserved immediately and the shapes reveal after `SKELETON_DELAY_MS` (150 ms). Callers pass
   geometry, the object-specific label and the busy state; the primitive never fetches.
+- `EditorSkeleton` also accepts an additive `fill` prop. The template editor already reserves a
+  `calc(100vh-340px)` frame (504 px at 390×844), so its fallback fills that frame instead of the
+  fixed 420/560 px shape; without `fill` the published 420/560 px default is unchanged.
 
 ## Microcopy lint
 
-Report mode: raw seeded ids, metric keys, purpose keys and the banned patterns from
-[microcopy](microcopy.md). I-owned findings must be zero; W/M/A/C/S findings are handed to their
-owners. Narrow exceptions: the friendly-name registry in `lib/labels.ts`, the Identifier copy
-control, the developer JSON view and preview source parsing.
+Strict mode for all six owners: raw seeded ids, metric keys, purpose keys and the banned patterns
+from [microcopy](microcopy.md) fail the suite. Narrow exceptions stay limited to the friendly-name
+registry in `lib/labels.ts`, the Identifier copy control, the developer JSON view, preview source
+parsing and fixture technical values whose visible label comes from the registry.
 
 <!-- phase28-microcopy:start -->
 ### I · 0 findings
 
 None.
 
-### W · 2 findings
+### W · 0 findings
 
-- `apps/web/src/features/agents/HostedAgentCard.tsx:237` **generic-error** — Error
-- `apps/web/src/pages/approvals/ApprovalsPage.tsx:154` **generic-error** — Loading
+None.
 
-### M · 1 finding
+### M · 0 findings
 
-- `apps/web/src/features/artifacts/ExperienceEditor.tsx:267` **purpose-key** — Traits, segments and session conditions need web_personalization consent; page, referrer, UTM and device do not.
+None.
 
-### A · 1 finding
+### A · 0 findings
 
-- `apps/web/src/pages/audience/ImportsPage.tsx:101` **purpose-key** — The purpose must be a lowercase key such as marketing_email.
+None.
 
-### C · 2 findings
+### C · 0 findings
 
-- `apps/web/src/features/phase27/content/ContentList.tsx:294` **generic-error** — Loading
-- `apps/web/src/features/phase27/content/ContentList.tsx:302` **generic-error** — Loading
+None.
 
-### S · 2 findings
+### S · 0 findings
 
-- `apps/web/src/features/deliverability/model.ts:99` **no-data** — No data
-- `apps/web/src/features/tokens/TokensCard.tsx:38` **banned-copy** — No client has sent unknown input keys for 7 days: it's safe to set
+None.
 
 <!-- phase28-microcopy:end -->
 
@@ -173,6 +174,16 @@ Regenerate only the baselines this branch actually moves, with
 `scripts/e2e-docker.sh update -g "<route> matches"`, and list each one here for human review.
 
 <!-- phase28-baselines:start -->
-None. All 12 committed visual routes matched their existing baselines after the shared CSS changes
-(static skeletons, token durations, static progress glyph); no `update` run was needed.
+Eight committed baselines moved in the phase; the other matrix routes kept their approved images.
+
+- `agents-390-light`, `agents-390-dark` (**W**): the comparison controls moved into the card body.
+  The integration pass regenerated these two again when the wide Status and Last 24 hours columns
+  moved under the agent name at 390 px; `agents-1440-*` is unchanged.
+- `journey-builder-390-light`, `journey-builder-390-dark` (**M**): the readable “Journey steps”
+  list replaced the phone layout that needed sideways reading.
+- `analytics-1440-light`, `analytics-1440-dark`, `analytics-390-light`, `analytics-390-dark`
+  (**S**): 204 px KPI tiles, including the reserved loading geometry.
+
+`TEST_PORT_OFFSET=100 E2E_SKIP_BUILD=1 scripts/e2e-docker.sh update -g "agents matches its baseline"`
+regenerated exactly the two agents phone baselines; the full visual run then passed all 12 routes.
 <!-- phase28-baselines:end -->

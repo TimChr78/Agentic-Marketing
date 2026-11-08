@@ -95,9 +95,9 @@ export function AgentsHome() {
             <tr>
               <Th>Agent</Th>
               <Th className="hidden md:table-cell">Sponsor</Th>
-              <Th>Status</Th>
+              <Th className="hidden md:table-cell">Status</Th>
               <Th className="hidden lg:table-cell">Credentials</Th>
-              <Th>Last 24 hours</Th>
+              <Th className="hidden md:table-cell">Last 24 hours</Th>
             </tr>
           </THead>
           <tbody>
@@ -108,6 +108,15 @@ export function AgentsHome() {
                     {a.name}
                   </Link>
                   {a.description && <div className="mt-0.5 line-clamp-1 max-w-[360px] text-[12px] text-muted">{a.description}</div>}
+                  {/* Below md the wide Status and Last 24 hours columns would clip; keep both
+                      facts under the name instead, matching the tokens card's phone pattern. */}
+                  <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 md:hidden">
+                    <AgentStatusPill status={a.status} guard={a.guard} statusReason={a.statusReason} />
+                    <span data-agent-24h className="text-[11px] text-muted">
+                      {a.last24h.changes} change{a.last24h.changes === 1 ? '' : 's'} · {a.last24h.escalated} escalated · {a.last24h.denied}{' '}
+                      denied
+                    </span>
+                  </div>
                   {admin && (
                     <div className="mt-1.5">
                       <AgentControls agent={a} variant="menu" onUpdated={replace} />
@@ -115,7 +124,7 @@ export function AgentsHome() {
                   )}
                 </Td>
                 <Td className="hidden md:table-cell">{a.sponsor.name}</Td>
-                <Td>
+                <Td className="hidden md:table-cell">
                   <AgentStatusPill status={a.status} guard={a.guard} statusReason={a.statusReason} />
                   {a.status === 'paused' && a.statusReason && (
                     <div className="mt-0.5 max-w-[220px] text-[11px] text-muted">{a.statusReason}</div>
@@ -125,7 +134,7 @@ export function AgentsHome() {
                   <div>{a.credentials.length === 1 ? '1 credential' : `${a.credentials.length} credentials`}</div>
                   <div className="text-[11px] text-muted break-words">{credentialKinds(a) || 'None yet'}</div>
                 </Td>
-                <Td className="whitespace-nowrap">
+                <Td className="hidden whitespace-nowrap md:table-cell">
                   <span className="text-[12px]">
                     {a.last24h.changes} change{a.last24h.changes === 1 ? '' : 's'} · {a.last24h.escalated} escalated · {a.last24h.denied}{' '}
                     denied

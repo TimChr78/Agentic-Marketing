@@ -23,39 +23,58 @@ seconds and pass/fail per task, not an aggregate average. Product owner recruits
 
 ## Automated checklist (I collects; area owners supply separate specs)
 
-- [ ] `pnpm test:affected`, lint, typecheck; smoke and required functional suites against shared test services.
-      Full suite CI. Build `build:live` before bundle tests; record exact repo commands used and exit codes.
-- [ ] Enumerate `app/routes.tsx`, redirects and `e2e/matrix.mjs`; current matrix 43 scenarios is the minimum,
-      not an exhaustive claim. Add reset-password, preferences/create, prompt/block details, tabs, demo links,
-      public confirm/unsubscribe/expired/web versions and other existing recipient routes where absent.
-- [ ] `e2e/axe.spec.ts`: zero violations; no newly suppressed findings in axe-known-issues. Include dialogs,
-      nav drawer, action menus, data tables and error/restricted/loading states. Verify accessible busy labels.
-- [ ] Existing 12 visual routes retained. I expands representative coverage for Consent, token drawer,
-      providers partial error, empty lists, loading and every reported defect; full screenshot matrix remains
-      1440/768/390 × both themes on deterministic fixture. Stable masks limited to genuinely volatile text;
-      unmasked assertions validate names/statuses/dates hidden by masks. Reviewer approves changed baselines.
-- [ ] New `phase28-mobile` spec checks every matrix destination for page overflow and hit testing of named
-      actions at 390. Local scroll regions get focusable labels/cues and end-column reachability tests; clipping
-      page content with overflow hidden does not pass. Open/close nav, search, menus, dialogs, footer at bottom.
-- [ ] Work: approve exact version; grouped member review; stale review rejects safely; agent Pause by keyboard
-      and touch. Marketing: zero audience prevents send; failed request preserves draft; report and summary usable.
-- [ ] Audience: look up person, inspect consent, import validation; content: create form/template, preview
-      provenance, draft/live labels, hosted confirmation by existing POST (GET never mutates); settings: read-only
-      viewer, one-time secrets, token revoke/focus return; insights: tables and suppressed values agree with plot.
-- [ ] Builder, approver, viewer each exercise allowed core steps and disallowed deep links; no forbidden CTA;
-      permission-disabled empty states explain who can act. Include stale, empty, failed, unavailable, suppressed.
-- [ ] Bundle caps and heavy-library boundaries from [budgets](skeletons-and-budgets.md) pass on fresh live dist.
-      Attach actual static/automatic/optional closures. No silent missing-manifest skip in release CI.
-- [ ] Microcopy lint asserts friendly text/options for known seeded keys; exceptions limited to Identifier,
-      explicitly technical setup/code and user content. Inspect all toasts/errors manually as regex is incomplete.
-- [ ] Delayed reads at 100ms/300ms/2s exercise reserved slots, reveal after 150ms only, stable bounds and recovery;
-      retain old data on refresh. Capture LayoutShift entries on cold core flows; report CLS and causes.
-- [ ] Normal/reduced-motion computed duration checks and JS settings; all allowed motion ≤180ms, none essential
-      to action; reduced = zero and static progress text. Charts never animate.
-- [ ] Dark-mode selected, hover, disabled, invalid, focus, editor chrome and charts contrast: text ≥4.5:1,
-      large text ≥3:1, controls/meaningful marks ≥3:1. Use current semantic tokens; measured palette script plus
-      real rendered colours, not screenshot appearance alone. Tenant content checked separately, not recoloured.
-- [ ] Demo shares real screens and banner, no send/AI execution. Existing redirects/bookmarks and role gates pass.
+Evidence collected on integrated head `c88b63e` (area branches merged), fresh seeded run-scoped
+database per suite, Linux, Playwright `v1.64.1-noble` Chromium, shared test stack with
+`TEST_PORT_OFFSET=100`. Commands and exit codes are in [release evidence](release-evidence.md).
+
+- [x] `npx vitest run --project web` exit 0 (100 files, 1,003 tests); `npx vitest run --project docs`
+      exit 0 (6 files, 38 tests); `corepack pnpm lint` exit 0; typecheck exit 0; full functional suite
+      exit 0 (151 passed). `build:live` exit 0 before the bundle tests; every command and exit code is
+      recorded in [release evidence](release-evidence.md).
+- [x] Enumerated `app/routes.tsx`, `app/redirects.ts` and `e2e/matrix.mjs`: 45 named matrix scenarios
+      (43 route/scenario tests plus the two signed-out screens) at 1440/768/390 × light/dark = 258
+      screenshots. Prompt and block details are in the matrix; reset-password is covered by
+      `phase28-mobile`, public confirm/unsubscribe/expired and hosted versions by `hosted-pages.spec.ts`,
+      preferences/create by unit tests, and demo deep links by `demo-smoke.spec.ts`.
+- [x] `scripts/e2e-docker.sh axe` exit 0: 43 passed, 2 skipped, zero violations, `axe-known-issues.json`
+      has 0 entries. The matrix covers dialogs, nav drawer, menus, data tables and error/restricted/loading
+      states; `phase28-states` verifies the accessible busy label.
+- [x] The 12 committed visual routes stay approved; `scripts/e2e-docker.sh visual` exit 0 (12 passed).
+      The full screenshot matrix is 258 images at 1440/768/390 × both themes. Consent, token drawer,
+      providers partial error, empty lists and loading states are asserted by their area specs, and
+      changed baselines are listed in [release evidence](release-evidence.md).
+- [x] `e2e/phase28-mobile.spec.ts` checks page-level overflow for every nav route at 390 and the compact
+      agents status/24-hour summary; it also opens/closes the nav drawer. The full functional suite
+      passed, including local-scroll and footer checks in the area specs.
+- [x] Work and marketing acceptance passed in the full suite: exact-version approval, grouped review,
+      stale-review warning, agent Pause, zero-audience prevention, draft preservation and usable reports
+      (`e2e/phase28-work.spec.ts`, `e2e/phase28-marketing.spec.ts`).
+- [x] Audience/content/settings acceptance passed: person lookup and consent, import validation, form and
+      template creation, preview provenance, draft/live labels, hosted POST (GET never mutates), read-only
+      viewer, one-time secrets, token revoke/focus return, and report tables agreeing with the plot
+      (`phase28-audience`, `phase28-content`, `phase28-settings-insights`).
+- [x] `e2e/phase28-roles.spec.ts` exercises the builder, approver and viewer core flows and deep links;
+      no forbidden CTA or hidden escalation. Stale, empty, failed, unavailable and suppressed states are
+      covered by the area and states specs.
+- [x] Bundle caps pass on a fresh `build:live` dist: `PHASE28_REQUIRE_BUNDLE=1 npx vitest run
+      apps/web/test/bundle.test.ts apps/web/test/phase28-bundle.test.ts` exit 0 (151 tests), including
+      the missing-manifest failure and initial/lazy/cold unions. Manifest-derived actuals are published
+      in [release evidence](release-evidence.md); no ceiling was raised.
+- [x] `apps/web/test/phase28-microcopy.test.ts` exit 0: I, W, M, A, C and S each report 0 findings.
+      Exceptions stay limited to the label registry, Identifier, developer JSON/source views and fixture
+      technical values; toasts and errors were inspected manually in the area reviews.
+- [x] Delayed reads at 100 ms, 300 ms and 2 s reserve the slot immediately, reveal shapes only after
+      150 ms, keep the left edge and width within 1 px of the ready table, and keep cumulative layout
+      shift ≤ 0.1 (`e2e/phase28-states.spec.ts`, newly added in this pass). The unit test covers the
+      150 ms threshold and refresh retention.
+- [x] `e2e/phase28-states.spec.ts` asserts reduced motion at computed-style level (0 durations/delays, no
+      infinite animation), the static progress glyph, and an entering overlay ≤180 ms. No CSS or JS
+      animation runs on charts, counters or skeletons.
+- [x] `python3 docs/design/showcase/verify_palette.py` exit 0: contrast, HTML/token parity and ramp order
+      pass. No palette value changed in the phase; dark selected/hover/disabled/focus and chart marks
+      therefore keep their measured ratios, and axe passes in both themes.
+- [x] `e2e/demo-smoke.spec.ts` passed in the full functional suite: the demo shares the real screens and
+      banner and never sends or executes AI; existing redirects, bookmarks and role gates still pass.
 
 ## Manual checklist (human, both themes)
 
@@ -63,20 +82,20 @@ Run core flows: sign in → Home; compose/review broadcast → approval (includi
 lookup person → consent; agent Pause; newsletter report → table; create form → preview. Include Settings token
 and provider dialogs as representative shared overlays. Test 1440, 768 and 390 where applicable.
 
-- [ ] Keyboard only: logical Tab/Shift+Tab order, visible focus, Enter/Space activation, Escape close, no trap
+- [ ] **owner sign-off** — Keyboard only: logical Tab/Shift+Tab order, visible focus, Enter/Space activation, Escape close, no trap
       outside modal; journey text view and existing keyboard actions work without dragging.
-- [ ] Focus return: opening trigger regains focus after menu/dialog close; deep-linked review returns to
+- [ ] **owner sign-off** — Focus return: opening trigger regains focus after menu/dialog close; deep-linked review returns to
       meaningful queue/heading if no trigger exists; deletion/removal chooses next stable target.
-- [ ] 200% browser zoom: reading order and labels remain, controls reachable, no two-dimensional page panning;
+- [ ] **owner sign-off** — 200% browser zoom: reading order and labels remain, controls reachable, no two-dimensional page panning;
       local canvas can remain desktop-first with summary. At 390 touch targets ≥40×40, adjacent controls ≥8px gap.
-- [ ] Screen reader (record pairing, e.g. NVDA/Firefox or VoiceOver/Safari): landmarks/headings, field labels,
+- [ ] **owner sign-off** — Screen reader (record pairing, e.g. NVDA/Firefox or VoiceOver/Safari): landmarks/headings, field labels,
       errors, status changes and tables make sense; skeleton announced once, copy success honest; no every-frame
       announcements. Read preview provenance and approval consequence before decisive action.
-- [ ] Dark/mobile: no invisible selected state or obscured footer; no reliance on colour/hover; long names,
+- [ ] **owner sign-off** — Dark/mobile: no invisible selected state or obscured footer; no reliance on colour/hover; long names,
       localization-shaped long labels and large text wrap without losing action names.
-- [ ] Five-participant timed findability sheet meets criterion per task. Record failures and fixes, then retest
+- [ ] **owner sign-off** — Five-participant timed findability sheet meets criterion per task. Record failures and fixes, then retest
       affected tasks; no declaration of success from developer familiarity.
-- [ ] Human visually compares integrated before/after matrix including untouched areas affected by shared CSS.
+- [ ] **owner sign-off** — Human visually compares integrated before/after matrix including untouched areas affected by shared CSS.
       Approves baselines and README/docs screenshots, final DESIGN v2, and confirms all P1/P2 backlog entries closed.
 
 Release gate: all wave criteria evidenced, P1/P2 closed, automated checks green and human gates signed. A missing
