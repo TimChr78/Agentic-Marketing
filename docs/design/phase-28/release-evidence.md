@@ -127,10 +127,10 @@ build run below; it must stay at or under 110 kB.
 
 ## Microcopy lint
 
-Report mode: raw seeded ids, metric keys, purpose keys and the banned patterns from
-[microcopy](microcopy.md). I-owned findings must be zero; W/M/A/C/S findings are handed to their
-owners. Narrow exceptions: the friendly-name registry in `lib/labels.ts`, the Identifier copy
-control, the developer JSON view and preview source parsing.
+Strict mode for all six owners: raw seeded ids, metric keys, purpose keys and the banned patterns
+from [microcopy](microcopy.md) fail the suite. Narrow exceptions stay limited to the friendly-name
+registry in `lib/labels.ts`, the Identifier copy control, the developer JSON view, preview source
+parsing and fixture technical values whose visible label comes from the registry.
 
 <!-- phase28-microcopy:start -->
 ### I · 0 findings
