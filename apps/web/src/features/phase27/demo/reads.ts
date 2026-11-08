@@ -1,6 +1,5 @@
 import { ApiError } from '../../../app/api';
 import type { DemoRead } from '../integration/demo';
-import { DEMO_ARTIFACTS, DEMO_PENDING_APPROVALS, DEMO_WORKSPACE } from '../integration/demo';
 import {
   DEMO_AGENTS,
   DEMO_AI_CALLS,
@@ -228,5 +227,3 @@ export const DEMO_READ_NAMES = [
   'artifacts.list',
   ...Object.keys(demoDestinationReads()),
 ] as const;
-
-export { DEMO_ARTIFACTS, DEMO_MEMBER_ROWS, DEMO_PENDING_APPROVALS, DEMO_WORKSPACE };
