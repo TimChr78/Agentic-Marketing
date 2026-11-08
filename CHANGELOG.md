@@ -2,6 +2,21 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [0.14.1] - 2026-11-08
+
+### Security
+
+- The public newsletter archive and web version now use one linear, quote-aware scanner that removes scripts, embedded frames, `meta refresh`, event handlers and obfuscated `javascript:` links from e-mail HTML without crashing on hostile entities, while benign markup keeps its exact bytes. A spec-compliant parse5 check is the final judge where the scanner and the browser's HTML parser disagree, with a re-check after cleaning and a fail-closed escape when active content survives. Slug, tag-stripping, SVG attribute, file-name and duration parsing now run in linear time, so crafted input (including an uploaded SVG) can no longer stall the server.
+
+### Upgrading from 0.14.0
+
+- **Migrations:** none.
+- **Configuration:** no new environment variables.
+- **Breaking changes:** none. Benign archive and web-version output is byte-identical; only active or malformed markup is removed.
+- **Manual steps:** none.
+- **Upgrade:** download `agentic-marketing-compose-0.14.1.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.14.1 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.14.1` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.14.1). Run `docker compose exec app am doctor`.
+
+
 ## [0.14.0] - 2026-11-08
 
 ### Changed

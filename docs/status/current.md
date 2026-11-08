@@ -2,7 +2,7 @@
 
 Durable handoff for the agent working on this repository. Update it when a long run starts, when work lands, and at every handoff. A new session should be able to resume from this file alone.
 
-_Last updated: 2026-11-08 (evening)_
+_Last updated: 2026-11-08 (night)_
 
 ## Now
 
@@ -14,14 +14,14 @@ _Last updated: 2026-11-08 (evening)_
   - Final integration: #568.
   - Fixes from Sol's review: #570. Sol approved them on re-check.
   - Evidence on the final head: full functional e2e 152, axe 43 with 0 violations, visual 12/12, web unit tests 1,011, bundle budgets 151.
-- **Release 0.14.0 is in progress** on `release/0.14.0`.
-  - Breaking changes: none, because the release is presentation only.
-  - Remaining steps:
-    - merge the release PR;
-    - tag `v0.14.0`;
-    - run `scripts/release/verify.sh 0.14.0`;
-    - run `close-issues.mjs 0.14.0 --yes`;
-    - close tracker #553.
+- **v0.14.0 is released and verified** (`5897c1a`). Tracker #553 is closed.
+- **Release 0.14.1, a security patch, is in progress.** It covers the CodeQL alerts that had been open since 2026-10-30 and is merged as #572.
+  - Seven polynomial ReDoS sites are now linear.
+  - The archive and web-version sanitiser is now a linear, quote-aware scanner, with parse5 8.0.1 as the final judge. Normal e-mail takes the fast path byte-identically. The cleaned output is re-checked, and the sanitiser fails closed if anything active remains.
+  - The tracking pixel is removed before the check, styles are escaped with `\3c`, and the real rendered page is covered by tests.
+  - Sol approved after four rounds.
+  - Alert 5 (MD5 used for NATS shard selection) was dismissed as a false positive.
+  - The `uuid` Dependabot alert is still accepted, because it only affects the dev spike.
 
 ## Owner sign-off (Wave 5 done criteria that cannot be automated)
 
@@ -43,7 +43,7 @@ When these are signed off, the Wave 5 epic #439 can close.
   - `ui/Button.tsx:68`: an iconless button can change width while busy. Reserving the slot widened idle buttons and wrapped the People filter row at 390, so a fix needs a layout-neutral approach.
   - `apps/web/test/phase28-bundle.test.ts`: strengthen missing-import rejection, the accounting of automatically mounted dynamic closures, and artifact-type, alias and tab completeness.
 
-## Lessons from Phase 28
+## Lessons from 0.14.1\n\n- **Check GitHub code scanning and Dependabot at every release.** Twelve high CodeQL alerts sat untriaged for nine days.\n- **A hand-written HTML sanitiser needs a spec parser as its judge, applied to the final page.** Each review round found a new disagreement between the regex or scanner and the browser (stray quotes, reassembled tags, `noscript`, pixel removal after the check, style breakout).\n- **Use scaling checks, not fixed millisecond limits.** Absolute limits flaked on CI runners; `expectLinear` (`test-support/linear.ts`) compares t(4n) with t(n).\n\n## Lessons from Phase 28
 
 - **One shared list for the "area landed" state.** Every area edited the same `fixme` and strict-area lines and conflicted with the others. The `STRICT` and `LANDED` lists fixed that. Start with such lists the next time several tasks flip a shared flag.
 - **e2e shares one seeded database.** New specs that assumed an untouched seed failed only in the full suite (#564, #566). `docs/process/delegates.md` now requires state-independent assertions, the **full** functional run and `pnpm lint` before a delegate reports.
