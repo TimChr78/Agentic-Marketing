@@ -68,6 +68,15 @@ test.describe('legacy URLs redirect', () => {
     await page.goto('/insights/journeys?journey=jrn_42&from=2026-10-01#waiting');
     await expect(page).toHaveURL(`${BASE}/marketing/journeys/jrn_42?from=2026-10-01&tab=report#waiting`);
   });
+
+  test('the old recipes address opens the Starters tab of Templates', async ({ page }) => {
+    await signIn(page, PEOPLE.owner);
+    await page.goto('/build/recipes');
+    await expect(page).toHaveURL(`${BASE}/content/templates?tab=starters`);
+    await expect(page.getByRole('tab', { name: 'Starters' })).toHaveAttribute('aria-selected', 'true');
+    // The existing recipe gallery is mounted; it is the same component the whole time.
+    await expect(page.getByText('Weekly newsletter', { exact: true })).toBeVisible();
+  });
 });
 
 test.describe('New and the command palette', () => {

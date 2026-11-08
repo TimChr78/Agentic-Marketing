@@ -188,6 +188,8 @@ export function resetPickerIndexes() {
 /** The shared picker index for one type in the current workspace. */
 export function usePickerIndex(type: string): PickerIndexState {
   const workspaceId = useSyncExternalStore(onWorkspaceChange, getWorkspaceId, getWorkspaceId);
+  // Before the session names a workspace there is nothing to key by; the shell does not mount
+  // pages until it has, so this read is only for a direct component mount (tests, embedded editors).
   const key = pickerIndexKey(workspaceId ?? '', type);
   const state = useSyncExternalStore(
     (listener) => subscribe(key, listener),
@@ -196,13 +198,9 @@ export function usePickerIndex(type: string): PickerIndexState {
   );
   // Every selector asks for the same key, so mounting several of them still starts one read.
   useEffect(() => {
-    if (!workspaceId) return;
-    void readPickerIndex(workspaceId, type).catch(() => {});
+    void readPickerIndex(workspaceId ?? '', type).catch(() => {});
   }, [workspaceId, type]);
-  const reload = useCallback(
-    () => (workspaceId ? refreshPickerIndex(workspaceId, type).then(() => undefined) : Promise.resolve()),
-    [workspaceId, type],
-  );
+  const reload = useCallback(() => refreshPickerIndex(workspaceId ?? '', type).then(() => undefined), [workspaceId, type]);
   return { ...state, reload };
 }
 
