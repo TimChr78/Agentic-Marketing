@@ -1,7 +1,7 @@
 import { Eye, FileText, Monitor, Moon, Smartphone } from 'lucide-react';
 import { useState } from 'react';
 import { api } from '../../app/api';
-import { Alert, CodeView, LoadingBlock, Meta, Segmented } from '../../ui';
+import { Alert, CodeView, Meta, Segmented, Skeleton, SkeletonRegion } from '../../ui';
 import { emailDoc, useDraftEmail } from '../previews/EmailPreview';
 import { PreviewLabel } from '../previews/PreviewLabel';
 import { useSharedRead } from '../previews/previewRead';
@@ -115,7 +115,17 @@ export function EditorPreview({
           )}
         </div>
       ) : rendering ? (
-        <LoadingBlock lines={6} label={dirty ? 'Rendering draft…' : 'Rendering the e-mail'} />
+        // The preview frame keeps the 620 px height of the ready iframe while it renders.
+        <div className="flex justify-center rounded-md border border-line bg-surface-3 p-3">
+          <SkeletonRegion
+            label={dirty ? 'Rendering the draft' : 'Rendering the e-mail'}
+            geometry="detail"
+            className="w-full"
+            minHeight={620}
+          >
+            <Skeleton className="w-full rounded-sm" height={620} />
+          </SkeletonRegion>
+        </div>
       ) : failure ? (
         <Alert
           tone="bad"

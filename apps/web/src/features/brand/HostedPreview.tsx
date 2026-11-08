@@ -1,7 +1,7 @@
 import { Monitor, Smartphone } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { api, errText } from '../../app/api';
-import { Alert, Segmented, Skeleton, Tabs } from '../../ui';
+import { Alert, Segmented, Skeleton, SkeletonRegion, Tabs } from '../../ui';
 import { useArtifactRef } from '../artifactCache';
 import { PreviewLabel } from '../previews/PreviewLabel';
 import type { PreviewSource } from '../previews/previewSource';
@@ -97,7 +97,11 @@ export function HostedPreview({
             style={{ width: width === 'mobile' ? 375 : '100%', height, border: 0 }}
           />
         ) : (
-          <Skeleton className="w-full" />
+          // Reserve the exact frame height the hosted page will use, so the admin chrome around
+          // the preview does not move when the renderer answers (Phase 28, #559).
+          <SkeletonRegion label="Loading the hosted page preview" geometry="detail" className="w-full" minHeight={height}>
+            <Skeleton className="w-full rounded-sm" height={height} />
+          </SkeletonRegion>
         )}
       </div>
     </div>

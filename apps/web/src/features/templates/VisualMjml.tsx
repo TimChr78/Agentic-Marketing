@@ -139,6 +139,16 @@ const VisualMjml = forwardRef<VisualMjmlHandle, { mjml: string; onChange: (mjml:
         // The plugin's own dark chrome (#2c2e35/#888686) is the contrast finding this task fixes;
         // the app tokens above style the chrome instead. Its device panel is also not wanted.
         pluginsOpts: { 'grapesjs-mjml': { useCustomTheme: false, resetDevices: false } },
+        // The inspector's own placeholder names internal tools ("Style Manager") and is title-cased
+        // against the rest of the app. Override only those two strings, per editor instance.
+        i18n: {
+          messagesAdd: {
+            en: {
+              styleManager: { empty: 'Select an element to edit its styles' },
+              traitManager: { empty: 'Select an element to edit its settings' },
+            },
+          },
+        },
         components: expandSelfClosing(mjml),
       });
       ed.on('update', () => {

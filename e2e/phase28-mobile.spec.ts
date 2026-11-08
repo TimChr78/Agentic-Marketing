@@ -85,7 +85,7 @@ test.describe('390 px page width', () => {
   for (const route of navRoutes()) {
     const owner = OWNER[route.path] ?? 'S';
     test(`${route.path} has no page-level horizontal overflow (${owner})`, async ({ page }) => {
-      test.fixme(owner !== 'I', `Owned by task ${owner}; reporting until that area lands`);
+      test.fixme(owner !== 'I' && owner !== 'C', `Owned by task ${owner}; reporting until that area lands`);
       await signIn(page, PEOPLE.owner);
       await page.goto(route.path);
       await settle(page);
