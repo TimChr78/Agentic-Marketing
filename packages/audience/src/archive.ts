@@ -15,6 +15,7 @@ import { profileForMessage } from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { and, asc, eq, sql } from 'drizzle-orm';
 import { type Context, Hono } from 'hono';
+import { type DefaultTreeAdapterTypes, parse, serialize } from 'parse5';
 import { z } from 'zod';
 
 // The public newsletter archive and the per-recipient web version (#100), served on the links
@@ -67,25 +68,53 @@ export async function archiveForSlug(db: Db, slug: string, workspaceId?: string)
   return hit ?? null;
 }
 
+/** Trims '-' from both ends in one linear pass; `^-+|-+$` backtracks on a long run. */
+function trimDashes(value: string): string {
+  let start = 0;
+  let end = value.length;
+  while (start < end && value[start] === '-') start++;
+  while (end > start && value[end - 1] === '-') end--;
+  return value.slice(start, end);
+}
+
 /** A URL-safe issue slug: "Signal #42: attribution is…" → "signal-42-attribution-is". */
 export function slugify(value: string): string {
   return (
-    value
-      .normalize('NFKD')
-      .replace(/[\u0300-\u036f]/g, '')
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-+|-+$/g, '')
-      .slice(0, 80) || 'issue'
+    trimDashes(
+      value
+        .normalize('NFKD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-'),
+    ).slice(0, 80) || 'issue'
   );
 }
 
 const day = (date: Date) => date.toISOString().slice(0, 10);
-const plain = (value: string) =>
-  value
-    .replace(/<[^>]*>/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
+
+/** The text of an HTML fragment, without tags, in one linear scan (the old `/<[^>]*>/g` was
+ * quadratic on a long run with no closing ">"). Matching is identical: the first "<" through the
+ * first ">" after it becomes a space, and a fragment with no ">" is left alone. */
+export const plain = (value: string) => {
+  let out = '';
+  let i = 0;
+  while (i < value.length) {
+    const open = value.indexOf('<', i);
+    if (open < 0) {
+      out += value.slice(i);
+      break;
+    }
+    out += value.slice(i, open);
+    const close = value.indexOf('>', open + 1);
+    if (close < 0) {
+      out += value.slice(open);
+      break;
+    }
+    out += ' ';
+    i = close + 1;
+  }
+  return out.replace(/\s+/g, ' ').trim();
+};
 
 /** Values for an archived issue: the template's sample data, but never a real profile. */
 function archiveVars(t: { sampleData?: Record<string, unknown> }) {
@@ -234,22 +263,425 @@ const metaDescription = (value: string, fallback: string) => {
   return text.length > 300 ? `${text.slice(0, 297)}…` : text;
 };
 
+const DANGEROUS_ELEMENTS = new Set(['script', 'iframe', 'object', 'embed', 'frame', 'frameset', 'applet', 'base']);
+/** Dangerous elements whose content is raw text or a nested document, so it goes with the tag. */
+const DROPS_CONTENT = new Set(['script', 'iframe', 'object', 'embed']);
+const URL_ATTRIBUTES = new Set(['href', 'src', 'xlink:href', 'action', 'formaction', 'background', 'poster', 'data', 'srcset']);
+
+const isWhitespace = (c: string) => c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\f';
+const isAsciiLetter = (c: string) => (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+const isTagNameChar = (c: string) => isAsciiLetter(c) || (c >= '0' && c <= '9') || c === ':' || c === '-';
+const isAttributeNameChar = (c: string) => !isWhitespace(c) && c !== '=' && c !== '>' && c !== '/' && c !== '"' && c !== "'" && c !== '<';
+const isHexDigit = (c: string) => (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+
+const REPLACEMENT = '\uFFFD';
+
+/** A numeric entity code point, or U+FFFD for anything a browser would not accept. */
+function safeCodePoint(value: number): string {
+  if (!Number.isFinite(value) || value <= 0 || value > 0x10ffff || (value >= 0xd800 && value <= 0xdfff)) return REPLACEMENT;
+  return String.fromCodePoint(value);
+}
+
+/** Decodes the entities a browser resolves before it reads a URL scheme, without ever throwing. */
+function decodeEntities(value: string): string {
+  const named: [string, string][] = [
+    ['&colon;', ':'],
+    ['&tab;', '\t'],
+    ['&Tab;', '\t'],
+    ['&newline;', '\n'],
+    ['&NewLine;', '\n'],
+  ];
+  let out = '';
+  let i = 0;
+  while (i < value.length) {
+    if (value[i] !== '&') {
+      out += value[i];
+      i++;
+      continue;
+    }
+    let j = i + 1;
+    if (value[j] === '#') {
+      j++;
+      const hex = value[j] === 'x' || value[j] === 'X';
+      if (hex) j++;
+      const start = j;
+      while (j < value.length && (hex ? isHexDigit(value[j]!) : value[j]! >= '0' && value[j]! <= '9')) j++;
+      if (j > start) {
+        const digits = value.slice(start, j);
+        if (value[j] === ';') j++;
+        out += safeCodePoint(Number.parseInt(digits, hex ? 16 : 10));
+        i = j;
+        continue;
+      }
+    }
+    const match = named.find(([name]) => value.startsWith(name, i));
+    if (match) {
+      out += match[1];
+      i += match[0].length;
+      continue;
+    }
+    out += value[i];
+    i++;
+  }
+  return out;
+}
+
+/** The scheme a browser would see: entities decoded, whitespace and controls removed. */
+function urlScheme(value: string): string {
+  const decoded = decodeEntities(value);
+  let out = '';
+  for (let i = 0; i < decoded.length; i++) if (decoded.charCodeAt(i) > 0x20) out += decoded[i];
+  return out.toLowerCase();
+}
+
+/** `javascript:`, `vbscript:` and non-image `data:` URLs never reach the archive page. */
+export function activeUrl(value: string): boolean {
+  const scheme = urlScheme(value);
+  if (scheme.startsWith('javascript:') || scheme.startsWith('vbscript:')) return true;
+  return scheme.startsWith('data:') && !scheme.startsWith('data:image/');
+}
+
+interface TagAttribute {
+  name: string;
+  lowerName: string;
+  value: string | null;
+  /** Whitespace and `/` before the attribute, kept when a tag has to be rebuilt. */
+  separator: string;
+  /** The attribute's original bytes, from its name through its value. */
+  raw: string;
+}
+
+interface ParsedTag {
+  endTag: boolean;
+  name: string;
+  lowerName: string;
+  attributes: TagAttribute[];
+  selfClosing: boolean;
+  /** The index just past the closing `>`. */
+  end: number;
+}
+
+/**
+ * Parses one tag at `open`, respecting quotes. Returns `null` when the text is not a tag, or
+ * `{ unterminated: true }` when the input ends before the tag does.
+ */
+function parseTag(body: string, open: number): ParsedTag | { unterminated: true } | null {
+  let j = open + 1;
+  let endTag = false;
+  if (body[j] === '/') {
+    endTag = true;
+    j++;
+  }
+  if (!isAsciiLetter(body[j] ?? '')) return null;
+  const nameStart = j;
+  j++;
+  while (j < body.length && isTagNameChar(body[j]!)) j++;
+  const name = body.slice(nameStart, j);
+  const attributes: TagAttribute[] = [];
+  let selfClosing = false;
+  while (true) {
+    const separatorStart = j;
+    while (j < body.length && (isWhitespace(body[j]!) || body[j] === '/')) j++;
+    const separator = body.slice(separatorStart, j);
+    if (j >= body.length) return { unterminated: true };
+    if (body[j] === '>') {
+      selfClosing = separator.includes('/');
+      j++;
+      return { endTag, name, lowerName: name.toLowerCase(), attributes, selfClosing, end: j };
+    }
+    if (body[j] === '<') return null;
+    const attributeStart = j;
+    while (j < body.length && isAttributeNameChar(body[j]!)) j++;
+    if (j === attributeStart) return null;
+    const attributeName = body.slice(attributeStart, j);
+    const afterName = j;
+    while (j < body.length && isWhitespace(body[j]!)) j++;
+    let value: string | null = null;
+    if (body[j] === '=') {
+      j++;
+      while (j < body.length && isWhitespace(body[j]!)) j++;
+      if (body[j] === '"' || body[j] === "'") {
+        const quote = body[j]!;
+        j++;
+        const valueStart = j;
+        while (j < body.length && body[j] !== quote) j++;
+        if (j >= body.length) return { unterminated: true };
+        value = body.slice(valueStart, j);
+        j++;
+      } else {
+        const valueStart = j;
+        while (j < body.length && !isWhitespace(body[j]!) && body[j] !== '>') {
+          if (body[j] === '<') break;
+          j++;
+        }
+        value = body.slice(valueStart, j);
+      }
+    } else {
+      // A valueless attribute: leave the whitespace after it for the next separator.
+      j = afterName;
+    }
+    attributes.push({
+      name: attributeName,
+      lowerName: attributeName.toLowerCase(),
+      value,
+      separator,
+      raw: body.slice(attributeStart, j),
+    });
+  }
+}
+
+/** The index just past the first `</name …>` at or after `from`, or the end of the input. */
+function findEndTagEnd(body: string, name: string, from: number): number {
+  let i = from;
+  while (i < body.length) {
+    const open = body.indexOf('<', i);
+    if (open < 0) return body.length;
+    if (body[open + 1] === '/') {
+      const nameStart = open + 2;
+      let k = 0;
+      while (k < name.length && body[nameStart + k]?.toLowerCase() === name[k]) k++;
+      if (k === name.length) {
+        const after = nameStart + k;
+        const boundary = body[after];
+        if (boundary === undefined || isWhitespace(boundary) || boundary === '/' || boundary === '>') {
+          const close = body.indexOf('>', after);
+          return close < 0 ? body.length : close + 1;
+        }
+      }
+    }
+    i = open + 1;
+  }
+  return body.length;
+}
+
+function hasRefresh(attributes: TagAttribute[]): boolean {
+  return attributes.some(
+    (a) => a.lowerName === 'http-equiv' && a.value !== null && decodeEntities(a.value).trim().toLowerCase() === 'refresh',
+  );
+}
+
+function dropsAttribute(attribute: TagAttribute): boolean {
+  if (attribute.lowerName.startsWith('on')) return true;
+  return URL_ATTRIBUTES.has(attribute.lowerName) && attribute.value !== null && activeUrl(attribute.value);
+}
+
+/** The index just past a comment opened at `from - 4`, or -1 when it runs to the end of input. */
+function commentEnd(body: string, from: number): number {
+  if (body[from] === '>') return from + 1;
+  if (body.startsWith('->', from)) return from + 2;
+  // One forward scan to the first terminator, so each comment costs only its own length.
+  for (let at = body.indexOf('--', from); at >= 0; at = body.indexOf('--', at + 1)) {
+    if (body[at + 2] === '>') return at + 3;
+    if (body[at + 2] === '!' && body[at + 3] === '>') return at + 4;
+  }
+  return -1;
+}
+
+/**
+ * Removes active content from e-mail HTML before the public archive and web version embed it.
+ * The strict CSP (`default-src 'none'`) already blocks scripts, so this is defence in depth.
+ * One linear, quote-aware pass: text is copied unchanged, tags are parsed once, dangerous
+ * elements and attributes are dropped, and a tag with nothing to remove keeps its exact bytes.
+ */
+export function scanEmailBody(body: string): string {
+  let out = '';
+  let i = 0;
+  while (i < body.length) {
+    const open = body.indexOf('<', i);
+    if (open < 0) {
+      out += body.slice(i);
+      break;
+    }
+    out += body.slice(i, open);
+
+    // Comments are opaque: copy them whole so a tag-looking string inside one stays inert. They
+    // close where a browser closes them: `<!-->` and `<!--->` are empty comments, and a comment
+    // ends at the first `-->` or `--!>`, so markup after an early close is still sanitised.
+    if (body.startsWith('<!--', open)) {
+      const after = commentEnd(body, open + 4);
+      if (after < 0) {
+        out += body.slice(open);
+        break;
+      }
+      out += body.slice(open, after);
+      i = after;
+      continue;
+    }
+    // Declarations such as <!doctype html> are copied through unchanged.
+    if (body[open + 1] === '!') {
+      const end = body.indexOf('>', open + 2);
+      if (end < 0) {
+        // No tag can close after this point; escape the opener and copy the rest once.
+        out += '&lt;';
+        out += body.slice(open + 1);
+        break;
+      }
+      out += body.slice(open, end + 1);
+      i = end + 1;
+      continue;
+    }
+
+    const tag = parseTag(body, open);
+    if (tag === null) {
+      out += '<';
+      i = open + 1;
+      continue;
+    }
+    if ('unterminated' in tag) {
+      // The input ends inside this tag, so no later "<" can start a complete tag either.
+      // Escape the opener and copy the remainder once, never rescanning it.
+      out += '&lt;';
+      out += body.slice(open + 1);
+      break;
+    }
+
+    if (tag.endTag) {
+      if (!DANGEROUS_ELEMENTS.has(tag.lowerName)) out += body.slice(open, tag.end);
+      i = tag.end;
+      continue;
+    }
+    if (DANGEROUS_ELEMENTS.has(tag.lowerName)) {
+      i = DROPS_CONTENT.has(tag.lowerName) ? findEndTagEnd(body, tag.lowerName, tag.end) : tag.end;
+      continue;
+    }
+    if (tag.lowerName === 'meta' && hasRefresh(tag.attributes)) {
+      i = tag.end;
+      continue;
+    }
+
+    const kept = tag.attributes.filter((attribute) => !dropsAttribute(attribute));
+    if (kept.length === tag.attributes.length) {
+      out += body.slice(open, tag.end);
+    } else {
+      out += `<${tag.name}`;
+      for (const attribute of kept) out += `${attribute.separator || ' '}${attribute.raw}`;
+      out += tag.selfClosing ? '/>' : '>';
+    }
+    i = tag.end;
+  }
+  return out;
+}
+
+const EMAIL_PARSE_OPTIONS = { scriptingEnabled: true } as const;
+// The judge parses a whole document and reads its <body>, which is how the archive page embeds
+// the e-mail (a <div> inside <main>). A document parse has no fragment root adoption, so it stays
+// linear however many top-level nodes the input has, and a stray </div> or </body> cannot move
+// nodes out of view: they stay in the document the sweep walks. A <body> or <html> start tag in
+// the input merges its attributes into those elements, exactly as it would on the real page, and
+// the sweep checks those attributes too.
+function parseEmailDocument(markup: string): {
+  document: DefaultTreeAdapterTypes.Document;
+  body: DefaultTreeAdapterTypes.Element | null;
+} {
+  const document = parse(`<!doctype html><html><head></head><body>${markup}`, EMAIL_PARSE_OPTIONS);
+  const root = document.childNodes.find((node) => 'tagName' in node && node.tagName === 'html') as
+    | DefaultTreeAdapterTypes.Element
+    | undefined;
+  const body = (root?.childNodes.find((node) => 'tagName' in node && node.tagName === 'body') ??
+    null) as DefaultTreeAdapterTypes.Element | null;
+  return { document, body };
+}
+
+function isActiveElement(element: DefaultTreeAdapterTypes.Element): boolean {
+  const name = element.tagName.toLowerCase();
+  if (DANGEROUS_ELEMENTS.has(name)) return true;
+  return (
+    name === 'meta' &&
+    element.attrs.some((attribute) => attribute.name.toLowerCase() === 'http-equiv' && attribute.value.trim().toLowerCase() === 'refresh')
+  );
+}
+
+function dropsParsedAttribute(attribute: { name: string; value: string }): boolean {
+  const name = attribute.name.toLowerCase();
+  if (name.startsWith('on')) return true;
+  return URL_ATTRIBUTES.has(name) && activeUrl(attribute.value);
+}
+
+/**
+ * Walks a parse5 fragment with the same active-content rules as the scanner, including the
+ * content of `<template>`. Checking reports whether anything is active; cleaning rebuilds each
+ * child list once, so removing many nodes stays linear. Iterative, so a deeply nested document
+ * cannot exhaust the call stack.
+ */
+function sweepFragment(root: DefaultTreeAdapterTypes.ParentNode, clean: boolean): boolean {
+  let active = false;
+  const stack: DefaultTreeAdapterTypes.ParentNode[] = [root];
+  while (stack.length > 0) {
+    const parent = stack.pop()!;
+    if (!clean) {
+      for (const node of parent.childNodes) {
+        if (!('tagName' in node)) continue;
+        const element = node as DefaultTreeAdapterTypes.Element;
+        if (isActiveElement(element) || element.attrs.some(dropsParsedAttribute)) {
+          active = true;
+          continue;
+        }
+        stack.push(element);
+        if (element.nodeName === 'template') stack.push((element as DefaultTreeAdapterTypes.Template).content);
+      }
+      continue;
+    }
+    const kept: DefaultTreeAdapterTypes.ChildNode[] = [];
+    for (const node of parent.childNodes) {
+      if (!('tagName' in node)) {
+        kept.push(node);
+        continue;
+      }
+      const element = node as DefaultTreeAdapterTypes.Element;
+      if (isActiveElement(element)) {
+        active = true;
+        continue;
+      }
+      element.attrs = element.attrs.filter((attribute) => !dropsParsedAttribute(attribute));
+      kept.push(element);
+      stack.push(element);
+      if (element.nodeName === 'template') stack.push((element as DefaultTreeAdapterTypes.Template).content);
+    }
+    parent.childNodes = kept;
+  }
+  return active;
+}
+
+function containsActiveContent(markup: string): boolean {
+  return sweepFragment(parseEmailDocument(markup).document, false);
+}
+
+function cleanActiveContent(markup: string): string {
+  const { document, body } = parseEmailDocument(markup);
+  sweepFragment(document, true);
+  return body ? serialize(body) : '';
+}
+
+/**
+ * The scanner above is fast and keeps benign bytes, but it is a hand-written HTML parser. A
+ * spec-compliant parse is the final judge: if the scanner's output still contains active
+ * content (a stray quote, an unterminated opener, a script splitting a tag name, `</noscript>`),
+ * remove it from the parse5 tree, serialize, and check the serialization again. If one cleaning
+ * round cannot make it inert (mutation XSS), escape the whole body and fail closed.
+ */
+export function sanitiseEmailBody(body: string, isActive: (html: string) => boolean = containsActiveContent): string {
+  const scanned = scanEmailBody(body);
+  if (!isActive(scanned)) return scanned;
+  const cleaned = cleanActiveContent(scanned);
+  if (!isActive(cleaned)) return cleaned;
+  return escapeHtml(body);
+}
+
 /** Splits MJML's complete document into the parts that can sit inside our page. */
 export function emailParts(html: string): { body: string; styles: string } {
   const styles = [...html.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style>/gi)].map((m) => m[1]).join('\n');
   const body = html.match(/<body\b[^>]*>([\s\S]*?)<\/body>/i)?.[1] ?? html;
-  // The strict CSP already blocks scripts; remove them and event handlers as defence in depth.
   // A 1×1 image is an open-tracking pixel (some templates and relays add one); the web page is
   // not a send, so it is dropped rather than counted.
   const pixel =
     /<img\b[^>]*(?:(?:width\s*=\s*["']?1(?:px)?["']?[\s\S]*?height\s*=\s*["']?1(?:px)?["']?)|(?:height\s*=\s*["']?1(?:px)?["']?[\s\S]*?width\s*=\s*["']?1(?:px)?["']?))[^>]*>/gi;
+  // The pixel is removed before sanitising, so the parser judges the final bytes: a removal
+  // afterwards could join the pieces around it into new markup (`<me<img …>ta …>`).
   return {
-    body: body
-      .replace(/<script\b[\s\S]*?<\/script>/gi, '')
-      .replace(/\son[a-z]+\s*=\s*"[^"]*"/gi, '')
-      .replace(/\son[a-z]+\s*=\s*'[^']*'/gi, '')
-      .replace(pixel, ''),
-    styles,
+    body: sanitiseEmailBody(body.replace(pixel, '')),
+    // The styles go back into the page's own <style>. CSS reads `\3c ` as `<`, so escaping every
+    // `<` keeps the rules while making `</style>` (and anything after it) impossible to inject.
+    styles: styles.replace(/</g, '\\3c '),
   };
 }
 

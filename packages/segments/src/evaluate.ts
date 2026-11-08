@@ -37,12 +37,28 @@ export interface EvalContext {
 
 const SECONDS: Record<string, number> = { W: 604_800, D: 86_400, H: 3_600, M: 60 };
 export function durationSeconds(iso: string): number {
+  // One linear scan. There is no length cap: a cap would reject a valid duration and change
+  // accepted behaviour without making the scan any safer.
+  const text = iso.replace(/^P/, '').replace('T', '');
   let total = 0;
-  for (const [, n, unit] of iso
-    .replace(/^P/, '')
-    .replace('T', '')
-    .matchAll(/(\d+)([WDHM])/g))
-    total += Number(n) * SECONDS[unit];
+  let i = 0;
+  while (i < text.length) {
+    if (text[i]! < '0' || text[i]! > '9') {
+      i += 1;
+      continue;
+    }
+    let end = i;
+    while (end < text.length && text[end]! >= '0' && text[end]! <= '9') end++;
+    const unit = text[end];
+    // The old regex matched only a digit run immediately followed by a unit; leave an
+    // un-suffixed run alone and continue after it, exactly as that scan did.
+    if (unit && SECONDS[unit] !== undefined) {
+      total += Number(text.slice(i, end)) * SECONDS[unit]!;
+      i = end + 1;
+    } else {
+      i = end;
+    }
+  }
   return total;
 }
 

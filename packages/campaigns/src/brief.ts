@@ -54,14 +54,23 @@ export type CampaignPlan = z.output<typeof CampaignPlan>;
 const channelPurpose = (channel: 'email' | 'sms' | 'push') =>
   channel === 'email' ? 'marketing_email' : channel === 'sms' ? 'marketing_sms' : 'marketing_push';
 
+/** Trims '-' from both ends in one linear pass; `^-+|-+$` backtracks on a long run. */
+function trimDashes(value: string): string {
+  let start = 0;
+  let end = value.length;
+  while (start < end && value[start] === '-') start++;
+  while (end > start && value[end - 1] === '-') end--;
+  return value.slice(start, end);
+}
+
 /** A URL-safe utm_campaign from the brief name, deterministic and within the schema's bounds. */
-function slug(text: string): string {
-  const value = text
-    .normalize('NFKD')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 60);
+export function slug(text: string): string {
+  const value = trimDashes(
+    text
+      .normalize('NFKD')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-'),
+  ).slice(0, 60);
   return value || 'campaign';
 }
 
