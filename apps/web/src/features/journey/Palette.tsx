@@ -65,7 +65,6 @@ export function Palette({ onAdd, disabled }: { onAdd: (k: NodeKind) => void; dis
                     <li key={k}>
                       <button
                         type="button"
-                        aria-label={meta.label}
                         draggable={!disabled}
                         disabled={disabled}
                         onDragStart={(e) => {
