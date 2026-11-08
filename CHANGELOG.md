@@ -2,6 +2,53 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [0.14.0] - 2026-11-08
+
+### Changed
+
+- The empty block picker points to Content → Templates, on the Blocks tab, matching the navigation.
+- At 390 px the agents table keeps status and the last-24-hours summary under the agent name; Pause and the row menu stay reachable.
+- The template editor's loading frame fills its reserved height instead of leaving a fixed 420/560 px shape.
+- Loading screens now reserve the space their content will use, so lists, details, charts and the sign-in screen no longer jump when data arrives; skeletons stay static and appear only after 150 ms.
+- Transitions use the shared 120 ms and 180 ms duration tokens, reduced motion removes them entirely, and the button progress glyph no longer spins or pulses.
+- Sign-in, password reset and shared empty/error copy now state what failed and what to try next instead of showing raw server text.
+- Automatic scrolling is immediate rather than smooth: the copilot's newest message and the highlighted approvals proposal no longer request `behavior: 'smooth'`, so `prefers-reduced-motion: reduce` is honoured, and a source scan fails any future smooth scroll.
+- A content or asset list on a phone reserves its compact 72 px row geometry while the read is pending instead of the desktop gallery's 170 px tiles, so the list no longer jumps when the rows arrive.
+- A partial provider read names the channels that failed and keeps the channels that answered usable; its Retry re-reads only the failed channels, and “Couldn’t load providers” appears only when every channel failed, never after a fully successful read.
+- Home's empty blocks now name the next action: view broadcasts, journeys, agents, alerts or the approvals queue, and say when the block only describes the loaded sample.
+- Home, approvals and agent screens use reserved loading slots, so lists, KPI tiles, the review drawer and the activity ledger keep their layout while data arrives.
+- The agent comparison controls move into the card on a phone, keeping the page at 390 px, and the agent Pause and approval footer remain reachable and unobstructed.
+- Agent copy now says Failure for a run's error column, avoids a healthy verdict when no run has finished, and points empty credential and comparison states to Integrations.
+- Journey purpose selection now shows the purpose name only; an unresolved saved purpose is named and its technical value stays in the copy affordance.
+- On a phone, the journey builder shows every step as readable text beside the canvas, and broadcast actions stay inside the 390 px viewport.
+- Marketing loading states use the reserved skeletons, and automatic canvas fits and report charts no longer animate.
+- Audience and consent screens name purposes in ordinary labels: the consent summary, the record drawer, the append-only ledger, imports and segment conditions no longer expose technical purpose keys, and a recorded choice names its purpose in the toast.
+- At phone width the consent purpose table stacks its lawful basis, channels, people counts and double opt-in, so counts are readable without panning the table.
+- People, person, consent, imports, segments, forms, purposes and editorial topics reserve their loading geometry with the shared skeletons instead of generic placeholder lines.
+- Template editors name purposes and topics without their technical keys, and a saved purpose that no longer exists reads “Unavailable purpose” with the key available only in the copy control.
+- The visual editor, the asset galleries, the e-mail preview, the hosted-page preview and the brand detail reserve their real geometry while they load, with object-specific status labels.
+- The visual editor's inspector uses app copy (“Select an element to edit its styles”) instead of naming its internal tool.
+- Empty content lists name the create or upload action; the asset picker's empty state names uploading.
+- Recipient-facing hosted pages, the archive and their headers are unchanged and pinned by an output test.
+- API tokens show their status beside the name at 390 px instead of off the right edge; brand, owner and last use stay in the token detail.
+- The strict-input hint now states the seven-day observation and what it does not guarantee, with `STRICT_INPUTS=true` kept in technical setup.
+- Insights and settings loading states use the reserved skeletons, report KPI tiles and charts keep their final geometry, and metric tables keep their period, denominator and freshness.
+
+### Fixed
+
+- A demo `Select` no longer drops a caller's `aria-description` when the control is unrestricted, and a restricted select ignores a change event instead of running its command.
+- The `nodemailer` copy used by the development SMTP server is now 10.1.4, closing three Dependabot advisories; the runtime copy already used a patched version.
+
+### Upgrading from 0.13.0
+
+- **Migrations:** none.
+- **Configuration:** no new environment variables.
+- **Breaking changes:** none. Phase 28 changes presentation only: commands, artifacts, URLs, configuration and recipient output are unchanged.
+- **Manual steps:** none.
+- **Upgrade:** download `agentic-marketing-compose-0.14.0.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.14.0 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.14.0` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.14.0). Run `docker compose exec app am doctor`.
+
+<!-- issues: 552, 555, 556, 557, 558, 559, 560 -->
+
 ## [0.13.0] - 2026-11-08
 
 ### Changed
