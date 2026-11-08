@@ -155,7 +155,7 @@ describe('legacy redirects', () => {
     ['/build/prompts', '', '/work/agents?tab=library'],
     ['/build/prompts/prm_01', '', '/work/agents/library/prm_01'],
     ['/build/topics', '', '/audience/consent?tab=topics'],
-    ['/build/recipes', '', '/create?tab=starters'],
+    ['/build/recipes', '', '/content/templates?tab=starters'],
     ['/design/templates', '', '/content/templates'],
     ['/design/templates/tpl_01', '', '/content/templates/tpl_01'],
     ['/design/blocks', '', '/content/templates?tab=blocks'],
