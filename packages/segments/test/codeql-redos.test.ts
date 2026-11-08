@@ -3,7 +3,7 @@ import { durationSeconds } from '../src/evaluate';
 
 // CodeQL alert 11 (js/polynomial-redos): `(\d+)([WDHM])` backtracks over every digit boundary
 // when a long digit run has no unit. Segment conditions and journey waits call this, so it must
-// stay linear and reject an absurd length instead of scanning it.
+// stay linear without a length cap that would reject a valid duration.
 const HOSTILE = 100_000;
 
 const timed = <T>(run: () => T): { value: T; ms: number } => {
@@ -20,11 +20,15 @@ describe('durationSeconds is linear (js/polynomial-redos)', () => {
     expect(ms).toBeLessThan(100);
   });
 
-  it('caps an absurdly long ISO duration instead of scanning it', () => {
+  it('scans a long duration without a length cap, in linear time', () => {
     const { value, ms } = timed(() => durationSeconds(`P${'1D'.repeat(HOSTILE / 2)}`));
 
-    expect(value).toBe(0);
+    expect(value).toBe((HOSTILE / 2) * 86_400);
     expect(ms).toBeLessThan(100);
+  });
+
+  it('accepts a duration just over the old 64-character cap', () => {
+    expect(durationSeconds(`P${'0'.repeat(63)}1D`)).toBe(86_400);
   });
 
   it('keeps every valid duration unchanged', () => {

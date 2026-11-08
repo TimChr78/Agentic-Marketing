@@ -36,11 +36,9 @@ export interface EvalContext {
 }
 
 const SECONDS: Record<string, number> = { W: 604_800, D: 86_400, H: 3_600, M: 60 };
-// Every caller validates an ISO 8601 duration (the longest form is a few characters); anything
-// longer is not a duration we accept. Capping keeps a hostile string from reaching the scanner.
-const MAX_DURATION_LENGTH = 64;
 export function durationSeconds(iso: string): number {
-  if (iso.length > MAX_DURATION_LENGTH) return 0;
+  // One linear scan. There is no length cap: a cap would reject a valid duration and change
+  // accepted behaviour without making the scan any safer.
   const text = iso.replace(/^P/, '').replace('T', '');
   let total = 0;
   let i = 0;
