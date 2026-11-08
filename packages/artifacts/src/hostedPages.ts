@@ -114,6 +114,68 @@ export function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char] as string);
 }
 
+/** The brand's palette as custom properties; the CSS only ever reads these names. */
+function brandVariables(brand: ResolvedBrand): string {
+  const colors = Object.entries(brand.colors)
+    .map(([name, value]) => `--${name.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)}:${value}`)
+    .join(';');
+  return `:root{color-scheme:light;${colors};--radius:${brand.radius}px;--measure:36rem;--font-stack:${brand.fontStack}}`;
+}
+
+/** The brand leads every hosted page: logo when there is one, otherwise the site name. */
+function brandHeader(brand: ResolvedBrand): string {
+  const logo = brand.logoUrl
+    ? `<img class="logo" src="${escapeHtml(brand.logoUrl)}" alt="${escapeHtml(brand.logoAlt ?? brand.siteName ?? '')}" height="${brand.logoHeight}" style="height:${brand.logoHeight}px">`
+    : '';
+  if (brand.logoUrl) return `<header class="brand">${logo}</header>`;
+  if (brand.siteName) return `<header class="brand"><p class="site-name">${escapeHtml(brand.siteName)}</p></header>`;
+  return '';
+}
+
+/**
+ * Shared geometry for every hosted card: one measure, mobile gutters, stacked actions and a
+ * quiet return link. Brand colours and type come from the resolved brand, never from admin tokens.
+ */
+const HOSTED_BASE_CSS = `*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+html,body{margin:0}
+body{min-height:100vh;padding:32px 16px;background:var(--background);color:var(--text);font-family:var(--font-stack);font-size:1rem;line-height:1.55}
+.skip{position:absolute;left:-9999px;top:0;padding:.5rem .75rem;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:var(--radius)}
+.skip:focus{left:1rem;top:1rem}
+.page{width:100%;max-width:var(--measure);margin:0 auto}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:clamp(24px,5vw,40px)}
+.brand{margin:0 0 1.5rem;display:flex;align-items:center;gap:.75rem;flex-wrap:wrap}
+.logo{display:block;max-width:100%;width:auto;max-height:96px}
+.site-name{margin:0;font-size:1rem;font-weight:600;color:var(--text);overflow-wrap:anywhere}
+h1{margin:0 0 .5rem;font-size:clamp(1.5rem,4.5vw,2rem);line-height:1.25;letter-spacing:-.01em;overflow-wrap:anywhere}
+p{margin:0 0 1.25rem;color:var(--text);white-space:pre-line;overflow-wrap:anywhere}
+p:last-child{margin-bottom:0}
+form{margin:1.5rem 0 0}
+button{font:inherit;font-weight:600;min-height:44px;padding:.7rem 1.25rem;border:1px solid var(--accent);border-radius:var(--radius);background:var(--accent);color:var(--accent-text);cursor:pointer}
+button:hover{filter:brightness(.94)}
+button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+button[disabled]{cursor:not-allowed}
+.back{margin:1.5rem 0 0;font-size:.95rem}
+a{color:var(--accent);text-underline-offset:.15em}
+a:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:2px}
+@media (max-width:480px){body{padding:16px}.card{padding:24px 20px}button{width:100%}}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}`;
+
+function hostedDocument(title: string, brand: ResolvedBrand, body: string, extraCss = ''): string {
+  return `<!doctype html>
+<html lang="${escapeHtml(brand.language)}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>${escapeHtml(title)}</title>
+<style>${brandVariables(brand)}
+${HOSTED_BASE_CSS}${extraCss ? `\n${extraCss}` : ''}</style>
+</head>
+<body><a class="skip" href="#main">Skip to content</a><main class="page" id="main">${body}</main></body>
+</html>`;
+}
+
 function siteLabel(brand: ResolvedBrand, siteUrl: string | null): string {
   if (brand.siteName?.trim()) return brand.siteName.trim();
   if (siteUrl) {
@@ -179,86 +241,61 @@ export interface PreferenceCentreContext {
  * effective status (their choice, or the topic's default). It uses the same brand, escaping and
  * header policy as the other hosted pages, and no scripts.
  */
+const PREFERENCES_CSS = `.preference-intro{max-width:36rem}
+.purpose{margin:0 0 1.5rem;padding:0 0 1.25rem;border-bottom:1px solid var(--border)}
+.purpose:last-of-type{border-bottom:0;padding-bottom:0}
+.purpose h2{margin:0 0 .25rem;font-size:1.125rem;line-height:1.35;color:var(--text);overflow-wrap:anywhere}
+.description{margin:0 0 .75rem;font-size:.95rem}
+fieldset{margin:.75rem 0 0;padding:0;border:0;min-width:0}
+legend{padding:0;margin:0 0 .5rem;font-size:.85rem;font-weight:600;color:var(--muted)}
+.topic{display:flex;gap:.75rem;align-items:flex-start;padding:.5rem 0;min-height:40px;cursor:pointer}
+.topic input{margin:.2rem 0 0;width:1.15rem;height:1.15rem;accent-color:var(--accent);flex:none}
+.topic-name{display:block;font-weight:600;color:var(--text)}
+.topic-description{display:block;font-size:.9rem;color:var(--muted)}
+.actions{display:flex;flex-wrap:wrap;gap:.75rem;align-items:center;margin-top:1.5rem}
+.actions button{width:auto}
+button.secondary{background:transparent;color:var(--accent)}
+button.danger{border-color:var(--text);color:var(--text)}
+.notice{margin:0 0 1rem;padding:.75rem .9rem;border:1px solid var(--accent);border-radius:var(--radius);background:var(--background);color:var(--text)}
+.error{margin:0 0 1rem;padding:.75rem .9rem;border:1px solid var(--text);border-radius:var(--radius);background:var(--background);color:var(--text)}
+.empty{margin:0 0 1rem;padding:1rem;border:1px dashed var(--border);border-radius:var(--radius)}
+@media (max-width:480px){.actions{flex-direction:column;align-items:stretch}.actions button{width:100%}}`;
+
 export function renderPreferencesPage(brand: ResolvedBrand, ctx: PreferenceCentreContext): string {
-  const colors = Object.entries(brand.colors)
-    .map(([name, value]) => `--${name.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)}:${value}`)
-    .join(';');
-  const logo = brand.logoUrl
-    ? `<img class="logo" src="${escapeHtml(brand.logoUrl)}" alt="${escapeHtml(brand.logoAlt ?? brand.siteName ?? '')}" height="${brand.logoHeight}" style="height:${brand.logoHeight}px">`
-    : '';
-  const header = brand.logoUrl
-    ? `<header class="brand">${logo}</header>`
-    : brand.siteName
-      ? `<header class="brand"><p class="site-name">${escapeHtml(brand.siteName)}</p></header>`
-      : '';
   const disabled = ctx.preview ? ' disabled aria-disabled="true"' : '';
   const notice = ctx.saved ? '<p class="notice" role="status">Your preferences are saved.</p>' : '';
   const error = ctx.error ? `<p class="error" role="alert">${escapeHtml(ctx.error)}</p>` : '';
-  const purposes = ctx.purposes
-    .map(
-      (p) => `<section class="purpose">
-<h2>${escapeHtml(p.name)}</h2>
-${p.description ? `<p class="description">${escapeHtml(p.description)}</p>` : ''}
-<fieldset><legend>Topics</legend>${p.topics
-        .map(
-          (
-            t,
-          ) => `<label class="topic"><input type="checkbox" name="topic:${escapeHtml(t.key)}" value="subscribed"${t.status === 'subscribed' ? ' checked' : ''}${disabled}>
+  const purposes = ctx.purposes.length
+    ? ctx.purposes
+        .map((p) => {
+          const headingId = `purpose-${p.key}`;
+          const descriptionId = p.description ? `${headingId}-description` : null;
+          const choices = p.topics.length
+            ? `<fieldset${descriptionId ? ` aria-describedby="${escapeHtml(descriptionId)}"` : ''}><legend>Topics</legend>${p.topics
+                .map(
+                  (
+                    t,
+                  ) => `<label class="topic"><input type="checkbox" name="topic:${escapeHtml(t.key)}" value="subscribed"${t.status === 'subscribed' ? ' checked' : ''}${disabled}>
 <span><span class="topic-name">${escapeHtml(t.name)}</span>${t.description ? `<span class="topic-description">${escapeHtml(t.description)}</span>` : ''}</span></label>`,
-        )
-        .join('')}</fieldset>
-</section>`,
-    )
-    .join('');
-  return `<!doctype html>
-<html lang="${escapeHtml(brand.language)}">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="robots" content="noindex">
-<title>Your preferences</title>
-<style>
-:root{color-scheme:light;${colors};--radius:${brand.radius}px}
-*{box-sizing:border-box}
-html,body{margin:0}
-body{min-height:100vh;padding:24px 12px;background:var(--background);color:var(--text);font-family:${brand.fontStack};font-size:16px;line-height:1.5}
-main{max-width:36rem;margin:0 auto}
-.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:clamp(20px,6vw,32px)}
-.brand{margin:0 0 1.25rem}
-.logo{display:block;max-width:100%;width:auto;margin:0 0 .75rem}
-.site-name{margin:0;font-size:.95rem;font-weight:600;color:var(--muted);overflow-wrap:anywhere}
-h1{margin:0 0 .5rem;font-size:clamp(1.35rem,4.5vw,1.6rem);line-height:1.25;overflow-wrap:anywhere}
-h2{margin:0 0 .25rem;font-size:1.05rem;line-height:1.3}
-p{margin:0 0 1rem;color:var(--muted);overflow-wrap:anywhere}
-.description{margin:0 0 .75rem;font-size:.95rem}
-.purpose{margin:0 0 1.5rem;padding:0 0 1rem;border-bottom:1px solid var(--border)}
-.purpose:last-of-type{border-bottom:0}
-fieldset{margin:0;padding:0;border:0;min-width:0}
-legend{padding:0;margin:0 0 .5rem;font-size:.85rem;font-weight:600;color:var(--muted)}
-.topic{display:flex;gap:.65rem;align-items:flex-start;padding:.5rem 0;cursor:pointer}
-.topic input{margin:.2rem 0 0;width:1.1rem;height:1.1rem;accent-color:var(--accent);flex:none}
-.topic-name{display:block;font-weight:600;color:var(--text)}
-.topic-description{display:block;font-size:.9rem;color:var(--muted)}
-.actions{display:flex;flex-wrap:wrap;gap:.75rem;align-items:center;margin-top:1.25rem}
-button{font:inherit;font-weight:600;min-height:44px;padding:.65rem 1.25rem;border:1px solid var(--accent);border-radius:var(--radius);background:var(--accent);color:var(--accent-text);cursor:pointer}
-button:hover{filter:brightness(.94)}
-button:focus-visible{outline:3px solid var(--text);outline-offset:3px}
-button[disabled]{cursor:not-allowed}
-button.secondary{background:transparent;color:var(--accent)}
-button.danger{border-color:var(--text);color:var(--text)}
-.notice{margin:0 0 1rem;padding:.65rem .85rem;border:1px solid var(--accent);border-radius:var(--radius);color:var(--text)}
-.error{margin:0 0 1rem;padding:.65rem .85rem;border:1px solid var(--text);border-radius:var(--radius);color:var(--text)}
-@media (max-width:400px){body{padding:16px 10px}.card{padding:20px 16px}}
-</style>
-</head>
-<body><main class="card">${header}<h1>Your preferences</h1>
-<p>Choose what you hear about. You can change this at any time from any e-mail we send.</p>
+                )
+                .join('')}</fieldset>`
+            : '';
+          return `<section class="purpose" aria-labelledby="${escapeHtml(headingId)}">
+<h2 id="${escapeHtml(headingId)}">${escapeHtml(p.name)}</h2>
+${p.description ? `<p class="description" id="${escapeHtml(descriptionId ?? '')}">${escapeHtml(p.description)}</p>` : ''}
+${choices}
+</section>`;
+        })
+        .join('')
+    : '<p class="empty">No topic choices are available for this subscription.</p>';
+  const leave = ctx.leavePurposeName ? `Unsubscribe from ${ctx.leavePurposeName}` : 'Unsubscribe';
+  const body = `<div class="card">${brandHeader(brand)}<h1>Your preferences</h1>
+<p class="preference-intro">Choose what you hear about. You can change this at any time from any e-mail we send.</p>
 ${notice}${error}
 <form method="post" action="${escapeHtml(ctx.action)}">${purposes}
-<div class="actions"><button type="submit"${disabled}>Save</button><button type="submit" class="secondary danger" name="action" value="unsubscribe_all"${disabled}>${escapeHtml(ctx.leavePurposeName ? `Unsubscribe from ${ctx.leavePurposeName}` : 'Unsubscribe')}</button></div>
-</form>
-</main></body>
-</html>`;
+<div class="actions"><button type="submit"${disabled}>Save preferences</button><button type="submit" class="secondary danger" name="action" value="unsubscribe_all"${disabled}>${escapeHtml(leave)}</button></div>
+</form></div>`;
+  return hostedDocument('Your preferences', brand, body, PREFERENCES_CSS);
 }
 
 const BUTTON_PAGES: ReadonlySet<HostedPageKind> = new Set(['confirm', 'unsubscribe']);
@@ -283,18 +320,6 @@ export function renderHostedPage(kind: HostedPageKind, brand: ResolvedBrand, ctx
   };
   const page = pages[kind];
 
-  const colors = Object.entries(brand.colors)
-    .map(([name, value]) => `--${name.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)}:${value}`)
-    .join(';');
-  const logo = brand.logoUrl
-    ? `<img class="logo" src="${escapeHtml(brand.logoUrl)}" alt="${escapeHtml(brand.logoAlt ?? brand.siteName ?? '')}" height="${brand.logoHeight}" style="height:${brand.logoHeight}px">`
-    : '';
-  const header = brand.logoUrl
-    ? `<header class="brand">${logo}</header>`
-    : brand.siteName
-      ? `<header class="brand"><p class="site-name">${escapeHtml(brand.siteName)}</p></header>`
-      : '';
-
   const action = BUTTON_PAGES.has(kind)
     ? `<form method="post"><button type="submit"${ctx.preview ? ' disabled aria-disabled="true"' : ''}>${text(page.button ?? '')}</button></form>`
     : '';
@@ -305,35 +330,6 @@ export function renderHostedPage(kind: HostedPageKind, brand: ResolvedBrand, ctx
       ? `<p class="back"><a href="${escapeHtml(ctx.manageUrl)}">Manage your preferences</a></p>`
       : '';
 
-  return `<!doctype html>
-<html lang="${escapeHtml(brand.language)}">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="robots" content="noindex">
-<title>${text(page.title)}</title>
-<style>
-:root{color-scheme:light;${colors};--radius:${brand.radius}px}
-*{box-sizing:border-box}
-html,body{margin:0}
-body{min-height:100vh;padding:24px 12px;background:var(--background);color:var(--text);font-family:${brand.fontStack};font-size:16px;line-height:1.5}
-main{max-width:32rem;margin:0 auto}
-.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:clamp(20px,6vw,32px)}
-.brand{margin:0 0 1.25rem}
-.logo{display:block;max-width:100%;width:auto;margin:0 0 .75rem}
-.site-name{margin:0;font-size:.95rem;font-weight:600;color:var(--muted);overflow-wrap:anywhere}
-h1{margin:0 0 .5rem;font-size:clamp(1.35rem,4.5vw,1.6rem);line-height:1.25;overflow-wrap:anywhere}
-p{margin:0 0 1.25rem;color:var(--muted);white-space:pre-line;overflow-wrap:anywhere}
-button{font:inherit;font-weight:600;min-height:44px;padding:.65rem 1.25rem;border:1px solid var(--accent);border-radius:var(--radius);background:var(--accent);color:var(--accent-text);cursor:pointer}
-button:hover{filter:brightness(.94)}
-button:focus-visible{outline:3px solid var(--text);outline-offset:3px}
-button[disabled]{cursor:not-allowed}
-.back{margin:1.5rem 0 0;font-size:.95rem}
-a{color:var(--accent);text-underline-offset:.15em}
-a:focus-visible{outline:3px solid var(--text);outline-offset:3px;border-radius:2px}
-@media (max-width:400px){body{padding:16px 10px}.card{padding:20px 16px}}
-</style>
-</head>
-<body><main class="card">${header}<h1>${text(page.title)}</h1><p>${text(page.body)}</p>${action}${back}${manage}</main></body>
-</html>`;
+  const body = `<div class="card">${brandHeader(brand)}<h1>${text(page.title)}</h1><p>${text(page.body)}</p>${action}${manage}${back}</div>`;
+  return hostedDocument(page.title.replaceAll('{site}', site), brand, body);
 }
