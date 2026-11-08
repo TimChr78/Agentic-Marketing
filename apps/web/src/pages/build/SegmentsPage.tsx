@@ -1,6 +1,7 @@
 import { api } from '../../app/api';
 import { ArtifactListPage } from '../../features/artifacts/ArtifactListPage';
-import { useAllArtifacts } from '../../features/artifacts/artifactList';
+import { usePickerIndex } from '../../features/artifacts/pickerIndex';
+import { AudiencePhoneRow, audienceCountLabel } from '../../features/phase27/audience/listRows';
 import { Field, Select } from '../../ui';
 
 type Mode = 'dynamic' | 'static' | 'snapshot';
@@ -48,12 +49,17 @@ export default function SegmentsPage() {
           return { artifactId: r.artifactId };
         },
       }}
+      template={{
+        mobileRow: (a) => <AudiencePhoneRow artifact={a} />,
+        countLabel: audienceCountLabel('segment', 'segments'),
+      }}
     />
   );
 }
 
+/** The source picker shares the one bounded segment index; it never reads a row detail. */
 function SnapshotSource({ value, onChange }: { value: string; onChange: (id: string) => void }) {
-  const list = useAllArtifacts('segment');
+  const list = usePickerIndex('segment');
   const items = (list.data?.artifacts ?? []).filter((a) => a.publishedVersion);
   return (
     <Field label="Source segment" hint="Its current members are copied and frozen. Publish it first.">
@@ -64,6 +70,7 @@ function SnapshotSource({ value, onChange }: { value: string; onChange: (id: str
             {a.name} · v{a.publishedVersion}
           </option>
         ))}
+        {!list.loading && !items.length && !list.error && <option disabled>No published segment yet</option>}
       </Select>
     </Field>
   );

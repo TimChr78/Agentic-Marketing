@@ -23,10 +23,15 @@ import {
   PageHeader,
   Select,
   StatusPill,
+  Table,
   TableFrame,
   Tabs,
   Tag,
+  Td,
   Textarea,
+  THead,
+  Th,
+  Tr,
   useToast,
 } from '../../ui';
 import { pageWidth } from '../../ui/layout';
@@ -39,11 +44,19 @@ type Lookup = { id: string; from: string };
 const PROFILE_ID = /^prf_[0-9a-f]{32}$/;
 const PURPOSE = /^[a-z][a-z0-9_]{0,63}$/;
 
+const BASIS_LABEL: Record<string, string> = {
+  consent: 'Consent',
+  legitimate_interest: 'Legitimate interest',
+  contract: 'Contract',
+  legal_obligation: 'Legal obligation',
+};
+
+const basisLabel = (basis: string) => BASIS_LABEL[basis] ?? basis.replace(/_/g, ' ');
+
 const refused = (c: { denied: number; withdrawn: number; objected: number }) => c.denied + c.withdrawn + c.objected;
 
-/** Purposes in force and the append-only ledger they are recorded in. */
+/** Purposes in force as the choices recorded against them, then the append-only ledger. */
 export function ConsentLedger() {
-  useCrumbs([{ label: 'Consent' }]);
   const { can } = useSession();
   const [value, setValue] = useState('');
   const [lookupError, setLookupError] = useState<string | null>(null);
@@ -94,28 +107,21 @@ export function ConsentLedger() {
   const canRecord = can('profiles:write');
 
   return (
-    <div className={pageWidth('default')}>
-      <PageHeader
-        title="Consent"
-        description="The purposes this workspace relies on, and the ledger of every choice a person has made. Look someone up to see or add records."
-      />
-
-      <Alert tone="info" className="mb-5">
+    <div className="space-y-5">
+      <Alert tone="info">
         The consent ledger is append-only. A record is never edited or deleted; to correct a choice, record a new one. The latest record per
         purpose and channel is what the send gateway uses.
       </Alert>
 
-      <section className="mb-6" aria-labelledby="purposes-heading">
+      <section aria-labelledby="purposes-heading">
         <div className="mb-2 flex flex-wrap items-center gap-2">
-          <h2 id="purposes-heading" className="text-[14px] font-semibold">
-            Purposes in force
+          <h2 id="purposes-heading" className="text-[16px] leading-6 font-semibold">
+            Consent by purpose
           </h2>
           {purposes.data && <Tag>{purposes.data.source === 'published' ? 'Published purposes' : 'Defaults'}</Tag>}
         </div>
         {!can('artifacts:read') ? (
-          <Alert tone="info">
-            Your role cannot read the purposes artifact. Ask a workspace admin for <Mono>artifacts:read</Mono> to see the full list here.
-          </Alert>
+          <Alert tone="info">Your role cannot read the purposes. Ask a workspace admin to give you access to them.</Alert>
         ) : purposes.loading ? (
           <LoadingBlock lines={3} label="Loading purposes" />
         ) : purposes.error ? (
@@ -123,48 +129,77 @@ export function ConsentLedger() {
             {purposes.error}
           </Alert>
         ) : (
-          <div className="grid gap-2.5 sm:grid-cols-2 xl:grid-cols-3">
-            {(purposes.data?.purposes ?? []).map((p) => {
-              const c = counts.get(p.key);
-              return (
-                <Card key={p.key} padded>
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="min-w-0">
-                      <h3 className="text-[14px] font-semibold text-fg">{p.name}</h3>
-                      <Mono className="mt-0.5 inline-block bg-transparent px-0 text-muted">{p.key}</Mono>
-                    </div>
-                    <Tag>{p.basis.replace(/_/g, ' ')}</Tag>
-                  </div>
-                  <p className="mt-2 text-[13px] text-fg-2">{p.description}</p>
-                  {p.channels.length > 0 && (
-                    <div className="mt-2 flex flex-wrap gap-1">
-                      {p.channels.map((ch) => (
-                        <Tag key={ch}>{ch}</Tag>
-                      ))}
-                    </div>
-                  )}
-                  {c && (
-                    <div className="mt-2 border-t border-line pt-2 text-[12px] text-muted">
-                      <span className="flex flex-wrap items-center gap-1.5">
-                        <StatusPill tone="good">{c.granted} allowed</StatusPill>
-                        {refused(c) > 0 && <StatusPill tone="warn">{refused(c)} refused</StatusPill>}
-                      </span>
-                      {c.channels.length > 0 && (
-                        <p className="mt-1">
-                          {c.channels.map((ch) => `${ch.channel}: ${ch.granted} allowed, ${refused(ch)} refused`).join(' · ')}
-                        </p>
-                      )}
-                      {(topicCounts.get(p.key) ?? []).length > 0 && (
-                        <p className="mt-1">
-                          {(topicCounts.get(p.key) ?? []).map((t) => `${t.topic}: ${t.subscribed} subscribed`).join(' · ')}
-                        </p>
-                      )}
-                    </div>
-                  )}
-                </Card>
-              );
-            })}
-          </div>
+          <>
+            <TableFrame>
+              <Table label="Purposes">
+                <THead>
+                  <tr>
+                    <Th>Purpose</Th>
+                    <Th>Lawful basis</Th>
+                    <Th>Channels</Th>
+                    <Th>People</Th>
+                    <Th>Double opt-in</Th>
+                  </tr>
+                </THead>
+                <tbody>
+                  {(purposes.data?.purposes ?? []).map((p) => {
+                    const c = counts.get(p.key);
+                    return (
+                      <Tr key={p.key}>
+                        <Td>
+                          <div className="font-medium text-fg">{p.name}</div>
+                          <div className="mt-0.5">
+                            <Mono className="bg-transparent px-0 text-muted">{p.key}</Mono>
+                          </div>
+                          {p.description && <p className="mt-1 max-w-[360px] text-[12px] leading-[18px] text-muted">{p.description}</p>}
+                        </Td>
+                        <Td className="whitespace-nowrap">{basisLabel(p.basis)}</Td>
+                        <Td>
+                          {p.channels.length ? (
+                            <span className="flex flex-wrap gap-1">
+                              {p.channels.map((ch) => (
+                                <Tag key={ch}>{ch}</Tag>
+                              ))}
+                            </span>
+                          ) : (
+                            <span className="text-muted">None</span>
+                          )}
+                        </Td>
+                        <Td>
+                          {summary.loading ? (
+                            <span className="text-muted">…</span>
+                          ) : c ? (
+                            <div className="space-y-1">
+                              <span className="flex flex-wrap gap-1">
+                                <StatusPill tone="good">{c.granted} allowed</StatusPill>
+                                {refused(c) > 0 && <StatusPill tone="warn">{refused(c)} refused</StatusPill>}
+                              </span>
+                              {c.channels.length > 0 && (
+                                <div className="text-[12px] leading-[18px] text-muted">
+                                  {c.channels.map((ch) => `${ch.channel}: ${ch.granted} allowed, ${refused(ch)} refused`).join(' · ')}
+                                </div>
+                              )}
+                              {(topicCounts.get(p.key) ?? []).length > 0 && (
+                                <div className="text-[12px] leading-[18px] text-muted">
+                                  {(topicCounts.get(p.key) ?? []).map((t) => `${t.topic}: ${t.subscribed} subscribed`).join(' · ')}
+                                </div>
+                              )}
+                            </div>
+                          ) : (
+                            <span className="text-muted">No recorded choices</span>
+                          )}
+                        </Td>
+                        <Td>{p.requiresDoubleOptIn ? 'Yes' : <span className="text-muted">No</span>}</Td>
+                      </Tr>
+                    );
+                  })}
+                </tbody>
+              </Table>
+            </TableFrame>
+            <p className="mt-2 text-[12px] leading-[18px] text-muted">
+              Counts show recorded choices for people who are still active. A person with no record is not counted as a refusal.
+            </p>
+          </>
         )}
       </section>
 
@@ -172,7 +207,7 @@ export function ConsentLedger() {
         title="Look up a person"
         description="Search by e-mail without revealing personal data, or paste their profile id."
         padded
-        className="mb-5"
+        className="mb-0"
       >
         <form
           className="flex flex-wrap items-end gap-2"
@@ -241,7 +276,7 @@ export function ConsentLedger() {
             isEmpty={records.length === 0}
             empty={
               <EmptyState compact title="No consent records yet">
-                Record what the person agreed to, refused or withdrew, with the evidence you have.
+                Record what the person agreed to, refused or withdrew, with the evidence you have. A missing choice is not a refusal.
               </EmptyState>
             }
           >
@@ -259,6 +294,7 @@ export function ConsentLedger() {
             setRecording(false);
             void history.reload();
             void profile.reload();
+            void summary.reload();
           }}
         />
       )}
@@ -404,13 +440,14 @@ type ConsentTab = (typeof CONSENT_TABS)[number];
 const CONSENT_TAB_ITEMS: { key: ConsentTab; label: string }[] = [
   { key: 'consent', label: 'Consent' },
   { key: 'purposes', label: 'Purposes' },
-  { key: 'topics', label: 'Topics' },
+  { key: 'topics', label: 'Editorial topics' },
 ];
 
 /**
- * Consent (#446): the append-only consent ledger plus the existing purposes editor and topics
- * manager as named tabs. The page route admits either permission; each tab keeps its own gate, so
- * an artifacts-only role can use Purposes/Topics without seeing the consent summary.
+ * Consent (#446): the append-only consent ledger plus the existing purposes editor and editorial
+ * queue as named tabs. The page owns the one h1; each tab is a section inside it. The route admits
+ * either permission and each tab keeps its own gate, so an artifacts-only role can use Purposes and
+ * Editorial topics without seeing the consent summary.
  */
 export default function ConsentPage() {
   const { can } = useSession();
@@ -419,10 +456,14 @@ export default function ConsentPage() {
     fallback: 'consent',
     allowed: (tab) => (tab === 'consent' ? can('profiles:read') : can('artifacts:read')),
   });
-  useCrumbs([{ label: active === 'consent' ? 'Consent' : active === 'purposes' ? 'Purposes' : 'Topics' }]);
+  useCrumbs([{ label: active === 'consent' ? 'Consent' : active === 'purposes' ? 'Purposes' : 'Editorial topics' }]);
 
   return (
     <div className={pageWidth('default')}>
+      <PageHeader
+        title="Consent"
+        description="The purposes this workspace relies on, every choice people have recorded, and the editorial topics backlog. The consent ledger is append-only."
+      />
       {invalid && (
         <Alert tone="info" className="mb-4">
           This tab is unavailable.
@@ -432,8 +473,8 @@ export default function ConsentPage() {
         {forbidden ? (
           <EmptyState title="Your role can't open this tab">
             {forbidden === 'consent'
-              ? 'The consent ledger needs profiles:read. Ask a workspace admin for it.'
-              : 'Purposes and topics need artifacts:read. Ask a workspace admin for it.'}
+              ? 'The consent ledger needs permission to read profiles. Ask a workspace admin for access.'
+              : 'Purposes and editorial topics need permission to read artifacts. Ask a workspace admin for access.'}
           </EmptyState>
         ) : active === 'purposes' ? (
           <PurposesPage />

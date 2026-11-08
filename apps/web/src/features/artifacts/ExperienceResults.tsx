@@ -51,6 +51,7 @@ export function ExperienceResults({ artifact }: { artifact: Artifact }) {
   const threshold = viewingLatest ? `${((analysis?.threshold ?? 0.95) * 100).toFixed(0)}%` : null;
   const method = r.method;
   const significance = method === 'bayesian' ? 'P(beats control)' : method === 'sequential' ? 'Always-valid p' : 'p-value';
+  const exposures = r.variants.reduce((sum, variant) => sum + variant.exposed, 0);
 
   return (
     <div className="space-y-4">
@@ -64,6 +65,16 @@ export function ExperienceResults({ artifact }: { artifact: Artifact }) {
           Refresh
         </Button>
       </div>
+      <p className="text-[12px] leading-[18px] text-muted">
+        Current totals for exposed visitors. Period and freshness unavailable: the results do not name a calendar period.
+      </p>
+      {!r.goal && <Alert tone="info">Set a goal to measure conversions.</Alert>}
+      {!r.control && <Alert tone="info">No control group is configured. Comparison is unavailable.</Alert>}
+      {exposures === 0 && (
+        <Alert tone="info" title="No exposures yet">
+          No exposures yet. A result cannot be calculated.
+        </Alert>
+      )}
 
       <TableFrame
         isEmpty={!r.variants.length}
@@ -81,6 +92,7 @@ export function ExperienceResults({ artifact }: { artifact: Artifact }) {
               <Th align="right">Converted</Th>
               <Th align="right">Rate</Th>
               <Th align="right">Lift vs control</Th>
+              <Th align="right">95% interval</Th>
               <Th align="right">{significance}</Th>
               <Th align="right" className="hidden lg:table-cell">
                 P(best)
@@ -101,10 +113,7 @@ export function ExperienceResults({ artifact }: { artifact: Artifact }) {
                   <Td align="right">{v.exposed.toLocaleString()}</Td>
                   <Td align="right">{v.converted.toLocaleString()}</Td>
                   <Td align="right">{pct(v.rate)}</Td>
-                  <Td
-                    align="right"
-                    title={v.ci95 ? `95% interval for the difference in rate: ${points(v.ci95[0])} to ${points(v.ci95[1])}` : undefined}
-                  >
+                  <Td align="right">
                     {isControl ? (
                       <span className="text-muted">—</span>
                     ) : (
@@ -115,6 +124,7 @@ export function ExperienceResults({ artifact }: { artifact: Artifact }) {
                       </span>
                     )}
                   </Td>
+                  <Td align="right">{isControl || !v.ci95 ? '—' : `${points(v.ci95[0])} to ${points(v.ci95[1])}`}</Td>
                   <Td align="right">
                     {isControl
                       ? '—'
@@ -144,7 +154,10 @@ export function ExperienceResults({ artifact }: { artifact: Artifact }) {
           {r.recommendation} {r.note}
         </p>
         {r.variants.some((v) => v.ci95) && (
-          <p className="mt-1">The 95% interval is for the difference in conversion rate, in percentage points; hover a lift to read it.</p>
+          <p className="mt-1">
+            The 95% interval is for the difference in conversion rate against the control, in percentage points. It is shown in its own
+            column, not only on hover.
+          </p>
         )}
       </Alert>
     </div>

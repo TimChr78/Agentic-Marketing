@@ -1,4 +1,5 @@
 import { ArtifactListPage } from '../../features/artifacts/ArtifactListPage';
+import { AudiencePhoneRow, audienceCountLabel } from '../../features/phase27/audience/listRows';
 
 export default function ExperiencesPage() {
   return (
@@ -16,6 +17,10 @@ export default function ExperiencesPage() {
           variants: [{ id: 'a', name: 'Variant A', weight: 50, content: { html: '<p>Get the newsletter.</p>' } }],
           holdoutPercent: 0,
         }),
+      }}
+      template={{
+        mobileRow: (a) => <AudiencePhoneRow artifact={a} />,
+        countLabel: audienceCountLabel('experience', 'experiences'),
       }}
     />
   );

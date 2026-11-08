@@ -2,12 +2,11 @@ import { Pencil, Plus } from 'lucide-react';
 import { useState } from 'react';
 import { api, errText } from '../../app/api';
 import { ButtonLink } from '../../app/links';
-import { useCrumbs } from '../../app/page';
 import { navigate } from '../../app/router';
 import { useWorkspace } from '../../app/session';
 import { useApi } from '../../app/useApi';
-import { Alert, Button, EmptyState, Mono, PageHeader, StatusPill, Table, TableFrame, Tag, Td, THead, Th, Tr, useToast } from '../../ui';
-import { pageWidth } from '../../ui/layout';
+import { invalidatePickerIndex } from '../../features/artifacts/pickerIndex';
+import { Alert, Button, EmptyState, Mono, StatusPill, Table, TableFrame, Tag, Td, THead, Th, Tr, useToast } from '../../ui';
 
 const BASIS_LABEL: Record<string, string> = {
   consent: 'Consent',
@@ -20,10 +19,12 @@ const basisLabel = (basis: string) => BASIS_LABEL[basis] ?? basis.replace(/_/g, 
 
 const refused = (c: { denied: number; withdrawn: number; objected: number }) => c.denied + c.withdrawn + c.objected;
 
-/** Purposes: the purposes in force, and a link into the purposes artifact where they are edited. */
+/**
+ * Purposes: the definitions in force, and the way into the purposes artifact where they are edited.
+ * It is a section of Consent, so it has no page heading or crumbs of its own.
+ */
 export default function PurposesPage() {
-  useCrumbs([{ label: 'Purposes' }]);
-  const { can } = useWorkspace();
+  const { can, workspace } = useWorkspace();
   const toast = useToast();
   const data = useApi(async () => {
     const [current, list] = await Promise.all([api.call('purposes.list', {}), api.call('artifacts.list', { type: 'purposes', limit: 1 })]);
@@ -60,6 +61,8 @@ export default function PurposesPage() {
         },
         note: 'Created from the default purposes.',
       });
+      // A new purposes artifact is a new row for the type's shared index; no other index changes.
+      invalidatePickerIndex(workspace.id, 'purposes');
       toast.success('Created the purposes artifact as a draft. Edit it, then submit it for review.');
       navigate(`/artifacts/${r.artifactId}`);
     } catch (e) {
@@ -70,19 +73,24 @@ export default function PurposesPage() {
   };
 
   return (
-    <div className={pageWidth('default')}>
-      <PageHeader
-        title="Purposes"
-        description="The lawful reasons you may contact people, and the channels each covers. Changes go through review like other artifacts: edit the purposes artifact, submit it, and a person approves it."
-        meta={
-          <>
+    <section aria-labelledby="purposes-in-force">
+      <div className="mb-2 flex flex-wrap items-start justify-between gap-x-4 gap-y-2">
+        <div className="min-w-0">
+          <h2 id="purposes-in-force" className="text-[16px] leading-6 font-semibold">
+            Purposes in force
+          </h2>
+          <div className="mt-1 flex flex-wrap items-center gap-2 text-[12px] leading-[18px] text-muted">
             <StatusPill tone={source === 'published' ? 'good' : 'neutral'}>{source === 'published' ? 'Published' : 'Defaults'}</StatusPill>
             <span>{source === 'published' ? 'These purposes are in force.' : 'The built-in defaults are in force.'}</span>
             {artifact && artifact.publishedVersion === null && <span>A draft exists and is not live yet.</span>}
-          </>
-        }
-        actions={
-          artifact ? (
+          </div>
+          <p className="mt-1 max-w-[760px] text-[13px] leading-5 text-muted">
+            The lawful reasons you may contact people, and the channels each covers. Changes go through review like other artifacts: edit
+            the purposes artifact, submit it, and a person approves it.
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          {artifact ? (
             <ButtonLink to={`/artifacts/${artifact.id}`} variant="primary" icon={<Pencil size={14} />}>
               Edit purposes
             </ButtonLink>
@@ -90,11 +98,12 @@ export default function PurposesPage() {
             <Button variant="primary" icon={<Plus size={15} />} loading={creating} onClick={() => void create()}>
               Create purposes
             </Button>
-          ) : undefined
-        }
-      />
+          ) : undefined}
+        </div>
+      </div>
+
       {!artifact && (
-        <Alert tone="info" title="No purposes artifact yet" className="mb-4">
+        <Alert tone="info" title="No purposes artifact yet" className="mt-3 mb-3">
           The defaults below apply.{' '}
           {canWrite
             ? 'Create a purposes artifact to change a basis, its channels or double opt-in.'
@@ -102,10 +111,11 @@ export default function PurposesPage() {
         </Alert>
       )}
       {error && (
-        <Alert tone="bad" title="Could not create the purposes artifact" className="mb-4">
+        <Alert tone="bad" title="Could not create the purposes artifact" className="mt-3 mb-3">
           {error}
         </Alert>
       )}
+
       <TableFrame
         loading={data.loading}
         error={data.error}
@@ -134,7 +144,7 @@ export default function PurposesPage() {
                     <div className="mt-0.5">
                       <Mono>{p.key}</Mono>
                     </div>
-                    {p.description && <p className="mt-1 max-w-[420px] text-[12px] text-muted">{p.description}</p>}
+                    {p.description && <p className="mt-1 max-w-[360px] text-[12px] leading-[18px] text-muted">{p.description}</p>}
                   </Td>
                   <Td className="whitespace-nowrap">{basisLabel(p.basis)}</Td>
                   <Td>
@@ -158,7 +168,7 @@ export default function PurposesPage() {
                           {refused(c) > 0 && <StatusPill tone="warn">{refused(c)} refused</StatusPill>}
                         </span>
                         {c.channels.length > 0 && (
-                          <div className="text-[12px] text-muted">
+                          <div className="text-[12px] leading-[18px] text-muted">
                             {c.channels.map((ch) => `${ch.channel}: ${ch.granted} allowed, ${refused(ch)} refused`).join(' · ')}
                           </div>
                         )}
@@ -174,6 +184,6 @@ export default function PurposesPage() {
           </tbody>
         </Table>
       </TableFrame>
-    </div>
+    </section>
   );
 }

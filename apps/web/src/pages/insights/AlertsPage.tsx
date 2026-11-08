@@ -4,11 +4,10 @@ import { api, errText, type In, type Out } from '../../app/api';
 import { useCrumbs } from '../../app/page';
 import { useSession } from '../../app/session';
 import { useApi } from '../../app/useApi';
-import { useAllArtifacts } from '../../features/artifacts/artifactList';
+import { usePickerIndex } from '../../features/artifacts/pickerIndex';
 import {
   Alert,
   Button,
-  Card,
   Checkbox,
   Drawer,
   EmptyState,
@@ -81,6 +80,13 @@ function ruleSummary(rule: Rule, journeyName?: string): string {
   return `More than ${num(Number(config.threshold ?? 5))} failed steps over ${window} for ${journey}.`;
 }
 
+/** A paused rule, a firing rule and a quiet rule are three different states. */
+function ruleState(rule: Rule): { tone: 'neutral' | 'bad'; text: string } {
+  if (!rule.enabled) return { tone: 'neutral', text: 'Paused' };
+  if (rule.state === 'firing') return { tone: 'bad', text: `Firing since ${formatDateTime(rule.firingSince)}` };
+  return { tone: 'neutral', text: 'Not firing' };
+}
+
 interface FormState {
   name: string;
   kind: Kind;
@@ -135,20 +141,24 @@ export default function AlertsPage() {
   const rules = useApi(() => api.call('alerts.list', {}), []);
   const endpoints = useApi(() => api.call('webhooks.list', {}), []);
   const members = useApi(() => api.call('members.list', {}), [], { skip: !admin });
-  const journeys = useAllArtifacts('journey');
-  const history = useApi(() => api.call('alerts.history', { limit: 50 }), [rules.data]);
+  const journeys = usePickerIndex('journey');
+  const journeyRows = journeys.data?.artifacts ?? [];
+  const history = useApi(() => api.call('alerts.history', { limit: 50 }), []);
   const ruleHistory = useApi(() => api.call('alerts.history', { ruleId: historyRule?.id, limit: 200 }), [historyRule?.id], {
     skip: !historyRule,
   });
 
-  const journeyName = (id: string) => journeys.data?.artifacts.find((a) => a.id === id)?.name ?? id;
+  const journeyName = (id: string) => journeyRows.find((a) => a.id === id)?.name ?? id;
   const endpointName = (id: string) => endpoints.data?.endpoints.find((e) => e.id === id)?.name ?? id;
-  const memberName = (id: string) => members.data?.members.find((m) => m.userId === id)?.email ?? id;
+  const memberName = (id: string) => members.data?.members.find((m) => m.userId === id)?.email ?? null;
 
   const channelsText = (rule: Rule) => {
-    const names = rule.channels.flatMap((channel) =>
-      channel.type === 'webhook' ? [`Webhook ${endpointName(channel.webhookId)}`] : channel.userIds.map((id) => `E-mail ${memberName(id)}`),
-    );
+    const names = rule.channels.flatMap((channel) => {
+      if (channel.type === 'webhook') return [`Webhook ${endpointName(channel.webhookId)}`];
+      const people = channel.userIds.map(memberName).filter((name): name is string => !!name);
+      if (people.length) return [`E-mail ${people.join(', ')}`];
+      return [`E-mail ${channel.userIds.length} ${channel.userIds.length === 1 ? 'person' : 'people'}`];
+    });
     return names.length ? names.join(' · ') : 'No channels';
   };
 
@@ -231,30 +241,45 @@ export default function AlertsPage() {
           </EmptyState>
         </div>
       ) : (
-        <div className="space-y-3">
-          {rows.map((rule) => (
-            <Card
-              key={rule.id}
-              title={
-                <span className="flex items-center gap-2">
-                  {rule.name}
-                  <Tag>{KIND_LABEL[rule.kind]}</Tag>
-                  {!rule.enabled && <Tag>Paused</Tag>}
-                </span>
-              }
-              description={ruleSummary(rule, rule.config.journeyId ? journeyName(String(rule.config.journeyId)) : undefined)}
-              action={
-                <StatusPill tone={rule.state === 'firing' ? 'bad' : 'good'} dot>
-                  {rule.state === 'firing' ? `Firing since ${formatDateTime(rule.firingSince)}` : 'OK'}
-                </StatusPill>
-              }
-            >
-              <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-line px-4 py-2.5 text-[12px] text-muted">
-                <span className="inline-flex items-center gap-1.5">
-                  {rule.state === 'firing' ? <BellRing size={13} /> : <Bell size={13} />}
-                  {channelsText(rule)}
-                </span>
-                <span className="ml-auto flex flex-wrap items-center gap-2">
+        <div className="am-frame overflow-hidden rounded-lg border border-line bg-surface">
+          <div
+            className="hidden border-b border-line bg-surface-2 px-4 py-2 text-[12px] leading-[18px] text-muted md:grid md:grid-cols-[minmax(0,1.2fr)_minmax(0,1.4fr)_190px_auto] md:gap-4"
+            aria-hidden
+          >
+            <span>Rule</span>
+            <span>Condition</span>
+            <span>State</span>
+            <span className="text-right">Actions</span>
+          </div>
+          {rows.map((rule) => {
+            const status = ruleState(rule);
+            return (
+              <section
+                key={rule.id}
+                aria-labelledby={`alert-rule-${rule.id}`}
+                className="grid grid-cols-1 gap-2 border-b border-line px-4 py-3 last:border-0 md:grid-cols-[minmax(0,1.2fr)_minmax(0,1.4fr)_190px_auto] md:items-start md:gap-4"
+              >
+                <div className="min-w-0">
+                  <h3 id={`alert-rule-${rule.id}`} className="text-[14px] leading-5 font-semibold text-fg">
+                    {rule.name}
+                  </h3>
+                  <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[12px] leading-[18px] text-muted">
+                    <Tag>{KIND_LABEL[rule.kind]}</Tag>
+                    <span className="inline-flex items-center gap-1.5">
+                      {rule.state === 'firing' ? <BellRing size={13} aria-hidden /> : <Bell size={13} aria-hidden />}
+                      {channelsText(rule)}
+                    </span>
+                  </div>
+                </div>
+                <p className="text-[13px] leading-5 text-fg-2">
+                  {ruleSummary(rule, rule.config.journeyId ? journeyName(String(rule.config.journeyId)) : undefined)}
+                </p>
+                <div>
+                  <StatusPill tone={status.tone} dot>
+                    {status.text}
+                  </StatusPill>
+                </div>
+                <div className="flex flex-wrap items-center gap-1 md:justify-end">
                   <Button size="sm" variant="ghost" onClick={() => setHistoryRule(rule)}>
                     History
                   </Button>
@@ -271,12 +296,16 @@ export default function AlertsPage() {
                       </Button>
                     </>
                   )}
-                </span>
-              </div>
-            </Card>
-          ))}
+                </div>
+              </section>
+            );
+          })}
         </div>
       )}
+      <p className="mt-2 text-[12px] leading-[18px] text-muted">
+        “Not firing” means the condition was not met at the last scheduled check. It does not by itself show healthy traffic when little or
+        no volume was evaluated. The scheduler checks every five minutes.
+      </p>
 
       <section aria-labelledby="alert-history" className="mt-6">
         <h2 id="alert-history" className="mb-2 text-[14px] font-semibold">
@@ -340,7 +369,7 @@ export default function AlertsPage() {
             rule={editing === 'new' ? null : editing}
             endpoints={endpoints.data?.endpoints ?? []}
             members={members.data?.members ?? []}
-            journeys={journeys.data?.artifacts ?? []}
+            journeys={journeyRows}
             onSaved={() => {
               setEditing(null);
               reload();
@@ -360,6 +389,12 @@ export default function AlertsPage() {
         {ruleHistory.loading ? (
           <div className="p-5">
             <LoadingBlock lines={4} label="Loading history" />
+          </div>
+        ) : ruleHistory.error ? (
+          <div className="p-5">
+            <Alert tone="bad" title="Couldn't load this rule's history" onRetry={ruleHistory.reload}>
+              {ruleHistory.error}
+            </Alert>
           </div>
         ) : (ruleHistory.data?.events.length ?? 0) === 0 ? (
           <div className="p-5">

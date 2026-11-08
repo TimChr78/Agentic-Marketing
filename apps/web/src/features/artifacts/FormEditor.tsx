@@ -3,8 +3,8 @@ import { useEffect, useRef, useState } from 'react';
 import { api } from '../../app/api';
 import { TextLink } from '../../app/links';
 import { useApi } from '../../app/useApi';
-import { Alert, Button, Checkbox, Field, FieldGroup, IconButton, Input, LoadingBlock, Switch, Textarea } from '../../ui';
-import { FormPreview } from '../previews/FormPreview';
+import { Alert, Button, Checkbox, Field, IconButton, Input, LoadingBlock, Switch, Textarea } from '../../ui';
+import { EditorSection } from '../phase27/audience/EditorSection';
 import type { EditorProps } from './ArtifactDetailPage';
 import { ArtifactSelect } from './ArtifactSelect';
 
@@ -80,193 +80,218 @@ export function FormEditor({ artifact, content, onChange, readOnly, errors }: Ed
   const selectedPurposes = content.purposes ?? [];
   const purposesError = errors.purposes;
 
-  return (
-    <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_360px]">
-      <div className="min-w-0 space-y-6">
-        <FieldGroup legend="Consent">
-          <fieldset className="min-w-0 space-y-2">
-            <legend className="mb-1 text-[12px] font-medium text-fg-2">
-              Purposes
-              <span className="ml-0.5 text-muted" aria-hidden>
-                *
-              </span>
-            </legend>
-            <p className="text-[12px] text-muted">At least one. People who submit the form agree to all of these.</p>
-            <div className="space-y-2">
-              {purposes.loading && <p className="text-[12px] text-muted">Loading purposes…</p>}
-              {purposes.error && (
-                <Alert tone="bad" title="Couldn't load the purposes" onRetry={purposes.reload}>
-                  {purposes.error}
-                </Alert>
-              )}
-              {purposes.data &&
-                [
-                  ...purposes.data.purposes.map((p) => p.key),
-                  ...selectedPurposes.filter((k) => !purposes.data?.purposes.some((p) => p.key === k)),
-                ].map((key) => {
-                  const p = purposes.data?.purposes.find((x) => x.key === key);
-                  return (
-                    <Checkbox
-                      key={key}
-                      checked={selectedPurposes.includes(key)}
-                      disabled={readOnly}
-                      onChange={(e) =>
-                        set({
-                          purposes: e.target.checked ? [...selectedPurposes, key] : selectedPurposes.filter((k) => k !== key),
-                        })
-                      }
-                      label={
-                        <>
-                          {p?.name ?? key} <span className="text-muted">({key})</span>
-                        </>
-                      }
-                      hint={p?.description}
-                    />
-                  );
-                })}
-            </div>
-            {purposesError && <p className="text-[12px] text-bad">{purposesError}</p>}
-          </fieldset>
+  // The confirmation page renderer is a server read. Opening the disclosure is what asks for it;
+  // once asked, the frame stays mounted so collapsing the section keeps the same preview.
+  const [previewOpen, setPreviewOpen] = useState(false);
 
+  // The override switch keeps the brand values while it is off, so turning it back on restores
+  // exactly what was there instead of starting from a blank override.
+  const [overrideOn, setOverrideOn] = useState(!!content.hostedPages);
+  const [rememberedBrand, setRememberedBrand] = useState<FormBrand | undefined>(content.hostedPages);
+  useEffect(() => {
+    if (content.hostedPages) {
+      setOverrideOn(true);
+      setRememberedBrand(content.hostedPages);
+    } else {
+      setOverrideOn(false);
+    }
+  }, [content.hostedPages]);
+
+  const setOverride = (on: boolean) => {
+    if (on) {
+      setOverrideOn(true);
+      set({ hostedPages: rememberedBrand ?? {} });
+    } else {
+      setRememberedBrand(content.hostedPages);
+      setOverrideOn(false);
+      remove('hostedPages');
+    }
+  };
+
+  return (
+    <div className="max-w-[900px] space-y-6">
+      <EditorSection title="Consent" defaultOpen>
+        <fieldset className="min-w-0 space-y-2">
+          <legend className="mb-1 text-[12px] font-medium text-fg-2">
+            Purposes
+            <span className="ml-0.5 text-muted" aria-hidden>
+              *
+            </span>
+          </legend>
+          <p className="text-[12px] text-muted">At least one. People who submit the form agree to all of these.</p>
+          <div className="space-y-2">
+            {purposes.loading && <p className="text-[12px] text-muted">Loading purposes…</p>}
+            {purposes.error && (
+              <Alert tone="bad" title="Couldn't load the purposes" onRetry={purposes.reload}>
+                {purposes.error}
+              </Alert>
+            )}
+            {purposes.data &&
+              [
+                ...purposes.data.purposes.map((p) => p.key),
+                ...selectedPurposes.filter((k) => !purposes.data?.purposes.some((p) => p.key === k)),
+              ].map((key) => {
+                const p = purposes.data?.purposes.find((x) => x.key === key);
+                return (
+                  <Checkbox
+                    key={key}
+                    checked={selectedPurposes.includes(key)}
+                    disabled={readOnly}
+                    onChange={(e) =>
+                      set({
+                        purposes: e.target.checked ? [...selectedPurposes, key] : selectedPurposes.filter((k) => k !== key),
+                      })
+                    }
+                    label={
+                      <>
+                        {p?.name ?? key} <span className="text-muted">({key})</span>
+                      </>
+                    }
+                    hint={p?.description}
+                  />
+                );
+              })}
+          </div>
+          {purposesError && <p className="text-[12px] text-bad">{purposesError}</p>}
+        </fieldset>
+
+        <Field
+          label="Consent text"
+          hint={`Shown next to the form. It is stored with each consent as proof. ${(content.consentText ?? '').length} / 2000 characters.`}
+          error={errors.consentText}
+          required
+        >
+          <Textarea
+            rows={4}
+            maxLength={2000}
+            value={content.consentText ?? ''}
+            readOnly={readOnly}
+            onChange={(e) => set({ consentText: e.target.value })}
+          />
+        </Field>
+
+        <div>
+          <Switch
+            checked={doubleOptIn}
+            onChange={(v) => set({ doubleOptIn: v })}
+            label="Double opt-in: the person confirms by e-mail"
+            disabled={readOnly}
+          />
+          <p className="mt-1 text-[12px] text-muted">
+            {doubleOptIn
+              ? 'Consent counts only after the person clicks the confirmation link.'
+              : 'Consent counts as soon as the form is submitted.'}
+          </p>
+          {errors.doubleOptIn && <p className="mt-1 text-[12px] text-bad">{errors.doubleOptIn}</p>}
+        </div>
+
+        {doubleOptIn && (
           <Field
-            label="Consent text"
-            hint={`Shown next to the form. It is stored with each consent as proof. ${(content.consentText ?? '').length} / 2000 characters.`}
-            error={errors.consentText}
+            label="Confirmation e-mail"
+            hint="It must contain {{ confirm_url }} and use a purpose that does not need consent, such as onboarding."
+            error={errors.confirmationTemplate}
             required
           >
-            <Textarea
-              rows={4}
-              maxLength={2000}
-              value={content.consentText ?? ''}
-              readOnly={readOnly}
-              onChange={(e) => set({ consentText: e.target.value })}
+            <ArtifactSelect
+              type="email_template"
+              value={content.confirmationTemplate}
+              onChange={(v) => set({ confirmationTemplate: v || undefined })}
+              disabled={readOnly}
             />
           </Field>
+        )}
+      </EditorSection>
 
-          <div>
-            <Switch
-              checked={doubleOptIn}
-              onChange={(v) => set({ doubleOptIn: v })}
-              label="Double opt-in: the person confirms by e-mail"
-              disabled={readOnly}
-            />
-            <p className="mt-1 text-[12px] text-muted">
-              {doubleOptIn
-                ? 'Consent counts only after the person clicks the confirmation link.'
-                : 'Consent counts as soon as the form is submitted.'}
-            </p>
-            {errors.doubleOptIn && <p className="mt-1 text-[12px] text-bad">{errors.doubleOptIn}</p>}
-          </div>
+      <EditorSection title="Fields" defaultOpen hint="The e-mail field is always collected. Add the traits this form also keeps.">
+        <TraitsEditor
+          value={content.traits ?? ['firstName']}
+          onChange={(traits) => set({ traits })}
+          readOnly={readOnly}
+          error={errors.traits}
+        />
+      </EditorSection>
 
-          {doubleOptIn && (
-            <Field
-              label="Confirmation e-mail"
-              hint="It must contain {{ confirm_url }} and use a purpose that does not need consent, such as onboarding."
-              error={errors.confirmationTemplate}
-              required
-            >
-              <ArtifactSelect
-                type="email_template"
-                value={content.confirmationTemplate}
-                onChange={(v) => set({ confirmationTemplate: v || undefined })}
-                disabled={readOnly}
-              />
-            </Field>
-          )}
-        </FieldGroup>
+      <EditorSection title="After submitting" defaultOpen>
+        <UrlField
+          label="Success page"
+          hint="Where the browser goes after submitting, e.g. /thanks."
+          required
+          value={content.successUrl}
+          onChange={(v) => set({ successUrl: v || undefined })}
+          readOnly={readOnly}
+          error={errors.successUrl}
+        />
+        <UrlField
+          label="Confirmed page"
+          hint="Where the browser goes after the person confirms the double opt-in. Leave empty to show the branded confirmation page."
+          value={content.confirmedUrl}
+          onChange={(v) => set({ confirmedUrl: v || undefined })}
+          readOnly={readOnly}
+          error={errors.confirmedUrl}
+        />
+        <UrlField
+          label="Error page"
+          hint="Where the browser goes when the submission is refused; ?error=… is added. Optional."
+          value={content.errorUrl}
+          onChange={(v) => set({ errorUrl: v || undefined })}
+          readOnly={readOnly}
+          error={errors.errorUrl}
+        />
+      </EditorSection>
 
-        <FieldGroup legend="Fields" hint="The e-mail field is always collected. Add the traits this form also keeps.">
-          <TraitsEditor
-            value={content.traits ?? ['firstName']}
-            onChange={(traits) => set({ traits })}
-            readOnly={readOnly}
-            error={errors.traits}
+      <EditorSection title="Security" hint="Allowed sites and bot protection. Changes apply when this form is next published.">
+        <OriginsEditor
+          value={content.allowedOrigins ?? []}
+          onChange={(allowedOrigins) => set({ allowedOrigins })}
+          readOnly={readOnly}
+          error={errors.allowedOrigins}
+        />
+        <div>
+          <Switch
+            checked={content.turnstile ?? false}
+            onChange={(v) => set({ turnstile: v })}
+            label="Require a Cloudflare Turnstile check"
+            disabled={readOnly}
           />
-        </FieldGroup>
+          <p className="mt-1 text-[12px] text-muted">
+            The secret is stored under <TextLink to="/settings/secrets">Settings → Secrets</TextLink> as{' '}
+            <code className="font-mono text-[12px]">turnstile.secret_key</code>.
+          </p>
+          {errors.turnstile && <p className="mt-1 text-[12px] text-bad">{errors.turnstile}</p>}
+        </div>
+      </EditorSection>
 
-        <FieldGroup legend="After submitting">
-          <UrlField
-            label="Success page"
-            hint="Where the browser goes after submitting, e.g. /thanks."
-            required
-            value={content.successUrl}
-            onChange={(v) => set({ successUrl: v || undefined })}
-            readOnly={readOnly}
-            error={errors.successUrl}
+      <EditorSection
+        title="Hosted pages"
+        hint="The confirm and expired pages a subscriber sees on the links host."
+        onFirstOpen={() => setPreviewOpen(true)}
+      >
+        <div>
+          <Switch
+            checked={overrideOn}
+            onChange={setOverride}
+            label="Use a different look for this form's confirm pages"
+            disabled={readOnly}
           />
-          <UrlField
-            label="Confirmed page"
-            hint="Where the browser goes after the person confirms the double opt-in. Leave empty to show the branded confirmation page."
-            value={content.confirmedUrl}
-            onChange={(v) => set({ confirmedUrl: v || undefined })}
+          <p className="mt-1 text-[12px] text-muted">
+            {overrideOn
+              ? 'Overrides parts of the workspace brand for this form only.'
+              : 'The workspace brand is used on the hosted pages. Your override values are kept while this is off.'}
+          </p>
+          {errors.hostedPages && <p className="mt-1 text-[12px] text-bad">{errors.hostedPages}</p>}
+        </div>
+
+        {content.hostedPages && (
+          <HostedPagesEditor
+            brand={content.hostedPages}
+            onChange={(hostedPages) => set({ hostedPages })}
             readOnly={readOnly}
-            error={errors.confirmedUrl}
+            errors={errors}
           />
-          <UrlField
-            label="Error page"
-            hint="Where the browser goes when the submission is refused; ?error=… is added. Optional."
-            value={content.errorUrl}
-            onChange={(v) => set({ errorUrl: v || undefined })}
-            readOnly={readOnly}
-            error={errors.errorUrl}
-          />
-        </FieldGroup>
+        )}
 
-        <FieldGroup legend="Security">
-          <OriginsEditor
-            value={content.allowedOrigins ?? []}
-            onChange={(allowedOrigins) => set({ allowedOrigins })}
-            readOnly={readOnly}
-            error={errors.allowedOrigins}
-          />
-          <div>
-            <Switch
-              checked={content.turnstile ?? false}
-              onChange={(v) => set({ turnstile: v })}
-              label="Require a Cloudflare Turnstile check"
-              disabled={readOnly}
-            />
-            <p className="mt-1 text-[12px] text-muted">
-              The secret is stored under <TextLink to="/settings/secrets">Settings → Secrets</TextLink> as{' '}
-              <code className="font-mono text-[12px]">turnstile.secret_key</code>.
-            </p>
-            {errors.turnstile && <p className="mt-1 text-[12px] text-bad">{errors.turnstile}</p>}
-          </div>
-        </FieldGroup>
-
-        <FieldGroup legend="Hosted pages" hint="The confirm and expired pages a subscriber sees on the links host.">
-          <div>
-            <Switch
-              checked={!!content.hostedPages}
-              onChange={(v) => (v ? set({ hostedPages: content.hostedPages ?? {} }) : remove('hostedPages'))}
-              label="Use a different look for this form's confirm pages"
-              disabled={readOnly}
-            />
-            <p className="mt-1 text-[12px] text-muted">
-              {content.hostedPages
-                ? 'Overrides parts of the workspace brand for this form only.'
-                : 'The workspace brand is used on the hosted pages.'}
-            </p>
-            {errors.hostedPages && <p className="mt-1 text-[12px] text-bad">{errors.hostedPages}</p>}
-          </div>
-
-          {content.hostedPages && (
-            <HostedPagesEditor
-              brand={content.hostedPages}
-              onChange={(hostedPages) => set({ hostedPages })}
-              readOnly={readOnly}
-              errors={errors}
-            />
-          )}
-
-          <HostedPagePreview formId={artifact.id} savedVersion={artifact.latestVersion} />
-        </FieldGroup>
-      </div>
-
-      <aside className="min-w-0 lg:sticky lg:top-4 lg:self-start" aria-label="Live preview">
-        <p className="mb-2 text-[12px] font-medium text-fg-2">Preview, with your unsaved changes</p>
-        <FormPreview content={content} stacked />
-      </aside>
+        {previewOpen && <HostedPagePreview formId={artifact.id} savedVersion={artifact.latestVersion} />}
+      </EditorSection>
     </div>
   );
 }
