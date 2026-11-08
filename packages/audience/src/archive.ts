@@ -67,25 +67,53 @@ export async function archiveForSlug(db: Db, slug: string, workspaceId?: string)
   return hit ?? null;
 }
 
+/** Trims '-' from both ends in one linear pass; `^-+|-+$` backtracks on a long run. */
+function trimDashes(value: string): string {
+  let start = 0;
+  let end = value.length;
+  while (start < end && value[start] === '-') start++;
+  while (end > start && value[end - 1] === '-') end--;
+  return value.slice(start, end);
+}
+
 /** A URL-safe issue slug: "Signal #42: attribution is…" → "signal-42-attribution-is". */
 export function slugify(value: string): string {
   return (
-    value
-      .normalize('NFKD')
-      .replace(/[\u0300-\u036f]/g, '')
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-+|-+$/g, '')
-      .slice(0, 80) || 'issue'
+    trimDashes(
+      value
+        .normalize('NFKD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-'),
+    ).slice(0, 80) || 'issue'
   );
 }
 
 const day = (date: Date) => date.toISOString().slice(0, 10);
-const plain = (value: string) =>
-  value
-    .replace(/<[^>]*>/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
+
+/** The text of an HTML fragment, without tags, in one linear scan (the old `/<[^>]*>/g` was
+ * quadratic on a long run with no closing ">"). Matching is identical: the first "<" through the
+ * first ">" after it becomes a space, and a fragment with no ">" is left alone. */
+export const plain = (value: string) => {
+  let out = '';
+  let i = 0;
+  while (i < value.length) {
+    const open = value.indexOf('<', i);
+    if (open < 0) {
+      out += value.slice(i);
+      break;
+    }
+    out += value.slice(i, open);
+    const close = value.indexOf('>', open + 1);
+    if (close < 0) {
+      out += value.slice(open);
+      break;
+    }
+    out += ' ';
+    i = close + 1;
+  }
+  return out.replace(/\s+/g, ' ').trim();
+};
 
 /** Values for an archived issue: the template's sample data, but never a real profile. */
 function archiveVars(t: { sampleData?: Record<string, unknown> }) {
@@ -234,21 +262,55 @@ const metaDescription = (value: string, fallback: string) => {
   return text.length > 300 ? `${text.slice(0, 297)}…` : text;
 };
 
+const DANGEROUS_ELEMENTS = 'script|iframe|object|embed';
+/** A complete dangerous element, tolerating whitespace before the end tag (`</script >`). */
+const DANGEROUS_PAIR = new RegExp(`<(${DANGEROUS_ELEMENTS})\\b[\\s\\S]*?<\\/\\1\\s*>`, 'gi');
+/** A dangerous start or end tag on its own, for unclosed and nested fragments. */
+const DANGEROUS_TAG = new RegExp(`<\\/?(${DANGEROUS_ELEMENTS})\\b[^>]*>`, 'gi');
+const QUOTED_HANDLER = [/\son[a-z]+\s*=\s*"[^"]*"/gi, /\son[a-z]+\s*=\s*'[^']*'/gi];
+const UNQUOTED_HANDLER = /\son[a-z]+\s*=\s*[^\s>"']+/gi;
+const JAVASCRIPT_URL = [
+  /\s(?:href|src)\s*=\s*"\s*javascript:[^"]*"/gi,
+  /\s(?:href|src)\s*=\s*'\s*javascript:[^']*'/gi,
+  /\s(?:href|src)\s*=\s*javascript:[^\s>"']*/gi,
+];
+
+/** One cleanup pass: dangerous elements and tags, event handlers, then javascript: URLs. */
+function cleanEmailMarkup(body: string): string {
+  let value = body.replace(DANGEROUS_PAIR, '').replace(DANGEROUS_TAG, '');
+  for (const pattern of [...QUOTED_HANDLER, UNQUOTED_HANDLER, ...JAVASCRIPT_URL]) value = value.replace(pattern, '');
+  return value;
+}
+
+/**
+ * Removes active content from e-mail HTML before the public archive and web version embed it.
+ * The strict CSP (`default-src 'none'`) already blocks scripts, so this is defence in depth: it
+ * iterates until the output stops changing, so a fragment that only becomes `<script>` after one
+ * removal (e.g. `<scr<script>ipt>`) cannot survive as markup. Real newsletter markup has nothing
+ * to remove, so its bytes are unchanged.
+ */
+function sanitiseEmailBody(body: string): string {
+  let current = body;
+  // Real input settles in one pass. Deep nesting is capped so a hostile fragment cannot turn the
+  // loop quadratic; anything still resembling a dangerous opener is escaped as text.
+  for (let pass = 0; pass < 16; pass++) {
+    const next = cleanEmailMarkup(current);
+    if (next === current) return current;
+    current = next;
+  }
+  return current.replace(/<(script|iframe|object|embed)\b/gi, '&lt;$1');
+}
+
 /** Splits MJML's complete document into the parts that can sit inside our page. */
 export function emailParts(html: string): { body: string; styles: string } {
   const styles = [...html.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style>/gi)].map((m) => m[1]).join('\n');
   const body = html.match(/<body\b[^>]*>([\s\S]*?)<\/body>/i)?.[1] ?? html;
-  // The strict CSP already blocks scripts; remove them and event handlers as defence in depth.
   // A 1×1 image is an open-tracking pixel (some templates and relays add one); the web page is
   // not a send, so it is dropped rather than counted.
   const pixel =
     /<img\b[^>]*(?:(?:width\s*=\s*["']?1(?:px)?["']?[\s\S]*?height\s*=\s*["']?1(?:px)?["']?)|(?:height\s*=\s*["']?1(?:px)?["']?[\s\S]*?width\s*=\s*["']?1(?:px)?["']?))[^>]*>/gi;
   return {
-    body: body
-      .replace(/<script\b[\s\S]*?<\/script>/gi, '')
-      .replace(/\son[a-z]+\s*=\s*"[^"]*"/gi, '')
-      .replace(/\son[a-z]+\s*=\s*'[^']*'/gi, '')
-      .replace(pixel, ''),
+    body: sanitiseEmailBody(body).replace(pixel, ''),
     styles,
   };
 }

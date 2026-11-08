@@ -67,16 +67,60 @@ export function imageSize(data: Buffer, contentType: AssetContentType): ImageSiz
   }
 }
 
-function parseAttributes(source: string): Record<string, string> {
+const isAttributeNameChar = (char: string) =>
+  char === ':' ||
+  char === '-' ||
+  char === '_' ||
+  (char >= '0' && char <= '9') ||
+  (char >= 'A' && char <= 'Z') ||
+  (char >= 'a' && char <= 'z');
+
+/**
+ * Hand-written tokenizer for `name="value"` / `name='value'` in an SVG root tag. A regex with
+ * `[:\w-]+\s*=\s*` backtracks once per character of a long name that is not followed by `=`;
+ * this scan consumes each name run once. It records the same attributes as the old pattern.
+ */
+export function parseAttributes(source: string): Record<string, string> {
   const attributes: Record<string, string> = {};
-  for (const match of source.matchAll(/([:\w-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g)) {
-    attributes[match[1]!] = match[2] ?? match[3] ?? '';
+  let i = 0;
+  while (i < source.length) {
+    if (!isAttributeNameChar(source[i]!)) {
+      i += 1;
+      continue;
+    }
+    const nameStart = i;
+    while (i < source.length && isAttributeNameChar(source[i]!)) i++;
+    const nameEnd = i;
+    const name = source.slice(nameStart, nameEnd);
+    let j = nameEnd;
+    while (j < source.length && /\s/.test(source[j]!)) j++;
+    if (source[j] !== '=') {
+      // No suffix of this name run can match either: the rest of the pattern is the same.
+      i = nameEnd;
+      continue;
+    }
+    j += 1;
+    while (j < source.length && /\s/.test(source[j]!)) j++;
+    const quote = source[j];
+    if (quote !== '"' && quote !== "'") {
+      i = nameEnd;
+      continue;
+    }
+    const close = source.indexOf(quote, j + 1);
+    if (close < 0) {
+      i = nameEnd;
+      continue;
+    }
+    attributes[name] = source.slice(j + 1, close);
+    i = close + 1;
   }
   return attributes;
 }
 
-function dimension(value: string | undefined): number | null {
-  const match = /^\s*([0-9]*\.?[0-9]+)\s*(px|pt|pc|mm|cm|in)?\s*$/i.exec(value ?? '');
+export function dimension(value: string | undefined): number | null {
+  // Trim first, and make the number alternation unambiguous, so neither whitespace nor digit
+  // boundaries can backtrack. The accepted forms are the same as before (`12`, `12.5`, `.5`).
+  const match = /^(\d+(?:\.\d+)?|\.\d+)\s*(px|pt|pc|mm|cm|in)?$/i.exec((value ?? '').trim());
   if (!match) return null;
   const number = Number(match[1]);
   if (!(number > 0)) return null;
@@ -177,14 +221,19 @@ export function renditionFileName(fileName: string): string {
   return `${fileName.replace(/\.[^.]*$/, '') || fileName}.png`;
 }
 
+/** Trims '.' and '-' from both ends in one linear pass; `^[.-]+|[.-]+$` backtracks. */
+function trimFileEdges(value: string): string {
+  let start = 0;
+  let end = value.length;
+  while (start < end && (value[start] === '.' || value[start] === '-')) start++;
+  while (end > start && (value[end - 1] === '.' || value[end - 1] === '-')) end--;
+  return value.slice(start, end);
+}
+
 /** A safe file name and URL segment: no paths, quotes, spaces or control characters. */
 export function sanitiseFileName(input: string): string {
   const base = input.split(/[\\/]/).pop() ?? '';
-  const cleaned = base
-    .replace(/[^A-Za-z0-9._-]+/g, '-')
-    .replace(/-{2,}/g, '-')
-    .replace(/^[.-]+|[.-]+$/g, '')
-    .slice(0, 120);
+  const cleaned = trimFileEdges(base.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/-{2,}/g, '-')).slice(0, 120);
   return cleaned || 'file';
 }
 
