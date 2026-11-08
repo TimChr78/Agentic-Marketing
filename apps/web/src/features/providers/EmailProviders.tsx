@@ -139,9 +139,9 @@ export function useEmailChannel(): ProviderChannel {
       onToggle: () => void toggle(p),
       onEdit: () => setEditing(p),
       menu: [
-        { label: 'Replace webhook URL', icon: <RefreshCw size={14} />, onSelect: () => void rotate(p) },
+        { label: 'Replace webhook URL', icon: <RefreshCw size={14} />, mutation: true, onSelect: () => void rotate(p) },
         'separator' as const,
-        { label: 'Delete', icon: <Trash2 size={14} />, destructive: true, onSelect: () => void remove(p) },
+        { label: 'Delete', icon: <Trash2 size={14} />, destructive: true, mutation: true, onSelect: () => void remove(p) },
       ],
     };
   });

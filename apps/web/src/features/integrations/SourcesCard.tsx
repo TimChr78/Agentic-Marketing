@@ -136,16 +136,16 @@ export function SourcesCard() {
                 <Td className="hidden md:table-cell">{s.kind === 'browser' ? s.allowedOrigins.join(', ') || 'Any' : '—'}</Td>
                 <Td>{s.requiredPurpose ? <Tag>{s.requiredPurpose}</Tag> : <span className="text-muted">None</span>}</Td>
                 <Td>
-                  <Switch checked={s.enabled} onChange={() => void toggle(s)} label={`${s.name} enabled`} hideLabel />
+                  <Switch checked={s.enabled} onChange={() => void toggle(s)} mutation label={`${s.name} enabled`} hideLabel />
                 </Td>
                 <Td align="right">
                   <Menu
                     label={`More for ${s.name}`}
                     items={[
                       { label: 'Edit', onSelect: () => setEditing(s) },
-                      { label: 'Replace key', icon: <RefreshCw />, onSelect: () => void rotate(s) },
+                      { label: 'Replace key', icon: <RefreshCw />, mutation: true, onSelect: () => void rotate(s) },
                       'separator',
-                      { label: 'Delete', icon: <Trash2 />, destructive: true, onSelect: () => void remove(s) },
+                      { label: 'Delete', icon: <Trash2 />, destructive: true, mutation: true, onSelect: () => void remove(s) },
                     ]}
                     trigger={(t) => (
                       <button

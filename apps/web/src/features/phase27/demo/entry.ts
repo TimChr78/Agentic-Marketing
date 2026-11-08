@@ -84,16 +84,17 @@ export function enterDemo(): DemoEntry {
 export function confineDemoHref(url: string | URL | null | undefined): string | undefined {
   if (url === null || url === undefined) return undefined;
   if (isSingleFileBuild()) return undefined;
+  const raw = String(url);
   let parsed: URL;
   try {
-    parsed = new URL(String(url), location.href);
+    parsed = new URL(raw, location.href);
   } catch {
-    return `${DEMO_BASE_PATH}${location.search}`;
+    // Let the native API raise its own error for a malformed destination.
+    return raw;
   }
-  if (parsed.origin !== location.origin) {
-    // A different origin would throw in the native API; keep the current demo entry instead.
-    return `${DEMO_BASE_PATH}${location.search}${location.hash}`;
-  }
+  // A different origin must reach the native API unchanged so it throws its SecurityError; never
+  // substitute the current query or hash for it.
+  if (parsed.origin !== location.origin) return raw;
   const internal = routerPath(parsed.pathname);
   const href = routerHref(internal);
   return `${href}${parsed.search}${parsed.hash}`;

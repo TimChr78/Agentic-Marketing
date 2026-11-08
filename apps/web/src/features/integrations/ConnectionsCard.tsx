@@ -457,6 +457,7 @@ export function ConnectionsCard() {
                                   label: 'Delete',
                                   icon: <Trash2 size={14} />,
                                   destructive: true,
+                                  mutation: true,
                                   disabled: busy === c.id,
                                   onSelect: () => void remove(c),
                                 },

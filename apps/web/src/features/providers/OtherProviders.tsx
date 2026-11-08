@@ -445,7 +445,7 @@ export function useSmsChannel(): ProviderChannel {
       note: p.adapter === 'log' ? 'Writes messages to the server log.' : undefined,
       onToggle: () => void toggle(p),
       onEdit: () => setEditing(p),
-      menu: [{ label: 'Delete', icon: <Trash2 size={14} />, destructive: true, onSelect: () => void remove(p) }],
+      menu: [{ label: 'Delete', icon: <Trash2 size={14} />, destructive: true, mutation: true, onSelect: () => void remove(p) }],
     };
   });
 
@@ -891,7 +891,7 @@ export function usePushChannel(): ProviderChannel {
       ) : undefined,
     onToggle: () => void toggle(p),
     onEdit: () => setEditing(p),
-    menu: [{ label: 'Delete', icon: <Trash2 size={14} />, destructive: true, onSelect: () => void remove(p) }],
+    menu: [{ label: 'Delete', icon: <Trash2 size={14} />, destructive: true, mutation: true, onSelect: () => void remove(p) }],
   }));
 
   return {
@@ -1260,7 +1260,7 @@ export function useAiChannel(): ProviderChannel {
     ),
     onToggle: () => void toggle(p),
     onEdit: () => setEditing(p),
-    menu: [{ label: 'Delete', icon: <Trash2 size={14} />, destructive: true, onSelect: () => void remove(p) }],
+    menu: [{ label: 'Delete', icon: <Trash2 size={14} />, destructive: true, mutation: true, onSelect: () => void remove(p) }],
   }));
 
   return {
