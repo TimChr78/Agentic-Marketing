@@ -1,6 +1,7 @@
 import { ChevronRight } from 'lucide-react';
 import { type ReactNode, useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { useCapabilities } from '../app/capabilities';
 import { cx } from './cx';
 
 export interface MenuItem {
@@ -13,6 +14,8 @@ export interface MenuItem {
   hint?: ReactNode;
   /** A second-level menu (used by the account menu's Theme submenu). */
   items?: (MenuItem | 'separator')[];
+  /** Marks an item that changes data; disabled with the reason in a restricted surface. */
+  mutation?: boolean;
 }
 
 /**
@@ -42,6 +45,11 @@ export function Menu({
   header?: ReactNode;
 }) {
   const id = `m${useId().replace(/:/g, '')}`;
+  const { mutations, reason } = useCapabilities();
+  const itemState = (it: MenuItem) => {
+    const blocked = it.mutation === true && !mutations;
+    return { blocked, disabled: it.disabled || blocked, title: blocked ? (reason ?? undefined) : undefined };
+  };
   const [open, setOpen] = useState(false);
   const [submenu, setSubmenu] = useState<number | null>(null);
   const [pos, setPos] = useState<{ top: number; left?: number; right?: number }>({ top: 0 });
@@ -115,6 +123,7 @@ export function Menu({
         // biome-ignore lint/suspicious/noArrayIndexKey: menu definitions are positional lists; separators have no identity
         return <hr key={`s${i}`} className="my-1 h-px border-0 bg-line" />;
       const key = `${nested ? 'n' : ''}${i}`;
+      const state = itemState(it);
       if (it.items?.length) {
         const expanded = !nested && submenu === i;
         return (
@@ -125,15 +134,17 @@ export function Menu({
               tabIndex={-1}
               aria-haspopup="menu"
               aria-expanded={expanded}
-              aria-disabled={it.disabled || undefined}
+              aria-disabled={state.disabled || undefined}
+              title={state.title}
+              data-demo-blocked={state.blocked || undefined}
               onClick={() => {
-                if (it.disabled) return;
+                if (state.disabled) return;
                 setSubmenu(expanded ? null : i);
               }}
               className={cx(
                 'flex h-10 w-full items-center gap-2 rounded-md px-3 text-left text-[13px] outline-none pointer-coarse:h-10 focus:bg-surface-2 hover:bg-surface-2 md:h-8 md:px-2',
                 it.destructive ? 'text-bad' : 'text-fg',
-                it.disabled && 'cursor-not-allowed opacity-50',
+                state.disabled && 'cursor-not-allowed opacity-50',
               )}
             >
               {it.icon && <span className="text-muted [&_svg]:size-4">{it.icon}</span>}
@@ -154,16 +165,18 @@ export function Menu({
           type="button"
           role="menuitem"
           tabIndex={-1}
-          aria-disabled={it.disabled || undefined}
+          aria-disabled={state.disabled || undefined}
+          title={state.title}
+          data-demo-blocked={state.blocked || undefined}
           onClick={() => {
-            if (it.disabled) return;
+            if (state.disabled) return;
             close();
             it.onSelect?.();
           }}
           className={cx(
             'flex h-10 w-full items-center gap-2 rounded-md px-3 text-left text-[13px] outline-none pointer-coarse:h-10 focus:bg-surface-2 hover:bg-surface-2 md:h-8 md:px-2',
             it.destructive ? 'text-bad' : 'text-fg',
-            it.disabled && 'cursor-not-allowed opacity-50',
+            state.disabled && 'cursor-not-allowed opacity-50',
           )}
         >
           {it.icon && <span className="text-muted [&_svg]:size-4">{it.icon}</span>}
@@ -229,6 +242,7 @@ export function ContextMenu({
   onClose: () => void;
   label?: string;
 }) {
+  const { mutations, reason } = useCapabilities();
   const list = useRef<HTMLDivElement>(null);
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
@@ -270,35 +284,40 @@ export function ContextMenu({
       }}
       className="am-fade-in z-[70] min-w-[180px] rounded-lg border border-line bg-surface p-1 shadow-1"
     >
-      {items.map((it, i) =>
-        it === 'separator' ? (
+      {items.map((it, i) => {
+        if (it === 'separator') {
           // biome-ignore lint/suspicious/noArrayIndexKey: menu definitions are positional lists; separators have no identity
-          <hr key={i} className="my-1 h-px border-0 bg-line" />
-        ) : (
+          return <hr key={i} className="my-1 h-px border-0 bg-line" />;
+        }
+        const blocked = it.mutation === true && !mutations;
+        const disabled = it.disabled || blocked;
+        return (
           <button
             // biome-ignore lint/suspicious/noArrayIndexKey: menu definitions are positional lists; items may repeat a label
             key={i}
             type="button"
             role="menuitem"
             tabIndex={-1}
-            aria-disabled={it.disabled || undefined}
+            aria-disabled={disabled || undefined}
+            title={blocked ? (reason ?? undefined) : undefined}
+            data-demo-blocked={blocked || undefined}
             onClick={() => {
-              if (it.disabled) return;
+              if (disabled) return;
               onClose();
               it.onSelect?.();
             }}
             className={cx(
               'flex h-10 w-full items-center gap-2 rounded-md px-3 text-left text-[13px] outline-none pointer-coarse:h-10 focus:bg-surface-2 hover:bg-surface-2 md:h-8 md:px-2',
               it.destructive ? 'text-bad' : 'text-fg',
-              it.disabled && 'cursor-not-allowed opacity-50',
+              disabled && 'cursor-not-allowed opacity-50',
             )}
           >
             {it.icon && <span className="text-muted [&_svg]:size-4">{it.icon}</span>}
             <span className="min-w-0 flex-1 truncate">{it.label}</span>
             {it.hint && <span className="text-[11px] text-muted">{it.hint}</span>}
           </button>
-        ),
-      )}
+        );
+      })}
     </div>,
     document.body,
   );

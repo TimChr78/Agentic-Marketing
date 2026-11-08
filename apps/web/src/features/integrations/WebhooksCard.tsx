@@ -146,7 +146,7 @@ function WebhookDrawer({
           <Button variant="secondary" onClick={onClose}>
             Cancel
           </Button>
-          <Button variant="primary" type="submit" form="webhook-form" loading={saving}>
+          <Button variant="primary" type="submit" form="webhook-form" mutation loading={saving}>
             {endpoint ? 'Save changes' : 'Add endpoint'}
           </Button>
         </>
@@ -298,17 +298,22 @@ export function WebhooksCard() {
 
   return (
     <div className="space-y-6">
-      <Card
-        title="Webhooks"
-        description="Send customer events and journey webhook steps to an HTTPS endpoint, signed so the receiver can verify them."
-        action={
-          admin ? (
+      <section aria-labelledby="webhook-endpoints">
+        <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <h2 id="webhook-endpoints" className="text-[16px] leading-6 font-semibold">
+              Endpoints
+            </h2>
+            <p className="mt-1 max-w-[70ch] text-[12px] leading-[18px] text-muted">
+              Send customer events and journey webhook steps to an HTTPS endpoint, signed so the receiver can verify them.
+            </p>
+          </div>
+          {admin && (
             <Button variant="primary" icon={<Plus size={16} />} onClick={() => setEditing('new')}>
               Add endpoint
             </Button>
-          ) : undefined
-        }
-      >
+          )}
+        </div>
         <TableFrame
           loading={list.loading}
           error={list.error ? errText(list.error) : null}
@@ -394,6 +399,7 @@ export function WebhooksCard() {
                           <Switch
                             checked={e.enabled}
                             onChange={() => void toggle(e)}
+                            mutation
                             label={`Enable ${e.name}`}
                             hideLabel
                             disabled={busy === e.id}
@@ -401,7 +407,7 @@ export function WebhooksCard() {
                           <Button size="sm" icon={<Pencil size={14} />} onClick={() => setEditing(e)}>
                             Edit
                           </Button>
-                          <Button size="sm" icon={<Send size={14} />} loading={busy === e.id} onClick={() => void sendTest(e)}>
+                          <Button size="sm" icon={<Send size={14} />} mutation loading={busy === e.id} onClick={() => void sendTest(e)}>
                             Send test
                           </Button>
                           <Menu
@@ -421,6 +427,7 @@ export function WebhooksCard() {
                                 label: 'Delete',
                                 icon: <Trash2 size={14} />,
                                 destructive: true,
+                                mutation: true,
                                 disabled: busy === e.id,
                                 onSelect: () => void remove(e),
                               },
@@ -435,7 +442,7 @@ export function WebhooksCard() {
             </tbody>
           </Table>
         </TableFrame>
-      </Card>
+      </section>
 
       <Card
         title="Recent deliveries"
@@ -458,7 +465,7 @@ export function WebhooksCard() {
               title="No deliveries yet"
               action={
                 admin && endpoints.length > 0 ? (
-                  <Button icon={<Send size={14} />} onClick={() => void sendTest(endpoints[0]!)}>
+                  <Button icon={<Send size={14} />} mutation onClick={() => void sendTest(endpoints[0]!)}>
                     Send a test to “{endpoints[0]!.name}”
                   </Button>
                 ) : undefined
@@ -513,6 +520,7 @@ export function WebhooksCard() {
                           size="sm"
                           variant="ghost"
                           icon={<RotateCcw size={14} />}
+                          mutation
                           loading={retrying === d.id}
                           onClick={() => void retry(d)}
                         >

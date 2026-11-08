@@ -1,5 +1,5 @@
 import { Search, Upload } from 'lucide-react';
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api, errText } from '../../app/api';
 import { artifactPath, typeLabel } from '../../app/artifactRoutes';
 import { useCrumbs } from '../../app/page';
@@ -14,13 +14,11 @@ import {
   CodeView,
   cx,
   Drawer,
-  EmptyState,
   Field,
   formatDateTime,
   Input,
   LoadingBlock,
   Meta,
-  PageHeader,
   Select,
   Skeleton,
   StatusPill,
@@ -28,16 +26,26 @@ import {
   useConfirm,
   useToast,
 } from '../../ui';
+import { ListPage, type PageReadState } from '../../ui/ListPage';
 import { pageWidth } from '../../ui/layout';
 
-/** Asset library (#35): upload, search, alt text, where each asset is used, safe delete. */
+/** Asset library (#35, #526): upload, search, alt text, where each asset is used, safe delete. */
 export default function AssetsPage() {
   useCrumbs([{ label: 'Assets' }]);
   const { can } = useSession();
   const toast = useToast();
   const [q, setQ] = useState('');
+  const [committedQ, setCommittedQ] = useState('');
   const [kind, setKind] = useState<'' | 'image' | 'file'>('');
-  const list = useApi(() => api.call('assets.list', { query: q || undefined, kind: kind || undefined, limit: 200 }), [q, kind]);
+  // The list reads once per committed filter, not once per keystroke.
+  useEffect(() => {
+    const t = setTimeout(() => setCommittedQ(q), 300);
+    return () => clearTimeout(t);
+  }, [q]);
+  const list = useApi(
+    () => api.call('assets.list', { query: committedQ || undefined, kind: kind || undefined, limit: 200 }),
+    [committedQ, kind],
+  );
   const [open, setOpen] = useState<Asset | null>(null);
   const [uploading, setUploading] = useState<string[]>([]);
   const [errors, setErrors] = useState<string[]>([]);
@@ -66,6 +74,12 @@ export default function AssetsPage() {
   };
 
   const assets = list.data?.assets ?? [];
+  const filtered = !!q || !!kind;
+  const state: PageReadState = list.loading ? 'loading' : list.error ? 'error' : assets.length === 0 ? 'empty' : 'ready';
+  const countLabel = assets.length ? `${assets.length} shown · up to 200` : undefined;
+
+  const openFile = () => input.current?.click();
+
   return (
     // biome-ignore lint/a11y/noStaticElementInteractions: drag-and-drop is a mouse enhancement; uploading also works through the Upload button
     <div
@@ -87,48 +101,17 @@ export default function AssetsPage() {
         dragging && 'outline-2 outline-offset-8 outline-accent outline-dashed',
       )}
     >
-      <PageHeader
-        title="Assets"
-        description="Images and PDFs for e-mails and hosted pages, served from your public links address with long caching. PNG, JPEG, GIF, WebP, SVG or PDF; SVG uploads are sanitised and get a PNG version for e-mail."
-        actions={
-          canWrite && (
-            <>
-              <input
-                ref={input}
-                type="file"
-                multiple
-                hidden
-                accept={ACCEPT}
-                onChange={(e) => {
-                  void upload([...(e.target.files ?? [])]);
-                  e.target.value = '';
-                }}
-              />
-              <Button variant="primary" icon={<Upload size={15} />} onClick={() => input.current?.click()} loading={uploading.length > 0}>
-                Upload
-              </Button>
-            </>
-          )
-        }
+      <input
+        ref={input}
+        type="file"
+        multiple
+        hidden
+        accept={ACCEPT}
+        onChange={(e) => {
+          void upload([...(e.target.files ?? [])]);
+          e.target.value = '';
+        }}
       />
-      <div className="mb-4 flex flex-wrap items-center gap-2">
-        <div className="relative w-full max-w-[320px]">
-          <Search size={14} className="pointer-events-none absolute top-1/2 left-2.5 -translate-y-1/2 text-muted" aria-hidden />
-          <Input
-            aria-label="Search assets"
-            placeholder="Search by name or alt text"
-            className="pl-8"
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-          />
-        </div>
-        <Select aria-label="Kind" value={kind} onChange={(e) => setKind(e.target.value as typeof kind)} className="w-auto">
-          <option value="">Images and PDFs</option>
-          <option value="image">Images</option>
-          <option value="file">PDFs</option>
-        </Select>
-        {canWrite && <span className="ml-auto hidden text-[12px] text-muted md:block">Drop files anywhere on this page to upload.</span>}
-      </div>
       {errors.length > 0 && (
         <Alert tone="bad" title="Some files were not uploaded" className="mb-4">
           <ul className="list-disc pl-4">
@@ -152,36 +135,108 @@ export default function AssetsPage() {
           ))}
         </div>
       )}
-      {list.loading ? (
-        <LoadingBlock lines={6} />
-      ) : list.error ? (
-        <Alert tone="bad" title="Couldn't load assets" onRetry={list.reload}>
-          {list.error}
-        </Alert>
-      ) : assets.length ? (
-        <AssetGrid assets={assets} onOpen={setOpen} />
-      ) : (
-        <div className="rounded-lg border border-dashed border-line-strong">
-          <EmptyState
-            title={q || kind ? 'Nothing matches' : 'No assets yet'}
-            action={
-              !q &&
-              !kind &&
-              canWrite && (
-                <Button variant="primary" icon={<Upload size={15} />} onClick={() => input.current?.click()}>
-                  Upload
-                </Button>
-              )
-            }
-          >
-            {q || kind
-              ? 'Clear the search or choose another kind.'
-              : 'Upload your logo and images for e-mails here, or drop files on this page. Then pick them in the template editor and the brand settings.'}
-          </EmptyState>
-        </div>
-      )}
+      <ListPage
+        title="Assets"
+        description="Images and PDFs for e-mails and hosted pages, served from your public links address with long caching. PNG, JPEG, GIF, WebP, SVG or PDF; SVG uploads are sanitised and get a PNG version for e-mail."
+        primaryAction={
+          canWrite && (
+            <Button variant="primary" icon={<Upload size={15} />} mutation onClick={openFile} loading={uploading.length > 0}>
+              Upload
+            </Button>
+          )
+        }
+        filters={
+          <>
+            <div className="relative w-full max-w-[280px]">
+              <Search size={14} className="pointer-events-none absolute top-1/2 left-2.5 -translate-y-1/2 text-muted" aria-hidden />
+              <Input
+                compact
+                aria-label="Search assets"
+                placeholder="Search by name or alt text"
+                className="pl-8"
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+              />
+            </div>
+            <Select compact aria-label="Kind" value={kind} onChange={(e) => setKind(e.target.value as typeof kind)} className="w-auto">
+              <option value="">Images and PDFs</option>
+              <option value="image">Images</option>
+              <option value="file">PDFs</option>
+            </Select>
+            {canWrite && <span className="hidden text-[12px] text-muted md:block">Drop files anywhere on this page to upload.</span>}
+          </>
+        }
+        countLabel={countLabel}
+        state={state}
+        notice={
+          state === 'error'
+            ? {
+                title: 'Couldn’t load assets',
+                body: list.error,
+                action: <Button onClick={() => void list.reload()}>Retry</Button>,
+              }
+            : state === 'empty'
+              ? filtered
+                ? {
+                    title: 'Nothing matches',
+                    body: 'Clear the search or choose another kind.',
+                    action: (
+                      <Button
+                        onClick={() => {
+                          setQ('');
+                          setKind('');
+                        }}
+                      >
+                        Clear filters
+                      </Button>
+                    ),
+                  }
+                : {
+                    title: 'No assets yet',
+                    body: 'Upload your logo and images for e-mails here, or drop files on this page. Then pick them in the template editor and the brand settings.',
+                    action: canWrite ? (
+                      <Button variant="primary" icon={<Upload size={15} />} mutation onClick={openFile}>
+                        Upload
+                      </Button>
+                    ) : undefined,
+                  }
+              : undefined
+        }
+        loadingContent={<LoadingBlock lines={6} />}
+        desktopTable={<AssetGrid assets={assets} onOpen={setOpen} />}
+        mobileList={<AssetPhoneList assets={assets} onOpen={setOpen} />}
+      />
       {open && <AssetDrawer id={open.id} onClose={() => setOpen(null)} onChanged={() => void list.reload()} />}
     </div>
+  );
+}
+
+function AssetPhoneList({ assets, onOpen }: { assets: Asset[]; onOpen: (a: Asset) => void }) {
+  return (
+    <ul aria-label="Assets list" className="divide-y divide-line">
+      {assets.map((a) => (
+        <li key={a.id}>
+          <button type="button" onClick={() => onOpen(a)} className="flex min-h-[72px] w-full items-center gap-3 px-4 py-3 text-left">
+            <span className="flex size-12 shrink-0 items-center justify-center overflow-hidden rounded-md border border-line bg-surface-2">
+              <AssetThumb a={a} />
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-[14px] font-medium text-fg">{a.name}</span>
+              <span className="mt-0.5 block text-[12px] leading-[18px] text-muted">
+                {a.kind === 'image' ? 'Image' : 'PDF'}
+                {a.width && a.height ? ` · ${a.width}×${a.height}` : ''} · {formatBytes(a.byteSize)}
+                {a.usageCount > 0 ? ` · Used in ${a.usageCount}` : ''}
+              </span>
+            </span>
+            {a.kind === 'image' && !a.altText && (
+              <StatusPill tone="warn" dot={false}>
+                No alt text
+              </StatusPill>
+            )}
+          </button>
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -268,10 +323,10 @@ function AssetDrawer({ id, onClose, onChanged }: { id: string; onClose: () => vo
         asset &&
         canWrite && (
           <>
-            <Button variant="danger" onClick={remove}>
+            <Button variant="danger" mutation onClick={remove}>
               Delete
             </Button>
-            <Button variant="primary" className="ml-auto" disabled={!dirty} loading={busy} onClick={save}>
+            <Button variant="primary" className="ml-auto" mutation disabled={!dirty} loading={busy} onClick={save}>
               Save changes
             </Button>
           </>
@@ -282,8 +337,8 @@ function AssetDrawer({ id, onClose, onChanged }: { id: string; onClose: () => vo
         <LoadingBlock lines={8} />
       ) : a.error ? (
         <div className="p-5">
-          <Alert tone="bad" onRetry={a.reload}>
-            {a.error}
+          <Alert tone="bad" title="This asset is unavailable" onRetry={a.reload}>
+            {a.error} Choose another asset or upload it again.
           </Alert>
         </div>
       ) : asset ? (
@@ -292,6 +347,19 @@ function AssetDrawer({ id, onClose, onChanged }: { id: string; onClose: () => vo
             <AssetThumb a={asset} />
           </div>
           <CodeView value={asset.url} label="Public URL" />
+          {asset.rendition && (
+            <>
+              <CodeView value={asset.rendition.url} label="PNG version for e-mail" />
+              <p className="-mt-2 text-[12px] leading-[18px] text-muted">
+                Use the generated PNG version in e-mail; the sanitised SVG remains available for hosted pages.
+              </p>
+            </>
+          )}
+          {asset.sanitized.length > 0 && (
+            <Alert tone="info" title="This SVG was sanitised">
+              Removed: {asset.sanitized.join(', ')}. The original file is not served.
+            </Alert>
+          )}
           <Field label="Name" hint="For finding it here; not shown to recipients.">
             <Input value={name ?? asset.name} onChange={(e) => setName(e.target.value)} readOnly={!canWrite} maxLength={120} />
           </Field>

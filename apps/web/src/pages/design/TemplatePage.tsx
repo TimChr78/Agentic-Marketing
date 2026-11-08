@@ -26,6 +26,7 @@ function SendTest({ id, version }: { id: string; version: number }) {
   return (
     <Button
       icon={<Send size={14} />}
+      mutation
       loading={busy}
       title="Send a [Test] copy of the saved version to your own address"
       onClick={async () => {

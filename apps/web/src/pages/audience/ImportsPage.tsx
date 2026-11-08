@@ -323,6 +323,7 @@ export default function ImportsPage() {
             <div className="flex flex-wrap items-center gap-2">
               <Button
                 variant="primary"
+                mutation
                 icon={<Upload size={15} />}
                 loading={busy}
                 disabled={!canImport || !payload.length || mapping.email < 0}

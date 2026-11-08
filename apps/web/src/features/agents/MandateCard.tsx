@@ -139,7 +139,7 @@ export function MandateCard({ agent }: { agent: Agent }) {
             Open the draft
           </ButtonLink>
         ) : can('artifacts:write') ? (
-          <Button variant="primary" icon={<Plus size={14} />} loading={creating} onClick={() => void create()}>
+          <Button variant="primary" icon={<Plus size={14} />} mutation loading={creating} onClick={() => void create()}>
             Create mandate
           </Button>
         ) : undefined

@@ -43,7 +43,7 @@ export function NewBrandDrawer({ open, onClose }: { open: boolean; onClose: () =
           <Button onClick={close} disabled={busy}>
             Cancel
           </Button>
-          <Button type="submit" form="new-brand" variant="primary" loading={busy}>
+          <Button type="submit" form="new-brand" variant="primary" mutation loading={busy}>
             Create brand
           </Button>
         </>

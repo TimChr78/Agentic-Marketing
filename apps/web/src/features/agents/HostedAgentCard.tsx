@@ -134,7 +134,7 @@ export function HostedAgentCard({ agentId, onChanged }: { agentId: string; onCha
         action={
           admin && (
             <div className="flex flex-wrap items-center gap-2">
-              <Button icon={<Play size={14} />} loading={busy} disabled={!hosted.enabled} onClick={() => void runNow()}>
+              <Button icon={<Play size={14} />} mutation loading={busy} disabled={!hosted.enabled} onClick={() => void runNow()}>
                 Run now
               </Button>
               <Button icon={<Pencil size={14} />} onClick={() => setEditing(true)}>
@@ -271,7 +271,7 @@ export function HostedAgentCard({ agentId, onChanged }: { agentId: string; onCha
       {confirmDialog}
       {admin && (
         <div className="flex justify-end">
-          <Button variant="danger" icon={<Trash2 size={14} />} loading={busy} onClick={() => void remove()}>
+          <Button variant="danger" icon={<Trash2 size={14} />} mutation loading={busy} onClick={() => void remove()}>
             Delete hosted agent
           </Button>
         </div>
@@ -351,6 +351,7 @@ function MemoryNotes({ agentId, admin, onChanged }: { agentId: string; admin: bo
                   variant="ghost"
                   icon={<Trash2 size={13} />}
                   loading={memoryBusy === note.id}
+                  mutation
                   onClick={() => void removeMemory(note.id)}
                 >
                   Delete

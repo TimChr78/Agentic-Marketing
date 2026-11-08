@@ -1,29 +1,24 @@
-import { ExternalLink, KeyRound, MoreHorizontal, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react';
+import { ExternalLink, KeyRound, RefreshCw, Trash2 } from 'lucide-react';
 import { useState } from 'react';
 import { ApiError, api, errText, type Out } from '../../app/api';
 import { useApi } from '../../app/useApi';
 import {
   Alert,
   Button,
-  Card,
   Checkbox,
   CodeView,
   Drawer,
-  EmptyState,
   Field,
   FieldGroup,
   fieldErrors,
   Input,
-  LoadingBlock,
-  Menu,
   Modal,
   Select,
   StatusPill,
-  Switch,
-  Tag,
   useConfirm,
   useToast,
 } from '../../ui';
+import { type ChannelRow, EnabledStatus, type ProviderChannel } from '../phase27/settings/channels';
 import { cleanValues, defaultsOf, type JsonSchema, SchemaForm } from './SchemaForm';
 
 type List = Out<'emailProviders.list'>;
@@ -36,7 +31,7 @@ const USE_TEXT: Record<Use, { label: string; hint: string }> = {
   marketing: { label: 'Marketing', hint: 'Newsletters, broadcasts and journeys that need consent.' },
 };
 
-export const trackingPill = (t: Adapter['tracking']) =>
+const trackingPill = (t: Adapter['tracking']) =>
   t === 'forced' ? (
     <StatusPill tone="warn">Tracks every message</StatusPill>
   ) : t === 'configurable' ? (
@@ -45,14 +40,19 @@ export const trackingPill = (t: Adapter['tracking']) =>
     <StatusPill tone="neutral">No provider tracking</StatusPill>
   );
 
-/** E-mail providers (#40): add, edit, enable or disable, rotate the webhook URL, delete. */
-export function EmailProviders() {
+/**
+ * E-mail providers as compact channel rows (#527). The row carries the routing summary and the
+ * existing per-provider actions; every adapter field, use and credential rule stays in the drawer.
+ */
+export function useEmailChannel(): ProviderChannel {
   const list = useApi(() => api.call('emailProviders.list', {}), []);
   const toast = useToast();
   const [confirmDialog, confirm] = useConfirm();
   const [editing, setEditing] = useState<Provider | 'new' | null>(null);
   const [webhook, setWebhook] = useState<{ name: string; url: string } | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+
+  const providers = list.data?.providers ?? [];
   const adapters = list.data?.adapters ?? [];
   const adapterOf = (id: string) => adapters.find((a) => a.id === id);
 
@@ -70,6 +70,7 @@ export function EmailProviders() {
       setBusy(null);
     }
   };
+
   const rotate = async (p: Provider) => {
     const ok = await confirm({
       title: `Replace the webhook URL of “${p.name}”?`,
@@ -85,6 +86,7 @@ export function EmailProviders() {
       toast.error(errText(e));
     }
   };
+
   const remove = async (p: Provider) => {
     const ok = await confirm({
       title: `Delete “${p.name}”?`,
@@ -109,142 +111,104 @@ export function EmailProviders() {
     }
   };
 
-  return (
-    <Card
-      title="E-mail"
-      description="Who delivers your e-mail. Each use (transactional, marketing) goes through one provider."
-      action={
-        <Button variant="primary" icon={<Plus size={15} />} onClick={() => setEditing('new')} disabled={!adapters.length}>
-          Add provider
-        </Button>
-      }
-    >
-      {list.loading ? (
-        <LoadingBlock lines={4} />
-      ) : list.error ? (
-        <div className="p-4">
-          <Alert tone="bad" title="Couldn't load e-mail providers" onRetry={list.reload}>
-            {list.error}
-          </Alert>
-        </div>
-      ) : (
+  const rows: ChannelRow[] = providers.map((p) => {
+    const adapter = adapterOf(p.adapter);
+    return {
+      id: p.id,
+      name: p.name,
+      adapter: adapter?.label ?? p.adapter,
+      enabled: p.enabled,
+      busy: busy === p.id,
+      status: (
+        <span className="inline-flex flex-wrap gap-1">
+          <EnabledStatus enabled={p.enabled} />
+          {trackingPill(p.tracking)}
+        </span>
+      ),
+      summary: p.useFor.length
+        ? `Sends ${p.useFor.map((u) => USE_TEXT[u].label.toLowerCase()).join(' and ')} e-mail`
+        : 'Not used for any e-mail yet',
+      detail: (
         <>
-          {list.data!.warnings.map((w) => (
-            <div key={w} className="border-b border-line p-4">
-              <Alert tone="warn" title="Provider tracking overrides your setting">
-                {w}
-              </Alert>
-            </div>
-          ))}
-          {!list.data!.providers.length ? (
-            <EmptyState
-              title="No e-mail provider yet"
-              action={
-                <Button variant="primary" icon={<Plus size={15} />} onClick={() => setEditing('new')}>
-                  Add provider
-                </Button>
-              }
-            >
-              Add one to send e-mail: Postmark, Amazon SES, Brevo, Cloudflare or any SMTP relay. Until then, nothing is sent.
-            </EmptyState>
-          ) : (
-            <ul className="divide-y divide-line">
-              {list.data!.providers.map((p) => {
-                const a = adapterOf(p.adapter);
-                return (
-                  <li key={p.id} className="flex flex-wrap items-start gap-x-4 gap-y-2 px-4 py-3.5">
-                    <div className="min-w-0 flex-1">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="font-medium text-fg">{p.name}</span>
-                        <Tag>{a?.label ?? p.adapter}</Tag>
-                        {p.enabled ? <StatusPill tone="good">Enabled</StatusPill> : <StatusPill>Disabled</StatusPill>}
-                        {trackingPill(p.tracking)}
-                      </div>
-                      <p className="mt-1 text-[13px] text-fg-2">
-                        From {p.fromName ? `${p.fromName} <${p.fromEmail}>` : p.fromEmail}
-                        {p.replyTo && ` · replies to ${p.replyTo}`}
-                      </p>
-                      <p className="mt-0.5 text-[12px] text-muted">
-                        {p.useFor.length
-                          ? `Sends ${p.useFor.map((u) => USE_TEXT[u].label.toLowerCase()).join(' and ')} e-mail`
-                          : 'Not used for any e-mail yet: edit it to choose what it sends'}
-                        {!p.hasCredentials && p.adapter !== 'log' && ' · no credentials stored'}
-                      </p>
-                      {p.tracking === 'forced' && p.useFor.includes('marketing') && (
-                        <p className="mt-1 text-[12px] text-warn">{p.trackingNote}</p>
-                      )}
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <Switch
-                        checked={p.enabled}
-                        disabled={busy === p.id}
-                        onChange={() => void toggle(p)}
-                        label={p.enabled ? 'Enabled' : 'Disabled'}
-                        hideLabel
-                      />
-                      <Button size="sm" icon={<Pencil size={13} />} onClick={() => setEditing(p)}>
-                        Edit
-                      </Button>
-                      <Menu
-                        label={`More for ${p.name}`}
-                        items={[
-                          { label: 'Replace webhook URL', icon: <RefreshCw />, onSelect: () => void rotate(p) },
-                          'separator',
-                          { label: 'Delete', icon: <Trash2 />, destructive: true, onSelect: () => void remove(p) },
-                        ]}
-                        trigger={(t) => (
-                          <button
-                            {...t}
-                            type="button"
-                            aria-label={`More actions for ${p.name}`}
-                            className="inline-flex size-7 items-center justify-center rounded-md text-fg-2 hover:bg-surface-2"
-                          >
-                            <MoreHorizontal size={16} />
-                          </button>
-                        )}
-                      />
-                    </div>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
+          From {p.fromName ? `${p.fromName} <${p.fromEmail}>` : p.fromEmail}
+          {p.replyTo && ` · replies to ${p.replyTo}`}
+          {!p.hasCredentials && p.adapter !== 'log' && ' · no credentials stored'}
         </>
-      )}
-      {editing && (
-        <ProviderDrawer
-          provider={editing === 'new' ? null : editing}
-          adapters={adapters}
-          others={list.data?.providers.filter((p) => editing === 'new' || p.id !== editing.id) ?? []}
-          onClose={() => setEditing(null)}
-          onSaved={(created) => {
-            setEditing(null);
-            void list.reload();
-            if (created) setWebhook(created);
-          }}
-        />
-      )}
-      {webhook && (
-        <Modal
-          open
-          onClose={() => setWebhook(null)}
-          title={`Webhook URL for “${webhook.name}”`}
-          footer={
-            <Button variant="primary" onClick={() => setWebhook(null)}>
-              I've saved it
-            </Button>
-          }
-        >
-          <p className="mb-3">
-            Register this URL for delivery, bounce and complaint events in the provider's webhook settings. It is shown only now; you can
-            replace it later.
-          </p>
-          <CodeView value={webhook.url} />
-        </Modal>
-      )}
-      {confirmDialog}
-    </Card>
-  );
+      ),
+      note: p.tracking === 'forced' && p.useFor.includes('marketing') ? p.trackingNote : undefined,
+      onToggle: () => void toggle(p),
+      onEdit: () => setEditing(p),
+      menu: [
+        { label: 'Replace webhook URL', icon: <RefreshCw size={14} />, mutation: true, onSelect: () => void rotate(p) },
+        'separator' as const,
+        { label: 'Delete', icon: <Trash2 size={14} />, destructive: true, mutation: true, onSelect: () => void remove(p) },
+      ],
+    };
+  });
+
+  return {
+    key: 'email',
+    label: 'E-mail',
+    description: 'Who delivers your e-mail.',
+    addLabel: 'Add provider',
+    onAdd: () => {
+      if (!adapters.length) {
+        toast.error('This install offers no e-mail adapters.');
+        return;
+      }
+      setEditing('new');
+    },
+    rows,
+    loading: list.loading,
+    error: list.error,
+    onRetry: () => void list.reload(),
+    empty: 'Add Postmark, Amazon SES, Brevo, Cloudflare or any SMTP relay. Until then, nothing is sent.',
+    notices: list.data?.warnings.length ? (
+      <div className="space-y-2">
+        {list.data.warnings.map((w) => (
+          <Alert key={w} tone="warn" title="Provider tracking overrides your setting">
+            {w}
+          </Alert>
+        ))}
+      </div>
+    ) : undefined,
+    overlay: (
+      <>
+        {editing && (
+          <ProviderDrawer
+            provider={editing === 'new' ? null : editing}
+            adapters={adapters}
+            others={providers.filter((p) => editing === 'new' || p.id !== editing.id)}
+            onClose={() => setEditing(null)}
+            onSaved={(created) => {
+              setEditing(null);
+              void list.reload();
+              if (created) setWebhook(created);
+            }}
+          />
+        )}
+        {webhook && (
+          <Modal
+            open
+            onClose={() => setWebhook(null)}
+            title={`Webhook URL for “${webhook.name}”`}
+            footer={
+              <Button variant="primary" onClick={() => setWebhook(null)}>
+                I've saved it
+              </Button>
+            }
+          >
+            <p className="mb-3">
+              Register this URL for delivery, bounce and complaint events in the provider's webhook settings. It is shown only now; you can
+              replace it later.
+            </p>
+            <CodeView value={webhook.url} />
+          </Modal>
+        )}
+        {confirmDialog}
+      </>
+    ),
+  };
 }
 
 function ProviderDrawer({
@@ -344,7 +308,7 @@ function ProviderDrawer({
           <Button variant="ghost" onClick={onClose}>
             Cancel
           </Button>
-          <Button variant="primary" className="ml-auto" loading={busy} onClick={save}>
+          <Button variant="primary" className="ml-auto" mutation loading={busy} onClick={save}>
             {provider ? 'Save changes' : 'Add provider'}
           </Button>
         </>
@@ -357,8 +321,9 @@ function ProviderDrawer({
           void save();
         }}
       >
+        {provider && <p className="-mt-3 text-[12px] leading-[18px] text-muted">{adapter.trackingNote}</p>}
         {!provider && (
-          <Field label="Provider" hint="Which service delivers the e-mail." required>
+          <Field label="Provider" hint={adapter.trackingNote} required>
             <Select
               value={adapterId}
               data-autofocus
@@ -378,24 +343,18 @@ function ProviderDrawer({
             </Select>
           </Field>
         )}
-        <Alert
-          tone={adapter.tracking === 'forced' ? 'warn' : 'info'}
-          title={adapter.tracking === 'forced' ? `${adapter.label} tracks every message` : 'Tracking by the provider'}
-          action={
-            adapter.docsUrl ? (
-              <a
-                href={adapter.docsUrl}
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex shrink-0 items-center gap-1 text-[13px] font-medium text-accent hover:underline"
-              >
-                Docs <ExternalLink size={12} aria-hidden />
-              </a>
-            ) : undefined
-          }
-        >
-          {adapter.trackingNote}
-        </Alert>
+        {adapter.docsUrl && (
+          <p className="-mt-3 text-[12px] leading-[18px]">
+            <a
+              href={adapter.docsUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1 font-medium text-accent hover:underline"
+            >
+              {adapter.label} Docs <ExternalLink size={12} aria-hidden />
+            </a>
+          </p>
+        )}
 
         <Field label="Name" hint="For your team, e.g. “Postmark (newsletter)”." error={err('name')} required>
           <Input
@@ -447,6 +406,12 @@ function ProviderDrawer({
           })}
           {!useFor.length && <p className="text-[12px] text-muted">Without a use, this provider sends nothing.</p>}
         </FieldGroup>
+
+        {adapter.tracking === 'forced' && (
+          <Alert tone="warn" title={`${adapter.label} tracks every message`}>
+            {adapter.trackingNote}
+          </Alert>
+        )}
 
         <FieldGroup legend="Settings">
           <SchemaForm schema={adapter.config as JsonSchema} value={config} onChange={setConfig} errors={errors} prefix="config" />

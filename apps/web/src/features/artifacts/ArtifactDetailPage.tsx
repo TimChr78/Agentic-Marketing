@@ -48,6 +48,7 @@ import { ExperienceEditor } from './ExperienceEditor';
 import { JsonEditor } from './JsonEditor';
 import { MandateEditor } from './MandateEditor';
 import { PurposesEditor } from './PurposesEditor';
+import { invalidatePickerArtifact } from './pickerIndex';
 import { VersionsPanel } from './VersionsPanel';
 
 export type Artifact = Out<'artifacts.get'>;
@@ -311,6 +312,8 @@ export function ArtifactDetailPage({
         setWarnings(r.warnings);
         setLastSave(r.layoutOnly ? 'layout' : 'content');
         invalidateArtifact(artifactId);
+        // A new version changes the row a picker shows; only this artifact's exact index keys drop.
+        invalidatePickerArtifact(workspace.id, artifactId);
         await art.reload();
         if (!saveResponseIsCurrent(syncRef.current, started.seq, activeIdRef.current)) return false;
         setSavedAt(Date.now());
@@ -339,7 +342,7 @@ export function ArtifactDetailPage({
         setSaving(false);
       }
     },
-    [a, art, toast],
+    [a, art, toast, workspace.id],
   );
 
   // Autosave: a moment after the last change; retried on the next change after an error, but never
@@ -472,6 +475,7 @@ export function ArtifactDetailPage({
       setDraft(undefined);
       syncRef.current = switchArtifact(syncRef.current, a.id);
       invalidateArtifact(a.id);
+      invalidatePickerArtifact(workspace.id, a.id);
       await art.reload();
     } catch (e) {
       setDiscardError(errText(e));
@@ -517,6 +521,7 @@ export function ArtifactDetailPage({
                 label: `Discard draft (back to live v${a.publishedVersion})`,
                 icon: <Undo2 />,
                 destructive: true,
+                mutation: true,
                 onSelect: () => {
                   setDiscardError(null);
                   setDiscardOpen(true);
@@ -643,6 +648,7 @@ export function ArtifactDetailPage({
           onClose={() => setPublishing(false)}
           onDone={() => {
             invalidateArtifact(a.id);
+            invalidatePickerArtifact(workspace.id, a.id);
             void art.reload();
             void pendingReq.reload();
           }}
@@ -668,7 +674,7 @@ export function ArtifactDetailPage({
               <Button onClick={() => setDiscardOpen(false)} disabled={discarding}>
                 Keep the draft
               </Button>
-              <Button variant="danger" loading={discarding} onClick={() => void discardDraft()}>
+              <Button variant="danger" mutation loading={discarding} onClick={() => void discardDraft()}>
                 Discard draft
               </Button>
             </>
@@ -742,7 +748,7 @@ export function ArtifactDetailPage({
                     <Button variant="ghost" onClick={resetToSaved}>
                       Discard changes
                     </Button>
-                    <Button variant="primary" loading={saving} onClick={() => void save()}>
+                    <Button variant="primary" mutation loading={saving} onClick={() => void save()}>
                       Save draft
                     </Button>
                   </>
@@ -753,7 +759,7 @@ export function ArtifactDetailPage({
                   </ButtonLink>
                 )}
                 {canPublish && (
-                  <Button variant="primary" icon={<Send size={14} />} onClick={() => setPublishing(true)}>
+                  <Button variant="primary" icon={<Send size={14} />} mutation onClick={() => setPublishing(true)}>
                     {directPublish ? 'Publish' : 'Submit for review'}
                   </Button>
                 )}
@@ -808,7 +814,7 @@ export function ArtifactDetailPage({
                 <Button variant="ghost" onClick={resetToSaved}>
                   Discard changes
                 </Button>
-                <Button variant="primary" loading={saving} onClick={() => void save()}>
+                <Button variant="primary" mutation loading={saving} onClick={() => void save()}>
                   Save draft
                 </Button>
               </>
@@ -819,7 +825,7 @@ export function ArtifactDetailPage({
               </ButtonLink>
             )}
             {canPublish && (
-              <Button variant="primary" icon={<Send size={14} />} onClick={() => setPublishing(true)}>
+              <Button variant="primary" icon={<Send size={14} />} mutation onClick={() => setPublishing(true)}>
                 {directPublish ? 'Publish' : 'Submit for review'}
               </Button>
             )}
@@ -887,7 +893,7 @@ function PublishDialog({
       footer={
         <>
           <Button onClick={onClose}>Cancel</Button>
-          <Button variant="primary" loading={busy} onClick={submit}>
+          <Button variant="primary" mutation loading={busy} onClick={submit}>
             {direct ? `Publish v${artifact.version.number}` : 'Submit for review'}
           </Button>
         </>
@@ -935,6 +941,7 @@ function RenameDialog({ name, onClose, onRename }: { name: string; onClose: () =
           <Button onClick={onClose}>Cancel</Button>
           <Button
             variant="primary"
+            mutation
             disabled={!valid}
             loading={busy}
             onClick={async () => {

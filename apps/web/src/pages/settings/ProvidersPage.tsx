@@ -1,19 +1,74 @@
+import { Fragment } from 'react';
 import { useCrumbs } from '../../app/page';
-import { EmailProviders } from '../../features/providers/EmailProviders';
-import { OtherProviders } from '../../features/providers/OtherProviders';
-import { PageHeader } from '../../ui';
-import { pageWidth } from '../../ui/layout';
+import { ChannelCards, ChannelTable } from '../../features/phase27/settings/channels';
+import { useEmailChannel } from '../../features/providers/EmailProviders';
+import { useAiChannel, usePushChannel, useSmsChannel } from '../../features/providers/OtherProviders';
+import { Button, LoadingBlock } from '../../ui';
+import { ListPage } from '../../ui/ListPage';
 
+/**
+ * Providers (#527): one compact row per configured provider, grouped by channel. Each channel's
+ * read is independent, so one failed channel leaves the others usable; every adapter field,
+ * credential rule and one-time secret stays in the channel's Add/Edit drawer.
+ */
 export default function ProvidersPage() {
   useCrumbs([{ label: 'Providers' }]);
+  const email = useEmailChannel();
+  const sms = useSmsChannel();
+  const push = usePushChannel();
+  const ai = useAiChannel();
+  const channels = [email, sms, push, ai];
+
+  const configured = channels.filter((c) => c.rows.length > 0).length;
+  const allLoading = channels.every((c) => c.loading && c.rows.length === 0);
+  const allFailed = channels.every((c) => c.error && c.rows.length === 0);
+  const state = allLoading ? 'loading' : allFailed ? 'error' : 'ready';
+
+  const retryAll = () => {
+    for (const channel of channels) channel.onRetry();
+  };
+
+  const notices = channels.some((c) => c.notices) && (
+    <div className="space-y-2 border-b border-line p-3">
+      {channels.map((channel) => (
+        <Fragment key={channel.key}>{channel.notices}</Fragment>
+      ))}
+    </div>
+  );
+
   return (
-    <div className={pageWidth('default', 'space-y-5')}>
-      <PageHeader
+    <div>
+      <ListPage
         title="Providers"
-        description="Services that deliver your messages and run AI steps. Credentials are encrypted and can be replaced, never read back."
+        description="Services that deliver your messages and run AI steps. Each use goes through one provider; credentials are encrypted and can be replaced, never read back."
+        countLabel={state === 'ready' ? `${configured} of ${channels.length} channels configured` : undefined}
+        state={state}
+        notice={{
+          title: 'Couldn’t load providers',
+          body: 'Provider configuration is unavailable. Retry to read it again; saved values are unchanged.',
+          action: (
+            <Button size="sm" variant="ghost" onClick={retryAll}>
+              Retry
+            </Button>
+          ),
+        }}
+        loadingContent={<LoadingBlock lines={6} label="Loading providers" />}
+        desktopTable={
+          <>
+            {notices}
+            <ChannelTable channels={channels} />
+          </>
+        }
+        mobileList={
+          <>
+            {notices}
+            <ChannelCards channels={channels} />
+          </>
+        }
       />
-      <EmailProviders />
-      <OtherProviders />
+      {channels.map((channel) => (
+        <Fragment key={channel.key}>{channel.overlay}</Fragment>
+      ))}
     </div>
   );
 }

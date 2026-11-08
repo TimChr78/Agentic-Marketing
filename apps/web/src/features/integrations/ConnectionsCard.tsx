@@ -6,7 +6,6 @@ import { useApi } from '../../app/useApi';
 import {
   Alert,
   Button,
-  Card,
   Checkbox,
   CodeView,
   Drawer,
@@ -175,7 +174,7 @@ function ConnectionDrawer({
           <Button variant="secondary" onClick={onClose}>
             Cancel
           </Button>
-          <Button variant="primary" type="submit" form="connection-form" loading={saving}>
+          <Button variant="primary" type="submit" form="connection-form" mutation loading={saving}>
             {connection ? 'Save changes' : 'Add connection'}
           </Button>
         </>
@@ -335,12 +334,14 @@ export function ConnectionsCard() {
 
   return (
     <div className="space-y-6">
-      <Card
-        title="Connections"
-        description="Connect Slack, Shopify, Salesforce or your own HTTP API so journeys can call it or receive its webhooks."
-        action={
-          admin ? (
-            <>
+      <div>
+        <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+          <p className="max-w-[70ch] text-[13px] leading-5 text-muted">
+            Connect Slack, Shopify, Salesforce or your own HTTP API so journeys can call it or receive its webhooks. Stored credentials are
+            never shown again.
+          </p>
+          {admin && (
+            <div className="flex flex-wrap items-center gap-2">
               <Button
                 variant="ghost"
                 size="sm"
@@ -353,10 +354,9 @@ export function ConnectionsCard() {
               <Button variant="primary" icon={<Plus size={16} />} disabled={!connectors.length} onClick={() => setEditing('new')}>
                 Add connection
               </Button>
-            </>
-          ) : undefined
-        }
-      >
+            </div>
+          )}
+        </div>
         {catalog.loading || list.loading ? (
           <LoadingBlock lines={4} />
         ) : (list.error ?? catalog.error) ? (
@@ -427,7 +427,13 @@ export function ConnectionsCard() {
                         <Td align="right">
                           <div className="flex items-center justify-end gap-2">
                             {connector?.auth === 'oauth2' && (
-                              <Button size="sm" icon={<ExternalLink size={14} />} loading={busy === c.id} onClick={() => void authorize(c)}>
+                              <Button
+                                size="sm"
+                                icon={<ExternalLink size={14} />}
+                                mutation
+                                loading={busy === c.id}
+                                onClick={() => void authorize(c)}
+                              >
                                 {c.oauth?.status === 'connected' ? 'Reconnect' : 'Authorize'}
                               </Button>
                             )}
@@ -451,6 +457,7 @@ export function ConnectionsCard() {
                                   label: 'Delete',
                                   icon: <Trash2 size={14} />,
                                   destructive: true,
+                                  mutation: true,
                                   disabled: busy === c.id,
                                   onSelect: () => void remove(c),
                                 },
@@ -466,7 +473,7 @@ export function ConnectionsCard() {
             </Table>
           </TableFrame>
         )}
-      </Card>
+      </div>
 
       {editing && (
         <ConnectionDrawer

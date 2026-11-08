@@ -9,15 +9,13 @@ import {
   Button,
   Checkbox,
   Drawer,
-  EmptyState,
   Field,
   fieldErrors,
   formatDateTime,
   Input,
+  LoadingBlock,
   Mono,
-  PageHeader,
   Table,
-  TableFrame,
   Td,
   THead,
   Th,
@@ -26,7 +24,7 @@ import {
   useConfirm,
   useToast,
 } from '../../ui';
-import { pageWidth } from '../../ui/layout';
+import { ListPage } from '../../ui/ListPage';
 
 type Secret = Out<'secrets.list'>['secrets'][number];
 type Editing = { mode: 'add' } | { mode: 'rotate'; secret: Secret };
@@ -78,24 +76,109 @@ export default function SecretsPage() {
     }
   };
 
+  const addButton = (
+    <Button variant="primary" icon={<Plus size={15} />} onClick={() => setEditing({ mode: 'add' })}>
+      Add secret
+    </Button>
+  );
+
+  const state = list.loading && !list.data ? 'loading' : list.error ? 'error' : secrets.length === 0 ? 'empty' : 'ready';
+
+  const actions = (secret: Secret) => (
+    <div className="flex flex-wrap justify-end gap-1">
+      <Button size="sm" variant="ghost" icon={<RotateCw size={14} />} mutation onClick={() => setEditing({ mode: 'rotate', secret })}>
+        Rotate
+      </Button>
+      <Button size="sm" variant="danger" icon={<Trash2 size={14} />} mutation onClick={() => void remove(secret)}>
+        Delete
+      </Button>
+    </div>
+  );
+
   return (
-    <div className={pageWidth('default')}>
-      <PageHeader
+    <div>
+      <ListPage
         title="Secrets"
         description="Credentials for providers, integrations and agents. Values are encrypted and can never be read back; you can only replace them."
-        actions={
-          canWrite && (
-            <Button variant="primary" icon={<Plus size={15} />} onClick={() => setEditing({ mode: 'add' })}>
-              Add secret
-            </Button>
-          )
+        primaryAction={canWrite ? addButton : undefined}
+        countLabel={state === 'ready' ? `${secrets.length} ${secrets.length === 1 ? 'secret' : 'secrets'}` : undefined}
+        state={state}
+        notice={
+          state === 'error'
+            ? { title: 'Couldn’t load secrets', body: list.error, action: <Button onClick={() => void list.reload()}>Retry</Button> }
+            : state === 'empty'
+              ? {
+                  title: 'No secrets stored',
+                  body: canWrite
+                    ? 'Add a provider API key or another credential. People with write access can replace a value later, but nobody can read it back.'
+                    : 'A person with write access can add a provider API key here. Values are encrypted and never shown.',
+                  action: canWrite ? addButton : undefined,
+                }
+              : undefined
+        }
+        loadingContent={<LoadingBlock lines={4} label="Loading secrets" />}
+        desktopTable={
+          <Table label="Secrets">
+            <THead>
+              <tr>
+                <Th>Name</Th>
+                <Th>Updated</Th>
+                <Th className="hidden md:table-cell">Last changed by</Th>
+                {canWrite && (
+                  <Th>
+                    <span className="sr-only">Actions</span>
+                  </Th>
+                )}
+              </tr>
+            </THead>
+            <tbody>
+              {secrets.map((s) => (
+                <Tr key={s.name}>
+                  <Td>
+                    <Mono>{s.name}</Mono>
+                    <div className="mt-0.5 text-[12px] text-muted md:hidden">{s.updatedByName ?? s.updatedBy}</div>
+                  </Td>
+                  <Td className="whitespace-nowrap" title={formatDateTime(s.updatedAt, { seconds: true, zone: true })}>
+                    {timeAgo(s.updatedAt)}
+                  </Td>
+                  <Td className="hidden md:table-cell">
+                    <span>{s.updatedByName ?? <span className="font-mono text-[12px]">{s.updatedBy}</span>}</span>
+                  </Td>
+                  {canWrite && <Td className="text-right">{actions(s)}</Td>}
+                </Tr>
+              ))}
+            </tbody>
+          </Table>
+        }
+        mobileList={
+          <ul aria-label="Secrets" className="divide-y divide-line">
+            {secrets.map((s) => (
+              <li key={s.name} className="space-y-2 p-3">
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <Mono>{s.name}</Mono>
+                    <p className="mt-0.5 text-[12px] text-muted">
+                      Updated {timeAgo(s.updatedAt)} · {s.updatedByName ?? s.updatedBy}
+                    </p>
+                  </div>
+                  {canWrite && actions(s)}
+                </div>
+                <dl className="grid grid-cols-[minmax(80px,max-content)_minmax(0,1fr)] gap-x-3 text-[12px] leading-[18px]">
+                  <dt className="text-muted">Updated</dt>
+                  <dd>{timeAgo(s.updatedAt)}</dd>
+                  <dt className="text-muted">Changed by</dt>
+                  <dd>{s.updatedByName ?? s.updatedBy}</dd>
+                </dl>
+              </li>
+            ))}
+          </ul>
         }
       />
       {error && (
         <Alert
           tone="bad"
           title="That did not work"
-          className="mb-4"
+          className="mt-4"
           action={
             <Button size="sm" variant="ghost" onClick={() => setError(null)}>
               Dismiss
@@ -105,77 +188,6 @@ export default function SecretsPage() {
           {error}
         </Alert>
       )}
-      <TableFrame
-        loading={list.loading}
-        error={list.error}
-        onRetry={list.reload}
-        columns={canWrite ? 4 : 3}
-        isEmpty={secrets.length === 0}
-        empty={
-          <EmptyState
-            title="No secrets stored"
-            action={
-              canWrite && (
-                <Button variant="primary" icon={<Plus size={15} />} onClick={() => setEditing({ mode: 'add' })}>
-                  Add secret
-                </Button>
-              )
-            }
-          >
-            {canWrite
-              ? 'Add a provider API key or another credential. People with write access can replace a value later, but nobody can read it back.'
-              : 'A person with write access can add a provider API key here. Values are encrypted and never shown.'}
-          </EmptyState>
-        }
-      >
-        <Table label="Secrets">
-          <THead>
-            <tr>
-              <Th>Name</Th>
-              <Th>Updated</Th>
-              <Th className="hidden md:table-cell">Last changed by</Th>
-              {canWrite && (
-                <Th>
-                  <span className="sr-only">Actions</span>
-                </Th>
-              )}
-            </tr>
-          </THead>
-          <tbody>
-            {secrets.map((s) => (
-              <Tr key={s.name}>
-                <Td>
-                  <Mono>{s.name}</Mono>
-                  <div className="mt-0.5 text-[12px] text-muted md:hidden">{s.updatedByName ?? s.updatedBy}</div>
-                </Td>
-                <Td className="whitespace-nowrap" title={formatDateTime(s.updatedAt, { seconds: true, zone: true })}>
-                  {timeAgo(s.updatedAt)}
-                </Td>
-                <Td className="hidden md:table-cell">
-                  <span>{s.updatedByName ?? <span className="font-mono text-[12px]">{s.updatedBy}</span>}</span>
-                </Td>
-                {canWrite && (
-                  <Td className="text-right" onClick={(e) => e.stopPropagation()}>
-                    <div className="flex justify-end gap-1">
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        icon={<RotateCw size={14} />}
-                        onClick={() => setEditing({ mode: 'rotate', secret: s })}
-                      >
-                        Rotate
-                      </Button>
-                      <Button size="sm" variant="danger" icon={<Trash2 size={14} />} onClick={() => void remove(s)}>
-                        Delete
-                      </Button>
-                    </div>
-                  </Td>
-                )}
-              </Tr>
-            ))}
-          </tbody>
-        </Table>
-      </TableFrame>
       {confirmDialog}
       {editing && (
         <SecretDrawer
@@ -241,7 +253,7 @@ function SecretDrawer({ editing, onClose, onSaved }: { editing: Editing; onClose
       footer={
         <>
           <Button onClick={onClose}>Cancel</Button>
-          <Button variant="primary" loading={busy} onClick={() => void submit()}>
+          <Button variant="primary" mutation loading={busy} onClick={() => void submit()}>
             {rotate ? 'Replace value' : 'Add secret'}
           </Button>
         </>

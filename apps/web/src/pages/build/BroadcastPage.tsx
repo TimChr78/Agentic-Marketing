@@ -116,7 +116,7 @@ function BroadcastPageForId({ params }: { params: Record<string, string> }) {
     switch (action.kind) {
       case 'save':
         return (
-          <Button variant="primary" loading={ctx.saving} onClick={() => void ctx.save()}>
+          <Button variant="primary" mutation loading={ctx.saving} onClick={() => void ctx.save()}>
             {action.label}
           </Button>
         );
@@ -128,7 +128,7 @@ function BroadcastPageForId({ params }: { params: Record<string, string> }) {
         );
       case 'publish':
         return (
-          <Button variant="primary" icon={<Send size={14} />} onClick={ctx.openPublish}>
+          <Button variant="primary" icon={<Send size={14} />} mutation onClick={ctx.openPublish}>
             {action.label}
           </Button>
         );
@@ -273,7 +273,7 @@ function BroadcastPageForId({ params }: { params: Record<string, string> }) {
           if (ctx.dirty && !ctx.readOnly) {
             if (action.kind !== 'save') {
               secondary.push(
-                <Button key="save" variant="ghost" loading={ctx.saving} onClick={() => void ctx.save()}>
+                <Button key="save" variant="ghost" mutation loading={ctx.saving} onClick={() => void ctx.save()}>
                   Save draft
                 </Button>,
               );

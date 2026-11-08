@@ -75,6 +75,7 @@ export function ListAudiencePanel({ artifactId, content }: { artifactId: string;
               variant="secondary"
               icon={<RefreshCw size={14} />}
               loading={busy === 'snapshot'}
+              mutation
               onClick={() => void refreshSnapshot()}
             >
               Refresh from source
@@ -131,6 +132,7 @@ export function ListAudiencePanel({ artifactId, content }: { artifactId: string;
                       size="sm"
                       variant="ghost"
                       icon={<Trash2 size={14} />}
+                      mutation
                       aria-label={`Remove ${m.profileId}`}
                       loading={busy === m.profileId}
                       onClick={() => void remove(m)}
@@ -255,7 +257,7 @@ function AddPeopleDialog({ artifactId, onClose, onDone }: { artifactId: string; 
           <Button onClick={onClose} disabled={busy}>
             {unmatched.length ? 'Done' : 'Cancel'}
           </Button>
-          <Button variant="primary" loading={busy} onClick={() => void submit()}>
+          <Button variant="primary" mutation loading={busy} onClick={() => void submit()}>
             Add
           </Button>
         </>
@@ -269,8 +271,9 @@ function AddPeopleDialog({ artifactId, onClose, onDone }: { artifactId: string; 
             <option value="profile_id">Profile id</option>
           </Select>
         </Field>
-        <Field label="People" hint="One per line. Up to 1,000. Adding someone twice changes nothing.">
+        <Field label="People" id="people-batch" hint="One per line. Up to 1,000. Adding someone twice changes nothing.">
           <textarea
+            id="people-batch"
             className="min-h-32 w-full rounded-md border border-line-strong bg-surface px-3 py-2 font-mono text-[12px]"
             value={text}
             onChange={(e) => setText(e.target.value)}
@@ -346,12 +349,12 @@ function ImportDialog({ artifactId, onClose, onDone }: { artifactId: string; onC
             Close
           </Button>
           {preview && (
-            <Button variant="primary" loading={busy} onClick={() => void run(false)}>
+            <Button variant="primary" mutation loading={busy} onClick={() => void run(false)}>
               Apply {preview.added} {preview.added === 1 ? 'addition' : 'additions'}
             </Button>
           )}
           {!preview && (
-            <Button variant="primary" loading={busy} disabled={!csv} onClick={() => void run(true)}>
+            <Button variant="primary" mutation loading={busy} disabled={!csv} onClick={() => void run(true)}>
               Preview matches
             </Button>
           )}
@@ -359,8 +362,8 @@ function ImportDialog({ artifactId, onClose, onDone }: { artifactId: string; onC
       }
     >
       <div className="space-y-3">
-        <Field label="CSV file" hint="Up to 5 MB, with a header row. UTF-8, comma, semicolon or tab.">
-          <input type="file" accept=".csv,text/csv" onChange={(e) => void readFile(e.target.files?.[0])} />
+        <Field label="CSV file" id="csv-file" hint="Up to 5 MB, with a header row. UTF-8, comma, semicolon or tab.">
+          <input id="csv-file" type="file" accept=".csv,text/csv" onChange={(e) => void readFile(e.target.files?.[0])} />
         </Field>
         {fileName && <p className="text-[12px] text-muted">{fileName}</p>}
 

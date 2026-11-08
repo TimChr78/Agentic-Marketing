@@ -156,7 +156,7 @@ export function BroadcastStatus({ artifact, status }: { artifact: Artifact; stat
           </a>
         )}
         {cancellable && can('messages:send') && (
-          <Button size="sm" variant="danger" icon={<Ban size={14} />} className="ml-auto" onClick={() => void cancel()}>
+          <Button size="sm" variant="danger" icon={<Ban size={14} />} className="ml-auto" mutation onClick={() => void cancel()}>
             Cancel sending
           </Button>
         )}
@@ -339,7 +339,7 @@ export function BroadcastStatus({ artifact, status }: { artifact: Artifact; stat
               </p>
             )}
             {stage.stage === 'stopped' && run.status === 'stopped' && can('artifacts:publish') && (
-              <Button size="sm" icon={<Play size={14} />} onClick={() => void sendRest()}>
+              <Button size="sm" icon={<Play size={14} />} mutation onClick={() => void sendRest()}>
                 Send the rest
               </Button>
             )}

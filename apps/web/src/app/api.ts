@@ -16,12 +16,30 @@ export function setReadListener(listener: ReadListener | null) {
 // under the same rules. The chosen workspace goes in X-Workspace-Id on every call.
 
 let workspaceId: string | null = localStorage.getItem('am.workspace');
-export function setWorkspaceId(id: string | null) {
+type WorkspaceListener = (id: string | null) => void;
+const workspaceListeners = new Set<WorkspaceListener>();
+
+/**
+ * Chooses the workspace every call acts in. `persist: false` is the demo's in-memory switch: it
+ * must never overwrite the workspace a signed-in person has stored for the real app (#524).
+ */
+export function setWorkspaceId(id: string | null, opts: { persist?: boolean } = {}) {
   workspaceId = id;
-  if (id) localStorage.setItem('am.workspace', id);
-  else localStorage.removeItem('am.workspace');
+  if (opts.persist !== false) {
+    if (id) localStorage.setItem('am.workspace', id);
+    else localStorage.removeItem('am.workspace');
+  }
+  for (const listener of workspaceListeners) listener(id);
 }
 export const getWorkspaceId = () => workspaceId;
+
+/** Notifies keyed caches (the shared picker index) when the chosen workspace changes. */
+export function onWorkspaceChange(listener: WorkspaceListener): () => void {
+  workspaceListeners.add(listener);
+  return () => {
+    workspaceListeners.delete(listener);
+  };
+}
 
 const fetchWithWorkspace: typeof fetch = (input, init = {}) => {
   const headers = new Headers(init.headers);
@@ -31,21 +49,57 @@ const fetchWithWorkspace: typeof fetch = (input, init = {}) => {
 
 const base = createClient<Commands>({ credentials: 'include', fetch: fetchWithWorkspace });
 
+/**
+ * A command transport (#524). The demo installs a fixture-backed one; production leaves it unset
+ * and every call goes through the real typed client. A transport receives the same command names
+ * and inputs as the server, so a page never learns that it is in demo mode.
+ */
+export type CommandTransport = <N extends Commands[number]['name']>(
+  name: N,
+  input: CommandInput<Commands, N>,
+  callOpts?: { idempotencyKey?: string },
+) => Promise<CommandOutput<Commands, N>>;
+
+let commandTransport: CommandTransport | null = null;
+
+/**
+ * Installs a transport (`null` restores the real API) and returns an uninstall that restores the
+ * previous one. Only the demo entry and tests call this; no page branches on demo mode.
+ */
+export function setCommandTransport(transport: CommandTransport | null): () => void {
+  const previous = commandTransport;
+  commandTransport = transport;
+  return () => {
+    if (commandTransport === transport) commandTransport = previous;
+  };
+}
+
 export const api = {
   async call<N extends Commands[number]['name']>(
     name: N,
     input: CommandInput<Commands, N>,
     callOpts: { idempotencyKey?: string } = {},
   ): Promise<CommandOutput<Commands, N>> {
-    const out = (await base.call(name, input, callOpts)) as CommandOutput<Commands, N>;
+    const out = commandTransport
+      ? await (
+          commandTransport as unknown as (
+            n: N,
+            i: CommandInput<Commands, N>,
+            o?: { idempotencyKey?: string },
+          ) => Promise<CommandOutput<Commands, N>>
+        )(name, input, callOpts)
+      : ((await base.call(name, input, callOpts)) as CommandOutput<Commands, N>);
     readListener?.(name, input, out);
-    return out;
+    return out as CommandOutput<Commands, N>;
   },
 };
 
 /**
  * A client that acts in one chosen brand for a single call, without switching the shell. Used when
  * creating a token for another brand (#187); the server still checks the person's role there.
+ *
+ * It still obeys the installed transport: the demo fixture transport answers or refuses this call
+ * exactly like `api.call`, so a cross-brand action can never build a real credentialed client.
  */
 export function apiForWorkspace(id: string) {
   const fetchForWorkspace: typeof fetch = (input, init = {}) => {
@@ -53,7 +107,49 @@ export function apiForWorkspace(id: string) {
     headers.set('x-workspace-id', id);
     return fetch(input, { ...init, headers });
   };
-  return createClient<Commands>({ credentials: 'include', fetch: fetchForWorkspace });
+  const client = createClient<Commands>({ credentials: 'include', fetch: fetchForWorkspace });
+  return {
+    call<N extends Commands[number]['name']>(
+      name: N,
+      input: CommandInput<Commands, N>,
+      callOpts: { idempotencyKey?: string } = {},
+    ): Promise<CommandOutput<Commands, N>> {
+      if (commandTransport) {
+        return (
+          commandTransport as unknown as (
+            n: N,
+            i: CommandInput<Commands, N>,
+            o?: { idempotencyKey?: string },
+          ) => Promise<CommandOutput<Commands, N>>
+        )(name, input, callOpts);
+      }
+      return client.call(name, input, callOpts) as Promise<CommandOutput<Commands, N>>;
+    },
+  };
+}
+
+/**
+ * The streaming seam (#530). The copilot's server-sent-events response cannot go through a typed
+ * command, so it has its own transport. Production leaves it unset and streams through `fetch`; the
+ * demo installs one that refuses, so no page can open a real assistant stream with the visitor's
+ * session cookie.
+ */
+export type StreamTransport = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+
+let streamTransport: StreamTransport | null = null;
+
+/** Installs a stream transport (`null` restores `fetch`) and returns the uninstall. */
+export function setStreamTransport(transport: StreamTransport | null): () => void {
+  const previous = streamTransport;
+  streamTransport = transport;
+  return () => {
+    if (streamTransport === transport) streamTransport = previous;
+  };
+}
+
+/** Every streaming request goes through the installed transport, like `api.call` does. */
+export function streamFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  return streamTransport ? streamTransport(input, init) : fetch(input, init);
 }
 export type CommandName = Commands[number]['name'];
 export type Out<N extends CommandName> = CommandOutput<Commands, N>;

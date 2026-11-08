@@ -1,13 +1,11 @@
 import { FileText, Plus, Search } from 'lucide-react';
 import { useState } from 'react';
 import { api, errText } from '../../app/api';
-import { useCrumbs } from '../../app/page';
 import { navigate } from '../../app/router';
 import { useSession } from '../../app/session';
 import { useApi } from '../../app/useApi';
 import { type TopicRow, TopicsTable, topicStatus } from '../../features/content/TopicsTable';
-import { Button, Field, Input, Modal, PageHeader, Select, TableFrame, Textarea, useToast } from '../../ui';
-import { pageWidth } from '../../ui/layout';
+import { Button, Field, Input, Modal, Select, TableFrame, Textarea, useToast } from '../../ui';
 
 // Build → Topics (#141): the editorial backlog. A queue, not a calendar: the target date is stored
 // so #78 can show it later, but this page groups by status and score. Briefs open in the normal
@@ -29,7 +27,6 @@ interface Draft {
 const EMPTY: Draft = { title: '', angle: '', audience: '', keyword: '', tags: '', targetDate: '', signals: '' };
 
 export default function TopicsPage() {
-  useCrumbs([{ label: 'Topics' }]);
   const { can } = useSession();
   const toast = useToast();
   const canWrite = can('artifacts:write');
@@ -109,18 +106,23 @@ export default function TopicsPage() {
   };
 
   return (
-    <div className={pageWidth('default')}>
-      <PageHeader
-        title="Topics"
-        description="The editorial backlog: ideas and signals become scored topics, a topic becomes a brief, and the brief’s approval moves it forward. A queue, not a calendar."
-        actions={
-          canWrite && (
-            <Button variant="primary" icon={<Plus size={15} />} onClick={() => setCreating(true)}>
-              New topic
-            </Button>
-          )
-        }
-      />
+    <section aria-labelledby="editorial-topics">
+      <div className="mb-2 flex flex-wrap items-start justify-between gap-x-4 gap-y-2">
+        <div className="min-w-0">
+          <h2 id="editorial-topics" className="text-[16px] leading-6 font-semibold">
+            Editorial topics
+          </h2>
+          <p className="mt-1 max-w-[760px] text-[13px] leading-5 text-muted">
+            The writing backlog, not subscriber topic preferences. Ideas and signals become scored topics, a topic becomes a brief, and the
+            brief’s approval moves it forward. A queue, not a calendar.
+          </p>
+        </div>
+        {canWrite && (
+          <Button variant="primary" icon={<Plus size={15} />} onClick={() => setCreating(true)}>
+            New topic
+          </Button>
+        )}
+      </div>
 
       <TableFrame
         loading={list.loading}
@@ -185,7 +187,7 @@ export default function TopicsPage() {
         footer={
           <>
             <Button onClick={() => setCreating(false)}>Cancel</Button>
-            <Button variant="primary" loading={saving} disabled={!draft.title.trim()} onClick={() => void create()}>
+            <Button variant="primary" mutation loading={saving} disabled={!draft.title.trim()} onClick={() => void create()}>
               Add topic
             </Button>
           </>
@@ -220,6 +222,6 @@ export default function TopicsPage() {
           </p>
         </div>
       </Modal>
-    </div>
+    </section>
   );
 }

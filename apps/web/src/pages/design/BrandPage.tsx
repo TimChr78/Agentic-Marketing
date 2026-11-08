@@ -5,13 +5,14 @@ import { useCrumbs } from '../../app/page';
 import { useWorkspace } from '../../app/session';
 import { useApi } from '../../app/useApi';
 import { usePageTab } from '../../app/useTab';
-import { ArtifactDetailPage } from '../../features/artifacts/ArtifactDetailPage';
-import { BrandEditor } from '../../features/brand/BrandEditor';
+import { ArtifactDetailPage, type ArtifactDetailView } from '../../features/artifacts/ArtifactDetailPage';
+import { type BrandContent, BrandEditor } from '../../features/brand/BrandEditor';
+import { HostedPreview } from '../../features/brand/HostedPreview';
 import { Alert, Button, EmptyState, LoadingBlock, PageHeader, Tabs } from '../../ui';
 import { pageWidth } from '../../ui/layout';
 import HostedPagesPage from './HostedPagesPage';
 
-/** Design → Brand (#37): the workspace brand is one artifact, reviewed like any other change. */
+/** Design → Brand (#37, #526): the workspace brand is one artifact, reviewed like any other change. */
 export function BrandHome() {
   const { can, workspace } = useWorkspace();
   const list = useApi(() => api.call('artifacts.list', { type: 'brand', limit: 1 }), []);
@@ -23,10 +24,13 @@ export function BrandHome() {
       <ArtifactDetailPage
         id={brand.id}
         crumbs={[]}
-        wide
         preview={false}
         description="Name, logo, colours and wording of the pages subscribers see: confirm, expired link and unsubscribe. Changes go live after review."
         editor={(p) => <BrandEditor {...p} />}
+        detail={{
+          kind: 'Brand',
+          context: (a, view) => <BrandContext artifact={a} view={view} />,
+        }}
       />
     );
   return (
@@ -48,6 +52,24 @@ export function BrandHome() {
         }
       }}
     />
+  );
+}
+
+/** The live preview context for the Brand detail. It previews the unsaved brand, never a saved one under that label. */
+function BrandContext({ artifact, view }: { artifact: { version: { content: unknown } }; view: ArtifactDetailView }) {
+  const content = (view.draft ?? artifact.version.content) as BrandContent;
+  return (
+    <section aria-label="Before publishing" className="space-y-3">
+      <div>
+        <h2 className="text-[13px] font-semibold text-fg">Before publishing</h2>
+        <p className="mt-1 text-[12px] leading-[18px] text-fg-2">
+          {view.dirty
+            ? 'Live preview of your unsaved changes. Subscriber pages keep the published brand until you publish.'
+            : 'Live preview of the saved brand. Subscriber pages use the published version.'}
+        </p>
+      </div>
+      <HostedPreview brand={content} height={420} />
+    </section>
   );
 }
 
@@ -80,7 +102,7 @@ function NoBrand({
         title="No brand yet"
         action={
           canCreate && (
-            <Button variant="primary" icon={<Plus size={15} />} loading={busy} onClick={onCreate}>
+            <Button variant="primary" icon={<Plus size={15} />} mutation loading={busy} onClick={onCreate}>
               Set up the brand
             </Button>
           )
@@ -100,7 +122,7 @@ const BRAND_TAB_ITEMS: { key: BrandTab; label: string }[] = [
   { key: 'subscriber-pages', label: 'Subscriber pages' },
 ];
 
-/** Brand (#446): the brand editor and the existing hosted subscriber pages as named tabs. */
+/** Brand (#446, #526): the brand editor and the subscriber pages as outer tabs. */
 export default function BrandPage() {
   const { active, invalid, select } = usePageTab({ keys: BRAND_TABS, fallback: 'brand' });
   useCrumbs([{ label: active === 'subscriber-pages' ? 'Subscriber pages' : 'Brand' }]);

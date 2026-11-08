@@ -99,12 +99,12 @@ export function AgentControls({
   const stopControls = (
     <>
       {agent.status === 'active' && (
-        <Button icon={<Pause size={14} />} loading={busy === 'pause'} onClick={() => void pause()}>
+        <Button icon={<Pause size={14} />} mutation loading={busy === 'pause'} onClick={() => void pause()}>
           Pause
         </Button>
       )}
       {agent.status === 'paused' && (
-        <Button variant="primary" icon={<Play size={14} />} loading={busy === 'resume'} onClick={() => void resume()}>
+        <Button variant="primary" icon={<Play size={14} />} mutation loading={busy === 'resume'} onClick={() => void resume()}>
           Resume
         </Button>
       )}
@@ -115,7 +115,10 @@ export function AgentControls({
     { label: 'Edit', icon: <Pencil size={14} />, onSelect: () => setEditing(true) },
     ...(agent.status === 'revoked'
       ? []
-      : ['separator' as const, { label: 'Revoke', icon: <Ban size={14} />, destructive: true, onSelect: () => void revoke() }]),
+      : [
+          'separator' as const,
+          { label: 'Revoke', icon: <Ban size={14} />, destructive: true, mutation: true, onSelect: () => void revoke() },
+        ]),
   ];
 
   return (
@@ -134,7 +137,7 @@ export function AgentControls({
               Edit
             </Button>
             {agent.status !== 'revoked' && (
-              <Button variant="danger" icon={<Ban size={14} />} loading={busy === 'revoke'} onClick={() => void revoke()}>
+              <Button variant="danger" icon={<Ban size={14} />} mutation loading={busy === 'revoke'} onClick={() => void revoke()}>
                 Revoke
               </Button>
             )}
@@ -146,7 +149,7 @@ export function AgentControls({
           <p role="alert">
             Pause failed. {agent.name} remains active. {pauseError}
           </p>
-          <Button size="sm" variant="ghost" className="mt-1" onClick={() => void pause()}>
+          <Button size="sm" variant="ghost" className="mt-1" mutation onClick={() => void pause()}>
             Retry
           </Button>
         </div>
@@ -215,7 +218,7 @@ function EditAgentDrawer({ agent, onClose, onSaved }: { agent: Agent; onClose: (
       footer={
         <>
           <Button onClick={onClose}>Cancel</Button>
-          <Button variant="primary" loading={busy} onClick={() => void submit()}>
+          <Button variant="primary" mutation loading={busy} onClick={() => void submit()}>
             Save changes
           </Button>
         </>

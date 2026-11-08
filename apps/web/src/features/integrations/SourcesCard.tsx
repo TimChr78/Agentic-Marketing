@@ -5,7 +5,6 @@ import { useApi } from '../../app/useApi';
 import {
   Alert,
   Button,
-  Card,
   CodeView,
   Drawer,
   EmptyState,
@@ -83,15 +82,16 @@ export function SourcesCard() {
   };
 
   return (
-    <Card
-      title="Event sources"
-      description="Where events come from: your website (a public write key limited to its origins) or a server (a secret key)."
-      action={
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <p className="max-w-[70ch] text-[13px] leading-5 text-muted">
+          Where events come from: your website (a public write key limited to its origins) or a server (a secret key). Consent rules are
+          checked before anything is kept.
+        </p>
         <Button variant="primary" icon={<Plus size={15} />} onClick={() => setEditing('new')}>
           Add source
         </Button>
-      }
-    >
+      </div>
       <TableFrame
         loading={list.loading}
         error={list.error}
@@ -136,16 +136,16 @@ export function SourcesCard() {
                 <Td className="hidden md:table-cell">{s.kind === 'browser' ? s.allowedOrigins.join(', ') || 'Any' : '—'}</Td>
                 <Td>{s.requiredPurpose ? <Tag>{s.requiredPurpose}</Tag> : <span className="text-muted">None</span>}</Td>
                 <Td>
-                  <Switch checked={s.enabled} onChange={() => void toggle(s)} label={`${s.name} enabled`} hideLabel />
+                  <Switch checked={s.enabled} onChange={() => void toggle(s)} mutation label={`${s.name} enabled`} hideLabel />
                 </Td>
                 <Td align="right">
                   <Menu
                     label={`More for ${s.name}`}
                     items={[
                       { label: 'Edit', onSelect: () => setEditing(s) },
-                      { label: 'Replace key', icon: <RefreshCw />, onSelect: () => void rotate(s) },
+                      { label: 'Replace key', icon: <RefreshCw />, mutation: true, onSelect: () => void rotate(s) },
                       'separator',
-                      { label: 'Delete', icon: <Trash2 />, destructive: true, onSelect: () => void remove(s) },
+                      { label: 'Delete', icon: <Trash2 />, destructive: true, mutation: true, onSelect: () => void remove(s) },
                     ]}
                     trigger={(t) => (
                       <button
@@ -165,7 +165,7 @@ export function SourcesCard() {
         </Table>
       </TableFrame>
       {browser?.writeKey && (
-        <div className="border-t border-line p-4">
+        <div className="rounded-lg border border-line bg-surface p-3">
           <CodeView
             label={`Browser SDK for “${browser.name}”`}
             value={`import { createAnalytics } from '@agentic-marketing/sdk-js';
@@ -203,7 +203,7 @@ analytics.page();`}
         </Modal>
       )}
       {confirmDialog}
-    </Card>
+    </div>
   );
 }
 
@@ -262,7 +262,14 @@ function SourceDrawer({
           <Button variant="ghost" onClick={onClose}>
             Cancel
           </Button>
-          <Button variant="primary" className="ml-auto" icon={source ? undefined : <KeyRound size={14} />} loading={busy} onClick={save}>
+          <Button
+            variant="primary"
+            className="ml-auto"
+            icon={source ? undefined : <KeyRound size={14} />}
+            mutation
+            loading={busy}
+            onClick={save}
+          >
             {source ? 'Save changes' : 'Add source'}
           </Button>
         </>

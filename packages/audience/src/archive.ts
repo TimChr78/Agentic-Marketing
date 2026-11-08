@@ -257,34 +257,46 @@ const brandStyles = (brand: ResolvedBrand) => {
   const colors = Object.entries(brand.colors)
     .map(([name, value]) => `--${name.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)}:${value}`)
     .join(';');
-  return `:root{color-scheme:light;${colors};--radius:${brand.radius}px}
+  return `:root{color-scheme:light;${colors};--radius:${brand.radius}px;--font-stack:${brand.fontStack};--measure:40rem}
 *{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
 html,body{margin:0}
-body{min-height:100vh;padding:24px 12px;background:var(--background);color:var(--text);font-family:${brand.fontStack};font-size:16px;line-height:1.55}
-main{max-width:46rem;margin:0 auto}
+body{min-height:100vh;padding:32px 16px;background:var(--background);color:var(--text);font-family:var(--font-stack);font-size:1rem;line-height:1.55}
+.skip{position:absolute;left:-9999px;top:0;padding:.5rem .75rem;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:var(--radius)}
+.skip:focus{left:1rem;top:1rem}
+.page{width:100%;max-width:var(--measure);margin:0 auto}
 a{color:var(--accent);text-underline-offset:.15em}
-a:focus-visible{outline:3px solid var(--text);outline-offset:3px;border-radius:2px}
+a:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:2px}
 .brand{display:flex;align-items:center;gap:.75rem;margin:0 0 1.5rem;flex-wrap:wrap}
-.logo{display:block;max-width:100%;width:auto}
-.site-name{margin:0;font-size:1rem;font-weight:600;color:var(--text)}
-h1{margin:0 0 .5rem;font-size:clamp(1.5rem,4.5vw,2rem);line-height:1.2;overflow-wrap:anywhere}
-h2{margin:0;font-size:1.1rem;line-height:1.3}
-p{margin:0 0 1rem;color:var(--muted);overflow-wrap:anywhere}
-.meta{margin:0 0 1.5rem;font-size:.85rem;color:var(--muted)}
-.lead{font-size:1.05rem}
+.logo{display:block;max-width:100%;width:auto;max-height:96px}
+.site-name{margin:0;font-size:1rem;font-weight:600;color:var(--text);overflow-wrap:anywhere}
+h1{margin:0 0 .5rem;font-size:clamp(1.5rem,4.5vw,2rem);line-height:1.25;letter-spacing:-.01em;overflow-wrap:anywhere}
+h2{margin:0;font-size:1.1rem;line-height:1.35;overflow-wrap:anywhere}
+p{margin:0 0 1rem;color:var(--text);overflow-wrap:anywhere}
+p:last-child{margin-bottom:0}
+.meta{margin:0 0 .75rem;font-size:.85rem;color:var(--muted)}
+.lead{font-size:1.05rem;margin:0 0 2rem;color:var(--text)}
 .issues{list-style:none;margin:0;padding:0}
-.issues li{padding:1.25rem 0;border-top:1px solid var(--border)}
+.issues li{padding:1.5rem 0;border-top:1px solid var(--border)}
 .issues li:first-child{border-top:0;padding-top:0}
 .issues h2 a{color:var(--text);text-decoration:none}
 .issues h2 a:hover{color:var(--accent);text-decoration:underline}
-.issue .email-body{margin:1.5rem 0;overflow-x:auto}
+.summary{margin:.5rem 0 0}
+.empty{padding:1rem;border:1px dashed var(--border);border-radius:var(--radius)}
+.issue .email-body{margin:2rem 0;overflow-x:auto}
 .email-body img{max-width:100%;height:auto}
 .email-body table{max-width:100%}
 .subscribe{margin:2rem 0 0;padding:1.25rem;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius)}
-.button{display:inline-block;padding:.65rem 1.25rem;border-radius:var(--radius);background:var(--accent);color:var(--accent-text);font-weight:600;text-decoration:none}
-footer{margin:2rem 0 0;font-size:.85rem;color:var(--muted)}
-.pager{display:flex;gap:1rem;margin:2rem 0 0;font-size:.9rem}
-@media (max-width:400px){body{padding:16px 10px}}`;
+.subscribe h2{margin:0 0 .25rem}
+.subscribe p{margin:0 0 1rem}
+.button{display:inline-block;min-height:44px;padding:.7rem 1.25rem;border-radius:var(--radius);background:var(--accent);color:var(--accent-text);font-weight:600;text-decoration:none}
+.button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+footer{margin:2rem 0 0;padding:1.5rem 0 0;border-top:1px solid var(--border);font-size:.9rem;color:var(--muted)}
+.feed{margin:1.5rem 0 0;font-size:.9rem}
+.pager{display:flex;flex-wrap:wrap;gap:1rem;justify-content:space-between;align-items:center;margin:2rem 0 0;font-size:.95rem}
+.issue-nav{margin:2rem 0 0}
+@media (max-width:480px){body{padding:16px}.subscribe{padding:1rem}}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}`;
 };
 
 interface ShellInput {
@@ -340,7 +352,7 @@ ${social}
 ${jsonLd}
 <style>${brandStyles(brand)}${(input.extraStyles ?? []).map((s) => `\n${s}`).join('')}</style>
 </head>
-<body><main>${header}${input.body}${footer}</main></body>
+<body><a class="skip" href="#main">Skip to content</a><div class="page">${header}<main id="main">${input.body}</main>${footer}</div></body>
 </html>`;
 }
 
@@ -386,29 +398,34 @@ export function renderArchiveIndex(
   <article>
     <h2><a href="${escapeHtml(issue.url)}">${escapeHtml(issue.subject)}</a></h2>
     <p class="meta"><time datetime="${escapeHtml(dateTime(issue.sentAt))}">${escapeHtml(dateLabel(issue.sentAt, brand))}</time></p>
-    ${issue.summary ? `<p>${escapeHtml(issue.summary)}</p>` : ''}
+    ${issue.summary ? `<p class="summary">${escapeHtml(issue.summary)}</p>` : ''}
   </article>
 </li>`,
         )
         .join('')}</ul>`
-    : '<p>No issues have been published yet.</p>';
+    : '<p class="empty">No issues have been published yet.</p>';
   const pager =
     pages > 1
       ? `<nav class="pager" aria-label="Archive pages">
 ${current > 1 ? `<a href="${escapeHtml(`${base}/?page=${current - 1}`)}">← Newer</a>` : '<span></span>'}
-<span>Page ${current} of ${pages}</span>
+<span aria-current="page">Page ${current} of ${pages}</span>
 ${current < pages ? `<a href="${escapeHtml(`${base}/?page=${current + 1}`)}">Older →</a>` : '<span></span>'}
 </nav>`
       : '';
   const subscribe = settings.subscribeUrl
-    ? `<p class="subscribe"><a class="button" href="${escapeHtml(settings.subscribeUrl)}">Subscribe</a></p>`
+    ? `<section class="subscribe" aria-labelledby="subscribe-title">
+<h2 id="subscribe-title">Subscribe</h2>
+<p>Get the next issue by e-mail.</p>
+<a class="button" href="${escapeHtml(settings.subscribeUrl)}">Subscribe</a>
+</section>`
     : '';
+  const feed = `<p class="feed"><a href="${escapeHtml(`${base}/feed.xml`)}">RSS feed</a></p>`;
   return shell({
     brand,
     title,
     description: metaDescription(description, title),
     canonical,
-    body: `<h1>${escapeHtml(title)}</h1>${description ? `<p class="lead">${escapeHtml(description)}</p>` : ''}${list}${pager}${subscribe}`,
+    body: `<h1>${escapeHtml(title)}</h1>${description ? `<p class="lead">${escapeHtml(description)}</p>` : ''}${list}${pager}${subscribe}${feed}`,
   });
 }
 
@@ -424,7 +441,11 @@ export function renderArchiveIssue(
   const description = metaDescription(issue.summary, issue.subject);
   const { body, styles } = emailParts(emailHtml);
   const subscribe = settings.subscribeUrl
-    ? `<p class="subscribe"><a class="button" href="${escapeHtml(settings.subscribeUrl)}">Subscribe</a></p>`
+    ? `<section class="subscribe" aria-labelledby="subscribe-title">
+<h2 id="subscribe-title">Subscribe</h2>
+<p>Get the next issue by e-mail.</p>
+<a class="button" href="${escapeHtml(settings.subscribeUrl)}">Subscribe</a>
+</section>`
     : '';
   const jsonLd = {
     '@context': 'https://schema.org',
@@ -446,14 +467,14 @@ export function renderArchiveIssue(
     jsonLd,
     extraStyles: [styles],
     body: `<article class="issue">
-<header>
+<header class="issue-header">
 <p class="meta">${escapeHtml(archiveTitle(brand, brandContent))}</p>
 <h1>${escapeHtml(issue.subject)}</h1>
 <p class="meta"><time datetime="${escapeHtml(dateTime(issue.sentAt))}">${escapeHtml(dateLabel(issue.sentAt, brand))}</time></p>
 </header>
 <div class="email-body">${body}</div>
 </article>
-<p><a href="${escapeHtml(`${base}/`)}">← All issues</a></p>${subscribe}`,
+<nav class="issue-nav" aria-label="Archive navigation"><a href="${escapeHtml(`${base}/`)}">← All issues</a></nav>${subscribe}`,
   });
 }
 
@@ -466,13 +487,13 @@ export function renderWebVersion(brand: ResolvedBrand, subject: string, archiveU
     noindex: true,
     extraStyles: [styles],
     body: `<article class="issue">
-<header>
+<header class="issue-header">
 <p class="meta">Web version</p>
 <h1>${escapeHtml(subject)}</h1>
 </header>
 <div class="email-body">${body}</div>
 </article>
-${archiveUrl ? `<p><a href="${escapeHtml(archiveUrl)}">Read the archive</a></p>` : ''}`,
+${archiveUrl ? `<nav class="issue-nav" aria-label="Archive navigation"><a href="${escapeHtml(archiveUrl)}">Read the archive</a></nav>` : ''}`,
   });
 }
 

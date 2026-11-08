@@ -153,7 +153,7 @@ export function TokenDrawer({ id, onClose, onChanged }: { id: string; onClose: (
         tok && (
           <>
             {canRevoke && (
-              <Button variant="danger" onClick={revoke}>
+              <Button variant="danger" mutation onClick={revoke}>
                 Revoke
               </Button>
             )}
@@ -162,7 +162,7 @@ export function TokenDrawer({ id, onClose, onChanged }: { id: string; onClose: (
                 <Button variant="ghost" disabled={!dirty} onClick={() => void t.reload()}>
                   Discard
                 </Button>
-                <Button variant="primary" disabled={!dirty} loading={busy} onClick={save}>
+                <Button variant="primary" mutation disabled={!dirty} loading={busy} onClick={save}>
                   {widening ? 'Confirm and widen' : 'Save changes'}
                 </Button>
               </div>
