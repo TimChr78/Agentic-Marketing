@@ -68,6 +68,9 @@ function Gate() {
   );
 }
 
+/** The real shell gate; the demo entry renders the same gate over a fixture session. */
+export { Gate as AuthenticatedRoot };
+
 function Centered({ children }: { children: React.ReactNode }) {
   return <div className="mx-auto max-w-[480px] px-4 pt-[18vh]">{children}</div>;
 }
