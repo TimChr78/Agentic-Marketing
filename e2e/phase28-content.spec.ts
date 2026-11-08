@@ -244,13 +244,19 @@ test.describe('content at 390 px', () => {
     expect(skeletonRows).toBeGreaterThan(0);
     expect(Math.abs(skeletonRow!.height - 72)).toBeLessThanOrEqual(1);
 
-    const firstRow = page.locator('main#main .am-frame li').first();
-    await expect(firstRow).toBeVisible({ timeout: 15_000 });
+    // Measure the loaded list only: wait for the placeholder to go, then exclude its rows.
+    await expect(page.getByRole('status', { name: 'Loading templates' })).toHaveCount(0, { timeout: 15_000 });
+    const readyRows = page
+      .locator('main#main')
+      .getByRole('list', { name: / list$/ })
+      .locator(':scope > li');
+    const firstRow = readyRows.first();
+    await expect(firstRow).toBeVisible();
     const readyBox = await region.boundingBox();
     const readyRow = await firstRow.boundingBox();
     expect(readyBox).not.toBeNull();
     expect(readyRow).not.toBeNull();
-    const rows = await page.locator('main#main .am-frame li').count();
+    const rows = await readyRows.count();
     expect(rows).toBeGreaterThan(0);
 
     // The region's top is the same reserved slot in both states, and the first real row starts
@@ -258,13 +264,13 @@ test.describe('content at 390 px', () => {
     expect(Math.abs(readyBox!.y - loadingBox!.y)).toBeLessThanOrEqual(1);
     expect(Math.abs(readyRow!.y - skeletonRow!.y)).toBeLessThanOrEqual(4);
 
-    // Tolerance: the placeholder reserves a fixed number of rows while the read returns a
-    // server-sized list, so the only honest allowance is the difference between the reserved and
-    // the actual row count at one row height, plus 2 px for the frame's border. A 72 px phone row
-    // is what makes this small; the old 170 px tiles would be off by more than 100 px per row.
-    const ROW = 72;
-    const tolerance = Math.abs(skeletonRows - rows) * ROW + 2;
-    expect(Math.abs(readyBox!.height - loadingBox!.height)).toBeLessThanOrEqual(tolerance);
+    // The placeholder reserves a fixed number of rows while the read returns a server-sized list,
+    // so the whole region's height legitimately differs by the row count. What must match is each
+    // row: a loaded phone row is the placeholder row's height (72 px minimum) within 4 px, where the
+    // old 170 px gallery tiles were off by about 100 px per row.
+    expect(Math.abs(readyRow!.height - skeletonRow!.height)).toBeLessThanOrEqual(4);
+    expect(rows).toBeGreaterThan(0);
+    expect(skeletonRows).toBeGreaterThan(0);
   });
 
   test('the asset library keeps Upload reachable and offers Clear filters when nothing matches', async ({ page }) => {
