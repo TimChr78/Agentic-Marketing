@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { cx } from '../../ui';
+import { cx, Skeleton, SkeletonRegion } from '../../ui';
 
 // Small KPI cards shared by the insight pages: a label, a tabular number and an optional hint.
 
@@ -37,5 +37,21 @@ export function StatGrid({ children, className, columns = 6 }: { children: React
     <div className={cx('grid grid-cols-2 gap-2.5 sm:grid-cols-3', columns === 4 ? 'xl:grid-cols-4' : 'xl:grid-cols-6', className)}>
       {children}
     </div>
+  );
+}
+
+/** The compact StatCard's reserved slot: one label line and one value line, same padding. */
+export function StatGridSkeleton({ labels, columns = 6 }: { labels: string[]; columns?: 4 | 6 }) {
+  return (
+    <StatGrid columns={columns}>
+      {labels.map((label) => (
+        <SkeletonRegion key={label} label={label} geometry="settings">
+          <div className="min-w-0 rounded-md border border-line bg-surface px-3.5 py-3">
+            <Skeleton className="h-3 w-3/5" />
+            <Skeleton className="mt-1.5 h-5 w-2/5" />
+          </div>
+        </SkeletonRegion>
+      ))}
+    </StatGrid>
   );
 }

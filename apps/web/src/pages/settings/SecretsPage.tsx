@@ -13,7 +13,7 @@ import {
   fieldErrors,
   formatDateTime,
   Input,
-  LoadingBlock,
+  ListSkeleton,
   Mono,
   Table,
   Td,
@@ -116,7 +116,7 @@ export default function SecretsPage() {
                 }
               : undefined
         }
-        loadingContent={<LoadingBlock lines={4} label="Loading secrets" />}
+        loadingContent={<ListSkeleton label="Loading secrets" columns={canWrite ? 4 : 3} />}
         desktopTable={
           <Table label="Secrets">
             <THead>
@@ -177,7 +177,7 @@ export default function SecretsPage() {
       {error && (
         <Alert
           tone="bad"
-          title="That did not work"
+          title="Couldn’t delete the secret"
           className="mt-4"
           action={
             <Button size="sm" variant="ghost" onClick={() => setError(null)}>
@@ -314,7 +314,7 @@ function SecretDrawer({ editing, onClose, onSaved }: { editing: Editing; onClose
         </Field>
         <Checkbox label="Show while typing" checked={show} onChange={(e) => setShow(e.target.checked)} />
         {error && (
-          <Alert tone="bad" title="Not saved">
+          <Alert tone="bad" title={rotate ? 'Couldn’t replace the secret’s value' : 'Couldn’t store the secret'}>
             {error}
           </Alert>
         )}

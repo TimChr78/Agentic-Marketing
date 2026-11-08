@@ -5,7 +5,19 @@ import { useSession } from '../../../app/session';
 import { useApi, useKeyedApi } from '../../../app/useApi';
 import { ANALYTICS_MEASURES, METRIC_UNIT_LABEL, measureDescription, measureLabel, measureUnit } from '../../../lib/labels';
 import { analyticsParams } from '../../../pages/insights/analyticsParams';
-import { Alert, Button, Checkbox, Field, Input, LineChart, PageHeader, Select, Skeleton } from '../../../ui';
+import {
+  Alert,
+  Button,
+  ChartSkeleton,
+  Checkbox,
+  Field,
+  Input,
+  KpiSkeleton,
+  LineChart,
+  ListSkeleton,
+  PageHeader,
+  Select,
+} from '../../../ui';
 import type { ChartDataState, ChartSeriesInput } from '../../../ui/charts';
 import { pageWidth } from '../../../ui/layout';
 import { getWorkspaceTimeZone } from '../../../ui/time';
@@ -142,7 +154,7 @@ function Tile({
   tone?: 'good' | 'bad' | 'neutral';
 }) {
   return (
-    <section className="flex min-h-[180px] flex-col rounded-lg bg-surface p-5">
+    <section className="flex min-h-[204px] flex-col rounded-lg bg-surface p-5">
       <p className="text-[13px] leading-5 font-medium text-fg-2">{label}</p>
       <div className="mt-2 flex items-baseline gap-1">
         <span className="num text-[28px] leading-9 font-semibold tracking-[-0.02em] text-fg md:text-[32px] md:leading-10">{value}</span>
@@ -166,26 +178,23 @@ function Tile({
   );
 }
 
-function SkeletonBlock({ label }: { label: string }) {
+const LOADING_TILES: Record<Selection['preset'], string[]> = {
+  newsletter: ['Delivered people', 'Tracked click rate', 'Unsubscribed people', 'Open rate · tracked'],
+  journey: ['Entered', 'Goal reached', 'Goal/entry ratio'],
+  deliverability: ['Bounce rate', 'Complaint rate', 'Sent people'],
+  conversion: ['Conversions', 'Revenue'],
+};
+
+function SkeletonBlock({ label, preset }: { label: string; preset: Selection['preset'] }) {
   return (
-    <div role="status" aria-busy="true" aria-label={label} className="space-y-4">
+    <div className="space-y-6">
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        {[0, 1, 2, 3].map((i) => (
-          <div key={i} className="min-h-[180px] rounded-lg bg-surface p-5">
-            <Skeleton className="h-3 w-2/5" />
-            <Skeleton className="mt-3 h-8 w-1/2" />
-            <Skeleton className="mt-3 h-3 w-3/5" />
-          </div>
+        {LOADING_TILES[preset].map((name) => (
+          <KpiSkeleton key={name} label={name} />
         ))}
       </div>
-      <div className="rounded-lg bg-surface p-5">
-        <Skeleton className="h-3 w-1/3" />
-        <Skeleton className="mt-4 h-[200px] w-full" />
-      </div>
-      <div className="rounded-lg bg-surface p-5">
-        <Skeleton className="h-3 w-1/4" />
-        <Skeleton className="mt-3 h-[120px] w-full" />
-      </div>
+      <ChartSkeleton label={`${label} chart`} />
+      <ListSkeleton label={`${label} table`} rows={5} columns={4} />
     </div>
   );
 }
@@ -715,10 +724,11 @@ export default function AnalyticsPerformance() {
   const renderTable = () => {
     if (loading) {
       return (
-        <div className="rounded-lg bg-surface p-5" role="status" aria-busy="true" aria-label="Loading result table">
-          <Skeleton className="h-3 w-1/4" />
-          <Skeleton className="mt-3 h-[160px] w-full" />
-        </div>
+        <ListSkeleton
+          label="Loading the result table"
+          rows={Math.max(1, series.days.length)}
+          columns={resolvedMeasures.length * (compare ? 2 : 1) + (conversionSelected ? 1 : 0) + 1}
+        />
       );
     }
     if (currentSeries.error && !currentSeries.data) {
@@ -980,7 +990,7 @@ export default function AnalyticsPerformance() {
             </Alert>
           )}
           {failed.length > 0 && !anySuccess && !loading && (
-            <Alert tone="bad" className="mt-4" title="Could not load analytics" onRetry={retryFailed}>
+            <Alert tone="bad" className="mt-4" title="Couldn’t load analytics" onRetry={retryFailed}>
               No old values are shown as current.
             </Alert>
           )}
@@ -1002,7 +1012,7 @@ export default function AnalyticsPerformance() {
 
           {loading ? (
             <div className="mt-4">
-              <SkeletonBlock label="Loading analytics" />
+              <SkeletonBlock label="Loading analytics" preset={selection.preset} />
             </div>
           ) : isEmpty ? (
             <Alert tone="info" className="mt-4" title="No recorded activity in this period">

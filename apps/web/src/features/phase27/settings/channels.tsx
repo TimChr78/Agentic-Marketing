@@ -1,6 +1,7 @@
 import { MoreHorizontal, Pencil, Plus } from 'lucide-react';
 import type { ReactNode } from 'react';
-import { Alert, Button, EmptyState, LoadingBlock, Menu, type MenuItem, StatusPill, Switch, Table, Td, THead, Th, Tr } from '../../../ui';
+import { Alert, Button, EmptyState, Menu, type MenuItem, StatusPill, Switch, Table, Td, THead, Th, Tr } from '../../../ui';
+import { SettingsRowsSkeleton } from '../../phase28/settings-insights/SettingsPanelSkeleton';
 
 /**
  * One configured provider, described in the words a compact channel row needs. The page that owns
@@ -109,7 +110,7 @@ export function ChannelTable({ channels }: { channels: ProviderChannel[] }) {
           {channel.loading && channel.rows.length === 0 ? (
             <tr>
               <Td colSpan={4}>
-                <LoadingBlock lines={2} label={`Loading ${channel.label.toLowerCase()} providers`} />
+                <SettingsRowsSkeleton label={`Loading ${channel.label.toLowerCase()} providers`} />
               </Td>
             </tr>
           ) : channel.error ? (
@@ -183,7 +184,7 @@ export function ChannelCards({ channels }: { channels: ProviderChannel[] }) {
             )}
           </div>
           {channel.loading && channel.rows.length === 0 ? (
-            <LoadingBlock lines={2} label={`Loading ${channel.label.toLowerCase()} providers`} />
+            <SettingsRowsSkeleton label={`Loading ${channel.label.toLowerCase()} providers`} />
           ) : channel.error ? (
             <Alert tone="bad" title={`Couldn't load ${channel.label.toLowerCase()} providers`} onRetry={channel.onRetry}>
               {channel.error}

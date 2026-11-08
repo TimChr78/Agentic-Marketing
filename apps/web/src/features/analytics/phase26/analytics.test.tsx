@@ -653,7 +653,7 @@ describe('data states (#506)', () => {
     let resolve!: (value: unknown) => void;
     h.deferred = { promise: new Promise((done) => (resolve = done)), resolve: (value) => resolve(value) };
     renderAt();
-    expect(await screen.findByLabelText('Loading analytics')).toBeTruthy();
+    expect(await screen.findByLabelText('Loading analytics table')).toBeTruthy();
     expect(screen.getByLabelText('Period')).toBeTruthy();
     expect(screen.getByLabelText('Question')).toBeTruthy();
     resolve(resultFor({ from: CURRENT_FROM, to: CURRENT_TO, dimensions: ['day'], measures: ['email.delivered'] }));
@@ -707,12 +707,12 @@ describe('data states (#506)', () => {
   it('shows no old values as current when every read fails, and retries', async () => {
     h.fail = () => 'server unavailable';
     renderAt();
-    await waitFor(() => expect(screen.getByText('Could not load analytics')).toBeTruthy());
+    await waitFor(() => expect(screen.getByText('Couldn’t load analytics')).toBeTruthy());
     expect(screen.queryByText('Delivered people')).toBeNull();
 
     h.fail = null;
     h.calls.length = 0;
-    const alert = screen.getByText('Could not load analytics').closest('[role="alert"]') as HTMLElement;
+    const alert = screen.getByText('Couldn’t load analytics').closest('[role="alert"]') as HTMLElement;
     fireEvent.click(within(alert).getByRole('button', { name: 'Retry' }));
     await waitForReads(4);
   });
@@ -726,7 +726,7 @@ describe('data states (#506)', () => {
     choose('Question', 'journey');
     await waitForReads(8);
 
-    expect(screen.getByLabelText('Loading analytics')).toBeTruthy();
+    expect(screen.getByLabelText('Loading analytics table')).toBeTruthy();
     expect(screen.queryByText('Delivered people')).toBeNull();
     expect(screen.queryByText('Delivered over time')).toBeNull();
     expect(screen.queryByText('Result table')).toBeNull();
@@ -742,7 +742,7 @@ describe('data states (#506)', () => {
     choose('Question', 'journey');
     await waitForReads(8);
 
-    expect(screen.getByLabelText('Loading analytics')).toBeTruthy();
+    expect(screen.getByLabelText('Loading analytics table')).toBeTruthy();
     // 800 is the new totals result; it must wait for the matching series rather than join old rows.
     expect(screen.queryByText('800')).toBeNull();
     expect(screen.queryByText('Delivered over time')).toBeNull();

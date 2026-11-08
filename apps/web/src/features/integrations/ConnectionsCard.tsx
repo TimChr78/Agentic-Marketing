@@ -14,7 +14,7 @@ import {
   FieldGroup,
   fieldErrors,
   Input,
-  LoadingBlock,
+  ListSkeleton,
   Menu,
   Modal,
   Select,
@@ -265,7 +265,7 @@ function ConnectionDrawer({
         )}
 
         {error && (
-          <Alert tone="bad" title={connection ? 'Not saved' : 'Not added'}>
+          <Alert tone="bad" title={connection ? 'Couldn’t save the connection' : 'Couldn’t add the connection'}>
             {error}
           </Alert>
         )}
@@ -301,7 +301,7 @@ export function ConnectionsCard() {
       window.open(url, '_blank', 'noopener,noreferrer');
       toast.info(`Opened the authorization page for “${c.name}”. Finish there, then refresh this list.`);
     } catch (e) {
-      toast.error(errText(e));
+      toast.error(`Couldn’t open the authorization page for “${c.name}”: ${errText(e)}`);
     } finally {
       setBusy(null);
     }
@@ -326,7 +326,7 @@ export function ConnectionsCard() {
       toast.success(`Deleted “${c.name}”.`);
       await list.reload();
     } catch (e) {
-      toast.error(errText(e));
+      toast.error(`Couldn’t delete “${c.name}”: ${errText(e)}`);
     } finally {
       setBusy(null);
     }
@@ -358,7 +358,7 @@ export function ConnectionsCard() {
           )}
         </div>
         {catalog.loading || list.loading ? (
-          <LoadingBlock lines={4} />
+          <ListSkeleton label="Loading connections" columns={4} />
         ) : (list.error ?? catalog.error) ? (
           <div className="p-3">
             <Alert tone="bad" title="Couldn't load connections" onRetry={reload}>
