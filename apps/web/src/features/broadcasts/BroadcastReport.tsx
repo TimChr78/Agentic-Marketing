@@ -1,5 +1,5 @@
 import { lazy, Suspense } from 'react';
-import { LoadingBlock } from '../../ui';
+import { DetailSkeleton } from '../../ui';
 
 // The report entry point (#500). The tab's active/authorized shell is lazy so this module stays
 // importable for its pure four-tile contract helper without loading the session and theme
@@ -61,13 +61,7 @@ export function reportViewOf(values: Record<LegacyMeasure, number | null>, suppr
 export function BroadcastReport({ artifactId, active }: { artifactId: string; active: boolean }) {
   if (!active) return null;
   return (
-    <Suspense
-      fallback={
-        <div aria-busy="true">
-          <LoadingBlock lines={5} label="Loading report" />
-        </div>
-      }
-    >
+    <Suspense fallback={<DetailSkeleton label="Loading the broadcast report" />}>
       <ReportEntry artifactId={artifactId} />
     </Suspense>
   );

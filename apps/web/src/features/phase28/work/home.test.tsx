@@ -1,5 +1,5 @@
-import { render, screen } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { cleanup, render, screen } from '@testing-library/react';
+import { afterEach, describe, expect, it } from 'vitest';
 import { HomeAttention } from '../../home/HomeAttention';
 import { HomeKpis } from '../../home/HomeKpis';
 import { HomeRunning } from '../../home/HomeRunning';
@@ -9,6 +9,9 @@ import type { HomeData } from '../../home/useHomeData';
 // Phase 28 (#556) W acceptance: every loaded-empty Home block names its next action, and the
 // loading slots use the shared object-specific skeleton labels. Rendering the blocks directly
 // keeps this a presentation check: no transport, no fixture server.
+
+// Unmount after each test: the skeleton's reveal timer must not fire after the environment is gone.
+afterEach(cleanup);
 
 const AS_OF = '2026-11-08T10:00:00.000Z';
 const CLOCK = homeClock(new Date(AS_OF), 'UTC');

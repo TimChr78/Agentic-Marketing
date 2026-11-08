@@ -264,7 +264,7 @@ export function ExperienceEditor({ content, onChange, readOnly, errors, warnings
 
       <FieldGroup
         legend="Who sees it"
-        hint="Traits, segments and session conditions need web_personalization consent; page, referrer, UTM and device do not."
+        hint="Traits, segments and session conditions need Personalization consent; page, referrer, UTM and device do not."
       >
         <Field label="Targeting" error={errors.targeting}>
           <Select
