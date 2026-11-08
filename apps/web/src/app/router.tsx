@@ -14,21 +14,22 @@ export function getRouterBasePath() {
   return basePath;
 }
 
+const NORMALIZE_ORIGIN = 'http://router.invalid';
+
 /**
- * Resolves `.`/`..` segments and collapses duplicate slashes without decoding percent escapes.
- * `..` above the root is clamped at the root, so normalization itself can never escape the base.
+ * Normalizes with the same parser the browser uses, so `.`/`..`, percent-encoded dot segments
+ * (`%2e`, `%2E`, `.%2e`), backslashes and duplicate slashes resolve exactly as a native link would.
+ * The probe origin is discarded; only its pathname is kept, so `..` clamps at the root and can never
+ * leave the mounted base.
  */
 function normalizePath(path: string): string {
-  const out: string[] = [];
-  for (const segment of path.split('/')) {
-    if (!segment || segment === '.') continue;
-    if (segment === '..') {
-      out.pop();
-      continue;
-    }
-    out.push(segment);
+  const slashed = path.replace(/\\/g, '/').replace(/\/{2,}/g, '/');
+  try {
+    const { pathname } = new URL(slashed.startsWith('/') ? slashed : `/${slashed}`, NORMALIZE_ORIGIN);
+    return pathname.length > 1 ? pathname.replace(/\/{2,}/g, '/').replace(/\/+$/, '') : '/';
+  } catch {
+    return '/';
   }
-  return `/${out.join('/')}`;
 }
 
 /** Split a destination into its path and the query/hash suffix it keeps verbatim. */
@@ -51,8 +52,13 @@ export function routerPath(pathname: string): string {
  * names the base all stay inside it.
  */
 export function routerHref(to: string): string {
-  if (!to.startsWith('/')) return to;
-  const [path, suffix] = splitHref(to);
+  if (!to) return to;
+  // Absolute URLs and protocol-relative URLs are not ours to rewrite; the browser owns them.
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(to) || to.startsWith('//')) return to;
+  // A leading backslash is a path separator to the URL parser; treat it like `/`.
+  const target = to.startsWith('\\') ? `/${to.slice(1)}` : to;
+  if (!target.startsWith('/')) return to;
+  const [path, suffix] = splitHref(target);
   let internal = path;
   if (basePath) {
     if (internal === basePath) internal = '/';

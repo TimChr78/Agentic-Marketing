@@ -55,7 +55,7 @@ export interface ProviderChannel {
 function RowActions({ row }: { row: ChannelRow }) {
   return (
     <div className="flex items-center justify-end gap-2">
-      <Switch checked={row.enabled} disabled={row.busy} onChange={row.onToggle} label={`Enable ${row.name}`} hideLabel />
+      <Switch checked={row.enabled} disabled={row.busy} onChange={row.onToggle} mutation label={`Enable ${row.name}`} hideLabel />
       <Button size="sm" icon={<Pencil size={13} />} onClick={row.onEdit}>
         Edit
       </Button>

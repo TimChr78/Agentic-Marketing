@@ -115,7 +115,10 @@ export function AgentControls({
     { label: 'Edit', icon: <Pencil size={14} />, onSelect: () => setEditing(true) },
     ...(agent.status === 'revoked'
       ? []
-      : ['separator' as const, { label: 'Revoke', icon: <Ban size={14} />, destructive: true, onSelect: () => void revoke() }]),
+      : [
+          'separator' as const,
+          { label: 'Revoke', icon: <Ban size={14} />, destructive: true, mutation: true, onSelect: () => void revoke() },
+        ]),
   ];
 
   return (

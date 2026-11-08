@@ -98,6 +98,22 @@ describe('demo mutation controls are visibly disabled (#530)', () => {
     expect(create.getAttribute('title')).toBe(DEMO_RESTRICTION_REASON);
   });
 
+  it('Integrations: the Hermes webhook switch and Delete action are disabled', async () => {
+    await renderDemoAt('/demo/settings/integrations');
+    fireEvent.click(await screen.findByRole('tab', { name: 'Webhooks' }));
+
+    const toggle = (await screen.findByRole('switch', { name: 'Enable Hermes' })) as HTMLButtonElement;
+    expect(toggle.disabled).toBe(true);
+    expect(toggle.getAttribute('title')).toBe(DEMO_RESTRICTION_REASON);
+    expect(toggle.getAttribute('data-demo-blocked')).toBe('true');
+
+    fireEvent.click(screen.getByRole('button', { name: 'More for Hermes' }));
+    const remove = screen.getByRole('menuitem', { name: 'Delete' });
+    expect(remove.getAttribute('aria-disabled')).toBe('true');
+    expect(remove.getAttribute('title')).toBe(DEMO_RESTRICTION_REASON);
+    expect(remove.getAttribute('data-demo-blocked')).toBe('true');
+  });
+
   it('leaves the same controls enabled outside the demo', async () => {
     // The shared primitive is the single switch: the default context keeps every page unchanged.
     const { Button } = await import('../../../ui');

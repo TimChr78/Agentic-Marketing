@@ -399,6 +399,7 @@ export function WebhooksCard() {
                           <Switch
                             checked={e.enabled}
                             onChange={() => void toggle(e)}
+                            mutation
                             label={`Enable ${e.name}`}
                             hideLabel
                             disabled={busy === e.id}
@@ -426,6 +427,7 @@ export function WebhooksCard() {
                                 label: 'Delete',
                                 icon: <Trash2 size={14} />,
                                 destructive: true,
+                                mutation: true,
                                 disabled: busy === e.id,
                                 onSelect: () => void remove(e),
                               },

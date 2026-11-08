@@ -221,6 +221,7 @@ export function CopilotDrawer({ open, onClose }: { open: boolean; onClose: () =>
                   <span className="shrink-0 text-[11px] text-muted">{timeAgo(c.updatedAt)}</span>
                   <IconButton
                     label={`Delete conversation ${c.title}`}
+                    mutation
                     icon={<Trash2 size={14} />}
                     variant="danger"
                     size="sm"

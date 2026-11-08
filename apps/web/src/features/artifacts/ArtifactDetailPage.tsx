@@ -521,6 +521,7 @@ export function ArtifactDetailPage({
                 label: `Discard draft (back to live v${a.publishedVersion})`,
                 icon: <Undo2 />,
                 destructive: true,
+                mutation: true,
                 onSelect: () => {
                   setDiscardError(null);
                   setDiscardOpen(true);

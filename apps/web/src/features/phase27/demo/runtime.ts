@@ -1,6 +1,6 @@
 import { getWorkspaceId, setWorkspaceId } from '../../../app/api';
 import { setRouterBasePath } from '../../../app/router';
-import { setWorkspaceTimeZone } from '../../../ui/time';
+import { getWorkspaceTimeZone, setWorkspaceTimeZone } from '../../../ui/time';
 import { DEMO_TIME_ZONE, DEMO_WORKSPACE_ID } from '../integration/demo/fixtures';
 import { installDemoStreamTransport, installDemoTransport } from '../integration/demo/transport';
 import { DEMO_BASE_PATH, installDemoHistory } from './entry';
@@ -23,6 +23,7 @@ function install(): () => void {
   const uninstallStream = installDemoStreamTransport();
   const uninstallHistory = installDemoHistory();
   setRouterBasePath(import.meta.env.MODE === 'single' ? '' : DEMO_BASE_PATH);
+  const previousZone = getWorkspaceTimeZone();
   setWorkspaceTimeZone(DEMO_TIME_ZONE);
   const previous = getWorkspaceId();
   // Keyed caches act in the demo workspace, in memory only: the stored workspace of a signed-in
@@ -33,6 +34,7 @@ function install(): () => void {
     uninstallStream();
     uninstallHistory();
     setWorkspaceId(previous, { persist: false });
+    setWorkspaceTimeZone(previousZone);
     setRouterBasePath('');
   };
 }
