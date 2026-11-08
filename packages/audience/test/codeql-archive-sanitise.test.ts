@@ -1,9 +1,11 @@
 import { readFileSync } from 'node:fs';
+import type { Brand } from '@agentic-marketing/artifacts';
+import { resolveBrand } from '@agentic-marketing/artifacts';
 import { renderTemplate } from '@agentic-marketing/email';
-import { type DefaultTreeAdapterTypes, parseFragment } from 'parse5';
+import { type DefaultTreeAdapterTypes, parse, parseFragment } from 'parse5';
 import { describe, expect, it } from 'vitest';
 import { expectLinear } from '../../../test-support/linear';
-import { activeUrl, emailParts, sanitiseEmailBody, scanEmailBody } from '../src/archive';
+import { activeUrl, emailParts, renderWebVersion, sanitiseEmailBody, scanEmailBody } from '../src/archive';
 
 // CodeQL alerts 4, 3, 2 and 1 (js/bad-tag-filter, js/incomplete-multi-character-sanitization):
 // the public archive renders e-mail HTML behind a strict CSP, and `emailParts` is the defence in
@@ -506,5 +508,60 @@ describe('archive sanitising: the final page, not only the body (Sol re-check 3)
         5_000,
       );
     }
+  });
+});
+
+describe('archive sanitising: the real rendered page (Sol re-check 4)', () => {
+  const brand = resolveBrand({ name: 'Northstar' } as unknown as Brand);
+
+  // Walk the whole document a browser builds from the real web-version page, head included.
+  const activeInPage = (page: string): string[] => {
+    const found: string[] = [];
+    const stack: DefaultTreeAdapterTypes.ParentNode[] = [parse(page, { scriptingEnabled: true })];
+    while (stack.length > 0) {
+      const parent = stack.pop()!;
+      for (const node of parent.childNodes) {
+        if (!('tagName' in node)) continue;
+        const element = node as DefaultTreeAdapterTypes.Element;
+        found.push(
+          ...activeContent(
+            `<${element.tagName} ${element.attrs.map((a) => `${a.name}="${a.value.replace(/"/g, '&quot;')}"`).join(' ')}></${element.tagName}>`,
+          ),
+        );
+        stack.push(element);
+        if (element.tagName === 'template') stack.push((element as DefaultTreeAdapterTypes.Template).content);
+      }
+    }
+    return found;
+  };
+
+  const payloads = [
+    '<me<img width=1 height=1>ta http-equiv=refresh content="0;url=https://example.org/">',
+    '<meta http-equiv=refresh content="0;url=https://example.org/" x">',
+    '<p title="<meta http-equiv=refresh content=0;url=https://example.org/>',
+    '<me<script></script>ta http-equiv=refresh content="0;url=https://example.org/">',
+    '<noscript><p title="</noscript><meta http-equiv=refresh content=0;url=https://example.org/>">',
+    '<img src=x x" onerror=alert(1)>',
+    '</div></main></body></html><meta http-equiv=refresh content=0>',
+    '<frameset><frame src="javascript:alert(1)"></frameset>',
+    '<head><base href="javascript:alert(1)//"></head>',
+    '<svg><style><img src=x onerror=alert(1)></style></svg>',
+  ];
+
+  it.each(payloads)('leaves nothing active in the page for %s', (payload) => {
+    const page = renderWebVersion(brand, 'Issue', null, `<html><body>${payload}</body></html>`);
+    expect(activeInPage(page)).toEqual([]);
+  });
+
+  it('keeps styles that try to close the page style element inside it', () => {
+    const email =
+      '<html><head><style></style x><meta http-equiv=refresh content="0;url=https://example.org/"></style></head><body><p>ok</p></body></html>';
+    expect(activeInPage(renderWebVersion(brand, 'Issue', null, email))).toEqual([]);
+  });
+
+  it('renders a benign issue with nothing active and its content intact', () => {
+    const page = renderWebVersion(brand, 'Issue', null, '<html><body><p>Hello <a href="https://example.com">there</a></p></body></html>');
+    expect(activeInPage(page)).toEqual([]);
+    expect(page).toContain('<p>Hello <a href="https://example.com">there</a></p>');
   });
 });
