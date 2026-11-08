@@ -3,6 +3,7 @@ import { usePageTab } from '../../app/useTab';
 import { ArtifactListPage } from '../../features/artifacts/ArtifactListPage';
 import { Alert, Tabs } from '../../ui';
 import { pageWidth } from '../../ui/layout';
+import RecipesPage from '../build/RecipesPage';
 import BlocksPage from './BlocksPage';
 
 const STARTER = `<mjml>
@@ -34,18 +35,22 @@ export function TemplateList() {
   );
 }
 
-const TEMPLATE_TABS = ['templates', 'blocks'] as const;
+const TEMPLATE_TABS = ['templates', 'blocks', 'starters'] as const;
 type TemplateTab = (typeof TEMPLATE_TABS)[number];
 
 const TEMPLATE_TAB_ITEMS: { key: TemplateTab; label: string }[] = [
   { key: 'templates', label: 'Templates' },
   { key: 'blocks', label: 'Blocks' },
+  { key: 'starters', label: 'Starters' },
 ];
 
-/** Templates (#446): the template gallery and the existing block library as named tabs. */
+/**
+ * Templates (#446, #524): the template gallery, the existing block library and the existing recipe
+ * gallery as named tabs. Starters mounts the embedded RecipesPage; it never auto-installs.
+ */
 export default function TemplatesPage() {
   const { active, invalid, select } = usePageTab({ keys: TEMPLATE_TABS, fallback: 'templates' });
-  useCrumbs([{ label: active === 'blocks' ? 'Blocks' : 'E-mail templates' }]);
+  useCrumbs([{ label: active === 'blocks' ? 'Blocks' : active === 'starters' ? 'Starters' : 'E-mail templates' }]);
 
   return (
     <div className={pageWidth('default')}>
@@ -55,7 +60,7 @@ export default function TemplatesPage() {
         </Alert>
       )}
       <Tabs items={TEMPLATE_TAB_ITEMS} value={active} onChange={select} label="Templates">
-        {active === 'blocks' ? <BlocksPage /> : <TemplateList />}
+        {active === 'blocks' ? <BlocksPage /> : active === 'starters' ? <RecipesPage embedded /> : <TemplateList />}
       </Tabs>
     </div>
   );

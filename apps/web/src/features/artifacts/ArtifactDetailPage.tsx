@@ -48,6 +48,7 @@ import { ExperienceEditor } from './ExperienceEditor';
 import { JsonEditor } from './JsonEditor';
 import { MandateEditor } from './MandateEditor';
 import { PurposesEditor } from './PurposesEditor';
+import { invalidatePickerArtifact } from './pickerIndex';
 import { VersionsPanel } from './VersionsPanel';
 
 export type Artifact = Out<'artifacts.get'>;
@@ -311,6 +312,8 @@ export function ArtifactDetailPage({
         setWarnings(r.warnings);
         setLastSave(r.layoutOnly ? 'layout' : 'content');
         invalidateArtifact(artifactId);
+        // A new version changes the row a picker shows; only this artifact's exact index keys drop.
+        invalidatePickerArtifact(workspace.id, artifactId);
         await art.reload();
         if (!saveResponseIsCurrent(syncRef.current, started.seq, activeIdRef.current)) return false;
         setSavedAt(Date.now());
@@ -339,7 +342,7 @@ export function ArtifactDetailPage({
         setSaving(false);
       }
     },
-    [a, art, toast],
+    [a, art, toast, workspace.id],
   );
 
   // Autosave: a moment after the last change; retried on the next change after an error, but never
@@ -472,6 +475,7 @@ export function ArtifactDetailPage({
       setDraft(undefined);
       syncRef.current = switchArtifact(syncRef.current, a.id);
       invalidateArtifact(a.id);
+      invalidatePickerArtifact(workspace.id, a.id);
       await art.reload();
     } catch (e) {
       setDiscardError(errText(e));
@@ -643,6 +647,7 @@ export function ArtifactDetailPage({
           onClose={() => setPublishing(false)}
           onDone={() => {
             invalidateArtifact(a.id);
+            invalidatePickerArtifact(workspace.id, a.id);
             void art.reload();
             void pendingReq.reload();
           }}
