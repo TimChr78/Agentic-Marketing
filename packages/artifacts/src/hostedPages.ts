@@ -148,7 +148,7 @@ body{min-height:100vh;padding:32px 16px;background:var(--background);color:var(-
 .logo{display:block;max-width:100%;width:auto;max-height:96px}
 .site-name{margin:0;font-size:1rem;font-weight:600;color:var(--text);overflow-wrap:anywhere}
 h1{margin:0 0 .5rem;font-size:clamp(1.5rem,4.5vw,2rem);line-height:1.25;letter-spacing:-.01em;overflow-wrap:anywhere}
-p{margin:0 0 1.25rem;color:var(--muted);white-space:pre-line;overflow-wrap:anywhere}
+p{margin:0 0 1.25rem;color:var(--text);white-space:pre-line;overflow-wrap:anywhere}
 p:last-child{margin-bottom:0}
 form{margin:1.5rem 0 0}
 button{font:inherit;font-weight:600;min-height:44px;padding:.7rem 1.25rem;border:1px solid var(--accent);border-radius:var(--radius);background:var(--accent);color:var(--accent-text);cursor:pointer}

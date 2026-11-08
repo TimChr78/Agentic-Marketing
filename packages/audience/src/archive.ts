@@ -272,10 +272,10 @@ a:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius
 .site-name{margin:0;font-size:1rem;font-weight:600;color:var(--text);overflow-wrap:anywhere}
 h1{margin:0 0 .5rem;font-size:clamp(1.5rem,4.5vw,2rem);line-height:1.25;letter-spacing:-.01em;overflow-wrap:anywhere}
 h2{margin:0;font-size:1.1rem;line-height:1.35;overflow-wrap:anywhere}
-p{margin:0 0 1rem;color:var(--muted);overflow-wrap:anywhere}
+p{margin:0 0 1rem;color:var(--text);overflow-wrap:anywhere}
 p:last-child{margin-bottom:0}
 .meta{margin:0 0 .75rem;font-size:.85rem;color:var(--muted)}
-.lead{font-size:1.05rem;margin:0 0 2rem}
+.lead{font-size:1.05rem;margin:0 0 2rem;color:var(--text)}
 .issues{list-style:none;margin:0;padding:0}
 .issues li{padding:1.5rem 0;border-top:1px solid var(--border)}
 .issues li:first-child{border-top:0;padding-top:0}
