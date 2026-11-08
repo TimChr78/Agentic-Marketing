@@ -132,6 +132,9 @@ describe('a request is viewed only after its rendered Review succeeds (#498 revi
     expect(await screen.findByRole('status', { name: 'Rendering the e-mail' })).toBeTruthy();
     expect(wasViewed('usr_reviewer', detail.id, detail.version)).toBe(false);
 
+    // The status can render before the held preview request starts; resolve only once it has, or
+    // a no-op resolve leaves the preview pending and the version never viewed.
+    await waitFor(() => expect(h.resolvePreview).toBeTypeOf('function'));
     await act(async () => {
       h.resolvePreview?.(preview());
     });
