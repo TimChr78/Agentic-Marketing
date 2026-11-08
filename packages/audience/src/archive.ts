@@ -15,6 +15,7 @@ import { profileForMessage } from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { and, asc, eq, sql } from 'drizzle-orm';
 import { type Context, Hono } from 'hono';
+import { type DefaultTreeAdapterTypes, defaultTreeAdapter, html, parseFragment, serialize } from 'parse5';
 import { z } from 'zod';
 
 // The public newsletter archive and the per-recipient web version (#100), served on the links
@@ -334,7 +335,7 @@ function urlScheme(value: string): string {
 }
 
 /** `javascript:`, `vbscript:` and non-image `data:` URLs never reach the archive page. */
-function activeUrl(value: string): boolean {
+export function activeUrl(value: string): boolean {
   const scheme = urlScheme(value);
   if (scheme.startsWith('javascript:') || scheme.startsWith('vbscript:')) return true;
   return scheme.startsWith('data:') && !scheme.startsWith('data:image/');
@@ -482,7 +483,7 @@ function commentEnd(body: string, from: number): number {
  * One linear, quote-aware pass: text is copied unchanged, tags are parsed once, dangerous
  * elements and attributes are dropped, and a tag with nothing to remove keeps its exact bytes.
  */
-function sanitiseEmailBody(body: string): string {
+export function scanEmailBody(body: string): string {
   let out = '';
   let i = 0;
   while (i < body.length) {
@@ -559,6 +560,132 @@ function sanitiseEmailBody(body: string): string {
     i = tag.end;
   }
   return out;
+}
+
+const EMAIL_PARSE_OPTIONS = { scriptingEnabled: true } as const;
+// A body context, matching how the archive page embeds the fragment inside <main>. The whole
+// input sits in one wrapper element: parse5's fragment adoption detaches root children one by
+// one, which is quadratic when the input is thousands of sibling comments, while one wrapper
+// is a single detach. The wrapper is removed again before serialization.
+const EMAIL_BODY_CONTEXT = defaultTreeAdapter.createElement('body', html.NS.HTML, []);
+
+function parseEmailFragment(html: string): {
+  fragment: DefaultTreeAdapterTypes.DocumentFragment;
+  wrapper: DefaultTreeAdapterTypes.Element | null;
+} {
+  const fragment = parseFragment(EMAIL_BODY_CONTEXT, `<div>${html}</div>`, EMAIL_PARSE_OPTIONS);
+  const first = fragment.childNodes[0];
+  const wrapper =
+    first && 'tagName' in first && (first as DefaultTreeAdapterTypes.Element).tagName === 'div'
+      ? (first as DefaultTreeAdapterTypes.Element)
+      : null;
+  return { fragment, wrapper };
+}
+
+/** Drops the parse-only wrapper, keeping its children and anything an early `</div>` moved out. */
+function unwrapEmailFragment(
+  fragment: DefaultTreeAdapterTypes.DocumentFragment,
+  wrapper: DefaultTreeAdapterTypes.Element | null,
+): DefaultTreeAdapterTypes.DocumentFragment {
+  if (!wrapper) return fragment;
+  const out = defaultTreeAdapter.createDocumentFragment();
+  for (const node of fragment.childNodes) {
+    if (node === wrapper) {
+      for (const child of wrapper.childNodes) {
+        child.parentNode = out;
+        out.childNodes.push(child);
+      }
+    } else {
+      node.parentNode = out;
+      out.childNodes.push(node);
+    }
+  }
+  return out;
+}
+
+function isActiveElement(element: DefaultTreeAdapterTypes.Element): boolean {
+  const name = element.tagName.toLowerCase();
+  if (DANGEROUS_ELEMENTS.has(name)) return true;
+  return (
+    name === 'meta' &&
+    element.attrs.some((attribute) => attribute.name.toLowerCase() === 'http-equiv' && attribute.value.trim().toLowerCase() === 'refresh')
+  );
+}
+
+function dropsParsedAttribute(attribute: { name: string; value: string }): boolean {
+  const name = attribute.name.toLowerCase();
+  if (name.startsWith('on')) return true;
+  return URL_ATTRIBUTES.has(name) && activeUrl(attribute.value);
+}
+
+/**
+ * Walks a parse5 fragment with the same active-content rules as the scanner, including the
+ * content of `<template>`. Checking reports whether anything is active; cleaning rebuilds each
+ * child list once, so removing many nodes stays linear. Iterative, so a deeply nested document
+ * cannot exhaust the call stack.
+ */
+function sweepFragment(root: DefaultTreeAdapterTypes.ParentNode, clean: boolean): boolean {
+  let active = false;
+  const stack: DefaultTreeAdapterTypes.ParentNode[] = [root];
+  while (stack.length > 0) {
+    const parent = stack.pop()!;
+    if (!clean) {
+      for (const node of parent.childNodes) {
+        if (!('tagName' in node)) continue;
+        const element = node as DefaultTreeAdapterTypes.Element;
+        if (isActiveElement(element)) {
+          active = true;
+          continue;
+        }
+        stack.push(element);
+        if (element.nodeName === 'template') stack.push((element as DefaultTreeAdapterTypes.Template).content);
+      }
+      continue;
+    }
+    const kept: DefaultTreeAdapterTypes.ChildNode[] = [];
+    for (const node of parent.childNodes) {
+      if (!('tagName' in node)) {
+        kept.push(node);
+        continue;
+      }
+      const element = node as DefaultTreeAdapterTypes.Element;
+      if (isActiveElement(element)) {
+        active = true;
+        continue;
+      }
+      element.attrs = element.attrs.filter((attribute) => !dropsParsedAttribute(attribute));
+      kept.push(element);
+      stack.push(element);
+      if (element.nodeName === 'template') stack.push((element as DefaultTreeAdapterTypes.Template).content);
+    }
+    parent.childNodes = kept;
+  }
+  return active;
+}
+
+function containsActiveContent(html: string): boolean {
+  return sweepFragment(parseEmailFragment(html).fragment, false);
+}
+
+function cleanActiveContent(html: string): string {
+  const { fragment, wrapper } = parseEmailFragment(html);
+  sweepFragment(fragment, true);
+  return serialize(unwrapEmailFragment(fragment, wrapper));
+}
+
+/**
+ * The scanner above is fast and keeps benign bytes, but it is a hand-written HTML parser. A
+ * spec-compliant parse is the final judge: if the scanner's output still contains active
+ * content (a stray quote, an unterminated opener, a script splitting a tag name, `</noscript>`),
+ * remove it from the parse5 tree, serialize, and check the serialization again. If one cleaning
+ * round cannot make it inert (mutation XSS), escape the whole body and fail closed.
+ */
+export function sanitiseEmailBody(body: string, isActive: (html: string) => boolean = containsActiveContent): string {
+  const scanned = scanEmailBody(body);
+  if (!isActive(scanned)) return scanned;
+  const cleaned = cleanActiveContent(scanned);
+  if (!isActive(cleaned)) return cleaned;
+  return escapeHtml(body);
 }
 
 /** Splits MJML's complete document into the parts that can sit inside our page. */

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { expectLinear } from '../../../test-support/linear';
 import { plain, slugify } from '../src/archive';
 
 // CodeQL alerts 16 and 9 (js/polynomial-redos): the slug trim and the tag-stripping regex both
@@ -6,27 +7,19 @@ import { plain, slugify } from '../src/archive';
 // templates and briefs, so both must be linear.
 const HOSTILE = 100_000;
 
-const timed = <T>(run: () => T): { value: T; ms: number } => {
-  const started = performance.now();
-  const value = run();
-  return { value, ms: performance.now() - started };
-};
-
 describe('archive helpers are linear (js/polynomial-redos)', () => {
-  it('slugifies a 100,000-character dash run well under 100 ms', () => {
-    const { value, ms } = timed(() => slugify(`${'-'.repeat(HOSTILE)}Signal${'-'.repeat(HOSTILE)}`));
+  it('slugifies a long dash run in linear time', () => {
+    const build = (n: number) => `${'-'.repeat(n)}Signal${'-'.repeat(n)}`;
 
-    expect(value).toBe('signal');
-    expect(ms).toBeLessThan(100);
+    expect(slugify(build(HOSTILE))).toBe('signal');
+    expectLinear(build, (value) => slugify(value), HOSTILE / 2);
   });
 
-  it('strips tags from 100,000 unmatched "<" characters well under 100 ms', () => {
-    const source = '<'.repeat(HOSTILE);
-    const { value, ms } = timed(() => plain(source));
+  it('strips tags from long runs of unmatched "<" in linear time', () => {
+    const build = (n: number) => '<'.repeat(n);
 
-    // The old regex cannot match without a ">", so the text is unchanged apart from whitespace.
-    expect(value).toBe(source);
-    expect(ms).toBeLessThan(100);
+    expect(plain(build(HOSTILE))).toBe(build(HOSTILE));
+    expectLinear(build, (value) => plain(value), HOSTILE / 2);
   });
 
   it('keeps normal slugs and plain text unchanged', () => {

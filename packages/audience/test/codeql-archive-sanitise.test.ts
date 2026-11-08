@@ -1,18 +1,14 @@
 import { readFileSync } from 'node:fs';
 import { renderTemplate } from '@agentic-marketing/email';
+import { type DefaultTreeAdapterTypes, parseFragment } from 'parse5';
 import { describe, expect, it } from 'vitest';
-import { emailParts } from '../src/archive';
+import { expectLinear } from '../../../test-support/linear';
+import { activeUrl, emailParts, sanitiseEmailBody, scanEmailBody } from '../src/archive';
 
 // CodeQL alerts 4, 3, 2 and 1 (js/bad-tag-filter, js/incomplete-multi-character-sanitization):
 // the public archive renders e-mail HTML behind a strict CSP, and `emailParts` is the defence in
 // depth. The scanner must be linear, quote-aware and safe on hostile entities.
 const body = (html: string) => emailParts(`<style>.issue{color:#111827}</style><body>${html}</body>`).body;
-
-const timed = <T>(run: () => T): { value: T; ms: number } => {
-  const started = performance.now();
-  const value = run();
-  return { value, ms: performance.now() - started };
-};
 
 /**
  * What `origin/main` produced for benign input. Its script and handler regexes never matched the
@@ -32,6 +28,46 @@ function benignReference(html: string): { body: string; styles: string } {
 const isBenign = (html: string) => {
   const body = html.match(/<body\b[^>]*>([\s\S]*?)<\/body>/i)?.[1] ?? html;
   return !/<\/?(?:script|iframe|object|embed|frame|applet|base|meta)\b/i.test(body) && !/[\s/"']on[a-z]+\s*=/i.test(body);
+};
+
+const ACTIVE_ELEMENTS = new Set(['script', 'iframe', 'object', 'embed', 'frame', 'frameset', 'applet', 'base']);
+const ACTIVE_URL_ATTRIBUTES = new Set(['href', 'src', 'xlink:href', 'action', 'formaction', 'background', 'poster', 'data', 'srcset']);
+
+/**
+ * What a spec-compliant parser with scripting enabled sees in the output. This is deliberately
+ * parse5 and not a regex: the hand-written scanner and the browser disagree on cases such as
+ * stray quotes in attribute names, unterminated openers and `</noscript>` closing raw text.
+ */
+function activeContent(html: string): string[] {
+  const fragment = parseFragment(html, { scriptingEnabled: true });
+  const found: string[] = [];
+  const walk = (parent: DefaultTreeAdapterTypes.ParentNode): void => {
+    for (const node of parent.childNodes) {
+      if (!('tagName' in node)) continue;
+      const element = node as DefaultTreeAdapterTypes.Element;
+      const name = element.tagName.toLowerCase();
+      if (ACTIVE_ELEMENTS.has(name)) found.push(`<${name}>`);
+      if (
+        name === 'meta' &&
+        element.attrs.some((a) => a.name.toLowerCase() === 'http-equiv' && a.value.trim().toLowerCase() === 'refresh')
+      ) {
+        found.push('<meta http-equiv="refresh">');
+      }
+      for (const attribute of element.attrs) {
+        const attributeName = attribute.name.toLowerCase();
+        if (attributeName.startsWith('on')) found.push(`${name}[${attributeName}]`);
+        else if (ACTIVE_URL_ATTRIBUTES.has(attributeName) && activeUrl(attribute.value)) found.push(`${name}[${attributeName}]`);
+      }
+      if (name === 'template') walk((element as DefaultTreeAdapterTypes.Template).content);
+      walk(element);
+    }
+  };
+  walk(fragment);
+  return found;
+}
+
+const expectInert = (html: string) => {
+  expect(activeContent(html), html).toEqual([]);
 };
 
 describe('archive e-mail body sanitising', () => {
@@ -125,19 +161,35 @@ describe('archive sanitising: separator and scheme obfuscation (integrator revie
 });
 
 describe('archive sanitising: linear time', () => {
-  // Roughly 128 KB each. Before the scanner, every unmatched opener made DANGEROUS_PAIR rescan
-  // the remaining body, so these took hundreds of milliseconds (or worse).
-  it.each([
-    ['unclosed iframes', '<iframe>'.repeat(16_000)],
-    ['unclosed scripts', '<script>'.repeat(16_000)],
-    ['unterminated quoted attributes', '<a href="'.repeat(20_000)],
-    ['lone "<" characters', '<'.repeat(100_000)],
-    ['repeated unterminated tags', '<a '.repeat(40_000)],
-    ['one unterminated tag with many attributes', `<p ${'a="x" '.repeat(20_000)}`],
-  ])('sanitises %s in under 50 ms', (_label, html) => {
-    const { ms } = timed(() => body(html));
+  // Scaling rather than a fixed millisecond limit: the same linear code is many times slower on
+  // a shared CI runner, which made absolute budgets flaky.
+  const cases: [string, (n: number) => string, number][] = [
+    ['unclosed iframes', (n) => '<iframe>'.repeat(n), 16_000],
+    ['unclosed scripts', (n) => '<script>'.repeat(n), 16_000],
+    ['unterminated quoted attributes', (n) => '<a href="'.repeat(n), 20_000],
+    ['lone "<" characters', (n) => '<'.repeat(n), 100_000],
+    ['repeated unterminated tags', (n) => '<a '.repeat(n), 40_000],
+    ['one unterminated tag with many attributes', (n) => `<p ${'a="x" '.repeat(n)}`, 20_000],
+  ];
 
-    expect(ms).toBeLessThan(50);
+  it.each(cases)('sanitises %s in linear time', (_label, build, base) => {
+    expectLinear(build, body, base);
+  });
+});
+
+describe('archive sanitising: the linear-time helper', () => {
+  it('detects a deliberately quadratic function', () => {
+    let sink = 0;
+    const quadratic = (input: string) => {
+      let count = 0;
+      for (let i = 0; i < input.length; i++) {
+        for (let j = 0; j < input.length; j++) count++;
+      }
+      sink = count;
+    };
+
+    expect(() => expectLinear((n) => 'x'.repeat(n), quadratic, 2_000)).toThrow(/expected linear scaling/);
+    expect(sink).toBeGreaterThan(0);
   });
 });
 
@@ -245,8 +297,14 @@ describe('archive sanitising: benign output is unchanged', () => {
   it('matches the old implementation on benign fixtures', () => {
     for (const html of fixtures) {
       expect(isBenign(html), html).toBe(true);
-      expect(isBenign(html), html).toBe(true);
       expect(emailParts(html), html).toEqual(benignReference(html));
+    }
+  });
+
+  it('takes the scanner fast path on benign fixtures', () => {
+    for (const html of fixtures) {
+      const extracted = html.match(/<body\b[^>]*>([\s\S]*?)<\/body>/i)?.[1] ?? html;
+      expect(sanitiseEmailBody(extracted), html).toBe(scanEmailBody(extracted));
     }
   });
 
@@ -257,6 +315,8 @@ describe('archive sanitising: benign output is unchanged', () => {
 
     expect(isBenign(rendered.html)).toBe(true);
     expect(parts).toEqual(benignReference(rendered.html));
+    const extracted = rendered.html.match(/<body\b[^>]*>([\s\S]*?)<\/body>/i)?.[1] ?? rendered.html;
+    expect(sanitiseEmailBody(extracted)).toBe(scanEmailBody(extracted));
   });
 
   it('matches the old implementation on 20,000 random benign inputs', () => {
@@ -354,11 +414,55 @@ describe('archive sanitising: comments close where a browser closes them (integr
 });
 
 describe('archive sanitising: comment scanning stays linear (integrator review)', () => {
-  it('handles many short comments and long dash runs quickly', () => {
-    for (const inner of ['<!---->'.repeat(30_000), `<!--${'-'.repeat(100_000)}`, '<!-- -- '.repeat(20_000)]) {
-      const started = performance.now();
-      emailParts(`<html><body>${inner}</body></html>`);
-      expect(performance.now() - started).toBeLessThan(50);
-    }
+  const cases: [string, (n: number) => string, number][] = [
+    ['many short comments', (n) => '<!---->'.repeat(n), 30_000],
+    ['one long dash run', (n) => `<!--${'-'.repeat(n)}`, 100_000],
+    ['spaced comments', (n) => '<!-- -- '.repeat(n), 20_000],
+  ];
+
+  it.each(cases)('handles %s in linear time', (_label, build, base) => {
+    expectLinear(build, (inner) => emailParts(`<html><body>${inner}</body></html>`), base);
+  });
+});
+
+describe('archive sanitising: spec-compliant parser is the final judge (Sol re-check)', () => {
+  const body = (inner: string) => emailParts(`<html><body>${inner}</body></html>`).body;
+
+  // A surviving `<meta http-equiv=refresh>` navigates despite the CSP, which does not govern
+  // refresh. Each payload makes the hand-written scanner and the browser's parser disagree.
+  const payloads = [
+    ['stray quote in an attribute name', '<meta http-equiv=refresh content="0;url=https://example.org/" x">'],
+    ['unterminated opener exposing embedded markup', '<p title="<meta http-equiv=refresh content=0;url=https://example.org/>'],
+    ['a script splits the tag name', '<me<script></script>ta http-equiv=refresh content="0;url=https://example.org/">'],
+    ['noscript closes before the meta', '<noscript><p title="</noscript><meta http-equiv=refresh content=0;url=https://example.org/>">'],
+  ] as const;
+
+  it.each(payloads)('leaves no active content for %s', (_label, payload) => {
+    expectInert(body(payload));
+  });
+
+  it.each([
+    ['uppercase HTTP-EQUIV', '<meta HTTP-EQUIV="REFRESH" content="0;url=https://example.org/">'],
+    ['padded Refresh value', '<meta http-equiv=" Refresh " content="0;url=https://example.org/">'],
+    ['refresh inside a template', '<template><meta http-equiv="refresh" content="0;url=https://example.org/"></template>'],
+    ['stray quote with uppercase HTTP-EQUIV', '<meta HTTP-EQUIV=Refresh content="0;url=https://example.org/" x">'],
+  ])('leaves no active content for %s', (_label, payload) => {
+    expectInert(body(payload));
+  });
+
+  it('parses benign output as inert', () => {
+    expect(activeContent(body('<p>Read <a href="https://example.com/story">the story</a>.</p>'))).toEqual([]);
+  });
+
+  it('fails closed when the cleaned tree is still active', () => {
+    const input = '<p>ok</p>';
+    expect(sanitiseEmailBody(input, () => true)).toBe('&lt;p&gt;ok&lt;/p&gt;');
+  });
+
+  it('sanitises assembled meta refreshes on the hostile path in linear time', () => {
+    const payload = '<me<script></script>ta http-equiv=refresh content="0;url=https://example.org/">';
+
+    expectInert(body(payload.repeat(4_000)));
+    expectLinear((n) => payload.repeat(n), body, 4_000);
   });
 });

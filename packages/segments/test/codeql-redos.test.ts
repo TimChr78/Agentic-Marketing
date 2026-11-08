@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { expectLinear } from '../../../test-support/linear';
 import { durationSeconds } from '../src/evaluate';
 
 // CodeQL alert 11 (js/polynomial-redos): `(\d+)([WDHM])` backtracks over every digit boundary
@@ -6,25 +7,19 @@ import { durationSeconds } from '../src/evaluate';
 // stay linear without a length cap that would reject a valid duration.
 const HOSTILE = 100_000;
 
-const timed = <T>(run: () => T): { value: T; ms: number } => {
-  const started = performance.now();
-  const value = run();
-  return { value, ms: performance.now() - started };
-};
-
 describe('durationSeconds is linear (js/polynomial-redos)', () => {
-  it('handles 100,000 digits with no unit well under 100 ms', () => {
-    const { value, ms } = timed(() => durationSeconds('0'.repeat(HOSTILE)));
+  it('handles a long digit run with no unit in linear time', () => {
+    const build = (n: number) => '0'.repeat(n);
 
-    expect(value).toBe(0);
-    expect(ms).toBeLessThan(100);
+    expect(durationSeconds(build(HOSTILE))).toBe(0);
+    expectLinear(build, (value) => durationSeconds(value), HOSTILE / 2);
   });
 
   it('scans a long duration without a length cap, in linear time', () => {
-    const { value, ms } = timed(() => durationSeconds(`P${'1D'.repeat(HOSTILE / 2)}`));
+    const build = (n: number) => `P${'1D'.repeat(n / 2)}`;
 
-    expect(value).toBe((HOSTILE / 2) * 86_400);
-    expect(ms).toBeLessThan(100);
+    expect(durationSeconds(build(HOSTILE))).toBe((HOSTILE / 2) * 86_400);
+    expectLinear(build, (value) => durationSeconds(value), HOSTILE / 2);
   });
 
   it('accepts a duration just over the old 64-character cap', () => {
