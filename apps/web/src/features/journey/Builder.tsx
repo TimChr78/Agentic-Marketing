@@ -54,6 +54,7 @@ import {
   Tag,
   useToast,
 } from '../../ui';
+import { Identifier } from '../../ui/Identifier';
 import type { EditorProps } from '../artifacts/ArtifactDetailPage';
 import { autoLayoutNodes } from '../phase27/journey/autoLayout';
 import { artifactNameFromIndex } from '../phase27/journey/names';
@@ -268,10 +269,14 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
           focusable: true,
           ariaLabel: `Connection from ${nodes.find((n) => n.id === e.source)?.label}${e.label ? ` (${e.label})` : ''} to ${nodes.find((n) => n.id === e.target)?.label}`,
           markerEnd: { type: MarkerType.ArrowClosed },
-          animated: path.includes(e.source) && path.includes(e.target),
           labelBgStyle: { fill: 'var(--surface)' },
           labelStyle: { fill: 'var(--fg-2)', fontSize: 11 },
-          style: selected ? { stroke: 'var(--accent)', strokeWidth: 2 } : undefined,
+          // A simulated path is a static highlighted stroke, never a moving dash (#555 motion).
+          style: selected
+            ? { stroke: 'var(--accent)', strokeWidth: 2 }
+            : path.includes(e.source) && path.includes(e.target)
+              ? { stroke: 'var(--good)', strokeWidth: 2 }
+              : undefined,
         };
       }),
     [nodes, sel, path],
@@ -300,7 +305,7 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
       position = { x: 0, y: nodes.length ? lowest + NODE_H + 72 : 0 };
     }
     commit(addNode(nodes, kind, position, from ? { source: from.id, index: from.next?.length ?? 0 } : undefined));
-    requestAnimationFrame(() => rf.fitView({ padding: 0.2, duration: 200 }));
+    requestAnimationFrame(() => rf.fitView({ padding: 0.2, duration: 0 }));
   };
 
   // Auto-layout (#528) is a view action: positions change, the saved graph does not. It goes on
@@ -309,7 +314,7 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
     if (readOnly || nodes.length === 0) return;
     try {
       apply(autoLayoutNodes(nodes));
-      requestAnimationFrame(() => rf.fitView({ padding: 0.2, duration: 200 }));
+      requestAnimationFrame(() => rf.fitView({ padding: 0.2, duration: 0 }));
       toast.info('Layout updated. Undo restores the previous positions.');
     } catch {
       toast.error('This journey could not be laid out. Its previous positions are kept.');
@@ -479,7 +484,7 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
             className="hidden lg:inline-flex"
             label="Fit to screen"
             icon={<Maximize size={15} />}
-            onClick={() => rf.fitView({ padding: 0.2, duration: 200 })}
+            onClick={() => rf.fitView({ padding: 0.2, duration: 0 })}
           />
           <IconButton
             className="hidden lg:inline-flex"
@@ -514,7 +519,7 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
               label="View"
               align="end"
               items={[
-                { label: 'Fit to screen', icon: <Maximize size={14} />, onSelect: () => rf.fitView({ padding: 0.2, duration: 200 }) },
+                { label: 'Fit to screen', icon: <Maximize size={14} />, onSelect: () => rf.fitView({ padding: 0.2, duration: 0 }) },
                 {
                   label: showMinimap ? 'Hide minimap' : 'Show minimap',
                   icon: <MapIcon size={14} />,
@@ -686,6 +691,27 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
           <Kbd>Del</Kbd> delete · <Kbd>Ctrl Z</Kbd> undo · <Kbd>Ctrl D</Kbd> duplicate · right-click or <Kbd>Shift F10</Kbd> for more · drag
           from a dot to connect
         </p>
+        {/* Desktop-first authoring keeps the canvas; below that breakpoint the same step data is
+            readable as text without zooming the graph. */}
+        {nodes.length > 0 && (
+          <section aria-labelledby="journey-steps-summary" className="border-t border-line px-3 py-3 lg:hidden">
+            <h2 id="journey-steps-summary" className="text-[13px] leading-5 font-semibold text-fg">
+              Journey steps
+            </h2>
+            <ol className="mt-2 space-y-2">
+              {nodes.map((n) => (
+                <li key={n.id} className="text-[13px] leading-5">
+                  <span className="font-medium text-fg">{n.label}</span>{' '}
+                  <span className="text-muted">{KINDS[n.kind]?.label ?? 'Unknown step'}</span>
+                  <span className="mt-0.5 block text-[13px] leading-5 text-fg-2">{summary(n, names)}</span>
+                  {warnings[n.id]?.length ? (
+                    <span className="mt-0.5 block text-[12px] leading-[18px] text-warn">{warnings[n.id]!.join(' ')}</span>
+                  ) : null}
+                </li>
+              ))}
+            </ol>
+          </section>
+        )}
       </div>
 
       {inspectorOpen && (
@@ -733,7 +759,7 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
                 onSelect={(id) => {
                   setSel({ kind: 'node', id });
                   setPanel('inspect');
-                  rf.fitView({ nodes: [{ id }], duration: 250, maxZoom: 1.2 });
+                  rf.fitView({ nodes: [{ id }], duration: 0, maxZoom: 1.2 });
                 }}
               />
             )}
@@ -844,6 +870,8 @@ function JourneyMeta({
   stats?: Out<'journeys.stats'>;
 }) {
   const purposes = useApi(() => api.call('purposes.list', {}), []);
+  const purposeOptions = purposes.data?.purposes ?? [];
+  const knownPurpose = purposeOptions.some((p) => p.key === content.purpose);
   // A rough expected control size from the people already in the journey, not a forecast. The
   // stats result is shared with the canvas overlay (#507), not fetched a second time here.
   const total = stats ? stats.now.ready + stats.now.waiting + stats.now.completed + stats.now.exited + stats.now.failed : 0;
@@ -855,14 +883,23 @@ function JourneyMeta({
       <p className="text-[12px] text-muted">Select a step to edit it. These settings apply to the whole journey.</p>
       <Field label="Purpose" hint="Every message in the journey is sent under this purpose's consent rules.">
         <Select value={content.purpose} disabled={readOnly} onChange={(e) => onChange({ ...content, purpose: e.target.value })}>
-          {!purposes.data?.purposes.some((p) => p.key === content.purpose) && <option value={content.purpose}>{content.purpose}</option>}
-          {purposes.data?.purposes.map((p) => (
+          {!content.purpose && <option value="">Choose a purpose</option>}
+          {content.purpose && !knownPurpose && (
+            <option value={content.purpose}>{purposes.loading ? 'Loading purpose…' : 'Unavailable purpose'}</option>
+          )}
+          {purposeOptions.map((p) => (
             <option key={p.key} value={p.key}>
-              {p.name} ({p.key})
+              {p.name}
             </option>
           ))}
         </Select>
       </Field>
+      {content.purpose && !knownPurpose && purposes.data && (
+        <p className="flex flex-wrap items-center gap-1.5 text-[12px] leading-[18px] text-muted">
+          The saved purpose is unavailable. Choose a purpose to replace it.
+          <Identifier value={content.purpose} label="Purpose ID" />
+        </p>
+      )}
       <Field label="Goal" hint="What success looks like, for the team and for reports.">
         <Input
           value={content.goal ?? ''}

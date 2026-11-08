@@ -22,7 +22,6 @@ test.describe('builder', () => {
   });
 
   test('the builder can reach the compose flow without a permission wall (M)', async ({ page }) => {
-    test.fixme(true, 'Owned by task M; reporting until marketing and journeys land');
     await signIn(page, PEOPLE.builder);
     await page.goto('/marketing/broadcasts?create=broadcast');
     await expect(page.getByRole('dialog')).toBeVisible();

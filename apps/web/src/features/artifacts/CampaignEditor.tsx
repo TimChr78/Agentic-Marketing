@@ -268,7 +268,7 @@ export function CampaignEditor({ content, onChange, readOnly, errors }: EditorPr
                     disabled={readOnly || artifacts.loading}
                     onChange={(e) => setMember(i, { artifactId: e.target.value })}
                   >
-                    <option value="">{artifacts.loading ? 'Loading…' : 'Choose an artifact…'}</option>
+                    <option value="">{artifacts.loading ? 'Loading templates…' : 'Choose an artifact…'}</option>
                     {m.artifactId && !choices.some((a) => a.id === m.artifactId) && (
                       <option value={m.artifactId}>{m.artifactId} (not found)</option>
                     )}
