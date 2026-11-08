@@ -254,13 +254,19 @@ export async function settle(page, { timeout = 20_000 } = {}) {
     { timeout },
   );
   // The journey canvas (React Flow) mounts its nodes hidden until it has measured them; capture once
-  // every canvas shows its nodes. CI once caught the builder with an empty canvas.
+  // every visible canvas shows its nodes (CI once caught the builder with an empty canvas). Only
+  // canvases with a size count, and one shown node is enough: requiring every node could wait
+  // forever on one that is never measured.
   await page.waitForFunction(
     () =>
-      Array.from(document.querySelectorAll('.react-flow')).every((flow) => {
-        const nodes = Array.from(flow.querySelectorAll('.react-flow__node'));
-        return nodes.length > 0 && nodes.every((node) => getComputedStyle(node).visibility !== 'hidden');
-      }),
+      Array.from(document.querySelectorAll('.react-flow'))
+        .filter((flow) => {
+          const r = flow.getBoundingClientRect();
+          return r.width > 0 && r.height > 0;
+        })
+        .every((flow) =>
+          Array.from(flow.querySelectorAll('.react-flow__node')).some((node) => getComputedStyle(node).visibility !== 'hidden'),
+        ),
     undefined,
     { timeout },
   );
