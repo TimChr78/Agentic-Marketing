@@ -11,17 +11,17 @@ are report-mode until each owner flips its own section to strict.
 
 | Check | Command | Exit | Notes |
 | --- | --- | ---: | --- |
-| Web unit tests | `npx vitest run --project web` | pending | |
-| Docs tests | `npx vitest run --project docs` | pending | |
-| Live build | `corepack pnpm --filter @agentic-marketing/web build:live` | pending | manifest at `apps/web/dist/.vite/manifest.json` |
-| Bundle budgets | `npx vitest run --project web apps/web/test/phase28-bundle.test.ts` | pending | decimal gzip kB |
-| Lint | `npx biome check .` | pending | |
-| Typecheck | `corepack pnpm -r --filter './packages/*' --filter './apps/*' typecheck` | pending | |
-| Changelog | `node scripts/changelog.mjs check` | pending | |
-| Smoke e2e | `TEST_PORT_OFFSET=100 scripts/e2e-docker.sh smoke` | pending | |
-| Phase 28 functional | `TEST_PORT_OFFSET=100 E2E_SKIP_BUILD=1 scripts/e2e-docker.sh functional e2e/phase28-*.spec.ts` | pending | reporting specs mark area routes `fixme` |
-| Axe | `TEST_PORT_OFFSET=100 E2E_SKIP_BUILD=1 scripts/e2e-docker.sh axe` | pending | |
-| Visual | `TEST_PORT_OFFSET=100 E2E_SKIP_BUILD=1 scripts/e2e-docker.sh visual` | pending | review changed baselines by eye |
+| Web unit tests | `npx vitest run --project web` | 0 | 95 files, 964 tests passed |
+| Docs tests | `npx vitest run --project docs` | 0 | 6 files, 38 tests passed |
+| Live build | `corepack pnpm --filter @agentic-marketing/web build:live` | 0 | manifest at `apps/web/dist/.vite/manifest.json` |
+| Bundle budgets | `npx vitest run --project web apps/web/test/phase28-bundle.test.ts` | 0 | decimal gzip kB; 140 tests |
+| Lint | `npx biome check .` | 0 | 32 pre-existing warnings, no errors |
+| Typecheck | `corepack pnpm -r --filter './packages/*' --filter './apps/*' typecheck` | 0 | |
+| Changelog | `node scripts/changelog.mjs check` | 0 | 1 fragment |
+| Smoke e2e | `TEST_PORT_OFFSET=100 scripts/e2e-docker.sh smoke` | 0 | 7 passed |
+| Phase 28 functional | `TEST_PORT_OFFSET=100 E2E_SKIP_BUILD=1 scripts/e2e-docker.sh functional e2e/phase28-*.spec.ts` | 0 | 13 passed, 32 skipped (area-owned reporting tests) |
+| Axe | `TEST_PORT_OFFSET=100 E2E_SKIP_BUILD=1 scripts/e2e-docker.sh axe` | 0 | 43 passed, 2 skipped; 0 violations, 0 allowlist entries |
+| Visual | `TEST_PORT_OFFSET=100 E2E_SKIP_BUILD=1 scripts/e2e-docker.sh visual` | 0 | 12 routes passed; no baseline changed |
 
 ## Bundle actuals
 
@@ -34,53 +34,53 @@ and its automatically mounted children; “cold” is their sum. Ceilings are fr
 Measured from `apps/web/dist/.vite/manifest.json` after
 `corepack pnpm --filter @agentic-marketing/web build:live` on this branch.
 
-- Signed-out initial (entry + Root + eagerly needed auth screens): **108.53 kB** (cap 110).
-- Signed-in initial (entry + Root + Shell + route table): **129.25 kB** (cap 150).
+- Signed-out initial (entry + Root + eagerly needed auth screens): **108.55 kB** (cap 110).
+- Signed-in initial (entry + Root + Shell + route table): **129.27 kB** (cap 150).
 - Auth screens add no separate lazy closure in this build; they are inside the signed-out initial.
 
 | Route | Initial | Lazy | Cold | Cap |
 | --- | ---: | ---: | ---: | ---: |
-| `/` | 129.25 | 14.77 | 144.02 | 25 |
-| `/approvals` | 129.25 | 6.37 | 135.62 | 25 |
-| `/approvals/:id` | 129.25 | 36.26 | 165.51 | 70 |
-| `/work/agents` | 129.25 | 27.05 | 156.30 | 35 |
-| `/work/agents/:id` | 129.25 | 36.93 | 166.18 | 45 |
-| `/work/agents/library/:id` | 129.25 | 26.76 | 156.01 | 35 |
-| `/marketing/campaigns` | 129.25 | 8.50 | 137.75 | 20 |
-| `/marketing/campaigns/:id` | 129.25 | 31.68 | 160.93 | 45 |
-| `/marketing/broadcasts` | 129.25 | 12.21 | 141.46 | 25 |
-| `/marketing/broadcasts/:id` | 129.25 | 49.98 | 179.23 | 80 |
-| `/marketing/journeys` | 129.25 | 8.70 | 137.96 | 20 |
-| `/marketing/journeys/:id` | 129.25 | 105.77 | 235.02 | 130 |
-| `/marketing/experiences` | 129.25 | 9.05 | 138.31 | 20 |
-| `/marketing/experiences/:id` | 129.25 | 26.81 | 156.06 | 40 |
-| `/audience/people` | 129.25 | 14.03 | 143.28 | 30 |
-| `/audience/people/:id` | 129.25 | 11.68 | 140.93 | 30 |
-| `/audience/segments` | 129.25 | 9.74 | 139.00 | 20 |
-| `/audience/segments/:id` | 129.25 | 33.44 | 162.69 | 40 |
-| `/audience/forms` | 129.25 | 9.74 | 139.00 | 20 |
-| `/audience/forms/:id` | 129.25 | 30.01 | 159.26 | 40 |
-| `/audience/consent` | 129.25 | 11.00 | 140.25 | 40 |
-| `/content/templates` | 129.25 | 12.72 | 141.97 | 35 |
-| `/content/templates/blocks/:id` | 129.25 | 23.94 | 153.19 | 40 |
-| `/content/templates/:id` | 129.25 | 40.52 | 169.78 | 65 |
-| `/content/assets` | 129.25 | 6.06 | 135.31 | 25 |
-| `/content/brand` | 129.25 | 30.79 | 160.04 | 40 |
-| `/insights/analytics` | 129.25 | 16.93 | 146.19 | 40 |
-| `/insights/messages` | 129.25 | 3.45 | 132.71 | 20 |
-| `/insights/deliverability` | 129.25 | 9.94 | 139.19 | 35 |
-| `/insights/alerts` | 129.25 | 7.38 | 136.63 | 30 |
-| `/settings` | 129.25 | 0.28 | 129.53 | 20 |
-| `/settings/workspace` | 129.25 | 3.29 | 132.55 | 20 |
-| `/settings/providers` | 129.25 | 14.94 | 144.19 | 40 |
-| `/settings/integrations` | 129.25 | 16.52 | 145.77 | 55 |
-| `/settings/integrations/tokens/:id` | 129.25 | 16.52 | 145.77 | 55 |
-| `/settings/secrets` | 129.25 | 3.71 | 132.96 | 20 |
-| `/settings/users` | 129.25 | 5.33 | 134.59 | 25 |
-| `/settings/approval-policy` | 129.25 | 5.04 | 134.30 | 25 |
-| `/preferences` | 129.25 | 2.88 | 132.13 | 20 |
-| `/create` | 129.25 | 5.06 | 134.31 | 20 |
-| `/artifacts/:id` | 129.25 | 21.19 | 150.44 | 130 |
+| `/` | 129.27 | 14.77 | 144.04 | 25 |
+| `/approvals` | 129.27 | 6.37 | 135.63 | 25 |
+| `/approvals/:id` | 129.27 | 36.26 | 165.53 | 70 |
+| `/work/agents` | 129.27 | 27.05 | 156.32 | 35 |
+| `/work/agents/:id` | 129.27 | 36.93 | 166.19 | 45 |
+| `/work/agents/library/:id` | 129.27 | 26.78 | 156.04 | 35 |
+| `/marketing/campaigns` | 129.27 | 8.50 | 137.76 | 20 |
+| `/marketing/campaigns/:id` | 129.27 | 31.70 | 160.96 | 45 |
+| `/marketing/broadcasts` | 129.27 | 12.21 | 141.48 | 25 |
+| `/marketing/broadcasts/:id` | 129.27 | 49.99 | 179.26 | 80 |
+| `/marketing/journeys` | 129.27 | 8.71 | 137.97 | 20 |
+| `/marketing/journeys/:id` | 129.27 | 105.79 | 235.06 | 130 |
+| `/marketing/experiences` | 129.27 | 9.06 | 138.32 | 20 |
+| `/marketing/experiences/:id` | 129.27 | 26.83 | 156.10 | 40 |
+| `/audience/people` | 129.27 | 14.04 | 143.30 | 30 |
+| `/audience/people/:id` | 129.27 | 11.69 | 140.95 | 30 |
+| `/audience/segments` | 129.27 | 9.75 | 139.01 | 20 |
+| `/audience/segments/:id` | 129.27 | 33.46 | 162.73 | 40 |
+| `/audience/forms` | 129.27 | 9.75 | 139.02 | 20 |
+| `/audience/forms/:id` | 129.27 | 30.03 | 159.30 | 40 |
+| `/audience/consent` | 129.27 | 11.00 | 140.26 | 40 |
+| `/content/templates` | 129.27 | 12.72 | 141.99 | 35 |
+| `/content/templates/blocks/:id` | 129.27 | 23.95 | 153.22 | 40 |
+| `/content/templates/:id` | 129.27 | 40.55 | 169.82 | 65 |
+| `/content/assets` | 129.27 | 6.06 | 135.33 | 25 |
+| `/content/brand` | 129.27 | 30.81 | 160.08 | 40 |
+| `/insights/analytics` | 129.27 | 16.93 | 146.20 | 40 |
+| `/insights/messages` | 129.27 | 3.45 | 132.72 | 20 |
+| `/insights/deliverability` | 129.27 | 9.94 | 139.21 | 35 |
+| `/insights/alerts` | 129.27 | 7.38 | 136.65 | 30 |
+| `/settings` | 129.27 | 0.28 | 129.54 | 20 |
+| `/settings/workspace` | 129.27 | 3.29 | 132.56 | 20 |
+| `/settings/providers` | 129.27 | 14.94 | 144.21 | 40 |
+| `/settings/integrations` | 129.27 | 16.52 | 145.79 | 55 |
+| `/settings/integrations/tokens/:id` | 129.27 | 16.52 | 145.79 | 55 |
+| `/settings/secrets` | 129.27 | 3.71 | 132.97 | 20 |
+| `/settings/users` | 129.27 | 5.33 | 134.60 | 25 |
+| `/settings/approval-policy` | 129.27 | 5.04 | 134.31 | 25 |
+| `/preferences` | 129.27 | 2.88 | 132.14 | 20 |
+| `/create` | 129.27 | 5.05 | 134.32 | 20 |
+| `/artifacts/:id` | 129.27 | 21.20 | 150.47 | 130 |
 
 Additional closures, measured as increments over the signed-in initial:
 
@@ -91,10 +91,10 @@ Additional closures, measured as increments over the signed-in initial:
 | Broadcast report action (`ReportEntry`) | 6.55 | 30 |
 | Demo fixture closure (`DemoRoot` + fixtures) | 14.71 | 25 |
 
-Analytics with its automatically mounted chart is **514.68 kB** (cap 590).
-Deliverability with a chart is **507.69 kB** (cap 585).
-Journey Report is **603.52 kB** (cap 680).
-Template with the automatically mounted visual editor is **860.19 kB** (cap 1,335).
+Analytics with its automatically mounted chart is **514.70 kB** (cap 590).
+Deliverability with a chart is **507.70 kB** (cap 585).
+Journey Report is **603.56 kB** (cap 680).
+Template with the automatically mounted visual editor is **860.27 kB** (cap 1,335).
 
 No ceiling was raised. Seven routes were over their ceilings before this landing because the shared
 detail page eagerly imported the preview stack and structured editors. Those imports now load through
@@ -173,5 +173,6 @@ Regenerate only the baselines this branch actually moves, with
 `scripts/e2e-docker.sh update -g "<route> matches"`, and list each one here for human review.
 
 <!-- phase28-baselines:start -->
-None recorded yet.
+None. All 12 committed visual routes matched their existing baselines after the shared CSS changes
+(static skeletons, token durations, static progress glyph); no `update` run was needed.
 <!-- phase28-baselines:end -->
