@@ -199,6 +199,7 @@ export default function UsersPage() {
                         compact
                         aria-label={`Role for ${personName(m)}`}
                         value={m.role}
+                        mutation
                         disabled={!mayChangeRole(m) || busyId === m.userId}
                         onChange={(e) => void changeRole(m, e.target.value as Role)}
                         className="w-auto"
@@ -262,6 +263,7 @@ export default function UsersPage() {
                         compact
                         aria-label={`Role for ${personName(m)}`}
                         value={m.role}
+                        mutation
                         disabled={!mayChangeRole(m) || busyId === m.userId}
                         onChange={(e) => void changeRole(m, e.target.value as Role)}
                       >
