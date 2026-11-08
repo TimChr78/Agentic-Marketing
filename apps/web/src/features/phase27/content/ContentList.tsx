@@ -13,7 +13,7 @@ import { ListPage, type PageReadState } from '../../../ui/ListPage';
 import { OperationalPill } from '../../../ui/state';
 import { notifyArtifactsChanged } from '../../artifactCache';
 import { type ArtifactRow, fetchAllArtifacts } from '../../artifacts/artifactList';
-import { GallerySkeleton } from '../../phase28/content/GallerySkeleton';
+import { GallerySkeleton, PhoneListSkeleton } from '../../phase28/content/GallerySkeleton';
 
 export interface ContentCreateSpec {
   label: string;
@@ -291,9 +291,17 @@ function PhoneList({ rows, title }: { rows: ArtifactRow[]; title: string }) {
 
 function ContentSkeleton({ layout, noun }: { layout: 'gallery' | 'table'; noun: string }) {
   // The shared primitives reserve the ready template's geometry; the label names the object
-  // instead of a generic "Loading" (Phase 28, #559).
-  if (layout === 'table') return <ListSkeleton label={`Loading ${noun}`} columns={4} />;
-  return <GallerySkeleton label={`Loading ${noun}`} />;
+  // instead of a generic "Loading" (Phase 28, #559). Below 768 px the ready list is the compact
+  // 72 px summary list for both layouts, so the phone placeholder reserves that geometry rather
+  // than the six 170 px gallery tiles (#555 review).
+  return (
+    <>
+      <PhoneListSkeleton label={`Loading ${noun}`} />
+      <div className="hidden md:block">
+        {layout === 'table' ? <ListSkeleton label={`Loading ${noun}`} columns={4} /> : <GallerySkeleton label={`Loading ${noun}`} />}
+      </div>
+    </>
+  );
 }
 
 function CreateDialog({ type, spec, onClose }: { type: string; spec: ContentCreateSpec; onClose: () => void }) {

@@ -325,6 +325,20 @@ describe('motion contract (#555)', () => {
     expect(block).toMatch(/\.am-fade-in,[\s\S]*?\.am-drawer-in,[\s\S]*?\.am-rise\s*\{[\s\S]*?transform:\s*none\s*!important/);
   });
 
+  it('never asks the browser for a smooth scroll', () => {
+    // motion.md forbids smooth auto-scroll: JS `behavior: 'smooth'` bypasses the CSS
+    // reduced-motion override, so scrolling is always immediate.
+    const violations: string[] = [];
+    for (const file of sourceFiles(SRC)) {
+      const text = withoutComments(readFileSync(file, 'utf8'));
+      for (const match of text.matchAll(/\b(?:scroll)?behavior\s*:\s*['"]smooth['"]/g))
+        violations.push(`${relative(ROOT, file)}:${lineOf(text, match.index ?? 0)} ${match[0]}`);
+      for (const match of text.matchAll(/scroll-behavior\s*:\s*smooth/g))
+        violations.push(`${relative(ROOT, file)}:${lineOf(text, match.index ?? 0)} ${match[0]}`);
+    }
+    expect(violations, violations.join('\n')).toEqual([]);
+  });
+
   it('keeps the skeleton and progress glyphs static', () => {
     const skeleton = css.match(/\.am-skeleton\s*\{([^}]*)\}/)?.[1] ?? '';
     expect(skeleton).toContain('background: var(--surface-3)');

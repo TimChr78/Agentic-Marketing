@@ -8,7 +8,7 @@ import { useSession } from '../../app/session';
 import { useApi } from '../../app/useApi';
 import { AssetGrid, AssetThumb } from '../../features/assets/AssetGrid';
 import { ACCEPT, type Asset, formatBytes, uploadFile } from '../../features/assets/upload';
-import { GallerySkeleton } from '../../features/phase28/content/GallerySkeleton';
+import { GallerySkeleton, PhoneListSkeleton } from '../../features/phase28/content/GallerySkeleton';
 import {
   Alert,
   Button,
@@ -203,7 +203,14 @@ export default function AssetsPage() {
                   }
               : undefined
         }
-        loadingContent={<GallerySkeleton label="Loading assets" minWidth={176} tileHeight={190} />}
+        loadingContent={
+          <>
+            <PhoneListSkeleton label="Loading assets" />
+            <div className="hidden md:block">
+              <GallerySkeleton label="Loading assets" minWidth={176} tileHeight={190} />
+            </div>
+          </>
+        }
         desktopTable={<AssetGrid assets={assets} onOpen={setOpen} />}
         mobileList={<AssetPhoneList assets={assets} onOpen={setOpen} />}
       />
