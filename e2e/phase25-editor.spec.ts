@@ -65,7 +65,7 @@ test('the editor inserts from the palette, opens every preview mode and labels t
   // exist, so accept either the empty state or the shared list.
   await palette.getByRole('tab', { name: 'Reusable blocks' }).click();
   await expect(
-    palette.getByText('No reusable blocks yet. Create one in Design → Blocks').or(palette.locator('ul button').first()),
+    palette.getByText('No reusable blocks yet. Create one in Content → Templates, on the Blocks tab').or(palette.locator('ul button').first()),
   ).toBeVisible();
 
   // Insert a text element into the visual editor; it lands in the first compatible column.

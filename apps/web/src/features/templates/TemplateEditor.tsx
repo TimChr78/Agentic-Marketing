@@ -272,7 +272,7 @@ export function TemplateEditor({ artifact, content, onChange, readOnly, errors }
               <Alert tone="info">Your role can read this template but not edit it. The preview shows the saved version.</Alert>
             ) : (
               <div className="h-[calc(100vh-340px)] min-h-[420px] min-w-0 overflow-hidden rounded-lg border border-line md:min-h-[560px]">
-                <Suspense fallback={<EditorSkeleton label="Loading the visual editor" />}>
+                <Suspense fallback={<EditorSkeleton label="Loading the visual editor" fill />}>
                   <VisualMjml
                     key={visualKey}
                     ref={visual}

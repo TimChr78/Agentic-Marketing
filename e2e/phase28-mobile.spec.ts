@@ -97,6 +97,32 @@ test.describe('390 px page width', () => {
     });
   }
 
+  test('the agents table keeps status and a 24-hour summary under the name', async ({ page }) => {
+    await signIn(page, PEOPLE.owner);
+    await page.goto('/work/agents');
+    await settle(page);
+
+    const table = page.getByRole('table', { name: 'Agents' });
+    // The wide columns stay for the desktop table but do not clip inside the phone card.
+    await expect(table.getByRole('columnheader', { name: 'Status', exact: true })).toBeHidden();
+    await expect(table.getByRole('columnheader', { name: 'Last 24 hours' })).toBeHidden();
+    await expect(table.getByRole('columnheader', { name: 'Sponsor' })).toBeHidden();
+
+    const summary = page.locator('[data-agent-24h]').first();
+    await expect(summary).toBeVisible();
+    await expect(summary).toContainText(/change/);
+    await expect(summary).toContainText(/escalated/);
+    await expect(summary).toContainText(/denied/);
+    const box = await summary.boundingBox();
+    expect(box).not.toBeNull();
+    expect(box!.x).toBeGreaterThanOrEqual(0);
+    expect(box!.x + box!.width).toBeLessThanOrEqual(391);
+
+    // Pause and the row menu remain reachable in the same phone card.
+    await expect(page.getByRole('button', { name: 'Pause' }).first()).toBeVisible();
+    await expect(page.getByRole('button', { name: /More actions for/ }).first()).toBeVisible();
+  });
+
   test('sign-in has no page-level horizontal overflow', async ({ page }) => {
     await page.goto('/');
     await expect(page.getByRole('heading', { name: 'Sign in' })).toBeVisible();

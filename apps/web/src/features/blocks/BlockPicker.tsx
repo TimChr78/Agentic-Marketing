@@ -49,7 +49,8 @@ export function BlockList({
       </Alert>
     );
   const blocks = list.data?.artifacts ?? [];
-  if (blocks.length === 0) return <p className="px-1 text-[13px] text-muted">No reusable blocks yet. Create one in Design → Blocks.</p>;
+  if (blocks.length === 0)
+    return <p className="px-1 text-[13px] text-muted">No reusable blocks yet. Create one in Content → Templates, on the Blocks tab.</p>;
   const shown = blocks.filter((a) => !needle || a.name.toLowerCase().includes(needle) || a.id.includes(needle));
   if (shown.length === 0)
     return (

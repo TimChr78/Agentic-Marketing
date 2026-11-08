@@ -88,6 +88,7 @@ export function SkeletonRegion({
   busy = true,
   delay = SKELETON_DELAY_MS,
   minHeight,
+  fill = false,
   className,
   children,
 }: {
@@ -97,6 +98,8 @@ export function SkeletonRegion({
   delay?: number;
   /** Override the reserved height when the template's own slot is known. */
   minHeight?: number | string;
+  /** Fill the height the caller's frame already reserves instead of the geometry's own height. */
+  fill?: boolean;
   className?: string;
   children: ReactNode;
 }) {
@@ -119,8 +122,9 @@ export function SkeletonRegion({
       data-skeleton-region=""
       data-geometry={geometry}
       data-skeleton-visible={visible ? 'true' : 'false'}
+      data-fill={fill ? 'true' : undefined}
       style={minHeight === undefined ? undefined : { minHeight }}
-      className={cx('min-w-0', className)}
+      className={cx('min-w-0', fill && 'h-full', className)}
     >
       <div aria-hidden className={visible ? undefined : 'invisible'}>
         {children}
@@ -288,15 +292,18 @@ export function KpiSkeleton({
 export function EditorSkeleton({
   label = 'Loading the editor',
   delay = SKELETON_DELAY_MS,
+  fill = false,
   className,
 }: {
   label?: string;
   delay?: number;
+  /** Fill the caller's reserved frame (for example the template editor's 100vh-based slot). */
+  fill?: boolean;
   className?: string;
 }) {
   return (
-    <SkeletonRegion label={label} geometry="settings" delay={delay} className={className}>
-      <Skeleton shape="editor" />
+    <SkeletonRegion label={label} geometry="settings" delay={delay} fill={fill} className={className}>
+      <Skeleton shape="editor" height={fill ? '100%' : undefined} />
     </SkeletonRegion>
   );
 }

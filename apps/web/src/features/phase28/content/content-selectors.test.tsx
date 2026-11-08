@@ -114,7 +114,7 @@ describe('empty content lists name their action (#559)', () => {
   it('names the create action in an empty block picker', async () => {
     render(<BlockPicker onClose={vi.fn()} onPick={vi.fn()} />);
     const empty = await screen.findByText(/No reusable blocks yet/);
-    expect(empty.textContent).toBe('No reusable blocks yet. Create one in Design → Blocks.');
+    expect(empty.textContent).toBe('No reusable blocks yet. Create one in Content → Templates, on the Blocks tab.');
   });
 });
 
