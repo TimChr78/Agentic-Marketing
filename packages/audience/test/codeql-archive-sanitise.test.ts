@@ -14,21 +14,25 @@ const timed = <T>(run: () => T): { value: T; ms: number } => {
   return { value, ms: performance.now() - started };
 };
 
-/** The implementation from `origin/main`, copied here for the differential test. */
-function oldEmailParts(html: string): { body: string; styles: string } {
+/**
+ * What `origin/main` produced for benign input. Its script and handler regexes never matched the
+ * benign corpus below (no active elements, no `on*` attributes), so on that input the old output is
+ * exactly body/style extraction plus 1×1-pixel removal. Keeping only those steps lets the
+ * differential test run without re-adding the regexes CodeQL flags.
+ */
+function benignReference(html: string): { body: string; styles: string } {
   const styles = [...html.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style>/gi)].map((m) => m[1]).join('\n');
   const extracted = html.match(/<body\b[^>]*>([\s\S]*?)<\/body>/i)?.[1] ?? html;
   const pixel =
     /<img\b[^>]*(?:(?:width\s*=\s*["']?1(?:px)?["']?[\s\S]*?height\s*=\s*["']?1(?:px)?["']?)|(?:height\s*=\s*["']?1(?:px)?["']?[\s\S]*?width\s*=\s*["']?1(?:px)?["']?))[^>]*>/gi;
-  return {
-    body: extracted
-      .replace(/<script\b[\s\S]*?<\/script>/gi, '')
-      .replace(/\son[a-z]+\s*=\s*"[^"]*"/gi, '')
-      .replace(/\son[a-z]+\s*=\s*'[^']*'/gi, '')
-      .replace(pixel, ''),
-    styles,
-  };
+  return { body: extracted.replace(pixel, ''), styles };
 }
+
+/** The corpus really is benign where it is sanitised (the body), so the reference is the old behaviour. */
+const isBenign = (html: string) => {
+  const body = html.match(/<body\b[^>]*>([\s\S]*?)<\/body>/i)?.[1] ?? html;
+  return !/<\/?(?:script|iframe|object|embed|frame|applet|base|meta)\b/i.test(body) && !/[\s/"']on[a-z]+\s*=/i.test(body);
+};
 
 describe('archive e-mail body sanitising', () => {
   it.each([
@@ -239,7 +243,11 @@ describe('archive sanitising: benign output is unchanged', () => {
   ];
 
   it('matches the old implementation on benign fixtures', () => {
-    for (const html of fixtures) expect(emailParts(html), html).toEqual(oldEmailParts(html));
+    for (const html of fixtures) {
+      expect(isBenign(html), html).toBe(true);
+      expect(isBenign(html), html).toBe(true);
+      expect(emailParts(html), html).toEqual(benignReference(html));
+    }
   });
 
   it('keeps a rendered newsletter byte-identical', async () => {
@@ -247,7 +255,8 @@ describe('archive sanitising: benign output is unchanged', () => {
     const rendered = await renderTemplate({ purpose: 'marketing_email', subject: 'Field notes', mjml }, {});
     const parts = emailParts(rendered.html);
 
-    expect(parts).toEqual(oldEmailParts(rendered.html));
+    expect(isBenign(rendered.html)).toBe(true);
+    expect(parts).toEqual(benignReference(rendered.html));
   });
 
   it('matches the old implementation on 20,000 random benign inputs', () => {
@@ -316,7 +325,8 @@ describe('archive sanitising: benign output is unchanged', () => {
 
     for (let i = 0; i < 20_000; i++) {
       const html = generate();
-      expect(emailParts(html), html).toEqual(oldEmailParts(html));
+      expect(isBenign(html), html).toBe(true);
+      expect(emailParts(html), html).toEqual(benignReference(html));
     }
   });
 });
