@@ -37,7 +37,7 @@ const REDIRECTS: { from: string; to: string; search?: string; hash?: string }[] 
   { from: '/build/prompts', to: '/work/agents?tab=library' },
   { from: '/build/prompts/prm_01', to: '/work/agents/library/prm_01' },
   { from: '/build/topics', to: '/audience/consent?tab=topics' },
-  { from: '/build/recipes', to: '/create?tab=starters' },
+  { from: '/build/recipes', to: '/content/templates?tab=starters' },
   { from: '/design/templates', to: '/content/templates' },
   { from: '/design/templates/tpl_01', to: '/content/templates/tpl_01' },
   { from: '/design/blocks', to: '/content/templates?tab=blocks' },

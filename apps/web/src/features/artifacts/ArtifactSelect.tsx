@@ -1,7 +1,11 @@
 import { Select } from '../../ui';
-import { useAllArtifacts } from './artifactList';
+import { usePickerIndex } from './pickerIndex';
 
-/** Pick an artifact of one type; labels say which ones are live (only live ones can be used when publishing). */
+/**
+ * Pick an artifact of one type; labels say which ones are live (only live ones can be used when
+ * publishing). The list is the shared, workspace-keyed picker index: one bounded read per type, no
+ * `artifacts.get` per row, and every selector on the page reuses it (#524).
+ */
 export function ArtifactSelect({
   type,
   value,
@@ -19,7 +23,7 @@ export function ArtifactSelect({
   id?: string;
   prefix?: string;
 }) {
-  const list = useAllArtifacts(type);
+  const list = usePickerIndex(type);
   const items = (list.data?.artifacts ?? []).filter((a) => !prefix || a.id.startsWith(prefix));
   const known = !value || items.some((a) => a.id === value);
   return (

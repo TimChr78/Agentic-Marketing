@@ -18,7 +18,7 @@ export interface User {
 
 type Status = 'loading' | 'signed-out' | 'offline' | 'no-workspace' | 'ready';
 
-interface SessionValue {
+export interface SessionValue {
   status: Status;
   user: User | null;
   workspace: Workspace | null;
@@ -33,6 +33,9 @@ interface SessionValue {
 }
 
 const SessionContext = createContext<SessionValue | null>(null);
+
+/** The session seam (#524): the demo supplies a fixture session through this provider. */
+export { SessionContext };
 
 async function getSession(): Promise<User | null | 'offline'> {
   try {
