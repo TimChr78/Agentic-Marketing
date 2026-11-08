@@ -2,57 +2,52 @@
 
 Durable handoff for the agent working on this repository. Update it when a long run starts, when work lands, and at every handoff. A new session should be able to resume from this file alone.
 
-_Last updated: 2026-11-07 (night)_
+_Last updated: 2026-11-08_
 
 ## Now
 
-- **Process batch 1 is merged** (2026-11-07). Each item was reviewed by Sol, re-checked after its fixes, and passed CI:
-  - **#515 — shared labelled test stack.**
-    - `docker-compose.test.yml` (label `am-test=1`), `scripts/test-services.sh`, `scripts/preflight.sh` and `scripts/docker-clean.sh`.
-    - `AM_TEST_RUN` and `scopedDbName()` / `packages/db/test/print-db.ts` give each run its own names.
-    - `TEST_PORT_OFFSET` with `e2e/ports.ts`.
-    - A run-scoped `test:clean`.
-  - **#518 — determinism kit.**
-    - `TZ=UTC`, plus the `test-support/` helpers: a seeded RNG, `uniqueEvent`/`uniqueJourney` and `expectUnordered`.
-    - The CLI is bundled once per run with source-path parity. The CLI test went from 396 s, with timeouts, to 110–170 s.
-    - The packages worker cap.
-  - **#516 — local Playwright runner.** `scripts/e2e-docker.sh` with smoke/functional/axe/visual/update/shots and an `@smoke` subset, plus the exact-selector lint.
-  - **Alongside these:** the curl retries for the PostgreSQL key (#519 and CI), the web 5 s async timeout, and `settle()` now waits for the journey canvas nodes.
-- **Waiting for the user:** a decision on the recommendation below (host setup, then batch 2 or Phase 27).
+- **Phase 27 is merged** to `main` (#539, merge `5719d88`). It covers the remaining families and the recipient surfaces (#524–#530), and its tracker is #531.
+  - Task PRs #532–#538 were followed by four rounds of fixes after Sol's reviews: #540–#549.
+  - Sol approved at `bbe4c1a`.
+  - Phase-level local e2e at `0f1e28d`: functional 75/75, axe 43/43 with 0 violations, visual 12/12.
+- **Release 0.13.0 is in progress.** `scripts/release/prepare.mjs 0.13.0 --previous 0.12.0` ran on `release/0.13.0` and folded 19 fragments.
+  - Breaking changes: none for commands, artifacts or configuration. The legacy demo is replaced by `/demo`.
+  - The fixes to features that are new in 0.13.0 are folded into "Changed".
+  - Remaining steps: merge the release PR, tag `v0.13.0`, run `scripts/release/verify.sh 0.13.0`, run `close-issues.mjs 0.13.0 --yes`, and close tracker #531.
+- **The process work has landed** (batches 1 and 2: #515, #516, #518, #521, #522 and #523). The shared `am-test` stack runs through the pinned `/mnt/user/appdata/t3code/tools/bin/docker-compose` until Unraid 8 ships native Compose.
 
 ## Next
 
-- **Recommended:** a short host-setup step, then a trimmed batch 2, then Phase 27.
-  - Batch 2 is: changelog fragments, per-delegate draft PRs against the phase branch, affected-test selection, and a release script with verification.
-  - Migration reservation is deferred; the Wave 5 UI phases rarely add migrations.
+- **Phase 28, the polish pass and verification** (`docs/architecture/roadmap-wave-5.md`):
+  - a microcopy pass;
+  - motion limited to orientation and feedback (120–180 ms, honouring reduced motion);
+  - dark-mode and mobile audits;
+  - per-route bundle budgets and skeletons without layout shift;
+  - DESIGN.md v2 final;
+  - refreshed screenshots and README images.
+- **Carry-overs into Phase 28:**
+  - The mutation sweep is still partly lexical for `Button` handlers (`mutationSweep.test.ts` `MUTATING_HANDLER`). Detect async commands the way `Select` now does (Sol P3).
+  - `Select` drops a caller's `aria-description` when it is unrestricted (`ui/form.tsx`, Sol P3).
+  - The role-dropdown demo test should also assert that an interaction makes zero submissions (Sol P3).
+  - `pnpm test:affected` defaults to `origin/main`. On a phase branch it should default to the phase branch, because unclassified paths that were already merged select the full suite.
+  - Dependabot reports 4 moderate alerts on `main`. Triage them.
 
 ## Blocked / decisions needed
 
-- **Host:** this Unraid host has no persistent Docker Compose, so `scripts/test-services.sh` cannot start the shared stack. The user needs to install the Compose plugin, or approve a pinned `docker-compose` binary under `/mnt/user/appdata`.
-- **Containers:** `am-patch-test-*` (four containers, not ours) is still running. Remove it only with the user's OK.
-- **Disk:** 33 GB of unused Docker volumes are reclaimable. Prune only with the user's OK; `docker-clean.sh` only touches `am-test` resources.
+- These are open questions for the user and block nothing:
+  - Should there be a public signup GET page?
+  - Is the demo walkthrough note (kept as a short notice on Home) enough?
+  - Where should Consent Topics live?
 
-## Baseline (2026-11-07, before the process work)
+## Lessons from Phase 27
 
-| Measure | Value |
-|---|---|
-| Full Vitest suite, local (`TEST_WORKERS=2`) | ~10 min; CI ~10 min for `test:ci` |
-| Web project alone | ~1 min (522 tests); flaky timeouts when delegates run tests in parallel on the host |
-| E2E functional + axe (Playwright image) | ~5–7 min plus ~30–90 s seed; hand-assembled `docker run` each time |
-| Visual check | ~1 min for 12 routes × 4 variants |
-| Per-delegate test stack | 4 containers per task (`tNNN-*`), named by hand; orphaned stacks found |
-| Docker | 157 volumes, 32.75 GB reclaimable |
-| CHANGELOG conflicts | every merge of a parallel task in Phases 25 and 26 |
-
-## Recurring failures the process work targets
-
-- Order and shared-state flakes: shared journey trigger events (#503, earlier 0.2.10/0.3.0), unordered results asserted in order (0.4.0).
-- Time-zone-dependent results; no `TZ` pinned in Vitest.
-- CLI tests compile the CLI per call (226–291 s under load).
-- E2E: no runner script; server start/stop by hand, stale seeded servers, the kill-by-pattern that killed the shell; loose `getByLabel` selectors.
-- Test stacks: per-delegate stacks with hand-picked ports, no labels, orphaned containers, disk pressure. Test database names are fixed per file (`am_<name>`), so two checkouts cannot share one stack safely.
-- Environment drift: `/tmp` wiped between sessions (pnpm shim, env file), commands that fail silently.
+- **Sol's review loop.** Review rounds 2–4 found narrower issues each time, mostly in the new demo isolation. Two things should cut the rounds:
+  - brief Sol to block only on P1 or P2 defects a person can actually hit;
+  - give each security-like boundary (demo isolation) its own adversarial checklist in the contract.
+- **Visual masking races.** `volatileMasks()` only masks what has rendered. Wait for late panels before masking (agents comparison, #544).
+- **Palette drags in e2e.** Taller rows can push the drag source below the fold. Filter with the palette search before dragging (#541).
 
 ## Last green
 
-- `main` at `f64fdcc` (v0.12.0, released and verified).
+- `main` at `5719d88` (Phase 27 merged; CI green on `bbe4c1a`).
+- The last release is v0.12.0 (`f64fdcc`), released and verified.
