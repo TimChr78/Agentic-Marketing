@@ -20,12 +20,31 @@ async function openTemplate(page: import('@playwright/test').Page) {
 test('the editor inserts from the palette, opens every preview mode and labels the source', { tag: '@smoke' }, async ({ page }) => {
   await openTemplate(page);
 
+  // At 1440 the preview starts closed so the canvas keeps the e-mail width (#526).
+  const canvas = page.locator('.am-gjs .gjs-editor');
+  const box = await canvas.boundingBox();
+  expect(box, 'the visual canvas is laid out').not.toBeNull();
+  expect(box!.width).toBeGreaterThanOrEqual(600);
+
+  const previewButton = page.getByRole('button', { name: 'Preview' });
+  await expect(previewButton).toHaveAttribute('aria-pressed', 'false');
+
   // A clean editor preview is the exact saved version, not an unsaved draft.
-  await page.getByRole('button', { name: 'Preview' }).click();
+  await previewButton.click();
+  await expect(previewButton).toHaveAttribute('aria-pressed', 'true');
   await expect(page.locator('[data-preview-source="saved"]')).toContainText(/Saved v\d+/);
   await expect(page.getByTitle(/^E-mail preview, desktop$/)).toBeVisible({ timeout: 20_000 });
+
+  // The same control closes the preview and returns the editor to full width, then opens it again.
+  await previewButton.click();
+  await expect(previewButton).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.locator('[data-preview-source="saved"]')).toHaveCount(0);
+  await previewButton.click();
+  await expect(previewButton).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('[data-preview-source="saved"]')).toContainText(/Saved v\d+/);
+
   await page.getByRole('radio', { name: 'Visual' }).click();
-  await expect(page.locator('.am-gjs .gjs-editor')).toBeVisible();
+  await expect(canvas).toBeVisible();
 
   // One Insert palette with the six basic elements, searchable, and reusable blocks in a second tab.
   const insert = page.getByRole('button', { name: 'Insert', exact: true });
@@ -59,8 +78,8 @@ test('the editor inserts from the palette, opens every preview mode and labels t
   const source = page.getByRole('textbox', { name: 'MJML with Liquid', exact: true });
   await expect(source).toHaveValue(/Write your text here\./, { timeout: 15_000 });
 
-  // The draft preview is local, labelled Unsaved draft, and offers width, dark mail and text modes.
-  await page.getByRole('button', { name: 'Preview' }).click();
+  // The preview stayed open through the toggle check; the local draft is labelled Unsaved draft and
+  // offers width, dark mail and text modes.
   await expect(page.locator('[data-preview-source="unsaved"]')).toContainText('Unsaved draft');
   await expect(page.locator('[data-preview-source="unsaved"]')).toContainText(/Based on Saved v\d+/);
   await expect(page.getByTitle(/^E-mail preview, desktop$/)).toBeVisible({ timeout: 20_000 });

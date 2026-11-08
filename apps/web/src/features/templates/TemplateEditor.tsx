@@ -34,7 +34,9 @@ export interface TemplateContent {
  */
 export function TemplateEditor({ artifact, content, onChange, readOnly, errors }: EditorProps<TemplateContent>) {
   const [view, setView] = useState<'visual' | 'code'>('visual');
-  const [showPreview, setShowPreview] = useState(true);
+  // At 1440 the preview cannot sit beside a canvas wide enough for an e-mail. Start it closed
+  // there; only a viewport wide enough for both panes opens with the preview showing.
+  const [showPreview, setShowPreview] = useState(() => window.innerWidth >= 1536);
   const [inserting, setInserting] = useState(false);
   const [picking, setPicking] = useState(false);
   const [pendingInsert, setPendingInsert] = useState<{ kind: InsertElementKind; columns?: 1 | 2 } | null>(null);
@@ -236,7 +238,7 @@ export function TemplateEditor({ artifact, content, onChange, readOnly, errors }
           variant={showPreview ? 'secondary' : 'ghost'}
           aria-pressed={showPreview}
           icon={<Eye size={14} aria-hidden />}
-          onClick={() => setShowPreview(true)}
+          onClick={() => setShowPreview((v) => !v)}
         >
           Preview
         </Button>
@@ -248,7 +250,7 @@ export function TemplateEditor({ artifact, content, onChange, readOnly, errors }
         </Alert>
       )}
       {errors.mjml && <Alert tone="bad">{errors.mjml}</Alert>}
-      <div className={showPreview ? 'grid gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(320px,480px)]' : undefined}>
+      <div className={showPreview ? 'grid gap-5 2xl:grid-cols-[minmax(0,1fr)_minmax(320px,480px)]' : undefined}>
         <div className="min-w-0">
           {view === 'visual' ? (
             readOnly ? (
