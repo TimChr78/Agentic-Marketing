@@ -43,9 +43,13 @@ test.describe('390 px marketing surfaces', () => {
     await page.goto(`/marketing/broadcasts/${id}`);
     await settle(page);
 
-    const primary = page
-      .locator('main#main')
-      .getByRole('link', { name: /^(Review the request|View request)$/ })
+    // The one primary action follows the broadcast's state, which earlier specs change (the
+    // composer saves a new draft), so accept each label ArtifactDetailPage can choose.
+    const PRIMARY = /^(Review the request|View request|View the approval request|Submit for review|Publish( v\d+)?|Save draft)$/;
+    const main = page.locator('main#main');
+    const primary = main
+      .getByRole('link', { name: PRIMARY })
+      .or(main.getByRole('button', { name: PRIMARY }))
       .first();
     await expect(primary).toBeVisible();
     const more = page.getByRole('button', { name: 'More actions' });
