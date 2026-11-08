@@ -10,7 +10,7 @@ import { pageWidth } from '../../ui/layout';
 
 /** Design → Hosted pages (#37): what subscribers see on your links address, per form. */
 export default function HostedPagesPage() {
-  useCrumbs([{ label: 'Hosted pages' }]);
+  useCrumbs([{ label: 'Subscriber pages' }]);
   const forms = useAllArtifacts('form');
   const archive = useApi(() => api.call('archive.issues', {}), []);
   const archiveSettings = archive.data?.settings;
@@ -18,8 +18,8 @@ export default function HostedPagesPage() {
   return (
     <div className={pageWidth('default', 'space-y-5')}>
       <PageHeader
-        title="Hosted pages"
-        description="The pages subscribers see on your links address after signing up and when they unsubscribe. They use the live brand, and a form can override parts of it."
+        title="Subscriber pages"
+        description="The pages subscribers see on your links address after signing up and when they unsubscribe. This preview uses the published brand, not unsaved edits in the Brand tab; a form can override parts of it."
         actions={
           <ButtonLink to="/content/brand" variant="primary">
             Edit brand
@@ -32,7 +32,10 @@ export default function HostedPagesPage() {
         </Card>
         <div className="space-y-4">
           <Card title="Preview as" padded>
-            <Field label="Form" hint="A form's own look (Forms → form → Hosted pages) applies to its confirm and expired pages.">
+            <Field
+              label="Form"
+              hint="A form's own look (Forms → form → Hosted pages) applies to its confirm and expired pages. Only published form overrides are used."
+            >
               <Select value={formId} onChange={(e) => setFormId(e.target.value)}>
                 <option value="">Workspace brand</option>
                 {forms.data?.artifacts.map((f) => (
@@ -46,7 +49,9 @@ export default function HostedPagesPage() {
           <Card title="Newsletter archive" padded>
             {archiveSettings?.enabled && archiveSettings.indexUrl ? (
               <>
-                <p className="text-[13px] text-fg-2">Sent issues marked “Publish to the archive” appear here, with RSS and a sitemap.</p>
+                <p className="text-[13px] text-fg-2">
+                  Sent issues marked “Publish to the archive” appear here, with an RSS feed and a sitemap for readers and search engines.
+                </p>
                 <p className="mt-2 text-[13px]">
                   <a className="font-medium text-accent hover:underline" href={archiveSettings.indexUrl} target="_blank" rel="noreferrer">
                     Open the live archive
