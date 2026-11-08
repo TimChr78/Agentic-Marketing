@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setWorkspaceId } from '../../../app/api';
 import ConsentPage from '../../../pages/audience/ConsentPage';
@@ -234,8 +234,8 @@ describe('import purpose labels (A1)', () => {
       target: { value: 'email_address,first_name\nada@example.com,Ada' },
     });
     fireEvent.click(screen.getByRole('button', { name: 'Use pasted CSV' }));
-    await waitFor(() => expect((screen.getByLabelText(/^Purpose/) as HTMLElement).tagName).toBe('SELECT'));
-    const purpose = screen.getByLabelText(/^Purpose/) as HTMLSelectElement;
+    const option = await screen.findByRole('option', { name: 'Marketing e-mail' });
+    const purpose = option.closest('select') as HTMLSelectElement;
     expect(within(purpose).getByRole('option', { name: 'Marketing e-mail' })).toBeTruthy();
     expect(within(purpose).queryByRole('option', { name: /\(marketing_email\)/ })).toBeNull();
     fireEvent.change(purpose, { target: { value: 'marketing_email' } });

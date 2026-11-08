@@ -212,7 +212,11 @@ export default function ImportsPage() {
                   <Input value={system} onChange={(e) => setSystem(e.target.value)} maxLength={80} />
                 </Field>
                 <Field label="Purpose" hint="What these people agreed to receive." required>
-                  {purposes.data?.purposes.length ? (
+                  {purposes.loading ? (
+                    <Select value={purpose} disabled onChange={() => {}} aria-label="Loading purposes">
+                      <option value={purpose}>Loading purposes…</option>
+                    </Select>
+                  ) : purposes.data?.purposes.length ? (
                     <Select value={purpose} onChange={(e) => setPurpose(e.target.value)}>
                       {purposes.data.purposes.map((p) => (
                         <option key={p.key} value={p.key}>
