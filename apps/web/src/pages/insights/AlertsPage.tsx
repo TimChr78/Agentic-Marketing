@@ -181,7 +181,7 @@ export default function AlertsPage() {
       if (historyRule?.id === rule.id) setHistoryRule(null);
       reload();
     } catch (e) {
-      toast.error(errText(e));
+      toast.error(`Couldn’t delete “${rule.name}”: ${errText(e)}`);
     }
   };
 
@@ -193,7 +193,7 @@ export default function AlertsPage() {
       else toast.info(feedback.message);
       reload();
     } catch (e) {
-      toast.error(errText(e));
+      toast.error(`Couldn’t send a test for “${rule.name}”: ${errText(e)}`);
     }
   };
 

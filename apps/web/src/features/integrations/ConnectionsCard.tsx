@@ -301,7 +301,7 @@ export function ConnectionsCard() {
       window.open(url, '_blank', 'noopener,noreferrer');
       toast.info(`Opened the authorization page for “${c.name}”. Finish there, then refresh this list.`);
     } catch (e) {
-      toast.error(errText(e));
+      toast.error(`Couldn’t open the authorization page for “${c.name}”: ${errText(e)}`);
     } finally {
       setBusy(null);
     }
@@ -326,7 +326,7 @@ export function ConnectionsCard() {
       toast.success(`Deleted “${c.name}”.`);
       await list.reload();
     } catch (e) {
-      toast.error(errText(e));
+      toast.error(`Couldn’t delete “${c.name}”: ${errText(e)}`);
     } finally {
       setBusy(null);
     }

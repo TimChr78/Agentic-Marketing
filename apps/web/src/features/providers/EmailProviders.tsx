@@ -83,7 +83,7 @@ export function useEmailChannel(): ProviderChannel {
       const r = await api.call('emailProviders.rotateWebhook', { id: p.id });
       setWebhook({ name: p.name, url: r.webhookUrl });
     } catch (e) {
-      toast.error(errText(e));
+      toast.error(`Couldn’t replace the webhook URL for “${p.name}”: ${errText(e)}`);
     }
   };
 
@@ -107,7 +107,7 @@ export function useEmailChannel(): ProviderChannel {
       toast.success(`Deleted “${p.name}”.`);
       await list.reload();
     } catch (e) {
-      toast.error(errText(e));
+      toast.error(`Couldn’t delete “${p.name}”: ${errText(e)}`);
     }
   };
 

@@ -395,7 +395,7 @@ export function useSmsChannel(): ProviderChannel {
       );
       await list.reload();
     } catch (e) {
-      toast.error(errText(e));
+      toast.error(`Couldn’t ${p.enabled ? 'disable' : 'enable'} “${p.name}”: ${errText(e)}`);
     } finally {
       setBusy(null);
     }
@@ -416,7 +416,7 @@ export function useSmsChannel(): ProviderChannel {
       toast.success(`Deleted “${p.name}”.`);
       await list.reload();
     } catch (e) {
-      toast.error(errText(e));
+      toast.error(`Couldn’t delete “${p.name}”: ${errText(e)}`);
     } finally {
       setBusy(null);
     }
@@ -849,7 +849,7 @@ export function usePushChannel(): ProviderChannel {
       toast.success(p.enabled ? `Disabled “${p.name}”. Push steps will skip it.` : `Enabled “${p.name}”. Push steps will use it.`);
       await list.reload();
     } catch (e) {
-      toast.error(errText(e));
+      toast.error(`Couldn’t ${p.enabled ? 'disable' : 'enable'} “${p.name}”: ${errText(e)}`);
     } finally {
       setBusy(null);
     }
@@ -870,7 +870,7 @@ export function usePushChannel(): ProviderChannel {
       toast.success(`Deleted “${p.name}”.`);
       await list.reload();
     } catch (e) {
-      toast.error(errText(e));
+      toast.error(`Couldn’t delete “${p.name}”: ${errText(e)}`);
     } finally {
       setBusy(null);
     }
@@ -1202,7 +1202,7 @@ export function useAiChannel(): ProviderChannel {
       toast.success(p.enabled ? `Disabled “${p.name}”. AI steps will skip it.` : `Enabled “${p.name}”. AI steps will use it.`);
       await list.reload();
     } catch (e) {
-      toast.error(errText(e));
+      toast.error(`Couldn’t ${p.enabled ? 'disable' : 'enable'} “${p.name}”: ${errText(e)}`);
     } finally {
       setBusy(null);
     }
@@ -1227,7 +1227,7 @@ export function useAiChannel(): ProviderChannel {
       toast.success(`Deleted “${p.name}”.`);
       await list.reload();
     } catch (e) {
-      toast.error(errText(e));
+      toast.error(`Couldn’t delete “${p.name}”: ${errText(e)}`);
     } finally {
       setBusy(null);
     }

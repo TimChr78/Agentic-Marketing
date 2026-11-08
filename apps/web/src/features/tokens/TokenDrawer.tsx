@@ -131,7 +131,7 @@ export function TokenDrawer({ id, onClose, onChanged }: { id: string; onClose: (
       onChanged();
       await t.reload();
     } catch (e) {
-      toast.error(errText(e));
+      toast.error(`Couldn’t revoke “${tok.name}”: ${errText(e)}`);
     }
   };
 
