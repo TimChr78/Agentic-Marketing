@@ -29,33 +29,43 @@ export default function ProvidersPage() {
   const retryAll = () => {
     for (const channel of channels) channel.onRetry();
   };
+  // Retrying a partial read touches only the channels that failed; the ones that answered keep
+  // their rows and are not re-read.
+  const retryFailed = () => {
+    for (const channel of failed) channel.onRetry();
+  };
 
-  // A partial read says only which channels failed; the channels that answered stay usable.
-  const notice = partial
-    ? {
-        title: 'Some provider channels couldn’t load',
-        body: (
-          <>
-            {failed.map((c) => c.label).join(', ')} could not be read. The other {channels.length - failed.length}{' '}
-            {channels.length - failed.length === 1 ? 'channel loaded' : 'channels loaded'} and remain usable. Retry to read the failed
-            {failed.length === 1 ? ' channel' : ' channels'} again; saved values are unchanged.
-          </>
-        ),
-        action: (
-          <Button size="sm" variant="ghost" onClick={retryAll}>
-            Retry
-          </Button>
-        ),
-      }
-    : {
-        title: 'Couldn’t load providers',
-        body: 'Provider configuration is unavailable. Retry to read it again; saved values are unchanged.',
-        action: (
-          <Button size="sm" variant="ghost" onClick={retryAll}>
-            Retry
-          </Button>
-        ),
-      };
+  // A partial read says only which channels failed; the channels that answered stay usable. With
+  // no failed channel there is nothing to report, and with every channel failed the page state
+  // already carries the error, so the notice never contradicts a successful read.
+  const notice =
+    failed.length === 0
+      ? undefined
+      : partial
+        ? {
+            title: 'Some provider channels couldn’t load',
+            body: (
+              <>
+                {failed.map((c) => c.label).join(', ')} could not be read. The other {channels.length - failed.length}{' '}
+                {channels.length - failed.length === 1 ? 'channel loaded' : 'channels loaded'} and remain usable. Retry to read the failed
+                {failed.length === 1 ? ' channel' : ' channels'} again; saved values are unchanged.
+              </>
+            ),
+            action: (
+              <Button size="sm" variant="ghost" onClick={retryFailed}>
+                Retry
+              </Button>
+            ),
+          }
+        : {
+            title: 'Couldn’t load providers',
+            body: 'Provider configuration is unavailable. Retry to read it again; saved values are unchanged.',
+            action: (
+              <Button size="sm" variant="ghost" onClick={retryAll}>
+                Retry
+              </Button>
+            ),
+          };
 
   const notices = channels.some((c) => c.notices) && (
     <div className="space-y-2 border-b border-line p-3">

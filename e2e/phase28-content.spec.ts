@@ -37,6 +37,14 @@ async function delayVisualEditor(page: Page) {
   );
 }
 
+/** Holds the content list read so the phone's reserved row geometry is observable. */
+async function delayContentList(page: Page) {
+  await page.route('**/v1/artifacts.list', async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    await route.continue();
+  });
+}
+
 const hexToRgb = (hex: string) => {
   const value = hex.trim().replace('#', '');
   return `rgb(${[0, 2, 4].map((i) => Number.parseInt(value.slice(i, i + 2), 16)).join(', ')})`;
@@ -215,6 +223,48 @@ test.describe('content at 390 px', () => {
     const purpose = page.getByRole('combobox', { name: 'Purpose', exact: true });
     await expect(purpose).toBeVisible();
     expect(await (await purpose.locator('option').allTextContents()).join(' ')).not.toContain('marketing_email');
+  });
+
+  test('the template list reserves the phone row geometry while the read is held', async ({ page }) => {
+    await signIn(page, PEOPLE.owner);
+    await delayContentList(page);
+    await page.goto('/content/templates');
+
+    // The loading placeholder is the compact row list, not the desktop gallery's six 170 px tiles.
+    const skeleton = page.locator('[data-skeleton-phone-list]');
+    await expect(skeleton).toBeVisible();
+    await expect(page.getByRole('status', { name: 'Loading templates' })).toBeVisible();
+    const region = page.locator('main#main .am-frame');
+    const loadingBox = await region.boundingBox();
+    expect(loadingBox).not.toBeNull();
+    const skeletonRows = await skeleton.locator(':scope > li').count();
+    const skeletonRow = await skeleton.locator(':scope > li').first().boundingBox();
+    expect(skeletonRow).not.toBeNull();
+    // A phone row is 72 px (the ready list's minimum), nowhere near a 170 px gallery tile.
+    expect(skeletonRows).toBeGreaterThan(0);
+    expect(Math.abs(skeletonRow!.height - 72)).toBeLessThanOrEqual(1);
+
+    const firstRow = page.locator('main#main .am-frame li').first();
+    await expect(firstRow).toBeVisible({ timeout: 15_000 });
+    const readyBox = await region.boundingBox();
+    const readyRow = await firstRow.boundingBox();
+    expect(readyBox).not.toBeNull();
+    expect(readyRow).not.toBeNull();
+    const rows = await page.locator('main#main .am-frame li').count();
+    expect(rows).toBeGreaterThan(0);
+
+    // The region's top is the same reserved slot in both states, and the first real row starts
+    // where the first placeholder row did.
+    expect(Math.abs(readyBox!.y - loadingBox!.y)).toBeLessThanOrEqual(1);
+    expect(Math.abs(readyRow!.y - skeletonRow!.y)).toBeLessThanOrEqual(4);
+
+    // Tolerance: the placeholder reserves a fixed number of rows while the read returns a
+    // server-sized list, so the only honest allowance is the difference between the reserved and
+    // the actual row count at one row height, plus 2 px for the frame's border. A 72 px phone row
+    // is what makes this small; the old 170 px tiles would be off by more than 100 px per row.
+    const ROW = 72;
+    const tolerance = Math.abs(skeletonRows - rows) * ROW + 2;
+    expect(Math.abs(readyBox!.height - loadingBox!.height)).toBeLessThanOrEqual(tolerance);
   });
 
   test('the asset library keeps Upload reachable and offers Clear filters when nothing matches', async ({ page }) => {

@@ -9,6 +9,8 @@ import { ToastProvider } from '../src/ui';
 
 const h = vi.hoisted(() => ({
   calls: [] as { name: string; input: Record<string, unknown> }[],
+  // Commands that reject, so a channel's read can fail on its own (#555 review).
+  fails: [] as string[],
   emptySms: false,
   emailTracking: 'configurable' as 'configurable' | 'forced',
   emailProviders: [
@@ -143,6 +145,7 @@ vi.mock('../src/app/api', async (importOriginal) => {
     api: {
       call: vi.fn(async (name: string, input: Record<string, unknown>) => {
         h.calls.push({ name, input });
+        if (h.fails.includes(name)) throw new Error(`${name} failed`);
         return respond(name);
       }),
     },
@@ -157,6 +160,7 @@ afterEach(() => {
 
 beforeEach(() => {
   h.calls = [];
+  h.fails = [];
   h.emptySms = false;
   h.emailTracking = 'configurable';
 });
@@ -360,5 +364,60 @@ describe('Providers compact channel rows (#527)', () => {
     await userEvent.click(within(confirm).getByRole('button', { name: 'Replace URL' }));
     const modal = await screen.findByRole('dialog', { name: 'Webhook URL for “Newsletter delivery”' });
     expect(within(modal).getByText('https://links.example.com/hooks/email/new')).toBeTruthy();
+  });
+});
+
+describe('Providers notices match what was read (#555 review)', () => {
+  const count = (name: string) => h.calls.filter((c) => c.name === name).length;
+
+  it('retries only the failed channel and clears the notice once every channel reads', async () => {
+    h.fails = ['aiProviders.list'];
+    render(
+      <ToastProvider>
+        <ProvidersPage />
+      </ToastProvider>,
+    );
+
+    expect(await screen.findByText('Some provider channels couldn’t load')).toBeTruthy();
+    expect(screen.getByText(/AI could not be read\. The other 3 channels loaded and remain usable\./)).toBeTruthy();
+    // The page notice offers one Retry; the failed channel's alert offers one per responsive half.
+    const retries = screen.getAllByRole('button', { name: 'Retry' });
+    expect(retries).toHaveLength(3);
+    const title = screen.getByText('Some provider channels couldn’t load');
+    const pageRetry = within(title.parentElement!.parentElement as HTMLElement).getByRole('button', { name: 'Retry' });
+
+    h.fails = [];
+    await userEvent.click(pageRetry);
+
+    await waitFor(() => expect(screen.queryByText('Some provider channels couldn’t load')).toBeNull());
+    expect(screen.queryByText('Couldn’t load providers')).toBeNull();
+    expect((await screen.findAllByText('Anthropic')).length).toBeGreaterThan(0);
+    // Only the failed channel was read again.
+    expect(count('aiProviders.list')).toBe(2);
+    for (const command of ['emailProviders.list', 'smsProviders.list', 'pushProviders.list']) expect(count(command)).toBe(1);
+  });
+
+  it('shows the error notice when every channel failed', async () => {
+    h.fails = ['emailProviders.list', 'smsProviders.list', 'pushProviders.list', 'aiProviders.list'];
+    render(
+      <ToastProvider>
+        <ProvidersPage />
+      </ToastProvider>,
+    );
+
+    expect(await screen.findByText('Couldn’t load providers')).toBeTruthy();
+    expect(screen.queryByText('Some provider channels couldn’t load')).toBeNull();
+  });
+
+  it('shows no notice when every channel loaded', async () => {
+    render(
+      <ToastProvider>
+        <ProvidersPage />
+      </ToastProvider>,
+    );
+
+    expect(await screen.findByText('4 of 4 channels configured')).toBeTruthy();
+    expect(screen.queryByText('Couldn’t load providers')).toBeNull();
+    expect(screen.queryByText('Some provider channels couldn’t load')).toBeNull();
   });
 });

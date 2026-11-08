@@ -66,8 +66,10 @@ export function CopilotDrawer({ open, onClose }: { open: boolean; onClose: () =>
   const [conversationAgent, setConversationAgent] = useState<string | null>(null);
   const [dialog, confirm] = useConfirm();
   const end = useRef<HTMLDivElement>(null);
+  // Scroll immediately: JS `behavior: 'smooth'` ignores the CSS reduced-motion override, and
+  // motion.md forbids smooth auto-scrolling (#555 review).
   // biome-ignore lint/correctness/useExhaustiveDependencies: scroll to the newest message whenever the list changes, which the body does not read
-  useEffect(() => end.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }), [items]);
+  useEffect(() => end.current?.scrollIntoView({ block: 'end' }), [items]);
 
   const past = useApi(() => api.call('copilot.conversations', {}), [], { skip: !open || !copilotAvailable });
   // Agents this person may talk as: ones they sponsor, or any active agent for an admin.

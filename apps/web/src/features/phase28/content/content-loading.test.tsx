@@ -61,16 +61,34 @@ const list = (over: Partial<Parameters<typeof ContentList>[0]> = {}) => (
 describe('content loading placeholders are labelled skeletons (#559)', () => {
   it('labels the template gallery read and uses the shared list geometry', () => {
     render(list());
-    const region = screen.getByRole('status', { name: 'Loading templates' });
-    expect(region.getAttribute('aria-busy')).toBe('true');
-    expect(region.getAttribute('data-geometry')).toBe('list');
-    expect(region.querySelector('[data-skeleton-shape]')).toBeTruthy();
+    // One region per breakpoint: the phone rows and the desktop gallery. CSS shows exactly one.
+    const regions = screen.getAllByRole('status', { name: 'Loading templates' });
+    expect(regions).toHaveLength(2);
+    for (const region of regions) {
+      expect(region.getAttribute('aria-busy')).toBe('true');
+      expect(region.getAttribute('data-geometry')).toBe('list');
+      expect(region.querySelector('[data-skeleton-shape]')).toBeTruthy();
+    }
     expect(screen.queryByRole('status', { name: 'Loading' })).toBeNull();
+  });
+
+  it('reserves the phone list geometry below 768 px and the gallery above it', () => {
+    render(list());
+    const [phone, desktop] = screen.getAllByRole('status', { name: 'Loading templates' });
+    // The phone slot is the ready list's compact row, not the desktop's 170 px tile.
+    expect(phone.className).toContain('md:hidden');
+    const rows = phone.querySelectorAll('[data-skeleton-phone-list] > li');
+    expect(rows).toHaveLength(5);
+    for (const row of rows) expect((row as HTMLElement).style.minHeight).toBe('72px');
+    expect(phone.querySelector('[data-skeleton-phone-list]')?.querySelectorAll('svg')).toHaveLength(0);
+    // The desktop region keeps the gallery tiles behind the md breakpoint.
+    expect(desktop.parentElement?.className).toContain('hidden md:block');
+    expect(desktop.querySelectorAll('li')).toHaveLength(6);
   });
 
   it('labels the block table read', () => {
     render(list({ type: 'email_block', title: 'Blocks', noun: 'blocks', layout: 'table' }));
-    expect(screen.getByRole('status', { name: 'Loading blocks' })).toBeTruthy();
+    expect(screen.getAllByRole('status', { name: 'Loading blocks' })).toHaveLength(2);
   });
 
   it('labels the asset list read', () => {

@@ -190,9 +190,11 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
   const list = useApi(() => api.call('approvals.list', { status, limit: 200 }), [status]);
   const proposals = useApi(() => api.call('workspace.proposals', { status: 'pending', limit: 50 }), []);
   const highlightedProposal = search.get('proposal');
+  // Highlighted proposals are brought into view immediately; motion.md forbids smooth auto-scroll
+  // (the CSS reduced-motion override cannot reach JS `behavior: 'smooth'`, #555 review).
   useEffect(() => {
     if (!highlightedProposal || !proposals.data) return;
-    document.getElementById(`proposal-${highlightedProposal}`)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    document.getElementById(`proposal-${highlightedProposal}`)?.scrollIntoView({ block: 'center' });
   }, [highlightedProposal, proposals.data]);
   const toast = useToast();
   const [pageId] = useState(() => ++approvalsPageSeq);
