@@ -40,11 +40,11 @@ test.describe('shared states', () => {
       route.fulfill({ status: 401, contentType: 'application/json', body: JSON.stringify({ message: 'Invalid credentials' }) }),
     );
     await page.goto('/');
-    await page.getByLabel('E-mail').fill('sam@example.com');
-    await page.getByLabel('Password').fill('wrong-password');
+    await page.getByLabel('E-mail', { exact: true }).fill('sam@example.com');
+    await page.getByLabel('Password', { exact: true }).fill('wrong-password');
     await page.getByRole('button', { name: 'Sign in' }).click();
     await expect(page.getByRole('alert')).toContainText('Couldn’t sign in. Check your e-mail and password, then try again.');
-    await expect(page.getByLabel('E-mail')).toHaveValue('sam@example.com');
+    await expect(page.getByLabel('E-mail', { exact: true })).toHaveValue('sam@example.com');
     // The raw server exception never reaches ordinary copy.
     await expect(page.getByRole('alert')).not.toContainText('Invalid credentials');
   });
@@ -59,8 +59,8 @@ test.describe('shared states', () => {
       await route.fulfill({ status: 401, contentType: 'application/json', body: '{}' });
     });
     await page.goto('/');
-    await page.getByLabel('E-mail').fill('sam@example.com');
-    await page.getByLabel('Password').fill('anything');
+    await page.getByLabel('E-mail', { exact: true }).fill('sam@example.com');
+    await page.getByLabel('Password', { exact: true }).fill('anything');
     const button = page.getByRole('button', { name: 'Sign in' });
     await button.click();
     await expect(button).toHaveAttribute('aria-busy', 'true');
