@@ -436,6 +436,9 @@ export function useSmsChannel(): ProviderChannel {
         <>
           {p.sender} · {p.billing.pricePerSegment} {p.billing.currency}/segment
           {p.billing.monthlyBudget != null && ` · budget ${p.billing.monthlyBudget} ${p.billing.currency}/month`}
+          <div className="mt-0.5 max-w-[260px] truncate font-mono text-[11px]" title={url}>
+            {url}
+          </div>
         </>
       ),
       extras: <CopyInline value={url} label="Copy incoming messages URL" />,

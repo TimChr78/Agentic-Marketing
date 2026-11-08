@@ -84,10 +84,10 @@ export default function SecretsPage() {
 
   const state = list.loading && !list.data ? 'loading' : list.error ? 'error' : secrets.length === 0 ? 'empty' : 'ready';
 
-  const actions = (secret: Secret, compact: boolean) => (
+  const actions = (secret: Secret) => (
     <div className="flex flex-wrap justify-end gap-1">
       <Button size="sm" variant="ghost" icon={<RotateCw size={14} />} onClick={() => setEditing({ mode: 'rotate', secret })}>
-        {compact ? 'Rotate' : 'Rotate'}
+        Rotate
       </Button>
       <Button size="sm" variant="danger" icon={<Trash2 size={14} />} onClick={() => void remove(secret)}>
         Delete
@@ -144,7 +144,7 @@ export default function SecretsPage() {
                   <Td className="hidden md:table-cell">
                     <span>{s.updatedByName ?? <span className="font-mono text-[12px]">{s.updatedBy}</span>}</span>
                   </Td>
-                  {canWrite && <Td className="text-right">{actions(s, false)}</Td>}
+                  {canWrite && <Td className="text-right">{actions(s)}</Td>}
                 </Tr>
               ))}
             </tbody>
@@ -161,7 +161,7 @@ export default function SecretsPage() {
                       Updated {timeAgo(s.updatedAt)} · {s.updatedByName ?? s.updatedBy}
                     </p>
                   </div>
-                  {canWrite && actions(s, true)}
+                  {canWrite && actions(s)}
                 </div>
                 <dl className="grid grid-cols-[minmax(80px,max-content)_minmax(0,1fr)] gap-x-3 text-[12px] leading-[18px]">
                   <dt className="text-muted">Updated</dt>

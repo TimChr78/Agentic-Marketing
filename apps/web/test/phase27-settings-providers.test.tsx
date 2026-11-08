@@ -26,6 +26,20 @@ const h = vi.hoisted(() => ({
       tracking: 'configurable',
       trackingNote: 'Postmark tracks opens and clicks only when you enable it in the message stream.',
     },
+    {
+      id: 'epr_2',
+      name: 'Receipts',
+      adapter: 'postmark',
+      config: { messageStream: 'outbound' },
+      fromEmail: 'receipts@example.com',
+      fromName: '',
+      replyTo: null,
+      useFor: ['transactional'],
+      enabled: true,
+      hasCredentials: true,
+      tracking: 'configurable',
+      trackingNote: 'Postmark tracks opens and clicks only when you enable it in the message stream.',
+    },
   ],
   adapters: [
     {
@@ -185,6 +199,13 @@ describe('Providers compact channel rows (#527)', () => {
     );
     expect(await screen.findByRole('heading', { level: 1, name: 'Providers' })).toBeTruthy();
     expect(screen.getByText('4 of 4 channels configured')).toBeTruthy();
+    await waitFor(() => expect(h.calls).toHaveLength(4));
+    expect(h.calls.map((c) => c.name).sort()).toEqual([
+      'aiProviders.list',
+      'emailProviders.list',
+      'pushProviders.list',
+      'smsProviders.list',
+    ]);
     expect(screen.getAllByText('E-mail').length).toBeGreaterThan(0);
     expect(screen.getAllByText('SMS').length).toBeGreaterThan(0);
     expect(screen.getAllByText('Push').length).toBeGreaterThan(0);
@@ -205,6 +226,9 @@ describe('Providers compact channel rows (#527)', () => {
     expect(fld(drawer, 'Reply-to address')).toHaveProperty('value', 'hello@example.com');
     expect(within(drawer).getByRole('checkbox', { name: 'Transactional' })).toBeTruthy();
     expect(within(drawer).getByRole('checkbox', { name: 'Marketing' })).toHaveProperty('checked', true);
+    expect(within(drawer).getByText(/Now sent by “Receipts”/)).toBeTruthy();
+    await userEvent.click(within(drawer).getByRole('checkbox', { name: 'Transactional' }));
+    expect(within(drawer).getByText(/Moves it from “Receipts”/)).toBeTruthy();
     expect(fld(drawer, 'Message stream')).toHaveProperty('value', 'broadcast');
     expect(fld(drawer, 'Server token')).toHaveProperty('value', '');
     expect(within(drawer).getByText(/Leave empty to keep the stored value/)).toBeTruthy();
@@ -218,7 +242,7 @@ describe('Providers compact channel rows (#527)', () => {
     await userEvent.click(within(drawer).getByRole('button', { name: 'Save changes' }));
     await waitFor(() => expect(h.calls.some((c) => c.name === 'emailProviders.update')).toBe(true));
     const update = h.calls.find((c) => c.name === 'emailProviders.update');
-    expect(update?.input).toMatchObject({ id: 'epr_1', fromEmail: 'news@example.com', useFor: ['marketing'] });
+    expect(update?.input).toMatchObject({ id: 'epr_1', fromEmail: 'news@example.com', useFor: ['marketing', 'transactional'] });
     expect(update?.input).not.toHaveProperty('secrets');
   });
 

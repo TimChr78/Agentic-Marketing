@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -129,6 +129,7 @@ describe('Workspace settings (#527)', () => {
   it('keeps General and Test sends as independent saves and keeps input after a failed save', async () => {
     view(<WorkspacePage />);
     expect(screen.getByRole('heading', { level: 1, name: 'Workspace' })).toBeTruthy();
+    expect(h.calls).toHaveLength(0);
     const name = fld(document.body, 'Name') as HTMLInputElement;
     expect(name.value).toBe('Northstar Journal');
     await userEvent.clear(name);
@@ -151,6 +152,12 @@ describe('Workspace settings (#527)', () => {
     expect(h.calls.some((c) => c.name === 'workspace.setSeedList')).toBe(false);
     expect((fld(document.body, 'Seed list') as HTMLTextAreaElement).value).toBe('not-an-address');
 
+    fireEvent.change(fld(document.body, 'Seed list'), {
+      target: { value: Array.from({ length: 51 }, (_, i) => `person${i}@example.com`).join('\n') },
+    });
+    await userEvent.click(screen.getByRole('button', { name: 'Save test sends' }));
+    expect(await screen.findByText(/Use at most 50 addresses/)).toBeTruthy();
+
     await userEvent.clear(fld(document.body, 'Seed list'));
     await userEvent.type(fld(document.body, 'Seed list'), 'Ops@Example.com\nmonitor@example.com');
     await userEvent.click(screen.getByRole('button', { name: 'Save test sends' }));
@@ -167,6 +174,7 @@ describe('Secrets (#527)', () => {
     view(<SecretsPage />);
     expect(screen.getByRole('heading', { level: 1, name: 'Secrets' })).toBeTruthy();
     expect((await screen.findAllByText('delivery.credential')).length).toBeGreaterThan(0);
+    expect(h.calls.map((c) => c.name)).toEqual(['secrets.list']);
     expect((await screen.findAllByText('Sam Rivera')).length).toBeGreaterThan(0);
     expect(screen.queryByText(/secret value/)).toBeNull();
 
@@ -201,6 +209,7 @@ describe('Users and roles (#527)', () => {
     view(<UsersPage />);
     expect(screen.getByRole('heading', { level: 1, name: 'Users and roles' })).toBeTruthy();
     const ownRole = (await screen.findAllByLabelText('Role for Sam Rivera'))[0] as HTMLSelectElement;
+    expect(h.calls.map((c) => c.name).sort()).toEqual(['invitations.list', 'members.list', 'scim.status', 'sso.list']);
     expect(ownRole.disabled).toBe(true);
     expect((screen.getAllByRole('button', { name: 'Remove Sam Rivera' })[0] as HTMLButtonElement).disabled).toBe(true);
 
@@ -219,6 +228,10 @@ describe('Users and roles (#527)', () => {
     expect(created).toBeTruthy();
     expect(within(drawer).getByDisplayValue(/\/invite\/abc123/)).toBeTruthy();
     expect(within(drawer).getByText(/No e-mail is sent/)).toBeTruthy();
+
+    expect(screen.getByText('Single sign-on and provisioning')).toBeTruthy();
+    expect(screen.getByText('No providers. People sign in with e-mail and password.')).toBeTruthy();
+    expect(screen.getByText('Off. Members are managed here and through single sign-on.')).toBeTruthy();
   });
 });
 
@@ -227,6 +240,7 @@ describe('Preferences (#527)', () => {
     view(<PreferencesPage />);
     expect(screen.getByRole('heading', { level: 1, name: 'Preferences' })).toBeTruthy();
     expect(screen.getByRole('radio', { name: /System/ })).toHaveProperty('checked', true);
+    expect(h.calls).toHaveLength(0);
     await userEvent.click(screen.getByRole('radio', { name: /Dark/ }));
     expect(h.setTheme).toHaveBeenCalledWith('dark');
 
