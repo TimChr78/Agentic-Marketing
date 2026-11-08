@@ -548,8 +548,43 @@ describe('segments family (#525)', () => {
       </ToastProvider>,
     );
     pending.resolve(99);
-    await waitFor(() => expect(estimateText()).toContain('previous estimate is no longer current'));
+    await waitFor(() => expect(estimateText()).toContain('previous estimate was not applied'));
     expect(estimateText()).not.toContain('99 people');
+  });
+
+  it('settles an abandoned estimate so returning to its rules leaves Estimate again usable', async () => {
+    h.rows.segment = [row(segmentId, 'segment', 'Weekly readers')];
+    const pending = pendingCount();
+    h.previewQueue = [() => pending.promise];
+    const first = { mode: 'dynamic', condition: { trait: 'loyaltyTier', op: 'eq', value: 'gold' } };
+    const second = { mode: 'dynamic', condition: { trait: 'loyaltyTier', op: 'eq', value: 'silver' } };
+    const editor = (content: Record<string, unknown>) => (
+      <SegmentEditor
+        artifact={artifact(segmentId, 'segment', 'Weekly readers', content) as never}
+        content={content as never}
+        onChange={() => {}}
+        readOnly={false}
+        errors={{}}
+        warnings={[]}
+      />
+    );
+    const { rerender } = renderWithToast(editor(first));
+    fireEvent.click(screen.getByRole('button', { name: 'Estimate audience' }));
+    await waitFor(() => expect(callsOf('segments.preview')).toHaveLength(1));
+
+    rerender(<ToastProvider>{editor(second)}</ToastProvider>);
+    await waitFor(() => expect(estimateText()).toContain('previous estimate was not applied'));
+
+    // The abandoned response arrives while the other rules are on screen and is ignored.
+    pending.resolve(99);
+    await waitFor(() => expect(estimateText()).toContain('previous estimate was not applied'));
+    expect(estimateText()).not.toContain('99 people');
+
+    // Returning to the first rules must not restore a permanently loading estimate.
+    rerender(<ToastProvider>{editor(first)}</ToastProvider>);
+    expect(estimateText()).toContain('estimate was not applied');
+    const again = screen.getByRole('button', { name: 'Estimate again' }) as HTMLButtonElement;
+    expect(again.disabled).toBe(false);
   });
 
   it('ignores an estimate that completes after a newer one', async () => {

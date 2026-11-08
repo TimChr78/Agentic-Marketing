@@ -50,6 +50,39 @@ const EMPTY_SNAPSHOT: PickerIndexState = {
 
 const entries = new Map<string, Entry>();
 
+// Artifact ids carry the type prefix the server assigns (packages/artifacts/src/types.ts). A
+// pending index has no rows to search, so its type comes from the id being renamed or discarded.
+const TYPE_BY_PREFIX: Record<string, string> = {
+  not: 'note',
+  jrn: 'journey',
+  blk: 'email_block',
+  eml: 'email_template',
+  sms: 'sms_template',
+  psh: 'push_template',
+  seg: 'segment',
+  exp: 'experience',
+  prm: 'prompt',
+  frm: 'form',
+  brd: 'brand',
+  bct: 'broadcast',
+  cmp: 'campaign',
+  tpl: 'tracking_plan',
+  pur: 'purposes',
+  cvm: 'conversion_map',
+  aud: 'audience_sync',
+  dlp: 'delivery_policy',
+  mnd: 'agent_mandate',
+  bcx: 'business_context',
+  cpb: 'campaign_brief',
+  brf: 'content_brief',
+  skl: 'skill',
+};
+
+function artifactTypeOfId(artifactId: string): string | null {
+  const match = /^([a-z]{3})_/.exec(artifactId);
+  return match ? (TYPE_BY_PREFIX[match[1]] ?? null) : null;
+}
+
 export function pickerIndexKey(workspaceId: string, type: string): string {
   return `${workspaceId}:${type}`;
 }
@@ -186,14 +219,20 @@ export function invalidatePickerIndex(workspaceId: string, type: string) {
 
 /**
  * Drops the exact keys that hold a new version of this artifact: its workspace's loaded indexes
- * whose rows contain its id. A create adds a row no index knows about yet; use
- * `invalidatePickerIndex` for that. Nothing else is refetched.
+ * whose rows contain its id, plus a pending index of the artifact's own type. A pending index has
+ * no rows yet, so its type comes from the id prefix; without that type every pending index in the
+ * workspace is dropped, which is safer than letting a pre-mutation response fill the cache. A
+ * create adds a row no index knows about yet; use `invalidatePickerIndex` for that.
  */
 export function invalidatePickerArtifact(workspaceId: string, artifactId: string) {
+  const type = artifactTypeOfId(artifactId);
   for (const [key, entry] of entries) {
     if (!key.startsWith(`${workspaceId}:`)) continue;
-    if (!entry.data?.artifacts.some((a: ArtifactRow) => a.id === artifactId)) continue;
-    reloadEntry(workspaceId, key.slice(workspaceId.length + 1));
+    const entryType = key.slice(workspaceId.length + 1);
+    const loaded = entry.data?.artifacts.some((a: ArtifactRow) => a.id === artifactId) ?? false;
+    const pending = !entry.data && (type === null || entryType === type);
+    if (!loaded && !pending) continue;
+    reloadEntry(workspaceId, entryType);
   }
 }
 
@@ -208,8 +247,11 @@ export function usePickerIndex(type: string, opts: { skip?: boolean } = {}): Pic
   // Before the session names a workspace there is nothing to key by; the shell does not mount
   // pages until it has, so this read is only for a direct component mount (tests, embedded editors).
   const key = pickerIndexKey(workspaceId ?? '', type);
+  // A skipped hook owns no index: it must not subscribe either, or an invalidation elsewhere would
+  // mistake that listener for a mounted picker and start a read nobody asked for.
+  const subscribeState = useCallback((listener: () => void) => (opts.skip ? () => {} : subscribe(key, listener)), [key, opts.skip]);
   const state = useSyncExternalStore(
-    (listener) => subscribe(key, listener),
+    subscribeState,
     () => snapshot(key),
     () => snapshot(key),
   );

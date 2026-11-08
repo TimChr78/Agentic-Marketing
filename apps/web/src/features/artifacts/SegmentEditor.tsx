@@ -629,6 +629,8 @@ interface Estimate {
   loading: boolean;
   count?: number;
   error?: string;
+  /** The request was abandoned by an edit or a newer request and will not be shown as current. */
+  cancelled?: boolean;
 }
 
 function EstimatedSize({ condition }: { condition: Condition }) {
@@ -642,6 +644,15 @@ function EstimatedSize({ condition }: { condition: Condition }) {
   const current = estimate && estimate.key === conditionKey ? estimate : null;
   const previous = estimate && estimate.key !== conditionKey ? estimate : null;
 
+  // Editing the rules abandons a pending estimate: it stops looking current so returning to those
+  // rules can never restore a permanently loading state. The response is still ignored below.
+  useEffect(() => {
+    setEstimate((prev) => (prev?.loading && prev.key !== conditionKey ? { ...prev, loading: false, cancelled: true } : prev));
+  }, [conditionKey]);
+
+  const settle = (key: string) =>
+    setEstimate((prev) => (prev?.loading && prev.key === key ? { ...prev, loading: false, cancelled: true } : prev));
+
   // A size is an explicit request, never an automatic read on every keystroke or on open. The
   // result belongs to the exact rules it was asked for: editing the rules makes it a previous
   // estimate, and a response that lands after another request is ignored.
@@ -653,10 +664,16 @@ function EstimatedSize({ condition }: { condition: Condition }) {
     setEstimate({ key, loading: true });
     try {
       const r = await api.call('segments.preview', { condition });
-      if (requestRef.current !== request || keyRef.current !== key) return;
+      if (requestRef.current !== request || keyRef.current !== key) {
+        settle(key);
+        return;
+      }
       setEstimate({ key, loading: false, count: r.count });
     } catch (e) {
-      if (requestRef.current !== request || keyRef.current !== key) return;
+      if (requestRef.current !== request || keyRef.current !== key) {
+        settle(key);
+        return;
+      }
       setEstimate({ key, loading: false, error: errText(e) });
     }
   };
@@ -670,6 +687,8 @@ function EstimatedSize({ condition }: { condition: Condition }) {
           <p className="text-[13px] text-muted">Your role can’t read profiles, so the size isn’t shown.</p>
         ) : current?.loading ? (
           <Skeleton className="mt-1 h-5 w-24" />
+        ) : current?.cancelled ? (
+          <p className="text-[13px] text-muted">The estimate was not applied. Estimate again.</p>
         ) : current?.error ? (
           <p className="text-[13px] text-bad">{current.error} Your rules are retained.</p>
         ) : current?.count !== undefined ? (
@@ -678,11 +697,13 @@ function EstimatedSize({ condition }: { condition: Condition }) {
           </p>
         ) : previous ? (
           <p className="text-[13px] text-muted">
-            {previous.loading
-              ? 'The previous estimate is no longer current. Estimate the current rules.'
-              : previous.error
-                ? 'The previous estimate failed. Estimate the current rules.'
-                : `The last estimate was ${(previous.count ?? 0).toLocaleString()} people, for the previous rules.`}
+            {previous.cancelled
+              ? 'The previous estimate was not applied. Estimate the current rules.'
+              : previous.loading
+                ? 'The previous estimate is no longer current. Estimate the current rules.'
+                : previous.error
+                  ? 'The previous estimate failed. Estimate the current rules.'
+                  : `The last estimate was ${(previous.count ?? 0).toLocaleString()} people, for the previous rules.`}
           </p>
         ) : (
           <p className="text-[13px] text-muted">Not estimated yet. Estimate the rules currently shown.</p>
