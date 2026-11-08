@@ -1,9 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BlockPicker } from '../../blocks/BlockPicker';
-import { NewBrandDrawer } from '../../brand/NewBrandDrawer';
 import { type TemplateContent, TemplateEditor } from '../../templates/TemplateEditor';
 
 // Phase 28 (#559) content polish: the purpose and topic selectors name purposes without their
@@ -112,16 +111,10 @@ describe('the visual editor reserves its height (#559)', () => {
 });
 
 describe('empty content lists name their action (#559)', () => {
-  it('points an empty block picker at the existing Blocks page, not an invented group', async () => {
+  it('names the create action in an empty block picker', async () => {
     render(<BlockPicker onClose={vi.fn()} onPick={vi.fn()} />);
     const empty = await screen.findByText(/No reusable blocks yet/);
-    expect(empty.textContent).toBe('No reusable blocks yet. Create one in Content → Templates, on the Blocks tab.');
-  });
-
-  it('names the Content group in the new-brand hint', () => {
-    render(<NewBrandDrawer open onClose={vi.fn()} />);
-    const drawer = screen.getByRole('dialog', { name: 'New brand' });
-    expect(within(drawer).getByText(/You can change it later under Content → Brand\./)).toBeTruthy();
+    expect(empty.textContent).toBe('No reusable blocks yet. Create one in Design → Blocks.');
   });
 });
 

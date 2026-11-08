@@ -87,7 +87,7 @@ export function NewBrandDrawer({ open, onClose }: { open: boolean; onClose: () =
         <Field label="Site name" hint="Optional; the hosted-page name. Defaults to the brand name.">
           <Input value={siteName} onChange={(e) => setSiteName(e.target.value)} />
         </Field>
-        <Field label="Logo URL" hint="Optional https URL. You can change it later under Content → Brand.">
+        <Field label="Logo URL" hint="Optional https URL. You can change it later under Design → Brand.">
           <Input value={logoUrl} onChange={(e) => setLogoUrl(e.target.value)} placeholder="https://example.com/logo.svg" inputMode="url" />
         </Field>
         {err && <Alert tone="bad">{err}</Alert>}

@@ -71,7 +71,11 @@ export function HostedPreview({
         </div>
       )}
       <div className="flex flex-wrap items-end justify-between gap-2">
-        <Tabs label="Page" items={PAGE_KINDS.map((p) => ({ key: p.key, label: p.label }))} value={page} onChange={setPage} />
+        {/* A grid track with a 0 minimum keeps the tab row from forcing its own content width on the
+            page at 390 px; the tabs then scroll inside their own row (#559). */}
+        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)]">
+          <Tabs label="Page" items={PAGE_KINDS.map((p) => ({ key: p.key, label: p.label }))} value={page} onChange={setPage} />
+        </div>
         <Segmented
           label="Preview width"
           value={width}

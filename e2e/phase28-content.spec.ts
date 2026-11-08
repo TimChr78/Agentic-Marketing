@@ -126,10 +126,25 @@ test.describe('template editor at 1440', () => {
 });
 
 test.describe('blocks and brand fields are unchanged', () => {
-  test('the block editor keeps every parameter control', async ({ page }) => {
+  test('the empty block list names its create action and the block editor keeps every parameter', async ({ page }) => {
     await signIn(page, PEOPLE.owner);
-    const id = await artifactId(page, 'email_block', 'Editorial header');
-    await page.goto(`/content/templates/blocks/${id}`);
+    await page.goto('/content/templates?tab=blocks');
+    await settle(page);
+    // No block is seeded, so the list states what is missing and names the create action.
+    await expect(page.getByText('No blocks yet')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'New block' }).first()).toBeVisible();
+
+    // Every block control still exists on the detail editor.
+    const created = await call<{ artifactId: string }>(page.request, 'artifacts.create', {
+      type: 'email_block',
+      name: `E2E block ${Date.now()}`,
+      content: {
+        category: 'header',
+        mjml: '<mj-section><mj-column><mj-text>{{ block.title }}</mj-text></mj-column></mj-section>',
+        params: [{ key: 'title', label: 'Title', type: 'text', default: 'This week' }],
+      },
+    });
+    await page.goto(`/content/templates/blocks/${created.artifactId}`);
     await settle(page);
 
     await expect(page.getByRole('heading', { name: 'Parameters' })).toBeVisible();
@@ -149,7 +164,7 @@ test.describe('blocks and brand fields are unchanged', () => {
     for (const label of ['Site name', 'Site address', 'Language', 'Logo alt text', 'Font', 'Corner radius']) {
       await expect(page.getByLabel(label, { exact: true })).toBeVisible();
     }
-    await expect(page.getByRole('group', { name: 'Confirm' })).toBeVisible();
+    await expect(page.getByRole('group', { name: 'Confirm', exact: true })).toBeVisible();
     await expect(page.getByRole('checkbox', { name: /Publish a newsletter archive/ })).toBeVisible();
 
     await page.getByRole('tab', { name: 'Subscriber pages' }).click();
