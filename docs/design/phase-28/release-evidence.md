@@ -34,67 +34,67 @@ and its automatically mounted children; “cold” is their sum. Ceilings are fr
 Measured from `apps/web/dist/.vite/manifest.json` after
 `corepack pnpm --filter @agentic-marketing/web build:live` on this branch.
 
-- Signed-out initial (entry + Root + eagerly needed auth screens): **108.55 kB** (cap 110).
-- Signed-in initial (entry + Root + Shell + route table): **129.27 kB** (cap 150).
+- Signed-out initial (entry + Root + eagerly needed auth screens): **108.65 kB** (cap 110).
+- Signed-in initial (entry + Root + Shell + route table): **129.46 kB** (cap 150).
 - Auth screens add no separate lazy closure in this build; they are inside the signed-out initial.
 
 | Route | Initial | Lazy | Cold | Cap |
 | --- | ---: | ---: | ---: | ---: |
-| `/` | 129.27 | 14.77 | 144.04 | 25 |
-| `/approvals` | 129.27 | 6.37 | 135.63 | 25 |
-| `/approvals/:id` | 129.27 | 36.26 | 165.53 | 70 |
-| `/work/agents` | 129.27 | 27.05 | 156.32 | 35 |
-| `/work/agents/:id` | 129.27 | 36.93 | 166.19 | 45 |
-| `/work/agents/library/:id` | 129.27 | 26.78 | 156.04 | 35 |
-| `/marketing/campaigns` | 129.27 | 8.50 | 137.76 | 20 |
-| `/marketing/campaigns/:id` | 129.27 | 31.70 | 160.96 | 45 |
-| `/marketing/broadcasts` | 129.27 | 12.21 | 141.48 | 25 |
-| `/marketing/broadcasts/:id` | 129.27 | 49.99 | 179.26 | 80 |
-| `/marketing/journeys` | 129.27 | 8.71 | 137.97 | 20 |
-| `/marketing/journeys/:id` | 129.27 | 105.79 | 235.06 | 130 |
-| `/marketing/experiences` | 129.27 | 9.06 | 138.32 | 20 |
-| `/marketing/experiences/:id` | 129.27 | 26.83 | 156.10 | 40 |
-| `/audience/people` | 129.27 | 14.04 | 143.30 | 30 |
-| `/audience/people/:id` | 129.27 | 11.69 | 140.95 | 30 |
-| `/audience/segments` | 129.27 | 9.75 | 139.01 | 20 |
-| `/audience/segments/:id` | 129.27 | 33.46 | 162.73 | 40 |
-| `/audience/forms` | 129.27 | 9.75 | 139.02 | 20 |
-| `/audience/forms/:id` | 129.27 | 30.03 | 159.30 | 40 |
-| `/audience/consent` | 129.27 | 11.00 | 140.26 | 40 |
-| `/content/templates` | 129.27 | 12.72 | 141.99 | 35 |
-| `/content/templates/blocks/:id` | 129.27 | 23.95 | 153.22 | 40 |
-| `/content/templates/:id` | 129.27 | 40.55 | 169.82 | 65 |
-| `/content/assets` | 129.27 | 6.06 | 135.33 | 25 |
-| `/content/brand` | 129.27 | 30.81 | 160.08 | 40 |
-| `/insights/analytics` | 129.27 | 16.93 | 146.20 | 40 |
-| `/insights/messages` | 129.27 | 3.45 | 132.72 | 20 |
-| `/insights/deliverability` | 129.27 | 9.94 | 139.21 | 35 |
-| `/insights/alerts` | 129.27 | 7.38 | 136.65 | 30 |
-| `/settings` | 129.27 | 0.28 | 129.54 | 20 |
-| `/settings/workspace` | 129.27 | 3.29 | 132.56 | 20 |
-| `/settings/providers` | 129.27 | 14.94 | 144.21 | 40 |
-| `/settings/integrations` | 129.27 | 16.52 | 145.79 | 55 |
-| `/settings/integrations/tokens/:id` | 129.27 | 16.52 | 145.79 | 55 |
-| `/settings/secrets` | 129.27 | 3.71 | 132.97 | 20 |
-| `/settings/users` | 129.27 | 5.33 | 134.60 | 25 |
-| `/settings/approval-policy` | 129.27 | 5.04 | 134.31 | 25 |
-| `/preferences` | 129.27 | 2.88 | 132.14 | 20 |
-| `/create` | 129.27 | 5.05 | 134.32 | 20 |
-| `/artifacts/:id` | 129.27 | 21.20 | 150.47 | 130 |
+| / | 129.46 kB | 14.96 kB | 144.42 kB | 25 |
+| /approvals | 129.46 kB | 6.39 kB | 135.85 kB | 25 |
+| /approvals/:id | 129.46 kB | 36.29 kB | 165.75 kB | 70 |
+| /artifacts/:id | 129.46 kB | 21.21 kB | 150.67 kB | 130 |
+| /audience/consent | 129.46 kB | 14.42 kB | 143.88 kB | 40 |
+| /audience/forms | 129.46 kB | 9.75 kB | 139.21 kB | 20 |
+| /audience/forms/:id | 129.46 kB | 30.04 kB | 159.50 kB | 40 |
+| /audience/people | 129.46 kB | 14.56 kB | 144.02 kB | 30 |
+| /audience/people/:id | 129.46 kB | 12.45 kB | 141.91 kB | 30 |
+| /audience/segments | 129.46 kB | 9.74 kB | 139.21 kB | 20 |
+| /audience/segments/:id | 129.46 kB | 34.35 kB | 163.81 kB | 40 |
+| /content/assets | 129.46 kB | 6.48 kB | 135.94 kB | 25 |
+| /content/brand | 129.46 kB | 31.32 kB | 160.78 kB | 40 |
+| /content/templates | 129.46 kB | 13.43 kB | 142.89 kB | 35 |
+| /content/templates/:id | 129.46 kB | 42.36 kB | 171.83 kB | 65 |
+| /content/templates/blocks/:id | 129.46 kB | 23.96 kB | 153.43 kB | 40 |
+| /create | 129.46 kB | 5.78 kB | 135.24 kB | 20 |
+| /insights/alerts | 129.46 kB | 7.43 kB | 136.89 kB | 30 |
+| /insights/analytics | 129.46 kB | 17.15 kB | 146.61 kB | 40 |
+| /insights/deliverability | 129.46 kB | 9.97 kB | 139.44 kB | 35 |
+| /insights/messages | 129.46 kB | 5.56 kB | 135.02 kB | 20 |
+| /marketing/broadcasts | 129.46 kB | 12.22 kB | 141.68 kB | 25 |
+| /marketing/broadcasts/:id | 129.46 kB | 50.17 kB | 179.63 kB | 80 |
+| /marketing/campaigns | 129.46 kB | 8.50 kB | 137.96 kB | 20 |
+| /marketing/campaigns/:id | 129.46 kB | 31.80 kB | 161.26 kB | 45 |
+| /marketing/experiences | 129.46 kB | 9.05 kB | 138.51 kB | 20 |
+| /marketing/experiences/:id | 129.46 kB | 26.84 kB | 156.30 kB | 40 |
+| /marketing/journeys | 129.46 kB | 8.71 kB | 138.17 kB | 20 |
+| /marketing/journeys/:id | 129.46 kB | 106.13 kB | 235.59 kB | 130 |
+| /preferences | 129.46 kB | 3.27 kB | 132.73 kB | 20 |
+| /settings | 129.46 kB | 0.66 kB | 130.12 kB | 20 |
+| /settings/approval-policy | 129.46 kB | 5.45 kB | 134.91 kB | 25 |
+| /settings/integrations | 129.46 kB | 17.31 kB | 146.77 kB | 55 |
+| /settings/integrations/tokens/:id | 129.46 kB | 17.31 kB | 146.77 kB | 55 |
+| /settings/providers | 129.46 kB | 15.55 kB | 145.01 kB | 40 |
+| /settings/secrets | 129.46 kB | 3.73 kB | 133.19 kB | 20 |
+| /settings/users | 129.46 kB | 5.36 kB | 134.83 kB | 25 |
+| /settings/workspace | 129.46 kB | 3.70 kB | 133.16 kB | 20 |
+| /work/agents | 129.46 kB | 27.24 kB | 156.70 kB | 35 |
+| /work/agents/:id | 129.46 kB | 37.01 kB | 166.47 kB | 45 |
+| /work/agents/library/:id | 129.46 kB | 26.79 kB | 156.25 kB | 35 |
 
 Additional closures, measured as increments over the signed-in initial:
 
 | Renderer / action | Gzip | Cap |
 | --- | ---: | ---: |
 | ECharts (`ChartImpl`) | 368.50 | 400 |
-| Visual e-mail authoring (`VisualMjml` + lib + CSS) | 690.41 | 1,120 |
+| Visual e-mail authoring (`VisualMjml` + lib + CSS) | 692.31 | 1,120 |
 | Broadcast report action (`ReportEntry`) | 6.55 | 30 |
-| Demo fixture closure (`DemoRoot` + fixtures) | 14.71 | 25 |
+| Demo fixture closure (`DemoRoot` + fixtures) | 14.75 | 25 |
 
-Analytics with its automatically mounted chart is **514.70 kB** (cap 590).
-Deliverability with a chart is **507.70 kB** (cap 585).
-Journey Report is **603.56 kB** (cap 680).
-Template with the automatically mounted visual editor is **860.27 kB** (cap 1,335).
+Analytics with its automatically mounted chart is **515.11 kB** (cap 590).
+Deliverability with a chart is **507.94 kB** (cap 585).
+Journey Report is **604.09 kB** (cap 680).
+Template with the automatically mounted visual editor is **864.14 kB** (cap 1,335).
 
 No ceiling was raised. Seven routes were over their ceilings before this landing because the shared
 detail page eagerly imported the preview stack and structured editors. Those imports now load through
