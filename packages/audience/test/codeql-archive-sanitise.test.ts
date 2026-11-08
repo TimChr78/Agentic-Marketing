@@ -466,3 +466,45 @@ describe('archive sanitising: spec-compliant parser is the final judge (Sol re-c
     expectLinear((n) => payload.repeat(n), body, 4_000);
   });
 });
+
+describe('archive sanitising: the final page, not only the body (Sol re-check 3)', () => {
+  // Parse the whole rendered page the way a browser would and list what is active in it.
+  const page = (html: string) => {
+    const parts = emailParts(html);
+    return `<style>${parts.styles}</style><div class="email-body">${parts.body}</div>`;
+  };
+
+  it('removes a tracking pixel before judging, so the pieces around it cannot form a refresh', () => {
+    const html = '<html><body><me<img width=1 height=1>ta http-equiv=refresh content="0;url=https://example.org/"></body></html>';
+    expect(activeContent(page(html))).toEqual([]);
+  });
+
+  it('keeps extracted styles inside the page style element', () => {
+    const html =
+      '<html><head><style></style x><meta http-equiv=refresh content="0;url=https://example.org/"></style></head><body><p>ok</p></body></html>';
+    expect(activeContent(page(html))).toEqual([]);
+    expect(emailParts(html).styles).not.toMatch(/<\/style/i);
+  });
+
+  it('judges attributes too: a handler after a malformed attribute is removed', () => {
+    const out = emailParts('<html><body><img src=x x" onerror=alert(1)></body></html>').body;
+    expect(activeContent(out)).toEqual([]);
+  });
+
+  it('judges attributes a <body> or <html> tag in the e-mail would merge into the page', () => {
+    for (const tag of ['<body onload=alert(1)>', '<html onload=alert(1)>']) {
+      const out = emailParts(`<html><body><p>ok</p>${tag}</body></html>`).body;
+      expect(out.toLowerCase(), tag).not.toContain('onload');
+    }
+  });
+
+  it('stays linear when an early </div> or </body> is followed by many comments', () => {
+    for (const close of ['</div>', '</body>']) {
+      expectLinear(
+        (n) => `<html><body>${close}${'<!--x-->'.repeat(n)}</body></html>`,
+        (html) => emailParts(html),
+        5_000,
+      );
+    }
+  });
+});

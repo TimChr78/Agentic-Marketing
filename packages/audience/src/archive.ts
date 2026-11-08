@@ -15,7 +15,7 @@ import { profileForMessage } from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { and, asc, eq, sql } from 'drizzle-orm';
 import { type Context, Hono } from 'hono';
-import { type DefaultTreeAdapterTypes, defaultTreeAdapter, html, parseFragment, serialize } from 'parse5';
+import { type DefaultTreeAdapterTypes, parse, serialize } from 'parse5';
 import { z } from 'zod';
 
 // The public newsletter archive and the per-recipient web version (#100), served on the links
@@ -563,44 +563,23 @@ export function scanEmailBody(body: string): string {
 }
 
 const EMAIL_PARSE_OPTIONS = { scriptingEnabled: true } as const;
-// A body context, matching how the archive page embeds the fragment inside <main>. The whole
-// input sits in one wrapper element: parse5's fragment adoption detaches root children one by
-// one, which is quadratic when the input is thousands of sibling comments, while one wrapper
-// is a single detach. The wrapper is removed again before serialization.
-const EMAIL_BODY_CONTEXT = defaultTreeAdapter.createElement('body', html.NS.HTML, []);
-
-function parseEmailFragment(html: string): {
-  fragment: DefaultTreeAdapterTypes.DocumentFragment;
-  wrapper: DefaultTreeAdapterTypes.Element | null;
+// The judge parses a whole document and reads its <body>, which is how the archive page embeds
+// the e-mail (a <div> inside <main>). A document parse has no fragment root adoption, so it stays
+// linear however many top-level nodes the input has, and a stray </div> or </body> cannot move
+// nodes out of view: they stay in the document the sweep walks. A <body> or <html> start tag in
+// the input merges its attributes into those elements, exactly as it would on the real page, and
+// the sweep checks those attributes too.
+function parseEmailDocument(markup: string): {
+  document: DefaultTreeAdapterTypes.Document;
+  body: DefaultTreeAdapterTypes.Element | null;
 } {
-  const fragment = parseFragment(EMAIL_BODY_CONTEXT, `<div>${html}</div>`, EMAIL_PARSE_OPTIONS);
-  const first = fragment.childNodes[0];
-  const wrapper =
-    first && 'tagName' in first && (first as DefaultTreeAdapterTypes.Element).tagName === 'div'
-      ? (first as DefaultTreeAdapterTypes.Element)
-      : null;
-  return { fragment, wrapper };
-}
-
-/** Drops the parse-only wrapper, keeping its children and anything an early `</div>` moved out. */
-function unwrapEmailFragment(
-  fragment: DefaultTreeAdapterTypes.DocumentFragment,
-  wrapper: DefaultTreeAdapterTypes.Element | null,
-): DefaultTreeAdapterTypes.DocumentFragment {
-  if (!wrapper) return fragment;
-  const out = defaultTreeAdapter.createDocumentFragment();
-  for (const node of fragment.childNodes) {
-    if (node === wrapper) {
-      for (const child of wrapper.childNodes) {
-        child.parentNode = out;
-        out.childNodes.push(child);
-      }
-    } else {
-      node.parentNode = out;
-      out.childNodes.push(node);
-    }
-  }
-  return out;
+  const document = parse(`<!doctype html><html><head></head><body>${markup}`, EMAIL_PARSE_OPTIONS);
+  const root = document.childNodes.find((node) => 'tagName' in node && node.tagName === 'html') as
+    | DefaultTreeAdapterTypes.Element
+    | undefined;
+  const body = (root?.childNodes.find((node) => 'tagName' in node && node.tagName === 'body') ??
+    null) as DefaultTreeAdapterTypes.Element | null;
+  return { document, body };
 }
 
 function isActiveElement(element: DefaultTreeAdapterTypes.Element): boolean {
@@ -633,7 +612,7 @@ function sweepFragment(root: DefaultTreeAdapterTypes.ParentNode, clean: boolean)
       for (const node of parent.childNodes) {
         if (!('tagName' in node)) continue;
         const element = node as DefaultTreeAdapterTypes.Element;
-        if (isActiveElement(element)) {
+        if (isActiveElement(element) || element.attrs.some(dropsParsedAttribute)) {
           active = true;
           continue;
         }
@@ -663,14 +642,14 @@ function sweepFragment(root: DefaultTreeAdapterTypes.ParentNode, clean: boolean)
   return active;
 }
 
-function containsActiveContent(html: string): boolean {
-  return sweepFragment(parseEmailFragment(html).fragment, false);
+function containsActiveContent(markup: string): boolean {
+  return sweepFragment(parseEmailDocument(markup).document, false);
 }
 
-function cleanActiveContent(html: string): string {
-  const { fragment, wrapper } = parseEmailFragment(html);
-  sweepFragment(fragment, true);
-  return serialize(unwrapEmailFragment(fragment, wrapper));
+function cleanActiveContent(markup: string): string {
+  const { document, body } = parseEmailDocument(markup);
+  sweepFragment(document, true);
+  return body ? serialize(body) : '';
 }
 
 /**
@@ -696,9 +675,13 @@ export function emailParts(html: string): { body: string; styles: string } {
   // not a send, so it is dropped rather than counted.
   const pixel =
     /<img\b[^>]*(?:(?:width\s*=\s*["']?1(?:px)?["']?[\s\S]*?height\s*=\s*["']?1(?:px)?["']?)|(?:height\s*=\s*["']?1(?:px)?["']?[\s\S]*?width\s*=\s*["']?1(?:px)?["']?))[^>]*>/gi;
+  // The pixel is removed before sanitising, so the parser judges the final bytes: a removal
+  // afterwards could join the pieces around it into new markup (`<me<img …>ta …>`).
   return {
-    body: sanitiseEmailBody(body).replace(pixel, ''),
-    styles,
+    body: sanitiseEmailBody(body.replace(pixel, '')),
+    // The styles go back into the page's own <style>. CSS reads `\3c ` as `<`, so escaping every
+    // `<` keeps the rules while making `</style>` (and anything after it) impossible to inject.
+    styles: styles.replace(/</g, '\\3c '),
   };
 }
 
