@@ -187,6 +187,12 @@ describe('phase 28 microcopy lint (#555)', () => {
     expect(ours, detail).toEqual([]);
   });
 
+  it('W-owned copy has no raw ids, keys or banned patterns', () => {
+    const ours = findings.filter((f) => f.owner === 'W');
+    const detail = ours.map((f) => `${f.file}:${f.line} [${f.rule}] ${f.text}`).join('\n');
+    expect(ours, detail).toEqual([]);
+  });
+
   it('reports the area totals so each task can flip its own section to strict', () => {
     for (const owner of ['W', 'M', 'A', 'C', 'S'] as const) {
       const rows = findings.filter((f) => f.owner === owner);
