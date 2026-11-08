@@ -218,7 +218,7 @@ export function AutonomyCard({
           </Alert>
         )}
         <div className="flex justify-end">
-          <Button variant="primary" loading={busy} disabled={!dirty || invalid} onClick={() => void save()}>
+          <Button variant="primary" mutation loading={busy} disabled={!dirty || invalid} onClick={() => void save()}>
             Save autonomy
           </Button>
         </div>

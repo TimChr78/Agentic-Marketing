@@ -185,7 +185,14 @@ export function PromptTests({ artifact }: { artifact: Artifact }) {
           </p>
         </div>
         {can('artifacts:write') && (
-          <Button variant="primary" icon={<Play size={14} />} loading={running} disabled={!cases.length} onClick={() => void runTests()}>
+          <Button
+            variant="primary"
+            icon={<Play size={14} />}
+            mutation
+            loading={running}
+            disabled={!cases.length}
+            onClick={() => void runTests()}
+          >
             Run tests
           </Button>
         )}

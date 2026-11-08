@@ -114,7 +114,7 @@ export function TopicsTable({
                     ) : (
                       canWrite &&
                       onCreateBrief && (
-                        <Button size="sm" variant="secondary" icon={<Plus size={13} />} onClick={() => onCreateBrief(topic)}>
+                        <Button size="sm" variant="secondary" icon={<Plus size={13} />} mutation onClick={() => onCreateBrief(topic)}>
                           Brief
                         </Button>
                       )
@@ -123,6 +123,7 @@ export function TopicsTable({
                       <Button
                         size="sm"
                         variant="ghost"
+                        mutation
                         aria-label={`Archive ${topic.title}`}
                         title="Archive"
                         onClick={() => onArchive(topic)}

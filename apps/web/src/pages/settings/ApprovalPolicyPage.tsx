@@ -182,6 +182,7 @@ export default function ApprovalPolicyPage() {
           active === 'policy' && canAdmin ? (
             <Button
               variant="primary"
+              mutation
               loading={busy}
               disabled={selected === workspace.approvalPolicy}
               title={selected === workspace.approvalPolicy ? 'Choose another policy first.' : undefined}

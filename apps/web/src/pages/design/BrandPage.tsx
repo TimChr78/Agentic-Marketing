@@ -102,7 +102,7 @@ function NoBrand({
         title="No brand yet"
         action={
           canCreate && (
-            <Button variant="primary" icon={<Plus size={15} />} loading={busy} onClick={onCreate}>
+            <Button variant="primary" icon={<Plus size={15} />} mutation loading={busy} onClick={onCreate}>
               Set up the brand
             </Button>
           )

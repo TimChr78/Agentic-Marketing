@@ -75,6 +75,7 @@ export function ListAudiencePanel({ artifactId, content }: { artifactId: string;
               variant="secondary"
               icon={<RefreshCw size={14} />}
               loading={busy === 'snapshot'}
+              mutation
               onClick={() => void refreshSnapshot()}
             >
               Refresh from source
@@ -131,6 +132,7 @@ export function ListAudiencePanel({ artifactId, content }: { artifactId: string;
                       size="sm"
                       variant="ghost"
                       icon={<Trash2 size={14} />}
+                      mutation
                       aria-label={`Remove ${m.profileId}`}
                       loading={busy === m.profileId}
                       onClick={() => void remove(m)}
@@ -255,7 +257,7 @@ function AddPeopleDialog({ artifactId, onClose, onDone }: { artifactId: string; 
           <Button onClick={onClose} disabled={busy}>
             {unmatched.length ? 'Done' : 'Cancel'}
           </Button>
-          <Button variant="primary" loading={busy} onClick={() => void submit()}>
+          <Button variant="primary" mutation loading={busy} onClick={() => void submit()}>
             Add
           </Button>
         </>
@@ -347,12 +349,12 @@ function ImportDialog({ artifactId, onClose, onDone }: { artifactId: string; onC
             Close
           </Button>
           {preview && (
-            <Button variant="primary" loading={busy} onClick={() => void run(false)}>
+            <Button variant="primary" mutation loading={busy} onClick={() => void run(false)}>
               Apply {preview.added} {preview.added === 1 ? 'addition' : 'additions'}
             </Button>
           )}
           {!preview && (
-            <Button variant="primary" loading={busy} disabled={!csv} onClick={() => void run(true)}>
+            <Button variant="primary" mutation loading={busy} disabled={!csv} onClick={() => void run(true)}>
               Preview matches
             </Button>
           )}

@@ -362,7 +362,7 @@ function RecordDrawer({
       footer={
         <>
           <Button onClick={onClose}>Cancel</Button>
-          <Button variant="primary" loading={busy} onClick={submit}>
+          <Button variant="primary" mutation loading={busy} onClick={submit}>
             Record consent
           </Button>
         </>

@@ -146,7 +146,7 @@ function WebhookDrawer({
           <Button variant="secondary" onClick={onClose}>
             Cancel
           </Button>
-          <Button variant="primary" type="submit" form="webhook-form" loading={saving}>
+          <Button variant="primary" type="submit" form="webhook-form" mutation loading={saving}>
             {endpoint ? 'Save changes' : 'Add endpoint'}
           </Button>
         </>
@@ -406,7 +406,7 @@ export function WebhooksCard() {
                           <Button size="sm" icon={<Pencil size={14} />} onClick={() => setEditing(e)}>
                             Edit
                           </Button>
-                          <Button size="sm" icon={<Send size={14} />} loading={busy === e.id} onClick={() => void sendTest(e)}>
+                          <Button size="sm" icon={<Send size={14} />} mutation loading={busy === e.id} onClick={() => void sendTest(e)}>
                             Send test
                           </Button>
                           <Menu
@@ -463,7 +463,7 @@ export function WebhooksCard() {
               title="No deliveries yet"
               action={
                 admin && endpoints.length > 0 ? (
-                  <Button icon={<Send size={14} />} onClick={() => void sendTest(endpoints[0]!)}>
+                  <Button icon={<Send size={14} />} mutation onClick={() => void sendTest(endpoints[0]!)}>
                     Send a test to “{endpoints[0]!.name}”
                   </Button>
                 ) : undefined
@@ -518,6 +518,7 @@ export function WebhooksCard() {
                           size="sm"
                           variant="ghost"
                           icon={<RotateCcw size={14} />}
+                          mutation
                           loading={retrying === d.id}
                           onClick={() => void retry(d)}
                         >

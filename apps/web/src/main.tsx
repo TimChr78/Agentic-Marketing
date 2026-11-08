@@ -9,11 +9,7 @@ function render(node: ReactNode) {
 // `/demo` runs the real shell and the seeded fixture reads; the single-file build is the same demo
 // alone. Everything else is the real workspace, so the demo's fixture code is never part of a
 // normal admin route's initial load. Kept inline: the check is the only demo code in the entry.
-const demo =
-  import.meta.env.MODE === 'single' ||
-  location.pathname === '/demo' ||
-  location.pathname.startsWith('/demo/') ||
-  (history.state as { demo?: boolean } | null)?.demo === true;
+const demo = import.meta.env.MODE === 'single' || location.pathname === '/demo' || location.pathname.startsWith('/demo/');
 
 if (demo) {
   document.title = 'Agentic Marketing demo';

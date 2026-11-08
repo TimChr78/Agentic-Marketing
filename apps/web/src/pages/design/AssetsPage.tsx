@@ -140,7 +140,7 @@ export default function AssetsPage() {
         description="Images and PDFs for e-mails and hosted pages, served from your public links address with long caching. PNG, JPEG, GIF, WebP, SVG or PDF; SVG uploads are sanitised and get a PNG version for e-mail."
         primaryAction={
           canWrite && (
-            <Button variant="primary" icon={<Upload size={15} />} onClick={openFile} loading={uploading.length > 0}>
+            <Button variant="primary" icon={<Upload size={15} />} mutation onClick={openFile} loading={uploading.length > 0}>
               Upload
             </Button>
           )
@@ -195,7 +195,7 @@ export default function AssetsPage() {
                     title: 'No assets yet',
                     body: 'Upload your logo and images for e-mails here, or drop files on this page. Then pick them in the template editor and the brand settings.',
                     action: canWrite ? (
-                      <Button variant="primary" icon={<Upload size={15} />} onClick={openFile}>
+                      <Button variant="primary" icon={<Upload size={15} />} mutation onClick={openFile}>
                         Upload
                       </Button>
                     ) : undefined,
@@ -323,10 +323,10 @@ function AssetDrawer({ id, onClose, onChanged }: { id: string; onClose: () => vo
         asset &&
         canWrite && (
           <>
-            <Button variant="danger" onClick={remove}>
+            <Button variant="danger" mutation onClick={remove}>
               Delete
             </Button>
-            <Button variant="primary" className="ml-auto" disabled={!dirty} loading={busy} onClick={save}>
+            <Button variant="primary" className="ml-auto" mutation disabled={!dirty} loading={busy} onClick={save}>
               Save changes
             </Button>
           </>

@@ -247,7 +247,7 @@ export default function PersonPage({ params }: { params: Record<string, string> 
               </Button>
             )}
             {can('profiles:erase') && (
-              <Button variant="danger" icon={<UserX size={15} />} loading={busy === 'erase'} onClick={erasePerson}>
+              <Button variant="danger" icon={<UserX size={15} />} mutation loading={busy === 'erase'} onClick={erasePerson}>
                 Erase person
               </Button>
             )}

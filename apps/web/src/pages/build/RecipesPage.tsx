@@ -319,6 +319,7 @@ export default function RecipesPage({ embedded = false }: { embedded?: boolean }
                 <Button
                   variant="primary"
                   icon={<ArrowRight size={14} />}
+                  mutation
                   loading={installing}
                   disabled={!canWrite || !preview?.ready}
                   onClick={() => void install()}

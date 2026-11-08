@@ -113,7 +113,7 @@ export function GuardianCard({ agent, onChanged }: { agent: Agent; onChanged: ()
           footer={
             <>
               <Button onClick={() => setClearing(false)}>Cancel</Button>
-              <Button variant="primary" loading={busy} disabled={!note.trim()} onClick={() => void clear()}>
+              <Button variant="primary" mutation loading={busy} disabled={!note.trim()} onClick={() => void clear()}>
                 Clear
               </Button>
             </>

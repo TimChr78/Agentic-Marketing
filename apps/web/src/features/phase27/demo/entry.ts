@@ -1,4 +1,4 @@
-import { setRouterBasePath } from '../../../app/router';
+import { routerHref, routerPath, setRouterBasePath } from '../../../app/router';
 
 /** Where the legacy demo's hash routes live in the real product. */
 const LEGACY_HASH: Record<string, string> = {
@@ -22,16 +22,16 @@ export interface DemoEntry {
   liveRetired: boolean;
 }
 
-const isSingleFileBuild = () => import.meta.env.MODE === 'single';
+export const isSingleFileBuild = () => import.meta.env.MODE === 'single';
 
 /** Whether this page belongs to the demo at all. */
 export function isDemoEntry(): boolean {
   if (isSingleFileBuild()) return true;
   if (typeof location === 'undefined') return false;
-  if (location.pathname === DEMO_BASE_PATH || location.pathname.startsWith(`${DEMO_BASE_PATH}/`)) return true;
-  // A demo history entry from the same tab. A production link, a typed real URL or the sign-in exit
-  // starts a real navigation without it, so the demo never leaks into a real workspace.
-  return (history.state as { demo?: boolean } | null)?.demo === true;
+  // The URL namespace is the only way in. A production path is never demo mode, even when an old
+  // entry still carries `history.state.demo`; a copied /demo link, a new tab and a reload all stay
+  // in the demo because the path says so.
+  return location.pathname === DEMO_BASE_PATH || location.pathname.startsWith(`${DEMO_BASE_PATH}/`);
 }
 
 /**
@@ -76,19 +76,44 @@ export function enterDemo(): DemoEntry {
 }
 
 /**
- * Marks every in-app navigation as demo history while the demo is mounted, so reload and
- * back/forward stay on fixture data. The router's own links and `navigate()` calls are untouched.
+ * The one confinement rule for a URL written while the demo is mounted. Any destination is resolved
+ * against the current URL, normalized (`.`/`..`/duplicate slashes) and rebuilt under `/demo`, so a
+ * caller cannot stamp a production path as demo. Returns undefined for no URL, letting the browser
+ * keep the current entry.
+ */
+export function confineDemoHref(url: string | URL | null | undefined): string | undefined {
+  if (url === null || url === undefined) return undefined;
+  if (isSingleFileBuild()) return undefined;
+  let parsed: URL;
+  try {
+    parsed = new URL(String(url), location.href);
+  } catch {
+    return `${DEMO_BASE_PATH}${location.search}`;
+  }
+  if (parsed.origin !== location.origin) {
+    // A different origin would throw in the native API; keep the current demo entry instead.
+    return `${DEMO_BASE_PATH}${location.search}${location.hash}`;
+  }
+  const internal = routerPath(parsed.pathname);
+  const href = routerHref(internal);
+  return `${href}${parsed.search}${parsed.hash}`;
+}
+
+/**
+ * Marks every in-app navigation as demo history while the demo is mounted and confines its URL to
+ * `/demo`. Reload and back/forward therefore stay on fixture data, and no caller can push a
+ * production path that later looks like demo mode.
  */
 export function installDemoHistory(): () => void {
-  if (typeof history === 'undefined') return () => {};
+  if (typeof history === 'undefined' || isSingleFileBuild()) return () => {};
   const push = history.pushState;
   const replace = history.replaceState;
   const mark = (state: unknown) => ({ ...((state as Record<string, unknown> | null) ?? {}), demo: true });
   history.pushState = function (this: History, state: unknown, unused: string, url?: string | URL | null) {
-    return push.call(this, mark(state), unused, url);
+    return push.call(this, mark(state), unused, confineDemoHref(url));
   } as typeof history.pushState;
   history.replaceState = function (this: History, state: unknown, unused: string, url?: string | URL | null) {
-    return replace.call(this, mark(state), unused, url);
+    return replace.call(this, mark(state), unused, confineDemoHref(url));
   } as typeof history.replaceState;
   return () => {
     history.pushState = push;
