@@ -1,7 +1,7 @@
-import { cleanup, render, screen } from '@testing-library/react';
-import { afterEach, describe, expect, it } from 'vitest';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CapabilitiesProvider, DEMO_CAPABILITIES, DEMO_RESTRICTION_REASON } from '../../../app/capabilities';
-import { Button, IconButton } from '../../../ui';
+import { Button, IconButton, Select } from '../../../ui';
 
 afterEach(cleanup);
 
@@ -38,5 +38,57 @@ describe('shared capability primitives (#530)', () => {
       </CapabilitiesProvider>,
     );
     expect((screen.getByRole('button', { name: 'Refresh' }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('keeps a caller-provided aria-description on an unrestricted select', () => {
+    render(
+      <CapabilitiesProvider value={DEMO_CAPABILITIES}>
+        <Select aria-label="Destination" aria-description="Pick where the copy goes">
+          <option>Newsletter</option>
+        </Select>
+      </CapabilitiesProvider>,
+    );
+    const select = screen.getByRole('combobox', { name: 'Destination' }) as HTMLSelectElement;
+    expect(select.disabled).toBe(false);
+    expect(select.getAttribute('aria-description')).toBe('Pick where the copy goes');
+  });
+
+  it('replaces the caller description with the demo reason on a blocked select', () => {
+    render(
+      <CapabilitiesProvider value={DEMO_CAPABILITIES}>
+        <Select mutation aria-label="Role" aria-description="Pick where the copy goes">
+          <option>Admin</option>
+        </Select>
+      </CapabilitiesProvider>,
+    );
+    const select = screen.getByRole('combobox', { name: 'Role' }) as HTMLSelectElement;
+    expect(select.disabled).toBe(true);
+    expect(select.getAttribute('aria-description')).toBe(DEMO_RESTRICTION_REASON);
+  });
+
+  it('never runs a blocked select onChange, even for a synthetic change event', () => {
+    const onChange = vi.fn();
+    render(
+      <CapabilitiesProvider value={DEMO_CAPABILITIES}>
+        <Select mutation aria-label="Role" onChange={onChange}>
+          <option value="admin">Admin</option>
+          <option value="viewer">Viewer</option>
+        </Select>
+      </CapabilitiesProvider>,
+    );
+    fireEvent.change(screen.getByRole('combobox', { name: 'Role' }), { target: { value: 'viewer' } });
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it('still runs an unrestricted select onChange', () => {
+    const onChange = vi.fn();
+    render(
+      <Select aria-label="Role" onChange={onChange}>
+        <option value="admin">Admin</option>
+        <option value="viewer">Viewer</option>
+      </Select>,
+    );
+    fireEvent.change(screen.getByRole('combobox', { name: 'Role' }), { target: { value: 'viewer' } });
+    expect(onChange).toHaveBeenCalledTimes(1);
   });
 });

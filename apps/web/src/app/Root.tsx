@@ -50,7 +50,7 @@ function Gate() {
         <Alert tone="warn" title="You're not in a workspace yet">
           {user?.email} is signed in but is not a member of any workspace. Ask an admin to invite you, then open the link in the invitation.
         </Alert>
-        <Button className="mt-4" onClick={() => void signOut()}>
+        <Button className="mt-4" mutation onClick={() => void signOut()}>
           Sign out
         </Button>
       </Centered>

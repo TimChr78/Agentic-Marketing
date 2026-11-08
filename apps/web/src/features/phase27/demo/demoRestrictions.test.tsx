@@ -115,14 +115,31 @@ describe('demo mutation controls are visibly disabled (#530)', () => {
   });
 
   it('Users: role dropdowns are disabled, so a role change never submits', async () => {
+    const { api } = await import('../../../app/api');
+    const call = vi.spyOn(api, 'call');
     await renderDemoAt('/demo/settings/users');
+    // Exactly one dropdown per rendered layout: the desktop table and the mobile list both mount,
+    // and CSS picks one at a breakpoint, so the count is read from the DOM instead of guessed.
     const roles = (await screen.findAllByRole('combobox', { name: 'Role for Vic Chen' })) as HTMLSelectElement[];
-    expect(roles.length).toBeGreaterThan(0);
+    const layouts = (screen.queryByRole('table', { name: 'Members' }) ? 1 : 0) + (screen.queryByRole('list', { name: 'Members' }) ? 1 : 0);
+    expect(layouts).toBeGreaterThan(0);
+    expect(roles.length).toBe(layouts);
+
+    // Page-load reads are not the dropdown's doing; only what happens after a change counts.
+    call.mockClear();
     for (const role of roles) {
       expect(role.disabled).toBe(true);
       expect(role.getAttribute('title')).toBe(DEMO_RESTRICTION_REASON);
       expect(role.getAttribute('data-demo-blocked')).toBe('true');
+      fireEvent.change(role, { target: { value: 'admin' } });
     }
+
+    // A disabled dropdown does not fire onChange, so no command reaches the demo transport and no
+    // request leaves the page; a regression shows up as a "Demo only" refusal toast instead.
+    expect(call).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+    expect(screen.queryByText(/Demo only/)).toBeNull();
+    call.mockRestore();
   });
 
   it('leaves the same controls enabled outside the demo', async () => {
