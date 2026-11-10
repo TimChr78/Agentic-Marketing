@@ -13,19 +13,30 @@ main
       ├── <task branch>  →  draft PR into feat/phase-<n>  →  CI  →  review  →  merge
       └── …
  └── PR feat/phase-<n> → main       one full review and CI run, then the release
+
+main (or a release tag)
+ └── patch/<x.y.z>                  patch branch: fixes for one released version
+      ├── <task branch>  →  draft PR into patch/<x.y.z>  →  CI  →  review  →  merge
+      └── PR patch/<x.y.z> → main   one release of the patch version
 ```
+
+A patch release (for example `patch/0.14.3`) uses the same flow: the integrator cuts it from the
+commit of the version being patched, delegates work on task branches, and integrates into the patch
+branch instead of a phase branch.
 
 1. **Plan.** Open the tracker and task issues, write the contracts (`docs/design/phase-<n>/`) and
    the ownership map, create `feat/phase-<n>` from `main` and push it.
 2. **Dispatch.** Each delegate works in its own worktree, branched from the pushed phase branch, on
    the files its task owns. It commits; it does not push.
 3. **Open a draft PR per task.** When a delegate reports, the integrator runs
-   `scripts/open-task-pr.sh <task-branch> feat/phase-<n> <issue> "<title>"`. CI runs on the task
-   alone, in parallel with the others; there is no local full-suite run per task.
-4. **Review and merge into the phase branch.** The integrator reads the diff, checks the delegate's
-   evidence, marks the PR ready and merges it once CI is green. Conflicts surface per PR, not in one
-   batch. `Closes #` in a PR into a phase branch does not close the issue; the release does
-   (`scripts/release/close-issues.mjs`).
+   `scripts/open-task-pr.sh <task-branch> <integration-branch> <issue> "<title>"`, where the
+   integration branch is `feat/phase-<n>` or `patch/<x.y.z>`. The script refuses `main` and any
+   other base. CI runs on the task alone, in parallel with the others; there is no local full-suite
+   run per task.
+4. **Review and merge into the integration branch.** The integrator reads the diff, checks the
+   delegate's evidence, marks the PR ready and merges it once CI is green. Conflicts surface per PR,
+   not in one batch. `Closes #` in a PR into a phase or patch branch does not close the issue; the
+   release does (`scripts/release/close-issues.mjs`).
 5. **Integrate.** After the last task: the phase-level checks that need everything together (browser,
    axe and visual baselines on a fresh seed, reviewed by a person), the independent review, then one
    PR from the phase branch to `main`.

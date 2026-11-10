@@ -57,7 +57,7 @@ export function findPreviousVersion(changelog, exclude) {
 export function migrationsSince(root, previous) {
   let files;
   try {
-    files = git(root, ['diff', '--name-only', `v${previous}..HEAD`, '--', 'packages/db/migrations']);
+    files = git(root, ['diff', '--name-only', '--diff-filter=A', `v${previous}..HEAD`, '--', 'packages/db/migrations']);
   } catch {
     throw new Error(`cannot diff v${previous}..HEAD; does tag v${previous} exist? (git fetch --tags)`);
   }
@@ -257,8 +257,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       const envVars = envVarsSince(root, previous);
       const upgradeBlock = renderUpgradeBlock({ previous, version: options.version, migrations, envVars });
 
-      const changes = bumpVersions(root, options.version);
-      const added = updateEnvHistory(root, options.version);
+      // Fold first (#602): a fragment validation failure must not leave version surfaces or
+      // ENV_SINCE stamped with a version that never shipped, and the fold is retry-safe.
       const built = buildChangelog({
         version: options.version,
         date: options.date,
@@ -266,6 +266,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
         changelogPath: join(root, 'CHANGELOG.md'),
         upgradeBlock,
       });
+      const changes = bumpVersions(root, options.version);
+      const added = updateEnvHistory(root, options.version);
       runCheckVersions(root, options.version);
 
       console.log(`prepared ${options.version} from ${previous}`);
