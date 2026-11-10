@@ -11,16 +11,15 @@ import { Hono } from 'hono';
 import { applyDeliveryEvents } from '../deliveryEvents';
 import type { EmailServices } from '../gateway';
 import { isMarketing } from '../policy';
+import { classifySmsReply } from './keywords';
 import { billingOf, smsTransportFor } from './providers';
+
+export { HELP_WORDS, START_WORDS, STOP_WORDS } from './keywords';
 
 // Public SMS endpoints: delivery status callbacks and inbound texts. The path carries a signed
 // token naming the workspace and provider; the provider's own signature is checked as well.
 // STOP-type keywords withdraw consent for marketing texts and suppress the number (carriers stop
 // all texts from a sender after STOP); START removes the suppression; HELP gets the help text.
-
-export const STOP_WORDS = ['STOP', 'STOPALL', 'UNSUBSCRIBE', 'CANCEL', 'END', 'QUIT', 'STOPP', 'AFMELD', 'AVSLUTA'];
-export const START_WORDS = ['START', 'UNSTOP', 'YES'];
-export const HELP_WORDS = ['HELP', 'INFO', 'HJÆLP', 'HJELP', 'HJÄLP'];
 
 // Provider callbacks carry one message plus metadata; 64 KB is comfortably above every adapter's
 // payload while still bounding the unauthenticated endpoint.
@@ -85,9 +84,9 @@ export function smsRoutes(deps: Deps) {
 
         const inbound = transport.parseInbound(req);
         if (!inbound) return { status: 400 as const };
-        const word = inbound.body.trim().split(/\s+/)[0]?.toUpperCase() ?? '';
+        const match = classifySmsReply(inbound.body);
         let reply: string | null = null;
-        if (STOP_WORDS.includes(word)) {
+        if (match?.intent === 'stop') {
           const { hash, profileIds } = await profilesWithPhone(tx, target.ws, deps.kp, inbound.from);
           const purposes = (await publishedSingleton(tx, 'purposes'))?.purposes ?? DEFAULT_PURPOSES;
           const smsMarketing = purposes.filter((p) => isMarketing(p.basis) && p.channels.includes('sms'));
@@ -102,7 +101,7 @@ export function smsRoutes(deps: Deps) {
                 channel: 'sms',
                 status: p.basis === 'legitimate_interest' ? ('objected' as const) : ('withdrawn' as const),
                 source: 'unsubscribe' as const,
-                proof: { via: `SMS ${word}`, provider: provider.id },
+                proof: { via: `SMS ${match.keyword}`, provider: provider.id },
               })),
             );
           await tx
@@ -110,7 +109,7 @@ export function smsRoutes(deps: Deps) {
             .values({ workspaceId: target.ws, channel: 'sms', valueHash: hash, reason: 'stop' })
             .onConflictDoNothing();
           logger.info({ workspace: target.ws, profiles: profileIds.length }, 'SMS STOP recorded');
-        } else if (START_WORDS.includes(word)) {
+        } else if (match?.intent === 'start') {
           // Lifts the block only; marketing texts need a new consent.
           const { hash } = await profilesWithPhone(tx, target.ws, deps.kp, inbound.from);
           await tx
@@ -118,7 +117,7 @@ export function smsRoutes(deps: Deps) {
             .where(
               and(eq(schema.suppressions.channel, 'sms'), eq(schema.suppressions.valueHash, hash), eq(schema.suppressions.reason, 'stop')),
             );
-        } else if (HELP_WORDS.includes(word)) reply = billingOf(provider).helpText;
+        } else if (match?.intent === 'help') reply = billingOf(provider).helpText;
         return { status: 200 as const, reply: transport.reply(reply) };
       });
       if (result.status !== 200) return c.json({ error: result.status === 401 ? 'bad_signature' : 'not_found' }, result.status);
