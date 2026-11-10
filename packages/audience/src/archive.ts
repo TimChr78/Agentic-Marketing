@@ -611,6 +611,15 @@ export const MAX_EMAIL_ATTRIBUTES = 512;
 // sibling scans the parent's child list, so thousands of fostered nodes cost quadratic time: a
 // 900 KB body took 6 s on a CI runner. Real e-mail fosters a handful; past this the judge fails closed.
 export const MAX_EMAIL_FOSTER_INSERTS = 512;
+// <html> and <body> start tags merge their attributes into the document's own elements, and each
+// merge rebuilds a set of every attribute gathered so far; the total is bounded, not the per-tag count.
+export const MAX_EMAIL_ADOPTED_ATTRIBUTES = 512;
+// The adoption agency (mis-nested formatting end tags) detaches a block's children one by one, and
+// each detach scans the parent's child list. Bound the total scanned, not the number of detaches.
+export const MAX_EMAIL_DETACH_SCAN = 2_000_000;
+// A backstop for tree-construction paths nobody has found yet: checked on every adapter call, so a
+// parse cannot run much past it. Real newsletters parse in about 20 ms.
+export const MAX_EMAIL_PARSE_MS = 1_000;
 
 // The judge wraps the fragment in <html> and <body>; those two levels are ours, not the e-mail's.
 const EMAIL_PARSE_WRAPPER_DEPTH = 2;
@@ -636,7 +645,15 @@ function depthBoundingTreeAdapter(maxDepth: number, maxFosterInserts: number): T
   const depths = new WeakMap<DefaultTreeAdapterTypes.Node, number>();
   // One budget per parse: every insert-before (element or text) searches the parent's children.
   let fosterInserts = 0;
+  let adoptedAttributes = 0;
+  let detachScan = 0;
+  const startedAt = performance.now();
+  // Every adapter call checks the wall clock, so no tree-construction path can run unbounded.
+  const tick = () => {
+    if (performance.now() - startedAt > MAX_EMAIL_PARSE_MS) throw new EmailNestingError();
+  };
   const foster = () => {
+    tick();
     fosterInserts += 1;
     if (fosterInserts > maxFosterInserts) throw new EmailNestingError();
   };
@@ -656,6 +673,7 @@ function depthBoundingTreeAdapter(maxDepth: number, maxFosterInserts: number): T
   return {
     ...defaultTreeAdapter,
     appendChild(parentNode, newNode) {
+      tick();
       track(parentNode, newNode);
       defaultTreeAdapter.appendChild(parentNode, newNode);
     },
@@ -665,7 +683,20 @@ function depthBoundingTreeAdapter(maxDepth: number, maxFosterInserts: number): T
       track(parentNode, newNode);
       defaultTreeAdapter.insertBefore(parentNode, newNode, referenceNode);
     },
+    adoptAttributes(recipient, attrs) {
+      tick();
+      adoptedAttributes += attrs.length;
+      if (adoptedAttributes > MAX_EMAIL_ADOPTED_ATTRIBUTES) throw new EmailNestingError();
+      defaultTreeAdapter.adoptAttributes(recipient, attrs);
+    },
+    detachNode(node) {
+      tick();
+      detachScan += node.parentNode?.childNodes.length ?? 0;
+      if (detachScan > MAX_EMAIL_DETACH_SCAN) throw new EmailNestingError();
+      defaultTreeAdapter.detachNode(node);
+    },
     setTemplateContent(templateElement, contentElement) {
+      tick();
       // The content fragment is one level deeper than its <template>.
       const depth = (depths.get(templateElement) ?? 0) + 1;
       if (depth > maxDepth) throw new EmailNestingError();
@@ -673,6 +704,7 @@ function depthBoundingTreeAdapter(maxDepth: number, maxFosterInserts: number): T
       defaultTreeAdapter.setTemplateContent(templateElement, contentElement);
     },
     insertText(parentNode, text) {
+      tick();
       // Text has no children, so it cannot nest; record it for completeness without bounding it.
       defaultTreeAdapter.insertText(parentNode, text);
       const last = parentNode.childNodes[parentNode.childNodes.length - 1];

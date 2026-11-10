@@ -838,3 +838,32 @@ describe('archive sanitising: foster parenting is bounded (CI 6.3 s cold)', () =
     expect(sanitiseEmailBody(one)).toBe(one);
   });
 });
+
+describe('archive sanitising: every tree-construction path is bounded (HY4 re-check)', () => {
+  const timed = (html: string) => {
+    const started = performance.now();
+    const out = sanitiseEmailBody(html);
+    return { out, ms: performance.now() - started };
+  };
+
+  it('fails closed quickly when <html>/<body> tags keep merging new attributes', () => {
+    let html = '';
+    for (let i = 0; i < 10_000; i += 1) html += `<html a${i}></html>`;
+    const { out, ms } = timed(html);
+    expect(out.startsWith('&lt;html')).toBe(true);
+    expect(ms, `adoptAttributes: ${ms.toFixed(0)} ms`).toBeLessThan(1_500);
+  });
+
+  it('fails closed quickly when the adoption agency re-parents a huge block', () => {
+    const { out, ms } = timed(`<b><div>${'<br>'.repeat(200_000)}</b>`);
+    expect(out.startsWith('&lt;b&gt;')).toBe(true);
+    expect(ms, `adoption agency: ${ms.toFixed(0)} ms`).toBeLessThan(1_500);
+  });
+
+  it('still keeps ordinary misnesting and a body attribute byte-identical', () => {
+    const html = '<p><b>bold <i>both</b> italic</i></p><body class="x"><p>after</p>';
+    const once = sanitiseEmailBody(html);
+    expect(sanitiseEmailBody(html)).toBe(once);
+    expect(once.includes('&lt;')).toBe(false);
+  });
+});
