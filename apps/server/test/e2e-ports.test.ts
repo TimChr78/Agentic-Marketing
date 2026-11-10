@@ -1,3 +1,4 @@
+import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
 import { portsFor } from '../../../e2e/ports';
 
@@ -52,5 +53,14 @@ describe('e2e ports', () => {
     expect(portsFor({ E2E_BASE: 'https://localhost' })).toMatchObject({ port: 443, fixturesPort: 444 });
     expect(portsFor({ E2E_BASE: 'https://localhost:443' })).toMatchObject({ port: 443, fixturesPort: 444 });
     expect(portsFor({ E2E_BASE: 'http://localhost' })).toMatchObject({ port: 80, fixturesPort: 81 });
+  });
+
+  // The main listener answers /healthz before the seed finishes; the fixtures port opens /ready only
+  // after it. Waiting on the wrong one starts the visual run against an unseeded server (#646).
+  it.each(['playwright.config.ts', 'playwright.visual.config.ts'])('waits for the fixtures /ready in %s', async (name) => {
+    const config = await readFile(new URL(`../../../${name}`, import.meta.url), 'utf8');
+    expect(config).toContain('e2eFixturesBase');
+    expect(config).toContain('url: `${e2eFixturesBase}/ready`');
+    expect(config).not.toMatch(/url: `[^`]*healthz`/);
   });
 });

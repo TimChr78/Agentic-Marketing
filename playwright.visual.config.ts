@@ -1,5 +1,5 @@
 import { defineConfig, devices } from '@playwright/test';
-import { e2eBase } from './e2e/ports';
+import { e2eBase, e2eFixturesBase } from './e2e/ports';
 
 // Visual regression (#433): the stable route subset from e2e/visual.spec.ts against committed
 // baselines, on its own so the functional e2e stays fast.
@@ -42,7 +42,8 @@ export default defineConfig({
     ? undefined
     : {
         command: 'pnpm --filter @agentic-marketing/web build:live && npx tsx apps/server/test/e2e/server.ts',
-        url: `${e2eBase}/healthz`,
+        // The fixtures port is opened only after the seed finishes; /healthz is up too early (#646).
+        url: `${e2eFixturesBase}/ready`,
         timeout: 240_000,
         reuseExistingServer: !process.env.CI,
       },
