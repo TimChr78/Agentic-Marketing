@@ -67,6 +67,12 @@ export const workspaceDomains = pgTable(
     verifiedAt: ts('verified_at'),
     createdBy: text('created_by').notNull(),
     createdAt: ts('created_at').notNull().defaultNow(),
+    /**
+     * When the row last became pending (#575). Pending claims expire seven days after this, never
+     * after `createdAt`, so moving an old verified row to a new host starts a fresh window. A
+     * trigger in migration 0087 also resets it on a host, prefix or token change while pending.
+     */
+    pendingSince: ts('pending_since').notNull().defaultNow(),
   },
   (t) => [
     uniqueIndex('workspace_domains_host_prefix').on(t.host, sql`coalesce(${t.pathPrefix}, '')`),

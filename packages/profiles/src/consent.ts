@@ -38,6 +38,57 @@ export function basisOf(purposes: Purposes, purpose: string) {
   return purposes.find((p) => p.key === purpose)?.basis ?? 'consent';
 }
 
+/**
+ * Proof keys that are evidence, not personal data: what was agreed to, on which form, from which
+ * import, and when. Everything else is withheld from a principal without `profiles:pii` (#594).
+ */
+const PUBLIC_PROOF_KEYS = new Set([
+  'messageId',
+  'sourceId',
+  'form_id',
+  'formId',
+  'form_version',
+  'form_version_id',
+  'form',
+  'consent_text',
+  'double_opt_in',
+  'submitted_at',
+  'confirmed_at',
+  'import_batch',
+  'import_label',
+  'import',
+  'system',
+  'status',
+  'purpose',
+  'subscribed_at',
+  'via',
+  'provider',
+  'method',
+  'issue',
+]);
+
+/**
+ * The consent proof a principal may see. Without `profiles:pii` only the evidence keys above with
+ * primitive values survive: IP addresses, user agents, page URLs, call notes and any other
+ * key that could carry personal data are removed before the response leaves the server. The
+ * `proofWithheld` flag lets the UI say so without naming or rendering what was removed.
+ */
+export function consentProofFor(
+  proof: Record<string, unknown> | null | undefined,
+  canSeePii: boolean,
+): { proof: Record<string, unknown>; proofWithheld: boolean } {
+  const all = proof ?? {};
+  if (canSeePii) return { proof: all, proofWithheld: false };
+  const visible: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(all)) {
+    if (!PUBLIC_PROOF_KEYS.has(key)) continue;
+    // A nested object could hide personal data under a harmless key name: fail closed.
+    if (value === null || value === undefined || typeof value === 'object') continue;
+    visible[key] = value;
+  }
+  return { proof: visible, proofWithheld: Object.keys(visible).length < Object.keys(all).length };
+}
+
 export async function recordConsent(tx: Tx, workspaceId: string, profileId: string, purposes: Purposes, records: ConsentInput[]) {
   if (!records.length) return 0;
   const inserted = await tx

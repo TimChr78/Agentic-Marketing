@@ -231,8 +231,19 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
     }
     const token = decodeURIComponent(match[2] ?? '');
     const { rows } = await db.admin.query<{ verification_token: string }>(
-      `SELECT verification_token FROM workspace_domains
-        WHERE host = $1 AND COALESCE(path_prefix, '') = COALESCE($2, '') AND verification_token = $3
+      // Only the row that currently owns the hostname may answer (#575). A verified row owns its
+      // host; otherwise the oldest pending claim does. A row of any other workspace on the same
+      // host must never be confirmed: otherwise a regression in the claim checks would let another
+      // workspace verify a hostname that is already held. The row is matched by host, prefix and
+      // token, so the query cannot be scoped by workspace (a pending host has no workspace yet);
+      // ownership is what scopes it.
+      `WITH owner AS (
+         SELECT workspace_id FROM workspace_domains WHERE host = $1
+          ORDER BY (status = 'verified') DESC, pending_since, created_at
+          LIMIT 1
+       )
+       SELECT d.verification_token FROM workspace_domains d JOIN owner ON owner.workspace_id = d.workspace_id
+        WHERE d.host = $1 AND COALESCE(d.path_prefix, '') = COALESCE($2, '') AND d.verification_token = $3
         LIMIT 1`,
       [host, prefix, token],
     );

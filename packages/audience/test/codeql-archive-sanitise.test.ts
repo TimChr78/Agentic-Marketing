@@ -32,7 +32,22 @@ const isBenign = (html: string) => {
   return !/<\/?(?:script|iframe|object|embed|frame|applet|base|meta)\b/i.test(body) && !/[\s/"']on[a-z]+\s*=/i.test(body);
 };
 
-const ACTIVE_ELEMENTS = new Set(['script', 'iframe', 'object', 'embed', 'frame', 'frameset', 'applet', 'base']);
+const ACTIVE_ELEMENTS = new Set([
+  'script',
+  'iframe',
+  'object',
+  'embed',
+  'frame',
+  'frameset',
+  'applet',
+  'base',
+  // SMIL can retarget an href/xlink:href to javascript: at runtime (#579).
+  'animate',
+  'set',
+  'animatetransform',
+  'animatemotion',
+  'discard',
+]);
 const ACTIVE_URL_ATTRIBUTES = new Set(['href', 'src', 'xlink:href', 'action', 'formaction', 'background', 'poster', 'data', 'srcset']);
 
 /**
@@ -192,6 +207,22 @@ describe('archive sanitising: the linear-time helper', () => {
 
     expect(() => expectLinear((n) => 'x'.repeat(n), quadratic, 2_000)).toThrow(/expected linear scaling/);
     expect(sink).toBeGreaterThan(0);
+  });
+});
+
+describe('archive sanitising: style/body/pixel extraction is linear (#574, #577)', () => {
+  // These builders are what the old extraction regexes backtracked over: an opener with no close.
+  // `emailParts` itself is timed because the extraction runs before `sanitiseEmailBody`.
+  const cases: [string, (n: number) => string, number][] = [
+    ['repeated unterminated <img openers', (n) => '<img'.repeat(n), 4_000],
+    ['repeated unterminated <style openers', (n) => '<style'.repeat(n), 2_000],
+    ['repeated unterminated <body openers', (n) => '<body'.repeat(n), 2_000],
+    // The exact #577 shape: one <img followed by many width=1 height=1 pairs and no ">".
+    ['one unterminated img with many width/height pairs (#577)', (n) => `<img${' width=1 height=1'.repeat(n)}`, 200],
+  ];
+
+  it.each(cases)('extracts %s in linear time', (_label, build, base) => {
+    expectLinear(build, emailParts, base);
   });
 });
 
@@ -469,6 +500,44 @@ describe('archive sanitising: spec-compliant parser is the final judge (Sol re-c
   });
 });
 
+describe('archive sanitising: nesting is bounded before the parse5 judge (#578)', () => {
+  const body = (inner: string) => emailParts(`<style>.x{}</style><body>${inner}</body>`).body;
+
+  it('fails closed on nesting deeper than the cap', () => {
+    const deep = `${'<div>'.repeat(600)}deep${'</div>'.repeat(600)}`;
+    const out = body(deep);
+
+    expect(out).toContain('&lt;div&gt;');
+    expect(out).not.toContain('<div>');
+  });
+
+  it('takes the fast path and stays byte-identical at a realistic depth', () => {
+    const html = `${'<div>'.repeat(40)}<p>Text</p>${'</div>'.repeat(40)}`;
+    expect(body(html)).toBe(html);
+  });
+
+  it('takes the fast path at the nesting cap', () => {
+    const html = `${'<div>'.repeat(512)}x${'</div>'.repeat(512)}`;
+    expect(body(html)).toBe(html);
+  });
+
+  it('fails closed above the size budget', () => {
+    const huge = `<p>${'x'.repeat(1_000_001)}</p>`;
+    const out = body(huge);
+
+    expect(out).toContain('&lt;p&gt;');
+    expect(out).not.toContain('<p>');
+  });
+
+  it('stays linear on benign nesting just under the cap', () => {
+    expectLinear((n) => `${'<div>'.repeat(n)}x${'</div>'.repeat(n)}`, body, 128);
+  });
+
+  it('stays linear on wide sibling-heavy input', () => {
+    expectLinear((n) => '<p>x</p>'.repeat(n), body, 5_000);
+  });
+});
+
 describe('archive sanitising: the final page, not only the body (Sol re-check 3)', () => {
   // Parse the whole rendered page the way a browser would and list what is active in it.
   const page = (html: string) => {
@@ -546,10 +615,37 @@ describe('archive sanitising: the real rendered page (Sol re-check 4)', () => {
     '<frameset><frame src="javascript:alert(1)"></frameset>',
     '<head><base href="javascript:alert(1)//"></head>',
     '<svg><style><img src=x onerror=alert(1)></style></svg>',
+    '<svg><a href="https://ok.example"><animate attributeName="href" values="javascript:alert(1)"/></a></svg>',
+    '<svg><a href="https://ok.example"><animate attributeName="xlink:href" values="javascript:alert(1)"/></a></svg>',
+    '<svg><a href="https://ok.example"><set attributeName="href" to="javascript:alert(1)"/></a></svg>',
+    '<svg><a href="https://ok.example"><set attributeName="xlink:href" to="javascript:alert(1)"/></a></svg>',
+    '<svg><a href="https://ok.example"><animateTransform attributeName="href" values="javascript:alert(1)"/></a></svg>',
+    '<svg><a href="https://ok.example"><animateMotion path="javascript:alert(1)"/></a></svg>',
+    '<svg><discard begin="0s" href="javascript:alert(1)"/></svg>',
   ];
 
   it.each(payloads)('leaves nothing active in the page for %s', (payload) => {
     const page = renderWebVersion(brand, 'Issue', null, `<html><body>${payload}</body></html>`);
+    expect(activeInPage(page)).toEqual([]);
+  });
+
+  it.each([
+    ['animate href', '<svg><a href="https://ok.example"><animate attributeName="href" values="javascript:alert(1)"/></a></svg>'],
+    ['set xlink:href', '<svg><a href="https://ok.example"><set attributeName="xlink:href" to="javascript:alert(1)"/></a></svg>'],
+  ])('drops a SMIL %s animation from the real page', (_label, payload) => {
+    const page = renderWebVersion(brand, 'Issue', null, `<html><body>${payload}</body></html>`);
+
+    expect(page).not.toMatch(/<(?:animate|animatetransform|animatemotion|set|discard)\b/i);
+    expect(page).not.toContain('javascript:');
+    expect(activeInPage(page)).toEqual([]);
+  });
+
+  it('fails closed on nesting beyond the cap and stays inert on the real page', () => {
+    const email = `<html><body>${'<div>'.repeat(600)}deep${'</div>'.repeat(600)}</body></html>`;
+    const page = renderWebVersion(brand, 'Issue', null, email);
+
+    expect(page).toContain('&lt;div&gt;');
+    expect(page).not.toContain('<div>deep');
     expect(activeInPage(page)).toEqual([]);
   });
 

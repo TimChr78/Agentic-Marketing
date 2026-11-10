@@ -275,6 +275,7 @@ export const createWorkspace = defineCommand({
               isPrimary: true,
               status: 'pending',
               verificationToken: newId('wdv'),
+              pendingSince: new Date(),
               createdBy: ctx.principal.userId,
             })
             .returning();
