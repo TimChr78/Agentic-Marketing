@@ -1,7 +1,7 @@
 # Phase 27 · source preservation ledger
 
 Baseline: `e9bd7c97f064cc70863ca924c8157e07e6722f9d` (`origin/feat/phase-27` at checkout). This supplements each contract's
-Inventory and destination table. Source paths/line references describe the baseline, not future code.
+Inventory and destination table. Source paths/line references describe the baseline, not future code; files deleted after it link to that commit on GitHub.
 
 Every listed field, action, tab, schema property and conditional state remains in its corresponding
 contract destination. Repeated controls are deduplicated per file below, never removed from the UI.
@@ -3177,7 +3177,7 @@ are preserved, not redesigned by the mock's sample values.
 
 ### apps/web/src/App.tsx
 
-[Baseline source](../../../apps/web/src/App.tsx) · Destination follows owner rule above.
+[Baseline source](https://github.com/TimChr78/Agentic-Marketing/blob/e9bd7c97f064cc70863ca924c8157e07e6722f9d/apps/web/src/App.tsx) · Destination follows owner rule above.
 
 | Line | Existing field/action/tab/state evidence |
 |---|---|
@@ -3197,7 +3197,7 @@ are preserved, not redesigned by the mock's sample values.
 
 ### apps/web/src/screens/Analytics.tsx
 
-[Baseline source](../../../apps/web/src/screens/Analytics.tsx) · Destination follows owner rule above.
+[Baseline source](https://github.com/TimChr78/Agentic-Marketing/blob/e9bd7c97f064cc70863ca924c8157e07e6722f9d/apps/web/src/screens/Analytics.tsx) · Destination follows owner rule above.
 
 | Line | Existing field/action/tab/state evidence |
 |---|---|
@@ -3219,7 +3219,7 @@ are preserved, not redesigned by the mock's sample values.
 
 ### apps/web/src/screens/Approvals.tsx
 
-[Baseline source](../../../apps/web/src/screens/Approvals.tsx) · Destination follows owner rule above.
+[Baseline source](https://github.com/TimChr78/Agentic-Marketing/blob/e9bd7c97f064cc70863ca924c8157e07e6722f9d/apps/web/src/screens/Approvals.tsx) · Destination follows owner rule above.
 
 | Line | Existing field/action/tab/state evidence |
 |---|---|
@@ -3238,7 +3238,7 @@ are preserved, not redesigned by the mock's sample values.
 
 ### apps/web/src/screens/EmailEditor.tsx
 
-[Baseline source](../../../apps/web/src/screens/EmailEditor.tsx) · Destination follows owner rule above.
+[Baseline source](https://github.com/TimChr78/Agentic-Marketing/blob/e9bd7c97f064cc70863ca924c8157e07e6722f9d/apps/web/src/screens/EmailEditor.tsx) · Destination follows owner rule above.
 
 | Line | Existing field/action/tab/state evidence |
 |---|---|
@@ -3265,7 +3265,7 @@ are preserved, not redesigned by the mock's sample values.
 
 ### apps/web/src/screens/Journeys.tsx
 
-[Baseline source](../../../apps/web/src/screens/Journeys.tsx) · Destination follows owner rule above.
+[Baseline source](https://github.com/TimChr78/Agentic-Marketing/blob/e9bd7c97f064cc70863ca924c8157e07e6722f9d/apps/web/src/screens/Journeys.tsx) · Destination follows owner rule above.
 
 | Line | Existing field/action/tab/state evidence |
 |---|---|
@@ -3308,7 +3308,7 @@ are preserved, not redesigned by the mock's sample values.
 
 ### apps/web/src/screens/LiveSite.tsx
 
-[Baseline source](../../../apps/web/src/screens/LiveSite.tsx) · Destination follows owner rule above.
+[Baseline source](https://github.com/TimChr78/Agentic-Marketing/blob/e9bd7c97f064cc70863ca924c8157e07e6722f9d/apps/web/src/screens/LiveSite.tsx) · Destination follows owner rule above.
 
 | Line | Existing field/action/tab/state evidence |
 |---|---|
@@ -3340,7 +3340,7 @@ are preserved, not redesigned by the mock's sample values.
 
 ### apps/web/src/screens/Overview.tsx
 
-[Baseline source](../../../apps/web/src/screens/Overview.tsx) · Destination follows owner rule above.
+[Baseline source](https://github.com/TimChr78/Agentic-Marketing/blob/e9bd7c97f064cc70863ca924c8157e07e6722f9d/apps/web/src/screens/Overview.tsx) · Destination follows owner rule above.
 
 | Line | Existing field/action/tab/state evidence |
 |---|---|
@@ -3362,7 +3362,7 @@ are preserved, not redesigned by the mock's sample values.
 
 ### apps/web/src/screens/Profiles.tsx
 
-[Baseline source](../../../apps/web/src/screens/Profiles.tsx) · Destination follows owner rule above.
+[Baseline source](https://github.com/TimChr78/Agentic-Marketing/blob/e9bd7c97f064cc70863ca924c8157e07e6722f9d/apps/web/src/screens/Profiles.tsx) · Destination follows owner rule above.
 
 | Line | Existing field/action/tab/state evidence |
 |---|---|
@@ -3384,7 +3384,7 @@ are preserved, not redesigned by the mock's sample values.
 
 ### apps/web/src/screens/Setup.tsx
 
-[Baseline source](../../../apps/web/src/screens/Setup.tsx) · Destination follows owner rule above.
+[Baseline source](https://github.com/TimChr78/Agentic-Marketing/blob/e9bd7c97f064cc70863ca924c8157e07e6722f9d/apps/web/src/screens/Setup.tsx) · Destination follows owner rule above.
 
 | Line | Existing field/action/tab/state evidence |
 |---|---|
@@ -3400,7 +3400,7 @@ are preserved, not redesigned by the mock's sample values.
 
 ### apps/web/src/screens/nodeKinds.tsx
 
-[Baseline source](../../../apps/web/src/screens/nodeKinds.tsx) · Destination follows owner rule above.
+[Baseline source](https://github.com/TimChr78/Agentic-Marketing/blob/e9bd7c97f064cc70863ca924c8157e07e6722f9d/apps/web/src/screens/nodeKinds.tsx) · Destination follows owner rule above.
 
 | Line | Existing field/action/tab/state evidence |
 |---|---|
@@ -3443,7 +3443,7 @@ are preserved, not redesigned by the mock's sample values.
 
 ### apps/web/src/mock/seed.ts
 
-[Baseline source](../../../apps/web/src/mock/seed.ts) · Destination follows owner rule above.
+[Baseline source](https://github.com/TimChr78/Agentic-Marketing/blob/e9bd7c97f064cc70863ca924c8157e07e6722f9d/apps/web/src/mock/seed.ts) · Destination follows owner rule above.
 
 | Line | Existing field/action/tab/state evidence |
 |---|---|
@@ -3454,7 +3454,7 @@ are preserved, not redesigned by the mock's sample values.
 
 ### apps/web/src/mock/store.ts
 
-[Baseline source](../../../apps/web/src/mock/store.ts) · Destination follows owner rule above.
+[Baseline source](https://github.com/TimChr78/Agentic-Marketing/blob/e9bd7c97f064cc70863ca924c8157e07e6722f9d/apps/web/src/mock/store.ts) · Destination follows owner rule above.
 
 | Line | Existing field/action/tab/state evidence |
 |---|---|

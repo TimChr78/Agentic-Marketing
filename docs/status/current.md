@@ -2,7 +2,7 @@
 
 Durable handoff for the agent working on this repository. Update it when a long run starts, when work lands, and at every handoff. A new session should be able to resume from this file alone.
 
-_Last updated: 2026-11-08 (night)_
+_Last updated: 2026-11-10_
 
 ## Now
 
@@ -15,13 +15,14 @@ _Last updated: 2026-11-08 (night)_
   - Fixes from Sol's review: #570. Sol approved them on re-check.
   - Evidence on the final head: full functional e2e 152, axe 43 with 0 violations, visual 12/12, web unit tests 1,011, bundle budgets 151.
 - **v0.14.0 is released and verified** (`5897c1a`). Tracker #553 is closed.
-- **Release 0.14.1, a security patch, is in progress.** It covers the CodeQL alerts that had been open since 2026-10-30 and is merged as #572.
+- **v0.14.1 is released and verified** (tag `v0.14.1`, release PR #573). It covers the CodeQL alerts that had been open since 2026-10-30.
   - Seven polynomial ReDoS sites are now linear.
   - The archive and web-version sanitiser is now a linear, quote-aware scanner, with parse5 8.0.1 as the final judge. Normal e-mail takes the fast path byte-identically. The cleaned output is re-checked, and the sanitiser fails closed if anything active remains.
   - The tracking pixel is removed before the check, styles are escaped with `\3c`, and the real rendered page is covered by tests.
   - Sol approved after four rounds.
   - Alert 5 (MD5 used for NATS shard selection) was dismissed as a false positive.
   - The `uuid` Dependabot alert is still accepted, because it only affects the dev spike.
+- **The audit-fix plan runs as patch releases 0.14.2 to 0.14.8.** 0.14.2 (security and compliance) is in review; **0.14.3 (documentation) is in progress**.
 
 ## Owner sign-off (Wave 5 done criteria that cannot be automated)
 
@@ -59,4 +60,4 @@ When these are signed off, the Wave 5 epic #439 can close.
 ## Last green
 
 - `main` at `9fbe296` (Phase 28 merged; CI green on `6332572`).
-- The last release is v0.13.0 (`f3bd868`), released and verified.
+- The last release is v0.14.1 (tag `v0.14.1`, `cbb7386`), released and verified.

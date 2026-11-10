@@ -17,7 +17,7 @@ flowchart LR
 - 6 containers, one VM with 4 vCPU / 16 GB RAM handles ~100k–1M profiles and hundreds of events/s.
 - The app runs the published image (`ghcr.io/timchr78/agentic-marketing:${AM_VERSION}`); use `docker-compose.build.yml` only to build this checkout.
 - ClickHouse is capped at `CLICKHOUSE_MEM_LIMIT` (default 2g) for the whole container. That is a starting point for the pilot: raise it (and ClickHouse's `max_server_memory_usage`) with event volume.
-- `app` image runs migrations on start (guarded by advisory lock), serves UI, API, MCP, ingest, decide, workers, scheduler.
+- `app` image runs migrations on start (guarded by advisory lock), serves UI, API, MCP, ingest (including the decision API), workers and the scheduler.
 - Config via env file; `cli` for admin tasks (create owner, rotate keys, backup hooks).
 
 ### "Scaled" (Kubernetes / Helm)
@@ -27,22 +27,20 @@ The Helm chart in [`deploy/helm/agentic-marketing`](../../deploy/helm/agentic-ma
 ```mermaid
 flowchart LR
   lb[Ingress] --> api["api ×N"]
-  lb --> ingest["ingest ×N"]
-  lb --> decide["decide ×N (optionally at edge)"]
+  lb --> ingest["ingest ×N (also serves /v1/decide)"]
   ingest --> nats[[NATS cluster ×3]]
   nats --> worker["worker ×N (per consumer group)"]
-  scheduler["scheduler ×2 (leader election)"] --> pg
+  scheduler["scheduler ×1 (Recreate)"] --> pg
   api --> pg[(Postgres primary + replicas)]
   worker --> pg
   worker --> ch[(ClickHouse cluster)]
-  decide --> vk[(Valkey primary + replicas)]
-  ingest --> vk
+  ingest --> vk[(Valkey primary + replicas)]
 ```
 
 ### Homelab / local (owner's first install)
 
 - Same single-node compose file; Caddy can use local certificates (or skip TLS on a trusted LAN).
-- **Public reachability:** a live website's SDK, provider webhooks and remote MCP clients need to reach `ingest`, `decide` and `/mcp`. Expose only those paths through a tunnel (e.g. Cloudflare Tunnel or Tailscale Funnel) rather than opening ports; keep the admin UI LAN/VPN-only.
+- **Public reachability:** a live website's SDK, provider webhooks and remote MCP clients need to reach `ingest` (which also serves `/v1/decide`) and `/mcp`. Expose only those paths through a tunnel (e.g. Cloudflare Tunnel or Tailscale Funnel) rather than opening ports; keep the admin UI LAN/VPN-only.
 - Outbound email via the configured SMTP relay; Mailpit for test sends.
 
 ## 2. Scaling path to 10M profiles

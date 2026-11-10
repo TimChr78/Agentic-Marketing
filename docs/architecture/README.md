@@ -1,6 +1,6 @@
 # Architecture — Agentic Marketing Platform
 
-> Status: **0.x — release 0.8.0.** Waves 1–3 are built through Phase 16 (0.2.10). Wave 4 (agentic autonomy) is built: Phases 17–22 shipped in 0.3.0–0.8.0 — see [roadmap-wave-4.md](roadmap-wave-4.md). Wave 5 (polish, UX and UI) is planned in [roadmap-wave-5.md](roadmap-wave-5.md).
+> Status: **0.x — release 0.14.1.** Waves 1–3 are built through Phase 16 (0.2.10). Wave 4 (agentic autonomy) shipped Phases 17–22 in 0.3.0–0.8.0 — see [roadmap-wave-4.md](roadmap-wave-4.md). Wave 5 (polish, UX and UI) shipped Phases 23–28 in 0.9.0–0.14.0 — see [roadmap-wave-5.md](roadmap-wave-5.md).
 > These pages describe how the platform is built and why, as it ships today. The release history is in the [CHANGELOG](../../CHANGELOG.md); how to run it is in the [README](../../README.md). Decisions are recorded as ADRs in [`adr/`](adr/); a later ADR can overturn an earlier one, and the ADRs keep their original text.
 
 ## What we are building
@@ -125,4 +125,4 @@ flowchart LR
 
 The full index, with each decision's status, is in [`adr/README.md`](adr/README.md).
 
-A Phase −1 interactive demo with a mocked backend lives in [`apps/web`](../../apps/web/README.md).
+The production admin UI lives in [`apps/web`](../../apps/web/README.md); the server serves it at `/`. `/demo` runs the same shell on fixed sample data, so a visitor can look around without a workspace.

@@ -2,6 +2,12 @@ import { fileURLToPath } from 'node:url';
 import { isIpOrCidr } from '@agentic-marketing/core';
 import { z } from 'zod';
 
+// The runtime roles a process can take. `ROLE` is a comma-separated list of these; any other value
+// (for example the retired `decide` role, whose API `ingest` serves) is a start-up error, because a
+// process that matches no role branch would start and then serve nothing.
+const Role = z.enum(['api', 'ingest', 'worker', 'scheduler']);
+const ROLES_HELP = `Comma-separated roles: ${Role.options.join(', ')}, or all`;
+
 // All configuration comes from the environment and is validated at start-up, so a missing or
 // malformed setting fails fast with a clear message instead of at the first request.
 const Env = z.object({
@@ -35,7 +41,21 @@ const Env = z.object({
     .enum(['dotted', 'underscore'])
     .default('dotted')
     .describe('MCP tool names: command names such as artifacts.list, or underscore names such as artifacts_list'),
-  ROLE: z.string().default('all').describe('Comma-separated roles: api, ingest, worker, scheduler, or all'),
+  ROLE: z
+    .string()
+    .default('all')
+    .describe(ROLES_HELP)
+    .superRefine((value, ctx) => {
+      if (value.trim() === 'all') return;
+      for (const entry of value.split(',').map((part) => part.trim())) {
+        if (!Role.safeParse(entry).success) {
+          ctx.addIssue({
+            code: 'custom',
+            message: `ROLE has unknown role "${entry}"; use ${Role.options.join(', ')}, or all`,
+          });
+        }
+      }
+    }),
   PORT: z.coerce.number().int().default(3000),
   PUBLIC_PORT: z.coerce
     .number()
@@ -304,8 +324,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
         .filter(Boolean),
     ),
   ];
+  // The schema above rejects any role outside the enum, so this only turns the string into a set.
+  const roles = e.ROLE === 'all' ? [...Role.options] : e.ROLE.split(',').map((role) => Role.parse(role.trim()));
   return {
-    roles: new Set(e.ROLE === 'all' ? ['api', 'ingest', 'worker', 'scheduler'] : e.ROLE.split(',').map((r) => r.trim())),
+    roles: new Set(roles),
     port: e.PORT,
     publicPort: e.PUBLIC_PORT,
     // Resolved from this file, never from the working directory: `pnpm start` and the image both
