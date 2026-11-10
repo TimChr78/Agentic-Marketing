@@ -169,7 +169,8 @@ const PENDING_CLAIM_MS = PENDING_CLAIM_DAYS * 24 * 60 * 60 * 1000;
 interface HostClaim {
   workspaceId: string;
   status: string;
-  createdAt: Date;
+  /** When the row last became pending (#575); expire claims by this, never by `createdAt`. */
+  pendingSince: Date;
 }
 
 function adminDb(ctx: CommandContext) {
@@ -192,13 +193,14 @@ async function lockHostname(ctx: CommandContext, host: string) {
 /** Every row on a hostname, across workspaces; resolution is installation-wide, so are claims. */
 async function hostClaims(ctx: CommandContext, host: string): Promise<HostClaim[]> {
   const { rows } = await adminDb(ctx).admin.query<HostClaim>(
-    `SELECT workspace_id AS "workspaceId", status, created_at AS "createdAt" FROM workspace_domains WHERE host = $1`,
+    `SELECT workspace_id AS "workspaceId", status, pending_since AS "pendingSince" FROM workspace_domains WHERE host = $1`,
     [host],
   );
   return rows;
 }
 
-const claimExpired = (claim: HostClaim) => claim.status === 'pending' && claim.createdAt.getTime() <= Date.now() - PENDING_CLAIM_MS;
+/** A claim expires at its own `pending_since + window` (#575), never at the row's age. */
+const claimExpired = (claim: HostClaim) => claim.status === 'pending' && claim.pendingSince.getTime() <= Date.now() - PENDING_CLAIM_MS;
 
 /**
  * A hostname belongs to one workspace (#462, #479): another workspace's verified row blocks it
@@ -226,13 +228,16 @@ async function assertHostNotClaimed(ctx: CommandContext, target: { host: string 
  * expired claim at another prefix would otherwise stay in the table and could be verified later,
  * after the host has moved to another workspace. Verified rows never expire. `excludeId` keeps the
  * row an update is about to change, so moving its prefix cannot delete it.
+ *
+ * Expiry counts from `pending_since` (#575). A row created long ago but moved to a new host or
+ * prefix just now is a fresh claim, and must survive until its own window has passed.
  */
 export async function reclaimExpiredClaims(ctx: CommandContext, target: { host: string }, excludeId?: string) {
   const db = adminDb(ctx);
   const cutoff = new Date(Date.now() - PENDING_CLAIM_MS);
   await db.admin.query(
     `DELETE FROM workspace_domains
-      WHERE host = $1 AND status = 'pending' AND created_at <= $2
+      WHERE host = $1 AND status = 'pending' AND pending_since <= $2
         AND ($3::text IS NULL OR id <> $3)`,
     [target.host, cutoff, excludeId ?? null],
   );
@@ -315,6 +320,7 @@ export const addWorkspaceDomain = defineCommand({
           status: 'pending',
           verificationToken: newId('wdv'),
           verifiedAt: null,
+          pendingSince: new Date(),
           createdBy: ctx.principal.userId,
         })
         .returning();
@@ -367,10 +373,12 @@ export const updateWorkspaceDomain = defineCommand({
       changes.isPrimary = input.isPrimary;
     }
     if (changes.host !== undefined || changes.pathPrefix !== undefined) {
-      // A domain that now points somewhere else is no longer verified at the old name.
+      // A domain that now points somewhere else is no longer verified at the old name. The move is
+      // a new claim, so it starts a fresh expiry window instead of inheriting the row's age (#575).
       changes.status = 'pending';
       changes.verifiedAt = null;
       changes.verificationToken = newId('wdv');
+      changes.pendingSince = new Date();
     }
 
     try {
