@@ -263,9 +263,41 @@ const metaDescription = (value: string, fallback: string) => {
   return text.length > 300 ? `${text.slice(0, 297)}…` : text;
 };
 
-const DANGEROUS_ELEMENTS = new Set(['script', 'iframe', 'object', 'embed', 'frame', 'frameset', 'applet', 'base']);
+const DANGEROUS_ELEMENTS = new Set([
+  'script',
+  'iframe',
+  'object',
+  'embed',
+  'frame',
+  'frameset',
+  'applet',
+  'base',
+  // SMIL can retarget an href/xlink:href to javascript: at runtime (#579).
+  'animate',
+  'set',
+  'animatetransform',
+  'animatemotion',
+  'discard',
+]);
 /** Dangerous elements whose content is raw text or a nested document, so it goes with the tag. */
 const DROPS_CONTENT = new Set(['script', 'iframe', 'object', 'embed']);
+/** Elements that never open a nesting level. */
+const VOID_ELEMENTS = new Set([
+  'area',
+  'base',
+  'br',
+  'col',
+  'embed',
+  'hr',
+  'img',
+  'input',
+  'link',
+  'meta',
+  'param',
+  'source',
+  'track',
+  'wbr',
+]);
 const URL_ATTRIBUTES = new Set(['href', 'src', 'xlink:href', 'action', 'formaction', 'background', 'poster', 'data', 'srcset']);
 
 const isWhitespace = (c: string) => c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\f';
@@ -661,27 +693,153 @@ function cleanActiveContent(markup: string): string {
  */
 export function sanitiseEmailBody(body: string, isActive: (html: string) => boolean = containsActiveContent): string {
   const scanned = scanEmailBody(body);
+  // Fail closed before parse5 sees the markup: a document past the size budget or nested past the
+  // cap would make the judge itself super-linear (#578).
+  if (scanned.length > MAX_EMAIL_LENGTH || exceedsNestingCap(scanned, MAX_EMAIL_NESTING)) return escapeHtml(body);
   if (!isActive(scanned)) return scanned;
   const cleaned = cleanActiveContent(scanned);
   if (!isActive(cleaned)) return cleaned;
   return escapeHtml(body);
 }
 
+/** Bounds the parse5 judge's input (#578). */
+export const MAX_EMAIL_NESTING = 512;
+export const MAX_EMAIL_LENGTH = 1_000_000;
+
+/**
+ * A linear pre-scan of the scanner's output. parse5's `element in scope` checks cost O(depth) per
+ * start tag, so a benign document nested a few thousand deep takes seconds. Real e-mail rarely
+ * nests deeper than about 40, so 512 leaves ordinary mail untouched while keeping the judge's own
+ * work linear.
+ */
+function exceedsNestingCap(markup: string, cap: number): boolean {
+  let depth = 0;
+  let i = 0;
+  while (i < markup.length) {
+    const open = markup.indexOf('<', i);
+    if (open < 0) break;
+    i = open + 1;
+    if (markup.startsWith('<!--', open)) {
+      const after = commentEnd(markup, open + 4);
+      if (after < 0) break;
+      i = after;
+      continue;
+    }
+    if (markup[open + 1] === '!') {
+      const end = markup.indexOf('>', open + 2);
+      if (end < 0) break;
+      i = end + 1;
+      continue;
+    }
+    const tag = parseTag(markup, open);
+    if (tag === null) continue;
+    if ('unterminated' in tag) break;
+    i = tag.end;
+    if (tag.endTag) {
+      if (depth > 0) depth--;
+      continue;
+    }
+    if (tag.selfClosing || VOID_ELEMENTS.has(tag.lowerName)) continue;
+    depth++;
+    if (depth > cap) return true;
+  }
+  return false;
+}
+
+interface EmailExtraction {
+  styles: string[];
+  bodyStart: number;
+  bodyEnd: number;
+  pixels: { start: number; end: number }[];
+}
+
+/** A 1×1 image is an open-tracking pixel: width and height, either order, each "1" or "1px". */
+function isTrackingPixel(attributes: readonly TagAttribute[]): boolean {
+  let width = false;
+  let height = false;
+  for (const attribute of attributes) {
+    if (attribute.value === null) continue;
+    const value = attribute.value.toLowerCase();
+    if (value !== '1' && value !== '1px') continue;
+    if (attribute.lowerName === 'width') width = true;
+    else if (attribute.lowerName === 'height') height = true;
+  }
+  return width && height;
+}
+
+/** Removes non-overlapping ranges from `text` in one pass, keeping every other byte. */
+function removeRanges(text: string, ranges: readonly (readonly [number, number])[]): string {
+  if (ranges.length === 0) return text;
+  let out = '';
+  let last = 0;
+  for (const [start, end] of ranges) {
+    if (start < last) continue;
+    if (start > last) out += text.slice(last, start);
+    last = end;
+  }
+  return out + text.slice(last);
+}
+
+/**
+ * One linear, quote-aware pass over the rendered e-mail, collecting the `<style>` bodies, the
+ * `<body>` content and the 1×1 images. Each tag is parsed once and every search pointer moves
+ * only forward, so repeated openers with no close cannot make the extraction quadratic (#574,
+ * #577).
+ */
+function extractEmailParts(html: string): EmailExtraction {
+  const lower = html.toLowerCase();
+  const styles: string[] = [];
+  const pixels: { start: number; end: number }[] = [];
+  let bodyStart = -1;
+  let bodyEnd = -1;
+  let styleClose = lower.indexOf('</style>');
+  let i = 0;
+  while (i < html.length) {
+    const open = html.indexOf('<', i);
+    if (open < 0) break;
+    i = open + 1;
+    // Comments are deliberately not special here: the old extraction regexes searched them too,
+    // and MJML puts some of its <style> elements inside MSO conditional comments.
+    const tag = parseTag(html, open);
+    if (tag === null) continue;
+    if ('unterminated' in tag) break;
+    i = tag.end;
+    if (tag.endTag) {
+      if (bodyStart >= 0 && bodyEnd < 0 && tag.lowerName === 'body') bodyEnd = open;
+      continue;
+    }
+    while (styleClose >= 0 && styleClose < open) styleClose = lower.indexOf('</style>', styleClose + 1);
+    if (tag.lowerName === 'style' && styleClose >= tag.end) {
+      styles.push(html.slice(tag.end, styleClose));
+      i = styleClose + '</style>'.length;
+      styleClose = lower.indexOf('</style>', i);
+      continue;
+    }
+    if (bodyStart < 0 && tag.lowerName === 'body') bodyStart = tag.end;
+    if (tag.lowerName === 'img' && isTrackingPixel(tag.attributes)) pixels.push({ start: open, end: tag.end });
+  }
+  return { styles, bodyStart, bodyEnd, pixels };
+}
+
 /** Splits MJML's complete document into the parts that can sit inside our page. */
 export function emailParts(html: string): { body: string; styles: string } {
-  const styles = [...html.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style>/gi)].map((m) => m[1]).join('\n');
-  const body = html.match(/<body\b[^>]*>([\s\S]*?)<\/body>/i)?.[1] ?? html;
-  // A 1×1 image is an open-tracking pixel (some templates and relays add one); the web page is
-  // not a send, so it is dropped rather than counted.
-  const pixel =
-    /<img\b[^>]*(?:(?:width\s*=\s*["']?1(?:px)?["']?[\s\S]*?height\s*=\s*["']?1(?:px)?["']?)|(?:height\s*=\s*["']?1(?:px)?["']?[\s\S]*?width\s*=\s*["']?1(?:px)?["']?))[^>]*>/gi;
+  const { styles, bodyStart, bodyEnd, pixels } = extractEmailParts(html);
+  const hasBody = bodyStart >= 0 && bodyEnd >= bodyStart;
+  const offset = hasBody ? bodyStart : 0;
+  const rawBody = hasBody ? html.slice(bodyStart, bodyEnd) : html;
   // The pixel is removed before sanitising, so the parser judges the final bytes: a removal
   // afterwards could join the pieces around it into new markup (`<me<img …>ta …>`).
+  const body = removeRanges(
+    rawBody,
+    pixels
+      .filter((pixel) => (hasBody ? pixel.start >= bodyStart && pixel.end <= bodyEnd : true))
+      .map((pixel) => [pixel.start - offset, pixel.end - offset] as const),
+  );
   return {
-    body: sanitiseEmailBody(body.replace(pixel, '')),
+    body: sanitiseEmailBody(body),
     // The styles go back into the page's own <style>. CSS reads `\3c ` as `<`, so escaping every
     // `<` keeps the rules while making `</style>` (and anything after it) impossible to inject.
-    styles: styles.replace(/</g, '\\3c '),
+    styles: styles.join('\n').replace(/</g, '\\3c '),
   };
 }
 
