@@ -38,12 +38,14 @@ const [
   read('docs/deployment/kubernetes.md'),
 ]);
 
-const [helmDeployments, helmMigrateJob, helmNotes, helmHelpers, helmHpa] = await Promise.all([
+const [helmDeployments, helmMigrateJob, helmNotes, helmHelpers, helmHpa, helmConfigMap, helmServices] = await Promise.all([
   read('deploy/helm/agentic-marketing/templates/deployments.yaml'),
   read('deploy/helm/agentic-marketing/templates/migrate-job.yaml'),
   read('deploy/helm/agentic-marketing/templates/NOTES.txt'),
   read('deploy/helm/agentic-marketing/templates/_helpers.tpl'),
   read('deploy/helm/agentic-marketing/templates/hpa.yaml'),
+  read('deploy/helm/agentic-marketing/templates/configmap.yaml'),
+  read('deploy/helm/agentic-marketing/templates/services.yaml'),
 ]);
 
 /** Environment-file keys, including commented examples (`# KEY=value`). */
@@ -256,6 +258,52 @@ describe('Helm rollout, migration and replica reporting', () => {
     expect(helmNotes).toContain('.Values.roles.scheduler');
     expect(helmHelpers).toContain('define "am.roleReplicas"');
     expect(helmHpa).toContain('range $role, $r := .Values.roles');
+  });
+});
+
+describe('Helm role ports and probes (#645, #649)', () => {
+  // The chart has no render test of its own (CI runs `helm lint` and kubeconform), and the pinned
+  // helm binary is not installed everywhere, so these checks read the templates. They cover the
+  // worker/scheduler probes and the single port.
+  const container = helmDeployments.slice(helmDeployments.indexOf('containers:'));
+
+  it('puts the container port and the HTTP probes behind the api/ingest role check', () => {
+    expect(helmDeployments).toMatch(/\$httpRole\s*:=\s*or \(eq \$role "api"\) \(eq \$role "ingest"\)/);
+    const guarded = /\{\{- if \$httpRole \}\}\n([\s\S]*?)\n\s*\{\{- end \}\}/.exec(container)?.[1] ?? '';
+    expect(guarded).toContain('ports:');
+    expect(guarded).toContain('livenessProbe:');
+    expect(guarded).toContain('httpGet: { path: /healthz, port: http }');
+    expect(guarded).toContain('readinessProbe:');
+    expect(guarded).toContain('httpGet: { path: /readyz, port: http }');
+    expect(guarded).toContain('containerPort: {{ $.Values.port }}');
+
+    // Nothing outside the guard may bind a port or probe worker/scheduler.
+    const unguarded = container.replace(guarded, '');
+    expect(unguarded).not.toContain('containerPort:');
+    expect(unguarded).not.toContain('livenessProbe:');
+    expect(unguarded).not.toContain('readinessProbe:');
+    expect(unguarded).not.toContain('/healthz');
+    expect(unguarded).not.toContain('/readyz');
+  });
+
+  it('uses one port value for the ConfigMap, container, Service and migrate hook', () => {
+    expect(helmValues).toMatch(/^port: 3000$/m);
+    expect(helmConfigMap).toMatch(/PORT: \{\{ \.Values\.port \| quote \}\}/);
+    expect(helmConfigMap).not.toMatch(/PORT:\s*"3000"/);
+    expect(container).not.toMatch(/containerPort:\s*3000/);
+    expect(helmServices).toContain('targetPort: {{ $.Values.port }}');
+    expect(helmMigrateJob).toMatch(/value: \{\{ \.Values\.port \| quote \}\}/);
+    expect(helmMigrateJob).not.toMatch(/value:\s*"3000"/);
+  });
+
+  it('keeps a config.PORT from duplicating the ConfigMap key (#649)', () => {
+    // The migrate Job guards this already; the ConfigMap must use the same guard.
+    expect(helmMigrateJob).toContain('hasKey .Values.config "PORT"');
+    expect(helmConfigMap).toContain('hasKey .Values.config "PORT"');
+  });
+
+  it('documents why worker and scheduler have no probes (#645)', () => {
+    expect(kubeDoc).toContain('so they get no probe');
   });
 });
 

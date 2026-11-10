@@ -88,7 +88,8 @@
 #       - backups:/backups
 #     restart: unless-stopped
 #     # The image's own healthcheck asks the web server, which this service doesn't run; this one
-#     # fails when the scheduler stopped or its last backup failed.
+#     # fails when the scheduler stopped, its last backup or that backup's verification failed, or
+#     # no backup has been verified within BACKUP_VERIFY_MAX_AGE_DAYS.
 #     healthcheck:
 #       test: ["CMD", "am", "backup", "--health"]
 #       interval: 1m

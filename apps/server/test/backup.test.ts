@@ -23,6 +23,8 @@ import {
   readVerifyStatus,
   restoreBackup,
   restoreClickHouse,
+  runScheduledBackups,
+  type ScheduleStatus,
   verifyBackup,
   writeScheduleStatus,
   writeVerifyStatus,
@@ -55,6 +57,17 @@ async function withEnv<T>(overrides: Record<string, string>, fn: () => Promise<T
       else process.env[key] = value;
     }
   }
+}
+
+/** Waits until the scheduler loop has recorded one completed run. */
+async function waitForScheduledRun(dir: string): Promise<ScheduleStatus> {
+  const deadline = Date.now() + 90_000;
+  while (Date.now() < deadline) {
+    const status = await readScheduleStatus(dir);
+    if (status?.lastRunAt) return status;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+  }
+  throw new Error('the scheduler did not complete a run within 90s');
 }
 
 async function clickhouse(query: string, database?: string, settings: Record<string, string> = {}): Promise<string> {
@@ -288,6 +301,60 @@ describe.skipIf(!pgToolsReady)('backup and restore', () => {
     expect((error as Error).message).toMatch(/postgres\.dump does not match its sha256 \(expected [0-9a-f]{64}, got [0-9a-f]{64}\)/);
     await rm(bad, { recursive: true, force: true });
   }, 60_000);
+
+  it('verifies each scheduled backup, so --health passes after a good run (#654)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'am-scheduled-'));
+    const controller = new AbortController();
+    try {
+      const env = { ...process.env, DATABASE_URL: dbUrl.toString(), BACKUP_DIR: dir, BACKUP_CRON: '* * * * *' };
+      const running = runScheduledBackups({ env, log: () => {}, signal: controller.signal });
+      const status = await waitForScheduledRun(dir);
+      controller.abort();
+      expect(await running).toBe(0);
+
+      const backup = (await readdir(dir)).find((name) => name.startsWith('am-scheduled-'));
+      expect(backup).toBeTruthy();
+      const verification = await readVerifyStatus(dir);
+      expect(verification?.backup).toBe(backup);
+      expect(verification?.verifiedAt).toBeTruthy();
+      expect(status.lastOk).toBe(true);
+      expect(status.lastError).toBeUndefined();
+      // This is the container healthcheck: a heartbeat alone was not enough (#145, #654).
+      expect(await backupHealth({ dir, env })).toMatchObject({ ok: true });
+    } finally {
+      controller.abort();
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it('records a failed verification, so --health fails after a bad scheduled run (#654)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'am-scheduled-bad-'));
+    const bin = await mkdtemp(join(tmpdir(), 'am-bad-pg-'));
+    const controller = new AbortController();
+    try {
+      // A pg_restore that cannot read the archive: createBackup still succeeds, verifyBackup does not.
+      const fake = join(bin, 'pg_restore');
+      await writeFile(fake, '#!/bin/sh\necho "pg_restore: error: could not read input file" >&2\nexit 1\n', { mode: 0o755 });
+      await withEnv({ PATH: `${bin}:${process.env.PATH}` }, async () => {
+        const env = { ...process.env, DATABASE_URL: dbUrl.toString(), BACKUP_DIR: dir, BACKUP_CRON: '* * * * *' };
+        const running = runScheduledBackups({ env, log: () => {}, signal: controller.signal });
+        const status = await waitForScheduledRun(dir);
+        controller.abort();
+        expect(await running).toBe(0);
+
+        expect(status.lastOk).toBe(false);
+        expect(status.lastError).toMatch(/pg_restore failed/);
+        expect(await readVerifyStatus(dir)).toBeNull();
+        const health = await backupHealth({ dir, env });
+        expect(health.ok).toBe(false);
+        expect(health.reason).toMatch(/last scheduled backup .* failed: .*pg_restore failed/);
+      });
+    } finally {
+      controller.abort();
+      await rm(dir, { recursive: true, force: true });
+      await rm(bin, { recursive: true, force: true });
+    }
+  }, 120_000);
 
   it('restores the deleted Postgres row', async () => {
     expect(await withEnv(env, () => restoreRun([backupPath, '--yes']))).toBe(0);

@@ -1211,7 +1211,13 @@ export async function backupHealth(
 
 /** `am backup --schedule`: checks the cron expression every minute and keeps going on failure. */
 export async function runScheduledBackups(
-  opts: { clickhouse?: boolean; env?: NodeJS.ProcessEnv; log?: (message: string) => void } = {},
+  opts: {
+    clickhouse?: boolean;
+    env?: NodeJS.ProcessEnv;
+    log?: (message: string) => void;
+    /** Stops the loop like SIGTERM, for an embedding process or a test. */
+    signal?: AbortSignal;
+  } = {},
 ): Promise<number> {
   const env = opts.env ?? process.env;
   const log = opts.log ?? console.log;
@@ -1260,6 +1266,8 @@ export async function runScheduledBackups(
   const onStop = () => stop.abort();
   process.once('SIGTERM', onStop);
   process.once('SIGINT', onStop);
+  if (opts.signal?.aborted) stop.abort();
+  else opts.signal?.addEventListener('abort', onStop, { once: true });
   let lastRunMinute = '';
   try {
     while (!stop.signal.aborted) {
@@ -1270,7 +1278,19 @@ export async function runScheduledBackups(
         status.lastRunAt = now.toISOString();
         try {
           // createBackup logs the final path; a failure is not fatal for the scheduler.
-          await createBackup({ clickhouse: opts.clickhouse, keepDays, kind: 'scheduled', env, log, dir });
+          const { dir: written } = await createBackup({
+            clickhouse: opts.clickhouse,
+            keepDays,
+            kind: 'scheduled',
+            env,
+            log,
+            dir,
+          });
+          // Read the new backup back before reporting a good run. `am backup --health` only trusts
+          // a verification record, and a scheduled backup nobody verified left the backup service
+          // unhealthy until someone ran `am backup --verify` by hand (#654). Verification only
+          // re-hashes the files and runs `pg_restore --list`; it writes nothing to a database.
+          await verifyBackup({ dir: written, env, log });
           status.lastOk = true;
           delete status.lastError;
         } catch (err) {
@@ -1288,6 +1308,7 @@ export async function runScheduledBackups(
     clearInterval(heartbeatTimer);
     process.off('SIGTERM', onStop);
     process.off('SIGINT', onStop);
+    opts.signal?.removeEventListener('abort', onStop);
   }
   log('scheduled backups stopped');
   return 0;
