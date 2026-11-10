@@ -1,4 +1,5 @@
 {{- range $role, $r := .Values.roles }}
+{{- $httpRole := or (eq $role "api") (eq $role "ingest") }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -47,15 +48,19 @@ spec:
               value: "true"
             {{- with $.Values.extraEnv }}{{ toYaml . | nindent 12 }}{{- end }}
           envFrom: {{- include "am.envFrom" $ | nindent 12 }}
+          # Only api and ingest call serve(); worker and scheduler run background loops with no
+          # listener, so they get no HTTP probes and no port. See docs/deployment/kubernetes.md.
+          {{- if $httpRole }}
           ports:
             - name: http
-              containerPort: 3000
+              containerPort: {{ $.Values.port }}
           livenessProbe:
             httpGet: { path: /healthz, port: http }
             periodSeconds: 15
           readinessProbe:
             httpGet: { path: /readyz, port: http }
             periodSeconds: 10
+          {{- end }}
           resources: {{- toYaml $r.resources | nindent 12 }}
           {{- with $.Values.extraVolumeMounts }}
           volumeMounts: {{- toYaml . | nindent 12 }}

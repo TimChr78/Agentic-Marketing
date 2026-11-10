@@ -4,7 +4,9 @@ metadata:
   name: {{ include "am.fullname" . }}
   labels: {{- include "am.labels" . | nindent 4 }}
 data:
-  PORT: "3000"
+{{- if not (hasKey .Values.config "PORT") }}
+  PORT: {{ .Values.port | quote }}
+{{- end }}
 {{- range $k, $v := .Values.config }}
 {{- if ne (toString $v) "" }}
   {{ $k }}: {{ $v | toString | quote }}
