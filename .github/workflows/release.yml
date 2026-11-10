@@ -25,22 +25,46 @@ permissions:
   contents: write
   packages: write
 
-# One release at a time per version.
-concurrency:
-  group: release-${{ inputs.version || github.ref_name }}
-  cancel-in-progress: false
-
+# One release at a time per version, whichever trigger started it: a tag push (v0.14.1) and a manual
+# run (0.14.1 or v0.14.1) must share a group. Workflow-level `concurrency` cannot read step outputs,
+# so the group lives on the release job and reads one normalised version from the prepare job (#648).
 jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Normalise the version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            v="${INPUT_VERSION#v}"
+          else
+            v="${GITHUB_REF_NAME#v}"
+          fi
+          echo "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' || { echo "::error::$v is not a version (x.y.z)"; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
   # The same checks as a pull request, on the commit being released.
   ci:
+    needs: prepare
     uses: ./.github/workflows/ci.yml
     permissions:
       contents: read
 
   release:
-    needs: ci
+    needs: [prepare, ci]
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    # The group is acquired before the version and release-existence checks below run, so a second
+    # run queued for the same version sees the first release when it starts.
+    concurrency:
+      group: release-v${{ needs.prepare.outputs.version }}
+      cancel-in-progress: false
     # The release files and the image need the token of the event; the attestations need a signed
     # identity (`id-token`) and the permission to store an attestation (`attestations`).
     permissions:
@@ -63,13 +87,8 @@ jobs:
         id: version
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          INPUT_VERSION: ${{ inputs.version }}
         run: |
-          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
-            v="${INPUT_VERSION#v}"
-          else
-            v="${GITHUB_REF_NAME#v}"
-          fi
+          v="${{ needs.prepare.outputs.version }}"
           echo "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' || { echo "::error::$v is not a version (x.y.z)"; exit 1; }
           # Every version surface (packages, chart, Compose defaults, README, CHANGELOG): #175.
           node scripts/check-versions.mjs "$v" || { echo "::error::Version files disagree with $v (see above)"; exit 1; }

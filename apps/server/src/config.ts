@@ -257,6 +257,25 @@ export class ConfigError extends Error {
   override name = 'ConfigError';
 }
 
+/**
+ * Parse DATABASE_URL and turn a malformed one into a ConfigError with the likely cause. Docker
+ * Compose interpolates POSTGRES_PASSWORD into DATABASE_URL raw and cannot percent-encode it, so a
+ * base64 password containing `/` makes the URL unparseable; a raw TypeError from `new URL()` would
+ * escape the ConfigError path in main.ts and print a stack instead of the fix (#647).
+ */
+function databaseUrl(raw: string): URL {
+  try {
+    return new URL(raw);
+  } catch {
+    throw new ConfigError(
+      'Configuration is incomplete: DATABASE_URL is not a valid URL. A password with a reserved character ' +
+        '(`/`, `?` or `#`) must be percent-encoded in the URL (`/` as `%2F`) — Docker Compose cannot encode ' +
+        'the POSTGRES_PASSWORD it interpolates — or the password must be hex, which needs no encoding: ' +
+        'generate it with `openssl rand -hex 32` instead of `openssl rand -base64 32`.',
+    );
+  }
+}
+
 /** Turn a zod issue into one short phrase, using the names the operator sees in .env. */
 function issueText(issue: z.core.$ZodIssue): string {
   const key = issue.path.map(String).join('.') || 'configuration';
@@ -295,7 +314,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
         ? [...missing(['OPENBAO_ADDR']), ...(e.OPENBAO_TOKEN || e.OPENBAO_TOKEN_FILE ? [] : ['OPENBAO_TOKEN or OPENBAO_TOKEN_FILE'])]
         : missing(['AWS_KMS_KEY_ID', 'AWS_REGION', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY']);
   if (needed.length) throw new ConfigError(`Configuration is incomplete: KEY_PROVIDER=${e.KEY_PROVIDER} needs ${needed.join(', ')}`);
-  const appUrl = new URL(e.DATABASE_URL);
+  const appUrl = databaseUrl(e.DATABASE_URL);
   appUrl.username = e.APP_DB_ROLE;
   appUrl.password = e.APP_DB_PASSWORD;
   const clientIpHeaders = [
