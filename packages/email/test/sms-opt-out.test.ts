@@ -1,7 +1,8 @@
 import type { SmsTemplate } from '@agentic-marketing/artifacts';
 import { describe, expect, it } from 'vitest';
+import { expectLinear } from '../../../test-support/linear';
 import { classifySmsReply, normalizeSmsText } from '../src/sms/keywords';
-import { renderSms, STOP_FOOTER } from '../src/sms/render';
+import { hasOptOutInstruction, renderSms, STOP_FOOTER } from '../src/sms/render';
 
 // #635: the outbound footer was skipped whenever the bare word "stop" appeared anywhere in the
 // body, so a marketing text about "Stop & Shop" shipped without an opt-out instruction.
@@ -90,5 +91,21 @@ describe('inbound reply normalisation (#636)', () => {
 
   it('leaves an ordinary reply alone', () => {
     expect(classifySmsReply('Hello there')).toBeNull();
+  });
+});
+
+describe('trailing carrier boilerplate is stripped in linear time (CodeQL js/redos)', () => {
+  it('stays linear on many repeated boilerplate-like clauses', () => {
+    expectLinear(
+      (n) => `msg${' freq variesmsg'.repeat(n)}!`,
+      (body) => hasOptOutInstruction(body),
+      5_000,
+    );
+  });
+
+  it('still recognises a real instruction followed by one or two boilerplate clauses', () => {
+    expect(hasOptOutInstruction('Sale today. Reply STOP to opt out. Msg & data rates may apply.')).toBe(true);
+    expect(hasOptOutInstruction('Sale today. Reply STOP to opt out. Msg&data rates may apply. Msg freq varies.')).toBe(true);
+    expect(hasOptOutInstruction('Stop by before the deals end! Msg & data rates may apply.')).toBe(false);
   });
 });

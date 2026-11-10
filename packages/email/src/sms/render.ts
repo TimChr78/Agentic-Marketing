@@ -38,11 +38,30 @@ const OPT_OUT_TAIL = new RegExp(
 );
 
 // A carrier's own boilerplate may follow the instruction; it does not make it a different command.
-const TRAILING_BOILERPLATE = /(?:\s*msg\s*(?:&|and)?\s*(?:data\s+rates\s+may\s+apply|freq(?:uency)?\s+varies)\.?)+\s*$/i;
+// One clause at a time, tested against a short window at the end, so the cost is constant per clause:
+// a single regex with a repeated group of optional whitespace backtracked exponentially (CodeQL).
+const BOILERPLATE_CLAUSE = /msg\s?(?:&|and)?\s?(?:data rates may apply|freq(?:uency)? varies)\.?$/i;
+const BOILERPLATE_WINDOW = 80;
+const MAX_BOILERPLATE_CLAUSES = 4;
+
+function stripTrailingBoilerplate(body: string): string {
+  let text = body.trimEnd();
+  for (let i = 0; i < MAX_BOILERPLATE_CLAUSES; i += 1) {
+    const start = Math.max(0, text.length - BOILERPLATE_WINDOW);
+    const window = text.slice(start).replace(/\s+/g, ' ');
+    const match = BOILERPLATE_CLAUSE.exec(window);
+    if (!match) break;
+    // The window's whitespace was collapsed, so cut by the clause's length in collapsed form: the
+    // remaining text before the clause is what the window held before the match.
+    const kept = window.slice(0, match.index);
+    text = (text.slice(0, start) + kept).trimEnd();
+  }
+  return text;
+}
 
 /** True when the body already ends with a real opt-out instruction (not merely the word "stop"). */
 export function hasOptOutInstruction(body: string): boolean {
-  const tail = body.replace(TRAILING_BOILERPLATE, '');
+  const tail = stripTrailingBoilerplate(body);
   return tail.endsWith(STOP_FOOTER) || OPT_OUT_TAIL.test(tail);
 }
 
