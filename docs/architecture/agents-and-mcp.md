@@ -1,6 +1,6 @@
 # Agents & MCP
 
-The platform is **agent-native**: agents are first-class principals that operate the platform (scope A), act as decision-makers inside journeys (scope B), and since wave 4 run whole loops under a mandate (scope C). Autonomy is built through Phase 20 (0.6.0, fixes in 0.6.1): agents still propose by default, and a person can grant bounded autonomy per agent, per action class and per audience.
+The platform is **agent-native**: agents are first-class principals that operate the platform (scope A), act as decision-makers inside journeys (scope B), and since wave 4 run whole loops under a mandate (scope C). Autonomy is built through Phase 22 (Phases 17–20 in 0.3.0–0.6.0, Phases 21–22 in 0.7.0–0.8.0): agents still propose by default, and a person can grant bounded autonomy per agent, per action class and per audience.
 
 ## 1. Command registry — one definition, three surfaces
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { loadConfig } from '../src/config';
+import { ConfigError, loadConfig } from '../src/config';
 
 const base = {
   DATABASE_URL: 'postgres://am:am@localhost:5432/am',
@@ -69,5 +69,18 @@ describe('configuration', () => {
   it('defaults the asset size limit to 5 MB and parses an override', () => {
     expect(loadConfig(base).assetMaxBytes).toBe(5_242_880);
     expect(loadConfig({ ...base, ASSET_MAX_BYTES: '1048576' }).assetMaxBytes).toBe(1_048_576);
+  });
+
+  it('accepts the four runtime roles, alone or comma-separated', () => {
+    expect([...loadConfig({ ...base, ROLE: 'worker' }).roles]).toEqual(['worker']);
+    expect([...loadConfig({ ...base, ROLE: 'api, ingest' }).roles]).toEqual(['api', 'ingest']);
+    expect([...loadConfig(base).roles]).toEqual(['api', 'ingest', 'worker', 'scheduler']);
+  });
+
+  it('rejects a ROLE that is not one of the four, instead of starting a process that serves nothing (#651)', () => {
+    expect(() => loadConfig({ ...base, ROLE: 'decide' })).toThrow(ConfigError);
+    expect(() => loadConfig({ ...base, ROLE: 'decide' })).toThrow('ROLE has unknown role "decide"');
+    expect(() => loadConfig({ ...base, ROLE: 'api,decide' })).toThrow('ROLE has unknown role "decide"');
+    expect(() => loadConfig({ ...base, ROLE: 'api,' })).toThrow(ConfigError);
   });
 });

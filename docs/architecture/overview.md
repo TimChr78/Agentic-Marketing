@@ -1,6 +1,6 @@
 # System overview
 
-> Status: describes **0.6.1**. Waves 1–3 are built through Phase 16; wave 4 has shipped Phases 17–20 (0.3.0–0.6.0, fixes through 0.6.1) and still has Phases 21–22 planned. See [roadmap.md](roadmap.md) for the wave 1 plan, [roadmap-wave-4.md](roadmap-wave-4.md) for the current wave, and [agentic-autonomy.md](agentic-autonomy.md) for what agents may do today.
+> Status: describes **0.14.1**. Waves 1–3 are built through Phase 16; wave 4 shipped Phases 17–22 (0.3.0–0.8.0) and wave 5 shipped Phases 23–28 (0.9.0–0.14.0). See [roadmap.md](roadmap.md) for the wave 1 plan, [roadmap-wave-4.md](roadmap-wave-4.md) and [roadmap-wave-5.md](roadmap-wave-5.md) for the later waves, and [agentic-autonomy.md](agentic-autonomy.md) for what agents may do today.
 
 ## 1. System context
 
@@ -28,29 +28,27 @@ flowchart TB
 
 ## 2. Containers (runtime roles)
 
-The platform is **one codebase and one container image**. A `ROLE` env var (or several, comma-separated) selects which modules a process runs. On a small install a single process runs all roles; at scale each role is deployed and scaled independently.
+The platform is **one codebase and one container image**. A `ROLE` env var (or several, comma-separated) selects which modules a process runs; the only valid values are `api`, `ingest`, `worker`, `scheduler` and `all`, and anything else is a start-up error. On a small install a single process runs all roles; at scale each role is deployed and scaled independently.
 
 | Role | Responsibility | Latency class | Scales by |
 |---|---|---|---|
 | `api` | Command layer: REST, MCP (streamable HTTP), UI RPC, auth, static UI | interactive (<300 ms) | users / agents |
-| `ingest` | Event intake (Segment-spec HTTP API), validation, consent filter, identity hints, session-state update, publish to bus | hot path (<20 ms p95) | events/s |
-| `decide` | Web personalization decision API, reads hot state from Valkey | hot path (<50 ms p95) | page views/s |
+| `ingest` | Event intake (Segment-spec HTTP API), validation, consent filter, identity hints, session-state update, publish to bus; also the web personalization decision API (`/v1/decide`), which reads hot state from Valkey | hot path (<20 ms p95 ingest, <50 ms p95 decide) | events/s, page views/s |
 | `worker` | Bus consumers: ClickHouse sink, profile updater, segment evaluator, journey trigger matcher; journey step execution; sends | near real time (<5 s) | events/s, journey steps/s |
-| `scheduler` | Timers (journey waits, scheduled segment recomputes, campaign schedules), maintenance jobs | seconds | singleton (leader-elected) |
+| `scheduler` | Timers (journey waits, scheduled segment recomputes, campaign schedules), maintenance jobs | seconds | one replica (`Recreate`): its loops are not coordinated across processes |
 
 ```mermaid
 flowchart LR
   subgraph edge["Public edge (Caddy / ingress)"]
     direction TB
   end
-  sdk[JS SDK] --> ingest
-  sdk --> decide
+  sdk[JS SDK] -->|track| ingest
+  sdk -->|decide| ingest
   browser[UI SPA] --> api
   mcp[MCP clients] --> api
 
   ingest --> nats[[NATS JetStream]]
   ingest --> valkey[(Valkey)]
-  decide --> valkey
   api --> pg[(Postgres)]
   api --> ch[(ClickHouse)]
   api --> nats
@@ -99,7 +97,7 @@ packages/
   edge-worker/     # the decision API as a Cloudflare Worker
   sdk-js/          # browser SDK: tracking, consent banner, personalization and push
 apps/
-  server/          # composes modules into roles (api, ingest, decide, worker, scheduler)
+  server/          # composes modules into roles (api, ingest, worker, scheduler)
   web/             # React admin UI (app shell and router, ui, features, pages) and the demo
 ```
 

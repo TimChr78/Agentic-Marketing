@@ -1,6 +1,6 @@
 # Agentic autonomy: agents that run marketing loops within borders
 
-Status: **accepted design** (2026-10-30; owner decisions in §11), **built through Phase 20** (0.3.0–0.6.0, fixes through 0.6.1). Phases 21–22 remain planned. The decision record is [ADR-0016](adr/0016-agent-autonomy-model.md); the phased plan is [wave 4](roadmap-wave-4.md).
+Status: **accepted design** (2026-10-30; owner decisions in §11), **built through Phase 22** (Phases 17–20 in 0.3.0–0.6.0, Phases 21–22 in 0.7.0–0.8.0). The decision record is [ADR-0016](adr/0016-agent-autonomy-model.md); the phased plan is [wave 4](roadmap-wave-4.md).
 
 Before wave 4 (0.2.10) an agent could do almost anything a marketer could through MCP or REST, but autonomy was one switch: the workspace approval policy (`none`, `agent_changes`, `all_publishes`) decided whether an agent's publish waited for a person. That gave two useful settings: "agents draft, people approve every change", or "agents can publish anything their scopes allow". Neither was what the product is for.
 

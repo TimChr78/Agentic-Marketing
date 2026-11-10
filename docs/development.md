@@ -34,7 +34,7 @@ packages/
   sdk-js/      browser SDK: Segment-compatible tracking, consent banner, personalization and push
 apps/
   server/      Hono app: REST (/v1/<command>, /openapi.json), MCP (/mcp), sign-in/consent, health; CLI
-  web/         React admin UI (app/ shell and router, ui/ design system, features/, pages/) served at /, and the mocked demo at /demo
+  web/         React admin UI (app/ shell and router, ui/ design system, features/, pages/) served at /; /demo runs the same shell on fixed sample data, read-only
 spikes/        throw-away prototypes with their FINDINGS.md (not part of CI or the image)
 scripts/       release bundle, smoke, config pull/push, version check and generated MCP tool docs
 e2e/           Playwright specs, screenshots and the seeded server
