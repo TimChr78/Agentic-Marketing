@@ -164,8 +164,12 @@ jobs:
           echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends postgresql-client-16
-          pg_dump --version
-          pg_dump --version | grep -Eq '\(PostgreSQL\) 16\.'
+          # Newer runner images preinstall a later client, and Debian's pg_wrapper runs the newest
+          # one; put 16's own binaries first for every later step so backups use the matching tools.
+          echo /usr/lib/postgresql/16/bin >> "$GITHUB_PATH"
+          /usr/lib/postgresql/16/bin/pg_dump --version
+          /usr/lib/postgresql/16/bin/pg_dump --version | grep -Eq '\(PostgreSQL\) 16\.'
+          /usr/lib/postgresql/16/bin/pg_restore --version | grep -Eq '\(PostgreSQL\) 16\.'
       - run: pnpm install --frozen-lockfile --filter "./packages/**" --filter "./apps/**" --filter "agentic-marketing"
       - run: pnpm test:ci
       # JUnit results for every run, so a flaky test shows up as a pattern across runs.
