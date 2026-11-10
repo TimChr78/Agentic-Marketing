@@ -1,4 +1,5 @@
 import { DEFAULT_PURPOSES, type Purposes, publishedSingleton } from '@agentic-marketing/artifacts';
+import { personalDataInText } from '@agentic-marketing/core';
 import {
   type ConsentSource,
   type ConsentStatus,
@@ -70,8 +71,10 @@ const PUBLIC_PROOF_KEYS = new Set([
 /**
  * The consent proof a principal may see. Without `profiles:pii` only the evidence keys above with
  * primitive values survive: IP addresses, user agents, page URLs, call notes and any other
- * key that could carry personal data are removed before the response leaves the server. The
- * `proofWithheld` flag lets the UI say so without naming or rendering what was removed.
+ * key that could carry personal data are removed before the response leaves the server. An
+ * allowlisted key name is not proof on its own — `{import_label: "ada@example.com"}` still holds
+ * personal data — so each kept string is checked with the shared detector. The `proofWithheld`
+ * flag lets the UI say so without naming or rendering what was removed.
  */
 export function consentProofFor(
   proof: Record<string, unknown> | null | undefined,
@@ -80,13 +83,25 @@ export function consentProofFor(
   const all = proof ?? {};
   if (canSeePii) return { proof: all, proofWithheld: false };
   const visible: Record<string, unknown> = {};
+  let withheld = false;
   for (const [key, value] of Object.entries(all)) {
-    if (!PUBLIC_PROOF_KEYS.has(key)) continue;
+    if (!PUBLIC_PROOF_KEYS.has(key)) {
+      withheld = true;
+      continue;
+    }
     // A nested object could hide personal data under a harmless key name: fail closed.
-    if (value === null || value === undefined || typeof value === 'object') continue;
+    if (value === null || value === undefined || typeof value === 'object') {
+      withheld = true;
+      continue;
+    }
+    // The key is allowlisted, but the value can still be an e-mail address, a phone number, etc.
+    if (typeof value === 'string' && personalDataInText(value).length > 0) {
+      withheld = true;
+      continue;
+    }
     visible[key] = value;
   }
-  return { proof: visible, proofWithheld: Object.keys(visible).length < Object.keys(all).length };
+  return { proof: visible, proofWithheld: withheld };
 }
 
 export async function recordConsent(tx: Tx, workspaceId: string, profileId: string, purposes: Purposes, records: ConsentInput[]) {

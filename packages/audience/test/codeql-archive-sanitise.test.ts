@@ -5,7 +5,17 @@ import { renderTemplate } from '@agentic-marketing/email';
 import { type DefaultTreeAdapterTypes, parse, parseFragment } from 'parse5';
 import { describe, expect, it } from 'vitest';
 import { expectLinear } from '../../../test-support/linear';
-import { activeUrl, emailParts, renderWebVersion, sanitiseEmailBody, scanEmailBody } from '../src/archive';
+import {
+  activeUrl,
+  clearEmailPartsCache,
+  emailParts,
+  MAX_EMAIL_LENGTH,
+  MAX_EMAIL_NESTING,
+  renderWebVersion,
+  sanitiseEmailBody,
+  scanEmailBody,
+} from '../src/archive';
+import { EmailPartsCache } from '../src/emailPartsCache';
 
 // CodeQL alerts 4, 3, 2 and 1 (js/bad-tag-filter, js/incomplete-multi-character-sanitization):
 // the public archive renders e-mail HTML behind a strict CSP, and `emailParts` is the defence in
@@ -327,10 +337,12 @@ describe('archive sanitising: benign output is unchanged', () => {
     '<ul><li>One</li><li>Two <strong>bold</strong></li></ul>',
   ];
 
-  it('matches the old implementation on benign fixtures', () => {
+  it('matches the old implementation on benign fixtures, cold and warm', () => {
     for (const html of fixtures) {
+      clearEmailPartsCache();
       expect(isBenign(html), html).toBe(true);
-      expect(emailParts(html), html).toEqual(benignReference(html));
+      expect(emailParts(html), `${html} (cold)`).toEqual(benignReference(html));
+      expect(emailParts(html), `${html} (warm)`).toEqual(benignReference(html));
     }
   });
 
@@ -353,6 +365,7 @@ describe('archive sanitising: benign output is unchanged', () => {
   });
 
   it('matches the old implementation on 20,000 random benign inputs', () => {
+    clearEmailPartsCache();
     let seed = 0x5eed1234;
     const random = () => {
       seed = (seed + 0x6d2b79f5) | 0;
@@ -504,7 +517,7 @@ describe('archive sanitising: nesting is bounded before the parse5 judge (#578)'
   const body = (inner: string) => emailParts(`<style>.x{}</style><body>${inner}</body>`).body;
 
   it('fails closed on nesting deeper than the cap', () => {
-    const deep = `${'<div>'.repeat(600)}deep${'</div>'.repeat(600)}`;
+    const deep = `${'<div>'.repeat(MAX_EMAIL_NESTING + 1)}deep${'</div>'.repeat(MAX_EMAIL_NESTING + 1)}`;
     const out = body(deep);
 
     expect(out).toContain('&lt;div&gt;');
@@ -516,9 +529,10 @@ describe('archive sanitising: nesting is bounded before the parse5 judge (#578)'
     expect(body(html)).toBe(html);
   });
 
-  it('takes the fast path at the nesting cap', () => {
-    const html = `${'<div>'.repeat(512)}x${'</div>'.repeat(512)}`;
+  it('takes the fast path one level under the cap', () => {
+    const html = `${'<div>'.repeat(MAX_EMAIL_NESTING - 1)}x${'</div>'.repeat(MAX_EMAIL_NESTING - 1)}`;
     expect(body(html)).toBe(html);
+    expect(sanitiseEmailBody(html)).toBe(scanEmailBody(html));
   });
 
   it('fails closed above the size budget', () => {
@@ -529,12 +543,153 @@ describe('archive sanitising: nesting is bounded before the parse5 judge (#578)'
     expect(out).not.toContain('<p>');
   });
 
-  it('stays linear on benign nesting just under the cap', () => {
-    expectLinear((n) => `${'<div>'.repeat(n)}x${'</div>'.repeat(n)}`, body, 128);
+  // parse5 checks the stack of open elements for every tag, so nested input is O(depth²). The cap
+  // is what bounds that cost; depth is not linear. Assert the bound, not a ratio that is mostly
+  // noise at these sizes: at the cap and one level under it, the fast path stays byte-identical
+  // and a genuinely slow CI runner still has a wide margin.
+  it('finishes benign nesting at the cap within a generous budget', () => {
+    for (const depth of [MAX_EMAIL_NESTING - 1, MAX_EMAIL_NESTING]) {
+      const html = `${'<div>'.repeat(depth)}x${'</div>'.repeat(depth)}`;
+      const started = performance.now();
+      const out = body(html);
+      const elapsed = performance.now() - started;
+
+      expect(out, `depth ${depth}`).toBe(html);
+      expect(elapsed, `depth ${depth}: ${elapsed.toFixed(1)} ms`).toBeLessThan(1_000);
+    }
+  });
+
+  it('stays linear in width at a realistic depth', () => {
+    expectLinear((n) => `${'<div>'.repeat(40)}x${'</div>'.repeat(40)}`.repeat(n), body, 200);
+  });
+
+  // Sol's re-check: each of these undercounted in a hand-written pre-scan (table/template scope and
+  // foreign-content <style>) and then cost seconds inside parse5. The tree adapter is the bound.
+  const solCases: [string, (n: number) => string, number][] = [
+    ['table scope ignoring </div>', (n) => '<div><table></div></table>'.repeat(n), 2_500],
+    ['template scope ignoring </div>', (n) => '<div><template></div></template>'.repeat(n), 2_500],
+    ['foreign-content <style> in SVG', (n) => `<svg><style>${'<div>'.repeat(n)}`, 7_500],
+    ['foreign-content <style> in MathML', (n) => `<math><style>${'<div>'.repeat(n)}`, 7_500],
+  ];
+
+  it.each(solCases)('fails closed and stays linear on %s', (_label, build, base) => {
+    const out = body(build(base * 4));
+
+    expect(out).toContain('&lt;div');
+    expect(out).not.toContain('<div');
+    expectLinear(build, body, base);
   });
 
   it('stays linear on wide sibling-heavy input', () => {
     expectLinear((n) => '<p>x</p>'.repeat(n), body, 5_000);
+  });
+
+  // Sol's 0.14.2 review: at 10,000 repetitions these shapes reached parse5 and took about 4.6 s.
+  // In HTML a slash on a non-void element does not close it, and an end tag with no matching open
+  // element is ignored, so the pre-scan has to count both instead of assuming they cancel out.
+  it('fails closed and stays linear on repeated self-closing non-void elements', () => {
+    const out = body('<div/>'.repeat(10_000));
+    expect(out).toContain('&lt;div/&gt;');
+    expect(out).not.toContain('<div');
+    // The cap now aborts early, so the remaining work is escaping the input in linear time. A
+    // larger base keeps the ratio out of sub-millisecond noise.
+    expectLinear((n) => '<div/>'.repeat(n), body, 10_000);
+  });
+
+  it('fails closed and stays linear when end tags match nothing open', () => {
+    const out = body('<div></span>'.repeat(10_000));
+    expect(out).toContain('&lt;div&gt;');
+    expect(out).not.toContain('<div');
+    expectLinear((n) => '<div></span>'.repeat(n), body, 10_000);
+  });
+
+  it('fails closed and stays linear on repeated self-closing paragraphs', () => {
+    const out = body('<p/>'.repeat(10_000));
+    expect(out).toContain('&lt;p/&gt;');
+    expect(out).not.toContain('<p');
+    expectLinear((n) => '<p/>'.repeat(n), body, 10_000);
+  });
+
+  it('keeps a true match to an open element on the fast path', () => {
+    const html = `${'<div>'.repeat(200)}x${'</div>'.repeat(200)}`;
+    expect(body(html)).toBe(html);
+  });
+
+  it('keeps benign self-closing non-void nesting under the cap byte-identical', () => {
+    const html = '<div/>'.repeat(100);
+    expect(body(html)).toBe(html);
+  });
+
+  it('does not count raw-text content as tags', () => {
+    const html = `<style>${'<div>'.repeat(1_000)}</style><p>ok</p>`;
+    expect(sanitiseEmailBody(html)).toBe(html);
+    expectLinear((n) => `<style>${'<div>'.repeat(n)}</style>`, sanitiseEmailBody, 2_500);
+  });
+
+  // Sol's re-check: parse5 calls setTemplateContent before attaching the template, so the content
+  // fragment used to start at depth 1. At 4,000 templates the over-depth markup passed unchanged;
+  // at 16,000 it overflowed the stack.
+  it.each([4_000, 16_000])('fails closed without throwing on %i nested templates', (count) => {
+    const html = `<select><style>${'<template>'.repeat(count)}</style>`;
+    let out = '';
+    expect(() => {
+      out = sanitiseEmailBody(html);
+    }).not.toThrow();
+
+    expect(out).toContain('&lt;template&gt;');
+    expect(out).not.toContain('<template>');
+  });
+
+  it('fails closed on a tag with more attributes than the bound', () => {
+    const attrs = Array.from({ length: 600 }, (_, i) => `a${i}="x"`).join(' ');
+    const out = sanitiseEmailBody(`<div ${attrs}>`);
+
+    expect(out).toContain('&lt;div');
+    expect(out).not.toContain('<div ');
+  });
+});
+
+describe('archive sanitising: emailParts cache (Sol re-check)', () => {
+  it('evicts the least recently used entry when the byte budget is exceeded', () => {
+    const cache = new EmailPartsCache(10, 20);
+    cache.set('a', { body: '12345', styles: '' });
+    cache.set('b', { body: '12345', styles: '' });
+    // Make "a" the most recently used, then overflow the byte budget with "c" and "d".
+    expect(cache.get('a')).toBeDefined();
+    cache.set('c', { body: '12345', styles: '' });
+    cache.set('d', { body: '12345', styles: '' });
+
+    expect(cache.size).toBe(3);
+    expect(cache.get('b')).toBeUndefined();
+    expect(cache.get('a')).toBeDefined();
+  });
+
+  // The archive parses stored HTML on every public request. This is Sol's worst foster-parenting
+  // and duplicate-attribute input at (near) the size cap: one cold parse under the 5 s budget,
+  // then one hash and lookup. MAX_EMAIL_LENGTH is the hard input bound; the first run is also
+  // bounded by the depth and attribute caps above, and later runs never reach parse5.
+  it('serves the size-cap hostile inputs once cold and then from cache', () => {
+    clearEmailPartsCache();
+    const foster = `<table>${'<input>'.repeat(128_000)}</table>`;
+    const attributes = `<div ${Array.from({ length: 90_000 }, (_, i) => `a${i}="x"`).join(' ')}>`;
+    for (const [label, html] of [
+      ['foster parenting', foster],
+      ['duplicate attributes', attributes],
+    ] as const) {
+      expect(html.length, label).toBeLessThanOrEqual(MAX_EMAIL_LENGTH);
+
+      const coldStarted = performance.now();
+      const cold = emailParts(html);
+      const coldMs = performance.now() - coldStarted;
+
+      const warmStarted = performance.now();
+      const warm = emailParts(html);
+      const warmMs = performance.now() - warmStarted;
+
+      expect(warm, label).toEqual(cold);
+      expect(coldMs, `${label} cold: ${coldMs.toFixed(0)} ms`).toBeLessThan(5_000);
+      expect(warmMs, `${label} warm: ${warmMs.toFixed(1)} ms`).toBeLessThan(50);
+    }
   });
 });
 
@@ -659,5 +814,56 @@ describe('archive sanitising: the real rendered page (Sol re-check 4)', () => {
     const page = renderWebVersion(brand, 'Issue', null, '<html><body><p>Hello <a href="https://example.com">there</a></p></body></html>');
     expect(activeInPage(page)).toEqual([]);
     expect(page).toContain('<p>Hello <a href="https://example.com">there</a></p>');
+  });
+});
+
+describe('archive sanitising: foster parenting is bounded (CI 6.3 s cold)', () => {
+  it('fails closed quickly on a table that fosters thousands of nodes', () => {
+    const html = `<table>${'<input>'.repeat(128_000)}</table>`;
+    const started = performance.now();
+    const out = sanitiseEmailBody(html);
+    const ms = performance.now() - started;
+    expect(out.startsWith('&lt;table&gt;')).toBe(true);
+    expect(ms, `foster cold: ${ms.toFixed(0)} ms`).toBeLessThan(1_000);
+  });
+
+  it('keeps a realistic table with a few stray fostered nodes byte-identical', () => {
+    const html = '<table><tr><td>a</td></tr><p>stray</p><b>bold</b></table><p>after</p>';
+    expect(sanitiseEmailBody(html)).toBe(html);
+  });
+
+  it('resets the foster budget for each parse', () => {
+    const one = `<table>${'<input>'.repeat(400)}</table>`; // under the 512 budget, twice
+    expect(sanitiseEmailBody(one)).toBe(one);
+    expect(sanitiseEmailBody(one)).toBe(one);
+  });
+});
+
+describe('archive sanitising: every tree-construction path is bounded (HY4 re-check)', () => {
+  const timed = (html: string) => {
+    const started = performance.now();
+    const out = sanitiseEmailBody(html);
+    return { out, ms: performance.now() - started };
+  };
+
+  it('fails closed quickly when <html>/<body> tags keep merging new attributes', () => {
+    let html = '';
+    for (let i = 0; i < 10_000; i += 1) html += `<html a${i}></html>`;
+    const { out, ms } = timed(html);
+    expect(out.startsWith('&lt;html')).toBe(true);
+    expect(ms, `adoptAttributes: ${ms.toFixed(0)} ms`).toBeLessThan(1_500);
+  });
+
+  it('fails closed quickly when the adoption agency re-parents a huge block', () => {
+    const { out, ms } = timed(`<b><div>${'<br>'.repeat(200_000)}</b>`);
+    expect(out.startsWith('&lt;b&gt;')).toBe(true);
+    expect(ms, `adoption agency: ${ms.toFixed(0)} ms`).toBeLessThan(1_500);
+  });
+
+  it('still keeps ordinary misnesting and a body attribute byte-identical', () => {
+    const html = '<p><b>bold <i>both</b> italic</i></p><body class="x"><p>after</p>';
+    const once = sanitiseEmailBody(html);
+    expect(sanitiseEmailBody(html)).toBe(once);
+    expect(once.includes('&lt;')).toBe(false);
   });
 });

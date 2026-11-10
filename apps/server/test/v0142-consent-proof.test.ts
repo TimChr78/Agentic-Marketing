@@ -70,12 +70,23 @@ beforeAll(async () => {
       note: NOTE,
     },
   });
+  // An allowlisted key name is not enough: the value itself can carry contact data.
+  await api.call('consent.record', {
+    profileId,
+    purpose: 'marketing_sms',
+    status: 'granted',
+    channel: 'sms',
+    source: 'import',
+    proof: { messageId: 'msg_import_label', import_label: 'ada@example.com' },
+  });
 }, 60_000);
 
 afterAll(() => t?.close());
 
 const recordOf = (records: { proof: Record<string, unknown>; proofWithheld: boolean }[]) =>
   records.find((r) => r.proof.messageId === 'msg_594')!;
+const importLabelRecordOf = (records: { proof: Record<string, unknown>; proofWithheld: boolean }[]) =>
+  records.find((r) => r.proof.messageId === 'msg_import_label')!;
 
 describe('consent.history proof without profiles:pii (#594)', () => {
   for (const [role, user] of [
@@ -102,6 +113,11 @@ describe('consent.history proof without profiles:pii (#594)', () => {
       expect(json).not.toContain(USER_AGENT);
       expect(json).not.toContain(PAGE);
       expect(json).not.toContain(NOTE);
+      // An allowlisted key can still hold personal data in its value.
+      const imported = importLabelRecordOf(history.records);
+      expect(imported.proofWithheld).toBe(true);
+      expect(imported.proof).not.toHaveProperty('import_label');
+      expect(JSON.stringify(history)).not.toContain('ada@example.com');
     });
   }
 
@@ -114,6 +130,9 @@ describe('consent.history proof without profiles:pii (#594)', () => {
       const record = recordOf(history.records);
       expect(record.proofWithheld).toBe(false);
       expect(record.proof).toMatchObject({ ip: IP, userAgent: USER_AGENT, page: PAGE, note: NOTE, messageId: 'msg_594' });
+      const imported = importLabelRecordOf(history.records);
+      expect(imported.proofWithheld).toBe(false);
+      expect(imported.proof).toMatchObject({ import_label: 'ada@example.com' });
     });
   }
 

@@ -12,7 +12,7 @@ const template = (body: string): SmsTemplate => ({ purpose: 'marketing_sms', bod
 
 describe('marketing SMS opt-out footer (#635)', () => {
   it('keeps the footer when the body merely contains the word stop', async () => {
-    for (const body of ["Don't stop reading", 'Visit Stop & Shop today']) {
+    for (const body of ["Don't stop reading", 'Visit Stop & Shop today', 'Stop by before the deals end!']) {
       expect((await renderSms(template(body), {}, true)).body).toBe(`${body}${STOP_FOOTER}`);
     }
   });
@@ -26,6 +26,17 @@ describe('marketing SMS opt-out footer (#635)', () => {
       const rendered = (await renderSms(template(body), {}, true)).body;
       expect(rendered).toBe(body);
       expect(rendered.match(/\bstop\b/gi) ?? []).toHaveLength(1);
+    }
+  });
+
+  it('does not add a second footer when standard boilerplate follows the instruction', async () => {
+    for (const body of [
+      'Big sale this week. Reply STOP to opt out. Msg & data rates may apply.',
+      'Big sale this week. Reply STOP to opt out. Msg&data rates may apply',
+      'Big sale this week. Text STOP to unsubscribe Msg freq varies',
+    ]) {
+      const rendered = (await renderSms(template(body), {}, true)).body;
+      expect(rendered).toBe(body);
     }
   });
 
@@ -57,7 +68,27 @@ describe('inbound reply normalisation (#636)', () => {
     expect(classifySmsReply('start.')).toMatchObject({ intent: 'start' });
   });
 
-  it('does not treat a conversational sentence as a stop', () => {
-    expect(classifySmsReply("Don't stop the music, it's great")).toBeNull();
+  it('treats any opt-out keyword anywhere in a long reply as a stop', () => {
+    // Accepted behaviour: a false opt-out is recoverable, a missed one is not. The same rule now
+    // covers every keyword, so "I want to cancel my order" opts out of marketing SMS too.
+    for (const body of [
+      "Don't stop the music, it's great",
+      'Please stop sending me these messages right now',
+      'Stop by our store this weekend',
+      'I want to cancel my order please thanks',
+      'Please cancel these marketing messages right now',
+      'Kan ni avsluta dessa utskick till mig tack',
+    ]) {
+      expect(classifySmsReply(body), body).toMatchObject({ intent: 'stop' });
+    }
+  });
+
+  it.each(['STOP,please', 'Please STOP/UNSUBSCRIBE', 'Please stop—sending these messages'])(
+    'tokenises punctuation around a keyword in %j',
+    (body) => expect(classifySmsReply(body)).toMatchObject({ intent: 'stop' }),
+  );
+
+  it('leaves an ordinary reply alone', () => {
+    expect(classifySmsReply('Hello there')).toBeNull();
   });
 });
