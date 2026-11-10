@@ -1,6 +1,8 @@
+import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { releaseNotesErrors, topReleaseVersion } from '../../../scripts/release/check-notes.mjs';
 import {
@@ -8,7 +10,9 @@ import {
   parseCloses,
   parseIssuesComment,
   previousTagFrom,
+  prLimitWarning,
   readChangelogAtTag,
+  resolvePreviousTag,
   selectReleasePullRequests,
 } from '../../../scripts/release/close-issues.mjs';
 import { missingPlatforms, platforms } from '../../../scripts/release/manifest-platforms.mjs';
@@ -17,6 +21,7 @@ import {
   checkRelease,
   envKeys,
   findPreviousVersion,
+  migrationsSince,
   missingEnvHistory,
   renderUpgradeBlock,
   updateEnvHistory,
@@ -275,5 +280,100 @@ describe('previousTagFrom (#521 re-check)', () => {
   });
   it('refuses when the release tag is not present locally', () => {
     expect(() => previousTagFrom(tags, '0.13.0')).toThrow(/not in the local repository/);
+  });
+});
+
+describe('the predecessor tag close-issues uses (#603)', () => {
+  const tags = ['v0.13.0', 'v0.14.0', 'v0.14.1'];
+  const changelog = '## [0.14.1] - 2026-11-09\n\n### Fixed\n\n- New.\n\n## [0.14.0] - 2026-11-01\n\n### Added\n\n- Old.\n';
+
+  it('accepts an explicit previous version', () => {
+    expect(resolvePreviousTag({ tags, version: '0.14.1', changelog, explicit: '0.14.0' })).toBe('v0.14.0');
+    expect(resolvePreviousTag({ tags, version: '0.14.1', changelog, explicit: 'v0.14.0' })).toBe('v0.14.0');
+  });
+
+  it('takes the previous version from the CHANGELOG when none is given', () => {
+    expect(resolvePreviousTag({ tags, version: '0.14.1', changelog })).toBe('v0.14.0');
+  });
+
+  it('fails instead of widening the range when the CHANGELOG predecessor tag is missing', () => {
+    expect(() => resolvePreviousTag({ tags: ['v0.14.1'], version: '0.14.1', changelog })).toThrow(
+      /v0\.14\.0 .*not in the local repository/,
+    );
+  });
+
+  it('fails when an explicit previous tag is missing', () => {
+    expect(() => resolvePreviousTag({ tags, version: '0.14.1', changelog, explicit: '0.13.1' })).toThrow(
+      /v0\.13\.1 .*not in the local repository/,
+    );
+  });
+
+  it('still fails when the release tag itself is missing', () => {
+    expect(() => resolvePreviousTag({ tags: ['v0.13.0'], version: '0.14.1', changelog })).toThrow(
+      /v0\.14\.1 .*not in the local repository/,
+    );
+  });
+
+  it('warns when the merged pull request list hits its page limit', () => {
+    expect(prLimitWarning(499)).toBeNull();
+    expect(prLimitWarning(500)).toMatch(/500/);
+    expect(prLimitWarning(500)).toMatch(/truncat|complete|more/i);
+  });
+});
+
+describe('migrationsSince (#604)', () => {
+  it('lists only migrations added in the range, not modified or deleted ones', () => {
+    const root = temp();
+    const git = (...args: string[]) => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
+    git('init', '-q', '-b', 'main');
+    git('config', 'user.email', 'release@example.com');
+    git('config', 'user.name', 'Release Test');
+    git('config', 'commit.gpgsign', 'false');
+
+    put(root, 'packages/db/migrations/0001_first.sql', 'select 1;\n');
+    put(root, 'packages/db/migrations/0002_keep.sql', 'select 2;\n');
+    git('add', '-A');
+    git('commit', '-q', '-m', 'base');
+    git('tag', 'v0.12.0');
+
+    // Amend one migration and delete another: neither is new in this release.
+    put(root, 'packages/db/migrations/0001_first.sql', 'select 10;\n');
+    rmSync(join(root, 'packages/db/migrations/0002_keep.sql'));
+    git('add', '-A');
+    git('commit', '-q', '-m', 'edit');
+
+    expect(migrationsSince(root, '0.12.0')).toEqual([]);
+
+    put(root, 'packages/db/migrations/0003_new.sql', 'select 3;\n');
+    git('add', '-A');
+    git('commit', '-q', '-m', 'add');
+
+    expect(migrationsSince(root, '0.12.0')).toEqual(['packages/db/migrations/0003_new.sql']);
+  });
+});
+
+describe('the release workflow concurrency (#648)', () => {
+  const root = fileURLToPath(new URL('../../../', import.meta.url));
+  const workflow = readFileSync(join(root, '.github/workflows/release.yml'), 'utf8');
+  const job = (name: string) => {
+    const start = workflow.indexOf(`\n  ${name}:\n`);
+    expect(start, `${name} job`).toBeGreaterThanOrEqual(0);
+    const rest = workflow.slice(start + 1);
+    const body = rest.slice(rest.indexOf('\n') + 1);
+    const next = body.search(/^ {2}[a-z][\w-]*:$/m);
+    return next < 0 ? body : body.slice(0, next);
+  };
+
+  it('keys one job-level group on the normalised version instead of the raw trigger input', () => {
+    expect(job('release')).toMatch(/concurrency:\n\s+group: release-v\$\{\{ needs\.prepare\.outputs\.version \}\}/);
+    expect(workflow).not.toMatch(/group: release-\$\{\{ inputs\.version \|\| github\.ref_name \}\}/);
+    expect(workflow).not.toMatch(/^concurrency:/m);
+  });
+
+  it('normalises a leading v for both a tag push and a manual run in one place', () => {
+    const prepare = job('prepare');
+    expect(prepare).toMatch(/\$\{INPUT_VERSION#v\}/);
+    expect(prepare).toMatch(/\$\{GITHUB_REF_NAME#v\}/);
+    expect(prepare).toMatch(/outputs:\n\s+version: \$\{\{ steps\.version\.outputs\.version \}\}/);
   });
 });

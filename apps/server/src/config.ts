@@ -2,6 +2,12 @@ import { fileURLToPath } from 'node:url';
 import { isIpOrCidr } from '@agentic-marketing/core';
 import { z } from 'zod';
 
+// The runtime roles a process can take. `ROLE` is a comma-separated list of these; any other value
+// (for example the retired `decide` role, whose API `ingest` serves) is a start-up error, because a
+// process that matches no role branch would start and then serve nothing.
+const Role = z.enum(['api', 'ingest', 'worker', 'scheduler']);
+const ROLES_HELP = `Comma-separated roles: ${Role.options.join(', ')}, or all`;
+
 // All configuration comes from the environment and is validated at start-up, so a missing or
 // malformed setting fails fast with a clear message instead of at the first request.
 const Env = z.object({
@@ -35,7 +41,21 @@ const Env = z.object({
     .enum(['dotted', 'underscore'])
     .default('dotted')
     .describe('MCP tool names: command names such as artifacts.list, or underscore names such as artifacts_list'),
-  ROLE: z.string().default('all').describe('Comma-separated roles: api, ingest, worker, scheduler, or all'),
+  ROLE: z
+    .string()
+    .default('all')
+    .describe(ROLES_HELP)
+    .superRefine((value, ctx) => {
+      if (value.trim() === 'all') return;
+      for (const entry of value.split(',').map((part) => part.trim())) {
+        if (!Role.safeParse(entry).success) {
+          ctx.addIssue({
+            code: 'custom',
+            message: `ROLE has unknown role "${entry}"; use ${Role.options.join(', ')}, or all`,
+          });
+        }
+      }
+    }),
   PORT: z.coerce.number().int().default(3000),
   PUBLIC_PORT: z.coerce
     .number()
@@ -237,6 +257,25 @@ export class ConfigError extends Error {
   override name = 'ConfigError';
 }
 
+/**
+ * Parse DATABASE_URL and turn a malformed one into a ConfigError with the likely cause. Docker
+ * Compose interpolates POSTGRES_PASSWORD into DATABASE_URL raw and cannot percent-encode it, so a
+ * base64 password containing `/` makes the URL unparseable; a raw TypeError from `new URL()` would
+ * escape the ConfigError path in main.ts and print a stack instead of the fix (#647).
+ */
+function databaseUrl(raw: string): URL {
+  try {
+    return new URL(raw);
+  } catch {
+    throw new ConfigError(
+      'Configuration is incomplete: DATABASE_URL is not a valid URL. A password with a reserved character ' +
+        '(`/`, `?` or `#`) must be percent-encoded in the URL (`/` as `%2F`) — Docker Compose cannot encode ' +
+        'the POSTGRES_PASSWORD it interpolates — or the password must be hex, which needs no encoding: ' +
+        'generate it with `openssl rand -hex 32` instead of `openssl rand -base64 32`.',
+    );
+  }
+}
+
 /** Turn a zod issue into one short phrase, using the names the operator sees in .env. */
 function issueText(issue: z.core.$ZodIssue): string {
   const key = issue.path.map(String).join('.') || 'configuration';
@@ -275,7 +314,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
         ? [...missing(['OPENBAO_ADDR']), ...(e.OPENBAO_TOKEN || e.OPENBAO_TOKEN_FILE ? [] : ['OPENBAO_TOKEN or OPENBAO_TOKEN_FILE'])]
         : missing(['AWS_KMS_KEY_ID', 'AWS_REGION', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY']);
   if (needed.length) throw new ConfigError(`Configuration is incomplete: KEY_PROVIDER=${e.KEY_PROVIDER} needs ${needed.join(', ')}`);
-  const appUrl = new URL(e.DATABASE_URL);
+  const appUrl = databaseUrl(e.DATABASE_URL);
   appUrl.username = e.APP_DB_ROLE;
   appUrl.password = e.APP_DB_PASSWORD;
   const clientIpHeaders = [
@@ -285,8 +324,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
         .filter(Boolean),
     ),
   ];
+  // The schema above rejects any role outside the enum, so this only turns the string into a set.
+  const roles = e.ROLE.trim() === 'all' ? [...Role.options] : e.ROLE.split(',').map((role) => Role.parse(role.trim()));
   return {
-    roles: new Set(e.ROLE === 'all' ? ['api', 'ingest', 'worker', 'scheduler'] : e.ROLE.split(',').map((r) => r.trim())),
+    roles: new Set(roles),
     port: e.PORT,
     publicPort: e.PUBLIC_PORT,
     // Resolved from this file, never from the working directory: `pnpm start` and the image both

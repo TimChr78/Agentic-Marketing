@@ -40,6 +40,8 @@ This ordering is what makes `helm install --wait` safe: Helm waits for the migra
 
 If the platform is reached through a tunnel or proxy that should see only the public paths, set `PUBLIC_PORT` (e.g. `3001`) on the `api` and `ingest` roles: the server adds a listener that serves only `/f`, `/u`, `/c`, `/a`, `/n`, `/hooks`, `/healthz` and `/readyz`. The chart does not publish a second Service port, so expose it through your own Service/Ingress or keep the path split above. Both listeners reject raw dot-segment and encoded-separator paths with 400, so a loose proxy rule cannot reach the admin API.
 
+The `api` and `ingest` roles get a `containerPort` and HTTP probes — `/healthz` for liveness and `/readyz` for readiness — on the chart's `port` (3000 by default); the ConfigMap's `PORT`, the Services' target port and the migration hook use the same value. The `worker` and `scheduler` roles open no HTTP listener and write no heartbeat file, so they get no probe: a liveness check there could only prove the process exists, and restarting a healthy background loop would interrupt its work. A crashed container is restarted by Kubernetes, and `helm upgrade --wait` waits for the serving roles to become Ready and for the other two to exist.
+
 Postgres, ClickHouse, NATS JetStream and Valkey are not in the chart. Use managed services or the operators you already run (CloudNativePG, the Altinity ClickHouse operator, the NATS Helm chart with JetStream, Valkey or Redis).
 
 ## Install

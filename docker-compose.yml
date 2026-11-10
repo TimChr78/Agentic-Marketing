@@ -103,6 +103,8 @@ services:
       STEP_UP_WINDOW_SECONDS: ${STEP_UP_WINDOW_SECONDS:-}
       STEP_UP_LOCKOUT_SECONDS: ${STEP_UP_LOCKOUT_SECONDS:-}
       TRUSTED_ORIGINS: ${TRUSTED_ORIGINS:-}
+      # POSTGRES_PASSWORD is interpolated raw: Compose has no percent-encoding. Use a hex password
+      # (`openssl rand -hex 32`, as `am init` does); base64 can contain `/`, which breaks the URL.
       DATABASE_URL: postgres://am:${POSTGRES_PASSWORD}@postgres:5432/am
       APP_DB_ROLE: ${APP_DB_ROLE:-}
       APP_DB_PASSWORD: ${APP_DB_PASSWORD:?set APP_DB_PASSWORD in .env}

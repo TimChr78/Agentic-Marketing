@@ -40,6 +40,37 @@ describe('test stack script portability', () => {
   });
 });
 
+describe('test stack exposure (#605)', () => {
+  it('publishes every service on loopback by default, never on a wildcard', async () => {
+    const compose = await read('docker-compose.test.yml');
+    const published = compose.split('\n').filter((line) => /\$\{AM_TEST_BIND_IP:/.test(line));
+    expect(published.length).toBeGreaterThanOrEqual(5);
+    for (const line of published) expect(line).toContain('${AM_TEST_BIND_IP:-127.0.0.1}');
+    expect(compose).not.toMatch(/\$\{AM_TEST_BIND_IP:-0\.0\.0\.0\}/);
+    expect(compose).not.toMatch(/\$\{AM_TEST_BIND_IP:-::\}/);
+  });
+
+  it('binds the Docker bridge address when it runs inside a container', () => {
+    // The host's loopback is unreachable from another container; the bridge's host address is not.
+    expect(services).toMatch(/in_container\(\) \{[\s\S]{0,120}\/\.dockerenv/);
+    expect(services).toMatch(/bind_ip\(\) \{[\s\S]{0,400}172\.17\.0\.1/);
+    expect(services).toMatch(/AM_TEST_BIND_IP=\$\(bind_ip\)/);
+  });
+
+  it('prints the real bind address and warns loudly about a wildcard bind', () => {
+    expect(services).toMatch(/announce_bind/);
+    expect(services).toMatch(/published on %s/);
+    expect(services).toMatch(/0\.0\.0\.0 \| :: \| '\[::\]'/);
+    expect(services).toMatch(/warning: every interface can reach the test stack|warning: that is a wildcard bind/);
+  });
+
+  it('documents the loopback default and the bridge override', () => {
+    expect(docs).toMatch(/bound to\n`127\.0\.0\.1`/);
+    expect(docs).toMatch(/AM_TEST_BIND_IP=172\.17\.0\.1/);
+    expect(docs).not.toMatch(/bound to\n`0\.0\.0\.0`/);
+  });
+});
+
 describe('preflight port probing', () => {
   it('probes the host namespace first with ss or /proc/net/tcp', () => {
     expect(preflight).toMatch(/\bss\b/);

@@ -335,9 +335,11 @@ This is **(a)** derived UI state, not persisted checklist completion:
 | Audience present / first send | B3 total if needed; otherwise `profiles.list({limit:1}).profiles.length>0` proves existence. `analytics.query` dimensionless `email.sent` over an explicit period proves observed sends in that period. | One profiles read (permission-gated) + one ClickHouse read. Zero within a limited period is not “never sent.” Do not require first send as a permanent checked milestone without an all-history contract. |
 | Agent connected (optional) | `agents.list.agents[].status,credentials`. | One read, only for an agent-specific onboarding branch; not a required new-brand capability. |
 
-The existing [Setup screen](../../apps/web/src/screens/Setup.tsx) is a legacy/mock screen with
-hard-coded channel state, endpoint and provider text, not an onboarding aggregate. Derive new
-checks from the commands above. No (b) checklist service is required. **(c)** Dismissal history,
+The existing [onboarding checklist](../../apps/web/src/features/home/OnboardingChecklist.tsx) renders
+four read-only checks on Home (brand published, marketing e-mail configured, link domain verified,
+audience present) from live configuration; it keeps no persisted completion, and it has no
+first-send or agent branch. Derive new checks from the commands above. No (b) checklist service is
+required. **(c)** Dismissal history,
 “completed by,” permanently remembered first-use milestones and new tracking events are deferred.
 
 ## Candidate read-only additions (b): precise contracts

@@ -63,7 +63,7 @@ spec:
           env:
             {{- if not (hasKey .Values.config "PORT") }}
             - name: PORT
-              value: "3000"
+              value: {{ .Values.port | quote }}
             {{- end }}
             {{- range $k, $v := .Values.config }}
             {{- if ne (toString $v) "" }}

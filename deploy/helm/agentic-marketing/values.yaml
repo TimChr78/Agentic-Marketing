@@ -10,6 +10,11 @@ image:
   pullPolicy: IfNotPresent
 imagePullSecrets: []
 
+# The port the api and ingest roles listen on. The ConfigMap, the container port, the Service
+# target and the probes all use this one value, so changing it moves them together. Set this
+# rather than `config.PORT`, which only changes the environment and leaves the Service behind.
+port: 3000
+
 # One image, four roles (ADR-0002). Each role is its own Deployment so it scales on its own.
 roles:
   api:          # UI, REST, MCP, copilot, e-mail links and webhooks

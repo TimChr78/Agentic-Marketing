@@ -18,6 +18,8 @@ docker compose exec app am doctor
 
 `am init` writes `.env` with generated values for `POSTGRES_PASSWORD`, `APP_DB_PASSWORD`, `AUTH_SECRET` and `MASTER_KEY`, and asks for the two public URLs. It never prints a secret. See [operations](operations.md) for its options.
 
+By hand, generate the two passwords as **hex** (`openssl rand -hex 32`) and the two keys as base64 (`openssl rand -base64 32`). Compose substitutes `POSTGRES_PASSWORD` into `DATABASE_URL` verbatim and cannot percent-encode it, so a base64 password that contains `/` makes the URL invalid: the app then stops with `Configuration is incomplete: DATABASE_URL is not a valid URL` instead of a stack trace. If a password must stay as it is, percent-encode the reserved character in `DATABASE_URL` yourself (`/` as `%2F`) and set that `DATABASE_URL` for the `app` service in `compose.override.yaml`.
+
 `AM_VERSION` pins the released image `ghcr.io/timchr78/agentic-marketing`; `AM_PORT` is the published admin port (the app still listens on 3000 inside the container). The admin UI and REST API are then on `http://localhost:3000`; MCP needs an HTTPS `PUBLIC_URL`.
 
 ## Environment variables
