@@ -5,7 +5,7 @@ import { renderTemplate } from '@agentic-marketing/email';
 import { type DefaultTreeAdapterTypes, parse, parseFragment } from 'parse5';
 import { describe, expect, it } from 'vitest';
 import { expectLinear } from '../../../test-support/linear';
-import { activeUrl, emailParts, renderWebVersion, sanitiseEmailBody, scanEmailBody } from '../src/archive';
+import { activeUrl, emailParts, MAX_EMAIL_NESTING, renderWebVersion, sanitiseEmailBody, scanEmailBody } from '../src/archive';
 
 // CodeQL alerts 4, 3, 2 and 1 (js/bad-tag-filter, js/incomplete-multi-character-sanitization):
 // the public archive renders e-mail HTML behind a strict CSP, and `emailParts` is the defence in
@@ -529,12 +529,68 @@ describe('archive sanitising: nesting is bounded before the parse5 judge (#578)'
     expect(out).not.toContain('<p>');
   });
 
-  it('stays linear on benign nesting just under the cap', () => {
-    expectLinear((n) => `${'<div>'.repeat(n)}x${'</div>'.repeat(n)}`, body, 128);
+  // parse5 checks the stack of open elements for every tag, so nested input is O(depth²). The cap
+  // is what bounds that cost; depth is not linear. Assert the bound, not a ratio that is mostly
+  // noise at these sizes: at the cap and one level under it, the fast path stays byte-identical
+  // and a genuinely slow CI runner still has a wide margin.
+  it('finishes benign nesting at the cap within a generous budget', () => {
+    for (const depth of [MAX_EMAIL_NESTING - 1, MAX_EMAIL_NESTING]) {
+      const html = `${'<div>'.repeat(depth)}x${'</div>'.repeat(depth)}`;
+      const started = performance.now();
+      const out = body(html);
+      const elapsed = performance.now() - started;
+
+      expect(out, `depth ${depth}`).toBe(html);
+      expect(elapsed, `depth ${depth}: ${elapsed.toFixed(1)} ms`).toBeLessThan(1_000);
+    }
+  });
+
+  it('stays linear in width at a realistic depth', () => {
+    expectLinear((n) => `${'<div>'.repeat(40)}x${'</div>'.repeat(40)}`.repeat(n), body, 200);
   });
 
   it('stays linear on wide sibling-heavy input', () => {
     expectLinear((n) => '<p>x</p>'.repeat(n), body, 5_000);
+  });
+
+  // Sol's 0.14.2 review: at 10,000 repetitions these shapes reached parse5 and took about 4.6 s.
+  // In HTML a slash on a non-void element does not close it, and an end tag with no matching open
+  // element is ignored, so the pre-scan has to count both instead of assuming they cancel out.
+  it('fails closed and stays linear on repeated self-closing non-void elements', () => {
+    const out = body('<div/>'.repeat(10_000));
+    expect(out).toContain('&lt;div/&gt;');
+    expect(out).not.toContain('<div');
+    expectLinear((n) => '<div/>'.repeat(n), body, 2_500);
+  });
+
+  it('fails closed and stays linear when end tags match nothing open', () => {
+    const out = body('<div></span>'.repeat(10_000));
+    expect(out).toContain('&lt;div&gt;');
+    expect(out).not.toContain('<div');
+    expectLinear((n) => '<div></span>'.repeat(n), body, 2_500);
+  });
+
+  it('fails closed and stays linear on repeated self-closing paragraphs', () => {
+    const out = body('<p/>'.repeat(10_000));
+    expect(out).toContain('&lt;p/&gt;');
+    expect(out).not.toContain('<p');
+    expectLinear((n) => '<p/>'.repeat(n), body, 2_500);
+  });
+
+  it('keeps a true match to an open element on the fast path', () => {
+    const html = `${'<div>'.repeat(200)}x${'</div>'.repeat(200)}`;
+    expect(body(html)).toBe(html);
+  });
+
+  it('keeps benign self-closing non-void nesting under the cap byte-identical', () => {
+    const html = '<div/>'.repeat(100);
+    expect(body(html)).toBe(html);
+  });
+
+  it('does not count raw-text content as tags', () => {
+    const html = `<style>${'<div>'.repeat(1_000)}</style><p>ok</p>`;
+    expect(sanitiseEmailBody(html)).toBe(html);
+    expectLinear((n) => `<style>${'<div>'.repeat(n)}</style>`, sanitiseEmailBody, 2_500);
   });
 });
 

@@ -4,9 +4,11 @@
 // Rule:
 // - Normalise: NFKC (fullwidth and other compatibility forms), lower-case, drop emoji, collapse
 //   whitespace, then strip punctuation around the message and around each word.
-// - STOP when the whole normalised message is a stop keyword, or when it is short (at most five
-//   words) and contains a stop keyword as a standalone word. "Please STOP" opts out; "STOP!!!"
-//   too. A long conversational sentence ("Don't stop the music, it's great") does not.
+// - STOP when the whole normalised message is a stop keyword, when its first word is one (however
+//   long the rest of the message is: "STOP sending me these messages please"), or when it is short
+//   (at most five words) and contains a stop keyword as a standalone word. "Please STOP" opts out;
+//   "STOP!!!" too. A long conversational sentence that merely contains one ("Don't stop the music,
+//   it's great") does not.
 // - START and HELP only as the whole normalised message, so "please start" is not an opt-in.
 // - Ambiguity: a short message with both a stop and a start word is a STOP. Opting out is the
 //   compliant default: a wrong opt-out is recoverable, a missed one keeps texting someone who
@@ -48,7 +50,10 @@ export function classifySmsReply(body: string): SmsReplyMatch | null {
   if (!text) return null;
   const words = text.split(' ').map(wordOf).filter(Boolean);
 
-  // STOP first, so the ambiguity rule always favours opting out.
+  // STOP first, so the ambiguity rule always favours opting out. A leading keyword is a clear
+  // instruction even when the message goes on ("STOP sending me these messages please").
+  const first = words[0];
+  if (first && stop.has(first)) return { intent: 'stop', keyword: first.toUpperCase() };
   if (words.length <= SHORT_MESSAGE_WORDS) {
     const found = words.find((word) => stop.has(word));
     if (found) return { intent: 'stop', keyword: found.toUpperCase() };

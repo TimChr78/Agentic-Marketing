@@ -707,39 +707,74 @@ export const MAX_EMAIL_NESTING = 512;
 export const MAX_EMAIL_LENGTH = 1_000_000;
 
 /**
+ * Elements whose content a browser reads as raw text, not as markup. The pre-scan must skip to the
+ * matching end tag, or a literal `<div>` inside a `<style>` would be counted as nesting.
+ */
+const RAW_TEXT_ELEMENTS = new Set([
+  'script',
+  'style',
+  'textarea',
+  'title',
+  'xmp',
+  'noscript',
+  'iframe',
+  'noembed',
+  'noframes',
+  'plaintext',
+]);
+
+/**
  * A linear pre-scan of the scanner's output. parse5's `element in scope` checks cost O(depth) per
  * start tag, so a benign document nested a few thousand deep takes seconds. Real e-mail rarely
  * nests deeper than about 40, so 512 leaves ordinary mail untouched while keeping the judge's own
  * work linear.
+ *
+ * The bound must never undercount, or 10,000 × `<div/>` (60 KB) reaches parse5 and costs seconds.
+ * In HTML a slash on a non-void element does not close it, and an end tag with no matching open
+ * element is ignored, so neither may cancel a level. Count every non-void start tag, including
+ * `/>`, and decrement only the name that is actually open (per-name counts keep this linear).
+ * Overcounting only fails closed on pathological input, which is the safe direction.
  */
 function exceedsNestingCap(markup: string, cap: number): boolean {
   let depth = 0;
+  const open = new Map<string, number>();
   let i = 0;
   while (i < markup.length) {
-    const open = markup.indexOf('<', i);
-    if (open < 0) break;
-    i = open + 1;
-    if (markup.startsWith('<!--', open)) {
-      const after = commentEnd(markup, open + 4);
+    const at = markup.indexOf('<', i);
+    if (at < 0) break;
+    i = at + 1;
+    if (markup.startsWith('<!--', at)) {
+      const after = commentEnd(markup, at + 4);
       if (after < 0) break;
       i = after;
       continue;
     }
-    if (markup[open + 1] === '!') {
-      const end = markup.indexOf('>', open + 2);
+    if (markup[at + 1] === '!') {
+      const end = markup.indexOf('>', at + 2);
       if (end < 0) break;
       i = end + 1;
       continue;
     }
-    const tag = parseTag(markup, open);
+    const tag = parseTag(markup, at);
     if (tag === null) continue;
     if ('unterminated' in tag) break;
     i = tag.end;
     if (tag.endTag) {
-      if (depth > 0) depth--;
+      const count = open.get(tag.lowerName) ?? 0;
+      if (count > 0) {
+        open.set(tag.lowerName, count - 1);
+        depth--;
+      }
       continue;
     }
-    if (tag.selfClosing || VOID_ELEMENTS.has(tag.lowerName)) continue;
+    if (VOID_ELEMENTS.has(tag.lowerName)) continue;
+    // Raw-text content is not markup to a browser. Skip the whole element; its end tag closes it,
+    // so the element itself adds no net level.
+    if (RAW_TEXT_ELEMENTS.has(tag.lowerName)) {
+      i = findEndTagEnd(markup, tag.lowerName, tag.end);
+      continue;
+    }
+    open.set(tag.lowerName, (open.get(tag.lowerName) ?? 0) + 1);
     depth++;
     if (depth > cap) return true;
   }

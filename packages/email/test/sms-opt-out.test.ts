@@ -12,7 +12,7 @@ const template = (body: string): SmsTemplate => ({ purpose: 'marketing_sms', bod
 
 describe('marketing SMS opt-out footer (#635)', () => {
   it('keeps the footer when the body merely contains the word stop', async () => {
-    for (const body of ["Don't stop reading", 'Visit Stop & Shop today']) {
+    for (const body of ["Don't stop reading", 'Visit Stop & Shop today', 'Stop by before the deals end!']) {
       expect((await renderSms(template(body), {}, true)).body).toBe(`${body}${STOP_FOOTER}`);
     }
   });
@@ -26,6 +26,17 @@ describe('marketing SMS opt-out footer (#635)', () => {
       const rendered = (await renderSms(template(body), {}, true)).body;
       expect(rendered).toBe(body);
       expect(rendered.match(/\bstop\b/gi) ?? []).toHaveLength(1);
+    }
+  });
+
+  it('does not add a second footer when standard boilerplate follows the instruction', async () => {
+    for (const body of [
+      'Big sale this week. Reply STOP to opt out. Msg & data rates may apply.',
+      'Big sale this week. Reply STOP to opt out. Msg&data rates may apply',
+      'Big sale this week. Text STOP to unsubscribe Msg freq varies',
+    ]) {
+      const rendered = (await renderSms(template(body), {}, true)).body;
+      expect(rendered).toBe(body);
     }
   });
 
@@ -60,4 +71,9 @@ describe('inbound reply normalisation (#636)', () => {
   it('does not treat a conversational sentence as a stop', () => {
     expect(classifySmsReply("Don't stop the music, it's great")).toBeNull();
   });
+
+  it.each(['STOP sending me these messages please', 'unsubscribe me from this list right now please'])(
+    'treats a long message that starts with a stop keyword (%j) as a stop',
+    (body) => expect(classifySmsReply(body)).toMatchObject({ intent: 'stop' }),
+  );
 });

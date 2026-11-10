@@ -6,7 +6,14 @@ ALTER TABLE workspace_domains ADD COLUMN pending_since timestamptz;
 
 -- A claim that is pending now has been pending since its row was created. Verified rows keep the
 -- value too; it only decides expiry while status = 'pending'.
+--
+-- workspace_domains FORCEs row-level security. A migration role that is not a superuser and has no
+-- BYPASSRLS would see no rows here, so the backfill would leave every row NULL and the SET NOT NULL
+-- below would fail on a populated database. Read and write as the table owner with FORCE off for
+-- this statement, then turn it back on before the migration commits (as 0072 and 0083 do).
+ALTER TABLE workspace_domains NO FORCE ROW LEVEL SECURITY;
 UPDATE workspace_domains SET pending_since = created_at;
+ALTER TABLE workspace_domains FORCE ROW LEVEL SECURITY;
 
 ALTER TABLE workspace_domains ALTER COLUMN pending_since SET NOT NULL;
 ALTER TABLE workspace_domains ALTER COLUMN pending_since SET DEFAULT now();

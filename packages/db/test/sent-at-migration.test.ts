@@ -159,6 +159,14 @@ describe.skipIf(!hasTestDatabase())('0.10.1 migrations on a populated install', 
            VALUES ($1, 'exp_paused_before_upgrade', 1, '{10,50}', 24, 1, 10, 'paused', $2)`,
         [d.workspace, pausedAt],
       );
+      // 0087 backfills pending_since under FORCE RLS. A populated row inserted before it runs proves
+      // the backfill sees the row as the non-BYPASSRLS owner, so SET NOT NULL cannot fail.
+      const domainCreatedAt = new Date(Date.now() - 60_000);
+      await d.db.admin.query(
+        `INSERT INTO workspace_domains (id, workspace_id, host, status, verification_token, created_by, created_at)
+           VALUES ('dom_before_0087', $1, 'before-0087.example', 'pending', 'token-before-0087', 'test', $2)`,
+        [d.workspace, domainCreatedAt],
+      );
 
       const limitedUrl = new URL(d.url.toString());
       limitedUrl.username = role;
@@ -179,6 +187,12 @@ describe.skipIf(!hasTestDatabase())('0.10.1 migrations on a populated install', 
       );
       expect(rows).toHaveLength(1);
       expect(rows[0]?.notified_at).not.toBeNull();
+
+      const domain = await d.db.admin.query<{ pending_since: Date; created_at: Date }>(
+        `SELECT pending_since, created_at FROM workspace_domains WHERE id = 'dom_before_0087'`,
+      );
+      expect(domain.rows, '0087 must not fail on a populated database').toHaveLength(1);
+      expect(domain.rows[0]?.pending_since.getTime()).toBe(domain.rows[0]?.created_at.getTime());
 
       const sentAt = await d.db.admin.query<{ present: boolean }>(
         `SELECT EXISTS (SELECT 1 FROM information_schema.columns
