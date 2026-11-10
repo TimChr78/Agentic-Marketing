@@ -350,5 +350,11 @@ export function scimApi(deps: { auth: Auth; db: Db; executor: Executor; publicUr
     }),
   );
 
+  // Unmatched /scim paths answer with a SCIM error document, never the admin SPA (#610). These are
+  // registered last so every real route above keeps precedence.
+  const notFound = () => reply({ schemas: [ERROR], status: '404', detail: 'Not found.' }, 404);
+  app.all('/scim', notFound);
+  app.all('/scim/*', notFound);
+
   return app;
 }

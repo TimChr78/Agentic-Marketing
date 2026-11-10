@@ -6,7 +6,7 @@ import { acceptItems, bodyLimit, sourceLookups } from '@agentic-marketing/ingest
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { eq } from 'drizzle-orm';
-import { Hono } from 'hono';
+import { type Context, Hono } from 'hono';
 import { connectionSecrets, connectorOf, inboundTokenHash } from './connections';
 
 // Inbound webhooks: POST /hooks/in/<connection>/<token>. The secret URL authenticates the
@@ -82,5 +82,9 @@ export function inboundApi(deps: { db: Db; bus: EventBus; kp: KeyProvider }) {
       return c.json({ success: true, accepted: accepted.length, duplicates, dropped, ...(rejected.length ? { rejected } : {}) });
     },
   );
+  // Every other /hooks path is still an API path: answer JSON, never the admin SPA (#610).
+  const notFound = (c: Context) => c.json({ error: 'not_found', message: 'Not found.' }, 404);
+  app.all('/hooks', notFound);
+  app.all('/hooks/*', notFound);
   return app;
 }

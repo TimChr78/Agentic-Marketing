@@ -29,7 +29,7 @@ import { decideApi, edgeMirror } from '@agentic-marketing/personalize';
 import { refreshPeople } from '@agentic-marketing/segments';
 import { logger } from '@agentic-marketing/telemetry';
 import { oauthProviderAuthServerMetadata, oauthProviderOpenIdConfigMetadata } from '@better-auth/oauth-provider';
-import { type Context, Hono } from 'hono';
+import { type Context, type ExecutionContext, Hono } from 'hono';
 import { mandateGuardrailBreach } from './agents/guardrails';
 import { agentOutcomes, agentOutcomesMany } from './agents/report';
 import type { Config } from './config';
@@ -186,25 +186,29 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
     onCommand: (event) => metrics.recordCommand(event),
   });
 
+  // The prefix re-dispatch below runs this same app a second time. That inner pass must not be
+  // counted again by the global recorder (#609). The mark is a WeakSet entry on the Request the
+  // server itself constructs, so no client header can forge it; the WeakMap records the stripped
+  // path so the single count is labelled with the route that actually served it.
+  const innerDispatch = new WeakSet<Request>();
+  const metricsPath = new WeakMap<Request, string>();
+
   const app = new Hono();
   // Prometheus counters and durations for every request except the scrape itself (#147). The labels
   // are the route group and status class, so the series count is fixed whatever clients request.
   app.use('*', async (c, next) => {
-    if (c.req.path === '/metrics') return next();
+    if (c.req.path === '/metrics' || innerDispatch.has(c.req.raw)) return next();
     const started = performance.now();
+    const group = () => routeGroup(metricsPath.get(c.req.raw) ?? c.req.path);
     try {
       await next();
     } catch (err) {
       // AppErrors still get their real class: the error handler turns them into a response, but
       // only after this middleware's stack has unwound.
-      metrics.recordHttp(
-        routeGroup(c.req.path),
-        err instanceof AppError ? statusClass(err.status) : '5xx',
-        (performance.now() - started) / 1000,
-      );
+      metrics.recordHttp(group(), err instanceof AppError ? statusClass(err.status) : '5xx', (performance.now() - started) / 1000);
       throw err;
     }
-    metrics.recordHttp(routeGroup(c.req.path), statusClass(c.res.status), (performance.now() - started) / 1000);
+    metrics.recordHttp(group(), statusClass(c.res.status), (performance.now() - started) / 1000);
   });
   // Baseline security headers on every response; routes with their own policy keep it (#178).
   // The reset page carries its token in the query string, so it tells browsers to send no referrer.
@@ -301,7 +305,18 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
         init.body = c.req.raw.body;
         init.duplex = 'half';
       }
-      return app.fetch(new Request(url, init));
+      // The inner pass must see the same environment as the outer one, or the socket address (and
+      // with it the per-client form limit and Turnstile remoteip) is lost (#608).
+      const inner = new Request(url, init);
+      innerDispatch.add(inner);
+      metricsPath.set(c.req.raw, stripped);
+      let executionCtx: ExecutionContext | undefined;
+      try {
+        executionCtx = c.executionCtx;
+      } catch {
+        // Hono's Node adapter does not always provide one; the inner pass may go without it too.
+      }
+      return app.fetch(inner, c.env, executionCtx);
     }
 
     if (!brandPath) return next();
