@@ -7,8 +7,8 @@ import { concurrentIndexNames, isNoTransaction, migrate } from '../src/migrate';
 import { APP_ROLE, createDisposableDb, type DisposableDb, hasTestDatabase } from './disposable';
 
 // The 0.10.1 migrations on a populated database (#453, #488, 0.10.1 review). 0.10.0's schema is
-// the head before 0082; the messages table is seeded with completed rows, then 0082–0086 run.
-// The test guards the properties that make this safe on a large install:
+// the head before 0082; the messages table is seeded with completed rows, then 0082 to the current
+// head run. The test guards the properties that make this safe on a large install:
 //   - 0082 is metadata-only and never rewrites the table;
 //   - the concurrent index files are marked no-transaction;
 //   - a send is not blocked by a ShareLock while the indexes build;
@@ -149,9 +149,9 @@ describe.skipIf(!hasTestDatabase())('0.10.1 migrations on a populated install', 
     try {
       await d.db.admin.query(`CREATE ROLE ${role} LOGIN CREATEROLE PASSWORD 'rls-password' NOSUPERUSER NOBYPASSRLS`);
       await d.db.admin.query(`GRANT CREATE ON SCHEMA public TO ${role}`);
-      // The migration role owns the tables the 0.10.1 files alter. It is deliberately not a
+      // The migration role owns the tables the migration files alter. It is deliberately not a
       // superuser and has no BYPASSRLS, so FORCE RLS applies to it.
-      for (const table of ['messages', 'experience_rollouts', 'hosted_agent_runs', 'workspaces'])
+      for (const table of ['messages', 'experience_rollouts', 'hosted_agent_runs', 'workspaces', 'workspace_domains'])
         await d.db.admin.query(`ALTER TABLE ${table} OWNER TO ${role}`);
       await d.db.admin.query(`GRANT SELECT, INSERT ON schema_migrations TO ${role}`);
       await d.db.admin.query(
