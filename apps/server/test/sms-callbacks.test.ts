@@ -121,7 +121,22 @@ describe('Twilio callbacks on brand hosts', () => {
 
 // #636: realistic replies carry punctuation, mixed case or a polite word around the keyword.
 // Twilio passes Body verbatim, so matching the first whitespace token alone never opted anyone out.
-const REPLY_VARIANTS = ['STOP.', 'STOP!', 'stop,', 'UNSUBSCRIBE.', 'Please STOP', 'stop please', '  Stop  ', 'ＳＴＯＰ', 'stop start'];
+const REPLY_VARIANTS = [
+  'STOP.',
+  'STOP!',
+  'stop,',
+  'UNSUBSCRIBE.',
+  'Please STOP',
+  'stop please',
+  '  Stop  ',
+  'ＳＴＯＰ',
+  'stop start',
+  'STOP,please',
+  'Please STOP/UNSUBSCRIBE',
+  'Please stop—sending these messages',
+  'Please cancel these marketing messages right now',
+  'Kan ni avsluta dessa utskick till mig tack',
+];
 const CONVERSATIONAL = REPLY_VARIANTS.length;
 const phoneOf = (i: number) => `+45${String(90_000_000 + i)}`;
 
@@ -184,7 +199,7 @@ describe('inbound keyword normalisation (#636)', () => {
     });
   });
 
-  it('withdraws consent for a conversational sentence with a strong stop word anywhere', async () => {
+  it('withdraws consent for a conversational sentence with an opt-out word anywhere', async () => {
     // Accepted behaviour: a false opt-out is recoverable, a missed one is not.
     const before = await suppressionCount();
     expect((await inbound(phoneOf(CONVERSATIONAL), "Don't stop the music, it's great")).status).toBe(200);

@@ -17,6 +17,9 @@ import { and, asc, eq, sql } from 'drizzle-orm';
 import { type Context, Hono } from 'hono';
 import { type DefaultTreeAdapterTypes, defaultTreeAdapter, parse, serialize, type TreeAdapter } from 'parse5';
 import { z } from 'zod';
+import { cachedEmailParts } from './emailPartsCache';
+
+export { clearEmailPartsCache, emailPartsCacheStats } from './emailPartsCache';
 
 // The public newsletter archive and the per-recipient web version (#100), served on the links
 // host next to the hosted pages. Everything here is public except /n/w/<token>, which is signed
@@ -567,6 +570,10 @@ export function scanEmailBody(body: string): string {
       break;
     }
 
+    // parse5's duplicate-attribute check walks every earlier attribute for each new one, so a tag
+    // with tens of thousands of them is quadratic. The scanner already has the count.
+    if (tag.attributes.length > MAX_EMAIL_ATTRIBUTES) throw new EmailScanError('too many attributes');
+
     if (tag.endTag) {
       if (!DANGEROUS_ELEMENTS.has(tag.lowerName)) out += body.slice(open, tag.end);
       i = tag.end;
@@ -597,6 +604,9 @@ export function scanEmailBody(body: string): string {
 /** Bounds the parse5 judge's input (#578). Real e-mail nests to about 40. */
 export const MAX_EMAIL_NESTING = 256;
 export const MAX_EMAIL_LENGTH = 1_000_000;
+// The duplicate-attribute check inside parse5 is quadratic in the attribute count. Real e-mail
+// tags have a handful; past this bound the scanner fails closed before parse5 sees the tag.
+export const MAX_EMAIL_ATTRIBUTES = 512;
 
 // The judge wraps the fragment in <html> and <body>; those two levels are ours, not the e-mail's.
 const EMAIL_PARSE_WRAPPER_DEPTH = 2;
@@ -606,6 +616,9 @@ const EMAIL_PARSE_WRAPPER_DEPTH = 2;
  * never be mistaken for the nesting abort and silently turned into an escaped body.
  */
 class EmailNestingError extends Error {}
+
+/** A scanner bound: too many attributes on one tag. sanitiseEmailBody turns it into escaped HTML. */
+class EmailScanError extends Error {}
 
 /**
  * parse5 is the authority on how deeply a document nests, not a hand-written approximation: scope
@@ -621,6 +634,14 @@ function depthBoundingTreeAdapter(maxDepth: number): TreeAdapter<DefaultTreeAdap
     const depth = (depths.get(parentNode) ?? 0) + 1;
     if (depth > maxDepth) throw new EmailNestingError();
     depths.set(newNode, depth);
+    // parse5 calls setTemplateContent before it attaches the template, so the fragment's depth
+    // was provisional. Now that the template has a real parent, its content sits one level below.
+    if (newNode.nodeName === 'template' && 'content' in newNode) {
+      const content = (newNode as DefaultTreeAdapterTypes.Template).content;
+      const contentDepth = depth + 1;
+      if (contentDepth > maxDepth) throw new EmailNestingError();
+      depths.set(content, contentDepth);
+    }
   };
   return {
     ...defaultTreeAdapter,
@@ -754,19 +775,21 @@ function cleanActiveContent(markup: string): string {
  * round cannot make it inert (mutation XSS), escape the whole body and fail closed.
  */
 export function sanitiseEmailBody(body: string, isActive: (html: string) => boolean = containsActiveContent): string {
-  const scanned = scanEmailBody(body);
-  // A cheap early exit for the common hostile shape; the tree adapter below is the real bound, so
-  // this scan may undercount without risking the judge (#578).
-  if (scanned.length > MAX_EMAIL_LENGTH || exceedsNestingCap(scanned, MAX_EMAIL_NESTING)) return escapeHtml(body);
+  // Avoid even scanning input past the budget; the scan can also expand unterminated "<" to "&lt;".
+  if (body.length > MAX_EMAIL_LENGTH) return escapeHtml(body);
   try {
+    const scanned = scanEmailBody(body);
+    // A cheap early exit for the common hostile shape; the tree adapter below is the real bound, so
+    // this scan may undercount without risking the judge (#578).
+    if (scanned.length > MAX_EMAIL_LENGTH || exceedsNestingCap(scanned, MAX_EMAIL_NESTING)) return escapeHtml(body);
     if (!isActive(scanned)) return scanned;
     const cleaned = cleanActiveContent(scanned);
     if (!isActive(cleaned)) return cleaned;
     return escapeHtml(body);
-  } catch (error) {
-    // The adapter aborts the moment the tree passes the cap, before a scope scan can get expensive.
-    if (error instanceof EmailNestingError) return escapeHtml(body);
-    throw error;
+  } catch {
+    // Fail closed on every parser and scanner failure (depth sentinel, attribute bound, RangeError
+    // from a pathological tree): a public page must never return a 500 for crafted content.
+    return escapeHtml(body);
   }
 }
 
@@ -924,7 +947,7 @@ function extractEmailParts(html: string): EmailExtraction {
 }
 
 /** Splits MJML's complete document into the parts that can sit inside our page. */
-export function emailParts(html: string): { body: string; styles: string } {
+function computeEmailParts(html: string): { body: string; styles: string } {
   const { styles, bodyStart, bodyEnd, pixels } = extractEmailParts(html);
   const hasBody = bodyStart >= 0 && bodyEnd >= bodyStart;
   const offset = hasBody ? bodyStart : 0;
@@ -943,6 +966,16 @@ export function emailParts(html: string): { body: string; styles: string } {
     // `<` keeps the rules while making `</style>` (and anything after it) impossible to inject.
     styles: styles.join('\n').replace(/</g, '\\3c '),
   };
+}
+
+/**
+ * The public archive's entry point for rendered e-mail parts, memoised by a SHA-256 of the HTML.
+ * Every archive and web-version request re-renders stored content, so a repeat of the same issue
+ * costs one hash and one lookup instead of a parse. The cache is bounded by entries and bytes, and
+ * the first unseen input is still parsed once under the size, attribute and depth bounds above.
+ */
+export function emailParts(html: string): { body: string; styles: string } {
+  return cachedEmailParts(html, computeEmailParts);
 }
 
 const brandStyles = (brand: ResolvedBrand) => {
