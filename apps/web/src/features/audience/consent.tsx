@@ -92,6 +92,8 @@ export function ConsentHistoryTable({
       </THead>
       <tbody>
         {records.map((r) => {
+          // The server withholds personal proof fields without profiles:pii (#594); the table
+          // shows that state and renders only the non-personal evidence it was given.
           const proof = proofText(r.proof);
           return (
             <Tr key={`${r.recordedAt}-${r.purpose}-${r.channel}-${r.status}`}>
@@ -109,6 +111,14 @@ export function ConsentHistoryTable({
               <Td className="max-w-[320px]">
                 <span className="block">{named(r.source, SOURCE_LABEL) || 'Not recorded'}</span>
                 {proof && <span className="mt-0.5 line-clamp-2 block text-[12px] text-muted">{proof}</span>}
+                {r.proofWithheld && (
+                  <span
+                    className="mt-0.5 block text-[12px] text-muted"
+                    title="Your role needs profiles:pii to see IP addresses, user agents and page URLs kept as consent proof."
+                  >
+                    Hidden for your role
+                  </span>
+                )}
               </Td>
             </Tr>
           );
