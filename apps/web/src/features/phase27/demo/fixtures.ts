@@ -540,6 +540,7 @@ export function demoConsentHistory(profileId: string): Out<'consent.history'> {
     basis: purposeBasis.get(entry.purpose)?.basis ?? 'consent',
     source: 'import',
     proof: { import: 'Kit export 2026-10-20' },
+    proofWithheld: false,
     recordedAt: profile?.lastSeen ?? OWNER_AT,
     recordedBy: null,
   }));

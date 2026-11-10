@@ -45,11 +45,89 @@ export function personalDataInText(s: string): string[] {
   return [...found];
 }
 
-export function redact<T>(v: T, depth = 0): T {
-  if (typeof v === 'string') return redactText(v) as T;
-  if (depth > 5 || v === null || typeof v !== 'object') return v;
-  if (Array.isArray(v)) return v.slice(0, 50).map((x) => redact(x, depth + 1)) as T;
-  return Object.fromEntries(Object.entries(v as Record<string, unknown>).map(([k, x]) => [k, redact(x, depth + 1)])) as T;
+/** Markers for what a structural cap removed: a marker, never the original value. */
+export const REDACTED_CYCLE = '[redacted: circular]';
+export const REDACTED_LIMIT = '[redacted: too large]';
+
+/** Arrays kept their original cap; objects and the whole walk get their own, larger ones. */
+const MAX_ARRAY_ITEMS = 50;
+const MAX_OBJECT_KEYS = 1_000;
+const MAX_NODES = 10_000;
+
+/**
+ * Rule-based redaction of contact and payment details at every depth (#641). Walks iteratively
+ * with no depth cap, the way `personalDataIn` does (#352), so a value nested fifty levels down
+ * is still visited instead of returned unchanged. A cycle or a size cap fails closed: the part
+ * that cannot be visited becomes a marker, never the original value.
+ */
+export function redact<T>(input: T): T {
+  let result: unknown;
+  const seen = new WeakSet<object>();
+  type Job = { value: unknown; set: (out: unknown) => void };
+  const jobs: Job[] = [
+    {
+      value: input,
+      set: (out) => {
+        result = out;
+      },
+    },
+  ];
+  let nodes = 0;
+  while (jobs.length) {
+    const job = jobs.pop();
+    if (!job) break;
+    const { value, set } = job;
+    if (typeof value === 'string') {
+      set(redactText(value));
+      continue;
+    }
+    if (value === null || typeof value !== 'object') {
+      set(value);
+      continue;
+    }
+    // A cycle (or a value already seen) cannot be walked safely and must not be forwarded.
+    if (seen.has(value)) {
+      set(REDACTED_CYCLE);
+      continue;
+    }
+    seen.add(value);
+    if (++nodes > MAX_NODES) {
+      set(REDACTED_LIMIT);
+      continue;
+    }
+    if (Array.isArray(value)) {
+      const out: unknown[] = [];
+      set(out);
+      const kept = Math.min(value.length, MAX_ARRAY_ITEMS);
+      for (let i = 0; i < kept; i++) {
+        out.push(undefined);
+        jobs.push({
+          value: value[i],
+          set: (x) => {
+            out[i] = x;
+          },
+        });
+      }
+      if (value.length > kept) out.push(REDACTED_LIMIT);
+      continue;
+    }
+    const out: Record<string, unknown> = {};
+    set(out);
+    const entries = Object.entries(value as Record<string, unknown>);
+    const kept = Math.min(entries.length, MAX_OBJECT_KEYS);
+    for (let i = 0; i < kept; i++) {
+      const [k, x] = entries[i] as [string, unknown];
+      out[k] = undefined;
+      jobs.push({
+        value: x,
+        set: (y) => {
+          out[k] = y;
+        },
+      });
+    }
+    if (entries.length > kept) out[REDACTED_LIMIT] = REDACTED_LIMIT;
+  }
+  return result as T;
 }
 
 /** Keys whose name alone marks personal data, even when the value does not match a detector. */
