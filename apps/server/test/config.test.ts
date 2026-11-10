@@ -102,6 +102,10 @@ describe('configuration', () => {
     expect([...loadConfig(base).roles]).toEqual(['api', 'ingest', 'worker', 'scheduler']);
   });
 
+  it('accepts ROLE=all with surrounding whitespace as every role, not a raw validation error (Sol 0.14.3 P3)', () => {
+    expect([...loadConfig({ ...base, ROLE: ' all ' }).roles].sort()).toEqual(['api', 'ingest', 'scheduler', 'worker']);
+  });
+
   it('rejects a ROLE that is not one of the four, instead of starting a process that serves nothing (#651)', () => {
     expect(() => loadConfig({ ...base, ROLE: 'decide' })).toThrow(ConfigError);
     expect(() => loadConfig({ ...base, ROLE: 'decide' })).toThrow('ROLE has unknown role "decide"');

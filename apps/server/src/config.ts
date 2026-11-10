@@ -325,7 +325,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     ),
   ];
   // The schema above rejects any role outside the enum, so this only turns the string into a set.
-  const roles = e.ROLE === 'all' ? [...Role.options] : e.ROLE.split(',').map((role) => Role.parse(role.trim()));
+  const roles = e.ROLE.trim() === 'all' ? [...Role.options] : e.ROLE.split(',').map((role) => Role.parse(role.trim()));
   return {
     roles: new Set(roles),
     port: e.PORT,
