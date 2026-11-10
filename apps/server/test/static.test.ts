@@ -84,6 +84,16 @@ describe('staticSite', () => {
     expect(await unknown.text()).not.toContain('live admin');
   });
 
+  it('leaves the webhook and SCIM API roots to the API, even when nothing matches (#610)', async () => {
+    const app = appFor(await site(files));
+
+    for (const path of ['/hooks/in/x/y', '/scim/v2/NotAResource']) {
+      const res = await app.request(path);
+      expect(res.status, path).toBe(404);
+      expect(await res.text(), path).not.toContain('live admin');
+    }
+  });
+
   it('falls through cleanly when there is no index.html', async () => {
     const app = appFor(await site({ 'assets/app.js': 'console.log("live");' }));
 

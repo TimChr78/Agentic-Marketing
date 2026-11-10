@@ -15,8 +15,11 @@ import { profileForMessage } from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { and, asc, eq, sql } from 'drizzle-orm';
 import { type Context, Hono } from 'hono';
-import { type DefaultTreeAdapterTypes, parse, serialize } from 'parse5';
+import { type DefaultTreeAdapterTypes, defaultTreeAdapter, parse, serialize, type TreeAdapter } from 'parse5';
 import { z } from 'zod';
+import { cachedEmailParts } from './emailPartsCache';
+
+export { clearEmailPartsCache, emailPartsCacheStats } from './emailPartsCache';
 
 // The public newsletter archive and the per-recipient web version (#100), served on the links
 // host next to the hosted pages. Everything here is public except /n/w/<token>, which is signed
@@ -263,9 +266,41 @@ const metaDescription = (value: string, fallback: string) => {
   return text.length > 300 ? `${text.slice(0, 297)}…` : text;
 };
 
-const DANGEROUS_ELEMENTS = new Set(['script', 'iframe', 'object', 'embed', 'frame', 'frameset', 'applet', 'base']);
+const DANGEROUS_ELEMENTS = new Set([
+  'script',
+  'iframe',
+  'object',
+  'embed',
+  'frame',
+  'frameset',
+  'applet',
+  'base',
+  // SMIL can retarget an href/xlink:href to javascript: at runtime (#579).
+  'animate',
+  'set',
+  'animatetransform',
+  'animatemotion',
+  'discard',
+]);
 /** Dangerous elements whose content is raw text or a nested document, so it goes with the tag. */
 const DROPS_CONTENT = new Set(['script', 'iframe', 'object', 'embed']);
+/** Elements that never open a nesting level. */
+const VOID_ELEMENTS = new Set([
+  'area',
+  'base',
+  'br',
+  'col',
+  'embed',
+  'hr',
+  'img',
+  'input',
+  'link',
+  'meta',
+  'param',
+  'source',
+  'track',
+  'wbr',
+]);
 const URL_ATTRIBUTES = new Set(['href', 'src', 'xlink:href', 'action', 'formaction', 'background', 'poster', 'data', 'srcset']);
 
 const isWhitespace = (c: string) => c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\f';
@@ -535,6 +570,10 @@ export function scanEmailBody(body: string): string {
       break;
     }
 
+    // parse5's duplicate-attribute check walks every earlier attribute for each new one, so a tag
+    // with tens of thousands of them is quadratic. The scanner already has the count.
+    if (tag.attributes.length > MAX_EMAIL_ATTRIBUTES) throw new EmailScanError('too many attributes');
+
     if (tag.endTag) {
       if (!DANGEROUS_ELEMENTS.has(tag.lowerName)) out += body.slice(open, tag.end);
       i = tag.end;
@@ -562,7 +601,130 @@ export function scanEmailBody(body: string): string {
   return out;
 }
 
-const EMAIL_PARSE_OPTIONS = { scriptingEnabled: true } as const;
+/** Bounds the parse5 judge's input (#578). Real e-mail nests to about 40. */
+export const MAX_EMAIL_NESTING = 256;
+export const MAX_EMAIL_LENGTH = 1_000_000;
+// The duplicate-attribute check inside parse5 is quadratic in the attribute count. Real e-mail
+// tags have a handful; past this bound the scanner fails closed before parse5 sees the tag.
+export const MAX_EMAIL_ATTRIBUTES = 512;
+// Foster parenting (stray content inside a <table>) inserts before a sibling, and finding that
+// sibling scans the parent's child list, so thousands of fostered nodes cost quadratic time: a
+// 900 KB body took 6 s on a CI runner. Real e-mail fosters a handful; past this the judge fails closed.
+export const MAX_EMAIL_FOSTER_INSERTS = 512;
+// <html> and <body> start tags merge their attributes into the document's own elements, and each
+// merge rebuilds a set of every attribute gathered so far; the total is bounded, not the per-tag count.
+export const MAX_EMAIL_ADOPTED_ATTRIBUTES = 512;
+// The adoption agency (mis-nested formatting end tags) detaches a block's children one by one, and
+// each detach scans the parent's child list. Bound the total scanned, not the number of detaches.
+export const MAX_EMAIL_DETACH_SCAN = 2_000_000;
+// A backstop for tree-construction paths nobody has found yet: checked on every adapter call, so a
+// parse cannot run much past it. Real newsletters parse in about 20 ms.
+export const MAX_EMAIL_PARSE_MS = 1_000;
+
+// The judge wraps the fragment in <html> and <body>; those two levels are ours, not the e-mail's.
+const EMAIL_PARSE_WRAPPER_DEPTH = 2;
+
+/**
+ * Thrown by the depth-bounding adapter. It is private to this module, so a caller's own error can
+ * never be mistaken for the nesting abort and silently turned into an escaped body.
+ */
+class EmailNestingError extends Error {}
+
+/** A scanner bound: too many attributes on one tag. sanitiseEmailBody turns it into escaped HTML. */
+class EmailScanError extends Error {}
+
+/**
+ * parse5 is the authority on how deeply a document nests, not a hand-written approximation: scope
+ * rules for tables, templates and foreign content are too subtle to mirror. This adapter records
+ * each node's depth as depth(parent) + 1 and throws before the tree can go past `maxDepth`. Every
+ * insertion path is covered, including foster parenting and `<template>` content. The parser's
+ * open-element stack is then bounded by the cap, so a scope scan costs at most O(cap) and the whole
+ * parse is O(input × cap) whatever the markup.
+ */
+function depthBoundingTreeAdapter(maxDepth: number, maxFosterInserts: number): TreeAdapter<DefaultTreeAdapterTypes.DefaultTreeAdapterMap> {
+  const depths = new WeakMap<DefaultTreeAdapterTypes.Node, number>();
+  // One budget per parse: every insert-before (element or text) searches the parent's children.
+  let fosterInserts = 0;
+  let adoptedAttributes = 0;
+  let detachScan = 0;
+  const startedAt = performance.now();
+  // Every adapter call checks the wall clock, so no tree-construction path can run unbounded.
+  const tick = () => {
+    if (performance.now() - startedAt > MAX_EMAIL_PARSE_MS) throw new EmailNestingError();
+  };
+  const foster = () => {
+    tick();
+    fosterInserts += 1;
+    if (fosterInserts > maxFosterInserts) throw new EmailNestingError();
+  };
+  const track = (parentNode: DefaultTreeAdapterTypes.ParentNode, newNode: DefaultTreeAdapterTypes.ChildNode) => {
+    const depth = (depths.get(parentNode) ?? 0) + 1;
+    if (depth > maxDepth) throw new EmailNestingError();
+    depths.set(newNode, depth);
+    // parse5 calls setTemplateContent before it attaches the template, so the fragment's depth
+    // was provisional. Now that the template has a real parent, its content sits one level below.
+    if (newNode.nodeName === 'template' && 'content' in newNode) {
+      const content = (newNode as DefaultTreeAdapterTypes.Template).content;
+      const contentDepth = depth + 1;
+      if (contentDepth > maxDepth) throw new EmailNestingError();
+      depths.set(content, contentDepth);
+    }
+  };
+  return {
+    ...defaultTreeAdapter,
+    appendChild(parentNode, newNode) {
+      tick();
+      track(parentNode, newNode);
+      defaultTreeAdapter.appendChild(parentNode, newNode);
+    },
+    insertBefore(parentNode, newNode, referenceNode) {
+      // Foster parenting inserts before a table's current child rather than appending.
+      foster();
+      track(parentNode, newNode);
+      defaultTreeAdapter.insertBefore(parentNode, newNode, referenceNode);
+    },
+    adoptAttributes(recipient, attrs) {
+      tick();
+      adoptedAttributes += attrs.length;
+      if (adoptedAttributes > MAX_EMAIL_ADOPTED_ATTRIBUTES) throw new EmailNestingError();
+      defaultTreeAdapter.adoptAttributes(recipient, attrs);
+    },
+    detachNode(node) {
+      tick();
+      detachScan += node.parentNode?.childNodes.length ?? 0;
+      if (detachScan > MAX_EMAIL_DETACH_SCAN) throw new EmailNestingError();
+      defaultTreeAdapter.detachNode(node);
+    },
+    setTemplateContent(templateElement, contentElement) {
+      tick();
+      // The content fragment is one level deeper than its <template>.
+      const depth = (depths.get(templateElement) ?? 0) + 1;
+      if (depth > maxDepth) throw new EmailNestingError();
+      depths.set(contentElement, depth);
+      defaultTreeAdapter.setTemplateContent(templateElement, contentElement);
+    },
+    insertText(parentNode, text) {
+      tick();
+      // Text has no children, so it cannot nest; record it for completeness without bounding it.
+      defaultTreeAdapter.insertText(parentNode, text);
+      const last = parentNode.childNodes[parentNode.childNodes.length - 1];
+      if (last && defaultTreeAdapter.isTextNode(last)) depths.set(last, (depths.get(parentNode) ?? 0) + 1);
+    },
+    insertTextBefore(parentNode, text, referenceNode) {
+      foster();
+      defaultTreeAdapter.insertTextBefore(parentNode, text, referenceNode);
+      const index = parentNode.childNodes.indexOf(referenceNode);
+      const previous = index > 0 ? parentNode.childNodes[index - 1] : undefined;
+      if (previous && defaultTreeAdapter.isTextNode(previous)) depths.set(previous, (depths.get(parentNode) ?? 0) + 1);
+    },
+  };
+}
+
+// A fresh adapter per parse, so the foster budget and depth map never carry over between parses.
+const emailParseOptions = () => ({
+  scriptingEnabled: true,
+  treeAdapter: depthBoundingTreeAdapter(MAX_EMAIL_NESTING + EMAIL_PARSE_WRAPPER_DEPTH, MAX_EMAIL_FOSTER_INSERTS),
+});
 // The judge parses a whole document and reads its <body>, which is how the archive page embeds
 // the e-mail (a <div> inside <main>). A document parse has no fragment root adoption, so it stays
 // linear however many top-level nodes the input has, and a stray </div> or </body> cannot move
@@ -573,7 +735,7 @@ function parseEmailDocument(markup: string): {
   document: DefaultTreeAdapterTypes.Document;
   body: DefaultTreeAdapterTypes.Element | null;
 } {
-  const document = parse(`<!doctype html><html><head></head><body>${markup}`, EMAIL_PARSE_OPTIONS);
+  const document = parse(`<!doctype html><html><head></head><body>${markup}`, emailParseOptions());
   const root = document.childNodes.find((node) => 'tagName' in node && node.tagName === 'html') as
     | DefaultTreeAdapterTypes.Element
     | undefined;
@@ -660,29 +822,207 @@ function cleanActiveContent(markup: string): string {
  * round cannot make it inert (mutation XSS), escape the whole body and fail closed.
  */
 export function sanitiseEmailBody(body: string, isActive: (html: string) => boolean = containsActiveContent): string {
-  const scanned = scanEmailBody(body);
-  if (!isActive(scanned)) return scanned;
-  const cleaned = cleanActiveContent(scanned);
-  if (!isActive(cleaned)) return cleaned;
-  return escapeHtml(body);
+  // Avoid even scanning input past the budget; the scan can also expand unterminated "<" to "&lt;".
+  if (body.length > MAX_EMAIL_LENGTH) return escapeHtml(body);
+  try {
+    const scanned = scanEmailBody(body);
+    // A cheap early exit for the common hostile shape; the tree adapter below is the real bound, so
+    // this scan may undercount without risking the judge (#578).
+    if (scanned.length > MAX_EMAIL_LENGTH || exceedsNestingCap(scanned, MAX_EMAIL_NESTING)) return escapeHtml(body);
+    if (!isActive(scanned)) return scanned;
+    const cleaned = cleanActiveContent(scanned);
+    if (!isActive(cleaned)) return cleaned;
+    return escapeHtml(body);
+  } catch {
+    // Fail closed on every parser and scanner failure (depth sentinel, attribute bound, RangeError
+    // from a pathological tree): a public page must never return a 500 for crafted content.
+    return escapeHtml(body);
+  }
+}
+
+/**
+ * Elements whose content a browser reads as raw text, not as markup. The pre-scan must skip to the
+ * matching end tag, or a literal `<div>` inside a `<style>` would be counted as nesting.
+ */
+const RAW_TEXT_ELEMENTS = new Set([
+  'script',
+  'style',
+  'textarea',
+  'title',
+  'xmp',
+  'noscript',
+  'iframe',
+  'noembed',
+  'noframes',
+  'plaintext',
+]);
+
+/**
+ * A linear, best-effort early exit over the scanner's output. It is not the authority on HTML
+ * scope: table, template and foreign-content rules are subtle enough that any rule here can
+ * disagree with parse5. The depth-bounding tree adapter is the real bound; this scan only catches
+ * the common hostile shapes before parse5 starts. Undercounting is therefore safe, and where a
+ * choice is cheap we overcount so pathological input fails closed earlier.
+ *
+ * Raw text is skipped only when the markup contains no foreign content: `<svg><style>` and
+ * `<math><style>` look like raw text here but are not to a browser, and the divs after them are
+ * real nesting.
+ */
+const FOREIGN_CONTENT = /<(?:svg|math)(?:[\s/>]|$)/i;
+
+function exceedsNestingCap(markup: string, cap: number): boolean {
+  const hasForeignContent = FOREIGN_CONTENT.test(markup);
+  let depth = 0;
+  const open = new Map<string, number>();
+  let i = 0;
+  while (i < markup.length) {
+    const at = markup.indexOf('<', i);
+    if (at < 0) break;
+    i = at + 1;
+    if (markup.startsWith('<!--', at)) {
+      const after = commentEnd(markup, at + 4);
+      if (after < 0) break;
+      i = after;
+      continue;
+    }
+    if (markup[at + 1] === '!') {
+      const end = markup.indexOf('>', at + 2);
+      if (end < 0) break;
+      i = end + 1;
+      continue;
+    }
+    const tag = parseTag(markup, at);
+    if (tag === null) continue;
+    if ('unterminated' in tag) break;
+    i = tag.end;
+    if (tag.endTag) {
+      const count = open.get(tag.lowerName) ?? 0;
+      if (count > 0) {
+        open.set(tag.lowerName, count - 1);
+        depth--;
+      }
+      continue;
+    }
+    if (VOID_ELEMENTS.has(tag.lowerName)) continue;
+    // Raw-text content is not markup to a browser. Skip the whole element; its end tag closes it,
+    // so the element itself adds no net level. Only safe when no foreign content could turn one
+    // of these names into an ordinary SVG/MathML element.
+    if (!hasForeignContent && RAW_TEXT_ELEMENTS.has(tag.lowerName)) {
+      i = findEndTagEnd(markup, tag.lowerName, tag.end);
+      continue;
+    }
+    open.set(tag.lowerName, (open.get(tag.lowerName) ?? 0) + 1);
+    depth++;
+    if (depth > cap) return true;
+  }
+  return false;
+}
+
+interface EmailExtraction {
+  styles: string[];
+  bodyStart: number;
+  bodyEnd: number;
+  pixels: { start: number; end: number }[];
+}
+
+/** A 1×1 image is an open-tracking pixel: width and height, either order, each "1" or "1px". */
+function isTrackingPixel(attributes: readonly TagAttribute[]): boolean {
+  let width = false;
+  let height = false;
+  for (const attribute of attributes) {
+    if (attribute.value === null) continue;
+    const value = attribute.value.toLowerCase();
+    if (value !== '1' && value !== '1px') continue;
+    if (attribute.lowerName === 'width') width = true;
+    else if (attribute.lowerName === 'height') height = true;
+  }
+  return width && height;
+}
+
+/** Removes non-overlapping ranges from `text` in one pass, keeping every other byte. */
+function removeRanges(text: string, ranges: readonly (readonly [number, number])[]): string {
+  if (ranges.length === 0) return text;
+  let out = '';
+  let last = 0;
+  for (const [start, end] of ranges) {
+    if (start < last) continue;
+    if (start > last) out += text.slice(last, start);
+    last = end;
+  }
+  return out + text.slice(last);
+}
+
+/**
+ * One linear, quote-aware pass over the rendered e-mail, collecting the `<style>` bodies, the
+ * `<body>` content and the 1×1 images. Each tag is parsed once and every search pointer moves
+ * only forward, so repeated openers with no close cannot make the extraction quadratic (#574,
+ * #577).
+ */
+function extractEmailParts(html: string): EmailExtraction {
+  const lower = html.toLowerCase();
+  const styles: string[] = [];
+  const pixels: { start: number; end: number }[] = [];
+  let bodyStart = -1;
+  let bodyEnd = -1;
+  let styleClose = lower.indexOf('</style>');
+  let i = 0;
+  while (i < html.length) {
+    const open = html.indexOf('<', i);
+    if (open < 0) break;
+    i = open + 1;
+    // Comments are deliberately not special here: the old extraction regexes searched them too,
+    // and MJML puts some of its <style> elements inside MSO conditional comments.
+    const tag = parseTag(html, open);
+    if (tag === null) continue;
+    if ('unterminated' in tag) break;
+    i = tag.end;
+    if (tag.endTag) {
+      if (bodyStart >= 0 && bodyEnd < 0 && tag.lowerName === 'body') bodyEnd = open;
+      continue;
+    }
+    while (styleClose >= 0 && styleClose < open) styleClose = lower.indexOf('</style>', styleClose + 1);
+    if (tag.lowerName === 'style' && styleClose >= tag.end) {
+      styles.push(html.slice(tag.end, styleClose));
+      i = styleClose + '</style>'.length;
+      styleClose = lower.indexOf('</style>', i);
+      continue;
+    }
+    if (bodyStart < 0 && tag.lowerName === 'body') bodyStart = tag.end;
+    if (tag.lowerName === 'img' && isTrackingPixel(tag.attributes)) pixels.push({ start: open, end: tag.end });
+  }
+  return { styles, bodyStart, bodyEnd, pixels };
 }
 
 /** Splits MJML's complete document into the parts that can sit inside our page. */
-export function emailParts(html: string): { body: string; styles: string } {
-  const styles = [...html.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style>/gi)].map((m) => m[1]).join('\n');
-  const body = html.match(/<body\b[^>]*>([\s\S]*?)<\/body>/i)?.[1] ?? html;
-  // A 1×1 image is an open-tracking pixel (some templates and relays add one); the web page is
-  // not a send, so it is dropped rather than counted.
-  const pixel =
-    /<img\b[^>]*(?:(?:width\s*=\s*["']?1(?:px)?["']?[\s\S]*?height\s*=\s*["']?1(?:px)?["']?)|(?:height\s*=\s*["']?1(?:px)?["']?[\s\S]*?width\s*=\s*["']?1(?:px)?["']?))[^>]*>/gi;
+function computeEmailParts(html: string): { body: string; styles: string } {
+  const { styles, bodyStart, bodyEnd, pixels } = extractEmailParts(html);
+  const hasBody = bodyStart >= 0 && bodyEnd >= bodyStart;
+  const offset = hasBody ? bodyStart : 0;
+  const rawBody = hasBody ? html.slice(bodyStart, bodyEnd) : html;
   // The pixel is removed before sanitising, so the parser judges the final bytes: a removal
   // afterwards could join the pieces around it into new markup (`<me<img …>ta …>`).
+  const body = removeRanges(
+    rawBody,
+    pixels
+      .filter((pixel) => (hasBody ? pixel.start >= bodyStart && pixel.end <= bodyEnd : true))
+      .map((pixel) => [pixel.start - offset, pixel.end - offset] as const),
+  );
   return {
-    body: sanitiseEmailBody(body.replace(pixel, '')),
+    body: sanitiseEmailBody(body),
     // The styles go back into the page's own <style>. CSS reads `\3c ` as `<`, so escaping every
     // `<` keeps the rules while making `</style>` (and anything after it) impossible to inject.
-    styles: styles.replace(/</g, '\\3c '),
+    styles: styles.join('\n').replace(/</g, '\\3c '),
   };
+}
+
+/**
+ * The public archive's entry point for rendered e-mail parts, memoised by a SHA-256 of the HTML.
+ * Every archive and web-version request re-renders stored content, so a repeat of the same issue
+ * costs one hash and one lookup instead of a parse. The cache is bounded by entries and bytes, and
+ * the first unseen input is still parsed once under the size, attribute and depth bounds above.
+ */
+export function emailParts(html: string): { body: string; styles: string } {
+  return cachedEmailParts(html, computeEmailParts);
 }
 
 const brandStyles = (brand: ResolvedBrand) => {

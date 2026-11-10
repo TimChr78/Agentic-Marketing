@@ -1,6 +1,6 @@
 import type { Purposes } from '@agentic-marketing/artifacts';
 import { describe, expect, it } from 'vitest';
-import { type ConsentRow, currentConsent, purposeAllowed, refusedPurposes } from '../src/consent';
+import { type ConsentRow, consentProofFor, currentConsent, purposeAllowed, refusedPurposes } from '../src/consent';
 import { CASES, P, row } from './consentCases';
 
 // The one rule for "current status of a purpose" (ADR 0014), as every reader applies it.
@@ -26,6 +26,31 @@ describe('currentConsent', () => {
     expect(purposeAllowed('legitimate_interest', unsubscribed)).toBe(false);
     expect(purposeAllowed('legitimate_interest', undefined)).toBe(true);
     expect(purposeAllowed('contract', unsubscribed)).toBe(true);
+  });
+});
+
+describe('consentProofFor (Sol 0.14.2 review)', () => {
+  it('withholds an allowlisted string that carries an e-mail address', () => {
+    expect(consentProofFor({ import_label: 'ada@example.com', system: 'Kit' }, false)).toEqual({
+      proof: { system: 'Kit' },
+      proofWithheld: true,
+    });
+  });
+
+  it('withholds an allowlisted string that carries a phone number', () => {
+    expect(consentProofFor({ import_label: '+45 12 34 56 78' }, false)).toEqual({ proof: {}, proofWithheld: true });
+  });
+
+  it('returns the same values in full to a role with profiles:pii', () => {
+    const proof = { import_label: 'ada@example.com', system: 'Kit' };
+    expect(consentProofFor(proof, true)).toEqual({ proof, proofWithheld: false });
+  });
+
+  it('keeps non-personal allowlisted values and reports nothing withheld', () => {
+    expect(consentProofFor({ import_label: 'privacy ledger test', form_id: 'frm_1' }, false)).toEqual({
+      proof: { import_label: 'privacy ledger test', form_id: 'frm_1' },
+      proofWithheld: false,
+    });
   });
 });
 
