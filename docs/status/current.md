@@ -22,7 +22,11 @@ _Last updated: 2026-11-10_
   - Sol approved after four rounds.
   - Alert 5 (MD5 used for NATS shard selection) was dismissed as a false positive.
   - The `uuid` Dependabot alert is still accepted, because it only affects the dev spike.
-- **The audit-fix plan runs as patch releases 0.14.2 to 0.14.8.** 0.14.2 (security and compliance) is in review; **0.14.3 (documentation) is in progress**.
+- **The audit-fix plan runs as patch releases 0.14.2 to 0.14.8.** The 2026-11-08 audit filed 81 issues (#574–#654). Each was validated against the code: 79 are real, 1 is a duplicate and 1 is not reproducible.
+  - **0.14.2** fixes all eight S1s (security and compliance) and is released. Its review ran four rounds; HY4 reviewed the last one after the Codex quota ran out.
+  - **0.14.3** (install, deploy and release tooling) is being released.
+  - **Next:** 0.14.4 (consent, privacy records and delivery reliability, plus #664), then 0.14.5 analytics, 0.14.6 UI stale data, 0.14.7 authoring and forms, and 0.14.8 alerts and jobs.
+  - **Follow-ups filed (S3):** #671, #672 and #673.
 
 ## Owner sign-off (Wave 5 done criteria that cannot be automated)
 

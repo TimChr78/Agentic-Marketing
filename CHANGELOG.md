@@ -2,6 +2,41 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [0.14.3] - 2026-11-10
+
+### Changed
+
+- Release tooling is crash-safe and honest: changelog folding is atomic and retry-safe, `close-issues` fetches and verifies the predecessor tag before widening a range, generated migration lists include only added files, e2e helper and Playwright config changes suggest every suite instead of smoke alone, and a tag push and a manual run of the same version share one release concurrency group. `scripts/open-task-pr.sh` also accepts `patch/<x.y.z>` integration branches.
+- The documentation now matches 0.14.1, and setting `ROLE` to anything other than `api`, `ingest`, `worker`, `scheduler` or `all` stops the server at start-up with a configuration error instead of running a process that serves nothing. The architecture pages document the four real roles: `ingest` also answers `/v1/decide`, and the scheduler runs as a single `Recreate` replica. The status handoff, the architecture status headers, the wave 5 roadmap and the demo pointers now describe the shipped 0.14 line, and the broken source links in the Phase 27 and Wave 5 design inventories are fixed.
+
+### Fixed
+
+- A fresh Compose install no longer dies on a base64 database password: `.env.example` and the
+  deployment docs generate `POSTGRES_PASSWORD` and `APP_DB_PASSWORD` as hex (`openssl rand -hex 32`,
+  as `am init` already did), and an unparseable `DATABASE_URL` (Compose interpolates the password
+  raw, so a `/` from base64 breaks it) now stops with `Configuration is incomplete: DATABASE_URL is
+  not a valid URL` and the fix, instead of a raw `TypeError` stack trace (#647).
+- The shared test stack publishes its ports on `127.0.0.1` by default instead of `0.0.0.0`:
+  `scripts/test-services.sh` uses the Docker bridge address (`172.17.0.1`) when it runs inside a
+  container, prints the bind address it used and warns loudly if `AM_TEST_BIND_IP=0.0.0.0` is set.
+  The dev OpenBao (root token) and the writable test Postgres are no longer reachable from the LAN
+  unless someone asks for it (#605).
+- `pnpm e2e:visual` waits for the seeded server's fixtures `/ready` instead of `/healthz`, so the
+  visual run no longer starts against a server whose seed is still running (#646).
+- The Helm chart no longer puts a container port and HTTP probes on the `worker` and `scheduler` roles, which never open a listener; those pods can pass readiness and `helm upgrade --wait` no longer times out or rolls back.
+- A single `port` value now drives the ConfigMap's `PORT`, the container port, the Service target and the probes, and setting `config.PORT` no longer renders a duplicate ConfigMap key.
+- Scheduled backups verify each backup they write, so the optional backup service's `am backup --health` becomes healthy after a good run and unhealthy after a failed verification instead of waiting for a manual `am backup --verify`.
+
+### Upgrading from 0.14.2
+
+- **Migrations:** none.
+- **Configuration:** no new environment variables.
+- **Breaking changes:** `ROLE` is now validated: any value other than `api`, `ingest`, `worker`, `scheduler` or `all` (comma-separated roles are fine) stops the server at start-up. Previously an unknown role such as `decide` started a process that served nothing. Helm: the chart has a top-level `port` value that drives the container port, the Service target port, the probes and `PORT`; worker and scheduler pods no longer get probes or a container port.
+- **Manual steps:** Helm users who set `config.PORT` should set the top-level `port` value instead, so the Service and the probes follow it. Compose installs need nothing.
+- **Upgrade:** download `agentic-marketing-compose-0.14.3.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.14.3 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.14.3` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.14.3). Run `docker compose exec app am doctor`.
+
+<!-- issues: 602, 603, 604, 605, 606, 607, 645, 646, 647, 648, 649, 650, 651, 652, 653, 654 -->
+
 ## [0.14.2] - 2026-11-10
 
 ### Security

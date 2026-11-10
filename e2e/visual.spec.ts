@@ -76,6 +76,9 @@ for (const name of SUBSET) {
         // The agents comparison loads after the page; its period and "Fetched" line follow the
         // server's clock, so wait for it before masking or a later day changes the screenshot.
         if (name === 'agents') await expect(page.getByText(/Period totals, not trends or a ranking/)).toBeVisible();
+        // The broadcast's pre-send checks also load after the page and print when DNS was checked;
+        // masking before they arrive left that date unmasked and moved the rows below it.
+        if (name === 'broadcast') await expect(page.getByText(/^DNS checked /)).toBeVisible();
         const mask = [...(await volatileMasks(page))];
         // People values (e-mail/name, a copied value, consent statuses and last seen) vary between
         // machines. Mask only those text hooks, not whole cells or phone cards, so layout
