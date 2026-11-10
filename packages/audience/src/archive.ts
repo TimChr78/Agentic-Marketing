@@ -607,6 +607,10 @@ export const MAX_EMAIL_LENGTH = 1_000_000;
 // The duplicate-attribute check inside parse5 is quadratic in the attribute count. Real e-mail
 // tags have a handful; past this bound the scanner fails closed before parse5 sees the tag.
 export const MAX_EMAIL_ATTRIBUTES = 512;
+// Foster parenting (stray content inside a <table>) inserts before a sibling, and finding that
+// sibling scans the parent's child list, so thousands of fostered nodes cost quadratic time: a
+// 900 KB body took 6 s on a CI runner. Real e-mail fosters a handful; past this the judge fails closed.
+export const MAX_EMAIL_FOSTER_INSERTS = 512;
 
 // The judge wraps the fragment in <html> and <body>; those two levels are ours, not the e-mail's.
 const EMAIL_PARSE_WRAPPER_DEPTH = 2;
@@ -628,8 +632,14 @@ class EmailScanError extends Error {}
  * open-element stack is then bounded by the cap, so a scope scan costs at most O(cap) and the whole
  * parse is O(input × cap) whatever the markup.
  */
-function depthBoundingTreeAdapter(maxDepth: number): TreeAdapter<DefaultTreeAdapterTypes.DefaultTreeAdapterMap> {
+function depthBoundingTreeAdapter(maxDepth: number, maxFosterInserts: number): TreeAdapter<DefaultTreeAdapterTypes.DefaultTreeAdapterMap> {
   const depths = new WeakMap<DefaultTreeAdapterTypes.Node, number>();
+  // One budget per parse: every insert-before (element or text) searches the parent's children.
+  let fosterInserts = 0;
+  const foster = () => {
+    fosterInserts += 1;
+    if (fosterInserts > maxFosterInserts) throw new EmailNestingError();
+  };
   const track = (parentNode: DefaultTreeAdapterTypes.ParentNode, newNode: DefaultTreeAdapterTypes.ChildNode) => {
     const depth = (depths.get(parentNode) ?? 0) + 1;
     if (depth > maxDepth) throw new EmailNestingError();
@@ -651,6 +661,7 @@ function depthBoundingTreeAdapter(maxDepth: number): TreeAdapter<DefaultTreeAdap
     },
     insertBefore(parentNode, newNode, referenceNode) {
       // Foster parenting inserts before a table's current child rather than appending.
+      foster();
       track(parentNode, newNode);
       defaultTreeAdapter.insertBefore(parentNode, newNode, referenceNode);
     },
@@ -668,6 +679,7 @@ function depthBoundingTreeAdapter(maxDepth: number): TreeAdapter<DefaultTreeAdap
       if (last && defaultTreeAdapter.isTextNode(last)) depths.set(last, (depths.get(parentNode) ?? 0) + 1);
     },
     insertTextBefore(parentNode, text, referenceNode) {
+      foster();
       defaultTreeAdapter.insertTextBefore(parentNode, text, referenceNode);
       const index = parentNode.childNodes.indexOf(referenceNode);
       const previous = index > 0 ? parentNode.childNodes[index - 1] : undefined;
@@ -676,8 +688,11 @@ function depthBoundingTreeAdapter(maxDepth: number): TreeAdapter<DefaultTreeAdap
   };
 }
 
-const EMAIL_TREE_ADAPTER = depthBoundingTreeAdapter(MAX_EMAIL_NESTING + EMAIL_PARSE_WRAPPER_DEPTH);
-const EMAIL_PARSE_OPTIONS = { scriptingEnabled: true, treeAdapter: EMAIL_TREE_ADAPTER };
+// A fresh adapter per parse, so the foster budget and depth map never carry over between parses.
+const emailParseOptions = () => ({
+  scriptingEnabled: true,
+  treeAdapter: depthBoundingTreeAdapter(MAX_EMAIL_NESTING + EMAIL_PARSE_WRAPPER_DEPTH, MAX_EMAIL_FOSTER_INSERTS),
+});
 // The judge parses a whole document and reads its <body>, which is how the archive page embeds
 // the e-mail (a <div> inside <main>). A document parse has no fragment root adoption, so it stays
 // linear however many top-level nodes the input has, and a stray </div> or </body> cannot move
@@ -688,7 +703,7 @@ function parseEmailDocument(markup: string): {
   document: DefaultTreeAdapterTypes.Document;
   body: DefaultTreeAdapterTypes.Element | null;
 } {
-  const document = parse(`<!doctype html><html><head></head><body>${markup}`, EMAIL_PARSE_OPTIONS);
+  const document = parse(`<!doctype html><html><head></head><body>${markup}`, emailParseOptions());
   const root = document.childNodes.find((node) => 'tagName' in node && node.tagName === 'html') as
     | DefaultTreeAdapterTypes.Element
     | undefined;

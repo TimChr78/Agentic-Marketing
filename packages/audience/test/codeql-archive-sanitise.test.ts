@@ -816,3 +816,25 @@ describe('archive sanitising: the real rendered page (Sol re-check 4)', () => {
     expect(page).toContain('<p>Hello <a href="https://example.com">there</a></p>');
   });
 });
+
+describe('archive sanitising: foster parenting is bounded (CI 6.3 s cold)', () => {
+  it('fails closed quickly on a table that fosters thousands of nodes', () => {
+    const html = `<table>${'<input>'.repeat(128_000)}</table>`;
+    const started = performance.now();
+    const out = sanitiseEmailBody(html);
+    const ms = performance.now() - started;
+    expect(out.startsWith('&lt;table&gt;')).toBe(true);
+    expect(ms, `foster cold: ${ms.toFixed(0)} ms`).toBeLessThan(1_000);
+  });
+
+  it('keeps a realistic table with a few stray fostered nodes byte-identical', () => {
+    const html = '<table><tr><td>a</td></tr><p>stray</p><b>bold</b></table><p>after</p>';
+    expect(sanitiseEmailBody(html)).toBe(html);
+  });
+
+  it('resets the foster budget for each parse', () => {
+    const one = `<table>${'<input>'.repeat(400)}</table>`; // under the 512 budget, twice
+    expect(sanitiseEmailBody(one)).toBe(one);
+    expect(sanitiseEmailBody(one)).toBe(one);
+  });
+});
