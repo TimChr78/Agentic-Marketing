@@ -819,12 +819,9 @@ describe('archive sanitising: the real rendered page (Sol re-check 4)', () => {
 
 describe('archive sanitising: foster parenting is bounded (CI 6.3 s cold)', () => {
   it('fails closed quickly on a table that fosters thousands of nodes', () => {
-    const html = `<table>${'<input>'.repeat(128_000)}</table>`;
-    const started = performance.now();
-    const out = sanitiseEmailBody(html);
-    const ms = performance.now() - started;
-    expect(out.startsWith('&lt;table&gt;')).toBe(true);
-    expect(ms, `foster cold: ${ms.toFixed(0)} ms`).toBeLessThan(1_000);
+    const fostered = (n: number) => `<table>${'<input>'.repeat(n)}</table>`;
+    expect(sanitiseEmailBody(fostered(128_000)).startsWith('&lt;table&gt;')).toBe(true);
+    expectLinear(fostered, (html) => sanitiseEmailBody(html), 32_000);
   });
 
   it('keeps a realistic table with a few stray fostered nodes byte-identical', () => {
@@ -846,18 +843,23 @@ describe('archive sanitising: every tree-construction path is bounded (HY4 re-ch
     return { out, ms: performance.now() - started };
   };
 
-  it('fails closed quickly when <html>/<body> tags keep merging new attributes', () => {
+  // Absolute millisecond limits flake on CI runners (1.6 s there, 0.4 s locally); assert the bound
+  // as fail-closed output plus linear scaling, with expectLinear's generous absolute ceiling.
+  const mergedAttributes = (n: number) => {
     let html = '';
-    for (let i = 0; i < 10_000; i += 1) html += `<html a${i}></html>`;
-    const { out, ms } = timed(html);
-    expect(out.startsWith('&lt;html')).toBe(true);
-    expect(ms, `adoptAttributes: ${ms.toFixed(0)} ms`).toBeLessThan(1_500);
+    for (let i = 0; i < n; i += 1) html += `<html a${i}></html>`;
+    return html;
+  };
+
+  it('fails closed quickly when <html>/<body> tags keep merging new attributes', () => {
+    expect(timed(mergedAttributes(10_000)).out.startsWith('&lt;html')).toBe(true);
+    expectLinear(mergedAttributes, (html) => sanitiseEmailBody(html), 2_500);
   });
 
   it('fails closed quickly when the adoption agency re-parents a huge block', () => {
-    const { out, ms } = timed(`<b><div>${'<br>'.repeat(200_000)}</b>`);
-    expect(out.startsWith('&lt;b&gt;')).toBe(true);
-    expect(ms, `adoption agency: ${ms.toFixed(0)} ms`).toBeLessThan(1_500);
+    const block = (n: number) => `<b><div>${'<br>'.repeat(n)}</b>`;
+    expect(timed(block(200_000)).out.startsWith('&lt;b&gt;')).toBe(true);
+    expectLinear(block, (html) => sanitiseEmailBody(html), 50_000);
   });
 
   it('still keeps ordinary misnesting and a body attribute byte-identical', () => {
