@@ -15,7 +15,7 @@ import { profileForMessage } from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { and, asc, eq, sql } from 'drizzle-orm';
 import { type Context, Hono } from 'hono';
-import { type DefaultTreeAdapterTypes, parse, serialize } from 'parse5';
+import { type DefaultTreeAdapterTypes, defaultTreeAdapter, parse, serialize, type TreeAdapter } from 'parse5';
 import { z } from 'zod';
 
 // The public newsletter archive and the per-recipient web version (#100), served on the links
@@ -594,7 +594,69 @@ export function scanEmailBody(body: string): string {
   return out;
 }
 
-const EMAIL_PARSE_OPTIONS = { scriptingEnabled: true } as const;
+/** Bounds the parse5 judge's input (#578). Real e-mail nests to about 40. */
+export const MAX_EMAIL_NESTING = 256;
+export const MAX_EMAIL_LENGTH = 1_000_000;
+
+// The judge wraps the fragment in <html> and <body>; those two levels are ours, not the e-mail's.
+const EMAIL_PARSE_WRAPPER_DEPTH = 2;
+
+/**
+ * Thrown by the depth-bounding adapter. It is private to this module, so a caller's own error can
+ * never be mistaken for the nesting abort and silently turned into an escaped body.
+ */
+class EmailNestingError extends Error {}
+
+/**
+ * parse5 is the authority on how deeply a document nests, not a hand-written approximation: scope
+ * rules for tables, templates and foreign content are too subtle to mirror. This adapter records
+ * each node's depth as depth(parent) + 1 and throws before the tree can go past `maxDepth`. Every
+ * insertion path is covered, including foster parenting and `<template>` content. The parser's
+ * open-element stack is then bounded by the cap, so a scope scan costs at most O(cap) and the whole
+ * parse is O(input × cap) whatever the markup.
+ */
+function depthBoundingTreeAdapter(maxDepth: number): TreeAdapter<DefaultTreeAdapterTypes.DefaultTreeAdapterMap> {
+  const depths = new WeakMap<DefaultTreeAdapterTypes.Node, number>();
+  const track = (parentNode: DefaultTreeAdapterTypes.ParentNode, newNode: DefaultTreeAdapterTypes.ChildNode) => {
+    const depth = (depths.get(parentNode) ?? 0) + 1;
+    if (depth > maxDepth) throw new EmailNestingError();
+    depths.set(newNode, depth);
+  };
+  return {
+    ...defaultTreeAdapter,
+    appendChild(parentNode, newNode) {
+      track(parentNode, newNode);
+      defaultTreeAdapter.appendChild(parentNode, newNode);
+    },
+    insertBefore(parentNode, newNode, referenceNode) {
+      // Foster parenting inserts before a table's current child rather than appending.
+      track(parentNode, newNode);
+      defaultTreeAdapter.insertBefore(parentNode, newNode, referenceNode);
+    },
+    setTemplateContent(templateElement, contentElement) {
+      // The content fragment is one level deeper than its <template>.
+      const depth = (depths.get(templateElement) ?? 0) + 1;
+      if (depth > maxDepth) throw new EmailNestingError();
+      depths.set(contentElement, depth);
+      defaultTreeAdapter.setTemplateContent(templateElement, contentElement);
+    },
+    insertText(parentNode, text) {
+      // Text has no children, so it cannot nest; record it for completeness without bounding it.
+      defaultTreeAdapter.insertText(parentNode, text);
+      const last = parentNode.childNodes[parentNode.childNodes.length - 1];
+      if (last && defaultTreeAdapter.isTextNode(last)) depths.set(last, (depths.get(parentNode) ?? 0) + 1);
+    },
+    insertTextBefore(parentNode, text, referenceNode) {
+      defaultTreeAdapter.insertTextBefore(parentNode, text, referenceNode);
+      const index = parentNode.childNodes.indexOf(referenceNode);
+      const previous = index > 0 ? parentNode.childNodes[index - 1] : undefined;
+      if (previous && defaultTreeAdapter.isTextNode(previous)) depths.set(previous, (depths.get(parentNode) ?? 0) + 1);
+    },
+  };
+}
+
+const EMAIL_TREE_ADAPTER = depthBoundingTreeAdapter(MAX_EMAIL_NESTING + EMAIL_PARSE_WRAPPER_DEPTH);
+const EMAIL_PARSE_OPTIONS = { scriptingEnabled: true, treeAdapter: EMAIL_TREE_ADAPTER };
 // The judge parses a whole document and reads its <body>, which is how the archive page embeds
 // the e-mail (a <div> inside <main>). A document parse has no fragment root adoption, so it stays
 // linear however many top-level nodes the input has, and a stray </div> or </body> cannot move
@@ -693,18 +755,20 @@ function cleanActiveContent(markup: string): string {
  */
 export function sanitiseEmailBody(body: string, isActive: (html: string) => boolean = containsActiveContent): string {
   const scanned = scanEmailBody(body);
-  // Fail closed before parse5 sees the markup: a document past the size budget or nested past the
-  // cap would make the judge itself super-linear (#578).
+  // A cheap early exit for the common hostile shape; the tree adapter below is the real bound, so
+  // this scan may undercount without risking the judge (#578).
   if (scanned.length > MAX_EMAIL_LENGTH || exceedsNestingCap(scanned, MAX_EMAIL_NESTING)) return escapeHtml(body);
-  if (!isActive(scanned)) return scanned;
-  const cleaned = cleanActiveContent(scanned);
-  if (!isActive(cleaned)) return cleaned;
-  return escapeHtml(body);
+  try {
+    if (!isActive(scanned)) return scanned;
+    const cleaned = cleanActiveContent(scanned);
+    if (!isActive(cleaned)) return cleaned;
+    return escapeHtml(body);
+  } catch (error) {
+    // The adapter aborts the moment the tree passes the cap, before a scope scan can get expensive.
+    if (error instanceof EmailNestingError) return escapeHtml(body);
+    throw error;
+  }
 }
-
-/** Bounds the parse5 judge's input (#578). */
-export const MAX_EMAIL_NESTING = 512;
-export const MAX_EMAIL_LENGTH = 1_000_000;
 
 /**
  * Elements whose content a browser reads as raw text, not as markup. The pre-scan must skip to the
@@ -724,18 +788,20 @@ const RAW_TEXT_ELEMENTS = new Set([
 ]);
 
 /**
- * A linear pre-scan of the scanner's output. parse5's `element in scope` checks cost O(depth) per
- * start tag, so a benign document nested a few thousand deep takes seconds. Real e-mail rarely
- * nests deeper than about 40, so 512 leaves ordinary mail untouched while keeping the judge's own
- * work linear.
+ * A linear, best-effort early exit over the scanner's output. It is not the authority on HTML
+ * scope: table, template and foreign-content rules are subtle enough that any rule here can
+ * disagree with parse5. The depth-bounding tree adapter is the real bound; this scan only catches
+ * the common hostile shapes before parse5 starts. Undercounting is therefore safe, and where a
+ * choice is cheap we overcount so pathological input fails closed earlier.
  *
- * The bound must never undercount, or 10,000 × `<div/>` (60 KB) reaches parse5 and costs seconds.
- * In HTML a slash on a non-void element does not close it, and an end tag with no matching open
- * element is ignored, so neither may cancel a level. Count every non-void start tag, including
- * `/>`, and decrement only the name that is actually open (per-name counts keep this linear).
- * Overcounting only fails closed on pathological input, which is the safe direction.
+ * Raw text is skipped only when the markup contains no foreign content: `<svg><style>` and
+ * `<math><style>` look like raw text here but are not to a browser, and the divs after them are
+ * real nesting.
  */
+const FOREIGN_CONTENT = /<(?:svg|math)(?:[\s/>]|$)/i;
+
 function exceedsNestingCap(markup: string, cap: number): boolean {
+  const hasForeignContent = FOREIGN_CONTENT.test(markup);
   let depth = 0;
   const open = new Map<string, number>();
   let i = 0;
@@ -769,8 +835,9 @@ function exceedsNestingCap(markup: string, cap: number): boolean {
     }
     if (VOID_ELEMENTS.has(tag.lowerName)) continue;
     // Raw-text content is not markup to a browser. Skip the whole element; its end tag closes it,
-    // so the element itself adds no net level.
-    if (RAW_TEXT_ELEMENTS.has(tag.lowerName)) {
+    // so the element itself adds no net level. Only safe when no foreign content could turn one
+    // of these names into an ordinary SVG/MathML element.
+    if (!hasForeignContent && RAW_TEXT_ELEMENTS.has(tag.lowerName)) {
       i = findEndTagEnd(markup, tag.lowerName, tag.end);
       continue;
     }

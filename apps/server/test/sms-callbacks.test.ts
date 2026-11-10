@@ -184,10 +184,16 @@ describe('inbound keyword normalisation (#636)', () => {
     });
   });
 
-  it('leaves a long conversational sentence alone', async () => {
+  it('withdraws consent for a conversational sentence with a strong stop word anywhere', async () => {
+    // Accepted behaviour: a false opt-out is recoverable, a missed one is not.
     const before = await suppressionCount();
     expect((await inbound(phoneOf(CONVERSATIONAL), "Don't stop the music, it's great")).status).toBe(200);
-    expect(await suppressionCount()).toBe(before);
-    expect((await consentHistory(profileIds[CONVERSATIONAL])).some((r) => r.status === 'withdrawn')).toBe(false);
+    expect(await suppressionCount()).toBe(before + 1);
+    expect(
+      (await consentHistory(profileIds[CONVERSATIONAL])).find((r) => r.purpose === 'marketing_sms' && r.status === 'withdrawn'),
+    ).toMatchObject({
+      channel: 'sms',
+      source: 'unsubscribe',
+    });
   });
 });

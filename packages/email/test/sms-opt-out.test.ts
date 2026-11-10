@@ -68,8 +68,21 @@ describe('inbound reply normalisation (#636)', () => {
     expect(classifySmsReply('start.')).toMatchObject({ intent: 'start' });
   });
 
-  it('does not treat a conversational sentence as a stop', () => {
-    expect(classifySmsReply("Don't stop the music, it's great")).toBeNull();
+  it('treats a strong stop word anywhere in a long reply as a stop', () => {
+    // Accepted behaviour: a false opt-out is recoverable, a missed one is not.
+    for (const body of [
+      "Don't stop the music, it's great",
+      'Please stop sending me these messages right now',
+      'Stop by our store this weekend',
+    ]) {
+      expect(classifySmsReply(body), body).toMatchObject({ intent: 'stop' });
+    }
+  });
+
+  it('keeps weak stop words to the whole message, the first word, or a short message', () => {
+    expect(classifySmsReply('I want to cancel my order please thanks')).toBeNull();
+    expect(classifySmsReply('CANCEL')).toMatchObject({ intent: 'stop' });
+    expect(classifySmsReply('Cancel my order')).toMatchObject({ intent: 'stop' });
   });
 
   it.each(['STOP sending me these messages please', 'unsubscribe me from this list right now please'])(

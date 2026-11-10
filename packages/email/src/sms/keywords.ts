@@ -4,11 +4,13 @@
 // Rule:
 // - Normalise: NFKC (fullwidth and other compatibility forms), lower-case, drop emoji, collapse
 //   whitespace, then strip punctuation around the message and around each word.
-// - STOP when the whole normalised message is a stop keyword, when its first word is one (however
-//   long the rest of the message is: "STOP sending me these messages please"), or when it is short
-//   (at most five words) and contains a stop keyword as a standalone word. "Please STOP" opts out;
-//   "STOP!!!" too. A long conversational sentence that merely contains one ("Don't stop the music,
-//   it's great") does not.
+// - Strong stop words (STOP, STOPALL, UNSUBSCRIBE) opt out anywhere they appear as a standalone
+//   word, however long the reply: "Please stop sending me these messages right now" and "Don't
+//   stop the music, it's great" both opt out. For replies to marketing SMS a false opt-out is the
+//   compliant failure; a missed one keeps texting someone who asked us to stop.
+// - Weak stop words (CANCEL, END, QUIT and the localised spellings) opt out only as the whole
+//   message, as the first word, or in a short message of at most five words. That keeps "I want to
+//   cancel my order please thanks" from opting out.
 // - START and HELP only as the whole normalised message, so "please start" is not an opt-in.
 // - Ambiguity: a short message with both a stop and a start word is a STOP. Opting out is the
 //   compliant default: a wrong opt-out is recoverable, a missed one keeps texting someone who
@@ -29,6 +31,8 @@ export interface SmsReplyMatch {
 const SHORT_MESSAGE_WORDS = 5;
 
 const stop = new Set(STOP_WORDS.map((w) => w.toLowerCase()));
+// These three are unambiguous enough to count anywhere in a reply.
+const strongStop = new Set(['stop', 'stopall', 'unsubscribe']);
 const start = new Set(START_WORDS.map((w) => w.toLowerCase()));
 const help = new Set(HELP_WORDS.map((w) => w.toLowerCase()));
 
@@ -50,8 +54,10 @@ export function classifySmsReply(body: string): SmsReplyMatch | null {
   if (!text) return null;
   const words = text.split(' ').map(wordOf).filter(Boolean);
 
-  // STOP first, so the ambiguity rule always favours opting out. A leading keyword is a clear
-  // instruction even when the message goes on ("STOP sending me these messages please").
+  // STOP first, so the ambiguity rule always favours opting out. A strong keyword anywhere is a
+  // clear instruction even when the message goes on ("Please stop sending me these messages").
+  const strong = words.find((word) => strongStop.has(word));
+  if (strong) return { intent: 'stop', keyword: strong.toUpperCase() };
   const first = words[0];
   if (first && stop.has(first)) return { intent: 'stop', keyword: first.toUpperCase() };
   if (words.length <= SHORT_MESSAGE_WORDS) {

@@ -504,7 +504,7 @@ describe('archive sanitising: nesting is bounded before the parse5 judge (#578)'
   const body = (inner: string) => emailParts(`<style>.x{}</style><body>${inner}</body>`).body;
 
   it('fails closed on nesting deeper than the cap', () => {
-    const deep = `${'<div>'.repeat(600)}deep${'</div>'.repeat(600)}`;
+    const deep = `${'<div>'.repeat(MAX_EMAIL_NESTING + 1)}deep${'</div>'.repeat(MAX_EMAIL_NESTING + 1)}`;
     const out = body(deep);
 
     expect(out).toContain('&lt;div&gt;');
@@ -516,9 +516,10 @@ describe('archive sanitising: nesting is bounded before the parse5 judge (#578)'
     expect(body(html)).toBe(html);
   });
 
-  it('takes the fast path at the nesting cap', () => {
-    const html = `${'<div>'.repeat(512)}x${'</div>'.repeat(512)}`;
+  it('takes the fast path one level under the cap', () => {
+    const html = `${'<div>'.repeat(MAX_EMAIL_NESTING - 1)}x${'</div>'.repeat(MAX_EMAIL_NESTING - 1)}`;
     expect(body(html)).toBe(html);
+    expect(sanitiseEmailBody(html)).toBe(scanEmailBody(html));
   });
 
   it('fails closed above the size budget', () => {
@@ -549,6 +550,23 @@ describe('archive sanitising: nesting is bounded before the parse5 judge (#578)'
     expectLinear((n) => `${'<div>'.repeat(40)}x${'</div>'.repeat(40)}`.repeat(n), body, 200);
   });
 
+  // Sol's re-check: each of these undercounted in a hand-written pre-scan (table/template scope and
+  // foreign-content <style>) and then cost seconds inside parse5. The tree adapter is the bound.
+  const solCases: [string, (n: number) => string, number][] = [
+    ['table scope ignoring </div>', (n) => '<div><table></div></table>'.repeat(n), 2_500],
+    ['template scope ignoring </div>', (n) => '<div><template></div></template>'.repeat(n), 2_500],
+    ['foreign-content <style> in SVG', (n) => `<svg><style>${'<div>'.repeat(n)}`, 7_500],
+    ['foreign-content <style> in MathML', (n) => `<math><style>${'<div>'.repeat(n)}`, 7_500],
+  ];
+
+  it.each(solCases)('fails closed and stays linear on %s', (_label, build, base) => {
+    const out = body(build(base * 4));
+
+    expect(out).toContain('&lt;div');
+    expect(out).not.toContain('<div');
+    expectLinear(build, body, base);
+  });
+
   it('stays linear on wide sibling-heavy input', () => {
     expectLinear((n) => '<p>x</p>'.repeat(n), body, 5_000);
   });
@@ -560,21 +578,23 @@ describe('archive sanitising: nesting is bounded before the parse5 judge (#578)'
     const out = body('<div/>'.repeat(10_000));
     expect(out).toContain('&lt;div/&gt;');
     expect(out).not.toContain('<div');
-    expectLinear((n) => '<div/>'.repeat(n), body, 2_500);
+    // The cap now aborts early, so the remaining work is escaping the input in linear time. A
+    // larger base keeps the ratio out of sub-millisecond noise.
+    expectLinear((n) => '<div/>'.repeat(n), body, 10_000);
   });
 
   it('fails closed and stays linear when end tags match nothing open', () => {
     const out = body('<div></span>'.repeat(10_000));
     expect(out).toContain('&lt;div&gt;');
     expect(out).not.toContain('<div');
-    expectLinear((n) => '<div></span>'.repeat(n), body, 2_500);
+    expectLinear((n) => '<div></span>'.repeat(n), body, 10_000);
   });
 
   it('fails closed and stays linear on repeated self-closing paragraphs', () => {
     const out = body('<p/>'.repeat(10_000));
     expect(out).toContain('&lt;p/&gt;');
     expect(out).not.toContain('<p');
-    expectLinear((n) => '<p/>'.repeat(n), body, 2_500);
+    expectLinear((n) => '<p/>'.repeat(n), body, 10_000);
   });
 
   it('keeps a true match to an open element on the fast path', () => {
