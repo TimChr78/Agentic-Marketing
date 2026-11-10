@@ -1,4 +1,5 @@
 import { DEFAULT_PURPOSES, publishedSingleton } from '@agentic-marketing/artifacts';
+import { redact } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
 import { consentStateOf, currentConsent, personCrypto, purposeAllowed } from '@agentic-marketing/profiles';
@@ -9,6 +10,16 @@ import { and, eq } from 'drizzle-orm';
 // non-personal traits and personal traits the tracking plan marks agentVisible, the profile id
 // instead of any identifier, and recent events with free text scrubbed of contact details.
 
+// Re-exported from core, where the consent ledger also uses the same detectors.
+export {
+  personalDataIn,
+  personalDataInText,
+  REDACTED_CYCLE,
+  REDACTED_LIMIT,
+  redact,
+  redactText,
+} from '@agentic-marketing/core';
+
 export const AI_PURPOSE = 'ai_processing';
 
 export interface PersonContext {
@@ -16,79 +27,6 @@ export interface PersonContext {
   traits: Record<string, unknown>;
   recentEvents: { name: string; at: string; properties: Record<string, unknown> }[];
   trigger?: { name: string; properties: Record<string, unknown> };
-}
-
-const detectors: [RegExp, string][] = [
-  [/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '[email]'],
-  [/\b[A-Z]{2}\d{2}(?: ?[A-Z0-9]{4}){2,7}(?: ?[A-Z0-9]{1,4})?\b/g, '[iban]'],
-  [/\b(?:\d[ -]?){13,19}\b/g, '[card]'],
-  [/(?:\+|\b00)\d[\d ().-]{6,}\d\b/g, '[phone]'],
-  [/\b\d{6}-?\d{4}\b/g, '[national-id]'],
-  [/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, '[ip]'],
-];
-
-/** Rule-based redaction of contact and payment details in free text. */
-export function redactText(s: string): string {
-  let out = s;
-  for (const [re, label] of detectors) out = out.replace(re, label);
-  return out;
-}
-
-/** Which kinds of personal data the same detectors find in free text, e.g. ["[email]"] (hosted memory notes, #340). */
-export function personalDataInText(s: string): string[] {
-  const found = new Set<string>();
-  for (const [re, label] of detectors) {
-    re.lastIndex = 0;
-    if (re.test(s)) found.add(label);
-    re.lastIndex = 0;
-  }
-  return [...found];
-}
-
-export function redact<T>(v: T, depth = 0): T {
-  if (typeof v === 'string') return redactText(v) as T;
-  if (depth > 5 || v === null || typeof v !== 'object') return v;
-  if (Array.isArray(v)) return v.slice(0, 50).map((x) => redact(x, depth + 1)) as T;
-  return Object.fromEntries(Object.entries(v as Record<string, unknown>).map(([k, x]) => [k, redact(x, depth + 1)])) as T;
-}
-
-/** Keys whose name alone marks personal data, even when the value does not match a detector. */
-const PERSONAL_KEY =
-  /^(e-?mail|phone|mobile|msisdn|first_?name|last_?name|full_?name|name|address|street|postcode|zip|ssn|iban|card(_?number)?)$/i;
-
-/**
- * The kind of personal data in a value ("email", "phone", …), or null. Uses the same detectors
- * as `redact`, so a decision provider without a no-retention agreement can refuse a state
- * instead of sending it (#194).
- */
-export function personalDataIn(v: unknown): string | null {
-  // Iterative, with no depth cap: a value nested deeper than the old limit of 8 used to be
-  // skipped entirely, so an e-mail nine levels down reached the provider (#352). The stack also
-  // keeps a deeply nested value from overflowing the call stack.
-  const stack: unknown[] = [v];
-  const seen = new WeakSet<object>();
-  while (stack.length) {
-    const x = stack.pop();
-    if (typeof x === 'string') {
-      for (const [re, label] of detectors) {
-        re.lastIndex = 0;
-        if (re.test(x)) return label.replace(/[[\]]/g, '');
-      }
-      continue;
-    }
-    if (x === null || typeof x !== 'object') continue;
-    if (seen.has(x)) continue;
-    seen.add(x);
-    if (Array.isArray(x)) {
-      for (const item of x) stack.push(item);
-      continue;
-    }
-    for (const [k, item] of Object.entries(x as Record<string, unknown>)) {
-      if (PERSONAL_KEY.test(k)) return 'identifier';
-      stack.push(item);
-    }
-  }
-  return null;
 }
 
 /** Whether the person's data may be processed by AI (the ai_processing purpose and its basis). */

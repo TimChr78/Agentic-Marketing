@@ -7,8 +7,8 @@ import { concurrentIndexNames, isNoTransaction, migrate } from '../src/migrate';
 import { APP_ROLE, createDisposableDb, type DisposableDb, hasTestDatabase } from './disposable';
 
 // The 0.10.1 migrations on a populated database (#453, #488, 0.10.1 review). 0.10.0's schema is
-// the head before 0082; the messages table is seeded with completed rows, then 0082–0086 run.
-// The test guards the properties that make this safe on a large install:
+// the head before 0082; the messages table is seeded with completed rows, then 0082 to the current
+// head run. The test guards the properties that make this safe on a large install:
 //   - 0082 is metadata-only and never rewrites the table;
 //   - the concurrent index files are marked no-transaction;
 //   - a send is not blocked by a ShareLock while the indexes build;
@@ -149,15 +149,23 @@ describe.skipIf(!hasTestDatabase())('0.10.1 migrations on a populated install', 
     try {
       await d.db.admin.query(`CREATE ROLE ${role} LOGIN CREATEROLE PASSWORD 'rls-password' NOSUPERUSER NOBYPASSRLS`);
       await d.db.admin.query(`GRANT CREATE ON SCHEMA public TO ${role}`);
-      // The migration role owns the tables the 0.10.1 files alter. It is deliberately not a
+      // The migration role owns the tables the migration files alter. It is deliberately not a
       // superuser and has no BYPASSRLS, so FORCE RLS applies to it.
-      for (const table of ['messages', 'experience_rollouts', 'hosted_agent_runs', 'workspaces'])
+      for (const table of ['messages', 'experience_rollouts', 'hosted_agent_runs', 'workspaces', 'workspace_domains'])
         await d.db.admin.query(`ALTER TABLE ${table} OWNER TO ${role}`);
       await d.db.admin.query(`GRANT SELECT, INSERT ON schema_migrations TO ${role}`);
       await d.db.admin.query(
         `INSERT INTO experience_rollouts (workspace_id, artifact_id, version, steps, step_hours, step_index, share, status, paused_at)
            VALUES ($1, 'exp_paused_before_upgrade', 1, '{10,50}', 24, 1, 10, 'paused', $2)`,
         [d.workspace, pausedAt],
+      );
+      // 0087 backfills pending_since under FORCE RLS. A populated row inserted before it runs proves
+      // the backfill sees the row as the non-BYPASSRLS owner, so SET NOT NULL cannot fail.
+      const domainCreatedAt = new Date(Date.now() - 60_000);
+      await d.db.admin.query(
+        `INSERT INTO workspace_domains (id, workspace_id, host, status, verification_token, created_by, created_at)
+           VALUES ('dom_before_0087', $1, 'before-0087.example', 'pending', 'token-before-0087', 'test', $2)`,
+        [d.workspace, domainCreatedAt],
       );
 
       const limitedUrl = new URL(d.url.toString());
@@ -179,6 +187,12 @@ describe.skipIf(!hasTestDatabase())('0.10.1 migrations on a populated install', 
       );
       expect(rows).toHaveLength(1);
       expect(rows[0]?.notified_at).not.toBeNull();
+
+      const domain = await d.db.admin.query<{ pending_since: Date; created_at: Date }>(
+        `SELECT pending_since, created_at FROM workspace_domains WHERE id = 'dom_before_0087'`,
+      );
+      expect(domain.rows, '0087 must not fail on a populated database').toHaveLength(1);
+      expect(domain.rows[0]?.pending_since.getTime()).toBe(domain.rows[0]?.created_at.getTime());
 
       const sentAt = await d.db.admin.query<{ present: boolean }>(
         `SELECT EXISTS (SELECT 1 FROM information_schema.columns

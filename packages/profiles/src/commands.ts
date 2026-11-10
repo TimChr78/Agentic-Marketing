@@ -6,6 +6,7 @@ import type {} from '@agentic-marketing/hotstate';
 import { and, desc, eq, inArray, isNull, lt, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import {
+  consentProofFor,
   consentStateOf,
   consentStatusSql,
   consentSummary,
@@ -467,7 +468,8 @@ export const recordConsentCommand = defineCommand({
 export const consentHistory = defineCommand({
   name: 'consent.history',
   title: 'Consent ledger of a person',
-  description: 'Every consent, refusal, withdrawal and objection recorded for a person (including merged profiles), oldest first.',
+  description:
+    'Every consent, refusal, withdrawal and objection recorded for a person (including merged profiles), oldest first. Proof fields personal to the person are withheld, and proofWithheld is true, unless your role has profiles:pii.',
   input: z.object({ profileId: ProfileId }),
   output: z.object({
     records: z.array(
@@ -478,6 +480,9 @@ export const consentHistory = defineCommand({
         basis: z.string(),
         source: z.string(),
         proof: z.record(z.string(), z.unknown()),
+        proofWithheld: z
+          .boolean()
+          .describe('True when proof fields personal to this person were withheld because your role needs profiles:pii'),
         recordedAt: z.string(),
         recordedBy: z.string().nullable(),
       }),
@@ -487,6 +492,7 @@ export const consentHistory = defineCommand({
   effect: 'read',
   target: (i) => i.profileId,
   handler: async (input, ctx) => {
+    const canSeePii = ctx.principal.permissions.has('profiles:pii');
     const p = await canonical(ctx, input.profileId);
     const family = await mergedFamily(ctx.tx, ctx.principal.workspaceId, p.id);
     const rows = await ctx.tx
@@ -501,7 +507,7 @@ export const consentHistory = defineCommand({
         status: r.status,
         basis: r.basis,
         source: r.source,
-        proof: r.proof,
+        ...consentProofFor(r.proof, canSeePii),
         recordedAt: r.recordedAt.toISOString(),
         recordedBy: r.recordedBy,
       })),

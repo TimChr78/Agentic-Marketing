@@ -1,3 +1,4 @@
+import http from 'node:http';
 import { addWorkspaceDomain } from '@agentic-marketing/artifacts';
 import { agentPrincipal, ROLE_PERMISSIONS } from '@agentic-marketing/commands';
 import { schema } from '@agentic-marketing/db';
@@ -21,6 +22,21 @@ let martechId = '';
 let secondBId = '';
 let sharedAId = '';
 let sharedA2Id = '';
+
+/** A raw request, so a test can choose the Host header the challenge route sees. */
+const challenge = (path: string, host: string) =>
+  new Promise<{ status: number; body: string }>((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port: PORT, path, method: 'GET', headers: { host } }, (res) => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => {
+        body += chunk;
+      });
+      res.on('end', () => resolve({ status: res.statusCode ?? 0, body }));
+    });
+    req.on('error', reject);
+    req.end();
+  });
 
 beforeAll(async () => {
   t = await startTestServer('test_workspace_domains', PORT, {
@@ -247,8 +263,8 @@ describe('brand domains', () => {
 
   it('expires a pending claim after seven days so another workspace can reclaim it (#467)', async () => {
     await t.srv.db.admin.query(
-      `INSERT INTO workspace_domains (id, workspace_id, host, path_prefix, is_primary, status, verification_token, created_by, created_at)
-       VALUES ($1, $2, $3, NULL, false, 'pending', $4, $5, now() - interval '8 days')`,
+      `INSERT INTO workspace_domains (id, workspace_id, host, path_prefix, is_primary, status, verification_token, created_by, created_at, pending_since)
+       VALUES ($1, $2, $3, NULL, false, 'pending', $4, $5, now() - interval '8 days', now() - interval '8 days')`,
       ['wdo_stale', wsA, 'stale.example', 'wdv_stale', owner.id],
     );
     const reclaimed = await t.api(otherOwner, wsB).call('workspace.domains.add', { host: 'stale.example' });
@@ -256,13 +272,101 @@ describe('brand domains', () => {
     expect((await t.srv.db.admin.query('SELECT id FROM workspace_domains WHERE id = $1', ['wdo_stale'])).rows).toEqual([]);
 
     await t.srv.db.admin.query(
-      `INSERT INTO workspace_domains (id, workspace_id, host, path_prefix, is_primary, status, verification_token, created_by, created_at)
-       VALUES ($1, $2, $3, NULL, false, 'pending', $4, $5, now() - interval '1 day')`,
+      `INSERT INTO workspace_domains (id, workspace_id, host, path_prefix, is_primary, status, verification_token, created_by, created_at, pending_since)
+       VALUES ($1, $2, $3, NULL, false, 'pending', $4, $5, now() - interval '1 day', now() - interval '1 day')`,
       ['wdo_fresh', wsA, 'fresh.example', 'wdv_fresh', owner.id],
     );
     const blocked = await rejects(t.api(otherOwner, wsB).call('workspace.domains.add', { host: 'fresh.example' }));
     expect(blocked.status).toBe(400);
     expect(blocked.message).toMatch(/claimed by another workspace/i);
+  });
+
+  it('starts a fresh claim window when an old domain is moved (#575)', async () => {
+    t.srv.services.fetchDomainChallenge = async (url) => ({
+      status: 200,
+      body: decodeURIComponent(new URL(url).pathname.split('/').pop() ?? ''),
+    });
+    // A verified row created eight days ago (the issue's reproduction: only `created_at` is old).
+    const added = await t.api(owner, wsA).call('workspace.domains.add', { host: 'old-claim.example' });
+    await t.api(owner, wsA).call('workspace.domains.verify', { id: added.domain.id });
+    await t.srv.db.admin.query(`UPDATE workspace_domains SET created_at = now() - interval '8 days' WHERE id = $1`, [added.domain.id]);
+
+    const moved = await t.api(owner, wsA).call('workspace.domains.update', { id: added.domain.id, host: 'new-claim.example' });
+    expect(moved.domain).toMatchObject({ host: 'new-claim.example', status: 'pending', verifiedAt: null });
+
+    // The move made a new claim, so the row's age must not let another workspace reclaim it.
+    const blocked = await rejects(t.api(otherOwner, wsB).call('workspace.domains.add', { host: 'new-claim.example' }));
+    expect(blocked.status).toBe(400);
+    expect(blocked.message).toMatch(/claimed by another workspace/i);
+    expect((await t.srv.db.admin.query('SELECT id FROM workspace_domains WHERE id = $1', [added.domain.id])).rows).toHaveLength(1);
+
+    // A prefix change on another old verified row behaves the same.
+    const reverified = await t.api(owner, wsA).call('workspace.domains.verify', { id: added.domain.id });
+    expect(reverified.domain.status).toBe('verified');
+    await t.srv.db.admin.query(`UPDATE workspace_domains SET created_at = now() - interval '8 days' WHERE id = $1`, [added.domain.id]);
+    const prefixed = await t.api(owner, wsA).call('workspace.domains.update', { id: added.domain.id, pathPrefix: '/brand' });
+    expect(prefixed.domain).toMatchObject({ pathPrefix: '/brand', status: 'pending' });
+    const prefixBlocked = await rejects(
+      t.api(otherOwner, wsB).call('workspace.domains.add', { host: 'new-claim.example', pathPrefix: '/other' }),
+    );
+    expect(prefixBlocked.status).toBe(400);
+    expect(prefixBlocked.message).toMatch(/claimed by another workspace/i);
+
+    // A can still finish verifying the name it just configured.
+    await t.api(owner, wsA).call('workspace.domains.verify', { id: added.domain.id });
+    expect(
+      (await t.api(owner, wsA).call('workspace.domains.list', {})).domains.find((d: { id: string }) => d.id === added.domain.id),
+    ).toMatchObject({ host: 'new-claim.example', pathPrefix: '/brand', status: 'verified' });
+  });
+
+  it('reclaims a claim by when it became pending, not by the row age (#575)', async () => {
+    // An old row that became pending yesterday still holds its hostname.
+    await t.srv.db.admin.query(
+      `INSERT INTO workspace_domains (id, workspace_id, host, path_prefix, is_primary, status, verification_token, created_by, created_at, pending_since)
+       VALUES ($1, $2, 'aged-row.example', NULL, false, 'pending', 'wdv_aged', $3, now() - interval '8 days', now() - interval '1 day')`,
+      ['wdo_aged_row', wsA, owner.id],
+    );
+    const held = await rejects(t.api(otherOwner, wsB).call('workspace.domains.add', { host: 'aged-row.example' }));
+    expect(held.status).toBe(400);
+    expect(held.message).toMatch(/claimed by another workspace/i);
+    expect((await t.srv.db.admin.query('SELECT id FROM workspace_domains WHERE id = $1', ['wdo_aged_row'])).rows).toHaveLength(1);
+
+    // A young row whose pending window ran out is reclaimable.
+    await t.srv.db.admin.query(
+      `INSERT INTO workspace_domains (id, workspace_id, host, path_prefix, is_primary, status, verification_token, created_by, created_at, pending_since)
+       VALUES ($1, $2, 'stale-window.example', NULL, false, 'pending', 'wdv_stale_window', $3, now(), now() - interval '8 days')`,
+      ['wdo_stale_window', wsA, owner.id],
+    );
+    const reclaimed = await t.api(otherOwner, wsB).call('workspace.domains.add', { host: 'stale-window.example' });
+    expect(reclaimed.domain).toMatchObject({ host: 'stale-window.example', status: 'pending' });
+    expect((await t.srv.db.admin.query('SELECT id FROM workspace_domains WHERE id = $1', ['wdo_stale_window'])).rows).toEqual([]);
+  });
+
+  it('does not serve a challenge that would verify another workspace’s host (#575)', async () => {
+    const own = await t.api(owner, wsA).call('workspace.domains.add', { host: 'challenge-held.example' });
+    // A row planted at another prefix with its own token: the commands refuse this, so it is written
+    // directly to prove both the public listener and the verify command refuse to validate it.
+    await t.srv.db.admin.query(
+      `INSERT INTO workspace_domains (id, workspace_id, host, path_prefix, is_primary, status, verification_token, created_by)
+       VALUES ($1, $2, 'challenge-held.example', '/deals', false, 'pending', 'wdv_challenge_b', $3)`,
+      ['wdo_challenge_b', wsB, otherOwner.id],
+    );
+    try {
+      const foreign = await challenge('/deals/.well-known/am-domain/wdv_challenge_b', 'challenge-held.example');
+      expect(foreign.status).toBe(404);
+      const ours = await challenge(`/.well-known/am-domain/${own.domain.verificationToken}`, 'challenge-held.example');
+      expect(ours).toEqual({ status: 200, body: own.domain.verificationToken });
+
+      t.srv.services.fetchDomainChallenge = async () => ({ status: 200, body: 'wdv_challenge_b' });
+      const verify = await rejects(t.api(otherOwner, wsB).call('workspace.domains.verify', { id: 'wdo_challenge_b' }));
+      expect(verify.status).toBe(400);
+      expect(verify.message).toMatch(/another workspace/i);
+      expect((await t.srv.db.admin.query('SELECT status FROM workspace_domains WHERE id = $1', ['wdo_challenge_b'])).rows).toEqual([
+        { status: 'pending' },
+      ]);
+    } finally {
+      await t.srv.db.admin.query('DELETE FROM workspace_domains WHERE id = $1', ['wdo_challenge_b']);
+    }
   });
 
   it('serializes concurrent claims of one host at different prefixes (#462, #467)', async () => {
@@ -296,8 +400,8 @@ describe('brand domains', () => {
 
   it('removes expired claims at other prefixes so they can never be verified later (#467)', async () => {
     await t.srv.db.admin.query(
-      `INSERT INTO workspace_domains (id, workspace_id, host, path_prefix, is_primary, status, verification_token, created_by, created_at)
-       VALUES ($1, $2, 'stale-prefix.example', '/old', false, 'pending', 'wdv_old', $3, now() - interval '8 days')`,
+      `INSERT INTO workspace_domains (id, workspace_id, host, path_prefix, is_primary, status, verification_token, created_by, created_at, pending_since)
+       VALUES ($1, $2, 'stale-prefix.example', '/old', false, 'pending', 'wdv_old', $3, now() - interval '8 days', now() - interval '8 days')`,
       ['wdo_stale_prefix', wsA, owner.id],
     );
     // B claims the same host at another prefix: A's abandoned claim is gone, not just ignored.

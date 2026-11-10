@@ -172,7 +172,7 @@ SMS is a second **channel**, not a replacement for e-mail. It shares the gateway
   - HELP gets the provider's help text.
   - The keywords are fixed for now.
 - **Content:**
-  - an `sms_template` artifact (Liquid, GSM-7 versus UCS-2 segment counter); marketing texts get " Reply STOP to opt out." unless they mention STOP. Link shortening is *later*;
+  - an `sms_template` artifact (Liquid, GSM-7 versus UCS-2 segment counter); marketing texts get " Reply STOP to opt out." unless the body already ends with a real opt-out instruction (a passing mention of "stop" does not count). Link shortening is *later*;
   - an alphanumeric sender id where allowed, a long number otherwise.
 - **Journey node** `sms` and broadcast support (`channel: sms`).
 - **Costs:** price per segment and an optional monthly budget per provider. `smsTemplates.preview` estimates the cost; a text that would exceed the budget is not sent (`budget: …`).
