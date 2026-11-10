@@ -82,7 +82,7 @@ Requirements: Node 22+, pnpm 10, PostgreSQL 16, ClickHouse (26.8 LTS), NATS with
 
 ```bash
 pnpm install
-cp .env.example .env          # fill AUTH_SECRET and MASTER_KEY (openssl rand -base64 32), point DATABASE_URL at Postgres
+cp .env.example .env          # fill AUTH_SECRET and MASTER_KEY (openssl rand -base64 32), point DATABASE_URL at Postgres; the passwords are hex (openssl rand -hex 32) because Compose puts POSTGRES_PASSWORD into DATABASE_URL raw
 pnpm --silent --filter @agentic-marketing/server cli bootstrap --email you@example.com --workspace 'My shop'
 pnpm dev                       # API on http://localhost:3000 (migrates on start)
 pnpm dev:web                   # the admin UI on http://localhost:5173 (the demo is at /demo)
@@ -415,13 +415,19 @@ scripts/test-services.sh reset          # drop the volumes
 scripts/docker-clean.sh --yes           # remove only resources labelled am-test=1
 ```
 
-The defaults are the host's long-lived test ports (25432, 28123, 26379, 24222, 28200) bound to
-`0.0.0.0`. Change them in `.env.test` (see `.env.test.example`) or with the `AM_TEST_PG_PORT`,
-`AM_TEST_CH_PORT`, `AM_TEST_VALKEY_PORT`, `AM_TEST_NATS_PORT` and `AM_TEST_OPENBAO_PORT`
-variables. `scripts/test-services.sh env` prints `localhost` on a normal host and `172.17.0.1`
-inside a container, where the host's published ports are only reachable on the Docker bridge; set
-`AM_TEST_HOST` to override that. The optional `mail` (Mailpit) and `obs` (Grafana otel-lgtm)
-profiles are off unless named: `scripts/test-services.sh up mail obs`.
+The defaults are the host's long-lived test ports (25432, 28123, 26379, 24222, 28200), bound to
+`127.0.0.1`. The stack carries a dev OpenBao whose root token is `root` and a writable Postgres
+(`am:am`), so it is not published on the LAN by default: `scripts/test-services.sh` prints the bind
+address it used and warns loudly when `AM_TEST_BIND_IP` is `0.0.0.0`. Change the ports in `.env.test`
+(see `.env.test.example`) or with the `AM_TEST_PG_PORT`, `AM_TEST_CH_PORT`, `AM_TEST_VALKEY_PORT`,
+`AM_TEST_NATS_PORT` and `AM_TEST_OPENBAO_PORT` variables. A process that runs inside a container
+cannot reach the host's loopback, so the script then binds the Docker bridge's host address
+(`172.17.0.1`) instead; on a host the same is available explicitly with
+`AM_TEST_BIND_IP=172.17.0.1 scripts/test-services.sh up`, and a LAN peer would need
+`AM_TEST_BIND_IP=<lan-ip>` (a deliberate, warned-about choice). `scripts/test-services.sh env` prints
+`localhost` on a normal host and the bind address inside a container; set `AM_TEST_HOST` to override
+that. The optional `mail` (Mailpit) and `obs` (Grafana otel-lgtm) profiles are off unless named:
+`scripts/test-services.sh up mail obs`.
 
 The scripts target **Linux (Unraid included)**. macOS needs bash 5 and GNU coreutils from
 Homebrew (`brew install bash coreutils`; run the scripts with `$HOMEBREW_PREFIX/bin/bash` and keep
