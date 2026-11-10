@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { loadConfig } from '../src/config';
+import { ConfigError, loadConfig } from '../src/config';
 
 const base = {
   DATABASE_URL: 'postgres://am:am@localhost:5432/am',
@@ -24,6 +24,31 @@ describe('configuration', () => {
 
   it('fails fast with the setting that is wrong', () => {
     expect(() => loadConfig({ ...base, PUBLIC_LINKS_URL: 'not a url' })).toThrow('PUBLIC_LINKS_URL');
+  });
+
+  // Docker Compose substitutes POSTGRES_PASSWORD into DATABASE_URL verbatim, and a base64 password
+  // contains `/` about half the time; a raw TypeError from new URL() escaped main.ts's ConfigError
+  // path and killed the container with a stack trace (#647).
+  it('turns an unparseable DATABASE_URL into a ConfigError that names the likely cause (#647)', () => {
+    let error: unknown;
+    try {
+      loadConfig({ ...base, DATABASE_URL: 'postgres://am:abc/def@postgres:5432/am' });
+    } catch (err) {
+      error = err;
+    }
+    expect(error).toBeInstanceOf(ConfigError);
+    expect(error).not.toBeInstanceOf(TypeError);
+    expect((error as Error).name).toBe('ConfigError');
+    expect((error as Error).message).toContain('Configuration is incomplete: DATABASE_URL is not a valid URL');
+    expect((error as Error).message).toMatch(/percent-encoded/);
+    expect((error as Error).message).toContain('openssl rand -hex 32');
+  });
+
+  it('accepts a percent-encoded password in DATABASE_URL (#647)', () => {
+    const c = loadConfig({ ...base, DATABASE_URL: 'postgres://am:abc%2Fdef@postgres:5432/am' });
+    // The app role replaces the owner credentials, and the URL setter encodes them.
+    expect(new URL(c.appDatabaseUrl).password).toBe('am_app_password');
+    expect(new URL(c.appDatabaseUrl).hostname).toBe('postgres');
   });
 
   it('parses client IP headers as an ordered, lowercased, de-duplicated list', () => {

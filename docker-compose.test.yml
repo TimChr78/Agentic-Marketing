@@ -8,9 +8,13 @@
 # this file. Every service, volume and network carries am-test=1: scripts/docker-clean.sh removes
 # only those, never another project's containers.
 #
-# Published ports default to the host's long-lived test ports. Override them through .env.test or
-# the environment when they are taken (scripts/test-services.sh loads .env.test):
-#   AM_TEST_BIND_IP=0.0.0.0 AM_TEST_PG_PORT=35432 AM_TEST_CH_PORT=38123 \
+# Published ports default to the host's long-lived test ports, bound to 127.0.0.1 (loopback only):
+# this stack includes a dev OpenBao whose root token is `root` and a writable Postgres (am:am), so
+# it must never be reachable from the LAN by default. scripts/test-services.sh picks 172.17.0.1 by
+# itself when it runs inside a container (the host's published ports are on the Docker bridge), and
+# warns when AM_TEST_BIND_IP is 0.0.0.0. Override the ports through .env.test or the environment when
+# they are taken (scripts/test-services.sh loads .env.test):
+#   AM_TEST_BIND_IP=192.168.1.20 AM_TEST_PG_PORT=35432 AM_TEST_CH_PORT=38123 \
 #   AM_TEST_VALKEY_PORT=36379 AM_TEST_NATS_PORT=34222 AM_TEST_OPENBAO_PORT=38200 \
 #     scripts/test-services.sh up
 name: am-test
@@ -24,7 +28,7 @@ services:
       POSTGRES_PASSWORD: am
       POSTGRES_DB: am
     ports:
-      - "${AM_TEST_BIND_IP:-0.0.0.0}:${AM_TEST_PG_PORT:-25432}:5432"
+      - "${AM_TEST_BIND_IP:-127.0.0.1}:${AM_TEST_PG_PORT:-25432}:5432"
     volumes:
       - pg_data:/var/lib/postgresql/data
     healthcheck:
@@ -41,7 +45,7 @@ services:
       # The row-policy tests create policies; that needs access management.
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
     ports:
-      - "${AM_TEST_BIND_IP:-0.0.0.0}:${AM_TEST_CH_PORT:-28123}:8123"
+      - "${AM_TEST_BIND_IP:-127.0.0.1}:${AM_TEST_CH_PORT:-28123}:8123"
     volumes:
       - ch_data:/var/lib/clickhouse
     ulimits:
@@ -61,7 +65,7 @@ services:
     labels: ["am-test=1"]
     command: ["valkey-server", "--save", "", "--appendonly", "no"]
     ports:
-      - "${AM_TEST_BIND_IP:-0.0.0.0}:${AM_TEST_VALKEY_PORT:-26379}:6379"
+      - "${AM_TEST_BIND_IP:-127.0.0.1}:${AM_TEST_VALKEY_PORT:-26379}:6379"
     healthcheck:
       test: ["CMD-SHELL", "valkey-cli ping | grep -q PONG"]
       interval: 5s
@@ -75,7 +79,7 @@ services:
     # -js is JetStream; the monitoring port backs the healthcheck.
     command: ["-js", "-sd", "/data", "-m", "8222"]
     ports:
-      - "${AM_TEST_BIND_IP:-0.0.0.0}:${AM_TEST_NATS_PORT:-24222}:4222"
+      - "${AM_TEST_BIND_IP:-127.0.0.1}:${AM_TEST_NATS_PORT:-24222}:4222"
     volumes:
       - nats_data:/data
     healthcheck:
@@ -95,7 +99,7 @@ services:
       BAO_DEV_ROOT_TOKEN_ID: root
       VAULT_ADDR: http://127.0.0.1:8200
     ports:
-      - "${AM_TEST_BIND_IP:-0.0.0.0}:${AM_TEST_OPENBAO_PORT:-28200}:8200"
+      - "${AM_TEST_BIND_IP:-127.0.0.1}:${AM_TEST_OPENBAO_PORT:-28200}:8200"
     healthcheck:
       test: ["CMD-SHELL", "bao status >/dev/null 2>&1"]
       interval: 5s
@@ -109,8 +113,8 @@ services:
     labels: ["am-test=1"]
     profiles: ["mail"]
     ports:
-      - "${AM_TEST_BIND_IP:-0.0.0.0}:${AM_TEST_MAILPIT_SMTP_PORT:-21025}:1025"
-      - "${AM_TEST_BIND_IP:-0.0.0.0}:${AM_TEST_MAILPIT_PORT:-28025}:8025"
+      - "${AM_TEST_BIND_IP:-127.0.0.1}:${AM_TEST_MAILPIT_SMTP_PORT:-21025}:1025"
+      - "${AM_TEST_BIND_IP:-127.0.0.1}:${AM_TEST_MAILPIT_PORT:-28025}:8025"
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8025/api/v1/info || exit 1"]
       interval: 5s
@@ -124,9 +128,9 @@ services:
     labels: ["am-test=1"]
     profiles: ["obs"]
     ports:
-      - "${AM_TEST_BIND_IP:-0.0.0.0}:${AM_TEST_GRAFANA_PORT:-23000}:3000"
-      - "${AM_TEST_BIND_IP:-0.0.0.0}:${AM_TEST_OTLP_GRPC_PORT:-24317}:4317"
-      - "${AM_TEST_BIND_IP:-0.0.0.0}:${AM_TEST_OTLP_HTTP_PORT:-24318}:4318"
+      - "${AM_TEST_BIND_IP:-127.0.0.1}:${AM_TEST_GRAFANA_PORT:-23000}:3000"
+      - "${AM_TEST_BIND_IP:-127.0.0.1}:${AM_TEST_OTLP_GRPC_PORT:-24317}:4317"
+      - "${AM_TEST_BIND_IP:-127.0.0.1}:${AM_TEST_OTLP_HTTP_PORT:-24318}:4318"
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/health || exit 1"]
       interval: 10s

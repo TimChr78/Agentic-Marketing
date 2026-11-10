@@ -40,6 +40,14 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 export const DEFAULT_BASE = 'origin/main';
 
 const PLAYWRIGHT_CONFIGS = new Set(['playwright.config.ts', 'playwright.visual.config.ts']);
+const PLAYWRIGHT_SPEC = /\.spec\.[cm]?tsx?$/;
+// Every suite imports the shared e2e helpers and the Playwright configs (#606).
+const E2E_SUITE_COMMANDS = [
+  'scripts/e2e-docker.sh smoke',
+  'scripts/e2e-docker.sh functional',
+  'scripts/e2e-docker.sh axe',
+  'scripts/e2e-docker.sh visual',
+];
 const PROJECTS = ['docs', 'packages', 'web', 'server'];
 const SOURCE_EXTENSIONS = /\.(?:ts|tsx|mts|cts|js|mjs|cjs)$/;
 const TEST_FILE = /\.test\.(?:ts|tsx|mts|cts)$/;
@@ -322,9 +330,11 @@ function fullTriggerReason(file) {
 function classifyPath(file, packages, docsFiles) {
   const full = fullTriggerReason(file);
   if (full) return { kind: 'full', reason: full };
+  // The Playwright configs name every suite, so a change there needs all four.
+  if (PLAYWRIGHT_CONFIGS.has(file)) return { kind: 'e2eConfig' };
   // Playwright specs are browser-only; any other file under e2e/ (ports, helpers, matrix) can be
   // imported by Vitest tests too, so it counts as source and runs whole projects.
-  if (PLAYWRIGHT_CONFIGS.has(file) || (file.startsWith('e2e/') && /\.spec\.[cm]?tsx?$/.test(file))) return { kind: 'e2e' };
+  if (file.startsWith('e2e/') && PLAYWRIGHT_SPEC.test(file)) return { kind: 'e2e' };
   if (file.startsWith('e2e/')) return { kind: 'source', e2e: true };
   // An e2e helper under apps/server/test is part of the server project's inputs, not a test.
   if (file.startsWith('apps/server/test/e2e/')) return { kind: 'source', e2e: true };
@@ -347,6 +357,31 @@ function classifyPath(file, packages, docsFiles) {
     return { kind: 'package-test-helper', package: name };
   }
   return { kind: 'unknown', reason: 'the path is not classified' };
+}
+
+/** The Playwright specs whose import graph reaches one of the changed e2e helpers. */
+function specsReaching(root, packages, helpers) {
+  const entries = walk(join(root, 'e2e'))
+    .filter((file) => PLAYWRIGHT_SPEC.test(file))
+    .map((file) => posix(relative(root, file)));
+  if (!entries.length || !helpers.length) return [];
+  const reach = reachability(
+    root,
+    packages,
+    entries,
+    (file) => file.startsWith('e2e/') || file.startsWith('apps/') || file.startsWith('packages/'),
+  );
+  const changed = new Set(helpers);
+  return entries.filter((entry) => [...(reach.get(entry) ?? [])].some((file) => changed.has(file))).sort();
+}
+
+/** The "run every Playwright suite" suggestion for an e2e helper, config or spec change. */
+function e2eSuggestion({ root, packages, helpers = [], reason }) {
+  const suites = E2E_SUITE_COMMANDS.map((command) => `\`${command}\``).join(', ');
+  const named = specsReaching(root, packages, helpers);
+  const shown = named.length > 8 ? [...named.slice(0, 8), `${named.length - 8} more`] : named;
+  const specs = shown.length ? `; specs that import them: ${shown.join(', ')}` : '';
+  return `${reason}: run every Playwright suite (${suites})${specs}`;
 }
 
 function emptySelection() {
@@ -422,6 +457,7 @@ export function selectAffected({ root = ROOT, files = [], base = null } = {}) {
     sources: [],
     packageTestHelpers: [],
     e2e: [],
+    e2eConfig: [],
   };
   const fullReasons = [];
   for (const file of changed) {
@@ -438,8 +474,20 @@ export function selectAffected({ root = ROOT, files = [], base = null } = {}) {
     return result;
   }
 
+  if (buckets.e2eConfig.length) {
+    result.suggestions.push(e2eSuggestion({ root, packages, reason: 'Playwright configuration changed' }));
+  }
   if (buckets.e2e.length) {
-    result.suggestions.push(`no Vitest tests for ${buckets.e2e.length} e2e/Playwright path(s): run scripts/e2e-docker.sh smoke`);
+    const suites = new Set();
+    for (const file of buckets.e2e) {
+      if (file.endsWith('visual.spec.ts')) suites.add('`scripts/e2e-docker.sh visual`');
+      else if (file.endsWith('axe.spec.ts')) suites.add('`scripts/e2e-docker.sh axe`');
+      else {
+        suites.add('`scripts/e2e-docker.sh functional`');
+        suites.add('`scripts/e2e-docker.sh smoke`');
+      }
+    }
+    result.suggestions.push(`no Vitest tests for ${buckets.e2e.length} Playwright spec(s): run ${[...suites].join(', ')}`);
   }
   if (buckets.docs.length) {
     const named = buckets.docs.slice(0, 5).join(', ');
@@ -468,8 +516,9 @@ export function selectAffected({ root = ROOT, files = [], base = null } = {}) {
       const named = packageNames.filter((name) => index.unsure || index.imported.has(name) || webDependsOn(packages, name));
       if (named.length) addProject(result, 'web', `${named.join(', ')}: web tests import it, so run the whole web project`);
     }
-    if (buckets.sources.some((source) => source.e2e)) {
-      result.suggestions.push('server e2e helpers changed: run scripts/e2e-docker.sh smoke');
+    const e2eHelpers = buckets.sources.filter((source) => source.e2e).map((source) => source.file);
+    if (e2eHelpers.length) {
+      result.suggestions.push(e2eSuggestion({ root, packages, helpers: e2eHelpers, reason: 'e2e helpers changed' }));
     }
   }
 

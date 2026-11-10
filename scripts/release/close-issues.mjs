@@ -10,7 +10,7 @@
 import { execFileSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { releaseSection } from './prepare.mjs';
+import { findPreviousVersion, releaseSection } from './prepare.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '../..');
 
@@ -47,17 +47,65 @@ function repository() {
 }
 
 function parseArgs(argv) {
-  const options = { version: undefined, yes: false, dryRun: false };
+  const options = { version: undefined, previous: undefined, yes: false, dryRun: false };
   for (let index = 0; index < argv.length; index++) {
     const arg = argv[index];
     if (arg === '--yes') options.yes = true;
     else if (arg === '--dry-run') options.dryRun = true;
+    else if (arg === '--previous') options.previous = argv[++index];
     else if (arg.startsWith('--')) throw new Error(`unknown option: ${arg}`);
     else if (!options.version) options.version = arg.replace(/^v/, '');
     else throw new Error(`unexpected argument: ${arg}`);
   }
-  if (!options.version) throw new Error('usage: node scripts/release/close-issues.mjs <version> [--dry-run] [--yes]');
+  if (!options.version)
+    throw new Error('usage: node scripts/release/close-issues.mjs <version> [--previous <version>] [--dry-run] [--yes]');
   return options;
+}
+
+/** The merged pull request list is one page; a full page may hide older pull requests. */
+export const PR_LIST_LIMIT = 500;
+
+/** A warning when the merged pull request query hit its page limit, or null. */
+export function prLimitWarning(count) {
+  if (count < PR_LIST_LIMIT) return null;
+  return `the merged pull request list hit its ${PR_LIST_LIMIT}-item limit and is truncated, so older pull requests in this release may be missing; close the remaining issues by hand`;
+}
+
+/** The release tags in the local repository. */
+export function localTags(run = (args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' })) {
+  return run(['tag', '--list', 'v*'])
+    .split('\n')
+    .map((tag) => tag.trim())
+    .filter(Boolean);
+}
+
+/**
+ * The tag immediately before `v<version>`, verified against the local repository (#603).
+ *
+ * An explicit `--previous` wins, then the previous version in the tagged CHANGELOG.md. A named
+ * predecessor must exist: without it the commit range would silently widen to earlier releases.
+ * Only when the CHANGELOG proves this is the first release does the tag list decide.
+ */
+export function resolvePreviousTag({ tags, version, changelog, explicit }) {
+  const target = `v${version}`;
+  if (!tags.includes(target)) throw new Error(`tag ${target} is not in the local repository; fetch tags first`);
+
+  if (explicit) {
+    const previous = `v${String(explicit).replace(/^v/, '')}`;
+    if (!tags.includes(previous)) throw new Error(`previous tag ${previous} is not in the local repository; fetch tags first`);
+    return previous;
+  }
+
+  const fromChangelog = changelog ? findPreviousVersion(changelog, version) : null;
+  if (fromChangelog) {
+    const previous = `v${fromChangelog}`;
+    if (!tags.includes(previous)) {
+      throw new Error(`previous release ${previous} from CHANGELOG.md is not in the local repository; fetch tags first`);
+    }
+    return previous;
+  }
+
+  return previousTagFrom(tags, version);
 }
 
 /** The merged pull requests that belong to a release, by tag range and default branch. */
@@ -113,9 +161,13 @@ export function previousTagFrom(tags, version) {
   return best?.tag ?? null;
 }
 
-function previousTag(version) {
-  const tags = execFileSync('git', ['tag', '--list', 'v*'], { cwd: root, encoding: 'utf8' }).split('\n').filter(Boolean);
-  return previousTagFrom(tags, version);
+/** Fetch tags first, so a stale clone cannot widen the release range (#603). */
+function fetchTags() {
+  try {
+    execFileSync('git', ['fetch', '--tags', '--force'], { cwd: root, stdio: ['ignore', 'pipe', 'pipe'] });
+  } catch {
+    throw new Error('cannot fetch tags (git fetch --tags failed); fetch them and retry, so the release range is real');
+  }
 }
 
 /** Commit SHAs in v<previous>..v<version>, or the tag's history for the first release. */
@@ -131,13 +183,29 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     const repo = repository();
     const release = JSON.parse(gh(['api', `repos/${repo}/releases/tags/v${options.version}`]));
     const branch = defaultBranch(repo);
-    const previous = previousTag(options.version);
+    fetchTags();
+    const tags = localTags();
+    if (!tags.includes(`v${options.version}`)) throw new Error(`tag v${options.version} is not in the local repository; fetch tags first`);
+    const changelog = readChangelogAtTag(options.version);
+    const previous = resolvePreviousTag({ tags, version: options.version, changelog, explicit: options.previous });
     const commits = commitsInRange(previous, options.version);
     const prs = JSON.parse(
-      gh(['pr', 'list', '--repo', repo, '--state', 'merged', '--limit', '500', '--json', 'number,body,baseRefName,mergeCommit']),
+      gh([
+        'pr',
+        'list',
+        '--repo',
+        repo,
+        '--state',
+        'merged',
+        '--limit',
+        String(PR_LIST_LIMIT),
+        '--json',
+        'number,body,baseRefName,mergeCommit',
+      ]),
     );
+    const limitWarning = prLimitWarning(prs.length);
+    if (limitWarning) console.warn(`close-issues: warning: ${limitWarning}`);
     const selected = selectReleasePullRequests({ prs, commits, defaultBranch: branch });
-    const changelog = readChangelogAtTag(options.version);
     const sorted = issuesForRelease({ prs: selected, changelog, version: options.version });
 
     console.log(

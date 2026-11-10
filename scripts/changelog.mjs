@@ -16,7 +16,7 @@
 //
 // `section` is one of SECTIONS; `issues` is optional. `build` sorts fragments by their lowest issue
 // number, then by file name, so the same fragments always produce the same section.
-import { readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -170,7 +170,7 @@ function subsections(lines) {
 }
 
 /** The generated `## [version]` section, without touching the filesystem. */
-export function renderSection({ version, date, unreleased = new Map(), fragments = [], upgradeBlock }) {
+export function renderSection({ version, date, unreleased = new Map(), fragments = [], upgradeBlock, issues }) {
   let section = `## [${version}] - ${date}`;
   const used = new Set();
   for (const name of SECTIONS) {
@@ -193,16 +193,66 @@ export function renderSection({ version, date, unreleased = new Map(), fragments
   const upgrade = upgradeBlock ?? (preservedUpgrade ? `### ${preservedUpgrade[0]}\n\n${preservedUpgrade[1]}` : undefined);
   if (upgrade?.trim()) section += `\n\n${upgrade.trim()}`;
 
-  const issues = [...new Set(fragments.flatMap((fragment) => fragment.issues))].filter(Number.isInteger).sort((a, b) => a - b);
-  if (issues.length) section += `\n\n<!-- issues: ${issues.join(', ')} -->`;
+  const numbers = issues ?? [...new Set(fragments.flatMap((fragment) => fragment.issues))];
+  const sorted = [...new Set(numbers)].filter(Number.isInteger).sort((a, b) => a - b);
+  if (sorted.length) section += `\n\n<!-- issues: ${sorted.join(', ')} -->`;
   return section;
+}
+
+/** Remove the hidden issue marker from preserved section text before it is rendered again. */
+function stripIssuesMarker(text) {
+  return text.replace(/<!--\s*issues:\s*[\d,\s]+\s*-->/g, '').trim();
+}
+
+/** The issue numbers in a section's `<!-- issues: … -->` marker. */
+function sectionIssues(section) {
+  const match = /<!--\s*issues:\s*([\d,\s]+)\s*-->/.exec(section);
+  if (!match) return [];
+  return [
+    ...new Set(
+      match[1]
+        .split(',')
+        .map((value) => Number(value.trim()))
+        .filter(Number.isInteger),
+    ),
+  ].sort((a, b) => a - b);
+}
+
+/** Whether every bullet line of a fragment is already in the section text. */
+function sectionHasFragment(section, fragment) {
+  const lines = new Set(section.split(/\r?\n/).map((line) => line.trim()));
+  return fragment.text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .every((line) => lines.has(line));
+}
+
+/** Replace a file atomically: a killed process leaves either the old file or the complete new one. */
+function writeAtomic(path, text) {
+  const temporary = `${path}.${process.pid}.tmp`;
+  try {
+    writeFileSync(temporary, text);
+    renameSync(temporary, path);
+  } finally {
+    try {
+      rmSync(temporary, { force: true });
+    } catch {
+      // The rename already consumed it.
+    }
+  }
 }
 
 /**
  * Fold `[Unreleased]` and the fragments into a `## [version]` section.
  *
  * With `dryRun`, nothing is written and `output` is the section that would be added. Otherwise the
- * changelog is replaced, the consumed fragments are deleted, and `output` is the new changelog.
+ * changelog is replaced atomically, the consumed fragments are deleted after that write, and
+ * `output` is the new changelog.
+ *
+ * Re-running after a kill between the write and the deletions is safe (#602): a version section that
+ * already exists is kept, fragments whose bullets it already contains are dropped, and only a
+ * fragment added after the crash is merged into it.
  */
 export function build({
   version,
@@ -222,9 +272,48 @@ export function build({
 
   const changelog = readFileSync(changelogPath, 'utf8');
   const { preamble, sections } = splitSections(changelog);
-  if (sections.some((candidate) => candidate.version === version)) {
-    throw new Error(`CHANGELOG.md already has a ## [${version}] section; revert it or bump the version`);
+  const existingSection = sections.find((candidate) => candidate.version === version);
+  const consumed = fragments.map((fragment) => fragment.name);
+
+  if (existingSection) {
+    const body = existingSection.lines.join('\n');
+    const novel = fragments.filter((fragment) => !sectionHasFragment(body, fragment));
+    if (!novel.length) {
+      // Nothing was lost: the crash left fragments whose bullets the section already has.
+      if (!dryRun) for (const fragment of fragments) rmSync(join(dir, fragment.name));
+      const section = `${existingSection.heading}\n${body}`.trim();
+      return { section, output: dryRun ? section : changelog, consumed };
+    }
+
+    // A fragment arrived after the crash: merge it without duplicating the folded ones.
+    const preserved = subsections(existingSection.lines);
+    for (const [name, text] of preserved) preserved.set(name, stripIssuesMarker(text));
+    const dateMatch = /^## \[[^\]]+\](?:\s*-\s*(.+))?$/.exec(existingSection.heading);
+    const section = renderSection({
+      version,
+      date: dateMatch?.[1]?.trim() || day,
+      unreleased: preserved,
+      fragments: novel,
+      upgradeBlock,
+      issues: [...sectionIssues(body), ...novel.flatMap((fragment) => fragment.issues)],
+    });
+    const next =
+      [
+        preamble,
+        ...sections.map((candidate) =>
+          candidate === existingSection ? section : `${candidate.heading}\n${candidate.lines.join('\n')}`.trim(),
+        ),
+      ]
+        .filter(Boolean)
+        .join('\n\n')
+        .replace(/\s+$/, '') + '\n';
+
+    if (dryRun) return { section, output: section, consumed };
+    writeAtomic(changelogPath, next);
+    for (const fragment of fragments) rmSync(join(dir, fragment.name));
+    return { section, output: next, consumed };
   }
+
   const unreleasedSection = sections.find((section) => section.version === 'Unreleased');
   const unreleased = unreleasedSection ? subsections(unreleasedSection.lines) : new Map();
   const section = renderSection({ version, date: day, unreleased, fragments, upgradeBlock });
@@ -234,10 +323,10 @@ export function build({
     .map((candidate) => `${candidate.heading}\n${candidate.lines.join('\n')}`.trim());
   const next = [preamble, section, ...remaining].filter(Boolean).join('\n\n').replace(/\s+$/, '') + '\n';
 
-  if (dryRun) return { section, output: section, consumed: fragments.map((fragment) => fragment.name) };
-  writeFileSync(changelogPath, next);
+  if (dryRun) return { section, output: section, consumed };
+  writeAtomic(changelogPath, next);
   for (const fragment of fragments) rmSync(join(dir, fragment.name));
-  return { section, output: next, consumed: fragments.map((fragment) => fragment.name) };
+  return { section, output: next, consumed };
 }
 
 function parseBuildArgs(argv) {
