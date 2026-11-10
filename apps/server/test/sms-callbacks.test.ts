@@ -1,7 +1,7 @@
 import http from 'node:http';
 import { twilioSignature } from '@agentic-marketing/email';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { startTestServer, testPort, type User } from './harness';
+import { eventually, startTestServer, testPort, type User } from './harness';
 
 // #457: Twilio signs the exact callback URL it called. Public routing keeps the fallback and every
 // verified domain reachable, so signature validation must use the request's own origin and prefix,
@@ -116,5 +116,78 @@ describe('Twilio callbacks on brand hosts', () => {
       const stop = await callback(target.publicUrl, target.host, target.path, { From: PHONE, Body: 'STOP' });
       expect(stop.status, target.name).toBe(200);
     }
+  });
+});
+
+// #636: realistic replies carry punctuation, mixed case or a polite word around the keyword.
+// Twilio passes Body verbatim, so matching the first whitespace token alone never opted anyone out.
+const REPLY_VARIANTS = ['STOP.', 'STOP!', 'stop,', 'UNSUBSCRIBE.', 'Please STOP', 'stop please', '  Stop  ', 'ＳＴＯＰ', 'stop start'];
+const CONVERSATIONAL = REPLY_VARIANTS.length;
+const phoneOf = (i: number) => `+45${String(90_000_000 + i)}`;
+
+describe('inbound keyword normalisation (#636)', () => {
+  let profileIds: string[] = [];
+
+  const inbound = (phone: string, body: string) =>
+    callback(FALLBACK, `localhost:${PORT}`, `${webhookPath}/inbound`, { From: phone, Body: body });
+  const suppressionCount = async () =>
+    (
+      await t.srv.db.admin.query<{ n: number }>(
+        `SELECT count(*)::int AS n FROM suppressions WHERE workspace_id = $1 AND channel = 'sms' AND reason = 'stop'`,
+        [ws],
+      )
+    ).rows[0].n;
+  const consentHistory = async (profileId: string) => (await t.api(owner, ws).call('consent.history', { profileId })).records;
+
+  beforeAll(async () => {
+    const api = t.api(owner, ws);
+    const { key } = await api.call('sources.create', { name: 'SMS keywords', kind: 'server' });
+    const people = [...REPLY_VARIANTS, 'conversational'];
+    const res = await fetch(`${t.base}/v1/batch`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Basic ${Buffer.from(`${key}:`).toString('base64')}` },
+      body: JSON.stringify({
+        batch: people.flatMap((_, i) => [
+          { type: 'identify', userId: `sms-keyword-${i}`, traits: { phone: phoneOf(i), email: `sms-keyword-${i}@example.com` } },
+          {
+            type: 'track',
+            userId: `sms-keyword-${i}`,
+            event: 'Segment Consent Preference Updated',
+            context: { consent: { categoryPreferences: { marketing_sms: true } } },
+          },
+        ]),
+      }),
+    });
+    expect(res.status).toBe(200);
+    profileIds = await Promise.all(
+      people.map(async (_, i) => {
+        const found = await eventually(
+          () => api.call('profiles.find', { type: 'user_id', value: `sms-keyword-${i}` }),
+          (r) => !!r.profileId,
+        );
+        await eventually(
+          () => api.call('profiles.get', { profileId: found.profileId! }),
+          (p) => p.consent.length >= 1,
+        );
+        return found.profileId!;
+      }),
+    );
+  }, 60_000);
+
+  it.each(REPLY_VARIANTS.map((body, i) => [body, i] as const))('withdraws consent and suppresses the number for %j', async (body, i) => {
+    const before = await suppressionCount();
+    expect((await inbound(phoneOf(i), body)).status).toBe(200);
+    expect(await suppressionCount()).toBe(before + 1);
+    expect((await consentHistory(profileIds[i])).find((r) => r.purpose === 'marketing_sms' && r.status === 'withdrawn')).toMatchObject({
+      channel: 'sms',
+      source: 'unsubscribe',
+    });
+  });
+
+  it('leaves a long conversational sentence alone', async () => {
+    const before = await suppressionCount();
+    expect((await inbound(phoneOf(CONVERSATIONAL), "Don't stop the music, it's great")).status).toBe(200);
+    expect(await suppressionCount()).toBe(before);
+    expect((await consentHistory(profileIds[CONVERSATIONAL])).some((r) => r.status === 'withdrawn')).toBe(false);
   });
 });
