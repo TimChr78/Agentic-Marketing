@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Push a delegate's task branch and open a draft PR against the phase branch, so CI validates the
-# task on its own while it is reviewed. The integrator runs this; delegates commit but do not push.
+# Push a delegate's task branch and open a draft PR against the integration branch, so CI validates
+# the task on its own while it is reviewed. The integrator runs this; delegates commit but do not push.
 #
-#   scripts/open-task-pr.sh <task-branch> <phase-branch> <issue> "<title>" [body-file]
+#   scripts/open-task-pr.sh <task-branch> <integration-branch> <issue> "<title>" [body-file]
+#
+# <integration-branch> is feat/phase-<n> or patch/<x.y.z> (for example patch/0.14.3).
 #
 # The PR body comes from the body file, or a minimal body with "Closes #<issue>".
 set -euo pipefail
@@ -14,21 +16,22 @@ fi
 task="$1"; phase="$2"; issue="$3"; title="$4"; body_file="${5:-}"
 
 case "$issue" in (*[!0-9]*|'') echo "error: issue must be a number, got '$issue'" >&2; exit 2;; esac
-# Only the documented phase-branch form: an arbitrary base (main, a release branch) is refused.
-if ! [[ "$phase" =~ ^feat/phase-[0-9]+$ ]]; then
-  echo "error: '$phase' is not a phase branch (expected feat/phase-<n>)" >&2
+# Only the documented integration forms: a phase branch or a patch branch for one version. An
+# arbitrary base (main, a release branch, an unknown patch form) is refused.
+if ! [[ "$phase" =~ ^(feat/phase-[0-9]+|patch/[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?)$ ]]; then
+  echo "error: '$phase' is not a phase branch or a patch/<semver> branch (expected feat/phase-<n> or patch/<x.y.z>)" >&2
   exit 2
 fi
 case "$task" in
-  ("$phase"|main|master|feat/phase-*|release-*) echo "error: '$task' cannot be a task branch" >&2; exit 2;;
+  ("$phase"|main|master|feat/phase-*|patch/*|release-*) echo "error: '$task' cannot be a task branch" >&2; exit 2;;
 esac
 git rev-parse --verify --quiet "refs/heads/$task" >/dev/null || { echo "error: no local branch '$task'" >&2; exit 1; }
-git ls-remote --exit-code --heads origin "$phase" >/dev/null || { echo "error: phase branch '$phase' is not on origin; push it first" >&2; exit 1; }
+git ls-remote --exit-code --heads origin "$phase" >/dev/null || { echo "error: integration branch '$phase' is not on origin; push it first" >&2; exit 1; }
 
-# A task branch must be based on the phase branch, or its PR would carry unrelated commits.
+# A task branch must be based on the integration branch, or its PR would carry unrelated commits.
 git fetch --quiet origin "$phase"
 if ! git merge-base --is-ancestor "origin/$phase" "$task"; then
-  echo "error: '$task' does not contain origin/$phase; merge or rebase it onto the phase branch first" >&2
+  echo "error: '$task' does not contain origin/$phase; merge or rebase it onto the integration branch first" >&2
   exit 1
 fi
 

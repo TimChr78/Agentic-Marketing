@@ -154,6 +154,26 @@ describe('selectAffected: full-suite fallbacks', () => {
     expect(vitestInvocations(result)).toEqual([]);
   });
 
+  it('suggests every Playwright suite for an e2e helper or config change (#606)', () => {
+    for (const file of ['e2e/helpers.ts', 'e2e/ports.ts', 'e2e/matrix.mjs', 'playwright.config.ts', 'playwright.visual.config.ts']) {
+      const text = select([file]).suggestions.join('\n');
+      for (const suite of ['smoke', 'functional', 'axe', 'visual']) {
+        expect(text, `${file} should suggest ${suite}`).toContain(`scripts/e2e-docker.sh ${suite}`);
+      }
+    }
+  });
+
+  it('names the specs that import a changed e2e helper', () => {
+    const text = select(['e2e/ports.ts']).suggestions.join(' ');
+    // apps/server/test/e2e-ports.test.ts imports ports for Vitest, but a change there reaches the
+    // Playwright specs through e2e/helpers.ts, so at least one spec is named.
+    expect(text).toMatch(/e2e\/[\w-]+\.spec\.ts/);
+  });
+
+  it('suggests the visual suite for a visual spec change instead of only smoke (#606)', () => {
+    expect(select(['e2e/visual.spec.ts']).suggestions.join(' ')).toContain('scripts/e2e-docker.sh visual');
+  });
+
   it('runs whole projects for a package test helper imported outside its package (#522 re-check)', () => {
     for (const file of ['packages/profiles/test/consentCases.ts', 'packages/db/test/run.ts']) {
       const result = select([file]);

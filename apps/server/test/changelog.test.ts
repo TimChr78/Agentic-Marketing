@@ -176,7 +176,7 @@ describe('changelog fragments', () => {
     expect(readFragments(fragmentDir).map((item) => item.name)).toEqual(['1-new.md']);
   });
 
-  it('refuses to build a version section that already exists and writes nothing', () => {
+  it('merges a new fragment into a version section that already exists', () => {
     const changelog = `# Changelog
 
 ## [0.13.0] - 2026-11-08
@@ -194,10 +194,55 @@ describe('changelog fragments', () => {
     const { fragmentDir, changelogPath } = workspace(changelog, {
       '1-new.md': fragment('Added', [1], '- New addition.'),
     });
-    const before = readFileSync(changelogPath, 'utf8');
-    expect(() => build({ version: '0.13.0', date: '2026-11-08', dir: fragmentDir, changelogPath })).toThrow(/already has/);
-    expect(readFileSync(changelogPath, 'utf8')).toBe(before);
-    expect(readFragments(fragmentDir).map((item) => item.name)).toEqual(['1-new.md']);
+    build({ version: '0.13.0', date: '2026-11-09', dir: fragmentDir, changelogPath });
+
+    const next = readFileSync(changelogPath, 'utf8');
+    expect(next).toContain('## [0.13.0] - 2026-11-08');
+    expect(next).toContain('- Already released.');
+    expect(next).toContain('- New addition.');
+    expect(next).toContain('<!-- issues: 1 -->');
+    expect(readFragments(fragmentDir)).toEqual([]);
+  });
+
+  it('folds again after a crash between the write and the fragment deletion, losing nothing', () => {
+    const fragments = {
+      '10-late.md': fragment('Changed', [10], '- Late change.'),
+      '2-beta.md': fragment('Added', [2], '- Beta change.'),
+    };
+    const { fragmentDir, changelogPath } = workspace(base, fragments);
+
+    const first = build({ version: '0.13.0', date: '2026-11-08', dir: fragmentDir, changelogPath });
+    expect(readFragments(fragmentDir)).toEqual([]);
+
+    // A kill after the atomic write but before the deletions leaves the fragments behind.
+    for (const [name, text] of Object.entries(fragments)) writeFileSync(join(fragmentDir, name), text);
+
+    const retried = build({ version: '0.13.0', date: '2026-11-09', dir: fragmentDir, changelogPath });
+
+    expect(retried.consumed.sort()).toEqual(Object.keys(fragments).sort());
+    // The existing section is kept as it was: a retry does not rewrite or lose a bullet.
+    expect(readFileSync(changelogPath, 'utf8')).toBe(first.output);
+    expect(readFragments(fragmentDir)).toEqual([]);
+    expect(readFileSync(changelogPath, 'utf8').match(/- Beta change\./g)).toHaveLength(1);
+    expect(readFileSync(changelogPath, 'utf8').match(/- Late change\./g)).toHaveLength(1);
+  });
+
+  it('merges a fragment added after such a crash without duplicating the ones already folded', () => {
+    const folded = { '10-late.md': fragment('Changed', [10], '- Late change.') };
+    const { fragmentDir, changelogPath } = workspace(base, folded);
+    build({ version: '0.13.0', date: '2026-11-08', dir: fragmentDir, changelogPath });
+
+    // The crash left the folded fragment behind, and a new fragment arrived before the retry.
+    writeFileSync(join(fragmentDir, '10-late.md'), folded['10-late.md']);
+    writeFileSync(join(fragmentDir, '12-new.md'), fragment('Added', [12], '- New after the crash.'));
+
+    build({ version: '0.13.0', date: '2026-11-09', dir: fragmentDir, changelogPath });
+
+    const changelog = readFileSync(changelogPath, 'utf8');
+    expect(changelog.match(/- Late change\./g)).toHaveLength(1);
+    expect(changelog.match(/- New after the crash\./g)).toHaveLength(1);
+    expect(changelog).toContain('<!-- issues: 10, 12 -->');
+    expect(readFragments(fragmentDir)).toEqual([]);
   });
 
   it('handles the empty case and leaves the files alone on a dry run', () => {
