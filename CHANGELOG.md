@@ -2,6 +2,28 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [0.14.2] - 2026-11-10
+
+### Security
+
+- The public newsletter archive and web version now extract styles, body content and tracking pixels in linear time, memoise the rendered parts in a bounded 256-entry / 32 MB cache so a repeat request does not re-parse the issue, refuse pathologically nested e-mail HTML (parse5 itself aborts the tree past the depth cap, template content included, with a conservative pre-scan failing closed early), fail closed on tags with more than 512 attributes or any parser error, and strip SVG animation elements that could turn links into `javascript:` URLs, so one crafted issue can no longer stall or weaken the public site.
+- Changing a brand domain's hostname or path prefix after seven days no longer forfeits the name: a new pending claim now expires seven days after it was made, not after the original row was created, so another workspace can no longer reclaim a host that is still being verified. The upgrade backfills existing rows as the table owner, so it applies cleanly on a populated install where row-level security is forced.
+- Consent history no longer returns personal proof fields (IP address, user agent, page URL, call notes and other personal evidence) to roles without `profiles:pii`, and an otherwise allowlisted field such as `import_label` is withheld when its value contains an e-mail address or phone number; the response says `proofWithheld` and the person page shows "Hidden for your role" instead of the fields.
+- Public traffic served under a registered path prefix keeps the visitor's client IP, so form submissions are rate-limited per visitor, Turnstile receives `remoteip` and consent records keep their address evidence. Such requests are also counted once in `/metrics`, under the public route group rather than the admin UI, and unmatched `/hooks` and `/scim` paths answer JSON instead of the admin page.
+- Marketing SMS always ends with " Reply STOP to opt out." unless the body already ends with a real opt-out instruction — an instruction verb, a stop keyword and an opt-out purpose, optionally followed by carrier boilerplate such as "Msg & data rates may apply." — so a text that merely mentions "stop" ("Don't stop reading", "Stop & Shop", "Stop by before the deals end!") can no longer ship without one, and a real instruction no longer gets a duplicate.
+- Inbound SMS replies are normalised before keyword matching and split on every run of non-letters/non-digits, so trailing punctuation, mixed case, fullwidth characters, surrounding emoji, "STOP,please", "Please STOP/UNSUBSCRIBE" and "Please stop—sending these messages" all contain the keyword. Any opt-out keyword anywhere in the reply now withdraws marketing consent and suppresses the number, however long the sentence ("I want to cancel my order", "Kan ni avsluta dessa utskick till mig tack"); a false opt-out is the accepted, recoverable failure. START and HELP still require the whole message, and STOP wins when both appear.
+- Redaction of contact and payment details before a prompt or the `ai_calls` log now reaches every depth; a cycle or an oversized value is replaced with a redaction marker instead of being passed through.
+
+### Upgrading from 0.14.1
+
+- **Migrations:** `packages/db/migrations/0087_domain_pending_since.sql`.
+- **Configuration:** no new environment variables.
+- **Breaking changes:** none for configuration or URLs. Three behaviour changes to be aware of: `consent.history` omits personal proof fields for roles without `profiles:pii` and adds `proofWithheld`; an inbound SMS reply containing any opt-out keyword (STOP, UNSUBSCRIBE, CANCEL, END, QUIT and their Nordic equivalents) anywhere now opts the number out of marketing SMS, so "can you cancel my order?" does too — a false opt-out is the compliant failure; and a stored e-mail whose markup is pathologically nested, malformed or slow to parse renders as escaped text on the public archive instead of HTML.
+- **Manual steps:** none.
+- **Upgrade:** download `agentic-marketing-compose-0.14.2.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.14.2 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.14.2` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.14.2). Run `docker compose exec app am doctor`.
+
+<!-- issues: 574, 575, 577, 578, 579, 594, 608, 609, 610, 635, 636, 641 -->
+
 ## [0.14.1] - 2026-11-08
 
 ### Security
@@ -15,7 +37,6 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 - **Breaking changes:** none. Benign archive and web-version output is byte-identical; only active or malformed markup is removed.
 - **Manual steps:** none.
 - **Upgrade:** download `agentic-marketing-compose-0.14.1.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.14.1 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.14.1` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.14.1). Run `docker compose exec app am doctor`.
-
 
 ## [0.14.0] - 2026-11-08
 
