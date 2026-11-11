@@ -112,6 +112,7 @@ function summaryMeasured(overrides: Record<string, unknown> = {}) {
     goal,
     headline: {
       recipients: 2400,
+      emailSent: 2400,
       delivered: 2400,
       clickers: 192,
       unsubscribers: 12,
@@ -140,6 +141,7 @@ function summaryMeasured(overrides: Record<string, unknown> = {}) {
         clickRate: 0.08,
         unsubscribeRate: 0.005,
         converters: 96,
+        suppressed: false,
       },
       {
         artifactId: journeyId,
@@ -151,6 +153,7 @@ function summaryMeasured(overrides: Record<string, unknown> = {}) {
         clickRate: 0.08,
         unsubscribeRate: 0.005,
         converters: 48,
+        suppressed: false,
       },
     ],
     holdouts: [journeyHoldout()],
@@ -589,6 +592,7 @@ describe('campaign roll-up states (#511)', () => {
     h.summary = summaryMeasured({
       headline: {
         recipients: 0,
+        emailSent: 0,
         delivered: 0,
         clickers: 0,
         unsubscribers: 0,
@@ -646,17 +650,30 @@ describe('campaign roll-up states (#511)', () => {
     expect(screen.queryByText('0%')).toBeNull();
   });
 
-  it('withholds the headline and funnel when the server suppressed cells', async () => {
+  it('keeps the headline and shows suppressed member cells when the server suppressed rows (#586)', async () => {
+    const base = summaryMeasured();
     h.summary = summaryMeasured({
-      meta: { ...meta, suppressed: 2, k: 5, notes: ['Two groups were suppressed.'] },
+      meta: { ...meta, suppressed: 1, k: 5, notes: ['One member row had fewer than k=5 people reached.'] },
+      members: [
+        { ...base.members[0], sent: null, delivered: null, clickRate: null, unsubscribeRate: null, converters: null, suppressed: true },
+        base.members[1],
+      ],
     });
 
     renderTab();
-    await screen.findByText('Values unavailable — fewer than 5 people');
-    expect(screen.getByText(/k=5|k = 5/)).toBeTruthy();
-    expect(screen.getByText('Two groups were suppressed.')).toBeTruthy();
-    expect(screen.queryByText('Recipients')).toBeNull();
-    expect(screen.queryByText('Campaign funnel')).toBeNull();
+    await screen.findByText('Some member rows are suppressed');
+    expect(screen.getByText(/k = 5/)).toBeTruthy();
+    expect(screen.getByText(/One member row had fewer than k=5 people reached\./)).toBeTruthy();
+    // The headline is a total, so it stays visible; only the small member row is hidden.
+    expect(screen.getAllByText('Recipients').length).toBeGreaterThan(0);
+    expect(screen.getByRole('table', { name: 'Campaign funnel' })).toBeTruthy();
+    expect(screen.getAllByText('Suppressed').length).toBeGreaterThan(0);
+  });
+
+  it('prints the k line only when suppression applies (#586)', async () => {
+    renderTab();
+    await screen.findAllByText('2,400');
+    expect(screen.queryByText(/k = 5/)).toBeNull();
   });
 
   it('replaces old values while refreshing and keeps a failure local with Retry', async () => {
@@ -723,7 +740,7 @@ describe('campaign roll-up states (#511)', () => {
 
     expect(screen.getAllByText(/30 Oct–5 Nov 2026 · UTC · Latest event in period: 5 Nov 2026, 21:42/).length).toBeGreaterThan(0);
     expect(screen.getByText('144 / 2,400 recipients = 6%')).toBeTruthy();
-    expect(screen.getByText('12 / 2,400 delivered people = 0.5%')).toBeTruthy();
+    expect(screen.getByText('12 / 2,400 delivered e-mails = 0.5%')).toBeTruthy();
   });
 
   it('labels a missing event timestamp as Unavailable and never as an epoch', async () => {

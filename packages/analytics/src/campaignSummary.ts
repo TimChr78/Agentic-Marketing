@@ -8,14 +8,13 @@ import { computeJourneyHoldout, type JourneyHoldoutResult } from '@agentic-marke
 import { eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
 import { type CampaignMember, type CampaignRecord, goalEventsFor, loadCampaignRecord } from './campaign';
-import { type AnalyticsResult, analyticsMeta, runAnalyticsQuery } from './query';
+import { type AnalyticsResult, analyticsMeta, K, MAX_RANGE_DAYS, runAnalyticsQuery } from './query';
 
 // The campaign summary (#66) is a named report over the campaign measures and the existing
 // e-mail measures. It keeps the raw runs out of the UI: the funnel, per-member rows and journey
 // holdouts all come from the same tenant-scoped metric layer.
 
 const CampaignId = z.string().regex(/^cmp_[0-9a-f]{32}$/, 'A campaign id (cmp_…)');
-const K = 5;
 
 interface Deps {
   tx: Tx;
@@ -41,8 +40,9 @@ const readinessSchema = z.object({
 const currencyAmount = z.object({ currency: z.string(), amount: z.number() });
 
 const headlineSchema = z.object({
-  recipients: z.number().int(),
-  delivered: z.number().int(),
+  recipients: z.number().int().describe('Distinct people reached by the campaign, on any channel'),
+  emailSent: z.number().int().describe('Distinct people the campaign reached by e-mail'),
+  delivered: z.number().int().describe('Distinct people whose campaign e-mail was delivered'),
   clickers: z.number().int(),
   unsubscribers: z.number().int(),
   complaintRate: z.number().nullable(),
@@ -69,11 +69,12 @@ const memberRow = z.object({
   name: z.string(),
   type: z.string(),
   role: z.enum(['primary', 'follow_up', 'content']),
-  sent: z.number().int(),
-  delivered: z.number().int(),
+  sent: z.number().int().nullable().describe('E-mails sent to distinct people; null when the row is suppressed'),
+  delivered: z.number().int().nullable().describe('E-mails delivered to distinct people; null when the row is suppressed'),
   clickRate: z.number().nullable(),
   unsubscribeRate: z.number().nullable(),
-  converters: z.number().int(),
+  converters: z.number().int().nullable().describe('Distinct campaign converters; null when the row is suppressed'),
+  suppressed: z.boolean().describe('True when the member reached fewer than k people, so its counts are hidden'),
 });
 
 const holdoutSchema = z.object({
@@ -177,6 +178,8 @@ async function readiness(tx: Tx, record: CampaignRecord): Promise<z.infer<typeof
 
 interface MemberBreakdown {
   artifactId: string;
+  /** Distinct people the member reached on any channel; the k-anonymity group size. */
+  reached: number;
   sent: number;
   delivered: number;
   clicked: number;
@@ -231,13 +234,16 @@ async function memberBreakdown(
       ),
       sent AS (
         SELECT journey_id AS member_id,
-          uniqExactIf(profile_id, type = 'sent') AS sent,
-          uniqExactIf(profile_id, type = 'delivered') AS delivered,
-          uniqExactIf(profile_id, type = 'clicked') AS clicked,
-          uniqExactIf(profile_id, type = 'unsubscribed') AS unsubscribed
+          -- The k group is people reached on any channel; the figures are e-mail only (#682).
+          uniqExactIf(profile_id, profile_id != '') AS reached,
+          uniqExactIf(profile_id, profile_id != '' AND channel = 'email' AND type = 'sent') AS sent,
+          uniqExactIf(profile_id, profile_id != '' AND channel = 'email' AND type = 'delivered') AS delivered,
+          uniqExactIf(profile_id, profile_id != '' AND channel = 'email' AND type = 'clicked') AS clicked,
+          uniqExactIf(profile_id, profile_id != '' AND channel = 'email' AND type = 'unsubscribed') AS unsubscribed
         FROM message_events FINAL
         WHERE workspace_id = {ws:UUID} AND journey_id IN {members:Array(String)}
           AND at >= {from:DateTime64(3, 'UTC')} AND at <= {to:DateTime64(3, 'UTC')}
+          AND profile_id != ''
         GROUP BY member_id
       ),
       conv AS (
@@ -248,7 +254,7 @@ async function memberBreakdown(
           AND e.timestamp <= addDays(f.first_at, {attribution_days:Int32})
         GROUP BY f.member_id
       )
-      SELECT s.member_id, s.sent, s.delivered, s.clicked, s.unsubscribed, ifNull(c.converters, 0) AS converters
+      SELECT s.member_id, s.reached, s.sent, s.delivered, s.clicked, s.unsubscribed, ifNull(c.converters, 0) AS converters
       FROM sent s LEFT JOIN conv c ON c.member_id = s.member_id`,
     query_params: {
       ws: deps.workspaceId,
@@ -271,6 +277,7 @@ async function memberBreakdown(
       String(r.member_id),
       {
         artifactId: String(r.member_id),
+        reached: Number(r.reached ?? 0),
         sent: Number(r.sent ?? 0),
         delivered: Number(r.delivered ?? 0),
         clicked: Number(r.clicked ?? 0),
@@ -298,14 +305,46 @@ async function holdoutResults(deps: Deps, record: CampaignRecord, from: string, 
   return out;
 }
 
+interface SummaryWindow {
+  from: string;
+  to: string;
+  /** True when the default window was shortened to the metric layer's range cap. */
+  clamped: boolean;
+}
+
+/**
+ * The explicit window is used as given. The documented default (campaign start → now) is clamped
+ * to the metric layer's cap, because the query layer rejects a longer range before it measures
+ * (#588); a campaign with no start date gets the last 400 days instead of the epoch.
+ */
+export function summaryWindow(input: { from?: string; to?: string; startsAt: string | null }, now: string): SummaryWindow {
+  const to = input.to ?? now;
+  const reversed = () =>
+    new AppError('invalid_input', 'from must be before to. Move from earlier than to, or omit from to use the campaign start and now.');
+
+  if (input.from !== undefined) {
+    if (Date.parse(input.from) > Date.parse(to)) throw reversed();
+    return { from: input.from, to, clamped: false };
+  }
+
+  const start = input.startsAt ?? '2000-01-01T00:00:00.000Z';
+  const earliest = new Date(Date.parse(to) - MAX_RANGE_DAYS * 86_400_000).toISOString();
+  const clamped = Date.parse(start) < Date.parse(earliest);
+  const from = clamped ? earliest : start;
+  if (Date.parse(from) > Date.parse(to)) throw reversed();
+  return { from, to, clamped };
+}
+
 export const analyticsCampaignSummary = defineCommand({
   name: 'analytics.campaignSummary',
   title: 'Campaign evaluation',
   description:
-    'One campaign’s goal and attribution: recipients, delivered, clickers, unsubscribers, complaint and unsubscribe rates, converters, conversion rate, revenue per currency and per recipient, progress towards the target when set, and the recipients → delivered → clicked → converted funnel. Includes a row per sending member (broadcast or journey) and the holdout result for journey members with a control group. A campaign that has not sent yet returns state "not_started" with readiness instead of zeros.',
+    'One campaign’s goal and attribution: recipients reached on any channel, e-mail delivered, clickers, unsubscribers, complaint and unsubscribe rates, converters, conversion rate, revenue per currency and per recipient, progress towards the target when set, and the recipients → delivered → clicked → converted funnel. Includes a row per sending member (broadcast or journey) and the holdout result for journey members with a control group. Member rows below k=5 people reached are suppressed. A campaign that has not sent yet returns state "not_started" with readiness instead of zeros.',
   input: z.object({
     campaignId: CampaignId,
-    from: isoDateTime('from').optional().describe('Count sends at or after this time; defaults to the campaign start'),
+    from: isoDateTime('from')
+      .optional()
+      .describe('Count sends at or after this time; defaults to the campaign start, clamped to the last 400 days'),
     to: isoDateTime('to').optional().describe('Count sends at or before this time; defaults to now'),
   }),
   output: campaignSummaryOutput,
@@ -317,8 +356,8 @@ export const analyticsCampaignSummary = defineCommand({
     const record = await loadCampaignRecord(ctx.tx, input.campaignId);
     const timeZone = await workspaceTimeZone(ctx.tx, deps.workspaceId);
     const now = new Date().toISOString();
-    const from = input.from ?? record.startsAt ?? '2000-01-01T00:00:00.000Z';
-    const to = input.to ?? now;
+    const window = summaryWindow({ from: input.from, to: input.to, startsAt: record.startsAt }, now);
+    const { from, to } = window;
     const ready = await readiness(ctx.tx, record);
 
     const sending = sendingMembers(record);
@@ -335,6 +374,9 @@ export const analyticsCampaignSummary = defineCommand({
       k: K,
       notes: [
         `Campaign conversions are people who got a campaign message and converted within ${record.goal.attributionDays} days of their first campaign message (first touch).`,
+        ...(window.clamped
+          ? [`The default window was shortened to the last ${MAX_RANGE_DAYS} days; pass from to measure an earlier period.`]
+          : []),
         ...(identity.overLimit
           ? [
               `Identity resolution was skipped: the workspace has more than ${identity.limit} merged identity mappings, so conversions are matched on the profile id stored with the event.`,
@@ -382,6 +424,7 @@ export const analyticsCampaignSummary = defineCommand({
 
     const recipients = cell(totals, 'campaign.recipients');
     const converters = cell(totals, 'campaign.converters');
+    const emailSent = cell(email, 'email.sent');
     const delivered = cell(email, 'email.delivered');
     const clickers = cell(email, 'email.clicked');
     const unsubscribers = cell(email, 'email.unsubscribed');
@@ -412,36 +455,70 @@ export const analyticsCampaignSummary = defineCommand({
       (conversionMap?.rules ?? []).map((r) => r.event),
     );
     const breakdown = await memberBreakdown(deps, memberIds, from, to, goalEvents, record.goal.attributionDays, identity);
+    // The same k rule the query layer applies to a dimension group: a member row whose group of
+    // people reached is below k has every count and derived rate suppressed (null), and is
+    // counted in meta.suppressed. The headline is a total and is never suppressed.
+    let memberSuppressed = 0;
     const members = sending.map((m) => {
       const row = breakdown.get(m.artifactId);
-      const sent = row?.sent ?? 0;
-      const memberDelivered = row?.delivered ?? 0;
+      if (!row) {
+        return {
+          artifactId: m.artifactId,
+          name: m.name,
+          type: m.type,
+          role: m.role,
+          sent: 0,
+          delivered: 0,
+          clickRate: null,
+          unsubscribeRate: null,
+          converters: 0,
+          suppressed: false,
+        };
+      }
+      if (row.reached < K) {
+        memberSuppressed++;
+        return {
+          artifactId: m.artifactId,
+          name: m.name,
+          type: m.type,
+          role: m.role,
+          sent: null,
+          delivered: null,
+          clickRate: null,
+          unsubscribeRate: null,
+          converters: null,
+          suppressed: true,
+        };
+      }
       return {
         artifactId: m.artifactId,
         name: m.name,
         type: m.type,
         role: m.role,
-        sent,
-        delivered: memberDelivered,
-        clickRate: memberDelivered ? (row?.clicked ?? 0) / memberDelivered : null,
-        unsubscribeRate: memberDelivered ? (row?.unsubscribed ?? 0) / memberDelivered : null,
-        converters: row?.converters ?? 0,
+        sent: row.sent,
+        delivered: row.delivered,
+        clickRate: row.delivered ? row.clicked / row.delivered : null,
+        unsubscribeRate: row.delivered ? row.unsubscribed / row.delivered : null,
+        converters: row.converters,
+        suppressed: false,
       };
     });
 
+    // E-mail figures divide by the e-mail base, never by the all-channel recipient total. The
+    // recipients and converted steps stay campaign-wide (#682).
     const funnel = [
       { step: 'recipients' as const, count: recipients, stepRate: null, shareOfRecipients: recipients ? 1 : null },
       {
         step: 'delivered' as const,
         count: delivered,
-        stepRate: recipients ? delivered / recipients : null,
-        shareOfRecipients: recipients ? delivered / recipients : null,
+        stepRate: emailSent ? delivered / emailSent : null,
+        shareOfRecipients: emailSent ? delivered / emailSent : null,
       },
       {
         step: 'clicked' as const,
         count: clickers,
         stepRate: delivered ? clickers / delivered : null,
-        shareOfRecipients: recipients ? clickers / recipients : null,
+        shareOfRecipients: emailSent ? clickers / emailSent : null,
       },
       {
         step: 'converted' as const,
@@ -453,6 +530,7 @@ export const analyticsCampaignSummary = defineCommand({
 
     const holdouts = await holdoutResults(deps, record, from, to);
     const notes = [...new Set([...totals.meta.notes, ...email.meta.notes, ...revenue.meta.notes, ...baseMeta.notes])];
+    if (memberSuppressed) notes.push(`Member rows with fewer than k=${K} people reached have their counts suppressed.`);
 
     return {
       campaignId: record.id,
@@ -461,6 +539,7 @@ export const analyticsCampaignSummary = defineCommand({
       goal: record.goal,
       headline: {
         recipients,
+        emailSent,
         delivered,
         clickers,
         unsubscribers,
@@ -481,7 +560,7 @@ export const analyticsCampaignSummary = defineCommand({
         from,
         to,
         freshness: email.meta.freshness ?? totals.meta.freshness,
-        suppressed: totals.meta.suppressed + email.meta.suppressed + revenue.meta.suppressed,
+        suppressed: totals.meta.suppressed + email.meta.suppressed + revenue.meta.suppressed + memberSuppressed,
         k: K,
         notes,
       },

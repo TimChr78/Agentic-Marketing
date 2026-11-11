@@ -48,16 +48,16 @@ function MetricGrid({ summary }: { summary: MeasuredSummary }) {
   return (
     <div className="space-y-3">
       <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 xl:grid-cols-4">
-        <StatCard label="Recipients" value={int(h.recipients)} hint="Distinct attributed people" />
+        <StatCard label="Recipients" value={int(h.recipients)} hint="Distinct people reached on any channel" />
         <StatCard
-          label="Delivered"
+          label="E-mails delivered"
           value={int(h.delivered)}
-          hint={h.recipients > 0 ? `${int(h.delivered)} of ${int(h.recipients)} recipients` : 'Unavailable · no recipients'}
+          hint={h.emailSent > 0 ? `${int(h.delivered)} of ${int(h.emailSent)} e-mails sent` : 'Unavailable · no e-mails sent'}
         />
         <StatCard
-          label="Clickers"
+          label="E-mail clickers"
           value={int(h.clickers)}
-          hint={h.delivered > 0 ? `${int(h.clickers)} of ${int(h.delivered)} delivered people` : 'Unavailable · no delivered people'}
+          hint={h.delivered > 0 ? `${int(h.clickers)} of ${int(h.delivered)} delivered e-mails` : 'Unavailable · no delivered e-mails'}
         />
         <StatCard
           label="Converters"
@@ -65,19 +65,19 @@ function MetricGrid({ summary }: { summary: MeasuredSummary }) {
           hint={`${int(h.converters)} / ${int(h.recipients)} recipients = ${rateOrDash(h.conversionRate, h.recipients)}`}
         />
         <StatCard
-          label="Unsubscribers"
+          label="E-mail unsubscribers"
           value={int(h.unsubscribers)}
-          hint={`${int(h.unsubscribers)} / ${int(h.delivered)} delivered people = ${rateOrDash(h.unsubscribeRate, h.delivered)}`}
+          hint={`${int(h.unsubscribers)} / ${int(h.delivered)} delivered e-mails = ${rateOrDash(h.unsubscribeRate, h.delivered)}`}
         />
         <StatCard
-          label="Complaint rate"
+          label="E-mail complaint rate"
           value={rateOrDash(h.complaintRate, h.delivered)}
-          hint={h.delivered > 0 ? `of ${int(h.delivered)} delivered people` : 'Unavailable · no delivered people'}
+          hint={h.delivered > 0 ? `of ${int(h.delivered)} delivered e-mails` : 'Unavailable · no delivered e-mails'}
         />
         <StatCard
-          label="Unsubscribe rate"
+          label="E-mail unsubscribe rate"
           value={rateOrDash(h.unsubscribeRate, h.delivered)}
-          hint={h.delivered > 0 ? `${int(h.unsubscribers)} of ${int(h.delivered)} delivered people` : 'Unavailable · no delivered people'}
+          hint={h.delivered > 0 ? `${int(h.unsubscribers)} of ${int(h.delivered)} delivered e-mails` : 'Unavailable · no delivered e-mails'}
         />
         {h.revenue.length === 0 ? (
           <StatCard label="Revenue" value="—" hint="No attributed revenue" />
@@ -91,7 +91,7 @@ function MetricGrid({ summary }: { summary: MeasuredSummary }) {
                 value={money(row.amount, row.currency)}
                 hint={
                   perRecipient
-                    ? `${money(perRecipient.amount, row.currency)} per attributed recipient`
+                    ? `${money(perRecipient.amount, row.currency)} per attributed recipient on any channel`
                     : 'Per-recipient revenue unavailable'
                 }
               />
@@ -172,7 +172,7 @@ function FunnelSection({ summary, bounds, zone }: { summary: MeasuredSummary; bo
                   Step rate
                 </th>
                 <th scope="col" className="h-9 px-3 text-right font-medium md:px-4">
-                  Of recipients
+                  Share
                 </th>
               </tr>
             </thead>
@@ -203,13 +203,11 @@ function FunnelSection({ summary, bounds, zone }: { summary: MeasuredSummary; bo
 
         <p className="text-[12px] leading-[18px] text-muted">
           Step rate divides by the previous stage; conversion is attributed to recipients, not conditioned on a click. Converters can exceed
-          clickers.
+          clickers. Delivered and clicked counts are e-mail; recipients and conversions cover every channel.
         </p>
         <p className="text-[12px] leading-[18px] text-muted">
-          Period {periodLabel} · {zone} · Latest event in period: {latestEventText(summary.meta.freshness, zone)} · k ={' '}
-          {int(summary.meta.k)}
+          Period {periodLabel} · {zone} · Latest event in period: {latestEventText(summary.meta.freshness, zone)}
         </p>
-        {summary.meta.notes.length > 0 && <p className="text-[12px] leading-[18px] text-muted">{summary.meta.notes.join(' ')}</p>}
       </div>
     </Card>
   );
@@ -217,6 +215,7 @@ function FunnelSection({ summary, bounds, zone }: { summary: MeasuredSummary; bo
 
 function MemberCells({ member }: { member: MemberRow }) {
   const contentOnly = member.role === 'content';
+  const hidden = member.suppressed;
   return (
     <>
       <Td className="max-lg:flex max-lg:items-start max-lg:justify-between max-lg:gap-3 max-lg:px-0">
@@ -231,24 +230,26 @@ function MemberCells({ member }: { member: MemberRow }) {
         <span>{typeLabel(member.type)}</span>
       </Td>
       <Td align="right" className="max-lg:flex max-lg:items-start max-lg:justify-between max-lg:gap-3 max-lg:px-0">
-        <span className="text-[12px] text-muted lg:hidden">Sent people</span>
-        <span>{contentOnly ? '—' : int(member.sent)}</span>
+        <span className="text-[12px] text-muted lg:hidden">E-mails sent</span>
+        <span>{contentOnly ? '—' : hidden ? 'Suppressed' : int(member.sent)}</span>
       </Td>
       <Td align="right" className="max-lg:flex max-lg:items-start max-lg:justify-between max-lg:gap-3 max-lg:px-0">
-        <span className="text-[12px] text-muted lg:hidden">Delivered</span>
-        <span>{contentOnly ? '—' : int(member.delivered)}</span>
+        <span className="text-[12px] text-muted lg:hidden">E-mails delivered</span>
+        <span>{contentOnly ? '—' : hidden ? 'Suppressed' : int(member.delivered)}</span>
       </Td>
       <Td align="right" className="max-lg:flex max-lg:items-start max-lg:justify-between max-lg:gap-3 max-lg:px-0">
         <span className="text-[12px] text-muted lg:hidden">Click rate</span>
-        <span>{contentOnly ? 'Not a sending member' : memberRateLabel(member.clickRate, member.delivered)}</span>
+        <span>{contentOnly ? 'Not a sending member' : hidden ? 'Suppressed' : memberRateLabel(member.clickRate, member.delivered)}</span>
       </Td>
       <Td align="right" className="max-lg:flex max-lg:items-start max-lg:justify-between max-lg:gap-3 max-lg:px-0">
         <span className="text-[12px] text-muted lg:hidden">Unsubscribe rate</span>
-        <span>{contentOnly ? 'Not a sending member' : memberRateLabel(member.unsubscribeRate, member.delivered)}</span>
+        <span>
+          {contentOnly ? 'Not a sending member' : hidden ? 'Suppressed' : memberRateLabel(member.unsubscribeRate, member.delivered)}
+        </span>
       </Td>
       <Td align="right" className="max-lg:flex max-lg:items-start max-lg:justify-between max-lg:gap-3 max-lg:px-0">
         <span className="text-[12px] text-muted lg:hidden">Converters</span>
-        <span>{contentOnly ? '—' : int(member.converters)}</span>
+        <span>{contentOnly ? '—' : hidden ? 'Suppressed' : int(member.converters)}</span>
       </Td>
     </>
   );
@@ -258,7 +259,7 @@ function MembersSection({ summary }: { summary: MeasuredSummary }) {
   return (
     <Card
       title="Members"
-      description={`Each broadcast and journey that sent for this campaign. Converters use the current published membership and ${int(summary.goal.attributionDays)}-day first-touch attribution.`}
+      description={`Each broadcast and journey member of this campaign; sent and delivered count e-mail. Converters use the current published membership and ${int(summary.goal.attributionDays)}-day first-touch attribution.`}
     >
       <TableFrame
         columns={7}
@@ -279,10 +280,10 @@ function MembersSection({ summary }: { summary: MeasuredSummary }) {
                 Type
               </th>
               <th scope="col" className="h-9 px-3 text-right font-medium md:px-4">
-                Sent people
+                E-mails sent
               </th>
               <th scope="col" className="h-9 px-3 text-right font-medium md:px-4">
-                Delivered
+                E-mails delivered
               </th>
               <th scope="col" className="h-9 px-3 text-right font-medium md:px-4">
                 Click rate
@@ -355,9 +356,9 @@ function JourneyHoldouts({
 
 function SuppressionNotice({ summary }: { summary: MeasuredSummary }) {
   return (
-    <Alert tone="warn" title="Values unavailable — fewer than 5 people">
-      The server suppressed this breakdown (k={int(summary.meta.k)}); no identities or inferred values are shown.
-      {summary.meta.notes.length > 0 && <span className="mt-1 block">{summary.meta.notes.join(' ')}</span>}
+    <Alert tone="warn" title="Some member rows are suppressed">
+      Member rows with fewer than k={int(summary.meta.k)} people reached have their counts and rates hidden. Campaign totals stay visible,
+      and no identities or inferred values are shown.
     </Alert>
   );
 }
@@ -518,14 +519,9 @@ export function CampaignEvaluationView({ campaignId, from, to, active = true, re
         </div>
       )}
       {periodLine}
-      {s.meta.suppressed > 0 ? (
-        <SuppressionNotice summary={s} />
-      ) : (
-        <>
-          <MetricGrid summary={s} />
-          <FunnelSection summary={s} bounds={bounds} zone={zone} />
-        </>
-      )}
+      <MetricGrid summary={s} />
+      <FunnelSection summary={s} bounds={bounds} zone={zone} />
+      {s.meta.suppressed > 0 && <SuppressionNotice summary={s} />}
       <MembersSection summary={s} />
       <JourneyHoldouts
         holdouts={s.holdouts}
@@ -533,9 +529,10 @@ export function CampaignEvaluationView({ campaignId, from, to, active = true, re
         attributionDays={s.goal.attributionDays}
         assignmentPeriod={`${periodLabel} · ${zone}`}
       />
-      {s.meta.suppressed === 0 && (
+      {(s.meta.suppressed > 0 || s.meta.notes.length > 0) && (
         <p className="text-[12px] leading-[18px] text-muted">
-          k = {int(s.meta.k)} · {s.meta.notes.join(' ')}
+          {s.meta.suppressed > 0 && <>k = {int(s.meta.k)} · </>}
+          {s.meta.notes.join(' ')}
         </p>
       )}
     </div>
