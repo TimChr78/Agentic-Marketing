@@ -83,8 +83,7 @@ export function writeKeyOf(c: Context, body: Record<string, unknown>): string | 
   return (body.writeKey as string | undefined) ?? (first?.writeKey as string | undefined) ?? c.req.header('x-write-key');
 }
 
-/** Validates and applies the workspace policy to raw Segment-spec events (shared by the gateway and inbound webhooks). */
-export function acceptItems(
+function accept(
   items: unknown[],
   source: SourceInfo,
   policy: WorkspacePolicy,
@@ -94,7 +93,8 @@ export function acceptItems(
     receivedAt?: Date;
     /** Overrides the id given to an item that carries none (e.g. a stable id derived from a webhook-id). */
     messageId?: (index: number) => string;
-  } = {},
+  },
+  internal: boolean,
 ) {
   const receivedAt = opts.receivedAt ?? new Date();
   const accepted: BusEvent[] = [];
@@ -118,6 +118,7 @@ export function acceptItems(
     const out = processEvent(parsed.data, source, policy, receivedAt, {
       ip: opts.ip,
       messageId: () => opts.messageId?.(index) ?? newUuid(),
+      internal,
     });
     if (out.kind === 'accepted') {
       accepted.push(out.event);
@@ -126,6 +127,37 @@ export function acceptItems(
     else rejected.push({ index, error: out.error });
   }
   return { accepted, rejected, warnings, dropped };
+}
+
+/** Validates and applies the workspace policy to raw Segment-spec events (the gateway and inbound webhooks). */
+export function acceptItems(
+  items: unknown[],
+  source: SourceInfo,
+  policy: WorkspacePolicy,
+  opts: {
+    ip?: string;
+    context?: Record<string, unknown>;
+    receivedAt?: Date;
+    /** Overrides the id given to an item that carries none (e.g. a stable id derived from a webhook-id). */
+    messageId?: (index: number) => string;
+  } = {},
+) {
+  return accept(items, source, policy, opts, false);
+}
+
+/**
+ * The platform's own server-side callers (forms, imports, e-mail events) use this entry point so
+ * their carrier events are exempt from the workspace plan (#624). It is deliberately separate from
+ * `acceptItems`: the public `/v1` gateway and inbound webhooks cannot reach the exemption, even
+ * with a server write key or an event that happens to carry a platform event name.
+ */
+export function acceptInternalItems(
+  items: unknown[],
+  source: SourceInfo,
+  policy: WorkspacePolicy,
+  opts: { ip?: string; context?: Record<string, unknown>; receivedAt?: Date } = {},
+) {
+  return accept(items, source, policy, opts, true);
 }
 
 export interface IngestDeps {
