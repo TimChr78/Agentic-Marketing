@@ -14,12 +14,16 @@ import { eventually, rejects, startTestServer, testPort, type User } from './har
 
 let t: Awaited<ReturnType<typeof startTestServer>>;
 let owner: User;
+let ws = '';
 let browserKey = '';
 let serverKey = '';
 let fake: Server;
 let apns: Http2Server;
 let base = '';
 let apnsBase = '';
+/** FCM answers 503 this many times for the transient token below, then succeeds (#639). */
+let fcmFailures = 0;
+const TRANSIENT_FCM_TOKEN = 'fcm-token-transient-0123456789';
 const webPushes: { path: string; headers: IncomingMessage['headers']; body: Buffer }[] = [];
 const fcmSends: { auth: string; body: { message: { token: string; notification: { title: string } } } }[] = [];
 const apnsSends: { path: string; headers: Record<string, unknown>; body: { aps: { alert: { title: string } } } }[] = [];
@@ -51,6 +55,12 @@ beforeAll(async () => {
     if (req.url?.startsWith('/v1/projects/')) {
       const b = JSON.parse(body.toString());
       fcmSends.push({ auth: String(req.headers.authorization), body: b });
+      if (b.message?.token === TRANSIENT_FCM_TOKEN && fcmFailures > 0) {
+        fcmFailures--;
+        return res
+          .writeHead(503, { 'content-type': 'application/json' })
+          .end(JSON.stringify({ error: { status: 'UNAVAILABLE', message: 'try again' } }));
+      }
       return res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ name: 'projects/shop-app/messages/1' }));
     }
     webPushes.push({ path: req.url ?? '', headers: req.headers, body });
@@ -73,7 +83,7 @@ beforeAll(async () => {
 
   t = await startTestServer('test_p11_push', testPort(3295));
   owner = await t.signUp(`owner-${Date.now()}@example.com`);
-  await t.workspaceWith([[owner, 'owner']], 'none');
+  ws = await t.workspaceWith([[owner, 'owner']], 'none');
   const api = t.api(owner);
   browserKey = (await api.call('sources.create', { name: 'Shop', kind: 'browser', allowedOrigins: [ORIGIN] })).key;
   serverKey = (await api.call('sources.create', { name: 'App backend', kind: 'server' })).key;
@@ -232,6 +242,42 @@ describe('sending', () => {
     // The browser that unsubscribed (410) is forgotten.
     const { devices } = await api.call('push.devices', { profileId: ada });
     expect(devices.map((x) => x.kind).sort()).toEqual(['apns', 'fcm', 'web']);
+  });
+
+  // #639: one delivered device used to mark the whole message `sent`, so a device whose transport
+  // threw a transient error was never retried (the retry branch only ran when nothing delivered).
+  it('retries only the devices that failed when others already received the push', async () => {
+    const api = t.api(owner);
+    const mix = await person('u-mix', 'anon-mix', true);
+    expect(
+      (await post('/v1/push/subscribe', browserKey, { anonymousId: 'anon-mix', subscription: subscription('/push/mix') })).status,
+    ).toBe(200);
+    expect((await post('/v1/push/subscribe', serverKey, { userId: 'u-mix', kind: 'fcm', token: TRANSIENT_FCM_TOKEN })).status).toBe(200);
+
+    fcmFailures = 1;
+    const d = await api.call('messages.sendPush', { profileId: mix, templateId: template });
+    const webSends = () => webPushes.filter((w) => w.path === '/push/mix').length;
+    const fcmTries = () => fcmSends.filter((s) => s.body.message.token === TRANSIENT_FCM_TOKEN).length;
+    const messageRow = async () =>
+      (await api.call('messages.list', { profileId: mix, limit: 10 })).messages.find((m) => m.id === d.messageId);
+
+    // One device received it, one failed transiently: the message is not `sent` yet and a retry
+    // is queued with the same back-off the e-mail and SMS paths use.
+    const partial = await eventually(messageRow, (m) => m?.reason?.includes('partly_sent') ?? false, 15_000);
+    expect(partial).toMatchObject({ status: 'queued', reason: expect.stringContaining('partly_sent') });
+    expect(partial?.nextAttemptAt).not.toBeNull();
+    expect(webSends()).toBe(1);
+    expect(fcmTries()).toBe(1);
+
+    // Make the queued retry claimable now; the worker delivers only to the device that failed.
+    await t.srv.db.admin.query(`UPDATE messages SET next_attempt_at = now() - interval '1 second' WHERE workspace_id = $1 AND id = $2`, [
+      ws,
+      d.messageId,
+    ]);
+    const settled = await eventually(messageRow, (m) => m?.status === 'sent', 15_000);
+    expect(settled).toMatchObject({ status: 'sent', reason: null });
+    expect(webSends()).toBe(1); // never sent to the device that already had it
+    expect(fcmTries()).toBe(2); // retried exactly once
   });
 
   it('does not notify without consent, or without devices', async () => {
