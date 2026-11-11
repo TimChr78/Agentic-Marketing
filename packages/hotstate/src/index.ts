@@ -47,6 +47,13 @@ export interface HotState {
   /** A short-lived string shared by all processes (e.g. a link-check result); null when absent. */
   cached(key: string): Promise<string | null>;
   cache(key: string, value: string, ttlSeconds: number): Promise<void>;
+  /**
+   * Records a one-time key for `ttlSeconds` atomically: true when this call created it, false when
+   * it was already there. For idempotency keys such as a webhook-id seen before (#643).
+   */
+  claim(key: string, ttlSeconds: number): Promise<boolean>;
+  /** Forgets a claim, so a request that failed after claiming can be retried. */
+  release(key: string): Promise<void>;
   /** When `key` is locked out after repeated failures, or null. */
   failureLock(key: string): Promise<Date | null>;
   /**
@@ -193,6 +200,13 @@ export function valkeyHotState(opts: { url: string; prefix?: string }): HotState
     },
     async cache(key, value, ttlSeconds) {
       await client.set(`${p}:c:${key}`, value, 'EX', ttlSeconds);
+    },
+
+    async claim(key, ttlSeconds) {
+      return (await client.set(`${p}:once:${key}`, '1', 'EX', ttlSeconds, 'NX')) === 'OK';
+    },
+    async release(key) {
+      await client.del(`${p}:once:${key}`);
     },
 
     async take(key, n, rate, burst) {

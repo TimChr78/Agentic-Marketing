@@ -1,7 +1,8 @@
-import { timingSafeEqual } from 'node:crypto';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import type { PublicRequest } from '@agentic-marketing/commands';
 import { type Db, schema } from '@agentic-marketing/db';
 import type { EventBus } from '@agentic-marketing/events';
+import type { HotState } from '@agentic-marketing/hotstate';
 import { acceptItems, bodyLimit, sourceLookups } from '@agentic-marketing/ingest';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
@@ -17,7 +18,12 @@ import { connectionSecrets, connectorOf, inboundTokenHash } from './connections'
 // the secret URL is authenticated or the body is read.
 const MAX_BODY = 1024 * 1024;
 
-export function inboundApi(deps: { db: Db; bus: EventBus; kp: KeyProvider }) {
+// Standard Webhooks allows a 5-minute timestamp tolerance. Remember a webhook-id a little longer,
+// so a replay inside the window is refused even when replicas' clocks disagree (#643).
+const REPLAY_TTL_S = 10 * 60;
+const RETRY_AFTER_S = 30;
+
+export function inboundApi(deps: { db: Db; bus: EventBus; kp: KeyProvider; hot: Pick<HotState, 'claim' | 'release'> }) {
   const { loadPolicy } = sourceLookups(deps.db);
   const app = new Hono<{ Variables: { publicRequest?: PublicRequest } }>();
   app.post(
@@ -76,8 +82,47 @@ export function inboundApi(deps: { db: Db; bus: EventBus; kp: KeyProvider }) {
         return c.json({ error: 'mapping_failed', message: `The mapping failed: ${(err as Error).message}` }, 422);
       }
       const source = { id: conn.row.id, workspaceId: ws, kind: 'server' as const, requiredPurpose: null };
-      const { accepted, rejected, dropped } = acceptItems(items, source, await loadPolicy(ws));
-      const { duplicates } = accepted.length ? await deps.bus.publish(accepted) : { duplicates: 0 };
+      const policy = await loadPolicy(ws);
+      // Standard Webhooks signs the webhook-id with the body, so it is safe to use as an
+      // idempotency key. Other schemes (Shopify, Salesforce) have no such header and keep their
+      // own deterministic event ids.
+      const webhookId = ictx.settings?.signature?.scheme === 'standard-webhooks' ? headers['webhook-id'] : undefined;
+      // A stable id per mapped record: if the hot state loses the key, JetStream still drops the
+      // retried delivery because both attempts derive the same message ids (120 s window).
+      const messageIdFor = webhookId
+        ? (index: number) => `wh-${conn.row.id}-${createHash('sha256').update(`${ws}\n${webhookId}`).digest('hex').slice(0, 32)}-${index}`
+        : undefined;
+      if (webhookId) {
+        const key = `inbound:${ws}:${conn.row.id}:${webhookId}`;
+        let first: boolean;
+        try {
+          first = await deps.hot.claim(key, REPLAY_TTL_S);
+        } catch (err) {
+          // Fail closed: without the shared store we cannot tell a replay from a first delivery,
+          // and publishing anyway would be the duplicate the guard exists to prevent. A 5xx makes
+          // the sender retry, and the retry publishes once when the store is back.
+          logger.warn({ err, connection: conn.row.id }, 'inbound webhook replay check unavailable');
+          return c.json({ error: 'replay_check_unavailable', message: 'Could not check this webhook for a replay. Retry shortly.' }, 503, {
+            'retry-after': String(RETRY_AFTER_S),
+          });
+        }
+        if (!first) {
+          // The spec treats any 2xx as delivered and any other status as a failure to retry, so a
+          // duplicate is a success that says nothing new was ingested (200, not 409).
+          logger.warn({ connection: conn.row.id, webhookId }, 'inbound webhook already received');
+          return c.json({ success: true, duplicate: true, accepted: 0, duplicates: 0, dropped: 0 });
+        }
+      }
+      const { accepted, rejected, dropped } = acceptItems(items, source, policy, messageIdFor ? { messageId: messageIdFor } : {});
+      let duplicates: number;
+      try {
+        ({ duplicates } = accepted.length ? await deps.bus.publish(accepted) : { duplicates: 0 });
+      } catch (err) {
+        // Nothing was published: forgetting the id lets the sender's retry through instead of
+        // turning a transient bus failure into a lost delivery.
+        if (webhookId) await deps.hot.release(`inbound:${ws}:${conn.row.id}:${webhookId}`).catch(() => {});
+        throw err;
+      }
       if (rejected.length) logger.warn({ connection: conn.row.id, rejected }, 'inbound webhook events rejected');
       return c.json({ success: true, accepted: accepted.length, duplicates, dropped, ...(rejected.length ? { rejected } : {}) });
     },
