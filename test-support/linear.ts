@@ -1,5 +1,8 @@
 import { expect } from 'vitest';
 
+/** Timings under this are too short for a meaningful 4n/n ratio. */
+const NOISE_FLOOR_MS = 20;
+
 /** One warm-up run, then the best of three, so a slow CI runner cannot inflate the ratio. */
 function bestOfThree(run: (input: string) => unknown, input: string): number {
   run(input);
@@ -28,6 +31,9 @@ export function expectLinear(build: (n: number) => string, run: (input: string) 
   const ratio = tLarge / Math.max(tSmall, 0.5);
   const detail = `n=${base}: ${tSmall.toFixed(2)} ms, 4n=${base * 4}: ${tLarge.toFixed(2)} ms (ratio ${ratio.toFixed(1)})`;
 
-  expect(ratio, `expected linear scaling, got ${detail}`).toBeLessThan(8);
+  // Below a few milliseconds the ratio measures timer noise and warm-up, not growth: a run that
+  // takes 0.4 ms at n and 4.5 ms at 4n failed here on a CI runner. Work that finishes this fast at
+  // 4n is not the slow path the check exists to catch, so only the ceiling applies.
+  if (tLarge >= NOISE_FLOOR_MS) expect(ratio, `expected linear scaling, got ${detail}`).toBeLessThan(8);
   expect(tLarge, `expected 4n under 2,000 ms, got ${detail}`).toBeLessThan(2_000);
 }
