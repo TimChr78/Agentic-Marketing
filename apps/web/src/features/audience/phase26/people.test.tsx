@@ -567,10 +567,94 @@ describe('Person detail (#510)', () => {
     renderPerson();
     await screen.findByRole('heading', { level: 1, name: 'ada@example.com' });
     expect(await screen.findByText(/Events and consent include merged identities; messages cover the current profile only/)).toBeTruthy();
-    expect(screen.getByText(/2 events loaded · 1 message loaded · 1 consent record loaded/)).toBeTruthy();
+    // The three counts come from separate reads; under load the caption renders before the last one lands.
+    expect(await screen.findByText(/2 events loaded · 1 message loaded · 1 consent record loaded/)).toBeTruthy();
     expect(screen.getByText(/Message event history may be capped at 1,000/)).toBeTruthy();
     expect(screen.getByText(/Latest event in period: Unavailable/)).toBeTruthy();
     expect(screen.queryByText(/1970/)).toBeNull();
+  });
+
+  it('shows consent per channel and a tie as the refusal delivery would enforce', async () => {
+    h.respond = (name, input) => {
+      if (name === 'profiles.get')
+        return profile({
+          consent: [
+            {
+              purpose: 'marketing_email',
+              channel: '',
+              status: 'granted',
+              basis: 'consent',
+              source: 'form',
+              updatedAt: '2026-11-01T09:00:00.000Z',
+            },
+            {
+              purpose: 'marketing_email',
+              channel: 'sms',
+              status: 'withdrawn',
+              basis: 'consent',
+              source: 'unsubscribe',
+              updatedAt: '2026-11-05T09:00:00.000Z',
+            },
+            {
+              purpose: 'product_updates',
+              channel: '',
+              status: 'granted',
+              basis: 'consent',
+              source: 'form',
+              updatedAt: '2026-11-05T09:00:00.000Z',
+            },
+            {
+              purpose: 'product_updates',
+              channel: 'email',
+              status: 'withdrawn',
+              basis: 'consent',
+              source: 'unsubscribe',
+              updatedAt: '2026-11-05T09:00:00.000Z',
+            },
+          ],
+          consentEffective: [
+            {
+              purpose: 'marketing_email',
+              basis: 'consent',
+              status: 'withdrawn',
+              allowed: false,
+              channels: [
+                { channel: 'email', status: 'granted', allowed: true },
+                { channel: 'sms', status: 'withdrawn', allowed: false },
+              ],
+            },
+            {
+              purpose: 'product_updates',
+              basis: 'consent',
+              status: 'withdrawn',
+              allowed: false,
+              channels: [{ channel: 'email', status: 'withdrawn', allowed: false }],
+            },
+            {
+              purpose: 'service_notices',
+              basis: 'legitimate_interest',
+              status: null,
+              allowed: true,
+              channels: [],
+            },
+          ],
+        });
+      return baseRespond(name, input);
+    };
+    renderPerson();
+    await screen.findByRole('heading', { level: 1, name: 'ada@example.com' });
+
+    const consent = await screen.findByRole('list', { name: 'Current consent per purpose' });
+    // The newer SMS withdrawal is visible beside the e-mail lane it did not touch.
+    expect(within(consent).getAllByText('Email: Allowed').length).toBeGreaterThan(0);
+    expect(within(consent).getAllByText('SMS: Withdrawn').length).toBeGreaterThan(0);
+    // The equal-timestamp grant/refusal resolves to the refusal, for the purpose and its channel.
+    const product = within(consent)
+      .getAllByRole('listitem')
+      .find((item) => item.textContent?.includes('Product updates'))!;
+    expect(within(product).getByText('Withdrawn')).toBeTruthy();
+    expect(within(product).queryByText('Allowed')).toBeNull();
+    expect(within(product).getByText('Email: Withdrawn')).toBeTruthy();
   });
 
   it('loads more events and messages with their own cursors', async () => {

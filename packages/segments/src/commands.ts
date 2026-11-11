@@ -210,6 +210,8 @@ export const profileSegments = defineCommand({
   output: z.object({ segments: z.array(z.object({ id: z.string(), name: z.string(), since: z.string() })) }),
   permission: 'profiles:read',
   effect: 'read',
+  auditReads: true,
+  target: (i) => i.profileId,
   handler: async (input, ctx) => {
     const rows = await ctx.tx
       .select({ id: schema.segmentMemberships.segmentId, since: schema.segmentMemberships.since, name: schema.artifacts.name })

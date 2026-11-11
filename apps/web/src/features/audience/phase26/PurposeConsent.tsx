@@ -4,7 +4,16 @@ import { basisLabel, consentLabel, consentTone, type PurposeRow } from './model'
 
 // Consent per purpose. The shared consent helpers stay frozen; this surface needs the plain
 // "Allowed" wording and the purpose's lawful-basis context, and it never turns missing records
-// into an aggregate ("1 allowed") or a refusal.
+// into an aggregate ("1 allowed") or a refusal. The person detail also shows the effective status
+// per channel, so a newer withdrawal on one channel is visible beside the lane it did not touch.
+
+const CHANNEL_LABEL: Record<string, string> = {
+  email: 'Email',
+  sms: 'SMS',
+  push: 'Push',
+  web: 'Web',
+  webhook: 'Webhook',
+};
 
 function PurposeLabel({ row }: { row: PurposeRow }) {
   if (row.name) return <span className="font-medium text-fg">{row.name}</span>;
@@ -48,6 +57,15 @@ export function PurposeConsentList({
               </span>
             </div>
             {context && <div className="mt-0.5 text-[12px] leading-[18px] text-muted">{context}</div>}
+            {row.channels.length > 0 && (
+              <div className="mt-0.5 flex flex-wrap gap-x-2 gap-y-0.5 text-[12px] leading-[18px] text-muted">
+                {row.channels.map((c) => (
+                  <span key={c.channel} data-volatile>
+                    {CHANNEL_LABEL[c.channel] ?? c.channel}: {consentLabel(c.status)}
+                  </span>
+                ))}
+              </div>
+            )}
           </li>
         );
       })}
