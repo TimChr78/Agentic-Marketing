@@ -285,6 +285,7 @@ export const profileScores = defineCommand({
   output: z.object({ scores: z.array(Score) }),
   permission: 'profiles:read',
   effect: 'read',
+  auditReads: true,
   target: (i) => i.profileId,
   handler: async (input, ctx) => {
     const rows = await unexpiredScores(ctx.tx, ctx.principal.workspaceId, input.profileId, input.key);
