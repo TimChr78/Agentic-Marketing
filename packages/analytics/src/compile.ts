@@ -162,6 +162,35 @@ export const SOURCE_FILTERS: Record<SourceId, (keyof NormalizedFilters)[]> = {
   campaign: ['campaign'],
 };
 
+/** The event types and message channels a set of measures counts. */
+export interface MeasureScope {
+  eventTypes: string[];
+  channels: string[];
+}
+
+/**
+ * The constraints the measures put on their source. A ratio brings its bases with it, so callers
+ * can pass either selected measures or resolved base measures. Freshness uses the same scope as
+ * the compiled query, so the two can never describe different events (#589, #682).
+ */
+export function measureScope(measures: Iterable<MeasureDef>): MeasureScope {
+  const eventTypes = new Set<string>();
+  const channels = new Set<string>();
+  const add = (measure: MeasureDef | undefined) => {
+    if (measure?.kind !== 'base') return;
+    for (const type of measure.eventTypes ?? []) eventTypes.add(type);
+    if (measure.channel) channels.add(measure.channel);
+  };
+  for (const measure of measures) {
+    add(measure);
+    if (measure.kind === 'ratio') {
+      add(MEASURES[measure.numerator]);
+      add(MEASURES[measure.denominator]);
+    }
+  }
+  return { eventTypes: [...eventTypes], channels: [...channels] };
+}
+
 export function dimensionExpression(source: SourceId, dimension: DimensionId): string {
   return DIMENSION_SQL[source][dimension] ?? '';
 }
@@ -308,12 +337,17 @@ export function buildQuery(input: BuildInput): CompiledQuery {
     `${timeColumn} <= {to:DateTime64(3, 'UTC')}`,
   ];
 
-  // Only scan the event types the requested measures actually count. This also keeps journey
-  // nodes without a step event (the trigger, the goal) out of a step breakdown.
-  const eventTypes = [...new Set([...baseById.values()].flatMap((base) => (base.kind === 'base' ? (base.eventTypes ?? []) : [])))];
-  if (eventTypes.length) {
-    params.types = eventTypes;
+  // Only scan the event types and channels the requested measures actually count. This also keeps
+  // journey nodes without a step event (the trigger, the goal) out of a step breakdown, and keeps
+  // SMS and push out of the measures named e-mail (#682).
+  const scope = measureScope(baseById.values());
+  if (scope.eventTypes.length) {
+    params.types = scope.eventTypes;
     where.push('type IN {types:Array(String)}');
+  }
+  if (source === 'message_events' && scope.channels.length) {
+    params.channels = scope.channels;
+    where.push('channel IN {channels:Array(String)}');
   }
 
   for (const key of SOURCE_FILTERS[source]) {
