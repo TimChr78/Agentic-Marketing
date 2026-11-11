@@ -366,6 +366,12 @@ const PropertyType = z.enum(['string', 'number', 'boolean', 'object', 'array', '
 const trackingPlan = z.object({
   unknownEvents: z.enum(['allow', 'warn', 'block']).default('allow').describe('What happens to events the plan does not list'),
   unknownProperties: z.enum(['allow', 'warn', 'block']).default('allow'),
+  declaredProperties: z
+    .enum(['warn', 'block'])
+    .optional()
+    .describe(
+      'What happens when a declared property is missing although required, or has the wrong type. When absent, block when unknownProperties is block, otherwise warn',
+    ),
   events: z
     .array(
       z.object({

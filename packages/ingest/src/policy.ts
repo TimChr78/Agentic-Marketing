@@ -194,10 +194,16 @@ export function processEvent(
         if (plan.unknownProperties === 'block') return { kind: 'rejected', error: msg };
         warnings.push(msg);
       }
-      // `required`/`type` problems concern properties the plan *does* declare. The plan schema has
-      // no strictness setting for them, so they keep the default plan's advisory behaviour and do
-      // not inherit the unrelated unknownEvents/unknownProperties decision (#623).
-      if (problems.length) warnings.push(`"${name}": ${problems.join('; ')}`);
+      // `required`/`type` problems concern properties the plan *does* declare. Their own setting
+      // decides; an older plan without it inherits the property policy (block) or warns, so a
+      // strict plan keeps rejecting and the default plan keeps warning. `unknownEvents` never
+      // influences this (#623).
+      if (problems.length) {
+        const msg = `"${name}": ${problems.join('; ')}`;
+        const declared = plan.declaredProperties ?? (plan.unknownProperties === 'block' ? 'block' : 'warn');
+        if (declared === 'block') return { kind: 'rejected', error: msg };
+        warnings.push(msg);
+      }
     }
   }
   // No plan (and unlisted events) get the same reserved-key removal: a track "Order Completed"

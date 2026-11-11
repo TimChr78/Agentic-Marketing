@@ -179,8 +179,8 @@ describe('tracking plan', () => {
     expect(
       run({ type: 'track', event: 'Order Completed', anonymousId: 'a', properties: { total: '1' }, context: yes }, browser, p),
     ).toMatchObject({
-      kind: 'accepted',
-      warnings: ['"Order Completed": "total" should be number'],
+      kind: 'rejected',
+      error: '"Order Completed": "total" should be number',
     });
   });
 
@@ -190,25 +190,25 @@ describe('tracking plan', () => {
   });
 });
 
-// #623: declared `required` / `type` problems are a separate dimension from how the plan treats
-// events and properties it does not list, and there is no dedicated strictness setting for them.
-// They therefore behave the same whatever the unknown* settings are: the plan warns (the default
-// plan's behaviour) and never rejects because of an unrelated setting.
+// #623: declared `required` / `type` problems have their own `declaredProperties` setting. When a
+// plan predates it, the setting is derived from `unknownProperties` so existing strict plans keep
+// rejecting; `unknownEvents` never influences it.
 describe('declared property validation', () => {
-  const plans = [
-    { unknownEvents: 'allow', unknownProperties: 'allow' },
-    { unknownEvents: 'block', unknownProperties: 'allow' },
-    { unknownEvents: 'warn', unknownProperties: 'warn' },
-    { unknownEvents: 'block', unknownProperties: 'block' },
-  ] as const;
-  const declared = (settings: (typeof plans)[number]): WorkspacePolicy => ({
+  type Settings = {
+    unknownEvents?: 'allow' | 'warn' | 'block';
+    unknownProperties?: 'allow' | 'warn' | 'block';
+    declaredProperties?: 'warn' | 'block';
+  };
+  const declared = (settings: Settings): WorkspacePolicy => ({
     ...defaultPolicy,
     plan: artifactTypes.tracking_plan.content.parse({
+      unknownEvents: 'allow',
+      unknownProperties: 'allow',
       ...settings,
       events: [{ name: 'Purchase', properties: [{ name: 'amount', type: 'number', required: true }] }],
     }),
   });
-  const outcome = (settings: (typeof plans)[number], properties: Record<string, unknown>) =>
+  const outcome = (settings: Settings, properties: Record<string, unknown>) =>
     processEvent(
       InboundEvent.parse({ type: 'track', event: 'Purchase', anonymousId: 'a', properties, context: yes }),
       browser,
@@ -217,22 +217,44 @@ describe('declared property validation', () => {
       { messageId: () => 'generated' },
     );
 
-  it('treats a wrong type the same for every unknown* setting', () => {
-    for (const settings of plans) {
-      expect(outcome(settings, { amount: 'free' }), JSON.stringify(settings)).toMatchObject({
-        kind: 'accepted',
-        warnings: ['"Purchase": "amount" should be number'],
-      });
-    }
+  it('derives block from unknownProperties: block when the setting is absent', () => {
+    expect(outcome({ unknownProperties: 'block' }, { amount: 'free' })).toMatchObject({
+      kind: 'rejected',
+      error: '"Purchase": "amount" should be number',
+    });
+    expect(outcome({ unknownProperties: 'block' }, {})).toMatchObject({
+      kind: 'rejected',
+      error: '"Purchase": "amount" is required',
+    });
   });
 
-  it('treats a missing required property the same for every unknown* setting', () => {
-    for (const settings of plans) {
-      expect(outcome(settings, {}), JSON.stringify(settings)).toMatchObject({
-        kind: 'accepted',
-        warnings: ['"Purchase": "amount" is required'],
-      });
-    }
+  it('does not derive from unknownEvents when the setting is absent', () => {
+    expect(outcome({ unknownEvents: 'block', unknownProperties: 'allow' }, { amount: 'free' })).toMatchObject({
+      kind: 'accepted',
+      warnings: ['"Purchase": "amount" should be number'],
+    });
+    expect(outcome({ unknownEvents: 'block', unknownProperties: 'allow' }, {})).toMatchObject({
+      kind: 'accepted',
+      warnings: ['"Purchase": "amount" is required'],
+    });
+  });
+
+  it('lets an explicit warn override unknownProperties: block', () => {
+    expect(outcome({ unknownProperties: 'block', declaredProperties: 'warn' }, { amount: 'free' })).toMatchObject({
+      kind: 'accepted',
+      warnings: ['"Purchase": "amount" should be number'],
+    });
+  });
+
+  it('lets an explicit block apply while the unknown settings allow', () => {
+    expect(outcome({ unknownEvents: 'allow', unknownProperties: 'allow', declaredProperties: 'block' }, { amount: 'free' })).toMatchObject({
+      kind: 'rejected',
+      error: '"Purchase": "amount" should be number',
+    });
+    expect(outcome({ unknownEvents: 'allow', unknownProperties: 'allow', declaredProperties: 'block' }, {})).toMatchObject({
+      kind: 'rejected',
+      error: '"Purchase": "amount" is required',
+    });
   });
 });
 
@@ -268,6 +290,26 @@ describe('platform-owned events', () => {
         kind: 'accepted',
       });
     }
+  });
+
+  it('stays exempt from declared-property rejection too', () => {
+    const planWithDeclaredProblem: WorkspacePolicy = {
+      ...defaultPolicy,
+      plan: artifactTypes.tracking_plan.content.parse({
+        unknownEvents: 'block',
+        unknownProperties: 'block',
+        declaredProperties: 'block',
+        events: [{ name: 'Form Submitted', properties: [{ name: 'form_id', type: 'number', required: true }] }],
+      }),
+    };
+    const out = processEvent(
+      InboundEvent.parse({ type: 'track', event: 'Form Submitted', anonymousId: 'a', properties: { form_id: 'frm_text' } }),
+      server,
+      planWithDeclaredProblem,
+      now,
+      { messageId: () => 'x', internal: true },
+    );
+    expect(out).toMatchObject({ kind: 'accepted' });
   });
 
   it('gives a public client no bypass, even on a server source', () => {
