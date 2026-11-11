@@ -221,7 +221,10 @@ export default function PersonPage({ params }: { params: Record<string, string> 
 
   const personal = Object.entries(p.personal);
   const hidden = !canSeePii && personal.some(([, v]) => v === '[hidden]');
-  const currentConsent = purposeRows(p.consent, purposes.data?.purposes, { includeUnrecorded: true });
+  const currentConsent = purposeRows(p.consent, purposes.data?.purposes, {
+    includeUnrecorded: true,
+    effective: p.consentEffective,
+  });
   const topicRows = topics.data?.topics ?? [];
   const segmentRows = segments.data?.segments ?? [];
 
