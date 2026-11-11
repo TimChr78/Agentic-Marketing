@@ -4,7 +4,10 @@ import { MEASURES, type MeasureDef } from '../src/registry';
 
 const CAMPAIGN = `cmp_${'a'.repeat(32)}`;
 const OTHER_CAMPAIGN = `cmp_${'b'.repeat(32)}`;
+const THIRD_CAMPAIGN = `cmp_${'e'.repeat(32)}`;
 const BROADCAST = `bct_${'c'.repeat(32)}`;
+const OTHER_BROADCAST = `bct_${'f'.repeat(32)}`;
+const THIRD_BROADCAST = `bct_${'g'.repeat(32)}`;
 const JOURNEY = `jrn_${'d'.repeat(32)}`;
 
 const goal = { kind: 'conversion' as const, event: 'Order Completed', target: null, attributionDays: 7 };
@@ -152,12 +155,13 @@ describe('campaign query compiler', () => {
     );
 
     expect(compiled.revenue).toBe(true);
-    expect(compiled.sql).toContain('INNER JOIN conv_roll');
+    expect(compiled.sql).toContain('LEFT JOIN conv_roll');
     expect(compiled.sql).toContain('currency AS dim_currency');
     expect(compiled.sql).toContain('sum(revenue_value) AS base_campaign_revenue');
     expect(compiled.sql).toContain('c.dim_currency');
+    expect(compiled.sql).toContain('ifNull(c.base_campaign_revenue, 0) AS base_campaign_revenue');
     expect(compiled.sql).toContain(
-      'if(r.base_campaign_recipients = 0, NULL, c.base_campaign_revenue / r.base_campaign_recipients) AS measure_campaign_revenue_per_recipient',
+      'if(r.base_campaign_recipients = 0, NULL, ifNull(c.base_campaign_revenue, 0) / r.base_campaign_recipients) AS measure_campaign_revenue_per_recipient',
     );
     expect(compiled.columns).toEqual([
       { name: 'campaign', kind: 'dimension' },
@@ -192,7 +196,136 @@ describe('campaign query compiler', () => {
     expect(compiled.params.goal_events).toEqual(['Order Completed', 'Signed Up', 'Order Completed']);
     expect(compiled.params.goal_event_campaigns).toEqual([CAMPAIGN, CAMPAIGN, OTHER_CAMPAIGN]);
     expect(compiled.params.goal_pair_count).toBe(3);
+    expect(compiled.params.campaign_window_ids).toEqual([CAMPAIGN, OTHER_CAMPAIGN]);
     expect(compiled.params.campaign_attr_days).toEqual([7, 7]);
+  });
+
+  it('gives every campaign its own attribution window when a campaign has several sending members (#629)', () => {
+    const compiled = buildCampaignQuery(
+      input({
+        queryMap: queryMap({
+          // The member arrays are member-aligned: the first campaign has two sending members.
+          map: {
+            memberIds: [BROADCAST, JOURNEY, OTHER_BROADCAST, THIRD_BROADCAST],
+            memberCampaignIds: [CAMPAIGN, CAMPAIGN, OTHER_CAMPAIGN, THIRD_CAMPAIGN],
+          },
+          scopes: [
+            { id: CAMPAIGN, name: 'One', goal, memberIds: [BROADCAST, JOURNEY], goalEvents: ['Order Completed'] },
+            {
+              id: OTHER_CAMPAIGN,
+              name: 'Two',
+              goal: { ...goal, attributionDays: 30 },
+              memberIds: [OTHER_BROADCAST],
+              goalEvents: ['Order Completed'],
+            },
+            {
+              id: THIRD_CAMPAIGN,
+              name: 'Three',
+              goal: { ...goal, attributionDays: 1 },
+              memberIds: [THIRD_BROADCAST],
+              goalEvents: ['Order Completed'],
+            },
+          ],
+        }),
+      }),
+    );
+
+    // The campaign map stays member-aligned; the window pair is one entry per campaign.
+    expect(compiled.params.campaign_map_ids).toEqual([CAMPAIGN, CAMPAIGN, OTHER_CAMPAIGN, THIRD_CAMPAIGN]);
+    expect(compiled.params.campaign_window_ids).toEqual([CAMPAIGN, OTHER_CAMPAIGN, THIRD_CAMPAIGN]);
+    expect(compiled.params.campaign_attr_days).toEqual([7, 30, 1]);
+    expect(compiled.sql).toContain(
+      'arrayElement({campaign_attr_days:Array(Int32)}, indexOf({campaign_window_ids:Array(String)}, r.campaign_id))',
+    );
+    // The misaligned lookup is gone: a member-aligned index must never pick a window.
+    expect(compiled.sql).not.toContain('indexOf({campaign_map_ids:Array(String)}, r.campaign_id)');
+  });
+
+  it('deduplicates the campaign window pair by campaign id (#629)', () => {
+    const compiled = buildCampaignQuery(
+      input({
+        queryMap: queryMap({
+          scopes: [
+            { id: CAMPAIGN, name: 'One', goal, memberIds: [BROADCAST], goalEvents: ['Order Completed'] },
+            {
+              id: CAMPAIGN,
+              name: 'One again',
+              goal: { ...goal, attributionDays: 30 },
+              memberIds: [JOURNEY],
+              goalEvents: ['Order Completed'],
+            },
+          ],
+        }),
+      }),
+    );
+    expect(compiled.params.campaign_window_ids).toEqual([CAMPAIGN]);
+    expect(compiled.params.campaign_attr_days).toEqual([7]);
+  });
+
+  it('keeps a campaign with recipients and no conversions in the revenue roll-up (#630)', () => {
+    const compiled = buildCampaignQuery(
+      input({
+        measures: [measure('campaign.recipients'), measure('campaign.revenue'), measure('campaign.revenue_per_recipient')],
+        conversionRules: [{ event: 'Order Completed', value: 'order.total', currency: 'DKK' }],
+      }),
+    );
+
+    // conv_roll only holds converting groups, so the join must keep every recipient group.
+    expect(compiled.sql).toContain('LEFT JOIN conv_roll');
+    expect(compiled.sql).not.toContain('INNER JOIN conv_roll');
+    expect(compiled.sql).toContain('ifNull(c.base_campaign_revenue, 0) AS base_campaign_revenue');
+    expect(compiled.sql).toContain('ifNull(c.base_campaign_revenue, 0) AS measure_campaign_revenue');
+    expect(compiled.sql).toContain(
+      'if(r.base_campaign_recipients = 0, NULL, ifNull(c.base_campaign_revenue, 0) / r.base_campaign_recipients)',
+    );
+  });
+
+  it('attributes conversions through the shared identity map (#590)', () => {
+    const compiled = buildCampaignQuery(
+      input({
+        identity: {
+          pairs: [
+            { key: 'anon-before-merge', profileId: CAMPAIGN, kind: 'anonymous_id' },
+            { key: 'previous-profile', profileId: CAMPAIGN, kind: 'profile' },
+            { key: 'user-before-merge', profileId: CAMPAIGN, kind: 'user_id' },
+          ],
+          overLimit: false,
+          limit: 2000,
+        },
+      }),
+    );
+
+    expect(compiled.params.identity_keys).toEqual(['anon-before-merge', 'previous-profile', 'user-before-merge']);
+    expect(compiled.params.identity_profiles).toEqual([CAMPAIGN, CAMPAIGN, CAMPAIGN]);
+    expect(compiled.params.identity_kinds).toEqual(['anonymous_id', 'profile', 'user_id']);
+    expect(compiled.params.identity_count).toBe(3);
+    expect(compiled.sql).toContain('event_identity AS');
+    expect(compiled.sql).toContain("LEFT JOIN identity by_user ON by_user.identity_key = e.user_id AND by_user.kind = 'user_id'");
+    expect(compiled.sql).toContain(
+      "LEFT JOIN identity by_anonymous ON by_anonymous.identity_key = e.anonymous_id AND by_anonymous.kind = 'anonymous_id'",
+    );
+    expect(compiled.sql).toContain(
+      "LEFT JOIN identity by_profile ON by_profile.identity_key = e.profile_id AND by_profile.kind = 'profile'",
+    );
+    expect(compiled.sql).toContain('INNER JOIN recipient r ON r.profile_id = i.profile_id');
+  });
+
+  it('does not ship an identity map above its bound (#590)', () => {
+    const compiled = buildCampaignQuery(
+      input({
+        identity: {
+          pairs: [{ key: 'anon-before-merge', profileId: CAMPAIGN, kind: 'anonymous_id' }],
+          overLimit: true,
+          limit: 2000,
+        },
+      }),
+    );
+    expect(compiled.params.identity_count).toBe(0);
+    expect(compiled.params.identity_keys).toEqual([]);
+    expect(compiled.params.identity_profiles).toEqual([]);
+    expect(compiled.params.identity_kinds).toEqual([]);
+    // The SQL is still valid: it falls back to the stored profile id, which the caller reports.
+    expect(compiled.sql).toContain('event_identity AS');
   });
 
   it('refuses a measure that is not a campaign measure', () => {

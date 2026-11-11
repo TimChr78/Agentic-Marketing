@@ -1,4 +1,5 @@
 import { publishedSingleton } from '@agentic-marketing/artifacts';
+import { loadIdentityMap } from '@agentic-marketing/campaigns';
 import { defineCommand } from '@agentic-marketing/commands';
 import { AppError, isoDateTime } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
@@ -346,6 +347,9 @@ async function execute(deps: Deps, input: QueryInput, measures: MeasureDef[], di
   const queryMap = needsCampaignMap
     ? await loadCampaignQueryMap(deps.tx, filters.campaign, campaignSource ? conversion.rules.map((r) => r.event) : [])
     : undefined;
+  // Campaign conversions resolve identity the same way the holdout card does (#590). The map is
+  // omitted above its transport bound; the note below says the result is then not identity-resolved.
+  const identity = campaignSource ? await loadIdentityMap(deps.tx, deps.workspaceId) : undefined;
 
   const compiled: CompiledQuery = campaignSource
     ? buildCampaignQuery({
@@ -360,6 +364,7 @@ async function execute(deps: Deps, input: QueryInput, measures: MeasureDef[], di
         order: input.order,
         conversionRules: conversion.rules,
         queryMap: queryMap!,
+        identity,
       })
     : buildQuery({
         workspaceId: deps.workspaceId,
@@ -456,6 +461,10 @@ async function execute(deps: Deps, input: QueryInput, measures: MeasureDef[], di
   if (campaignSource)
     notes.push(
       'Campaign conversions are people who got a campaign message and converted within the goal’s attribution window of their first campaign message (first touch).',
+    );
+  if (campaignSource && identity?.overLimit)
+    notes.push(
+      `Conversions are not identity-resolved for this query: the workspace has more than ${identity.limit} merged identity mappings, so they are matched on the profile id stored with the event.`,
     );
   if (suppressed) notes.push(`Groups smaller than k=${K} have their measures suppressed.`);
 
