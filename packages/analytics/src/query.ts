@@ -7,7 +7,16 @@ import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { buildCampaignQuery, loadCampaignQueryMap } from './campaign';
-import { buildQuery, type CampaignMap, type CompiledQuery, type ConversionRule, type NormalizedFilters, SOURCE_FILTERS } from './compile';
+import {
+  buildQuery,
+  type CampaignMap,
+  type CompiledQuery,
+  type ConversionRule,
+  type MeasureScope,
+  measureScope,
+  type NormalizedFilters,
+  SOURCE_FILTERS,
+} from './compile';
 import { DIMENSIONS, type DimensionId, MEASURES, METRIC_CATALOG, type MeasureDef, measureIds, type SourceId } from './registry';
 
 // The read-only metric layer (#75): one typed query over a fixed catalogue. Nothing here accepts
@@ -76,10 +85,22 @@ export const analyticsResult = z.object({
 
 export type AnalyticsResult = z.infer<typeof analyticsResult>;
 
-interface Deps {
+export interface Deps {
   tx: Tx;
   events: EventStore;
   workspaceId: string;
+}
+
+/** What the freshness probe must ask, so it describes the same events as the compiled query. */
+export interface FreshnessInput {
+  source: SourceId;
+  from: string;
+  to: string;
+  filters: NormalizedFilters;
+  /** Conversion event names. For events an empty list matches nothing, exactly as in the query. */
+  names?: string[];
+  scope?: MeasureScope;
+  campaignMap?: CampaignMap;
 }
 
 interface CacheEntry {
@@ -201,19 +222,23 @@ async function conversionInput(tx: Tx, filters: NormalizedFilters): Promise<{ ru
   return { rules, names: filters.name?.length ? filters.name : mapNames, hasMap: !!map };
 }
 
-async function freshness(
-  deps: Deps,
-  source: SourceId,
-  from: string,
-  to: string,
-  filters: NormalizedFilters,
-  names: string[],
-  campaignMap?: CampaignMap,
-): Promise<string | null> {
+export async function freshness(deps: Deps, input: FreshnessInput): Promise<string | null> {
+  const { source, from, to, filters, names = [], scope, campaignMap } = input;
   const table = source === 'events' ? 'events' : source;
   const column = source === 'events' ? 'received_at' : 'at';
   const params: Record<string, unknown> = { ws: deps.workspaceId, from: from.replace('Z', ''), to: to.replace('Z', '') };
   const where = ['workspace_id = {ws:UUID}', `${column} >= {from:DateTime64(3, 'UTC')}`, `${column} <= {to:DateTime64(3, 'UTC')}`];
+
+  // The same constraints the compiled query applies. Without them freshness can name a raw event
+  // the result itself cannot count (#589), or an SMS event beside e-mail numbers (#682).
+  if (scope?.eventTypes.length) {
+    params.types = scope.eventTypes;
+    where.push('type IN {types:Array(String)}');
+  }
+  if (source === 'message_events' && scope?.channels.length) {
+    params.channels = scope.channels;
+    where.push('channel IN {channels:Array(String)}');
+  }
   const filterColumn: Partial<Record<keyof NormalizedFilters, string>> = {
     template: 'template_id',
     broadcast: 'journey_id',
@@ -235,7 +260,9 @@ async function freshness(
     params[`filter_${key}`] = values;
     where.push(`${filterColumn[key]} IN {filter_${key}:Array(String)}`);
   }
-  if (source === 'events' && names.length) {
+  // Always apply the conversion-name set for events: the compiled query does, and an empty list
+  // matches nothing, so freshness must return null rather than the newest raw event (#589).
+  if (source === 'events') {
     params.names = names;
     where.push('name IN {names:Array(String)}');
   }
@@ -440,15 +467,15 @@ async function execute(deps: Deps, input: QueryInput, measures: MeasureDef[], di
       currency: currencies.size === 1 && !currencies.has('UNKNOWN') ? [...currencies][0] : null,
       from: input.from,
       to: input.to,
-      freshness: await freshness(
-        deps,
-        campaignSource ? 'message_events' : source,
-        input.from,
-        input.to,
+      freshness: await freshness(deps, {
+        source: campaignSource ? 'message_events' : source,
+        from: input.from,
+        to: input.to,
         filters,
-        conversion.names,
-        queryMap?.map,
-      ),
+        names: conversion.names,
+        scope: measureScope(measures),
+        campaignMap: queryMap?.map,
+      }),
       suppressed,
       k: K,
       notes,

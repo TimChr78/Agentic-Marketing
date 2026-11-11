@@ -133,6 +133,11 @@ export interface BaseMeasureDef {
   counting: Counting;
   /** Message or journey event types this measure counts, for the compiler. */
   eventTypes?: readonly string[];
+  /**
+   * The message channel this measure counts. Omitted means every channel. SMS and push write the
+   * same sent/delivered types as e-mail, so a measure named e-mail must say which channel it means.
+   */
+  channel?: string;
   dimensions: readonly DimensionId[];
   defaultGrain: DimensionId | null;
 }
@@ -185,6 +190,7 @@ const emailBase = (
   aggregation: 'distinct profiles',
   counting: 'profiles',
   eventTypes: [type],
+  channel: 'email',
   dimensions,
   defaultGrain: 'day',
 });

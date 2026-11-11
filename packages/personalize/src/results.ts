@@ -122,6 +122,10 @@ export const experienceResults = defineCommand({
     'Exposures, conversions (the goal event after first exposure) and conversion rates per variant of a web experience, compared with the control (holdout, or else the first variant): lift, fixed-horizon p-value and 95% interval, an always-valid sequential p-value, and Bayesian probabilities to beat the control and to be best. `recommendation` follows the experience’s analysis method.',
   input: z.object({ artifactId: z.string().regex(/^exp_[0-9a-f]{32}$/), days: z.number().int().min(1).max(400).optional() }),
   output: z.object({
+    version: z
+      .number()
+      .int()
+      .describe('The experience version these results describe: the published one, or the latest while it has never been published'),
     goal: z.string().nullable(),
     control: z.string().nullable(),
     variants: z.array(
@@ -146,19 +150,26 @@ export const experienceResults = defineCommand({
   permission: 'artifacts:read',
   effect: 'read',
   handler: async (input, ctx) => {
+    const [artifact] = await ctx.tx
+      .select({ latestVersion: schema.artifacts.latestVersion, publishedVersion: schema.artifacts.publishedVersion })
+      .from(schema.artifacts)
+      .where(and(eq(schema.artifacts.workspaceId, ctx.principal.workspaceId), eq(schema.artifacts.id, input.artifactId)));
+    if (!artifact) throw new AppError('not_found', `No experience ${input.artifactId}.`);
+    // Results describe what visitors actually saw. Editing a draft must not rewrite a live
+    // experiment's goal, analysis or control fallback (#631); a never-published one keeps using
+    // its latest version, as before.
+    const version = artifact.publishedVersion ?? artifact.latestVersion;
     const [row] = await ctx.tx
       .select({ content: schema.artifactVersions.content })
-      .from(schema.artifacts)
-      .innerJoin(
-        schema.artifactVersions,
+      .from(schema.artifactVersions)
+      .where(
         and(
-          eq(schema.artifactVersions.workspaceId, schema.artifacts.workspaceId),
-          eq(schema.artifactVersions.artifactId, schema.artifacts.id),
-          eq(schema.artifactVersions.number, schema.artifacts.latestVersion),
+          eq(schema.artifactVersions.workspaceId, ctx.principal.workspaceId),
+          eq(schema.artifactVersions.artifactId, input.artifactId),
+          eq(schema.artifactVersions.number, version),
         ),
-      )
-      .where(eq(schema.artifacts.id, input.artifactId));
-    if (!row) throw new AppError('not_found', `No experience ${input.artifactId}.`);
+      );
+    if (!row) throw new AppError('not_found', `No experience ${input.artifactId} version ${version}.`);
     const def = artifactTypes.experience.content.parse(row.content);
     const counts = await ctx.services.events.experimentCounts(ctx.principal.workspaceId, {
       experienceId: input.artifactId,
@@ -198,6 +209,7 @@ export const experienceResults = defineCommand({
         recommendation = `${controlRow.variant} is better than every variant with at least ${pct(threshold)} probability.`;
     } else recommendation = 'Fixed horizon: read the p-values once the planned sample size is reached, not before.';
     return {
+      version,
       goal: def.goal?.event ?? null,
       control: controlRow?.variant ?? null,
       variants,
