@@ -36,6 +36,8 @@ export const previewSegment = defineCommand({
   output: z.object({ count: z.number().int(), sample: z.array(z.string()), tookMs: z.number().int() }),
   permission: 'profiles:read',
   effect: 'read',
+  // The sample is profile ids: pseudonymous, but they identify people in the workspace.
+  auditReads: true,
   handler: async (input, ctx) => {
     let condition = input.condition;
     let listSegment: string | undefined;
