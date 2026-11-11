@@ -1,5 +1,5 @@
 import { artifactTypes, type CampaignDefinition } from '@agentic-marketing/artifacts';
-import { publishedCampaigns } from '@agentic-marketing/campaigns';
+import { goalEventsFor, type IdentityMap, publishedCampaigns } from '@agentic-marketing/campaigns';
 import { AppError } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
 import { and, eq, inArray } from 'drizzle-orm';
@@ -148,15 +148,10 @@ export async function loadCampaignQueryMap(
 }
 
 /**
- * The goal event(s) for one campaign. Revenue goals follow the conversion map, because that is
- * where the value and currency live; other goals use the event the campaign names.
+ * The goal event(s) for one campaign. Kept exported here because the compiler and the summary
+ * import it from this module; the implementation is shared with campaigns.holdoutResult (#632).
  */
-export function goalEventsFor(goal: CampaignGoal, conversionMapEvents: readonly string[]): string[] {
-  if (goal.kind === 'revenue' && conversionMapEvents.length) {
-    return [...new Set([...conversionMapEvents, ...(goal.event ? [goal.event] : [])])];
-  }
-  return goal.event ? [goal.event] : [];
-}
+export { goalEventsFor };
 
 /** One campaign, including its never-published latest version, for the summary's readiness state. */
 export async function loadCampaignRecord(tx: Tx, campaignId: string): Promise<CampaignRecord> {
@@ -216,12 +211,21 @@ export interface CampaignBuildInput {
   order?: { by: string; dir: 'asc' | 'desc' };
   conversionRules: ConversionRule[];
   queryMap: CampaignQueryMap;
+  /** The shared identity map (#590); omitted in a caller that does not need merge resolution. */
+  identity?: IdentityMap;
 }
 
 const alias = (prefix: string, id: string) => `${prefix}_${id.replace(/[^A-Za-z0-9_]/g, '_')}`;
 
 /** Compiles the campaign measures into the same shape analytics.query already consumes. */
 export function buildCampaignQuery(input: CampaignBuildInput): CompiledQuery {
+  // One entry per campaign, paired by campaign id: the member map is member-aligned, so a campaign
+  // with two sending members must never shift its neighbours' attribution window (#629).
+  const windows = new Map<string, number>();
+  for (const scope of input.queryMap.scopes) if (!windows.has(scope.id)) windows.set(scope.id, scope.goal.attributionDays);
+  // The identity map is all or nothing: above its transport bound it is omitted, and the caller
+  // reports that the result is not identity-resolved (#590).
+  const identity = input.identity?.overLimit ? [] : (input.identity?.pairs ?? []);
   const params: Record<string, unknown> = {
     ws: input.workspaceId,
     tz: input.timeZone,
@@ -230,7 +234,12 @@ export function buildCampaignQuery(input: CampaignBuildInput): CompiledQuery {
     limit: input.limit,
     campaign_map_members: input.queryMap.map.memberIds,
     campaign_map_ids: input.queryMap.map.memberCampaignIds,
-    campaign_attr_days: input.queryMap.scopes.map((s) => s.goal.attributionDays),
+    campaign_window_ids: [...windows.keys()],
+    campaign_attr_days: [...windows.values()],
+    identity_keys: identity.map((p) => p.key),
+    identity_profiles: identity.map((p) => p.profileId),
+    identity_kinds: identity.map((p) => p.kind),
+    identity_count: identity.length,
   };
   const conversion = revenueExpressions(input.conversionRules, params);
   const goalPairs = input.queryMap.scopes.flatMap((s) => s.goalEvents.map((event) => ({ campaignId: s.id, event })));
@@ -275,24 +284,57 @@ export function buildCampaignQuery(input: CampaignBuildInput): CompiledQuery {
     FROM numbers({goal_pair_count:UInt32})
   )`;
 
+  // Every key the identity map knows: a merged-away profile id, or an identifier that moved to its
+  // survivor. With an empty map it contributes no rows and the joins fall back to the stored ids.
+  const identityMap = `identity AS (
+    SELECT
+      arrayElement({identity_keys:Array(String)}, number + 1) AS identity_key,
+      arrayElement({identity_profiles:Array(String)}, number + 1) AS profile_id,
+      arrayElement({identity_kinds:Array(String)}, number + 1) AS kind
+    FROM numbers({identity_count:UInt32})
+  )`;
+
+  // An event's profile id is historical: a merge does not rewrite it. Resolve it the way the
+  // holdout card does, through the user id, then the anonymous id, then a merged-away profile id,
+  // and finally the stored id when the map knows nothing better (#590).
+  const eventIdentity = `event_identity AS (
+    SELECT
+      e.event_id AS event_id,
+      e.name AS name,
+      e.timestamp AS timestamp,
+      e.properties AS properties,
+      coalesce(
+        nullIf(by_user.profile_id, ''),
+        nullIf(by_anonymous.profile_id, ''),
+        nullIf(by_profile.profile_id, ''),
+        e.profile_id
+      ) AS profile_id
+    FROM events e FINAL
+    LEFT JOIN identity by_user ON by_user.identity_key = e.user_id AND by_user.kind = 'user_id'
+    LEFT JOIN identity by_anonymous ON by_anonymous.identity_key = e.anonymous_id AND by_anonymous.kind = 'anonymous_id'
+    LEFT JOIN identity by_profile ON by_profile.identity_key = e.profile_id AND by_profile.kind = 'profile'
+    WHERE e.workspace_id = {ws:UUID}
+      AND has({goal_events:Array(String)}, e.name)
+      AND e.timestamp >= {from:DateTime64(3, 'UTC')}
+  )`;
+
   const conversionSql = `conversion AS (
     SELECT
       r.campaign_id AS campaign_id,
-      r.profile_id AS profile_id,
+      i.profile_id AS profile_id,
       r.send_day,
       r.send_week,
       r.send_month,
-      e.event_id AS event_id,
+      i.event_id AS event_id,
       ${conversion.value} AS revenue_value,
       ${conversion.currency} AS currency
-    FROM events e FINAL
-    INNER JOIN recipient r ON r.profile_id = e.profile_id
-    INNER JOIN goal_map g ON g.campaign_id = r.campaign_id AND g.goal_event = e.name
-    WHERE e.workspace_id = {ws:UUID}
-      AND e.timestamp >= r.first_at
-      AND e.timestamp <= addDays(
+    FROM event_identity i
+    INNER JOIN recipient r ON r.profile_id = i.profile_id
+    INNER JOIN goal_map g ON g.campaign_id = r.campaign_id AND g.goal_event = i.name
+    WHERE i.timestamp >= r.first_at
+      AND i.timestamp <= addDays(
         r.first_at,
-        arrayElement({campaign_attr_days:Array(Int32)}, indexOf({campaign_map_ids:Array(String)}, r.campaign_id))
+        arrayElement({campaign_attr_days:Array(Int32)}, indexOf({campaign_window_ids:Array(String)}, r.campaign_id))
       )
   )`;
 
@@ -314,7 +356,7 @@ export function buildCampaignQuery(input: CampaignBuildInput): CompiledQuery {
   if (revenue) outer.push(`c.${currencyAlias}`);
   outer.push('r.base_campaign_recipients AS base_campaign_recipients');
   outer.push('ifNull(c.base_campaign_converters, 0) AS base_campaign_converters');
-  if (revenue) outer.push('c.base_campaign_revenue AS base_campaign_revenue');
+  if (revenue) outer.push('ifNull(c.base_campaign_revenue, 0) AS base_campaign_revenue');
   outer.push('r.base_campaign_recipients AS k_group');
 
   const measureSql: string[] = [];
@@ -324,7 +366,7 @@ export function buildCampaignQuery(input: CampaignBuildInput): CompiledQuery {
     const target = alias('measure', id);
     if (id === 'campaign.recipients') return `r.base_campaign_recipients AS ${target}`;
     if (id === 'campaign.converters') return `ifNull(c.base_campaign_converters, 0) AS ${target}`;
-    if (id === 'campaign.revenue') return `c.base_campaign_revenue AS ${target}`;
+    if (id === 'campaign.revenue') return `ifNull(c.base_campaign_revenue, 0) AS ${target}`;
     throw new Error(`${id} is not a campaign measure`);
   };
   const selected = new Set<string>();
@@ -335,7 +377,9 @@ export function buildCampaignQuery(input: CampaignBuildInput): CompiledQuery {
         `if(r.base_campaign_recipients = 0, NULL, ifNull(c.base_campaign_converters, 0) / r.base_campaign_recipients) AS ${target}`,
       );
     else if (m.id === 'campaign.revenue_per_recipient')
-      measureSql.push(`if(r.base_campaign_recipients = 0, NULL, c.base_campaign_revenue / r.base_campaign_recipients) AS ${target}`);
+      measureSql.push(
+        `if(r.base_campaign_recipients = 0, NULL, ifNull(c.base_campaign_revenue, 0) / r.base_campaign_recipients) AS ${target}`,
+      );
     else measureSql.push(baseSelect(m.id));
     selected.add(m.id);
     outputs.push({
@@ -357,9 +401,9 @@ export function buildCampaignQuery(input: CampaignBuildInput): CompiledQuery {
   }
 
   const joinKeys = dimensions.map((d) => `r.${alias('dim', d)} = c.${alias('dim', d)}`);
-  const joined = `FROM rec_roll r ${revenue ? 'INNER' : 'LEFT'} JOIN conv_roll c${
-    joinKeys.length ? ` ON ${joinKeys.join(' AND ')}` : ' ON 1 = 1'
-  }`;
+  // conv_roll only holds groups that converted, so the join must keep every recipient group:
+  // otherwise a campaign with recipients and no conversions disappears (#630).
+  const joined = `FROM rec_roll r LEFT JOIN conv_roll c${joinKeys.length ? ` ON ${joinKeys.join(' AND ')}` : ' ON 1 = 1'}`;
 
   const columns: Column[] = dimensions.map((d) => ({ name: d, kind: 'dimension' as const }));
   if (revenue) columns.push({ name: 'currency', kind: 'dimension' });
@@ -369,7 +413,7 @@ export function buildCampaignQuery(input: CampaignBuildInput): CompiledQuery {
   const dir = input.order?.dir ?? (dimensions.length ? 'asc' : 'desc');
   const orderSql = dimensions.includes(primary as DimensionId) ? `r.${alias('dim', primary)}` : alias('measure', primary);
 
-  const sql = `WITH ${recipient}, ${goalMap}, ${conversionSql}, ${recRoll}, ${convSql}
+  const sql = `WITH ${recipient}, ${goalMap}, ${identityMap}, ${eventIdentity}, ${conversionSql}, ${recRoll}, ${convSql}
     SELECT ${[...outer, ...measureSql].join(', ')}
     ${joined}
     ORDER BY ${orderSql} ${dir.toUpperCase()} LIMIT {limit:UInt32}`;

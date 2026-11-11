@@ -14,6 +14,8 @@ import type {} from '@agentic-marketing/events';
 import { and, eq, gte, inArray, isNotNull, lte, max } from 'drizzle-orm';
 import { z } from 'zod';
 import { campaignFromBrief, planCampaign } from './brief';
+import { goalEventsFor } from './goal';
+import { loadIdentityMap } from './identity';
 
 // Campaigns (#65) stay thin: a published campaign version groups existing artifacts under one goal
 // and one UTM campaign. Membership is read from those published versions rather than from a join
@@ -454,24 +456,24 @@ export const campaignHoldoutResult = defineCommand({
           )
       : [];
     const sendingIds = sends.filter((s) => SENDING_TYPES.has(s.type)).map((s) => s.id);
-    const names =
-      c.goal.kind === 'revenue'
-        ? [...new Set(((await publishedSingleton(ctx.tx, 'conversion_map'))?.rules ?? []).map((r) => r.event))]
-        : [c.goal.event!];
+    const conversionMap = await publishedSingleton(ctx.tx, 'conversion_map');
+    // A revenue goal counts the map's events and the campaign's own goal.event; with no map
+    // published that is the goal event alone (#632).
+    const names = goalEventsFor(
+      c.goal,
+      (conversionMap?.rules ?? []).map((r) => r.event),
+    );
     if (people.size && names.length) {
       const assignedTimes = [...people.values()].map((p) => p.assignedAt.getTime());
       const first = new Date(Math.min(...assignedTimes));
       const last = new Date(Math.max(...assignedTimes) + c.goal.attributionDays * 86_400_000);
       const windowTo = to && to < last ? to : last;
-      const identifiers = await ctx.tx
-        .select({ type: schema.identifiers.type, value: schema.identifiers.value, profileId: schema.identifiers.profileId })
-        .from(schema.identifiers)
-        .where(
-          and(inArray(schema.identifiers.profileId, [...people.keys()]), inArray(schema.identifiers.type, ['anonymous_id', 'user_id'])),
-        );
-      // Event profile ids are historical; current identifiers follow the canonical merge survivor.
-      const userProfiles = new Map(identifiers.filter((i) => i.type === 'user_id').map((i) => [i.value, i.profileId]));
-      const anonymousProfiles = new Map(identifiers.filter((i) => i.type === 'anonymous_id').map((i) => [i.value, i.profileId]));
+      // One identity resolution, shared with the campaign summary and the measure queries (#590):
+      // an event stored under an identifier or a merged-away profile counts for the survivor.
+      const identity = await loadIdentityMap(ctx.tx, ws, { profileIds: [...people.keys()] });
+      const userProfiles = new Map(identity.pairs.filter((p) => p.kind === 'user_id').map((p) => [p.key, p.profileId]));
+      const anonymousProfiles = new Map(identity.pairs.filter((p) => p.kind === 'anonymous_id').map((p) => [p.key, p.profileId]));
+      const mergedProfiles = new Map(identity.pairs.filter((p) => p.kind === 'profile').map((p) => [p.key, p.profileId]));
       // The event query is scoped to the campaign's people (profile ids plus their identifiers) and
       // pages the whole attribution window, so a busy workspace cannot hide a late conversion behind
       // an unrelated 100k-event cap (#366).
@@ -481,23 +483,26 @@ export const campaignHoldoutResult = defineCommand({
         to: windowTo,
         profileIds: [...people.keys()],
         identifiers: {
-          anonymousIds: identifiers.filter((i) => i.type === 'anonymous_id').map((i) => i.value),
-          userIds: identifiers.filter((i) => i.type === 'user_id').map((i) => i.value),
+          anonymousIds: [...new Set(identity.pairs.filter((p) => p.kind === 'anonymous_id').map((p) => p.key))],
+          userIds: [...new Set(identity.pairs.filter((p) => p.kind === 'user_id').map((p) => p.key))],
         },
       });
       const conversions = new Map<string, { timestamp: number; name: string; properties: Record<string, unknown> }[]>();
       for (const e of events) {
+        // Event profile ids are historical; identifiers and merged ids lead to the survivor.
         const profileId =
-          userProfiles.get(e.userId) ?? anonymousProfiles.get(e.anonymousId) ?? (people.has(e.profileId) ? e.profileId : undefined);
+          userProfiles.get(e.userId) ??
+          anonymousProfiles.get(e.anonymousId) ??
+          mergedProfiles.get(e.profileId) ??
+          (people.has(e.profileId) ? e.profileId : undefined);
         if (!profileId || !people.has(profileId)) continue;
         const list = conversions.get(profileId) ?? [];
         list.push(e);
         conversions.set(profileId, list);
       }
       if (c.goal.kind === 'revenue') {
-        const map = await publishedSingleton(ctx.tx, 'conversion_map');
-        const rules = new Map<string, NonNullable<typeof map>['rules'][number]>();
-        for (const rule of map?.rules ?? []) if (!rules.has(rule.event)) rules.set(rule.event, rule);
+        const rules = new Map<string, NonNullable<typeof conversionMap>['rules'][number]>();
+        for (const rule of conversionMap?.rules ?? []) if (!rules.has(rule.event)) rules.set(rule.event, rule);
         for (const [profileId, person] of people) {
           const end = Math.min(person.assignedAt.getTime() + c.goal.attributionDays * 86_400_000, windowTo.getTime());
           let converted = false;

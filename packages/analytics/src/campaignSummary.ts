@@ -1,4 +1,5 @@
 import { publishedSingleton } from '@agentic-marketing/artifacts';
+import { type IdentityMap, loadIdentityMap } from '@agentic-marketing/campaigns';
 import { defineCommand } from '@agentic-marketing/commands';
 import { AppError, isoDateTime } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
@@ -184,9 +185,25 @@ interface MemberBreakdown {
 }
 
 /** One row per sending member: message performance and attributed converters. */
-async function memberBreakdown(deps: Deps, memberIds: string[], from: string, to: string, goalEvents: string[], attributionDays: number) {
+async function memberBreakdown(
+  deps: Deps,
+  memberIds: string[],
+  from: string,
+  to: string,
+  goalEvents: string[],
+  attributionDays: number,
+  identity: IdentityMap,
+) {
+  const pairs = identity.overLimit ? [] : identity.pairs;
   const result = await deps.events.client.query({
     query: `WITH
+      identity AS (
+        SELECT
+          arrayElement({identity_keys:Array(String)}, number + 1) AS identity_key,
+          arrayElement({identity_profiles:Array(String)}, number + 1) AS profile_id,
+          arrayElement({identity_kinds:Array(String)}, number + 1) AS kind
+        FROM numbers({identity_count:UInt32})
+      ),
       first AS (
         SELECT journey_id AS member_id, profile_id, min(at) AS first_at
         FROM message_events FINAL
@@ -194,6 +211,23 @@ async function memberBreakdown(deps: Deps, memberIds: string[], from: string, to
           AND at >= {from:DateTime64(3, 'UTC')} AND at <= {to:DateTime64(3, 'UTC')}
           AND type IN ('sent', 'delivered') AND profile_id != ''
         GROUP BY member_id, profile_id
+      ),
+      events_resolved AS (
+        SELECT
+          e.name AS name,
+          e.timestamp AS timestamp,
+          coalesce(
+            nullIf(by_user.profile_id, ''),
+            nullIf(by_anonymous.profile_id, ''),
+            nullIf(by_profile.profile_id, ''),
+            e.profile_id
+          ) AS profile_id
+        FROM events e FINAL
+        LEFT JOIN identity by_user ON by_user.identity_key = e.user_id AND by_user.kind = 'user_id'
+        LEFT JOIN identity by_anonymous ON by_anonymous.identity_key = e.anonymous_id AND by_anonymous.kind = 'anonymous_id'
+        LEFT JOIN identity by_profile ON by_profile.identity_key = e.profile_id AND by_profile.kind = 'profile'
+        WHERE e.workspace_id = {ws:UUID}
+          AND e.name IN {goal_events:Array(String)}
       ),
       sent AS (
         SELECT journey_id AS member_id,
@@ -208,11 +242,9 @@ async function memberBreakdown(deps: Deps, memberIds: string[], from: string, to
       ),
       conv AS (
         SELECT f.member_id, uniqExact(f.profile_id) AS converters
-        FROM events e FINAL
+        FROM events_resolved e
         INNER JOIN first f ON f.profile_id = e.profile_id
-        WHERE e.workspace_id = {ws:UUID}
-          AND e.name IN {goal_events:Array(String)}
-          AND e.timestamp >= f.first_at
+        WHERE e.timestamp >= f.first_at
           AND e.timestamp <= addDays(f.first_at, {attribution_days:Int32})
         GROUP BY f.member_id
       )
@@ -225,6 +257,10 @@ async function memberBreakdown(deps: Deps, memberIds: string[], from: string, to
       to: to.replace('Z', ''),
       goal_events: goalEvents,
       attribution_days: attributionDays,
+      identity_keys: pairs.map((p) => p.key),
+      identity_profiles: pairs.map((p) => p.profileId),
+      identity_kinds: pairs.map((p) => p.kind),
+      identity_count: pairs.length,
     },
     format: 'JSONEachRow',
     clickhouse_settings: { ...(await deps.events.settingsFor(deps.workspaceId)), max_execution_time: 10, max_result_rows: 500 } as never,
@@ -287,6 +323,8 @@ export const analyticsCampaignSummary = defineCommand({
 
     const sending = sendingMembers(record);
     const memberIds = sending.map((m) => m.artifactId);
+    // The same identity map the measure queries and the holdout card use (#590).
+    const identity = await loadIdentityMap(ctx.tx, deps.workspaceId);
     const baseMeta = {
       timeZone,
       currency: null as string | null,
@@ -297,6 +335,11 @@ export const analyticsCampaignSummary = defineCommand({
       k: K,
       notes: [
         `Campaign conversions are people who got a campaign message and converted within ${record.goal.attributionDays} days of their first campaign message (first touch).`,
+        ...(identity.overLimit
+          ? [
+              `Identity resolution was skipped: the workspace has more than ${identity.limit} merged identity mappings, so conversions are matched on the profile id stored with the event.`,
+            ]
+          : []),
       ],
     };
 
@@ -368,7 +411,7 @@ export const analyticsCampaignSummary = defineCommand({
       record.goal,
       (conversionMap?.rules ?? []).map((r) => r.event),
     );
-    const breakdown = await memberBreakdown(deps, memberIds, from, to, goalEvents, record.goal.attributionDays);
+    const breakdown = await memberBreakdown(deps, memberIds, from, to, goalEvents, record.goal.attributionDays, identity);
     const members = sending.map((m) => {
       const row = breakdown.get(m.artifactId);
       const sent = row?.sent ?? 0;
