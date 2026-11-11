@@ -1,7 +1,8 @@
 import { artifactTypes } from '@agentic-marketing/artifacts';
 import { InboundEvent } from '@agentic-marketing/events';
 import { describe, expect, it } from 'vitest';
-import { defaultPolicy, processEvent, type SourceInfo, truncateIp, type WorkspacePolicy } from '../src/policy';
+import { acceptInternalItems, acceptItems } from '../src/gateway';
+import { defaultPolicy, PLATFORM_EVENTS, processEvent, type SourceInfo, truncateIp, type WorkspacePolicy } from '../src/policy';
 
 const browser: SourceInfo = { id: 'src_b', workspaceId: 'ws', kind: 'browser', requiredPurpose: 'analytics' };
 const server: SourceInfo = { id: 'src_s', workspaceId: 'ws', kind: 'server', requiredPurpose: null };
@@ -165,7 +166,7 @@ describe('personal data', () => {
 
 describe('tracking plan', () => {
   const p: WorkspacePolicy = { ...defaultPolicy, plan };
-  it('warns on unknown events and blocks unknown properties or wrong types', () => {
+  it('warns on unknown events, blocks unknown properties, and warns about declared wrong types', () => {
     expect(run({ type: 'track', event: 'Mystery', anonymousId: 'a', context: yes }, browser, p)).toMatchObject({
       kind: 'accepted',
       warnings: ['Event "Mystery" is not in the tracking plan.'],
@@ -178,13 +179,108 @@ describe('tracking plan', () => {
     expect(
       run({ type: 'track', event: 'Order Completed', anonymousId: 'a', properties: { total: '1' }, context: yes }, browser, p),
     ).toMatchObject({
-      kind: 'rejected',
-      error: expect.stringContaining('"total" should be number'),
+      kind: 'accepted',
+      warnings: ['"Order Completed": "total" should be number'],
     });
   });
 
   it('names events and corrects timestamps', () => {
     const out = run({ type: 'page', name: 'Home', anonymousId: 'a', timestamp: '2026-10-22T09:59:00Z', context: yes });
     expect(out).toMatchObject({ event: { name: 'Home', messageId: 'generated', timestamp: '2026-10-22T09:59:00.000Z' } });
+  });
+});
+
+// #623: declared `required` / `type` problems are a separate dimension from how the plan treats
+// events and properties it does not list, and there is no dedicated strictness setting for them.
+// They therefore behave the same whatever the unknown* settings are: the plan warns (the default
+// plan's behaviour) and never rejects because of an unrelated setting.
+describe('declared property validation', () => {
+  const plans = [
+    { unknownEvents: 'allow', unknownProperties: 'allow' },
+    { unknownEvents: 'block', unknownProperties: 'allow' },
+    { unknownEvents: 'warn', unknownProperties: 'warn' },
+    { unknownEvents: 'block', unknownProperties: 'block' },
+  ] as const;
+  const declared = (settings: (typeof plans)[number]): WorkspacePolicy => ({
+    ...defaultPolicy,
+    plan: artifactTypes.tracking_plan.content.parse({
+      ...settings,
+      events: [{ name: 'Purchase', properties: [{ name: 'amount', type: 'number', required: true }] }],
+    }),
+  });
+  const outcome = (settings: (typeof plans)[number], properties: Record<string, unknown>) =>
+    processEvent(
+      InboundEvent.parse({ type: 'track', event: 'Purchase', anonymousId: 'a', properties, context: yes }),
+      browser,
+      declared(settings),
+      now,
+      { messageId: () => 'generated' },
+    );
+
+  it('treats a wrong type the same for every unknown* setting', () => {
+    for (const settings of plans) {
+      expect(outcome(settings, { amount: 'free' }), JSON.stringify(settings)).toMatchObject({
+        kind: 'accepted',
+        warnings: ['"Purchase": "amount" should be number'],
+      });
+    }
+  });
+
+  it('treats a missing required property the same for every unknown* setting', () => {
+    for (const settings of plans) {
+      expect(outcome(settings, {}), JSON.stringify(settings)).toMatchObject({
+        kind: 'accepted',
+        warnings: ['"Purchase": "amount" is required'],
+      });
+    }
+  });
+});
+
+// #624: the platform emits its own carrier events (signup, confirmation, import, e-mail outcomes)
+// through the same ingest path. A workspace's product-analytics plan must never reject them, but
+// only the platform's own server-side callers may use the exemption.
+describe('platform-owned events', () => {
+  const strict: WorkspacePolicy = {
+    ...defaultPolicy,
+    plan: artifactTypes.tracking_plan.content.parse({ unknownEvents: 'block', unknownProperties: 'block', events: [] }),
+  };
+  const event = (name: string) => InboundEvent.parse({ type: 'track', event: name, anonymousId: 'a', properties: { internal: true } });
+
+  it('lists every carrier event the platform emits through ingest', () => {
+    expect([...PLATFORM_EVENTS].sort()).toEqual(
+      [
+        'Email Bounced',
+        'Email Complained',
+        'Email Delivered',
+        'Email Link Clicked',
+        'Email Sent',
+        'Email Unsubscribed',
+        'Form Submitted',
+        'Subscription Confirmed',
+        'Subscription Imported',
+      ].sort(),
+    );
+  });
+
+  it('accepts each platform event from an internal caller under a strict plan', () => {
+    for (const name of PLATFORM_EVENTS) {
+      expect(processEvent(event(name), server, strict, now, { messageId: () => 'x', internal: true }), name).toMatchObject({
+        kind: 'accepted',
+      });
+    }
+  });
+
+  it('gives a public client no bypass, even on a server source', () => {
+    for (const name of PLATFORM_EVENTS) {
+      expect(processEvent(event(name), server, strict, now, { messageId: () => 'x' }), name).toMatchObject({ kind: 'rejected' });
+    }
+  });
+
+  it('exempts only the internal entry point, not the public one', () => {
+    const item = { type: 'track', event: 'Form Submitted', anonymousId: 'a' };
+    expect(acceptItems([item], server, strict).rejected).toHaveLength(1);
+    expect(acceptInternalItems([item], server, strict).accepted).toHaveLength(1);
+    // The public gateway and inbound webhooks keep using acceptItems, wherever the source came from.
+    expect(acceptItems([item], { ...server, kind: 'browser' }, strict).rejected).toHaveLength(1);
   });
 });
