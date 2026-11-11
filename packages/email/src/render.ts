@@ -4,6 +4,7 @@ import { convert } from 'html-to-text';
 import { type Context, Hash, Liquid, Tag, type TagToken, type TopLevelToken, toPromise } from 'liquidjs';
 import mjml2html from 'mjml';
 import { isAllowedBlockUrl, parseBlockTagArgs } from './blockTags';
+import { hasUnsubscribeLink } from './unsubscribe';
 
 // Rendering (ADR-0006): Liquid first, then MJML → HTML, then a text part. Liquid runs sandboxed:
 // no file system, no includes, bounded time and output, and every value is HTML-escaped unless
@@ -153,6 +154,36 @@ const PLACEHOLDER_UNSUBSCRIBE = 'https://example.invalid/unsubscribe';
 const PLACEHOLDER_WEB = 'https://example.invalid/web';
 
 /**
+ * The unsubscribe URL a render with `vars` uses. The same value must be found as an `<a href>` in
+ * the rendered HTML, both at save and at publish (#637).
+ */
+export function unsubscribeUrlFor(vars: RenderVars): string {
+  const value = vars.unsubscribe_url;
+  return value === undefined || value === null || value === '' ? PLACEHOLDER_UNSUBSCRIBE : String(value);
+}
+
+/**
+ * True when the source inlines a reusable `{% block … %}`. Such a template can only be rendered
+ * with a block resolver, which a content validator does not have; the publish gate resolves the
+ * block and decides compliance from the real footer.
+ */
+function usesBlockTag(src: string): boolean {
+  let i = 0;
+  for (;;) {
+    const open = src.indexOf('{%', i);
+    if (open < 0) return false;
+    let j = open + 2;
+    if (src[j] === '-') j++;
+    while (j < src.length && (src[j] === ' ' || src[j] === '\t' || src[j] === '\n' || src[j] === '\r')) j++;
+    if (src.startsWith('block', j)) {
+      const after = src[j + 5];
+      if (after === undefined || !/[A-Za-z0-9_]/.test(after)) return true;
+    }
+    i = open + 2;
+  }
+}
+
+/**
  * E-mail clients rarely render SVG. Our assets answer `/a/<id>/<file>.png` with the PNG rendition,
  * so point an asset URL in an e-mail at that path. Only our asset ids match; other URLs stay.
  */
@@ -207,8 +238,24 @@ export async function validateTemplate(t: EmailTemplate): Promise<string[]> {
       problems.push(`mjml: ${(e as Error).message.split('\n')[0]}`);
     }
   }
-  if (!/unsubscribe_url/.test(t.mjml) && t.purpose !== 'onboarding' && t.purpose !== 'necessary')
-    problems.push('Marketing e-mails need an unsubscribe link: add {{ unsubscribe_url }} to the MJML');
+  if (t.purpose !== 'onboarding' && t.purpose !== 'necessary') {
+    // Decide from the rendered e-mail, not the source: a footer supplied by a block is a real
+    // link (#637), and the characters "unsubscribe_url" in prose are not.
+    const vars = (t.sampleData ?? {}) as RenderVars;
+    let rendered: Rendered | null = null;
+    try {
+      rendered = await renderTemplate(t, vars);
+    } catch {
+      // Liquid or MJML that does not render is reported above (or by the publish gate). A block
+      // footer is the expected failure here: only the publish gate can resolve it.
+    }
+    if (rendered) {
+      if (!hasUnsubscribeLink(rendered.html, unsubscribeUrlFor(vars)))
+        problems.push('Marketing e-mails need an unsubscribe link: add {{ unsubscribe_url }} to the MJML');
+    } else if (!usesBlockTag(t.mjml) && !/unsubscribe_url/.test(t.mjml)) {
+      problems.push('Marketing e-mails need an unsubscribe link: add {{ unsubscribe_url }} to the MJML');
+    }
+  }
   return problems;
 }
 
