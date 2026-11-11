@@ -24,9 +24,9 @@ import { DIMENSIONS, type DimensionId, MEASURES, METRIC_CATALOG, type MeasureDef
 // SQL, a table name, a column name or an expression from the caller. The workspace comes from the
 // principal, and ClickHouse's row policy checks it again.
 
-const K = 5;
 const CACHE_TTL_MS = 60_000;
-const MAX_RANGE_DAYS = 400;
+export const K = 5;
+export const MAX_RANGE_DAYS = 400;
 
 const ValueOrList = z.union([z.string().min(1).max(200), z.array(z.string().min(1).max(200)).min(1).max(100)]);
 
