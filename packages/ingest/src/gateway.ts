@@ -88,7 +88,13 @@ export function acceptItems(
   items: unknown[],
   source: SourceInfo,
   policy: WorkspacePolicy,
-  opts: { ip?: string; context?: Record<string, unknown>; receivedAt?: Date } = {},
+  opts: {
+    ip?: string;
+    context?: Record<string, unknown>;
+    receivedAt?: Date;
+    /** Overrides the id given to an item that carries none (e.g. a stable id derived from a webhook-id). */
+    messageId?: (index: number) => string;
+  } = {},
 ) {
   const receivedAt = opts.receivedAt ?? new Date();
   const accepted: BusEvent[] = [];
@@ -109,7 +115,10 @@ export function acceptItems(
       rejected.push({ index, error: z.prettifyError(parsed.error) });
       continue;
     }
-    const out = processEvent(parsed.data, source, policy, receivedAt, { ip: opts.ip, messageId: newUuid });
+    const out = processEvent(parsed.data, source, policy, receivedAt, {
+      ip: opts.ip,
+      messageId: () => opts.messageId?.(index) ?? newUuid(),
+    });
     if (out.kind === 'accepted') {
       accepted.push(out.event);
       for (const w of out.warnings) warnings.push({ index, warning: w });

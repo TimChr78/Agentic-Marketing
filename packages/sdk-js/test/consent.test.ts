@@ -49,6 +49,17 @@ describe('ad click ids', () => {
     expect(captureClickIds('?epik=epik-new', '_epik=epik-old')).toEqual({ epik: 'epik-new' });
   });
 
+  it('rejects a cookie value with "=" instead of storing a truncated prefix (#644)', () => {
+    // Values that fail CLICK_VALUE (which excludes "=") are dropped whole; the old split on every
+    // "=" stored "abcd1234" for "_fbc=abcd1234==" and "abcd" for "_ttp=abcd=".
+    expect(captureClickIds('', '_fbc=abcd1234==')).toEqual({});
+    expect(captureClickIds('', '_fbp=fb.1.1690000000000.123==')).toEqual({});
+    expect(captureClickIds('', '_ttp=abcd=')).toEqual({});
+    expect(captureClickIds('', '_epik=epik-cookie-1=')).toEqual({});
+    // A value without "=" is still read as before, and a separator inside it is kept.
+    expect(captureClickIds('', '_fbc=abcd1234; _ttp=abcd')).toEqual({ fbc: 'abcd1234', ttp: 'abcd' });
+  });
+
   it('sends and keeps them only with ad_measurement allowed', async () => {
     const h = harness({ search: '?gclid=Cj0KCQabc', cookies: '' });
     const a = h.make();
