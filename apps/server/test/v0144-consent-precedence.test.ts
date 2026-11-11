@@ -137,6 +137,15 @@ describe('personal-data reads are audited (#592, #625)', () => {
     await expectAudited('profiles.scores', (api) => api.call('profiles.scores', { profileId }), profileId);
   });
 
+  // Sample profile ids are pseudonymous, but they identify people in this workspace.
+  it('segments.preview writes a read audit record', async () => {
+    await expectAudited(
+      'segments.preview',
+      (api) => api.call('segments.preview', { condition: { score: { key: 'conversion_propensity', gte: 0.5 } } }),
+      null,
+    );
+  });
+
   it('deliveries.list writes a read audit record', async () => {
     await expectAudited('deliveries.list', (api) => api.call('deliveries.list', { limit: 10 }), null);
   });
@@ -231,5 +240,14 @@ describe('journeys.simulate previews refused webhooks (#626)', () => {
     const hook = sim.steps.find((s) => s.node === 'hook')!;
     expect(hook.detail).toContain('would not send');
     expect(hook.detail).toContain('no lawful basis');
+  });
+
+  // A simulation for a named person reveals their consent verdicts and branch data.
+  it('writes a read audit record with the person as the target', async () => {
+    const before = await seq();
+    await t.api(owner, ws).call('journeys.simulate', { artifactId: journeyId, profileId });
+    const audit = await auditSince(before, 'journeys.simulate');
+    expect(audit).toHaveLength(1);
+    expect(audit[0]).toMatchObject({ command: 'journeys.simulate', principal_id: owner.id, ok: true, target: profileId });
   });
 });

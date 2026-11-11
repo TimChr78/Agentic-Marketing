@@ -87,7 +87,13 @@ function accept(
   items: unknown[],
   source: SourceInfo,
   policy: WorkspacePolicy,
-  opts: { ip?: string; context?: Record<string, unknown>; receivedAt?: Date },
+  opts: {
+    ip?: string;
+    context?: Record<string, unknown>;
+    receivedAt?: Date;
+    /** Overrides the id given to an item that carries none (e.g. a stable id derived from a webhook-id). */
+    messageId?: (index: number) => string;
+  },
   internal: boolean,
 ) {
   const receivedAt = opts.receivedAt ?? new Date();
@@ -109,7 +115,11 @@ function accept(
       rejected.push({ index, error: z.prettifyError(parsed.error) });
       continue;
     }
-    const out = processEvent(parsed.data, source, policy, receivedAt, { ip: opts.ip, messageId: newUuid, internal });
+    const out = processEvent(parsed.data, source, policy, receivedAt, {
+      ip: opts.ip,
+      messageId: () => opts.messageId?.(index) ?? newUuid(),
+      internal,
+    });
     if (out.kind === 'accepted') {
       accepted.push(out.event);
       for (const w of out.warnings) warnings.push({ index, warning: w });
@@ -124,7 +134,13 @@ export function acceptItems(
   items: unknown[],
   source: SourceInfo,
   policy: WorkspacePolicy,
-  opts: { ip?: string; context?: Record<string, unknown>; receivedAt?: Date } = {},
+  opts: {
+    ip?: string;
+    context?: Record<string, unknown>;
+    receivedAt?: Date;
+    /** Overrides the id given to an item that carries none (e.g. a stable id derived from a webhook-id). */
+    messageId?: (index: number) => string;
+  } = {},
 ) {
   return accept(items, source, policy, opts, false);
 }

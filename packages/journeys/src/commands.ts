@@ -688,7 +688,9 @@ export const simulateJourney = defineCommand({
   }),
   permission: 'artifacts:read',
   effect: 'read',
-  target: (i) => i.artifactId,
+  // With a profile, the walk shows that person's consent verdicts and branch data.
+  auditReads: true,
+  target: (i) => i.profileId ?? i.artifactId,
   handler: async (input, ctx) => {
     const { version, def } = await loadDefinition(ctx.tx, input.artifactId, input.version);
     let graph: ReturnType<typeof compile>;
