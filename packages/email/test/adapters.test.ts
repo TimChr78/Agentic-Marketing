@@ -167,6 +167,79 @@ describe('Amazon SES', () => {
   });
 });
 
+// #634: the signing-certificate cache stored the *promise*, keyed by URL, with no `.catch()` and no
+// eviction. One timeout or 5xx poisoned that URL for the life of the process, so every later SNS
+// bounce/complaint webhook was rejected with 401. Only a successful fetch may be cached.
+describe('SNS certificate cache (#634)', () => {
+  const certUrl = (n: number) => `https://sns.eu-west-1.amazonaws.com/SimpleNotificationService-cache-${n}.pem`;
+
+  /** A correctly signed Notification, plus the PEM that verifies it. */
+  function snsFixture(url: string) {
+    const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+    const pem = publicKey.export({ type: 'spki', format: 'pem' }).toString();
+    const m: Record<string, string> = {
+      Type: 'Notification',
+      MessageId: `sns-${url.slice(-9)}`,
+      TopicArn: 'arn:aws:sns:eu-west-1:123:ses-events',
+      Message: JSON.stringify({
+        eventType: 'Complaint',
+        mail: { messageId: 'ses-1' },
+        complaint: { feedbackId: 'f1', timestamp: '2026-10-22T10:00:00Z' },
+      }),
+      Timestamp: '2026-10-22T10:00:01Z',
+      SignatureVersion: '2',
+      SigningCertURL: url,
+    };
+    const sign = createSign('RSA-SHA256');
+    sign.update(['Message', 'MessageId', 'Timestamp', 'TopicArn', 'Type'].map((k) => `${k}\n${m[k]}\n`).join(''));
+    m.Signature = sign.sign(privateKey, 'base64');
+    return { m, pem };
+  }
+
+  it('caches only a successful fetch: one timeout does not disable the next webhook', async () => {
+    const { m, pem } = snsFixture(certUrl(1));
+    let calls = 0;
+    const fetch = (async () => {
+      calls++;
+      if (calls === 1) throw new Error('socket hang up');
+      return new Response(pem);
+    }) as typeof globalThis.fetch;
+
+    expect(await verifySnsMessage(m, { fetch })).toBe(false);
+    expect(await verifySnsMessage(m, { fetch })).toBe(true);
+    expect(calls).toBe(2);
+  });
+
+  it('does not cache a non-OK certificate response', async () => {
+    const { m, pem } = snsFixture(certUrl(2));
+    let calls = 0;
+    const fetch = (async () => {
+      calls++;
+      return calls === 1 ? new Response('<html>service unavailable</html>', { status: 503 }) : new Response(pem);
+    }) as typeof globalThis.fetch;
+
+    expect(await verifySnsMessage(m, { fetch })).toBe(false);
+    expect(await verifySnsMessage(m, { fetch })).toBe(true);
+    expect(calls).toBe(2);
+  });
+
+  it('refetches once when a cached certificate no longer verifies', async () => {
+    const good = snsFixture(certUrl(3));
+    const attacker = snsFixture(certUrl(3));
+    let calls = 0;
+    const fetch = (async () => {
+      calls++;
+      return new Response(good.pem);
+    }) as typeof globalThis.fetch;
+
+    expect(await verifySnsMessage(good.m, { fetch })).toBe(true);
+    // Different key, same URL: the cached certificate fails, so it is fetched again before the
+    // signature is refused.
+    expect(await verifySnsMessage(attacker.m, { fetch })).toBe(false);
+    expect(calls).toBe(2);
+  });
+});
+
 describe('SMTP', () => {
   const received: { from: string; to: string[]; data: string }[] = [];
   const server = new SMTPServer({

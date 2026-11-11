@@ -8,12 +8,60 @@ import { type AdapterDeps, type DeliveryEvent, defineAdapter, type WebhookReques
 // signature is verified against Amazon's certificate before anything is trusted.
 
 const SNS_HOST = /^sns\.[a-z0-9-]+\.amazonaws\.com(\.cn)?$/;
-const certs = new Map<string, Promise<string>>();
+/**
+ * Successfully fetched signing certificates, keyed by URL. Only a verified, non-empty PEM is
+ * cached: a failed request, a non-OK status or an error body must never poison the URL, or every
+ * later SNS webhook for the process would be rejected (#634). A handful of AWS certificates is
+ * all a workspace sees, so the map is bounded as an LRU.
+ */
+const CERTS_MAX = 8;
+const certs = new Map<string, string>();
 
 function snsUrlOk(raw: unknown): raw is string {
   try {
     const u = new URL(String(raw));
     return u.protocol === 'https:' && SNS_HOST.test(u.hostname);
+  } catch {
+    return false;
+  }
+}
+
+/** A certificate body, or a clear error so the caller can refuse the webhook and try again later. */
+async function fetchCert(url: string, deps: AdapterDeps): Promise<string> {
+  const res = await deps.fetch(url);
+  if (!res.ok) throw new Error(`SNS certificate fetch failed: HTTP ${res.status}`);
+  const pem = await res.text();
+  // A 200 with an HTML error page is not a certificate, and caching it would disable the URL.
+  // (Tests use a PEM public key; AWS sends a certificate, but both are PEM blocks.)
+  if (!pem.includes('-----BEGIN ')) throw new Error('SNS certificate response is not a PEM certificate');
+  return pem;
+}
+
+/** The cached PEM, or a fresh one; `cached` tells the caller whether a failed verify may refetch. */
+async function getCert(url: string, deps: AdapterDeps, force = false): Promise<{ pem: string; cached: boolean }> {
+  const hit = force ? undefined : certs.get(url);
+  if (hit !== undefined) {
+    // Refresh the insertion order, so the entry a flood of URLs would evict is the least used.
+    certs.delete(url);
+    certs.set(url, hit);
+    return { pem: hit, cached: true };
+  }
+  certs.delete(url);
+  const pem = await fetchCert(url, deps);
+  certs.set(url, pem);
+  while (certs.size > CERTS_MAX) {
+    const oldest = certs.keys().next().value;
+    if (oldest === undefined) break;
+    certs.delete(oldest);
+  }
+  return { pem, cached: false };
+}
+
+function verifyWith(cert: string, stringToSign: string, m: Record<string, string>): boolean {
+  const v = createVerify(m.SignatureVersion === '2' ? 'RSA-SHA256' : 'RSA-SHA1');
+  v.update(stringToSign, 'utf8');
+  try {
+    return v.verify(cert, m.Signature, 'base64');
   } catch {
     return false;
   }
@@ -30,19 +78,24 @@ export async function verifySnsMessage(m: Record<string, string>, deps: AdapterD
     .filter((k) => m[k] !== undefined)
     .map((k) => `${k}\n${m[k]}\n`)
     .join('');
-  if (!certs.has(m.SigningCertURL))
-    certs.set(
-      m.SigningCertURL,
-      deps.fetch(m.SigningCertURL).then((r) => r.text()),
-    );
-  const cert = await certs.get(m.SigningCertURL)!;
-  const v = createVerify(m.SignatureVersion === '2' ? 'RSA-SHA256' : 'RSA-SHA1');
-  v.update(stringToSign, 'utf8');
+  let cert: { pem: string; cached: boolean };
   try {
-    return v.verify(cert, m.Signature, 'base64');
+    cert = await getCert(m.SigningCertURL, deps);
+  } catch {
+    // The failure is not cached, so the next webhook fetches again instead of staying poisoned.
+    return false;
+  }
+  if (verifyWith(cert.pem, stringToSign, m)) return true;
+  if (!cert.cached) return false;
+  // A cached certificate may be stale (AWS rotates one behind a stable URL) or was verified
+  // against a body cached by an older build. Refetch once before refusing the signature.
+  try {
+    cert = await getCert(m.SigningCertURL, deps, true);
   } catch {
     return false;
   }
+  // getCert just refreshed the entry, so this is a fresh body; verify and give the final answer.
+  return verifyWith(cert.pem, stringToSign, m);
 }
 
 /** SES event (configuration-set publishing or classic notification) → delivery events. */
