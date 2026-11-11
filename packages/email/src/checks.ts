@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import type { EmailTemplate } from '@agentic-marketing/artifacts';
 import { Parser } from 'htmlparser2';
 import { type Rendered, type RenderOptions, type RenderVars, renderTemplate, unsubscribeUrlFor } from './render';
-import { hasUnsubscribeLink } from './unsubscribe';
+import { unsubscribeLinkProblem, unsubscribeProblemMessage } from './unsubscribe';
 
 // Pre-send checks (#90): a template can be valid MJML/Liquid and still fail in an inbox, so this
 // inspects the rendered e-mail (the same output the preview shows, with the sample data) for the
@@ -258,12 +258,13 @@ async function personalisedHrefs(t: EmailTemplate, vars: RenderVars, hrefs: stri
 
 function checkCompliance(t: EmailTemplate, opts: EmailCheckOptions, c: Collector, renderedHtml: string, unsubscribeUrl: string) {
   // The gate promises a real unsubscribe link in the e-mail, not the variable name in the source
-  // (#637). `unsubscribeUrl` is the URL the send gateway puts in the visible link and in
-  // List-Unsubscribe / List-Unsubscribe-Post for marketing mail.
-  if (opts.marketing && !hasUnsubscribeLink(renderedHtml, unsubscribeUrl))
-    c.add('compliance', 'unsubscribe', 'blocking', 'A marketing e-mail must contain an unsubscribe link, and this one does not.', {
+  // (#637), and it must be a link a reader can see and click (review P2). `unsubscribeUrl` is the
+  // URL the send gateway puts in the visible link and in List-Unsubscribe / List-Unsubscribe-Post.
+  const problem = opts.marketing ? unsubscribeLinkProblem(renderedHtml, unsubscribeUrl) : null;
+  if (problem)
+    c.add('compliance', 'unsubscribe', 'blocking', unsubscribeProblemMessage(problem), {
       location: 'mjml',
-      fix: 'Add a link to {{ unsubscribe_url }} to the footer, usually as an “Unsubscribe” link.',
+      fix: 'Make the footer link to {{ unsubscribe_url }} visible and give it text, e.g. an “Unsubscribe” link.',
     });
   // A physical address in the footer is a warning, but there is no workspace or brand field to
   // compare against, so there is nothing concrete to report; skip it rather than guess.

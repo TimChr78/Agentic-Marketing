@@ -238,6 +238,41 @@ describe('SNS certificate cache (#634)', () => {
     expect(await verifySnsMessage(attacker.m, { fetch })).toBe(false);
     expect(calls).toBe(2);
   });
+
+  it('refetches at most once per certificate URL per 60 seconds', async () => {
+    const good = snsFixture(certUrl(4));
+    const attacker = snsFixture(certUrl(4));
+    let calls = 0;
+    let now = 1_000_000;
+    const deps = {
+      fetch: (async () => {
+        calls++;
+        return new Response(good.pem);
+      }) as typeof globalThis.fetch,
+      now: () => now,
+    };
+
+    expect(await verifySnsMessage(good.m, deps)).toBe(true); // the initial fetch
+    for (let i = 0; i < 5; i++) expect(await verifySnsMessage(attacker.m, deps)).toBe(false);
+    // One refetch for the first bad signature; the next four stay inside the cooldown.
+    expect(calls).toBe(2);
+    now += 60_001;
+    expect(await verifySnsMessage(attacker.m, deps)).toBe(false);
+    expect(calls).toBe(3);
+  });
+
+  it('coalesces concurrent fetches for the same certificate URL into one request', async () => {
+    const { m, pem } = snsFixture(certUrl(5));
+    let calls = 0;
+    const deps = {
+      fetch: (async () => {
+        calls++;
+        return new Response(pem);
+      }) as typeof globalThis.fetch,
+    };
+    expect(await Promise.all([verifySnsMessage(m, deps), verifySnsMessage(m, deps)])).toEqual([true, true]);
+    expect(calls).toBe(1);
+  });
 });
 
 describe('SMTP', () => {

@@ -4,7 +4,7 @@ import { convert } from 'html-to-text';
 import { type Context, Hash, Liquid, Tag, type TagToken, type TopLevelToken, toPromise } from 'liquidjs';
 import mjml2html from 'mjml';
 import { isAllowedBlockUrl, parseBlockTagArgs } from './blockTags';
-import { hasUnsubscribeLink } from './unsubscribe';
+import { unsubscribeLinkProblem, unsubscribeProblemMessage } from './unsubscribe';
 
 // Rendering (ADR-0006): Liquid first, then MJML → HTML, then a text part. Liquid runs sandboxed:
 // no file system, no includes, bounded time and output, and every value is HTML-escaped unless
@@ -250,10 +250,10 @@ export async function validateTemplate(t: EmailTemplate): Promise<string[]> {
       // footer is the expected failure here: only the publish gate can resolve it.
     }
     if (rendered) {
-      if (!hasUnsubscribeLink(rendered.html, unsubscribeUrlFor(vars)))
-        problems.push('Marketing e-mails need an unsubscribe link: add {{ unsubscribe_url }} to the MJML');
+      const problem = unsubscribeLinkProblem(rendered.html, unsubscribeUrlFor(vars));
+      if (problem) problems.push(unsubscribeProblemMessage(problem));
     } else if (!usesBlockTag(t.mjml) && !/unsubscribe_url/.test(t.mjml)) {
-      problems.push('Marketing e-mails need an unsubscribe link: add {{ unsubscribe_url }} to the MJML');
+      problems.push(unsubscribeProblemMessage('missing'));
     }
   }
   return problems;
