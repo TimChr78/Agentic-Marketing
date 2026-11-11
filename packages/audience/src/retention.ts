@@ -52,7 +52,8 @@ interface Cursor {
 interface Candidate {
   workspace_id: string;
   id: string;
-  created_at: Date;
+  /** PostgreSQL's full microsecond precision, formatted as text so the driver cannot round it. */
+  created_at: string;
   anonymous_ids: string[];
 }
 
@@ -65,9 +66,13 @@ interface Candidate {
 function onlyFormActivity(events: StoredEvent[]): boolean {
   if (!events.length || events.length >= EVENT_WINDOW) return false;
   if (events.some((e) => e.name === PLATFORM_EVENT.subscriptionConfirmed)) return false;
-  const submittedAt = new Set(events.filter((e) => e.type === 'track' && e.name === PLATFORM_EVENT.formSubmitted).map((e) => e.timestamp));
-  if (!submittedAt.size) return false;
-  return events.every((e) => PLATFORM_NAMES.has(e.name) || (e.type === 'identify' && submittedAt.has(e.timestamp)));
+  // The form's own identify came from the form source at the submission timestamp. The source id
+  // is set by the ingest path (the form id `frm_…`), not by the request body, so a client identify
+  // that merely shares the timestamp does not count as the form's (P3).
+  const submissions = events.filter((e) => e.type === 'track' && e.name === PLATFORM_EVENT.formSubmitted);
+  if (!submissions.length) return false;
+  const submitted = new Set(submissions.map((e) => `${e.sourceId}:${e.timestamp}`));
+  return events.every((e) => PLATFORM_NAMES.has(e.name) || (e.type === 'identify' && submitted.has(`${e.sourceId}:${e.timestamp}`)));
 }
 
 async function readCursor(deps: RetentionDeps): Promise<Cursor | null> {
@@ -101,7 +106,8 @@ async function writeCursor(deps: RetentionDeps, cursor: Cursor | null) {
  */
 async function candidates(deps: RetentionDeps, cursor: Cursor | null): Promise<Candidate[]> {
   const { rows } = await deps.db.admin.query<Candidate>(
-    `SELECT p.workspace_id, p.id, p.created_at,
+    `SELECT p.workspace_id, p.id,
+            to_char(p.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at,
             ARRAY(SELECT a.value FROM identifiers a
                   WHERE a.workspace_id = p.workspace_id AND a.profile_id = p.id AND a.type = 'anonymous_id') AS anonymous_ids
      FROM profiles p
@@ -225,7 +231,7 @@ export async function runRetentionOnce(deps: RetentionDeps): Promise<{
     }
   }
   const last = rows.at(-1);
-  if (rows.length === CANDIDATE_BATCH && last) await writeCursor(deps, { createdAt: last.created_at.toISOString(), id: last.id });
+  if (rows.length === CANDIDATE_BATCH && last) await writeCursor(deps, { createdAt: last.created_at, id: last.id });
   else await writeCursor(deps, null);
   const deliveries = await deps.db.admin.query(
     `DELETE FROM deliveries WHERE status IN ('done', 'failed', 'dead') AND created_at < now() - make_interval(days => $1)`,

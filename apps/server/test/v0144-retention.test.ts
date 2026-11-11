@@ -36,13 +36,13 @@ async function seedProfile(anon: string, email: string, createdAt: Date, id?: st
   return profileId;
 }
 
-function storedEvent(anon: string, name: string, type: BusEvent['type'] = 'track'): BusEvent {
-  const at = new Date().toISOString();
+function storedEvent(anon: string, name: string, opts: { type?: BusEvent['type']; sourceId?: string; timestamp?: string } = {}): BusEvent {
+  const at = opts.timestamp ?? new Date().toISOString();
   return {
     workspaceId: ws,
-    sourceId: 'frm_test',
+    sourceId: opts.sourceId ?? 'frm_test',
     messageId: `retention:${anon}:${name}:${++seq}`,
-    type,
+    type: opts.type ?? 'track',
     name,
     anonymousId: anon,
     userId: '',
@@ -117,5 +117,19 @@ describe('retention positive evidence (#627 review)', () => {
     expect((await runRetentionOnce({ ...retentionDeps(), events })).profiles).toBe(0);
     expect(await profileExists(id)).toBe(true);
     expect((await api().call('consent.history', { profileId: id })).records.length).toBeGreaterThan(0);
+  });
+
+  it('does not treat an unrelated identify with the same timestamp as the form identify', async () => {
+    const anon = 'form:timestamp-collision';
+    const id = await seedProfile(anon, 'timestamp-collision@example.com', new Date(Date.now() - 60 * 86_400_000));
+    const at = new Date().toISOString();
+    await t.srv.events.insert([
+      storedEvent(anon, 'Form Submitted', { timestamp: at }),
+      // An SDK identify can share the timestamp, but its source is not the form.
+      storedEvent(anon, 'identify', { type: 'identify', sourceId: 'src_other', timestamp: at }),
+    ]);
+
+    expect((await runRetentionOnce(retentionDeps())).profiles).toBe(0);
+    expect(await profileExists(id)).toBe(true);
   });
 });
