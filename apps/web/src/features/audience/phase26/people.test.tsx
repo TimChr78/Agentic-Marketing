@@ -567,7 +567,8 @@ describe('Person detail (#510)', () => {
     renderPerson();
     await screen.findByRole('heading', { level: 1, name: 'ada@example.com' });
     expect(await screen.findByText(/Events and consent include merged identities; messages cover the current profile only/)).toBeTruthy();
-    expect(screen.getByText(/2 events loaded · 1 message loaded · 1 consent record loaded/)).toBeTruthy();
+    // The three counts come from separate reads; under load the caption renders before the last one lands.
+    expect(await screen.findByText(/2 events loaded · 1 message loaded · 1 consent record loaded/)).toBeTruthy();
     expect(screen.getByText(/Message event history may be capped at 1,000/)).toBeTruthy();
     expect(screen.getByText(/Latest event in period: Unavailable/)).toBeTruthy();
     expect(screen.queryByText(/1970/)).toBeNull();
