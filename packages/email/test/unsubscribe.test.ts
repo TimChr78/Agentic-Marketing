@@ -1,5 +1,6 @@
 import type { EmailTemplate } from '@agentic-marketing/artifacts';
 import { describe, expect, it } from 'vitest';
+import { expectLinear } from '../../../test-support/linear';
 import { emailPublishProblems } from '../src/checks';
 import { validateTemplate } from '../src/render';
 import { unsubscribeLinkProblem } from '../src/unsubscribe';
@@ -37,6 +38,39 @@ const rejected: { name: string; html: string; reason: 'hidden' | 'empty' | 'miss
   { name: 'an anchor with only whitespace', html: `<a href="${URL}"> \n\t </a>`, reason: 'empty' },
   { name: 'an image with an empty alt', html: `<a href="${URL}"><img src="x.png" alt=""></a>`, reason: 'empty' },
   { name: 'a link only inside a comment', html: `<!-- ${link()} -->`, reason: 'hidden' },
+  // Review round 2 (P2): content inside the link is checked at the content node, not just at the
+  // anchor and its ancestors. A display:none span is not visible content, even though the anchor
+  // itself is visible.
+  {
+    name: 'a hidden span inside the link',
+    html: `<a href="${URL}"><span style="display:none">Unsubscribe</span></a>`,
+    reason: 'hidden',
+  },
+  {
+    name: 'a span with visibility:hidden inside the link',
+    html: `<a href="${URL}"><span style="visibility:hidden">Unsubscribe</span></a>`,
+    reason: 'hidden',
+  },
+  {
+    name: 'a span with font-size:0 inside the link',
+    html: `<a href="${URL}"><span style="font-size:0">Unsubscribe</span></a>`,
+    reason: 'hidden',
+  },
+  {
+    name: 'a span with the hidden attribute inside the link',
+    html: `<a href="${URL}"><span hidden>Unsubscribe</span></a>`,
+    reason: 'hidden',
+  },
+  {
+    name: 'a span hidden by a class rule inside the link',
+    html: `<html><head><style>.gone { display: none; }</style></head><body><a href="${URL}"><span class="gone">Unsubscribe</span></a></body></html>`,
+    reason: 'hidden',
+  },
+  {
+    name: 'a hidden image inside the link',
+    html: `<a href="${URL}"><img src="x.png" alt="Unsubscribe" style="display:none"></a>`,
+    reason: 'hidden',
+  },
 ];
 
 describe('the unsubscribe link must be visible and clickable (#637 review)', () => {
@@ -46,6 +80,28 @@ describe('the unsubscribe link must be visible and clickable (#637 review)', () 
 
   it('accepts a normal visible text link', () => {
     expect(unsubscribeLinkProblem(`<p>${link()}</p>`, URL)).toBeNull();
+  });
+
+  it('accepts a link with one hidden span and one visible span', () => {
+    expect(
+      unsubscribeLinkProblem(`<a href="${URL}"><span style="display:none">Unsubscribe</span> <span>Unsubscribe</span></a>`, URL),
+    ).toBeNull();
+  });
+
+  // Review round 2 (P3): the anchor's font-size:0 is overridden by the span that holds the text.
+  it('accepts a zero font size on the anchor when the text resets it', () => {
+    expect(
+      unsubscribeLinkProblem(`<a href="${URL}" style="font-size:0"><span style="font-size:13px">Unsubscribe</span></a>`, URL),
+    ).toBeNull();
+  });
+
+  it('accepts a link whose text recolours itself under a hidden-colour anchor', () => {
+    expect(
+      unsubscribeLinkProblem(
+        `<a href="${URL}" style="color:#ffffff;background-color:#ffffff"><span style="color:#111827">Unsubscribe</span></a>`,
+        URL,
+      ),
+    ).toBeNull();
   });
 
   it('accepts an image link with alt text', () => {
@@ -74,6 +130,14 @@ describe('the unsubscribe link must be visible and clickable (#637 review)', () 
     const html = `<html><head><style>@media (max-width: 600px) { .gone { display: none; } }</style></head><body>${link(' class="gone"')}</body></html>`;
     expect(unsubscribeLinkProblem(html, URL)).toBeNull();
   });
+
+  it('stays linear with many content nodes inside the link', () => {
+    expectLinear(
+      (n) => `<a href="${URL}">${'<span style="display:none">x</span>'.repeat(n)}</a>`,
+      (html) => unsubscribeLinkProblem(html, URL),
+      5_000,
+    );
+  });
 });
 
 const mjml = (body: string, head = '') =>
@@ -99,6 +163,20 @@ describe('the gate refuses an unusable unsubscribe link at save and at publish (
     const t = template('<mj-text><a href="{{ unsubscribe_url }}"></a></mj-text>');
     expect((await validateTemplate(t)).join(' ')).toContain('no text');
     expect((await emailPublishProblems(t, { marketing: true })).join(' ')).toContain('no text');
+  });
+
+  it('rejects a link whose only content is a hidden span, at save and at publish', async () => {
+    const t = template('<mj-text><a href="{{ unsubscribe_url }}"><span style="display:none">Unsubscribe</span></a></mj-text>');
+    expect((await validateTemplate(t)).join(' ')).toContain('hidden');
+    expect((await emailPublishProblems(t, { marketing: true })).join(' ')).toContain('hidden');
+  });
+
+  it('accepts a zero font size on the anchor when the text resets it', async () => {
+    const t = template(
+      '<mj-text><a style="font-size:0" href="{{ unsubscribe_url }}"><span style="font-size:13px">Unsubscribe</span></a></mj-text>',
+    );
+    await expect(validateTemplate(t)).resolves.toEqual([]);
+    await expect(emailPublishProblems(t, { marketing: true })).resolves.toEqual([]);
   });
 
   it('rejects a link hidden by an mj-style class rule', async () => {

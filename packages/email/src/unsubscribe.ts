@@ -2,8 +2,14 @@ import { Parser } from 'htmlparser2';
 
 // #637 (review, P2): the gate must find an unsubscribe link a reader can actually see and click.
 // A link that exists only in the source — inline display:none, an ancestor style, a <template>, an
-// empty anchor — is not an unsubscribe link. This predicate is shared by the save validator and
-// the publish gate, so both give the same answer.
+// empty anchor, or text hidden inside the link — is not an unsubscribe link. This predicate is
+// shared by the save validator and the publish gate, so both give the same answer.
+//
+// Visibility is evaluated where the content is, not just at the anchor: a single top-down pass
+// carries the inherited state (visibility, font-size, colour, background, whether a subtree is
+// hidden outright) through every element, and a text node or <img alt> counts only when that
+// state at the node is visible. The CSS rules from <style> are collected in a small first pass,
+// so the evaluation pass knows them before it reaches the body.
 
 export type UnsubscribeLinkProblem = 'missing' | 'hidden' | 'empty';
 
@@ -19,14 +25,12 @@ interface ElementInfo {
 }
 
 interface Candidate {
-  /** The link and every open ancestor at the moment it opened. */
-  chain: ElementInfo[];
   /** Inside <template>, <head>, <script>, <style> or <noscript>. */
   outsideBody: boolean;
-  /** Non-whitespace text directly or indirectly inside the link. */
-  text: boolean;
-  /** An <img> inside the link with a non-empty alt. */
-  imageAlt: boolean;
+  /** A non-whitespace text node or an <img alt>, rendered or not. */
+  content: boolean;
+  /** At least one of those content nodes is visible where it sits. */
+  visible: boolean;
 }
 
 /** A simple class/id selector whose rule hides its target. Complex selectors are not modelled. */
@@ -37,9 +41,47 @@ interface HideSelector {
 }
 
 interface HiddenRules {
-  display: HideSelector[];
-  visibility: HideSelector[];
+  display: RuleIndex;
+  visibility: RuleIndex;
 }
+
+/** Style rules indexed for a constant-time match in the evaluation pass. */
+interface RuleIndex {
+  byTag: Set<string>;
+  byId: Set<string>;
+  byClass: Set<string>;
+  compound: HideSelector[];
+}
+
+const ruleIndex = (): RuleIndex => ({ byTag: new Set(), byId: new Set(), byClass: new Set(), compound: [] });
+
+/**
+ * Carried down the tree. `hidden` is latched for the subtree (display:none, hidden, aria-hidden,
+ * opacity:0, a clipped zero box, mso-hide:all); the rest are inherited properties whose nearest
+ * explicit value wins.
+ */
+interface VisibilityState {
+  hidden: boolean;
+  forbidden: number;
+  visibility: 'hidden' | 'visible' | null;
+  fontSizeZero: boolean | null;
+  color: string | null;
+  background: string | null;
+}
+
+interface OpenElement {
+  name: string;
+  state: VisibilityState;
+}
+
+const INITIAL: VisibilityState = {
+  hidden: false,
+  forbidden: 0,
+  visibility: null,
+  fontSizeZero: null,
+  color: null,
+  background: null,
+};
 
 /**
  * True when the rendered HTML has a usable unsubscribe link. `url` is the rendered
@@ -47,16 +89,15 @@ interface HiddenRules {
  * `List-Unsubscribe` / `List-Unsubscribe-Post` for marketing mail.
  *
  * Returns null when a visible link exists, otherwise why not: `missing` (no link to that URL),
- * `hidden` (outside the body or hidden by a rule below) or `empty` (no text and no image alt).
+ * `hidden` (outside the body, or it has content but none of it is visible) or `empty` (no text
+ * and no image alt at all).
  *
- * Hidden when the link or an ancestor has:
+ * A content node is hidden when it, or any element on the path up to the body, has:
  * - `hidden` or `aria-hidden="true"`;
  * - inline `display:none`, `opacity:0`, or `mso-hide:all`;
  * - a zero max-height/height/width together with `overflow:hidden`;
- * - an effective `font-size:0` (the nearest explicit font size, so an MJML wrapper's zero does
- *   not hide a child that sets its own size) or an effective `visibility:hidden` (nearest wins,
- *   so a child may make itself visible again);
- * - inline `color` equal to an explicitly set `background-color`/`background` colour;
+ * - an effective `font-size:0`, `visibility:hidden`, or text colour equal to the effective
+ *   background colour, with the nearest explicit value on the path winning for the inherited ones;
  * - a class or id matched by a simple `<style>` rule (outside an at-rule) that sets
  *   `display:none` or `visibility:hidden`.
  *
@@ -68,51 +109,53 @@ interface HiddenRules {
 export function unsubscribeLinkProblem(html: string, url: string): UnsubscribeLinkProblem | null {
   const wanted = url.trim();
   if (!wanted) return 'missing';
+  const rules = hiddenRules(styleText(html));
 
-  const stack: ElementInfo[] = [];
+  const stack: OpenElement[] = [];
   const candidates: Candidate[] = [];
-  const open: Candidate[] = [];
-  let css = '';
-  let inStyle = 0;
+  const anchors: (Candidate | null)[] = [];
 
   const parser = new Parser(
     {
       onopentag(name, attribs) {
-        if (name === 'style') inStyle++;
+        const parent = stack.length > 0 ? stack[stack.length - 1]!.state : INITIAL;
         const el = element(name, attribs);
-        stack.push(el);
-        if (name === 'img' && open.length && attribs.alt?.trim()) {
-          for (const c of open) c.imageAlt = true;
-        }
+        const state = nextState(el, parent, rules);
+        let candidate: Candidate | null = null;
         if (name === 'a') {
-          const href = attribs.href;
-          if (href !== undefined && href.trim() === wanted) {
-            const c: Candidate = {
-              chain: [...stack],
-              outsideBody: stack.some((e) => NOT_BODY.has(e.name)),
-              text: false,
-              imageAlt: false,
-            };
-            candidates.push(c);
-            open.push(c);
+          if (attribs.href !== undefined && attribs.href.trim() === wanted) {
+            candidate = { outsideBody: state.forbidden > 0, content: false, visible: false };
+            candidates.push(candidate);
+          }
+          anchors.push(candidate);
+        }
+        stack.push({ name, state });
+        // The image itself is the content node, so judge it in its own state (its alt is visible
+        // only if the image is).
+        if (name === 'img' && attribs.alt?.trim()) {
+          const c = anchors.length > 0 ? anchors[anchors.length - 1] : null;
+          if (c && state.forbidden === 0) {
+            c.content = true;
+            if (contentVisible(state)) c.visible = true;
           }
         }
       },
       ontext(text) {
-        if (inStyle) {
-          css += text;
-          return;
-        }
-        if (open.length && text.trim()) for (const c of open) c.text = true;
+        if (!text.trim() || anchors.length === 0) return;
+        const state = stack.length > 0 ? stack[stack.length - 1]!.state : INITIAL;
+        if (state.forbidden > 0) return;
+        const c = anchors[anchors.length - 1];
+        if (!c) return;
+        c.content = true;
+        if (contentVisible(state)) c.visible = true;
       },
       oncomment(text) {
-        // A link that was commented out is not a link. It has no element to inspect, so mark the
-        // document as holding a hidden one; a usable candidate elsewhere still wins in the scan.
-        if (text.includes(wanted)) candidates.push({ chain: [], outsideBody: true, text: false, imageAlt: false });
+        // A link that was commented out is not a link. It has no element to inspect, so mark a
+        // hidden candidate; a usable candidate elsewhere still wins.
+        if (text.includes(wanted)) candidates.push({ outsideBody: true, content: true, visible: false });
       },
       onclosetag(name) {
-        if (name === 'style' && inStyle > 0) inStyle--;
-        if (name === 'a') open.pop();
+        if (name === 'a') anchors.pop();
         let i = stack.length - 1;
         while (i >= 0 && stack[i]!.name !== name) i--;
         if (i >= 0) stack.length = i;
@@ -124,23 +167,39 @@ export function unsubscribeLinkProblem(html: string, url: string): UnsubscribeLi
   parser.write(html);
   parser.end();
 
-  const rules = hiddenSelectors(css);
   let sawHidden = false;
   let sawEmpty = false;
   for (const c of candidates) {
-    if (c.outsideBody || chainHidden(c.chain, rules)) {
-      sawHidden = true;
-      continue;
-    }
-    if (!c.text && !c.imageAlt) {
-      sawEmpty = true;
-      continue;
-    }
-    return null;
+    if (c.visible) return null;
+    if (c.outsideBody || c.content) sawHidden = true;
+    else sawEmpty = true;
   }
   if (sawHidden) return 'hidden';
   if (sawEmpty) return 'empty';
   return 'missing';
+}
+
+/** The style text of every <style> block, collected before the evaluation pass. */
+function styleText(html: string): string {
+  let css = '';
+  let inStyle = 0;
+  const parser = new Parser(
+    {
+      onopentag(name) {
+        if (name === 'style') inStyle++;
+      },
+      ontext(text) {
+        if (inStyle > 0) css += text;
+      },
+      onclosetag(name) {
+        if (name === 'style' && inStyle > 0) inStyle--;
+      },
+    },
+    { decodeEntities: true, lowerCaseTags: true, lowerCaseAttributeNames: true },
+  );
+  parser.write(html);
+  parser.end();
+  return css;
 }
 
 function element(name: string, attribs: Record<string, string>): ElementInfo {
@@ -153,43 +212,73 @@ function element(name: string, attribs: Record<string, string>): ElementInfo {
   };
 }
 
-/**
- * Whether any element in the link's chain hides it. `visibility` and `font-size` are inherited,
- * so the nearest explicit value decides: an MJML wrapper's `font-size:0` does not hide a link
- * whose own container sets 13px. `display`, `opacity`, clipping and aria-hidden hide the subtree
- * regardless of descendants.
- */
-function chainHidden(chain: ElementInfo[], rules: HiddenRules): boolean {
-  let visibility: 'hidden' | 'visible' | null = null;
-  let fontSizeZero: boolean | null = null;
-  for (let i = chain.length - 1; i >= 0; i--) {
-    const el = chain[i]!;
-    const d = el.declarations;
-    if ('hidden' in el.attribs) return true;
-    if ((el.attribs['aria-hidden'] ?? '').trim().toLowerCase() === 'true') return true;
-    if (d.get('display') === 'none' || rules.display.some((s) => selectorMatches(s, el))) return true;
-    if (isZero(d.get('opacity'))) return true;
-    if ((isZero(d.get('max-height')) || isZero(d.get('height')) || isZero(d.get('width'))) && (d.get('overflow') ?? '').includes('hidden'))
-      return true;
-    if ((d.get('mso-hide') ?? '') === 'all') return true;
-    const colour = colourValue(d.get('color'));
-    const background = colourValue(d.get('background-color') ?? d.get('background'));
-    if (colour !== null && background !== null && colour === background) return true;
+/** The state for one element, from its parent's inherited state and its own attributes/rules. */
+function nextState(el: ElementInfo, parent: VisibilityState, rules: HiddenRules): VisibilityState {
+  const d = el.declarations;
+  const clipped =
+    (isZero(d.get('max-height')) || isZero(d.get('height')) || isZero(d.get('width'))) && (d.get('overflow') ?? '').includes('hidden');
+  const hidden =
+    parent.hidden ||
+    'hidden' in el.attribs ||
+    (el.attribs['aria-hidden'] ?? '').trim().toLowerCase() === 'true' ||
+    d.get('display') === 'none' ||
+    ruleMatches(rules.display, el) ||
+    isZero(d.get('opacity')) ||
+    clipped ||
+    (d.get('mso-hide') ?? '') === 'all';
 
-    if (visibility === null) {
-      const declared = d.get('visibility');
-      if (declared === 'hidden' || declared === 'visible') visibility = declared;
-      else if (rules.visibility.some((s) => selectorMatches(s, el))) visibility = 'hidden';
-    }
-    if (fontSizeZero === null && d.has('font-size')) fontSizeZero = isZero(d.get('font-size'));
-  }
-  return visibility === 'hidden' || fontSizeZero === true;
+  const declaredVisibility = d.get('visibility');
+  const visibility =
+    declaredVisibility === 'hidden' || declaredVisibility === 'visible'
+      ? declaredVisibility
+      : ruleMatches(rules.visibility, el)
+        ? 'hidden'
+        : parent.visibility;
+
+  const ownColour = d.has('color') ? colourValue(d.get('color')) : null;
+  const backgroundDeclaration = d.has('background-color') ? d.get('background-color') : d.get('background');
+  const ownBackground = backgroundDeclaration === undefined ? null : colourValue(backgroundDeclaration);
+
+  return {
+    hidden,
+    forbidden: parent.forbidden + (NOT_BODY.has(el.name) ? 1 : 0),
+    visibility,
+    fontSizeZero: d.has('font-size') ? isZero(d.get('font-size')) : parent.fontSizeZero,
+    color: ownColour ?? parent.color,
+    background: ownBackground ?? parent.background,
+  };
+}
+
+/** The inherited state decides whether text (or an image's alt) is visible where it sits. */
+function contentVisible(state: VisibilityState): boolean {
+  if (state.hidden || state.visibility === 'hidden' || state.fontSizeZero === true) return false;
+  return !(state.color !== null && state.background !== null && state.color === state.background);
 }
 
 function selectorMatches(selector: HideSelector, el: ElementInfo): boolean {
   if (selector.tag !== null && selector.tag !== el.name) return false;
   if (selector.id !== null && selector.id !== el.id) return false;
   return selector.classes.every((c) => el.classes.has(c));
+}
+
+/** A constant-time check for the common selectors, with a small fallback for compounds. */
+function ruleMatches(index: RuleIndex, el: ElementInfo): boolean {
+  if (el.id !== null && index.byId.has(el.id)) return true;
+  for (const c of el.classes) if (index.byClass.has(c)) return true;
+  if (index.byTag.has(el.name)) return true;
+  return index.compound.some((s) => selectorMatches(s, el));
+}
+
+function addRule(index: RuleIndex, selector: HideSelector): void {
+  if (selector.tag === null && selector.id === null && selector.classes.length === 1) {
+    index.byClass.add(selector.classes[0]!);
+  } else if (selector.tag === null && selector.id !== null && selector.classes.length === 0) {
+    index.byId.add(selector.id);
+  } else if (selector.tag !== null && selector.id === null && selector.classes.length === 0) {
+    index.byTag.add(selector.tag);
+  } else {
+    index.compound.push(selector);
+  }
 }
 
 /** Declarations of one inline style, or of one simple CSS rule body. */
@@ -259,9 +348,9 @@ function isLetters(s: string): boolean {
  * The two declarations are kept apart because one hides a subtree outright and the other is
  * inherited and can be reversed by a nearer `visibility:visible`.
  */
-function hiddenSelectors(css: string): HiddenRules {
+function hiddenRules(css: string): HiddenRules {
   const text = stripCssComments(css);
-  const rules: HiddenRules = { display: [], visibility: [] };
+  const rules: HiddenRules = { display: ruleIndex(), visibility: ruleIndex() };
   let i = 0;
   while (i < text.length) {
     const brace = text.indexOf('{', i);
@@ -284,7 +373,7 @@ function hiddenSelectors(css: string): HiddenRules {
       for (const part of prelude.split(',')) {
         const selector = parseSimpleSelector(part.trim());
         if (selector === null) continue;
-        for (const kind of hides) rules[kind].push(selector);
+        for (const kind of hides) addRule(rules[kind], selector);
       }
     }
     i = j;
