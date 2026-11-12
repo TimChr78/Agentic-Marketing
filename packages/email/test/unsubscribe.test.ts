@@ -76,6 +76,10 @@ const rejected: { name: string; html: string; reason: 'hidden' | 'empty' | 'miss
   { name: 'link text inside noembed', html: `<a href="${URL}"><noembed><span hidden>Unsubscribe</span></noembed></a>`, reason: 'empty' },
   { name: 'link text inside noframes', html: `<a href="${URL}"><noframes>Unsubscribe</noframes></a>`, reason: 'empty' },
   { name: 'link text inside iframe', html: `<a href="${URL}"><iframe>Unsubscribe</iframe></a>`, reason: 'empty' },
+  // 0.14.9 review round 2 (P2): SVG title, desc and metadata are never rendered.
+  { name: 'a link inside an SVG title', html: `<svg><title><a href="${URL}">Unsubscribe</a></title></svg>`, reason: 'hidden' },
+  { name: 'a link inside an SVG desc', html: `<svg><desc><a href="${URL}">Unsubscribe</a></desc></svg>`, reason: 'hidden' },
+  { name: 'a link inside SVG metadata', html: `<svg><metadata><a href="${URL}">Unsubscribe</a></metadata></svg>`, reason: 'hidden' },
   // Review round 3 (P2): invisible colours, and the last declaration of a property winning.
   { name: 'transparent text', html: link(' style="color:transparent"'), reason: 'hidden' },
   { name: 'zero-alpha rgba text', html: link(' style="color:rgba(0,0,0,0)"'), reason: 'hidden' },
@@ -425,6 +429,12 @@ describe('the gate refuses an unusable unsubscribe link at save and at publish (
     const t = template('<mj-text><a href="{{ unsubscribe_url }}"><noembed><span hidden>Unsubscribe</span></noembed></a></mj-text>');
     expect((await validateTemplate(t)).join(' ')).toContain('no text');
     expect((await emailPublishProblems(t, { marketing: true })).join(' ')).toContain('no text');
+  });
+
+  it('rejects a link inside an SVG title at save and at publish (0.14.9 review round 2)', async () => {
+    const t = template('<mj-text><svg><title><a href="{{ unsubscribe_url }}">Unsubscribe</a></title></svg></mj-text>');
+    expect(await validateTemplate(t)).not.toEqual([]);
+    expect(await emailPublishProblems(t, { marketing: true })).not.toEqual([]);
   });
 
   it('rejects transparent text at save and at publish', async () => {
