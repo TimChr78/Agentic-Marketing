@@ -366,6 +366,12 @@ const PropertyType = z.enum(['string', 'number', 'boolean', 'object', 'array', '
 const trackingPlan = z.object({
   unknownEvents: z.enum(['allow', 'warn', 'block']).default('allow').describe('What happens to events the plan does not list'),
   unknownProperties: z.enum(['allow', 'warn', 'block']).default('allow'),
+  declaredProperties: z
+    .enum(['warn', 'block'])
+    .optional()
+    .describe(
+      'What happens when a declared property is missing although required, or has the wrong type. When absent, block when unknownProperties is block, otherwise warn',
+    ),
   events: z
     .array(
       z.object({
@@ -1015,6 +1021,17 @@ const UrlOrPath = z
   .max(2000)
   .regex(/^(https?:\/\/|\/)/, 'An absolute URL or a path starting with /');
 
+/**
+ * Origins compare case-insensitively (#597): the scheme and host are lowercased and the port is
+ * kept as written. Browsers always send a lowercased `Origin`, so a site saved as
+ * "https://MySite.com" must still match "https://mysite.com".
+ */
+export function normalizeOrigin(origin: string): string {
+  const match = /^([A-Za-z][A-Za-z0-9+.-]*):\/\/([^/:?#]+)(:\d+)?$/.exec(origin.trim());
+  if (!match) return origin.trim().toLowerCase();
+  return `${match[1]!.toLowerCase()}://${match[2]!.toLowerCase()}${match[3] ?? ''}`;
+}
+
 // Hosted pages (#37): the workspace's brand for the pages a subscriber sees on the links host
 // (double opt-in confirm and expired, unsubscribe and its result page). One brand per workspace;
 // each form may override parts of it. Every value here ends up in HTML or CSS, so it is validated
@@ -1145,15 +1162,28 @@ const form = z
     ),
     errorUrl: UrlOrPath.optional().describe('Where the browser goes when the submission is refused (?error=… is added)'),
     allowedOrigins: z
-      .array(z.string().regex(/^https?:\/\/[a-z0-9.-]+(:\d+)?$/i))
+      .array(
+        z
+          .string()
+          .regex(/^https?:\/\/[a-z0-9.-]+(:\d+)?$/i)
+          .transform(normalizeOrigin),
+      )
       .max(20)
       .default([])
-      .describe('Sites the form may be posted from; empty: any'),
+      .describe(
+        'Sites the form may be posted from (stored with the scheme and host lowercased, since browsers send Origin lowercased); empty: any',
+      ),
     turnstile: z.boolean().default(false).describe('Require a Cloudflare Turnstile token (secret in secrets as "turnstile.secret_key")'),
+    hostedPagesEnabled: z
+      .boolean()
+      .optional()
+      .describe(
+        'Set false to keep a saved hostedPages override but use the workspace brand on this form’s hosted pages; leave it out to apply the override',
+      ),
     hostedPages: brandInput
       .optional()
       .describe(
-        'Overrides the workspace brand on this form’s hosted confirm and expired pages (site name, colours, logo, copy and language); keep it small so the firm-wide brand stays recognisable',
+        'Overrides the workspace brand on this form’s hosted confirm and expired pages (site name, colours, logo, copy and language); only applied while hostedPagesEnabled is not false. Keep it small so the firm-wide brand stays recognisable',
       ),
   })
   .refine((f) => !f.doubleOptIn || !!f.confirmationTemplate, 'Double opt-in needs a confirmationTemplate');

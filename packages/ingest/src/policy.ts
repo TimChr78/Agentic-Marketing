@@ -18,6 +18,31 @@ export interface WorkspacePolicy {
 
 export const defaultPolicy: WorkspacePolicy = { plan: null, purposes: DEFAULT_PURPOSES };
 
+/**
+ * The carrier events the platform emits itself through the ingest path: signup, confirmation,
+ * import and the e-mail outcomes derived from the message log. They are not an operator's product
+ * analytics, so a workspace tracking plan must not reject them (#624). Only a trusted internal
+ * caller may claim this exemption (see `acceptInternalItems`); a public `/v1` client that happens
+ * to send one of these names is still validated like any other event.
+ */
+export const PLATFORM_EVENT = {
+  formSubmitted: 'Form Submitted',
+  subscriptionConfirmed: 'Subscription Confirmed',
+  subscriptionImported: 'Subscription Imported',
+  emailSent: 'Email Sent',
+  emailDelivered: 'Email Delivered',
+  emailBounced: 'Email Bounced',
+  emailComplained: 'Email Complained',
+  emailLinkClicked: 'Email Link Clicked',
+  emailUnsubscribed: 'Email Unsubscribed',
+} as const;
+
+/** Every platform-owned carrier event name, in one list for the ingest exemption. */
+export const PLATFORM_EVENTS: readonly string[] = Object.values(PLATFORM_EVENT);
+const PLATFORM_EVENT_SET = new Set(PLATFORM_EVENTS);
+
+export const isPlatformEvent = (name: string) => PLATFORM_EVENT_SET.has(name);
+
 /** Segment reserved traits that are personal data unless the attribute schema says otherwise. */
 const PERSONAL_TRAITS = new Set([
   'email',
@@ -123,12 +148,16 @@ export function processEvent(
   source: SourceInfo,
   policy: WorkspacePolicy,
   receivedAt: Date,
-  opts: { ip?: string; messageId: () => string },
+  opts: { ip?: string; messageId: () => string; internal?: boolean },
 ): Outcome {
   const warnings: string[] = [];
   const consent = consentOf(e.context);
   const name = eventName(e);
   const isConsentChange = e.type === 'track' && e.event === CONSENT_EVENT;
+  // A workspace plan is about the operator's own tracking. The platform's carrier events are not
+  // in it, and a strict plan must not drop the event that records a signup or imported consent.
+  // `internal` is only set by acceptInternalItems, never by the public gateway.
+  const platformEvent = opts.internal === true && isPlatformEvent(name);
 
   // A consent change is always recorded (also a "no"); nothing else is without the purpose allowed.
   if (!isConsentChange && !consentAllows(source, policy, consent)) return { kind: 'dropped', reason: 'no_consent' };
@@ -143,7 +172,7 @@ export function processEvent(
       ?.properties.filter((p) => !p.pii)
       .map((p) => p.name),
   );
-  if (plan && !isConsentChange && (e.type === 'track' || e.type === 'page' || e.type === 'screen')) {
+  if (plan && !isConsentChange && !platformEvent && (e.type === 'track' || e.type === 'page' || e.type === 'screen')) {
     const def = plan.events.find((d) => d.name === name);
     if (!def) {
       if (plan.unknownEvents === 'block') return { kind: 'rejected', error: `Event "${name}" is not in the tracking plan.` };
@@ -165,9 +194,14 @@ export function processEvent(
         if (plan.unknownProperties === 'block') return { kind: 'rejected', error: msg };
         warnings.push(msg);
       }
+      // `required`/`type` problems concern properties the plan *does* declare. Their own setting
+      // decides; an older plan without it inherits the property policy (block) or warns, so a
+      // strict plan keeps rejecting and the default plan keeps warning. `unknownEvents` never
+      // influences this (#623).
       if (problems.length) {
         const msg = `"${name}": ${problems.join('; ')}`;
-        if (plan.unknownProperties === 'block' || plan.unknownEvents === 'block') return { kind: 'rejected', error: msg };
+        const declared = plan.declaredProperties ?? (plan.unknownProperties === 'block' ? 'block' : 'warn');
+        if (declared === 'block') return { kind: 'rejected', error: msg };
         warnings.push(msg);
       }
     }

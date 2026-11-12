@@ -215,6 +215,7 @@ export const listDeliveries = defineCommand({
   output: z.object({ deliveries: z.array(Delivery) }),
   permission: 'artifacts:read',
   effect: 'read',
+  auditReads: true,
   handler: async (input, ctx) => {
     const d = schema.deliveries;
     const rows = await ctx.tx

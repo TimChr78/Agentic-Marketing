@@ -1,4 +1,5 @@
-import { publishedSingleton } from '@agentic-marketing/artifacts';
+import { K, publishedSingleton } from '@agentic-marketing/artifacts';
+import { campaignIdentityMap, identityUnresolvedNote } from '@agentic-marketing/campaigns';
 import { defineCommand } from '@agentic-marketing/commands';
 import { AppError, isoDateTime } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
@@ -7,16 +8,26 @@ import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { buildCampaignQuery, loadCampaignQueryMap } from './campaign';
-import { buildQuery, type CampaignMap, type CompiledQuery, type ConversionRule, type NormalizedFilters, SOURCE_FILTERS } from './compile';
+import {
+  buildQuery,
+  type CampaignMap,
+  type CompiledQuery,
+  type ConversionRule,
+  type MeasureScope,
+  measureScope,
+  type NormalizedFilters,
+  SOURCE_FILTERS,
+} from './compile';
 import { DIMENSIONS, type DimensionId, MEASURES, METRIC_CATALOG, type MeasureDef, measureIds, type SourceId } from './registry';
 
 // The read-only metric layer (#75): one typed query over a fixed catalogue. Nothing here accepts
 // SQL, a table name, a column name or an expression from the caller. The workspace comes from the
 // principal, and ClickHouse's row policy checks it again.
 
-const K = 5;
 const CACHE_TTL_MS = 60_000;
-const MAX_RANGE_DAYS = 400;
+
+export { K };
+export const MAX_RANGE_DAYS = 400;
 
 const ValueOrList = z.union([z.string().min(1).max(200), z.array(z.string().min(1).max(200)).min(1).max(100)]);
 
@@ -49,7 +60,13 @@ export const queryInput = z.object({
     .optional(),
 });
 
-export type QueryInput = z.infer<typeof queryInput>;
+export type QueryInput = z.infer<typeof queryInput> & {
+  /**
+   * Internal: restrict journey_events to one published version. Named reports use it so a funnel
+   * describes one topology; analytics.query's own input does not accept it.
+   */
+  journeyVersion?: number;
+};
 
 export const analyticsColumn = z.object({
   name: z.string(),
@@ -76,10 +93,23 @@ export const analyticsResult = z.object({
 
 export type AnalyticsResult = z.infer<typeof analyticsResult>;
 
-interface Deps {
+export interface Deps {
   tx: Tx;
   events: EventStore;
   workspaceId: string;
+}
+
+/** What the freshness probe must ask, so it describes the same events as the compiled query. */
+export interface FreshnessInput {
+  source: SourceId;
+  from: string;
+  to: string;
+  filters: NormalizedFilters;
+  /** Conversion event names. For events an empty list matches nothing, exactly as in the query. */
+  names?: string[];
+  scope?: MeasureScope;
+  campaignMap?: CampaignMap;
+  journeyVersion?: number;
 }
 
 interface CacheEntry {
@@ -184,6 +214,7 @@ function cacheKey(workspaceId: string, input: QueryInput, filters: NormalizedFil
     from: input.from,
     to: input.to,
     filters: sortedFilters,
+    journeyVersion: input.journeyVersion ?? null,
     limit: input.limit,
     order: input.order ?? null,
   });
@@ -201,19 +232,27 @@ async function conversionInput(tx: Tx, filters: NormalizedFilters): Promise<{ ru
   return { rules, names: filters.name?.length ? filters.name : mapNames, hasMap: !!map };
 }
 
-async function freshness(
-  deps: Deps,
-  source: SourceId,
-  from: string,
-  to: string,
-  filters: NormalizedFilters,
-  names: string[],
-  campaignMap?: CampaignMap,
-): Promise<string | null> {
+export async function freshness(deps: Deps, input: FreshnessInput): Promise<string | null> {
+  const { source, from, to, filters, names = [], scope, campaignMap, journeyVersion } = input;
   const table = source === 'events' ? 'events' : source;
   const column = source === 'events' ? 'received_at' : 'at';
   const params: Record<string, unknown> = { ws: deps.workspaceId, from: from.replace('Z', ''), to: to.replace('Z', '') };
   const where = ['workspace_id = {ws:UUID}', `${column} >= {from:DateTime64(3, 'UTC')}`, `${column} <= {to:DateTime64(3, 'UTC')}`];
+
+  // The same constraints the compiled query applies. Without them freshness can name a raw event
+  // the result itself cannot count (#589), or an SMS event beside e-mail numbers (#682).
+  if (scope?.eventTypes.length) {
+    params.types = scope.eventTypes;
+    where.push('type IN {types:Array(String)}');
+  }
+  if (source === 'message_events' && scope?.channels.length) {
+    params.channels = scope.channels;
+    where.push('channel IN {channels:Array(String)}');
+  }
+  if (source === 'journey_events' && journeyVersion !== undefined) {
+    params.journey_version = journeyVersion;
+    where.push('version = {journey_version:UInt32}');
+  }
   const filterColumn: Partial<Record<keyof NormalizedFilters, string>> = {
     template: 'template_id',
     broadcast: 'journey_id',
@@ -235,7 +274,9 @@ async function freshness(
     params[`filter_${key}`] = values;
     where.push(`${filterColumn[key]} IN {filter_${key}:Array(String)}`);
   }
-  if (source === 'events' && names.length) {
+  // Always apply the conversion-name set for events: the compiled query does, and an empty list
+  // matches nothing, so freshness must return null rather than the newest raw event (#589).
+  if (source === 'events') {
     params.names = names;
     where.push('name IN {names:Array(String)}');
   }
@@ -319,6 +360,18 @@ async function execute(deps: Deps, input: QueryInput, measures: MeasureDef[], di
   const queryMap = needsCampaignMap
     ? await loadCampaignQueryMap(deps.tx, filters.campaign, campaignSource ? conversion.rules.map((r) => r.event) : [])
     : undefined;
+  // Campaign conversions resolve identity the same way the holdout card does (#590). The map's
+  // scope is the union of the campaign's sent recipients and its holdout assignments, so the two
+  // surfaces cannot fall on different sides of the bound; above it both omit the map and the note
+  // below says the result is not identity-resolved.
+  const identity = campaignSource
+    ? await campaignIdentityMap(deps, {
+        campaignIds: queryMap?.scopes.map((scope) => scope.id) ?? [],
+        memberIds: queryMap?.map.memberIds ?? [],
+        from: input.from,
+        to: input.to,
+      })
+    : undefined;
 
   const compiled: CompiledQuery = campaignSource
     ? buildCampaignQuery({
@@ -333,6 +386,7 @@ async function execute(deps: Deps, input: QueryInput, measures: MeasureDef[], di
         order: input.order,
         conversionRules: conversion.rules,
         queryMap: queryMap!,
+        identity,
       })
     : buildQuery({
         workspaceId: deps.workspaceId,
@@ -348,6 +402,7 @@ async function execute(deps: Deps, input: QueryInput, measures: MeasureDef[], di
         conversionRules: conversion.rules,
         conversionNames: conversion.names,
         campaignMap: queryMap?.map,
+        journeyVersion: input.journeyVersion,
       });
 
   const started = Date.now();
@@ -430,6 +485,7 @@ async function execute(deps: Deps, input: QueryInput, measures: MeasureDef[], di
     notes.push(
       'Campaign conversions are people who got a campaign message and converted within the goal’s attribution window of their first campaign message (first touch).',
     );
+  if (campaignSource && identity?.overLimit) notes.push(identityUnresolvedNote(identity.limit));
   if (suppressed) notes.push(`Groups smaller than k=${K} have their measures suppressed.`);
 
   return {
@@ -440,15 +496,16 @@ async function execute(deps: Deps, input: QueryInput, measures: MeasureDef[], di
       currency: currencies.size === 1 && !currencies.has('UNKNOWN') ? [...currencies][0] : null,
       from: input.from,
       to: input.to,
-      freshness: await freshness(
-        deps,
-        campaignSource ? 'message_events' : source,
-        input.from,
-        input.to,
+      freshness: await freshness(deps, {
+        source: campaignSource ? 'message_events' : source,
+        from: input.from,
+        to: input.to,
         filters,
-        conversion.names,
-        queryMap?.map,
-      ),
+        names: conversion.names,
+        scope: measureScope(measures),
+        campaignMap: queryMap?.map,
+        journeyVersion: input.journeyVersion,
+      }),
       suppressed,
       k: K,
       notes,

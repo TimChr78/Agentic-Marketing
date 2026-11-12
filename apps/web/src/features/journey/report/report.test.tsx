@@ -6,7 +6,7 @@ import { JourneyGraph } from '../JourneyGraph';
 import type { JNode } from '../model';
 import { withNodeCounts } from './counts';
 import { JourneyReport } from './JourneyReport';
-import { funnelGate } from './model';
+import { funnelGate, REACH_NOTICE } from './model';
 
 const journeyId = `jrn_${'a'.repeat(32)}`;
 const periodFrom = '2026-10-30T00:00:00.000Z';
@@ -142,6 +142,7 @@ const stats = (overrides: Record<string, unknown> = {}) => ({
 
 const funnel = (overrides: Record<string, unknown> = {}) => ({
   journeyId,
+  basis: 'published',
   entered: 812,
   goalReached: 120,
   completed: 560,
@@ -324,6 +325,7 @@ describe('journey report reads (#507)', () => {
 describe('funnel gate (#507)', () => {
   const gate = (overrides: Partial<Parameters<typeof funnelGate>[0]> = {}) =>
     funnelGate({
+      basis: 'published',
       latestVersion: 1,
       publishedVersion: 1,
       nodes: linearNodes(),
@@ -349,6 +351,14 @@ describe('funnel gate (#507)', () => {
     ]);
     expect(result.stages[1]!.difference).toBe(92);
     expect(result.stages[1]!.differenceRate).toBeCloseTo(92 / 812);
+  });
+
+  it('fails a reach basis even for a linear topology, and names the drop-off rule', () => {
+    const result = gate({ basis: 'reach' });
+    expect(result.pass).toBe(false);
+    if (result.pass) return;
+    expect(result.reason).toBe('reach');
+    expect(result.notice).toBe(REACH_NOTICE);
   });
 
   it('fails a branching graph and says so honestly', () => {
@@ -453,19 +463,39 @@ describe('funnel gate (#507)', () => {
       version: { number: 1, state: 'published', content: { purpose: 'marketing', goal: 'Signup', nodes } },
     });
     h.funnel = funnel({
+      basis: 'reach',
       steps: [
-        { step: 'n1', reached: 812, dropOff: 0, dropOffRate: 0 },
-        { step: 'n2', reached: 700, dropOff: 112, dropOffRate: 112 / 812 },
-        { step: 'n3', reached: 400, dropOff: 300, dropOffRate: 300 / 700 },
-        { step: 'n4', reached: 300, dropOff: 100, dropOffRate: 100 / 700 },
+        { step: 'n1', reached: 812, dropOff: null, dropOffRate: null },
+        { step: 'n2', reached: 700, dropOff: null, dropOffRate: null },
+        { step: 'n3', reached: 400, dropOff: null, dropOffRate: null },
+        { step: 'n4', reached: 300, dropOff: null, dropOffRate: null },
       ],
     });
     h.stats = stats({ reached: { n1: 812, n2: 700, n3: 400, n4: 300 }, waitingAt: { n2: 5 } });
 
     renderReport();
-    await screen.findByText('This journey branches. Step reach is not a cohort funnel.');
+    await screen.findByText(REACH_NOTICE);
+    expect(REACH_NOTICE).toContain('Drop-off is shown only for linear journeys.');
     expect(screen.queryAllByText('Sequential event reach')).toHaveLength(0);
     expect(screen.getAllByText('Participants reaching steps · selected period').length).toBeGreaterThan(0);
+    expect(screen.getByRole('figure', { name: 'Participants reaching steps · selected period' })).toBeTruthy();
+  });
+
+  it('renders reach without drop-off whenever the server reports basis reach', async () => {
+    // The saved topology looks linear, so only the server's basis can rule out a drop-off chain.
+    h.funnel = funnel({
+      basis: 'reach',
+      steps: [
+        { step: 'n1', reached: 812, dropOff: null, dropOffRate: null },
+        { step: 'n2', reached: 720, dropOff: null, dropOffRate: null },
+        { step: 'n3', reached: 600, dropOff: null, dropOffRate: null },
+      ],
+    });
+
+    renderReport();
+    await screen.findByText(REACH_NOTICE);
+    expect(screen.queryAllByText('Sequential event reach')).toHaveLength(0);
+    expect(screen.queryByRole('table', { name: 'Sequential event reach' })).toBeNull();
     expect(screen.getByRole('figure', { name: 'Participants reaching steps · selected period' })).toBeTruthy();
   });
 });
@@ -675,5 +705,34 @@ describe('journey report states (#507)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
     await waitFor(() => expect(calls('analytics.journeyFunnel')).toHaveLength(2));
     expect(calls('journeys.holdoutResult')).toHaveLength(1);
+  });
+
+  it('shows a suppressed holdout as hidden counts and the k line, never as zero (#590)', async () => {
+    h.artifact = artifact({
+      version: {
+        number: 1,
+        state: 'published',
+        content: { purpose: 'marketing', goal: 'Signup', controlGroup: { percent: 10, minSampleSize: 200 }, nodes: linearNodes() },
+      },
+    });
+    h.holdout = {
+      ...holdout(),
+      k: 5,
+      suppressed: true,
+      control: { entered: null, converted: null, unsubscribed: null, conversionRate: null, unsubscribeRate: null },
+      treatment: { entered: null, converted: null, unsubscribed: null, conversionRate: null, unsubscribeRate: null },
+      absoluteLift: null,
+      relativeLift: null,
+      ci95: null,
+      verdict: 'not_enough_data',
+      note: 'Suppressed: fewer than k=5 people in the control or treatment arm, so counts, rates and lift are hidden.',
+    };
+    renderReport();
+    await screen.findByText('Entered in period');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Holdout' }));
+    await waitFor(() => expect(calls('journeys.holdoutResult')).toHaveLength(1));
+    expect(screen.getAllByText('Suppressed').length).toBeGreaterThan(1);
+    expect(screen.getByText(/Groups smaller than k=5 are hidden/)).toBeTruthy();
   });
 });

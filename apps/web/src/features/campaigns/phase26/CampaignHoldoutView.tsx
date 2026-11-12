@@ -161,6 +161,7 @@ export function CampaignHoldoutView({ campaignId, from, to, active = true, refre
       minSampleSizeMet={result.data.minSampleSizeMet}
       verdict={result.data.verdict}
       note={result.data.note}
+      suppressed={result.data.suppressed}
       goalEvent={result.data.goal.event ?? goal?.event ?? null}
       attributionDays={result.data.goal.attributionDays ?? goal?.attributionDays ?? null}
       assignmentPeriod={assignmentPeriod}

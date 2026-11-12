@@ -17,6 +17,7 @@ export interface FormContent {
   errorUrl?: string;
   allowedOrigins?: string[];
   turnstile?: boolean;
+  hostedPagesEnabled?: boolean;
   hostedPages?: Record<string, unknown>;
 }
 
@@ -108,7 +109,10 @@ export function FormPreview({
                 ['On error', url(content.errorUrl)],
                 ['Allowed sites', content.allowedOrigins?.length ? content.allowedOrigins.join(', ') : 'Any site'],
                 ['Bot check', content.turnstile ? 'Cloudflare Turnstile required' : 'None'],
-                ['Hosted pages', content.hostedPages ? 'Overrides the workspace brand' : 'Workspace brand'],
+                [
+                  'Hosted pages',
+                  content.hostedPages && content.hostedPagesEnabled !== false ? 'Overrides the workspace brand' : 'Workspace brand',
+                ],
               ]}
             />
           </div>

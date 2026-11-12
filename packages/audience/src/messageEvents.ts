@@ -1,6 +1,6 @@
 import type { Db } from '@agentic-marketing/db';
 import type { EventBus, EventStore, MessageEvent } from '@agentic-marketing/events';
-import { acceptItems, sourceLookups } from '@agentic-marketing/ingest';
+import { acceptInternalItems, PLATFORM_EVENT, sourceLookups } from '@agentic-marketing/ingest';
 import { logger } from '@agentic-marketing/telemetry';
 
 // What happens to e-mails becomes part of the person's story: sent, delivered, bounced,
@@ -9,12 +9,12 @@ import { logger } from '@agentic-marketing/telemetry';
 // journey branches and webhook subscriptions can use them. The source is "email".
 
 export const EMAIL_EVENTS: Partial<Record<MessageEvent['type'], string>> = {
-  sent: 'Email Sent',
-  delivered: 'Email Delivered',
-  bounced: 'Email Bounced',
-  complained: 'Email Complained',
-  clicked: 'Email Link Clicked',
-  unsubscribed: 'Email Unsubscribed',
+  sent: PLATFORM_EVENT.emailSent,
+  delivered: PLATFORM_EVENT.emailDelivered,
+  bounced: PLATFORM_EVENT.emailBounced,
+  complained: PLATFORM_EVENT.emailComplained,
+  clicked: PLATFORM_EVENT.emailLinkClicked,
+  unsubscribed: PLATFORM_EVENT.emailUnsubscribed,
 };
 
 /**
@@ -100,7 +100,7 @@ export function withEmailProfileEvents(store: EventStore, deps: { db: Db; bus: E
         ];
       });
       if (!items.length) continue;
-      const { accepted } = acceptItems(
+      const { accepted } = acceptInternalItems(
         items,
         { id: 'email', workspaceId: ws, kind: 'server', requiredPurpose: null },
         await loadPolicy(ws),

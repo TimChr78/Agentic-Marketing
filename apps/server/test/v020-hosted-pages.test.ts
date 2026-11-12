@@ -409,3 +409,59 @@ describe('hostedPages.preview', () => {
     expect(badOverride.message).toContain('hostedPages.colors.accent');
   });
 });
+
+describe('a form whose hosted-page override is switched off (#598)', () => {
+  it('keeps the override values in the saved content and renders the workspace brand', async () => {
+    const override = { colors: { accent: '#0f766e' }, copy: { confirmTitle: 'Formens egen titel' } };
+    const form = (
+      await api().call('artifacts.create', {
+        type: 'form',
+        name: 'Override off',
+        content: {
+          purposes: ['marketing_email'],
+          doubleOptIn: true,
+          confirmationTemplate: ids.template,
+          consentText: 'Send me the newsletter.',
+          successUrl: `${SITE}/thanks`,
+          allowedOrigins: [SITE],
+          hostedPages: override,
+          hostedPagesEnabled: false,
+        },
+      })
+    ).artifactId;
+    await publish(form);
+
+    // The values survive the save, so switching the override back on restores them.
+    const saved = (await api().call('artifacts.get', { artifactId: form })).version.content as Record<string, unknown>;
+    expect(saved.hostedPages).toEqual(override);
+    expect(saved.hostedPagesEnabled).toBe(false);
+
+    const post = await fetch(`${t.base}/f/${form}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded', origin: SITE },
+      body: new URLSearchParams({ email: 'cleo@example.com' }).toString(),
+      redirect: 'manual',
+    });
+    expect(post.status).toBe(303);
+    const mail = await eventually(
+      async () => mailTo('cleo@example.com'),
+      (m) => m.length === 1,
+    );
+    let link = linkFrom(mail[0].html, /href="([^"]*\/(?:c|f\/confirm)\/[^"]+)"/);
+    if (link.includes('/c/')) link = (await fetch(link, { redirect: 'manual' })).headers.get('location')!;
+
+    const page = await fetch(link);
+    expect(page.status).toBe(200);
+    const html = await page.text();
+    expect(html).toContain('--accent:#1d4ed8'); // the workspace brand, not the override
+    expect(html).toContain('Bekræft din tilmelding');
+    expect(html).not.toContain('#0f766e');
+    expect(html).not.toContain('Formens egen titel');
+
+    // The admin preview of the same form agrees.
+    const preview = await api().call('hostedPages.preview', { page: 'confirm', formId: form, brand: brandContent() });
+    expect(preview.html).toContain('Bekræft din tilmelding');
+    expect(preview.html).not.toContain('Formens egen titel');
+    expect(preview.html).not.toContain('#0f766e');
+  }, 30_000);
+});

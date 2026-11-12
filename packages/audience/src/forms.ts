@@ -3,10 +3,12 @@ import { clickIdsFrom } from '@agentic-marketing/ads';
 import {
   artifactTypes,
   type BrandCopy,
+  type BrandOverride,
   DEFAULT_PURPOSES,
   type FormDefinition,
   type HostedPageKind,
   hostedPageHeaders,
+  normalizeOrigin,
   originOfUrl,
   publishedSingleton,
   publishValidators,
@@ -19,7 +21,7 @@ import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import type { LinkSigner } from '@agentic-marketing/email';
 import type { EventBus } from '@agentic-marketing/events';
 import type { HotState } from '@agentic-marketing/hotstate';
-import { acceptItems, bodyLimit, sourceLookups } from '@agentic-marketing/ingest';
+import { acceptInternalItems, bodyLimit, PLATFORM_EVENT, sourceLookups } from '@agentic-marketing/ingest';
 import { type EgressPolicy, safeRequest } from '@agentic-marketing/integrations';
 import { type KeyProvider, readSecret } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
@@ -32,8 +34,8 @@ import { z } from 'zod';
 // identify and a "Form Submitted" event on the bus, from the form as a trusted source; the consent
 // hook then records the consent, or sends the double opt-in confirmation first.
 
-export const SUBMITTED = 'Form Submitted';
-export const CONFIRMED = 'Subscription Confirmed';
+export const SUBMITTED = PLATFORM_EVENT.formSubmitted;
+export const CONFIRMED = PLATFORM_EVENT.subscriptionConfirmed;
 export const DOI_DAYS = 7;
 
 // A form submission is a few hundred bytes of fields; 64 KB leaves room for long custom answers
@@ -158,6 +160,15 @@ export function formOrigin(def: Pick<FormDefinition, 'allowedOrigins' | 'success
   return def.allowedOrigins[0] ?? originOfUrl(def.successUrl);
 }
 
+/**
+ * The form's brand override, unless the editor switched it off (#598). The values stay in the
+ * saved content while the switch is off, so turning it back on restores them; a form saved before
+ * the flag existed has none, which means the override applies.
+ */
+export function formBrandOverride(def: Pick<FormDefinition, 'hostedPages' | 'hostedPagesEnabled'>): BrandOverride | undefined {
+  return def.hostedPagesEnabled === false ? undefined : def.hostedPages;
+}
+
 export function formsApi(deps: FormsDeps) {
   const { loadPolicy } = sourceLookups(deps.db);
   const ratePerMinute = deps.ratePerMinute ?? 5;
@@ -191,7 +202,7 @@ export function formsApi(deps: FormsDeps) {
       form: await publishedForm(tx, t.f, t.v),
       brand: await publishedSingleton(tx, 'brand'),
     }));
-    const html = renderHostedPage(kind, resolveBrand(brand, form?.def.hostedPages), {
+    const html = renderHostedPage(kind, resolveBrand(brand, form ? formBrandOverride(form.def) : undefined), {
       fallbackSiteUrl: form ? formOrigin(form.def) : null,
       ...ctx,
     });
@@ -241,7 +252,14 @@ export function formsApi(deps: FormsDeps) {
       };
       if (!form) return c.json({ ok: false, error: 'unknown_form' }, 404, cors);
       if (crossBrand(c, form.ws)) return c.json({ ok: false, error: 'unknown_form' }, 404, cors);
-      if (origin && form.def.allowedOrigins.length && !form.def.allowedOrigins.includes(origin.toLowerCase()))
+      // The saved origins are lowercased by the schema, but published content may predate that;
+      // normalise both sides so a mixed-case saved origin still matches the Origin a browser sends.
+      const requestOrigin = origin ? normalizeOrigin(origin) : null;
+      if (
+        requestOrigin &&
+        form.def.allowedOrigins.length &&
+        !form.def.allowedOrigins.some((allowed) => normalizeOrigin(allowed) === requestOrigin)
+      )
         return done(false, 'origin_not_allowed', 403);
 
       const raw = (isJson ? await c.req.json().catch(() => ({})) : await c.req.parseBody()) as Record<string, unknown>;
@@ -297,7 +315,7 @@ export function formsApi(deps: FormsDeps) {
       ];
       // The form is the source: the consent hook only trusts these events from frm_ sources.
       const source = { id: c.req.param('id'), workspaceId: form.ws, kind: 'server' as const, requiredPurpose: null };
-      const { accepted, rejected } = acceptItems(items, source, await loadPolicy(form.ws));
+      const { accepted, rejected } = acceptInternalItems(items, source, await loadPolicy(form.ws));
       if (rejected.length) {
         logger.warn({ form: c.req.param('id'), rejected }, 'form submission rejected');
         return done(false, 'invalid');
@@ -356,7 +374,11 @@ export function formsApi(deps: FormsDeps) {
         consent_text: consentTextHash(form.def.consentText),
       },
     };
-    const { accepted } = acceptItems([item], { id: t.f, workspaceId: t.w, kind: 'server', requiredPurpose: null }, await loadPolicy(t.w));
+    const { accepted } = acceptInternalItems(
+      [item],
+      { id: t.f, workspaceId: t.w, kind: 'server', requiredPurpose: null },
+      await loadPolicy(t.w),
+    );
     await deps.bus.publish(accepted);
     // Without a thank-you page of its own, the site shows the branded confirmed page in place.
     if (form.def.confirmedUrl) return c.redirect(form.def.confirmedUrl, 303);

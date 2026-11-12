@@ -402,6 +402,28 @@ describe('spend and ROAS', () => {
     });
     expect(perf.totals).toMatchObject({ cost: 230, conversions: 1, revenue: 300 });
     expect(perf.unattributed).toEqual({ conversions: 1, revenue: 40 });
+
+    // #640: a server-side order carries only a user id (the shape Shopify orders produce). It has
+    // no campaign touch, but it is still one of our conversions and must appear in the totals as
+    // unattributed instead of being filtered out before the attribution loop.
+    await ingest([
+      {
+        type: 'track',
+        event: 'Order Completed',
+        userId: 'shop-buyer-1',
+        properties: { total: 70 },
+        context: ctx({ ad_measurement: true }),
+      },
+    ]);
+    const withServerSide = await eventually(
+      () => api.call('ads.performance', {}),
+      (p) => p.unattributed.revenue === 110,
+      15_000,
+    );
+    // The attributed totals do not move (there is no campaign touch); the conversion is in the
+    // report as unattributed, where the output says conversions without a touch belong.
+    expect(withServerSide.totals).toMatchObject({ conversions: 1, revenue: 300 });
+    expect(withServerSide.unattributed).toEqual({ conversions: 2, revenue: 110 });
   });
 
   it('sends the conversion to Microsoft with the msclkid through SOAP', async () => {

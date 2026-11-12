@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type {} from '@agentic-marketing/commands';
 import type { BusEvent } from '@agentic-marketing/events';
 import Valkey from 'iovalkey';
@@ -28,6 +29,9 @@ export interface ProfileSnapshot {
   at: string;
 }
 
+/** What a claim found: this call now owns a pending lease, or another call already holds/finished it. */
+export type ClaimOutcome = { state: 'claimed'; token: string } | { state: 'pending' } | { state: 'done' };
+
 export interface HotState {
   /** Counts accepted events into each visitor's session (ingest, before it answers). */
   recordSessions(events: BusEvent[]): Promise<void>;
@@ -47,6 +51,19 @@ export interface HotState {
   /** A short-lived string shared by all processes (e.g. a link-check result); null when absent. */
   cached(key: string): Promise<string | null>;
   cache(key: string, value: string, ttlSeconds: number): Promise<void>;
+  /**
+   * Claims a one-time key for `ttlSeconds` as pending. Returns the owner token when this call
+   * created the pending lease, `done` when the key was already completed, or `pending` while
+   * another request holds it. The token proves ownership to `complete` and `release`.
+   */
+  claim(key: string, ttlSeconds: number): Promise<ClaimOutcome>;
+  /**
+   * Marks a claimed key done for `ttlSeconds`, only while `token` still owns the pending lease.
+   * False when the lease expired or another request took it over.
+   */
+  complete(key: string, token: string, ttlSeconds: number): Promise<boolean>;
+  /** Drops the pending lease when `token` still owns it (the publish failed). */
+  release(key: string, token: string): Promise<void>;
   /** When `key` is locked out after repeated failures, or null. */
   failureLock(key: string): Promise<Date | null>;
   /**
@@ -107,6 +124,29 @@ if count >= limit then lock = now + blockMs end
 redis.call('HSET', KEYS[1], 'c', tostring(count), 'w', tostring(windowStart), 'b', tostring(lock))
 redis.call('PEXPIRE', KEYS[1], windowMs + blockMs + 1000)
 return {count, lock}`;
+
+// Pending → done must not overwrite a lease that expired and was taken by another request, so
+// both transitions compare the owner token. Values are "p:<token>" while pending and "done" after.
+const CLAIM = `
+local v = redis.call('GET', KEYS[1])
+if not v then
+  redis.call('SET', KEYS[1], 'p:' .. ARGV[1], 'EX', ARGV[2])
+  return 'claimed'
+end
+if string.sub(v, 1, 2) == 'p:' then return 'pending' end
+return 'done'`;
+
+const COMPLETE = `
+local v = redis.call('GET', KEYS[1])
+if v == 'p:' .. ARGV[1] then
+  redis.call('SET', KEYS[1], 'done', 'EX', ARGV[2])
+  return 1
+end
+return 0`;
+
+const RELEASE = `
+if redis.call('GET', KEYS[1]) == 'p:' .. ARGV[1] then return redis.call('DEL', KEYS[1]) end
+return 0`;
 
 export function valkeyHotState(opts: { url: string; prefix?: string }): HotState {
   const client = new Valkey(opts.url, { lazyConnect: true, maxRetriesPerRequest: 2, enableAutoPipelining: true });
@@ -193,6 +233,18 @@ export function valkeyHotState(opts: { url: string; prefix?: string }): HotState
     },
     async cache(key, value, ttlSeconds) {
       await client.set(`${p}:c:${key}`, value, 'EX', ttlSeconds);
+    },
+
+    async claim(key, ttlSeconds) {
+      const token = randomUUID();
+      const state = (await client.eval(CLAIM, 1, `${p}:once:${key}`, token, ttlSeconds)) as 'claimed' | 'pending' | 'done';
+      return state === 'claimed' ? { state, token } : { state };
+    },
+    async complete(key, token, ttlSeconds) {
+      return (await client.eval(COMPLETE, 1, `${p}:once:${key}`, token, ttlSeconds)) === 1;
+    },
+    async release(key, token) {
+      await client.eval(RELEASE, 1, `${p}:once:${key}`, token);
     },
 
     async take(key, n, rate, burst) {

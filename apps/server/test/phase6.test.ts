@@ -173,6 +173,17 @@ describe('retention', () => {
       () => api.call('profiles.find', { type: 'email', value: 'never@example.com' }),
       (r) => !!r.profileId,
     );
+    // Retention needs the signup's stored event as positive evidence, so wait for the sink.
+    const profile = await api.call('profiles.get', { profileId: profileId! });
+    const anon = profile.identifiers.find((i) => i.type === 'anonymous_id')!.value;
+    const [{ workspace_id }] = (
+      await t.srv.db.admin.query<{ workspace_id: string }>('SELECT workspace_id FROM profiles WHERE id = $1', [profileId])
+    ).rows;
+    await eventually(
+      async () =>
+        (await t.srv.events.eventsOf(workspace_id, { anonymousIds: [anon], userIds: [] })).some((e) => e.name === 'Form Submitted'),
+      Boolean,
+    );
 
     const deps = { db: t.srv.db, events: t.srv.events, hot: t.srv.hot, unconfirmedDays: 30, logDays: 180 };
     expect((await runRetentionOnce(deps)).profiles).toBe(0); // too recent

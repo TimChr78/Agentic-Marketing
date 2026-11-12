@@ -212,3 +212,42 @@ describe('inbound keyword normalisation (#636)', () => {
     });
   });
 });
+
+// #664: START could never lift the suppression, because am_app had only SELECT, INSERT on
+// suppressions and the route's DELETE failed with "permission denied" (a 500). The opt-in must
+// lift only the SMS stop row for that number, never a bounce or complaint suppression.
+describe('START lifts only the SMS stop suppression (#664)', () => {
+  const phone = '+4512345679';
+  const inbound = (body: string) => callback(FALLBACK, `localhost:${PORT}`, `${webhookPath}/inbound`, { From: phone, Body: body });
+
+  it('returns 200, removes the stop row and never lifts a bounce suppression', async () => {
+    const since = new Date();
+    expect((await inbound('STOP')).status).toBe(200);
+    const stop = await t.srv.db.admin.query<{ value_hash: string }>(
+      `SELECT value_hash FROM suppressions WHERE workspace_id = $1 AND channel = 'sms' AND reason = 'stop' AND at >= $2
+        ORDER BY at DESC`,
+      [ws, since],
+    );
+    expect(stop.rows).toHaveLength(1);
+    const hash = stop.rows[0]!.value_hash;
+    const rowsFor = async () =>
+      (
+        await t.srv.db.admin.query<{ reason: string }>(
+          `SELECT reason FROM suppressions WHERE workspace_id = $1 AND channel = 'sms' AND value_hash = $2 ORDER BY reason`,
+          [ws, hash],
+        )
+      ).rows.map((r) => r.reason);
+
+    expect((await inbound('START')).status).toBe(200);
+    expect(await rowsFor()).toEqual([]);
+
+    // The same number now has a delivery suppression (a hard bounce reported after the block).
+    // START may lift the carrier block, never a bounce: that is a fact about the address.
+    await t.srv.db.admin.query(
+      `INSERT INTO suppressions (workspace_id, channel, value_hash, reason) VALUES ($1, 'sms', $2, 'hard_bounce')`,
+      [ws, hash],
+    );
+    expect((await inbound('START')).status).toBe(200);
+    expect(await rowsFor()).toEqual(['hard_bounce']);
+  });
+});
