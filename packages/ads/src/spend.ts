@@ -2,7 +2,7 @@ import { type ConversionMap, publishedSingleton } from '@agentic-marketing/artif
 import { defineCommand } from '@agentic-marketing/commands';
 import { AppError } from '@agentic-marketing/core';
 import { type Db, schema } from '@agentic-marketing/db';
-import type { EventStore } from '@agentic-marketing/events';
+import type { ConversionEvent, EventStore } from '@agentic-marketing/events';
 import { accessTokenOf, connectionSecrets, type EgressPolicy, safeRequest } from '@agentic-marketing/integrations';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
@@ -315,44 +315,6 @@ export const adPerformance = defineCommand({
       })
     ).json<Record<string, string | number>>();
 
-    // Our conversions: events of the conversion map in the period, with their values. The shared
-    // reader pages the whole window by (timestamp, event_id) instead of a raw `LIMIT 100000`, so
-    // no conversion silently falls outside an arbitrary row slice (#786, #366).
-    const map: ConversionMap | null = await publishedSingleton(ctx.tx, 'conversion_map');
-    const rules = map?.rules ?? [];
-    const names = [...new Set(rules.map((r) => r.event))];
-    const windowFrom = new Date(`${since}T00:00:00.000Z`);
-    const windowUntilEnd = new Date(Date.parse(until) + 86_400_000);
-    const conversions = names.length
-      ? await ctx.services.events.conversionEvents(ws, {
-          names,
-          from: windowFrom,
-          // The helper's upper bound is inclusive; the report window ends at the start of the
-          // day after `until`, exactly as the old `< untilEnd` predicate did.
-          to: new Date(windowUntilEnd.getTime() - 1),
-        })
-      : [];
-    // Empty identifiers never have a touch to look up; a user-id-only conversion stays unattributed.
-    const visitors = [...new Set(conversions.map((c) => c.anonymousId).filter((id) => id !== ''))];
-    const touches = visitors.length
-      ? await (
-          await ch.query({
-            query: `SELECT anonymous_id, timestamp,
-                      coalesce(nullIf(decodeURLFormComponent(extractURLParameter(toString(context.page.url), 'utm_campaign')), ''), toString(context.campaign.name)) AS campaign,
-                      coalesce(nullIf(decodeURLFormComponent(extractURLParameter(toString(context.page.url), 'utm_source')), ''), toString(context.campaign.source)) AS source
-                    FROM events FINAL
-                    WHERE workspace_id = {ws:UUID} AND anonymous_id IN {visitors:Array(String)}
-                      AND timestamp >= {from:DateTime64(3, 'UTC')} AND campaign != ''
-                    ORDER BY timestamp`,
-            query_params: { ws, visitors, from: `${day(new Date(Date.parse(since) - input.windowDays * 86_400_000))} 00:00:00` },
-            format: 'JSONEachRow',
-            clickhouse_settings,
-          })
-        ).json<{ anonymous_id: string; timestamp: string; campaign: string; source: string }>()
-      : [];
-
-    const byVisitor = new Map<string, typeof touches>();
-    for (const t of touches) byVisitor.set(t.anonymous_id, [...(byVisitor.get(t.anonymous_id) ?? []), t]);
     const key = (platform: string, campaign: string) => `${platform}:${campaign.toLowerCase()}`;
     const rows = spend.map((s) => ({
       platform: String(s.platform),
@@ -376,26 +338,105 @@ export const adPerformance = defineCommand({
       lookup.set(key('*', r.campaignName), r);
     }
     const unattributed = { conversions: 0, revenue: 0 };
-    for (const c of conversions) {
-      const at = c.timestamp;
-      const touch = (byVisitor.get(c.anonymousId) ?? [])
-        .filter((t) => {
-          const tt = Date.parse(`${t.timestamp.replace(' ', 'T')}Z`);
-          return tt <= at && at - tt <= input.windowDays * 86_400_000;
-        })
-        .at(-1);
-      const rule = rules.find((r) => r.event === c.name);
-      const value = rule?.value ? Number(get(c.properties ?? {}, rule.value)) || 0 : 0;
-      const platform = touch ? (PLATFORM_OF_SOURCE.find(([re]) => re.test(touch.source))?.[1] ?? '*') : '*';
-      const row = touch ? (lookup.get(key(platform, touch.campaign)) ?? lookup.get(key('*', touch.campaign))) : undefined;
-      if (row) {
-        row.conversions++;
-        row.revenue += value;
-      } else {
-        unattributed.conversions++;
-        unattributed.revenue += value;
+    const windowMs = input.windowDays * 86_400_000;
+
+    // Our conversions: events of the conversion map in the period, with their values. The shared
+    // reader pages the whole window by (timestamp, event_id) instead of a raw `LIMIT 100000`, so
+    // no conversion silently falls outside an arbitrary row slice (#786, #366). Each page is
+    // attributed and folded into the totals at once, so a window of millions of conversions never
+    // has to fit in memory.
+    const map: ConversionMap | null = await publishedSingleton(ctx.tx, 'conversion_map');
+    const rules = map?.rules ?? [];
+    const names = [...new Set(rules.map((r) => r.event))];
+    const windowFrom = new Date(`${since}T00:00:00.000Z`);
+    const windowUntilEnd = new Date(Date.parse(until) + 86_400_000);
+    const touchesFrom = `${day(new Date(Date.parse(since) - windowMs))} 00:00:00`;
+
+    // ClickHouse caps one HTTP form field at 128 KiB, and the id array is JSON-escaped on the way
+    // in. Send the visitors of one page in 64 KiB chunks rather than one unbounded
+    // `visitors:Array(String)`: 100,001 distinct ids failed with "Field value too long" (#786).
+    // Chunking fits here where identityParams' three-array identity-map builder does not.
+    const visitorChunks = (ids: string[]) => {
+      const chunks: string[][] = [];
+      let chunk: string[] = [];
+      let bytes = 2;
+      const flush = () => {
+        if (!chunk.length) return;
+        chunks.push(chunk);
+        chunk = [];
+        bytes = 2;
+      };
+      for (const id of ids) {
+        const size = Buffer.byteLength(JSON.stringify(id)) * 2 + 3;
+        if (chunk.length && bytes + size > 64 * 1024) flush();
+        chunk.push(id);
+        bytes += size;
       }
-    }
+      flush();
+      return chunks;
+    };
+
+    const attribute = async (conversions: ConversionEvent[]) => {
+      // Empty identifiers never have a touch to look up; a user-id-only conversion stays
+      // unattributed.
+      const visitors = [...new Set(conversions.map((c) => c.anonymousId).filter((id) => id !== ''))];
+      const byVisitor = new Map<string, { anonymous_id: string; timestamp: string; campaign: string; source: string }[]>();
+      for (const chunk of visitorChunks(visitors)) {
+        const touches = await (
+          await ch.query({
+            query: `SELECT anonymous_id, timestamp,
+                      coalesce(nullIf(decodeURLFormComponent(extractURLParameter(toString(context.page.url), 'utm_campaign')), ''), toString(context.campaign.name)) AS campaign,
+                      coalesce(nullIf(decodeURLFormComponent(extractURLParameter(toString(context.page.url), 'utm_source')), ''), toString(context.campaign.source)) AS source
+                    FROM events FINAL
+                    WHERE workspace_id = {ws:UUID} AND anonymous_id IN {visitors:Array(String)}
+                      AND timestamp >= {from:DateTime64(3, 'UTC')} AND campaign != ''
+                    ORDER BY timestamp`,
+            query_params: { ws, visitors: chunk, from: touchesFrom },
+            format: 'JSONEachRow',
+            clickhouse_settings,
+          })
+        ).json<{ anonymous_id: string; timestamp: string; campaign: string; source: string }>();
+        for (const t of touches) {
+          const list = byVisitor.get(t.anonymous_id);
+          if (list) list.push(t);
+          else byVisitor.set(t.anonymous_id, [t]);
+        }
+      }
+      // Last utm_campaign touch within the window, before the conversion: computed per page, which
+      // is identical to the whole-window loop because a conversion only reads its own visitor's
+      // touches. Pages are ordered by (timestamp, event_id) and no rule dedupes or depends on
+      // another conversion, so a batch boundary cannot change the result.
+      for (const c of conversions) {
+        const at = c.timestamp;
+        const touch = (byVisitor.get(c.anonymousId) ?? [])
+          .filter((t) => {
+            const tt = Date.parse(`${t.timestamp.replace(' ', 'T')}Z`);
+            return tt <= at && at - tt <= windowMs;
+          })
+          .at(-1);
+        const rule = rules.find((r) => r.event === c.name);
+        const value = rule?.value ? Number(get(c.properties ?? {}, rule.value)) || 0 : 0;
+        const platform = touch ? (PLATFORM_OF_SOURCE.find(([re]) => re.test(touch.source))?.[1] ?? '*') : '*';
+        const row = touch ? (lookup.get(key(platform, touch.campaign)) ?? lookup.get(key('*', touch.campaign))) : undefined;
+        if (row) {
+          row.conversions++;
+          row.revenue += value;
+        } else {
+          unattributed.conversions++;
+          unattributed.revenue += value;
+        }
+      }
+    };
+
+    if (names.length)
+      await ctx.services.events.conversionEvents(ws, {
+        names,
+        from: windowFrom,
+        // The helper's upper bound is inclusive; the report window ends at the start of the
+        // day after `until`, exactly as the old `< untilEnd` predicate did.
+        to: new Date(windowUntilEnd.getTime() - 1),
+        onPage: attribute,
+      });
     for (const r of rows) {
       r.cpa = r.conversions ? Math.round((r.cost / r.conversions) * 100) / 100 : null;
       r.roas = r.cost ? Math.round((r.revenue / r.cost) * 100) / 100 : null;
