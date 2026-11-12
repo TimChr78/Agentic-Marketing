@@ -124,6 +124,7 @@ describe('campaign query compiler', () => {
       },
     ]);
     expect(compiled.kAlias).toBe('k_group');
+    expect(compiled.revenueKAlias).toBeUndefined();
     expect(compiled.hasNonTimeDimension).toBe(true);
     expect(compiled.revenue).toBe(false);
   });
@@ -156,6 +157,9 @@ describe('campaign query compiler', () => {
     );
 
     expect(compiled.revenue).toBe(true);
+    expect(compiled.kAlias).toBe('k_group');
+    expect(compiled.revenueKAlias).toBe('k_revenue_group');
+    expect(compiled.sql).toContain('ifNull(c.base_campaign_converters, 0) AS k_revenue_group');
     expect(compiled.sql).toContain('LEFT JOIN conv_roll');
     expect(compiled.sql).toContain('LEFT JOIN rev_roll rv');
     expect(compiled.sql).toContain('currency AS dim_currency');

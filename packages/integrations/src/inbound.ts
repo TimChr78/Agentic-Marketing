@@ -3,7 +3,7 @@ import type { PublicRequest } from '@agentic-marketing/commands';
 import { type Db, schema } from '@agentic-marketing/db';
 import type { EventBus } from '@agentic-marketing/events';
 import type { ClaimOutcome, HotState } from '@agentic-marketing/hotstate';
-import { acceptItems, bodyLimit, sourceLookups } from '@agentic-marketing/ingest';
+import { acceptInternalItems, bodyLimit, sourceLookups } from '@agentic-marketing/ingest';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { eq } from 'drizzle-orm';
@@ -99,18 +99,27 @@ export function inboundApi(deps: {
       } catch (err) {
         return c.json({ error: 'mapping_failed', message: `The mapping failed: ${(err as Error).message}` }, 422);
       }
-      const source = { id: conn.row.id, workspaceId: ws, kind: 'server' as const, requiredPurpose: null };
+      // A connector's mapping is platform-defined (Shopify orders, Salesforce records, a generic
+      // JSONata mapping): a strict tracking plan must not drop those events while the sender is
+      // told the delivery succeeded (#764). `acceptInternalItems` is the trusted path, so a public
+      // `/v1` client still cannot claim the exemption.
+      const source = { id: conn.row.id, workspaceId: ws, kind: 'server' as const, requiredPurpose: null, platform: true };
       const policy = await loadPolicy(ws);
-      // Standard Webhooks signs the webhook-id with the body, so it is safe to use as an
-      // idempotency key. Other schemes (Shopify, Salesforce) have no such header and keep their
-      // own deterministic event ids.
-      const webhookId = ictx.settings?.signature?.scheme === 'standard-webhooks' ? headers['webhook-id'] : undefined;
-      const replayKey = webhookId ? inboundReplayKey(ws, conn.row.id, webhookId) : undefined;
+      // Standard Webhooks signs the webhook-id with the body, so the header is a sender-chosen
+      // idempotency key. Every other scheme has no id that changes with the body: hmac-sha256 has
+      // no timestamp or nonce (signing.ts verifyHmac) and an unsigned secret URL has nothing at
+      // all. There the raw body is the only stable identity a replay has, so derive the key from
+      // it; the hot-state done TTL is the dedupe window, since those schemes carry no timestamp.
+      const scheme = ictx.settings?.signature?.scheme;
+      const webhookId = scheme === 'standard-webhooks' ? headers['webhook-id'] : undefined;
+      const replayId =
+        webhookId ?? (scheme === 'standard-webhooks' ? undefined : createHash('sha256').update(`${conn.row.id}\n${raw}`).digest('hex'));
+      const replayKey = replayId ? inboundReplayKey(ws, conn.row.id, replayId) : undefined;
       let claimToken: string | undefined;
       // A stable id per mapped record: if the hot state loses the key, JetStream still drops the
       // retried delivery because both attempts derive the same message ids (120 s window).
-      const messageIdFor = webhookId
-        ? (index: number) => `wh-${conn.row.id}-${createHash('sha256').update(`${ws}\n${webhookId}`).digest('hex').slice(0, 32)}-${index}`
+      const messageIdFor = replayId
+        ? (index: number) => `wh-${conn.row.id}-${createHash('sha256').update(`${ws}\n${replayId}`).digest('hex').slice(0, 32)}-${index}`
         : undefined;
       if (replayKey) {
         let claim: ClaimOutcome;
@@ -128,21 +137,21 @@ export function inboundApi(deps: {
         if (claim.state === 'done') {
           // The spec treats any 2xx as delivered and any other status as a failure to retry, so a
           // duplicate is a success that says nothing new was ingested (200, not 409).
-          logger.warn({ connection: conn.row.id, webhookId }, 'inbound webhook already received');
+          logger.warn({ connection: conn.row.id, replayId }, 'inbound webhook already received');
           return c.json({ success: true, duplicate: true, accepted: 0, duplicates: 0, dropped: 0 });
         }
         if (claim.state === 'pending') {
           // Another request claimed this id and has not published yet. Acknowledging now would let
           // a crash between its claim and its publish look like a completed delivery; the sender
           // must retry instead. Its lease expires if that request died.
-          logger.warn({ connection: conn.row.id, webhookId }, 'inbound webhook still in progress');
+          logger.warn({ connection: conn.row.id, replayId }, 'inbound webhook still in progress');
           return c.json({ error: 'in_progress', message: 'This webhook is already being processed. Retry shortly.' }, 503, {
             'retry-after': String(RETRY_AFTER_S),
           });
         }
         claimToken = claim.token;
       }
-      const { accepted, rejected, dropped } = acceptItems(items, source, policy, messageIdFor ? { messageId: messageIdFor } : {});
+      const { accepted, rejected, dropped } = acceptInternalItems(items, source, policy, messageIdFor ? { messageId: messageIdFor } : {});
       let duplicates: number;
       try {
         ({ duplicates } = accepted.length ? await deps.bus.publish(accepted) : { duplicates: 0 });
@@ -162,7 +171,7 @@ export function inboundApi(deps: {
           logger.warn({ err, connection: conn.row.id }, 'inbound webhook could not be marked done');
           return false;
         });
-        if (!done) logger.warn({ connection: conn.row.id, webhookId }, 'inbound webhook lease expired before it was marked done');
+        if (!done) logger.warn({ connection: conn.row.id, replayId }, 'inbound webhook lease expired before it was marked done');
       }
       if (rejected.length) logger.warn({ connection: conn.row.id, rejected }, 'inbound webhook events rejected');
       return c.json({ success: true, accepted: accepted.length, duplicates, dropped, ...(rejected.length ? { rejected } : {}) });

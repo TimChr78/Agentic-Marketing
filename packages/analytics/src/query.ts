@@ -26,6 +26,11 @@ import { DIMENSIONS, type DimensionId, MEASURES, METRIC_CATALOG, type MeasureDef
 
 const CACHE_TTL_MS = 60_000;
 
+/** True for a measure whose value is money: campaign.revenue and the ratios built on it. */
+function isRevenueMeasure(measure: MeasureDef): boolean {
+  return measure.id === 'campaign.revenue' || (measure.kind === 'ratio' && measure.numerator === 'campaign.revenue');
+}
+
 export { K };
 export const MAX_RANGE_DAYS = 400;
 
@@ -448,10 +453,21 @@ async function execute(deps: Deps, input: QueryInput, measures: MeasureDef[], di
   );
 
   let suppressed = 0;
+  let revenueSuppressed = 0;
   const rows = raw.map((row) => {
     const k = Number(row[compiled.kAlias]);
     const hide = compiled.hasNonTimeDimension && (!Number.isFinite(k) || k < K);
+    // A per-currency revenue row is about its converters, even when the caller asked for no other
+    // dimension. Below k its revenue figures are null, while the row's recipient and converter
+    // counts stay readable (#756). Zero converters have no people to protect and stay a real 0
+    // (#630), which is why only a non-empty group below k is hidden.
+    const revenueK = compiled.revenueKAlias === undefined ? Number.NaN : Number(row[compiled.revenueKAlias]);
+    const hideRevenue = compiled.revenueKAlias !== undefined && Number.isFinite(revenueK) && revenueK > 0 && revenueK < K;
     if (hide) suppressed++;
+    else if (hideRevenue) {
+      suppressed++;
+      revenueSuppressed++;
+    }
     return compiled.outputs.map((out) => {
       const value = row[out.alias];
       if (out.kind === 'dimension') {
@@ -459,6 +475,7 @@ async function execute(deps: Deps, input: QueryInput, measures: MeasureDef[], di
         return typeof value === 'number' ? value : String(value);
       }
       if (hide) return null;
+      if (hideRevenue && isRevenueMeasure(out.measure)) return null;
       if (value === null || value === undefined) return null;
       const n = Number(value);
       return Number.isFinite(n) ? n : null;
@@ -479,6 +496,7 @@ async function execute(deps: Deps, input: QueryInput, measures: MeasureDef[], di
     notes.push('Rates are computed from aggregated base measures, not by averaging other rates.');
   if (compiled.revenue)
     notes.push('Revenue is grouped by the currency on the conversion event; different currencies are never added together.');
+  if (revenueSuppressed) notes.push(`Currency rows with fewer than k=${K} converters have their revenue suppressed.`);
   if (source === 'events' && !conversion.names.length)
     notes.push('No conversion map is published and no name filter was given, so there are no conversion events to count.');
   if (source === 'events' && !conversion.hasMap && conversion.names.length)
@@ -536,7 +554,7 @@ export const analyticsQuery = defineCommand({
   name: 'analytics.query',
   title: 'Query marketing metrics',
   description:
-    'Read a fixed catalogue of marketing measures, broken down by up to three dimensions. Measures have stable ids (email.sent, email.delivered, email.click_rate, journey.entered, conversions, revenue, segment.members, …); ratios are computed from their base measures after aggregation, never averaged. The workspace time zone decides day, week and month boundaries. Breakdowns by anything other than a time dimension hide rows with fewer than k=5 people behind their counts and report how many were suppressed in meta.suppressed; totals are never suppressed. There is no SQL, table or expression input, and the workspace always comes from the caller. Results are cached for 60 seconds; each query is limited to 10 seconds and at most 5000 rows.',
+    'Read a fixed catalogue of marketing measures, broken down by up to three dimensions. Measures have stable ids (email.sent, email.delivered, email.click_rate, journey.entered, conversions, revenue, segment.members, …); ratios are computed from their base measures after aggregation, never averaged. The workspace time zone decides day, week and month boundaries. Breakdowns by anything other than a time dimension hide rows with fewer than k=5 people behind their counts and report how many were suppressed in meta.suppressed; totals are never suppressed. A campaign revenue row is keyed on the people who converted in its currency, so its revenue and revenue per recipient are null below k=5 even when the campaign reached enough people, and it is counted in meta.suppressed. There is no SQL, table or expression input, and the workspace always comes from the caller. Results are cached for 60 seconds; each query is limited to 10 seconds and at most 5000 rows.',
   input: queryInput,
   output: analyticsResult,
   permission: 'artifacts:read',
