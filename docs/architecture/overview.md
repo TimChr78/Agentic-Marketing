@@ -1,6 +1,6 @@
 # System overview
 
-> Status: describes **0.14.1**. Waves 1–3 are built through Phase 16; wave 4 shipped Phases 17–22 (0.3.0–0.8.0) and wave 5 shipped Phases 23–28 (0.9.0–0.14.0). See [roadmap.md](roadmap.md) for the wave 1 plan, [roadmap-wave-4.md](roadmap-wave-4.md) and [roadmap-wave-5.md](roadmap-wave-5.md) for the later waves, and [agentic-autonomy.md](agentic-autonomy.md) for what agents may do today.
+> Status: describes **0.14.8**. Waves 1–3 are built through Phase 16; wave 4 shipped Phases 17–22 (0.3.0–0.8.0) and wave 5 shipped Phases 23–28 (0.9.0–0.14.0). See [roadmap.md](roadmap.md) for the wave 1 plan, [roadmap-wave-4.md](roadmap-wave-4.md) and [roadmap-wave-5.md](roadmap-wave-5.md) for the later waves, and [agentic-autonomy.md](agentic-autonomy.md) for what agents may do today.
 
 ## 1. System context
 

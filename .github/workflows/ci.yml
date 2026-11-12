@@ -425,6 +425,17 @@ jobs:
         with:
           version: v3.19.0
       - run: helm lint deploy/helm/agentic-marketing --set secrets.existingSecret=am
+      # A leftover config.PORT must fail the render, not produce a pod whose probes can never pass
+      # (#774). The helm binary is only in CI, so this is the render test the chart does not have.
+      - name: Refuse a config.PORT that disagrees with port (#774)
+        run: |
+          if helm template am deploy/helm/agentic-marketing --set secrets.existingSecret=am \
+              --set config.PORT=3001 > rendered-config-port.txt 2>&1; then
+            cat rendered-config-port.txt
+            echo "::error::the chart rendered with config.PORT 3001 while port is 3000; the probes and Service would target the wrong port"
+            exit 1
+          fi
+          grep -q 'config.PORT is 3001' rendered-config-port.txt
       - run: |
           helm template am deploy/helm/agentic-marketing --set secrets.existingSecret=am \
             --set ingress.enabled=true --set config.TRUSTED_PROXY_CIDRS=10.244.0.0/16 \

@@ -540,6 +540,16 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
   if (config.roles.has('api')) app.route('/', scimApi({ auth, db, executor, publicUrl: config.publicUrl }));
   app.route('/', restApi({ auth, db, executor, assetMaxBytes: config.assetMaxBytes }));
 
+  // API-owned roots answer JSON on every role, even the ones whose implementation is not mounted
+  // here (an api-only or ingest-only pod). An unmatched /hooks, /oauth or /scim path must never
+  // become the admin SPA or Hono's text/plain 404 (#610, #751). Registered after every real route
+  // above, so it only catches what nothing else claimed.
+  const apiNotFound = (c: Context) => c.json({ error: 'not_found', message: 'Not found.' }, 404);
+  for (const root of ['/hooks', '/oauth', '/scim']) {
+    app.all(root, apiNotFound);
+    app.all(`${root}/*`, apiNotFound);
+  }
+
   // Last, so every API route above wins. Without a build (packages/tests, server-only install) the
   // middleware is a no-op and the server behaves exactly as before.
   if (existsSync(config.webDist)) {

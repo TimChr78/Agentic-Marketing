@@ -30,6 +30,15 @@ export function normalizeVersion(value) {
   return isSemver(version) ? version : null;
 }
 
+/**
+ * The `major.minor` line of a version. It is the release concurrency key and the floating image
+ * tag (`:0.14`), so it must ignore a prerelease: `1.0.0-rc.1` belongs to the `1.0` line (#773).
+ */
+export function releaseLine(version) {
+  const match = /^(\d+)\.(\d+)\./.exec(version ?? '');
+  return match ? `${match[1]}.${match[2]}` : null;
+}
+
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const raw = process.argv[2] ?? '';
   const version = normalizeVersion(raw);
@@ -37,5 +46,6 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     console.error(`::error::${raw || '(empty)'} is not a SemVer version (x.y.z, optionally -prerelease and +build)`);
     process.exit(1);
   }
-  console.log(version);
+  // `--line` prints `major.minor` for the concurrency group and the floating image tag.
+  console.log(process.argv.includes('--line') ? releaseLine(version) : version);
 }

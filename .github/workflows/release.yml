@@ -25,9 +25,11 @@ permissions:
   contents: write
   packages: write
 
-# One release at a time per version, whichever trigger started it: a tag push (v0.14.1) and a manual
-# run (0.14.1 or v0.14.1) must share a group. Workflow-level `concurrency` cannot read step outputs,
-# so the group lives on the release job and reads one normalised version from the prepare job (#648).
+# One release at a time per release line (major.minor), whichever trigger started it: a tag push
+# (v0.14.1) and a manual run (0.14.1 or v0.14.1) must share a group, and every patch of a line
+# publishes the same floating `:0.14` image tag, so patches of one line queue behind each other.
+# Workflow-level `concurrency` cannot read step outputs, so the group lives on the release job and
+# reads the normalised line from the prepare job (#648, #773).
 jobs:
   prepare:
     runs-on: ubuntu-latest
@@ -35,6 +37,7 @@ jobs:
       contents: read
     outputs:
       version: ${{ steps.version.outputs.version }}
+      line: ${{ steps.version.outputs.line }}
     steps:
       # The version check is a script, so the release fails on the full SemVer grammar before
       # anything is built, and the same check is unit-tested (#671).
@@ -54,6 +57,8 @@ jobs:
           # Prints the version without one leading v, or fails the job with a ::error:: line.
           v="$(node scripts/release/semver.mjs "$raw")"
           echo "version=$v" >> "$GITHUB_OUTPUT"
+          # The release line (major.minor) keys the concurrency group and floats the image tag.
+          echo "line=$(node scripts/release/semver.mjs "$raw" --line)" >> "$GITHUB_OUTPUT"
 
   # The same checks as a pull request, on the commit being released.
   ci:
@@ -68,8 +73,11 @@ jobs:
     timeout-minutes: 60
     # The group is acquired before the version and release-existence checks below run, so a second
     # run queued for the same version sees the first release when it starts.
+    # One group per release line (major.minor), not per version: every patch of a line pushes the
+    # same floating `:0.14` image tag, so overlapping patches must queue behind each other (#773).
+    # cancel-in-progress stays false so none of them is cancelled mid-publish.
     concurrency:
-      group: release-v${{ needs.prepare.outputs.version }}
+      group: release-v${{ needs.prepare.outputs.line }}
       cancel-in-progress: false
     # The release files and the image need the token of the event; the attestations need a signed
     # identity (`id-token`) and the permission to store an attestation (`attestations`).
@@ -126,13 +134,35 @@ jobs:
       - name: Resolve the image name
         id: image
         run: echo "name=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/agentic-marketing" >> "$GITHUB_OUTPUT"
+      # A re-run of an older patch may start after a newer one finished. Concurrency queues a line,
+      # and this guard makes the floating major.minor tag follow semver, never publish order: the
+      # line tag is pushed only when this version is the newest release in the line (#773).
+      - name: Decide the image tags
+        id: tags
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          LINE: ${{ needs.prepare.outputs.line }}
+        run: |
+          if gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v${LINE}." --paginate --jq '.[].ref' \
+              > "$RUNNER_TEMP/line-tags.raw"; then
+            sed 's#^refs/tags/##' "$RUNNER_TEMP/line-tags.raw" > "$RUNNER_TEMP/line-tags.txt"
+            spec="$(node scripts/release/image-tags.mjs "$VERSION" "$RUNNER_TEMP/line-tags.txt")"
+          else
+            # An unreadable tag list must not move the floating tag: publish the exact version only.
+            echo "::warning::cannot list tags in the v${LINE} line; publishing only ${VERSION}"
+            spec="$(node scripts/release/image-tags.mjs "$VERSION" --exact-only)"
+          fi
+          {
+            echo 'spec<<AM_IMAGE_TAGS'
+            echo "$spec"
+            echo 'AM_IMAGE_TAGS'
+          } >> "$GITHUB_OUTPUT"
       - id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ghcr.io/${{ github.repository_owner }}/agentic-marketing
-          tags: |
-            type=semver,pattern={{version}},value=${{ steps.version.outputs.version }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ steps.version.outputs.version }}
+          tags: ${{ steps.tags.outputs.spec }}
           labels: |
             org.opencontainers.image.title=Agentic Marketing
             org.opencontainers.image.licenses=MIT
