@@ -11,8 +11,8 @@
   },
   "dependencies": {
     "@opentelemetry/api": "1.10.0",
-    "@opentelemetry/exporter-trace-otlp-http": "0.223.0",
-    "@opentelemetry/sdk-node": "0.223.0",
+    "@opentelemetry/exporter-trace-otlp-http": "0.301.0",
+    "@opentelemetry/sdk-node": "0.301.0",
     "pino": "10.4.0"
   }
 }
