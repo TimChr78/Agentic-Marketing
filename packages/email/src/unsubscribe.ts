@@ -11,7 +11,13 @@ import { Parser } from 'htmlparser2';
 // node is visible. Style rules from <style> are collected in a small first pass and cascaded
 // against the inline declarations the way CSS does within the scope described below.
 
-export type UnsubscribeLinkProblem = 'missing' | 'hidden' | 'empty' | 'too_deep';
+export type UnsubscribeLinkProblem = 'missing' | 'hidden' | 'empty' | 'too_complex';
+
+/**
+ * The longest the check may run on one document. Normal e-mails take a few milliseconds; past the
+ * budget the check stops and rejects, so no input can make a save or publish slow (review round 8).
+ */
+export const MAX_UNSUBSCRIBE_CHECK_MS = 1_000;
 
 /**
  * The deepest element nesting the check evaluates. MJML output nests a few dozen levels; deeper
@@ -170,8 +176,10 @@ const isSpace = (ch: string) => ch === ' ' || ch === '\t' || ch === '\n' || ch =
 export function unsubscribeLinkProblem(html: string, url: string): UnsubscribeLinkProblem | null {
   const wanted = url.trim();
   if (!wanted) return 'missing';
-  const css = styleText(html);
-  if (css === null) return 'too_deep';
+  const startedAt = performance.now();
+  const overBudget = () => performance.now() - startedAt > MAX_UNSUBSCRIBE_CHECK_MS;
+  const css = styleText(html, overBudget);
+  if (css === null) return 'too_complex';
   const rules = hiddenRules(css);
   let tooDeep = false;
 
@@ -194,7 +202,7 @@ export function unsubscribeLinkProblem(html: string, url: string): UnsubscribeLi
           anchors.push(candidate);
         }
         stack.push({ name, state });
-        if (stack.length > MAX_UNSUBSCRIBE_NESTING) {
+        if (stack.length > MAX_UNSUBSCRIBE_NESTING || overBudget()) {
           tooDeep = true;
           parser.pause();
           return;
@@ -234,7 +242,7 @@ export function unsubscribeLinkProblem(html: string, url: string): UnsubscribeLi
     { decodeEntities: true, lowerCaseTags: true, lowerCaseAttributeNames: true },
   );
   parser.write(html);
-  if (tooDeep) return 'too_deep';
+  if (tooDeep) return 'too_complex';
   parser.end();
 
   let sawHidden = false;
@@ -251,9 +259,10 @@ export function unsubscribeLinkProblem(html: string, url: string): UnsubscribeLi
 
 /**
  * The style text of every <style> block, collected before the evaluation pass, or null when the
- * document nests deeper than MAX_UNSUBSCRIBE_NESTING (the parse stops there).
+ * document nests deeper than MAX_UNSUBSCRIBE_NESTING or the check runs past its time budget
+ * (the parse stops there).
  */
-function styleText(html: string): string | null {
+function styleText(html: string, overBudget: () => boolean): string | null {
   let css = '';
   let inStyle = 0;
   let depth = 0;
@@ -262,7 +271,7 @@ function styleText(html: string): string | null {
     {
       onopentag(name) {
         if (name === 'style') inStyle++;
-        if (++depth > MAX_UNSUBSCRIBE_NESTING) {
+        if (++depth > MAX_UNSUBSCRIBE_NESTING || overBudget()) {
           tooDeep = true;
           parser.pause();
         }
@@ -824,8 +833,8 @@ function stripCssComments(css: string): string {
 export function unsubscribeProblemMessage(problem: UnsubscribeLinkProblem): string {
   if (problem === 'hidden')
     return 'The unsubscribe link is hidden, so readers cannot see or click it. Make it a visible link in the message body.';
-  if (problem === 'too_deep')
-    return `The e-mail nests elements more than ${MAX_UNSUBSCRIBE_NESTING} levels deep, so the unsubscribe link cannot be checked. Simplify the layout.`;
+  if (problem === 'too_complex')
+    return `The e-mail is too complex to check the unsubscribe link (more than ${MAX_UNSUBSCRIBE_NESTING} nested levels, or more than ${MAX_UNSUBSCRIBE_CHECK_MS / 1000} second of checking). Simplify the layout or its styles.`;
   if (problem === 'empty')
     return 'The unsubscribe link has no text, so readers cannot see it. Give it a few words, or an image with alt text.';
   return 'A marketing e-mail must contain an unsubscribe link, and this one does not.';

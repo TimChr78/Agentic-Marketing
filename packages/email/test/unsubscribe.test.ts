@@ -1,9 +1,9 @@
 import type { EmailTemplate } from '@agentic-marketing/artifacts';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { expectLinear } from '../../../test-support/linear';
 import { emailPublishProblems } from '../src/checks';
 import { validateTemplate } from '../src/render';
-import { MAX_UNSUBSCRIBE_NESTING, unsubscribeLinkProblem } from '../src/unsubscribe';
+import { MAX_UNSUBSCRIBE_CHECK_MS, MAX_UNSUBSCRIBE_NESTING, unsubscribeLinkProblem } from '../src/unsubscribe';
 
 // Review of #637 (P2): the gate only checked that an <a href> with the unsubscribe URL existed.
 // A link nobody can see or click — inline display:none, an ancestor style, a <template>, or an
@@ -266,7 +266,7 @@ describe('the unsubscribe link must be visible and clickable (#637 review)', () 
       8_000,
     );
     const deep = `${'<div>'.repeat(MAX_UNSUBSCRIBE_NESTING + 1)}<a href="${URL}">Unsubscribe</a>`;
-    expect(unsubscribeLinkProblem(deep, URL)).toBe('too_deep');
+    expect(unsubscribeLinkProblem(deep, URL)).toBe('too_complex');
     const fine = `${'<div>'.repeat(60)}<a href="${URL}">Unsubscribe</a>${'</div>'.repeat(60)}`;
     expect(unsubscribeLinkProblem(fine, URL)).toBeNull();
   });
@@ -290,6 +290,21 @@ describe('the unsubscribe link must be visible and clickable (#637 review)', () 
       (html) => unsubscribeLinkProblem(html, URL),
       2_000,
     );
+  });
+
+  it('stops and rejects once the check runs past its time budget (review round 8)', () => {
+    let now = 0;
+    const spy = vi.spyOn(performance, 'now').mockImplementation(() => {
+      now += MAX_UNSUBSCRIBE_CHECK_MS / 4;
+      return now;
+    });
+    try {
+      const html = `${'<div>x</div>'.repeat(20)}<a href="${URL}">Unsubscribe</a>`;
+      expect(unsubscribeLinkProblem(html, URL)).toBe('too_complex');
+    } finally {
+      spy.mockRestore();
+    }
+    expect(unsubscribeLinkProblem(`<a href="${URL}">Unsubscribe</a>`, URL)).toBeNull();
   });
 
   it('still applies a compound hiding rule in a normal stylesheet', () => {
