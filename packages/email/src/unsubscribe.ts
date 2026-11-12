@@ -11,7 +11,17 @@ import { Parser } from 'htmlparser2';
 // node is visible. Style rules from <style> are collected in a small first pass and cascaded
 // against the inline declarations the way CSS does within the scope described below.
 
-export type UnsubscribeLinkProblem = 'missing' | 'hidden' | 'empty';
+export type UnsubscribeLinkProblem = 'missing' | 'hidden' | 'empty' | 'too_deep';
+
+/**
+ * The deepest element nesting the check evaluates. MJML output nests a few dozen levels; deeper
+ * documents are rejected, because the HTML parser's own open-element stack is super-linear in the
+ * depth (review round 6).
+ */
+export const MAX_UNSUBSCRIBE_NESTING = 512;
+
+/** The most classes one compound selector may name and still be modelled (review round 6). */
+const MAX_SELECTOR_CLASSES = 8;
 
 /** Elements whose content is not rendered as visible body content in an e-mail. */
 const NOT_BODY = new Set(['template', 'head', 'script', 'style', 'noscript']);
@@ -145,7 +155,8 @@ const isSpace = (ch: string) => ch === ' ' || ch === '\t' || ch === '\n' || ch =
  * it is ignored.
  *
  * Known limits: selectors with combinators, attributes or pseudo-classes, rules inside `@media` or
- * any other at-rule, compound (tag/class/id) rules past the first 64 per kind, and external
+ * any other at-rule, compound (tag/class/id) rules past the first 64 per kind, selectors naming
+ * more than 8 classes, and external
  * stylesheets are not evaluated (a matching `display:none` rule
  * wins over any later non-important rule that would unhide it). Colour parsing is small: white,
  * black and transparent are normalised, hex and `rgb()`/`rgba()` are compared, but other named
@@ -157,7 +168,10 @@ const isSpace = (ch: string) => ch === ' ' || ch === '\t' || ch === '\n' || ch =
 export function unsubscribeLinkProblem(html: string, url: string): UnsubscribeLinkProblem | null {
   const wanted = url.trim();
   if (!wanted) return 'missing';
-  const rules = hiddenRules(styleText(html));
+  const css = styleText(html);
+  if (css === null) return 'too_deep';
+  const rules = hiddenRules(css);
+  let tooDeep = false;
 
   const stack: OpenElement[] = [];
   const candidates: Candidate[] = [];
@@ -178,6 +192,11 @@ export function unsubscribeLinkProblem(html: string, url: string): UnsubscribeLi
           anchors.push(candidate);
         }
         stack.push({ name, state });
+        if (stack.length > MAX_UNSUBSCRIBE_NESTING) {
+          tooDeep = true;
+          parser.pause();
+          return;
+        }
         // The image itself is the content node, so judge it in its own state (its alt is visible
         // only if the image is).
         if (name === 'img' && attribs.alt?.trim()) {
@@ -213,6 +232,7 @@ export function unsubscribeLinkProblem(html: string, url: string): UnsubscribeLi
     { decodeEntities: true, lowerCaseTags: true, lowerCaseAttributeNames: true },
   );
   parser.write(html);
+  if (tooDeep) return 'too_deep';
   parser.end();
 
   let sawHidden = false;
@@ -227,25 +247,36 @@ export function unsubscribeLinkProblem(html: string, url: string): UnsubscribeLi
   return 'missing';
 }
 
-/** The style text of every <style> block, collected before the evaluation pass. */
-function styleText(html: string): string {
+/**
+ * The style text of every <style> block, collected before the evaluation pass, or null when the
+ * document nests deeper than MAX_UNSUBSCRIBE_NESTING (the parse stops there).
+ */
+function styleText(html: string): string | null {
   let css = '';
   let inStyle = 0;
+  let depth = 0;
+  let tooDeep = false;
   const parser = new Parser(
     {
       onopentag(name) {
         if (name === 'style') inStyle++;
+        if (++depth > MAX_UNSUBSCRIBE_NESTING) {
+          tooDeep = true;
+          parser.pause();
+        }
       },
       ontext(text) {
         if (inStyle > 0) css += text;
       },
       onclosetag(name) {
         if (name === 'style' && inStyle > 0) inStyle--;
+        if (depth > 0) depth--;
       },
     },
     { decodeEntities: true, lowerCaseTags: true, lowerCaseAttributeNames: true },
   );
   parser.write(html);
+  if (tooDeep) return null;
   parser.end();
   return css;
 }
@@ -741,8 +772,12 @@ function parseSimpleSelector(raw: string): HideSelector | null {
     while (j < raw.length && raw[j] !== '.' && raw[j] !== '#') j++;
     const name = raw.slice(i + 1, j);
     if (!name) return null;
-    if (kind === '.') classes.push(name);
-    else id = name;
+    if (kind === '.') {
+      // A selector naming many classes is matched class by class against every candidate element;
+      // past a few it is a stated limit, which keeps matching linear (review round 6).
+      if (classes.length >= MAX_SELECTOR_CLASSES) return null;
+      classes.push(name);
+    } else id = name;
     i = j;
   }
   return { tag, id, classes };
@@ -765,6 +800,8 @@ function stripCssComments(css: string): string {
 export function unsubscribeProblemMessage(problem: UnsubscribeLinkProblem): string {
   if (problem === 'hidden')
     return 'The unsubscribe link is hidden, so readers cannot see or click it. Make it a visible link in the message body.';
+  if (problem === 'too_deep')
+    return `The e-mail nests elements more than ${MAX_UNSUBSCRIBE_NESTING} levels deep, so the unsubscribe link cannot be checked. Simplify the layout.`;
   if (problem === 'empty')
     return 'The unsubscribe link has no text, so readers cannot see it. Give it a few words, or an image with alt text.';
   return 'A marketing e-mail must contain an unsubscribe link, and this one does not.';
