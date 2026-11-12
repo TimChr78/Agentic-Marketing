@@ -77,6 +77,8 @@ export const previewSegment = defineCommand({
   effect: 'read',
   // The sample is profile ids: pseudonymous, but they identify people in the workspace.
   auditReads: true,
+  // One audit entry per sampled person, so a preview cannot read the segment without naming who it saw (#763).
+  auditTargets: (out) => out.sample,
   handler: async (input, ctx) => {
     let condition = input.condition;
     let listSegment: string | undefined;
