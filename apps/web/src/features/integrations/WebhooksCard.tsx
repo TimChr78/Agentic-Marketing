@@ -206,27 +206,43 @@ function WebhookDrawer({
   );
 }
 
+/** One endpoint's last webhook delivery, read by its target id (#615). */
+function EndpointLastDelivery({ id, version }: { id: string; version: number }) {
+  const read = useApi(() => api.call('deliveries.list', { kind: 'webhook', targetId: id, limit: 1 }), [id, version]);
+  const last = read.data?.deliveries[0];
+  if (!last) return <span className="text-muted">Never</span>;
+  return (
+    <div className="flex flex-col gap-0.5">
+      <StatusPill tone={DELIVERY_TONE[last.status]}>{DELIVERY_LABEL[last.status]}</StatusPill>
+      <span className="text-[11px] text-muted">{timeAgo(last.createdAt)}</span>
+    </div>
+  );
+}
+
 export function WebhooksCard() {
   const { can } = useWorkspace();
   const admin = can('workspace:admin');
   const list = useApi(() => api.call('webhooks.list', {}), []);
-  const deliveries = useApi(() => api.call('deliveries.list', { limit: 100 }), []);
+  const deliveries = useApi(() => api.call('deliveries.list', { kind: 'webhook', limit: 100 }), []);
   const toast = useToast();
   const [confirmDialog, confirm] = useConfirm();
   const [editing, setEditing] = useState<Endpoint | 'new' | null>(null);
   const [secret, setSecret] = useState<{ name: string; value: string } | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [retrying, setRetrying] = useState<string | null>(null);
+  const [deliveriesVersion, setDeliveriesVersion] = useState(0);
 
   const endpoints = list.data?.endpoints ?? [];
   const allDeliveries = deliveries.data?.deliveries ?? [];
   const webhookDeliveries = allDeliveries.filter((d) => d.kind === 'webhook');
-  const latest = new Map<string, Delivery>();
-  for (const d of webhookDeliveries) if (!latest.has(d.targetId)) latest.set(d.targetId, d);
   const endpointName = (id: string) => endpoints.find((e) => e.id === id)?.name ?? id;
 
+  const reloadDeliveries = () => {
+    void deliveries.reload();
+    setDeliveriesVersion((value) => value + 1);
+  };
   const reloadDeliveriesSoon = () => {
-    window.setTimeout(() => void deliveries.reload(), 1500);
+    window.setTimeout(reloadDeliveries, 1500);
   };
 
   const toggle = async (e: Endpoint) => {
@@ -351,7 +367,6 @@ export function WebhooksCard() {
             </THead>
             <tbody>
               {endpoints.map((e) => {
-                const last = latest.get(e.id);
                 return (
                   <Tr key={e.id}>
                     <Td>
@@ -381,14 +396,7 @@ export function WebhooksCard() {
                       </div>
                     </Td>
                     <Td>
-                      {last ? (
-                        <div className="flex flex-col gap-0.5">
-                          <StatusPill tone={DELIVERY_TONE[last.status]}>{DELIVERY_LABEL[last.status]}</StatusPill>
-                          <span className="text-[11px] text-muted">{timeAgo(last.createdAt)}</span>
-                        </div>
-                      ) : (
-                        <span className="text-muted">Never</span>
-                      )}
+                      <EndpointLastDelivery id={e.id} version={deliveriesVersion} />
                     </Td>
                     <Td>
                       <StatusPill tone={e.enabled ? 'good' : 'neutral'}>{e.enabled ? 'Enabled' : 'Paused'}</StatusPill>
@@ -448,7 +456,7 @@ export function WebhooksCard() {
         title="Recent deliveries"
         description="The latest webhook deliveries, newest first. Failed deliveries retry with backoff; gave-up ones can be retried by hand."
         action={
-          <Button variant="ghost" size="sm" icon={<RefreshCw size={14} />} onClick={deliveries.reload} loading={deliveries.refreshing}>
+          <Button variant="ghost" size="sm" icon={<RefreshCw size={14} />} onClick={reloadDeliveries} loading={deliveries.refreshing}>
             Refresh
           </Button>
         }
@@ -456,7 +464,7 @@ export function WebhooksCard() {
         <TableFrame
           loading={deliveries.loading}
           error={deliveries.error ? errText(deliveries.error) : null}
-          onRetry={deliveries.reload}
+          onRetry={reloadDeliveries}
           isEmpty={webhookDeliveries.length === 0}
           columns={6}
           empty={

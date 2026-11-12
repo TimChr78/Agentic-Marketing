@@ -119,6 +119,7 @@ const MIGRATION_RELEASES: Record<string, string> = {
   '0085_rollout_notify_state.sql': '0.10.1',
   '0086_message_sent_at_index.sql': '0.10.1',
   '0087_domain_pending_since.sql': '0.14.2',
+  '0089_delivery_kind_index.sql': '0.14.6',
 };
 
 export function releaseForMigrationHead(head: string | null): string | null {
