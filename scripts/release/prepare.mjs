@@ -13,6 +13,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build as buildChangelog, check as checkChangelog, splitSections } from '../changelog.mjs';
+import { normalizeVersion } from './semver.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '../..');
 
@@ -235,6 +236,11 @@ function parseArgs(argv) {
   }
   if (!options.version)
     throw new Error('usage: node scripts/release/prepare.mjs <version> [--date YYYY-MM-DD] [--previous <version>] [--check]');
+  // The same SemVer 2.0.0 check as the workflow's prepare job (#671), so a hand run cannot accept
+  // a version CI would refuse.
+  const version = normalizeVersion(options.version);
+  if (!version) throw new Error(`not a version: ${options.version}`);
+  options.version = version;
   return options;
 }
 

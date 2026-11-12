@@ -55,6 +55,29 @@ describe('ConsentHistoryTable proof privacy (#594)', () => {
     expect(container.textContent).not.toMatch(/\bip:|userAgent/);
   });
 
+  it('renders the fixed import label a role without profiles:pii receives (#672)', () => {
+    const { container } = render(
+      <ConsentHistoryTable
+        records={[
+          {
+            purpose: 'marketing_email',
+            channel: 'email',
+            status: 'granted',
+            basis: 'consent',
+            source: 'import',
+            proof: { import_label: 'Imported', import_batch: 'imp_1' },
+            proofWithheld: true,
+            recordedAt: '2026-11-05T09:00:00.000Z',
+            recordedBy: null,
+          },
+        ]}
+      />,
+    );
+    expect(container.textContent).toContain('import label: Imported');
+    expect(screen.getByText('Hidden for your role')).toBeTruthy();
+    expect(container.textContent).not.toMatch(/Alice Smith/);
+  });
+
   it('prints the full proof when the role may see it', () => {
     const { container } = render(
       <ConsentHistoryTable

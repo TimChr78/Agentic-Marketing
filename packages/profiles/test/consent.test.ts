@@ -32,13 +32,23 @@ describe('currentConsent', () => {
 describe('consentProofFor (Sol 0.14.2 review)', () => {
   it('withholds an allowlisted string that carries an e-mail address', () => {
     expect(consentProofFor({ import_label: 'ada@example.com', system: 'Kit' }, false)).toEqual({
-      proof: { system: 'Kit' },
+      proof: { import_label: 'Imported', system: 'Kit' },
       proofWithheld: true,
     });
   });
 
   it('withholds an allowlisted string that carries a phone number', () => {
-    expect(consentProofFor({ import_label: '+45 12 34 56 78' }, false)).toEqual({ proof: {}, proofWithheld: true });
+    expect(consentProofFor({ import_label: '+45 12 34 56 78' }, false)).toEqual({
+      proof: { import_label: 'Imported' },
+      proofWithheld: true,
+    });
+  });
+
+  it('replaces a free-text import label for a role without profiles:pii (#672)', () => {
+    // A name cannot be detected as personal data, so the label text is never shown.
+    const result = consentProofFor({ import_label: 'Alice Smith', system: 'Kit' }, false);
+    expect(result).toEqual({ proof: { import_label: 'Imported', system: 'Kit' }, proofWithheld: true });
+    expect(JSON.stringify(result)).not.toContain('Alice Smith');
   });
 
   it('returns the same values in full to a role with profiles:pii', () => {
@@ -46,9 +56,14 @@ describe('consentProofFor (Sol 0.14.2 review)', () => {
     expect(consentProofFor(proof, true)).toEqual({ proof, proofWithheld: false });
   });
 
+  it('keeps the import label for a role with profiles:pii (#672)', () => {
+    const proof = { import_label: 'Alice Smith' };
+    expect(consentProofFor(proof, true)).toEqual({ proof, proofWithheld: false });
+  });
+
   it('keeps non-personal allowlisted values and reports nothing withheld', () => {
-    expect(consentProofFor({ import_label: 'privacy ledger test', form_id: 'frm_1' }, false)).toEqual({
-      proof: { import_label: 'privacy ledger test', form_id: 'frm_1' },
+    expect(consentProofFor({ consent_text: 'Newsletter signup', form_id: 'frm_1' }, false)).toEqual({
+      proof: { consent_text: 'Newsletter signup', form_id: 'frm_1' },
       proofWithheld: false,
     });
   });

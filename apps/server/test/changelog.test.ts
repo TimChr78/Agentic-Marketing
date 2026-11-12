@@ -245,6 +245,68 @@ describe('changelog fragments', () => {
     expect(readFragments(fragmentDir)).toEqual([]);
   });
 
+  it('keeps a fragment whose bullet text matches a bullet in another section (#671)', () => {
+    const changelog = `# Changelog
+
+## [0.14.9] - 2026-11-11
+
+### Added
+
+- The ledger keeps the reason for every refusal.
+
+<!-- issues: 700 -->
+`;
+    const { fragmentDir, changelogPath } = workspace(changelog, {
+      '671-security.md': fragment('Security', [671], '- The ledger keeps the reason for every refusal.'),
+    });
+
+    build({ version: '0.14.9', date: '2026-11-12', dir: fragmentDir, changelogPath });
+
+    const next = readFileSync(changelogPath, 'utf8');
+    // The matching Added bullet is not a fold of the Security bullet: both stay, each in its section.
+    expect(next).toMatch(/### Added\n\n- The ledger keeps the reason for every refusal\./);
+    expect(next).toMatch(/### Security\n\n- The ledger keeps the reason for every refusal\./);
+    expect(next.match(/The ledger keeps the reason for every refusal\./g)).toHaveLength(2);
+    expect(next).toContain('<!-- issues: 671, 700 -->');
+    expect(readFragments(fragmentDir)).toEqual([]);
+  });
+
+  it('records the issue marker of a fragment whose bullet is already folded (#671)', () => {
+    const changelog = `# Changelog
+
+## [0.14.9] - 2026-11-11
+
+### Fixed
+
+- Already folded.
+`;
+    const { fragmentDir, changelogPath } = workspace(changelog, {
+      '671-issues.md': fragment('Fixed', [671], '- Already folded.'),
+    });
+
+    build({ version: '0.14.9', date: '2026-11-12', dir: fragmentDir, changelogPath });
+
+    const next = readFileSync(changelogPath, 'utf8');
+    // Dropping the fragment as already folded must not drop the issue it names.
+    expect(next).toContain('<!-- issues: 671 -->');
+    expect(next.match(/- Already folded\./g)).toHaveLength(1);
+    expect(readFragments(fragmentDir)).toEqual([]);
+  });
+
+  it('refuses a version that is not full SemVer 2.0.0 before touching anything (#671)', () => {
+    const { fragmentDir, changelogPath } = workspace(base, {
+      '1-new.md': fragment('Added', [1], '- New addition.'),
+    });
+    const before = readFileSync(changelogPath, 'utf8');
+
+    for (const version of ['0.14.3-..', '01.2.3', '1.2', 'v1.2.3', '1.2.3-']) {
+      expect(() => build({ version, date: '2026-11-12', dir: fragmentDir, changelogPath }), version).toThrow(/not a version/);
+    }
+
+    expect(readFileSync(changelogPath, 'utf8')).toBe(before);
+    expect(readFragments(fragmentDir).map((item) => item.name)).toEqual(['1-new.md']);
+  });
+
   it('handles the empty case and leaves the files alone on a dry run', () => {
     const empty = workspace('# Changelog\n\nIntro.\n\n## [0.12.0] - 2026-11-07\n\n### Added\n\n- Previous release.\n');
     const result = build({ version: '0.13.0', date: '2026-11-08', dir: empty.fragmentDir, changelogPath: empty.changelogPath });
