@@ -11,18 +11,24 @@ const SNS_HOST = /^sns\.[a-z0-9-]+\.amazonaws\.com(\.cn)?$/;
 /**
  * Successfully fetched signing certificates, keyed by URL. Only a verified, non-empty PEM is
  * cached: a failed request, a non-OK status or an error body must never poison the URL, or every
- * later SNS webhook for the process would be rejected (#634). A handful of AWS certificates is
- * all a workspace sees, so the map is bounded as an LRU.
+ * later SNS webhook for the process would be rejected (#634). Certificates are per AWS region and
+ * a multi-workspace install spans several, so the map holds comfortably more than a region set.
  */
-const CERTS_MAX = 8;
+const CERTS_MAX = 64;
 /** A bad signature may force one refetch per certificate URL in this window. */
 const REFETCH_COOLDOWN_MS = 60_000;
 interface CertEntry {
   pem: string;
-  /** When a signature failure last forced a refetch; null for an ordinary first fetch. */
-  refetchedAt: number | null;
 }
 const certs = new Map<string, CertEntry>();
+/**
+ * When a signature failure last forced a refetch, keyed by URL. Kept out of the certificate map on
+ * purpose: the throttle used to live on the cached entry, so churning more URLs than the map holds
+ * handed the once-per-minute bound back to the flood (#755). Bounded, and each entry expires on its
+ * own, so a forgotten URL cannot keep an attacker's slot forever.
+ */
+const refetchedAt = new Map<string, number>();
+const REFETCHES_MAX = 1024;
 /** One request per URL while a fetch is in flight, so a burst of webhooks cannot fan out. */
 const inflight = new Map<string, Promise<string>>();
 
@@ -58,7 +64,7 @@ function fetchCertOnce(url: string, deps: AdapterDeps): Promise<string> {
 }
 
 /** The cached PEM, or a fresh one; `cached` tells the caller whether a failed verify may refetch. */
-async function getCert(url: string, deps: AdapterDeps, force: boolean, now: number): Promise<{ pem: string; cached: boolean }> {
+async function getCert(url: string, deps: AdapterDeps, force: boolean): Promise<{ pem: string; cached: boolean }> {
   const hit = force ? undefined : certs.get(url);
   if (hit !== undefined) {
     // Refresh the insertion order, so the entry a flood of URLs would evict is the least used.
@@ -68,13 +74,34 @@ async function getCert(url: string, deps: AdapterDeps, force: boolean, now: numb
   }
   const pem = await fetchCertOnce(url, deps);
   certs.delete(url);
-  certs.set(url, { pem, refetchedAt: force ? now : null });
+  certs.set(url, { pem });
   while (certs.size > CERTS_MAX) {
     const oldest = certs.keys().next().value;
     if (oldest === undefined) break;
     certs.delete(oldest);
   }
   return { pem, cached: false };
+}
+
+/** One refetch per certificate URL per minute, whatever happened to the cached PEM since (#755). */
+function refetchThrottled(url: string, now: number): boolean {
+  const at = refetchedAt.get(url);
+  if (at === undefined) return false;
+  if (now - at >= REFETCH_COOLDOWN_MS) {
+    refetchedAt.delete(url);
+    return false;
+  }
+  return true;
+}
+
+function recordRefetch(url: string, now: number): void {
+  refetchedAt.delete(url);
+  refetchedAt.set(url, now);
+  while (refetchedAt.size > REFETCHES_MAX) {
+    const oldest = refetchedAt.keys().next().value;
+    if (oldest === undefined) break;
+    refetchedAt.delete(oldest);
+  }
 }
 
 function verifyWith(cert: string, stringToSign: string, m: Record<string, string>): boolean {
@@ -101,7 +128,7 @@ export async function verifySnsMessage(m: Record<string, string>, deps: AdapterD
   let cert: { pem: string; cached: boolean };
   const now = deps.now?.() ?? Date.now();
   try {
-    cert = await getCert(m.SigningCertURL, deps, false, now);
+    cert = await getCert(m.SigningCertURL, deps, false);
   } catch {
     // The failure is not cached, so the next webhook fetches again instead of staying poisoned.
     return false;
@@ -111,13 +138,12 @@ export async function verifySnsMessage(m: Record<string, string>, deps: AdapterD
   // A cached certificate may be stale (AWS rotates one behind a stable URL) or was verified
   // against a body cached by an older build. Refetch once, but only once per URL per minute: a
   // flood of bad signatures must not turn into a flood of requests to AWS (#634 review).
-  const entry = certs.get(m.SigningCertURL);
-  if (entry && entry.refetchedAt !== null && now - entry.refetchedAt < REFETCH_COOLDOWN_MS) return false;
+  if (refetchThrottled(m.SigningCertURL, now)) return false;
   // Start the cooldown before awaiting, so concurrent bad signatures join this one rather than
   // starting their own refetch even if the fetch is slow or fails.
-  if (entry) entry.refetchedAt = now;
+  recordRefetch(m.SigningCertURL, now);
   try {
-    cert = await getCert(m.SigningCertURL, deps, true, now);
+    cert = await getCert(m.SigningCertURL, deps, true);
   } catch {
     return false;
   }

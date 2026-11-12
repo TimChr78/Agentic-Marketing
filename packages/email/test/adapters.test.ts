@@ -261,6 +261,37 @@ describe('SNS certificate cache (#634)', () => {
     expect(calls).toBe(3);
   });
 
+  it('keeps the refetch throttle when churn evicts the certificate URL (#755)', async () => {
+    const url = certUrl(90);
+    const good = snsFixture(url);
+    const attacker = snsFixture(url); // same URL, another key: the cached PEM fails to verify
+    let calls = 0;
+    const now = 1_000_000;
+    const deps = {
+      fetch: (async () => {
+        calls++;
+        return new Response(good.pem);
+      }) as typeof globalThis.fetch,
+      now: () => now,
+    };
+
+    expect(await verifySnsMessage(good.m, deps)).toBe(true); // the initial fetch
+    expect(await verifySnsMessage(attacker.m, deps)).toBe(false); // one forced refetch starts the cooldown
+    expect(calls).toBe(2);
+
+    // Certificates are per AWS region: more distinct URLs than the cache holds evict this one, and
+    // the throttle used to live on the evicted entry. SigningCertURL is not part of the signature,
+    // so the same fixture verifies against every churned URL.
+    for (let i = 0; i < 70; i++) expect(await verifySnsMessage({ ...good.m, SigningCertURL: certUrl(200 + i) }, deps)).toBe(true);
+
+    // A miss fetches once (there is no PEM to verify against); that fetch is not a refetch.
+    expect(await verifySnsMessage(attacker.m, deps)).toBe(false);
+    const afterMiss = calls;
+    // A hit inside the same minute must not refetch: the throttle survived the eviction.
+    expect(await verifySnsMessage(attacker.m, deps)).toBe(false);
+    expect(calls).toBe(afterMiss);
+  });
+
   it('coalesces concurrent fetches for the same certificate URL into one request', async () => {
     const { m, pem } = snsFixture(certUrl(5));
     let calls = 0;
