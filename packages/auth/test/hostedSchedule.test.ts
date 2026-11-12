@@ -7,6 +7,7 @@ import { describeHostedSchedule, nextHostedRunAt, parseHostedSchedule } from '..
 // rebuilt a formatter for every minute it scanned (#622).
 
 const at = (iso: string) => new Date(iso);
+const HOUR = 3_600_000;
 
 describe('hosted schedules', () => {
   it('parses and describes the three forms', () => {
@@ -34,20 +35,88 @@ describe('an hourly schedule runs at minute 0 of every hour (#621)', () => {
   });
 });
 
-describe('daylight-saving transitions', () => {
-  // Europe/Stockholm: 2026-03-29 02:00 CET jumps to 03:00 CEST, so 02:30 does not exist that day.
-  it('uses the next matching day when a local time is skipped', () => {
-    expect(nextHostedRunAt('daily:02:30', 'Europe/Stockholm', at('2026-03-28T12:00:00Z'))).toEqual(at('2026-03-30T00:30:00Z'));
+describe('resolving a wall time around a transition', () => {
+  it('finds a valid run on the spring-forward day in New York', () => {
+    // 2026-03-08 02:00 EST jumps to 03:00 EDT; 03:30 exists on the 8th at 07:30Z.
+    expect(nextHostedRunAt('daily:03:30', 'America/New_York', at('2026-03-07T18:00:00Z'))).toEqual(at('2026-03-08T07:30:00Z'));
   });
 
-  // 2026-10-25 03:00 CEST falls back to 02:00 CET: 02:30 happens twice, at 00:30Z and 01:30Z.
-  it('takes the first occurrence when a local time repeats', () => {
-    expect(nextHostedRunAt('daily:02:30', 'Europe/Stockholm', at('2026-10-24T12:00:00Z'))).toEqual(at('2026-10-25T00:30:00Z'));
+  it('takes the first repeated occurrence in a 30-minute DST zone', () => {
+    // Lord Howe: 2026-04-05 02:00 LHDT falls back to 01:30 LHST, so 01:45 happens at 14:45Z and
+    // 15:15Z. The first is the next run.
+    expect(nextHostedRunAt('daily:01:45', 'Australia/Lord_Howe', at('2026-04-04T12:00:00Z'))).toEqual(at('2026-04-04T14:45:00Z'));
+    expect(nextHostedRunAt('weekly:sun:01:45', 'Australia/Lord_Howe', at('2026-04-04T12:00:00Z'))).toEqual(at('2026-04-04T14:45:00Z'));
   });
 
-  it('keeps a weekly schedule on its local weekday across a transition', () => {
-    // Sunday 2026-03-29 07:00 CEST (05:00Z) is the first matching time after Saturday.
-    expect(nextHostedRunAt('weekly:sun:07:00', 'Europe/Stockholm', at('2026-03-28T12:00:00Z'))).toEqual(at('2026-03-29T05:00:00Z'));
+  it('finds the remaining repeated occurrence when now is between the two', () => {
+    // New York 2026-11-01: 02:00 EDT falls back to 01:00 EST, so 01:30 happens at 05:30Z and
+    // 06:30Z. now (05:45Z) is after the first.
+    expect(nextHostedRunAt('daily:01:30', 'America/New_York', at('2026-11-01T05:45:00Z'))).toEqual(at('2026-11-01T06:30:00Z'));
+  });
+});
+
+// A minute-by-minute reference over the DST weeks of 2026, kept in the test only. It is the
+// definition the jump-based implementation must reproduce for every zone, including 30-minute and
+// southern-hemisphere transitions.
+const REFERENCE_LIMIT = { hourly: 61, daily: 9 * 24 * 60, weekly: 9 * 24 * 60 } as const;
+
+function referenceParts(date: Date, timeZone: string, formatters: Map<string, Intl.DateTimeFormat>) {
+  let formatter = formatters.get(timeZone);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      weekday: 'short',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    });
+    formatters.set(timeZone, formatter);
+  }
+  const parts = formatter.formatToParts(date);
+  const get = (type: string) => parts.find((p) => p.type === type)?.value ?? '';
+  return { weekday: get('weekday').toLowerCase().slice(0, 3), hour: Number(get('hour')), minute: Number(get('minute')) };
+}
+
+function referenceNext(schedule: string, timeZone: string, now: Date, formatters: Map<string, Intl.DateTimeFormat>): Date {
+  const parsed = parseHostedSchedule(schedule);
+  let candidate = new Date(Math.floor(now.getTime() / 60_000) * 60_000 + 60_000);
+  for (let i = 0; i < REFERENCE_LIMIT[parsed.kind]; i++) {
+    const local = referenceParts(candidate, timeZone, formatters);
+    const matches = parsed.kind === 'hourly' ? local.minute === 0 : local.hour === parsed.hour && local.minute === parsed.minute;
+    if (matches && (parsed.kind !== 'weekly' || local.weekday === parsed.weekday)) return candidate;
+    candidate = new Date(candidate.getTime() + 60_000);
+  }
+  throw new Error(`the reference found no ${schedule} run in ${timeZone} after ${now.toISOString()}`);
+}
+
+describe('the jump-based computation matches a minute scan across the DST weeks of 2026', () => {
+  const zones: { zone: string; transitions: string[] }[] = [
+    { zone: 'UTC', transitions: ['2026-03-08', '2026-11-01'] },
+    { zone: 'America/New_York', transitions: ['2026-03-08', '2026-11-01'] },
+    { zone: 'Europe/London', transitions: ['2026-03-29', '2026-10-25'] },
+    { zone: 'Asia/Kolkata', transitions: ['2026-03-29', '2026-10-25'] },
+    { zone: 'Australia/Lord_Howe', transitions: ['2026-04-05', '2026-10-04'] },
+    { zone: 'Australia/Sydney', transitions: ['2026-04-05', '2026-10-04'] },
+    { zone: 'America/Santiago', transitions: ['2026-04-05', '2026-09-06'] },
+  ];
+  const schedules = ['hourly', 'daily:02:30', 'weekly:sun:02:30'];
+
+  it('agrees on every sampled zone, kind and transition week', () => {
+    const formatters = new Map<string, Intl.DateTimeFormat>();
+    for (const { zone, transitions } of zones) {
+      for (const date of transitions) {
+        const day = new Date(`${date}T00:00:00Z`).getTime();
+        for (const offset of [-12 * HOUR, 0, 12 * HOUR]) {
+          const now = new Date(day + offset);
+          for (const schedule of schedules) {
+            const expected = referenceNext(schedule, zone, now, formatters);
+            const actual = nextHostedRunAt(schedule, zone, now);
+            expect(actual, `${schedule} in ${zone} after ${now.toISOString()}`).toEqual(expected);
+            expect(actual.getTime()).toBeGreaterThan(now.getTime());
+          }
+        }
+      }
+    }
   });
 });
 

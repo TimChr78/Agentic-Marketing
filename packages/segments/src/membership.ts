@@ -1,6 +1,6 @@
+import { createHash } from 'node:crypto';
 import { artifactTypes, type SegmentDefinition } from '@agentic-marketing/artifacts';
 
-import { newId } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
 import type { BusEvent, EventBus, EventStore } from '@agentic-marketing/events';
 import type { ResolvedEvent } from '@agentic-marketing/profiles';
@@ -203,24 +203,29 @@ export async function refreshSegment(tx: Tx, workspaceId: string, seg: Published
   ).rows;
   const entered = rows.filter((r) => r.entered);
   const exited = rows.filter((r) => !r.entered);
-  // A fresh cause per refresh run (#628). The old minute-truncated timestamp gave two refreshes in
-  // the same minute identical messageIds, so JetStream's two-minute dedupe dropped the second run's
-  // events. The events are built once per run, so retrying a publish keeps their ids and dedupes.
-  const runId = newId('run');
+  const announcingExits = exited.filter((r) => !r.merged);
+  // The cause is deterministic for what this transaction is about to commit (#628): the last
+  // committed refresh token plus the sorted change set. A publish that fails rolls the transaction
+  // back, so the retry sees the same token and the same changes and reuses the messageIds (which
+  // JetStream then deduplicates); a refresh that commits moves `segment_runs.at`, so a later run
+  // with the same change set gets new ids. The token only advances with a committed refresh.
+  const [prior] = await tx
+    .select({ at: schema.segmentRuns.at })
+    .from(schema.segmentRuns)
+    .where(and(eq(schema.segmentRuns.workspaceId, workspaceId), eq(schema.segmentRuns.segmentId, seg.id)));
+  const changesKey = [...entered.map((r) => `${r.profile_id}:in`), ...announcingExits.map((r) => `${r.profile_id}:out`)].sort();
+  const cause = `run:${createHash('sha256')
+    .update(`${seg.id}\n${prior?.at.toISOString() ?? 'first'}\n${changesKey.join('\n')}`)
+    .digest('hex')
+    .slice(0, 32)}`;
   const changes: BusEvent[] = [];
   const add = (r: Row, name: string) => {
-    const e = changeEvent(
-      workspaceId,
-      seg,
-      { profileId: r.profile_id, userId: r.user_id, anonymousId: r.anonymous_id },
-      name,
-      `run:${runId}`,
-    );
+    const e = changeEvent(workspaceId, seg, { profileId: r.profile_id, userId: r.user_id, anonymousId: r.anonymous_id }, name, cause);
     if (e) changes.push(e);
   };
   for (const r of entered) add(r, ENTERED);
   // People merged into others leave quietly: they still exist, as part of someone else.
-  for (const r of exited) if (!r.merged) add(r, EXITED);
+  for (const r of announcingExits) add(r, EXITED);
   const run = {
     workspaceId,
     segmentId: seg.id,
