@@ -155,13 +155,29 @@ describe('prefixed dispatch is counted once, under its real route (#609)', () =>
   });
 });
 
-describe('unmatched API paths are JSON, never the SPA (#610)', () => {
+describe('unmatched API paths are JSON, never the SPA (#610, #751)', () => {
   it('answers a GET to a webhook URL with a JSON 404', async () => {
     const res = await request('/hooks/in/x/y');
     expect(res.status).toBe(404);
     expect(res.headers['content-type'] ?? '').toContain('application/json');
     expect(res.body).not.toContain('routing SPA shell');
     expect(JSON.parse(res.body)).toMatchObject({ error: 'not_found' });
+  });
+
+  it('answers an unmatched OAuth path with a JSON 404 instead of the admin shell', async () => {
+    for (const path of ['/oauth/authorize', '/oauth/token-typo', '/oauth/unknown']) {
+      const res = await request(path);
+      expect(res.status, path).toBe(404);
+      expect(res.headers['content-type'] ?? '', path).toContain('application/json');
+      expect(res.body, path).not.toContain('routing SPA shell');
+      expect(JSON.parse(res.body), path).toMatchObject({ error: 'not_found' });
+    }
+  });
+
+  it('keeps a real OAuth callback ahead of the catch-all', async () => {
+    // The route itself exists; without a valid state it fails like before, not with the catch-all.
+    const res = await request('/oauth/callback');
+    expect(res.status).not.toBe(404);
   });
 
   it('answers an unmatched authenticated SCIM path with a JSON 404', async () => {

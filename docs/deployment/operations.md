@@ -162,7 +162,7 @@ In Docker Compose, a Prometheus container on the same project network reaches th
 | `am_process_resident_memory_bytes` | gauge | | Resident set size. |
 | `am_process_heap_used_bytes` | gauge | | JavaScript heap in use. |
 | `am_process_event_loop_lag_seconds` | gauge | | Mean event-loop delay since the previous scrape (10 ms resolution). |
-| `am_http_requests_total` | counter | `route`, `status` | HTTP requests by route group (`auth`, `v1`, `mcp`, `pages`, `public`, `ui`, `well-known`, `healthz`, `readyz`) and status class (`2xx`…`5xx`). |
+| `am_http_requests_total` | counter | `route`, `status` | HTTP requests by route group (`auth`, `v1`, `mcp`, `pages`, `public`, `ui`, `api`, `oauth`, `well-known`, `healthz`, `readyz`) and status class (`2xx`…`5xx`). `api` covers `/api/*` and SCIM (`/scim/*`); `oauth` is the connector and MCP OAuth edge (`/oauth/*`), so identity-provider failures never page as admin-UI regressions. |
 | `am_http_request_duration_seconds` | histogram | `route`, `status` | Request duration, same groups; buckets from 5 ms to 10 s. |
 | `am_commands_total` | counter | `command`, `effect`, `outcome` | Command executions; `outcome` is `ok` or `error` and covers REST, MCP and SCIM because they all run through one executor. |
 | `am_queue_messages_pending` | gauge | | Messages in `queued` or `sending`. |
