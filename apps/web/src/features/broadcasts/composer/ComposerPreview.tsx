@@ -21,6 +21,7 @@ export function ComposerPreview({
   data,
   savedRevision,
   segmentName,
+  segmentLoading,
   topicName,
   onRefreshChecks,
 }: {
@@ -31,6 +32,8 @@ export function ComposerPreview({
   data: ComposerData;
   savedRevision: string;
   segmentName: string | null;
+  /** The segment reference is still being read; "Unavailable" is reserved for a failed or missing read. */
+  segmentLoading: boolean;
   topicName: string;
   onRefreshChecks: () => void;
 }) {
@@ -56,7 +59,10 @@ export function ComposerPreview({
       {content.description && <p className="text-[13px] leading-5 break-words text-fg-2">{content.description}</p>}
       <dl className="grid min-w-0 grid-cols-1 gap-x-4 gap-y-1 text-[12px] leading-[18px] sm:grid-cols-2">
         <MetaRow term="Template" value={templateArtifact?.name ?? 'Not set'} />
-        <MetaRow term="Segment" value={segmentName ?? (content.segment ? 'Unavailable reference' : 'Not set')} />
+        <MetaRow
+          term="Segment"
+          value={segmentName ?? (content.segment ? (segmentLoading ? 'Segment…' : 'Unavailable reference') : 'Not set')}
+        />
         <MetaRow term="Topic" value={topicName} />
         <MetaRow term="Time zone" value={`Shown in ${zone}`} />
       </dl>

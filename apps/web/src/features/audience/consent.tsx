@@ -52,7 +52,7 @@ export function label(value: string): string {
 const named = (value: string | null | undefined, labels: Record<string, string>) => (value ? (labels[value] ?? label(value)) : '');
 
 /** A purpose in the workspace's own words, never its technical key in ordinary label position. */
-function PurposeName({ purpose, purposes }: { purpose: string; purposes?: readonly { key: string; name: string }[] }) {
+export function PurposeName({ purpose, purposes }: { purpose: string; purposes?: readonly { key: string; name: string }[] }) {
   const name = purposes?.find((p) => p.key === purpose)?.name ?? PURPOSE_LABEL[purpose];
   if (name) return <>{name}</>;
   return (

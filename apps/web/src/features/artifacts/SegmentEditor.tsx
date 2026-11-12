@@ -1,9 +1,10 @@
 import { List, Plus, Trash2, Users } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, errText } from '../../app/api';
 import { useSession } from '../../app/session';
 import { useApi } from '../../app/useApi';
 import { Button, Field, IconButton, Input, JsonView, Select, Skeleton, Textarea } from '../../ui';
+import { forgetArtifact, getArtifact, onArtifactsChanged } from '../artifactCache';
 import { CopyPurposeKey } from '../audience/phase26/CopyControl';
 import type { EditorProps } from './ArtifactDetailPage';
 import { ListAudiencePanel } from './ListAudiencePanel';
@@ -637,8 +638,73 @@ interface Estimate {
   loading: boolean;
   count?: number;
   error?: string;
+  /** The published versions of the referenced segments the server resolved, when it reported them. */
+  resolved?: Record<string, number>;
   /** The request was abandoned by an edit or a newer request and will not be shown as current. */
   cancelled?: boolean;
+}
+
+/** Every segment id a condition references, directly or nested under not/all/any. */
+export function referencedSegmentIds(condition: unknown): string[] {
+  const found = new Set<string>();
+  const walk = (node: unknown) => {
+    if (!node || typeof node !== 'object') return;
+    if (Array.isArray(node)) {
+      for (const child of node) walk(child);
+      return;
+    }
+    for (const [key, value] of Object.entries(node)) {
+      if (key === 'segment' && typeof value === 'string') found.add(value);
+      else walk(value);
+    }
+  };
+  walk(condition);
+  return [...found].sort();
+}
+
+/**
+ * The referenced segments' current published versions. A publish in another tab is not a local
+ * change, so the reads are forced on the shared invalidation signal, on focus and when the tab
+ * becomes visible again: an estimate must never outlive the definitions it was counted from.
+ */
+function useReferencedSegmentVersions(ids: string[]) {
+  const key = [...new Set(ids)].sort().join(',');
+  const [versions, setVersions] = useState<Record<string, number | null>>({});
+  const seq = useRef(0);
+  const read = useCallback(async () => {
+    const list = key ? key.split(',') : [];
+    const n = ++seq.current;
+    const entries = await Promise.all(
+      list.map(async (id) => {
+        forgetArtifact(id);
+        try {
+          const artifact = await getArtifact(id);
+          return [id, artifact.publishedVersion ?? null] as const;
+        } catch {
+          return [id, null] as const;
+        }
+      }),
+    );
+    if (n === seq.current) setVersions(Object.fromEntries(entries));
+  }, [key]);
+
+  useEffect(() => {
+    void read();
+  }, [read]);
+  useEffect(() => onArtifactsChanged(() => void read()), [read]);
+  useEffect(() => {
+    const recheck = () => {
+      if (document.visibilityState !== 'hidden') void read();
+    };
+    window.addEventListener('focus', recheck);
+    document.addEventListener('visibilitychange', recheck);
+    return () => {
+      window.removeEventListener('focus', recheck);
+      document.removeEventListener('visibilitychange', recheck);
+    };
+  }, [read]);
+
+  return versions;
 }
 
 function EstimatedSize({ condition }: { condition: Condition }) {
@@ -649,8 +715,30 @@ function EstimatedSize({ condition }: { condition: Condition }) {
   keyRef.current = conditionKey;
   const requestRef = useRef(0);
   const [estimate, setEstimate] = useState<Estimate | null>(null);
-  const current = estimate && estimate.key === conditionKey ? estimate : null;
-  const previous = estimate && estimate.key !== conditionKey ? estimate : null;
+  // The server names the versions it counted against; read them again when the cache says an
+  // artifact changed, on focus and when the tab returns, so a republished reference is noticed
+  // without an edit here (#599).
+  const [resolvedIds, setResolvedIds] = useState<string[]>([]);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the condition is keyed by its JSON form
+  const directReferences = useMemo(() => referencedSegmentIds(condition), [conditionKey]);
+  // Nothing is watched before an estimate exists: there is no count to invalidate, and opening a
+  // segment must not read every reference it names.
+  const hasEstimate = estimate !== null;
+  const watched = useMemo(
+    () => (hasEstimate ? [...new Set([...directReferences, ...resolvedIds])] : []),
+    [hasEstimate, directReferences, resolvedIds],
+  );
+  const liveVersions = useReferencedSegmentVersions(watched);
+  const versionsKnown = watched.every((id) => id in liveVersions);
+  const referencedChanged =
+    !!estimate &&
+    estimate.resolved !== undefined &&
+    estimate.key === conditionKey &&
+    !estimate.loading &&
+    versionsKnown &&
+    watched.some((id) => (liveVersions[id] ?? null) !== (estimate.resolved?.[id] ?? null));
+  const current = estimate && estimate.key === conditionKey && !referencedChanged ? estimate : null;
+  const previous = estimate && !current ? estimate : null;
 
   // Editing the rules abandons a pending estimate: it stops looking current so returning to those
   // rules can never restore a permanently loading state. The response is still ignored below.
@@ -676,7 +764,9 @@ function EstimatedSize({ condition }: { condition: Condition }) {
         settle(request);
         return;
       }
-      setEstimate({ key, request, loading: false, count: r.count });
+      const resolved = r.segments ? Object.fromEntries(r.segments.map((s) => [s.id, s.version])) : undefined;
+      if (resolved) setResolvedIds(Object.keys(resolved));
+      setEstimate({ key, request, loading: false, count: r.count, resolved });
     } catch (e) {
       if (requestRef.current !== request || keyRef.current !== key) {
         settle(request);
@@ -714,7 +804,9 @@ function EstimatedSize({ condition }: { condition: Condition }) {
                 ? 'The previous estimate is no longer current. Estimate the current rules.'
                 : previous.error
                   ? 'The previous estimate failed. Estimate the current rules.'
-                  : `The last estimate was ${(previous.count ?? 0).toLocaleString()} people, for the previous rules.`}
+                  : referencedChanged && previous.count !== undefined
+                    ? `The previous estimate was ${previous.count.toLocaleString()} people, before a referenced segment was republished.`
+                    : `The last estimate was ${(previous.count ?? 0).toLocaleString()} people, for the previous rules.`}
           </p>
         ) : (
           <p className="text-[13px] text-muted">Not estimated yet. Estimate the rules currently shown.</p>
