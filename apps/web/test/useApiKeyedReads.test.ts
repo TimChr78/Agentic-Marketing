@@ -106,11 +106,6 @@ const KEPT: Kept[] = [
     reason: 'Only rendered under a keyed artifact or approval read that unmounts it while the new id loads.',
   },
   {
-    call: 'apps/web/src/features/broadcasts/composer/useComposerData.ts :: artifacts.get :: [templateId, publishedVersion]',
-    reason:
-      'The composer remounts per broadcast; its exact live-version read gates the checklist through contentLoading, and this patch leaves that screen for its own task.',
-  },
-  {
     call: 'apps/web/src/features/broadcasts/composer/useComposerData.ts :: purposes.list :: [refreshKey]',
     reason: 'Explicit refresh counter: the purpose/provider/DNS reads are the same configuration refreshed in place.',
   },
