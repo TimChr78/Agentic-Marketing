@@ -15,6 +15,7 @@ export type HostedWeekday = (typeof DAYS)[number];
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
+const DAY_MS = 24 * HOUR;
 
 const TIME = /^([01]\d|2[0-3]):([0-5]\d)$/;
 const DAY = /^(mon|tue|wed|thu|fri|sat|sun)$/;
@@ -70,13 +71,21 @@ function offsetMs(at: Date, timeZone: string): number {
  * The earliest instant at or after `from` whose wall clock in `timeZone` is the named minute, or
  * null when that wall-clock time does not exist (a daylight-saving spring-forward).
  *
- * Probing the offsets on both sides of the target resolves a repeated wall-clock time (fall-back)
- * to its first occurrence that has not passed, instead of guessing from a UTC correction.
+ * Resolving a wall time needs the zone offset, and the offset is exactly what changes at a
+ * transition. The standard two-pass method reads the offset at the target interpreted as UTC,
+ * subtracts it, then re-reads the offset at that candidate. Probing 24 hours before and after as
+ * well brackets both sides of any transition (30 minutes, 1 hour, 2 hours), so the candidates
+ * include every instant that really maps back to the wall time. A repeated time keeps the earliest
+ * that is not before `from`; a skipped one has no candidate, so the caller moves to the next day.
  */
 function localMinute(y: number, m: number, d: number, hour: number, minute: number, timeZone: string, from: Date): Date | null {
   const wanted = Date.UTC(y, m - 1, d, hour, minute);
   const offsets = new Set<number>();
-  for (const shift of [-3, 0, 3]) offsets.add(offsetMs(new Date(wanted + shift * HOUR), timeZone));
+  for (const shift of [-DAY_MS, 0, DAY_MS]) {
+    const first = offsetMs(new Date(wanted + shift), timeZone);
+    offsets.add(first);
+    offsets.add(offsetMs(new Date(wanted - first), timeZone));
+  }
   let best: Date | null = null;
   for (const offset of offsets) {
     const candidate = new Date(wanted - offset);
