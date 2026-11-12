@@ -152,7 +152,7 @@ export function statusProblems(status, version) {
   const line = now.split('\n').find((l) => new RegExp(`\\*\\*${escaped}\\*\\*`).test(l));
   if (!line) return [`${STATUS_FILE} does not name **${version}** in its "Now" state; update it before the release`];
   const problems = [];
-  if (!/\breleased\b/i.test(line) || /\b(is being|in progress|pending|not yet|to be released)\b/i.test(line))
+  if (!/\breleased\b/i.test(line) || /\b(is being|in progress|pending|not yet|not released|to be released)\b/i.test(line))
     problems.push(`${STATUS_FILE} does not say ${version} is released in its "Now" state; mark it released before the release`);
   if (!new RegExp(`\\bThe last release is v${escaped}(?![0-9A-Za-z.-]*[0-9A-Za-z])`).test(status))
     problems.push(`${STATUS_FILE} does not say "The last release is v${version}"; update the last release line`);
