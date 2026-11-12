@@ -63,3 +63,41 @@ describe('form allowed origins (#597)', () => {
     expect(await json.json()).toEqual({ ok: false, error: 'origin_not_allowed' });
   });
 });
+
+describe('default ports in allowed origins (#769)', () => {
+  async function createForm(name: string, allowedOrigins: string[]) {
+    const created = await api().call('artifacts.create', {
+      type: 'form',
+      name,
+      content: {
+        purposes: ['marketing_email'],
+        doubleOptIn: false,
+        consentText: 'Send me the newsletter.',
+        successUrl: `${SITE}/thanks`,
+        allowedOrigins,
+      },
+    });
+    await api().call('artifacts.requestPublish', { artifactId: created.artifactId, note: 'default port test' });
+    const got = await api().call('artifacts.get', { artifactId: created.artifactId });
+    return { artifactId: created.artifactId, stored: (got.version.content as { allowedOrigins: string[] }).allowedOrigins };
+  }
+
+  it('drops the default https port, so a browser Origin matches', async () => {
+    const { artifactId, stored } = await createForm('Default port site', ['https://MySite.com:443']);
+    expect(stored).toEqual(['https://mysite.com']);
+
+    const res = await fetch(`${t.base}/f/${artifactId}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded', origin: 'https://mysite.com' },
+      body: new URLSearchParams({ email: `port-${Date.now()}@example.com` }).toString(),
+      redirect: 'manual',
+    });
+    expect(res.status).toBe(303);
+    expect(res.headers.get('location')).toBe(`${SITE}/thanks`);
+  });
+
+  it('keeps a non-default port', async () => {
+    const { stored } = await createForm('Preview port site', ['https://MySite.com:8443']);
+    expect(stored).toEqual(['https://mysite.com:8443']);
+  });
+});

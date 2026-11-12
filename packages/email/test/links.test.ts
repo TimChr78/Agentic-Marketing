@@ -57,6 +57,33 @@ describe('UTM tags in the HTML and text parts', () => {
     expect(tracked).toContain(`href="${wrap('https://shop.example.com/bare')}"`);
   });
 
+  // #789: an href is an HTML attribute, so its character references mean the character to the
+  // mail client. Tagging and tracking must read the same URL the reader would, or a numeric `&`
+  // turns into a URL fragment and the query after it is lost.
+  it('decodes decimal, hex and named character references once before tagging and tracking', () => {
+    const wrap = (url: string) => `https://m.example.com/c/tok?u=${encodeURIComponent(url)}`;
+    const url = 'https://shop.example.com/checkout?cart=abc&coupon=SAVE';
+
+    for (const reference of ['&#38;', '&#x26;', '&amp;']) {
+      const html = `<a href="https://shop.example.com/checkout?cart=abc${reference}coupon=SAVE">Pay</a>`;
+
+      const tagged = tagLinks(html, utm, skip);
+      expect(tagged).toBe(
+        '<a href="https://shop.example.com/checkout?cart=abc&amp;coupon=SAVE&amp;utm_source=newsletter&amp;utm_medium=email&amp;utm_campaign=welcome">Pay</a>',
+      );
+
+      const tracked = trackLinks(html, wrap, skip);
+      expect(tracked).toBe(`<a href="${wrap(url)}">Pay</a>`);
+      // The signature covers the real destination, not a "#38;" fragment.
+      expect(tracked).toContain(encodeURIComponent('cart=abc&coupon=SAVE'));
+      expect(tracked).not.toContain('%2338');
+
+      // Tagging then tracking agrees with tracking the original: each pass decodes exactly once.
+      const both = trackLinks(tagged, wrap, skip);
+      expect(both).toContain(encodeURIComponent(url));
+    }
+  });
+
   it('leaves skipped schemes, platform links and non-http hrefs alone in every quoting style', () => {
     const wrap = (url: string) => `https://m.example.com/c/tok?u=${encodeURIComponent(url)}`;
     const html =
