@@ -19,6 +19,7 @@
 import { readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isSemver } from './release/semver.mjs';
 
 export const SECTIONS = ['Added', 'Changed', 'Fixed', 'Security', 'Removed'];
 export const FRAGMENT_NAME = /^\d+-[a-z0-9]+(?:-[a-z0-9]+)*\.md$/;
@@ -218,14 +219,35 @@ function sectionIssues(section) {
   ].sort((a, b) => a - b);
 }
 
-/** Whether every bullet line of a fragment is already in the section text. */
-function sectionHasFragment(section, fragment) {
-  const lines = new Set(section.split(/\r?\n/).map((line) => line.trim()));
+/**
+ * Whether every bullet line of a fragment is already in its own subsection of the section body.
+ * Matching on the section too matters (#671): a Security fragment whose bullet text repeats an
+ * Added bullet is a new entry, not a fold of the old one.
+ */
+function sectionHasFragment(bulletsByHeading, fragment) {
+  const lines = bulletsByHeading.get(fragment.section);
+  if (!lines) return false;
   return fragment.text
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean)
     .every((line) => lines.has(line));
+}
+
+/** The bullet lines of a section body per `### Heading`, without throwing on bare text. */
+function bulletsByHeading(body) {
+  const map = new Map();
+  let heading = null;
+  for (const line of body.split(/\r?\n/)) {
+    const match = /^### (.+)$/.exec(line);
+    if (match) {
+      heading = match[1].trim();
+      if (!map.has(heading)) map.set(heading, new Set());
+      continue;
+    }
+    if (heading) map.get(heading).add(line.trim());
+  }
+  return map;
 }
 
 /** Replace a file atomically: a killed process leaves either the old file or the complete new one. */
@@ -262,7 +284,7 @@ export function build({
   upgradeBlock,
   dryRun = false,
 }) {
-  if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version)) throw new Error(`not a version: ${version}`);
+  if (!isSemver(version)) throw new Error(`not a version: ${version}`);
   const day = date ?? new Date().toISOString().slice(0, 10);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) throw new Error(`not a date (YYYY-MM-DD): ${day}`);
 
@@ -277,8 +299,15 @@ export function build({
 
   if (existingSection) {
     const body = existingSection.lines.join('\n');
-    const novel = fragments.filter((fragment) => !sectionHasFragment(body, fragment));
-    if (!novel.length) {
+    const bullets = bulletsByHeading(body);
+    const novel = fragments.filter((fragment) => !sectionHasFragment(bullets, fragment));
+    const recorded = sectionIssues(body);
+    // A folded fragment still names its issue (#671): if the marker lost one, the section is
+    // rebuilt so the fragment can be dropped without losing the issue it recorded.
+    const missing = [...new Set(fragments.flatMap((fragment) => fragment.issues))].filter(
+      (issue) => Number.isInteger(issue) && !recorded.includes(issue),
+    );
+    if (!novel.length && !missing.length) {
       // Nothing was lost: the crash left fragments whose bullets the section already has.
       if (!dryRun) for (const fragment of fragments) rmSync(join(dir, fragment.name));
       const section = `${existingSection.heading}\n${body}`.trim();
@@ -295,7 +324,7 @@ export function build({
       unreleased: preserved,
       fragments: novel,
       upgradeBlock,
-      issues: [...sectionIssues(body), ...novel.flatMap((fragment) => fragment.issues)],
+      issues: [...recorded, ...missing, ...novel.flatMap((fragment) => fragment.issues)],
     });
     const next =
       [

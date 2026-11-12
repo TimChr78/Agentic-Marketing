@@ -69,12 +69,20 @@ const PUBLIC_PROOF_KEYS = new Set([
 ]);
 
 /**
+ * The label a role without `profiles:pii` sees instead of an import's own name. An import label is
+ * free text (`"Alice Smith"`, `"Kit export for ADA"`) and a name cannot be detected the way an
+ * e-mail address or phone number can, so the value is never shown (#672).
+ */
+export const REDACTED_IMPORT_LABEL = 'Imported';
+
+/**
  * The consent proof a principal may see. Without `profiles:pii` only the evidence keys above with
  * primitive values survive: IP addresses, user agents, page URLs, call notes and any other
  * key that could carry personal data are removed before the response leaves the server. An
  * allowlisted key name is not proof on its own — `{import_label: "ada@example.com"}` still holds
- * personal data — so each kept string is checked with the shared detector. The `proofWithheld`
- * flag lets the UI say so without naming or rendering what was removed.
+ * personal data — so each kept string is checked with the shared detector, and `import_label`,
+ * whose value is always free text, becomes a fixed label. The `proofWithheld` flag lets the UI say
+ * so without naming or rendering what was removed.
  */
 export function consentProofFor(
   proof: Record<string, unknown> | null | undefined,
@@ -92,6 +100,12 @@ export function consentProofFor(
     // A nested object could hide personal data under a harmless key name: fail closed.
     if (value === null || value === undefined || typeof value === 'object') {
       withheld = true;
+      continue;
+    }
+    // Free text such as a name in an import label is not detectable, so it is replaced, not shown.
+    if (key === 'import_label') {
+      if (value !== REDACTED_IMPORT_LABEL) withheld = true;
+      visible[key] = REDACTED_IMPORT_LABEL;
       continue;
     }
     // The key is allowlisted, but the value can still be an e-mail address, a phone number, etc.

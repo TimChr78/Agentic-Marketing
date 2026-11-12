@@ -3,7 +3,7 @@ import type { Brand } from '@agentic-marketing/artifacts';
 import { resolveBrand } from '@agentic-marketing/artifacts';
 import { renderTemplate } from '@agentic-marketing/email';
 import { type DefaultTreeAdapterTypes, parse, parseFragment } from 'parse5';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { expectLinear } from '../../../test-support/linear';
 import {
   activeUrl,
@@ -11,6 +11,7 @@ import {
   emailParts,
   MAX_EMAIL_LENGTH,
   MAX_EMAIL_NESTING,
+  MAX_EMAIL_PARSE_MS,
   renderWebVersion,
   sanitiseEmailBody,
   scanEmailBody,
@@ -867,5 +868,88 @@ describe('archive sanitising: every tree-construction path is bounded (HY4 re-ch
     const once = sanitiseEmailBody(html);
     expect(sanitiseEmailBody(html)).toBe(once);
     expect(once.includes('&lt;')).toBe(false);
+  });
+});
+
+describe('archive sanitising: the scanner decodes every entity parse5 trims (#673)', () => {
+  // parse5 decodes named entities and `.trim()` strips the characters, while the scanner only
+  // decoded a handful. `<meta http-equiv="&nbsp;refresh">` therefore passed the scanner and took
+  // the cleaning path. Every entry here decodes to whitespace JavaScript's `trim()` removes.
+  it.each([
+    ['nbsp', '&nbsp;'],
+    ['NonBreakingSpace', '&NonBreakingSpace;'],
+    ['ensp', '&ensp;'],
+    ['emsp', '&emsp;'],
+    ['emsp13', '&emsp13;'],
+    ['emsp14', '&emsp14;'],
+    ['numsp', '&numsp;'],
+    ['puncsp', '&puncsp;'],
+    ['thinsp', '&thinsp;'],
+    ['ThinSpace', '&ThinSpace;'],
+    ['VeryThinSpace', '&VeryThinSpace;'],
+    ['hairsp', '&hairsp;'],
+    ['MediumSpace', '&MediumSpace;'],
+    ['ThickSpace', '&ThickSpace;'],
+  ])('flags a refresh separated by %s in the scanner', (_label, entity) => {
+    const tag = `<meta http-equiv="${entity}refresh" content="0;url=https://evil.example/">`;
+
+    expect(scanEmailBody(tag)).toBe('');
+    expect(sanitiseEmailBody(tag)).toBe('');
+  });
+
+  it('keeps an ordinary http-equiv whose value merely contains an entity', () => {
+    const tag = '<meta http-equiv="content-type" content="text/html">';
+    expect(scanEmailBody(tag)).toBe(tag);
+  });
+});
+
+describe('archive sanitising: the time backstop is a hard ceiling (#673)', () => {
+  // The scanner builds its output without touching the tree adapter, so a clock checked only in
+  // the adapter never saw a long tag run. `</p>` with a deep stack is the shape from the issue.
+  const endTagRun = (n: number) => `${'<b>'.repeat(250)}${'</p>'.repeat(n)}`;
+
+  it('fails closed in the scanner before the judge parses a long end-tag run', () => {
+    let now = 0;
+    const spy = vi.spyOn(performance, 'now').mockImplementation(() => {
+      now += MAX_EMAIL_PARSE_MS / 4;
+      return now;
+    });
+    let judged = false;
+    try {
+      const out = sanitiseEmailBody(endTagRun(200_000), () => {
+        judged = true;
+        return false;
+      });
+
+      expect(out.startsWith('&lt;b&gt;')).toBe(true);
+      // Reaching the judge would mean the scanner spent the whole budget without noticing.
+      expect(judged).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+
+    // The clock is only mocked for the call above.
+    expect(sanitiseEmailBody('<p>ok</p>')).toBe('<p>ok</p>');
+  });
+});
+
+describe('archive sanitising: end tags that walk a long open stack are bounded (#673)', () => {
+  // Each `</div>` with no div open makes parse5 scan the whole open-element stack (it calls
+  // getNamespaceURI per level) and insert nothing, so the insert-path clock check never fires.
+  const deepEndTags = (n: number) => `${'<b>'.repeat(250)}${'</div>'.repeat(n)}`;
+
+  it('fails closed on a deep stack followed by many end tags', () => {
+    const out = sanitiseEmailBody(deepEndTags(10_000));
+
+    expect(out.startsWith('&lt;b&gt;')).toBe(true);
+  });
+
+  it('keeps a realistic document with repeated end tags byte-identical', () => {
+    const html = `${'<div><p>x</p></div>'.repeat(100)}`;
+    expect(sanitiseEmailBody(html)).toBe(html);
+  });
+
+  it('stays linear when end tags walk a deep stack', () => {
+    expectLinear(deepEndTags, (html) => sanitiseEmailBody(html), 2_500);
   });
 });

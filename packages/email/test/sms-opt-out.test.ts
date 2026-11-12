@@ -41,6 +41,33 @@ describe('marketing SMS opt-out footer (#635)', () => {
     }
   });
 
+  it('does not add a second footer when boilerplate sits between the instruction and its purpose (#672)', async () => {
+    for (const body of [
+      'Big sale this week. Reply STOP. Msg & data rates may apply. To opt out',
+      'Big sale this week. Text STOP. Msg and data rates may apply. To unsubscribe.',
+      'Big sale this week. Reply STOP; Msg freq varies; to opt out.',
+      'Big sale this week. Reply STOP. Msg & data rates may apply. Msg freq varies. To opt out.',
+    ]) {
+      const rendered = (await renderSms(template(body), {}, true)).body;
+      expect(rendered, body).toBe(body);
+    }
+  });
+
+  it('still adds the footer when the parts never form a complete instruction (#672)', async () => {
+    for (const body of [
+      // No instruction verb and stop keyword: the purpose alone is not an opt-out.
+      'Big sale this week. Msg & data rates may apply. To opt out',
+      // An instruction verb without a stop keyword is not an instruction.
+      'Big sale this week. Reply soon. Msg & data rates may apply. To opt out',
+      // An instruction with no purpose after it is not a split instruction.
+      'Big sale this week. Msg & data rates may apply. Reply STOP.',
+      // The purpose comes before the instruction, not after it.
+      'Big sale this week. To opt out, reply STOP.',
+    ]) {
+      expect((await renderSms(template(body), {}, true)).body, body).toBe(`${body}${STOP_FOOTER}`);
+    }
+  });
+
   it('does not duplicate the footer it rendered itself', async () => {
     const once = (await renderSms(template('Big sale this week.'), {}, true)).body;
     expect(once.endsWith(STOP_FOOTER)).toBe(true);
@@ -107,5 +134,15 @@ describe('trailing carrier boilerplate is stripped in linear time (CodeQL js/red
     expect(hasOptOutInstruction('Sale today. Reply STOP to opt out. Msg & data rates may apply.')).toBe(true);
     expect(hasOptOutInstruction('Sale today. Reply STOP to opt out. Msg&data rates may apply. Msg freq varies.')).toBe(true);
     expect(hasOptOutInstruction('Stop by before the deals end! Msg & data rates may apply.')).toBe(false);
+  });
+
+  it('finds a split instruction with boilerplate in between in linear time (#672)', () => {
+    // The repeat sits before the instruction, so the instruction and its purpose stay in the tail
+    // window at every size: the same recognised path runs at n and 4n, and the growth is linear.
+    expectLinear(
+      (n) => `Sale today. ${'Msg & data rates may apply. '.repeat(n)}Reply STOP. Msg & data rates may apply. To opt out`,
+      (body) => hasOptOutInstruction(body),
+      20_000,
+    );
   });
 });

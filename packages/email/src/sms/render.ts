@@ -59,10 +59,49 @@ function stripTrailingBoilerplate(body: string): string {
   return text;
 }
 
+// The instruction may also be split by boilerplate: "Reply STOP. Msg & data rates may apply. To opt
+// out" (#672). Split a short tail into clauses and walk them once, so the cost stays linear: no
+// regex may repeat across the input, and only the last few clauses are ever examined.
+const CLAUSE_WINDOW = 300;
+const MAX_CLAUSES = 6;
+const INSTRUCTION_CLAUSE = new RegExp(`^(?:reply|text|txt|send|respond)\\s+${STOP_KEYWORD}$`, 'i');
+const PURPOSE_CLAUSE = new RegExp(`^${OPT_OUT_PURPOSE}\\b`, 'i');
+const BOILERPLATE_SENTENCE = new RegExp(
+  `^(?:(?:standard|carrier)\\s+)?(?:(?:msg|message|text|sms)\\s*(?:&|and)?\\s*)?` +
+    '(?:data\\s*rates?\\s*may\\s*apply|freq(?:uency)?\\s*varies)$',
+  'i',
+);
+
+function tailClauses(body: string): string[] {
+  const start = Math.max(0, body.length - CLAUSE_WINDOW);
+  return body
+    .slice(start)
+    .split(/[.!?;]+/)
+    .map((clause) => clause.trim())
+    .filter(Boolean)
+    .slice(-MAX_CLAUSES);
+}
+
+/** A split instruction: an instruction clause, boilerplate between, then the purpose. */
+function hasSplitInstruction(body: string): boolean {
+  const clauses = tailClauses(body);
+  for (let i = 0; i < clauses.length; i += 1) {
+    if (!INSTRUCTION_CLAUSE.test(clauses[i])) continue;
+    for (let j = i + 1; j < clauses.length; j += 1) {
+      if (PURPOSE_CLAUSE.test(clauses[j])) {
+        // Only carrier boilerplate may follow the purpose for it to still end the message.
+        return clauses.slice(j + 1).every((clause) => BOILERPLATE_SENTENCE.test(clause));
+      }
+      if (!BOILERPLATE_SENTENCE.test(clauses[j])) break;
+    }
+  }
+  return false;
+}
+
 /** True when the body already ends with a real opt-out instruction (not merely the word "stop"). */
 export function hasOptOutInstruction(body: string): boolean {
   const tail = stripTrailingBoilerplate(body);
-  return tail.endsWith(STOP_FOOTER) || OPT_OUT_TAIL.test(tail);
+  return tail.endsWith(STOP_FOOTER) || OPT_OUT_TAIL.test(tail) || hasSplitInstruction(tail);
 }
 
 export function validateSmsTemplate(t: SmsTemplate): string[] {
