@@ -401,23 +401,19 @@ export const adPerformance = defineCommand({
         const at = chunk.map((r) => r.at);
         const touches = await (
           await ch.query({
-            // Touches with no campaign are dropped before the per-timestamp choice, so an
-            // identify at the same timestamp cannot mask a page touch. argMax on event_id then
-            // makes two campaign touches at the same timestamp deterministic (the greater event
-            // id wins) before the ASOF join picks the latest one. The right side is bounded above
-            // by the newest conversion in the chunk, and the outer predicate drops a latest touch
-            // that is older than its conversion's window, which is exactly when no touch in the
-            // window exists.
-            query: `SELECT idx, campaign, source
+            // The conversion chunk is the join's build side (the right table of a hash join), and
+            // the touches stream past it: ClickHouse holds one chunk of conversions and one
+            // aggregate per conversion, never a visitor's touch history, however long it is
+            // (0.14.12 review round 3). Touches with no campaign are dropped first, so an identify
+            // cannot mask a page touch; argMax on (timestamp, event_id) picks the latest touch in
+            // the window, and the greater event id wins a same-timestamp tie. The touch scan is
+            // bounded by the chunk's window, and a conversion with no touch in its window has no
+            // row (unattributed).
+            query: `SELECT c.idx AS idx,
+                           argMax(t.touch_campaign, (t.timestamp, t.event_id)) AS campaign,
+                           argMax(t.touch_source, (t.timestamp, t.event_id)) AS source
                     FROM (
-                      SELECT tupleElement(z, 1) AS idx, tupleElement(z, 2) AS visitor,
-                             toDateTime64(tupleElement(z, 3), 3, 'UTC') AS at
-                      FROM (SELECT arrayJoin(arrayZip({idxs:Array(UInt32)}, {visitors:Array(String)}, {times:Array(String)})) AS z)
-                    ) AS c
-                    ASOF LEFT JOIN (
-                      SELECT anonymous_id, timestamp,
-                             argMax(touch_campaign, event_id) AS campaign,
-                             argMax(touch_source, event_id) AS source
+                      SELECT anonymous_id, timestamp, event_id, touch_campaign, touch_source
                       FROM (
                         SELECT anonymous_id, timestamp, event_id,
                                coalesce(nullIf(decodeURLFormComponent(extractURLParameter(toString(context.page.url), 'utm_campaign')), ''), toString(context.campaign.name)) AS touch_campaign,
@@ -427,12 +423,17 @@ export const adPerformance = defineCommand({
                           AND timestamp >= {from:DateTime64(3, 'UTC')} AND timestamp <= {to:DateTime64(3, 'UTC')}
                       )
                       WHERE touch_campaign != ''
-                      GROUP BY anonymous_id, timestamp
-                      ORDER BY anonymous_id, timestamp
                     ) AS t
-                    ON c.visitor = t.anonymous_id AND c.at >= t.timestamp
-                    WHERE t.timestamp >= c.at - toIntervalMillisecond({windowMs:UInt64})
-                    ORDER BY idx`,
+                    INNER JOIN (
+                      SELECT tupleElement(z, 1) AS idx, tupleElement(z, 2) AS visitor,
+                             toDateTime64(tupleElement(z, 3), 3, 'UTC') AS at
+                      FROM (SELECT arrayJoin(arrayZip({idxs:Array(UInt32)}, {visitors:Array(String)}, {times:Array(String)})) AS z)
+                    ) AS c
+                    ON t.anonymous_id = c.visitor
+                    WHERE t.timestamp <= c.at AND t.timestamp >= c.at - toIntervalMillisecond({windowMs:UInt64})
+                    GROUP BY idx
+                    ORDER BY idx
+                    SETTINGS join_algorithm = 'hash'`,
             query_params: {
               ws,
               idxs: chunk.map((r) => r.idx),
