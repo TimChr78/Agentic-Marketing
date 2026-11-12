@@ -54,7 +54,7 @@ beforeAll(async () => {
 
   receiver = createServer((req, res) => {
     hits.push(`${req.method} ${req.url}`);
-    if (req.url === '/missing') return res.writeHead(404).end();
+    if (req.url === '/missing' || req.url === '/missing-block') return res.writeHead(404).end();
     if (req.url === '/forbidden') return res.writeHead(403).end();
     res.writeHead(200).end('ok');
   });
@@ -156,6 +156,41 @@ describe('templates.check', () => {
     const r = await t.api(owner).call('templates.check', { artifactId, checkLinks: true });
     expect(hits.filter((h) => h.includes('prf_'))).toEqual([]);
     expect(r.findings.filter((f) => f.category === 'links' && f.severity !== 'info')).toEqual([]);
+  });
+
+  it('checks links when a reusable block supplies the footer (#782)', async () => {
+    const api = t.api(owner);
+    const block = await api.call('artifacts.create', {
+      type: 'email_block',
+      name: 'Footer with a link',
+      content: {
+        category: 'footer',
+        mjml: `<mj-section><mj-column>
+          <mj-text><a href="${links}/missing-block">Read the archive</a></mj-text>
+          <mj-text><a href="{{ unsubscribe_url }}">Unsubscribe</a></mj-text>
+        </mj-column></mj-section>`,
+        params: [],
+      },
+    });
+    await api.call('artifacts.requestPublish', { artifactId: block.artifactId, note: 'block footer' });
+
+    const created = await api.call('artifacts.create', {
+      type: 'email_template',
+      name: 'Block footer',
+      content: {
+        purpose: 'marketing_email',
+        subject: 'A calm subject with a block footer',
+        mjml: `<mjml><mj-body><mj-section><mj-column><mj-text>Hi</mj-text></mj-column></mj-section>{% block '${block.artifactId}' %}</mj-body></mjml>`,
+      },
+    });
+    hits = [];
+    const r = await api.call('templates.check', { artifactId: created.artifactId, checkLinks: true });
+
+    // The check completes and reports on the block's link, instead of failing with invalid_input.
+    expect(r.findings).toContainEqual(
+      expect.objectContaining({ category: 'links', severity: 'warning', message: expect.stringContaining('HTTP 404') }),
+    );
+    expect(hits.some((h) => h.endsWith('/missing-block'))).toBe(true);
   });
 
   it('refuses a template that points at an asset which no longer exists, and allows a real one', async () => {
