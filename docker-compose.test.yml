@@ -89,7 +89,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
-    mem_limit: 512m
+    mem_limit: 1g
 
   openbao:
     image: openbao/openbao:2.6.4
