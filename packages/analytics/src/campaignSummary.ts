@@ -1,5 +1,5 @@
 import { publishedSingleton, suppressHoldout } from '@agentic-marketing/artifacts';
-import { type IdentityMap, identityUnresolvedNote } from '@agentic-marketing/campaigns';
+import { campaignIdentityMap, type IdentityMap, identityUnresolvedNote } from '@agentic-marketing/campaigns';
 import { defineCommand } from '@agentic-marketing/commands';
 import { AppError, isoDateTime } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
@@ -9,7 +9,7 @@ import { eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
 import { type CampaignMember, type CampaignRecord, goalEventsFor, loadCampaignRecord } from './campaign';
 import { identityQueryParams } from './identityParams';
-import { type AnalyticsResult, analyticsMeta, campaignRecipientIdentityMap, K, MAX_RANGE_DAYS, runAnalyticsQuery } from './query';
+import { type AnalyticsResult, analyticsMeta, K, MAX_RANGE_DAYS, runAnalyticsQuery } from './query';
 
 // The campaign summary (#66) is a named report over the campaign measures and the existing
 // e-mail measures. It keeps the raw runs out of the UI: the funnel, per-member rows and journey
@@ -413,8 +413,14 @@ export const analyticsCampaignSummary = defineCommand({
       allowFutureStart: notStarted,
     });
     const { from, to } = window;
-    // The same campaign-scoped identity map the measure queries and the holdout card use (#590).
-    const identity = await campaignRecipientIdentityMap(ctx.tx, deps, memberIds, from, to);
+    // The same campaign identity map the measure queries and the holdout card use (#590): sent
+    // recipients union holdout assignments, with one bound decision for all of them.
+    const identity = await campaignIdentityMap(deps, {
+      campaignIds: [record.id],
+      memberIds,
+      from,
+      to,
+    });
     const baseMeta = {
       timeZone,
       currency: null as string | null,
