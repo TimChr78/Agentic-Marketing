@@ -1,4 +1,5 @@
 import type { Out } from '../../../app/api';
+import { resolveConsentTopic } from '../../../lib/consentTopic';
 import { formatDateTime } from '../../../ui/time';
 import type { PreviewSource } from '../../previews/previewSource';
 
@@ -358,7 +359,7 @@ export function consentCheck(input: ConsentCheckInput): CheckRow {
       `Purpose “${purpose.name}” does not include the ${input.channel} channel.`,
       'Add the channel to the purpose or change the template’s purpose.',
     ]);
-  const topic = input.broadcastTopic ?? input.templateTopic;
+  const topic = resolveConsentTopic(input.broadcastTopic, input.templateTopic);
   if (topic && !purpose.topics.some((t) => t.key === topic))
     return attention([`Topic “${topic}” is not under purpose “${purpose.name}”.`, 'Choose a topic under this purpose or remove it.']);
   return {

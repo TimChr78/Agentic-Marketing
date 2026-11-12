@@ -6,6 +6,7 @@ import { useApi } from '../../app/useApi';
 import { Alert, Button, JsonView, StatusPill } from '../../ui';
 import { formatDateTime } from '../../ui/time';
 import { getArtifact } from '../artifactCache';
+import { CopyPurposeKey } from '../audience/phase26/CopyControl';
 import { ConditionView } from '../previews/ConditionView';
 import { useSharedRead } from '../previews/previewRead';
 import {
@@ -278,7 +279,17 @@ function ConsequenceRowView({ row }: { row: ConsequenceRow }) {
     <div className="grid gap-0.5 sm:grid-cols-[140px_minmax(0,1fr)] sm:gap-3">
       <dt className="text-[12px] text-muted sm:text-[13px]">{row.label}</dt>
       <dd className="min-w-0 text-fg">
-        {row.value && <p className={row.tone === 'bad' ? 'text-bad' : row.tone === 'warn' ? 'text-warn' : undefined}>{row.value}</p>}
+        {row.value && (
+          <p className={row.tone === 'bad' ? 'text-bad' : row.tone === 'warn' ? 'text-warn' : undefined}>
+            {row.value}
+            {row.copyKey && (
+              <>
+                {' '}
+                <CopyPurposeKey purposeKey={row.copyKey} />
+              </>
+            )}
+          </p>
+        )}
         {row.items && (
           <ul className="space-y-1.5">
             {row.items.map((item) => (
@@ -327,7 +338,15 @@ function EvidenceList({ rows }: { rows: ConsequenceEvidence[] }) {
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
             <span className="text-[12px] text-muted sm:min-w-[116px]">{row.label}</span>
             <StatusPill tone={evidenceTone(row.status)}>{evidenceLabel(row.status)}</StatusPill>
-            <span className="min-w-0 break-words text-fg-2">{row.value}</span>
+            <span className="min-w-0 break-words text-fg-2">
+              {row.value}
+              {row.copyKey && (
+                <>
+                  {' '}
+                  <CopyPurposeKey purposeKey={row.copyKey} />
+                </>
+              )}
+            </span>
           </div>
           {row.detail && <p className="mt-0.5 text-[12px] leading-[18px] text-muted">{row.detail}</p>}
         </li>

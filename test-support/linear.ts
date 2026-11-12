@@ -26,9 +26,19 @@ function bestOfThree(run: (input: string) => unknown, input: string): number {
 export function expectLinear(build: (n: number) => string, run: (input: string) => unknown, base = 25_000): void {
   const small = build(base);
   const large = build(base * 4);
-  const tSmall = bestOfThree(run, small);
-  const tLarge = bestOfThree(run, large);
-  const ratio = tLarge / Math.max(tSmall, 0.5);
+  // A super-linear path gives a ratio near 16 on every attempt; a busy shared runner inflates one
+  // measurement now and then (8.6 at 26 ms broke a release run). Re-measure up to two more times
+  // before failing, and judge the best attempt, so noise cannot fail the check but a real slow
+  // path still does.
+  let best: { tSmall: number; tLarge: number; ratio: number } | null = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const tSmall = bestOfThree(run, small);
+    const tLarge = bestOfThree(run, large);
+    const ratio = tLarge / Math.max(tSmall, 0.5);
+    if (!best || ratio < best.ratio) best = { tSmall, tLarge, ratio };
+    if (tLarge < NOISE_FLOOR_MS || ratio < 8) break;
+  }
+  const { tSmall, tLarge, ratio } = best!;
   const detail = `n=${base}: ${tSmall.toFixed(2)} ms, 4n=${base * 4}: ${tLarge.toFixed(2)} ms (ratio ${ratio.toFixed(1)})`;
 
   // Below a few milliseconds the ratio measures timer noise and warm-up, not growth: a run that

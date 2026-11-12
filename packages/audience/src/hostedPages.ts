@@ -10,7 +10,7 @@ import {
 import { defineCommand } from '@agentic-marketing/commands';
 import { AppError } from '@agentic-marketing/core';
 import { z } from 'zod';
-import { formOrigin, publishedForm } from './forms';
+import { formBrandOverride, formOrigin, publishedForm } from './forms';
 
 // The admin preview under Design → Hosted pages. It renders the same document the public route
 // serves; because there is no real token, primary buttons are disabled and nothing is submitted.
@@ -44,7 +44,7 @@ export const previewHostedPage = defineCommand({
           'not_found',
           `No published form ${input.formId}. Publish the form, then preview its hosted pages; drafts do not change live pages.`,
         );
-      override = form.def.hostedPages;
+      override = formBrandOverride(form.def);
       fallbackSiteUrl = formOrigin(form.def);
     }
     return {
