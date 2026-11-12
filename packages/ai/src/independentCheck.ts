@@ -5,7 +5,7 @@ import type { KeyProvider } from '@agentic-marketing/secrets';
 import { generateText } from 'ai';
 import { z } from 'zod';
 import { redact } from './context';
-import { estimateTokens, modelFor, releaseTokens, reserveTokens } from './providers';
+import { billingReservationTtlMs, estimateTokens, modelFor, releaseTokens, reserveTokens, settleReservation } from './providers';
 
 // The independent check (ADR-0016 §4.5, #231): before an autonomous or held action, a second
 // model compares what the agent says it is doing with the action itself and the mandate that
@@ -170,44 +170,48 @@ export async function independentCheck(
     workspaceId,
     model.providerId,
     estimateTokens({ system: SYSTEM, prompt }, MAX_OUTPUT_TOKENS),
+    billingReservationTtlMs(),
   );
   const started = Date.now();
-  const logged = async (values: {
+  /** The usage row for this call; it commits in the same transaction that releases the hold. */
+  const rowValues = (values: {
     status: 'done' | 'failed';
     output?: unknown;
     rationale?: string | null;
     error?: string | null;
     inputTokens?: number;
     outputTokens?: number;
-  }) =>
-    deps.db.withWorkspace(workspaceId, (logTx) =>
-      logTx.insert(schema.aiCalls).values({
-        workspaceId,
-        id,
-        kind: 'check',
-        providerId: model.providerId,
-        model: model.modelId,
-        input: {
-          command: input.command,
-          intent: input.intent,
-          mandateId: input.mandate.id,
-          mandateVersion: input.mandate.version,
-          purpose: input.mandate.purpose,
-          impact: scrub(input.policy.impact) as Record<string, unknown>,
-        },
-        principalId: input.principal.userId,
-        status: values.status,
-        output: values.output ?? null,
-        rationale: values.rationale ?? null,
-        error: values.error ?? null,
-        inputTokens: values.inputTokens ?? 0,
-        outputTokens: values.outputTokens ?? 0,
-        latencyMs: Date.now() - started,
-        finishedAt: new Date(),
-      }),
-    );
+  }) => ({
+    workspaceId,
+    id,
+    kind: 'check' as const,
+    providerId: model.providerId,
+    model: model.modelId,
+    input: {
+      command: input.command,
+      intent: input.intent,
+      mandateId: input.mandate.id,
+      mandateVersion: input.mandate.version,
+      purpose: input.mandate.purpose,
+      impact: scrub(input.policy.impact) as Record<string, unknown>,
+    },
+    principalId: input.principal.userId,
+    status: values.status,
+    output: values.output ?? null,
+    rationale: values.rationale ?? null,
+    error: values.error ?? null,
+    inputTokens: values.inputTokens ?? 0,
+    outputTokens: values.outputTokens ?? 0,
+    latencyMs: Date.now() - started,
+    finishedAt: new Date(),
+  });
+  const record = async (logTx: Tx, values: Parameters<typeof rowValues>[0]) => {
+    await logTx.insert(schema.aiCalls).values(rowValues(values));
+  };
+  const logged = (values: Parameters<typeof rowValues>[0]) => deps.db.withWorkspace(workspaceId, (logTx) => record(logTx, values));
+  let answer: Awaited<ReturnType<typeof generateText>>;
   try {
-    const answer = await generateText({
+    answer = await generateText({
       model: model.model,
       system: SYSTEM,
       prompt,
@@ -216,21 +220,42 @@ export async function independentCheck(
       maxRetries: 1,
       timeout: 60_000,
     });
-    const verdict = parseVerdict(answer.text);
-    const reason = verdict.reason.slice(0, 500);
-    await logged({
-      status: 'done',
-      output: { match: verdict.match, reason },
-      rationale: reason,
-      inputTokens: answer.usage.inputTokens ?? 0,
-      outputTokens: answer.usage.outputTokens ?? 0,
-    });
-    return { ok: verdict.match === true, reason };
   } catch (err) {
-    // A failed check is still a call worth seeing in the log; the error itself goes to the person.
+    // No usage is known: the provider refused the request or it never completed. Log it and let the
+    // hold go, like decisionCall does before the provider has billed anything.
     await logged({ status: 'failed', error: (err as Error).message.slice(0, 1000) }).catch(() => undefined);
-    throw err;
-  } finally {
     await releaseTokens(deps.db, workspaceId, reservation);
+    throw err;
   }
+  const usage = { inputTokens: answer.usage.inputTokens ?? 0, outputTokens: answer.usage.outputTokens ?? 0 };
+  let verdict: z.infer<typeof Verdict>;
+  try {
+    verdict = parseVerdict(answer.text);
+  } catch (err) {
+    // The provider has billed these tokens even though the answer is unusable. Settle the failed row
+    // with its real usage; a failed write keeps and extends the hold (#642).
+    await settleReservation(
+      deps.db,
+      workspaceId,
+      reservation,
+      (logTx) => record(logTx, { status: 'failed', error: (err as Error).message.slice(0, 1000), ...usage }),
+      { label: 'independent check' },
+    );
+    throw err;
+  }
+  const reason = verdict.reason.slice(0, 500);
+  const outcome = await settleReservation(
+    deps.db,
+    workspaceId,
+    reservation,
+    (logTx) => record(logTx, { status: 'done', output: { match: verdict.match, reason }, rationale: reason, ...usage }),
+    { label: 'independent check' },
+  );
+  // 'held' means the provider billed the call but neither the usage row nor its release committed.
+  // The hold is the only remaining record of those tokens, so the caller must fail closed.
+  if (outcome === 'held')
+    throw new Error(
+      'The independent check was billed, but its usage could not be recorded. The budget reservation is kept through the month so the month is not under-counted.',
+    );
+  return { ok: verdict.match === true, reason };
 }

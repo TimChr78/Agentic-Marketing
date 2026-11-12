@@ -1,5 +1,6 @@
 import { artifactTypes, type SegmentDefinition } from '@agentic-marketing/artifacts';
 
+import { newId } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
 import type { BusEvent, EventBus, EventStore } from '@agentic-marketing/events';
 import type { ResolvedEvent } from '@agentic-marketing/profiles';
@@ -202,7 +203,10 @@ export async function refreshSegment(tx: Tx, workspaceId: string, seg: Published
   ).rows;
   const entered = rows.filter((r) => r.entered);
   const exited = rows.filter((r) => !r.entered);
-  const runId = new Date().toISOString().slice(0, 16);
+  // A fresh cause per refresh run (#628). The old minute-truncated timestamp gave two refreshes in
+  // the same minute identical messageIds, so JetStream's two-minute dedupe dropped the second run's
+  // events. The events are built once per run, so retrying a publish keeps their ids and dedupes.
+  const runId = newId('run');
   const changes: BusEvent[] = [];
   const add = (r: Row, name: string) => {
     const e = changeEvent(
