@@ -207,17 +207,27 @@ describe('archive sanitising: linear time', () => {
 
 describe('archive sanitising: the linear-time helper', () => {
   it('detects a deliberately quadratic function', () => {
-    let sink = 0;
-    const quadratic = (input: string) => {
-      let count = 0;
-      for (let i = 0; i < input.length; i++) {
-        for (let j = 0; j < input.length; j++) count++;
-      }
-      sink = count;
-    };
-
-    expect(() => expectLinear((n) => 'x'.repeat(n), quadratic, 2_000)).toThrow(/expected linear scaling/);
-    expect(sink).toBeGreaterThan(0);
+    // Drive `performance.now` from a synthetic clock: the helper measures only that, and a busy
+    // runner used to inflate one measurement and hide the quadratic ratio (#816).
+    let now = 0;
+    const clock = vi.spyOn(performance, 'now').mockImplementation(() => now);
+    try {
+      let sink = 0;
+      // Quadratic cost: 4× the input gives 16× the synthetic time.
+      const quadratic = (input: string) => {
+        sink += input.length;
+        now += input.length ** 2 / 100_000;
+      };
+      expect(() => expectLinear((n) => 'x'.repeat(n), quadratic, 2_000)).toThrow(/expected linear scaling/);
+      expect(sink).toBeGreaterThan(0);
+      // Linear cost on the same clock passes, so the failure above is the ratio, not the ceiling.
+      const linear = (input: string) => {
+        now += input.length / 10;
+      };
+      expect(() => expectLinear((n) => 'x'.repeat(n), linear, 2_000)).not.toThrow();
+    } finally {
+      clock.mockRestore();
+    }
   });
 });
 
