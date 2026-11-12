@@ -183,9 +183,11 @@ export const testWebhook = defineCommand({
   },
 });
 
+const DELIVERY_KINDS = ['webhook', 'action', 'ad_conversion'] as const;
+
 const Delivery = z.object({
   id: z.string(),
-  kind: z.enum(['webhook', 'action', 'ad_conversion']),
+  kind: z.enum(DELIVERY_KINDS),
   targetId: z.string(),
   action: z.string().nullable(),
   status: z.enum(['pending', 'running', 'done', 'failed', 'dead']),
@@ -205,6 +207,7 @@ export const listDeliveries = defineCommand({
   description:
     'Recent deliveries to webhook endpoints and connector actions, newest first, with attempts, status codes and errors. `dead` ones gave up; a suppressed delivery records `response.suppressed` instead of sending the payload.',
   input: z.object({
+    kind: z.enum(DELIVERY_KINDS).optional().describe('Only deliveries of this kind: webhook, action or ad_conversion'),
     targetId: z.string().optional().describe('An endpoint (whk_…) or connection (con_…) id'),
     status: z.enum(['pending', 'running', 'done', 'failed', 'dead']).optional(),
     limit: z.number().int().min(1).max(200).default(50),
@@ -217,7 +220,13 @@ export const listDeliveries = defineCommand({
     const rows = await ctx.tx
       .select()
       .from(d)
-      .where(and(input.targetId ? eq(d.targetId, input.targetId) : undefined, input.status ? eq(d.status, input.status) : undefined))
+      .where(
+        and(
+          input.kind ? eq(d.kind, input.kind) : undefined,
+          input.targetId ? eq(d.targetId, input.targetId) : undefined,
+          input.status ? eq(d.status, input.status) : undefined,
+        ),
+      )
       .orderBy(desc(d.createdAt))
       .limit(input.limit);
     return {

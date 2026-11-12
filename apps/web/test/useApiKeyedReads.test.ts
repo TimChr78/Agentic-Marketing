@@ -37,6 +37,11 @@ interface Kept {
  */
 const KEPT: Kept[] = [
   {
+    call: 'apps/web/src/features/integrations/WebhooksCard.tsx :: deliveries.list :: [id, version]',
+    reason:
+      'One EndpointLastDelivery per endpoint row, rendered with key={e.id}, so id never changes for an instance; version is an explicit refresh of the same read.',
+  },
+  {
     call: 'apps/web/src/features/agents/HostedAgentCard.tsx :: agents.hostedRuns :: [agentId]',
     reason:
       'AgentPage withholds the previous agent and unmounts its tabs while the keyed agents.get loads; hosted paging also resets on view.data.',
