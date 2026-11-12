@@ -78,6 +78,17 @@ const rejected: { name: string; html: string; reason: 'hidden' | 'empty' | 'miss
   { name: 'white on white', html: link(' style="color:#fff;background:#FFFFFF"'), reason: 'hidden' },
   { name: 'display:inline then display:none', html: link(' style="display:inline;display:none"'), reason: 'hidden' },
   { name: 'display:block then display:none', html: link(' style="display:block;display:none"'), reason: 'hidden' },
+  // Review round 4 (P2): a transparent background shows the ancestor's background through it.
+  {
+    name: 'white text with a transparent background on a white parent',
+    html: `<div style="background:#fff"><a href="${URL}" style="color:#fff;background-color:transparent">Unsubscribe</a></div>`,
+    reason: 'hidden',
+  },
+  {
+    name: 'white text with a zero-alpha background on a white parent',
+    html: `<div style="background-color:#ffffff"><a href="${URL}" style="color:white;background:rgba(0,0,0,0)">Unsubscribe</a></div>`,
+    reason: 'hidden',
+  },
   { name: 'an important hide then a later unhide', html: link(' style="display:none !important;display:block"'), reason: 'hidden' },
   {
     name: 'an important class rule over an inline unhide',
@@ -223,6 +234,14 @@ describe('the gate refuses an unusable unsubscribe link at save and at publish (
 
   it('rejects transparent text at save and at publish', async () => {
     const t = template('<mj-text><a style="color:transparent" href="{{ unsubscribe_url }}">Unsubscribe</a></mj-text>');
+    expect((await validateTemplate(t)).join(' ')).toContain('hidden');
+    expect((await emailPublishProblems(t, { marketing: true })).join(' ')).toContain('hidden');
+  });
+
+  it('rejects white text on a transparent background inside a white section at save and at publish', async () => {
+    const t = template(
+      '<mj-text container-background-color="#ffffff"><div style="background:#fff"><a style="color:#fff;background-color:transparent" href="{{ unsubscribe_url }}">Unsubscribe</a></div></mj-text>',
+    );
     expect((await validateTemplate(t)).join(' ')).toContain('hidden');
     expect((await emailPublishProblems(t, { marketing: true })).join(' ')).toContain('hidden');
   });
