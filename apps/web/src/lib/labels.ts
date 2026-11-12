@@ -282,8 +282,9 @@ export const PURPOSE_LABEL: Record<string, string> = {
 
 /**
  * A purpose in the workspace's own words when its published purposes are available, else the
- * default name, else a readable key. The key is never the visible label.
+ * default name. A saved but unresolved purpose is named "Unavailable purpose"; its key belongs in
+ * the copy affordance, never in a label.
  */
 export function purposeLabel(key: string, purposes?: readonly { key: string; name: string }[] | null): string {
-  return purposes?.find((p) => p.key === key)?.name ?? PURPOSE_LABEL[key] ?? humanise(key);
+  return purposes?.find((p) => p.key === key)?.name ?? PURPOSE_LABEL[key] ?? 'Unavailable purpose';
 }

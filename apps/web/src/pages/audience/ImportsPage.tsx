@@ -4,8 +4,8 @@ import { api, errText } from '../../app/api';
 import { useCrumbs } from '../../app/page';
 import { useSession } from '../../app/session';
 import { useApi } from '../../app/useApi';
+import { PurposeName } from '../../features/audience/consent';
 import { guessMapping, type Mapping, parseCsv, toImportRows } from '../../lib/csvImport';
-import { purposeLabel } from '../../lib/labels';
 import {
   Alert,
   Button,
@@ -62,7 +62,6 @@ export default function ImportsPage() {
   const [result, setResult] = useState<Result | null>(null);
 
   const purposes = useApi(() => api.call('purposes.list', {}), [], { skip: !can('artifacts:read') });
-  const purposeName = (key: string) => purposes.data?.purposes.find((p) => p.key === key)?.name ?? purposeLabel(key);
   const prepared = useMemo(
     () => (mapping && rows.length > 0 && mapping.email >= 0 ? toImportRows(rows, mapping, { purpose, system, activeOnly }) : null),
     [rows, mapping, purpose, system, activeOnly],
@@ -280,7 +279,7 @@ export default function ImportsPage() {
                             <Td className="hidden md:table-cell">{r.traits.firstName ?? '—'}</Td>
                             <Td>
                               {r.consent[0]?.status ? (CONSENT_LABEL[r.consent[0].status as ConsentStatus] ?? r.consent[0].status) : 'none'}{' '}
-                              · {purposeName(r.consent[0]?.purpose ?? purpose)}
+                              · <PurposeName purpose={r.consent[0]?.purpose ?? purpose} purposes={purposes.data?.purposes} />
                             </Td>
                             <Td className="hidden lg:table-cell">
                               {r.consent[0]?.recordedAt ? (
