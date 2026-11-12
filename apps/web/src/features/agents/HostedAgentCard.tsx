@@ -4,7 +4,7 @@ import { api, errText } from '../../app/api';
 import { artifactPath } from '../../app/artifactRoutes';
 import { Link, navigate } from '../../app/router';
 import { useWorkspace } from '../../app/session';
-import { useApi } from '../../app/useApi';
+import { useApi, useKeyedApi } from '../../app/useApi';
 import {
   Alert,
   Button,
@@ -395,21 +395,18 @@ function SkillsSection({ ids }: { ids: string[] }) {
 
 function SkillLinks({ ids }: { ids: string[] }) {
   const key = ids.join(',');
-  // biome-ignore lint/correctness/useExhaustiveDependencies: the joined id list changes exactly when the references do
-  const skills = useApi(
-    () =>
-      Promise.all(
-        ids.map(async (id) => {
-          try {
-            const artifact = await api.call('artifacts.get', { artifactId: id });
-            return { id, name: artifact.name, draft: artifact.publishedVersion === null };
-          } catch {
-            // A skill that cannot be read still keeps its id visible behind the link.
-            return { id, name: null, draft: false };
-          }
-        }),
-      ),
-    [key],
+  const skills = useKeyedApi(key, () =>
+    Promise.all(
+      ids.map(async (id) => {
+        try {
+          const artifact = await api.call('artifacts.get', { artifactId: id });
+          return { id, name: artifact.name, draft: artifact.publishedVersion === null };
+        } catch {
+          // A skill that cannot be read still keeps its id visible behind the link.
+          return { id, name: null, draft: false };
+        }
+      }),
+    ),
   );
   if (!skills.data) return <p className="mt-2 text-[12px] text-muted">Loading referenced skills…</p>;
   return (

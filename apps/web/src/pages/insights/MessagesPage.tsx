@@ -1,11 +1,11 @@
 import { Search } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useRef, useState } from 'react';
 import { api, errText, type Out } from '../../app/api';
 import { ButtonLink } from '../../app/links';
 import { useCrumbs } from '../../app/page';
 import { Link } from '../../app/router';
 import { useSession } from '../../app/session';
-import { useApi } from '../../app/useApi';
+import { useKeyedApi } from '../../app/useApi';
 import { StatCard, StatGrid, StatGridSkeleton } from '../../features/insights/Stats';
 import { purposeLabel } from '../../lib/labels';
 import {
@@ -55,13 +55,14 @@ export default function MessagesPage() {
   const [person, setPerson] = useState('');
   const [channel, setChannel] = useState('');
   const [status, setStatus] = useState('');
-  const [more, setMore] = useState<{ rows: Message[]; cursor: string | null; loaded: boolean }>({
+  const [more, setMore] = useState<{ key: string; rows: Message[]; cursor: string | null; loaded: boolean }>({
+    key: '',
     rows: [],
     cursor: null,
     loaded: false,
   });
-  const [loadingMore, setLoadingMore] = useState(false);
-  const [moreError, setMoreError] = useState<string | null>(null);
+  const [loadingMoreByKey, setLoadingMoreByKey] = useState<{ key: string; value: boolean }>({ key: '', value: false });
+  const [moreError, setMoreError] = useState<{ key: string; message: string | null }>({ key: '', message: null });
 
   const profileId = PROFILE_ID.test(person.trim()) ? person.trim() : '';
   const filterKey = `${profileId}|${channel}|${status}`;
@@ -71,31 +72,39 @@ export default function MessagesPage() {
     ...(status ? { status: status as MessageStatus } : {}),
   };
 
-  const list = useApi(() => api.call('messages.list', { limit: 50, ...filters }), [filterKey]);
-  const stats = useApi(() => api.call('messages.stats', { days }), [days], { skip: !can('artifacts:read') });
+  // A filter or period is the identity of the read, not a refresh of the previous one (#619).
+  const list = useKeyedApi(filterKey, () => api.call('messages.list', { limit: 50, ...filters }));
+  const stats = useKeyedApi(String(days), () => api.call('messages.stats', { days }), { skip: !can('artifacts:read') });
 
-  // A filter change is a new list; pages loaded for the old one no longer belong to it.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: reset paging whenever the filter key changes, which the body does not read
-  useEffect(() => {
-    setMore({ rows: [], cursor: null, loaded: false });
-    setMoreError(null);
-  }, [filterKey]);
+  // Extra pages carry the filter key they were loaded for, so the first render after a change can
+  // never mix two filters, and a response for the old filter is dropped.
+  const currentMore = more.key === filterKey ? more : { key: filterKey, rows: [], cursor: null, loaded: false };
+  const loadingMore = loadingMoreByKey.key === filterKey && loadingMoreByKey.value;
+  const moreErrorNow = moreError.key === filterKey ? moreError.message : null;
+  const keyRef = useRef(filterKey);
+  keyRef.current = filterKey;
 
-  const all = [...(list.data?.messages ?? []), ...more.rows];
-  const cursor = more.loaded ? more.cursor : (list.data?.nextCursor ?? null);
+  const all = [...(list.data?.messages ?? []), ...currentMore.rows];
+  const cursor = currentMore.loaded ? currentMore.cursor : (list.data?.nextCursor ?? null);
   const filtered = !!person.trim() || !!channel || !!status;
 
   const loadMore = async () => {
     if (!cursor || loadingMore) return;
-    setLoadingMore(true);
-    setMoreError(null);
+    const requestKey = filterKey;
+    setLoadingMoreByKey({ key: requestKey, value: true });
+    setMoreError({ key: requestKey, message: null });
     try {
       const r = await api.call('messages.list', { limit: 50, cursor, ...filters });
-      setMore((m) => ({ rows: [...m.rows, ...r.messages], cursor: r.nextCursor, loaded: true }));
+      if (keyRef.current !== requestKey) return;
+      setMore((current) =>
+        current.key === requestKey
+          ? { key: requestKey, rows: [...current.rows, ...r.messages], cursor: r.nextCursor, loaded: true }
+          : { key: requestKey, rows: r.messages, cursor: r.nextCursor, loaded: true },
+      );
     } catch (e) {
-      setMoreError(errText(e));
+      if (keyRef.current === requestKey) setMoreError({ key: requestKey, message: errText(e) });
     } finally {
-      setLoadingMore(false);
+      setLoadingMoreByKey((current) => (current.key === requestKey ? { key: requestKey, value: false } : current));
     }
   };
 
@@ -278,9 +287,9 @@ export default function MessagesPage() {
           </tbody>
         </Table>
       </TableFrame>
-      {moreError && (
+      {moreErrorNow && (
         <Alert tone="bad" className="mt-3">
-          {moreError}
+          {moreErrorNow}
         </Alert>
       )}
       {cursor && (

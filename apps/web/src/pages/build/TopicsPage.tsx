@@ -3,7 +3,7 @@ import { useState } from 'react';
 import { api, errText } from '../../app/api';
 import { navigate } from '../../app/router';
 import { useSession } from '../../app/session';
-import { useApi } from '../../app/useApi';
+import { useKeyedApi } from '../../app/useApi';
 import { type TopicRow, TopicsTable, topicStatus } from '../../features/content/TopicsTable';
 import { Button, Field, Input, Modal, Select, TableFrame, Textarea, useToast } from '../../ui';
 
@@ -39,15 +39,14 @@ export default function TopicsPage() {
   const [draft, setDraft] = useState<Draft>(EMPTY);
   const [saving, setSaving] = useState(false);
 
-  const list = useApi(
-    () =>
-      api.call('content.topics.list', {
-        status: status ? (status as TopicRow['status']) : undefined,
-        owner: owner.trim() || undefined,
-        tag: tag.trim() || undefined,
-        minScore: minScore ? Number(minScore) : undefined,
-      }),
-    [status, owner, tag, minScore],
+  const filterKey = `${status}|${owner.trim()}|${tag.trim()}|${minScore}`;
+  const list = useKeyedApi(filterKey, () =>
+    api.call('content.topics.list', {
+      status: status ? (status as TopicRow['status']) : undefined,
+      owner: owner.trim() || undefined,
+      tag: tag.trim() || undefined,
+      minScore: minScore ? Number(minScore) : undefined,
+    }),
   );
   const topics = list.data?.topics ?? [];
 

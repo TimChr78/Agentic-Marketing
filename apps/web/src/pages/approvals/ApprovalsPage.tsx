@@ -5,7 +5,7 @@ import { typeLabel } from '../../app/artifactRoutes';
 import { useCrumbs } from '../../app/page';
 import { Link, navigate, routerPath, useLocation } from '../../app/router';
 import { useSession } from '../../app/session';
-import { useApi } from '../../app/useApi';
+import { useApi, useKeyedApi } from '../../app/useApi';
 import { approvalDecisions } from '../../features/approvals/decisions';
 import { HoldBadge, HoldCountdown } from '../../features/approvals/HoldBadge';
 import { useNow } from '../../features/approvals/holds';
@@ -187,7 +187,7 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
   const { can, user, refreshPending } = useSession();
   const { search } = useLocation();
   const status = (search.get('status') as Status) || 'pending';
-  const list = useApi(() => api.call('approvals.list', { status, limit: 200 }), [status]);
+  const list = useKeyedApi(status, () => api.call('approvals.list', { status, limit: 200 }));
   const proposals = useApi(() => api.call('workspace.proposals', { status: 'pending', limit: 50 }), []);
   const highlightedProposal = search.get('proposal');
   // Highlighted proposals are brought into view immediately; motion.md forbids smooth auto-scroll

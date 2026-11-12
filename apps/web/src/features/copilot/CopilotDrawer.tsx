@@ -46,6 +46,11 @@ function apply(xs: Item[], e: Event, streaming: { id: string | null }): Item[] {
 let seq = 0;
 const nid = () => `m${++seq}`;
 
+/** A conversation read may carry its own usage; when it does, that is the chat's total (#613). */
+type ConversationUsage = { totalTokens?: number; inputTokens?: number; outputTokens?: number };
+const usageTotal = (usage: ConversationUsage | undefined) =>
+  usage ? (usage.totalTokens ?? (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0)) : undefined;
+
 const SUGGESTIONS = [
   'What is in this workspace?',
   'Draft a win-back segment for people who have not ordered in 90 days',
@@ -87,6 +92,8 @@ export function CopilotDrawer({ open, onClose }: { open: boolean; onClose: () =>
       setItems((c.events as Event[]).reduce<Item[]>((xs, e) => apply(xs, e, streaming), []));
       setConversationId(c.id);
       setConversationAgent(past.data?.conversations.find((x) => x.id === id)?.agentId ?? null);
+      // The counter belongs to the conversation on screen, never to the one before it (#613).
+      setTokens(usageTotal((c as { usage?: ConversationUsage }).usage) ?? 0);
     } catch (e) {
       setError(errText(e));
     }
@@ -155,6 +162,7 @@ export function CopilotDrawer({ open, onClose }: { open: boolean; onClose: () =>
       if (id === conversationId) {
         setItems([]);
         setConversationId(undefined);
+        setTokens(0);
       }
     } catch (e) {
       setError(errText(e));
@@ -180,6 +188,7 @@ export function CopilotDrawer({ open, onClose }: { open: boolean; onClose: () =>
               setConversationId(undefined);
               setConversationAgent(null);
               setError(null);
+              setTokens(0);
             }}
           >
             New chat
@@ -328,7 +337,7 @@ export function CopilotDrawer({ open, onClose }: { open: boolean; onClose: () =>
           />
           <div className="flex items-center justify-between gap-3">
             <p className="text-[11px] text-muted" aria-live="polite">
-              {tokens > 0 ? `${tokens.toLocaleString()} tokens used in this chat` : 'Enter sends, Shift+Enter starts a new line.'}
+              {tokens > 0 ? `${tokens.toLocaleString()} tokens used in this session` : 'Enter sends, Shift+Enter starts a new line.'}
             </p>
             <Button
               variant="primary"

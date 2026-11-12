@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { api } from '../../app/api';
-import { useApi } from '../../app/useApi';
+import { useApi, useKeyedApi } from '../../app/useApi';
 import {
   Actor,
   Alert,
@@ -84,11 +84,11 @@ export function VersionsPanel({ artifact }: { artifact: Artifact }) {
 
 function VersionDetail({ artifactId, number }: { artifactId: string; number: number }) {
   const [view, setView] = useState<'diff' | 'content'>('diff');
-  const diff = useApi(
-    () => api.call('artifacts.diff', { artifactId, from: number > 1 ? number - 1 : undefined, to: number }),
-    [artifactId, number],
+  const versionKey = `${artifactId}|${number}`;
+  const diff = useKeyedApi(versionKey, () =>
+    api.call('artifacts.diff', { artifactId, from: number > 1 ? number - 1 : undefined, to: number }),
   );
-  const content = useApi(() => api.call('artifacts.get', { artifactId, version: number }), [artifactId, number], {
+  const content = useKeyedApi(versionKey, () => api.call('artifacts.get', { artifactId, version: number }), {
     skip: view !== 'content',
   });
   return (

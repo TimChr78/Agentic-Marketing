@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import { api, errText } from '../../../app/api';
 import { artifactPath } from '../../../app/artifactRoutes';
 import { Link } from '../../../app/router';
-import { useApi } from '../../../app/useApi';
+import { useKeyedApi } from '../../../app/useApi';
 import { Alert, Button, Card, EmptyState, Skeleton, SkeletonRegion, StatusPill, Tag } from '../../../ui';
 import { Identifier } from '../../../ui/Identifier';
 import { DecisionBadge } from '../AgentStatus';
@@ -31,25 +31,30 @@ export function ActivityTab({
   agent: AgentDetail;
   onChanged: () => void;
 }) {
-  const list = useApi(() => api.call('agents.activity', { agentId, since, limit: LIMIT }), [agentId, since], { skip: !canAudit });
-  const [more, setMore] = useState<{ rows: AgentActionRow[]; next: number | null; loaded: boolean }>({
+  // The ledger belongs to one agent and one bound. Both are part of the key, so switching agent
+  // with the same `since` still withholds the previous agent's pages (#611).
+  const key = `${agentId}|${since}`;
+  const list = useKeyedApi(key, () => api.call('agents.activity', { agentId, since, limit: LIMIT }), { skip: !canAudit });
+  // Extra "Load more" pages carry the key they were loaded for, so a render can never mix pages of
+  // two keys even before an effect runs. The state keeps the last written key; a response for an
+  // older key is dropped.
+  const [more, setMore] = useState<{ key: string; rows: AgentActionRow[]; next: number | null; loaded: boolean }>({
+    key,
     rows: [],
     next: null,
     loaded: false,
   });
-  const [loadingMore, setLoadingMore] = useState(false);
-  const [moreError, setMoreError] = useState<string | null>(null);
-  const [announcement, setAnnouncement] = useState('');
+  const [loadingMoreByKey, setLoadingMoreByKey] = useState<{ key: string; value: boolean }>({ key, value: false });
+  const [moreError, setMoreError] = useState<{ key: string; message: string | null }>({ key, message: null });
+  const [announcement, setAnnouncement] = useState<{ key: string; text: string }>({ key, text: '' });
   const headingRef = useRef<HTMLHeadingElement>(null);
+  const keyRef = useRef(key);
+  keyRef.current = key;
   const checkedAt = useFetchedAt(list.data);
-
-  // A new `since` is a new ledger; pages loaded for the old bound no longer belong to it.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: reset paging whenever the bound changes, which the body does not read
-  useEffect(() => {
-    setMore({ rows: [], next: null, loaded: false });
-    setMoreError(null);
-    setAnnouncement('');
-  }, [since]);
+  const currentMore = more.key === key ? more : { key, rows: [], next: null, loaded: false };
+  const loadingMore = loadingMoreByKey.key === key && loadingMoreByKey.value;
+  const moreErrorNow = moreError.key === key ? moreError.message : null;
+  const announcementNow = announcement.key === key ? announcement.text : '';
 
   if (!canAudit) {
     return (
@@ -80,23 +85,30 @@ export function ActivityTab({
 
   const data: AgentActivity | undefined = list.data;
   const firstPage = data?.actions ?? [];
-  const actions = [...firstPage, ...more.rows];
-  const next = more.loaded ? more.next : (data?.next ?? null);
+  const actions = [...firstPage, ...currentMore.rows];
+  const next = currentMore.loaded ? currentMore.next : (data?.next ?? null);
 
   const loadMore = async () => {
     if (next === null || loadingMore) return;
-    setLoadingMore(true);
-    setMoreError(null);
+    const requestKey = key;
+    setLoadingMoreByKey({ key: requestKey, value: true });
+    setMoreError({ key: requestKey, message: null });
     try {
       const page = await api.call('agents.activity', { agentId, since, limit: LIMIT, before: next });
-      const shown = [...firstPage, ...more.rows, ...page.actions];
-      setMore((current) => ({ rows: [...current.rows, ...page.actions], next: page.next, loaded: true }));
-      setAnnouncement(`${shown.length} ${shown.length === 1 ? 'entry' : 'entries'} shown`);
+      // The agent or bound changed while this page was in flight: it belongs to the old key.
+      if (keyRef.current !== requestKey) return;
+      const shown = [...firstPage, ...currentMore.rows, ...page.actions];
+      setMore((current) =>
+        current.key === requestKey
+          ? { key: requestKey, rows: [...current.rows, ...page.actions], next: page.next, loaded: true }
+          : { key: requestKey, rows: page.actions, next: page.next, loaded: true },
+      );
+      setAnnouncement({ key: requestKey, text: `${shown.length} ${shown.length === 1 ? 'entry' : 'entries'} shown` });
       headingRef.current?.focus();
     } catch (e) {
-      setMoreError(errText(e));
+      if (keyRef.current === requestKey) setMoreError({ key: requestKey, message: errText(e) });
     } finally {
-      setLoadingMore(false);
+      setLoadingMoreByKey((current) => (current.key === requestKey ? { key: requestKey, value: false } : current));
     }
   };
 
@@ -135,13 +147,13 @@ export function ActivityTab({
             {intText(actions.length)} {actions.length === 1 ? 'entry' : 'entries'} shown
           </span>
         </div>
-        {moreError && (
+        {moreErrorNow && (
           <Alert tone="bad" title="Couldn't load more actions" onRetry={() => void loadMore()}>
-            {moreError}
+            {moreErrorNow}
           </Alert>
         )}
         <p role="status" aria-live="polite" className="sr-only">
-          {announcement}
+          {announcementNow}
         </p>
       </section>
 

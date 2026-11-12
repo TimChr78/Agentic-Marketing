@@ -18,6 +18,7 @@ const h = vi.hoisted(() => ({
   },
   hold: new Set<string>(),
   held: [] as { name: string; resolve: (value: unknown) => void }[],
+  erased: false,
 }));
 
 vi.mock('../../../app/api', async (importOriginal) => {
@@ -195,7 +196,11 @@ const consentHistory = (overrides: Record<string, unknown> = {}) => ({
 });
 
 const baseRespond = (name: string, input: any) => {
-  if (name === 'profiles.list') return listPage();
+  if (name === 'profiles.list') return h.erased ? listPage({ profiles: [] }) : listPage();
+  if (name === 'profiles.erase') {
+    h.erased = true;
+    return { erasureId: `era_${'f'.repeat(32)}`, profiles: 1, identifiers: 1, consentRecords: 1 };
+  }
   if (name === 'purposes.list') return purposes;
   if (name === 'profiles.get') return profile({ id: input.profileId === personId ? canonicalId : input.profileId });
   if (name === 'profiles.events') return events();
@@ -229,6 +234,7 @@ beforeEach(() => {
   h.held.length = 0;
   h.hold.clear();
   h.can = () => true;
+  h.erased = false;
   h.respond = baseRespond;
   resetPurposesCache();
   window.scrollTo = () => {};
@@ -362,6 +368,25 @@ describe('People list (#510)', () => {
     h.respond = (name, input) => (name === 'profiles.list' ? listPage({ profiles: [], nextCursor: null }) : baseRespond(name, input));
     renderList();
     expect(await screen.findByText('No people yet')).toBeTruthy();
+  });
+
+  it('drops a cached page when a person is erased, so the erased person is not shown (#595)', async () => {
+    // The list stays mounted with its page cached while the person is erased in another surface.
+    renderList();
+    await screen.findAllByText('ada@example.com');
+    renderPerson();
+    await screen.findByRole('heading', { level: 1, name: 'ada@example.com' });
+
+    await userEvent.click(screen.getByRole('button', { name: 'Erase person' }));
+    const dialog = await screen.findByRole('alertdialog');
+    await userEvent.type(within(dialog).getByLabelText(/to confirm/), 'ada@example.com');
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Erase person' }));
+    await waitFor(() => expect(calls('profiles.erase')).toHaveLength(1));
+
+    // The invalidation drops the cached pages: the list rereads and no longer presents the erased row.
+    await waitFor(() => expect(screen.queryByRole('table', { name: 'People' })).toBeNull());
+    expect(screen.getByText('No people yet')).toBeTruthy();
+    expect(screen.queryByRole('link', { name: 'ada@example.com' })).toBeNull();
   });
 
   it('searches only on submit, by exact e-mail, and opens the match', async () => {

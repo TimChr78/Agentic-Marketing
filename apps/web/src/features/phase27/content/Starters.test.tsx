@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import RecipesPage from '../../../pages/build/RecipesPage';
@@ -8,6 +8,8 @@ const h = vi.hoisted(() => ({
   calls: [] as Call[],
   ready: true,
   empty: false,
+  two: false,
+  held: [] as { which: 'A' | 'B'; resolve: (value: unknown) => void }[],
   checkError: null as Error | null,
   installError: null as Error | null,
 }));
@@ -23,19 +25,45 @@ vi.mock('../../../app/api', async (importOriginal) => {
           return {
             recipes: h.empty
               ? []
-              : [
-                  {
-                    id: `rcp_${'a'.repeat(32)}`,
-                    title: 'Weekly newsletter',
-                    description: 'A newsletter loop with confirmation.',
-                    version: 1,
-                    artifacts: 2,
-                    parameters: 2,
-                    prerequisites: 1,
-                  },
-                ],
+              : h.two
+                ? [
+                    {
+                      id: `rcp_${'a'.repeat(32)}`,
+                      title: 'Starter A',
+                      description: 'The first starter.',
+                      version: 1,
+                      artifacts: 1,
+                      parameters: 1,
+                      prerequisites: 0,
+                    },
+                    {
+                      id: `rcp_${'b'.repeat(32)}`,
+                      title: 'Starter B',
+                      description: 'The second starter.',
+                      version: 1,
+                      artifacts: 1,
+                      parameters: 1,
+                      prerequisites: 0,
+                    },
+                  ]
+                : [
+                    {
+                      id: `rcp_${'a'.repeat(32)}`,
+                      title: 'Weekly newsletter',
+                      description: 'A newsletter loop with confirmation.',
+                      version: 1,
+                      artifacts: 2,
+                      parameters: 2,
+                      prerequisites: 1,
+                    },
+                  ],
           };
-        if (name === 'recipes.get')
+        if (name === 'recipes.get') {
+          // With two starters the reads are held, so the test decides the order they resolve in.
+          if (h.two) {
+            const which = input.recipeId === `rcp_${'b'.repeat(32)}` ? ('B' as const) : ('A' as const);
+            return new Promise((resolve) => h.held.push({ which, resolve }));
+          }
           return {
             recipe: {
               id: `rcp_${'a'.repeat(32)}`,
@@ -57,6 +85,7 @@ vi.mock('../../../app/api', async (importOriginal) => {
               checklist: ['Review the confirmation e-mail', 'Check the send time'],
             },
           };
+        }
         if (name === 'recipes.preview') {
           if (h.checkError) throw h.checkError;
           return {
@@ -92,6 +121,8 @@ beforeEach(() => {
   h.calls = [];
   h.ready = true;
   h.empty = false;
+  h.two = false;
+  h.held = [];
   h.checkError = null;
   h.installError = null;
 });
@@ -110,6 +141,60 @@ describe('Starters gallery (#526)', () => {
     expect(screen.getByText('Review the confirmation e-mail')).toBeTruthy();
     expect(screen.getByText('Check the send time')).toBeTruthy();
     expect(screen.getByText('Nothing is published or sent by creating drafts.')).toBeTruthy();
+  });
+
+  it('lets only the latest selection commit when an earlier read resolves last (#616)', async () => {
+    h.two = true;
+    renderPage();
+    expect(await screen.findByRole('button', { name: /Starter A/ })).toBeTruthy();
+    // The first selection starts its detail read; it stays in flight.
+    await waitFor(() => expect(h.held).toHaveLength(1));
+    expect(h.held[0].which).toBe('A');
+
+    await userEvent.click(screen.getByRole('button', { name: /Starter B/ }));
+    await waitFor(() => expect(h.held).toHaveLength(2));
+    expect(h.held[1].which).toBe('B');
+
+    // The newly selected starter shows its own loading state, never the old form.
+    expect(screen.getByLabelText('Loading the starter')).toBeTruthy();
+    expect(screen.queryByLabelText(/^A parameter/)).toBeNull();
+
+    // B arrives first and commits.
+    await act(async () => {
+      h.held[1].resolve({
+        recipe: {
+          id: `rcp_${'b'.repeat(32)}`,
+          title: 'Starter B',
+          description: 'The second starter.',
+          version: 1,
+          artifacts: 1,
+          parameters: [{ key: 'bParam', label: 'B parameter', type: 'text', required: true, default: 'B value' }],
+          prerequisites: [],
+          checklist: [],
+        },
+      });
+    });
+    await waitFor(() => expect(screen.getByLabelText(/^B parameter/)).toHaveProperty('value', 'B value'));
+
+    // A resolves last but must not overwrite the selection that is now active.
+    await act(async () => {
+      h.held[0].resolve({
+        recipe: {
+          id: `rcp_${'a'.repeat(32)}`,
+          title: 'Starter A',
+          description: 'The first starter.',
+          version: 1,
+          artifacts: 1,
+          parameters: [{ key: 'aParam', label: 'A parameter', type: 'text', required: true, default: 'A value' }],
+          prerequisites: [],
+          checklist: [],
+        },
+      });
+    });
+
+    await waitFor(() => expect(screen.getByLabelText(/^B parameter/)).toHaveProperty('value', 'B value'));
+    expect(screen.queryByLabelText(/^A parameter/)).toBeNull();
+    expect(screen.getByRole('heading', { name: 'Starter B' })).toBeTruthy();
   });
 
   it('checks prerequisites with one preview and keeps Create drafts unavailable while missing', async () => {

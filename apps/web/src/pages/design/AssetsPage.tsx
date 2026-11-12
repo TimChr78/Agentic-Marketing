@@ -5,7 +5,7 @@ import { artifactPath, typeLabel } from '../../app/artifactRoutes';
 import { useCrumbs } from '../../app/page';
 import { Link } from '../../app/router';
 import { useSession } from '../../app/session';
-import { useApi } from '../../app/useApi';
+import { useKeyedApi } from '../../app/useApi';
 import { AssetGrid, AssetThumb } from '../../features/assets/AssetGrid';
 import { ACCEPT, type Asset, formatBytes, uploadFile } from '../../features/assets/upload';
 import { GallerySkeleton, PhoneListSkeleton } from '../../features/phase28/content/GallerySkeleton';
@@ -43,9 +43,9 @@ export default function AssetsPage() {
     const t = setTimeout(() => setCommittedQ(q), 300);
     return () => clearTimeout(t);
   }, [q]);
-  const list = useApi(
-    () => api.call('assets.list', { query: committedQ || undefined, kind: kind || undefined, limit: 200 }),
-    [committedQ, kind],
+  const filterKey = `${committedQ}|${kind}`;
+  const list = useKeyedApi(filterKey, () =>
+    api.call('assets.list', { query: committedQ || undefined, kind: kind || undefined, limit: 200 }),
   );
   const [open, setOpen] = useState<Asset | null>(null);
   const [uploading, setUploading] = useState<string[]>([]);
@@ -252,7 +252,7 @@ function AssetDrawer({ id, onClose, onChanged }: { id: string; onClose: () => vo
   const { can } = useSession();
   const toast = useToast();
   const [confirmDialog, confirm] = useConfirm();
-  const a = useApi(() => api.call('assets.get', { id }), [id]);
+  const a = useKeyedApi(id, () => api.call('assets.get', { id }));
   const [name, setName] = useState<string | null>(null);
   const [alt, setAlt] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);

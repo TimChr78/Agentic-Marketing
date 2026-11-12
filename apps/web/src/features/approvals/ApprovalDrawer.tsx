@@ -5,7 +5,7 @@ import { artifactPath, typeLabel } from '../../app/artifactRoutes';
 import { TextLink } from '../../app/links';
 import { Link, navigate } from '../../app/router';
 import { useWorkspace } from '../../app/session';
-import { useApi } from '../../app/useApi';
+import { useKeyedApi } from '../../app/useApi';
 import {
   Alert,
   Button,
@@ -68,7 +68,8 @@ export function ApprovalDrawer({
 }) {
   const { can, user, workspace } = useWorkspace();
   const toast = useToast();
-  const d = useApi(() => api.call('approvals.get', { approvalId: id }), [id]);
+  // The drawer is reused when the URL id advances, so the read must be keyed by that id (#612).
+  const d = useKeyedApi(id, () => api.call('approvals.get', { approvalId: id }));
   const [tab, setTab] = useState<Tab>('review');
   const [rejecting, setRejecting] = useState(false);
   const [reason, setReason] = useState('');
@@ -93,7 +94,10 @@ export function ApprovalDrawer({
     setActionError(null);
   }, [id]);
 
-  const a = d.data;
+  // Only data for the id in the address bar may drive the review or its actions.
+  const staleRead = !!d.data && d.data.id !== id;
+  const a = d.data?.id === id ? d.data : undefined;
+  const loading = d.loading || staleRead;
   const pending = a?.status === 'pending';
   const held = !!a?.holdUntil && pending;
   // Reviewed together with other changes (#107): deciding this one decides all of them.
@@ -295,7 +299,7 @@ export function ApprovalDrawer({
         )
       }
     >
-      {d.loading ? (
+      {loading ? (
         <LoadingBlock geometry="detail" label="Loading the approval request" />
       ) : d.error ? (
         <div className="p-5">
@@ -651,7 +655,7 @@ function BundleMemberRow({
 }) {
   const isCurrent = member.approvalId === current.id;
   // One exact read per member per open review; the open member's read is already the drawer's.
-  const detail = useApi(() => api.call('approvals.get', { approvalId: member.approvalId }), [member.approvalId], { skip: isCurrent });
+  const detail = useKeyedApi(member.approvalId, () => api.call('approvals.get', { approvalId: member.approvalId }), { skip: isCurrent });
   const a = isCurrent ? current : detail.data;
   const stale = !!a && a.artifactLatestVersion > a.version;
   const summary = a ? bundleMemberSummary(a, (iso) => formatDateTime(iso, { zone: true })) : null;

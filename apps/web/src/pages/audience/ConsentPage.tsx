@@ -4,7 +4,7 @@ import { ApiError, api, errText } from '../../app/api';
 import { useCrumbs } from '../../app/page';
 import { Link } from '../../app/router';
 import { useSession } from '../../app/session';
-import { useApi } from '../../app/useApi';
+import { useApi, useKeyedApi } from '../../app/useApi';
 import { usePageTab } from '../../app/useTab';
 import { ConsentHistoryTable } from '../../features/audience/consent';
 import { personLabel } from '../../features/audience/profile';
@@ -89,8 +89,10 @@ export function ConsentLedger() {
   const counts = new Map((summary.data?.purposes ?? []).map((p) => [p.purpose, p]));
   const topicCounts = new Map<string, { topic: string; subscribed: number; unsubscribed: number }[]>();
   for (const t of summary.data?.topics ?? []) topicCounts.set(t.purpose, [...(topicCounts.get(t.purpose) ?? []), t]);
-  const profile = useApi(() => api.call('profiles.get', { profileId: person!.id }), [person?.id], { skip: !person });
-  const history = useApi(() => api.call('consent.history', { profileId: person!.id }), [person?.id], { skip: !person });
+  // A lookup is a new person: never keep the previous person's identity or ledger under a new
+  // search, and never let the ledger action act on a person whose data is not on screen (#617).
+  const profile = useKeyedApi(person?.id ?? '', () => api.call('profiles.get', { profileId: person!.id }), { skip: !person });
+  const history = useKeyedApi(person?.id ?? '', () => api.call('consent.history', { profileId: person!.id }), { skip: !person });
 
   const lookUp = async () => {
     const q = value.trim();
@@ -124,7 +126,7 @@ export function ConsentLedger() {
   };
 
   const records = history.data?.records ?? [];
-  const canRecord = can('profiles:write');
+  const canRecord = can('profiles:write') && !!person && profile.data?.id === person.id;
 
   return (
     <div className="space-y-5">
