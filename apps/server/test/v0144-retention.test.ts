@@ -119,6 +119,30 @@ describe('retention positive evidence (#627 review)', () => {
     expect((await api().call('consent.history', { profileId: id })).records.length).toBeGreaterThan(0);
   });
 
+  it('keeps a profile whose new activity lands after the history snapshot and before the delete (#766)', async () => {
+    const anon = 'form:late-activity';
+    const id = await seedProfile(anon, 'late-activity@example.com', new Date(Date.now() - 60 * 86_400_000));
+    await t.srv.events.insert([storedEvent(anon, 'Form Submitted')]);
+
+    // The round's history snapshot is taken once for the batch; an event that arrives after it and
+    // before the candidate's delete is not a Postgres row, so only a fresh store read sees it.
+    let inserted = false;
+    const events = {
+      ...t.srv.events,
+      async eventsOfAnonymousIds(...args: Parameters<typeof t.srv.events.eventsOfAnonymousIds>) {
+        const rows = await t.srv.events.eventsOfAnonymousIds(...args);
+        if (!inserted) {
+          inserted = true;
+          await t.srv.events.insert([storedEvent(anon, 'Page Viewed', { sourceId: 'src_site' })]);
+        }
+        return rows;
+      },
+    } as typeof t.srv.events;
+
+    expect((await runRetentionOnce({ ...retentionDeps(), events })).profiles).toBe(0);
+    expect(await profileExists(id)).toBe(true);
+  });
+
   it('does not treat an unrelated identify with the same timestamp as the form identify', async () => {
     const anon = 'form:timestamp-collision';
     const id = await seedProfile(anon, 'timestamp-collision@example.com', new Date(Date.now() - 60 * 86_400_000));
