@@ -2,6 +2,33 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [0.14.9] - 2026-11-12
+
+### Changed
+
+- The rest of the grouped dependency update from #720 lands: OpenTelemetry `sdk-node` and the OTLP trace exporter move from 0.223 to 0.301, the Anthropic SDK from 1.0 to 1.8, Vite from 8.3.5 to 8.3.8, Biome from 2.5 to 2.6, Playwright from 1.64 to 1.65, and Vitest from 5.0 to 5.1, together with the current minors of the AI SDK, Hono, the MCP SDK, Tailwind, React Flow, GrapesJS, lucide, zustand and the e-mail, ClickHouse and parser libraries.
+- OpenTelemetry tracing now also reports `os.*` and `service.instance.id` resource attributes, and requires Node.js 22.15 or newer when it is enabled. Nothing needs to change in the tracing configuration.
+- Biome 2.6's new `noComponentHookFactories` rule flagged seven test-only helper components that were declared inside a test; they now sit at module scope. No rule was disabled, and the mechanical format/fix pass had nothing left to change.
+- Updated the HTML parser to htmlparser2 12. The e-mail unsubscribe-link check no longer counts a link inside inline SVG or MathML as visible: many e-mail clients strip inline SVG, and the new parser exposed links that Chromium never draws there. A normal footer link beside an SVG icon still passes.
+
+### Security
+
+- The auth stack moves to Better Auth 1.7.22 together: `better-auth`, `@better-auth/{core,oauth-provider,sso,mcp,cimd}`, `@better-auth/utils` 0.5.1, `@better-fetch/fetch` 1.3.3, `better-call` 1.4.5 and `jose` 6.2.16. The `pnpm` overrides that held three of those packages at 1.7.7 are gone; the new Dependabot group moves the whole stack in one PR.
+- A password reset that fails to save or to revoke the person's sessions no longer keeps the new password or burns the link, so the same link still works.
+- OAuth consent is per brand: granting an MCP client access in one brand is no longer reused, or overwritten, by a grant in another.
+- Sign-in is stricter with identity providers: OIDC SSO providers whose issuer does not match discovery are refused at registration, and SAML responses are checked against the clock skew and replay protection (including assertion IDs written as XML character references). SAML certificates and callback URLs can now be rotated for accounts that are already linked.
+- Revoking the current session or deleting the account now expires the session cookie immediately, and a `"false"` `email_verified` claim no longer counts as verified.
+
+### Upgrading from 0.14.8
+
+- **Migrations:** none.
+- **Configuration:** no new environment variables.
+- **Breaking changes:** an e-mail whose only unsubscribe link sits inside inline SVG or MathML is now refused at save and publish; move the link into the normal HTML footer. With OpenTelemetry tracing enabled, the server needs Node.js 22.15 or newer (the published images already ship it).
+- **Manual steps:** none.
+- **Upgrade:** download `agentic-marketing-compose-0.14.9.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.14.9 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.14.9` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.14.9). Run `docker compose exec app am doctor`.
+
+<!-- issues: 727 -->
+
 ## [0.14.8] - 2026-11-12
 
 ### Fixed
