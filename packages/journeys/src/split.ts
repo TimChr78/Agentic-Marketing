@@ -100,3 +100,13 @@ export function attributeSplitOutcomes(
   }
   return counts;
 }
+
+/**
+ * Distinct people per split arm. The k-anonymity floor counts people, not entries: one person who
+ * re-enters an arm several times is still one person (0.14.11 review, #757).
+ */
+export function splitArmPeople(entries: readonly { profileId: string; arm: number }[], armCount: number): number[] {
+  const people = Array.from({ length: armCount }, () => new Set<string>());
+  for (const entry of entries) if (entry.arm >= 0 && entry.arm < armCount) people[entry.arm]!.add(entry.profileId);
+  return people.map((set) => set.size);
+}

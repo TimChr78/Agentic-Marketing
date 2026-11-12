@@ -117,6 +117,30 @@ describe('inbound replay protection for every scheme (#787)', () => {
     await eventually(events, (rows) => rows.length === 2);
   });
 
+  it('keeps two deliveries with the same body but different mapped event ids (0.14.11 review)', async () => {
+    const connection = await api(plainWs).call('connections.create', {
+      connector: 'webhook',
+      name: 'Header-keyed generic',
+      settings: { mapping: '$merge([body, {"messageId": headers."x-event-id"}])' },
+      secrets: {},
+    });
+    const events = () =>
+      t.srv.events
+        .eventsOf(plainWs, { anonymousIds: [], userIds: ['header-keyed'] })
+        .then((rows) => rows.filter((e) => e.name === 'Order Completed'));
+
+    const body = tracked('header-keyed', 'h-1');
+    const first = await post(connection.inboundPath!, body, { 'x-event-id': 'evt-1' });
+    expect(await first.json()).toMatchObject({ success: true, accepted: 1 });
+    const second = await post(connection.inboundPath!, body, { 'x-event-id': 'evt-2' });
+    expect(await second.json()).toMatchObject({ success: true, accepted: 1 });
+    await eventually(events, (rows) => rows.length === 2);
+
+    const replay = await post(connection.inboundPath!, body, { 'x-event-id': 'evt-2' });
+    expect(await replay.json()).toMatchObject({ success: true, duplicate: true, accepted: 0 });
+    expect(await events()).toHaveLength(2);
+  });
+
   it('publishes a byte-identical unsigned replay once and a different body again', async () => {
     const connection = await api(plainWs).call('connections.create', {
       connector: 'webhook',

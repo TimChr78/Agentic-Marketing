@@ -112,8 +112,20 @@ export function inboundApi(deps: {
       // it; the hot-state done TTL is the dedupe window, since those schemes carry no timestamp.
       const scheme = ictx.settings?.signature?.scheme;
       const webhookId = scheme === 'standard-webhooks' ? headers['webhook-id'] : undefined;
+      // A mapping may read a header into the event's messageId (a generic connector's `x-event-id`),
+      // so two deliveries with the same body can still be two events. Those mapped ids are part of
+      // the replay identity; anything else the mapping derives (a receipt time) is not, or a replay
+      // would never match (0.14.11 review).
+      const mappedIds = items
+        .map((item) => (item && typeof item === 'object' ? (item as { messageId?: unknown }).messageId : undefined))
+        .filter((id): id is string => typeof id === 'string' && id.length > 0);
       const replayId =
-        webhookId ?? (scheme === 'standard-webhooks' ? undefined : createHash('sha256').update(`${conn.row.id}\n${raw}`).digest('hex'));
+        webhookId ??
+        (scheme === 'standard-webhooks'
+          ? undefined
+          : createHash('sha256')
+              .update(`${conn.row.id}\n${raw}\n${mappedIds.join('\n')}`)
+              .digest('hex'));
       const replayKey = replayId ? inboundReplayKey(ws, conn.row.id, replayId) : undefined;
       let claimToken: string | undefined;
       // A stable id per mapped record: if the hot state loses the key, JetStream still drops the

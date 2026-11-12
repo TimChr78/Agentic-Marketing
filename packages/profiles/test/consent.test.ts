@@ -79,6 +79,11 @@ describe('consentProofFor hides national phones and addresses (#765)', () => {
     }
   });
 
+  it('withholds a Danish 8-digit number in an allowlisted proof key (0.14.11 review)', () => {
+    expect(consentProofFor({ via: '12345678', system: 'Kit' }, false)).toEqual({ proof: { system: 'Kit' }, proofWithheld: true });
+    expect(consentProofFor({ via: '12 34 56 78', system: 'Kit' }, false)).toEqual({ proof: { system: 'Kit' }, proofWithheld: true });
+  });
+
   it('withholds a postal address in an allowlisted proof key', () => {
     expect(consentProofFor({ method: 'signed at 123 Main Street', issue: 'Hauptstraße 12' }, false)).toEqual({
       proof: {},
