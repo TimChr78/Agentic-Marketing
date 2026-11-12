@@ -147,6 +147,25 @@ export async function requestPush(tx: Tx, workspaceId: string, kp: KeyProvider, 
   return { messageId: m.id, status, reason, duplicate: false };
 }
 
+/**
+ * The device ids that already received this message, kept in `messages.data` between attempts
+ * (#639). Keys starting with `__` are internal, as `__subject` already is; a template never reads
+ * this one.
+ */
+const DELIVERED_DEVICES = '__pushDelivered';
+
+function deliveredDevices(data: Record<string, unknown>): string[] {
+  const value = data[DELIVERED_DEVICES];
+  return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : [];
+}
+
+function withoutDeliveredDevices(data: Record<string, unknown>): Record<string, unknown> {
+  if (!(DELIVERED_DEVICES in data)) return data;
+  const out = { ...data };
+  delete out[DELIVERED_DEVICES];
+  return out;
+}
+
 export async function deliverPush(db: Db, ws: string, id: string, deps: { kp: KeyProvider; events: EventStore; email: EmailServices }) {
   const prepared = await db.withWorkspace(ws, async (tx) => {
     const [m] = await tx.select().from(schema.messages).where(eq(schema.messages.id, id));
@@ -223,7 +242,11 @@ export async function deliverPush(db: Db, ws: string, id: string, deps: { kp: Ke
   const delivered: { device: string; id: string | null; provider: string; adapter: string }[] = [];
   const gone: string[] = [];
   const errors: string[] = [];
+  // One message fans out to every device, so a retry must reach only the devices that have not
+  // received it yet (#639). Delivered ids are kept on the message row between attempts.
+  const alreadyDelivered = new Set(deliveredDevices(m.data));
   for (const s of sends) {
+    if (alreadyDelivered.has(s.device.id)) continue;
     try {
       const r = await s.transport.send(s.to, out);
       if (r.ok) delivered.push({ device: s.device.id, id: r.providerMessageId, provider: s.provider.id, adapter: s.provider.adapter });
@@ -232,6 +255,30 @@ export async function deliverPush(db: Db, ws: string, id: string, deps: { kp: Ke
       errors.push(`${s.provider.adapter}: ${(e as Error).message.split('\n')[0]}`);
     }
   }
+  const reachedDevices = [...alreadyDelivered, ...delivered.map((d) => d.device)];
+  const reached = reachedDevices.length > 0;
+  // A transient failure is retried with the shared back-off. Until every device is settled the
+  // message stays `queued`: there is no `partial` status, and `sent` while a retry is pending
+  // would count an incomplete fan-out as a delivered message. Once attempts run out, `sent` with
+  // `partly_sent: …` in the reason is the truthful reading when at least one device received it.
+  const retry = errors.length > 0 && m.attempts < MAX_ATTEMPTS;
+  const status: 'queued' | 'sent' | 'failed' | 'suppressed' = retry
+    ? 'queued'
+    : errors.length > 0
+      ? reached
+        ? 'sent'
+        : 'failed'
+      : reached
+        ? 'sent'
+        : 'suppressed';
+  const reason =
+    errors.length > 0
+      ? `${reached ? 'partly_sent' : 'provider_error'}: ${errors.join('; ')}`.slice(0, 500)
+      : status === 'suppressed'
+        ? 'no_address: every registered device has unsubscribed'
+        : null;
+  if (errors.length) logger.warn({ messageId: id, retry, errors }, 'push send failed');
+  const data = status === 'queued' ? { ...m.data, [DELIVERED_DEVICES]: reachedDevices } : withoutDeliveredDevices(m.data);
   const event = await db.withWorkspace(ws, async (tx): Promise<MessageEvent> => {
     const s = schema.pushSubscriptions;
     if (gone.length) await tx.delete(s).where(inArray(s.id, gone));
@@ -245,32 +292,20 @@ export async function deliverPush(db: Db, ws: string, id: string, deps: { kp: Ke
             delivered.map((d) => d.device),
           ),
         );
-    if (delivered.length) {
-      await tx
-        .update(schema.messages)
-        .set({
-          status: 'sent',
-          reason: errors.length ? `partly_sent: ${errors.join('; ')}`.slice(0, 500) : null,
-          providerId: delivered[0].provider,
-          providerMessageId: delivered[0].id,
-          sentAt: new Date(),
-          updatedAt: new Date(),
-        })
-        .where(eq(schema.messages.id, id));
-      return decisionEvent(m, 'sent', '', delivered[0].adapter);
-    }
-    // Only errors: retried. Only gone devices: nothing left to send to.
-    const retry = errors.length > 0 && m.attempts < MAX_ATTEMPTS;
-    const reason = errors.length
-      ? `provider_error: ${errors.join('; ')}`.slice(0, 500)
-      : 'no_address: every registered device has unsubscribed';
-    if (errors.length) logger.warn({ messageId: id, retry, errors }, 'push send failed');
-    const nextAttemptAt = retry ? new Date(Date.now() + retryDelaySeconds(stream, m.attempts) * 1000) : null;
     await tx
       .update(schema.messages)
-      .set({ status: retry ? 'queued' : errors.length ? 'failed' : 'suppressed', reason, nextAttemptAt, updatedAt: new Date() })
+      .set({
+        status,
+        reason,
+        providerId: delivered[0]?.provider ?? m.providerId,
+        providerMessageId: delivered[0]?.id ?? m.providerMessageId,
+        sentAt: status === 'sent' ? new Date() : null,
+        nextAttemptAt: retry ? new Date(Date.now() + retryDelaySeconds(stream, m.attempts) * 1000) : null,
+        data,
+        updatedAt: new Date(),
+      })
       .where(eq(schema.messages.id, id));
-    return decisionEvent(m, retry ? 'queued' : errors.length ? 'failed' : 'suppressed', reason);
+    return decisionEvent(m, status, reason ?? '', delivered[0]?.adapter ?? '');
   });
   await deps.events.insertMessageEvents([event]);
 }

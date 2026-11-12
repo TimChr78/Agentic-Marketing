@@ -425,11 +425,25 @@ const purposeBasis = new Map(
   ((DEMO_ARTIFACT_CONTENT.Purposes as { purposes: Purpose[] }).purposes ?? []).map((purpose) => [purpose.key, purpose]),
 );
 
+function demoAllowed(basis: string, status: string): boolean {
+  if (basis === 'consent') return status === 'granted';
+  if (basis === 'legitimate_interest') return !['withdrawn', 'objected', 'denied'].includes(status);
+  return true;
+}
+
 export function demoProfile(id: string): PersonProfile {
   const index = DEMO_PROFILE_ROWS.findIndex((row) => row.id === id);
   if (index < 0) throw new ApiError(404, 'not_found', 'This person is not part of the demo sample.');
   const row = DEMO_PROFILE_ROWS[index]!;
   const person = DEMO_PEOPLE[index]!;
+  const consent = row.consent.map((entry) => ({
+    purpose: entry.purpose,
+    channel: entry.purpose.includes('email') ? 'email' : 'web',
+    status: entry.status ?? 'granted',
+    basis: purposeBasis.get(entry.purpose)?.basis ?? 'consent',
+    source: 'import',
+    updatedAt: row.lastSeen,
+  }));
   return {
     id: row.id,
     traits: { city: person.city, lifecycle_stage: index % 3 === 0 ? 'engaged' : 'new' },
@@ -438,13 +452,13 @@ export function demoProfile(id: string): PersonProfile {
       { type: 'email', value: person.email, firstSeen: row.firstSeen, lastSeen: row.lastSeen },
       { type: 'user_id', value: person.userId, firstSeen: row.firstSeen, lastSeen: row.lastSeen },
     ],
-    consent: row.consent.map((entry) => ({
+    consent,
+    consentEffective: consent.map((entry) => ({
       purpose: entry.purpose,
-      channel: entry.purpose.includes('email') ? 'email' : 'web',
-      status: entry.status ?? 'granted',
-      basis: purposeBasis.get(entry.purpose)?.basis ?? 'consent',
-      source: 'import',
-      updatedAt: row.lastSeen,
+      basis: entry.basis,
+      status: entry.status,
+      allowed: demoAllowed(entry.basis, entry.status),
+      channels: [{ channel: entry.channel, status: entry.status, allowed: demoAllowed(entry.basis, entry.status) }],
     })),
     mergedFrom: [],
     firstSeen: row.firstSeen,

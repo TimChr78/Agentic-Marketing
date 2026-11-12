@@ -2,7 +2,8 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { EmailTemplate } from '@agentic-marketing/artifacts';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { type AssetInfo, checkEmailTemplate, clearLinkCache, type EmailCheckOptions, scanHtml } from '../src/checks';
+import { type AssetInfo, checkEmailTemplate, clearLinkCache, type EmailCheckOptions, emailPublishProblems, scanHtml } from '../src/checks';
+import { validateTemplate } from '../src/render';
 
 // Pre-send checks (#90) against real rendered MJML: each category has a fixture template, and link
 // reachability talks to a local server so 200/404/403 are deterministic and nothing leaves the box.
@@ -44,6 +45,41 @@ describe('email pre-send checks', () => {
       opts({ marketing: false }),
     );
     expect(r.summary.blocking).toBe(0);
+  });
+
+  // #637: the gate searched the template *source* for the characters "unsubscribe_url". A footer
+  // supplied by a reusable block was blocked although the rendered e-mail has the link, and prose
+  // that merely names the variable passed with no link at all. The answer must come from the
+  // rendered e-mail, and it must be the same at save (validateTemplate) and at publish.
+  describe('unsubscribe compliance is decided from the rendered e-mail (#637)', () => {
+    const footer = { id: `blk_${'f'.repeat(32)}`, mjml: unsubscribe, params: [] };
+    const blockFooter = template({ mjml: mjml(`<mj-text>Hi</mj-text>{% block '${footer.id}' %}`) });
+    const prose = template({ mjml: mjml('<mj-text>See unsubscribe_url in our policy.</mj-text>') });
+    const blocks = { blocks: (id: string) => (id === footer.id ? footer : null) };
+
+    it('accepts a footer supplied by a reusable block, at save and at publish', async () => {
+      await expect(validateTemplate(blockFooter)).resolves.toEqual([]);
+      await expect(emailPublishProblems(blockFooter, { marketing: true, render: blocks })).resolves.toEqual([]);
+      const checked = await checkEmailTemplate(blockFooter, opts({ render: blocks }));
+      expect(checked.findings.filter((f) => f.category === 'compliance')).toEqual([]);
+    });
+
+    it('rejects a template that only mentions unsubscribe_url in prose, at save and at publish', async () => {
+      const saved = (await validateTemplate(prose)).join(' ');
+      expect(saved).toContain('unsubscribe link');
+      const published = (await emailPublishProblems(prose, { marketing: true })).join(' ');
+      expect(published).toContain('unsubscribe link');
+      const checked = await checkEmailTemplate(prose, opts());
+      expect(checked.findings).toContainEqual(expect.objectContaining({ category: 'compliance', severity: 'blocking' }));
+    });
+
+    it('still accepts a plain marketing template with the link and rejects one without it', async () => {
+      await expect(validateTemplate(template())).resolves.toEqual([]);
+      await expect(emailPublishProblems(template(), { marketing: true })).resolves.toEqual([]);
+      const none = template({ mjml: mjml('<mj-text>Hi</mj-text>') });
+      expect((await validateTemplate(none)).join(' ')).toContain('unsubscribe link');
+      expect((await emailPublishProblems(none, { marketing: true })).join(' ')).toContain('unsubscribe link');
+    });
   });
 
   it('notes a purpose that is not marked for e-mail', async () => {

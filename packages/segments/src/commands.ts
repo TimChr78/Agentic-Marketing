@@ -36,6 +36,8 @@ export const previewSegment = defineCommand({
   output: z.object({ count: z.number().int(), sample: z.array(z.string()), tookMs: z.number().int() }),
   permission: 'profiles:read',
   effect: 'read',
+  // The sample is profile ids: pseudonymous, but they identify people in the workspace.
+  auditReads: true,
   handler: async (input, ctx) => {
     let condition = input.condition;
     let listSegment: string | undefined;
@@ -210,6 +212,8 @@ export const profileSegments = defineCommand({
   output: z.object({ segments: z.array(z.object({ id: z.string(), name: z.string(), since: z.string() })) }),
   permission: 'profiles:read',
   effect: 'read',
+  auditReads: true,
+  target: (i) => i.profileId,
   handler: async (input, ctx) => {
     const rows = await ctx.tx
       .select({ id: schema.segmentMemberships.segmentId, since: schema.segmentMemberships.since, name: schema.artifacts.name })

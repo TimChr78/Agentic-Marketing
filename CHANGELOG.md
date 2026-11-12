@@ -2,6 +2,42 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [0.14.4] - 2026-11-12
+
+### Fixed
+
+- Personal-data reads now write an audit record: `profiles.find`, `profiles.events`, `consent.history`, `topics.preferences`, `messages.list`, `segments.ofProfile`, `profiles.scores`, `deliveries.list`, `segments.preview` (its sample is profile ids) and `journeys.simulate` (with the person as the target when a profile is given).
+- The person page shows the consent delivery actually enforces, per purpose and per channel, so a newer withdrawal on one channel is visible beside the channels it did not touch and an equal-timestamp refusal wins.
+- `journeys.simulate` asks the same channel-precedence rule as the runtime, so a webhook withdrawal behind an older all-channel grant previews as “would not send” instead of “would send a webhook”.
+- A strict tracking plan no longer rejects the platform's own signup, confirmation, import and e-mail carrier events, so newsletter signups keep working and imported consent is recorded.
+- Tracking plans gain a `declaredProperties` setting for a declared property that is missing although required, or has the wrong type. When it is absent, plans that block unknown properties keep blocking and other plans warn; the unknown-event setting no longer affects this.
+- Retention removes unconfirmed form signups that supplied a client anonymous id only when the stored event history proves an unconfirmed signup with no other activity; confirmed subscribers and people with other activity stay, and kept candidates can no longer hide an older signup.
+- Delivery events from Amazon SES keep arriving after a transient failure: the SNS signing certificate is cached only after a successful fetch, a stale certificate is fetched again at most once a minute, and one timeout or 5xx no longer rejects every bounce and complaint webhook for the life of the process.
+- The unsubscribe check now reads the rendered e-mail, not the template source: a footer supplied by a reusable block passes, while prose that only mentions `unsubscribe_url` is refused, with the same answer at save and at publish. The link must also be usable: a hidden link (`display:none`, `visibility:hidden`, `hidden`, a covering style or a simple `<style>` rule), one outside the body, or one with no text or image alt text is refused with the reason. Visibility is judged at the link's own text, following the CSS cascade (the last declaration wins unless an earlier one is `!important`; inline beats a simple rule), and transparent, zero-alpha or background-coloured text counts as hidden, including semi-transparent backgrounds, the `background` shorthand and table `bgcolor`. An e-mail nested more than 512 levels deep, or one that takes more than a second to check, is refused as too complex to check. Known limits (complex selectors, `@media` rules, external stylesheets, transforms and some colour forms) are listed in #707.
+- UTM tagging and click tracking now cover single-quoted and unquoted `href` links that authors write inside `mj-text`; the existing double-quoted output is unchanged.
+- A push message that reached some devices while others hit a transient error now retries only the failed devices with the normal back-off, instead of marking the message `sent` and losing those notifications.
+- Replying START to an SMS now works: the app role may delete its workspace’s `stop` suppression, so opting back in returns 200 and never removes a bounce or complaint suppression.
+- Signed inbound webhooks remember their `webhook-id` in the shared hot state: a replayed request is answered as already received and publishes nothing, while a delivery still being processed gets a retryable 503 instead of a false acknowledgement, so a crash mid-publish cannot lose the event.
+- The browser SDK reads ad click-id cookies without truncating values at `=`: a value that fails the click-id pattern is dropped whole instead of a shortened, wrong id being stored.
+
+### Security
+
+- `fast-xml-parser` is pinned to 5.12.0 for `@better-auth/sso`, which parses SAML responses with it; 5.11.2 and earlier spend quadratic CPU on unterminated stop-node tags (Dependabot alert 21).
+
+### Upgrading from 0.14.3
+
+- **Migrations:** `packages/db/migrations/0088_suppressions_delete_grant.sql`.
+- **Configuration:** no new environment variables.
+- **Breaking changes:** stricter unsubscribe-link checks, a new tracking-plan setting, more audit records and changed webhook replay answers.
+  - **Marketing e-mail templates are checked more strictly.** A template whose unsubscribe link is hidden, outside the body, empty, or only mentioned in prose is now refused at save and at publish, and so is one too complex to check. Templates that passed before can now be refused; open them and fix the footer link (the message names the reason). Transactional e-mail is not affected.
+  - **Tracking plans:** the new `declaredProperties` setting decides what happens to a declared property that is missing or has the wrong type. Plans without it keep blocking when they block unknown properties and otherwise warn; the unknown-event setting no longer affects this.
+  - **More audit records:** the personal-data reads listed under Fixed now each write an audit record, so the audit log grows faster on workspaces that read profiles often.
+  - **Inbound webhook replays:** a repeated `webhook-id` is acknowledged without publishing, and a delivery still in progress gets a retryable 503. Senders that retry on 503 need no change.
+- **Manual steps:** none.
+- **Upgrade:** download `agentic-marketing-compose-0.14.4.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.14.4 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.14.4` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.14.4). Run `docker compose exec app am doctor`.
+
+<!-- issues: 592, 593, 623, 624, 625, 626, 627, 634, 637, 638, 639, 643, 644, 664 -->
+
 ## [0.14.3] - 2026-11-10
 
 ### Changed

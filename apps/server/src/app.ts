@@ -497,7 +497,7 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
         },
       }),
     );
-  if (config.roles.has('ingest')) app.route('/', inboundApi({ db, bus, kp: keyProvider }));
+  if (config.roles.has('ingest')) app.route('/', inboundApi({ db, bus, kp: keyProvider, hot }));
   if (config.roles.has('api')) app.route('/', oauthRoutes({ db, kp: keyProvider, egress: config.egress }));
   // Public asset links, on both roles that front the public edge (like /f and /u).
   if (config.roles.has('api') || config.roles.has('ingest')) app.route('/', assetRoutes({ db }));

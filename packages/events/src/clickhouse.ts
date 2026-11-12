@@ -18,6 +18,8 @@ export interface EventStore {
     ids: { anonymousIds: string[]; userIds: string[] },
     opts?: { limit?: number; before?: string; beforeId?: string },
   ): Promise<StoredEvent[]>;
+  /** The newest `perId` events for each of several anonymous ids in one query (bounded retention scans). */
+  eventsOfAnonymousIds(workspaceId: string, anonymousIds: string[], perId: number): Promise<StoredEvent[]>;
   /** Deletes a person's events (erasure). */
   deleteEventsOf(workspaceId: string, ids: { anonymousIds: string[]; userIds: string[]; profileIds?: string[] }): Promise<void>;
   /** Matching events per identifier (segments): name, property equality, time window, optional id scope. */
@@ -193,6 +195,7 @@ export interface JourneyEvent {
 
 export interface StoredEvent {
   eventId: string;
+  sourceId: string;
   type: string;
   name: string;
   timestamp: string;
@@ -340,7 +343,7 @@ export function clickHouseStore(opts: { url: string; database: string }): EventS
           : "AND timestamp < {before:DateTime64(3, 'UTC')}"
         : '';
       const rs = await query(workspaceId, {
-        query: `SELECT event_id, type, name, timestamp, received_at, anonymous_id, user_id, properties, context
+        query: `SELECT event_id, source_id, type, name, timestamp, received_at, anonymous_id, user_id, properties, context
                 FROM events FINAL
                 WHERE ${idFilter} ${after}
                 ORDER BY timestamp DESC, event_id DESC LIMIT {limit:UInt32}`,
@@ -355,6 +358,32 @@ export function clickHouseStore(opts: { url: string; database: string }): EventS
       const rows = await rs.json<Record<string, never>>();
       return rows.map((r) => ({
         eventId: r.event_id,
+        sourceId: r.source_id,
+        type: r.type,
+        name: r.name,
+        timestamp: `${String(r.timestamp).replace(' ', 'T')}Z`,
+        receivedAt: `${String(r.received_at).replace(' ', 'T')}Z`,
+        anonymousId: r.anonymous_id,
+        userId: r.user_id,
+        properties: r.properties,
+        context: r.context,
+      }));
+    },
+    async eventsOfAnonymousIds(workspaceId, anonymousIds, perId) {
+      if (!anonymousIds.length) return [];
+      const rs = await query(workspaceId, {
+        query: `SELECT event_id, source_id, type, name, timestamp, received_at, anonymous_id, user_id, properties, context
+                FROM events FINAL
+                WHERE workspace_id = {ws:UUID} AND anonymous_id IN {anon:Array(String)}
+                ORDER BY timestamp DESC, event_id DESC
+                LIMIT {perId:UInt32} BY anonymous_id`,
+        query_params: { ws: workspaceId, anon: anonymousIds, perId },
+        format: 'JSONEachRow',
+      });
+      const rows = await rs.json<Record<string, never>>();
+      return rows.map((r) => ({
+        eventId: r.event_id,
+        sourceId: r.source_id,
         type: r.type,
         name: r.name,
         timestamp: `${String(r.timestamp).replace(' ', 'T')}Z`,

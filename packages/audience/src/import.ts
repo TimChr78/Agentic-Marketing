@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { DEFAULT_PURPOSES, publishedSingleton } from '@agentic-marketing/artifacts';
 import { defineCommand } from '@agentic-marketing/commands';
 import { isoDateTime, newId } from '@agentic-marketing/core';
-import { acceptItems } from '@agentic-marketing/ingest';
+import { acceptInternalItems, PLATFORM_EVENT } from '@agentic-marketing/ingest';
 import { z } from 'zod';
 
 // Importing people with their consent history, e.g. newsletter subscribers moving from another
@@ -10,7 +10,7 @@ import { z } from 'zod';
 // source, so identity resolution, segments and journeys see them like any other event, and the
 // consent hook records the consents with the imported timestamps and proof.
 
-export const IMPORTED = 'Subscription Imported';
+export const IMPORTED = PLATFORM_EVENT.subscriptionImported;
 
 const Row = z.object({
   email: z.email().max(320),
@@ -89,7 +89,7 @@ export const importProfiles = defineCommand({
     }
     const batchId = newId('imp');
     const plan = await publishedSingleton(ctx.tx, 'tracking_plan');
-    const out = acceptItems(items, { id: batchId, workspaceId: ws, kind: 'server', requiredPurpose: null }, { plan, purposes });
+    const out = acceptInternalItems(items, { id: batchId, workspaceId: ws, kind: 'server', requiredPurpose: null }, { plan, purposes });
     for (const r of out.rejected) rejected.push({ index: rowOf[r.index], error: r.error });
     if (out.accepted.length) await ctx.services.bus.publish(out.accepted);
     return { batchId, accepted: input.rows.length - new Set(rejected.map((r) => r.index)).size, rejected };

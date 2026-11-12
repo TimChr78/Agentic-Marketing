@@ -101,6 +101,8 @@ export const listMessages = defineCommand({
   }),
   permission: 'profiles:read',
   effect: 'read',
+  auditReads: true,
+  target: (i) => i.profileId,
   handler: async (input, ctx) => {
     const c = schema.messages;
     const cursor = input.cursor ? decodeCursor(input.cursor) : null;

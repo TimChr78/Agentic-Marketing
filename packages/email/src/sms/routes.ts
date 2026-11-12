@@ -110,13 +110,17 @@ export function smsRoutes(deps: Deps) {
             .onConflictDoNothing();
           logger.info({ workspace: target.ws, profiles: profileIds.length }, 'SMS STOP recorded');
         } else if (match?.intent === 'start') {
-          // Lifts the block only; marketing texts need a new consent.
+          // Lifts the block only; marketing texts need a new consent. Only the SMS stop row for
+          // this number is removed: a hard bounce or complaint for the same number is a delivery
+          // fact, not an opt-out, and stays suppressed (#664).
           const { hash } = await profilesWithPhone(tx, target.ws, deps.kp, inbound.from);
-          await tx
+          const lifted = await tx
             .delete(schema.suppressions)
             .where(
               and(eq(schema.suppressions.channel, 'sms'), eq(schema.suppressions.valueHash, hash), eq(schema.suppressions.reason, 'stop')),
-            );
+            )
+            .returning({ reason: schema.suppressions.reason });
+          logger.info({ workspace: target.ws, lifted: lifted.length }, 'SMS START lifted the stop suppression');
         } else if (match?.intent === 'help') reply = billingOf(provider).helpText;
         return { status: 200 as const, reply: transport.reply(reply) };
       });
