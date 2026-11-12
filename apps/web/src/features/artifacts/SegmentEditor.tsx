@@ -693,13 +693,29 @@ function useReferencedSegmentVersions(ids: string[]) {
   }, [read]);
   useEffect(() => onArtifactsChanged(() => void read()), [read]);
   useEffect(() => {
+    // Returning to a tab fires visibilitychange and focus, in either order, for one return. Re-check
+    // once per return (#735): the first signal reads, the other is the same return. The latch clears
+    // when the tab hides or the window loses focus, which is where every return starts. The shared
+    // cache invalidation signal still reads immediately through its own effect above.
+    let checked = false;
     const recheck = () => {
-      if (document.visibilityState !== 'hidden') void read();
+      if (document.visibilityState === 'hidden') {
+        checked = false;
+        return;
+      }
+      if (checked) return;
+      checked = true;
+      void read();
+    };
+    const left = () => {
+      checked = false;
     };
     window.addEventListener('focus', recheck);
+    window.addEventListener('blur', left);
     document.addEventListener('visibilitychange', recheck);
     return () => {
       window.removeEventListener('focus', recheck);
+      window.removeEventListener('blur', left);
       document.removeEventListener('visibilitychange', recheck);
     };
   }, [read]);

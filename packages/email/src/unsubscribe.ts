@@ -79,10 +79,12 @@ interface Candidate {
   visible: boolean;
 }
 
-/** A simple class/id/tag selector whose rule sets display or visibility. */
+/** A simple class/id/tag selector whose rule sets a visibility-relevant property. */
 interface HideSelector {
   tag: string | null;
   id: string | null;
+  /** How many times the id is named: `#a#a` counts twice toward specificity, as in CSS. */
+  idCount: number;
   classes: string[];
 }
 
@@ -113,6 +115,9 @@ interface HiddenRules {
   display: RuleBucket;
   visibility: RuleBucket;
   background: RuleBucket;
+  opacity: RuleBucket;
+  'font-size': RuleBucket;
+  color: RuleBucket;
 }
 
 /**
@@ -172,20 +177,22 @@ const isSpace = (ch: string) => ch === ' ' || ch === '\t' || ch === '\n' || ch =
  * - an off-screen box: a `text-indent` of at most -1000px with hidden overflow, an absolutely
  *   positioned `left`/`top` of at most -1000px, `clip: rect(0,0,0,0)`, or a `clip-path` of
  *   `inset(50%)`/`inset(100%)`/`circle(0)`;
- * - a class or id matched by a simple `<style>` rule (outside an at-rule) that sets display,
- *   visibility or a background, cascaded with the inline style.
+ * - a class, id or tag matched by a simple `<style>` rule (outside an at-rule) that sets display,
+ *   visibility, opacity, font-size, colour or a background, cascaded with the inline style.
  *
  * Cascade scope: declarations in one style attribute or one rule use the last value, except that
  * `!important` beats a later value without it. `background` and `background-color` are one
  * property for this purpose, so the later of the two wins. Inline wins over a simple rule unless
  * the rule is `!important` and the inline value is not; between simple rules an important rule
- * wins, then the later rule. Specificity beyond tag/class/id is not modelled.
+ * wins, then the rule with the higher specificity (id, then class, then tag), then the later rule.
+ * Specificity beyond simple tag/class/id compounds is not modelled.
  *
  * The `bgcolor` attribute sets an element's background when no CSS background applies, and a
  * `<font color>` attribute sets its text colour when no CSS colour does (CSS wins). A `background`
  * shorthand contributes the last top-level token that is a colour, so a gradient or url() before
  * it is ignored.
  *
+ * Rules are ordered as CSS does: importance, then specificity (id, class, tag), then document order.
  * Known limits: selectors with combinators, attributes or pseudo-classes, rules inside `@media` or
  * any other at-rule, compound (tag/class/id) rules past the first 64 per kind, selectors naming
  * more than 8 classes, and external
@@ -341,6 +348,11 @@ function nextState(el: ElementInfo, parent: VisibilityState, rules: HiddenRules)
   const visibility =
     visibilityDecl === 'hidden' || visibilityDecl === 'collapse' ? 'hidden' : visibilityDecl === 'visible' ? 'visible' : parent.visibility;
 
+  // Opacity applies to the element itself (the subtree inherits the latched `hidden`), so the
+  // winning declaration only has to say whether it is zero.
+  const opacity = cascadeDeclaration(d.get('opacity'), matchRule(rules.opacity, el));
+  const opacityZero = opacity !== null && declarationIsZero(opacity);
+
   const overflow = declaredValue(d, 'overflow') ?? '';
   const clipped =
     (isZero(declaredValue(d, 'max-height')) || isZero(declaredValue(d, 'height')) || isZero(declaredValue(d, 'width'))) &&
@@ -350,12 +362,17 @@ function nextState(el: ElementInfo, parent: VisibilityState, rules: HiddenRules)
     'hidden' in el.attribs ||
     (el.attribs['aria-hidden'] ?? '').trim().toLowerCase() === 'true' ||
     display === 'none' ||
-    isZero(declaredValue(d, 'opacity')) ||
+    opacityZero ||
     clipped ||
     (declaredValue(d, 'mso-hide') ?? '') === 'all' ||
     isOffscreen(d);
 
-  const ownColour = d.has('color') ? colourValue(declaredValue(d, 'color')) : el.name === 'font' ? colourValue(el.attribs.color) : null;
+  // Font-size and colour are inherited: an element without a winning declaration keeps its
+  // parent's resolved value, and a child's own declaration replaces it (so font-size:0 on an
+  // ancestor does not hide text that resets the size).
+  const fontSize = cascadeDeclaration(d.get('font-size'), matchRule(rules['font-size'], el));
+  const colour = cascadeDeclaration(d.get('color'), matchRule(rules.color, el));
+  const ownColour = colour !== null ? declarationColour(colour) : el.name === 'font' ? colourValue(el.attribs.color) : null;
   const inlineBackground = d.get('background');
   const backgroundRule = matchRule(rules.background, el);
   const ruleWins = backgroundRule !== null && (!inlineBackground || (backgroundRule.important && !inlineBackground.important));
@@ -371,7 +388,7 @@ function nextState(el: ElementInfo, parent: VisibilityState, rules: HiddenRules)
     hidden,
     forbidden: parent.forbidden + (NOT_BODY.has(el.name) ? 1 : 0),
     visibility,
-    fontSizeZero: d.has('font-size') ? isZero(declaredValue(d, 'font-size')) : parent.fontSizeZero,
+    fontSizeZero: fontSize !== null ? declarationIsZero(fontSize) : parent.fontSizeZero,
     color: ownColour ?? parent.color,
     // A transparent background shows the ancestor's, and a semi-transparent one is composited
     // over a known ancestor background.
@@ -387,23 +404,51 @@ function contentVisible(state: VisibilityState): boolean {
 }
 
 /**
- * The winning value of an inline declaration against the winning simple rule. Inline wins unless
- * the rule is `!important` and the inline value is not; an inline `!important` also wins.
+ * The winning declaration of an inline declaration against the winning simple rule. Inline wins
+ * unless the rule is `!important` and the inline value is not; an inline `!important` also wins.
+ * The declaration is returned rather than its value so a rule's value can be parsed once and
+ * cached by declaration (review rounds 7 and 8).
  */
+function cascadeDeclaration(inline: Declaration | undefined, rule: RuleDecl | null): Declaration | null {
+  if (rule && (!inline || (rule.important && !inline.important))) return rule.declaration;
+  return inline ?? null;
+}
+
+/** The winning value, for properties whose value is compared directly. */
 function cascade(inline: Declaration | undefined, rule: RuleDecl | null): string | undefined {
-  if (rule && (!inline || (rule.important && !inline.important))) return rule.value;
-  return inline?.value;
+  return cascadeDeclaration(inline, rule)?.value;
 }
 
 /** The latest matching important rule, else the latest matching normal rule. */
+/**
+ * A simple selector's specificity as one comparable number: ids, then classes, then the tag. A
+ * compound selector has at most one id, MAX_SELECTOR_CLASSES classes and one tag, so the weights
+ * never overlap.
+ */
+function specificity(selector: HideSelector): number {
+  return selector.idCount * 10_000 + selector.classes.length * 100 + (selector.tag !== null ? 1 : 0);
+}
+
+/**
+ * Whether `rule` wins over `current` in the CSS cascade at the same importance: higher specificity
+ * first, then the later rule (#775; the colour, opacity and font-size buckets made a later broad
+ * rule able to flip a visible footer to hidden, 0.14.10 review).
+ */
+function beats(rule: RuleDecl, current: RuleDecl | null): boolean {
+  if (!current) return true;
+  const a = specificity(rule.selector);
+  const b = specificity(current.selector);
+  return a !== b ? a > b : rule.order > current.order;
+}
+
 function matchRule(bucket: RuleBucket, el: ElementInfo): RuleDecl | null {
   let important: RuleDecl | null = null;
   let normal: RuleDecl | null = null;
   const consider = (rule: RuleDecl | null | undefined) => {
     if (!rule) return;
     if (rule.important) {
-      if (!important || rule.order > important.order) important = rule;
-    } else if (!normal || rule.order > normal.order) {
+      if (beats(rule, important)) important = rule;
+    } else if (beats(rule, normal)) {
       normal = rule;
     }
   };
@@ -430,7 +475,7 @@ function addRule(bucket: RuleBucket, rule: RuleDecl): void {
   const { tag, id, classes } = rule.selector;
   if (tag === null && id === null && classes.length === 1) {
     addToSlot(bucket.byClass, classes[0]!, rule);
-  } else if (tag === null && id !== null && classes.length === 0) {
+  } else if (tag === null && id !== null && rule.selector.idCount === 1 && classes.length === 0) {
     addToSlot(bucket.byId, id, rule);
   } else if (tag !== null && id === null && classes.length === 0) {
     addToSlot(bucket.byTag, tag, rule);
@@ -628,6 +673,29 @@ function ruleBackgroundColour(rule: RuleDecl): string | null {
   return colour;
 }
 
+/**
+ * Each declaration's zero test and colour, parsed on first use like the background above. A rule
+ * value may be long and match many elements, so parsing it per element would make the check
+ * quadratic (#746).
+ */
+const declarationZeros = new WeakMap<Declaration, boolean>();
+const declarationColours = new WeakMap<Declaration, string | null>();
+
+function declarationIsZero(declaration: Declaration): boolean {
+  const cached = declarationZeros.get(declaration);
+  if (cached !== undefined) return cached;
+  const zero = isZero(declaration.value);
+  declarationZeros.set(declaration, zero);
+  return zero;
+}
+
+function declarationColour(declaration: Declaration): string | null {
+  if (declarationColours.has(declaration)) return declarationColours.get(declaration) ?? null;
+  const colour = colourValue(declaration.value);
+  declarationColours.set(declaration, colour);
+  return colour;
+}
+
 function backgroundColour(raw: string): string | null {
   const direct = colourValue(raw);
   if (direct !== null) return direct;
@@ -780,12 +848,21 @@ function isLetters(s: string): boolean {
 }
 
 /**
- * Simple display/visibility rules in document order, skipping comments and every at-rule block.
- * A rule that sets `display:block` is kept too, so it can override an earlier hide.
+ * Simple visibility-relevant rules (display, visibility, background, opacity, font-size, colour)
+ * in document order, skipping comments and every at-rule block. A rule that sets `display:block`
+ * is kept too, so it can override an earlier hide.
  */
 function hiddenRules(css: string): HiddenRules {
   const text = stripCssComments(css);
-  const rules: HiddenRules = { display: ruleBucket(), visibility: ruleBucket(), background: ruleBucket() };
+  const rules: HiddenRules = {
+    display: ruleBucket(),
+    visibility: ruleBucket(),
+    background: ruleBucket(),
+    opacity: ruleBucket(),
+    'font-size': ruleBucket(),
+    color: ruleBucket(),
+  };
+  const properties = ['display', 'visibility', 'background', 'opacity', 'font-size', 'color'] as const;
   let i = 0;
   let order = 0;
   while (i < text.length) {
@@ -804,7 +881,7 @@ function hiddenRules(css: string): HiddenRules {
     if (!prelude.startsWith('@')) {
       order++;
       const declarations = parseDeclarations(body);
-      for (const property of ['display', 'visibility', 'background'] as const) {
+      for (const property of properties) {
         const declaration = declarations.get(property);
         if (!declaration) continue;
         for (const part of prelude.split(',')) {
@@ -842,6 +919,7 @@ function parseSimpleSelector(raw: string): HideSelector | null {
   while (i < raw.length && raw[i] !== '.' && raw[i] !== '#') i++;
   const tag = i > 0 ? raw.slice(0, i).toLowerCase() : null;
   let id: string | null = null;
+  let idCount = 0;
   const classes: string[] = [];
   while (i < raw.length) {
     const kind = raw[i];
@@ -854,10 +932,18 @@ function parseSimpleSelector(raw: string): HideSelector | null {
       // past a few it is a stated limit, which keeps matching linear (review round 6).
       if (classes.length >= MAX_SELECTOR_CLASSES) return null;
       classes.push(name);
-    } else id = name;
+    } else {
+      // Two different ids can never match one element; skip the rule. A repeated id counts once
+      // per occurrence toward specificity (0.14.10 review round 2). Like many classes, more than
+      // MAX_SELECTOR_CLASSES repeats is a stated limit, so the weights in specificity() never overlap.
+      if (id !== null && id !== name) return null;
+      if (idCount >= MAX_SELECTOR_CLASSES) return null;
+      id = name;
+      idCount++;
+    }
     i = j;
   }
-  return { tag, id, classes };
+  return { tag, id, idCount, classes };
 }
 
 function stripCssComments(css: string): string {

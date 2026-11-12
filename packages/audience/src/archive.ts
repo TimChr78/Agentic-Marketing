@@ -25,6 +25,16 @@ export { clearEmailPartsCache, emailPartsCacheStats } from './emailPartsCache';
 // host next to the hosted pages. Everything here is public except /n/w/<token>, which is signed
 // per message and shows that one recipient their own e-mail. Archive issues are re-rendered from
 // the template version that was sent with empty personalisation, never from a person's message.
+//
+// E-mail HTML is untrusted. Before it reaches a page it passes a linear scanner and, when the
+// scanner cannot settle the question, parse5 as the final judge, under depth, attribute, foster,
+// stack-read and wall-clock bounds. Any bound that trips fails closed: the page shows the whole
+// body as escaped text rather than risk active content. Two consequences are deliberate and not
+// bugs. First, the clock bound makes a borderline e-mail's result wall-clock dependent: one
+// process may serve the cleaned markup, another the escaped source, and each caches its own answer
+// for the life of the process. Second, a malformed e-mail with more than MAX_EMAIL_FOSTER_INSERTS
+// genuinely fostered nodes is escaped as source instead of having the stray markup dropped, which
+// is a display regression only for input a browser would have rearranged anyway.
 
 const PER_PAGE = 20;
 
@@ -317,7 +327,11 @@ function safeCodePoint(value: number): string {
   return String.fromCodePoint(value);
 }
 
-/** Decodes the entities a browser resolves before it reads a URL scheme, without ever throwing. */
+/**
+ * Decodes the entities a browser resolves before it reads a URL scheme, without ever throwing.
+ * The whitespace entities matter for the `http-equiv` check: parse5 decodes all of them and
+ * `trim()` then removes the character, so the scanner has to see the same value (#673).
+ */
 function decodeEntities(value: string): string {
   const named: [string, string][] = [
     ['&colon;', ':'],
@@ -325,6 +339,20 @@ function decodeEntities(value: string): string {
     ['&Tab;', '\t'],
     ['&newline;', '\n'],
     ['&NewLine;', '\n'],
+    ['&nbsp;', '\u00a0'],
+    ['&NonBreakingSpace;', '\u00a0'],
+    ['&ensp;', '\u2002'],
+    ['&emsp;', '\u2003'],
+    ['&emsp13;', '\u2004'],
+    ['&emsp14;', '\u2005'],
+    ['&numsp;', '\u2007'],
+    ['&puncsp;', '\u2008'],
+    ['&thinsp;', '\u2009'],
+    ['&ThinSpace;', '\u2009'],
+    ['&VeryThinSpace;', '\u200a'],
+    ['&hairsp;', '\u200a'],
+    ['&MediumSpace;', '\u205f'],
+    ['&ThickSpace;', '\u205f\u200a'],
   ];
   let out = '';
   let i = 0;
@@ -512,16 +540,60 @@ function commentEnd(body: string, from: number): number {
   return -1;
 }
 
+/** Bounds the parse5 judge's input (#578). Real e-mail nests to about 40. */
+export const MAX_EMAIL_NESTING = 256;
+export const MAX_EMAIL_LENGTH = 1_000_000;
+// The duplicate-attribute check inside parse5 is quadratic in the attribute count. Real e-mail
+// tags have a handful; past this bound the scanner fails closed before parse5 sees the tag.
+export const MAX_EMAIL_ATTRIBUTES = 512;
+// Foster parenting (stray content inside a <table>) inserts before a sibling, and finding that
+// sibling scans the parent's child list, so thousands of fostered nodes cost quadratic time: a
+// 900 KB body took 6 s on a CI runner. Real e-mail fosters a handful; past this the judge fails closed.
+export const MAX_EMAIL_FOSTER_INSERTS = 512;
+// <html> and <body> start tags merge their attributes into the document's own elements, and each
+// merge rebuilds a set of every attribute gathered so far; the total is bounded, not the per-tag count.
+export const MAX_EMAIL_ADOPTED_ATTRIBUTES = 512;
+// The adoption agency (mis-nested formatting end tags) detaches a block's children one by one, and
+// each detach scans the parent's child list. Bound the total scanned, not the number of detaches.
+export const MAX_EMAIL_DETACH_SCAN = 2_000_000;
+// An end tag with no matching open element inserts nothing; parse5 only scans the open-element
+// stack, once per level. A deep stack and a long run of end tags therefore cost time without
+// touching any adapter insertion hook. Bound the total read, so the work is capped on a fast
+// machine too, not only by the clock. A real document reads about depth × tags, far below this.
+// parse5 8.1 keeps an index of the stack, so most end tags no longer read it at all; the cap stays as
+// a backstop for the paths that still scan (scope checks, foreign content).
+export const MAX_EMAIL_STACK_READS = 2_000_000;
+// A backstop for a whole sanitiser call: the scanner, the tree adapter, the stack reads and the
+// node sweep all check it, so a call cannot run much past it. Real newsletters take about 20 ms.
+export const MAX_EMAIL_PARSE_MS = 1_000;
+// Counting items and checking the clock only every so often keeps the checks off the hot path:
+// a `performance.now()` call per tag or per stack read would cost more than the work it bounds.
+const BUDGET_CHECK_EVERY = 256;
+const STACK_READ_CHECK_EVERY = 4_096;
+
+/** A wall-clock budget for one sanitiser call. Throws like the depth cap, so the caller fails closed. */
+type Tick = () => void;
+
+function parseBudget(): Tick {
+  const startedAt = performance.now();
+  return () => {
+    if (performance.now() - startedAt > MAX_EMAIL_PARSE_MS) throw new EmailNestingError();
+  };
+}
+
 /**
  * Removes active content from e-mail HTML before the public archive and web version embed it.
  * The strict CSP (`default-src 'none'`) already blocks scripts, so this is defence in depth.
  * One linear, quote-aware pass: text is copied unchanged, tags are parsed once, dangerous
  * elements and attributes are dropped, and a tag with nothing to remove keeps its exact bytes.
+ * `tick` is the caller's shared budget; it runs every few hundred tags, not on every one.
  */
-export function scanEmailBody(body: string): string {
+export function scanEmailBody(body: string, tick: Tick = () => {}): string {
   let out = '';
   let i = 0;
+  let steps = 0;
   while (i < body.length) {
+    if (++steps % BUDGET_CHECK_EVERY === 0) tick();
     const open = body.indexOf('<', i);
     if (open < 0) {
       out += body.slice(i);
@@ -601,26 +673,6 @@ export function scanEmailBody(body: string): string {
   return out;
 }
 
-/** Bounds the parse5 judge's input (#578). Real e-mail nests to about 40. */
-export const MAX_EMAIL_NESTING = 256;
-export const MAX_EMAIL_LENGTH = 1_000_000;
-// The duplicate-attribute check inside parse5 is quadratic in the attribute count. Real e-mail
-// tags have a handful; past this bound the scanner fails closed before parse5 sees the tag.
-export const MAX_EMAIL_ATTRIBUTES = 512;
-// Foster parenting (stray content inside a <table>) inserts before a sibling, and finding that
-// sibling scans the parent's child list, so thousands of fostered nodes cost quadratic time: a
-// 900 KB body took 6 s on a CI runner. Real e-mail fosters a handful; past this the judge fails closed.
-export const MAX_EMAIL_FOSTER_INSERTS = 512;
-// <html> and <body> start tags merge their attributes into the document's own elements, and each
-// merge rebuilds a set of every attribute gathered so far; the total is bounded, not the per-tag count.
-export const MAX_EMAIL_ADOPTED_ATTRIBUTES = 512;
-// The adoption agency (mis-nested formatting end tags) detaches a block's children one by one, and
-// each detach scans the parent's child list. Bound the total scanned, not the number of detaches.
-export const MAX_EMAIL_DETACH_SCAN = 2_000_000;
-// A backstop for tree-construction paths nobody has found yet: checked on every adapter call, so a
-// parse cannot run much past it. Real newsletters parse in about 20 ms.
-export const MAX_EMAIL_PARSE_MS = 1_000;
-
 // The judge wraps the fragment in <html> and <body>; those two levels are ours, not the e-mail's.
 const EMAIL_PARSE_WRAPPER_DEPTH = 2;
 
@@ -639,18 +691,27 @@ class EmailScanError extends Error {}
  * each node's depth as depth(parent) + 1 and throws before the tree can go past `maxDepth`. Every
  * insertion path is covered, including foster parenting and `<template>` content. The parser's
  * open-element stack is then bounded by the cap, so a scope scan costs at most O(cap) and the whole
- * parse is O(input × cap) whatever the markup.
+ * parse is O(input × cap) whatever the markup. `tick` is the caller's budget for the whole sanitise
+ * call, shared with the scanner and the sweep.
  */
-function depthBoundingTreeAdapter(maxDepth: number, maxFosterInserts: number): TreeAdapter<DefaultTreeAdapterTypes.DefaultTreeAdapterMap> {
+function depthBoundingTreeAdapter(
+  maxDepth: number,
+  maxFosterInserts: number,
+  tick: Tick,
+): TreeAdapter<DefaultTreeAdapterTypes.DefaultTreeAdapterMap> {
   const depths = new WeakMap<DefaultTreeAdapterTypes.Node, number>();
   // One budget per parse: every insert-before (element or text) searches the parent's children.
   let fosterInserts = 0;
   let adoptedAttributes = 0;
   let detachScan = 0;
-  const startedAt = performance.now();
-  // Every adapter call checks the wall clock, so no tree-construction path can run unbounded.
-  const tick = () => {
-    if (performance.now() - startedAt > MAX_EMAIL_PARSE_MS) throw new EmailNestingError();
+  let stackReads = 0;
+  // An end tag with no matching open element inserts nothing, so no insertion hook runs: parse5
+  // only asks the adapter for each open element's namespace while it checks scope. Check the clock
+  // here too, and bound the total reads, or a deep stack plus a long end-tag run is unbounded work.
+  const readStack = () => {
+    stackReads += 1;
+    if (stackReads > MAX_EMAIL_STACK_READS) throw new EmailNestingError();
+    if (stackReads % STACK_READ_CHECK_EVERY === 0) tick();
   };
   const foster = () => {
     tick();
@@ -717,13 +778,21 @@ function depthBoundingTreeAdapter(maxDepth: number, maxFosterInserts: number): T
       const previous = index > 0 ? parentNode.childNodes[index - 1] : undefined;
       if (previous && defaultTreeAdapter.isTextNode(previous)) depths.set(previous, (depths.get(parentNode) ?? 0) + 1);
     },
+    getNamespaceURI(element) {
+      readStack();
+      return defaultTreeAdapter.getNamespaceURI(element);
+    },
+    getTagName(element) {
+      readStack();
+      return defaultTreeAdapter.getTagName(element);
+    },
   };
 }
 
 // A fresh adapter per parse, so the foster budget and depth map never carry over between parses.
-const emailParseOptions = () => ({
+const emailParseOptions = (tick: Tick) => ({
   scriptingEnabled: true,
-  treeAdapter: depthBoundingTreeAdapter(MAX_EMAIL_NESTING + EMAIL_PARSE_WRAPPER_DEPTH, MAX_EMAIL_FOSTER_INSERTS),
+  treeAdapter: depthBoundingTreeAdapter(MAX_EMAIL_NESTING + EMAIL_PARSE_WRAPPER_DEPTH, MAX_EMAIL_FOSTER_INSERTS, tick),
 });
 // The judge parses a whole document and reads its <body>, which is how the archive page embeds
 // the e-mail (a <div> inside <main>). A document parse has no fragment root adoption, so it stays
@@ -731,11 +800,14 @@ const emailParseOptions = () => ({
 // nodes out of view: they stay in the document the sweep walks. A <body> or <html> start tag in
 // the input merges its attributes into those elements, exactly as it would on the real page, and
 // the sweep checks those attributes too.
-function parseEmailDocument(markup: string): {
+function parseEmailDocument(
+  markup: string,
+  tick: Tick,
+): {
   document: DefaultTreeAdapterTypes.Document;
   body: DefaultTreeAdapterTypes.Element | null;
 } {
-  const document = parse(`<!doctype html><html><head></head><body>${markup}`, emailParseOptions());
+  const document = parse(`<!doctype html><html><head></head><body>${markup}`, emailParseOptions(tick));
   const root = document.childNodes.find((node) => 'tagName' in node && node.tagName === 'html') as
     | DefaultTreeAdapterTypes.Element
     | undefined;
@@ -763,15 +835,21 @@ function dropsParsedAttribute(attribute: { name: string; value: string }): boole
  * Walks a parse5 fragment with the same active-content rules as the scanner, including the
  * content of `<template>`. Checking reports whether anything is active; cleaning rebuilds each
  * child list once, so removing many nodes stays linear. Iterative, so a deeply nested document
- * cannot exhaust the call stack.
+ * cannot exhaust the call stack. `tick` is checked as nodes are visited: a 1 MB tree is linear but
+ * still worth a periodic clock check when it arrives on a public request.
  */
-function sweepFragment(root: DefaultTreeAdapterTypes.ParentNode, clean: boolean): boolean {
+function sweepFragment(root: DefaultTreeAdapterTypes.ParentNode, clean: boolean, tick: Tick = () => {}): boolean {
   let active = false;
+  let visited = 0;
+  const check = () => {
+    if (++visited % BUDGET_CHECK_EVERY === 0) tick();
+  };
   const stack: DefaultTreeAdapterTypes.ParentNode[] = [root];
   while (stack.length > 0) {
     const parent = stack.pop()!;
     if (!clean) {
       for (const node of parent.childNodes) {
+        check();
         if (!('tagName' in node)) continue;
         const element = node as DefaultTreeAdapterTypes.Element;
         if (isActiveElement(element) || element.attrs.some(dropsParsedAttribute)) {
@@ -785,6 +863,7 @@ function sweepFragment(root: DefaultTreeAdapterTypes.ParentNode, clean: boolean)
     }
     const kept: DefaultTreeAdapterTypes.ChildNode[] = [];
     for (const node of parent.childNodes) {
+      check();
       if (!('tagName' in node)) {
         kept.push(node);
         continue;
@@ -804,13 +883,16 @@ function sweepFragment(root: DefaultTreeAdapterTypes.ParentNode, clean: boolean)
   return active;
 }
 
-function containsActiveContent(markup: string): boolean {
-  return sweepFragment(parseEmailDocument(markup).document, false);
+function containsActiveContent(markup: string, tick: Tick = () => {}): boolean {
+  return sweepFragment(parseEmailDocument(markup, tick).document, false, tick);
 }
 
-function cleanActiveContent(markup: string): string {
-  const { document, body } = parseEmailDocument(markup);
-  sweepFragment(document, true);
+function cleanActiveContent(markup: string, tick: Tick = () => {}): string {
+  const { document, body } = parseEmailDocument(markup, tick);
+  sweepFragment(document, true, tick);
+  // Serializing is one linear pass over the tree this parse already bounded (1 MB of input, depth
+  // cap, stack-read cap), so it needs no clock check of its own; the sweep above is where the
+  // many-node cost sits. The output cannot outgrow the input by more than the markup parse5 adds.
   return body ? serialize(body) : '';
 }
 
@@ -821,17 +903,21 @@ function cleanActiveContent(markup: string): string {
  * remove it from the parse5 tree, serialize, and check the serialization again. If one cleaning
  * round cannot make it inert (mutation XSS), escape the whole body and fail closed.
  */
-export function sanitiseEmailBody(body: string, isActive: (html: string) => boolean = containsActiveContent): string {
+export function sanitiseEmailBody(body: string, isActive?: (html: string) => boolean): string {
   // Avoid even scanning input past the budget; the scan can also expand unterminated "<" to "&lt;".
   if (body.length > MAX_EMAIL_LENGTH) return escapeHtml(body);
+  // One budget for the whole call: the scan, every parse and the sweep share it, so the work a
+  // public request can trigger is bounded by one clock, not one per stage (#673).
+  const tick = parseBudget();
+  const active = isActive ?? ((html: string) => containsActiveContent(html, tick));
   try {
-    const scanned = scanEmailBody(body);
+    const scanned = scanEmailBody(body, tick);
     // A cheap early exit for the common hostile shape; the tree adapter below is the real bound, so
     // this scan may undercount without risking the judge (#578).
-    if (scanned.length > MAX_EMAIL_LENGTH || exceedsNestingCap(scanned, MAX_EMAIL_NESTING)) return escapeHtml(body);
-    if (!isActive(scanned)) return scanned;
-    const cleaned = cleanActiveContent(scanned);
-    if (!isActive(cleaned)) return cleaned;
+    if (scanned.length > MAX_EMAIL_LENGTH || exceedsNestingCap(scanned, MAX_EMAIL_NESTING, tick)) return escapeHtml(body);
+    if (!active(scanned)) return scanned;
+    const cleaned = cleanActiveContent(scanned, tick);
+    if (!active(cleaned)) return cleaned;
     return escapeHtml(body);
   } catch {
     // Fail closed on every parser and scanner failure (depth sentinel, attribute bound, RangeError
@@ -870,12 +956,14 @@ const RAW_TEXT_ELEMENTS = new Set([
  */
 const FOREIGN_CONTENT = /<(?:svg|math)(?:[\s/>]|$)/i;
 
-function exceedsNestingCap(markup: string, cap: number): boolean {
+function exceedsNestingCap(markup: string, cap: number, tick: Tick = () => {}): boolean {
   const hasForeignContent = FOREIGN_CONTENT.test(markup);
   let depth = 0;
+  let steps = 0;
   const open = new Map<string, number>();
   let i = 0;
   while (i < markup.length) {
+    if (++steps % BUDGET_CHECK_EVERY === 0) tick();
     const at = markup.indexOf('<', i);
     if (at < 0) break;
     i = at + 1;
@@ -953,13 +1041,23 @@ function removeRanges(text: string, ranges: readonly (readonly [number, number])
 }
 
 /**
+ * Lower-cases only ASCII `A`–`Z`, so every offset in the result is the same offset in the input.
+ * JavaScript `toLowerCase()` is not length-preserving (`İ` becomes two code units), so its offsets
+ * must never be used to slice the original string (#748).
+ */
+function asciiLower(input: string): string {
+  return input.replace(/[A-Z]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) + 32));
+}
+
+/**
  * One linear, quote-aware pass over the rendered e-mail, collecting the `<style>` bodies, the
  * `<body>` content and the 1×1 images. Each tag is parsed once and every search pointer moves
  * only forward, so repeated openers with no close cannot make the extraction quadratic (#574,
  * #577).
  */
 function extractEmailParts(html: string): EmailExtraction {
-  const lower = html.toLowerCase();
+  // ASCII-only: a length-changing Unicode case fold would shift every offset used on `html`.
+  const lower = asciiLower(html);
   const styles: string[] = [];
   const pixels: { start: number; end: number }[] = [];
   let bodyStart = -1;
