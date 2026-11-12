@@ -1,6 +1,6 @@
 import { schema, type Tx } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, gte, inArray, lte } from 'drizzle-orm';
 import { type IdentityMap, identityScopeProfileLimit, loadIdentityMap, overLimitIdentityMap } from './identity';
 
 // One campaign identity map for every surface (#590). The headline and the member rows used to
@@ -58,7 +58,11 @@ async function sentProfileIds(deps: Deps, scope: CampaignIdentityWindow, limit: 
   return ids.length > limit ? null : ids;
 }
 
-/** The profile ids assigned to the campaign's holdout, both arms, capped at bound + 1. */
+/**
+ * The profile ids assigned to the campaign's holdout in the window, both arms, capped at bound + 1.
+ * The window is the one `campaigns.holdoutResult` applies to `assigned_at`, so assignments outside
+ * the report cannot push its scope over the bound (0.14.5 review round 4).
+ */
 async function assignedProfileIds(deps: Deps, scope: CampaignIdentityWindow, limit: number): Promise<string[] | null> {
   if (!scope.campaignIds.length) return [];
   const rows = await deps.tx
@@ -69,6 +73,8 @@ async function assignedProfileIds(deps: Deps, scope: CampaignIdentityWindow, lim
         eq(schema.holdoutAssignments.workspaceId, deps.workspaceId),
         eq(schema.holdoutAssignments.scopeType, 'campaign'),
         inArray(schema.holdoutAssignments.scopeId, [...scope.campaignIds]),
+        scope.from ? gte(schema.holdoutAssignments.assignedAt, new Date(scope.from)) : undefined,
+        scope.to ? lte(schema.holdoutAssignments.assignedAt, new Date(scope.to)) : undefined,
       ),
     )
     .limit(limit + 1);
