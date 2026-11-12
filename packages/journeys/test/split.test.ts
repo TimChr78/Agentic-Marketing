@@ -1,5 +1,6 @@
+import { anyArmBelowK } from '@agentic-marketing/artifacts';
 import { describe, expect, it } from 'vitest';
-import { attributeSplitOutcomes, type SplitEntry, type SplitOutcome } from '../src/split';
+import { attributeSplitOutcomes, type SplitEntry, type SplitOutcome, splitArmPeople } from '../src/split';
 
 // #369: a conversion or unsubscribe belongs to exactly one split entry, even when a profile
 // re-enters and lands in another arm. These cases pin the rule before the server suite runs it
@@ -164,5 +165,20 @@ describe('split outcome attribution', () => {
       2,
     );
     expect(counts.map((c) => c.converted)).toEqual([1, 0]);
+  });
+});
+
+describe('splitArmPeople (0.14.11 review)', () => {
+  it('counts one person who re-enters an arm five times as one person, so the arm stays below k', () => {
+    const entries = [
+      ...Array.from({ length: 5 }, () => ({ profileId: 'prf_one', arm: 0 })),
+      ...['a', 'b', 'c', 'd', 'e'].map((p) => ({ profileId: `prf_${p}`, arm: 1 })),
+    ];
+    expect(splitArmPeople(entries, 2)).toEqual([1, 5]);
+    expect(anyArmBelowK(splitArmPeople(entries, 2).map((n) => ({ entered: n })))).toBe(true);
+  });
+
+  it('ignores entries outside the arm range', () => {
+    expect(splitArmPeople([{ profileId: 'prf_x', arm: 3 }], 2)).toEqual([0, 0]);
   });
 });

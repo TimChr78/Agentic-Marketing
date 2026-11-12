@@ -25,7 +25,7 @@ import { compile, unsupported } from './graph';
 import { assignHoldout, computeJourneyHoldout, holdoutDetail, holdoutHashVersion } from './holdout';
 import { conditionSegments, journeyTouches } from './impact';
 import { advance, type ParticipantState } from './interpreter';
-import { attributeSplitOutcomes } from './split';
+import { attributeSplitOutcomes, splitArmPeople } from './split';
 
 const JourneyId = z.string().regex(/^jrn_[0-9a-f]{32}$/);
 const SegmentId = z.string().regex(/^seg_[0-9a-f]{32}$/);
@@ -311,10 +311,13 @@ export const journeySplitResult = defineCommand({
     );
     const rate = (n: number, of: number) => (of ? n / of : 0);
     // The same k floor the holdout read applies, per arm (#757): an arm below k never reports a
-    // count or rate, and no comparison or verdict is computed from a hidden baseline.
-    const belowK = anyArmBelowK(counts);
+    // count or rate, and no comparison or verdict is computed from a hidden baseline. The floor
+    // counts distinct people, not entries: one person re-entering an arm five times is still one
+    // person (0.14.11 review).
+    const armPeople = splitArmPeople(taken, weights.length).map((n) => ({ entered: n }));
+    const belowK = anyArmBelowK(armPeople);
     const arms = counts.map((c, i) =>
-      belowK && c.entered < K
+      belowK && armPeople[i]!.entered < K
         ? {
             arm: i,
             weight: weights[i],
