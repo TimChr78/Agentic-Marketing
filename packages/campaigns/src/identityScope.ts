@@ -1,6 +1,7 @@
+import { artifactTypes, type CampaignDefinition, holdoutHashVersion } from '@agentic-marketing/artifacts';
 import { schema, type Tx } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
-import { and, eq, gte, inArray, lte } from 'drizzle-orm';
+import { and, eq, gte, inArray, lte, or } from 'drizzle-orm';
 import { type IdentityMap, identityScopeProfileLimit, loadIdentityMap, overLimitIdentityMap } from './identity';
 
 // One campaign identity map for every surface (#590). The headline and the member rows used to
@@ -59,12 +60,44 @@ async function sentProfileIds(deps: Deps, scope: CampaignIdentityWindow, limit: 
 }
 
 /**
+ * Each published campaign's current holdout hash version. A percentage reset starts a new scope and
+ * keeps the old assignments, which `campaigns.holdoutResult` no longer counts; campaigns without a
+ * published control group have no counted assignments at all.
+ */
+async function currentHashVersions(deps: Deps, campaignIds: readonly string[]): Promise<Map<string, string>> {
+  const rows = await deps.tx
+    .select({ id: schema.artifacts.id, content: schema.artifactVersions.content })
+    .from(schema.artifacts)
+    .innerJoin(
+      schema.artifactVersions,
+      and(
+        eq(schema.artifactVersions.artifactId, schema.artifacts.id),
+        eq(schema.artifactVersions.number, schema.artifacts.publishedVersion),
+      ),
+    )
+    .where(and(eq(schema.artifacts.workspaceId, deps.workspaceId), inArray(schema.artifacts.id, [...campaignIds])));
+  const versions = new Map<string, string>();
+  for (const row of rows) {
+    const parsed = artifactTypes.campaign.content.safeParse(row.content);
+    const percent = parsed.success ? (parsed.data as CampaignDefinition).controlGroup?.percent : undefined;
+    if (percent !== undefined) versions.set(row.id, holdoutHashVersion(percent));
+  }
+  return versions;
+}
+
+/**
  * The profile ids assigned to the campaign's holdout in the window, both arms, capped at bound + 1.
- * The window is the one `campaigns.holdoutResult` applies to `assigned_at`, so assignments outside
- * the report cannot push its scope over the bound (0.14.5 review round 4).
+ * The filters are the ones `campaigns.holdoutResult` applies: the window on `assigned_at` (0.14.5
+ * review round 4) and the published campaign's current hash version (round 5), so assignments the
+ * report does not count cannot push its scope over the bound.
  */
 async function assignedProfileIds(deps: Deps, scope: CampaignIdentityWindow, limit: number): Promise<string[] | null> {
   if (!scope.campaignIds.length) return [];
+  const versions = await currentHashVersions(deps, scope.campaignIds);
+  if (!versions.size) return [];
+  const current = [...versions].map(([campaignId, hashVersion]) =>
+    and(eq(schema.holdoutAssignments.scopeId, campaignId), eq(schema.holdoutAssignments.hashVersion, hashVersion)),
+  );
   const rows = await deps.tx
     .selectDistinct({ profileId: schema.holdoutAssignments.profileId })
     .from(schema.holdoutAssignments)
@@ -72,7 +105,7 @@ async function assignedProfileIds(deps: Deps, scope: CampaignIdentityWindow, lim
       and(
         eq(schema.holdoutAssignments.workspaceId, deps.workspaceId),
         eq(schema.holdoutAssignments.scopeType, 'campaign'),
-        inArray(schema.holdoutAssignments.scopeId, [...scope.campaignIds]),
+        or(...current),
         scope.from ? gte(schema.holdoutAssignments.assignedAt, new Date(scope.from)) : undefined,
         scope.to ? lte(schema.holdoutAssignments.assignedAt, new Date(scope.to)) : undefined,
       ),
