@@ -709,6 +709,32 @@ describe('Person detail (#510)', () => {
     expect(names().slice(before)).toEqual(['profiles.get', 'profiles.events', 'messages.list', 'consent.history']);
   });
 
+  it("does not show the previous person's segments or topics after switching person (0.14.6 review)", async () => {
+    const since = '2026-01-01T00:00:00.000Z';
+    h.respond = (name, input) => {
+      if (name === 'segments.ofProfile' && input.profileId === canonicalId)
+        return { segments: [{ id: `seg_${'a'.repeat(32)}`, name: 'Alpha segment', since }] };
+      if (name === 'topics.preferences' && input.profileId === canonicalId)
+        return { topics: [{ id: 'alpha-topic', name: 'Alpha topic', status: 'subscribed', source: null, updatedAt: null }] };
+      return baseRespond(name, input);
+    };
+    const view = renderPerson();
+    await screen.findByRole('heading', { level: 1, name: 'ada@example.com' });
+    await userEvent.click(screen.getByRole('tab', { name: 'Segments' }));
+    await screen.findByText('Alpha segment');
+
+    h.hold.add('segments.ofProfile');
+    view.rerender(
+      <ToastProvider>
+        <PersonPage params={{ id: otherId }} />
+      </ToastProvider>,
+    );
+    await waitFor(() => expect(calls('profiles.get').some((c) => c.input.profileId === otherId)).toBe(true));
+    await waitFor(() => expect(calls('segments.ofProfile').some((c) => c.input.profileId === otherId)).toBe(true));
+    expect(screen.queryByText('Alpha segment')).toBeNull();
+    expect(screen.queryByRole('table', { name: 'Segments' })).toBeNull();
+  });
+
   it('does not let a stale profile response replace a newer selection', async () => {
     h.hold.add('profiles.get');
     const view = renderPerson();

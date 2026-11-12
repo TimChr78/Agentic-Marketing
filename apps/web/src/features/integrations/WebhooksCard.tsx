@@ -210,7 +210,7 @@ function WebhookDrawer({
 function EndpointLastDelivery({ id, version }: { id: string; version: number }) {
   const read = useApi(() => api.call('deliveries.list', { kind: 'webhook', targetId: id, limit: 1 }), [id, version]);
   const last = read.data?.deliveries[0];
-  if (!last) return <span className="text-muted">{read.loading ? '…' : 'Never'}</span>;
+  if (!last) return <span className="text-muted">{read.loading ? '…' : read.error ? 'Unavailable' : 'Never'}</span>;
   return (
     <div className="flex flex-col gap-0.5">
       <StatusPill tone={DELIVERY_TONE[last.status]}>{DELIVERY_LABEL[last.status]}</StatusPill>
