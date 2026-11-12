@@ -36,7 +36,25 @@ const MAX_SELECTOR_CLASSES = 8;
  */
 // SVG `title`, `desc` and `metadata` are never drawn either; parser 12 exposes anchors inside an
 // SVG `title` as elements (0.14.9 review round 2). An HTML `title` belongs in `head`, already listed.
-const NOT_BODY = new Set(['template', 'head', 'script', 'style', 'noscript', 'noembed', 'noframes', 'iframe', 'title', 'desc', 'metadata']);
+// Inline SVG and MathML are not a reliable way to show a link in e-mail (Gmail and others strip
+// inline SVG), and much of their content is never drawn (defs, symbol, clipPath, mask, title,
+// annotation, foreign textarea …). Nothing inside them counts as a visible unsubscribe link
+// (0.14.9 review round 3).
+const NOT_BODY = new Set([
+  'template',
+  'head',
+  'script',
+  'style',
+  'noscript',
+  'noembed',
+  'noframes',
+  'iframe',
+  'title',
+  'desc',
+  'metadata',
+  'svg',
+  'math',
+]);
 
 /** One declaration with the importance CSS needs for the cascade. */
 interface Declaration {
