@@ -1,5 +1,5 @@
 import type { EventBus } from '@agentic-marketing/events';
-import { publishedSegments, publishInSlices, refreshSegment } from '@agentic-marketing/segments';
+import { publishedSegments, publishInSlices, refreshPeople, refreshSegment } from '@agentic-marketing/segments';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { eventually, startTestServer, testPort, type User } from './harness';
 
@@ -154,6 +154,42 @@ describe('a refresh whose publish fails partway', () => {
     // The retry sees the same committed token and the same change set, so its ids match.
     const retryIds = await refreshIds(artifactId);
     expect(retryIds).toEqual(firstIds);
+  }, 60_000);
+});
+
+describe('a reusable preference link (#781)', () => {
+  it('gives a segment re-entry a new messageId even with the same caller cause', async () => {
+    const api = t.api(owner);
+    const { artifactId } = await api.call('artifacts.create', {
+      type: 'segment',
+      name: 'People in Fredrikstad',
+      content: { condition: { trait: 'city', op: 'eq', value: 'Fredrikstad' } },
+    });
+    await api.call('artifacts.requestPublish', { artifactId, note: 'First version' });
+    await eventually(
+      () => api.call('segments.members', { artifactId }),
+      (r) => r.total === 0 && r.members.length === 0,
+    );
+
+    // A preference-centre token is reusable, so every topic-changing submission passes the same
+    // cause. JetStream drops a duplicate msgID for two minutes, so a re-entry used to be lost.
+    const cause = `preferences:${adaId}`;
+    // The round also re-evaluates the other segments this file published, so keep only ours.
+    const refresh = async () => {
+      const changes = await t.srv.db.withWorkspace(ws, (tx) => refreshPeople(tx, ws, [adaId], t.srv.events, cause));
+      return changes.filter((e) => e.properties.segment_id === artifactId).map((e) => e.messageId);
+    };
+
+    await setCity(adaId, 'Fredrikstad');
+    const first = await refresh();
+    expect(first).toHaveLength(1);
+    expect(first[0]).toContain(':in:');
+
+    // The person leaves and re-enters the topic segment before the duplicate window closes.
+    await removeMembership(artifactId);
+    const second = await refresh();
+    expect(second).toHaveLength(1);
+    expect(second[0]).not.toBe(first[0]);
   }, 60_000);
 });
 
