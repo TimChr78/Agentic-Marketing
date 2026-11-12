@@ -223,15 +223,100 @@ export async function primePage(page, { theme = 'light', width = 1440, fixedTime
   );
 }
 
+/**
+ * The conditions a settle() timeout can name, as sentences. Pure and exported for its unit test:
+ * a flaky route must say which read or paint is still pending, not only that 20 s elapsed (#732).
+ */
+export function describeSettleState(state) {
+  const pending = [];
+  if (!state.main) pending.push('the main landmark (main#main, form or [role="main"]) has not painted');
+  if (state.skeletons?.length)
+    pending.push(
+      `${state.skeletons.length} skeleton(s): ${state.skeletons
+        .map((s) => `${s.selector}${s.region ? ` in “${s.region}”` : ''}`)
+        .join(', ')}`,
+    );
+  if (state.images?.length)
+    pending.push(`${state.images.length} on-screen image(s) not complete: ${state.images.map((i) => i.src).join(', ')}`);
+  if (state.fonts && state.fonts !== 'loaded') pending.push(`fonts are ${state.fonts}`);
+  if (state.gjs?.length) pending.push(`${state.gjs.length} e-mail editor(s) not ready: ${state.gjs.join(', ')}`);
+  if (state.flows?.length) pending.push(`${state.flows.length} journey canvas(es) without a visible node: ${state.flows.join(', ')}`);
+  return pending.length ? pending.join('; ') : 'nothing is pending';
+}
+
+/**
+ * The DOM facts describeSettleState needs, read in the page so the message is exact. It mirrors the
+ * conditions settle() waits for, so a timeout names the one that is still outstanding.
+ */
+export function settleState() {
+  const onScreen = (el) => {
+    const r = el.getBoundingClientRect();
+    return r.bottom > 0 && r.top < window.innerHeight && r.right > 0 && r.left < window.innerWidth;
+  };
+  const describe = (el) => {
+    const classes = el.classList.length ? `.${[...el.classList].join('.')}` : '';
+    const shape = el.getAttribute('data-skeleton-shape');
+    const geometry = el.getAttribute('data-geometry');
+    return `${el.tagName.toLowerCase()}${classes}${shape ? `[data-skeleton-shape="${shape}"]` : ''}${
+      geometry ? `[data-geometry="${geometry}"]` : ''
+    }`;
+  };
+  return {
+    main: !!document.querySelector('main#main, form, [role="main"]'),
+    skeletons: Array.from(document.querySelectorAll('.am-skeleton'))
+      .slice(0, 20)
+      .map((el) => ({
+        selector: describe(el),
+        region: el.closest('[data-skeleton-region]')?.getAttribute('aria-label') ?? null,
+      })),
+    images: Array.from(document.images)
+      .filter((img) => onScreen(img) && !img.complete)
+      .slice(0, 20)
+      .map((img) => ({ src: img.currentSrc || img.src, loading: img.loading })),
+    fonts: document.fonts.status,
+    gjs: Array.from(document.querySelectorAll('.am-gjs-app'))
+      .filter((el) => el.dataset.amGjsReady !== 'true')
+      .slice(0, 20)
+      .map((el) => el.id || el.className || 'editor'),
+    flows: Array.from(document.querySelectorAll('.react-flow'))
+      .filter((flow) => {
+        const r = flow.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+      })
+      .filter(
+        (flow) => !Array.from(flow.querySelectorAll('.react-flow__node')).some((node) => getComputedStyle(node).visibility !== 'hidden'),
+      )
+      .slice(0, 20)
+      .map((flow) => flow.id || flow.className || 'canvas'),
+  };
+}
+
+/**
+ * One settle condition. A timeout names the condition and every remaining skeleton, image, editor
+ * and canvas, so the next CI failure explains itself (#732).
+ */
+async function waitForSettle(page, label, fn, options) {
+  try {
+    await page.waitForFunction(fn, undefined, options);
+  } catch (error) {
+    const state = await page.evaluate(settleState).catch(() => null);
+    throw new Error(
+      `settle() timed out waiting for ${label}; still pending: ${state ? describeSettleState(state) : 'the page could not be inspected'}. ${error.message}`,
+    );
+  }
+}
+
 /** Waits until the page has painted its data: fonts and images loaded, no skeleton left. */
 export async function settle(page, { timeout = 20_000 } = {}) {
   await page.waitForLoadState('domcontentloaded');
   // The shell paints after the session call; the sign-in form is the signed-out equivalent.
-  await page.waitForFunction(() => document.querySelector('main#main, form, [role="main"]'), undefined, { timeout });
+  await waitForSettle(page, 'the main landmark', () => document.querySelector('main#main, form, [role="main"]'), { timeout });
   // Skeletons appear with the first render, so give the page a beat before checking they are gone.
   await page.waitForTimeout(120);
-  await page.waitForFunction(() => !document.querySelector('.am-skeleton'), undefined, { timeout, polling: 50 });
-  await page.waitForFunction(
+  await waitForSettle(page, 'the skeletons to clear', () => !document.querySelector('.am-skeleton'), { timeout, polling: 50 });
+  await waitForSettle(
+    page,
+    'fonts and on-screen images to finish',
     () => {
       // A lazy image outside the viewport is never fetched (gallery thumbnails below the fold);
       // waiting for it would never end. Images on screen must still finish.
@@ -244,20 +329,22 @@ export async function settle(page, { timeout = 20_000 } = {}) {
         Array.from(document.images).every((img) => img.complete || (img.loading === 'lazy' && !onScreen(img)))
       );
     },
-    undefined,
     { timeout },
   );
   // The e-mail editor removes GrapesJS's own chrome when it is ready; capture after that, not before.
-  await page.waitForFunction(
+  await waitForSettle(
+    page,
+    'the e-mail editor to be ready',
     () => Array.from(document.querySelectorAll('.am-gjs-app')).every((el) => el.dataset.amGjsReady === 'true'),
-    undefined,
     { timeout },
   );
   // The journey canvas (React Flow) mounts its nodes hidden until it has measured them; capture once
   // every visible canvas shows its nodes (CI once caught the builder with an empty canvas). Only
   // canvases with a size count, and one shown node is enough: requiring every node could wait
   // forever on one that is never measured.
-  await page.waitForFunction(
+  await waitForSettle(
+    page,
+    'the journey canvas to draw a visible node',
     () =>
       Array.from(document.querySelectorAll('.react-flow'))
         .filter((flow) => {
@@ -267,7 +354,6 @@ export async function settle(page, { timeout = 20_000 } = {}) {
         .every((flow) =>
           Array.from(flow.querySelectorAll('.react-flow__node')).some((node) => getComputedStyle(node).visibility !== 'hidden'),
         ),
-    undefined,
     { timeout },
   );
   // Two frames, so charts (ECharts SVG) and layout effects have painted.
