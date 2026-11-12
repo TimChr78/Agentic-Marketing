@@ -312,7 +312,7 @@ function CreateDialog<S>({ type, spec, onClose }: { type: string; spec: CreateSp
       const r = spec.create
         ? await spec.create(name.trim(), state)
         : await api.call('artifacts.create', { type: type as never, name: name.trim(), content: spec.content(name.trim(), state) });
-      notifyArtifactsChanged();
+      notifyArtifactsChanged(r.artifactId);
       // A new artifact belongs in its type's picker index; every other index is untouched.
       invalidatePickerIndex(workspace.id, type);
       toast.success(`Created “${name.trim()}” as a draft.`);

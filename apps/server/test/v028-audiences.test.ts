@@ -155,6 +155,30 @@ describe('static and snapshot audiences', () => {
     await api().call('audiences.add', { segmentId: list, emails: [emailOf('ada')] });
   });
 
+  it('reports a list membership stamp so an import invalidates a referencing estimate (#771)', async () => {
+    const stampList = await createSegment('Stamp list', { mode: 'static' });
+    await api().call('audiences.add', { segmentId: stampList, emails: [emailOf('ada')] });
+
+    const own = await api().call('segments.preview', { artifactId: stampList });
+    expect(own.count).toBe(1);
+    expect(own.segments).toEqual([
+      { id: stampList, version: 1, stamp: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/) },
+    ]);
+    const first = own.segments[0].stamp;
+
+    // A rule that references the list resolves it, and the same stamp travels with its count.
+    const rule = await api().call('segments.preview', { condition: { segment: stampList } });
+    expect(rule).toMatchObject({ count: 1 });
+    expect(rule.segments).toEqual([{ id: stampList, version: 1, stamp: first }]);
+
+    // An import changes who the list holds without publishing a version: only the stamp moves.
+    await api().call('audiences.add', { segmentId: stampList, emails: [emailOf('bo')] });
+    const after = await api().call('segments.preview', { artifactId: stampList });
+    expect(after.count).toBe(2);
+    expect(after.segments[0].version).toBe(1);
+    expect(after.segments[0].stamp).not.toBe(first);
+  });
+
   it('a broadcast to a static list reaches members with consent only', async () => {
     const template = await api().call('artifacts.create', {
       type: 'email_template',

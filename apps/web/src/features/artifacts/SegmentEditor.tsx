@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, errText } from '../../app/api';
 import { useSession } from '../../app/session';
 import { useApi } from '../../app/useApi';
+import { useFocusRecheck } from '../../app/useFocusRecheck';
 import { Button, Field, IconButton, Input, JsonView, Select, Skeleton, Textarea } from '../../ui';
 import { forgetArtifact, getArtifact, onArtifactsChanged } from '../artifactCache';
 import { CopyPurposeKey } from '../audience/phase26/CopyControl';
@@ -638,8 +639,11 @@ interface Estimate {
   loading: boolean;
   count?: number;
   error?: string;
-  /** The published versions of the referenced segments the server resolved, when it reported them. */
-  resolved?: Record<string, number>;
+  /**
+   * The published versions of the referenced segments the server resolved, and the membership stamp
+   * of a referenced list (a list changes members without a new published version, #771).
+   */
+  resolved?: Record<string, { version: number; stamp: string | null }>;
   /** The request was abandoned by an edit or a newer request and will not be shown as current. */
   cancelled?: boolean;
 }
@@ -662,14 +666,21 @@ export function referencedSegmentIds(condition: unknown): string[] {
   return [...found].sort();
 }
 
+/** A referenced segment as the estimate recorded it: its published version, plus a list's stamp. */
+interface ReferenceSnapshot {
+  version: number | null;
+  stamp: string | null;
+}
+
 /**
- * The referenced segments' current published versions. A publish in another tab is not a local
- * change, so the reads are forced on the shared invalidation signal, on focus and when the tab
- * becomes visible again: an estimate must never outlive the definitions it was counted from.
+ * The referenced segments' current published versions, and the membership stamp of any that is a
+ * static or snapshot list. A publish in another tab is not a local change, so the reads are forced
+ * on the shared invalidation signal, on focus and when the tab becomes visible again: an estimate
+ * must never outlive the definitions (or list membership) it was counted from.
  */
 function useReferencedSegmentVersions(ids: string[]) {
   const key = [...new Set(ids)].sort().join(',');
-  const [versions, setVersions] = useState<Record<string, number | null>>({});
+  const [versions, setVersions] = useState<Record<string, ReferenceSnapshot>>({});
   const seq = useRef(0);
   const read = useCallback(async () => {
     const list = key ? key.split(',') : [];
@@ -679,9 +690,18 @@ function useReferencedSegmentVersions(ids: string[]) {
         forgetArtifact(id);
         try {
           const artifact = await getArtifact(id);
-          return [id, artifact.publishedVersion ?? null] as const;
+          const version = artifact.publishedVersion ?? null;
+          let stamp: string | null = null;
+          // A list's count changes on an import or `audiences.add`, not on a publish (#771).
+          // `segments.preview` reports the list's membership stamp, so read it the same way.
+          const mode = (artifact.version.content as { mode?: string } | undefined)?.mode;
+          if (version !== null && mode && mode !== 'dynamic') {
+            const preview = await api.call('segments.preview', { artifactId: id });
+            stamp = preview.segments?.find((s) => s.id === id)?.stamp ?? null;
+          }
+          return [id, { version, stamp }] as const;
         } catch {
-          return [id, null] as const;
+          return [id, { version: null, stamp: null }] as const;
         }
       }),
     );
@@ -691,18 +711,15 @@ function useReferencedSegmentVersions(ids: string[]) {
   useEffect(() => {
     void read();
   }, [read]);
-  useEffect(() => onArtifactsChanged(() => void read()), [read]);
-  useEffect(() => {
-    const recheck = () => {
-      if (document.visibilityState !== 'hidden') void read();
-    };
-    window.addEventListener('focus', recheck);
-    document.addEventListener('visibilitychange', recheck);
-    return () => {
-      window.removeEventListener('focus', recheck);
-      document.removeEventListener('visibilitychange', recheck);
-    };
-  }, [read]);
+  useEffect(
+    () =>
+      onArtifactsChanged((changed) => {
+        if (changed && !(key ? key.split(',') : []).includes(changed)) return;
+        void read();
+      }),
+    [key, read],
+  );
+  useFocusRecheck(() => void read());
 
   return versions;
 }
@@ -736,7 +753,11 @@ function EstimatedSize({ condition }: { condition: Condition }) {
     estimate.key === conditionKey &&
     !estimate.loading &&
     versionsKnown &&
-    watched.some((id) => (liveVersions[id] ?? null) !== (estimate.resolved?.[id] ?? null));
+    watched.some(
+      (id) =>
+        (liveVersions[id]?.version ?? null) !== (estimate.resolved?.[id]?.version ?? null) ||
+        (liveVersions[id]?.stamp ?? null) !== (estimate.resolved?.[id]?.stamp ?? null),
+    );
   const current = estimate && estimate.key === conditionKey && !referencedChanged ? estimate : null;
   const previous = estimate && !current ? estimate : null;
 
@@ -764,7 +785,9 @@ function EstimatedSize({ condition }: { condition: Condition }) {
         settle(request);
         return;
       }
-      const resolved = r.segments ? Object.fromEntries(r.segments.map((s) => [s.id, s.version])) : undefined;
+      const resolved = r.segments
+        ? Object.fromEntries(r.segments.map((s) => [s.id, { version: s.version, stamp: s.stamp ?? null }]))
+        : undefined;
       if (resolved) setResolvedIds(Object.keys(resolved));
       setEstimate({ key, request, loading: false, count: r.count, resolved });
     } catch (e) {
