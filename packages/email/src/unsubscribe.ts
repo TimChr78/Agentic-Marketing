@@ -546,11 +546,21 @@ function zeroClipPath(raw: string): boolean {
  * transparent and zero-alpha colours become `#rrggbb00`. Other names compare verbatim, and a
  * nonzero-alpha `hsl()` is not converted.
  */
-/** No real CSS colour value is longer; longer values are not colours (review round 9). */
+/**
+ * The longest normalised colour kept. Parsed colours become short hex; only values kept verbatim
+ * (unparsed rgb/hsl, unknown names) can be long, and those are compared on every text node, so a
+ * longer one is treated as unknown (review rounds 9 and 10). The input itself is not capped: valid
+ * CSS such as `rgba(0,0,0,   0)` may be long and still parse.
+ */
 const MAX_COLOUR_LENGTH = 64;
 
 function colourValue(raw: string | undefined): string | null {
-  if (!raw || raw.length > MAX_COLOUR_LENGTH) return null;
+  const colour = parseColour(raw);
+  return colour !== null && colour.length > MAX_COLOUR_LENGTH ? null : colour;
+}
+
+function parseColour(raw: string | undefined): string | null {
+  if (!raw) return null;
   const value = raw.trim().toLowerCase();
   if (!value) return null;
   if (value.startsWith('#')) {
