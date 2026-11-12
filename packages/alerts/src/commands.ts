@@ -263,6 +263,10 @@ export const deleteAlert = defineCommand({
   handler: async (input, ctx) => {
     const rows = await ctx.tx.delete(schema.alertRules).where(eq(schema.alertRules.id, input.id)).returning({ id: schema.alertRules.id });
     if (!rows.length) throw new AppError('not_found', `No alert rule ${input.id}.`);
+    // `alert_events.workspace_id, rule_id` references the rule with ON DELETE CASCADE
+    // (0043_alerts.sql), so this statement already removed the episodes in the same transaction.
+    // Rows already queued in the outbox are untouched. alerts.history additionally joins the rule,
+    // so a row left behind by a database without the constraint never surfaces as history (#620).
     return { deleted: true as const };
   },
 });
@@ -327,21 +331,19 @@ export const alertHistory = defineCommand({
   permission: 'artifacts:read',
   effect: 'read',
   handler: async (input, ctx) => {
+    // Only episodes whose rule still exists are history. An orphaned row has no name and no unit,
+    // so it would be shown under a raw id (and rates as fractions); the join drops it.
     const events = await ctx.tx
-      .select()
+      .select({ event: schema.alertEvents, ruleName: schema.alertRules.name })
       .from(schema.alertEvents)
+      .innerJoin(
+        schema.alertRules,
+        and(eq(schema.alertEvents.ruleId, schema.alertRules.id), eq(schema.alertEvents.workspaceId, schema.alertRules.workspaceId)),
+      )
       .where(input.ruleId ? eq(schema.alertEvents.ruleId, input.ruleId) : undefined)
       .orderBy(desc(schema.alertEvents.firedAt))
       .limit(input.limit);
-    const ids = [...new Set(events.map((e) => e.ruleId))];
-    const rules = ids.length
-      ? await ctx.tx
-          .select({ id: schema.alertRules.id, name: schema.alertRules.name })
-          .from(schema.alertRules)
-          .where(inArray(schema.alertRules.id, ids))
-      : [];
-    const names = new Map(rules.map((r) => [r.id, r.name]));
-    return { events: events.map((e) => eventOut(e, names.get(e.ruleId) ?? e.ruleId)) };
+    return { events: events.map((row) => eventOut(row.event, row.ruleName)) };
   },
 });
 
