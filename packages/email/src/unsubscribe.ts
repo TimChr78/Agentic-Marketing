@@ -314,9 +314,16 @@ function nextState(el: ElementInfo, parent: VisibilityState, rules: HiddenRules)
     isOffscreen(d);
 
   const ownColour = d.has('color') ? colourValue(declaredValue(d, 'color')) : el.name === 'font' ? colourValue(el.attribs.color) : null;
-  const backgroundDecl = cascade(d.get('background'), matchRule(rules.background, el));
-  // The bgcolor attribute is a presentational hint: only when no CSS background applies.
-  const ownBackground = backgroundDecl === undefined ? colourValue(el.attribs.bgcolor) : backgroundColour(backgroundDecl);
+  const inlineBackground = d.get('background');
+  const backgroundRule = matchRule(rules.background, el);
+  const ruleWins = backgroundRule !== null && (!inlineBackground || (backgroundRule.important && !inlineBackground.important));
+  // The bgcolor attribute is a presentational hint: only when no CSS background applies. A rule's
+  // background is parsed once per rule, not once per matching element (review round 7).
+  const ownBackground = ruleWins
+    ? ruleBackgroundColour(backgroundRule)
+    : inlineBackground
+      ? backgroundColour(inlineBackground.value)
+      : colourValue(el.attribs.bgcolor);
 
   return {
     hidden,
@@ -551,6 +558,17 @@ function colourValue(raw: string | undefined): string | null {
  * The colour of a `background` shorthand: the value itself when it is one colour, else the last
  * top-level token that is a colour. Tokens inside parentheses (url(), gradients) are ignored.
  */
+/** Each stylesheet rule's background colour, parsed on first use. */
+const ruleBackgrounds = new WeakMap<RuleDecl, string | null>();
+
+function ruleBackgroundColour(rule: RuleDecl): string | null {
+  const cached = ruleBackgrounds.get(rule);
+  if (cached !== undefined) return cached;
+  const colour = backgroundColour(rule.value);
+  ruleBackgrounds.set(rule, colour);
+  return colour;
+}
+
 function backgroundColour(raw: string): string | null {
   const direct = colourValue(raw);
   if (direct !== null) return direct;
