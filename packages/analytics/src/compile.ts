@@ -48,6 +48,8 @@ export interface BuildInput {
   conversionRules: ConversionRule[];
   conversionNames: string[];
   campaignMap?: CampaignMap;
+  /** Restrict journey_events to one published version. Internal to named reports, never a user filter. */
+  journeyVersion?: number;
 }
 
 export interface Column {
@@ -348,6 +350,12 @@ export function buildQuery(input: BuildInput): CompiledQuery {
   if (source === 'message_events' && scope.channels.length) {
     params.channels = scope.channels;
     where.push('channel IN {channels:Array(String)}');
+  }
+  // Journey events record the version that produced them. A named report that describes one
+  // published topology must count only that version (#591).
+  if (source === 'journey_events' && input.journeyVersion !== undefined) {
+    params.journey_version = input.journeyVersion;
+    where.push('version = {journey_version:UInt32}');
   }
 
   for (const key of SOURCE_FILTERS[source]) {
