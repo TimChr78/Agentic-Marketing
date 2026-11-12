@@ -29,6 +29,58 @@ const DONE_TTL_S = 10 * 60;
 const RETRY_AFTER_S = 30;
 
 /** One signed delivery's idempotency key: workspace + endpoint + signed id (#643). */
+
+/** Request headers that change per hop or per attempt, never per event. */
+const TRANSPORT_HEADERS = new Set([
+  'host',
+  'content-length',
+  'connection',
+  'accept-encoding',
+  'user-agent',
+  'via',
+  'date',
+  'cdn-loop',
+  'x-forwarded-for',
+  'x-forwarded-proto',
+  'x-forwarded-host',
+  'x-forwarded-port',
+  'x-real-ip',
+  'true-client-ip',
+  'x-request-id',
+  'x-amzn-trace-id',
+  'traceparent',
+  'tracestate',
+  'cf-ray',
+  'cf-connecting-ip',
+  'cf-ipcountry',
+  'cf-visitor',
+]);
+
+/**
+ * The header values that belong to a delivery's replay identity: the headers a generic mapping
+ * reads. JSONata names a header as `headers.name`, `headers."x-name"` or `headers.` + backquoted
+ * name; a mapping that uses the `headers` object any other way (`$keys(headers)`, `headers` alone)
+ * takes every header except per-hop transport ones. A connector without a mapping expression derives
+ * its events from the body, so its identity is the body alone.
+ */
+export function replayHeaderValues(settings: unknown, headers: Record<string, string>): string {
+  const mapping = settings && typeof settings === 'object' ? (settings as { mapping?: unknown }).mapping : undefined;
+  if (typeof mapping !== 'string' || !/\bheaders\b/.test(mapping)) return '';
+  const named = new Set<string>();
+  let wholesale = false;
+  const ref = /\bheaders\b(?:\s*\.\s*(?:"([^"]*)"|`([^`]*)`|([A-Za-z_$][\w$]*)))?/g;
+  for (const m of mapping.matchAll(ref)) {
+    const name = m[1] ?? m[2] ?? m[3];
+    if (name === undefined) wholesale = true;
+    else named.add(name.toLowerCase());
+  }
+  const keys = wholesale ? Object.keys(headers).filter((k) => !TRANSPORT_HEADERS.has(k)) : [...named];
+  return keys
+    .sort()
+    .map((k) => `${k}:${headers[k] ?? ''}`)
+    .join('\n');
+}
+
 export const inboundReplayKey = (workspaceId: string, connectionId: string, webhookId: string) =>
   `inbound:${workspaceId}:${connectionId}:${webhookId}`;
 
@@ -112,20 +164,17 @@ export function inboundApi(deps: {
       // it; the hot-state done TTL is the dedupe window, since those schemes carry no timestamp.
       const scheme = ictx.settings?.signature?.scheme;
       const webhookId = scheme === 'standard-webhooks' ? headers['webhook-id'] : undefined;
-      // A mapping may read a header into the event's messageId (a generic connector's `x-event-id`),
-      // so two deliveries with the same body can still be two events. Those mapped ids are part of
-      // the replay identity; anything else the mapping derives (a receipt time) is not, or a replay
-      // would never match (0.14.11 review).
-      const mappedIds = items
-        .map((item) => (item && typeof item === 'object' ? (item as { messageId?: unknown }).messageId : undefined))
-        .filter((id): id is string => typeof id === 'string' && id.length > 0);
+      // The replay identity comes from the **request**, never from the mapping's output: a mapping
+      // can read a header (`x-event-id`, a device id, a timestamp) into any field, so two deliveries
+      // with one body can be two events; and it can call $millis() or $uuid(), so its output differs
+      // on every replay. The key is the connection, the raw body and the values of the headers the
+      // mapping reads (0.14.11 review, rounds 1 and 2).
+      const replayHeaders = replayHeaderValues(ictx.settings, headers);
       const replayId =
         webhookId ??
         (scheme === 'standard-webhooks'
           ? undefined
-          : createHash('sha256')
-              .update(`${conn.row.id}\n${raw}\n${mappedIds.join('\n')}`)
-              .digest('hex'));
+          : createHash('sha256').update(`${conn.row.id}\n${raw}\n${replayHeaders}`).digest('hex'));
       const replayKey = replayId ? inboundReplayKey(ws, conn.row.id, replayId) : undefined;
       let claimToken: string | undefined;
       // A stable id per mapped record: if the hot state loses the key, JetStream still drops the

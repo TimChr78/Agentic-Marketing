@@ -80,3 +80,11 @@ describe('redact', () => {
     expect(json).toContain('[redacted: too large]');
   });
 });
+
+describe('8-digit operational values in the AI context (0.14.11 review)', () => {
+  it('keeps an 8-digit order number in trigger properties and recent events', () => {
+    const out = redact({ trigger: { properties: { order_id: '12345678' } }, recentEvents: [{ properties: { order: '87654321' } }] });
+    expect(out.trigger.properties.order_id).toBe('12345678');
+    expect(out.recentEvents[0]!.properties.order).toBe('87654321');
+  });
+});
