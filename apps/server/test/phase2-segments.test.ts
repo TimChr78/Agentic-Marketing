@@ -122,7 +122,7 @@ describe('segments', () => {
       condition: { all: [{ segment: artifactId }, { trait: 'city', op: 'eq', value: 'Aarhus' }] },
     });
     expect(nested).toMatchObject({ count: 1 });
-    expect(nested.segments).toEqual([{ id: artifactId, version: 1 }]);
+    expect(nested.segments).toEqual([{ id: artifactId, version: 1, stamp: null }]);
     const loop = await api.call('artifacts.updateDraft', { artifactId, content: { condition: { segment: artifactId } } });
     expect((await rejects(api.call('segments.preview', { artifactId, version: loop.version }))).message).toContain('loop');
   });

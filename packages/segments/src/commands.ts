@@ -55,6 +55,24 @@ export function resolvedSegmentVersions(condition: unknown, published: Published
   return found.sort((a, b) => a.id.localeCompare(b.id));
 }
 
+/**
+ * When each referenced static or snapshot list last changed membership, as microsecond text.
+ * `segment_runs.at` advances on every list mutation, so an import or `audiences.add` changes the
+ * stamp without a published version moving (#771). Read as text: a JS Date would truncate it, and
+ * the comparison only needs the stamp to be different, not parseable.
+ */
+async function listRunStamps(tx: Tx, workspaceId: string, ids: string[]): Promise<Map<string, string>> {
+  if (!ids.length) return new Map();
+  const rows = await tx
+    .select({
+      segmentId: schema.segmentRuns.segmentId,
+      stamp: sql<string>`to_char(${schema.segmentRuns.at} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
+    })
+    .from(schema.segmentRuns)
+    .where(and(eq(schema.segmentRuns.workspaceId, workspaceId), inArray(schema.segmentRuns.segmentId, ids)));
+  return new Map(rows.map((r) => [r.segmentId, r.stamp]));
+}
+
 export const previewSegment = defineCommand({
   name: 'segments.preview',
   title: 'Preview a segment',
@@ -70,8 +88,17 @@ export const previewSegment = defineCommand({
     sample: z.array(z.string()),
     tookMs: z.number().int(),
     segments: z
-      .array(z.object({ id: SegmentId, version: z.number().int() }))
-      .describe('The published versions of the referenced segments this count was resolved against'),
+      .array(
+        z.object({
+          id: SegmentId,
+          version: z.number().int(),
+          stamp: z
+            .string()
+            .nullable()
+            .describe('A static or snapshot list: when its membership last changed (microseconds); null for a rule segment'),
+        }),
+      )
+      .describe('The published versions (and list membership stamps) of the referenced segments this count was resolved against'),
   }),
   permission: 'profiles:read',
   effect: 'read',
@@ -101,12 +128,31 @@ export const previewSegment = defineCommand({
         .where(eq(schema.segmentMemberships.segmentId, listSegment))
         .orderBy(schema.segmentMemberships.profileId)
         .limit(20);
-      return { count: row?.n ?? 0, sample: sample.map((r) => r.profileId), tookMs: Date.now() - started, segments: [] };
+      // The list is its own resolved reference: a client estimating a rule over it compares this
+      // stamp, because an import changes the count without a new published version.
+      const [artifact] = await ctx.tx
+        .select({ version: schema.artifacts.publishedVersion })
+        .from(schema.artifacts)
+        .where(and(eq(schema.artifacts.workspaceId, ctx.principal.workspaceId), eq(schema.artifacts.id, listSegment)));
+      const stamps = await listRunStamps(ctx.tx, ctx.principal.workspaceId, [listSegment]);
+      return {
+        count: row?.n ?? 0,
+        sample: sample.map((r) => r.profileId),
+        tookMs: Date.now() - started,
+        segments: [{ id: listSegment, version: artifact?.version ?? 0, stamp: stamps.get(listSegment) ?? null }],
+      };
     }
     if (!condition) throw new AppError('invalid_input', 'The segment has no condition.');
     // The previewed version stands in for its segment, so references back to it are checked too.
     const published = await publishedSegments(ctx.tx);
     const resolved = resolvedSegmentVersions(condition, published);
+    // Only a list's membership can move without its published version; a rule's version is enough.
+    const byId = new Map(published.map((s) => [s.id, s.definition.mode]));
+    const stamps = await listRunStamps(
+      ctx.tx,
+      ctx.principal.workspaceId,
+      resolved.filter((s) => byId.get(s.id) !== 'dynamic').map((s) => s.id),
+    );
     let segments = published;
     if (input.artifactId)
       segments = [
@@ -122,7 +168,12 @@ export const previewSegment = defineCommand({
     );
     const members = await materialize(condition, evalCtx);
     const sample = await ctx.tx.execute<{ profile_id: string }>(sql.raw(`SELECT profile_id FROM ${members.table} LIMIT 20`));
-    return { count: members.size, sample: sample.rows.map((r) => r.profile_id), tookMs: Date.now() - started, segments: resolved };
+    return {
+      count: members.size,
+      sample: sample.rows.map((r) => r.profile_id),
+      tookMs: Date.now() - started,
+      segments: resolved.map((s) => ({ ...s, stamp: stamps.get(s.id) ?? null })),
+    };
   },
 });
 
