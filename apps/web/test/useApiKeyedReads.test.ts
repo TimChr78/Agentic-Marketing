@@ -183,14 +183,6 @@ const KEPT: Kept[] = [
     reason: 'The type comes from the route; a different artifact type is a different page component, never an in-place change.',
   },
   {
-    call: 'apps/web/src/pages/audience/PersonPage.tsx :: topics.preferences :: [resolvedId]',
-    reason: 'Owned by another 0.14.6 delegate; listed here and left untouched.',
-  },
-  {
-    call: 'apps/web/src/pages/audience/PersonPage.tsx :: segments.ofProfile :: [resolvedId]',
-    reason: 'Owned by another 0.14.6 delegate; listed here and left untouched.',
-  },
-  {
     call: 'apps/web/src/pages/build/BroadcastPage.tsx :: broadcasts.status :: [id]',
     reason: 'BroadcastPageForId is mounted with key={params.id}, so the id never changes in place.',
   },
