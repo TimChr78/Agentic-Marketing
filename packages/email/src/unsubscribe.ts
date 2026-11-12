@@ -278,7 +278,8 @@ function nextState(el: ElementInfo, parent: VisibilityState, rules: HiddenRules)
     visibility,
     fontSizeZero: d.has('font-size') ? isZero(declaredValue(d, 'font-size')) : parent.fontSizeZero,
     color: ownColour ?? parent.color,
-    background: ownBackground ?? parent.background,
+    // A transparent (zero-alpha) background shows the ancestor's background through it.
+    background: ownBackground !== null && !isInvisibleColour(ownBackground) ? ownBackground : parent.background,
   };
 }
 
