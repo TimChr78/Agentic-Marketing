@@ -213,41 +213,70 @@ describe('inbound keyword normalisation (#636)', () => {
   });
 });
 
-// #664: START could never lift the suppression, because am_app had only SELECT, INSERT on
-// suppressions and the route's DELETE failed with "permission denied" (a 500). The opt-in must
-// lift only the SMS stop row for that number, never a bounce or complaint suppression.
-describe('START lifts only the SMS stop suppression (#664)', () => {
-  const phone = '+4512345679';
-  const inbound = (body: string) => callback(FALLBACK, `localhost:${PORT}`, `${webhookPath}/inbound`, { From: phone, Body: body });
+// #664, #750: START may lift only the SMS stop row for that number, never a bounce or complaint
+// suppression. A hard bounce that arrives while the stop row already holds the primary key must
+// escalate that row instead of being dropped: otherwise START unsuppresses a number that bounced.
+describe('START lifts only the SMS stop suppression (#664, #750)', () => {
+  const rowsFor = async (hash: string) =>
+    (
+      await t.srv.db.admin.query<{ reason: string }>(
+        `SELECT reason FROM suppressions WHERE workspace_id = $1 AND channel = 'sms' AND value_hash = $2 ORDER BY reason`,
+        [ws, hash],
+      )
+    ).rows.map((r) => r.reason);
 
-  it('returns 200, removes the stop row and never lifts a bounce suppression', async () => {
+  const stopRow = async (since: Date) =>
+    (
+      await t.srv.db.admin.query<{ value_hash: string }>(
+        `SELECT value_hash FROM suppressions WHERE workspace_id = $1 AND channel = 'sms' AND reason = 'stop' AND at >= $2
+          ORDER BY at DESC`,
+        [ws, since],
+      )
+    ).rows;
+
+  it('lifts a stop that never bounced', async () => {
+    const phone = '+4512345680';
+    const inbound = (body: string) => callback(FALLBACK, `localhost:${PORT}`, `${webhookPath}/inbound`, { From: phone, Body: body });
     const since = new Date();
+
     expect((await inbound('STOP')).status).toBe(200);
-    const stop = await t.srv.db.admin.query<{ value_hash: string }>(
-      `SELECT value_hash FROM suppressions WHERE workspace_id = $1 AND channel = 'sms' AND reason = 'stop' AND at >= $2
-        ORDER BY at DESC`,
-      [ws, since],
-    );
-    expect(stop.rows).toHaveLength(1);
-    const hash = stop.rows[0]!.value_hash;
-    const rowsFor = async () =>
-      (
-        await t.srv.db.admin.query<{ reason: string }>(
-          `SELECT reason FROM suppressions WHERE workspace_id = $1 AND channel = 'sms' AND value_hash = $2 ORDER BY reason`,
-          [ws, hash],
-        )
-      ).rows.map((r) => r.reason);
+    const stops = await stopRow(since);
+    expect(stops).toHaveLength(1);
+    const hash = stops[0]!.value_hash;
+    expect(await rowsFor(hash)).toEqual(['stop']);
 
     expect((await inbound('START')).status).toBe(200);
-    expect(await rowsFor()).toEqual([]);
+    expect(await rowsFor(hash)).toEqual([]);
+  });
 
-    // The same number now has a delivery suppression (a hard bounce reported after the block).
-    // START may lift the carrier block, never a bounce: that is a fact about the address.
+  it('escalates a stop to hard_bounce when the in-flight message bounces, and START keeps it', async () => {
+    const phone = '+4512345679';
+    const inbound = (body: string) => callback(FALLBACK, `localhost:${PORT}`, `${webhookPath}/inbound`, { From: phone, Body: body });
+    const since = new Date();
+
+    expect((await inbound('STOP')).status).toBe(200);
+    const stops = await stopRow(since);
+    expect(stops).toHaveLength(1);
+    const hash = stops[0]!.value_hash;
+
+    // The message was already in flight when the STOP arrived, then the carrier reports it
+    // undelivered with a permanent error (Twilio 30003: unreachable handset) — a hard bounce.
+    const sid = `SM${'c'.repeat(32)}`;
     await t.srv.db.admin.query(
-      `INSERT INTO suppressions (workspace_id, channel, value_hash, reason) VALUES ($1, 'sms', $2, 'hard_bounce')`,
-      [ws, hash],
+      `INSERT INTO messages (workspace_id, id, idempotency_key, channel, purpose, status, provider_message_id, recipient_hash)
+       VALUES ($1, $2, $3, 'sms', 'marketing_sms', 'sent', $4, $5)`,
+      [ws, `msg-${sid}`, `idem-${sid}`, sid, hash],
     );
+    const status = await callback(FALLBACK, `localhost:${PORT}`, `${webhookPath}/status`, {
+      MessageSid: sid,
+      MessageStatus: 'undelivered',
+      ErrorCode: '30003',
+    });
+    expect(status.status).toBe(200);
+    expect(await rowsFor(hash)).toEqual(['hard_bounce']);
+
+    // START lifts the carrier block, never the delivery fact.
     expect((await inbound('START')).status).toBe(200);
-    expect(await rowsFor()).toEqual(['hard_bounce']);
+    expect(await rowsFor(hash)).toEqual(['hard_bounce']);
   });
 });

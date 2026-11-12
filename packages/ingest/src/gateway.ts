@@ -146,16 +146,22 @@ export function acceptItems(
 }
 
 /**
- * The platform's own server-side callers (forms, imports, e-mail events) use this entry point so
- * their carrier events are exempt from the workspace plan (#624). It is deliberately separate from
- * `acceptItems`: the public `/v1` gateway and inbound webhooks cannot reach the exemption, even
- * with a server write key or an event that happens to carry a platform event name.
+ * The platform's own server-side callers (forms, imports, e-mail events, and connector webhooks)
+ * use this entry point so their carrier events are exempt from the workspace plan (#624, #764). It
+ * is deliberately separate from `acceptItems`: the public `/v1` gateway cannot reach the exemption,
+ * even with a server write key or an event that happens to carry a platform event name.
  */
 export function acceptInternalItems(
   items: unknown[],
   source: SourceInfo,
   policy: WorkspacePolicy,
-  opts: { ip?: string; context?: Record<string, unknown>; receivedAt?: Date } = {},
+  opts: {
+    ip?: string;
+    context?: Record<string, unknown>;
+    receivedAt?: Date;
+    /** Overrides the id given to an item that carries none (e.g. a stable id derived from a webhook). */
+    messageId?: (index: number) => string;
+  } = {},
 ) {
   return accept(items, source, policy, opts, true);
 }

@@ -108,8 +108,8 @@ describe('personal-data reads are audited (#592, #625)', () => {
     expect(JSON.stringify(audit)).not.toContain('v0144@example.com');
   }
 
-  it('profiles.find writes a read audit record', async () => {
-    await expectAudited('profiles.find', (api) => api.call('profiles.find', { type: 'email', value: 'v0144@example.com' }), null);
+  it('profiles.find writes a read audit record naming the resolved person (#763)', async () => {
+    await expectAudited('profiles.find', (api) => api.call('profiles.find', { type: 'email', value: 'v0144@example.com' }), profileId);
   });
 
   it('profiles.events writes a read audit record', async () => {

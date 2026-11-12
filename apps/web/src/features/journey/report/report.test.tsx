@@ -30,6 +30,8 @@ const h = vi.hoisted(() => ({
   pendingFunnel: false,
   holdout: null as unknown,
   holdoutError: null as Error | null,
+  split: null as unknown,
+  splitError: null as Error | null,
 }));
 
 vi.mock('../../../app/api', async (importOriginal) => {
@@ -62,6 +64,10 @@ vi.mock('../../../app/api', async (importOriginal) => {
         if (name === 'journeys.holdoutResult') {
           if (h.holdoutError) throw h.holdoutError;
           return h.holdout;
+        }
+        if (name === 'journeys.splitResult') {
+          if (h.splitError) throw h.splitError;
+          return h.split;
         }
         throw new Error(`unexpected command ${name}`);
       }),
@@ -205,6 +211,8 @@ beforeEach(() => {
   h.pendingFunnel = false;
   h.holdout = holdout();
   h.holdoutError = null;
+  h.split = null;
+  h.splitError = null;
 });
 
 afterEach(() => {
@@ -734,5 +742,54 @@ describe('journey report states (#507)', () => {
     await waitFor(() => expect(calls('journeys.holdoutResult')).toHaveLength(1));
     expect(screen.getAllByText('Suppressed').length).toBeGreaterThan(1);
     expect(screen.getByText(/Groups smaller than k=5 are hidden/)).toBeTruthy();
+  });
+
+  it('shows a split arm below k as Suppressed and withholds its comparison (#757)', async () => {
+    const splitNodes = (): JNode[] => [
+      { id: 'n1', kind: 'trigger', label: 'Signed up', config: {}, next: [{ to: 'split' }] },
+      {
+        id: 'split',
+        kind: 'split',
+        label: 'A/B',
+        config: { weights: [50, 50] },
+        next: [{ to: 'a' }, { to: 'b' }],
+      },
+      { id: 'a', kind: 'email', label: 'Path A mail', config: {}, next: [] },
+      { id: 'b', kind: 'email', label: 'Path B mail', config: {}, next: [] },
+    ];
+    h.artifact = artifact({
+      version: {
+        number: 1,
+        state: 'published',
+        content: { purpose: 'marketing', goal: 'Signup', nodes: splitNodes() },
+      },
+    });
+    h.split = {
+      journeyId,
+      node: 'split',
+      k: 5,
+      suppressed: true,
+      arms: [
+        { arm: 0, weight: 50, entered: 6, converted: 0, unsubscribed: 0, conversionRate: 0, unsubscribeRate: 0, suppressed: false },
+        {
+          arm: 1,
+          weight: 50,
+          entered: null,
+          converted: null,
+          unsubscribed: null,
+          conversionRate: null,
+          unsubscribeRate: null,
+          suppressed: true,
+        },
+      ],
+      comparisons: [],
+      note: 'Arm 1 has fewer than k=5 people.',
+    };
+    renderReport();
+    await screen.findByText('Entered in period');
+    await waitFor(() => expect(calls('journeys.splitResult')).toHaveLength(1));
+    expect(calls('journeys.splitResult')[0]!.input).toEqual({ journeyId, node: 'split', from: periodFrom, to: periodTo });
+    expect(screen.getAllByText('Suppressed').length).toBeGreaterThan(1);
+    expect(screen.getByText(/smaller than k=5/)).toBeTruthy();
   });
 });

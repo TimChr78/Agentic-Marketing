@@ -60,15 +60,16 @@ interface AnchorTag {
   start: number;
   /** Index of `>` closing the opening tag. */
   end: number;
-  /** The raw attribute value, with entities exactly as written. */
+  /** The href as the mail client reads it: character references already decoded. */
   href: string;
 }
 
 /**
- * The opening `<a>` tags of an HTML document, with their raw hrefs. The same parser the pre-send
+ * The opening `<a>` tags of an HTML document, with their hrefs. The same parser the pre-send
  * checks use handles every quoting style (`"…"`, `'…'`, unquoted) and ignores `>` inside a value,
  * so a hand-written link inside `mj-text` is found as reliably as MJML's own output (#638).
- * `decodeEntities: false` keeps the raw value, which is what the rewriters below transform.
+ * `decodeEntities: true` resolves `&#38;`, `&#x26;`, `&amp;` and the other references once, before
+ * the URL is parsed: an attribute value is not a URL until its references are decoded (#789).
  */
 function anchorTags(html: string): AnchorTag[] {
   const tags: AnchorTag[] = [];
@@ -81,7 +82,7 @@ function anchorTags(html: string): AnchorTag[] {
         tags.push({ start: parser.startIndex, end: parser.endIndex, href });
       },
     },
-    { decodeEntities: false, lowerCaseTags: true, lowerCaseAttributeNames: true },
+    { decodeEntities: true, lowerCaseTags: true, lowerCaseAttributeNames: true },
   );
   parser.write(html);
   parser.end();
@@ -154,9 +155,8 @@ const HTTP_URL = /^https?:\/\//i;
 export function trackLinks(html: string, wrap: (url: string) => string, skip: string[]): string {
   return rewriteAnchors(html, (url) => {
     if (!HTTP_URL.test(url)) return null;
-    const decoded = url.replace(/&amp;/g, '&');
-    if (skip.some((s) => decoded.startsWith(s))) return null;
-    return wrap(decoded).replace(/&/g, '&amp;');
+    if (skip.some((s) => url.startsWith(s))) return null;
+    return wrap(url).replace(/&/g, '&amp;');
   });
 }
 
@@ -197,7 +197,7 @@ function taggedUrl(raw: string, utm: Utm, skip: string[]): string | null {
 export function tagLinks(html: string, utm: Utm, skip: string[]): string {
   return rewriteAnchors(html, (url) => {
     if (!HTTP_URL.test(url)) return null;
-    const tagged = taggedUrl(url.replace(/&amp;/g, '&'), utm, skip);
+    const tagged = taggedUrl(url, utm, skip);
     return tagged === null ? null : tagged.replace(/&/g, '&amp;');
   });
 }

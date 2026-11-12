@@ -6,6 +6,7 @@ import { useCrumbs } from '../../app/page';
 import { Link } from '../../app/router';
 import { useSession } from '../../app/session';
 import { useKeyedApi } from '../../app/useApi';
+import { usePurposes } from '../../features/audience/phase26/usePurposes';
 import { StatCard, StatGrid, StatGridSkeleton } from '../../features/insights/Stats';
 import { purposeLabel } from '../../lib/labels';
 import {
@@ -75,6 +76,8 @@ export default function MessagesPage() {
   // A filter or period is the identity of the read, not a refresh of the previous one (#619).
   const list = useKeyedApi(filterKey, () => api.call('messages.list', { limit: 50, ...filters }));
   const stats = useKeyedApi(String(days), () => api.call('messages.stats', { days }), { skip: !can('artifacts:read') });
+  // Purpose names are workspace artifacts: a custom key only reads correctly with the list (#793).
+  const purposes = usePurposes({ enabled: can('artifacts:read'), always: true });
 
   // Extra pages carry the filter key they were loaded for, so the first render after a change can
   // never mix two filters, and a response for the old filter is dropped.
@@ -254,7 +257,7 @@ export default function MessagesPage() {
                   )}
                 </Td>
                 <Td className="hidden lg:table-cell">
-                  {purposeLabel(m.purpose)}
+                  {purposeLabel(m.purpose, purposes.data?.purposes)}
                   {m.test && <span className="ml-1 text-muted">· test</span>}
                 </Td>
                 <Td className="hidden md:table-cell">{m.attempts > 0 ? m.attempts : <span className="text-muted">—</span>}</Td>

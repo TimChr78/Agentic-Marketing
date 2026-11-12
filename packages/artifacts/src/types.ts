@@ -1022,14 +1022,18 @@ const UrlOrPath = z
   .regex(/^(https?:\/\/|\/)/, 'An absolute URL or a path starting with /');
 
 /**
- * Origins compare case-insensitively (#597): the scheme and host are lowercased and the port is
- * kept as written. Browsers always send a lowercased `Origin`, so a site saved as
- * "https://MySite.com" must still match "https://mysite.com".
+ * Origins compare case-insensitively (#597): the scheme and host are lowercased, and the port is
+ * dropped when it is the scheme's default (#769). Browsers always send a lowercased `Origin` and
+ * omit `:443` for https and `:80` for http, so a site saved as "https://MySite.com:443" must match
+ * the "https://mysite.com" a visitor's browser sends.
  */
 export function normalizeOrigin(origin: string): string {
   const match = /^([A-Za-z][A-Za-z0-9+.-]*):\/\/([^/:?#]+)(:\d+)?$/.exec(origin.trim());
   if (!match) return origin.trim().toLowerCase();
-  return `${match[1]!.toLowerCase()}://${match[2]!.toLowerCase()}${match[3] ?? ''}`;
+  const scheme = match[1]!.toLowerCase();
+  const port = match[3] ?? '';
+  const defaultPort = (scheme === 'https' && port === ':443') || (scheme === 'http' && port === ':80');
+  return `${scheme}://${match[2]!.toLowerCase()}${defaultPort ? '' : port}`;
 }
 
 // Hosted pages (#37): the workspace's brand for the pages a subscriber sees on the links host

@@ -22,6 +22,7 @@ import {
   type StepRow,
   stepRows,
 } from './model';
+import { SplitResultsCard } from './SplitResults';
 
 // The Phase 26 journey report (#507). It builds on the Phase 24 Report tab: current snapshot,
 // selected-period reach and all-time reach stay separate, a funnel appears only where a single
@@ -274,6 +275,7 @@ function PeriodReads({
     reached: statsView.reached,
     waitingAt: statsView.waitingAt,
   });
+  const splits = nodes.filter((node) => node.kind === 'split');
 
   const busy = funnel.loading || funnel.refreshing;
   const empty =
@@ -301,6 +303,14 @@ function PeriodReads({
             <StepReach gate={gate} rows={rows} meta={meta} suppressed={suppressed} />
           </>
         )
+      )}
+      {splits.length > 0 && (
+        <section className="space-y-3" aria-label="Split results">
+          <h2 className="text-[16px] leading-6 font-semibold">Split results</h2>
+          {splits.map((node) => (
+            <SplitResultsCard key={node.id} journeyId={journeyId} node={node} from={period.from} to={period.to} />
+          ))}
+        </section>
       )}
     </div>
   );

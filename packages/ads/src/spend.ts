@@ -315,28 +315,25 @@ export const adPerformance = defineCommand({
       })
     ).json<Record<string, string | number>>();
 
-    // Our conversions: events of the conversion map in the period, with their values.
+    // Our conversions: events of the conversion map in the period, with their values. The shared
+    // reader pages the whole window by (timestamp, event_id) instead of a raw `LIMIT 100000`, so
+    // no conversion silently falls outside an arbitrary row slice (#786, #366).
     const map: ConversionMap | null = await publishedSingleton(ctx.tx, 'conversion_map');
     const rules = map?.rules ?? [];
     const names = [...new Set(rules.map((r) => r.event))];
+    const windowFrom = new Date(`${since}T00:00:00.000Z`);
+    const windowUntilEnd = new Date(Date.parse(until) + 86_400_000);
     const conversions = names.length
-      ? await (
-          await ch.query({
-            // No anonymous_id filter here: a server-side conversion may carry only a user id. It
-            // has no campaign touch either way, so it must reach the loop below and be counted in
-            // `unattributed` rather than disappear before attribution (#640).
-            query: `SELECT anonymous_id, timestamp, name, toString(properties) AS properties FROM events FINAL
-                    WHERE workspace_id = {ws:UUID} AND name IN {names:Array(String)}
-                      AND timestamp >= {since:DateTime64(3, 'UTC')} AND timestamp < {untilEnd:DateTime64(3, 'UTC')}
-                    LIMIT 100000`,
-            query_params: { ws, names, since: `${since} 00:00:00`, untilEnd: `${day(new Date(Date.parse(until) + 86_400_000))} 00:00:00` },
-            format: 'JSONEachRow',
-            clickhouse_settings,
-          })
-        ).json<{ anonymous_id: string; timestamp: string; name: string; properties: string }>()
+      ? await ctx.services.events.conversionEvents(ws, {
+          names,
+          from: windowFrom,
+          // The helper's upper bound is inclusive; the report window ends at the start of the
+          // day after `until`, exactly as the old `< untilEnd` predicate did.
+          to: new Date(windowUntilEnd.getTime() - 1),
+        })
       : [];
     // Empty identifiers never have a touch to look up; a user-id-only conversion stays unattributed.
-    const visitors = [...new Set(conversions.map((c) => c.anonymous_id).filter((id) => id !== ''))];
+    const visitors = [...new Set(conversions.map((c) => c.anonymousId).filter((id) => id !== ''))];
     const touches = visitors.length
       ? await (
           await ch.query({
@@ -380,19 +377,15 @@ export const adPerformance = defineCommand({
     }
     const unattributed = { conversions: 0, revenue: 0 };
     for (const c of conversions) {
-      const at = Date.parse(`${c.timestamp.replace(' ', 'T')}Z`);
-      const touch = (byVisitor.get(c.anonymous_id) ?? [])
+      const at = c.timestamp;
+      const touch = (byVisitor.get(c.anonymousId) ?? [])
         .filter((t) => {
           const tt = Date.parse(`${t.timestamp.replace(' ', 'T')}Z`);
           return tt <= at && at - tt <= input.windowDays * 86_400_000;
         })
         .at(-1);
       const rule = rules.find((r) => r.event === c.name);
-      let props: unknown = {};
-      try {
-        props = JSON.parse(c.properties);
-      } catch {}
-      const value = rule?.value ? Number(get(props, rule.value)) || 0 : 0;
+      const value = rule?.value ? Number(get(c.properties ?? {}, rule.value)) || 0 : 0;
       const platform = touch ? (PLATFORM_OF_SOURCE.find(([re]) => re.test(touch.source))?.[1] ?? '*') : '*';
       const row = touch ? (lookup.get(key(platform, touch.campaign)) ?? lookup.get(key('*', touch.campaign))) : undefined;
       if (row) {

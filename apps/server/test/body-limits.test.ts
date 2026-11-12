@@ -438,6 +438,38 @@ describe('invitation acceptance (#377)', () => {
   });
 });
 
+// #790: the consent route read and replayed the whole body before Better Auth's session check,
+// so it was the one unauthenticated POST on the main listener with no cap. A consent form is
+// tiny; the limit is applied before the read, and a 50 MB chunked body is refused while it is
+// still arriving.
+describe('OAuth consent (#790)', () => {
+  it('refuses an oversized consent body with a correct Content-Length', async () => {
+    const res = await fetch(`${t.base}/api/auth/oauth2/consent`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: t.base },
+      body: JSON.stringify({ accept: true, oauth_query: 'client_id=limits', pad: oversize(64 * 1024) }),
+    });
+    expect(res.status).toBe(413);
+    expect(await res.json()).toMatchObject({ error: 'payload_too_large' });
+  });
+
+  it('refuses a 50 MB chunked consent body before reading it', async () => {
+    const total = 50 * 1024 * 1024;
+    const res = await postChunked('/api/auth/oauth2/consent', { total });
+    expect(res.status).toBe(413);
+    expect(res.writtenAtResponse).toBeLessThan(total);
+  });
+
+  it('still answers the session check for a normal consent body', async () => {
+    const res = await fetch(`${t.base}/api/auth/oauth2/consent`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: t.base },
+      body: JSON.stringify({ accept: true, oauth_query: 'client_id=limits' }),
+    });
+    expect(res.status).not.toBe(413);
+  });
+});
+
 describe('password reset and copilot (#347)', () => {
   it('refuses an oversized password-reset body before doing any work', async () => {
     const res = await fetch(`${t.base}/api/auth/forgot-password`, {

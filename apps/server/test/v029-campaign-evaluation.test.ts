@@ -17,6 +17,9 @@ const WIDE_TO = '2026-04-01T00:00:00.000Z';
 // the campaign-dimension expectations above.
 const LATE_FROM = '2026-10-31T00:00:00.000Z';
 const LATE_TO = '2026-11-05T00:00:00.000Z';
+// The revenue k fixtures (#756) send in May, outside every other window in this file.
+const REV_FROM = '2026-05-01T00:00:00.000Z';
+const REV_TO = '2026-05-10T00:00:00.000Z';
 let t: Awaited<ReturnType<typeof startTestServer>>;
 let owner: User;
 let wsA = '';
@@ -40,6 +43,10 @@ let broadcastGuard = '';
 let broadcastNoStart = '';
 let broadcastOldStart = '';
 let broadcastFuture = '';
+let broadcastRevenueBelow = '';
+let broadcastRevenueAbove = '';
+let campaignRevenueBelow = '';
+let campaignRevenueAbove = '';
 let journeyA = '';
 let journeyTiny = '';
 let journeyControlSmall = '';
@@ -211,6 +218,8 @@ beforeAll(async () => {
   broadcastNoStart = await broadcast('No-start broadcast');
   broadcastOldStart = await broadcast('Old-start broadcast');
   broadcastFuture = await broadcast('Future broadcast');
+  broadcastRevenueBelow = await broadcast('Revenue below k broadcast');
+  broadcastRevenueAbove = await broadcast('Revenue above k broadcast');
   await api().call('artifacts.requestPublishBundle', {
     artifactIds: [
       broadcastA,
@@ -221,6 +230,8 @@ beforeAll(async () => {
       broadcastNoStart,
       broadcastOldStart,
       broadcastFuture,
+      broadcastRevenueBelow,
+      broadcastRevenueAbove,
     ],
     note: 'broadcasts',
   });
@@ -264,6 +275,8 @@ beforeAll(async () => {
   campaignHealthy = await createCampaign('Healthy holdout campaign', [journeyHealthy], {}, '2026-11-01T00:00:00.000Z');
   // A campaign that starts tomorrow: the default window must not reject its own start (#588).
   campaignFuture = await createCampaign('Future campaign', [broadcastFuture], {}, new Date(Date.now() + 86_400_000).toISOString());
+  campaignRevenueBelow = await createCampaign('Revenue below k campaign', [broadcastRevenueBelow], {}, '2026-05-01T00:00:00.000Z');
+  campaignRevenueAbove = await createCampaign('Revenue above k campaign', [broadcastRevenueAbove], {}, '2026-05-01T00:00:00.000Z');
   await api().call('artifacts.requestPublishBundle', {
     artifactIds: [
       campaignA,
@@ -279,7 +292,7 @@ beforeAll(async () => {
     note: 'campaigns',
   });
   await api().call('artifacts.requestPublishBundle', {
-    artifactIds: [campaignHealthy, campaignFuture],
+    artifactIds: [campaignHealthy, campaignFuture, campaignRevenueBelow, campaignRevenueAbove],
     note: 'holdout fixture campaigns',
   });
 
@@ -315,6 +328,9 @@ beforeAll(async () => {
   const pTiny = Array.from({ length: 3 }, person);
   const pControlSmall = Array.from({ length: 8 }, person);
   const pHealthy = Array.from({ length: 10 }, person);
+  const pRevBelow = Array.from({ length: 6 }, person);
+  const pRevAboveEur = Array.from({ length: 5 }, person);
+  const pRevAboveDkk = Array.from({ length: 5 }, person);
   await t.srv.events.insertMessageEvents([
     ...messageEvents(wsA, broadcastA, '2026-03-01T10:00:00.000Z', pA, [5, 2, 1, 1]),
     ...messageEvents(wsA, journeyA, '2026-03-02T10:00:00.000Z', pJ, [4, 1, 1, 0]),
@@ -332,6 +348,9 @@ beforeAll(async () => {
     ...messageEvents(wsA, journeyTiny, '2026-11-03T10:00:00.000Z', pTiny, [3, 0, 0, 0]),
     ...messageEvents(wsA, journeyControlSmall, '2026-11-03T10:00:00.000Z', pControlSmall, [8, 0, 0, 0]),
     ...messageEvents(wsA, journeyHealthy, '2026-11-03T10:00:00.000Z', pHealthy, [10, 0, 0, 0]),
+    // Revenue k (#756): six recipients with one EUR converter, and ten with five per currency.
+    ...messageEvents(wsA, broadcastRevenueBelow, '2026-05-02T10:00:00.000Z', pRevBelow, [6, 0, 0, 0]),
+    ...messageEvents(wsA, broadcastRevenueAbove, '2026-05-02T10:00:00.000Z', [...pRevAboveEur, ...pRevAboveDkk], [10, 0, 0, 0]),
   ]);
 
   await t.srv.events.insertJourneyEvents(
@@ -350,6 +369,13 @@ beforeAll(async () => {
     goal(wsA, pChannelEmail[0]!, 100, 'DKK', '2026-11-01T11:00:00.000Z'),
     goal(wsA, pChannelEmail[1]!, 50, 'DKK', '2026-11-01T11:30:00.000Z'),
     goal(wsA, pChannelEmail[2]!, 25, 'DKK', '2026-11-01T12:00:00.000Z'),
+    // One EUR converter in the six-recipient campaign, and five per currency in the other.
+    goal(wsA, pRevBelow[0]!, 2499, 'EUR', '2026-05-02T11:00:00.000Z'),
+    // Five DKK converters among the same six people: the campaign clears k overall while EUR still
+    // has one buyer, so the EUR revenue must stay hidden (#756 with #779).
+    ...pRevBelow.slice(1, 6).map((p, i) => goal(wsA, p, 20, 'DKK', `2026-05-02T12:0${i}:00.000Z`)),
+    ...pRevAboveEur.map((p, i) => goal(wsA, p, 10, 'EUR', `2026-05-02T11:0${i}:00.000Z`)),
+    ...pRevAboveDkk.map((p, i) => goal(wsA, p, 20, 'DKK', `2026-05-02T11:1${i}:00.000Z`)),
   ]);
 
   // A journey control group large enough for a verdict, with outcomes for both arms.
@@ -459,16 +485,113 @@ describe('campaign dimension and filter', () => {
     const revenue = await api().call('analytics.query', {
       measures: ['campaign.revenue', 'campaign.revenue_per_recipient'],
       dimensions: ['campaign'],
+      from: REV_FROM,
+      to: REV_TO,
+      filters: { campaign: [campaignRevenueAbove] },
+      order: { by: 'campaign', dir: 'asc' },
+    });
+    const byCurrency = Object.fromEntries(revenue.rows.map((r) => [r[columnIndex(revenue, 'currency')], r]));
+    expect(byCurrency.DKK?.[columnIndex(revenue, 'campaign.revenue')]).toBe(100);
+    expect(byCurrency.EUR?.[columnIndex(revenue, 'campaign.revenue')]).toBe(50);
+    expect(byCurrency.DKK?.[columnIndex(revenue, 'campaign.revenue_per_recipient')]).toBeCloseTo(10, 5);
+    expect(byCurrency.EUR?.[columnIndex(revenue, 'campaign.revenue_per_recipient')]).toBeCloseTo(5, 5);
+    expect(revenue.meta.currency).toBeNull();
+    expect(revenue.meta.suppressed).toBe(0);
+  });
+
+  it('suppresses a currency revenue row whose converter count is below k (#756)', async () => {
+    const revenue = await api().call('analytics.query', {
+      measures: ['campaign.recipients', 'campaign.converters', 'campaign.revenue'],
+      dimensions: ['campaign'],
+      from: REV_FROM,
+      to: REV_TO,
+      filters: { campaign: [campaignRevenueBelow] },
+    });
+    // Six recipients, one EUR converter and five DKK converters: the campaign has six converters, so
+    // the campaign row clears k, but the EUR row's subject is one person and its revenue stays null.
+    // The DKK row, with five buyers, shows its revenue.
+    const byCurrency = Object.fromEntries(revenue.rows.map((r) => [r[columnIndex(revenue, 'currency')], r]));
+    expect(byCurrency.EUR?.[columnIndex(revenue, 'campaign.recipients')]).toBe(6);
+    expect(byCurrency.EUR?.[columnIndex(revenue, 'campaign.converters')]).toBe(6);
+    expect(byCurrency.EUR?.[columnIndex(revenue, 'campaign.revenue')]).toBeNull();
+    expect(byCurrency.DKK?.[columnIndex(revenue, 'campaign.revenue')]).toBe(100);
+    expect(revenue.meta.suppressed).toBe(1);
+
+    const summary = await api().call('analytics.campaignSummary', { campaignId: campaignRevenueBelow, from: REV_FROM, to: REV_TO });
+    expect(summary.state).toBe('measured');
+    if (summary.state !== 'measured') return;
+    expect(summary.headline.recipients).toBe(6);
+    expect(summary.headline.converters).toBe(6);
+    expect(summary.headline.revenue).toEqual([{ currency: 'DKK', amount: 100 }]);
+    expect(summary.meta.suppressed).toBe(1);
+  });
+
+  it('shows a currency revenue row with k or more converters (#756)', async () => {
+    const revenue = await api().call('analytics.query', {
+      measures: ['campaign.recipients', 'campaign.converters', 'campaign.revenue'],
+      dimensions: ['campaign'],
+      from: REV_FROM,
+      to: REV_TO,
+      filters: { campaign: [campaignRevenueAbove] },
+      order: { by: 'campaign', dir: 'asc' },
+    });
+    const byCurrency = Object.fromEntries(revenue.rows.map((r) => [r[columnIndex(revenue, 'currency')], r]));
+    expect(byCurrency.EUR?.[columnIndex(revenue, 'campaign.recipients')]).toBe(10);
+    // Since #779 converters are the campaign's total on every currency row (5 EUR + 5 DKK
+    // buyers); the revenue k floor still counts the converters in each currency (#756).
+    expect(byCurrency.EUR?.[columnIndex(revenue, 'campaign.converters')]).toBe(10);
+    expect(byCurrency.EUR?.[columnIndex(revenue, 'campaign.revenue')]).toBe(50);
+    expect(byCurrency.DKK?.[columnIndex(revenue, 'campaign.converters')]).toBe(10);
+    expect(byCurrency.DKK?.[columnIndex(revenue, 'campaign.revenue')]).toBe(100);
+    expect(revenue.meta.suppressed).toBe(0);
+
+    const summary = await api().call('analytics.campaignSummary', { campaignId: campaignRevenueAbove, from: REV_FROM, to: REV_TO });
+    expect(summary.state).toBe('measured');
+    if (summary.state !== 'measured') return;
+    expect(summary.headline.revenue).toEqual([
+      { currency: 'DKK', amount: 100 },
+      { currency: 'EUR', amount: 50 },
+    ]);
+  });
+
+  it('keeps converters and the conversion rate independent of a revenue measure (#779)', async () => {
+    const withoutRevenue = await api().call('analytics.query', {
+      measures: ['campaign.recipients', 'campaign.converters', 'campaign.conversion_rate'],
+      dimensions: ['campaign'],
       from: FROM,
       to: TO,
       order: { by: 'campaign', dir: 'asc' },
     });
-    const byCurrency = Object.fromEntries(revenue.rows.map((r) => [r[columnIndex(revenue, 'currency')], r]));
-    expect(byCurrency.DKK?.[columnIndex(revenue, 'campaign.revenue')]).toBe(100 + 75);
-    expect(byCurrency.EUR?.[columnIndex(revenue, 'campaign.revenue')]).toBe(50);
-    expect(byCurrency.DKK?.[columnIndex(revenue, 'campaign.revenue_per_recipient')]).toBeCloseTo(17.5, 5);
-    expect(byCurrency.EUR?.[columnIndex(revenue, 'campaign.revenue_per_recipient')]).toBeCloseTo(5, 5);
-    expect(revenue.meta.currency).toBeNull();
+    const withRevenue = await api().call('analytics.query', {
+      measures: ['campaign.recipients', 'campaign.converters', 'campaign.conversion_rate', 'campaign.revenue'],
+      dimensions: ['campaign'],
+      from: FROM,
+      to: TO,
+      order: { by: 'campaign', dir: 'asc' },
+    });
+
+    const convertersOf = (result: typeof withoutRevenue, campaign: string) => {
+      const campaignIndex = columnIndex(result, 'campaign');
+      const convertersIndex = columnIndex(result, 'campaign.converters');
+      const rateIndex = columnIndex(result, 'campaign.conversion_rate');
+      const row = result.rows.find((r) => r[campaignIndex] === campaign)!;
+      return { converters: row[convertersIndex], rate: row[rateIndex] };
+    };
+    const plain = convertersOf(withoutRevenue, campaignA);
+    // The defect split the same campaign into one row per conversion currency, counting only
+    // that currency's people as converters and dividing each by the all-channel recipients.
+    const byCurrency = new Map(
+      withRevenue.rows
+        .filter((r) => r[columnIndex(withRevenue, 'campaign')] === campaignA)
+        .map((r) => [r[columnIndex(withRevenue, 'currency')], r]),
+    );
+    expect(new Set(byCurrency.keys())).toEqual(new Set(['DKK', 'EUR']));
+    for (const row of byCurrency.values()) {
+      expect(row[columnIndex(withRevenue, 'campaign.converters')]).toBe(plain.converters);
+      expect(row[columnIndex(withRevenue, 'campaign.conversion_rate')]).toBeCloseTo(plain.rate as number, 5);
+    }
+    expect(plain).toMatchObject({ converters: 3 });
+    expect(plain.rate).toBeCloseTo(0.3, 5);
   });
 
   it('never sees another workspace', async () => {
@@ -500,14 +623,8 @@ describe('analytics.campaignSummary', () => {
     expect(summary.headline.unsubscribeRate).toBeCloseTo(2 / 9, 5);
     expect(summary.headline.converters).toBe(3);
     expect(summary.headline.conversionRate).toBeCloseTo(0.3, 5);
-    expect(summary.headline.revenue).toEqual([
-      { currency: 'DKK', amount: 175 },
-      { currency: 'EUR', amount: 50 },
-    ]);
-    expect(summary.headline.revenuePerRecipient).toEqual([
-      { currency: 'DKK', amount: 17.5 },
-      { currency: 'EUR', amount: 5 },
-    ]);
+    expect(summary.headline.revenue).toEqual([]);
+    expect(summary.headline.revenuePerRecipient).toEqual([]);
     expect(summary.headline.targetProgress).toBeCloseTo(0.3, 5);
 
     expect(summary.funnel).toEqual([
@@ -566,7 +683,7 @@ describe('analytics.campaignSummary', () => {
     expect(summary.meta.timeZone).toBe(TZ);
     expect(summary.meta.k).toBe(5);
     expect(summary.meta.currency).toBeNull();
-    expect(summary.meta.suppressed).toBe(2);
+    expect(summary.meta.suppressed).toBe(4);
     expect(summary.meta.notes.join(' ')).toContain('fewer than k');
     expect(summary.meta.notes.join(' ')).toContain(
       'got a campaign message and converted within 7 days of their first campaign message (first touch)',
@@ -732,6 +849,98 @@ describe('analytics.campaignSummary', () => {
       suppressed: false,
     });
     expect(summary.headline.emailSent).toBe(6);
+  });
+
+  it('scopes campaign freshness to sent and delivered for an SMS-only campaign (#760)', async () => {
+    const broadcast = await api().call('artifacts.create', {
+      type: 'broadcast',
+      name: 'SMS-only broadcast',
+      content: { template, segment },
+    });
+    const campaign = await createCampaign('SMS-only campaign', [broadcast.artifactId], {}, '2026-11-10T00:00:00.000Z');
+    await api().call('artifacts.requestPublishBundle', {
+      artifactIds: [broadcast.artifactId, campaign],
+      note: 'sms freshness',
+    });
+    const people = Array.from({ length: 6 }, person);
+    const sent = messageEvents(wsA, broadcast.artifactId, '2026-11-10T10:00:00.000Z', people, [5, 0, 0, 0], 'sms');
+    // A later failed send decision: the recipient CTE never counts it, so freshness must not name
+    // it either. Before #760 the campaign source took max(at) over every message event type.
+    const failed: MessageEvent = {
+      workspaceId: wsA,
+      messageId: `msg_${broadcast.artifactId}_sms_failed`,
+      eventId: `${broadcast.artifactId}:sms:failed:0`,
+      type: 'failed',
+      at: '2026-11-11T10:00:00.000Z',
+      profileId: people[0]!,
+      channel: 'sms',
+      purpose: 'marketing_sms',
+      provider: 'log',
+      templateId: '',
+      templateVersion: 1,
+      journeyId: broadcast.artifactId,
+      variant: '',
+      reason: 'provider rejected',
+      url: '',
+    };
+    await t.srv.events.insertMessageEvents([...sent, failed]);
+
+    const from = '2026-11-10T00:00:00.000Z';
+    const to = '2026-11-12T00:00:00.000Z';
+    const query = await api().call('analytics.query', {
+      measures: ['campaign.recipients'],
+      filters: { campaign: [campaign] },
+      from,
+      to,
+    });
+    expect(query.meta.freshness).toBe('2026-11-10T10:00:00.000Z');
+
+    // The summary falls back to the campaign-source freshness when it has no e-mail events.
+    const summary = await api().call('analytics.campaignSummary', { campaignId: campaign, from, to });
+    expect(summary.state).toBe('measured');
+    expect(summary.meta.freshness).toBe('2026-11-10T10:00:00.000Z');
+  });
+
+  it('measures an archived campaign by id with a headline that matches its member rows (#780)', async () => {
+    const broadcast = await api().call('artifacts.create', {
+      type: 'broadcast',
+      name: 'Archived broadcast',
+      content: { template, segment },
+    });
+    const campaign = await createCampaign('Archived campaign', [broadcast.artifactId], {}, '2026-11-08T00:00:00.000Z');
+    await api().call('artifacts.requestPublishBundle', {
+      artifactIds: [broadcast.artifactId, campaign],
+      note: 'archived campaign',
+    });
+    const people = Array.from({ length: 6 }, person);
+    await t.srv.events.insertMessageEvents(messageEvents(wsA, broadcast.artifactId, '2026-11-08T10:00:00.000Z', people, [5, 2, 0, 0]));
+    await t.srv.events.insert([
+      goal(wsA, people[0]!, 30, 'DKK', '2026-11-08T11:00:00.000Z'),
+      goal(wsA, people[1]!, 20, 'DKK', '2026-11-09T09:00:00.000Z'),
+    ]);
+    await api().call('campaigns.archive', { campaignId: campaign });
+
+    const summary = await api().call('analytics.campaignSummary', {
+      campaignId: campaign,
+      from: '2026-11-08T00:00:00.000Z',
+      to: '2026-11-10T00:00:00.000Z',
+    });
+    expect(summary.state).toBe('measured');
+    if (summary.state !== 'measured') return;
+
+    // The headline and the member rows must describe the same population. Before #780 the
+    // headline resolved through the non-archived query map (all zeros) while members did not.
+    expect(summary.headline.recipients).toBe(6);
+    expect(summary.headline.delivered).toBe(5);
+    expect(summary.headline.converters).toBe(2);
+    expect(summary.members).toHaveLength(1);
+    expect(summary.members[0]).toMatchObject({
+      artifactId: broadcast.artifactId,
+      sent: 6,
+      delivered: 5,
+      converters: 2,
+      suppressed: false,
+    });
   });
 
   it('returns readiness instead of zeros before the first send', async () => {
