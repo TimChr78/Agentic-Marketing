@@ -2,6 +2,34 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [0.14.10] - 2026-11-12
+
+### Fixed
+
+- A changelog fragment is folded once, not twice: resuming an interrupted release matches a fragment on its section and bullet text, so a `Security` entry that repeats an `Added` bullet keeps its section and its issue number, and a folded fragment that names an issue the section's marker lacks adds it before the fragment is deleted.
+- The release version is checked against the full SemVer 2.0.0 grammar in one script that the workflow's first job calls, so `0.14.3-..`, `01.2.3` and `1.2` fail the release before anything is built (`prepare.mjs` and the changelog fold use the same check).
+- An SMS body that splits its opt-out instruction with carrier boilerplate ("Reply STOP. Msg & data rates may apply. To opt out") no longer gets a second footer; a body with no instruction still gets one, and the match stays linear.
+- Consent proof shown to a role without `profiles:pii` no longer includes a free-text import label, which can name a person: it shows the fixed label "Imported" and marks the proof as withheld. A role with `profiles:pii` still sees the original label.
+- Returning to a segment tab re-reads each watched segment once, not once for focus and again for visibility. A bundled purposes rollback now shows the same “moves the live … back” warning as templates, segments and blocks.
+- An e2e settle timeout now names the condition still pending, the skeleton selectors or the on-screen images that never finished, so a flaky route explains itself.
+- The visible unsubscribe-link check now applies simple `<style>` rules that set `opacity`, `font-size` or `color`, using the same tag/class/id cascade and limits as `display`, `visibility` and `background`, so a stylesheet rule can no longer hide the link from the save and publish gates.
+- A campaign summary request whose `to` falls before a campaign that has sent later returns its readiness instead of rejecting the default window as reversed; an explicit `from` after `to` is still refused.
+- Archive and web-version extraction finds `<style>` and `<body>` tags in the original document with an ASCII-only case fold, so a character such as `İ` no longer shifts the body and stylesheet slices.
+
+### Security
+
+- The archive and web-version sanitiser now bounds a whole render by one clock, checks it while scanning and while walking a deep open-element stack, and decodes the whitespace entities that could hide a `meta refresh` from the scanner. Input past any bound still fails closed to escaped text.
+
+### Upgrading from 0.14.9
+
+- **Migrations:** none.
+- **Configuration:** no new environment variables.
+- **Breaking changes:** consent proof read by a role without `profiles:pii` shows "Imported" instead of a free-text import label and is marked withheld. E-mails whose unsubscribe link a `<style>` rule hides with `opacity`, `font-size` or `color` are now refused at save and publish.
+- **Manual steps:** none.
+- **Upgrade:** download `agentic-marketing-compose-0.14.10.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.14.10 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.14.10` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.14.10). Run `docker compose exec app am doctor`.
+
+<!-- issues: 671, 672, 673, 732, 735, 746, 747, 748 -->
+
 ## [0.14.9] - 2026-11-12
 
 ### Changed

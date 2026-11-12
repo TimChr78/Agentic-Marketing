@@ -30,7 +30,9 @@ _Last updated: 2026-11-12_
   - **0.14.6** (admin UI stale data, migration 0089) is released and verified (the first release run hit an `expectLinear` flake; `expectLinear` now re-measures, #730).
   - **0.14.7** (authoring, approvals and forms) is released and verified. P3 follow-ups: #735.
   - **0.14.8** (alerts, schedules and jobs) is released and verified: the last of the seven audit releases. Sol approved after three rounds (DST resolution cross-checked against a minute scan in nine zones; retry-stable, strictly increasing refresh tokens). Up to four delegates run at once (raised 2026-11-12).
-  - **0.14.9** (dependency updates, #727) is released: the auth stack, `htmlparser2` 12, `jsdom` 31, OpenTelemetry 0.301, Biome 2.6 and the remaining group. Sol approved the final review. Flaky axe test: #732.
+  - **0.14.9** (dependency updates, #727) is released and verified: the auth stack, `htmlparser2` 12, `jsdom` 31, OpenTelemetry 0.301, Biome 2.6 and the remaining group.
+  - **0.14.10** (bug follow-ups: #735, #732, #671, #672, #673, #746) is released. Sol approved. parse5 8.1 indexes the open-element stack, so the #673 read cap is now a backstop.
+  - **0.14.11–0.14.15** (the 2026-11-12 audit, 52 issues): in review. Plan: https://claude.ai/artifact/BDXuwrEBa6hevSKU4s9vAL
   - **Follow-ups filed (S3):** #671, #672 and #673.
 
 ## Owner sign-off (Wave 5 done criteria that cannot be automated)
@@ -76,4 +78,4 @@ When these are signed off, the Wave 5 epic #439 can close.
 ## Last green
 
 - `main` at `9fbe296` (Phase 28 merged; CI green on `6332572`).
-- The last release is v0.14.9, released from `main`; v0.14.8 is verified.
+- The last release is v0.14.10, released from `main`; v0.14.9 is verified.
