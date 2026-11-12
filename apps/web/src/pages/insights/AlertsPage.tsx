@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react';
 import { api, errText, type In, type Out } from '../../app/api';
 import { useCrumbs } from '../../app/page';
 import { useSession } from '../../app/session';
-import { useApi } from '../../app/useApi';
+import { useApi, useKeyedApi } from '../../app/useApi';
 import { usePickerIndex } from '../../features/artifacts/pickerIndex';
 import {
   Alert,
@@ -144,7 +144,9 @@ export default function AlertsPage() {
   const journeys = usePickerIndex('journey');
   const journeyRows = journeys.data?.artifacts ?? [];
   const history = useApi(() => api.call('alerts.history', { limit: 50 }), []);
-  const ruleHistory = useApi(() => api.call('alerts.history', { ruleId: historyRule?.id, limit: 200 }), [historyRule?.id], {
+  // The drawer's title names one rule: its episodes must belong to that rule, never the previous
+  // selection shown with the new rule's units (#596).
+  const ruleHistory = useKeyedApi(historyRule?.id ?? '', () => api.call('alerts.history', { ruleId: historyRule?.id, limit: 200 }), {
     skip: !historyRule,
   });
 

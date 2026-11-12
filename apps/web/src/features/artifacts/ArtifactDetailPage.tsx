@@ -6,7 +6,7 @@ import { ButtonLink } from '../../app/links';
 import { type Crumb, useCrumbs } from '../../app/page';
 import { addNavigationGuard } from '../../app/router';
 import { useWorkspace } from '../../app/session';
-import { useApi } from '../../app/useApi';
+import { useApi, useKeyedApi } from '../../app/useApi';
 import { publicationLabel, stateOfArtifact } from '../../lib/state';
 import {
   Alert,
@@ -188,8 +188,10 @@ export function ArtifactDetailPage({
   const toast = useToast();
   const canRead = can('artifacts:read');
   const restricted = !!detail && !canRead;
-  const art = useApi(() => api.call('artifacts.get', { artifactId: id }), [id], { skip: restricted });
-  const pendingReq = useApi(() => api.call('approvals.list', { status: 'pending', artifactId: id, limit: 5 }), [id], {
+  // The route is keyed by its pattern, not by id: this read is the page's identity. While the
+  // new artifact loads the previous one is withheld, and every tab below unmounts with it.
+  const art = useKeyedApi(id, () => api.call('artifacts.get', { artifactId: id }), { skip: restricted });
+  const pendingReq = useKeyedApi(id, () => api.call('approvals.list', { status: 'pending', artifactId: id, limit: 5 }), {
     skip: restricted,
   });
   const a = art.data;

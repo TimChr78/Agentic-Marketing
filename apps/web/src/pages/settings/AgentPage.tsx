@@ -3,7 +3,7 @@ import { api } from '../../app/api';
 import { ButtonLink } from '../../app/links';
 import { useCrumbs } from '../../app/page';
 import { useWorkspace } from '../../app/session';
-import { useApi } from '../../app/useApi';
+import { useKeyedApi } from '../../app/useApi';
 import { usePageTab } from '../../app/useTab';
 import { AgentControls } from '../../features/agents/AgentControls';
 import { AgentStatusPill } from '../../features/agents/AgentStatus';
@@ -37,7 +37,9 @@ export default function AgentPage({ params }: { params: Record<string, string> }
   const { can } = useWorkspace();
   const canArtifacts = can('artifacts:read');
   const canAudit = can('audit:read');
-  const agent = useApi(() => api.call('agents.get', { id }), [id], { skip: !canArtifacts });
+  // The page's tabs read per agent; withhold the previous agent while the new one loads, so they
+  // unmount instead of being reused with a new agentId.
+  const agent = useKeyedApi(id, () => api.call('agents.get', { id }), { skip: !canArtifacts });
   // ?tab= like every other tabbed page, so a tab can be linked to and survives a reload.
   const { active: tab, select: setTab } = usePageTab<AgentTab>({ keys: AGENT_TABS, fallback: 'overview' });
   const [choice, setChoice] = useState<ReportPeriodChoice>(7);

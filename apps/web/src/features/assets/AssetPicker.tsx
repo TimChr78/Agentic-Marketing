@@ -1,7 +1,7 @@
 import { Search, Upload } from 'lucide-react';
 import { useRef, useState } from 'react';
 import { api, errText } from '../../app/api';
-import { useApi } from '../../app/useApi';
+import { useKeyedApi } from '../../app/useApi';
 import { Alert, Button, EmptyState, Input, Modal } from '../../ui';
 import { GallerySkeleton } from '../phase28/content/GallerySkeleton';
 import { AssetGrid } from './AssetGrid';
@@ -20,7 +20,8 @@ export function AssetPicker({
   title?: string;
 }) {
   const [q, setQ] = useState('');
-  const list = useApi(() => api.call('assets.list', { kind, query: q || undefined, limit: 100 }), [kind, q]);
+  const filterKey = `${kind}|${q}`;
+  const list = useKeyedApi(filterKey, () => api.call('assets.list', { kind, query: q || undefined, limit: 100 }));
   const [selected, setSelected] = useState<Asset | null>(null);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);

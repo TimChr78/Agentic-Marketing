@@ -4,7 +4,7 @@ import { api, type Out } from '../../app/api';
 import { ButtonLink, TextLink } from '../../app/links';
 import { useCrumbs } from '../../app/page';
 import { useSession } from '../../app/session';
-import { useApi } from '../../app/useApi';
+import { useApi, useKeyedApi } from '../../app/useApi';
 import { StatCard, StatGrid, StatGridSkeleton } from '../../features/insights/Stats';
 import {
   Alert,
@@ -51,8 +51,9 @@ export default function AiUsagePage() {
   const [kind, setKind] = useState<'' | Kind>('');
   const [open, setOpen] = useState<string | null>(null);
 
-  const usage = useApi(() => api.call('ai.usage', { days }), [days]);
-  const calls = useApi(() => api.call('ai.calls', { ...(kind ? { kind } : {}), limit: 200 }), [kind]);
+  // Period and kind are the identity of these reads, not a refresh of one period or filter (#618).
+  const usage = useKeyedApi(String(days), () => api.call('ai.usage', { days }));
+  const calls = useKeyedApi(kind || 'all', () => api.call('ai.calls', { ...(kind ? { kind } : {}), limit: 200 }));
   const reviews = useApi(() => api.call('ai.reviews', { status: 'pending', limit: 50 }), []);
 
   const totals = useMemo(() => {
