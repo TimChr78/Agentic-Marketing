@@ -7,6 +7,7 @@ import { Link, navigate } from '../../app/router';
 import { useSession } from '../../app/session';
 import { useApi } from '../../app/useApi';
 import { ConsentHistoryTable } from '../../features/audience/consent';
+import { notifyPeopleChanged } from '../../features/audience/peopleEvents';
 import { CopyPersonId } from '../../features/audience/phase26/CopyControl';
 import { basisLabel, consentLabel, type PersonProfile, personIdentity, purposeRows } from '../../features/audience/phase26/model';
 import { ProfileTimeline } from '../../features/audience/phase26/ProfileTimeline';
@@ -210,6 +211,8 @@ export default function PersonPage({ params }: { params: Record<string, string> 
     setActionError(null);
     try {
       await api.call('profiles.erase', { profileId: p.id, reason: reason.trim() || 'Erasure request' });
+      // Any list that still holds this person in a cached page must reread (#595).
+      notifyPeopleChanged();
       toast.success('Erased this person. Their e-mail and phone stay suppressed.');
       navigate('/audience/people', { replace: true });
     } catch (e) {

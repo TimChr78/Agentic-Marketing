@@ -1,5 +1,5 @@
 import { ArrowRight, ListChecks, Sparkles } from 'lucide-react';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, errText, type Out } from '../../app/api';
 import { ButtonLink } from '../../app/links';
 import { useCrumbs } from '../../app/page';
@@ -39,6 +39,8 @@ export default function RecipesPage({ embedded = false }: { embedded?: boolean }
   const [error, setError] = useState<string | null>(null);
   const [checkError, setCheckError] = useState<string | null>(null);
   const canWrite = can('artifacts:write');
+  // Never show the previous starter's form while the newly selected one is loading.
+  const activeRecipe = recipe?.id === selected ? recipe : null;
 
   const loadList = useCallback(async () => {
     setLoading(true);
@@ -58,7 +60,11 @@ export default function RecipesPage({ embedded = false }: { embedded?: boolean }
     void loadList();
   }, [loadList]);
 
+  const loadSeq = useRef(0);
   const load = useCallback(async (recipeId: string) => {
+    // Only the latest selection may commit state (#616): a slower earlier read must not overwrite
+    // the starter the person is now looking at.
+    const seq = ++loadSeq.current;
     setError(null);
     setCheckError(null);
     setInstalled(null);
@@ -66,12 +72,15 @@ export default function RecipesPage({ embedded = false }: { embedded?: boolean }
     setPreview(null);
     try {
       const got = await api.call('recipes.get', { recipeId });
+      if (seq !== loadSeq.current) return;
       setRecipe(got.recipe);
       const initial = initialValues(got.recipe);
       setValues(initial);
-      setPreview(await api.call('recipes.preview', { recipeId, params: initial }));
+      const nextPreview = await api.call('recipes.preview', { recipeId, params: initial });
+      if (seq !== loadSeq.current) return;
+      setPreview(nextPreview);
     } catch (e) {
-      setError(errText(e));
+      if (seq === loadSeq.current) setError(errText(e));
     }
   }, []);
 
@@ -189,13 +198,13 @@ export default function RecipesPage({ embedded = false }: { embedded?: boolean }
 
       {selected && !loading && list.length > 0 && (
         <section aria-labelledby="starter-detail" className="space-y-4 rounded-lg border border-line bg-surface p-4">
-          {recipe ? (
+          {activeRecipe ? (
             <>
               <div>
                 <h2 id="starter-detail" className="text-[14px] font-semibold text-fg">
-                  {recipe.title}
+                  {activeRecipe.title}
                 </h2>
-                <p className="text-[12px] leading-[18px] text-muted">{recipe.description}</p>
+                <p className="text-[12px] leading-[18px] text-muted">{activeRecipe.description}</p>
               </div>
 
               <section aria-labelledby="starter-parameters" className="space-y-2">
@@ -203,7 +212,7 @@ export default function RecipesPage({ embedded = false }: { embedded?: boolean }
                   Parameters
                 </h3>
                 <div className="grid gap-3 sm:grid-cols-2">
-                  {recipe.parameters.map((p) => {
+                  {activeRecipe.parameters.map((p) => {
                     const value = values[p.key];
                     if (p.type === 'boolean')
                       return (
@@ -313,7 +322,7 @@ export default function RecipesPage({ embedded = false }: { embedded?: boolean }
                   <ListChecks size={14} aria-hidden /> Review checklist
                 </h3>
                 <ul className="list-disc space-y-1 pl-5 text-[13px] text-fg-2">
-                  {recipe.checklist.map((item) => (
+                  {activeRecipe.checklist.map((item) => (
                     <li key={item}>{item}</li>
                   ))}
                 </ul>

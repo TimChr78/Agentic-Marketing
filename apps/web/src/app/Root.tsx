@@ -1,6 +1,6 @@
-import { lazy, Suspense } from 'react';
+import { lazy, Suspense, useEffect } from 'react';
 import { AutonomyProvider } from '../features/agents/AutonomyProvider';
-import { Alert, AuthSkeleton, Button, LoadingBlock, ToastProvider } from '../ui';
+import { Alert, AuthSkeleton, Button, LoadingBlock, ToastProvider, useToast } from '../ui';
 import { ForgotPassword } from './ForgotPassword';
 import { ResetPassword } from './ResetPassword';
 import { useLocation } from './router';
@@ -25,8 +25,13 @@ export function Root() {
 }
 
 function Gate() {
-  const { status, refresh, signOut, user } = useSession();
+  const { status, refresh, signOut, user, signOutError } = useSession();
+  const toast = useToast();
   const { path, search } = useLocation();
+  // A refused or unreachable sign-out keeps the session and says so (#614).
+  useEffect(() => {
+    if (signOutError) toast.error(signOutError);
+  }, [signOutError, toast]);
   // Signed-out screens that stand on their own (#191). They work whether or not a session exists,
   // so a reset link opened in a signed-in browser still changes the password.
   if (path === '/forgot-password') return <ForgotPassword />;
