@@ -94,7 +94,10 @@ describe('campaign conversion measurement (#366)', () => {
 
     // Both arms need k people or the result is suppressed (0.14.5): four more treatment people and
     // five control people, none of whom converts.
-    for (const [arm, n] of [['treatment', 4], ['control', 5]] as const) {
+    for (const [arm, n] of [
+      ['treatment', 4],
+      ['control', 5],
+    ] as const) {
       for (let i = 0; i < n; i++) {
         const filler = `prf_${arm}_filler_${i}_${stamp}`;
         await t.srv.db.admin.query("INSERT INTO profiles (workspace_id, id, traits) VALUES ($1, $2, '{}')", [ws, filler]);
