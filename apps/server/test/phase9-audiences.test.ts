@@ -426,6 +426,62 @@ describe('spend and ROAS', () => {
     expect(withServerSide.unattributed).toEqual({ conversions: 2, revenue: 110 });
   });
 
+  it('attributes more than 100,000 conversions with distinct anonymous ids (#786)', async () => {
+    // A fresh workspace keeps the totals exact: the conversions below are its only events.
+    const work = await t.workspaceWith([[owner, 'owner']]);
+    const api = t.api(owner, work);
+    const microsoft = await api.call('connections.create', {
+      connector: 'microsoft_ads',
+      name: 'Microsoft',
+      settings: {
+        customerId: '111',
+        accountId: '222',
+        apiBase: `${platformUrl}/msads`,
+        authorizeUrl: `${platformUrl}/authorize`,
+        tokenUrl: `${platformUrl}/token`,
+      },
+      secrets: { clientId: 'mc', clientSecret: 'ms', developerToken: 'ms-dev-token' },
+    });
+    const map = await api.call('artifacts.create', {
+      type: 'conversion_map',
+      name: 'Bulk conversions',
+      content: {
+        rules: [
+          {
+            event: 'Bulk Purchase',
+            value: 'total',
+            currency: 'DKK',
+            microsoft: { connection: microsoft.id, conversionName: 'Purchase' },
+          },
+        ],
+      },
+    });
+    await api.call('artifacts.requestPublish', { artifactId: map.artifactId, note: 'bulk' });
+
+    // Each id is 37 characters. The old single `visitors:Array(String)` parameter serialised all
+    // 100,001 of them into one HTTP form field, which ClickHouse rejects as "Field value too long"
+    // long before attribution starts. The ids are distinct and have no campaign touch, so every
+    // conversion must come back unattributed.
+    const settings = await t.srv.events.settingsFor(work);
+    await t.srv.events.client.command({
+      query: `INSERT INTO events
+                (workspace_id, event_id, source_id, received_at, timestamp, type, name,
+                 anonymous_id, user_id, profile_id, properties, traits, context, consent)
+              SELECT {ws:UUID}, concat('bulk-ad-', toString(number)), 'src_bulk',
+                     {at:DateTime64(3, 'UTC')}, {at:DateTime64(3, 'UTC')},
+                     'track', 'Bulk Purchase',
+                     concat('anon-', leftPad(toString(number), 32, '0')), '', '',
+                     CAST('{"total":1}' AS JSON), CAST('{}' AS JSON), CAST('{}' AS JSON), map()
+              FROM numbers({n:UInt32})`,
+      query_params: { ws: work, at: '2026-11-05 00:00:00.000', n: 100_001 },
+      clickhouse_settings: settings as never,
+    });
+
+    const report = await api.call('ads.performance', { since: '2026-11-01', until: '2026-11-12', windowDays: 30 });
+    expect(report.unattributed).toEqual({ conversions: 100_001, revenue: 100_001 });
+    expect(report.totals).toEqual({ cost: 0, conversions: 0, revenue: 0, roas: null });
+  }, 180_000);
+
   it('sends the conversion to Microsoft with the msclkid through SOAP', async () => {
     const [req] = await eventually(
       async () => at('POST', '/msads'),
