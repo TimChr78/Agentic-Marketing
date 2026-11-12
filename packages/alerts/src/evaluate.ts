@@ -24,11 +24,27 @@ const CONFIRMED_SIGNUP = 'Subscription Confirmed';
 
 type RuleRow = typeof schema.alertRules.$inferSelect;
 
-/** Last successful evaluation per rule, for the per-rule minimum interval. Load shaping only. */
-const lastEvaluated = new Map<string, number>();
+/**
+ * How many consecutive failures a rule may retry on every tick before it keeps the per-rule
+ * minimum interval. A transient ClickHouse blip is retried five minutes later; a rule that is
+ * genuinely broken must not keep querying analytics every tick forever.
+ */
+const FAILURES_BEFORE_BACKOFF = 3;
+
+interface RuleEvaluationState {
+  /** Last measurement that produced a decision. The minimum interval is measured from it. */
+  lastSuccessAt?: number;
+  /** Last attempt, including failures. The failure back-off is measured from it. */
+  lastAttemptAt?: number;
+  /** Consecutive failed measurements; a successful measurement (including a skip) resets it. */
+  failures: number;
+}
+
+/** Load shaping only: a failed or skipped measurement is never recorded as an evaluation. */
+const evaluationState = new Map<string, RuleEvaluationState>();
 
 export function resetAlertEvaluationState() {
-  lastEvaluated.clear();
+  evaluationState.clear();
 }
 
 export interface EvaluateOptions {
@@ -216,9 +232,18 @@ async function notifyFor(
 async function evaluateRule(deps: AlertDeps, tx: Tx, rule: RuleRow, now: Date, opts: EvaluateOptions) {
   const key = `${rule.workspaceId}:${rule.id}`;
   const config = parseAlertConfig(rule.kind, rule.config);
-  const last = lastEvaluated.get(key);
-  if (!opts.force && last !== undefined && now.getTime() - last < minimumIntervalMs(config)) return;
-  lastEvaluated.set(key, now.getTime());
+  const interval = minimumIntervalMs(config);
+  const state = evaluationState.get(key) ?? { failures: 0 };
+  if (!opts.force) {
+    // A rule that keeps failing backs off after a few retries, so a broken rule does not hammer
+    // ClickHouse every five minutes; until then a failure is retried on the next tick.
+    if (state.failures >= FAILURES_BEFORE_BACKOFF && state.lastAttemptAt !== undefined && now.getTime() - state.lastAttemptAt < interval)
+      return;
+    // Only a successful measurement starts the minimum interval. Failures and skips retry next tick.
+    if (state.lastSuccessAt !== undefined && now.getTime() - state.lastSuccessAt < interval) return;
+  }
+  state.lastAttemptAt = now.getTime();
+  evaluationState.set(key, state);
 
   const workspace = await tx
     .select({ id: schema.workspaces.id, name: schema.workspaces.name })
@@ -230,10 +255,15 @@ async function evaluateRule(deps: AlertDeps, tx: Tx, rule: RuleRow, now: Date, o
   try {
     measurement = await measureRule(deps, tx, rule, now);
   } catch (err) {
-    logger.error({ err, rule: rule.id, workspaceId: rule.workspaceId }, 'alert evaluation failed');
+    state.failures++;
+    // Once per failure streak: the retries and the back-off are expected, not new incidents.
+    if (state.failures === 1)
+      logger.error({ err, rule: rule.id, workspaceId: rule.workspaceId }, 'alert evaluation failed; retrying on the next tick');
     return;
   }
+  state.failures = 0;
   if (measurement.skip) return;
+  state.lastSuccessAt = now.getTime();
 
   const [open] = await tx
     .select()
