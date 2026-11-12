@@ -111,6 +111,46 @@ describe('two committed refreshes in the same minute (#628)', () => {
   }, 60_000);
 });
 
+describe('republishing the same commit’s events', () => {
+  it('keeps their messageIds when the change set is published again (#628)', async () => {
+    const api = t.api(owner);
+    const { artifactId } = await api.call('artifacts.create', {
+      type: 'segment',
+      name: 'People in Tromsø',
+      content: { condition: { trait: 'city', op: 'eq', value: 'Tromso' } },
+    });
+    await api.call('artifacts.requestPublish', { artifactId, note: 'First version' });
+    await eventually(
+      () => api.call('segments.members', { artifactId }),
+      (r) => r.total === 0 && r.members.length === 0,
+    );
+    await setCity(adaId, 'Tromso');
+
+    const published: string[][] = [];
+    const bus = {
+      publish: async (events: { messageId: string }[]) => {
+        published.push(events.map((e) => e.messageId));
+        return { accepted: events.length, duplicates: 0 };
+      },
+    } as unknown as EventBus;
+
+    const ids = await t.srv.db.withWorkspace(ws, async (tx) => {
+      const all = await publishedSegments(tx);
+      const seg = all.find((s) => s.id === artifactId);
+      if (!seg) throw new Error('segment not found');
+      const run = await refreshSegment(tx, ws, seg, t.srv.events, all);
+      // A bus retry republishes the same committed change set; the ids are part of the events and
+      // must not be regenerated per publish.
+      await publishInSlices(bus, run.changes);
+      await publishInSlices(bus, run.changes);
+      return run.changes.map((e) => e.messageId);
+    });
+
+    expect(ids).toHaveLength(1);
+    expect(published).toEqual([ids, ids]);
+  }, 60_000);
+});
+
 describe('a refresh whose publish fails partway', () => {
   it('reuses the same messageIds when the rolled-back run is retried', async () => {
     const api = t.api(owner);

@@ -1,4 +1,4 @@
-import { createPrivateKey } from 'node:crypto';
+import { createHash, createPrivateKey } from 'node:crypto';
 import { z } from 'zod';
 import type { AdapterDeps } from '../adapters/types';
 import { encryptPayload, es256Jwt, MAX_PAYLOAD, rs256Jwt, vapidAuthorization } from './crypto';
@@ -154,8 +154,11 @@ export const fcmAdapter = definePushAdapter({
               android: {
                 priority: msg.urgency === 'high' ? 'high' : 'normal',
                 ttl: `${msg.ttlSeconds}s`,
-                // Same key on a retry, so FCM collapses a duplicate instead of showing it twice (#753).
+                // A message with a notification payload ignores collapse_key, so the Android
+                // notification tag is what replaces a retried display notification (#753). The
+                // collapse key is harmless and still collapses a data-only delivery.
                 collapse_key: msg.messageId,
+                notification: { tag: msg.messageId },
               },
             },
           }),
@@ -175,6 +178,15 @@ export const fcmAdapter = definePushAdapter({
 
 // APNs provider tokens may be reused for up to an hour, and Apple refuses new ones more often than every 20 minutes.
 const apnsTokens = new Map<string, { token: string; until: number }>();
+
+/** Apple caps apns-collapse-id at 64 bytes; our 36-byte ids pass through unchanged. */
+const APNS_COLLAPSE_ID_MAX_BYTES = 64;
+
+function apnsCollapseId(messageId: string): string {
+  if (Buffer.byteLength(messageId, 'utf8') <= APNS_COLLAPSE_ID_MAX_BYTES) return messageId;
+  // A shorter id keeps a retry matching its first delivery even if an id ever grows past the cap.
+  return createHash('sha256').update(messageId).digest('base64url').slice(0, APNS_COLLAPSE_ID_MAX_BYTES);
+}
 
 export const apnsAdapter = definePushAdapter({
   id: 'apns',
@@ -215,8 +227,8 @@ export const apnsAdapter = definePushAdapter({
             'apns-priority': msg.urgency === 'high' ? '10' : '5',
             'apns-expiration': String(Math.floor(Date.now() / 1000) + msg.ttlSeconds),
             // A retry of the same message carries the same id, so Apple collapses it instead of
-            // showing the notification twice (#753).
-            'apns-collapse-id': msg.messageId,
+            // showing the notification twice (#753). Condensed only when an id exceeds the cap.
+            'apns-collapse-id': apnsCollapseId(msg.messageId),
             'content-type': 'application/json',
           },
           body: JSON.stringify({

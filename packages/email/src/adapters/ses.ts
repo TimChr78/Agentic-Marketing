@@ -15,22 +15,64 @@ const SNS_HOST = /^sns\.[a-z0-9-]+\.amazonaws\.com(\.cn)?$/;
  * a multi-workspace install spans several, so the map holds comfortably more than a region set.
  */
 const CERTS_MAX = 64;
-/** A bad signature may force one refetch per certificate URL in this window. */
+/** The window in which a URL may not be fetched again, whether it was a first fetch or a refetch. */
 const REFETCH_COOLDOWN_MS = 60_000;
 interface CertEntry {
   pem: string;
 }
 const certs = new Map<string, CertEntry>();
 /**
- * When a signature failure last forced a refetch, keyed by URL. Kept out of the certificate map on
- * purpose: the throttle used to live on the cached entry, so churning more URLs than the map holds
- * handed the once-per-minute bound back to the flood (#755). Bounded, and each entry expires on its
- * own, so a forgotten URL cannot keep an attacker's slot forever.
+ * When a fetch last succeeded, keyed by URL. A cache eviction must not hand a churner another
+ * fetch inside the cooldown, so a miss consults this too (#755). Bounded, and expired entries are
+ * pruned: an unexpired cooldown is never evicted to make room. When the map is full of unexpired
+ * entries a fetch is refused, which fails verification and lets SNS retry later.
+ */
+const fetchedAt = new Map<string, number>();
+/**
+ * When a signature failure last forced a refetch, keyed by URL. Kept out of the certificate map
+ * on purpose: the throttle used to live on the cached entry, so churning more URLs than the map
+ * holds handed the once-per-minute bound back to the flood (#755). Bounded and pruned the same way.
  */
 const refetchedAt = new Map<string, number>();
-const REFETCHES_MAX = 1024;
+const THROTTLES_MAX = 1024;
 /** One request per URL while a fetch is in flight, so a burst of webhooks cannot fan out. */
 const inflight = new Map<string, Promise<string>>();
+
+/** True while `url` is inside its cooldown; an expired entry is dropped on the way. */
+function coolingDown(at: Map<string, number>, url: string, now: number): boolean {
+  const when = at.get(url);
+  if (when === undefined) return false;
+  if (now - when < REFETCH_COOLDOWN_MS) return true;
+  at.delete(url);
+  return false;
+}
+
+/** Drop expired entries only: the maps never evict a cooldown that is still in force. */
+function pruneExpired(at: Map<string, number>, now: number): void {
+  for (const [url, when] of at) if (now - when >= REFETCH_COOLDOWN_MS) at.delete(url);
+}
+
+/** Whether a new cooldown for `url` fits, after pruning expired ones. */
+function hasRoom(at: Map<string, number>, url: string, now: number): boolean {
+  pruneExpired(at, now);
+  return at.has(url) || at.size < THROTTLES_MAX;
+}
+
+/** Records a successful fetch; only called after `hasRoom` for a plain miss. */
+function markFetched(url: string, now: number): void {
+  pruneExpired(fetchedAt, now);
+  if (fetchedAt.size >= THROTTLES_MAX && !fetchedAt.has(url)) return;
+  fetchedAt.delete(url);
+  fetchedAt.set(url, now);
+}
+
+/** Claims the once-per-minute refetch, or false when it is cooling down or the map is full. */
+function reserveRefetch(url: string, now: number): boolean {
+  if (coolingDown(refetchedAt, url, now)) return false;
+  if (!hasRoom(refetchedAt, url, now)) return false;
+  refetchedAt.set(url, now);
+  return true;
+}
 
 function snsUrlOk(raw: unknown): raw is string {
   try {
@@ -72,7 +114,18 @@ async function getCert(url: string, deps: AdapterDeps, force: boolean): Promise<
     certs.set(url, hit);
     return { pem: hit.pem, cached: true };
   }
+  const now = deps.now?.() ?? Date.now();
+  if (!force) {
+    // The cooldown is checked before *any* fetch, cache miss included (#755): a URL evicted from
+    // the certificate map while its successful fetch is still cooling down must not be fetched again.
+    if (coolingDown(refetchedAt, url, now) || coolingDown(fetchedAt, url, now)) throw new Error('SNS certificate fetch is in cooldown');
+    // Refuse rather than evict an unexpired cooldown: the message fails verification and SNS retries.
+    if (!hasRoom(fetchedAt, url, now)) throw new Error('SNS certificate fetch throttle is full');
+  }
   const pem = await fetchCertOnce(url, deps);
+  // Only a successful fetch starts the cooldown; a timeout or an error body must not disable the
+  // URL (#634). A forced refetch has already claimed its own cooldown.
+  markFetched(url, now);
   certs.delete(url);
   certs.set(url, { pem });
   while (certs.size > CERTS_MAX) {
@@ -81,27 +134,6 @@ async function getCert(url: string, deps: AdapterDeps, force: boolean): Promise<
     certs.delete(oldest);
   }
   return { pem, cached: false };
-}
-
-/** One refetch per certificate URL per minute, whatever happened to the cached PEM since (#755). */
-function refetchThrottled(url: string, now: number): boolean {
-  const at = refetchedAt.get(url);
-  if (at === undefined) return false;
-  if (now - at >= REFETCH_COOLDOWN_MS) {
-    refetchedAt.delete(url);
-    return false;
-  }
-  return true;
-}
-
-function recordRefetch(url: string, now: number): void {
-  refetchedAt.delete(url);
-  refetchedAt.set(url, now);
-  while (refetchedAt.size > REFETCHES_MAX) {
-    const oldest = refetchedAt.keys().next().value;
-    if (oldest === undefined) break;
-    refetchedAt.delete(oldest);
-  }
 }
 
 function verifyWith(cert: string, stringToSign: string, m: Record<string, string>): boolean {
@@ -137,11 +169,9 @@ export async function verifySnsMessage(m: Record<string, string>, deps: AdapterD
   if (!cert.cached) return false;
   // A cached certificate may be stale (AWS rotates one behind a stable URL) or was verified
   // against a body cached by an older build. Refetch once, but only once per URL per minute: a
-  // flood of bad signatures must not turn into a flood of requests to AWS (#634 review).
-  if (refetchThrottled(m.SigningCertURL, now)) return false;
-  // Start the cooldown before awaiting, so concurrent bad signatures join this one rather than
-  // starting their own refetch even if the fetch is slow or fails.
-  recordRefetch(m.SigningCertURL, now);
+  // flood of bad signatures must not turn into a flood of requests to AWS (#634 review). The
+  // claim starts the cooldown before awaiting, so concurrent bad signatures join this refetch.
+  if (!reserveRefetch(m.SigningCertURL, now)) return false;
   try {
     cert = await getCert(m.SigningCertURL, deps, true);
   } catch {

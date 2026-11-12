@@ -36,6 +36,13 @@ describe('isoDateTime', () => {
     }
   });
 
+  it('accepts a lowercase t and z, as the ISO parser already did (#807)', () => {
+    const field = isoDateTime('sendAt');
+    // The calendar check used to be case-sensitive while the ISO check was not, so a browser
+    // serialising with lowercase letters was rejected by the second refinement only.
+    expect(field.parse('2026-10-24t13:00:00z')).toBe('2026-10-24T13:00:00.000Z');
+  });
+
   it('accepts a real leap day and the last minute of the day (#807)', () => {
     const field = isoDateTime('sendAt');
     expect(field.parse('2028-02-29T12:00:00Z')).toBe('2028-02-29T12:00:00.000Z');

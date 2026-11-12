@@ -23,8 +23,11 @@ export interface Db {
    * Run `fn` in one transaction scoped to a workspace; RLS reads `app.workspace_id`.
    * `snapshot: true` (repeatable read) makes every statement see the same data, for reads that
    * combine several queries and must not see a concurrent change half-applied.
+   * `advisoryLockKey` takes a session-level advisory lock on the same connection *before* `BEGIN`,
+   * so a repeatable-read snapshot is taken after the previous holder commits (the idempotency
+   * waiter must see the winner's row, #812), and releases it after commit or rollback.
    */
-  withWorkspace<T>(workspaceId: string, fn: (tx: Tx) => Promise<T>, opts?: { snapshot?: boolean }): Promise<T>;
+  withWorkspace<T>(workspaceId: string, fn: (tx: Tx) => Promise<T>, opts?: { snapshot?: boolean; advisoryLockKey?: string }): Promise<T>;
   ping(): Promise<void>;
   close(): Promise<void>;
 }
@@ -41,7 +44,13 @@ export function createDb(config: DbConfig): Db {
     app,
     async withWorkspace(workspaceId, fn, opts) {
       const client = await app.connect();
+      let locked = false;
       try {
+        if (opts?.advisoryLockKey) {
+          // Session-level and before BEGIN: the snapshot below cannot predate the winner's commit.
+          await client.query('SELECT pg_advisory_lock(hashtextextended($1, 0))', [opts.advisoryLockKey]);
+          locked = true;
+        }
         await client.query(opts?.snapshot ? 'BEGIN ISOLATION LEVEL REPEATABLE READ' : 'BEGIN');
         await client.query("SELECT set_config('app.workspace_id', $1, true)", [workspaceId]);
         const result = await fn(drizzle(client, { schema }));
@@ -51,7 +60,16 @@ export function createDb(config: DbConfig): Db {
         await client.query('ROLLBACK').catch(() => {});
         throw err;
       } finally {
-        client.release();
+        // The lock is session-scoped: a rollback or a thrown handler does not release it.
+        let unlockFailed = false;
+        if (locked) {
+          await client.query('SELECT pg_advisory_unlock(hashtextextended($1, 0))', [opts?.advisoryLockKey]).catch(() => {
+            unlockFailed = true;
+          });
+        }
+        // If the unlock could not run, destroy the connection so its backend exits and the lock dies
+        // with it; returning it to the pool could hand the next request a still-locked session.
+        client.release(unlockFailed ? true : undefined);
       }
     },
     async ping() {
